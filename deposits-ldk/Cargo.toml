@@ -1,0 +1,45 @@
+[package]
+name = "deposits-ldk"
+version = "0.1.0"
+edition = "2021"
+description = "LDK adapter for the Bitcoin Deposits protocol"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Core protocol library
+deposits-core = { path = "../deposits-core" }
+
+# Bitcoin primitives
+bitcoin = { version = "0.32", features = ["serde"] }
+
+# Lightning (LDK) - use vendored version from ldk-node to ensure compatibility
+lightning = { path = "../../ldk-node/vendor/rust-lightning/lightning", default-features = false, features = ["std"] }
+lightning-types = { path = "../../ldk-node/vendor/rust-lightning/lightning-types" }
+lightning-invoice = { path = "../../ldk-node/vendor/rust-lightning/lightning-invoice", features = ["std"] }
+lightning-persister = { path = "../../ldk-node/vendor/rust-lightning/lightning-persister" }
+
+# Async runtime
+tokio = { version = "1", features = ["sync", "rt", "time", "macros"] }
+
+# Error handling
+thiserror = "1.0"
+
+# Serialization
+bincode = "1.3"
+base64 = "0.22"
+
+# Utilities
+hex = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Logging
+log = "0.4"
+
+[features]
+default = []
+testing = ["lightning/_test_utils"]
+bitcoin-deposits-non-conforming = []  # Testing feature for non-conforming protocol behavior
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

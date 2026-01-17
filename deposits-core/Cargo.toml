@@ -1,0 +1,32 @@
+[package]
+name = "deposits-core"
+version = "0.1.0"
+edition = "2021"
+description = "Bitcoin Deposits Protocol - Core library (Lightning-implementation agnostic)"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/anthropics/ldk-node"
+keywords = ["bitcoin", "lightning", "custody", "deposits"]
+
+[dependencies]
+# Bitcoin primitives (no Lightning dependencies!)
+bitcoin = { version = "0.32", features = ["serde"] }
+secp256k1 = { version = "0.29", features = ["serde"] }
+
+# Hashing
+sha2 = "0.10"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+thiserror = "1.0"
+
+# Hex encoding for debugging
+hex = "0.4"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[features]
+default = []

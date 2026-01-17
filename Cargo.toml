@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "deposits-core",
+    "deposits-ldk",
+]
+resolver = "2"

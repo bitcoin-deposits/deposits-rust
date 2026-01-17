@@ -1,0 +1,864 @@
+// This file is Copyright its original authors, visible in version control history.
+//
+// This file is licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license <LICENSE-MIT or
+// http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
+// accordance with one or both of these licenses.
+
+//! Bitcoin Deposits Protocol Handler
+//!
+//! The core protocol state machine, generic over Lightning implementation.
+//!
+//! This handler implements the deposits protocol logic using adapter traits,
+//! allowing it to work with any Lightning implementation (LDK, CLN, etc.).
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, RwLock};
+
+use bitcoin::secp256k1::PublicKey;
+
+use crate::ledger::Ledger;
+use crate::traits::{
+    Broadcaster, ChainSource, ChannelRegistry, EventEmitter, Logger, LogLevel,
+    MessageHandler, PaymentTracker, PeerTransport, SignatureProvider, Storage,
+    HandleError,
+};
+
+/// The main protocol handler
+///
+/// This struct manages all protocol state and implements message handling.
+/// It is generic over the adapter traits, allowing it to work with any
+/// Lightning implementation.
+pub struct Handler<S, T, P, C, B, H, G, E, L>
+where
+    S: Storage,
+    T: PeerTransport,
+    P: PaymentTracker,
+    C: ChannelRegistry,
+    B: Broadcaster,
+    H: ChainSource,
+    G: SignatureProvider,
+    E: EventEmitter,
+    L: Logger,
+{
+    /// Our node's public key (derived from signer)
+    node_id: PublicKey,
+
+    /// Ledgers indexed by (operator, partner)
+    ledgers: Mutex<HashMap<(PublicKey, PublicKey), Arc<RwLock<Ledger>>>>,
+
+    /// Storage
+    storage: Arc<S>,
+
+    /// Peer transport
+    transport: Arc<T>,
+
+    /// Payment tracker
+    payments: Arc<P>,
+
+    /// Channel registry
+    channels: Arc<C>,
+
+    /// Transaction broadcaster
+    broadcaster: Arc<B>,
+
+    /// Chain source
+    chain: Arc<H>,
+
+    /// Signature provider
+    signer: Arc<G>,
+
+    /// Event emitter
+    events: Arc<E>,
+
+    /// Logger
+    logger: Arc<L>,
+}
+
+impl<S, T, P, C, B, H, G, E, L> Handler<S, T, P, C, B, H, G, E, L>
+where
+    S: Storage,
+    T: PeerTransport,
+    P: PaymentTracker,
+    C: ChannelRegistry,
+    B: Broadcaster,
+    H: ChainSource,
+    G: SignatureProvider,
+    E: EventEmitter,
+    L: Logger,
+{
+    /// Create a new handler
+    pub fn new(
+        storage: Arc<S>,
+        transport: Arc<T>,
+        payments: Arc<P>,
+        channels: Arc<C>,
+        broadcaster: Arc<B>,
+        chain: Arc<H>,
+        signer: Arc<G>,
+        events: Arc<E>,
+        logger: Arc<L>,
+    ) -> Self {
+        let node_id = signer.node_pubkey();
+        Self {
+            node_id,
+            ledgers: Mutex::new(HashMap::new()),
+            storage,
+            transport,
+            payments,
+            channels,
+            broadcaster,
+            chain,
+            signer,
+            events,
+            logger,
+        }
+    }
+
+    /// Get our node ID
+    pub fn node_id(&self) -> PublicKey {
+        self.node_id
+    }
+
+    /// Get the current block height
+    pub fn current_height(&self) -> u32 {
+        self.chain.current_height()
+    }
+
+    /// Get a ledger by (operator, partner)
+    pub fn get_ledger(&self, operator: PublicKey, partner: PublicKey) -> Option<Arc<RwLock<Ledger>>> {
+        let ledgers = self.ledgers.lock().unwrap();
+        ledgers.get(&(operator, partner)).cloned()
+    }
+
+    /// List all partners where we are the operator
+    pub fn list_operator_ledgers(&self) -> Vec<PublicKey> {
+        let ledgers = self.ledgers.lock().unwrap();
+        ledgers.keys()
+            .filter(|(op, _)| *op == self.node_id)
+            .map(|(_, partner)| *partner)
+            .collect()
+    }
+
+    /// List all operators where we are the partner
+    pub fn list_partner_ledgers(&self) -> Vec<PublicKey> {
+        let ledgers = self.ledgers.lock().unwrap();
+        ledgers.keys()
+            .filter(|(_, partner)| *partner == self.node_id)
+            .map(|(op, _)| *op)
+            .collect()
+    }
+
+    /// List all ledgers (both operator and partner roles)
+    pub fn list_all_ledgers(&self) -> Vec<(PublicKey, PublicKey)> {
+        let ledgers = self.ledgers.lock().unwrap();
+        ledgers.keys().cloned().collect()
+    }
+
+    // ========================================================================
+    // Ledger Management
+    // ========================================================================
+
+    /// Create a new ledger as operator with the given partner
+    pub fn create_operator_ledger(
+        &self,
+        partner: PublicKey,
+        ledger_address: String,
+    ) -> Result<(), HandleError> {
+        let key = (self.node_id, partner);
+
+        let mut ledgers = self.ledgers.lock().unwrap();
+        if ledgers.contains_key(&key) {
+            return Err(HandleError::ValidationFailed(
+                "Ledger already exists".to_string(),
+            ));
+        }
+
+        let ledger = Ledger::new_as_operator(self.node_id, partner, ledger_address);
+        ledgers.insert(key, Arc::new(RwLock::new(ledger)));
+
+        self.logger.log(
+            LogLevel::Info,
+            &format!("Created operator ledger with partner {}", partner),
+        );
+
+        Ok(())
+    }
+
+    /// Create a new ledger as partner with the given operator
+    pub fn create_partner_ledger(
+        &self,
+        operator: PublicKey,
+        ledger_address: String,
+    ) -> Result<(), HandleError> {
+        let key = (operator, self.node_id);
+
+        let mut ledgers = self.ledgers.lock().unwrap();
+        if ledgers.contains_key(&key) {
+            return Err(HandleError::ValidationFailed(
+                "Ledger already exists".to_string(),
+            ));
+        }
+
+        let ledger = Ledger::new_as_partner(operator, self.node_id, ledger_address);
+        ledgers.insert(key, Arc::new(RwLock::new(ledger)));
+
+        self.logger.log(
+            LogLevel::Info,
+            &format!("Created partner ledger with operator {}", operator),
+        );
+
+        Ok(())
+    }
+
+    /// Remove a ledger (used for cleanup after close)
+    pub fn remove_ledger(&self, operator: PublicKey, partner: PublicKey) -> bool {
+        let mut ledgers = self.ledgers.lock().unwrap();
+        ledgers.remove(&(operator, partner)).is_some()
+    }
+
+    /// Check if we have a ledger with this peer (as operator or partner)
+    pub fn has_ledger_with(&self, peer: PublicKey) -> bool {
+        let ledgers = self.ledgers.lock().unwrap();
+        ledgers.contains_key(&(self.node_id, peer)) || ledgers.contains_key(&(peer, self.node_id))
+    }
+
+    /// Get our role with a peer (Operator, Partner, or None)
+    pub fn role_with(&self, peer: PublicKey) -> Option<crate::ledger::LedgerRole> {
+        let ledgers = self.ledgers.lock().unwrap();
+        if ledgers.contains_key(&(self.node_id, peer)) {
+            Some(crate::ledger::LedgerRole::Operator)
+        } else if ledgers.contains_key(&(peer, self.node_id)) {
+            Some(crate::ledger::LedgerRole::Partner)
+        } else {
+            None
+        }
+    }
+
+    // ========================================================================
+    // Ledger Query Operations
+    // ========================================================================
+
+    /// Get ledger hash for a specific ledger
+    pub fn get_ledger_hash(&self, operator: PublicKey, partner: PublicKey) -> Option<[u8; 32]> {
+        self.get_ledger(operator, partner).map(|arc| {
+            let ledger = arc.read().unwrap();
+            ledger.hash()
+        })
+    }
+
+    /// Get ledger sequence number
+    pub fn get_ledger_sequence(&self, operator: PublicKey, partner: PublicKey) -> Option<u64> {
+        self.get_ledger(operator, partner).map(|arc| {
+            let ledger = arc.read().unwrap();
+            ledger.sequence()
+        })
+    }
+
+    /// Get total deposit balance (msat) for a ledger
+    pub fn get_ledger_deposit_balance(&self, operator: PublicKey, partner: PublicKey) -> Option<u64> {
+        self.get_ledger(operator, partner).map(|arc| {
+            let ledger = arc.read().unwrap();
+            ledger.total_deposit_balance()
+        })
+    }
+
+    /// Get reserves amount (sats) for a ledger
+    pub fn get_ledger_reserves(&self, operator: PublicKey, partner: PublicKey) -> Option<u64> {
+        self.get_ledger(operator, partner).map(|arc| {
+            let ledger = arc.read().unwrap();
+            ledger.reserves_amount()
+        })
+    }
+
+    /// Check if a ledger has sufficient reserves
+    pub fn ledger_has_sufficient_reserves(&self, operator: PublicKey, partner: PublicKey) -> bool {
+        self.get_ledger(operator, partner)
+            .map(|arc| {
+                let ledger = arc.read().unwrap();
+                ledger.has_sufficient_reserves()
+            })
+            .unwrap_or(false)
+    }
+
+    // ========================================================================
+    // Message Processing
+    // ========================================================================
+
+    /// Process a V2 protocol message
+    pub fn process_message_v2(
+        &self,
+        sender: PublicKey,
+        message: &crate::messages::DepositsMessage,
+    ) -> Result<Option<crate::messages::DepositsMessage>, HandleError> {
+        use crate::messages::DepositsMessage;
+
+        self.logger.log(
+            LogLevel::Debug,
+            &format!(
+                "Processing {} from {}",
+                message.variant_name(),
+                sender
+            ),
+        );
+
+        match message {
+            DepositsMessage::LedgerUpdate(msg) => {
+                self.handle_ledger_update(sender, msg)
+            }
+            DepositsMessage::LedgerUpdateResponse(msg) => {
+                self.handle_ledger_update_response(sender, msg)
+            }
+            DepositsMessage::Handshake(msg) => {
+                self.handle_handshake(sender, msg)
+            }
+            DepositsMessage::HandshakeResponse(msg) => {
+                self.handle_handshake_response(sender, msg)
+            }
+            DepositsMessage::Sync(msg) => {
+                self.handle_sync(sender, msg)
+            }
+            DepositsMessage::SyncResponse(msg) => {
+                self.handle_sync_response(sender, msg)
+            }
+            DepositsMessage::Recovery(msg) => {
+                self.handle_recovery(sender, msg)
+            }
+            DepositsMessage::RecoveryResponse(msg) => {
+                self.handle_recovery_response(sender, msg)
+            }
+            DepositsMessage::Coordination(msg) => {
+                self.handle_coordination(sender, msg)
+            }
+            DepositsMessage::CoordinationResponse(msg) => {
+                self.handle_coordination_response(sender, msg)
+            }
+            DepositsMessage::Relay(msg) => {
+                self.handle_relay(sender, msg)
+            }
+            DepositsMessage::RelayResponse(msg) => {
+                self.handle_relay_response(sender, msg)
+            }
+        }
+    }
+
+    // ========================================================================
+    // Message Handlers (stubs - to be implemented)
+    // ========================================================================
+
+    fn handle_ledger_update(
+        &self,
+        sender: PublicKey,
+        msg: &crate::messages::LedgerUpdateMsg,
+    ) -> Result<Option<crate::messages::DepositsMessage>, HandleError> {
+        self.logger.log(
+            LogLevel::Debug,
+            &format!(
+                "Ledger update from {} - seq={}, op={:?}",
+                sender, msg.sequence_number, msg.operation
+            ),
+        );
+
+        // Get the ledger
+        let ledger_arc = self.get_ledger(msg.operator_id, msg.partner_id)
+            .ok_or(HandleError::UnknownLedger {
+                operator: msg.operator_id,
+                partner: msg.partner_id,
+            })?;
+
+        // Validate and apply the update
+        {
+            let mut ledger = ledger_arc.write().unwrap();
+
+            // Verify sequence number
+            if msg.sequence_number != ledger.sequence() + 1 {
+                return Err(HandleError::ValidationFailed(format!(
+                    "Sequence mismatch: expected {}, got {}",
+                    ledger.sequence() + 1,
+                    msg.sequence_number
+                )));
+            }
+
+            // Verify previous hash
+            if msg.previous_hash != ledger.hash() {
+                return Err(HandleError::ValidationFailed(
+                    "Previous hash mismatch".to_string(),
+                ));
+            }
+
+            // Verify operator signature
+            if !self.signer.verify_schnorr(
+                &msg.operator_id,
+                msg.current_hash,
+                &msg.operator_signature,
+            ) {
+                return Err(HandleError::ValidationFailed(
+                    "Invalid operator signature".to_string(),
+                ));
+            }
+
+            // Apply the operation
+            let update = ledger.apply_operation(&msg.operation)
+                .map_err(|e| HandleError::ValidationFailed(e.to_string()))?;
+
+            // Verify computed hash matches
+            if update.current_hash != msg.current_hash {
+                return Err(HandleError::ValidationFailed(
+                    "Hash mismatch after applying operation".to_string(),
+                ));
+            }
+        }
+
+        // Sign the response
+        let partner_signature = self.signer.sign_schnorr(msg.current_hash)
+            .map_err(|e| HandleError::Internal(e))?;
+
+        // Create response
+        let response = crate::messages::LedgerUpdateResponseMsg {
+            operator_id: msg.operator_id,
+            partner_id: msg.partner_id,
+            request_hash: msg.current_hash,
+            accepted: true,
+            error: None,
+            partner_signature: Some(partner_signature),
+            confirmed_sequence: msg.sequence_number,
+            confirmed_hash: msg.current_hash,
+        };
+
+        Ok(Some(crate::messages::DepositsMessage::LedgerUpdateResponse(response)))
+    }
+
+    fn handle_ledger_update_response(
+        &self,
+        sender: PublicKey,
+        msg: &crate::messages::LedgerUpdateResponseMsg,
+    ) -> Result<Option<crate::messages::DepositsMessage>, HandleError> {
+        self.logger.log(
+            LogLevel::Debug,
+            &format!(
+                "Ledger update response from {} - accepted={}, seq={}",
+                sender, msg.accepted, msg.confirmed_sequence
+            ),
+        );
+
+        if !msg.accepted {
+            self.logger.log(
+                LogLevel::Warn,
+                &format!(
+                    "Ledger update rejected: {:?}",
+                    msg.error
+                ),
+            );
+        }
+
+        // Verify partner signature if accepted
+        if msg.accepted {
+            if let Some(sig) = &msg.partner_signature {
+                if !self.signer.verify_schnorr(&msg.partner_id, msg.confirmed_hash, sig) {
+                    return Err(HandleError::ValidationFailed(
+                        "Invalid partner signature".to_string(),
+                    ));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn handle_handshake(
+        &self,
+        sender: PublicKey,
+        msg: &crate::messages::HandshakeMsg,
+    ) -> Result<Option<crate::messages::DepositsMessage>, HandleError> {
+        self.logger.log(
+            LogLevel::Info,
+            &format!(
+                "Handshake from {} - protocol v{}",
+                sender, msg.protocol_version
+            ),
+        );
+
+        // Create handshake response
+        let response = crate::messages::HandshakeResponseMsg {
+            request_hash: [0u8; 32], // TODO: Hash the request
+            partner_pubkey: self.node_id,
+            accepted: true,
+            protocol_version: crate::messages::PROTOCOL_VERSION,
+            error: None,
+        };
+
+        Ok(Some(crate::messages::DepositsMessage::HandshakeResponse(response)))
+    }
+
+    fn handle_handshake_response(
+        &self,
+        sender: PublicKey,
+        msg: &crate::messages::HandshakeResponseMsg,
+    ) -> Result<Option<crate::messages::DepositsMessage>, HandleError> {
+        self.logger.log(
+            LogLevel::Info,
+            &format!(
+                "Handshake response from {} - accepted={}, v{}",
+                sender, msg.accepted, msg.protocol_version
+            ),
+        );
+        Ok(None)
+    }
+
+    fn handle_sync(
+        &self,
+        sender: PublicKey,
+        msg: &crate::messages::SyncMsg,
+    ) -> Result<Option<crate::messages::DepositsMessage>, HandleError> {
+        self.logger.log(
+            LogLevel::Debug,
+            &format!("Sync request from {} - from_seq={}", sender, msg.last_known_sequence),
+        );
+
+        // Get ledger and prepare sync response
+        let ledger_arc = self.get_ledger(msg.operator_id, msg.partner_id)
+            .ok_or(HandleError::UnknownLedger {
+                operator: msg.operator_id,
+                partner: msg.partner_id,
+            })?;
+
+        let (current_hash, current_sequence) = {
+            let ledger = ledger_arc.read().unwrap();
+            (ledger.hash(), ledger.sequence())
+        };
+
+        let response = crate::messages::SyncResponseMsg {
+            operator_id: msg.operator_id,
+            partner_id: msg.partner_id,
+            request_hash: msg.last_known_hash, // Use the known hash as request reference
+            updates: Vec::new(), // Would be populated from history
+            current_hash,
+            current_sequence,
+        };
+
+        Ok(Some(crate::messages::DepositsMessage::SyncResponse(response)))
+    }
+
+    fn handle_sync_response(
+        &self,
+        sender: PublicKey,
+        msg: &crate::messages::SyncResponseMsg,
+    ) -> Result<Option<crate::messages::DepositsMessage>, HandleError> {
+        self.logger.log(
+            LogLevel::Debug,
+            &format!(
+                "Sync response from {} - {} updates, seq={}",
+                sender, msg.updates.len(), msg.current_sequence
+            ),
+        );
+        Ok(None)
+    }
+
+    fn handle_recovery(
+        &self,
+        sender: PublicKey,
+        _msg: &crate::messages::RecoveryMsg,
+    ) -> Result<Option<crate::messages::DepositsMessage>, HandleError> {
+        self.logger.log(
+            LogLevel::Info,
+            &format!("Recovery message from {}", sender),
+        );
+        // Recovery handling is complex - stub for now
+        Ok(None)
+    }
+
+    fn handle_recovery_response(
+        &self,
+        sender: PublicKey,
+        _msg: &crate::messages::RecoveryResponseMsg,
+    ) -> Result<Option<crate::messages::DepositsMessage>, HandleError> {
+        self.logger.log(
+            LogLevel::Info,
+            &format!("Recovery response from {}", sender),
+        );
+        Ok(None)
+    }
+
+    fn handle_coordination(
+        &self,
+        sender: PublicKey,
+        _msg: &crate::messages::CoordinationMsg,
+    ) -> Result<Option<crate::messages::DepositsMessage>, HandleError> {
+        self.logger.log(
+            LogLevel::Debug,
+            &format!("Coordination message from {}", sender),
+        );
+        // Coordination handling - stub for now
+        Ok(None)
+    }
+
+    fn handle_coordination_response(
+        &self,
+        sender: PublicKey,
+        _msg: &crate::messages::CoordinationResponseMsg,
+    ) -> Result<Option<crate::messages::DepositsMessage>, HandleError> {
+        self.logger.log(
+            LogLevel::Debug,
+            &format!("Coordination response from {}", sender),
+        );
+        Ok(None)
+    }
+
+    fn handle_relay(
+        &self,
+        sender: PublicKey,
+        _msg: &crate::messages::RelayMsg,
+    ) -> Result<Option<crate::messages::DepositsMessage>, HandleError> {
+        self.logger.log(
+            LogLevel::Debug,
+            &format!("Relay message from {}", sender),
+        );
+        // Relay handling - stub for now
+        Ok(None)
+    }
+
+    fn handle_relay_response(
+        &self,
+        sender: PublicKey,
+        _msg: &crate::messages::RelayResponseMsg,
+    ) -> Result<Option<crate::messages::DepositsMessage>, HandleError> {
+        self.logger.log(
+            LogLevel::Debug,
+            &format!("Relay response from {}", sender),
+        );
+        Ok(None)
+    }
+
+    // ========================================================================
+    // Sending Messages
+    // ========================================================================
+
+    /// Send a message to a peer
+    pub fn send_message(
+        &self,
+        peer: PublicKey,
+        message: &crate::messages::DepositsMessage,
+    ) -> Result<(), HandleError> {
+        let bytes = message.encode();
+        self.transport.send(peer, &bytes)
+            .map_err(|e| HandleError::Internal(format!("Transport error: {}", e)))
+    }
+}
+
+impl<S, T, P, C, B, H, G, E, L> MessageHandler for Handler<S, T, P, C, B, H, G, E, L>
+where
+    S: Storage,
+    T: PeerTransport,
+    P: PaymentTracker,
+    C: ChannelRegistry,
+    B: Broadcaster,
+    H: ChainSource,
+    G: SignatureProvider,
+    E: EventEmitter,
+    L: Logger,
+{
+    fn handle_message(
+        &self,
+        sender: PublicKey,
+        message: &[u8],
+    ) -> Result<Option<Vec<u8>>, HandleError> {
+        use crate::messages::DepositsMessage;
+
+        self.logger.log(LogLevel::Debug, &format!(
+            "Received {} bytes from {}",
+            message.len(),
+            sender
+        ));
+
+        // Decode the message
+        let decoded = DepositsMessage::decode(message)
+            .map_err(|e| HandleError::InvalidMessage(format!("Decode error: {:?}", e)))?;
+
+        self.logger.log(LogLevel::Debug, &format!(
+            "Decoded message type {} from {}",
+            decoded.variant_name(),
+            sender
+        ));
+
+        // Process and get response
+        let response = self.process_message_v2(sender, &decoded)?;
+
+        // Encode response if any
+        Ok(response.map(|r| r.encode()))
+    }
+
+    fn peer_connected(&self, peer: PublicKey) {
+        self.logger.log(LogLevel::Info, &format!(
+            "Peer connected: {}",
+            peer
+        ));
+
+        // Notify transport
+        // Note: In a real implementation, this would update the transport's connected peer list
+    }
+
+    fn peer_disconnected(&self, peer: PublicKey) {
+        self.logger.log(LogLevel::Info, &format!(
+            "Peer disconnected: {}",
+            peer
+        ));
+
+        // Notify transport
+        // Note: In a real implementation, this would update the transport's connected peer list
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::traits::*;
+    use bitcoin::secp256k1::{Secp256k1, SecretKey};
+
+    fn test_pubkey() -> PublicKey {
+        let secp = Secp256k1::new();
+        let secret = SecretKey::from_slice(&[1u8; 32]).unwrap();
+        PublicKey::from_secret_key(&secp, &secret)
+    }
+
+    // Mock implementations for testing
+    struct MockTransport;
+    impl PeerTransport for MockTransport {
+        fn send(&self, _peer: PublicKey, _message: &[u8]) -> Result<(), TransportError> { Ok(()) }
+        fn is_connected(&self, _peer: &PublicKey) -> bool { true }
+        fn connected_peers(&self) -> Vec<PublicKey> { vec![] }
+    }
+
+    struct MockStorage;
+    impl Storage for MockStorage {
+        fn get(&self, _key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> { Ok(None) }
+        fn put(&self, _key: &[u8], _value: &[u8]) -> Result<(), StorageError> { Ok(()) }
+        fn delete(&self, _key: &[u8]) -> Result<(), StorageError> { Ok(()) }
+        fn scan_prefix(&self, _prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> { Ok(vec![]) }
+    }
+
+    struct MockChannels;
+    impl ChannelRegistry for MockChannels {
+        fn partner_for_channel(&self, _channel_id: [u8; 32]) -> Option<PublicKey> { None }
+        fn channels_with_peer(&self, _peer: PublicKey) -> Vec<[u8; 32]> { vec![] }
+        fn channel_is_usable(&self, _channel_id: [u8; 32]) -> bool { false }
+        fn channel_balance_msat(&self, _channel_id: [u8; 32]) -> Option<u64> { None }
+    }
+
+    struct MockChain;
+    impl ChainSource for MockChain {
+        fn current_height(&self) -> u32 { 800000 }
+        fn get_block_hash(&self, _height: u32) -> Option<[u8; 32]> { Some([0u8; 32]) }
+        fn fee_rate(&self, _confirmation_target: u32) -> Option<u64> { Some(10) }
+    }
+
+    struct MockPayments;
+    impl PaymentTracker for MockPayments {
+        fn payment_received(&self, _payment_hash: [u8; 32], _amount_msat: u64) -> bool { false }
+        fn payment_sent(&self, _payment_id: [u8; 32], _success: bool) {}
+        fn get_payment_status(&self, _payment_id: [u8; 32]) -> PaymentStatus { PaymentStatus::Unknown }
+        fn get_preimage(&self, _payment_hash: [u8; 32]) -> Option<[u8; 32]> { None }
+    }
+
+    struct MockBroadcaster;
+    impl Broadcaster for MockBroadcaster {
+        fn broadcast_transaction(&self, _tx: &bitcoin::Transaction) -> Result<(), BroadcastError> { Ok(()) }
+    }
+
+    struct MockSigner;
+    impl SignatureProvider for MockSigner {
+        fn node_pubkey(&self) -> PublicKey { test_pubkey() }
+        fn sign_schnorr(&self, _message_hash: [u8; 32]) -> Result<[u8; 64], String> { Ok([0u8; 64]) }
+        fn verify_schnorr(&self, _pubkey: &PublicKey, _message_hash: [u8; 32], _signature: &[u8; 64]) -> bool { true }
+    }
+
+    struct MockEvents;
+    impl EventEmitter for MockEvents {
+        fn emit(&self, _event: ProtocolEvent) {}
+    }
+
+    #[test]
+    fn test_handler_creation() {
+        let handler = Handler::new(
+            Arc::new(MockStorage),
+            Arc::new(MockTransport),
+            Arc::new(MockPayments),
+            Arc::new(MockChannels),
+            Arc::new(MockBroadcaster),
+            Arc::new(MockChain),
+            Arc::new(MockSigner),
+            Arc::new(MockEvents),
+            Arc::new(NullLogger),
+        );
+
+        assert_eq!(handler.node_id(), test_pubkey());
+        assert_eq!(handler.current_height(), 800000);
+        assert!(handler.list_operator_ledgers().is_empty());
+        assert!(handler.list_partner_ledgers().is_empty());
+    }
+
+    #[test]
+    fn test_message_handler_impl() {
+        let handler = Handler::new(
+            Arc::new(MockStorage),
+            Arc::new(MockTransport),
+            Arc::new(MockPayments),
+            Arc::new(MockChannels),
+            Arc::new(MockBroadcaster),
+            Arc::new(MockChain),
+            Arc::new(MockSigner),
+            Arc::new(MockEvents),
+            Arc::new(NullLogger),
+        );
+
+        // Test handle_message with invalid bytes - should return an error
+        let result = handler.handle_message(test_pubkey(), &[1, 2, 3]);
+        assert!(result.is_err()); // Invalid message bytes should fail to decode
+
+        // Test peer_connected/disconnected (just verify they don't panic)
+        handler.peer_connected(test_pubkey());
+        handler.peer_disconnected(test_pubkey());
+    }
+
+    #[test]
+    fn test_ledger_management() {
+        let handler = Handler::new(
+            Arc::new(MockStorage),
+            Arc::new(MockTransport),
+            Arc::new(MockPayments),
+            Arc::new(MockChannels),
+            Arc::new(MockBroadcaster),
+            Arc::new(MockChain),
+            Arc::new(MockSigner),
+            Arc::new(MockEvents),
+            Arc::new(NullLogger),
+        );
+
+        let partner = {
+            let secp = Secp256k1::new();
+            let secret = SecretKey::from_slice(&[2u8; 32]).unwrap();
+            PublicKey::from_secret_key(&secp, &secret)
+        };
+
+        // Initially no ledgers
+        assert!(!handler.has_ledger_with(partner));
+        assert!(handler.list_operator_ledgers().is_empty());
+
+        // Create operator ledger
+        let result = handler.create_operator_ledger(partner, "tb1q...".to_string());
+        assert!(result.is_ok());
+        assert!(handler.has_ledger_with(partner));
+        assert_eq!(handler.list_operator_ledgers(), vec![partner]);
+
+        // Verify ledger properties
+        assert_eq!(handler.get_ledger_sequence(test_pubkey(), partner), Some(0));
+        assert_eq!(handler.get_ledger_deposit_balance(test_pubkey(), partner), Some(0));
+
+        // Can't create duplicate
+        let result = handler.create_operator_ledger(partner, "tb1q...".to_string());
+        assert!(result.is_err());
+
+        // Remove ledger
+        assert!(handler.remove_ledger(test_pubkey(), partner));
+        assert!(!handler.has_ledger_with(partner));
+    }
+}
