@@ -10,7 +10,7 @@
 //! Implements the `Storage` trait using LDK's KVStore interface.
 
 use deposits_core::traits::{Storage, StorageError};
-use lightning::util::persist::KVStore;
+use lightning::util::persist::KVStoreSync;
 
 use std::sync::Arc;
 
@@ -19,16 +19,16 @@ pub const DEPOSITS_NAMESPACE: &str = "deposits";
 
 /// LDK-based storage adapter for Bitcoin Deposits protocol.
 ///
-/// Wraps an LDK KVStore to provide the Storage trait interface
+/// Wraps an LDK KVStoreSync to provide the Storage trait interface
 /// needed by deposits-core.
-pub struct LdkStorage<K: KVStore + ?Sized> {
+pub struct LdkStorage<K: KVStoreSync + ?Sized> {
     /// The underlying KVStore
     kv_store: Arc<K>,
     /// Primary namespace for all deposits data
     namespace: String,
 }
 
-impl<K: KVStore + ?Sized> LdkStorage<K> {
+impl<K: KVStoreSync + ?Sized> LdkStorage<K> {
     /// Create a new LDK storage adapter.
     pub fn new(kv_store: Arc<K>) -> Self {
         Self {
@@ -59,7 +59,7 @@ impl<K: KVStore + ?Sized> LdkStorage<K> {
     }
 }
 
-impl<K: KVStore + Send + Sync + ?Sized> Storage for LdkStorage<K> {
+impl<K: KVStoreSync + Send + Sync + ?Sized> Storage for LdkStorage<K> {
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         let (secondary, key_name) = self.split_key(key);
 
@@ -81,7 +81,7 @@ impl<K: KVStore + Send + Sync + ?Sized> Storage for LdkStorage<K> {
         let (secondary, key_name) = self.split_key(key);
 
         self.kv_store
-            .write(&self.namespace, &secondary, &key_name, value)
+            .write(&self.namespace, &secondary, &key_name, value.to_vec())
             .map_err(|e| StorageError::IoError(format!("{:?}", e)))
     }
 

@@ -283,22 +283,22 @@ where
         // Use simple in-memory store for testing
         #[cfg(any(test, feature = "testing"))]
         let store: Arc<DynStore> = {
-            use lightning::util::persist::KVStore;
+            use lightning::util::persist::KVStoreSync;
             use lightning::io;
 
             #[derive(Debug)]
             struct MemoryStore(RwLock<HashMap<String, Vec<u8>>>);
 
-            impl KVStore for MemoryStore {
+            impl KVStoreSync for MemoryStore {
                 fn read(&self, primary_namespace: &str, secondary_namespace: &str, key: &str) -> Result<Vec<u8>, lightning::io::Error> {
                     let full_key = format!("{}:{}:{}", primary_namespace, secondary_namespace, key);
                     self.0.read().unwrap().get(&full_key).cloned()
                         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Key not found"))
                 }
 
-                fn write(&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: &[u8]) -> Result<(), lightning::io::Error> {
+                fn write(&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>) -> Result<(), lightning::io::Error> {
                     let full_key = format!("{}:{}:{}", primary_namespace, secondary_namespace, key);
-                    self.0.write().unwrap().insert(full_key, buf.to_vec());
+                    self.0.write().unwrap().insert(full_key, buf);
                     Ok(())
                 }
 
@@ -324,22 +324,22 @@ where
 
         #[cfg(not(any(test, feature = "testing")))]
         let store: Arc<DynStore> = {
-            use lightning::util::persist::KVStore;
+            use lightning::util::persist::KVStoreSync;
             use lightning::io;
 
             #[derive(Debug)]
             struct MemoryStore(RwLock<HashMap<String, Vec<u8>>>);
 
-            impl KVStore for MemoryStore {
+            impl KVStoreSync for MemoryStore {
                 fn read(&self, primary_namespace: &str, secondary_namespace: &str, key: &str) -> Result<Vec<u8>, lightning::io::Error> {
                     let full_key = format!("{}:{}:{}", primary_namespace, secondary_namespace, key);
                     self.0.read().unwrap().get(&full_key).cloned()
                         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Key not found"))
                 }
 
-                fn write(&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: &[u8]) -> Result<(), lightning::io::Error> {
+                fn write(&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>) -> Result<(), lightning::io::Error> {
                     let full_key = format!("{}:{}:{}", primary_namespace, secondary_namespace, key);
-                    self.0.write().unwrap().insert(full_key, buf.to_vec());
+                    self.0.write().unwrap().insert(full_key, buf);
                     Ok(())
                 }
 

@@ -10,10 +10,11 @@ license = "MIT OR Apache-2.0"
 deposits-core = { path = "../deposits-core" }
 
 # Bitcoin primitives
-bitcoin = { version = "0.32", features = ["serde"] }
+bitcoin = { version = "0.32", features = ["serde", "rand-std"] }
 
 # Lightning (LDK) - use rust-lightning via ldk-node's vendor symlink for path consistency
 lightning = { path = "../../ldk-node/vendor/rust-lightning/lightning", default-features = false, features = ["std"] }
+lightning-macros = { path = "../../ldk-node/vendor/rust-lightning/lightning-macros" }
 lightning-types = { path = "../../ldk-node/vendor/rust-lightning/lightning-types" }
 lightning-invoice = { path = "../../ldk-node/vendor/rust-lightning/lightning-invoice", features = ["std"] }
 lightning-persister = { path = "../../ldk-node/vendor/rust-lightning/lightning-persister" }
@@ -43,3 +44,4 @@ bitcoin-deposits-non-conforming = []  # Testing feature for non-conforming proto
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+rand = "0.8"

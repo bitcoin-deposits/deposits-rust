@@ -323,7 +323,7 @@ where
         let serialized = bincode::serialize(log)
             .map_err(|_| DepositsError::SerializationError)?;
 
-        self.kv_store.write("deposits", "signed_ledger_updates", &key, &serialized)
+        self.kv_store.write("deposits", "signed_ledger_updates", &key, serialized)
             .map_err(|e| {
                 log_error!(
                     self.logger,

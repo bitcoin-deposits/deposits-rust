@@ -32,7 +32,7 @@ where
     {
         use crate::event::EventQueue;
         use crate::types::DynStore;
-        use lightning::util::persist::KVStore;
+        use lightning::util::persist::KVStoreSync;
         use lightning::io;
         use std::sync::RwLock;
         use std::collections::HashMap;
@@ -41,16 +41,16 @@ where
         #[derive(Debug)]
         struct TestMemoryStore(RwLock<HashMap<String, Vec<u8>>>);
 
-        impl KVStore for TestMemoryStore {
+        impl KVStoreSync for TestMemoryStore {
             fn read(&self, primary_namespace: &str, secondary_namespace: &str, key: &str) -> Result<Vec<u8>, lightning::io::Error> {
                 let full_key = format!("{}:{}:{}", primary_namespace, secondary_namespace, key);
                 self.0.read().unwrap().get(&full_key).cloned()
                     .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Key not found"))
             }
 
-            fn write(&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: &[u8]) -> Result<(), lightning::io::Error> {
+            fn write(&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>) -> Result<(), lightning::io::Error> {
                 let full_key = format!("{}:{}:{}", primary_namespace, secondary_namespace, key);
-                self.0.write().unwrap().insert(full_key, buf.to_vec());
+                self.0.write().unwrap().insert(full_key, buf);
                 Ok(())
             }
 
@@ -95,7 +95,7 @@ where
     {
         use crate::event::EventQueue;
         use crate::types::DynStore;
-        use lightning::util::persist::KVStore;
+        use lightning::util::persist::KVStoreSync;
         use lightning::io;
         use std::sync::RwLock;
         use std::collections::HashMap;
@@ -104,16 +104,16 @@ where
         #[derive(Debug)]
         struct TestMemoryStore(RwLock<HashMap<String, Vec<u8>>>);
 
-        impl KVStore for TestMemoryStore {
+        impl KVStoreSync for TestMemoryStore {
             fn read(&self, primary_namespace: &str, secondary_namespace: &str, key: &str) -> Result<Vec<u8>, lightning::io::Error> {
                 let full_key = format!("{}:{}:{}", primary_namespace, secondary_namespace, key);
                 self.0.read().unwrap().get(&full_key).cloned()
                     .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Key not found"))
             }
 
-            fn write(&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: &[u8]) -> Result<(), lightning::io::Error> {
+            fn write(&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>) -> Result<(), lightning::io::Error> {
                 let full_key = format!("{}:{}:{}", primary_namespace, secondary_namespace, key);
-                self.0.write().unwrap().insert(full_key, buf.to_vec());
+                self.0.write().unwrap().insert(full_key, buf);
                 Ok(())
             }
 
@@ -144,7 +144,7 @@ where
     /// This clears ledgers, signed_update_logs, and persisted data
     #[cfg(feature = "bitcoin-deposits-non-conforming")]
     pub fn drop_all_ledgers(&self) -> usize {
-        use lightning::util::persist::KVStore;
+        use lightning::util::persist::KVStoreSync;
         use lightning::log_warn;
         use lightning::util::logger::Logger as LdkLogger;
 

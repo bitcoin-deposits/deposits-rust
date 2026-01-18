@@ -840,6 +840,7 @@ mod tests {
     use bitcoin::secp256k1::{Secp256k1, SecretKey};
     use std::sync::Arc;
     use lightning::util::test_utils::TestLogger;
+    use crate::handler::messages as handler_messages;
 
     fn create_test_handler() -> DepositsHandler<Arc<TestLogger>> {
         let logger = Arc::new(TestLogger::new());
@@ -892,7 +893,7 @@ mod tests {
         let sender = create_test_pubkey(5);
         let msg = crate::wire::messages::DepositUpdateMsg {
             pubkey: create_test_pubkey(6),
-            new_fees: deposits_core::messages::FeeStructure::default(),
+            new_fees: crate::wire::types::FeeStructure::default(),
             partner_id: create_test_pubkey(7),
         };
 
@@ -1006,7 +1007,7 @@ mod tests {
     fn test_validate_reserves_remove_no_ledger() {
         let handler = create_test_handler();
         let sender = create_test_pubkey(18);
-        let msg = super::messages::ReservesRemoveOutputMsg {
+        let msg = handler_messages::ReservesRemoveOutputMsg {
             remove_all: false,
             partner_id: create_test_pubkey(19),
         };
@@ -1624,14 +1625,12 @@ mod tests {
         let sender = create_test_pubkey(170);
 
         let msg = crate::wire::messages::ReceivingCosignInvoiceMsg {
-            pending_invoice: deposits_core::PendingInvoice::new(
-                10_000,
-                [0xAB; 32],
-                1000000,
-                create_test_pubkey(171),
-                "test_invoice".to_string(),
-                "lnbc1...".to_string(),
-            ),
+            amount: 10_000,
+            payment_hash: [0xAB; 32],
+            expires: 1000000,
+            assigned_deposit: create_test_pubkey(171),
+            invoice_id: "test_invoice".to_string(),
+            bolt11: "lnbc1...".to_string(),
         };
 
         let result = handler.validate_receiving_cosign_invoice(&msg, sender);
@@ -1659,14 +1658,12 @@ mod tests {
         }
 
         let msg = crate::wire::messages::ReceivingCosignInvoiceMsg {
-            pending_invoice: deposits_core::PendingInvoice::new(
-                10_000,
-                [0xAB; 32],
-                1000000,
-                create_test_pubkey(173), // Doesn't exist
-                "test_invoice".to_string(),
-                "lnbc1...".to_string(),
-            ),
+            amount: 10_000,
+            payment_hash: [0xAB; 32],
+            expires: 1000000,
+            assigned_deposit: create_test_pubkey(173), // Doesn't exist
+            invoice_id: "test_invoice".to_string(),
+            bolt11: "lnbc1...".to_string(),
         };
 
         let result = handler.validate_receiving_cosign_invoice(&msg, operator);
@@ -1699,14 +1696,12 @@ mod tests {
         }
 
         let msg = crate::wire::messages::ReceivingCosignInvoiceMsg {
-            pending_invoice: deposits_core::PendingInvoice::new(
-                0, // Zero amount
-                [0xAB; 32],
-                1000000,
-                deposit_pubkey,
-                "test_invoice".to_string(),
-                "lnbc1...".to_string(),
-            ),
+            amount: 0, // Zero amount
+            payment_hash: [0xAB; 32],
+            expires: 1000000,
+            assigned_deposit: deposit_pubkey,
+            invoice_id: "test_invoice".to_string(),
+            bolt11: "lnbc1...".to_string(),
         };
 
         let result = handler.validate_receiving_cosign_invoice(&msg, operator);
@@ -1741,14 +1736,12 @@ mod tests {
 
         // Try to cosign invoice for 25k - would push total to 55k, exceeding 50k reserves
         let msg = crate::wire::messages::ReceivingCosignInvoiceMsg {
-            pending_invoice: deposits_core::PendingInvoice::new(
-                25_000,
-                [0xAB; 32],
-                1000000,
-                deposit_pubkey,
-                "test_invoice".to_string(),
-                "lnbc1...".to_string(),
-            ),
+            amount: 25_000,
+            payment_hash: [0xAB; 32],
+            expires: 1000000,
+            assigned_deposit: deposit_pubkey,
+            invoice_id: "test_invoice".to_string(),
+            bolt11: "lnbc1...".to_string(),
         };
 
         let result = handler.validate_receiving_cosign_invoice(&msg, operator);
@@ -1783,14 +1776,12 @@ mod tests {
 
         // Try to cosign invoice for 25k - would push total to 55k, exceeding 50k collateral
         let msg = crate::wire::messages::ReceivingCosignInvoiceMsg {
-            pending_invoice: deposits_core::PendingInvoice::new(
-                25_000,
-                [0xAB; 32],
-                1000000,
-                deposit_pubkey,
-                "test_invoice".to_string(),
-                "lnbc1...".to_string(),
-            ),
+            amount: 25_000,
+            payment_hash: [0xAB; 32],
+            expires: 1000000,
+            assigned_deposit: deposit_pubkey,
+            invoice_id: "test_invoice".to_string(),
+            bolt11: "lnbc1...".to_string(),
         };
 
         let result = handler.validate_receiving_cosign_invoice(&msg, operator);
@@ -1823,14 +1814,12 @@ mod tests {
         }
 
         let msg = crate::wire::messages::ReceivingCosignInvoiceMsg {
-            pending_invoice: deposits_core::PendingInvoice::new(
-                10_000,
-                [0xAB; 32],
-                1000000,
-                deposit_pubkey,
-                "".to_string(), // Empty ID
-                "lnbc1...".to_string(),
-            ),
+            amount: 10_000,
+            payment_hash: [0xAB; 32],
+            expires: 1000000,
+            assigned_deposit: deposit_pubkey,
+            invoice_id: "".to_string(), // Empty ID
+            bolt11: "lnbc1...".to_string(),
         };
 
         let result = handler.validate_receiving_cosign_invoice(&msg, operator);
@@ -1863,14 +1852,12 @@ mod tests {
         }
 
         let msg = crate::wire::messages::ReceivingCosignInvoiceMsg {
-            pending_invoice: deposits_core::PendingInvoice::new(
-                10_000,
-                [0x00; 32], // All zeros - fake
-                1000000,
-                deposit_pubkey,
-                "test_invoice".to_string(),
-                "lnbc1...".to_string(),
-            ),
+            amount: 10_000,
+            payment_hash: [0x00; 32], // All zeros - fake
+            expires: 1000000,
+            assigned_deposit: deposit_pubkey,
+            invoice_id: "test_invoice".to_string(),
+            bolt11: "lnbc1...".to_string(),
         };
 
         let result = handler.validate_receiving_cosign_invoice(&msg, operator);
@@ -1909,14 +1896,12 @@ mod tests {
         for i in 0..32 { payment_hash[i] = i as u8; }
 
         let msg = crate::wire::messages::ReceivingCosignInvoiceMsg {
-            pending_invoice: deposits_core::PendingInvoice::new(
-                50_000,
-                payment_hash,
-                1000000,
-                deposit_pubkey,
-                "test_invoice".to_string(),
-                "lnbc1...".to_string(),
-            ),
+            amount: 50_000,
+            payment_hash,
+            expires: 1000000,
+            assigned_deposit: deposit_pubkey,
+            invoice_id: "test_invoice".to_string(),
+            bolt11: "lnbc1...".to_string(),
         };
 
         let result = handler.validate_receiving_cosign_invoice(&msg, operator);

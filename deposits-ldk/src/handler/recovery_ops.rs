@@ -738,6 +738,7 @@ mod tests {
     use deposits_core::{Deposit, FeeStructure};
     use std::sync::RwLock;
     use lightning::ln::peer_handler::CustomMessageHandler;
+    use crate::handler::messages as handler_messages;
 
     fn create_test_handler() -> DepositsHandler<Arc<TestLogger>> {
         let logger = Arc::new(TestLogger::new());
@@ -1114,7 +1115,7 @@ mod tests {
         let vote_msg = pending.iter().find_map(|(_, msg)| {
             match msg {
                 DepositsMessage::RecoveryVote { operator, partner, voter, is_conforming, validated_hash, validated_sequence, substitute_nomination, discovered_violation, signature } => {
-                    Some(super::messages::RecoveryVoteMsg {
+                    Some(handler_messages::RecoveryVoteMsg {
                         operator: *operator,
                         partner: *partner,
                         voter: *voter,
@@ -1365,7 +1366,7 @@ mod tests {
     #[test]
     fn test_uncredited_payment_accusation_with_cosigned_invoice_no_credit() {
         use bitcoin::hashes::{sha256, Hash};
-        use super::CosignedInvoice;
+        use crate::handler::CosignedInvoice;
 
         let (handler, our_node_id) = create_test_handler_with_signing_key();
         let operator = create_test_pubkey(160);
@@ -1430,7 +1431,7 @@ mod tests {
     #[test]
     fn test_uncredited_payment_accusation_no_ledger() {
         use bitcoin::hashes::{sha256, Hash};
-        use super::CosignedInvoice;
+        use crate::handler::CosignedInvoice;
 
         let (handler, our_node_id) = create_test_handler_with_signing_key();
         let operator = create_test_pubkey(170);
@@ -1473,7 +1474,7 @@ mod tests {
     #[test]
     fn test_uncredited_payment_accusation_wrong_deposit_pubkey() {
         use bitcoin::hashes::{sha256, Hash};
-        use super::CosignedInvoice;
+        use crate::handler::CosignedInvoice;
 
         let (handler, our_node_id) = create_test_handler_with_signing_key();
         let operator = create_test_pubkey(180);

@@ -38,7 +38,7 @@ where
     /// Create a new protocol instance (stub - ignores all parameters).
     pub fn new(
         _secret_key: bitcoin::secp256k1::SecretKey,
-        _store: std::sync::Arc<dyn lightning::util::persist::KVStore + Sync + Send>,
+        _store: std::sync::Arc<dyn lightning::util::persist::KVStoreSync + Sync + Send>,
         _logger: L,
     ) -> Self {
         Self {

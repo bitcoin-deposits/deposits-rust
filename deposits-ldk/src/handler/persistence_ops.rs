@@ -313,7 +313,7 @@ where
             })?;
 
 
-        self.kv_store.write("deposits", "ledgers", &key, &serialized)
+        self.kv_store.write("deposits", "ledgers", &key, serialized)
             .map_err(|e| {
                 deposits_core::DepositsError::PersistenceFailed { reason: e.to_string() }
             })?;
@@ -355,7 +355,7 @@ where
             })?;
 
 
-        self.kv_store.write("deposits", "audit_ledgers", &key, &serialized)
+        self.kv_store.write("deposits", "audit_ledgers", &key, serialized)
             .map_err(|e| {
                 deposits_core::DepositsError::PersistenceFailed { reason: e.to_string() }
             })?;

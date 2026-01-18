@@ -45,8 +45,9 @@ impl SignedLedgerUpdateExt for deposits_core::types::SignedLedgerUpdate {
         // so we must read using the CustomMessageReader which dispatches
         // based on message_type to the correct V1 Readable implementation.
         let reader = DepositsMessageReader;
-        let mut cursor = std::io::Cursor::new(&self.message);
-        reader.read(self.message_type, &mut cursor)
+        // Use slice reference which implements LengthLimitedRead
+        let mut slice = self.message.as_slice();
+        reader.read(self.message_type, &mut slice)
             .map_err(|_| DepositsError::SerializationError)?
             .ok_or(DepositsError::SerializationError)
     }

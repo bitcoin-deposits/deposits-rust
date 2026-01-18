@@ -148,7 +148,7 @@ mod tests {
     use super::*;
     use bitcoin::secp256k1::PublicKey;
     use std::str::FromStr;
-    use deposits_core::messages::*;
+    // Note: DepositsMessage from handler is used (via super::*)
     
     fn create_test_pubkey() -> PublicKey {
         // Use a valid compressed public key for testing
@@ -158,8 +158,11 @@ mod tests {
     #[test]
     fn test_message_encoding_roundtrip() {
         // Test V2-supported Handshake message
+        // Note: DepositsMessage uses the handler's message types
+        use crate::handler::messages::HandshakeMsg;
+
         let test_pubkey = create_test_pubkey();
-        let original_msg = DepositsMessage::Handshake(deposits_core::messages::HandshakeMsg {
+        let original_msg = DepositsMessage::Handshake(HandshakeMsg {
             protocol_version: 2,
             min_protocol_version: 1,
             features: 0,
@@ -183,15 +186,18 @@ mod tests {
             panic!("Expected Handshake message");
         }
     }
-    
+
     #[test]
     fn test_all_message_types_roundtrip() {
+        // Note: DepositsMessage uses the handler's message types
+        use crate::handler::messages::{HandshakeMsg, HandshakeResponseMsg, SyncMsg};
+
         let test_pubkey = create_test_pubkey();
 
         // Test V2-supported messages that have full encoding/decoding support
         let test_messages: Vec<DepositsMessage> = vec![
             // Handshake message
-            DepositsMessage::Handshake(deposits_core::messages::HandshakeMsg {
+            DepositsMessage::Handshake(HandshakeMsg {
                 protocol_version: 2,
                 min_protocol_version: 1,
                 features: 0,
@@ -202,7 +208,7 @@ mod tests {
                 funding_vout: 0,
             }),
             // Handshake response
-            DepositsMessage::HandshakeResponse(deposits_core::messages::HandshakeResponseMsg {
+            DepositsMessage::HandshakeResponse(HandshakeResponseMsg {
                 protocol_version: 2,
                 accepted: true,
                 error_reason: None,
@@ -210,7 +216,7 @@ mod tests {
                 partner_id: test_pubkey,
             }),
             // Sync message
-            DepositsMessage::Sync(deposits_core::messages::SyncMsg {
+            DepositsMessage::Sync(SyncMsg {
                 operator_id: test_pubkey,
                 partner_id: test_pubkey,
                 from_sequence: 0,
@@ -269,7 +275,8 @@ mod tests {
         let test_pubkey = create_test_pubkey();
 
         // Create a V2-supported test message (Handshake has full encoding support)
-        let original_msg = DepositsMessage::Handshake(deposits_core::messages::HandshakeMsg {
+        use crate::handler::messages::HandshakeMsg;
+        let original_msg = DepositsMessage::Handshake(HandshakeMsg {
             protocol_version: 2,
             min_protocol_version: 1,
             features: 0,

@@ -7,11 +7,11 @@
 
 //! Type aliases for common types used in deposits-ldk.
 
-use lightning::util::persist::KVStore;
+use lightning::util::persist::KVStoreSync;
 use crate::wire::message_types::*;
 
-/// Dynamic storage type - wraps LDK's KVStore trait object
-pub type DynStore = dyn KVStore + Sync + Send;
+/// Dynamic storage type - wraps LDK's KVStoreSync trait object
+pub type DynStore = dyn KVStoreSync + Sync + Send;
 
 /// HashStrategy determines how to calculate the expected consensus hash
 /// for message types that require commitment transaction synchronization.

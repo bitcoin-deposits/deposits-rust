@@ -304,14 +304,14 @@ mod tests {
         if let Some(ledger_arc) = ledgers.get(&(handler.our_node_id, partner)) {
             let mut ledger = ledger_arc.write().unwrap();
             if let Some(deposit) = ledger.state.deposits.get_mut(&deposit_pubkey) {
-                let invoice: deposits_core::Invoice = Invoice::new(
-                    "test-invoice".to_string(),
+                let invoice: deposits_core::Invoice = deposits_core::Invoice {
+                    id: "test-invoice".to_string(),
                     payment_hash,
                     amount,
                     expires,
-                    deposit_pubkey,
-                    "lntb1test".to_string(),
-                ).into();
+                    assigned_deposit: deposit_pubkey,
+                    bolt11: "lntb1test".to_string(),
+                };
                 deposit.invoices.push(invoice);
             }
         }
@@ -489,23 +489,23 @@ mod tests {
             if let Some(ledger_arc) = ledgers.get(&(handler.our_node_id, partner)) {
                 let mut ledger = ledger_arc.write().unwrap();
                 if let Some(dep) = ledger.state.deposits.get_mut(&deposit) {
-                    let invoice2: deposits_core::Invoice = Invoice::new(
-                        "test-invoice-2".to_string(),
-                        [0x02; 32],
-                        100_000,
-                        u64::MAX,
-                        deposit,
-                        "lntb2test".to_string(),
-                    ).into();
+                    let invoice2: deposits_core::Invoice = deposits_core::Invoice {
+                        id: "test-invoice-2".to_string(),
+                        payment_hash: [0x02; 32],
+                        amount: 100_000,
+                        expires: u64::MAX,
+                        assigned_deposit: deposit,
+                        bolt11: "lntb2test".to_string(),
+                    };
                     dep.invoices.push(invoice2);
-                    let invoice3: deposits_core::Invoice = Invoice::new(
-                        "test-invoice-3".to_string(),
-                        [0x03; 32],
-                        75_000,
-                        u64::MAX,
-                        deposit,
-                        "lntb3test".to_string(),
-                    ).into();
+                    let invoice3: deposits_core::Invoice = deposits_core::Invoice {
+                        id: "test-invoice-3".to_string(),
+                        payment_hash: [0x03; 32],
+                        amount: 75_000,
+                        expires: u64::MAX,
+                        assigned_deposit: deposit,
+                        bolt11: "lntb3test".to_string(),
+                    };
                     dep.invoices.push(invoice3);
                 }
             }

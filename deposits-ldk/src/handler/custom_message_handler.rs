@@ -15,6 +15,7 @@ use lightning::io;
 use lightning::ln::msgs::{DecodeError, LightningError};
 use lightning::ln::peer_handler::CustomMessageHandler;
 use lightning::ln::wire::CustomMessageReader;
+use lightning::util::ser::LengthLimitedRead;
 use lightning_types::features::{InitFeatures, NodeFeatures};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
@@ -32,7 +33,7 @@ where
 {
     type CustomMessage = DepositsMessage;
 
-    fn read<R: io::Read>(
+    fn read<R: LengthLimitedRead>(
         &self,
         message_type: u16,
         buffer: &mut R,

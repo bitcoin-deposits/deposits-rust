@@ -40,6 +40,9 @@
 
 #![allow(missing_docs)] // TODO: Add comprehensive documentation
 
+// Explicitly import lightning_macros so it's available for macro expansions
+extern crate lightning_macros;
+
 pub mod chain;
 pub mod channel_extension;
 pub mod channel_manager_ops;

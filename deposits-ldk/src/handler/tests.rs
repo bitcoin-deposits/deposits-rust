@@ -30,7 +30,7 @@ use crate::types::DynStore;
 fn create_test_handler() -> DepositsHandler<Arc<TestLogger>> {
     let logger = Arc::new(TestLogger::new());
     let kv_store: Arc<DynStore> = Arc::new(TestStore::new(false));
-    let event_queue = Arc::new(EventQueue::new(Arc::clone(&kv_store), Arc::clone(&logger)));
+    let event_queue = Arc::new(EventQueue::new(Arc::clone(&logger)));
 
     // Generate a test node ID
     use bitcoin::secp256k1::{Secp256k1, SecretKey};
@@ -528,14 +528,14 @@ fn test_broadcast_uncredited_payment_accusation_with_ledger() {
     // Add deposit with cosigned invoice (required for fraud proof validation)
     let mut deposit = deposits_core::Deposit::new(deposit_pubkey, None);
     deposit.balance = 100_000;
-    deposit.invoices = vec![Invoice::new(
-        hex::encode(&payment_hash),
+    deposit.invoices = vec![Invoice {
+        id: hex::encode(&payment_hash),
         payment_hash,
-        50_000,
-        u64::MAX,
-        deposit_pubkey,
-        "lnbc500n1test".to_string(),
-    ).into()];
+        amount: 50_000,
+        expires: u64::MAX,
+        assigned_deposit: deposit_pubkey,
+        bolt11: "lnbc500n1test".to_string(),
+    }.into()];
     ledger.state.deposits.insert(deposit_pubkey, deposit);
 
     // Add ledger to handler
@@ -630,14 +630,14 @@ fn test_broadcast_uncredited_payment_accusation_broadcasts_to_collateral_partner
     // Add deposit with cosigned invoice (required for fraud proof validation)
     let mut deposit = deposits_core::Deposit::new(deposit_pubkey, None);
     deposit.balance = 100_000;
-    deposit.invoices = vec![Invoice::new(
-        hex::encode(&payment_hash),
+    deposit.invoices = vec![Invoice {
+        id: hex::encode(&payment_hash),
         payment_hash,
-        100_000,
-        u64::MAX,
-        deposit_pubkey,
-        "lnbc1m1test".to_string(),
-    ).into()];
+        amount: 100_000,
+        expires: u64::MAX,
+        assigned_deposit: deposit_pubkey,
+        bolt11: "lnbc1m1test".to_string(),
+    }.into()];
     ledger.state.deposits.insert(deposit_pubkey, deposit);
 
     // Add ledger to handler
@@ -748,7 +748,7 @@ fn test_fraud_proof_rejected_without_cosigned_invoice() {
 fn test_fraud_proof_rejected_when_already_credited() {
     use bitcoin::hashes::{sha256, Hash};
     use deposits_core::Ledger;
-    use super::super::ledger_ext::LedgerExt;
+    use crate::handler::ledger_ext::LedgerExt;
     use deposits_core::{Deposit, Invoice};
     use crate::wire::messages::ReceivingCreditPaymentMsg;
 
@@ -778,14 +778,14 @@ fn test_fraud_proof_rejected_when_already_credited() {
     // Add deposit with a cosigned invoice
     let mut deposit = deposits_core::Deposit::new(deposit_pubkey, None);
     deposit.balance = 100_000;
-    deposit.invoices = vec![Invoice::new(
-        hex::encode(&payment_hash),
+    deposit.invoices = vec![Invoice {
+        id: hex::encode(&payment_hash),
         payment_hash,
-        50_000,
-        u64::MAX,
-        deposit_pubkey,
-        "lnbc500n1test".to_string(),
-    ).into()];
+        amount: 50_000,
+        expires: u64::MAX,
+        assigned_deposit: deposit_pubkey,
+        bolt11: "lnbc500n1test".to_string(),
+    }.into()];
     ledger.state.deposits.insert(deposit_pubkey, deposit);
 
     // Add a ReceivingCreditPayment to the ledger updates (simulating payment was credited)
@@ -891,14 +891,14 @@ fn test_fraud_proof_accepted_with_valid_cosigned_invoice() {
     // Add deposit with a cosigned invoice
     let mut deposit = deposits_core::Deposit::new(deposit_pubkey, None);
     deposit.balance = 100_000;
-    deposit.invoices = vec![Invoice::new(
-        hex::encode(&payment_hash),
+    deposit.invoices = vec![Invoice {
+        id: hex::encode(&payment_hash),
         payment_hash,
-        50_000,
-        u64::MAX,
-        deposit_pubkey,
-        "lnbc500n1test".to_string(),
-    ).into()];
+        amount: 50_000,
+        expires: u64::MAX,
+        assigned_deposit: deposit_pubkey,
+        bolt11: "lnbc500n1test".to_string(),
+    }.into()];
     ledger.state.deposits.insert(deposit_pubkey, deposit);
 
     // Add ledger to handler (no credit payment added)

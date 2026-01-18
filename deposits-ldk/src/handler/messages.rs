@@ -21,7 +21,7 @@
 //! - [`RelayMsg`]/[`RelayResponseMsg`]: NWC relay
 
 use bitcoin::secp256k1::PublicKey;
-use lightning::util::ser::{Readable, Writeable, Writer};
+use lightning::util::ser::{LengthLimitedRead, Readable, Writeable, Writer};
 use lightning::ln::msgs::DecodeError;
 use lightning::io;
 
@@ -2915,7 +2915,7 @@ pub struct DepositsMessageReader;
 impl lightning::ln::wire::CustomMessageReader for DepositsMessageReader {
     type CustomMessage = DepositsMessage;
 
-    fn read<R: io::Read>(
+    fn read<R: LengthLimitedRead>(
         &self,
         message_type: u16,
         buffer: &mut R,
