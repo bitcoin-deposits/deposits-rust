@@ -55,6 +55,7 @@ pub mod hex_utils;
 pub mod logger;
 pub mod payments;
 pub mod reserves;
+pub mod service;
 pub mod services;
 pub mod signer;
 pub mod storage;

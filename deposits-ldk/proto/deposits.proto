@@ -1,0 +1,141 @@
+syntax = "proto3";
+package deposits;
+
+// Ledger operations
+message InitLedgerRequest {
+  string partner_node_id = 1;
+  string ledger_address = 2;
+}
+message InitLedgerResponse {
+  string ledger_id = 1;
+}
+
+message ListLedgersRequest {}
+message ListLedgersResponse {
+  repeated LedgerInfo ledgers = 1;
+}
+
+message GetLedgerRequest {
+  string ledger_id = 1;
+}
+message GetLedgerResponse {
+  LedgerInfo ledger = 1;
+}
+
+message CloseLedgerRequest {
+  string ledger_id = 1;
+}
+message CloseLedgerResponse {}
+
+// Deposit operations
+message AddDepositRequest {
+  string partner_node_id = 1;
+  string deposit_pubkey = 2;
+}
+message AddDepositResponse {
+  string deposit_pubkey = 1;
+}
+
+message ListDepositsRequest {
+  optional string ledger_id = 1;
+}
+message ListDepositsResponse {
+  repeated DepositInfo deposits = 1;
+}
+
+message RemoveDepositRequest {
+  string ledger_id = 1;
+  string deposit_pubkey = 2;
+}
+message RemoveDepositResponse {}
+
+// Reserves operations
+message GetReservesStatusRequest {
+  string partner_node_id = 1;
+}
+message GetReservesStatusResponse {
+  uint64 current_amount = 1;
+  uint64 required_amount = 2;
+  uint64 excess_amount = 3;
+  uint64 total_deposit_balances = 4;
+}
+
+message ReduceReservesRequest {
+  string partner_node_id = 1;
+  uint64 amount_sat = 2;
+}
+message ReduceReservesResponse {}
+
+// Collateral operations
+message AddCollateralPartnerRequest {
+  string partner_node_id = 1;
+  string collateral_partner_id = 2;
+}
+message AddCollateralPartnerResponse {}
+
+message RemoveCollateralPartnerRequest {
+  string partner_node_id = 1;
+  string collateral_partner_id = 2;
+}
+message RemoveCollateralPartnerResponse {}
+
+message GetCollateralInfoRequest {
+  string partner_node_id = 1;
+}
+message GetCollateralInfoResponse {
+  repeated CollateralPartnerInfo partners = 1;
+  uint64 total_available_collateral = 2;
+}
+
+// Ledger updates
+message GetLedgerUpdatesRequest {
+  string ledger_id = 1;
+  optional uint64 from_sequence = 2;
+  optional uint64 limit = 3;
+}
+message GetLedgerUpdatesResponse {
+  repeated LedgerUpdate updates = 1;
+}
+
+// Common types
+message LedgerInfo {
+  string ledger_id = 1;
+  string operator_node_id = 2;
+  string partner_node_id = 3;
+  uint64 operator_balance_sat = 4;
+  uint64 partner_balance_sat = 5;
+  uint64 reserves_sat = 6;
+  uint64 deposit_count = 7;
+  uint64 sequence_number = 8;
+  string channel_id = 9;
+  string status = 10;
+  uint64 capacity_sat = 11;
+  string local_ledger_hash = 12;
+  string remote_ledger_hash = 13;
+}
+
+message DepositInfo {
+  string deposit_pubkey = 1;
+  string ledger_id = 2;
+  uint64 balance_sat = 3;
+  uint64 locked_balance_sat = 4;
+}
+
+message CollateralPartnerInfo {
+  string pubkey = 1;
+  uint64 collateral_amount = 2;
+  uint32 block_height = 3;
+  bool has_attestation = 4;
+}
+
+message LedgerUpdate {
+  uint64 sequence_number = 1;
+  string operation_type = 2;
+  bytes signature = 3;
+  uint64 timestamp = 4;
+}
+
+message DepositsError {
+  string code = 1;
+  string message = 2;
+}

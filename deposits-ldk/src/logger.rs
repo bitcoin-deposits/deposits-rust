@@ -14,7 +14,7 @@
 use std::ops::Deref;
 
 use deposits_core::traits::{Logger as CoreLogger, LogLevel};
-use lightning::util::logger::Logger as LdkLogger;
+pub use lightning::util::logger::Logger as LdkLogger;
 
 /// Adapter that implements deposits-core's Logger trait using LDK's Logger
 pub struct LdkLoggerAdapter<L: Deref>
