@@ -12,7 +12,7 @@ deposits-core = { path = "../deposits-core" }
 # Bitcoin primitives
 bitcoin = { version = "0.32", features = ["serde"] }
 
-# Lightning (LDK) - use vendored version from ldk-node to ensure compatibility
+# Lightning (LDK) - use rust-lightning via ldk-node's vendor symlink for path consistency
 lightning = { path = "../../ldk-node/vendor/rust-lightning/lightning", default-features = false, features = ["std"] }
 lightning-types = { path = "../../ldk-node/vendor/rust-lightning/lightning-types" }
 lightning-invoice = { path = "../../ldk-node/vendor/rust-lightning/lightning-invoice", features = ["std"] }
