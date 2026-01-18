@@ -1,0 +1,26 @@
+#!/bin/bash
+#
+# Fast reinitialization of the test environment
+# Drops all ledgers and recreates wallets without restarting containers
+#
+# Usage: ./fast-reinit.sh <network>
+
+set -e
+
+if [ $# -ne 1 ]; then
+    echo "Usage: $0 <network>"
+    echo "  network: regtest or mutinynet"
+    exit 1
+fi
+
+NETWORK=$1
+
+# 1. Drop all ledgers (clears in-memory + persisted data)
+./drop-ledgers.sh "$NETWORK"
+
+# 2. Reopen channels if they were force-closed
+./open-channels.sh "$NETWORK"
+
+# 3. Recreate ledgers
+./make-a-wallet.sh "$NETWORK" alice charlie bob amber
+./make-a-wallet.sh "$NETWORK" bob charlie alice blue

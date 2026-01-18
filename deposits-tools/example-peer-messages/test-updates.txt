@@ -1,0 +1,29 @@
+=== Ledger Updates - Alice ==========
+
+Partner: Bob → Alice (4 updates)
+  LedgerOpenRequest                        -  [00000000~f3076d03]
+  LedgerAddDeposit                         -  [f3076d03~03eef7f1]
+  LedgerAddDeposit                         -  [03eef7f1~4e96a30f]
+  ReservesToReserves                   1000 sat  [4e96a30f~22d300b6]
+
+
+=== Ledger Updates - Bob ==========
+
+Partner: Alice → Bob (2 updates)
+  LedgerOpenRequest                        -  [00000000~45faa4ad]
+  ReservesToReserves                  10000 sat  [45faa4ad~328d4978]
+
+
+=== Ledger Updates - Charlie ==========
+
+Partner: Bob → Charlie (2 updates)
+  LedgerOpenRequest                        -  [00000000~aade2d78]
+  ReservesToReserves                   1000 sat  [aade2d78~d5485ac3]
+
+Partner: Alice → Charlie (4 updates)
+  LedgerOpenRequest                        -  [00000000~9a3792b0]
+  LedgerAddDeposit                         -  [9a3792b0~2391e0ba]
+  LedgerAddDeposit                         -  [2391e0ba~f04b5d5c]
+  ReservesToReserves                  10000 sat  [f04b5d5c~105f3434]
+
+

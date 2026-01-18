@@ -1,0 +1,6 @@
+{
+  "secret": "0e12b4165158a8799357a39639c0506fcb6acbbdbc494248fe0ee70b51ffb5d2",
+  "pubkey": "e28687d48d058bcaae9e18854a05722783a1093e779921913414974f18db8b6e",
+  "relay": "ws://localhost:7777",
+  "target": "alice"
+}

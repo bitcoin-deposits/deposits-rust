@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "nwc": {
+      "command": "node",
+      "args": ["vendor/mcp/build/src/index.js"],
+      "env": {
+        "DEFAULT_RELAY_URL": "ws://localhost:7777",
+        "DEFAULT_NWC_PUBKEY": "4eb0842182540e752c2e9603cfddca0017ee664afd9b813e4a8c4d3a8ec2653b"
+      }
+    }
+  }
+}

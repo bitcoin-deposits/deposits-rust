@@ -2,5 +2,33 @@
 members = [
     "deposits-core",
     "deposits-ldk",
+    "deposits-tools",
 ]
 resolver = "2"
+
+# Use ldk-node's local rust-lightning fork
+[patch.crates-io]
+lightning = { path = "../ldk-node/vendor/rust-lightning/lightning" }
+lightning-types = { path = "../ldk-node/vendor/rust-lightning/lightning-types" }
+lightning-invoice = { path = "../ldk-node/vendor/rust-lightning/lightning-invoice" }
+lightning-net-tokio = { path = "../ldk-node/vendor/rust-lightning/lightning-net-tokio" }
+lightning-persister = { path = "../ldk-node/vendor/rust-lightning/lightning-persister", features = ["tokio"] }
+lightning-background-processor = { path = "../ldk-node/vendor/rust-lightning/lightning-background-processor" }
+lightning-rapid-gossip-sync = { path = "../ldk-node/vendor/rust-lightning/lightning-rapid-gossip-sync" }
+lightning-block-sync = { path = "../ldk-node/vendor/rust-lightning/lightning-block-sync" }
+lightning-transaction-sync = { path = "../ldk-node/vendor/rust-lightning/lightning-transaction-sync" }
+lightning-liquidity = { path = "../ldk-node/vendor/rust-lightning/lightning-liquidity" }
+lightning-macros = { path = "../ldk-node/vendor/rust-lightning/lightning-macros" }
+
+[patch."https://github.com/lightningdevkit/rust-lightning"]
+lightning = { path = "../ldk-node/vendor/rust-lightning/lightning" }
+lightning-types = { path = "../ldk-node/vendor/rust-lightning/lightning-types" }
+lightning-invoice = { path = "../ldk-node/vendor/rust-lightning/lightning-invoice" }
+lightning-net-tokio = { path = "../ldk-node/vendor/rust-lightning/lightning-net-tokio" }
+lightning-persister = { path = "../ldk-node/vendor/rust-lightning/lightning-persister", features = ["tokio"] }
+lightning-background-processor = { path = "../ldk-node/vendor/rust-lightning/lightning-background-processor" }
+lightning-rapid-gossip-sync = { path = "../ldk-node/vendor/rust-lightning/lightning-rapid-gossip-sync" }
+lightning-block-sync = { path = "../ldk-node/vendor/rust-lightning/lightning-block-sync" }
+lightning-transaction-sync = { path = "../ldk-node/vendor/rust-lightning/lightning-transaction-sync" }
+lightning-liquidity = { path = "../ldk-node/vendor/rust-lightning/lightning-liquidity" }
+lightning-macros = { path = "../ldk-node/vendor/rust-lightning/lightning-macros" }

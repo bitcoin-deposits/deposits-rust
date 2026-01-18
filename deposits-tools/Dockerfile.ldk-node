@@ -1,0 +1,53 @@
+# LDK Node Dockerfile
+FROM rust:latest as builder
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    pkg-config \
+    libssl-dev \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set working directory
+WORKDIR /app
+
+# Copy source code (using .dockerignore to exclude target/ and .git/)
+COPY Cargo.toml Cargo.lock ./
+COPY src/ src/
+COPY vendor/ vendor/
+COPY deposits-core/ deposits-core/
+COPY deposits-ldk/ deposits-ldk/
+
+# Build the LDK server
+# Clean to ensure Lightning fork changes are compiled
+# Features: bitcoin-deposits-non-conforming includes bitcoin-deposits and enables testing APIs
+RUN cargo clean && cargo build --release --features bitcoin-deposits-non-conforming,testing --bin ldk-server
+
+# Runtime stage - use same base as builder to avoid GLIBC issues
+FROM rust:latest
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create ldk user
+RUN useradd -m -s /bin/bash ldk
+
+# Copy binary from builder
+COPY --from=builder /app/target/release/ldk-server /usr/local/bin/ldk-server
+
+# Create data directory with proper permissions
+RUN mkdir -p /ldk && chown -R ldk:ldk /ldk && chmod -R 755 /ldk
+
+# Switch to ldk user
+USER ldk
+WORKDIR /ldk
+
+# Expose Lightning P2P port and API port
+EXPOSE 9735 3000
+
+# Default command - start the LDK server
+CMD ["ldk-server"]

@@ -1,0 +1,129 @@
+# Docker Compose for Mutinynet (public signet)
+#
+# Mutinynet is a public Lightning-friendly signet with fast blocks.
+# Uses public esplora but local nostr relay (to avoid rate limits).
+#
+# Resources:
+#   - Esplora API: https://mutinynet.com/api/
+#   - Block Explorer: https://mutinynet.com/
+#   - Faucet: https://faucet.mutinynet.com/
+#   - Nostr Relay: Local (ws://nostr-relay:8080)
+#
+# Usage:
+#   docker-compose -f docker-compose-mutinynet.yml up -d
+#
+# Get testnet coins from faucet, then open channels between nodes.
+
+services:
+  # Local Nostr Relay (to avoid rate limits from public relays)
+  nostr-relay:
+    image: dockurr/strfry:latest
+    container_name: nostr-relay-mutiny
+    ports:
+      - "7777:7777"
+    volumes:
+      - nostr_mutiny_data:/app/strfry-db
+      - ./permissive-write-policy.py:/app/write-policy.py:ro
+    networks:
+      mutinynet_network:
+        ipv4_address: 172.21.0.10
+  # LDK Node 1 - Alice (Mutinynet)
+  ldk-alice:
+    build:
+      context: .
+      dockerfile: Dockerfile.ldk-node
+    container_name: ldk-alice-mutiny
+    environment:
+      - NODE_NAME=alice
+      - LDK_DATA_DIR=/ldk
+      - NETWORK=signet
+      - CHAIN_SOURCE=esplora
+      - ESPLORA_URL=https://mutinynet.com/api/
+      - LISTEN_PORT=9735
+      - ENABLE_DEPOSITS=true
+      - NOSTR_RELAY_URL=ws://nostr-relay:7777
+      - NWC_PRIVATE_KEY=4e5743616c696365000000000000000000000000000000000000000000000001
+      - NWC_PUBLIC_KEY=4eb0842182540e752c2e9603cfddca0017ee664afd9b813e4a8c4d3a8ec2653b
+      - RUST_LOG=ldk_node::deposits=debug,lightning=debug
+      - RUST_BACKTRACE=0
+    ports:
+      - "9735:9735"   # Lightning P2P
+      - "3011:3000"   # API port
+    volumes:
+      - alice_mutiny_data:/ldk
+    depends_on:
+      - nostr-relay
+    networks:
+      mutinynet_network:
+        ipv4_address: 172.21.0.20
+
+  # LDK Node 2 - Bob (Mutinynet)
+  ldk-bob:
+    build:
+      context: .
+      dockerfile: Dockerfile.ldk-node
+    container_name: ldk-bob-mutiny
+    environment:
+      - NODE_NAME=bob
+      - LDK_DATA_DIR=/ldk
+      - NETWORK=signet
+      - CHAIN_SOURCE=esplora
+      - ESPLORA_URL=https://mutinynet.com/api/
+      - LISTEN_PORT=9736
+      - ENABLE_DEPOSITS=true
+      - NOSTR_RELAY_URL=ws://nostr-relay:7777
+      - NWC_PRIVATE_KEY=4e5743626f620000000000000000000000000000000000000000000000000002
+      - NWC_PUBLIC_KEY=aa3f00534c75865971cb680487a3416ba2d3ac6c248e2c27aca7fd242845ac7b
+      - RUST_LOG=ldk_node::deposits=debug,lightning=debug
+      - RUST_BACKTRACE=0
+    ports:
+      - "9736:9736"   # Lightning P2P
+      - "3012:3000"   # API port
+    volumes:
+      - bob_mutiny_data:/ldk
+    depends_on:
+      - nostr-relay
+    networks:
+      mutinynet_network:
+        ipv4_address: 172.21.0.21
+
+  # LDK Node 3 - Charlie (Mutinynet)
+  ldk-charlie:
+    build:
+      context: .
+      dockerfile: Dockerfile.ldk-node
+    container_name: ldk-charlie-mutiny
+    environment:
+      - NODE_NAME=charlie
+      - LDK_DATA_DIR=/ldk
+      - NETWORK=signet
+      - CHAIN_SOURCE=esplora
+      - ESPLORA_URL=https://mutinynet.com/api/
+      - LISTEN_PORT=9737
+      - ENABLE_DEPOSITS=true
+      - NOSTR_RELAY_URL=ws://nostr-relay:7777
+      - RUST_LOG=ldk_node::deposits=debug,lightning=debug
+      - RUST_BACKTRACE=0
+    ports:
+      - "9737:9737"   # Lightning P2P
+      - "3013:3000"   # API port
+    volumes:
+      - charlie_mutiny_data:/ldk
+    depends_on:
+      - nostr-relay
+    networks:
+      mutinynet_network:
+        ipv4_address: 172.21.0.22
+
+volumes:
+  nostr_mutiny_data:
+  alice_mutiny_data:
+  bob_mutiny_data:
+  charlie_mutiny_data:
+
+networks:
+  mutinynet_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.0.0/16

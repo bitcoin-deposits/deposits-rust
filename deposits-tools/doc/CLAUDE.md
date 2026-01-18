@@ -1,0 +1,3 @@
+- don't account for backward compatibiltiy
+- re-init takes five minutes, so don't cut it off
+- fight the urge to conclude the problem is old code or data
