@@ -36,6 +36,42 @@ pub struct GetBalancesResponse {
     pub spendable_onchain_balance_sats: u64,
 }
 
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct OpenChannelRequest {
+    #[prost(string, tag = "1")]
+    pub node_pubkey: String,
+    #[prost(string, tag = "2")]
+    pub address: String,
+    #[prost(uint64, tag = "3")]
+    pub channel_amount_sats: u64,
+    #[prost(uint64, optional, tag = "4")]
+    pub push_to_counterparty_msat: Option<u64>,
+    #[prost(bool, tag = "6")]
+    pub announce_channel: bool,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct OpenChannelResponse {
+    #[prost(string, tag = "1")]
+    pub user_channel_id: String,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListChannelsResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub channels: Vec<ChannelInfo>,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ChannelInfo {
+    #[prost(string, tag = "2")]
+    pub counterparty_node_id: String,
+    #[prost(bool, tag = "13")]
+    pub is_channel_ready: bool,
+    #[prost(bool, tag = "14")]
+    pub is_usable: bool,
+}
+
 /// Compute HMAC-SHA256 auth header for ldk-server
 /// Format: "HMAC <timestamp>:<hmac_hex>"
 fn compute_auth_header(body: &[u8]) -> String {
@@ -81,20 +117,7 @@ struct BitcoinBalance {
     pending_balance_sat: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct ConnectPeerRequest {
-    pubkey: String,
-    host: String,
-    port: u16,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct OpenChannelRequest {
-    pubkey: String,
-    amount_sat: u64,
-    push_to_counterparty_msat: Option<u64>,
-    announce: bool,
-}
+// ConnectPeerRequest removed - using OpenChannel address field instead
 
 #[derive(Debug, Serialize, Deserialize)]
 struct BitcoinRpcRequest {
@@ -111,20 +134,7 @@ struct BitcoinRpcResponse {
     id: u32,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct ChannelInfo {
-    channel_id: Option<String>,
-    counterparty_node_id: Option<String>,
-    channel_value_satoshis: Option<u64>,
-    balance_msat: Option<u64>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct ChannelsResponse {
-    success: bool,
-    data: Option<Vec<ChannelInfo>>,
-    error: Option<String>,
-}
+// JSON ChannelInfo and ChannelsResponse removed - using protobuf ListChannelsResponse instead
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ChainInfo {
@@ -529,19 +539,27 @@ impl NetworkInitializer {
     }
 
     async fn check_existing_channel(&self, node1: &str, node2_pubkey: &str) -> Result<bool, Box<dyn std::error::Error>> {
-        let response = self.ldk_api_call::<serde_json::Value>(node1, "/channels", "GET", None).await?;
+        let node_config = self.nodes.get(node1)
+            .ok_or_else(|| format!("Unknown node: {}", node1))?;
 
-        if response.success {
-            if let Some(data) = response.data {
-                if let Some(channels) = data.as_array() {
-                    for channel in channels {
-                        if let Some(counterparty) = channel.get("counterparty_node_id") {
-                            if let Some(counterparty_str) = counterparty.as_str() {
-                                if counterparty_str == node2_pubkey {
-                                    return Ok(true);
-                                }
-                            }
-                        }
+        let url = format!("https://localhost:{}/ListChannels", node_config.api_port);
+        let body: Vec<u8> = vec![];
+        let auth_header = compute_auth_header(&body);
+
+        let response = self.client
+            .post(&url)
+            .header("Content-Type", "application/octet-stream")
+            .header("X-Auth", auth_header)
+            .body(body)
+            .send()
+            .await?;
+
+        if response.status().is_success() {
+            let bytes = response.bytes().await?;
+            if let Ok(list) = ListChannelsResponse::decode(bytes.as_ref()) {
+                for channel in &list.channels {
+                    if channel.counterparty_node_id == node2_pubkey {
+                        return Ok(true);
                     }
                 }
             }
@@ -555,11 +573,23 @@ impl NetworkInitializer {
 
         let mut insufficient_nodes = Vec::new();
 
-        for (node_id, node_config) in &self.nodes {
-            match self.ldk_api_call::<BitcoinBalance>(node_id, "/bitcoin/balance", "GET", None).await {
-                Ok(response) if response.success => {
-                    if let Some(balance_data) = response.data {
-                        let total = balance_data.balance_sat + balance_data.pending_balance_sat;
+        for (_node_id, node_config) in &self.nodes {
+            let url = format!("https://localhost:{}/GetBalances", node_config.api_port);
+            let body: Vec<u8> = vec![];
+            let auth_header = compute_auth_header(&body);
+
+            match self.client
+                .post(&url)
+                .header("Content-Type", "application/octet-stream")
+                .header("X-Auth", auth_header)
+                .body(body)
+                .send()
+                .await
+            {
+                Ok(response) if response.status().is_success() => {
+                    let bytes = response.bytes().await?;
+                    if let Ok(balance) = GetBalancesResponse::decode(bytes.as_ref()) {
+                        let total = balance.total_onchain_balance_sats;
                         if total < min_balance_sat {
                             self.warn(&format!("❌ {} has insufficient funds: {} sat (need {} sat)",
                                 node_config.name, total, min_balance_sat));
@@ -579,14 +609,26 @@ impl NetworkInitializer {
         if !insufficient_nodes.is_empty() {
             self.log("");
             self.log("📍 Fund these addresses from your treasury wallet:");
-            for (node_id, node_config) in &self.nodes {
-                match self.ldk_api_call::<BitcoinAddress>(node_id, "/bitcoin/address", "GET", None).await {
-                    Ok(response) if response.success => {
-                        if let Some(addr_data) = response.data {
-                            self.log(&format!("   {}: {}", node_config.name, addr_data.address));
+            for (_node_id, node_config) in &self.nodes {
+                let url = format!("https://localhost:{}/OnchainReceive", node_config.api_port);
+                let body: Vec<u8> = vec![];
+                let auth_header = compute_auth_header(&body);
+
+                if let Ok(response) = self.client
+                    .post(&url)
+                    .header("Content-Type", "application/octet-stream")
+                    .header("X-Auth", auth_header)
+                    .body(body)
+                    .send()
+                    .await
+                {
+                    if response.status().is_success() {
+                        if let Ok(bytes) = response.bytes().await {
+                            if let Ok(addr) = OnchainReceiveResponse::decode(bytes.as_ref()) {
+                                self.log(&format!("   {}: {}", node_config.name, addr.address));
+                            }
                         }
                     }
-                    _ => {}
                 }
             }
             self.log("");
@@ -648,47 +690,43 @@ impl NetworkInitializer {
 
                     self.log(&format!("🔗 Creating channel: {} -> {}", selected_node_config.name, target_node_config.name));
 
-                    // Connect peers first
-                    let connect_data = ConnectPeerRequest {
-                        pubkey: target_pubkey.clone(),
-                        host: target_node_config.ip.clone(),
-                        port: target_node_config.p2p_port,
-                    };
-
-                    // Try to connect (ignore if already connected)
-                    let _ = self.ldk_api_call::<serde_json::Value>(
-                        selected_node_id, "/peers/connect", "POST",
-                        Some(serde_json::to_value(&connect_data)?)
-                    ).await;
-
-                    // Wait for connection
-                    sleep(Duration::from_secs(2)).await;
-
-                    // Open channel with 50/50 balance (push half to counterparty)
+                    // Open channel using protobuf API (includes peer connection)
                     let push_msat = Some((channel_amount * 1000) / 2); // Push 50% in millisats
-                    let channel_data = OpenChannelRequest {
-                        pubkey: target_pubkey.clone(),
-                        amount_sat: channel_amount,
+                    let target_address = format!("{}:{}", target_node_config.ip, target_node_config.p2p_port);
+
+                    let request = OpenChannelRequest {
+                        node_pubkey: target_pubkey.clone(),
+                        address: target_address,
+                        channel_amount_sats: channel_amount,
                         push_to_counterparty_msat: push_msat,
-                        announce: true,
+                        announce_channel: true,
                     };
 
-                    match self.ldk_api_call::<serde_json::Value>(
-                        selected_node_id, "/channels/open", "POST",
-                        Some(serde_json::to_value(&channel_data)?)
-                    ).await {
-                        Ok(response) if response.success => {
-                            if let Some(data) = response.data {
-                                if let Some(channel_id) = data.get("channel_id") {
-                                    let channel_key = format!("{}-{}", selected_node_id, target_node_id);
-                                    self.channels.insert(channel_key, channel_id.as_str().unwrap_or("").to_string());
-                                    pass_channel_count += 1;
-                                    self.log(&format!("✅ Channel created: {}", channel_id));
-                                }
+                    let url = format!("https://localhost:{}/OpenChannel", selected_node_config.api_port);
+                    let body = request.encode_to_vec();
+                    let auth_header = compute_auth_header(&body);
+
+                    match self.client
+                        .post(&url)
+                        .header("Content-Type", "application/octet-stream")
+                        .header("X-Auth", auth_header)
+                        .body(body)
+                        .send()
+                        .await
+                    {
+                        Ok(response) if response.status().is_success() => {
+                            let bytes = response.bytes().await?;
+                            if let Ok(resp) = OpenChannelResponse::decode(bytes.as_ref()) {
+                                let channel_key = format!("{}-{}", selected_node_id, target_node_id);
+                                self.channels.insert(channel_key, resp.user_channel_id.clone());
+                                pass_channel_count += 1;
+                                self.log(&format!("✅ Channel created: {}", resp.user_channel_id));
                             }
                         }
                         Ok(response) => {
-                            self.warn(&format!("⚠️ Channel creation failed: {:?}", response.error));
+                            let status = response.status();
+                            let body = response.text().await.unwrap_or_default();
+                            self.warn(&format!("⚠️ Channel creation failed: {} - {}", status, body));
                         }
                         Err(e) => {
                             self.warn(&format!("⚠️ Channel creation error: {}", e));
