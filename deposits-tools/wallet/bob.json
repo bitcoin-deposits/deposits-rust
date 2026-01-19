@@ -1,9 +1,0 @@
-{
-  "secret": "4e5743626f620000000000000000000000000000000000000000000000000002",
-  "pubkey": "aa3f00534c75865971cb680487a3416ba2d3ac6c248e2c27aca7fd242845ac7b",
-  "relay": "ws://localhost:7777",
-  "target": "bob",
-  "deposit_secret": null,
-  "deposit_pubkey": null,
-  "target_nwc_pubkey": null
-}

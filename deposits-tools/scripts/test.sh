@@ -2,6 +2,7 @@
 #
 # Usage: ./test.sh <network>
 
+cd "$(dirname "$0")"
 set -e
 
 if [ $# -ne 1 ]; then
@@ -12,13 +13,15 @@ fi
 
 NETWORK=$1
 
-LOGFILE=test-$(date +'%s').log
+SCRIPT_DIR="$(pwd)"
+
+LOGFILE="$SCRIPT_DIR/test-$(date +'%s').log"
 exec > >(tee -a "$LOGFILE") 2>&1
 
 echo "Testing on network: $NETWORK"
 
-./make-node-wallets.sh "$NETWORK"
-./make-a-wallet.sh "$NETWORK" alice charlie bob amber
-./make-a-wallet.sh "$NETWORK" bob charlie alice blue
-./pay-amber-from-charlie.sh
-./pay-blue-from-amber.sh
+"$SCRIPT_DIR/make-node-wallets.sh" "$NETWORK"
+"$SCRIPT_DIR/make-a-wallet.sh" "$NETWORK" alice charlie bob amber
+"$SCRIPT_DIR/make-a-wallet.sh" "$NETWORK" bob charlie alice blue
+"$SCRIPT_DIR/pay-amber-from-charlie.sh"
+"$SCRIPT_DIR/pay-blue-from-amber.sh"

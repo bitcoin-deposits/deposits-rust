@@ -1,5 +1,7 @@
 #!/bin/bash
 
+cd "$(dirname "$0")"
+
 echo "Creating 5 deposits on Alice-Frank ledger..."
 
 for i in {1..5}; do

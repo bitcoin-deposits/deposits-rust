@@ -1,9 +1,0 @@
-{
-  "secret": "4e5743616c696365000000000000000000000000000000000000000000000001",
-  "pubkey": "4eb0842182540e752c2e9603cfddca0017ee664afd9b813e4a8c4d3a8ec2653b",
-  "relay": "ws://localhost:7777",
-  "target": "alice",
-  "deposit_secret": null,
-  "deposit_pubkey": null,
-  "target_nwc_pubkey": null
-}

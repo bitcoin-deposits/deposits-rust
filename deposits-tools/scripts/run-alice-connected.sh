@@ -2,6 +2,7 @@
 
 # Script to run Alice standalone but connected to Docker infrastructure
 
+cd "$(dirname "$0")"
 set -e
 
 echo "🔧 Setting up Alice connected debug environment..."

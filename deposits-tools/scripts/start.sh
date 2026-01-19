@@ -3,6 +3,8 @@
 # Simple turnkey start script
 # Build images once, then just use docker-compose up -d
 
+cd "$(dirname "$0")"
+
 echo "🚀 Starting Bitcoin Deposits Environment..."
 
 # Check if images exist, build if needed

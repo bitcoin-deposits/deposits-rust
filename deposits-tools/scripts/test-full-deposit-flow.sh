@@ -1,5 +1,7 @@
 #!/bin/bash
 
+cd "$(dirname "$0")"
+
 echo "=== Testing Full Deposit Flow with Audit Updates ==="
 
 # Get pubkeys

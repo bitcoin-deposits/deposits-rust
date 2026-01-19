@@ -4,6 +4,7 @@
 #
 # Usage: ./make-node-wallets.sh <network>
 
+cd "$(dirname "$0")"
 set -e
 
 if [ $# -ne 1 ]; then
@@ -24,10 +25,14 @@ case "$NETWORK" in
         ;;
 esac
 
-mkdir -p wallet
+SCRIPT_DIR="$(pwd)"
+PROJECT_DIR="$(cd ".." && pwd)"
+WORKSPACE_DIR="$(cd "../.." && pwd)"
+
+mkdir -p "$PROJECT_DIR/wallet"
 
 # diana eve frank
 for NODE_NAME in alice bob charlie; do
-    rm -f wallet/$NODE_NAME.json
-    target/release/nwc-client -r "$RELAY_URL" -w wallet/$NODE_NAME.json -t $NODE_NAME init-node
+    rm -f "$PROJECT_DIR/wallet/$NODE_NAME.json"
+    "$WORKSPACE_DIR/target/release/nwc-client" -r "$RELAY_URL" -w "$PROJECT_DIR/wallet/$NODE_NAME.json" -t $NODE_NAME init-node
 done

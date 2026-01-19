@@ -3,6 +3,7 @@
 # Stress test for Bitcoin Deposits
 # Creates many wallets and has them pay each other (parallelized)
 
+cd "$(dirname "$0")"
 set -e
 
 LOGFILE="stress-test-$(date +'%s').log"

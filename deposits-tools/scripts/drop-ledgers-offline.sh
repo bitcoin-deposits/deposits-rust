@@ -11,6 +11,7 @@
 #   ./drop-ledgers-offline.sh alice bob          # specific nodes on mutinynet
 #   NETWORK=regtest ./drop-ledgers-offline.sh    # regtest nodes
 
+cd "$(dirname "$0")"
 set -e
 
 NETWORK=${NETWORK:-mutiny}

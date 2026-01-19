@@ -8,6 +8,7 @@
 # 3. Initializes Bitcoin Deposits ledgers on all channels
 # 4. Sets up NWC services for mobile wallet integration
 
+cd "$(dirname "$0")"
 set -e
 
 # Colors for output

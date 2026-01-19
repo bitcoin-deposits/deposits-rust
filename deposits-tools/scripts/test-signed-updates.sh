@@ -1,5 +1,7 @@
 #!/bin/bash
 
+cd "$(dirname "$0")"
+
 echo "=== Testing Signed Audit Updates ==="
 
 # Get Alice and Bob's pubkeys

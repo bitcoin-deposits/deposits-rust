@@ -3,6 +3,7 @@
 # Turnkey Docker Environment Setup Script
 # This script provides a reliable way to recreate the entire Bitcoin Deposits environment
 
+cd "$(dirname "$0")"
 set -e  # Exit on any error
 
 echo "🚀 Starting turnkey Docker environment setup..."

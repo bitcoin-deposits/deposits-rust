@@ -11,6 +11,7 @@
 # 6. Remove reserves outputs
 # 7. Close ledgers
 
+cd "$(dirname "$0")"
 set -e
 
 if [ $# -ne 1 ]; then

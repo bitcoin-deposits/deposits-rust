@@ -3,6 +3,7 @@
 # Quick Reset Script for Docker Environment
 # Use this when you need to quickly restart without rebuilding images
 
+cd "$(dirname "$0")"
 set -e
 
 echo "🔄 Quick environment reset..."

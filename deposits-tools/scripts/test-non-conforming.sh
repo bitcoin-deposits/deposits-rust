@@ -5,6 +5,7 @@
 #
 # Usage: ./test-non-conforming.sh <network>
 
+cd "$(dirname "$0")"
 set -e
 
 if [ $# -ne 1 ]; then
