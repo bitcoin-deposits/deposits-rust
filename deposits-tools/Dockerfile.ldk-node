@@ -1,4 +1,4 @@
-# LDK Node Dockerfile
+# LDK Node Dockerfile for deposits-rust
 FROM rust:latest as builder
 
 # Install system dependencies
@@ -7,22 +7,26 @@ RUN apt-get update && apt-get install -y \
     pkg-config \
     libssl-dev \
     curl \
+    protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
 WORKDIR /app
 
-# Copy source code (using .dockerignore to exclude target/ and .git/)
-COPY Cargo.toml Cargo.lock ./
-COPY src/ src/
-COPY vendor/ vendor/
-COPY deposits-core/ deposits-core/
-COPY deposits-ldk/ deposits-ldk/
+# Copy ldk-node (includes vendor/rust-lightning)
+COPY ldk-node/ ldk-node/
 
-# Build the LDK server
+# Copy deposits-rust workspace
+COPY deposits-rust/Cargo.toml deposits-rust/Cargo.lock ./deposits-rust/
+COPY deposits-rust/deposits-core/ deposits-rust/deposits-core/
+COPY deposits-rust/deposits-ldk/ deposits-rust/deposits-ldk/
+COPY deposits-rust/deposits-tools/ deposits-rust/deposits-tools/
+
+# Build the LDK server for deposits
 # Clean to ensure Lightning fork changes are compiled
 # Features: bitcoin-deposits-non-conforming includes bitcoin-deposits and enables testing APIs
-RUN cargo clean && cargo build --release --features bitcoin-deposits-non-conforming,testing --bin ldk-server
+WORKDIR /app/deposits-rust
+RUN cargo clean && cargo build --release --features bitcoin-deposits-non-conforming --bin ldk-server-deposits
 
 # Runtime stage - use same base as builder to avoid GLIBC issues
 FROM rust:latest
@@ -37,7 +41,7 @@ RUN apt-get update && apt-get install -y \
 RUN useradd -m -s /bin/bash ldk
 
 # Copy binary from builder
-COPY --from=builder /app/target/release/ldk-server /usr/local/bin/ldk-server
+COPY --from=builder /app/deposits-rust/target/release/ldk-server-deposits /usr/local/bin/ldk-server
 
 # Create data directory with proper permissions
 RUN mkdir -p /ldk && chown -R ldk:ldk /ldk && chmod -R 755 /ldk

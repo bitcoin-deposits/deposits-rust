@@ -10,6 +10,8 @@ use deposits_ldk::service::{
     RemoveDepositRequest, RemoveDepositResponse,
     ReduceReservesRequest, ReduceReservesResponse,
     GetLedgerUpdatesRequest, GetLedgerUpdatesResponse,
+    AddCollateralPartnerRequest, AddCollateralPartnerResponse,
+    RemoveCollateralPartnerRequest, RemoveCollateralPartnerResponse,
     DepositsError,
 };
 use prost::Message;
@@ -322,6 +324,42 @@ fn build_cli() -> Command {
                 ),
         )
         .subcommand(
+            Command::new("add-collateral-partner")
+                .about("Add a collateral partner to a ledger")
+                .arg(
+                    Arg::new("partner")
+                        .help("Partner node for the ledger")
+                        .value_hint(ValueHint::Other)
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    Arg::new("collateral-partner")
+                        .help("Node to add as collateral partner")
+                        .value_hint(ValueHint::Other)
+                        .required(true)
+                        .index(2),
+                ),
+        )
+        .subcommand(
+            Command::new("remove-collateral-partner")
+                .about("Remove a collateral partner from a ledger")
+                .arg(
+                    Arg::new("partner")
+                        .help("Partner node for the ledger")
+                        .value_hint(ValueHint::Other)
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    Arg::new("collateral-partner")
+                        .help("Node to remove as collateral partner")
+                        .value_hint(ValueHint::Other)
+                        .required(true)
+                        .index(2),
+                ),
+        )
+        .subcommand(
             Command::new("status")
                 .about("Show node status and info")
                 .arg(
@@ -419,6 +457,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
         Some(("remove-reserves", sub_m)) => {
             remove_reserves(&client, &base_url, sub_m).await?;
+        }
+        Some(("add-collateral-partner", sub_m)) => {
+            add_collateral_partner(&client, &base_url, sub_m).await?;
+        }
+        Some(("remove-collateral-partner", sub_m)) => {
+            remove_collateral_partner(&client, &base_url, sub_m).await?;
         }
         Some(("status", sub_m)) => {
             // Use node arg if provided, otherwise use original alias (before resolution)
@@ -723,6 +767,60 @@ async fn remove_reserves(_client: &Client, _base_url: &str, _matches: &ArgMatche
     // TODO: Add proto support for remove-reserves endpoint
     eprintln!("❌ remove-reserves not yet implemented with proto API");
     std::process::exit(1);
+}
+
+async fn add_collateral_partner(client: &Client, base_url: &str, matches: &ArgMatches) -> Result<(), Box<dyn Error>> {
+    let partner_input = matches.get_one::<String>("partner").unwrap();
+    let collateral_input = matches.get_one::<String>("collateral-partner").unwrap();
+
+    // Resolve aliases to node IDs if needed
+    let partner_id = resolve_node_id(client, partner_input).await?;
+    let collateral_partner_id = resolve_node_id(client, collateral_input).await?;
+
+    println!("🔗 Adding collateral partner {} to ledger with {}...", collateral_partner_id, partner_id);
+
+    let request = AddCollateralPartnerRequest {
+        partner_node_id: partner_id.clone(),
+        collateral_partner_id: collateral_partner_id.clone(),
+    };
+
+    let _response: AddCollateralPartnerResponse = proto_request(
+        client,
+        base_url,
+        endpoints::DEPOSITS_ADD_COLLATERAL_PARTNER_PATH,
+        request,
+    ).await?;
+
+    println!("✅ Collateral partner added successfully!");
+
+    Ok(())
+}
+
+async fn remove_collateral_partner(client: &Client, base_url: &str, matches: &ArgMatches) -> Result<(), Box<dyn Error>> {
+    let partner_input = matches.get_one::<String>("partner").unwrap();
+    let collateral_input = matches.get_one::<String>("collateral-partner").unwrap();
+
+    // Resolve aliases to node IDs if needed
+    let partner_id = resolve_node_id(client, partner_input).await?;
+    let collateral_partner_id = resolve_node_id(client, collateral_input).await?;
+
+    println!("🔗 Removing collateral partner {} from ledger with {}...", collateral_partner_id, partner_id);
+
+    let request = RemoveCollateralPartnerRequest {
+        partner_node_id: partner_id.clone(),
+        collateral_partner_id: collateral_partner_id.clone(),
+    };
+
+    let _response: RemoveCollateralPartnerResponse = proto_request(
+        client,
+        base_url,
+        endpoints::DEPOSITS_REMOVE_COLLATERAL_PARTNER_PATH,
+        request,
+    ).await?;
+
+    println!("✅ Collateral partner removed successfully!");
+
+    Ok(())
 }
 
 async fn complete_dynamic(client: &Client, base_url: &str, comp_type: &str) -> Result<(), Box<dyn Error>> {

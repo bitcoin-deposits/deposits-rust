@@ -28,21 +28,48 @@ where
     L: Deref + Clone + Send + Sync,
     L::Target: LdkLogger,
 {
+    use bitcoin::secp256k1::{Secp256k1, SecretKey};
+    use bitcoin::secp256k1::rand::rngs::OsRng;
+
     let partner_id = PublicKey::from_str(&request.partner_node_id)
         .map_err(|_| DepositsError {
             code: "INVALID_PUBKEY".into(),
             message: "Invalid partner_node_id".into(),
         })?;
 
-    // Parse address - try to infer network from the address prefix
-    let address: Address<bitcoin::address::NetworkUnchecked> = request.ledger_address.parse()
-        .map_err(|_| DepositsError {
-            code: "INVALID_ADDRESS".into(),
-            message: "Invalid ledger_address".into(),
-        })?;
+    // Generate address if not provided
+    let address = if request.ledger_address.is_empty() {
+        // Generate a new address
+        let secp = Secp256k1::new();
+        let mut rng = OsRng;
+        let secret_key = SecretKey::new(&mut rng);
+        let public_key = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
 
-    // Assume the address is valid for the network it claims to be
-    let address = address.assume_checked();
+        // Create P2WPKH address (native segwit)
+        let compressed_pk = bitcoin::CompressedPublicKey::try_from(bitcoin::PublicKey::new(public_key))
+            .map_err(|e| DepositsError {
+                code: "ADDRESS_GENERATION_FAILED".into(),
+                message: format!("Failed to compress public key: {}", e),
+            })?;
+
+        // Store the private key for this ledger
+        handler.store_ledger_private_key(partner_id, secret_key)
+            .map_err(|e| DepositsError {
+                code: "KEY_STORAGE_FAILED".into(),
+                message: format!("Failed to store ledger private key: {}", e),
+            })?;
+
+        // Use regtest network (TODO: get from config)
+        bitcoin::Address::p2wpkh(&compressed_pk, bitcoin::Network::Regtest)
+    } else {
+        // Parse provided address
+        let address: Address<bitcoin::address::NetworkUnchecked> = request.ledger_address.parse()
+            .map_err(|_| DepositsError {
+                code: "INVALID_ADDRESS".into(),
+                message: "Invalid ledger_address".into(),
+            })?;
+        address.assume_checked()
+    };
 
     handler.initiate_ledger_handshake_async(partner_id, address).await
         .map_err(|e| DepositsError {

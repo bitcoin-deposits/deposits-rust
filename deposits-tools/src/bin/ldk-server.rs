@@ -2757,6 +2757,51 @@ async fn start_api_server(node: Arc<Node>, nwc_service: Option<Arc<NWCService>>,
                 }
             });
 
+        // Proto: Add Collateral Partner
+        let node_for_proto_add_collateral = Arc::clone(&node);
+        let proto_add_collateral = warp::path!("deposits" / "add_collateral_partner")
+            .and(warp::post())
+            .and(warp::body::bytes())
+            .and_then(move |body: warp::hyper::body::Bytes| {
+                let node = node_for_proto_add_collateral.clone();
+                async move {
+                    let request = match AddCollateralPartnerRequest::decode(body.as_ref()) {
+                        Ok(r) => r,
+                        Err(e) => return Ok::<_, warp::Rejection>(proto_error_response("DECODE_ERROR", &format!("Failed to decode request: {}", e))),
+                    };
+
+                    if let Some(bd_handler) = node.deposits() {
+                        match collateral::handle_add_collateral_partner(&bd_handler, request).await {
+                            Ok(response) => Ok(proto_response(response)),
+                            Err(e) => Ok(proto_error_response(&e.code, &e.message)),
+                        }
+                    } else {
+                        Ok(proto_error_response("NOT_ENABLED", "Bitcoin Deposits not enabled"))
+                    }
+                }
+            });
+
+        // Proto: Remove Collateral Partner
+        let node_for_proto_remove_collateral = Arc::clone(&node);
+        let proto_remove_collateral = warp::path!("deposits" / "remove_collateral_partner")
+            .and(warp::post())
+            .and(warp::body::bytes())
+            .map(move |body: warp::hyper::body::Bytes| {
+                let request = match RemoveCollateralPartnerRequest::decode(body.as_ref()) {
+                    Ok(r) => r,
+                    Err(e) => return proto_error_response("DECODE_ERROR", &format!("Failed to decode request: {}", e)),
+                };
+
+                if let Some(bd_handler) = node_for_proto_remove_collateral.deposits() {
+                    match collateral::handle_remove_collateral_partner(&bd_handler, request) {
+                        Ok(response) => proto_response(response),
+                        Err(e) => proto_error_response(&e.code, &e.message),
+                    }
+                } else {
+                    proto_error_response("NOT_ENABLED", "Bitcoin Deposits not enabled")
+                }
+            });
+
         // Combine proto routes (primary API)
         let proto_routes = proto_list_ledgers
             .or(proto_init_ledger)
@@ -2765,12 +2810,12 @@ async fn start_api_server(node: Arc<Node>, nwc_service: Option<Arc<NWCService>>,
             .or(proto_list_deposits)
             .or(proto_remove_deposit)
             .or(proto_reduce_reserves)
-            .or(proto_get_updates);
+            .or(proto_get_updates)
+            .or(proto_add_collateral)
+            .or(proto_remove_collateral);
 
         // Management routes that don't have proto equivalents yet (keep as JSON)
         let management_routes = start_nwc
-            .or(add_collateral_partner)
-            .or(remove_collateral_partner)
             .or(submit_fraud_proof);
 
         // Combine proto and management routes

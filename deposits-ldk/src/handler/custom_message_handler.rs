@@ -95,40 +95,38 @@ where
     fn get_and_clear_pending_msg(&self) -> Vec<(PublicKey, Self::CustomMessage)> {
         let mut result = Vec::new();
 
-        // Get the set of currently connected peers
+        // Only return messages for connected peers - messages for disconnected peers stay in queue
+        // LDK drops messages for disconnected peers, so we must hold them until reconnection
         let connected = self.connected_peers.lock().unwrap().clone();
-
-        // Only drain messages for connected peers - keep messages for disconnected peers
         let mut guard = self.outbound_messages.lock().unwrap();
 
         let initial_count: usize = guard.values().map(|v| v.len()).sum();
 
-        // Collect peer IDs to process (only connected ones)
-        let peer_ids: Vec<_> = guard.keys().cloned().collect();
-        let mut drained_count = 0;
-        let mut held_count = 0;
+        // Collect peer IDs for connected peers with messages
+        let peers_to_drain: Vec<PublicKey> = guard.keys()
+            .filter(|peer_id| connected.contains(peer_id))
+            .cloned()
+            .collect();
 
-        for peer_id in peer_ids {
-            if connected.contains(&peer_id) {
-                // Peer is connected - drain their messages
-                if let Some(messages) = guard.remove(&peer_id) {
-                    drained_count += messages.len();
-                    for message in messages {
-                        result.push((peer_id, message));
-                    }
-                }
-            } else {
-                // Peer is disconnected - keep their messages for later
-                if let Some(msgs) = guard.get(&peer_id) {
-                    held_count += msgs.len();
+        // Only drain messages for connected peers
+        for peer_id in peers_to_drain {
+            if let Some(messages) = guard.remove(&peer_id) {
+                for message in messages {
+                    result.push((peer_id, message));
                 }
             }
         }
 
+        // Log how many messages are held back
+        let held_back: usize = guard.values().map(|v| v.len()).sum();
+
         if initial_count > 0 || !result.is_empty() {
-            println!("🔵 GET_AND_CLEAR_PENDING_MSG: drained {} messages, holding {} for disconnected peers", drained_count, held_count);
+            println!("🔵 GET_AND_CLEAR_PENDING_MSG: sending {} messages (held back {} for disconnected peers)",
+                     result.len(), held_back);
             for (peer_id, msg) in &result {
-                println!("🔵   -> Sending type {:#06x} to {}", msg.message_type(), peer_id);
+                let is_connected = connected.contains(&peer_id);
+                println!("🔵   -> Sending type {:#06x} to {} (connected={})",
+                         msg.message_type(), peer_id, is_connected);
             }
         }
 
