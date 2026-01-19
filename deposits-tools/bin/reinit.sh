@@ -15,7 +15,7 @@ COMPOSE_FILE=$(get_compose_file "$NETWORK")
 
 rm -f wallet/*.json
 
-touch RE-INIT.at
+touch log/reinit-time
 
 if [ "$NETWORK" = "regtest" ]; then
     # Regtest: wipe volumes since we can mine new funds
