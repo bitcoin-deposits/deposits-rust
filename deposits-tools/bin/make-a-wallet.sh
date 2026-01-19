@@ -1,12 +1,9 @@
 #!/bin/bash
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 set -eo pipefail
 
-SCRIPT_DIR="$(pwd)"
-PROJECT_DIR="$(cd ".." && pwd)"
-
-# Usage: ./make-a-wallet.sh <network> <operator> <partner1> <partner2> <wallet_name>
+# Usage: ./bin/make-a-wallet.sh <network> <operator> <partner1> <partner2> <wallet_name>
 # Example: ./make-a-wallet.sh regtest alice charlie bob amber
 #          ./make-a-wallet.sh mutinynet bob charlie alice blue
 
@@ -56,7 +53,7 @@ DEPOSIT_NAME=$5
 RELAY_URL=$(get_relay_url "$NETWORK")
 
 # Use deposits-admin CLI - it handles node alias resolution internally
-ADMIN="cargo run --manifest-path $PROJECT_DIR/Cargo.toml --features bitcoin-deposits --bin deposits-admin --"
+ADMIN="cargo run --manifest-path ../Cargo.toml --features bitcoin-deposits --bin deposits-admin --"
 
 echo "Setting up 100%+100% collateral model for $NODE_NAME..."
 
@@ -95,11 +92,11 @@ $ADMIN -p "$NODE_NAME" add-collateral-partner "$PARTNER2_NAME" "$PARTNER1_NAME" 
 echo ""
 echo "Two OPERATOR ledgers initialized for $NODE_NAME with symmetric collateral partners."
 sleep 1
-mkdir -p "$PROJECT_DIR/wallet"
+mkdir -p wallet
 
 # Check if wallet already exists with a deposit_pubkey
-if [ -f "$PROJECT_DIR/wallet/$DEPOSIT_NAME.json" ]; then
-    EXISTING_PUBKEY=$(jq -r '.deposit_pubkey // empty' "$PROJECT_DIR/wallet/$DEPOSIT_NAME.json" 2>/dev/null)
+if [ -f "wallet/$DEPOSIT_NAME.json" ]; then
+    EXISTING_PUBKEY=$(jq -r '.deposit_pubkey // empty' "wallet/$DEPOSIT_NAME.json" 2>/dev/null)
     if [ -n "$EXISTING_PUBKEY" ]; then
         echo "INFO: Wallet $DEPOSIT_NAME already exists with deposit pubkey $EXISTING_PUBKEY"
         echo "      Skipping deposit creation to avoid orphaned deposits on ledger."
@@ -109,7 +106,7 @@ fi
 
 # Create deposit wallet - the system will auto-select an available channel
 echo "Creating deposit wallet on ${NODE_NAME} (auto-selecting channel)..."
-if ! cargo run --manifest-path "$PROJECT_DIR/Cargo.toml" --features bitcoin-deposits --bin nwc-client -- -w "$PROJECT_DIR/wallet/$DEPOSIT_NAME.json" -t "$NODE_NAME" -r "$RELAY_URL" init-deposit; then
+if ! cargo run --manifest-path ../Cargo.toml --features bitcoin-deposits --bin nwc-client -- -w "wallet/$DEPOSIT_NAME.json" -t "$NODE_NAME" -r "$RELAY_URL" init-deposit; then
     echo "ERROR: Failed to create deposit wallet for $DEPOSIT_NAME"
     exit 1
 fi

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 echo "Creating 5 deposits on Alice-Frank ledger..."
 

@@ -3,7 +3,7 @@
 # Turnkey Docker Environment Setup Script
 # This script provides a reliable way to recreate the entire Bitcoin Deposits environment
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 set -e  # Exit on any error
 
 echo "🚀 Starting turnkey Docker environment setup..."
@@ -11,7 +11,8 @@ echo "============================================================"
 
 # Configuration
 COMPOSE_FILE="docker-compose-deposits.yml"
-LOG_FILE="setup.log"
+mkdir -p log
+LOG_FILE="log/setup.log"
 
 # Colors for output
 RED='\033[0;31m'

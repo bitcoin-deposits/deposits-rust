@@ -5,7 +5,7 @@
 #
 # Usage: ./fast-reinit.sh <network>
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 set -e
 
 if [ $# -ne 1 ]; then
@@ -17,11 +17,11 @@ fi
 NETWORK=$1
 
 # 1. Drop all ledgers (clears in-memory + persisted data)
-./drop-ledgers.sh "$NETWORK"
+./bin/drop-ledgers.sh "$NETWORK"
 
 # 2. Reopen channels if they were force-closed
-./open-channels.sh "$NETWORK"
+./bin/open-channels.sh "$NETWORK"
 
 # 3. Recreate ledgers
-./make-a-wallet.sh "$NETWORK" alice charlie bob amber
-./make-a-wallet.sh "$NETWORK" bob charlie alice blue
+./bin/make-a-wallet.sh "$NETWORK" alice charlie bob amber
+./bin/make-a-wallet.sh "$NETWORK" bob charlie alice blue

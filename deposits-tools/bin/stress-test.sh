@@ -3,10 +3,11 @@
 # Stress test for Bitcoin Deposits
 # Creates many wallets and has them pay each other (parallelized)
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 set -e
 
-LOGFILE="stress-test-$(date +'%s').log"
+mkdir -p log
+LOGFILE="log/stress-test-$(date +'%s').log"
 exec > >(tee -a "$LOGFILE") 2>&1
 
 echo "=============================================="
@@ -21,7 +22,7 @@ PAYMENTS_PER_WALLET=50 # Payments each wallet will make (500 total)
 PAYMENT_AMOUNT=1000   # Amount per payment in msats
 PARALLEL_JOBS=10      # Number of parallel payment jobs
 
-NWC_CLIENT="target/release/nwc-client"
+NWC_CLIENT="../target/release/nwc-client"
 
 # Ensure wallet directory exists
 mkdir -p wallet/stress
@@ -266,7 +267,7 @@ fi
 
 echo ""
 echo "Ledger status:"
-./updates.sh 2>/dev/null | grep -E "^(Direct|Partner|Audit):" | head -10
+./bin/updates.sh 2>/dev/null | grep -E "^(Direct|Partner|Audit):" | head -10
 
 echo ""
 echo "Full log: $LOGFILE"

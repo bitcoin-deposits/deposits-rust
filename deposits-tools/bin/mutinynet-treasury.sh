@@ -16,7 +16,7 @@
 #   ./mutinynet-treasury.sh fund-nodes     # Fund nodes from treasury
 #   ./mutinynet-treasury.sh backup-seeds   # Backup node seeds to host
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 set -e
 
 TREASURY_DIR="treasury"

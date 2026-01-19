@@ -5,7 +5,7 @@
 #
 # Usage: ./test-non-conforming.sh <network>
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 set -e
 
 if [ $# -ne 1 ]; then
@@ -16,19 +16,22 @@ fi
 
 NETWORK=$1
 
-LOGFILE=test-non-conforming-$(date +'%s').log
+mkdir -p log
+LOGFILE=log/test-non-conforming-$(date +'%s').log
 exec > >(tee -a "$LOGFILE") 2>&1
+
+NWC="../target/release/nwc-client"
 
 echo "=== Non-Conforming Test: Invoice Unregistration + Fraud Proof ==="
 echo "Network: $NETWORK"
 echo ""
 
 # Run the standard setup
-./make-node-wallets.sh "$NETWORK"
-./make-a-wallet.sh "$NETWORK" alice charlie bob amber
-./make-a-wallet.sh "$NETWORK" bob charlie alice blue
-./pay-amber-from-charlie.sh
-./pay-blue-from-amber.sh
+./bin/make-node-wallets.sh "$NETWORK"
+./bin/make-a-wallet.sh "$NETWORK" alice charlie bob amber
+./bin/make-a-wallet.sh "$NETWORK" bob charlie alice blue
+./bin/pay-amber-from-charlie.sh
+./bin/pay-blue-from-amber.sh
 
 echo ""
 echo "=== Standard setup complete. Now testing non-conforming behavior ==="
@@ -36,10 +39,10 @@ echo ""
 
 # Show current state
 echo "--- Before non-conforming payment ---"
-./updates.sh --verbose
+./bin/updates.sh --verbose
 
 # Get amber's deposit pubkey from balance response (not wallet file - that's NWC pubkey)
-BALANCE_RESPONSE=$(target/release/nwc-client -w wallet/amber.json balance 2>/dev/null)
+BALANCE_RESPONSE=$($NWC -w wallet/amber.json balance 2>/dev/null)
 AMBER_DEPOSIT_PUBKEY=$(echo "$BALANCE_RESPONSE" | jq -r '.result.deposit_pubkey')
 echo ""
 echo "Amber's deposit pubkey: $AMBER_DEPOSIT_PUBKEY"
@@ -51,12 +54,12 @@ echo "Alice's node ID (operator): $ALICE_NODE_ID"
 # Get amber's current balance
 echo ""
 echo "--- Amber's balance before ---"
-target/release/nwc-client -w wallet/amber.json balance
+$NWC -w wallet/amber.json balance
 
 # Create an invoice for amber (will be registered for deposit)
 echo ""
 echo "--- Creating invoice for amber's deposit (5000 msat) ---"
-INVOICE_RESPONSE=$(target/release/nwc-client -w wallet/amber.json make-invoice 5000)
+INVOICE_RESPONSE=$($NWC -w wallet/amber.json make-invoice 5000)
 echo "$INVOICE_RESPONSE"
 
 # Extract invoice and payment_hash
@@ -79,7 +82,7 @@ echo "$UNREGISTER_RESPONSE" | jq .
 # Pay the invoice from charlie
 echo ""
 echo "--- Paying unregistered invoice from charlie ---"
-2>/dev/null target/release/nwc-client -w wallet/charlie.json pay-invoice "$INVOICE" || true
+2>/dev/null $NWC -w wallet/charlie.json pay-invoice "$INVOICE" || true
 
 sleep 3
 
@@ -106,12 +109,12 @@ fi
 # Show updated state
 echo ""
 echo "--- After non-conforming payment ---"
-./updates.sh --verbose
+./bin/updates.sh --verbose
 
 # Show amber's balance after (should be unchanged since funds went to node)
 echo ""
 echo "--- Amber's balance after (should be unchanged - funds went to node) ---"
-target/release/nwc-client -w wallet/amber.json balance
+$NWC -w wallet/amber.json balance
 
 echo ""
 echo "=== SUBMITTING FRAUD PROOF ==="

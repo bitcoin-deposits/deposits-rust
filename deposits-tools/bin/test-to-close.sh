@@ -11,7 +11,7 @@
 # 6. Remove reserves outputs
 # 7. Close ledgers
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 set -e
 
 if [ $# -ne 1 ]; then
@@ -21,10 +21,11 @@ if [ $# -ne 1 ]; then
 fi
 
 NETWORK=$1
-NWC="./target/release/nwc-client"
-ADMIN="./target/release/deposits-admin"
+NWC="../target/release/nwc-client"
+ADMIN="../target/release/deposits-admin"
 
-LOGFILE=test-to-close-$(date +'%s').log
+mkdir -p log
+LOGFILE=log/test-to-close-$(date +'%s').log
 exec > >(tee -a "$LOGFILE") 2>&1
 
 echo "=========================================="
@@ -46,9 +47,9 @@ echo ""
 # ============================================
 echo "=== PHASE 1: Creating wallets ==="
 
-./make-node-wallets.sh "$NETWORK"
-./make-a-wallet.sh "$NETWORK" alice charlie bob amber
-./make-a-wallet.sh "$NETWORK" bob charlie alice blue
+./bin/make-node-wallets.sh "$NETWORK"
+./bin/make-a-wallet.sh "$NETWORK" alice charlie bob amber
+./bin/make-a-wallet.sh "$NETWORK" bob charlie alice blue
 
 # ============================================
 # PHASE 2: Run payments between wallets
@@ -56,8 +57,8 @@ echo "=== PHASE 1: Creating wallets ==="
 echo ""
 echo "=== PHASE 2: Running payments ==="
 
-./pay-amber-from-charlie.sh
-./pay-blue-from-amber.sh
+./bin/pay-amber-from-charlie.sh
+./bin/pay-blue-from-amber.sh
 
 # Show balances after payments (NWC returns balance in msat)
 echo ""
@@ -70,7 +71,7 @@ echo "  blue:  $BLUE_BALANCE msat"
 # Show ledger status
 echo ""
 echo "Ledger status after payments:"
-./updates.sh
+./bin/updates.sh
 
 # ============================================
 # PHASE 3: Drain deposits (pay out balances)
@@ -144,7 +145,7 @@ run_with_retry bob "Removing blue deposit from bob->charlie" $ADMIN remove-depos
 sleep 2
 echo ""
 echo "Ledger status after deposit removal:"
-./updates.sh
+./bin/updates.sh
 
 # ============================================
 # PHASE 5: Reduce reserves to 0
