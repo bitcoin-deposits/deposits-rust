@@ -67,3 +67,24 @@ get_compose_file() {
             ;;
     esac
 }
+
+# Copy TLS certificates from LDK containers to local certs/ directory
+# Usage: copy_tls_certs [container_names...]
+#   If no containers specified, copies from alice, bob, charlie
+copy_tls_certs() {
+    local containers=("${@:-alice bob charlie}")
+    local certs_dir="certs"
+
+    mkdir -p "$certs_dir"
+
+    for node in "${containers[@]}"; do
+        local container="ldk-${node}"
+        if docker ps --format '{{.Names}}' | grep -q "^${container}$"; then
+            if docker cp "${container}:/ldk/tls.crt" "${certs_dir}/${node}.crt" 2>/dev/null; then
+                echo "  📜 Copied TLS cert for ${node}"
+            else
+                echo "  ⚠️  Could not copy TLS cert for ${node}" >&2
+            fi
+        fi
+    done
+}

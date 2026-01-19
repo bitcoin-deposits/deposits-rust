@@ -13,11 +13,11 @@ deposits-core = { path = "../deposits-core" }
 bitcoin = { version = "0.32", features = ["serde", "rand-std"] }
 
 # Lightning (LDK) - use rust-lightning via ldk-node's vendor symlink for path consistency
-lightning = { path = "../../ldk-node/vendor/rust-lightning/lightning", default-features = false, features = ["std"] }
-lightning-macros = { path = "../../ldk-node/vendor/rust-lightning/lightning-macros" }
-lightning-types = { path = "../../ldk-node/vendor/rust-lightning/lightning-types" }
-lightning-invoice = { path = "../../ldk-node/vendor/rust-lightning/lightning-invoice", features = ["std"] }
-lightning-persister = { path = "../../ldk-node/vendor/rust-lightning/lightning-persister" }
+lightning = { path = "../../rust-lightning/lightning", default-features = false, features = ["std"] }
+lightning-macros = { path = "../../rust-lightning/lightning-macros" }
+lightning-types = { path = "../../rust-lightning/lightning-types" }
+lightning-invoice = { path = "../../rust-lightning/lightning-invoice", features = ["std"] }
+lightning-persister = { path = "../../rust-lightning/lightning-persister" }
 
 # Async runtime
 tokio = { version = "1", features = ["sync", "rt", "time", "macros"] }

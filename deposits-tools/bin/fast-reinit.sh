@@ -21,3 +21,6 @@ validate_network "$NETWORK" || exit 1
 # 3. Recreate ledgers
 ./bin/make-a-wallet.sh alice charlie bob amber
 ./bin/make-a-wallet.sh bob charlie alice blue
+
+# 4. Ensure TLS certificates are available
+copy_tls_certs alice bob charlie

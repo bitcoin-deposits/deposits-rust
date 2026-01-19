@@ -1,4 +1,5 @@
-# LDK Node Dockerfile for deposits-rust
+# LDK Server Dockerfile with Bitcoin Deposits support
+# Builds from ldk-server which integrates deposits-ldk
 FROM rust:latest as builder
 
 # Install system dependencies
@@ -13,20 +14,23 @@ RUN apt-get update && apt-get install -y \
 # Set working directory
 WORKDIR /app
 
-# Copy ldk-node (includes vendor/rust-lightning)
+# Copy rust-lightning fork (required by ldk-server via patch)
+COPY rust-lightning/ rust-lightning/
+
+# Copy ldk-node (dependency of ldk-server)
 COPY ldk-node/ ldk-node/
 
-# Copy deposits-rust workspace
+# Copy deposits-rust (deposits-core and deposits-ldk dependencies)
 COPY deposits-rust/Cargo.toml deposits-rust/Cargo.lock ./deposits-rust/
 COPY deposits-rust/deposits-core/ deposits-rust/deposits-core/
 COPY deposits-rust/deposits-ldk/ deposits-rust/deposits-ldk/
-COPY deposits-rust/deposits-tools/ deposits-rust/deposits-tools/
 
-# Build the LDK server for deposits
-# Clean to ensure Lightning fork changes are compiled
-# Features: bitcoin-deposits-non-conforming includes bitcoin-deposits and enables testing APIs
-WORKDIR /app/deposits-rust
-RUN cargo clean && cargo build --release --features bitcoin-deposits-non-conforming --bin ldk-server-deposits
+# Copy ldk-server workspace
+COPY ldk-server/ ldk-server/
+
+# Build ldk-server (includes deposits support via deposits-ldk dependency)
+WORKDIR /app/ldk-server
+RUN cargo clean && cargo build --release --bin ldk-server
 
 # Runtime stage - use same base as builder to avoid GLIBC issues
 FROM rust:latest
@@ -41,7 +45,11 @@ RUN apt-get update && apt-get install -y \
 RUN useradd -m -s /bin/bash ldk
 
 # Copy binary from builder
-COPY --from=builder /app/deposits-rust/target/release/ldk-server-deposits /usr/local/bin/ldk-server
+COPY --from=builder /app/ldk-server/target/release/ldk-server /usr/local/bin/ldk-server
+
+# Copy entrypoint script
+COPY deposits-rust/deposits-tools/ldk-server-entrypoint.sh /usr/local/bin/ldk-server-entrypoint.sh
+RUN chmod +x /usr/local/bin/ldk-server-entrypoint.sh
 
 # Create data directory with proper permissions
 RUN mkdir -p /ldk && chown -R ldk:ldk /ldk && chmod -R 755 /ldk
@@ -53,5 +61,5 @@ WORKDIR /ldk
 # Expose Lightning P2P port and API port
 EXPOSE 9735 3000
 
-# Default command - start the LDK server
-CMD ["ldk-server"]
+# Default command - run entrypoint which generates config and starts ldk-server
+CMD ["/usr/local/bin/ldk-server-entrypoint.sh"]

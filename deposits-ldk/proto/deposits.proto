@@ -130,9 +130,17 @@ message CollateralPartnerInfo {
 
 message LedgerUpdate {
   uint64 sequence_number = 1;
-  string operation_type = 2;
+  string operation_type = 2;         // Human-readable: "DepositOpen", "PaymentCredit", etc.
   bytes signature = 3;
   uint64 timestamp = 4;
+  string previous_hash = 5;          // Hex-encoded previous state hash
+  string current_hash = 6;           // Hex-encoded current state hash
+  bool acknowledged = 7;             // Partner has acknowledged this update
+  bool committed = 8;                // Included in channel commitment
+  // Key parameters extracted from operation
+  optional uint64 amount_sat = 9;
+  optional string deposit_pubkey = 10;
+  optional string description = 11;  // Additional context (e.g., collateral partner name)
 }
 
 message DepositsError {

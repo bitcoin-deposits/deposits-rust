@@ -662,10 +662,48 @@ fn print_updates(response: &GetLedgerUpdatesResponse) {
         println!("  No updates found.");
     } else {
         for update in &response.updates {
-            println!("  #{}: {} (ts: {})",
+            // Format: "  $seq [$prev~$curr] ✓/· 🔒/  $operation  key:value..."
+            let ack_indicator = if update.acknowledged { "✓" } else { "·" };
+            let commit_indicator = if update.committed { "🔒" } else { "  " };
+
+            // Hash transition (first 8 chars of each)
+            let prev_hash = if update.previous_hash.len() >= 8 {
+                &update.previous_hash[..8]
+            } else {
+                &update.previous_hash
+            };
+            let curr_hash = if update.current_hash.len() >= 8 {
+                &update.current_hash[..8]
+            } else {
+                &update.current_hash
+            };
+
+            // Build params string
+            let mut params = Vec::new();
+            if let Some(amount) = update.amount_sat {
+                params.push(format!("{} sat", amount));
+            }
+            if let Some(ref pk) = update.deposit_pubkey {
+                let pk_short = if pk.len() >= 8 { &pk[..8] } else { pk };
+                params.push(format!("pk:{}", pk_short));
+            }
+            if let Some(ref desc) = update.description {
+                params.push(desc.clone());
+            }
+            let params_str = if params.is_empty() {
+                String::new()
+            } else {
+                format!("  {}", params.join(" "))
+            };
+
+            println!("  {:>3} [{}~{}] {}{} {:<20}{}",
                 update.sequence_number,
+                prev_hash,
+                curr_hash,
+                ack_indicator,
+                commit_indicator,
                 update.operation_type,
-                update.timestamp);
+                params_str);
         }
     }
     println!();

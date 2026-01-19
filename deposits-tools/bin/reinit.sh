@@ -42,6 +42,11 @@ echo "🔑 Creating wallet for alice..."
 echo "🔑 Creating wallet for bob..."
 ./bin/make-a-wallet.sh bob charlie alice blue
 
+# Copy TLS certificates for CLI access
+echo ""
+echo "🔐 Copying TLS certificates..."
+copy_tls_certs alice bob charlie
+
 # Backup seeds for mutinynet so we can recover funds if volumes are wiped
 if [ "$NETWORK" = "mutinynet" ]; then
     echo ""
