@@ -2,18 +2,14 @@
 #
 # Drop all ledgers on all nodes for quick test environment cycling
 #
-# Usage: ./drop-ledgers.sh <network>
+# Usage: ./bin/drop-ledgers.sh [network]
 
 cd "$(dirname "$0")/.."
 set -e
+. ./bin/_common.sh
 
-if [ $# -ne 1 ]; then
-    echo "Usage: $0 <network>"
-    echo "  network: regtest or mutinynet"
-    exit 1
-fi
-
-NETWORK=$1
+NETWORK=$(get_network "${1:-}") || exit 1
+validate_network "$NETWORK" || exit 1
 
 echo "Dropping all ledgers on $NETWORK..."
 echo ""
@@ -61,5 +57,5 @@ if [ $failed -eq 1 ]; then
 fi
 
 echo "Done. Recreate ledgers with:"
-echo "  ./make-a-wallet.sh $NETWORK alice charlie bob amber"
-echo "  ./make-a-wallet.sh $NETWORK bob charlie alice blue"
+echo "  ./bin/make-a-wallet.sh alice charlie bob amber"
+echo "  ./bin/make-a-wallet.sh bob charlie alice blue"

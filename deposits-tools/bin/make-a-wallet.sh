@@ -2,55 +2,43 @@
 
 cd "$(dirname "$0")/.."
 set -eo pipefail
+. ./bin/_common.sh
 
-# Usage: ./bin/make-a-wallet.sh <network> <operator> <partner1> <partner2> <wallet_name>
-# Example: ./make-a-wallet.sh regtest alice charlie bob amber
-#          ./make-a-wallet.sh mutinynet bob charlie alice blue
+# Usage: ./bin/make-a-wallet.sh <operator> <partner1> <partner2> <wallet_name>
+# Example: ./bin/make-a-wallet.sh alice charlie bob amber
+#          ./bin/make-a-wallet.sh bob charlie alice blue
 
 usage() {
-    echo "Usage: $0 <network> <operator> <partner1> <partner2> <wallet_name>"
+    echo "Usage: $0 <operator> <partner1> <partner2> <wallet_name>"
     echo ""
     echo "Sets up a deposit wallet with 100%+100% collateral model."
+    echo "Network is read from .network config (set via ./bin/use-network.sh)"
     echo ""
     echo "Arguments:"
-    echo "  network      Network type: regtest or mutinynet"
     echo "  operator     Node that operates the wallet (alice, bob, charlie, etc.)"
     echo "  partner1     First partner node for ledger"
     echo "  partner2     Second partner node (provides collateral for partner1)"
     echo "  wallet_name  Name for the wallet file (e.g., amber, blue)"
     echo ""
     echo "Examples:"
-    echo "  $0 regtest alice charlie bob amber    # Alice operates, Charlie+Bob validate"
-    echo "  $0 mutinynet bob charlie alice blue   # Bob operates, Charlie+Alice validate"
+    echo "  $0 alice charlie bob amber    # Alice operates, Charlie+Bob validate"
+    echo "  $0 bob charlie alice blue     # Bob operates, Charlie+Alice validate"
     exit 1
 }
 
-# Get relay URL for network
-get_relay_url() {
-    local network=$1
-    case "$network" in
-        regtest)   echo "ws://localhost:7777" ;;
-        mutinynet) echo "ws://localhost:7777" ;;
-        *)
-            echo "ERROR: Unknown network '$network'. Valid networks: regtest, mutinynet" >&2
-            exit 1
-            ;;
-    esac
-}
-
 # Check arguments
-if [ $# -ne 5 ]; then
+if [ $# -ne 4 ]; then
     usage
 fi
 
-NETWORK=$1
-NODE_NAME=$2
-PARTNER1_NAME=$3
-PARTNER2_NAME=$4
-DEPOSIT_NAME=$5
-
-# Get relay URL for network
+NETWORK=$(get_network) || exit 1
+validate_network "$NETWORK" || exit 1
 RELAY_URL=$(get_relay_url "$NETWORK")
+
+NODE_NAME=$1
+PARTNER1_NAME=$2
+PARTNER2_NAME=$3
+DEPOSIT_NAME=$4
 
 # Use deposits-admin CLI - it handles node alias resolution internally
 ADMIN="cargo run --manifest-path ../Cargo.toml --features bitcoin-deposits --bin deposits-admin --"

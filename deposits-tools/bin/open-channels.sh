@@ -3,18 +3,14 @@
 # Open Lightning channels between nodes that need them
 # This is useful after dropping ledgers (which may have force-closed channels)
 #
-# Usage: ./open-channels.sh <network>
+# Usage: ./bin/open-channels.sh [network]
 
 cd "$(dirname "$0")/.."
 set -e
+. ./bin/_common.sh
 
-if [ $# -ne 1 ]; then
-    echo "Usage: $0 <network>"
-    echo "  network: regtest or mutinynet"
-    exit 1
-fi
-
-NETWORK=$1
+NETWORK=$(get_network "${1:-}") || exit 1
+validate_network "$NETWORK" || exit 1
 
 CHANNEL_AMOUNT=5000000  # 5M sats = 0.05 BTC
 

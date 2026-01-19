@@ -2,28 +2,15 @@
 #
 # Create NWC wallets for Lightning nodes
 #
-# Usage: ./make-node-wallets.sh <network>
+# Usage: ./bin/make-node-wallets.sh [network]
 
 cd "$(dirname "$0")/.."
 set -e
+. ./bin/_common.sh
 
-if [ $# -ne 1 ]; then
-    echo "Usage: $0 <network>"
-    echo "  network: regtest or mutinynet"
-    exit 1
-fi
-
-NETWORK=$1
-
-# Get relay URL for network
-case "$NETWORK" in
-    regtest)   RELAY_URL="ws://localhost:7777" ;;
-    mutinynet) RELAY_URL="ws://localhost:7777" ;; #RELAY_URL="wss://relay.damus.io" ;;
-    *)
-        echo "ERROR: Unknown network '$NETWORK'. Valid networks: regtest, mutinynet"
-        exit 1
-        ;;
-esac
+NETWORK=$(get_network "${1:-}") || exit 1
+validate_network "$NETWORK" || exit 1
+RELAY_URL=$(get_relay_url "$NETWORK")
 
 mkdir -p wallet
 

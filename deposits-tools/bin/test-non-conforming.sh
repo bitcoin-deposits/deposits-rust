@@ -3,18 +3,14 @@
 # Test script for non-conforming behavior: unregister an invoice
 # so funds go to the node instead of the deposit, then submit fraud proof.
 #
-# Usage: ./test-non-conforming.sh <network>
+# Usage: ./bin/test-non-conforming.sh [network]
 
 cd "$(dirname "$0")/.."
 set -e
+. ./bin/_common.sh
 
-if [ $# -ne 1 ]; then
-    echo "Usage: $0 <network>"
-    echo "  network: regtest or mutinynet"
-    exit 1
-fi
-
-NETWORK=$1
+NETWORK=$(get_network "${1:-}") || exit 1
+validate_network "$NETWORK" || exit 1
 
 mkdir -p log
 LOGFILE=log/test-non-conforming-$(date +'%s').log
@@ -27,9 +23,9 @@ echo "Network: $NETWORK"
 echo ""
 
 # Run the standard setup
-./bin/make-node-wallets.sh "$NETWORK"
-./bin/make-a-wallet.sh "$NETWORK" alice charlie bob amber
-./bin/make-a-wallet.sh "$NETWORK" bob charlie alice blue
+./bin/make-node-wallets.sh
+./bin/make-a-wallet.sh alice charlie bob amber
+./bin/make-a-wallet.sh bob charlie alice blue
 ./bin/pay-amber-from-charlie.sh
 ./bin/pay-blue-from-amber.sh
 

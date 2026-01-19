@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Usage: ./test-to-close.sh <network>
+# Usage: ./bin/test-to-close.sh [network]
 #
 # Full test cycle with complete teardown:
 # 1. Create wallets (deposits on ledgers)
@@ -13,14 +13,11 @@
 
 cd "$(dirname "$0")/.."
 set -e
+. ./bin/_common.sh
 
-if [ $# -ne 1 ]; then
-    echo "Usage: $0 <network>"
-    echo "  network: regtest or mutinynet"
-    exit 1
-fi
+NETWORK=$(get_network "${1:-}") || exit 1
+validate_network "$NETWORK" || exit 1
 
-NETWORK=$1
 NWC="../target/release/nwc-client"
 ADMIN="../target/release/deposits-admin"
 
@@ -47,9 +44,9 @@ echo ""
 # ============================================
 echo "=== PHASE 1: Creating wallets ==="
 
-./bin/make-node-wallets.sh "$NETWORK"
-./bin/make-a-wallet.sh "$NETWORK" alice charlie bob amber
-./bin/make-a-wallet.sh "$NETWORK" bob charlie alice blue
+./bin/make-node-wallets.sh
+./bin/make-a-wallet.sh alice charlie bob amber
+./bin/make-a-wallet.sh bob charlie alice blue
 
 # ============================================
 # PHASE 2: Run payments between wallets

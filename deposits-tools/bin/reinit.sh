@@ -3,28 +3,15 @@
 # Full reinitialization of the test environment
 # Tears down containers, rebuilds, and recreates everything
 #
-# Usage: ./reinit.sh <network>
+# Usage: ./bin/reinit.sh [network]
 
 cd "$(dirname "$0")/.."
 set -e
+. ./bin/_common.sh
 
-if [ $# -ne 1 ]; then
-    echo "Usage: $0 <network>"
-    echo "  network: regtest or mutinynet"
-    exit 1
-fi
-
-NETWORK=$1
-
-# Select docker-compose file based on network
-if [ "$NETWORK" = "regtest" ]; then
-    COMPOSE_FILE="docker-compose-deposits.yml"
-elif [ "$NETWORK" = "mutinynet" ]; then
-    COMPOSE_FILE="docker-compose-mutinynet.yml"
-else
-    echo "ERROR: Unknown network '$NETWORK'. Valid networks: regtest, mutinynet"
-    exit 1
-fi
+NETWORK=$(get_network "${1:-}") || exit 1
+validate_network "$NETWORK" || exit 1
+COMPOSE_FILE=$(get_compose_file "$NETWORK")
 
 rm -f wallet/*.json
 
@@ -46,14 +33,14 @@ cargo run --manifest-path ../Cargo.toml --features bitcoin-deposits --bin networ
 echo "⏳ Waiting for peer connections to stabilize (60 seconds)..."
 sleep 60
 
-./bin/drop-ledgers.sh "$NETWORK"
+./bin/drop-ledgers.sh
 
 # Create wallets for alice and bob
 echo "🔑 Creating wallet for alice..."
-./bin/make-a-wallet.sh "$NETWORK" alice charlie bob amber
+./bin/make-a-wallet.sh alice charlie bob amber
 
 echo "🔑 Creating wallet for bob..."
-./bin/make-a-wallet.sh "$NETWORK" bob charlie alice blue
+./bin/make-a-wallet.sh bob charlie alice blue
 
 # Backup seeds for mutinynet so we can recover funds if volumes are wiped
 if [ "$NETWORK" = "mutinynet" ]; then
