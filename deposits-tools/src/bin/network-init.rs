@@ -127,17 +127,17 @@ impl NetworkInitializer {
         }
         self
     }
-    
+
     fn log(&self, message: &str) {
         let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S");
         println!("\x1b[32m[{}] INFO: {}\x1b[0m", timestamp, message);
     }
-    
+
     fn error(&self, message: &str) {
         let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S");
         eprintln!("\x1b[31m[{}] ERROR: {}\x1b[0m", timestamp, message);
     }
-    
+
     fn warn(&self, message: &str) {
         let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S");
         println!("\x1b[33m[{}] WARNING: {}\x1b[0m", timestamp, message);
@@ -248,9 +248,9 @@ impl NetworkInitializer {
     {
         let node_config = self.nodes.get(node)
             .ok_or_else(|| format!("Unknown node: {}", node))?;
-        
+
         let url = format!("http://localhost:{}{}", node_config.api_port, endpoint);
-        
+
         let request = match method {
             "GET" => self.client.get(&url),
             "POST" => {
@@ -262,7 +262,7 @@ impl NetworkInitializer {
             }
             _ => return Err(format!("Unsupported HTTP method: {}", method).into()),
         };
-        
+
         let response = request.send().await?;
         let api_response: ApiResponse<T> = response.json().await?;
 
@@ -302,11 +302,11 @@ impl NetworkInitializer {
 
     async fn wait_for_nodes(&self) -> Result<(), Box<dyn std::error::Error>> {
         self.log("🔄 Waiting for all LDK nodes to be ready...");
-        
+
         for (node_id, node_config) in &self.nodes {
             let max_retries = 30;
             let mut retry_count = 0;
-            
+
             while retry_count < max_retries {
                 match self.ldk_api_call::<serde_json::Value>(node_id, "/health", "GET", None).await {
                     Ok(response) if response.success => {
@@ -318,21 +318,21 @@ impl NetworkInitializer {
                         if retry_count < max_retries {
                             sleep(Duration::from_secs(2)).await;
                         } else {
-                            return Err(format!("❌ {} failed to start after {} seconds", 
+                            return Err(format!("❌ {} failed to start after {} seconds",
                                 node_config.name, max_retries * 2).into());
                         }
                     }
                 }
             }
         }
-        
+
         self.log("✅ All LDK nodes are ready");
         Ok(())
     }
 
     async fn setup_bitcoin_funding(&self) -> Result<(), Box<dyn std::error::Error>> {
         self.log("💰 Setting up Bitcoin funding...");
-        
+
         // Ensure Bitcoin wallet exists
         match self.bitcoin_rpc("createwallet", serde_json::json!(["default"])).await {
             Ok(_) => {
@@ -350,10 +350,10 @@ impl NetworkInitializer {
                 }
             }
         }
-        
+
         // Generate initial blocks using safe mining
         self.mine_blocks_safely(101, "Bitcoin coinbase maturity").await?;
-        
+
         // Get node addresses and fund them
         for (node_id, node_config) in &self.nodes {
             match self.ldk_api_call::<BitcoinAddress>(node_id, "/bitcoin/address", "GET", None).await {
@@ -368,7 +368,7 @@ impl NetworkInitializer {
                 }
             }
         }
-        
+
         // Mine blocks to confirm funding transactions
         self.mine_blocks_safely(6, "funding transaction confirmations").await?;
 
@@ -381,7 +381,7 @@ impl NetworkInitializer {
             match self.ldk_api_call::<BitcoinBalance>(node_id, "/bitcoin/balance", "GET", None).await {
                 Ok(response) if response.success => {
                     if let Some(balance_data) = response.data {
-                        self.log(&format!("💰 {} balance: {} sat", 
+                        self.log(&format!("💰 {} balance: {} sat",
                             node_config.name, balance_data.balance_sat));
                     }
                 }
@@ -390,7 +390,7 @@ impl NetworkInitializer {
                 }
             }
         }
-        
+
         Ok(())
     }
 
@@ -419,13 +419,13 @@ impl NetworkInitializer {
                 }
             }
         }
-        
+
         Ok(())
     }
 
     async fn check_existing_channel(&self, node1: &str, node2_pubkey: &str) -> Result<bool, Box<dyn std::error::Error>> {
         let response = self.ldk_api_call::<serde_json::Value>(node1, "/channels", "GET", None).await?;
-        
+
         if response.success {
             if let Some(data) = response.data {
                 if let Some(channels) = data.as_array() {
@@ -441,7 +441,7 @@ impl NetworkInitializer {
                 }
             }
         }
-        
+
         Ok(false)
     }
 
@@ -530,7 +530,7 @@ impl NetworkInitializer {
                     };
 
                     let selected_pubkey = &self.node_pubkeys[selected_node_id];
-                
+
                     // Check if channel already exists (from either direction)
                     let channel_exists = self.check_existing_channel(selected_node_id, target_pubkey).await.unwrap_or(false) ||
                                        self.check_existing_channel(target_node_id, selected_pubkey).await.unwrap_or(false);
@@ -542,7 +542,7 @@ impl NetworkInitializer {
                     }
 
                     self.log(&format!("🔗 Creating channel: {} -> {}", selected_node_config.name, target_node_config.name));
-                
+
                     // Connect peers first
                     let connect_data = ConnectPeerRequest {
                         pubkey: target_pubkey.clone(),
@@ -706,14 +706,14 @@ impl NetworkInitializer {
 
     async fn setup_nwc_services(&self) -> Result<(), Box<dyn std::error::Error>> {
         self.log("📱 Setting up NWC (Nostr Wallet Connect) services...");
-        
+
         for (node_id, node_config) in &self.nodes {
             let nwc_config = serde_json::json!({
                 "enable_nwc_server": true,
                 "nwc_relay_urls": ["wss://relay.damus.io", "wss://nos.lol"],
                 "max_sessions": 100
             });
-            
+
             match self.ldk_api_call::<serde_json::Value>(
                 node_id, "/bitcoin-deposits/nwc/start", "POST",
                 Some(nwc_config)
@@ -726,7 +726,7 @@ impl NetworkInitializer {
                 }
             }
         }
-        
+
         self.log("✅ NWC services configured");
         Ok(())
     }
@@ -736,12 +736,12 @@ impl NetworkInitializer {
         println!("================================================================================");
         self.log("🎉 BITCOIN DEPOSITS LIGHTNING NETWORK INITIALIZED");
         println!("================================================================================");
-        
+
         self.log(&format!("📊 Network Statistics:"));
         self.log(&format!("   • Nodes: {}", self.nodes.len()));
         self.log(&format!("   • Channels: {}", self.channels.len()));
         self.log(&format!("   • Bitcoin Deposits Ledgers: {}", self.channels.len()));
-        
+
         println!();
         self.log("📡 Node Information:");
         for (node_id, node_config) in &self.nodes {
@@ -751,7 +751,7 @@ impl NetworkInitializer {
             self.log(&format!("     - P2P: {}:{}", node_config.ip, node_config.p2p_port));
             self.log(&format!("     - PubKey: {}", pubkey));
         }
-        
+
         println!();
         self.log("⚡ Channel Topology (Full Mesh):");
         for (channel_key, _channel_id) in &self.channels {
@@ -762,13 +762,7 @@ impl NetworkInitializer {
                 self.log(&format!("   • {} <-> {} (5,000 sat)", name1, name2));
             }
         }
-        
-        println!();
-        self.log("📱 Mobile Wallet Integration:");
-        self.log("   • All nodes support NWC (Nostr Wallet Connect)");
-        self.log("   • Bitcoin Deposits API available on all nodes");
-        self.log("   • Production-ready service architecture");
-        
+
         println!();
         self.log("✅ Network ready for Bitcoin Deposits operations!");
         println!("================================================================================");

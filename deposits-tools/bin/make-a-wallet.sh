@@ -41,7 +41,7 @@ PARTNER2_NAME=$3
 DEPOSIT_NAME=$4
 
 # Use deposits-admin CLI - it handles node alias resolution internally
-ADMIN="cargo run --manifest-path ../Cargo.toml --features bitcoin-deposits --bin deposits-admin --"
+ADMIN="cargo_quiet run --manifest-path ../Cargo.toml --features bitcoin-deposits --bin deposits-admin --"
 
 echo "Setting up 100%+100% collateral model for $NODE_NAME..."
 
@@ -94,7 +94,7 @@ fi
 
 # Create deposit wallet - the system will auto-select an available channel
 echo "Creating deposit wallet on ${NODE_NAME} (auto-selecting channel)..."
-if ! cargo run --manifest-path ../Cargo.toml --features bitcoin-deposits --bin nwc-client -- -w "wallet/$DEPOSIT_NAME.json" -t "$NODE_NAME" -r "$RELAY_URL" init-deposit; then
+if ! cargo_quiet run --manifest-path ../Cargo.toml --features bitcoin-deposits --bin nwc-client -- -w "wallet/$DEPOSIT_NAME.json" -t "$NODE_NAME" -r "$RELAY_URL" init-deposit; then
     echo "ERROR: Failed to create deposit wallet for $DEPOSIT_NAME"
     exit 1
 fi

@@ -4,6 +4,7 @@
 # Build images once, then just use docker-compose up -d
 
 cd "$(dirname "$0")/.."
+. ./bin/_common.sh
 
 echo "🚀 Starting Bitcoin Deposits Environment..."
 
@@ -22,7 +23,7 @@ echo "⏳ Waiting for services to initialize..."
 sleep 15
 
 echo "🔍 Network status check:"
-cargo run --bin status network
+cargo_quiet run --bin status network
 
 echo ""
 echo "🎉 Environment is ready!"

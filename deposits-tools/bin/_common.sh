@@ -1,6 +1,11 @@
 # Common functions for deposits-tools scripts
 # Source this file: . ./bin/_common.sh
 
+# Run cargo with warnings suppressed (warnings go to stderr)
+cargo_quiet() {
+    cargo "$@" 2>/dev/null
+}
+
 # Get the network from config file or argument
 # Usage: get_network [optional_arg]
 #   If optional_arg is provided and non-empty, use it
