@@ -1,7 +1,7 @@
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::sleep;
 use clap::{Arg, Command};
 use deposits_tools::network_config::{Network, NetworkConfig, NodeConfig};
@@ -10,6 +10,50 @@ use deposits_ldk::service::{
     ListLedgersRequest, ListLedgersResponse,
 };
 use prost::Message;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+
+const API_KEY: &str = "test_api_key";
+
+// Simple protobuf messages for ldk-server API
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetNodeInfoResponse {
+    #[prost(string, tag = "1")]
+    pub node_id: String,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct OnchainReceiveResponse {
+    #[prost(string, tag = "1")]
+    pub address: String,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetBalancesResponse {
+    #[prost(uint64, tag = "1")]
+    pub total_onchain_balance_sats: u64,
+    #[prost(uint64, tag = "2")]
+    pub spendable_onchain_balance_sats: u64,
+}
+
+/// Compute HMAC-SHA256 auth header for ldk-server
+/// Format: "HMAC <timestamp>:<hmac_hex>"
+fn compute_auth_header(body: &[u8]) -> String {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("System time should be after Unix epoch")
+        .as_secs();
+
+    type HmacSha256 = Hmac<Sha256>;
+    let mut mac = HmacSha256::new_from_slice(API_KEY.as_bytes())
+        .expect("HMAC can take key of any size");
+    mac.update(&timestamp.to_be_bytes());
+    mac.update(body);
+    let result = mac.finalize();
+    let hmac_hex = hex::encode(result.into_bytes());
+
+    format!("HMAC {}:{}", timestamp, hmac_hex)
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ApiResponse<T> {
@@ -103,6 +147,7 @@ impl NetworkInitializer {
         Self {
             client: Client::builder()
                 .timeout(Duration::from_secs(30))
+                .danger_accept_invalid_certs(true)  // Accept self-signed certs for dev
                 .build()
                 .expect("Failed to create HTTP client"),
             network,
@@ -222,16 +267,20 @@ impl NetworkInitializer {
     where
         T: for<'de> Deserialize<'de>,
     {
-        let url = format!("http://localhost:{}{}", node_config.api_port, endpoint);
+        let url = format!("https://localhost:{}{}", node_config.api_port, endpoint);
+
+        let body = data.as_ref()
+            .map(|json| serde_json::to_vec(json).unwrap_or_default())
+            .unwrap_or_default();
+        let auth_header = compute_auth_header(&body);
 
         let request = match method {
-            "GET" => self.client.get(&url),
+            "GET" => self.client.get(&url).header("X-Auth", auth_header),
             "POST" => {
-                let mut req = self.client.post(&url);
-                if let Some(json) = data {
-                    req = req.json(&json);
-                }
-                req
+                self.client.post(&url)
+                    .header("X-Auth", auth_header)
+                    .header("Content-Type", "application/json")
+                    .body(body)
             }
             _ => return Err(format!("Unsupported HTTP method: {}", method).into()),
         };
@@ -249,16 +298,20 @@ impl NetworkInitializer {
         let node_config = self.nodes.get(node)
             .ok_or_else(|| format!("Unknown node: {}", node))?;
 
-        let url = format!("http://localhost:{}{}", node_config.api_port, endpoint);
+        let url = format!("https://localhost:{}{}", node_config.api_port, endpoint);
+
+        let body = data.as_ref()
+            .map(|json| serde_json::to_vec(json).unwrap_or_default())
+            .unwrap_or_default();
+        let auth_header = compute_auth_header(&body);
 
         let request = match method {
-            "GET" => self.client.get(&url),
+            "GET" => self.client.get(&url).header("X-Auth", auth_header),
             "POST" => {
-                let mut req = self.client.post(&url);
-                if let Some(json) = data {
-                    req = req.json(&json);
-                }
-                req
+                self.client.post(&url)
+                    .header("X-Auth", auth_header)
+                    .header("Content-Type", "application/json")
+                    .body(body)
             }
             _ => return Err(format!("Unsupported HTTP method: {}", method).into()),
         };
@@ -279,12 +332,14 @@ impl NetworkInitializer {
         let node_config = self.nodes.get(node)
             .ok_or_else(|| format!("Unknown node: {}", node))?;
 
-        let url = format!("http://localhost:{}{}", node_config.api_port, path);
+        let url = format!("https://localhost:{}{}", node_config.api_port, path);
         let body = request.encode_to_vec();
+        let auth_header = compute_auth_header(&body);
 
         let response = self.client
             .post(&url)
             .header("Content-Type", "application/octet-stream")
+            .header("X-Auth", auth_header)
             .body(body)
             .send()
             .await?;
@@ -308,8 +363,20 @@ impl NetworkInitializer {
             let mut retry_count = 0;
 
             while retry_count < max_retries {
-                match self.ldk_api_call::<serde_json::Value>(node_id, "/health", "GET", None).await {
-                    Ok(response) if response.success => {
+                // Use GetNodeInfo protobuf endpoint to check if node is ready
+                let url = format!("https://localhost:{}/GetNodeInfo", node_config.api_port);
+                let body: Vec<u8> = vec![];  // Empty protobuf request
+                let auth_header = compute_auth_header(&body);
+                let result = self.client
+                    .post(&url)
+                    .header("Content-Type", "application/octet-stream")
+                    .header("X-Auth", auth_header)
+                    .body(body)
+                    .send()
+                    .await;
+
+                match result {
+                    Ok(response) if response.status().is_success() => {
                         self.log(&format!("✅ {} is ready", node_config.name));
                         break;
                     }
@@ -354,13 +421,25 @@ impl NetworkInitializer {
         // Generate initial blocks using safe mining
         self.mine_blocks_safely(101, "Bitcoin coinbase maturity").await?;
 
-        // Get node addresses and fund them
-        for (node_id, node_config) in &self.nodes {
-            match self.ldk_api_call::<BitcoinAddress>(node_id, "/bitcoin/address", "GET", None).await {
-                Ok(response) if response.success => {
-                    if let Some(addr_data) = response.data {
-                        self.bitcoin_rpc("sendtoaddress", serde_json::json!([addr_data.address, 1.0])).await?;
-                        self.log(&format!("💸 Sent 1 BTC to {} ({})", node_config.name, addr_data.address));
+        // Get node addresses and fund them using OnchainReceive protobuf endpoint
+        for (_node_id, node_config) in &self.nodes {
+            let url = format!("https://localhost:{}/OnchainReceive", node_config.api_port);
+            let body: Vec<u8> = vec![];  // Empty request
+            let auth_header = compute_auth_header(&body);
+
+            match self.client
+                .post(&url)
+                .header("Content-Type", "application/octet-stream")
+                .header("X-Auth", auth_header)
+                .body(body)
+                .send()
+                .await
+            {
+                Ok(response) if response.status().is_success() => {
+                    let bytes = response.bytes().await?;
+                    if let Ok(addr_resp) = OnchainReceiveResponse::decode(bytes.as_ref()) {
+                        self.bitcoin_rpc("sendtoaddress", serde_json::json!([addr_resp.address, 1.0])).await?;
+                        self.log(&format!("💸 Sent 1 BTC to {} ({})", node_config.name, addr_resp.address));
                     }
                 }
                 _ => {
@@ -376,13 +455,25 @@ impl NetworkInitializer {
         self.log("⏳ Waiting for electrs sync and balance detection...");
         sleep(Duration::from_secs(30)).await;
 
-        // Verify node balances
-        for (node_id, node_config) in &self.nodes {
-            match self.ldk_api_call::<BitcoinBalance>(node_id, "/bitcoin/balance", "GET", None).await {
-                Ok(response) if response.success => {
-                    if let Some(balance_data) = response.data {
+        // Verify node balances using GetBalances protobuf endpoint
+        for (_node_id, node_config) in &self.nodes {
+            let url = format!("https://localhost:{}/GetBalances", node_config.api_port);
+            let body: Vec<u8> = vec![];
+            let auth_header = compute_auth_header(&body);
+
+            match self.client
+                .post(&url)
+                .header("Content-Type", "application/octet-stream")
+                .header("X-Auth", auth_header)
+                .body(body)
+                .send()
+                .await
+            {
+                Ok(response) if response.status().is_success() => {
+                    let bytes = response.bytes().await?;
+                    if let Ok(balance) = GetBalancesResponse::decode(bytes.as_ref()) {
                         self.log(&format!("💰 {} balance: {} sat",
-                            node_config.name, balance_data.balance_sat));
+                            node_config.name, balance.total_onchain_balance_sats));
                     }
                 }
                 _ => {
@@ -402,9 +493,23 @@ impl NetworkInitializer {
         let all_available_nodes = NetworkConfig::nodes_for_network(self.network);
 
         for (node_id, node_config) in &all_available_nodes {
-            match self.ldk_api_call_any::<NodeInfo>(node_config, "/info", "GET", None).await {
-                Ok(response) if response.success => {
-                    if let Some(info) = response.data {
+            // Use protobuf GetNodeInfo endpoint
+            let url = format!("https://localhost:{}/GetNodeInfo", node_config.api_port);
+            let body: Vec<u8> = vec![];
+            let auth_header = compute_auth_header(&body);
+
+            match self.client
+                .post(&url)
+                .header("Content-Type", "application/octet-stream")
+                .header("X-Auth", auth_header)
+                .body(body)
+                .send()
+                .await
+            {
+                Ok(response) if response.status().is_success() => {
+                    let bytes = response.bytes().await?;
+                    // Parse protobuf - node_id is field 1 (string)
+                    if let Ok(info) = GetNodeInfoResponse::decode(bytes.as_ref()) {
                         self.node_pubkeys.insert(node_id.clone(), info.node_id.clone());
                         self.log(&format!("🔑 {}: {}", node_config.name, info.node_id));
                     }
@@ -747,7 +852,7 @@ impl NetworkInitializer {
         for (node_id, node_config) in &self.nodes {
             let pubkey = self.node_pubkeys.get(node_id).map(|s| s.as_str()).unwrap_or("Unknown");
             self.log(&format!("   • {}", node_config.name));
-            self.log(&format!("     - API: http://localhost:{}", node_config.api_port));
+            self.log(&format!("     - API: https://localhost:{}", node_config.api_port));
             self.log(&format!("     - P2P: {}:{}", node_config.ip, node_config.p2p_port));
             self.log(&format!("     - PubKey: {}", pubkey));
         }

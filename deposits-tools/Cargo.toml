@@ -56,9 +56,9 @@ bitcoin = { version = "0.32", features = ["serde", "rand-std"] }
 bdk_wallet = { version = "2.2.0", default-features = false, features = ["std", "keys-bip39"] }
 
 # Lightning (via ldk-node's vendor)
-lightning = { path = "../../ldk-node/vendor/rust-lightning/lightning", default-features = false, features = ["std"] }
-lightning-invoice = { path = "../../ldk-node/vendor/rust-lightning/lightning-invoice" }
-lightning-types = { path = "../../ldk-node/vendor/rust-lightning/lightning-types" }
+lightning = { path = "../../rust-lightning/lightning", default-features = false, features = ["std"] }
+lightning-invoice = { path = "../../rust-lightning/lightning-invoice" }
+lightning-types = { path = "../../rust-lightning/lightning-types" }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
