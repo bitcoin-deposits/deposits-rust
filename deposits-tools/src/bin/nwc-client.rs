@@ -459,6 +459,7 @@ struct WalletData {
     /// For regular wallets: TARGET server's NWC pubkey (fetched from API)
     /// For deposit wallets: This should be EMPTY (use target_nwc_pubkey instead)
     pubkey: Option<String>,
+    #[serde(alias = "relay_url")]
     relay: String,
     target: Option<String>,
     /// Deposit private key (hex) - client-generated, used for signing payment authorizations
