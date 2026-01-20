@@ -72,13 +72,13 @@ where
 }
 
 /// Handle reduce_reserves request
-/// Uses direct reduction (bypasses safety headroom) for manual close-out operations
-pub fn handle_reduce_reserves<L>(
+/// Uses async method which works properly in the server context
+pub async fn handle_reduce_reserves<L>(
     handler: &DepositsHandler<L>,
     request: ReduceReservesRequest,
 ) -> Result<ReduceReservesResponse, DepositsError>
 where
-    L: Deref + Clone,
+    L: Deref + Clone + Send + Sync,
     L::Target: LdkLogger,
 {
     let partner_id = PublicKey::from_str(&request.partner_node_id)
@@ -87,9 +87,8 @@ where
             message: "Invalid partner_node_id".into(),
         })?;
 
-    // Use direct reduction method instead of reclaim_excess_reserves_async
-    // This allows reducing to 0 for ledger close-out operations
-    handler.reduce_reserves_from_channel(partner_id, request.amount_sat)
+    // Use async method - it works when deposits are 0 (excess = full amount)
+    handler.reclaim_excess_reserves_async(partner_id, request.amount_sat).await
         .map_err(|e| DepositsError {
             code: "REDUCE_FAILED".into(),
             message: format!("{:?}", e),
