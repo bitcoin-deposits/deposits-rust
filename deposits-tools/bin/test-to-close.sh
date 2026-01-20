@@ -94,14 +94,14 @@ echo "=== PHASE 3: Draining deposits ==="
 # NOTE: NWC balance returns msats, not sats
 if [ "$AMBER_BALANCE" -gt 0 ]; then
     echo "Draining amber ($AMBER_BALANCE msat) to charlie..."
-    AMBER_INVOICE=$($LDK_CLI -b localhost:3013 -a "$API_KEY" -t certs/charlie.crt bolt11-receive --amount-msat "$AMBER_BALANCE" -D "drain amber" | jq -r '.invoice')
+    AMBER_INVOICE=$($LDK_CLI -b localhost:3013 -a "$API_KEY" -t certs/charlie.crt bolt11-receive --amount-msat "$AMBER_BALANCE" -d "drain amber" | jq -r '.invoice')
     $NWC -w wallet/amber.json pay-invoice "$AMBER_INVOICE" || echo "amber payment failed"
     sleep 2
 fi
 
 if [ "$BLUE_BALANCE" -gt 0 ]; then
     echo "Draining blue ($BLUE_BALANCE msat) to charlie..."
-    BLUE_INVOICE=$($LDK_CLI -b localhost:3013 -a "$API_KEY" -t certs/charlie.crt bolt11-receive --amount-msat "$BLUE_BALANCE" -D "drain blue" | jq -r '.invoice')
+    BLUE_INVOICE=$($LDK_CLI -b localhost:3013 -a "$API_KEY" -t certs/charlie.crt bolt11-receive --amount-msat "$BLUE_BALANCE" -d "drain blue" | jq -r '.invoice')
     $NWC -w wallet/blue.json pay-invoice "$BLUE_INVOICE" || echo "blue payment failed"
     sleep 2
 fi
