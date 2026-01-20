@@ -101,12 +101,13 @@ where
 }
 
 /// Handle remove_deposit request
-pub fn handle_remove_deposit<L>(
+/// Uses async method which works properly in the server context
+pub async fn handle_remove_deposit<L>(
     handler: &DepositsHandler<L>,
     request: RemoveDepositRequest,
 ) -> Result<RemoveDepositResponse, DepositsError>
 where
-    L: Deref + Clone,
+    L: Deref + Clone + Send + Sync,
     L::Target: LdkLogger,
 {
     let partner_id = PublicKey::from_str(&request.ledger_id)
@@ -121,26 +122,12 @@ where
             message: "Invalid deposit_pubkey".into(),
         })?;
 
-    // Get the ledger and remove the deposit
-    let ledger_arc = handler.get_all_ledgers()
-        .into_iter()
-        .find(|((op, part), _)| *op == handler.our_node_id && *part == partner_id)
-        .map(|(_, ledger)| ledger);
-
-    let ledger_arc = ledger_arc.ok_or_else(|| DepositsError {
-        code: "LEDGER_NOT_FOUND".into(),
-        message: format!("No ledger found for partner {}", partner_id),
-    })?;
-
-    {
-        let mut ledger = ledger_arc.write().unwrap();
-        if ledger.state.deposits.remove(&deposit_pubkey).is_none() {
-            return Err(DepositsError {
-                code: "DEPOSIT_NOT_FOUND".into(),
-                message: format!("Deposit {} not found in ledger", deposit_pubkey),
-            });
-        }
-    }
+    // Use async method - properly sends DepositClose message and waits for ACK
+    handler.remove_deposit_async(partner_id, deposit_pubkey).await
+        .map_err(|e| DepositsError {
+            code: "REMOVE_FAILED".into(),
+            message: format!("{:?}", e),
+        })?;
 
     Ok(RemoveDepositResponse {})
 }

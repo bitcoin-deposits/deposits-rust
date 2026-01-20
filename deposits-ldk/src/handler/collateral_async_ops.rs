@@ -738,4 +738,91 @@ where
         log_info!(self.logger, "Successfully removed reserves output from channel with {}", partner_node_id);
         Ok(())
     }
+
+    /// Remove a deposit entirely (when balance is zero) - async version
+    /// Uses async sleep to not block the tokio executor when called from HTTP handlers
+    pub async fn remove_deposit_async(
+        &self,
+        partner_node_id: PublicKey,
+        deposit_pubkey: PublicKey,
+    ) -> Result<(), DepositsError> {
+        use super::messages::DepositsMessage;
+
+        // First validate that the deposit exists and has zero balance
+        {
+            let ledgers = self.ledgers.lock().unwrap();
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+                let ledger = ledger_arc.read().unwrap();
+
+                // Ensure deposit balance is zero before removing
+                if let Some(deposit) = ledger.state.deposits.get(&deposit_pubkey) {
+                    if deposit.balance > 0 {
+                        return Err(DepositsError::ProtocolViolation {
+                            violation_type: "non_zero_balance".to_string(),
+                            details: format!("Cannot remove deposit with non-zero balance: {} msat", deposit.balance),
+                        });
+                    }
+                } else {
+                    return Err(DepositsError::DepositNotFound);
+                }
+            } else {
+                return Err(DepositsError::LedgerNotFound);
+            }
+        }
+
+        // Capture prev_hash before creating message
+        let prev_hash = {
+            let ledgers = self.ledgers.lock().unwrap();
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+                let ledger = ledger_arc.read().unwrap();
+                ledger.tail_hash()
+            } else {
+                [0u8; 32]
+            }
+        };
+
+        // Send DepositClose message to partner (V2 format)
+        let update_msg = LedgerUpdateMsg::new_with_operation(
+            self.our_node_id,    // operator
+            partner_node_id,     // partner
+            LedgerOperation::DepositClose { pubkey: deposit_pubkey },
+        );
+        let message = DepositsMessage::LedgerUpdate(update_msg);
+
+        let message_hash = self.calculate_message_hash(&message);
+        let message_for_broadcast = message.clone();
+
+        log_info!(self.logger, "Sending DepositClose message for deposit {} to partner {}", deposit_pubkey, partner_node_id);
+
+        // Send message and wait for acknowledgment using async version
+        self.send_message_with_ack_async(partner_node_id, message.clone(), 30000).await?;
+
+        // After ACK received, apply the update to our ledger and capture new_hash
+        let (new_hash, chain_index) = {
+            let ledgers = self.ledgers.lock().unwrap();
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+                let mut ledger = ledger_arc.write().unwrap();
+                let hash = ledger.append_v1_mut(message_for_broadcast.clone())?;
+                let seq = (ledger.history.len() - 1) as u64;
+                self.persist_ledger_state(&*ledger)?;
+                (hash, seq)
+            } else {
+                return Err(DepositsError::LedgerNotFound);
+            }
+        };
+
+        // Update sent_messages_for_broadcast with correct new_hash and broadcast
+        {
+            let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
+            sent_messages.insert(message_hash, (self.our_node_id, partner_node_id, message_for_broadcast.clone(), prev_hash, new_hash, chain_index));
+        }
+
+        // Broadcast to other partners (auditors)
+        if let Err(e) = self.broadcast_message_to_other_partners(message_hash, partner_node_id, None) {
+            log_error!(self.logger, "Failed to broadcast deposit close: {}", e);
+        }
+
+        log_info!(self.logger, "Successfully removed deposit {} from channel with {}", deposit_pubkey, partner_node_id);
+        Ok(())
+    }
 }
