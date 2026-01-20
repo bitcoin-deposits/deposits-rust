@@ -29,10 +29,10 @@ echo "=========================================="
 echo "Testing on network: $NETWORK"
 echo "=========================================="
 
-# Get node IDs
-ALICE_ID=$(curl -s http://localhost:3011/info | jq -r '.data.node_id')
-BOB_ID=$(curl -s http://localhost:3012/info | jq -r '.data.node_id')
-CHARLIE_ID=$(curl -s http://localhost:3013/info | jq -r '.data.node_id')
+# Get node IDs using authenticated HTTPS
+ALICE_ID=$(ldk_curl 3011 GET /node/info | jq -r '.node_id')
+BOB_ID=$(ldk_curl 3012 GET /node/info | jq -r '.node_id')
+CHARLIE_ID=$(ldk_curl 3013 GET /node/info | jq -r '.node_id')
 
 echo "Alice:   $ALICE_ID"
 echo "Bob:     $BOB_ID"
@@ -80,14 +80,14 @@ echo "=== PHASE 3: Draining deposits ==="
 # NOTE: NWC balance returns msats, not sats
 if [ "$AMBER_BALANCE" -gt 0 ]; then
     echo "Draining amber ($AMBER_BALANCE msat) to charlie..."
-    AMBER_INVOICE=$(curl -s -X POST http://localhost:3013/invoice -H "Content-Type: application/json" -d "{\"amount_msat\": $AMBER_BALANCE, \"description\": \"drain amber\"}" | jq -r '.data.bolt11_invoice')
+    AMBER_INVOICE=$(ldk_curl 3013 POST /invoice "{\"amount_msat\": $AMBER_BALANCE, \"description\": \"drain amber\"}" | jq -r '.invoice')
     $NWC -w wallet/amber.json pay-invoice "$AMBER_INVOICE" 2>/dev/null || echo "amber payment failed"
     sleep 2
 fi
 
 if [ "$BLUE_BALANCE" -gt 0 ]; then
     echo "Draining blue ($BLUE_BALANCE msat) to charlie..."
-    BLUE_INVOICE=$(curl -s -X POST http://localhost:3013/invoice -H "Content-Type: application/json" -d "{\"amount_msat\": $BLUE_BALANCE, \"description\": \"drain blue\"}" | jq -r '.data.bolt11_invoice')
+    BLUE_INVOICE=$(ldk_curl 3013 POST /invoice "{\"amount_msat\": $BLUE_BALANCE, \"description\": \"drain blue\"}" | jq -r '.invoice')
     $NWC -w wallet/blue.json pay-invoice "$BLUE_INVOICE" 2>/dev/null || echo "blue payment failed"
     sleep 2
 fi
@@ -151,11 +151,10 @@ echo ""
 echo "=== PHASE 5: Reducing reserves ==="
 
 # Get current reserves for the specific ledgers (alice->charlie, bob->charlie)
-# Filter by partner_node_id to get the correct ledger
-ALICE_RESERVES=$(curl -s http://localhost:3011/bitcoin-deposits/ledgers | \
-    jq -r ".data.ledgers[] | select(.partner_node_id == \"$CHARLIE_ID\") | .local_reserves_sat // 0" | head -1)
-BOB_RESERVES=$(curl -s http://localhost:3012/bitcoin-deposits/ledgers | \
-    jq -r ".data.ledgers[] | select(.partner_node_id == \"$CHARLIE_ID\") | .local_reserves_sat // 0" | head -1)
+# Use deposits-admin to list ledgers and parse reserves
+# Note: deposits-admin outputs text, so we use grep/awk to extract reserves
+ALICE_RESERVES=$($ADMIN -p alice list-ledgers 2>/dev/null | grep -A5 "charlie" | grep "reserves" | awk '{print $NF}' | tr -d ',' | head -1)
+BOB_RESERVES=$($ADMIN -p bob list-ledgers 2>/dev/null | grep -A5 "charlie" | grep "reserves" | awk '{print $NF}' | tr -d ',' | head -1)
 
 # Default to 0 if empty
 ALICE_RESERVES=${ALICE_RESERVES:-0}

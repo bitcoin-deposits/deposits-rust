@@ -32,6 +32,11 @@ ESPLORA_URL="https://mutinynet.com/api"
 # Ensure directories exist
 mkdir -p "$TREASURY_DIR" "$SEEDS_DIR"
 
+# Helper to call ldk-cli.sh
+ldk_cli() {
+    ./bin/ldk-cli.sh "$@"
+}
+
 usage() {
     echo "Usage: $0 <command>"
     echo ""
@@ -125,18 +130,13 @@ cmd_treasury_balance() {
     echo "Node balances:"
     echo ""
     local total=0
-    for node in alice:3011 bob:3012 charlie:3013; do
-        name=${node%:*}
-        port=${node#*:}
-        balance=$(curl -s http://localhost:${port}/bitcoin/balance 2>/dev/null | jq -r '.data.balance_sat // 0')
-        pending=$(curl -s http://localhost:${port}/bitcoin/balance 2>/dev/null | jq -r '.data.pending_balance_sat // 0')
-        total=$((total + balance + pending))
-        printf "  %-8s %12s sat" "$name:" "$balance"
-        if [ "$pending" != "0" ]; then
-            echo " (+$pending pending)"
-        else
-            echo ""
-        fi
+    for node in alice bob charlie; do
+        balances=$(ldk_cli "$node" get-balances 2>/dev/null || echo '{}')
+        balance=$(echo "$balances" | jq -r '.total_onchain_balance_sats // 0')
+        spendable=$(echo "$balances" | jq -r '.spendable_onchain_balance_sats // 0')
+        lightning=$(echo "$balances" | jq -r '.total_lightning_balance_sats // 0')
+        total=$((total + balance + lightning))
+        printf "  %-8s %12s sat (spendable: %s, lightning: %s)\n" "$node:" "$balance" "$spendable" "$lightning"
     done
     echo ""
     echo "Total in nodes: $total sat"
@@ -199,18 +199,10 @@ cmd_backup_seeds() {
         # Copy seed from container to temp file
         local temp_seed=$(mktemp)
         if docker cp "${container}:/ldk/keys_seed" "$temp_seed" 2>/dev/null; then
-            # Get hex and address
+            # Get hex and address using ldk-cli
             seed_hex=$(xxd -p "$temp_seed" | tr -d '\n')
-            address=$(curl -s http://localhost:${node#alice}${node#bob}${node#charlie}/bitcoin/address 2>/dev/null | jq -r '.data.address // "unknown"')
-
-            # Get port for address lookup
-            case "$node" in
-                alice)   port=3011 ;;
-                bob)     port=3012 ;;
-                charlie) port=3013 ;;
-            esac
-            address=$(curl -s http://localhost:${port}/bitcoin/address | jq -r '.data.address // "unknown"')
-            balance=$(curl -s http://localhost:${port}/bitcoin/balance | jq -r '.data.balance_sat // 0')
+            address=$(ldk_cli "$node" onchain-receive 2>/dev/null | jq -r '.address // "unknown"')
+            balance=$(ldk_cli "$node" get-balances 2>/dev/null | jq -r '.total_onchain_balance_sats // 0')
 
             # Append to log (never overwrite!)
             echo "$node: seed=$seed_hex address=$address balance=${balance}sat" >> "$seeds_log"
@@ -294,19 +286,17 @@ cmd_log_addresses() {
     echo "Logging current node addresses..."
     log_timestamp "=== Address snapshot ==="
 
-    for node in alice:3011 bob:3012 charlie:3013; do
-        name=${node%:*}
-        port=${node#*:}
-        address=$(curl -s http://localhost:${port}/bitcoin/address | jq -r '.data.address // "unavailable"')
-        node_id=$(curl -s http://localhost:${port}/info | jq -r '.data.node_id // "unavailable"')
-        balance=$(curl -s http://localhost:${port}/bitcoin/balance | jq -r '.data.balance_sat // 0')
+    for node in alice bob charlie; do
+        address=$(ldk_cli "$node" onchain-receive 2>/dev/null | jq -r '.address // "unavailable"')
+        node_id=$(ldk_cli "$node" get-node-info 2>/dev/null | jq -r '.node_id // "unavailable"')
+        balance=$(ldk_cli "$node" get-balances 2>/dev/null | jq -r '.total_onchain_balance_sats // 0')
 
-        log_timestamp "$name: address=$address node_id=${node_id:0:16}... balance=$balance"
-        echo "  $name: $address (balance: $balance sat)"
+        log_timestamp "$node: address=$address node_id=${node_id:0:16}... balance=$balance"
+        echo "  $node: $address (balance: $balance sat)"
     done
 
     echo ""
-    echo "Addresses logged to $ADDRESSES_LOG"
+    echo "Addresses logged to $SEEDS_LOG"
 }
 
 cmd_fund_nodes() {
@@ -348,26 +338,22 @@ cmd_sweep_nodes() {
     echo "Sweeping all node funds to treasury: $treasury_address"
     echo ""
 
-    for node in alice:3011 bob:3012 charlie:3013; do
-        name=${node%:*}
-        port=${node#*:}
-
-        balance=$(curl -s http://localhost:${port}/bitcoin/balance 2>/dev/null | jq -r '.data.balance_sat // 0')
+    for node in alice bob charlie; do
+        balance=$(ldk_cli "$node" get-balances 2>/dev/null | jq -r '.spendable_onchain_balance_sats // 0')
 
         if [ "$balance" -gt 15000 ]; then
             # Leave some for fees
             sweep_amount=$((balance - 5000))
-            echo "Sweeping $sweep_amount sats from $name..."
-            result=$(curl -s -X POST http://localhost:${port}/bitcoin/send \
-                -H "Content-Type: application/json" \
-                -d "{\"address\":\"$treasury_address\",\"amount_sat\":$sweep_amount}")
-            if echo "$result" | jq -e '.success' >/dev/null 2>&1; then
-                echo "  sent!"
+            echo "Sweeping $sweep_amount sats from $node..."
+            result=$(ldk_cli "$node" onchain-send --address "$treasury_address" --amount-sats "$sweep_amount" 2>&1) || true
+            txid=$(echo "$result" | jq -r '.txid // empty' 2>/dev/null || echo "")
+            if [ -n "$txid" ]; then
+                echo "  sent! txid: ${txid:0:16}..."
             else
-                echo "  failed: $(echo "$result" | jq -r '.error // "unknown error"')"
+                echo "  failed: $result"
             fi
         else
-            echo "$name: balance too low ($balance sat)"
+            echo "$node: balance too low ($balance sat)"
         fi
     done
 
@@ -393,31 +379,26 @@ cmd_reclaim() {
     echo "=== Reclaiming funds to treasury: $treasury_address ==="
     echo ""
 
-    # Part 1: Reclaim from running nodes via API
+    # Part 1: Reclaim from running nodes via ldk-cli
     echo "--- Running nodes ---"
     local total_from_nodes=0
 
-    for node in alice:3011 bob:3012 charlie:3013; do
-        name=${node%:*}
-        port=${node#*:}
-
-        balance=$(curl -s http://localhost:${port}/bitcoin/balance 2>/dev/null | jq -r '.data.balance_sat // 0')
+    for node in alice bob charlie; do
+        balance=$(ldk_cli "$node" get-balances 2>/dev/null | jq -r '.spendable_onchain_balance_sats // 0')
 
         if [[ "$balance" -gt 1000 ]]; then
-            echo "  $name: sweeping all (balance: $balance)..."
-            # Omit amount_sat to sweep all funds
-            result=$(curl -s -X POST http://localhost:${port}/bitcoin/send \
-                -H "Content-Type: application/json" \
-                -d "{\"address\":\"$treasury_address\"}")
-            if echo "$result" | jq -e '.success' >/dev/null 2>&1; then
-                txid=$(echo "$result" | jq -r '.data.txid // "unknown"')
+            echo "  $node: sweeping all (balance: $balance)..."
+            # Use send-all to sweep all funds
+            result=$(ldk_cli "$node" onchain-send --address "$treasury_address" --send-all true 2>&1) || true
+            txid=$(echo "$result" | jq -r '.txid // empty' 2>/dev/null || echo "")
+            if [ -n "$txid" ]; then
                 echo "         sent! txid: ${txid:0:16}..."
                 total_from_nodes=$((total_from_nodes + balance))
             else
-                echo "         failed: $(echo "$result" | jq -r '.error // "unknown error"')"
+                echo "         failed: $result"
             fi
         else
-            echo "  $name: balance too low ($balance sat), skipping"
+            echo "  $node: balance too low ($balance sat), skipping"
         fi
     done
 

@@ -68,6 +68,52 @@ get_compose_file() {
     esac
 }
 
+# API key for LDK server authentication
+LDK_API_KEY="test_api_key"
+
+# Generate HMAC-SHA256 auth header for LDK server
+# Usage: ldk_auth_header [body]
+#   body: optional request body (empty string for GET/empty POST)
+# Returns: "HMAC <timestamp>:<hmac_hex>"
+ldk_auth_header() {
+    local body="${1:-}"
+    local timestamp=$(date +%s)
+
+    # Compute HMAC: HMAC-SHA256(key, timestamp_be_bytes || body)
+    # timestamp is 8 bytes big-endian
+    local timestamp_hex=$(printf '%016x' "$timestamp")
+    local body_hex=$(printf '%s' "$body" | xxd -p | tr -d '\n')
+    local data_hex="${timestamp_hex}${body_hex}"
+
+    local hmac=$(echo -n "$data_hex" | xxd -r -p | openssl dgst -sha256 -hmac "$LDK_API_KEY" -binary | xxd -p | tr -d '\n')
+
+    echo "HMAC ${timestamp}:${hmac}"
+}
+
+# Make authenticated HTTPS request to LDK server
+# Usage: ldk_curl <port> <method> <endpoint> [body]
+# Returns: response body
+ldk_curl() {
+    local port="$1"
+    local method="$2"
+    local endpoint="$3"
+    local body="${4:-}"
+
+    local auth_header=$(ldk_auth_header "$body")
+
+    if [ -n "$body" ]; then
+        curl -s -k -X "$method" \
+            -H "X-Auth: $auth_header" \
+            -H "Content-Type: application/json" \
+            -d "$body" \
+            "https://localhost:${port}${endpoint}"
+    else
+        curl -s -k -X "$method" \
+            -H "X-Auth: $auth_header" \
+            "https://localhost:${port}${endpoint}"
+    fi
+}
+
 # Copy TLS certificates from LDK containers to local certs/ directory
 # Usage: copy_tls_certs [container_names...]
 #   If no containers specified, copies from alice, bob, charlie

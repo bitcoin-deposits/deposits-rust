@@ -20,7 +20,7 @@ for node in alice:3011 bob:3012 charlie:3013; do
     name=${node%:*}
     port=${node#*:}
 
-    response=$(curl -s -X POST http://localhost:${port}/bitcoin-deposits/non-conforming/drop-ledgers)
+    response=$(ldk_curl "$port" POST "/bitcoin-deposits/non-conforming/drop-ledgers")
 
     # Check if response is empty (endpoint doesn't exist)
     if [ -z "$response" ]; then

@@ -5,6 +5,7 @@
 
 cd "$(dirname "$0")/.."
 set -e
+. ./bin/_common.sh
 
 echo "🔄 Quick environment reset..."
 
@@ -17,16 +18,16 @@ docker-compose -f docker-compose-deposits.yml up -d
 echo "⏳ Waiting for services to be ready..."
 sleep 20
 
-# Quick health check
+# Quick health check using authenticated HTTPS
 echo "🔍 Quick health check:"
-if curl -s http://localhost:3011/info > /dev/null 2>&1; then
+if ldk_curl 3011 GET /node/info > /dev/null 2>&1; then
     echo "✅ Alice is ready"
 else
     echo "⚠️  Alice not ready yet (may need more time)"
 fi
 
-if curl -s http://localhost:3012/info > /dev/null 2>&1; then
-    echo "✅ Bob is ready" 
+if ldk_curl 3012 GET /node/info > /dev/null 2>&1; then
+    echo "✅ Bob is ready"
 else
     echo "⚠️  Bob not ready yet (may need more time)"
 fi

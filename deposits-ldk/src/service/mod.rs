@@ -25,6 +25,7 @@ pub mod deposit;
 pub mod reserves;
 pub mod collateral;
 pub mod updates;
+pub mod nwc;
 
 // Re-export commonly used types
 pub use proto::*;
@@ -53,4 +54,8 @@ pub mod endpoints {
 
     // Ledger updates
     pub const DEPOSITS_GET_LEDGER_UPDATES_PATH: &str = "/deposits/get_ledger_updates";
+
+    // NWC operations
+    pub const DEPOSITS_NWC_INFO_PATH: &str = "/deposits/nwc_info";
+    pub const DEPOSITS_NWC_CONNECT_PATH: &str = "/deposits/nwc_connect";
 }

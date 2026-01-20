@@ -33,7 +33,17 @@ cargo run --manifest-path ../Cargo.toml --features bitcoin-deposits --bin networ
 echo "⏳ Waiting for peer connections to stabilize (60 seconds)..."
 sleep 60
 
-./bin/drop-ledgers.sh
+# For mutinynet, drop existing ledgers (regtest volumes were already wiped with -v)
+if [ "$NETWORK" = "mutinynet" ]; then
+    echo "🗑️ Dropping existing ledgers..."
+    # Stop containers, clear deposits data from SQLite, restart
+    docker compose -f "$COMPOSE_FILE" stop ldk-alice ldk-bob ldk-charlie
+    NETWORK="$NETWORK" ./bin/drop-ledgers-offline.sh alice bob charlie
+    docker compose -f "$COMPOSE_FILE" start ldk-alice ldk-bob ldk-charlie
+    # Wait for nodes to restart
+    echo "⏳ Waiting for nodes to restart (30 seconds)..."
+    sleep 30
+fi
 
 # Create wallets for alice and bob
 echo "🔑 Creating wallet for alice..."

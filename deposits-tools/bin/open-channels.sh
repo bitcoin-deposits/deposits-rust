@@ -20,6 +20,11 @@ BITCOIN_RPC_PORT="18443"
 BITCOIN_RPC_USER="user"
 BITCOIN_RPC_PASSWORD="pass"
 
+# Helper to call ldk-cli.sh
+ldk_cli() {
+    ./bin/ldk-cli.sh "$@"
+}
+
 bitcoin_rpc() {
     local wallet="${1:-}"
     local method="$2"
@@ -69,10 +74,10 @@ ensure_miner_wallet() {
 echo "Opening Lightning channels..."
 echo ""
 
-# Get node pubkeys
-ALICE_PUBKEY=$(curl -s http://localhost:3011/info | jq -r '.data.node_id')
-BOB_PUBKEY=$(curl -s http://localhost:3012/info | jq -r '.data.node_id')
-CHARLIE_PUBKEY=$(curl -s http://localhost:3013/info | jq -r '.data.node_id')
+# Get node pubkeys using ldk-cli
+ALICE_PUBKEY=$(ldk_cli alice get-node-info | jq -r '.node_id')
+BOB_PUBKEY=$(ldk_cli bob get-node-info | jq -r '.node_id')
+CHARLIE_PUBKEY=$(ldk_cli charlie get-node-info | jq -r '.node_id')
 
 echo "Node pubkeys:"
 echo "  alice:   ${ALICE_PUBKEY:0:16}..."
@@ -84,43 +89,40 @@ CHANNELS_CREATED=0
 
 open_channel() {
     local from_name=$1
-    local from_port=$2
-    local to_name=$3
-    local to_pubkey=$4
-    local to_host=$5
-    local to_p2p_port=$6
+    local to_name=$2
+    local to_pubkey=$3
+    local to_host=$4
+    local to_p2p_port=$5
 
     # Check if channel already exists
-    existing=$(curl -s http://localhost:${from_port}/channels | jq -r ".data[] | select(.counterparty_node_id == \"$to_pubkey\") | .channel_id" 2>/dev/null || echo "")
+    existing=$(ldk_cli "$from_name" list-channels | jq -r ".channels[] | select(.counterparty_node_id == \"$to_pubkey\") | .channel_id" 2>/dev/null || echo "")
 
     if [ -n "$existing" ]; then
         echo "  $from_name -> $to_name: channel already exists"
         return 0
     fi
 
-    # Connect peers first
-    echo "  $from_name -> $to_name: connecting..."
-    curl -s -X POST http://localhost:${from_port}/peers/connect \
-        -H "Content-Type: application/json" \
-        -d "{\"pubkey\":\"$to_pubkey\",\"host\":\"$to_host\",\"port\":$to_p2p_port}" > /dev/null 2>&1 || true
-
-    sleep 1
-
-    # Open channel with 50/50 balance
+    # Open channel with 50/50 balance (open-channel auto-connects to peer)
     push_msat=$((CHANNEL_AMOUNT * 500))  # 50% in millisats
     echo "  $from_name -> $to_name: opening channel (${CHANNEL_AMOUNT} sats)..."
-    response=$(curl -s -X POST http://localhost:${from_port}/channels/open \
-        -H "Content-Type: application/json" \
-        -d "{\"pubkey\":\"$to_pubkey\",\"amount_sat\":$CHANNEL_AMOUNT,\"push_to_counterparty_msat\":$push_msat,\"announce\":true}")
 
-    success=$(echo "$response" | jq -r '.success')
-    if [ "$success" = "true" ]; then
-        channel_id=$(echo "$response" | jq -r '.data.channel_id')
-        echo "  $from_name -> $to_name: ✅ channel created: ${channel_id:0:16}..."
+    # Use ldk-cli to open channel
+    response=$(ldk_cli "$from_name" open-channel \
+        --node-pubkey "$to_pubkey" \
+        --address "${to_host}:${to_p2p_port}" \
+        --channel-amount-sats "$CHANNEL_AMOUNT" \
+        --push-to-counterparty-msat "$push_msat" \
+        --announce-channel 2>&1) || true
+
+    # Check if we got a user_channel_id back (success)
+    user_channel_id=$(echo "$response" | jq -r '.user_channel_id // empty' 2>/dev/null || echo "")
+    if [ -n "$user_channel_id" ]; then
+        echo "  $from_name -> $to_name: channel opening (user_channel_id: ${user_channel_id:0:16}...)"
         CHANNELS_CREATED=$((CHANNELS_CREATED + 1))
     else
-        error=$(echo "$response" | jq -r '.error // "unknown error"')
-        echo "  $from_name -> $to_name: ❌ failed: $error"
+        # Check for error message
+        error=$(echo "$response" | grep -i "error" || echo "$response")
+        echo "  $from_name -> $to_name: failed: $error"
         return 1
     fi
 }
@@ -128,11 +130,11 @@ open_channel() {
 # Open channels for full mesh: alice <-> bob, alice <-> charlie, bob <-> charlie
 # Using localhost since we're running from host machine
 echo "Opening full mesh (3 channels for 3 nodes)..."
-open_channel "alice" 3011 "bob" "$BOB_PUBKEY" "localhost" 9736
+open_channel "alice" "bob" "$BOB_PUBKEY" "localhost" 9736
 sleep 2
-open_channel "alice" 3011 "charlie" "$CHARLIE_PUBKEY" "localhost" 9737
+open_channel "alice" "charlie" "$CHARLIE_PUBKEY" "localhost" 9737
 sleep 2
-open_channel "bob" 3012 "charlie" "$CHARLIE_PUBKEY" "localhost" 9737
+open_channel "bob" "charlie" "$CHARLIE_PUBKEY" "localhost" 9737
 
 echo ""
 if [ "$CHANNELS_CREATED" -eq 0 ]; then
@@ -173,12 +175,11 @@ fi
 
 echo ""
 echo "Channel status:"
-for node in alice:3011 bob:3012 charlie:3013; do
-    name=${node%:*}
-    port=${node#*:}
-    count=$(curl -s http://localhost:${port}/channels | jq -r '.data | length')
-    ready=$(curl -s http://localhost:${port}/channels | jq -r '[.data[] | select(.is_channel_ready == true)] | length')
-    echo "  $name: $ready/$count channels ready"
+for node in alice bob charlie; do
+    channels_json=$(ldk_cli "$node" list-channels 2>/dev/null || echo '{"channels":[]}')
+    count=$(echo "$channels_json" | jq -r '.channels | length')
+    ready=$(echo "$channels_json" | jq -r '[.channels[] | select(.is_channel_ready == true)] | length')
+    echo "  $node: $ready/$count channels ready"
 done
 
 echo ""

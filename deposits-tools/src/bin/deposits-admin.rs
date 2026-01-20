@@ -14,14 +14,37 @@ use deposits_ldk::service::{
     RemoveCollateralPartnerRequest, RemoveCollateralPartnerResponse,
     DepositsError,
 };
+use hmac::{Hmac, Mac};
 use prost::Message;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::Sha256;
 use std::collections::HashMap;
 use std::env;
 use std::error::Error;
 use std::io;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+const API_KEY: &str = "test_api_key";
+
+/// Compute HMAC-SHA256 auth header for ldk-server
+fn compute_auth_header(body: &[u8]) -> String {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("System time should be after Unix epoch")
+        .as_secs();
+
+    type HmacSha256 = Hmac<Sha256>;
+    let mut mac = HmacSha256::new_from_slice(API_KEY.as_bytes())
+        .expect("HMAC can take key of any size");
+    mac.update(&timestamp.to_be_bytes());
+    mac.update(body);
+    let result = mac.finalize();
+    let hmac_hex = hex::encode(result.into_bytes());
+
+    format!("HMAC {}:{}", timestamp, hmac_hex)
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 struct ApiResponse<T> {
@@ -51,10 +74,12 @@ async fn proto_request<Req: Message, Resp: Message + Default>(
 ) -> Result<Resp, Box<dyn Error>> {
     let url = format!("{}{}", base_url, path);
     let body = request.encode_to_vec();
+    let auth_header = compute_auth_header(&body);
 
     let response = client
         .post(&url)
         .header("Content-Type", "application/octet-stream")
+        .header("X-Auth", auth_header)
         .body(body)
         .send()
         .await?;
@@ -98,7 +123,7 @@ async fn resolve_node_id(client: &Client, node_id_or_alias: &str) -> Result<Stri
 
     // Try to resolve as an alias
     let port = resolve_port(node_id_or_alias);
-    let base_url = format!("http://localhost:{}", port);
+    let base_url = format!("https://localhost:{}", port);
 
     let response = client
         .get(&format!("{}/info", base_url))
@@ -132,7 +157,7 @@ async fn build_node_name_map(client: &Client) -> HashMap<String, String> {
     ];
 
     for (name, port) in known_nodes {
-        let url = format!("http://localhost:{}/info", port);
+        let url = format!("https://localhost:{}/info", port);
         if let Ok(resp) = client.get(&url).send().await {
             if let Ok(result) = resp.json::<ApiResponse<Value>>().await {
                 if result.success {
@@ -388,8 +413,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
 
     let port = resolve_port(&port_or_alias);
-    let base_url = format!("http://localhost:{}", port);
-    let client = Client::new();
+    let base_url = format!("https://localhost:{}", port);
+    let client = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .expect("Failed to build HTTP client");
 
     match matches.subcommand() {
         Some(("completions", sub_m)) => {
@@ -412,7 +440,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let comp_type = sub_m.get_one::<String>("type").unwrap();
             let port_or_alias = sub_m.get_one::<String>("port").unwrap_or(&port);
             let resolved_port = resolve_port(port_or_alias);
-            complete_dynamic(&client, &format!("http://localhost:{}", resolved_port), comp_type).await?;
+            complete_dynamic(&client, &format!("https://localhost:{}", resolved_port), comp_type).await?;
             return Ok(());
         }
         Some(("add-ledger", sub_m)) => {
@@ -470,7 +498,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| port_or_alias.clone());
             let resolved_port = resolve_port(&node_name);
-            let node_url = format!("http://localhost:{}", resolved_port);
+            let node_url = format!("https://localhost:{}", resolved_port);
             show_status(&client, &node_url, &node_name).await?;
         }
         Some(("info", _)) => {

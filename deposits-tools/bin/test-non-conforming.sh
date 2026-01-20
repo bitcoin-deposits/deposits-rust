@@ -43,8 +43,8 @@ AMBER_DEPOSIT_PUBKEY=$(echo "$BALANCE_RESPONSE" | jq -r '.result.deposit_pubkey'
 echo ""
 echo "Amber's deposit pubkey: $AMBER_DEPOSIT_PUBKEY"
 
-# Get alice's node ID (the operator)
-ALICE_NODE_ID=$(curl -s http://localhost:3011/info | jq -r '.data.node_id')
+# Get alice's node ID (the operator) - use authenticated HTTPS
+ALICE_NODE_ID=$(ldk_curl 3011 GET /node/info | jq -r '.node_id')
 echo "Alice's node ID (operator): $ALICE_NODE_ID"
 
 # Get amber's current balance
@@ -70,9 +70,8 @@ echo "Payment Hash: $PAYMENT_HASH"
 echo ""
 echo "--- UNREGISTERING INVOICE (non-conforming) ---"
 # Alice is the operator (port 3011)
-UNREGISTER_RESPONSE=$(curl -s -X POST http://localhost:3011/bitcoin-deposits/non-conforming/unregister-invoice \
-  -H "Content-Type: application/json" \
-  -d "{\"payment_hash\": \"$PAYMENT_HASH\"}")
+UNREGISTER_RESPONSE=$(ldk_curl 3011 POST /bitcoin-deposits/non-conforming/unregister-invoice \
+  "{\"payment_hash\": \"$PAYMENT_HASH\"}")
 echo "$UNREGISTER_RESPONSE" | jq .
 
 # Pay the invoice from charlie
@@ -86,7 +85,7 @@ sleep 3
 echo ""
 echo "--- Getting payment preimage from charlie (the payer) ---"
 # Charlie is port 3013
-PAYMENT_RESPONSE=$(curl -s http://localhost:3013/bitcoin-deposits/non-conforming/get-payment/$PAYMENT_HASH)
+PAYMENT_RESPONSE=$(ldk_curl 3013 GET "/bitcoin-deposits/non-conforming/get-payment/$PAYMENT_HASH")
 echo "$PAYMENT_RESPONSE" | jq .
 
 PREIMAGE=$(echo "$PAYMENT_RESPONSE" | jq -r '.data.preimage')
@@ -97,7 +96,7 @@ if [ "$PREIMAGE" == "null" ] || [ -z "$PREIMAGE" ]; then
     echo "ERROR: Preimage not available yet. Payment may still be in-flight."
     echo "Waiting 5 more seconds..."
     sleep 5
-    PAYMENT_RESPONSE=$(curl -s http://localhost:3013/bitcoin-deposits/non-conforming/get-payment/$PAYMENT_HASH)
+    PAYMENT_RESPONSE=$(ldk_curl 3013 GET "/bitcoin-deposits/non-conforming/get-payment/$PAYMENT_HASH")
     PREIMAGE=$(echo "$PAYMENT_RESPONSE" | jq -r '.data.preimage')
     echo "Preimage (retry): $PREIMAGE"
 fi
@@ -123,15 +122,14 @@ if [ "$PREIMAGE" != "null" ] && [ -n "$PREIMAGE" ]; then
     # Submit fraud proof from Bob (port 3012) - the partner who cosigned the invoice
     # Amber's deposit is on the alice-bob ledger, so Bob is the one who can verify
     # This uses the regular endpoint (not non-conforming) - submitting fraud proof is legitimate
-    FRAUD_PROOF_RESPONSE=$(curl -s -X POST http://localhost:3012/bitcoin-deposits/submit-fraud-proof \
-      -H "Content-Type: application/json" \
-      -d "{
+    FRAUD_PROOF_BODY="{
         \"operator\": \"$ALICE_NODE_ID\",
         \"payment_hash\": \"$PAYMENT_HASH\",
         \"preimage\": \"$PREIMAGE\",
         \"deposit_pubkey\": \"$AMBER_DEPOSIT_PUBKEY\",
         \"amount_msat\": 5000
-      }")
+      }"
+    FRAUD_PROOF_RESPONSE=$(ldk_curl 3012 POST /bitcoin-deposits/submit-fraud-proof "$FRAUD_PROOF_BODY")
     echo "Fraud proof response:"
     echo "$FRAUD_PROOF_RESPONSE" | jq .
 else

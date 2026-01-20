@@ -4,6 +4,7 @@ use std::error::Error;
 use std::fs;
 use std::path::Path;
 use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -13,6 +14,15 @@ use bitcoin::secp256k1::{Secp256k1, SecretKey, PublicKey, Keypair, XOnlyPublicKe
 use bitcoin::hashes::{Hash, sha256};
 use hex;
 use rand::RngCore;
+use prost::Message as ProstMessage;
+
+// Protobuf imports for NWC endpoints
+use deposits_ldk::service::{
+    GetNwcInfoRequest, GetNwcInfoResponse,
+    GetNwcConnectRequest, GetNwcConnectResponse,
+    DepositsError,
+    endpoints,
+};
 
 // NIP-44 encryption
 use chacha20::cipher::{KeyIvInit, StreamCipher};
@@ -22,6 +32,26 @@ use hmac::{Hmac, Mac};
 type HmacSha256 = Hmac<Sha256>;
 
 use deposits_tools::network_config::NetworkConfig;
+
+/// API key for ldk-server authentication
+const API_KEY: &str = "test_api_key";
+
+/// Compute HMAC-SHA256 auth header for ldk-server
+fn compute_auth_header(body: &[u8]) -> String {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("System time should be after Unix epoch")
+        .as_secs();
+
+    let mut mac = HmacSha256::new_from_slice(API_KEY.as_bytes())
+        .expect("HMAC can take key of any size");
+    mac.update(&timestamp.to_be_bytes());
+    mac.update(body);
+    let result = mac.finalize();
+    let hmac_hex = hex::encode(result.into_bytes());
+
+    format!("HMAC {}:{}", timestamp, hmac_hex)
+}
 
 /// NIP-44 encryption implementation for gift-wrapped DMs
 mod nip44 {
@@ -543,42 +573,42 @@ impl NWCClient {
         }
 
         // Fetch connection string from server (includes secret for node-level access)
-        let api_url = format!("http://localhost:{}/nwc/connect", self.target_port);
+        let api_url = format!("https://localhost:{}{}", self.target_port, endpoints::DEPOSITS_NWC_CONNECT_PATH);
         eprintln!("🔍 Fetching NWC connection string from: {}", api_url);
 
-        let response = reqwest::get(&api_url).await?;
+        // Build HTTPS client with cert validation disabled (self-signed certs)
+        let client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()?;
+
+        // Send protobuf request with HMAC authentication
+        let request = GetNwcConnectRequest {};
+        let body = request.encode_to_vec();
+        let auth_header = compute_auth_header(&body);
+
+        let response = client
+            .post(&api_url)
+            .header("Content-Type", "application/octet-stream")
+            .header("X-Auth", auth_header)
+            .body(body)
+            .send()
+            .await?;
+
         if !response.status().is_success() {
-            return Err(format!("Failed to fetch NWC connection: {}", response.status()).into());
-        }
-
-        let api_response: serde_json::Value = response.json().await?;
-
-        let connection_string = api_response
-            .get("data")
-            .and_then(|d| d.get("connection_string"))
-            .and_then(|v| v.as_str())
-            .ok_or("Missing connection_string in response")?;
-
-        // Parse connection string: nostr+walletconnect://<pubkey>?relay=<relay>&secret=<secret>
-        let url = url::Url::parse(connection_string)?;
-
-        let nwc_pubkey = url.host_str()
-            .ok_or("Missing pubkey in connection string")?
-            .to_string();
-
-        let mut relay_url = None;
-        let mut secret = None;
-
-        for (key, value) in url.query_pairs() {
-            match key.as_ref() {
-                "relay" => relay_url = Some(value.to_string()),
-                "secret" => secret = Some(value.to_string()),
-                _ => {}
+            let bytes = response.bytes().await?;
+            if let Ok(error) = DepositsError::decode(bytes.as_ref()) {
+                return Err(format!("NWC connect failed: {}: {}", error.code, error.message).into());
             }
+            return Err(format!("Failed to fetch NWC connection: {}", String::from_utf8_lossy(&bytes)).into());
         }
 
-        let secret = secret.ok_or("Missing secret in connection string")?;
-        let relay_url = relay_url.ok_or("Missing relay in connection string")?;
+        let bytes = response.bytes().await?;
+        let nwc_response = GetNwcConnectResponse::decode(bytes.as_ref())?;
+
+        // Protobuf response already has all fields directly
+        let nwc_pubkey = nwc_response.pubkey;
+        let secret = nwc_response.secret;
+        let relay_url = nwc_response.relay_url;
 
         // Derive keypair from secret
         let secret_bytes = hex::decode(&secret)?;
@@ -638,31 +668,46 @@ impl NWCClient {
             return Ok(cached_pubkey.clone());
         }
 
-        let api_url = format!("http://localhost:{}/nwc/pubkey", self.target_port);
+        let api_url = format!("https://localhost:{}{}", self.target_port, endpoints::DEPOSITS_NWC_INFO_PATH);
         eprintln!("🔍 Fetching NWC pubkey from: {}", api_url);
         eprintln!("🔍 Target node: {}", self.target_name);
         eprintln!("🔍 Target port: {}", self.target_port);
-        let response = reqwest::get(&api_url).await?;
+
+        // Build HTTPS client with cert validation disabled (self-signed certs)
+        let client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()?;
+
+        // Send protobuf request with HMAC authentication
+        let request = GetNwcInfoRequest {};
+        let body = request.encode_to_vec();
+        let auth_header = compute_auth_header(&body);
+
+        let response = client
+            .post(&api_url)
+            .header("Content-Type", "application/octet-stream")
+            .header("X-Auth", auth_header)
+            .body(body)
+            .send()
+            .await?;
 
         if !response.status().is_success() {
-            return Err(format!("Failed to fetch NWC pubkey: {}", response.status()).into());
-        }
-
-        let api_response: serde_json::Value = response.json().await?;
-
-        if let Some(data) = api_response.get("data") {
-            if let Some(pubkey) = data.get("nwc_pubkey") {
-                if let Some(pubkey_str) = pubkey.as_str() {
-                    eprintln!("🔍 Retrieved NWC pubkey from API: {}", pubkey_str);
-                    // Cache the pubkey
-                    self.wallet_data.pubkey = Some(pubkey_str.to_string());
-                    self.save_wallet()?;
-                    return Ok(pubkey_str.to_string());
-                }
+            let bytes = response.bytes().await?;
+            if let Ok(error) = DepositsError::decode(bytes.as_ref()) {
+                return Err(format!("NWC info failed: {}: {}", error.code, error.message).into());
             }
+            return Err(format!("Failed to fetch NWC pubkey: {}", String::from_utf8_lossy(&bytes)).into());
         }
-        
-        Err("Invalid API response format".into())
+
+        let bytes = response.bytes().await?;
+        let nwc_response = GetNwcInfoResponse::decode(bytes.as_ref())?;
+        let pubkey_str = nwc_response.pubkey;
+
+        eprintln!("🔍 Retrieved NWC pubkey from API: {}", pubkey_str);
+        // Cache the pubkey
+        self.wallet_data.pubkey = Some(pubkey_str.clone());
+        self.save_wallet()?;
+        Ok(pubkey_str)
     }
     
     async fn send_nwc_request(&mut self, method: &str, params: Value) -> Result<Value, Box<dyn Error>> {

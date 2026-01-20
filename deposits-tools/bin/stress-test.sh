@@ -5,6 +5,7 @@
 
 cd "$(dirname "$0")/.."
 set -e
+. ./bin/_common.sh
 
 mkdir -p log
 LOGFILE="log/stress-test-$(date +'%s').log"
@@ -34,27 +35,25 @@ rm -f wallet/stress/*.json
 RESULTS_DIR=$(mktemp -d)
 trap "rm -rf $RESULTS_DIR" EXIT
 
+ADMIN="cargo_quiet run --manifest-path ../Cargo.toml --features bitcoin-deposits --bin deposits-admin --"
+
 echo "Phase 1: Initialize ledgers"
 echo "-------------------------------------------"
 
-# Get node IDs
-ALICE_ID=$(curl -s http://localhost:3011/info | jq -r '.data.node_id')
-BOB_ID=$(curl -s http://localhost:3012/info | jq -r '.data.node_id')
-CHARLIE_ID=$(curl -s http://localhost:3013/info | jq -r '.data.node_id')
+# Get node IDs using authenticated HTTPS
+ALICE_ID=$(ldk_curl 3011 GET /node/info | jq -r '.node_id')
+BOB_ID=$(ldk_curl 3012 GET /node/info | jq -r '.node_id')
+CHARLIE_ID=$(ldk_curl 3013 GET /node/info | jq -r '.node_id')
 
 echo "Alice:   $ALICE_ID"
 echo "Bob:     $BOB_ID"
 echo "Charlie: $CHARLIE_ID"
 
-# Initialize ledgers in parallel
+# Initialize ledgers using deposits-admin
 echo ""
 echo "Initializing ledgers..."
-curl -s -X POST http://localhost:3011/bitcoin-deposits/ledger/init \
-  -H 'Content-Type: application/json' \
-  -d "{\"partner_pubkey\":\"$CHARLIE_ID\"}" | jq -r '.data.message // .error // "already exists"' &
-curl -s -X POST http://localhost:3012/bitcoin-deposits/ledger/init \
-  -H 'Content-Type: application/json' \
-  -d "{\"partner_pubkey\":\"$CHARLIE_ID\"}" | jq -r '.data.message // .error // "already exists"' &
+$ADMIN -p alice add-ledger charlie &
+$ADMIN -p bob add-ledger charlie &
 wait
 
 sleep 1
@@ -121,15 +120,13 @@ fund_wallet_via_node() {
         echo "  $name FAILED (no invoice)"
         return 1
     fi
-    # Pay via node's /pay endpoint
-    result=$(curl -s -X POST "http://localhost:${node_port}/pay" \
-        -H 'Content-Type: application/json' \
-        -d "{\"invoice\":\"${invoice}\"}" | jq -r '.data.status // empty')
-    if [ "$result" = "sent" ]; then
+    # Pay via node's /bolt11/send endpoint using authenticated HTTPS
+    result=$(ldk_curl "$node_port" POST /bolt11/send "{\"invoice\":\"${invoice}\"}" | jq -r '.payment_id // empty')
+    if [ -n "$result" ]; then
         echo "  $name funded"
         return 0
     fi
-    echo "  $name FAILED (pay: $result)"
+    echo "  $name FAILED (pay: no payment_id)"
     return 1
 }
 

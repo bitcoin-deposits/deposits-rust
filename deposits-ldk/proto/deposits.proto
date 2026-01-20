@@ -147,3 +147,18 @@ message DepositsError {
   string code = 1;
   string message = 2;
 }
+
+// NWC (Nostr Wallet Connect) operations
+message GetNwcInfoRequest {}
+message GetNwcInfoResponse {
+  string pubkey = 1;           // Node's NWC pubkey (hex)
+  string relay_url = 2;        // Relay URL for NWC connections
+}
+
+message GetNwcConnectRequest {}
+message GetNwcConnectResponse {
+  string connection_string = 1;  // nostr+walletconnect:// URI
+  string pubkey = 2;             // Node's NWC pubkey (hex)
+  string secret = 3;             // Connection secret (hex)
+  string relay_url = 4;          // Relay URL
+}

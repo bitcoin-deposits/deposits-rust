@@ -27,8 +27,8 @@ cargo_quiet run --bin status network
 
 echo ""
 echo "🎉 Environment is ready!"
-echo "📝 Test commands:"
-echo "   curl http://localhost:3011/info"
+echo "📝 Test commands (HTTPS with HMAC auth required):"
+echo "   . ./bin/_common.sh && ldk_curl 3011 GET /node/info"
 echo "   cargo run --bin nwc-client alice"
 echo "   cargo run --bin status network"
 echo ""

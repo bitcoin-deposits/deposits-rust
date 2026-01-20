@@ -272,6 +272,33 @@ impl NetworkInitializer {
         Ok(())
     }
 
+    async fn wait_for_funding_transactions(&self, expected_count: usize) -> Result<(), Box<dyn std::error::Error>> {
+        self.log(&format!("⏳ Waiting for {} funding transaction(s) to appear in mempool...", expected_count));
+
+        let timeout = Duration::from_secs(60);
+        let poll_interval = Duration::from_secs(2);
+        let start = std::time::Instant::now();
+
+        loop {
+            // Get mempool size
+            let result = self.bitcoin_rpc("getmempoolinfo", serde_json::json!([])).await?;
+            let mempool_size = result.get("size").and_then(|s| s.as_u64()).unwrap_or(0) as usize;
+
+            if mempool_size >= expected_count {
+                self.log(&format!("✅ Found {} transaction(s) in mempool", mempool_size));
+                return Ok(());
+            }
+
+            if start.elapsed() > timeout {
+                self.warn(&format!("⚠️ Timeout waiting for funding transactions (found {} of {} expected)", mempool_size, expected_count));
+                // Don't fail - some channels may have been created, proceed with mining
+                return Ok(());
+            }
+
+            sleep(poll_interval).await;
+        }
+    }
+
     // Helper method that can call ANY node (not just selected ones)
     async fn ldk_api_call_any<T>(&self, node_config: &NodeConfig, endpoint: &str, method: &str, data: Option<serde_json::Value>) -> Result<ApiResponse<T>, Box<dyn std::error::Error>>
     where
@@ -461,38 +488,65 @@ impl NetworkInitializer {
         // Mine blocks to confirm funding transactions
         self.mine_blocks_safely(6, "funding transaction confirmations").await?;
 
-        // Wait longer for electrs to index and LDK nodes to detect the transactions
-        self.log("⏳ Waiting for electrs sync and balance detection...");
-        sleep(Duration::from_secs(30)).await;
+        // Poll until all nodes have detected their funds (or timeout)
+        self.log("⏳ Waiting for nodes to detect funds...");
+        let timeout = Duration::from_secs(120);
+        let poll_interval = Duration::from_secs(5);
+        let start = std::time::Instant::now();
 
-        // Verify node balances using GetBalances protobuf endpoint
-        for (_node_id, node_config) in &self.nodes {
-            let url = format!("https://localhost:{}/GetBalances", node_config.api_port);
-            let body: Vec<u8> = vec![];
-            let auth_header = compute_auth_header(&body);
+        loop {
+            let mut all_funded = true;
+            let mut balances: Vec<(String, u64)> = vec![];
 
-            match self.client
-                .post(&url)
-                .header("Content-Type", "application/octet-stream")
-                .header("X-Auth", auth_header)
-                .body(body)
-                .send()
-                .await
-            {
-                Ok(response) if response.status().is_success() => {
-                    let bytes = response.bytes().await?;
-                    if let Ok(balance) = GetBalancesResponse::decode(bytes.as_ref()) {
-                        self.log(&format!("💰 {} balance: {} sat",
-                            node_config.name, balance.total_onchain_balance_sats));
-                    }
-                }
-                _ => {
-                    self.warn(&format!("Could not check balance for {}", node_config.name));
+            for (_node_id, node_config) in &self.nodes {
+                let balance = self.get_node_balance(node_config).await.unwrap_or(0);
+                balances.push((node_config.name.clone(), balance));
+                if balance == 0 {
+                    all_funded = false;
                 }
             }
+
+            if all_funded {
+                for (name, balance) in &balances {
+                    self.log(&format!("💰 {} balance: {} sat", name, balance));
+                }
+                break;
+            }
+
+            if start.elapsed() > timeout {
+                self.warn("⚠️ Timeout waiting for balance detection. Current balances:");
+                for (name, balance) in &balances {
+                    self.log(&format!("💰 {} balance: {} sat", name, balance));
+                }
+                break;
+            }
+
+            sleep(poll_interval).await;
         }
 
         Ok(())
+    }
+
+    async fn get_node_balance(&self, node_config: &NodeConfig) -> Result<u64, Box<dyn std::error::Error>> {
+        let url = format!("https://localhost:{}/GetBalances", node_config.api_port);
+        let body: Vec<u8> = vec![];
+        let auth_header = compute_auth_header(&body);
+
+        let response = self.client
+            .post(&url)
+            .header("Content-Type", "application/octet-stream")
+            .header("X-Auth", auth_header)
+            .body(body)
+            .send()
+            .await?;
+
+        if response.status().is_success() {
+            let bytes = response.bytes().await?;
+            if let Ok(balance) = GetBalancesResponse::decode(bytes.as_ref()) {
+                return Ok(balance.total_onchain_balance_sats);
+            }
+        }
+        Ok(0)
     }
 
     async fn get_node_pubkeys(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -574,35 +628,13 @@ impl NetworkInitializer {
         let mut insufficient_nodes = Vec::new();
 
         for (_node_id, node_config) in &self.nodes {
-            let url = format!("https://localhost:{}/GetBalances", node_config.api_port);
-            let body: Vec<u8> = vec![];
-            let auth_header = compute_auth_header(&body);
-
-            match self.client
-                .post(&url)
-                .header("Content-Type", "application/octet-stream")
-                .header("X-Auth", auth_header)
-                .body(body)
-                .send()
-                .await
-            {
-                Ok(response) if response.status().is_success() => {
-                    let bytes = response.bytes().await?;
-                    if let Ok(balance) = GetBalancesResponse::decode(bytes.as_ref()) {
-                        let total = balance.total_onchain_balance_sats;
-                        if total < min_balance_sat {
-                            self.warn(&format!("❌ {} has insufficient funds: {} sat (need {} sat)",
-                                node_config.name, total, min_balance_sat));
-                            insufficient_nodes.push(node_config.name.clone());
-                        } else {
-                            self.log(&format!("✅ {} balance: {} sat", node_config.name, total));
-                        }
-                    }
-                }
-                _ => {
-                    self.warn(&format!("Could not check balance for {}", node_config.name));
-                    insufficient_nodes.push(node_config.name.clone());
-                }
+            let total = self.get_node_balance(node_config).await.unwrap_or(0);
+            if total < min_balance_sat {
+                self.warn(&format!("❌ {} has insufficient funds: {} sat (need {} sat)",
+                    node_config.name, total, min_balance_sat));
+                insufficient_nodes.push(node_config.name.clone());
+            } else {
+                self.log(&format!("✅ {} balance: {} sat", node_config.name, total));
             }
         }
 
@@ -659,82 +691,121 @@ impl NetworkInitializer {
             let mut pass_channel_count = 0;
             let mut pass_existing_count = 0;
 
-            // Create channels from each selected node to all other running nodes
-            for (selected_node_id, selected_node_config) in &self.nodes {
-                for (target_node_id, target_node_config) in &all_available_nodes {
-                    // Skip if trying to connect to self
+            // Collect all potential channel pairs
+            let mut channel_pairs: Vec<(String, String)> = Vec::new();
+            for (selected_node_id, _) in &self.nodes {
+                for (target_node_id, _) in &all_available_nodes {
                     if selected_node_id == target_node_id {
                         continue;
                     }
-
-                    // Skip if target node is not running (no pubkey available)
-                    let target_pubkey = match self.node_pubkeys.get(target_node_id) {
-                        Some(pubkey) => pubkey,
-                        None => {
-                            // Target node is not running, skip
-                            continue;
-                        }
-                    };
-
-                    let selected_pubkey = &self.node_pubkeys[selected_node_id];
-
-                    // Check if channel already exists (from either direction)
-                    let channel_exists = self.check_existing_channel(selected_node_id, target_pubkey).await.unwrap_or(false) ||
-                                       self.check_existing_channel(target_node_id, selected_pubkey).await.unwrap_or(false);
-
-                    if channel_exists {
-                        self.log(&format!("✅ Channel already exists: {} <-> {}", selected_node_config.name, target_node_config.name));
-                        pass_existing_count += 1;
+                    if self.node_pubkeys.get(target_node_id).is_none() {
                         continue;
                     }
+                    channel_pairs.push((selected_node_id.clone(), target_node_id.clone()));
+                }
+            }
 
-                    self.log(&format!("🔗 Creating channel: {} -> {}", selected_node_config.name, target_node_config.name));
-
-                    // Open channel using protobuf API (includes peer connection)
-                    let push_msat = Some((channel_amount * 1000) / 2); // Push 50% in millisats
-                    let target_address = format!("{}:{}", target_node_config.ip, target_node_config.p2p_port);
-
-                    let request = OpenChannelRequest {
-                        node_pubkey: target_pubkey.clone(),
-                        address: target_address,
-                        channel_amount_sats: channel_amount,
-                        push_to_counterparty_msat: push_msat,
-                        announce_channel: true,
-                    };
-
-                    let url = format!("https://localhost:{}/OpenChannel", selected_node_config.api_port);
-                    let body = request.encode_to_vec();
-                    let auth_header = compute_auth_header(&body);
-
-                    match self.client
-                        .post(&url)
-                        .header("Content-Type", "application/octet-stream")
-                        .header("X-Auth", auth_header)
-                        .body(body)
-                        .send()
-                        .await
-                    {
-                        Ok(response) if response.status().is_success() => {
-                            let bytes = response.bytes().await?;
-                            if let Ok(resp) = OpenChannelResponse::decode(bytes.as_ref()) {
-                                let channel_key = format!("{}-{}", selected_node_id, target_node_id);
-                                self.channels.insert(channel_key, resp.user_channel_id.clone());
-                                pass_channel_count += 1;
-                                self.log(&format!("✅ Channel created: {}", resp.user_channel_id));
-                            }
-                        }
-                        Ok(response) => {
-                            let status = response.status();
-                            let body = response.text().await.unwrap_or_default();
-                            self.warn(&format!("⚠️ Channel creation failed: {} - {}", status, body));
-                        }
-                        Err(e) => {
-                            self.warn(&format!("⚠️ Channel creation error: {}", e));
+            // Reorder pairs so no node creates two channels in a row (round-robin by source)
+            let mut by_source: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+            for (src, dst) in channel_pairs {
+                by_source.entry(src).or_default().push(dst);
+            }
+            let mut reordered: Vec<(String, String)> = Vec::new();
+            let sources: Vec<String> = by_source.keys().cloned().collect();
+            loop {
+                let mut added = false;
+                for src in &sources {
+                    if let Some(targets) = by_source.get_mut(src) {
+                        if let Some(target) = targets.pop() {
+                            reordered.push((src.clone(), target));
+                            added = true;
                         }
                     }
+                }
+                if !added {
+                    break;
+                }
+            }
 
-                    // Longer delay to give nodes time to fully process the channel
-                    sleep(Duration::from_secs(3)).await;
+            // Process channels in reordered sequence (one from each node at a time)
+            for (selected_node_id, target_node_id) in reordered {
+                let selected_node_config = &all_available_nodes[&selected_node_id];
+                let target_node_config = &all_available_nodes[&target_node_id];
+                let target_pubkey = &self.node_pubkeys[&target_node_id];
+                let selected_pubkey = &self.node_pubkeys[&selected_node_id];
+
+                // Check if channel already exists (from either direction)
+                let channel_exists = self.check_existing_channel(&selected_node_id, target_pubkey).await.unwrap_or(false) ||
+                                   self.check_existing_channel(&target_node_id, selected_pubkey).await.unwrap_or(false);
+
+                if channel_exists {
+                    self.log(&format!("✅ Channel already exists: {} <-> {}", selected_node_config.name, target_node_config.name));
+                    pass_existing_count += 1;
+                    continue;
+                }
+
+                self.log(&format!("🔗 Creating channel: {} -> {}", selected_node_config.name, target_node_config.name));
+
+                // Open channel using protobuf API (includes peer connection)
+                let push_msat = Some((channel_amount * 1000) / 2); // Push 50% in millisats
+                let target_address = format!("{}:{}", target_node_config.ip, target_node_config.p2p_port);
+
+                let request = OpenChannelRequest {
+                    node_pubkey: target_pubkey.clone(),
+                    address: target_address,
+                    channel_amount_sats: channel_amount,
+                    push_to_counterparty_msat: push_msat,
+                    announce_channel: true,
+                };
+
+                let url = format!("https://localhost:{}/OpenChannel", selected_node_config.api_port);
+                let body = request.encode_to_vec();
+                let auth_header = compute_auth_header(&body);
+
+                let channel_created = match self.client
+                    .post(&url)
+                    .header("Content-Type", "application/octet-stream")
+                    .header("X-Auth", auth_header)
+                    .body(body)
+                    .send()
+                    .await
+                {
+                    Ok(response) if response.status().is_success() => {
+                        let bytes = response.bytes().await?;
+                        if let Ok(resp) = OpenChannelResponse::decode(bytes.as_ref()) {
+                            let channel_key = format!("{}-{}", selected_node_id, target_node_id);
+                            self.channels.insert(channel_key, resp.user_channel_id.clone());
+                            pass_channel_count += 1;
+                            self.log(&format!("✅ Channel created: {}", resp.user_channel_id));
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    Ok(response) => {
+                        let status = response.status();
+                        let body = response.text().await.unwrap_or_default();
+                        self.warn(&format!("⚠️ Channel creation failed: {} - {}", status, body));
+                        false
+                    }
+                    Err(e) => {
+                        self.warn(&format!("⚠️ Channel creation error: {}", e));
+                        false
+                    }
+                };
+
+                // Only wait for funding tx and mine blocks if channel was successfully created
+                if channel_created {
+                    if self.network == Network::Regtest {
+                        sleep(Duration::from_secs(2)).await;
+                        self.wait_for_funding_transactions(1).await?;
+                        self.mine_blocks_safely(1, "channel funding confirmation").await?;
+                        // Wait for wallet to sync with new block before next channel
+                        sleep(Duration::from_secs(10)).await;
+                    } else {
+                        // On mutinynet, just wait - we can't mine on demand
+                        sleep(Duration::from_secs(5)).await;
+                    }
                 }
             }
 
@@ -744,11 +815,11 @@ impl NetworkInitializer {
 
             self.log(&format!("📊 Pass {} summary: {} new channels, {} existing", pass, pass_channel_count, pass_existing_count));
 
-            // Wait for channel confirmations
+            // Wait for channel confirmations (additional blocks for full confirmation)
             if pass_channel_count > 0 {
                 if self.network == Network::Regtest {
-                    // Regtest: mine blocks
-                    self.mine_blocks_safely(6, &format!("pass {} channel confirmations", pass)).await?;
+                    // We already mined 1 block per channel above, mine 5 more for 6 total confirmations
+                    self.mine_blocks_safely(5, &format!("pass {} remaining confirmations", pass)).await?;
                     self.log("⏳ Waiting for channel_ready messages and processing...");
                     sleep(Duration::from_secs(30)).await;
                 } else {
@@ -775,22 +846,31 @@ impl NetworkInitializer {
             self.log("✅ No new channels created, skipping confirmation wait");
         }
 
-        // Verify channel readiness
+        // Verify channel readiness using protobuf API
         self.log("🔍 Verifying channel readiness...");
         let mut ready_channels = 0;
         let mut total_channels = 0;
 
-        for (node_id, _) in &self.nodes {
-            match self.ldk_api_call::<serde_json::Value>(node_id, "/channels", "GET", None).await {
-                Ok(response) if response.success => {
-                    if let Some(data) = response.data {
-                        if let Some(channels) = data.as_array() {
-                            for channel in channels {
+        for (node_id, node_config) in &self.nodes {
+            let url = format!("https://localhost:{}/ListChannels", node_config.api_port);
+            let body: Vec<u8> = vec![];
+            let auth_header = compute_auth_header(&body);
+
+            match self.client
+                .post(&url)
+                .header("Content-Type", "application/octet-stream")
+                .header("X-Auth", auth_header)
+                .body(body)
+                .send()
+                .await
+            {
+                Ok(response) if response.status().is_success() => {
+                    if let Ok(bytes) = response.bytes().await {
+                        if let Ok(list_response) = ListChannelsResponse::decode(bytes.as_ref()) {
+                            for channel in &list_response.channels {
                                 total_channels += 1;
-                                if let Some(is_ready) = channel.get("is_channel_ready") {
-                                    if is_ready.as_bool().unwrap_or(false) {
-                                        ready_channels += 1;
-                                    }
+                                if channel.is_channel_ready {
+                                    ready_channels += 1;
                                 }
                             }
                         }
@@ -848,29 +928,9 @@ impl NetworkInitializer {
     }
 
     async fn setup_nwc_services(&self) -> Result<(), Box<dyn std::error::Error>> {
-        self.log("📱 Setting up NWC (Nostr Wallet Connect) services...");
-
-        for (node_id, node_config) in &self.nodes {
-            let nwc_config = serde_json::json!({
-                "enable_nwc_server": true,
-                "nwc_relay_urls": ["wss://relay.damus.io", "wss://nos.lol"],
-                "max_sessions": 100
-            });
-
-            match self.ldk_api_call::<serde_json::Value>(
-                node_id, "/bitcoin-deposits/nwc/start", "POST",
-                Some(nwc_config)
-            ).await {
-                Ok(response) if response.success => {
-                    self.log(&format!("✅ NWC service started for {}", node_config.name));
-                }
-                _ => {
-                    self.warn(&format!("⚠️ Could not start NWC service for {}", node_config.name));
-                }
-            }
-        }
-
-        self.log("✅ NWC services configured");
+        // NWC is not part of upstream ldk-server - it was a custom bitcoin-deposits addition.
+        // Skip NWC setup for now until it's re-implemented as a separate service.
+        self.log("📱 Skipping NWC setup (not available in upstream ldk-server)");
         Ok(())
     }
 

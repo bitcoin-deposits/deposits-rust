@@ -5,6 +5,7 @@
 
 cd "$(dirname "$0")/.."
 set -e  # Exit on any error
+. ./bin/_common.sh
 
 echo "🚀 Starting turnkey Docker environment setup..."
 echo "============================================================"
@@ -58,14 +59,14 @@ wait_for_service() {
     return 1
 }
 
-# Function to check API endpoint
+# Function to check API endpoint using authenticated HTTPS
 check_api() {
     local name=$1
     local port=$2
-    local endpoint=${3:-"/info"}
-    
+    local endpoint=${3:-"/node/info"}
+
     log "Checking $name API at port $port..."
-    if curl -s --max-time 5 "http://localhost:$port$endpoint" > /dev/null; then
+    if ldk_curl "$port" GET "$endpoint" > /dev/null 2>&1; then
         success "$name API is responding"
         return 0
     else
@@ -133,13 +134,11 @@ fi
 
 # Step 6: Test Lightning endpoints
 log "Step 6: Testing Lightning invoice creation..."
-alice_response=$(curl -s -X POST http://localhost:3011/invoice \
-    -H "Content-Type: application/json" \
-    -d '{"amount_msat": 50000, "description": "Test setup invoice"}' 2>/dev/null || echo "")
+alice_response=$(ldk_curl 3011 POST /bolt11/receive '{"amount_msat": 50000, "description": "Test setup invoice"}' 2>/dev/null || echo "")
 
-if echo "$alice_response" | grep -q "bolt11_invoice"; then
+if echo "$alice_response" | grep -q "invoice"; then
     success "Lightning invoice creation working"
-    invoice=$(echo "$alice_response" | grep -o '"bolt11_invoice":"[^"]*"' | cut -d'"' -f4)
+    invoice=$(echo "$alice_response" | jq -r '.invoice // empty')
     log "Created test invoice: ${invoice:0:50}..."
 else
     warning "Lightning invoice creation may need time to initialize"
@@ -155,18 +154,19 @@ echo "  • Bitcoin Core: http://localhost:18443 (RPC: user/pass)"
 echo "  • Electrs: http://localhost:3002"
 echo "  • Nostr Relay: ws://localhost:7777"
 echo ""
-log "⚡ Lightning Nodes:"
-echo "  • Alice: http://localhost:3011 (Lightning: 9735)"
-echo "  • Bob: http://localhost:3012 (Lightning: 9736)"
-echo "  • Charlie: http://localhost:3013 (Lightning: 9737)"
-echo "  • Diana: http://localhost:3014 (Lightning: 9738)"
-echo "  • Eve: http://localhost:3015 (Lightning: 9739)"
-echo "  • Frank: http://localhost:3016 (Lightning: 9740)"
+log "⚡ Lightning Nodes (HTTPS with HMAC auth required):"
+echo "  • Alice: https://localhost:3011 (Lightning: 9735)"
+echo "  • Bob: https://localhost:3012 (Lightning: 9736)"
+echo "  • Charlie: https://localhost:3013 (Lightning: 9737)"
+echo "  • Diana: https://localhost:3014 (Lightning: 9738)"
+echo "  • Eve: https://localhost:3015 (Lightning: 9739)"
+echo "  • Frank: https://localhost:3016 (Lightning: 9740)"
 echo ""
-log "🧪 Quick Tests:"
-echo "  • Node info: curl http://localhost:3011/info"
-echo "  • Balance: curl http://localhost:3011/bitcoin/balance"
-echo "  • Create invoice: curl -X POST http://localhost:3011/invoice -H 'Content-Type: application/json' -d '{\"amount_msat\": 100000, \"description\": \"test\"}'"
+log "🧪 Quick Tests (use ldk_curl from _common.sh):"
+echo "  • Source helpers: . ./bin/_common.sh"
+echo "  • Node info: ldk_curl 3011 GET /node/info"
+echo "  • Balance: ldk_curl 3011 GET /onchain/balance"
+echo "  • Create invoice: ldk_curl 3011 POST /bolt11/receive '{\"amount_msat\": 100000, \"description\": \"test\"}'"
 echo "  • NWC client: cargo run --bin nwc-client alice"
 echo "  • Status tool: cargo run --bin status node alice"
 echo ""
