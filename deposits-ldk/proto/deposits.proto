@@ -60,6 +60,12 @@ message GetReservesStatusResponse {
   uint64 total_deposit_balances = 4;
 }
 
+message AddReservesRequest {
+  string partner_node_id = 1;
+  uint64 amount_sat = 2;
+}
+message AddReservesResponse {}
+
 message ReduceReservesRequest {
   string partner_node_id = 1;
   uint64 amount_sat = 2;

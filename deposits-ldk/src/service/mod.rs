@@ -45,6 +45,7 @@ pub mod endpoints {
 
     // Reserves operations
     pub const DEPOSITS_GET_RESERVES_STATUS_PATH: &str = "/deposits/get_reserves_status";
+    pub const DEPOSITS_ADD_RESERVES_PATH: &str = "/deposits/add_reserves";
     pub const DEPOSITS_REDUCE_RESERVES_PATH: &str = "/deposits/reduce_reserves";
     pub const DEPOSITS_REMOVE_RESERVES_PATH: &str = "/deposits/remove_reserves";
 

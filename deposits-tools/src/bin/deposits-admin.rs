@@ -9,6 +9,7 @@ use deposits_ldk::service::{
     AddDepositRequest, AddDepositResponse,
     ListDepositsRequest, ListDepositsResponse,
     RemoveDepositRequest, RemoveDepositResponse,
+    AddReservesRequest, AddReservesResponse,
     ReduceReservesRequest, ReduceReservesResponse,
     RemoveReservesRequest, RemoveReservesResponse,
     GetLedgerUpdatesRequest, GetLedgerUpdatesResponse,
@@ -348,6 +349,24 @@ fn build_cli() -> Command {
                 .about("Manually trigger fee collection for all deposits"),
         )
         .subcommand(
+            Command::new("add-reserves")
+                .about("Add reserves to channel (creates Taproot output with ledger hash)")
+                .arg(
+                    Arg::new("partner")
+                        .help("Partner node public key")
+                        .value_hint(ValueHint::Other)
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    Arg::new("amount")
+                        .help("Amount in sats to add")
+                        .value_hint(ValueHint::Other)
+                        .required(true)
+                        .index(2),
+                ),
+        )
+        .subcommand(
             Command::new("reduce-reserves")
                 .about("Reduce reserves (move sats back to local balance)")
                 .arg(
@@ -537,6 +556,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
         Some(("collect-fees", _)) => {
             collect_fees(&client, &base_url).await?;
+        }
+        Some(("add-reserves", sub_m)) => {
+            add_reserves(&client, &base_url, sub_m).await?;
         }
         Some(("reduce-reserves", sub_m)) => {
             reduce_reserves(&client, &base_url, sub_m).await?;
@@ -907,6 +929,33 @@ async fn collect_fees(_client: &Client, _base_url: &str) -> Result<(), Box<dyn E
     // TODO: Add proto support for collect-fees endpoint
     eprintln!("❌ collect-fees not yet implemented with proto API");
     std::process::exit(1);
+}
+
+async fn add_reserves(client: &Client, base_url: &str, matches: &ArgMatches) -> Result<(), Box<dyn Error>> {
+    let partner_input = matches.get_one::<String>("partner").unwrap();
+    let amount_str = matches.get_one::<String>("amount").unwrap();
+    let amount: u64 = amount_str.parse()?;
+
+    // Resolve alias to node ID if needed
+    let partner = resolve_node_id(client, partner_input).await?;
+
+    println!("📈 Adding {} sats to reserves with partner {}...", amount, partner);
+
+    let request = AddReservesRequest {
+        partner_node_id: partner,
+        amount_sat: amount,
+    };
+
+    let _response: AddReservesResponse = proto_request(
+        client,
+        base_url,
+        endpoints::DEPOSITS_ADD_RESERVES_PATH,
+        request,
+    ).await?;
+
+    println!("✅ Reserves added successfully (Taproot output with ledger hash committed)");
+
+    Ok(())
 }
 
 async fn reduce_reserves(client: &Client, base_url: &str, matches: &ArgMatches) -> Result<(), Box<dyn Error>> {

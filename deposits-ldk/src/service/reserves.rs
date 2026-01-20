@@ -11,6 +11,7 @@ use lightning::util::logger::Logger as LdkLogger;
 use crate::handler::{DepositsHandler, ReservesOperations};
 use super::proto::{
     GetReservesStatusRequest, GetReservesStatusResponse,
+    AddReservesRequest, AddReservesResponse,
     ReduceReservesRequest, ReduceReservesResponse,
     RemoveReservesRequest, RemoveReservesResponse,
     DepositsError,
@@ -43,6 +44,31 @@ where
         excess_amount: status.excess_amount,
         total_deposit_balances: status.total_deposit_balances,
     })
+}
+
+/// Handle add_reserves request
+/// Adds reserves to the channel commitment with Taproot script embedding ledger hash
+pub fn handle_add_reserves<L>(
+    handler: &DepositsHandler<L>,
+    request: AddReservesRequest,
+) -> Result<AddReservesResponse, DepositsError>
+where
+    L: Deref + Clone,
+    L::Target: LdkLogger,
+{
+    let partner_id = PublicKey::from_str(&request.partner_node_id)
+        .map_err(|_| DepositsError {
+            code: "INVALID_PUBKEY".into(),
+            message: "Invalid partner_node_id".into(),
+        })?;
+
+    handler.add_reserves_to_channel(partner_id, request.amount_sat)
+        .map_err(|e| DepositsError {
+            code: "ADD_FAILED".into(),
+            message: format!("{:?}", e),
+        })?;
+
+    Ok(AddReservesResponse {})
 }
 
 /// Handle reduce_reserves request
