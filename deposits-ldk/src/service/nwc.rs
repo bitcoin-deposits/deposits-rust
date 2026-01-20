@@ -121,7 +121,9 @@ fn generate_deposit_nwc_keypair(nwc_secret_bytes: &[u8], deposit_pubkey: &Public
 }
 
 /// Handle get deposit-specific NWC credentials request
-/// Returns NWC keypair derived from the node's NWC secret + deposit pubkey
+/// Returns:
+/// - nwc_pubkey: the SERVER's NWC pubkey (client encrypts TO this)
+/// - nwc_secret: the CLIENT's deposit-specific secret (client signs WITH this)
 pub fn handle_get_deposit_nwc<L>(
     handler: &DepositsHandler<L>,
     request: GetDepositNwcRequest,
@@ -143,31 +145,32 @@ where
             message: format!("Invalid deposit pubkey: {}", e),
         })?;
 
-    // Get the node's NWC secret (same derivation as nwc_connect)
+    // Get the node's main NWC keypair (server's keypair)
     let node_pubkey = handler.our_node_id();
     let node_pubkey_hex = hex::encode(node_pubkey.serialize());
-    let (nwc_secret_hex, _) = generate_nwc_keypair(&node_pubkey_hex);
-    let nwc_secret_bytes = hex::decode(&nwc_secret_hex)
+    let (server_nwc_secret_hex, server_nwc_pubkey) = generate_nwc_keypair(&node_pubkey_hex);
+    let server_nwc_secret_bytes = hex::decode(&server_nwc_secret_hex)
         .expect("nwc_secret_hex is valid hex");
 
-    // Derive deposit-specific NWC keypair
-    let (deposit_nwc_secret, deposit_nwc_pubkey) =
-        generate_deposit_nwc_keypair(&nwc_secret_bytes, &deposit_pubkey);
+    // Derive deposit-specific client keypair (for client to sign with)
+    let (client_nwc_secret, _client_nwc_pubkey) =
+        generate_deposit_nwc_keypair(&server_nwc_secret_bytes, &deposit_pubkey);
 
     let relay_url = DEFAULT_RELAY_URL;
 
     // Build the nostr+walletconnect:// URI
+    // Format: nostr+walletconnect://<server_pubkey>?relay=<relay>&secret=<client_secret>
     let encoded_relay = relay_url.replace(":", "%3A").replace("/", "%2F");
     let connection_string = format!(
         "nostr+walletconnect://{}?relay={}&secret={}",
-        deposit_nwc_pubkey,
+        server_nwc_pubkey,  // Server's pubkey (to encrypt TO)
         encoded_relay,
-        deposit_nwc_secret
+        client_nwc_secret   // Client's secret (to sign WITH)
     );
 
     Ok(GetDepositNwcResponse {
-        nwc_pubkey: deposit_nwc_pubkey,
-        nwc_secret: deposit_nwc_secret,
+        nwc_pubkey: server_nwc_pubkey,   // Server's pubkey
+        nwc_secret: client_nwc_secret,   // Client's secret
         relay_url: relay_url.to_string(),
         connection_string,
     })
