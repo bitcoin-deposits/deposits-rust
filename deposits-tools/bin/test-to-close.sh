@@ -20,6 +20,19 @@ validate_network "$NETWORK" || exit 1
 
 NWC="../target/release/nwc-client"
 ADMIN="../target/release/deposits-admin"
+LDK_CLI="cargo run -q --manifest-path /Users/vinnyfiano/workspace/ldk-server/Cargo.toml --bin ldk-server-cli --"
+API_KEY="test_api_key"
+
+# Helper: get deposit balance in msats using protobuf API
+# Usage: get_deposit_balance <operator> <deposit_pubkey>
+get_deposit_balance() {
+    local operator=$1
+    local deposit_pubkey=$2
+    local balance_sat
+    balance_sat=$(TARGET=$operator $ADMIN deposit-balance "$deposit_pubkey" 2>/dev/null)
+    # Convert sats to msats
+    echo $((balance_sat * 1000))
+}
 
 mkdir -p log
 LOGFILE=log/test-to-close-$(date +'%s').log
@@ -29,10 +42,10 @@ echo "=========================================="
 echo "Testing on network: $NETWORK"
 echo "=========================================="
 
-# Get node IDs using authenticated HTTPS
-ALICE_ID=$(ldk_curl 3011 GET /node/info | jq -r '.node_id')
-BOB_ID=$(ldk_curl 3012 GET /node/info | jq -r '.node_id')
-CHARLIE_ID=$(ldk_curl 3013 GET /node/info | jq -r '.node_id')
+# Get node IDs using ldk-server-cli (protobuf API)
+ALICE_ID=$($LDK_CLI -b localhost:3011 -a "$API_KEY" -t certs/alice.crt get-node-info 2>/dev/null | jq -r '.node_id')
+BOB_ID=$($LDK_CLI -b localhost:3012 -a "$API_KEY" -t certs/bob.crt get-node-info 2>/dev/null | jq -r '.node_id')
+CHARLIE_ID=$($LDK_CLI -b localhost:3013 -a "$API_KEY" -t certs/charlie.crt get-node-info 2>/dev/null | jq -r '.node_id')
 
 echo "Alice:   $ALICE_ID"
 echo "Bob:     $BOB_ID"
@@ -44,7 +57,6 @@ echo ""
 # ============================================
 echo "=== PHASE 1: Creating wallets ==="
 
-./bin/make-node-wallets.sh
 ./bin/make-a-wallet.sh alice charlie bob amber
 ./bin/make-a-wallet.sh bob charlie alice blue
 
@@ -57,11 +69,13 @@ echo "=== PHASE 2: Running payments ==="
 ./bin/pay-amber-from-charlie.sh
 ./bin/pay-blue-from-amber.sh
 
-# Show balances after payments (NWC returns balance in msat)
+# Show balances after payments (using protobuf API)
 echo ""
 echo "Balances after payments:"
-AMBER_BALANCE=$($NWC -w wallet/amber.json balance 2>/dev/null | jq -r '.result.balance // 0')
-BLUE_BALANCE=$($NWC -w wallet/blue.json balance 2>/dev/null | jq -r '.result.balance // 0')
+AMBER_PUBKEY=$(jq -r '.deposit_pubkey' wallet/amber.json)
+BLUE_PUBKEY=$(jq -r '.deposit_pubkey' wallet/blue.json)
+AMBER_BALANCE=$(get_deposit_balance alice "$AMBER_PUBKEY")
+BLUE_BALANCE=$(get_deposit_balance bob "$BLUE_PUBKEY")
 echo "  amber: $AMBER_BALANCE msat"
 echo "  blue:  $BLUE_BALANCE msat"
 
@@ -80,23 +94,23 @@ echo "=== PHASE 3: Draining deposits ==="
 # NOTE: NWC balance returns msats, not sats
 if [ "$AMBER_BALANCE" -gt 0 ]; then
     echo "Draining amber ($AMBER_BALANCE msat) to charlie..."
-    AMBER_INVOICE=$(ldk_curl 3013 POST /invoice "{\"amount_msat\": $AMBER_BALANCE, \"description\": \"drain amber\"}" | jq -r '.invoice')
+    AMBER_INVOICE=$($LDK_CLI -b localhost:3013 -a "$API_KEY" -t certs/charlie.crt bolt11-receive --amount-msat "$AMBER_BALANCE" -D "drain amber" 2>/dev/null | jq -r '.invoice')
     $NWC -w wallet/amber.json pay-invoice "$AMBER_INVOICE" 2>/dev/null || echo "amber payment failed"
     sleep 2
 fi
 
 if [ "$BLUE_BALANCE" -gt 0 ]; then
     echo "Draining blue ($BLUE_BALANCE msat) to charlie..."
-    BLUE_INVOICE=$(ldk_curl 3013 POST /invoice "{\"amount_msat\": $BLUE_BALANCE, \"description\": \"drain blue\"}" | jq -r '.invoice')
+    BLUE_INVOICE=$($LDK_CLI -b localhost:3013 -a "$API_KEY" -t certs/charlie.crt bolt11-receive --amount-msat "$BLUE_BALANCE" -D "drain blue" 2>/dev/null | jq -r '.invoice')
     $NWC -w wallet/blue.json pay-invoice "$BLUE_INVOICE" 2>/dev/null || echo "blue payment failed"
     sleep 2
 fi
 
-# Verify balances are zero
+# Verify balances are zero (using protobuf API)
 echo ""
 echo "Balances after drain:"
-AMBER_BALANCE=$($NWC -w wallet/amber.json balance 2>/dev/null | jq -r '.result.balance // 0')
-BLUE_BALANCE=$($NWC -w wallet/blue.json balance 2>/dev/null | jq -r '.result.balance // 0')
+AMBER_BALANCE=$(get_deposit_balance alice "$AMBER_PUBKEY")
+BLUE_BALANCE=$(get_deposit_balance bob "$BLUE_PUBKEY")
 echo "  amber: $AMBER_BALANCE msat"
 echo "  blue:  $BLUE_BALANCE msat"
 

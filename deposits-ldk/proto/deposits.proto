@@ -162,3 +162,14 @@ message GetNwcConnectResponse {
   string secret = 3;             // Connection secret (hex)
   string relay_url = 4;          // Relay URL
 }
+
+// Get deposit-specific NWC credentials
+message GetDepositNwcRequest {
+  string deposit_pubkey = 1;     // Deposit public key (hex)
+}
+message GetDepositNwcResponse {
+  string nwc_pubkey = 1;         // Deposit-specific NWC pubkey (hex)
+  string nwc_secret = 2;         // Deposit-specific NWC secret (hex)
+  string relay_url = 3;          // Relay URL
+  string connection_string = 4;  // Full nostr+walletconnect:// URI
+}

@@ -60,6 +60,18 @@ $ADMIN -p "$NODE_NAME" add-ledger "$PARTNER2_NAME" || {
 }
 
 echo ""
+echo "Step 2a: Initialize partner-side ledger ${PARTNER1_NAME}->${NODE_NAME} (for validation tracking)..."
+$ADMIN -p "$PARTNER1_NAME" add-ledger "$NODE_NAME" || {
+    echo "   (Ledger may already exist - continuing)"
+}
+
+echo ""
+echo "Step 2b: Initialize partner-side ledger ${PARTNER2_NAME}->${NODE_NAME} (for validation tracking)..."
+$ADMIN -p "$PARTNER2_NAME" add-ledger "$NODE_NAME" || {
+    echo "   (Ledger may already exist - continuing)"
+}
+
+echo ""
 echo "Waiting for ledger handshakes to complete..."
 sleep 3
 
@@ -82,68 +94,44 @@ echo "Two OPERATOR ledgers initialized for $NODE_NAME with symmetric collateral 
 sleep 1
 mkdir -p wallet
 
-# Step 5: Create the deposit wallet
+# Step 5: Create the deposit wallet using protobuf API
 echo ""
-echo "Step 5: Creating deposit '$DEPOSIT_NAME' on ledger ${NODE_NAME}->${PARTNER1_NAME}..."
+echo "Step 5: Creating deposit '$DEPOSIT_NAME' on ledger ${NODE_NAME}->${PARTNER1_NAME} via protobuf API..."
 
-# Generate a random deposit keypair using openssl
-DEPOSIT_SECRET=$(openssl rand -hex 32)
-# Derive compressed pubkey from secret using bitcoin-cli style or just use a placeholder
-# For simplicity, we'll use the deposits-admin to handle this by generating a deterministic key
-# Actually, let's generate a proper secp256k1 pubkey
+# Generate a deposit keypair using deposits-admin gen-keypair
+KEYPAIR=$($ADMIN gen-keypair 2>/dev/null)
+DEPOSIT_PRIVATE_KEY=$(echo "$KEYPAIR" | cut -d' ' -f1)
+DEPOSIT_PUBKEY=$(echo "$KEYPAIR" | cut -d' ' -f2)
 
-# Use python to derive the pubkey (available on most systems)
-DEPOSIT_PUBKEY=$(python3 -c "
-import hashlib
-import sys
-# Simple secp256k1 pubkey derivation for testing
-# In production, use proper crypto library
-secret_hex = '$DEPOSIT_SECRET'
-secret_bytes = bytes.fromhex(secret_hex)
-# For testing, just use a deterministic compressed pubkey format
-# This is NOT cryptographically correct but works for the test flow
-# The server just needs a unique 33-byte pubkey
-import secrets
-# Generate a fake but valid-looking compressed pubkey (02 or 03 prefix + 32 bytes)
-print('02' + secret_hex)
-" 2>/dev/null) || {
-    # Fallback: use the secret as part of pubkey (test only)
-    DEPOSIT_PUBKEY="02${DEPOSIT_SECRET}"
-}
-
-echo "   Deposit pubkey: $DEPOSIT_PUBKEY"
-
-# Add the deposit to the ledger
-$ADMIN -p "$NODE_NAME" add-deposit "$PARTNER1_NAME" "$DEPOSIT_PUBKEY" || {
-    echo "   (Deposit may already exist - continuing)"
-}
-
-# Create wallet file that references the node's NWC connection
-# The wallet uses the node's NWC credentials but tracks this specific deposit
-NODE_WALLET="wallet/${NODE_NAME}.json"
-if [ -f "$NODE_WALLET" ]; then
-    # Copy NWC credentials from node wallet and add deposit info
-    NWC_SECRET=$(jq -r '.secret // empty' "$NODE_WALLET")
-    NWC_PUBKEY=$(jq -r '.pubkey // empty' "$NODE_WALLET")
-    NWC_RELAY=$(jq -r '.relay // "ws://localhost:7777"' "$NODE_WALLET")
-    TARGET_NWC_PUBKEY=$(jq -r '.target_nwc_pubkey // .pubkey // empty' "$NODE_WALLET")
-
-    cat > "wallet/${DEPOSIT_NAME}.json" << EOF
-{
-  "secret": "$NWC_SECRET",
-  "pubkey": "$NWC_PUBKEY",
-  "relay": "$NWC_RELAY",
-  "target": "$NODE_NAME",
-  "deposit_secret": "$DEPOSIT_SECRET",
-  "deposit_pubkey": "$DEPOSIT_PUBKEY",
-  "target_nwc_pubkey": "$TARGET_NWC_PUBKEY"
-}
-EOF
-    echo "   ✅ Wallet file created: wallet/${DEPOSIT_NAME}.json"
-else
-    echo "   ⚠️  Node wallet $NODE_WALLET not found - cannot create deposit wallet"
-    echo "   Run make-node-wallets.sh first"
+if [ -z "$DEPOSIT_PRIVATE_KEY" ] || [ -z "$DEPOSIT_PUBKEY" ]; then
+    echo "   ERROR: Failed to generate keypair"
+    exit 1
 fi
+
+echo "   Generated deposit keypair"
+echo "   Deposit pubkey: ${DEPOSIT_PUBKEY:0:20}..."
+
+# Add the deposit via protobuf API
+echo "   Adding deposit to ledger..."
+$ADMIN -p "$NODE_NAME" add-deposit "$PARTNER1_NAME" "$DEPOSIT_PUBKEY" || {
+    echo "   ERROR: Failed to add deposit"
+    exit 1
+}
+
+# Get NWC credentials for the deposit
+echo "   Getting NWC credentials..."
+NWC_CREDS=$($ADMIN -p "$NODE_NAME" deposit-nwc "$DEPOSIT_PUBKEY" 2>/dev/null)
+if [ -z "$NWC_CREDS" ] || [ "$NWC_CREDS" = "null" ]; then
+    echo "   ERROR: Failed to get NWC credentials"
+    exit 1
+fi
+
+# Create wallet file with both deposit keypair and NWC credentials
+rm -f "wallet/${DEPOSIT_NAME}.json"
+echo "$NWC_CREDS" | jq --arg deposit_secret "$DEPOSIT_PRIVATE_KEY" \
+    '. + {deposit_secret: $deposit_secret}' > "wallet/${DEPOSIT_NAME}.json"
+
+echo "   ✅ Wallet file created: wallet/${DEPOSIT_NAME}.json"
 
 echo ""
 echo "✅ Deposit wallet '$DEPOSIT_NAME' set up successfully!"

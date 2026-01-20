@@ -58,4 +58,5 @@ pub mod endpoints {
     // NWC operations
     pub const DEPOSITS_NWC_INFO_PATH: &str = "/deposits/nwc_info";
     pub const DEPOSITS_NWC_CONNECT_PATH: &str = "/deposits/nwc_connect";
+    pub const DEPOSITS_DEPOSIT_NWC_PATH: &str = "/deposits/deposit_nwc";
 }

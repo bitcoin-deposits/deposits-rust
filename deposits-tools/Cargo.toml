@@ -50,6 +50,7 @@ bitcoin-deposits-non-conforming = ["bitcoin-deposits", "deposits-ldk/bitcoin-dep
 ldk-node = { path = "../../ldk-node" }
 deposits-core = { path = "../deposits-core" }
 deposits-ldk = { path = "../deposits-ldk" }
+ldk-server-protos = { path = "../../ldk-server/ldk-server-protos" }
 
 # Bitcoin
 bitcoin = { version = "0.32", features = ["serde", "rand-std"] }

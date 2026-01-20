@@ -19,7 +19,6 @@ use prost::Message as ProstMessage;
 // Protobuf imports for NWC endpoints
 use deposits_ldk::service::{
     GetNwcInfoRequest, GetNwcInfoResponse,
-    GetNwcConnectRequest, GetNwcConnectResponse,
     DepositsError,
     endpoints,
 };
@@ -418,9 +417,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Initialize a new wallet
-    #[command(name = "init-node")]
-    InitNode,
     /// Get wallet info
     Info,
     /// Get wallet balance
@@ -452,8 +448,8 @@ enum Commands {
     /// Create deposit via DM (Bitcoin Deposits specific)
     #[command(name = "init-deposit")]
     InitDeposit {
-        /// Channel ID for the deposit (optional - will auto-select if not provided)
-        channel_id: Option<String>,
+        /// Partner node ID for the deposit ledger (optional - will auto-select if not provided)
+        partner_id: Option<String>,
     },
 }
 
@@ -528,119 +524,6 @@ impl NWCClient {
             target_port,
             target_name: effective_target,
         })
-    }
-    
-    fn init_wallet(&mut self) -> Result<(), Box<dyn Error>> {
-        // Check if wallet file already exists
-        if Path::new(&self.wallet_file).exists() {
-            eprintln!("❌ Error: Wallet file '{}' already exists", self.wallet_file);
-            eprintln!("💡 Use a different --wallet-file path or remove the existing file to create a new wallet");
-            return Err("Wallet file already exists".into());
-        }
-
-        // Generate new private key
-        let mut rng = rand::thread_rng();
-        let mut secret_bytes = [0u8; 32];
-        rng.fill_bytes(&mut secret_bytes);
-
-        let secret_key = SecretKey::from_slice(&secret_bytes)?;
-        let keypair = Keypair::from_secret_key(&self.secp, &secret_key);
-        let secret_hex = hex::encode(secret_bytes);
-
-        let (xonly_pubkey, _) = XOnlyPublicKey::from_keypair(&keypair);
-
-        self.wallet_data.secret = Some(secret_hex);
-        self.wallet_data.target = Some(self.target_name.clone());
-        self.keypair = Some(keypair);
-
-        self.save_wallet()?;
-
-        eprintln!("✅ Wallet initialized");
-        eprintln!("🔑 Public key: {}", xonly_pubkey);
-        eprintln!("🎯 Target node: {}", self.target_name);
-        eprintln!("📁 Wallet file: {}", self.wallet_file);
-
-        Ok(())
-    }
-
-    /// Initialize wallet for node-level access by fetching connection string from server
-    async fn init_node_wallet(&mut self) -> Result<(), Box<dyn Error>> {
-        // Check if wallet file already exists
-        if Path::new(&self.wallet_file).exists() {
-            eprintln!("❌ Error: Wallet file '{}' already exists", self.wallet_file);
-            eprintln!("💡 Use a different --wallet-file path or remove the existing file to create a new wallet");
-            return Err("Wallet file already exists".into());
-        }
-
-        // Fetch connection string from server (includes secret for node-level access)
-        let api_url = format!("https://localhost:{}{}", self.target_port, endpoints::DEPOSITS_NWC_CONNECT_PATH);
-        eprintln!("🔍 Fetching NWC connection string from: {}", api_url);
-
-        // Build HTTPS client with cert validation disabled (self-signed certs)
-        let client = reqwest::Client::builder()
-            .danger_accept_invalid_certs(true)
-            .build()?;
-
-        // Send protobuf request with HMAC authentication
-        let request = GetNwcConnectRequest {};
-        let body = request.encode_to_vec();
-        let auth_header = compute_auth_header(&body);
-
-        let response = client
-            .post(&api_url)
-            .header("Content-Type", "application/octet-stream")
-            .header("X-Auth", auth_header)
-            .body(body)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let bytes = response.bytes().await?;
-            if let Ok(error) = DepositsError::decode(bytes.as_ref()) {
-                return Err(format!("NWC connect failed: {}: {}", error.code, error.message).into());
-            }
-            return Err(format!("Failed to fetch NWC connection: {}", String::from_utf8_lossy(&bytes)).into());
-        }
-
-        let bytes = response.bytes().await?;
-        let nwc_response = GetNwcConnectResponse::decode(bytes.as_ref())?;
-
-        // Protobuf response already has all fields directly
-        let nwc_pubkey = nwc_response.pubkey;
-        let secret = nwc_response.secret;
-        let relay_url = nwc_response.relay_url;
-
-        // Derive keypair from secret
-        let secret_bytes = hex::decode(&secret)?;
-        let secret_key = SecretKey::from_slice(&secret_bytes)?;
-        let keypair = Keypair::from_secret_key(&self.secp, &secret_key);
-        let (xonly_pubkey, _) = XOnlyPublicKey::from_keypair(&keypair);
-
-        // Verify derived pubkey matches server's pubkey
-        if xonly_pubkey.to_string() != nwc_pubkey {
-            return Err(format!(
-                "Derived pubkey {} doesn't match server pubkey {}",
-                xonly_pubkey, nwc_pubkey
-            ).into());
-        }
-
-        self.wallet_data.secret = Some(secret);
-        self.wallet_data.pubkey = Some(nwc_pubkey.clone());
-        // Use CLI-provided relay if available, otherwise use server's relay
-        if self.wallet_data.relay.is_empty() {
-            self.wallet_data.relay = relay_url;
-        }
-        self.wallet_data.target = Some(self.target_name.clone());
-        self.keypair = Some(keypair);
-
-        self.save_wallet()?;
-
-        eprintln!("✅ Node wallet initialized from server connection string");
-        eprintln!("🔑 NWC pubkey: {}", nwc_pubkey);
-        eprintln!("🎯 Target node: {}", self.target_name);
-        eprintln!("📁 Wallet file: {}", self.wallet_file);
-
-        Ok(())
     }
     
     fn save_wallet(&self) -> Result<(), Box<dyn Error>> {
@@ -996,10 +879,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut client = NWCClient::new(cli.wallet_file, cli.target, cli.relay)?;
     
     match cli.command {
-        Commands::InitNode => {
-            // Fetch connection string from server and initialize wallet with shared secret
-            client.init_node_wallet().await?;
-        },
         Commands::Info => {
             let response = client.send_nwc_request("get_info", json!({})).await?;
             println!("{}", serde_json::to_string_pretty(&response)?);
@@ -1034,7 +913,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let response = client.send_nwc_request("get_deposit_balance", params).await?;
             println!("{}", serde_json::to_string_pretty(&response)?);
         },
-        Commands::InitDeposit { channel_id } => {
+        Commands::InitDeposit { partner_id } => {
             // Generate temporary client identity for the DM exchange if needed
             if client.keypair.is_none() {
                 eprintln!("🔑 Generating temporary client identity for deposit creation...");
@@ -1059,10 +938,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             let target_nwc_pubkey = client.get_target_nwc_pubkey().await?;
 
-            // Format: init-deposit <deposit_pubkey> [channel_id]
+            // Format: init-deposit <deposit_pubkey> [partner_node_id]
             // The deposit_pubkey is REQUIRED - server doesn't generate it
-            let deposit_command = if let Some(ch_id) = channel_id {
-                format!("init-deposit {} {}", deposit_pubkey_hex, ch_id)
+            let deposit_command = if let Some(partner) = partner_id {
+                format!("init-deposit {} {}", deposit_pubkey_hex, partner)
             } else {
                 format!("init-deposit {}", deposit_pubkey_hex)
             };

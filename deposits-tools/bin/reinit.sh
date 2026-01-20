@@ -45,11 +45,11 @@ if [ "$NETWORK" = "mutinynet" ]; then
     sleep 30
 fi
 
-# Create wallets for alice and bob
-echo "🔑 Creating wallet for alice..."
+# Create deposit wallets (uses NWC DM flow - no node wallets needed)
+echo "🔑 Creating deposit wallet 'amber' for alice..."
 ./bin/make-a-wallet.sh alice charlie bob amber
 
-echo "🔑 Creating wallet for bob..."
+echo "🔑 Creating deposit wallet 'blue' for bob..."
 ./bin/make-a-wallet.sh bob charlie alice blue
 
 # Copy TLS certificates for CLI access

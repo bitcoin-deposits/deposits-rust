@@ -1333,6 +1333,27 @@ where
             log_warn!(self.logger, "📋 CONSENT: Failed to send CollateralConsentResponse: {:?}", e);
         }
 
+        // If consent granted, request sync of the ledger state we're backing
+        // As a collateral partner, we need to track the ledger's state
+        if consent_granted {
+            log_info!(
+                self.logger,
+                "📋 CONSENT: Requesting sync of ledger ({}, {}) that we're backing as collateral",
+                msg.operator_id,
+                msg.partner_id
+            );
+
+            let sync_request = DepositsMessage::SyncRequest(super::messages::SyncRequestMsg {
+                operator_id: msg.operator_id,
+                partner_id: msg.partner_id,
+                last_known_sequence: 0, // Start from beginning since we're new to this ledger
+            });
+
+            if let Err(e) = self.send_message(msg.operator_id, sync_request) {
+                log_warn!(self.logger, "📋 CONSENT: Failed to send SyncRequest: {:?}", e);
+            }
+        }
+
         Ok(())
     }
 

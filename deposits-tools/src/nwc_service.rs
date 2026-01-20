@@ -1216,7 +1216,7 @@ impl NWCService {
             let parts: Vec<&str> = content.split_whitespace().collect();
             if parts.len() < 2 {
                 let error_response = serde_json::json!({
-                    "error": "Missing deposit_pubkey. Format: init-deposit <deposit_pubkey> [channel_id]"
+                    "error": "Missing deposit_pubkey. Format: init-deposit <deposit_pubkey> [partner_node_id]"
                 });
                 let response_content = serde_json::to_string(&error_response).unwrap();
                 if use_gift_wrap {
@@ -1270,7 +1270,7 @@ impl NWCService {
                 }
             }
         } else if content == "/help" {
-            let help_response = "🏦 Bitcoin Deposits Commands:\n\ninit-deposit [channel_id] - Create deposit and return JSON\n  - Omit channel_id to auto-select available channel\n/help - Show this help";
+            let help_response = "🏦 Bitcoin Deposits Commands:\n\ninit-deposit <deposit_pubkey> [partner_node_id] - Create deposit and return JSON\n  - Omit partner_node_id to auto-select available channel\n/help - Show this help";
             if use_gift_wrap {
                 self.send_gift_wrap_response(ws_stream, client_pubkey, help_response).await?;
             } else {
@@ -2338,17 +2338,34 @@ impl NWCService {
             }
         }
 
-        // Get channel ID - either from parameter or auto-select
-        let (channel_bytes, selected_channel_id_str) = if let Some(channel_id_str) = channel_id {
-            // Validate provided channel ID format
-            let channel_bytes = hex::decode(channel_id_str)
-                .map_err(|_| "Invalid channel ID format".to_string())?;
-            if channel_bytes.len() != 32 {
-                return Err("Channel ID must be 32 bytes".to_string());
+        // Get channel ID - either from parameter (channel_id or partner_node_id) or auto-select
+        let (channel_bytes, selected_channel_id_str) = if let Some(id_str) = channel_id {
+            let id_bytes = hex::decode(id_str)
+                .map_err(|_| "Invalid ID format (expected hex)".to_string())?;
+
+            if id_bytes.len() == 33 {
+                // 33 bytes = compressed public key = partner node ID
+                // Find the channel with this counterparty
+                let partner_pubkey = bitcoin::secp256k1::PublicKey::from_slice(&id_bytes)
+                    .map_err(|_| "Invalid partner node ID".to_string())?;
+
+                let channel_details = self.node.list_channels();
+                let channel = channel_details.iter()
+                    .find(|ch| ch.counterparty_node_id == partner_pubkey && ch.is_channel_ready && ch.is_usable)
+                    .ok_or_else(|| format!("No usable channel found with partner {}", id_str))?;
+
+                let channel_bytes = channel.channel_id.0;
+                let channel_id_str = hex::encode(channel_bytes);
+                println!("🔍 Found channel {} for partner {}", channel_id_str, id_str);
+                (channel_bytes, channel_id_str)
+            } else if id_bytes.len() == 32 {
+                // 32 bytes = channel ID
+                let channel_bytes: [u8; 32] = id_bytes.try_into()
+                    .map_err(|_| "Channel ID conversion failed".to_string())?;
+                (channel_bytes, id_str.to_string())
+            } else {
+                return Err(format!("Invalid ID length: {} bytes (expected 32 for channel_id or 33 for partner_node_id)", id_bytes.len()));
             }
-            let channel_bytes: [u8; 32] = channel_bytes.try_into()
-                .map_err(|_| "Channel ID conversion failed".to_string())?;
-            (channel_bytes, channel_id_str.to_string())
         } else {
             // Auto-select an available channel that has a ledger initialized
             // Retry a few times since channels may be temporarily unavailable during commitment updates
@@ -3223,7 +3240,7 @@ impl NWCServiceTaskContext {
             let parts: Vec<&str> = content.split_whitespace().collect();
             if parts.len() < 2 {
                 let error_response = serde_json::json!({
-                    "error": "Missing deposit_pubkey. Format: init-deposit <deposit_pubkey> [channel_id]"
+                    "error": "Missing deposit_pubkey. Format: init-deposit <deposit_pubkey> [partner_node_id]"
                 });
                 self.send_dm_response_async(client_pubkey, &error_response.to_string(), response_tx).await?;
                 return Ok(());
@@ -3274,7 +3291,7 @@ impl NWCServiceTaskContext {
                 }
             }
         } else if content == "/help" {
-            let response = "🏦 Bitcoin Deposits Commands:\n\ninit-deposit [channel_id] - Create deposit and return JSON\n  - Omit channel_id to auto-select available channel\n/help - Show this help".to_string();
+            let response = "🏦 Bitcoin Deposits Commands:\n\ninit-deposit <deposit_pubkey> [partner_node_id] - Create deposit and return JSON\n  - Omit partner_node_id to auto-select available channel\n/help - Show this help".to_string();
             if use_gift_wrap {
                 if let Err(e) = self.send_gift_wrap_dm_with_retry(client_pubkey, &response).await {
                     println!("⚠️ Failed to send gift-wrapped help DM: {}", e);
@@ -4777,17 +4794,34 @@ impl NWCServiceTaskContext {
             }
         }
 
-        // Get channel ID - either from parameter or auto-select
-        let (channel_bytes, selected_channel_id_str) = if let Some(channel_id_str) = channel_id {
-            // Validate provided channel ID format
-            let channel_bytes = hex::decode(channel_id_str)
-                .map_err(|_| "Invalid channel ID format".to_string())?;
-            if channel_bytes.len() != 32 {
-                return Err("Channel ID must be 32 bytes".to_string());
+        // Get channel ID - either from parameter (channel_id or partner_node_id) or auto-select
+        let (channel_bytes, selected_channel_id_str) = if let Some(id_str) = channel_id {
+            let id_bytes = hex::decode(id_str)
+                .map_err(|_| "Invalid ID format (expected hex)".to_string())?;
+
+            if id_bytes.len() == 33 {
+                // 33 bytes = compressed public key = partner node ID
+                // Find the channel with this counterparty
+                let partner_pubkey = bitcoin::secp256k1::PublicKey::from_slice(&id_bytes)
+                    .map_err(|_| "Invalid partner node ID".to_string())?;
+
+                let channel_details = self.node.list_channels();
+                let channel = channel_details.iter()
+                    .find(|ch| ch.counterparty_node_id == partner_pubkey && ch.is_channel_ready && ch.is_usable)
+                    .ok_or_else(|| format!("No usable channel found with partner {}", id_str))?;
+
+                let channel_bytes = channel.channel_id.0;
+                let channel_id_str = hex::encode(channel_bytes);
+                println!("🔍 Found channel {} for partner {}", channel_id_str, id_str);
+                (channel_bytes, channel_id_str)
+            } else if id_bytes.len() == 32 {
+                // 32 bytes = channel ID
+                let channel_bytes: [u8; 32] = id_bytes.try_into()
+                    .map_err(|_| "Channel ID conversion failed".to_string())?;
+                (channel_bytes, id_str.to_string())
+            } else {
+                return Err(format!("Invalid ID length: {} bytes (expected 32 for channel_id or 33 for partner_node_id)", id_bytes.len()));
             }
-            let channel_bytes: [u8; 32] = channel_bytes.try_into()
-                .map_err(|_| "Channel ID conversion failed".to_string())?;
-            (channel_bytes, channel_id_str.to_string())
         } else {
             // Auto-select an available channel that has a ledger initialized
             // Retry a few times since channels may be temporarily unavailable during commitment updates

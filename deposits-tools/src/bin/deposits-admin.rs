@@ -1,7 +1,8 @@
+use bitcoin::secp256k1::{Secp256k1, SecretKey, PublicKey};
 use clap::{Arg, ArgMatches, Command, CommandFactory, ValueHint};
 use clap_complete::{generate, Shell};
 use deposits_ldk::service::{
-    proto, endpoints,
+    endpoints,
     InitLedgerRequest, InitLedgerResponse,
     ListLedgersRequest, ListLedgersResponse,
     CloseLedgerRequest, CloseLedgerResponse,
@@ -12,10 +13,14 @@ use deposits_ldk::service::{
     GetLedgerUpdatesRequest, GetLedgerUpdatesResponse,
     AddCollateralPartnerRequest, AddCollateralPartnerResponse,
     RemoveCollateralPartnerRequest, RemoveCollateralPartnerResponse,
+    GetDepositNwcRequest, GetDepositNwcResponse,
     DepositsError,
 };
+use ldk_server_protos::api::{GetNodeInfoRequest, GetNodeInfoResponse};
+use ldk_server_protos::endpoints::GET_NODE_INFO_PATH;
 use hmac::{Hmac, Mac};
 use prost::Message;
+use rand::RngCore;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -125,22 +130,16 @@ async fn resolve_node_id(client: &Client, node_id_or_alias: &str) -> Result<Stri
     let port = resolve_port(node_id_or_alias);
     let base_url = format!("https://localhost:{}", port);
 
-    let response = client
-        .get(&format!("{}/info", base_url))
-        .send()
-        .await?;
+    // Use protobuf GetNodeInfo endpoint
+    let request = GetNodeInfoRequest {};
+    let response: GetNodeInfoResponse = proto_request(
+        client,
+        &base_url,
+        &format!("/{}", GET_NODE_INFO_PATH),
+        request,
+    ).await.map_err(|e| format!("Failed to resolve node alias '{}': {}", node_id_or_alias, e))?;
 
-    let result: ApiResponse<Value> = response.json().await?;
-
-    if result.success {
-        if let Some(data) = result.data {
-            if let Some(node_id) = data.get("node_id").and_then(|v| v.as_str()) {
-                return Ok(node_id.to_string());
-            }
-        }
-    }
-
-    Err(format!("Failed to resolve node alias '{}' to node ID", node_id_or_alias).into())
+    Ok(response.node_id)
 }
 
 /// Build a lookup table from node_id -> human-readable name by querying all known nodes
@@ -157,17 +156,15 @@ async fn build_node_name_map(client: &Client) -> HashMap<String, String> {
     ];
 
     for (name, port) in known_nodes {
-        let url = format!("https://localhost:{}/info", port);
-        if let Ok(resp) = client.get(&url).send().await {
-            if let Ok(result) = resp.json::<ApiResponse<Value>>().await {
-                if result.success {
-                    if let Some(data) = result.data {
-                        if let Some(node_id) = data.get("node_id").and_then(|v| v.as_str()) {
-                            map.insert(node_id.to_string(), name.to_string());
-                        }
-                    }
-                }
-            }
+        let base_url = format!("https://localhost:{}", port);
+        let request = GetNodeInfoRequest {};
+        if let Ok(response) = proto_request::<_, GetNodeInfoResponse>(
+            client,
+            &base_url,
+            &format!("/{}", GET_NODE_INFO_PATH),
+            request,
+        ).await {
+            map.insert(response.node_id, name.to_string());
         }
     }
     map
@@ -214,6 +211,14 @@ fn build_cli() -> Command {
                 .arg(Arg::new("port").required(false).index(2)),
         )
         .subcommand(
+            Command::new("get-node-id")
+                .about("Get the node's public key (node ID)")
+        )
+        .subcommand(
+            Command::new("gen-keypair")
+                .about("Generate a new secp256k1 keypair (outputs: secret pubkey)")
+        )
+        .subcommand(
             Command::new("add-ledger")
                 .about("Add/initialize a new ledger with a partner")
                 .arg(
@@ -250,6 +255,28 @@ fn build_cli() -> Command {
                     Arg::new("partner")
                         .help("Partner node public key (optional - shows all if omitted)")
                         .value_hint(ValueHint::Other)
+                        .index(1),
+                ),
+        )
+        .subcommand(
+            Command::new("deposit-balance")
+                .about("Get balance for a specific deposit (outputs sats only)")
+                .arg(
+                    Arg::new("deposit-pubkey")
+                        .help("Deposit public key")
+                        .value_hint(ValueHint::Other)
+                        .required(true)
+                        .index(1),
+                ),
+        )
+        .subcommand(
+            Command::new("deposit-nwc")
+                .about("Get NWC credentials for a deposit (outputs JSON for wallet file)")
+                .arg(
+                    Arg::new("deposit-pubkey")
+                        .help("Deposit public key")
+                        .value_hint(ValueHint::Other)
+                        .required(true)
                         .index(1),
                 ),
         )
@@ -443,6 +470,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
             complete_dynamic(&client, &format!("https://localhost:{}", resolved_port), comp_type).await?;
             return Ok(());
         }
+        Some(("get-node-id", _)) => {
+            // Print just the node ID (for script usage)
+            let request = GetNodeInfoRequest {};
+            let response: GetNodeInfoResponse = proto_request(
+                &client,
+                &base_url,
+                &format!("/{}", GET_NODE_INFO_PATH),
+                request,
+            ).await?;
+            println!("{}", response.node_id);
+        }
+        Some(("gen-keypair", _)) => {
+            // Generate a random secp256k1 keypair
+            let secp = Secp256k1::new();
+            let mut secret_bytes = [0u8; 32];
+            rand::thread_rng().fill_bytes(&mut secret_bytes);
+            let secret_key = SecretKey::from_slice(&secret_bytes)
+                .expect("32 random bytes are always a valid secret key");
+            let public_key = PublicKey::from_secret_key(&secp, &secret_key);
+            // Output: secret_hex pubkey_hex (space-separated for easy parsing)
+            println!("{} {}", hex::encode(secret_bytes), hex::encode(public_key.serialize()));
+        }
         Some(("add-ledger", sub_m)) => {
             add_ledger(&client, &base_url, sub_m).await?;
         }
@@ -462,6 +511,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 None
             };
             list_deposits(&client, &base_url, partner.as_deref()).await?;
+        }
+        Some(("deposit-balance", sub_m)) => {
+            let deposit_pubkey = sub_m.get_one::<String>("deposit-pubkey").unwrap();
+            deposit_balance(&client, &base_url, deposit_pubkey).await?;
+        }
+        Some(("deposit-nwc", sub_m)) => {
+            let deposit_pubkey = sub_m.get_one::<String>("deposit-pubkey").unwrap();
+            deposit_nwc(&client, &base_url, deposit_pubkey).await?;
         }
         Some(("get-updates", sub_m)) => {
             let partner = if let Some(partner_input) = sub_m.get_one::<String>("partner") {
@@ -635,6 +692,52 @@ async fn list_deposits(client: &Client, base_url: &str, partner: Option<&str>) -
     Ok(())
 }
 
+async fn deposit_balance(client: &Client, base_url: &str, deposit_pubkey: &str) -> Result<(), Box<dyn Error>> {
+    // List all deposits and find the one matching the pubkey
+    let request = ListDepositsRequest { ledger_id: None };
+    let response: ListDepositsResponse = proto_request(
+        client,
+        base_url,
+        endpoints::DEPOSITS_LIST_DEPOSITS_PATH,
+        request,
+    ).await?;
+
+    for deposit in &response.deposits {
+        if deposit.deposit_pubkey == deposit_pubkey {
+            // Output just the balance in sats (for easy script parsing)
+            println!("{}", deposit.balance_sat);
+            return Ok(());
+        }
+    }
+
+    // Deposit not found - output 0
+    println!("0");
+    Ok(())
+}
+
+async fn deposit_nwc(client: &Client, base_url: &str, deposit_pubkey: &str) -> Result<(), Box<dyn Error>> {
+    let request = GetDepositNwcRequest {
+        deposit_pubkey: deposit_pubkey.to_string(),
+    };
+    let response: GetDepositNwcResponse = proto_request(
+        client,
+        base_url,
+        endpoints::DEPOSITS_DEPOSIT_NWC_PATH,
+        request,
+    ).await?;
+
+    // Output JSON for wallet file creation
+    let wallet_json = serde_json::json!({
+        "nwc_pubkey": response.nwc_pubkey,
+        "nwc_secret": response.nwc_secret,
+        "relay_url": response.relay_url,
+        "connection_string": response.connection_string,
+        "deposit_pubkey": deposit_pubkey
+    });
+    println!("{}", serde_json::to_string_pretty(&wallet_json)?);
+    Ok(())
+}
+
 async fn get_updates(client: &Client, base_url: &str, partner: Option<&str>) -> Result<(), Box<dyn Error>> {
     // If no partner specified, list ledgers first to get all partner IDs
     if partner.is_none() {
@@ -690,7 +793,9 @@ fn print_updates(response: &GetLedgerUpdatesResponse) {
         println!("  No updates found.");
     } else {
         for update in &response.updates {
-            // Format: "  $seq [$prev~$curr] ✓/· 🔒/  $operation  key:value..."
+            // Format: "  $seq [$prev~$curr] ack count lock $operation  params..."
+            // Count: 3 if acked (operator + partner + collateral), 1 if not
+            let node_count = if update.acknowledged { 3 } else { 1 };
             let ack_indicator = if update.acknowledged { "✓" } else { "·" };
             let commit_indicator = if update.committed { "🔒" } else { "  " };
 
@@ -724,11 +829,12 @@ fn print_updates(response: &GetLedgerUpdatesResponse) {
                 format!("  {}", params.join(" "))
             };
 
-            println!("  {:>3} [{}~{}] {}{} {:<20}{}",
+            println!("  {:>3} [{}~{}] {}{}{} {:<20}{}",
                 update.sequence_number,
                 prev_hash,
                 curr_hash,
                 ack_indicator,
+                node_count,
                 commit_indicator,
                 update.operation_type,
                 params_str);
