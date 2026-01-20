@@ -531,18 +531,15 @@ impl NWCService {
         let lightning_node_id = node.node_id();
         let secp = Secp256k1::new();
 
-        // Derive NWC keypair from Lightning node key + "NWC" domain separation
-        let mut secret_bytes = [0u8; 32];
-        // Copy Lightning node pubkey bytes as base
-        secret_bytes[..32].copy_from_slice(&lightning_node_id.serialize()[1..33]); // Skip the 0x02/0x03 prefix
-        // Apply domain separation for NWC
-        secret_bytes[0] ^= 0x4E; // 'N' for NWC
-        secret_bytes[1] ^= 0x57; // 'W' for Wallet
-        secret_bytes[2] ^= 0x43; // 'C' for Connect
-        secret_bytes[31] ^= (node_port & 0xFF) as u8; // Make unique per node
-        secret_bytes[30] ^= ((node_port >> 8) & 0xFF) as u8;
+        // Derive NWC keypair from Lightning node key using SHA256
+        // Must match deposits-ldk/src/service/nwc.rs derivation
+        let node_pubkey_hex = hex::encode(lightning_node_id.serialize());
+        let mut data = b"nwc-secret-v2-".to_vec();
+        data.extend_from_slice(node_pubkey_hex.as_bytes());
+        let hash = sha256::Hash::hash(&data);
+        let secret_bytes: &[u8] = hash.as_ref();
 
-        let secret_key = SecretKey::from_slice(&secret_bytes)
+        let secret_key = SecretKey::from_slice(secret_bytes)
             .map_err(|e| format!("Invalid derived private key: {}", e))?;
         let keypair = Keypair::from_secret_key(&secp, &secret_key);
 

@@ -22,8 +22,9 @@ const DEFAULT_RELAY_URL: &str = "ws://localhost:7777";
 /// Generate a deterministic NWC keypair from the node pubkey
 /// Returns (secret_hex, pubkey_hex) where pubkey is derived from secret
 fn generate_nwc_keypair(node_pubkey_hex: &str) -> (String, String) {
-    // Generate deterministic secret from node pubkey
-    let mut data = b"nwc-secret-".to_vec();
+    // Generate deterministic secret from node pubkey using SHA256
+    // Must match nwc_service.rs derivation
+    let mut data = b"nwc-secret-v2-".to_vec();
     data.extend_from_slice(node_pubkey_hex.as_bytes());
     let hash = sha256::Hash::hash(&data);
     let secret_bytes: &[u8] = hash.as_ref();
@@ -32,12 +33,11 @@ fn generate_nwc_keypair(node_pubkey_hex: &str) -> (String, String) {
     let secp = Secp256k1::new();
     let secret_key = SecretKey::from_slice(secret_bytes)
         .expect("32 bytes from sha256 is always valid");
-    let nwc_pubkey = PublicKey::from_secret_key(&secp, &secret_key);
+    let keypair = Keypair::from_secret_key(&secp, &secret_key);
+    let (xonly_pubkey, _) = keypair.x_only_public_key();
 
     // Return x-only pubkey (32 bytes) for Nostr compatibility
-    let pubkey_bytes = nwc_pubkey.serialize();
-    // Skip the 02/03 prefix byte to get x-only format
-    let xonly_hex = hex::encode(&pubkey_bytes[1..]);
+    let xonly_hex = hex::encode(xonly_pubkey.serialize());
     let secret_hex = hex::encode(secret_bytes);
 
     (secret_hex, xonly_hex)
