@@ -5,10 +5,6 @@ edition = "2021"
 description = "Bitcoin Deposits tooling and test binaries"
 
 [[bin]]
-name = "ldk-server-deposits"
-path = "src/bin/ldk-server.rs"
-
-[[bin]]
 name = "deposits-admin"
 path = "src/bin/deposits-admin.rs"
 
@@ -50,6 +46,7 @@ bitcoin-deposits-non-conforming = ["bitcoin-deposits", "deposits-ldk/bitcoin-dep
 ldk-node = { path = "../../ldk-node" }
 deposits-core = { path = "../deposits-core" }
 deposits-ldk = { path = "../deposits-ldk" }
+ldk-server = { path = "../../ldk-server/ldk-server" }
 ldk-server-protos = { path = "../../ldk-server/ldk-server-protos" }
 
 # Bitcoin

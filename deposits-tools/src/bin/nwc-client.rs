@@ -471,8 +471,10 @@ struct WalletData {
     deposit_pubkey: Option<String>,
     /// Target server's NWC pubkey - used for deposit wallets where client pubkey != server pubkey
     /// Parsed from nwc_connection_string (format: nostr+walletconnect://<server_pubkey>?...)
-    #[serde(alias = "connection_string")]
     target_nwc_pubkey: Option<String>,
+    /// Full NWC connection string (not used directly, but stored for reference)
+    #[serde(default)]
+    connection_string: Option<String>,
 }
 
 struct NWCClient {
