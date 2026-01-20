@@ -99,12 +99,13 @@ where
 
 /// Handle remove_reserves request
 /// Removes the reserves output from the channel (requires reserves to be 0)
-pub fn handle_remove_reserves<L>(
+/// Uses async method which works properly in the server context
+pub async fn handle_remove_reserves<L>(
     handler: &DepositsHandler<L>,
     request: RemoveReservesRequest,
 ) -> Result<RemoveReservesResponse, DepositsError>
 where
-    L: Deref + Clone,
+    L: Deref + Clone + Send + Sync,
     L::Target: LdkLogger,
 {
     let partner_id = PublicKey::from_str(&request.partner_node_id)
@@ -113,7 +114,8 @@ where
             message: "Invalid partner_node_id".into(),
         })?;
 
-    handler.remove_reserves(partner_id)
+    // Use async method - it works properly in the async server context
+    handler.remove_reserves_async(partner_id).await
         .map_err(|e| DepositsError {
             code: "REMOVE_FAILED".into(),
             message: format!("{:?}", e),

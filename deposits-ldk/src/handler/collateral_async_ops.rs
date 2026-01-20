@@ -670,4 +670,72 @@ where
 
         Ok(())
     }
+
+    /// Remove reserves output from a channel - async version
+    /// Uses async sleep to not block the tokio executor when called from HTTP handlers
+    /// Requires: reserves balance is 0 (use reclaim_excess_reserves_async first)
+    pub async fn remove_reserves_async(&self, partner_node_id: PublicKey) -> Result<(), DepositsError> {
+        use super::messages::DepositsMessage;
+
+        // Validate reserves are 0
+        {
+            let ledgers = self.ledgers.lock().unwrap();
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+                let ledger = ledger_arc.read().unwrap();
+                if ledger.reserves_amount() > 0 {
+                    return Err(DepositsError::ProtocolViolation {
+                        violation_type: "non_zero_reserves".to_string(),
+                        details: format!("Cannot remove reserves output with {} sats remaining. Use reclaim_excess_reserves_async first.", ledger.reserves_amount()),
+                    });
+                }
+            } else {
+                return Err(DepositsError::LedgerNotFound);
+            }
+        }
+
+        // Send ReservesRemove message (V2 format)
+        let update_msg = LedgerUpdateMsg::new_with_operation(
+            self.our_node_id,    // operator
+            partner_node_id,     // partner
+            LedgerOperation::ReservesRemove,
+        );
+        let message = DepositsMessage::LedgerUpdate(update_msg);
+
+        let message_hash = self.calculate_message_hash(&message);
+        let message_type = message.message_type();
+
+        // Track pending ACK
+        {
+            let mut pending_acks = self.pending_acks.lock().unwrap();
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            pending_acks.insert(message_hash, (message_type, timestamp));
+        }
+
+        log_info!(self.logger, "Sending ReservesRemove message to partner {}", partner_node_id);
+
+        // Send message and wait for acknowledgment using async version
+        self.send_message_with_ack_async(partner_node_id, message.clone(), 30000).await?;
+
+        // After ACK, apply update to ledger
+        {
+            let ledgers = self.ledgers.lock().unwrap();
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+                let mut ledger = ledger_arc.write().unwrap();
+                ledger.append_v1_mut(message)?;
+                self.persist_ledger_state(&*ledger)?;
+            }
+        }
+
+        // Sync commitment to remove reserves output from channel
+        if let Err(e) = self.refresh_reserves_commitment(partner_node_id) {
+            log_error!(self.logger, "Failed to sync commitment after reserves removal: {}", e);
+            // Don't fail - the ledger update was successful
+        }
+
+        log_info!(self.logger, "Successfully removed reserves output from channel with {}", partner_node_id);
+        Ok(())
+    }
 }
