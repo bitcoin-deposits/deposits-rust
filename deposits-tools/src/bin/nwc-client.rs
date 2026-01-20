@@ -455,9 +455,11 @@ enum Commands {
 
 #[derive(Serialize, Deserialize, Default)]
 struct WalletData {
+    #[serde(alias = "nwc_secret")]
     secret: Option<String>,
     /// For regular wallets: TARGET server's NWC pubkey (fetched from API)
     /// For deposit wallets: This should be EMPTY (use target_nwc_pubkey instead)
+    #[serde(alias = "nwc_pubkey")]
     pubkey: Option<String>,
     #[serde(alias = "relay_url")]
     relay: String,
@@ -469,6 +471,7 @@ struct WalletData {
     deposit_pubkey: Option<String>,
     /// Target server's NWC pubkey - used for deposit wallets where client pubkey != server pubkey
     /// Parsed from nwc_connection_string (format: nostr+walletconnect://<server_pubkey>?...)
+    #[serde(alias = "connection_string")]
     target_nwc_pubkey: Option<String>,
 }
 
