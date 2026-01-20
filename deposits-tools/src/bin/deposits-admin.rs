@@ -10,6 +10,7 @@ use deposits_ldk::service::{
     ListDepositsRequest, ListDepositsResponse,
     RemoveDepositRequest, RemoveDepositResponse,
     ReduceReservesRequest, ReduceReservesResponse,
+    RemoveReservesRequest, RemoveReservesResponse,
     GetLedgerUpdatesRequest, GetLedgerUpdatesResponse,
     AddCollateralPartnerRequest, AddCollateralPartnerResponse,
     RemoveCollateralPartnerRequest, RemoveCollateralPartnerResponse,
@@ -935,10 +936,28 @@ async fn reduce_reserves(client: &Client, base_url: &str, matches: &ArgMatches) 
     Ok(())
 }
 
-async fn remove_reserves(_client: &Client, _base_url: &str, _matches: &ArgMatches) -> Result<(), Box<dyn Error>> {
-    // TODO: Add proto support for remove-reserves endpoint
-    eprintln!("❌ remove-reserves not yet implemented with proto API");
-    std::process::exit(1);
+async fn remove_reserves(client: &Client, base_url: &str, matches: &ArgMatches) -> Result<(), Box<dyn Error>> {
+    let partner_input = matches.get_one::<String>("partner").unwrap();
+
+    // Resolve alias to node ID if needed
+    let partner_id = resolve_node_id(client, partner_input).await?;
+
+    println!("🗑️  Removing reserves output from ledger with {}...", partner_id);
+
+    let request = RemoveReservesRequest {
+        partner_node_id: partner_id.clone(),
+    };
+
+    let _response: RemoveReservesResponse = proto_request(
+        client,
+        base_url,
+        endpoints::DEPOSITS_REMOVE_RESERVES_PATH,
+        request,
+    ).await?;
+
+    println!("✅ Reserves output removed successfully");
+
+    Ok(())
 }
 
 async fn add_collateral_partner(client: &Client, base_url: &str, matches: &ArgMatches) -> Result<(), Box<dyn Error>> {

@@ -66,6 +66,11 @@ message ReduceReservesRequest {
 }
 message ReduceReservesResponse {}
 
+message RemoveReservesRequest {
+  string partner_node_id = 1;
+}
+message RemoveReservesResponse {}
+
 // Collateral operations
 message AddCollateralPartnerRequest {
   string partner_node_id = 1;

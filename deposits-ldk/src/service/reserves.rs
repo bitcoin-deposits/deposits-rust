@@ -12,6 +12,7 @@ use crate::handler::{DepositsHandler, ReservesOperations};
 use super::proto::{
     GetReservesStatusRequest, GetReservesStatusResponse,
     ReduceReservesRequest, ReduceReservesResponse,
+    RemoveReservesRequest, RemoveReservesResponse,
     DepositsError,
 };
 
@@ -66,4 +67,29 @@ where
         })?;
 
     Ok(ReduceReservesResponse {})
+}
+
+/// Handle remove_reserves request
+/// Removes the reserves output from the channel (requires reserves to be 0)
+pub fn handle_remove_reserves<L>(
+    handler: &DepositsHandler<L>,
+    request: RemoveReservesRequest,
+) -> Result<RemoveReservesResponse, DepositsError>
+where
+    L: Deref + Clone,
+    L::Target: LdkLogger,
+{
+    let partner_id = PublicKey::from_str(&request.partner_node_id)
+        .map_err(|_| DepositsError {
+            code: "INVALID_PUBKEY".into(),
+            message: "Invalid partner_node_id".into(),
+        })?;
+
+    handler.remove_reserves(partner_id)
+        .map_err(|e| DepositsError {
+            code: "REMOVE_FAILED".into(),
+            message: format!("{:?}", e),
+        })?;
+
+    Ok(RemoveReservesResponse {})
 }
