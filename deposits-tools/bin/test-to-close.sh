@@ -166,9 +166,9 @@ echo "=== PHASE 5: Reducing reserves ==="
 
 # Get current reserves for the specific ledgers (alice->charlie, bob->charlie)
 # Use deposits-admin to list ledgers and parse reserves
-# Note: deposits-admin outputs text, so we use grep/awk to extract reserves
-ALICE_RESERVES=$($ADMIN -p alice list-ledgers 2>/dev/null | grep -A5 "charlie" | grep "reserves" | awk '{print $NF}' | tr -d ',' | head -1)
-BOB_RESERVES=$($ADMIN -p bob list-ledgers 2>/dev/null | grep -A5 "charlie" | grep "reserves" | awk '{print $NF}' | tr -d ',' | head -1)
+# Output format: "    Reserves: 10000 sat" - extract field 2
+ALICE_RESERVES=$($ADMIN -p alice list-ledgers 2>/dev/null | grep -A5 "charlie" | grep -i "reserves" | awk '{print $2}' | head -1)
+BOB_RESERVES=$($ADMIN -p bob list-ledgers 2>/dev/null | grep -A5 "charlie" | grep -i "reserves" | awk '{print $2}' | head -1)
 
 # Default to 0 if empty
 ALICE_RESERVES=${ALICE_RESERVES:-0}
