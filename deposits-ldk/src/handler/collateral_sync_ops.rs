@@ -261,6 +261,9 @@ where
                 let new_hash = ledger.append_v1_mut(message_for_broadcast.clone())?;
                 let chain_index = (ledger.history.len() - 1) as u64; // 0-based (index of just-appended entry)
 
+                // Update partner_deepest_ack_hash since partner just ACKed this update
+                ledger.state.partner_deepest_ack_hash = new_hash;
+
                 // Persist the updated ledger
                 if let Err(e) = self.persist_ledger_state(&*ledger) {
                     log_warn!(self.logger, "Failed to persist ledger after removing collateral partner: {:?}", e);

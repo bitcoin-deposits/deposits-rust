@@ -181,13 +181,13 @@ where
     })
 }
 
-/// Handle close_ledger request
-pub fn handle_close_ledger<L>(
+/// Handle close_ledger request (async version to avoid blocking event loop)
+pub async fn handle_close_ledger<L>(
     handler: &DepositsHandler<L>,
     request: CloseLedgerRequest,
 ) -> Result<CloseLedgerResponse, DepositsError>
 where
-    L: Deref + Clone,
+    L: Deref + Clone + Send + Sync,
     L::Target: LdkLogger,
 {
     let partner_id = PublicKey::from_str(&request.ledger_id)
@@ -196,7 +196,7 @@ where
             message: "Invalid ledger_id (expected partner node pubkey)".into(),
         })?;
 
-    handler.close_ledger(partner_id)
+    handler.close_ledger_async(partner_id).await
         .map_err(|e| DepositsError {
             code: "CLOSE_FAILED".into(),
             message: format!("{:?}", e),

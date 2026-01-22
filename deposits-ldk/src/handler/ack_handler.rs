@@ -35,12 +35,20 @@ where
         // Check if we have a pending oneshot ACK waiting for this message hash
         let oneshot_sender = {
             let mut pending_oneshot_acks = self.pending_oneshot_acks.lock().unwrap();
-            pending_oneshot_acks.remove(&ack_msg.message_hash)
+            let pending_count = pending_oneshot_acks.len();
+            let found = pending_oneshot_acks.remove(&ack_msg.message_hash);
+            println!("🔍 ACK_HANDLER: Looking for hash={:02x?} in pending_oneshot_acks (count={}, found={})",
+                &ack_msg.message_hash[0..4], pending_count, found.is_some());
+            found
         };
 
         if let Some(oneshot_tx) = oneshot_sender {
             // Send result to oneshot channel
-            let _ = oneshot_tx.send(result.clone());
+            println!("✅ ACK_HANDLER: Signaling oneshot channel for hash={:02x?}, success={}", &ack_msg.message_hash[0..4], ack_msg.success);
+            let send_result = oneshot_tx.send(result.clone());
+            println!("✅ ACK_HANDLER: Oneshot send result for hash={:02x?}: {:?}", &ack_msg.message_hash[0..4], send_result.is_ok());
+        } else {
+            println!("⚠️ ACK_HANDLER: No oneshot waiting for hash={:02x?}", &ack_msg.message_hash[0..4]);
         }
 
         // Check if we have a pending cosignature request waiting for this message hash

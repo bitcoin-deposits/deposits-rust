@@ -7,9 +7,9 @@
 # 2. Run payments between wallets
 # 3. Pay out balances (drain deposits)
 # 4. Remove deposits
-# 5. Reduce reserves to 0
-# 6. Remove reserves outputs
-# 7. Close ledgers
+# 5. Close ledgers
+# 6. Reduce reserves to 0
+# 7. Remove reserves outputs
 
 cd "$(dirname "$0")/.."
 set -e
@@ -28,10 +28,8 @@ API_KEY="test_api_key"
 get_deposit_balance() {
     local operator=$1
     local deposit_pubkey=$2
-    local balance_sat
-    balance_sat=$(TARGET=$operator $ADMIN deposit-balance "$deposit_pubkey" 2>/dev/null)
-    # Convert sats to msats
-    echo $((balance_sat * 1000))
+    # Balance is returned directly in msat
+    TARGET=$operator $ADMIN deposit-balance "$deposit_pubkey" 2>/dev/null
 }
 
 mkdir -p log
@@ -50,6 +48,28 @@ CHARLIE_ID=$($LDK_CLI -b localhost:3013 -a "$API_KEY" -t certs/charlie.crt get-n
 echo "Alice:   $ALICE_ID"
 echo "Bob:     $BOB_ID"
 echo "Charlie: $CHARLIE_ID"
+echo ""
+
+# ============================================
+# PHASE 0: Clean up any existing deposits from previous runs
+# ============================================
+echo "=== PHASE 0: Cleaning up existing deposits ==="
+
+# Clean alice's deposits on the charlie ledger
+echo "Cleaning alice's deposits..."
+for deposit_pubkey in $($ADMIN -p alice list-deposits 2>/dev/null | grep "Deposit:" | awk '{print $2}'); do
+    echo "  Removing deposit $deposit_pubkey from alice->charlie..."
+    $ADMIN -p alice remove-deposit charlie "$deposit_pubkey" 2>/dev/null || echo "    (skipped - may not exist on this ledger)"
+done
+
+# Clean bob's deposits on the charlie ledger
+echo "Cleaning bob's deposits..."
+for deposit_pubkey in $($ADMIN -p bob list-deposits 2>/dev/null | grep "Deposit:" | awk '{print $2}'); do
+    echo "  Removing deposit $deposit_pubkey from bob->charlie..."
+    $ADMIN -p bob remove-deposit charlie "$deposit_pubkey" 2>/dev/null || echo "    (skipped - may not exist on this ledger)"
+done
+
+echo "Cleanup complete."
 echo ""
 
 # ============================================
@@ -200,7 +220,7 @@ run_with_retry bob "Removing Bob's reserves output" $ADMIN remove-reserves charl
 sleep 2
 
 # ============================================
-# PHASE 7: Close ledgers
+# PHASE 7: Close ledgers (must be LAST - after reserves are handled)
 # ============================================
 echo ""
 echo "=== PHASE 7: Closing ledgers ==="
@@ -210,6 +230,57 @@ sleep 2
 
 run_with_retry bob "Closing Bob's ledger with Charlie" $ADMIN remove-ledger charlie
 sleep 2
+
+# ============================================
+# PHASE 8: Close alice<->bob collateral ledgers
+# ============================================
+echo ""
+echo "=== PHASE 8: Closing collateral ledgers (alice<->bob) ==="
+
+# Get Bob's node ID for alice's ledger lookup
+BOB_ID=$($ADMIN -p bob get-node-info 2>/dev/null | grep -i "pubkey" | awk '{print $2}' | head -1)
+ALICE_ID=$($ADMIN -p alice get-node-info 2>/dev/null | grep -i "pubkey" | awk '{print $2}' | head -1)
+
+echo "Reducing Alice's reserves with Bob..."
+ALICE_BOB_RESERVES=$($ADMIN -p alice list-ledgers 2>/dev/null | grep -A5 "$BOB_ID" | grep -i "reserves" | awk '{print $2}' | head -1)
+ALICE_BOB_RESERVES=${ALICE_BOB_RESERVES:-0}
+if [ "$ALICE_BOB_RESERVES" -gt 0 ]; then
+    run_with_retry alice "Reducing Alice's reserves with Bob ($ALICE_BOB_RESERVES sats)" $ADMIN reduce-reserves bob "$ALICE_BOB_RESERVES"
+    sleep 2
+fi
+
+echo "Reducing Bob's reserves with Alice..."
+BOB_ALICE_RESERVES=$($ADMIN -p bob list-ledgers 2>/dev/null | grep -A5 "$ALICE_ID" | grep -i "reserves" | awk '{print $2}' | head -1)
+BOB_ALICE_RESERVES=${BOB_ALICE_RESERVES:-0}
+if [ "$BOB_ALICE_RESERVES" -gt 0 ]; then
+    run_with_retry bob "Reducing Bob's reserves with Alice ($BOB_ALICE_RESERVES sats)" $ADMIN reduce-reserves alice "$BOB_ALICE_RESERVES"
+    sleep 2
+fi
+
+run_with_retry alice "Removing Alice's reserves output with Bob" $ADMIN remove-reserves bob
+sleep 2
+
+run_with_retry bob "Removing Bob's reserves output with Alice" $ADMIN remove-reserves alice
+sleep 2
+
+run_with_retry alice "Closing Alice's ledger with Bob" $ADMIN remove-ledger bob
+sleep 2
+
+run_with_retry bob "Closing Bob's ledger with Alice" $ADMIN remove-ledger alice
+sleep 2
+
+# ============================================
+# PHASE 9: Close Charlie's partner-side ledgers
+# ============================================
+echo ""
+echo "=== PHASE 9: Closing Charlie's partner-side ledgers ==="
+
+# Charlie has partner-side ledgers with Alice and Bob (from validation tracking)
+run_with_retry charlie "Closing Charlie's ledger with Alice" $ADMIN remove-ledger alice || echo "  (may not exist)"
+sleep 1
+
+run_with_retry charlie "Closing Charlie's ledger with Bob" $ADMIN remove-ledger bob || echo "  (may not exist)"
+sleep 1
 
 # ============================================
 # Final status

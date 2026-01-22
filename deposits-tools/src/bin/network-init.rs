@@ -740,6 +740,13 @@ impl NetworkInitializer {
 
                 if channel_exists {
                     self.log(&format!("✅ Channel already exists: {} <-> {}", selected_node_config.name, target_node_config.name));
+                    // Track existing channel for topology display (normalize key to avoid duplicates)
+                    let channel_key = if selected_node_id < target_node_id {
+                        format!("{}-{}", selected_node_id, target_node_id)
+                    } else {
+                        format!("{}-{}", target_node_id, selected_node_id)
+                    };
+                    self.channels.entry(channel_key).or_insert_with(|| "existing".to_string());
                     pass_existing_count += 1;
                     continue;
                 }
@@ -773,7 +780,12 @@ impl NetworkInitializer {
                     Ok(response) if response.status().is_success() => {
                         let bytes = response.bytes().await?;
                         if let Ok(resp) = OpenChannelResponse::decode(bytes.as_ref()) {
-                            let channel_key = format!("{}-{}", selected_node_id, target_node_id);
+                            // Normalize key to avoid duplicates (smaller node ID first)
+                            let channel_key = if selected_node_id < target_node_id {
+                                format!("{}-{}", selected_node_id, target_node_id)
+                            } else {
+                                format!("{}-{}", target_node_id, selected_node_id)
+                            };
                             self.channels.insert(channel_key, resp.user_channel_id.clone());
                             pass_channel_count += 1;
                             self.log(&format!("✅ Channel created: {}", resp.user_channel_id));
@@ -943,7 +955,7 @@ impl NetworkInitializer {
         self.log(&format!("📊 Network Statistics:"));
         self.log(&format!("   • Nodes: {}", self.nodes.len()));
         self.log(&format!("   • Channels: {}", self.channels.len()));
-        self.log(&format!("   • Bitcoin Deposits Ledgers: {}", self.channels.len()));
+        self.log(&format!("   • Bitcoin Deposits Ledgers: 0 (created on demand)"));
 
         println!();
         self.log("📡 Node Information:");
@@ -960,9 +972,10 @@ impl NetworkInitializer {
         for (channel_key, _channel_id) in &self.channels {
             let parts: Vec<&str> = channel_key.split('-').collect();
             if parts.len() == 2 {
-                let name1 = &self.nodes[parts[0]].name;
-                let name2 = &self.nodes[parts[1]].name;
-                self.log(&format!("   • {} <-> {} (5,000 sat)", name1, name2));
+                // Only show channels between selected nodes (skip external nodes)
+                if let (Some(node1), Some(node2)) = (self.nodes.get(parts[0]), self.nodes.get(parts[1])) {
+                    self.log(&format!("   • {} <-> {} (5,000 sat)", node1.name, node2.name));
+                }
             }
         }
 

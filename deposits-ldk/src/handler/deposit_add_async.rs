@@ -29,6 +29,34 @@ where
         deposit_pubkey: PublicKey,
         fees: Option<deposits_core::FeeStructure>,
     ) -> Result<(), DepositsError> {
+        // Log the deposit being added for tracing
+        log_info!(
+            self.logger,
+            "📝 add_deposit_async called: deposit_pubkey={}, partner={}",
+            deposit_pubkey,
+            partner_node_id
+        );
+
+        // Check for duplicate deposit before proceeding
+        {
+            let ledgers = self.ledgers.lock().unwrap();
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+                let ledger = ledger_arc.read().unwrap();
+                if ledger.state.deposits.contains_key(&deposit_pubkey) {
+                    log_info!(
+                        self.logger,
+                        "⚠️ Deposit {} already exists on ledger with {}, skipping duplicate add",
+                        deposit_pubkey,
+                        partner_node_id
+                    );
+                    return Err(DepositsError::ProtocolViolation {
+                        violation_type: "Duplicate deposit".to_string(),
+                        details: format!("Deposit {} already exists on this ledger", deposit_pubkey),
+                    });
+                }
+            }
+        }
+
         // Acquire channel lock to prevent commitment signature races
         let _channel_lock = self.acquire_channel_lock_async(self.our_node_id, partner_node_id).await;
 

@@ -706,8 +706,8 @@ async fn list_deposits(client: &Client, base_url: &str, partner: Option<&str>) -
         for deposit in &response.deposits {
             println!("  Deposit: {}", deposit.deposit_pubkey);
             println!("    Ledger: {}", deposit.ledger_id);
-            println!("    Balance: {} sat", deposit.balance_sat);
-            println!("    Locked:  {} sat", deposit.locked_balance_sat);
+            println!("    Balance: {} msat", deposit.balance_msat);
+            println!("    Locked:  {} msat", deposit.locked_balance_msat);
             println!();
         }
     }
@@ -727,8 +727,8 @@ async fn deposit_balance(client: &Client, base_url: &str, deposit_pubkey: &str) 
 
     for deposit in &response.deposits {
         if deposit.deposit_pubkey == deposit_pubkey {
-            // Output just the balance in sats (for easy script parsing)
-            println!("{}", deposit.balance_sat);
+            // Output just the balance in msat (for easy script parsing)
+            println!("{}", deposit.balance_msat);
             return Ok(());
         }
     }

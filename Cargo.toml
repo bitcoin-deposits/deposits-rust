@@ -2,6 +2,7 @@
 members = [
     "deposits-core",
     "deposits-ldk",
+    "deposits-nwc",
     "deposits-tools",
 ]
 resolver = "2"

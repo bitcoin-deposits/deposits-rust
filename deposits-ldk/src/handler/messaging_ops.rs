@@ -75,7 +75,12 @@ where
         let queue_len_after = {
             let mut guard = self.outbound_messages.lock().unwrap();
             guard.entry(peer_node_id).or_insert_with(Vec::new).push(message);
-            guard.get(&peer_node_id).map(|v| v.len()).unwrap_or(0)
+            let len = guard.get(&peer_node_id).map(|v| v.len()).unwrap_or(0);
+            // Log queue state after adding
+            println!("📬 QUEUE_ADD: type {:#06x} for peer {} (queue now has {} for this peer, {} total)",
+                message_type, peer_node_id, len,
+                guard.values().map(|v| v.len()).sum::<usize>());
+            len
         };
 
         log_info!(
@@ -222,13 +227,83 @@ where
         let timeout_duration = Duration::from_millis(timeout_ms);
 
         // Use a polling approach with brief yields to allow Lightning to process
+        // Track time spent while peer is connected AND message has been sent
+        let mut ack_wait_time_elapsed = Duration::ZERO;
+        let mut last_check = std::time::Instant::now();
+        let mut last_status_log = std::time::Instant::now();
+        let mut last_connected_state = false;
+        let mut message_sent = false;
+
+        println!("🔄 ONESHOT_ACK: Starting wait for hash={:02x?}, timeout={}ms", &message_hash[0..4], timeout_ms);
+
         loop {
-            // Check if we've timed out
-            if start_time.elapsed() > timeout_duration {
+            let now = std::time::Instant::now();
+            let delta = now.duration_since(last_check);
+            last_check = now;
+
+            // Check if peer is currently connected
+            let is_connected = self.connected_peers.lock().unwrap().contains(&peer_node_id);
+
+            // Check if our message has been sent (no longer in outbound_messages queue)
+            // This tells us the message was picked up by get_and_clear_pending_msg
+            let message_still_queued = {
+                let guard = self.outbound_messages.lock().unwrap();
+                if let Some(msgs) = guard.get(&peer_node_id) {
+                    msgs.iter().any(|m| self.calculate_message_hash(m) == message_hash)
+                } else {
+                    false
+                }
+            };
+
+            if !message_still_queued && !message_sent {
+                message_sent = true;
+                println!("📨 ONESHOT_ACK: Message sent (removed from queue) hash={:02x?}", &message_hash[0..4]);
+            }
+
+            // Log connection state changes
+            if is_connected != last_connected_state {
+                println!("🔌 ONESHOT_ACK: Peer {} connection changed: {} -> {} (hash={:02x?})",
+                    peer_node_id, last_connected_state, is_connected, &message_hash[0..4]);
+                last_connected_state = is_connected;
+            }
+
+            // Only count time toward ACK timeout if:
+            // 1. Message has actually been sent (not still in queue)
+            // 2. AND peer is connected (can receive our message and respond)
+            if message_sent && is_connected {
+                ack_wait_time_elapsed += delta;
+            }
+
+            // Log status every 5 seconds
+            if now.duration_since(last_status_log) > Duration::from_secs(5) {
+                println!("⏳ ONESHOT_ACK: hash={:02x?} connected={} sent={} ack_wait={:.1}s total={:.1}s",
+                    &message_hash[0..4], is_connected, message_sent,
+                    ack_wait_time_elapsed.as_secs_f64(), start_time.elapsed().as_secs_f64());
+                last_status_log = now;
+            }
+
+            // Check if we've timed out (only counting time after message sent while connected)
+            if ack_wait_time_elapsed > timeout_duration {
                 self.pending_oneshot_acks.lock().unwrap().remove(&message_hash);
                 return Err(DepositsError::ProtocolViolation {
                     violation_type: "ACK timeout".to_string(),
-                    details: format!("No ACK received within {}ms", timeout_ms),
+                    details: format!("No ACK received within {}ms (message was sent)", timeout_ms),
+                });
+            }
+
+            // Also enforce a hard timeout to prevent infinite waits if message never gets sent
+            // (e.g., peer stays disconnected forever)
+            let hard_timeout = Duration::from_millis(timeout_ms * 3);
+            if start_time.elapsed() > hard_timeout {
+                self.pending_oneshot_acks.lock().unwrap().remove(&message_hash);
+                let reason = if message_sent {
+                    "message sent but no ACK"
+                } else {
+                    "message never sent (peer stayed disconnected)"
+                };
+                return Err(DepositsError::ProtocolViolation {
+                    violation_type: "ACK timeout".to_string(),
+                    details: format!("Hard timeout ({}ms): {}", timeout_ms * 3, reason),
                 });
             }
 

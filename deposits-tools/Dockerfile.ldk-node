@@ -20,10 +20,11 @@ COPY rust-lightning/ rust-lightning/
 # Copy ldk-node (dependency of ldk-server)
 COPY ldk-node/ ldk-node/
 
-# Copy deposits-rust (deposits-core and deposits-ldk dependencies)
+# Copy deposits-rust (deposits-core, deposits-ldk, deposits-nwc dependencies)
 COPY deposits-rust/Cargo.toml deposits-rust/Cargo.lock ./deposits-rust/
 COPY deposits-rust/deposits-core/ deposits-rust/deposits-core/
 COPY deposits-rust/deposits-ldk/ deposits-rust/deposits-ldk/
+COPY deposits-rust/deposits-nwc/ deposits-rust/deposits-nwc/
 
 # Copy ldk-server workspace
 COPY ldk-server/ ldk-server/

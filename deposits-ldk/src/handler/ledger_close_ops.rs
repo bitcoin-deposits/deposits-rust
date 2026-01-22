@@ -88,6 +88,9 @@ where
                     let mut ledger = ledger_arc.write().unwrap();
                     let hash = ledger.append_v1_mut(message_for_broadcast.clone())?;
                     let seq = (ledger.history.len() - 1) as u64; // 0-based (index of just-appended entry)
+                    // Update partner_deepest_ack_hash since partner just ACKed this update
+                    ledger.state.partner_deepest_ack_hash = hash;
+                    self.persist_ledger_state(&*ledger)?;
                     (hash, seq)
                 } else {
                     return Err(DepositsError::LedgerNotFound);
@@ -155,17 +158,34 @@ where
             pending_acks.insert(message_hash, (message_type, timestamp));
         }
 
-        log_info!(self.logger, "Sending LedgerClose message to partner {}", partner_node_id);
+        // Check peer connection status before sending
+        let is_connected = self.connected_peers.lock().unwrap().contains(&partner_node_id);
+        log_info!(self.logger, "📤 CLOSE_LEDGER: Sending LedgerClose to {} (connected={}, hash={:02x?})",
+            partner_node_id, is_connected, &message_hash[0..4]);
+        println!("📤 CLOSE_LEDGER: Sending LedgerClose to {} (connected={}, hash={:02x?})",
+            partner_node_id, is_connected, &message_hash[0..4]);
 
         // Send message and wait for acknowledgment
-        self.send_message_with_oneshot_ack(partner_node_id, message.clone(), 30000)?;
+        match self.send_message_with_oneshot_ack(partner_node_id, message.clone(), 30000) {
+            Ok(()) => {
+                log_info!(self.logger, "✅ CLOSE_LEDGER: ACK received for hash={:02x?}", &message_hash[0..4]);
+                println!("✅ CLOSE_LEDGER: ACK received for hash={:02x?}", &message_hash[0..4]);
+            }
+            Err(e) => {
+                log_info!(self.logger, "❌ CLOSE_LEDGER: ACK failed for hash={:02x?}: {:?}", &message_hash[0..4], e);
+                println!("❌ CLOSE_LEDGER: ACK failed for hash={:02x?}: {:?}", &message_hash[0..4], e);
+                return Err(e);
+            }
+        }
 
         // After ACK, apply update and remove ledger
         {
             let mut ledgers = self.ledgers.lock().unwrap();
             if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
                 let mut ledger = ledger_arc.write().unwrap();
-                ledger.append_v1_mut(message)?;
+                let new_hash = ledger.append_v1_mut(message)?;
+                // Update partner_deepest_ack_hash since partner just ACKed this update
+                ledger.state.partner_deepest_ack_hash = new_hash;
                 self.persist_ledger_state(&*ledger)?;
             }
             // Remove the ledger from our map
@@ -176,6 +196,87 @@ where
         self.remove_protocol(&partner_node_id);
 
         log_info!(self.logger, "Successfully closed ledger with partner {}", partner_node_id);
+        Ok(())
+    }
+
+    /// Close a ledger with a partner asynchronously (non-blocking version)
+    /// Requires: no deposits remain on the ledger
+    pub async fn close_ledger_async(&self, partner_node_id: PublicKey) -> Result<(), DepositsError> {
+        // Validate ledger exists and has no deposits
+        {
+            let ledgers = self.ledgers.lock().unwrap();
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+                let ledger = ledger_arc.read().unwrap();
+                if !ledger.state.deposits.is_empty() {
+                    return Err(DepositsError::ProtocolViolation {
+                        violation_type: "deposits_remain".to_string(),
+                        details: format!("Cannot close ledger with {} deposits remaining", ledger.state.deposits.len()),
+                    });
+                }
+            } else {
+                return Err(DepositsError::LedgerNotFound);
+            }
+        }
+
+        // Send LedgerClose message (V2 format)
+        let update_msg = LedgerUpdateMsg::new_with_operation(
+            self.our_node_id,    // operator
+            partner_node_id,     // partner
+            LedgerOperation::LedgerClose,
+        );
+        let message = DepositsMessage::LedgerUpdate(update_msg);
+
+        let message_hash = self.calculate_message_hash(&message);
+        let message_type = message.message_type();
+
+        // Track pending ACK
+        {
+            let mut pending_acks = self.pending_acks.lock().unwrap();
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            pending_acks.insert(message_hash, (message_type, timestamp));
+        }
+
+        // Check peer connection status before sending
+        let is_connected = self.connected_peers.lock().unwrap().contains(&partner_node_id);
+        log_info!(self.logger, "📤 CLOSE_LEDGER_ASYNC: Sending LedgerClose to {} (connected={}, hash={:02x?})",
+            partner_node_id, is_connected, &message_hash[0..4]);
+        println!("📤 CLOSE_LEDGER_ASYNC: Sending LedgerClose to {} (connected={}, hash={:02x?})",
+            partner_node_id, is_connected, &message_hash[0..4]);
+
+        // Send message and wait for acknowledgment (async version - doesn't block event loop)
+        match self.send_message_with_ack_async(partner_node_id, message.clone(), 30000).await {
+            Ok(()) => {
+                log_info!(self.logger, "✅ CLOSE_LEDGER_ASYNC: ACK received for hash={:02x?}", &message_hash[0..4]);
+                println!("✅ CLOSE_LEDGER_ASYNC: ACK received for hash={:02x?}", &message_hash[0..4]);
+            }
+            Err(e) => {
+                log_info!(self.logger, "❌ CLOSE_LEDGER_ASYNC: ACK failed for hash={:02x?}: {:?}", &message_hash[0..4], e);
+                println!("❌ CLOSE_LEDGER_ASYNC: ACK failed for hash={:02x?}: {:?}", &message_hash[0..4], e);
+                return Err(e);
+            }
+        }
+
+        // After ACK, apply update and remove ledger
+        {
+            let mut ledgers = self.ledgers.lock().unwrap();
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+                let mut ledger = ledger_arc.write().unwrap();
+                let new_hash = ledger.append_v1_mut(message)?;
+                // Update partner_deepest_ack_hash since partner just ACKed this update
+                ledger.state.partner_deepest_ack_hash = new_hash;
+                self.persist_ledger_state(&*ledger)?;
+            }
+            // Remove the ledger from our map
+            ledgers.remove(&(self.our_node_id, partner_node_id));
+        }
+
+        // Also remove from protocols map
+        self.remove_protocol(&partner_node_id);
+
+        log_info!(self.logger, "Successfully closed ledger with partner {} (async)", partner_node_id);
         Ok(())
     }
 
@@ -229,7 +330,9 @@ where
             let ledgers = self.ledgers.lock().unwrap();
             if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
                 let mut ledger = ledger_arc.write().unwrap();
-                ledger.append_v1_mut(message)?;
+                let new_hash = ledger.append_v1_mut(message)?;
+                // Update partner_deepest_ack_hash since partner just ACKed this update
+                ledger.state.partner_deepest_ack_hash = new_hash;
                 self.persist_ledger_state(&*ledger)?;
             }
         }

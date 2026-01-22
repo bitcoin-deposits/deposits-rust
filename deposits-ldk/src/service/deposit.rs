@@ -68,11 +68,11 @@ where
         handler.get_deposits_for_partner(partner_id)
             .map(|deps| {
                 deps.into_iter()
-                    .map(|(pubkey, balance, locked)| DepositInfo {
+                    .map(|(pubkey, balance_msat, locked_msat)| DepositInfo {
                         deposit_pubkey: pubkey.to_string(),
                         ledger_id: partner_id.to_string(),
-                        balance_sat: balance,
-                        locked_balance_sat: locked,
+                        balance_msat,
+                        locked_balance_msat: locked_msat,
                     })
                     .collect()
             })
@@ -89,8 +89,8 @@ where
                     .map(|(pubkey, deposit)| DepositInfo {
                         deposit_pubkey: pubkey.to_string(),
                         ledger_id: partner_id.to_string(),
-                        balance_sat: deposit.balance,
-                        locked_balance_sat: deposit.locked_balance,
+                        balance_msat: deposit.balance,
+                        locked_balance_msat: deposit.locked_balance,
                     })
                     .collect::<Vec<_>>()
             })

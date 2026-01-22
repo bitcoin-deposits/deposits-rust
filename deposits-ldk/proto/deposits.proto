@@ -128,8 +128,8 @@ message LedgerInfo {
 message DepositInfo {
   string deposit_pubkey = 1;
   string ledger_id = 2;
-  uint64 balance_sat = 3;
-  uint64 locked_balance_sat = 4;
+  uint64 balance_msat = 3;
+  uint64 locked_balance_msat = 4;
 }
 
 message CollateralPartnerInfo {

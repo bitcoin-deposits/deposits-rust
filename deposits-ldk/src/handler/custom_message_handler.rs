@@ -102,6 +102,22 @@ where
 
         let initial_count: usize = guard.values().map(|v| v.len()).sum();
 
+        // Log ALL messages in queue BEFORE draining (to understand what's there)
+        if initial_count > 0 {
+            println!("🔍 GET_AND_CLEAR: Queue state BEFORE drain (total={} messages):", initial_count);
+            for (peer_id, msgs) in guard.iter() {
+                let is_connected = connected.contains(peer_id);
+                println!("🔍   -> peer {} has {} messages (connected={})", peer_id, msgs.len(), is_connected);
+                for (i, msg) in msgs.iter().enumerate() {
+                    println!("🔍      [{}] type {:#06x}", i, msg.message_type());
+                }
+            }
+            println!("🔍 Connected peers ({}):", connected.len());
+            for peer in &connected {
+                println!("🔍   -> {}", peer);
+            }
+        }
+
         // Collect peer IDs for connected peers with messages
         let peers_to_drain: Vec<PublicKey> = guard.keys()
             .filter(|peer_id| connected.contains(peer_id))
@@ -123,6 +139,11 @@ where
         if initial_count > 0 || !result.is_empty() {
             println!("🔵 GET_AND_CLEAR_PENDING_MSG: sending {} messages (held back {} for disconnected peers)",
                      result.len(), held_back);
+            // Log which peers have held-back messages
+            for (peer_id, msgs) in guard.iter() {
+                println!("🔵   -> HELD: {} messages for {} (in connected_peers={})",
+                         msgs.len(), peer_id, connected.contains(peer_id));
+            }
             for (peer_id, msg) in &result {
                 let is_connected = connected.contains(&peer_id);
                 println!("🔵   -> Sending type {:#06x} to {} (connected={})",
@@ -182,6 +203,7 @@ where
             their_node_id,
             inbound
         );
+        println!("🟢 PEER_CONNECTED: {} (inbound={})", their_node_id, inbound);
 
         // Track this peer as connected for message delivery
         self.connected_peers.lock().unwrap().insert(their_node_id);
@@ -245,6 +267,7 @@ where
             "Bitcoin Deposits peer disconnected: {}",
             their_node_id
         );
+        println!("🔴 PEER_DISCONNECTED: {}", their_node_id);
 
         // Remove from connected peers - messages for this peer will be held until reconnection
         self.connected_peers.lock().unwrap().remove(&their_node_id);

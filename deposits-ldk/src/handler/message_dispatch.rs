@@ -721,8 +721,10 @@ where
                             // NOTE: We're already holding the ledgers lock from the outer scope,
                             // so we use the existing `ledgers` variable instead of re-locking
                             for ((op_id, part_id), _) in ledgers.iter() {
-                                // Broadcast to all partners except the operator we just responded to
-                                if *part_id != sender_node_id && *op_id != sender_node_id {
+                                // Broadcast to all partners except:
+                                // - the operator we just responded to
+                                // - ourselves (if we are the partner in another ledger)
+                                if *part_id != sender_node_id && *op_id != sender_node_id && *part_id != self.our_node_id {
                                     pending_messages.push((*part_id, attestation_msg.clone()));
                                 }
                             }
