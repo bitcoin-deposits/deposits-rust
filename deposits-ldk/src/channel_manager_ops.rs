@@ -15,6 +15,7 @@
 
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::ScriptBuf;
+use lightning::ln::chan_utils::CommitmentExtraOutput;
 use lightning::ln::types::ChannelId;
 
 /// Channel details for reserves operations
@@ -54,9 +55,71 @@ pub trait ChannelManagerOps: Send + Sync {
     /// Get the current best block height
     fn current_best_block_height(&self) -> u32;
 
-    /// Send an update_reserves message to a peer
+    /// Propose extra outputs to be included in commitment transactions.
     ///
-    /// This updates the reserves commitment for a channel.
+    /// Returns Ok(true) if the proposal is ready to be sent, Ok(false) if queued.
+    /// The caller must send a custom message to notify the counterparty.
+    fn propose_extra_outputs(
+        &self,
+        node_id: &PublicKey,
+        channel_id: &ChannelId,
+        outputs: Vec<CommitmentExtraOutput>,
+    ) -> Result<bool, String>;
+
+    /// Called when counterparty proposes extra outputs via custom message.
+    ///
+    /// Stores the proposal in pending state for validation.
+    fn receive_extra_outputs_proposal(
+        &self,
+        node_id: &PublicKey,
+        channel_id: &ChannelId,
+        outputs: Vec<CommitmentExtraOutput>,
+        user_data: Vec<u8>,
+    ) -> Result<(), String>;
+
+    /// Accept the counterparty's pending extra outputs proposal.
+    fn accept_extra_outputs_proposal(
+        &self,
+        node_id: &PublicKey,
+        channel_id: &ChannelId,
+    ) -> Result<(), String>;
+
+    /// Reject the counterparty's pending extra outputs proposal.
+    fn reject_extra_outputs_proposal(
+        &self,
+        node_id: &PublicKey,
+        channel_id: &ChannelId,
+    ) -> Result<(), String>;
+
+    /// Called when counterparty accepts our extra outputs proposal.
+    fn extra_outputs_accepted(
+        &self,
+        node_id: &PublicKey,
+        channel_id: &ChannelId,
+    ) -> Result<(), String>;
+
+    /// Get current extra outputs for a channel.
+    ///
+    /// Returns (holder_outputs, counterparty_outputs).
+    fn get_channel_extra_outputs(
+        &self,
+        node_id: &PublicKey,
+        channel_id: &ChannelId,
+    ) -> Result<(Vec<CommitmentExtraOutput>, Vec<CommitmentExtraOutput>), String>;
+
+    /// Clear all extra outputs from a channel.
+    fn clear_channel_extra_outputs(
+        &self,
+        node_id: &PublicKey,
+        channel_id: &ChannelId,
+    ) -> Result<(), String>;
+
+    // === Legacy compatibility methods (will be removed after migration) ===
+
+    /// Send an update_reserves message to a peer (LEGACY - use propose_extra_outputs)
+    ///
+    /// This method is maintained for backwards compatibility during migration.
+    /// New code should use propose_extra_outputs() and send custom messages.
     fn send_update_reserves(
         &self,
         node_id: &PublicKey,
@@ -67,14 +130,14 @@ pub trait ChannelManagerOps: Send + Sync {
         remote_ledger_hash: [u8; 32],
     ) -> Result<(), String>;
 
-    /// Get the currently committed local reserves ledger hash
+    /// Get the currently committed local reserves ledger hash (LEGACY)
     fn get_channel_local_reserves_ledger_hash(
         &self,
         node_id: &PublicKey,
         channel_id: &ChannelId,
     ) -> Option<[u8; 32]>;
 
-    /// Check if there are pending (uncommitted) local reserves updates
+    /// Check if there are pending (uncommitted) local reserves updates (LEGACY)
     fn has_pending_local_reserves(
         &self,
         node_id: &PublicKey,
@@ -119,6 +182,65 @@ impl ChannelManagerOps for NullChannelManager {
 
     fn current_best_block_height(&self) -> u32 {
         0
+    }
+
+    fn propose_extra_outputs(
+        &self,
+        _node_id: &PublicKey,
+        _channel_id: &ChannelId,
+        _outputs: Vec<CommitmentExtraOutput>,
+    ) -> Result<bool, String> {
+        Ok(true)
+    }
+
+    fn receive_extra_outputs_proposal(
+        &self,
+        _node_id: &PublicKey,
+        _channel_id: &ChannelId,
+        _outputs: Vec<CommitmentExtraOutput>,
+        _user_data: Vec<u8>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn accept_extra_outputs_proposal(
+        &self,
+        _node_id: &PublicKey,
+        _channel_id: &ChannelId,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn reject_extra_outputs_proposal(
+        &self,
+        _node_id: &PublicKey,
+        _channel_id: &ChannelId,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn extra_outputs_accepted(
+        &self,
+        _node_id: &PublicKey,
+        _channel_id: &ChannelId,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn get_channel_extra_outputs(
+        &self,
+        _node_id: &PublicKey,
+        _channel_id: &ChannelId,
+    ) -> Result<(Vec<CommitmentExtraOutput>, Vec<CommitmentExtraOutput>), String> {
+        Ok((Vec::new(), Vec::new()))
+    }
+
+    fn clear_channel_extra_outputs(
+        &self,
+        _node_id: &PublicKey,
+        _channel_id: &ChannelId,
+    ) -> Result<(), String> {
+        Ok(())
     }
 
     fn send_update_reserves(
