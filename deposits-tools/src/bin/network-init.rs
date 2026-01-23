@@ -678,7 +678,7 @@ impl NetworkInitializer {
     async fn create_full_mesh_channels(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.log("🔗 Creating Lightning channels from selected nodes to all available nodes...");
 
-        let channel_amount = 5_000u64; // 5k sats per channel (for testing)
+        let channel_amount = 100_000u64; // 100k sats per channel
         let mut total_channel_count = 0;
         let mut total_existing_count = 0;
         let max_passes = 2; // Run the entire channel creation process twice
