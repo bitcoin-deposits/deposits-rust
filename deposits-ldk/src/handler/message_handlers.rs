@@ -11,7 +11,7 @@
 //! to improve maintainability.
 
 use bitcoin::secp256k1::PublicKey;
-use lightning::ln::msgs::LightningError;
+use lightning::ln::msgs::{LightningError, ErrorAction};
 use lightning::util::logger::Logger;
 
 use super::core::DepositsHandler;
@@ -2235,6 +2235,250 @@ where
 
         // Don't send acknowledgment for audit messages - they're informational only
         Ok(true)
+    }
+
+    // ========================================================================
+    // Reserves Commitment Protocol Handlers (UpdateReserves/AcceptReserves)
+    // ========================================================================
+
+    /// Handle incoming UpdateReserves custom message
+    ///
+    /// This is part of the reserves commitment protocol using the generic extra outputs API.
+    /// When we receive this message, the counterparty is proposing to add extra outputs
+    /// to our commitment transaction for their reserves.
+    ///
+    /// We need to:
+    /// 1. Call receive_extra_outputs_proposal() on the channel manager
+    /// 2. Validate the proposal (check ledger hash, etc.)
+    /// 3. Call accept_extra_outputs_proposal() to accept it
+    /// 4. Send AcceptReserves response
+    pub(super) fn handle_update_reserves(
+        &self,
+        channel_id: &[u8; 32],
+        reserves_sats: u64,
+        script_pubkey: &[u8],
+        ledger_hash: &[u8; 32],
+        remote_ledger_hash: &[u8; 32],
+        sender_node_id: PublicKey,
+    ) -> Result<(), LightningError> {
+        use lightning::ln::types::ChannelId;
+        use lightning::ln::chan_utils::CommitmentExtraOutput;
+
+        log_info!(
+            self.logger,
+            "📥 Received UpdateReserves from {} for channel {} - reserves={} sats, hash={:02x?}",
+            sender_node_id,
+            hex::encode(&channel_id[..8]),
+            reserves_sats,
+            &ledger_hash[0..8]
+        );
+
+        let channel_id_typed = ChannelId(*channel_id);
+
+        // Get the channel manager
+        let cm = match &self.channel_manager {
+            Some(cm) => cm,
+            None => {
+                log_error!(self.logger, "Channel manager not available for UpdateReserves handling");
+                return Err(LightningError {
+                    err: "Channel manager not available".to_string(),
+                    action: ErrorAction::IgnoreError,
+                });
+            }
+        };
+
+        // Convert script_pubkey bytes to ScriptBuf
+        let script = bitcoin::ScriptBuf::from_bytes(script_pubkey.to_vec());
+
+        // Build the CommitmentExtraOutput
+        let output = CommitmentExtraOutput {
+            amount_satoshis: reserves_sats,
+            script_pubkey: script,
+        };
+
+        // Serialize the ledger hashes as user_data for validation later
+        let mut user_data = Vec::with_capacity(64);
+        user_data.extend_from_slice(ledger_hash);
+        user_data.extend_from_slice(remote_ledger_hash);
+
+        // Call receive_extra_outputs_proposal on the channel manager
+        if let Err(e) = cm.receive_extra_outputs_proposal(
+            &sender_node_id,
+            &channel_id_typed,
+            vec![output],
+            user_data,
+        ) {
+            log_error!(
+                self.logger,
+                "Failed to receive extra outputs proposal from {}: {}",
+                sender_node_id,
+                e
+            );
+            return Err(LightningError {
+                err: format!("Failed to receive proposal: {}", e),
+                action: ErrorAction::IgnoreError,
+            });
+        }
+
+        log_debug!(
+            self.logger,
+            "Stored extra outputs proposal from {} - validating...",
+            sender_node_id
+        );
+
+        // TODO: Validate the proposal
+        // - Check that remote_ledger_hash matches our ledger state
+        // - Check that the script_pubkey is valid for the claimed ledger_hash
+        // For now, we accept all proposals
+
+        // Accept the proposal
+        if let Err(e) = cm.accept_extra_outputs_proposal(&sender_node_id, &channel_id_typed) {
+            log_error!(
+                self.logger,
+                "Failed to accept extra outputs proposal from {}: {}",
+                sender_node_id,
+                e
+            );
+            return Err(LightningError {
+                err: format!("Failed to accept proposal: {}", e),
+                action: ErrorAction::IgnoreError,
+            });
+        }
+
+        log_info!(
+            self.logger,
+            "✅ Accepted UpdateReserves from {} - sending AcceptReserves response",
+            sender_node_id
+        );
+
+        // Update our copy of the sender's ledger's channel_deepest_commitment_hash
+        // The sender is the operator of the ledger, we are the partner
+        // Key is (operator_node_id, partner_node_id) = (sender_node_id, our_node_id)
+        {
+            let partner_ledger_key = (sender_node_id, self.our_node_id);
+            let ledgers = self.ledgers.lock().unwrap();
+
+            // Debug: print all ledger keys we have
+            println!("[HANDLE_UPDATE_RESERVES] Looking for ledger key ({}, {})", sender_node_id, self.our_node_id);
+            println!("[HANDLE_UPDATE_RESERVES] Available ledger keys:");
+            for (k, _) in ledgers.iter() {
+                println!("  - ({}, {})", k.0, k.1);
+            }
+
+            if let Some(ledger_arc) = ledgers.get(&partner_ledger_key) {
+                let mut ledger = ledger_arc.write().unwrap();
+                println!(
+                    "[HANDLE_UPDATE_RESERVES] FOUND ledger! Updating commitment hash from {:02x?} to {:02x?}",
+                    &ledger.state.channel_deepest_commitment_hash[0..8],
+                    &ledger_hash[0..8]
+                );
+                ledger.state.channel_deepest_commitment_hash = *ledger_hash;
+                log_info!(
+                    self.logger,
+                    "🔒 Updated partner copy channel_deepest_commitment_hash to {:02x?}",
+                    &ledger_hash[0..8]
+                );
+                // Persist the updated commitment hash
+                if let Err(e) = self.persist_ledger_state(&ledger) {
+                    log_error!(
+                        self.logger,
+                        "Failed to persist partner ledger state after commitment update: {}",
+                        e
+                    );
+                }
+            } else {
+                println!(
+                    "[HANDLE_UPDATE_RESERVES] NO ledger found for key ({}, {})",
+                    sender_node_id, self.our_node_id
+                );
+                log_debug!(
+                    self.logger,
+                    "No partner ledger copy found for {} (key: {:?}), skipping commitment hash update",
+                    sender_node_id,
+                    partner_ledger_key
+                );
+            }
+        }
+
+        // Send AcceptReserves response
+        let accept_msg = DepositsMessage::AcceptReserves {
+            channel_id: *channel_id,
+        };
+
+        if let Err(e) = self.send_message(sender_node_id, accept_msg) {
+            log_error!(
+                self.logger,
+                "Failed to send AcceptReserves to {}: {:?}",
+                sender_node_id,
+                e
+            );
+        } else {
+            log_info!(
+                self.logger,
+                "📤 Sent AcceptReserves to {} for channel {}",
+                sender_node_id,
+                hex::encode(&channel_id[..8])
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Handle incoming AcceptReserves custom message
+    ///
+    /// This is sent by the counterparty in response to our UpdateReserves message.
+    /// It indicates they have accepted our proposed extra outputs.
+    /// We need to call extra_outputs_accepted() on the channel manager to finalize.
+    pub(super) fn handle_accept_reserves(
+        &self,
+        channel_id: &[u8; 32],
+        sender_node_id: PublicKey,
+    ) -> Result<(), LightningError> {
+        use lightning::ln::types::ChannelId;
+
+        log_info!(
+            self.logger,
+            "📥 Received AcceptReserves from {} for channel {}",
+            sender_node_id,
+            hex::encode(&channel_id[..8])
+        );
+
+        let channel_id_typed = ChannelId(*channel_id);
+
+        // Get the channel manager
+        let cm = match &self.channel_manager {
+            Some(cm) => cm,
+            None => {
+                log_error!(self.logger, "Channel manager not available for AcceptReserves handling");
+                return Err(LightningError {
+                    err: "Channel manager not available".to_string(),
+                    action: ErrorAction::IgnoreError,
+                });
+            }
+        };
+
+        // Call extra_outputs_accepted to finalize the proposal
+        if let Err(e) = cm.extra_outputs_accepted(&sender_node_id, &channel_id_typed) {
+            log_error!(
+                self.logger,
+                "Failed to process AcceptReserves from {}: {}",
+                sender_node_id,
+                e
+            );
+            return Err(LightningError {
+                err: format!("Failed to process acceptance: {}", e),
+                action: ErrorAction::IgnoreError,
+            });
+        }
+
+        log_info!(
+            self.logger,
+            "✅ Extra outputs accepted by {} for channel {} - commitment transaction will be updated",
+            sender_node_id,
+            hex::encode(&channel_id[..8])
+        );
+
+        Ok(())
     }
 }
 

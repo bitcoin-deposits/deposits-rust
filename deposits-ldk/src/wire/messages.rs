@@ -186,6 +186,88 @@ impl Readable for ReservesUpdateOutputMsg {
 }
 
 // ============================================================================
+// Reserves Commitment Protocol Messages (Custom messages for generic extra outputs API)
+// ============================================================================
+
+/// UpdateReserves message - sent to propose reserves commitment to counterparty
+///
+/// This custom message is sent after calling propose_extra_outputs() on the
+/// ChannelManager to notify the counterparty of the proposed extra outputs.
+/// The counterparty should respond with AcceptReserves after validation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UpdateReservesMsg {
+    /// The Lightning channel ID
+    pub channel_id: [u8; 32],
+    /// Reserves amount in satoshis
+    pub reserves_sats: u64,
+    /// The script pubkey for the reserves output
+    pub script_pubkey: Vec<u8>,
+    /// Our ledger hash being committed
+    pub ledger_hash: [u8; 32],
+    /// Remote ledger hash for bidirectional verification
+    pub remote_ledger_hash: [u8; 32],
+}
+
+impl Writeable for UpdateReservesMsg {
+    fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
+        writer.write_all(&self.channel_id)?;
+        self.reserves_sats.write(writer)?;
+        (self.script_pubkey.len() as u16).write(writer)?;
+        writer.write_all(&self.script_pubkey)?;
+        writer.write_all(&self.ledger_hash)?;
+        writer.write_all(&self.remote_ledger_hash)?;
+        Ok(())
+    }
+}
+
+impl Readable for UpdateReservesMsg {
+    fn read<R: lightning::io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
+        let mut channel_id = [0u8; 32];
+        reader.read_exact(&mut channel_id).map_err(|_| DecodeError::ShortRead)?;
+        let reserves_sats: u64 = Readable::read(reader)?;
+        let script_len: u16 = Readable::read(reader)?;
+        let mut script_pubkey = vec![0u8; script_len as usize];
+        reader.read_exact(&mut script_pubkey).map_err(|_| DecodeError::ShortRead)?;
+        let mut ledger_hash = [0u8; 32];
+        reader.read_exact(&mut ledger_hash).map_err(|_| DecodeError::ShortRead)?;
+        let mut remote_ledger_hash = [0u8; 32];
+        reader.read_exact(&mut remote_ledger_hash).map_err(|_| DecodeError::ShortRead)?;
+        Ok(Self {
+            channel_id,
+            reserves_sats,
+            script_pubkey,
+            ledger_hash,
+            remote_ledger_hash,
+        })
+    }
+}
+
+/// AcceptReserves message - response to UpdateReserves indicating acceptance
+///
+/// Sent by the counterparty after validating and accepting the proposed
+/// reserves commitment via accept_extra_outputs_proposal().
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AcceptReservesMsg {
+    /// The Lightning channel ID
+    pub channel_id: [u8; 32],
+}
+
+impl Writeable for AcceptReservesMsg {
+    fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
+        writer.write_all(&self.channel_id)?;
+        Ok(())
+    }
+}
+
+impl Readable for AcceptReservesMsg {
+    fn read<R: lightning::io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
+        let mut channel_id = [0u8; 32];
+        reader.read_exact(&mut channel_id).map_err(|_| DecodeError::ShortRead)?;
+        Ok(Self { channel_id })
+    }
+}
+
+// ============================================================================
 // Deposit Messages
 // ============================================================================
 

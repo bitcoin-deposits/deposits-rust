@@ -15,7 +15,6 @@ exec > >(tee -a "$LOGFILE") 2>&1
 
 echo "Testing on network: $NETWORK"
 
-./bin/make-node-wallets.sh
 ./bin/make-a-wallet.sh alice charlie bob amber
 ./bin/make-a-wallet.sh bob charlie alice blue
 ./bin/pay-amber-from-charlie.sh

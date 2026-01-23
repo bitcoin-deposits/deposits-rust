@@ -395,6 +395,25 @@ where
                 return self.handle_uncredited_payment(&msg, sender_node_id);
             }
 
+            // UpdateReserves custom message (0x80E1) - Reserves commitment protocol
+            // Counterparty is proposing extra outputs for the commitment transaction
+            DepositsMessage::UpdateReserves { ref channel_id, reserves_sats, ref script_pubkey, ref ledger_hash, ref remote_ledger_hash } => {
+                return self.handle_update_reserves(
+                    channel_id,
+                    *reserves_sats,
+                    script_pubkey,
+                    ledger_hash,
+                    remote_ledger_hash,
+                    sender_node_id,
+                );
+            }
+
+            // AcceptReserves custom message (0x80E3) - Reserves commitment protocol
+            // Counterparty has accepted our proposed extra outputs
+            DepositsMessage::AcceptReserves { ref channel_id } => {
+                return self.handle_accept_reserves(channel_id, sender_node_id);
+            }
+
             _ => {} // Not a quorum/recovery/voter/collateral/accusation message, continue processing
         }
 

@@ -13,6 +13,7 @@
 use bitcoin::secp256k1::PublicKey;
 
 use super::core::{build_taproot_reserves_script, DepositsHandler};
+use super::messages::DepositsMessage;
 use deposits_core::DepositsError;
 use super::ledger_ext::LedgerExt;
 use deposits_core::VoterSet;
@@ -31,6 +32,8 @@ where
     /// IMPORTANT: Only the OPERATOR should send UpdateReserves. Partners should never originate
     /// UpdateReserves messages - they only respond with AcceptReserves when they receive one.
     pub(super) fn refresh_reserves_commitment(&self, partner_node_id: PublicKey) -> Result<(), DepositsError> {
+        println!("[REFRESH_COMMIT] Called for partner={}", partner_node_id);
+
         // Get the ledger hash, reserves amount, voter set, and key for later update
         // ONLY consider ledgers where we are the OPERATOR (key1)
         // Partners should NOT send UpdateReserves - only operators do
@@ -40,6 +43,12 @@ where
 
             // Only check for ledger where WE are the operator
             let operator_key = (self.our_node_id, partner_node_id);
+
+            println!("[REFRESH_COMMIT] Looking for ledger key ({}, {})", self.our_node_id, partner_node_id);
+            println!("[REFRESH_COMMIT] Available ledger keys:");
+            for (k, _) in ledgers.iter() {
+                println!("  - ({}, {})", k.0, k.1);
+            }
 
             if let Some(ledger_arc) = ledgers.get(&operator_key) {
                 let ledger = ledger_arc.read().unwrap();
@@ -77,6 +86,10 @@ where
             } else {
                 // No ledger where we're the operator - we're either the partner or have no ledger
                 // Partners should NOT send UpdateReserves, so return early
+                println!(
+                    "[REFRESH_COMMIT] NO OPERATOR LEDGER found for partner {} (we may be the partner)",
+                    partner_node_id
+                );
                 log_debug!(
                     self.logger,
                     "No operator ledger found for {}, skipping UpdateReserves (we may be the partner)",
@@ -133,6 +146,9 @@ where
                     partner_node_id,
                     &holder_ledger_hash[0..4]
                 );
+                // Clone script_pubkey before moving into send_update_reserves
+                let script_pubkey_bytes = script_pubkey.as_bytes().to_vec();
+
                 cm.send_update_reserves(
                     &partner_node_id,
                     &channel.channel_id,
@@ -154,6 +170,35 @@ where
                     "[COMMIT] send_update_reserves OK for {}",
                     partner_node_id
                 );
+
+                // Send the UpdateReserves custom message to notify the counterparty
+                // The generic extra outputs API sets pending state but doesn't send messages,
+                // so we need to send this custom message for the counterparty to know about the proposal
+                let update_msg = DepositsMessage::UpdateReserves {
+                    channel_id: channel.channel_id.0,
+                    reserves_sats,
+                    script_pubkey: script_pubkey_bytes,
+                    ledger_hash: holder_ledger_hash,
+                    remote_ledger_hash,
+                };
+
+                if let Err(e) = self.send_message(partner_node_id, update_msg) {
+                    log_error!(
+                        self.logger,
+                        "Failed to send UpdateReserves custom message to {}: {:?}",
+                        partner_node_id,
+                        e
+                    );
+                    // Don't fail the whole operation - the propose_extra_outputs succeeded
+                    // The counterparty will eventually sync via other means
+                } else {
+                    log_info!(
+                        self.logger,
+                        "📤 Sent UpdateReserves custom message to {} with hash {:02x?}",
+                        partner_node_id,
+                        &holder_ledger_hash[0..8]
+                    );
+                }
 
                 // Update channel_deepest_commitment_hash AFTER sending UpdateReserves succeeds
                 // This ensures we only record the hash after the send was actually accepted
@@ -180,6 +225,7 @@ where
                     &holder_ledger_hash[0..8]
                 );
             } else {
+                println!("[REFRESH_COMMIT] NO CHANNEL FOUND with {}", partner_node_id);
                 log_error!(
                     self.logger,
                     "No channel found with {} during reserves refresh",
@@ -188,6 +234,7 @@ where
                 return Err(DepositsError::InvalidChannelState);
             }
         } else {
+            println!("[REFRESH_COMMIT] NO CHANNEL MANAGER");
             log_error!(self.logger, "Channel manager not available for reserves refresh");
             return Err(DepositsError::InvalidChannelState);
         }
@@ -294,6 +341,9 @@ where
                     &ledger_hash[0..8]
                 );
 
+                // Clone script_pubkey before moving into send_update_reserves
+                let script_pubkey_bytes = script_pubkey.as_bytes().to_vec();
+
                 cm.send_update_reserves(
                     &partner_node_id,
                     &channel.channel_id,
@@ -313,6 +363,31 @@ where
                     "[PREDICT-COMMIT] send_update_reserves OK for {} hash={:02x?}",
                     partner_node_id, &ledger_hash[0..4]
                 );
+
+                // Send the UpdateReserves custom message to notify the counterparty
+                let update_msg = DepositsMessage::UpdateReserves {
+                    channel_id: channel.channel_id.0,
+                    reserves_sats,
+                    script_pubkey: script_pubkey_bytes,
+                    ledger_hash,
+                    remote_ledger_hash,
+                };
+
+                if let Err(e) = self.send_message(partner_node_id, update_msg) {
+                    log_error!(
+                        self.logger,
+                        "Failed to send UpdateReserves custom message to {}: {:?}",
+                        partner_node_id,
+                        e
+                    );
+                } else {
+                    log_info!(
+                        self.logger,
+                        "📤 Sent UpdateReserves custom message to {} with predicted hash {:02x?}",
+                        partner_node_id,
+                        &ledger_hash[0..8]
+                    );
+                }
 
                 Ok(())
             } else {

@@ -751,6 +751,7 @@ impl NetworkInitializer {
                     continue;
                 }
 
+
                 self.log(&format!("🔗 Creating channel: {} -> {}", selected_node_config.name, target_node_config.name));
 
                 // Open channel using protobuf API (includes peer connection)
@@ -811,9 +812,11 @@ impl NetworkInitializer {
                     if self.network == Network::Regtest {
                         sleep(Duration::from_secs(2)).await;
                         self.wait_for_funding_transactions(1).await?;
-                        self.mine_blocks_safely(1, "channel funding confirmation").await?;
-                        // Wait for wallet to sync with new block before next channel
-                        sleep(Duration::from_secs(10)).await;
+                        // Mine 6 blocks to fully confirm the funding tx before creating next channel
+                        // This ensures the wallet sees the tx as confirmed and updates its UTXO set
+                        self.mine_blocks_safely(6, "channel funding confirmation").await?;
+                        // Wait for wallet to sync with new blocks
+                        sleep(Duration::from_secs(5)).await;
                     } else {
                         // On mutinynet, just wait - we can't mine on demand
                         sleep(Duration::from_secs(5)).await;
@@ -827,13 +830,11 @@ impl NetworkInitializer {
 
             self.log(&format!("📊 Pass {} summary: {} new channels, {} existing", pass, pass_channel_count, pass_existing_count));
 
-            // Wait for channel confirmations (additional blocks for full confirmation)
+            // Wait for channel_ready messages (channels already have 6 confirmations from above)
             if pass_channel_count > 0 {
                 if self.network == Network::Regtest {
-                    // We already mined 1 block per channel above, mine 5 more for 6 total confirmations
-                    self.mine_blocks_safely(5, &format!("pass {} remaining confirmations", pass)).await?;
-                    self.log("⏳ Waiting for channel_ready messages and processing...");
-                    sleep(Duration::from_secs(30)).await;
+                    self.log("⏳ Waiting for channel_ready messages...");
+                    sleep(Duration::from_secs(10)).await;
                 } else {
                     // Mutinynet: wait for natural blocks (~30s each, need 6 confirmations)
                     self.log("⏳ Waiting for mutinynet blocks (6 confirmations @ ~30s each = ~3 min)...");

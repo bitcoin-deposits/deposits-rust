@@ -74,6 +74,8 @@ pub use crate::wire::messages::{
     // Reserves operations
     ReservesIncreaseMsg, ReservesDecreaseMsg, ReservesAddOutputMsg,
     ReservesRemoveOutputMsg, ReservesUpdateOutputMsg,
+    // Reserves commitment protocol (custom messages for generic extra outputs API)
+    UpdateReservesMsg, AcceptReservesMsg,
     // Deposit operations
     DepositOpenMsg, DepositCloseMsg, DepositUpdateMsg,
     // Collateral operations
@@ -254,6 +256,19 @@ pub enum DepositsMessage {
     ReservesUpdateOutput {
         partner_id: PublicKey,
         spend_to: PublicKey,
+    },
+    /// UpdateReserves - custom message for reserves commitment protocol
+    /// Sent after propose_extra_outputs() to notify counterparty of proposed reserves
+    UpdateReserves {
+        channel_id: [u8; 32],
+        reserves_sats: u64,
+        script_pubkey: Vec<u8>,
+        ledger_hash: [u8; 32],
+        remote_ledger_hash: [u8; 32],
+    },
+    /// AcceptReserves - response to UpdateReserves indicating acceptance
+    AcceptReserves {
+        channel_id: [u8; 32],
     },
     /// Payment credit (receiving) - uses inline fields (legacy ReceivingCreditPaymentMsg retained for deserialization)
     ReceivingCreditPayment {
@@ -545,6 +560,8 @@ impl DepositsMessage {
             Self::ReservesIncrease { .. } => RESERVES_INCREASE,
             Self::ReservesDecrease { .. } => RESERVES_DECREASE,
             Self::ReservesUpdateOutput { .. } => RESERVES_UPDATE_OUTPUT,
+            Self::UpdateReserves { .. } => UPDATE_RESERVES,
+            Self::AcceptReserves { .. } => ACCEPT_RESERVES,
             Self::ReceivingCreditPayment { .. } => RECEIVING_CREDIT_PAYMENT,
             Self::ReceivingCosignInvoice { .. } => RECEIVING_COSIGN_INVOICE,
             Self::SendingLockPayment { .. } => SENDING_LOCK_PAYMENT,
@@ -619,6 +636,8 @@ impl DepositsMessage {
             Self::ReservesIncrease { .. } => "ReservesIncrease",
             Self::ReservesDecrease { .. } => "ReservesDecrease",
             Self::ReservesUpdateOutput { .. } => "ReservesUpdateOutput",
+            Self::UpdateReserves { .. } => "UpdateReserves",
+            Self::AcceptReserves { .. } => "AcceptReserves",
             Self::ReceivingCreditPayment { .. } => "ReceivingCreditPayment",
             Self::ReceivingCosignInvoice { .. } => "ReceivingCosignInvoice",
             Self::SendingLockPayment { .. } => "SendingLockPayment",
@@ -726,6 +745,8 @@ impl DepositsMessage {
             Self::ReservesIncrease { partner_id, .. } => Some(*partner_id),
             Self::ReservesDecrease { partner_id, .. } => Some(*partner_id),
             Self::ReservesUpdateOutput { partner_id, .. } => Some(*partner_id),
+            Self::UpdateReserves { .. } => None, // Channel-identified, partner from sender
+            Self::AcceptReserves { .. } => None, // Channel-identified, partner from sender
             Self::ReceivingCreditPayment { partner_id, .. } => Some(*partner_id),
             Self::ReceivingCosignInvoice { .. } => None,
             Self::SendingLockPayment { .. } => None, // partner_id passed separately
@@ -1951,6 +1972,40 @@ impl DepositsMessage {
                     attestation_signature: [0u8; 64],
                 })
             }
+
+            // UpdateReserves and AcceptReserves are deposits-ldk specific messages
+            // that don't have a V2 core equivalent. For logging purposes (encode() method),
+            // we use a placeholder LedgerUpdate. Actual wire encoding uses Writeable directly.
+            Self::UpdateReserves { reserves_sats, ledger_hash, .. } => {
+                DepositsMessageCore::LedgerUpdate(LedgerUpdateMsgV2 {
+                    operator_id: PublicKey::from_slice(&[2; 33]).unwrap_or_else(|_| {
+                        PublicKey::from_slice(&[3; 33]).unwrap()
+                    }),
+                    partner_id: PublicKey::from_slice(&[2; 33]).unwrap_or_else(|_| {
+                        PublicKey::from_slice(&[3; 33]).unwrap()
+                    }),
+                    operation: LedgerOperation::ReservesIncrease { new_amount: reserves_sats },
+                    sequence_number: 0,
+                    previous_hash: [0u8; 32],
+                    current_hash: ledger_hash,
+                    operator_signature: [0u8; 64],
+                })
+            }
+            Self::AcceptReserves { channel_id } => {
+                DepositsMessageCore::LedgerUpdate(LedgerUpdateMsgV2 {
+                    operator_id: PublicKey::from_slice(&[2; 33]).unwrap_or_else(|_| {
+                        PublicKey::from_slice(&[3; 33]).unwrap()
+                    }),
+                    partner_id: PublicKey::from_slice(&[2; 33]).unwrap_or_else(|_| {
+                        PublicKey::from_slice(&[3; 33]).unwrap()
+                    }),
+                    operation: LedgerOperation::ReservesIncrease { new_amount: 0 },
+                    sequence_number: 0,
+                    previous_hash: channel_id,
+                    current_hash: [0u8; 32],
+                    operator_signature: [0u8; 64],
+                })
+            }
         }
     }
 }
@@ -2339,7 +2394,7 @@ pub struct QuorumStateSyncMsg {
 // Import all V1 message type constants from deposits-ldk
 pub use crate::wire::message_types::{
     RESERVES_ADD_OUTPUT, RESERVES_REMOVE_OUTPUT, RESERVES_INCREASE, RESERVES_DECREASE,
-    RESERVES_UPDATE_OUTPUT, COLLATERAL_INCREASE, COLLATERAL_DECREASE, COLLATERAL_STATUS,
+    RESERVES_UPDATE_OUTPUT, UPDATE_RESERVES, ACCEPT_RESERVES, COLLATERAL_INCREASE, COLLATERAL_DECREASE, COLLATERAL_STATUS,
     DEPOSIT_OPEN, DEPOSIT_CLOSE, DEPOSIT_UPDATE, DEPOSIT_LOCK_TRANSFER, DEPOSIT_FAIL_TRANSFER,
     DEPOSIT_FULFILL_TRANSFER, LEDGER_CLOSE, MAINTENANCE_FEE_COLLECT, RECEIVING_COSIGN_INVOICE,
     RECEIVING_CREDIT_PAYMENT, UNCREDITED_PAYMENT, SENDING_LOCK_PAYMENT, SENDING_FAIL_PAYMENT,
@@ -2370,7 +2425,7 @@ pub mod consts {
     // V1 compatibility constants from deposits-ldk
     pub use crate::wire::message_types::{
         RESERVES_ADD_OUTPUT, RESERVES_REMOVE_OUTPUT, RESERVES_INCREASE, RESERVES_DECREASE,
-        RESERVES_UPDATE_OUTPUT, COLLATERAL_INCREASE, COLLATERAL_DECREASE, COLLATERAL_STATUS,
+        RESERVES_UPDATE_OUTPUT, UPDATE_RESERVES, ACCEPT_RESERVES, COLLATERAL_INCREASE, COLLATERAL_DECREASE, COLLATERAL_STATUS,
         DEPOSIT_OPEN, DEPOSIT_CLOSE, DEPOSIT_UPDATE, DEPOSIT_LOCK_TRANSFER, DEPOSIT_FAIL_TRANSFER,
         DEPOSIT_FULFILL_TRANSFER, LEDGER_CLOSE, MAINTENANCE_FEE_COLLECT, RECEIVING_COSIGN_INVOICE,
         RECEIVING_CREDIT_PAYMENT, UNCREDITED_PAYMENT, SENDING_LOCK_PAYMENT, SENDING_FAIL_PAYMENT,
@@ -2398,7 +2453,8 @@ pub const ALL_MESSAGE_TYPES: &[u16] = &[
     RELAY, RELAY_RESPONSE,
     // V1 message types (for compatibility with existing code)
     RESERVES_ADD_OUTPUT, RESERVES_REMOVE_OUTPUT, RESERVES_INCREASE, RESERVES_DECREASE,
-    RESERVES_UPDATE_OUTPUT, COLLATERAL_INCREASE, COLLATERAL_DECREASE, COLLATERAL_STATUS,
+    RESERVES_UPDATE_OUTPUT, UPDATE_RESERVES, ACCEPT_RESERVES,
+    COLLATERAL_INCREASE, COLLATERAL_DECREASE, COLLATERAL_STATUS,
     DEPOSIT_OPEN, DEPOSIT_CLOSE, DEPOSIT_UPDATE, DEPOSIT_LOCK_TRANSFER, DEPOSIT_FAIL_TRANSFER,
     DEPOSIT_FULFILL_TRANSFER, LEDGER_CLOSE, MAINTENANCE_FEE_COLLECT, RECEIVING_COSIGN_INVOICE,
     RECEIVING_CREDIT_PAYMENT, UNCREDITED_PAYMENT, SENDING_LOCK_PAYMENT, SENDING_FAIL_PAYMENT,
@@ -2674,6 +2730,20 @@ impl Readable for DepositsMessage {
                     spend_to: m.spend_to,
                 });
             }
+            UPDATE_RESERVES => {
+                return UpdateReservesMsg::read(reader).map(|m| Self::UpdateReserves {
+                    channel_id: m.channel_id,
+                    reserves_sats: m.reserves_sats,
+                    script_pubkey: m.script_pubkey,
+                    ledger_hash: m.ledger_hash,
+                    remote_ledger_hash: m.remote_ledger_hash,
+                });
+            }
+            ACCEPT_RESERVES => {
+                return AcceptReservesMsg::read(reader).map(|m| Self::AcceptReserves {
+                    channel_id: m.channel_id,
+                });
+            }
             COLLATERAL_INCREASE => {
                 return CollateralIncreaseMsg::read(reader).map(|m| Self::CollateralIncrease {
                     partner_id: m.partner_id,
@@ -2837,6 +2907,18 @@ impl Writeable for DepositsMessage {
             }
             Self::ReservesUpdateOutput { partner_id, spend_to } => {
                 ReservesUpdateOutputMsg { partner_id: *partner_id, spend_to: *spend_to }.write(writer)
+            }
+            Self::UpdateReserves { channel_id, reserves_sats, script_pubkey, ledger_hash, remote_ledger_hash } => {
+                UpdateReservesMsg {
+                    channel_id: *channel_id,
+                    reserves_sats: *reserves_sats,
+                    script_pubkey: script_pubkey.clone(),
+                    ledger_hash: *ledger_hash,
+                    remote_ledger_hash: *remote_ledger_hash,
+                }.write(writer)
+            }
+            Self::AcceptReserves { channel_id } => {
+                AcceptReservesMsg { channel_id: *channel_id }.write(writer)
             }
             Self::ReceivingCreditPayment { payment_hash, deposit_pubkey, amount, invoice_id, partner_id, sequence_number } => {
                 ReceivingCreditPaymentMsg { payment_hash: *payment_hash, deposit_pubkey: *deposit_pubkey, amount: *amount, invoice_id: invoice_id.clone(), partner_id: *partner_id, sequence_number: *sequence_number }.write(writer)
@@ -3027,6 +3109,22 @@ impl lightning::ln::wire::CustomMessageReader for DepositsMessageReader {
                     .map(|m| Some(DepositsMessage::ReservesUpdateOutput {
                         partner_id: m.partner_id,
                         spend_to: m.spend_to,
+                    }));
+            }
+            UPDATE_RESERVES => {
+                return UpdateReservesMsg::read(buffer)
+                    .map(|m| Some(DepositsMessage::UpdateReserves {
+                        channel_id: m.channel_id,
+                        reserves_sats: m.reserves_sats,
+                        script_pubkey: m.script_pubkey,
+                        ledger_hash: m.ledger_hash,
+                        remote_ledger_hash: m.remote_ledger_hash,
+                    }));
+            }
+            ACCEPT_RESERVES => {
+                return AcceptReservesMsg::read(buffer)
+                    .map(|m| Some(DepositsMessage::AcceptReserves {
+                        channel_id: m.channel_id,
                     }));
             }
             COLLATERAL_INCREASE => {
