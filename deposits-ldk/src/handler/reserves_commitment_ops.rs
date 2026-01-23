@@ -17,6 +17,7 @@ use super::messages::DepositsMessage;
 use deposits_core::DepositsError;
 use super::ledger_ext::LedgerExt;
 use deposits_core::VoterSet;
+use lightning::ln::chan_utils::CommitmentExtraOutput;
 use lightning::{log_debug, log_error, log_info};
 use lightning::util::logger::Logger as LdkLogger;
 
@@ -142,32 +143,44 @@ where
                 // This ensures both parties commit the same state (the most recently ACKed update)
                 // Include remote_ledger_hash for bidirectional verification
                 println!(
-                    "[COMMIT] calling send_update_reserves for {} hash={:02x?}",
+                    "[COMMIT] calling propose_extra_outputs for {} hash={:02x?}",
                     partner_node_id,
                     &holder_ledger_hash[0..4]
                 );
-                // Clone script_pubkey before moving into send_update_reserves
+                // Clone script_pubkey before moving into propose_extra_outputs
+                let script_pubkey_clone = script_pubkey.clone();
                 let script_pubkey_bytes = script_pubkey.as_bytes().to_vec();
 
-                cm.send_update_reserves(
+                // Use the generic extra outputs API directly
+                let output = CommitmentExtraOutput {
+                    amount_satoshis: reserves_sats,
+                    script_pubkey,
+                };
+                cm.propose_extra_outputs(
                     &partner_node_id,
                     &channel.channel_id,
-                    reserves_sats,
-                    script_pubkey,
-                    holder_ledger_hash,
-                    remote_ledger_hash,
+                    vec![output],
                 ).map_err(|e| {
-                    // Log the error - Ignore errors mean a pending UpdateReserves exists
-                    // The commitment will be refreshed when the pending one completes
                     println!(
-                        "[COMMIT] send_update_reserves FAILED for {}: {:?}",
+                        "[COMMIT] propose_extra_outputs FAILED for {}: {:?}",
                         partner_node_id,
                         e
                     );
                     DepositsError::InvalidChannelState
                 })?;
+
+                // Track pending commitment for wait_for_reserves_commitment
+                {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+                    let mut pending = self.pending_reserves_commitments.lock().unwrap();
+                    pending.insert(partner_node_id, (script_pubkey_clone, holder_ledger_hash, reserves_sats, now));
+                }
+
                 println!(
-                    "[COMMIT] send_update_reserves OK for {}",
+                    "[COMMIT] propose_extra_outputs OK for {}",
                     partner_node_id
                 );
 
@@ -341,26 +354,39 @@ where
                     &ledger_hash[0..8]
                 );
 
-                // Clone script_pubkey before moving into send_update_reserves
+                // Clone script_pubkey before moving into propose_extra_outputs
+                let script_pubkey_clone = script_pubkey.clone();
                 let script_pubkey_bytes = script_pubkey.as_bytes().to_vec();
 
-                cm.send_update_reserves(
+                // Use the generic extra outputs API directly
+                let output = CommitmentExtraOutput {
+                    amount_satoshis: reserves_sats,
+                    script_pubkey,
+                };
+                cm.propose_extra_outputs(
                     &partner_node_id,
                     &channel.channel_id,
-                    reserves_sats,
-                    script_pubkey,
-                    ledger_hash,
-                    remote_ledger_hash,
+                    vec![output],
                 ).map_err(|e| {
                     println!(
-                        "[PREDICT-COMMIT] send_update_reserves FAILED for {}: {:?}",
+                        "[PREDICT-COMMIT] propose_extra_outputs FAILED for {}: {:?}",
                         partner_node_id, e
                     );
                     DepositsError::InvalidChannelState
                 })?;
 
+                // Track pending commitment for wait_for_reserves_commitment
+                {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+                    let mut pending = self.pending_reserves_commitments.lock().unwrap();
+                    pending.insert(partner_node_id, (script_pubkey_clone, ledger_hash, reserves_sats, now));
+                }
+
                 println!(
-                    "[PREDICT-COMMIT] send_update_reserves OK for {} hash={:02x?}",
+                    "[PREDICT-COMMIT] propose_extra_outputs OK for {} hash={:02x?}",
                     partner_node_id, &ledger_hash[0..4]
                 );
 

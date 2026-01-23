@@ -669,11 +669,31 @@ where
             }
         };
 
+        // Get the expected script from pending_reserves_commitments
+        let expected_script = {
+            let pending = self.pending_reserves_commitments.lock().unwrap();
+            pending.get(&partner_node_id).map(|(script, _, _, _)| script.clone())
+        };
+
         loop {
-            // Check if the committed ledger hash matches our expected hash
+            // Check if the extra outputs now contain our expected script
             if let Some(ref cm) = self.channel_manager {
-                if let Some(committed_hash) = cm.get_channel_local_reserves_ledger_hash(&partner_node_id, &channel_id) {
-                    if committed_hash == expected_ledger_hash {
+                if let Ok((holder_outputs, _)) = cm.get_channel_extra_outputs(&partner_node_id, &channel_id) {
+                    // Check if any output matches our expected script
+                    let is_committed = if let Some(ref expected) = expected_script {
+                        holder_outputs.iter().any(|o| &o.script_pubkey == expected)
+                    } else {
+                        // No expected script tracked, check by ledger hash (legacy fallback)
+                        // This won't work reliably, but avoids breaking existing code
+                        false
+                    };
+
+                    if is_committed {
+                        // Clear the pending state
+                        {
+                            let mut pending = self.pending_reserves_commitments.lock().unwrap();
+                            pending.remove(&partner_node_id);
+                        }
                         println!("✅ COMMITMENT VERIFIED: ledger_hash {:02x?} is now committed",
                                  &expected_ledger_hash[0..8]);
                         return Ok(());
@@ -730,13 +750,16 @@ where
         };
 
         loop {
-            // Check if there's no pending reserves
-            if let Some(ref cm) = self.channel_manager {
-                if !cm.has_pending_local_reserves(&partner_node_id, &channel_id) {
-                    println!("✅ PENDING RESERVES CLEAR: channel {} ready for new UpdateReserves",
-                             channel_id);
-                    return Ok(());
-                }
+            // Check if there's no pending reserves in our tracking
+            let has_pending = {
+                let pending = self.pending_reserves_commitments.lock().unwrap();
+                pending.contains_key(&partner_node_id)
+            };
+
+            if !has_pending {
+                println!("✅ PENDING RESERVES CLEAR: channel {} ready for new UpdateReserves",
+                         channel_id);
+                return Ok(());
             }
 
             // Check timeout

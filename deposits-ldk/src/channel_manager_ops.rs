@@ -14,7 +14,6 @@
 //! while still being able to use its functionality when wired up.
 
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::ScriptBuf;
 use lightning::ln::chan_utils::CommitmentExtraOutput;
 use lightning::ln::types::ChannelId;
 
@@ -114,36 +113,6 @@ pub trait ChannelManagerOps: Send + Sync {
         channel_id: &ChannelId,
     ) -> Result<(), String>;
 
-    // === Legacy compatibility methods (will be removed after migration) ===
-
-    /// Send an update_reserves message to a peer (LEGACY - use propose_extra_outputs)
-    ///
-    /// This method is maintained for backwards compatibility during migration.
-    /// New code should use propose_extra_outputs() and send custom messages.
-    fn send_update_reserves(
-        &self,
-        node_id: &PublicKey,
-        channel_id: &ChannelId,
-        reserves_sats: u64,
-        script_pubkey: ScriptBuf,
-        holder_ledger_hash: [u8; 32],
-        remote_ledger_hash: [u8; 32],
-    ) -> Result<(), String>;
-
-    /// Get the currently committed local reserves ledger hash (LEGACY)
-    fn get_channel_local_reserves_ledger_hash(
-        &self,
-        node_id: &PublicKey,
-        channel_id: &ChannelId,
-    ) -> Option<[u8; 32]>;
-
-    /// Check if there are pending (uncommitted) local reserves updates (LEGACY)
-    fn has_pending_local_reserves(
-        &self,
-        node_id: &PublicKey,
-        channel_id: &ChannelId,
-    ) -> bool;
-
     /// Force close a channel with the latest transaction
     fn force_close_broadcasting_latest_txn(
         &self,
@@ -241,34 +210,6 @@ impl ChannelManagerOps for NullChannelManager {
         _channel_id: &ChannelId,
     ) -> Result<(), String> {
         Ok(())
-    }
-
-    fn send_update_reserves(
-        &self,
-        _node_id: &PublicKey,
-        _channel_id: &ChannelId,
-        _reserves_sats: u64,
-        _script_pubkey: ScriptBuf,
-        _holder_ledger_hash: [u8; 32],
-        _remote_ledger_hash: [u8; 32],
-    ) -> Result<(), String> {
-        Ok(())
-    }
-
-    fn get_channel_local_reserves_ledger_hash(
-        &self,
-        _node_id: &PublicKey,
-        _channel_id: &ChannelId,
-    ) -> Option<[u8; 32]> {
-        None
-    }
-
-    fn has_pending_local_reserves(
-        &self,
-        _node_id: &PublicKey,
-        _channel_id: &ChannelId,
-    ) -> bool {
-        false
     }
 
     fn force_close_broadcasting_latest_txn(

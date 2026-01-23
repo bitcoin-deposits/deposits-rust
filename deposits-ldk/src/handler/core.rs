@@ -255,6 +255,11 @@ where
 
     /// Bitcoin network (mainnet, testnet, regtest, etc.)
     pub(super) network: Network,
+
+    /// Track pending reserves commitments awaiting confirmation
+    /// Key: partner_id -> (expected_script_pubkey, ledger_hash, reserves_sats, timestamp_sent)
+    /// Set when propose_extra_outputs is called, cleared when outputs appear in channel
+    pub(super) pending_reserves_commitments: Mutex<HashMap<PublicKey, (ScriptBuf, [u8; 32], u64, u64)>>,
 }
 
 impl<L: Deref + Clone> DepositsHandler<L>
@@ -356,6 +361,7 @@ where
                 deposits_core::recovery_claim::ClaimConfig::default(),
             )),
             network,
+            pending_reserves_commitments: Mutex::new(HashMap::new()),
         };
 
         // Recover existing ledgers on startup - propagate errors

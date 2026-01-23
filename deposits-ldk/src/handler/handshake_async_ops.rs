@@ -22,6 +22,7 @@ use super::ledger_ext::{LedgerExt, SignedLedgerUpdateExt};
 use deposits_core::VoterSet;
 use deposits_core::Invoice;
 use deposits_core::LedgerValidator;
+use lightning::ln::chan_utils::CommitmentExtraOutput;
 use lightning::{log_debug, log_error, log_info, log_warn};
 use lightning::util::logger::Logger as LdkLogger;
 
@@ -484,15 +485,27 @@ where
                     }
                 };
 
-                match cm.send_update_reserves(
+                // Use the generic extra outputs API directly
+                let script_pubkey_clone = script_pubkey.clone();
+                let output = CommitmentExtraOutput {
+                    amount_satoshis: initial_reserves_sats,
+                    script_pubkey,
+                };
+                match cm.propose_extra_outputs(
                     &partner_node_id,
                     &channel.channel_id,
-                    initial_reserves_sats,
-                    script_pubkey,
-                    zero_hash,
-                    zero_hash, // remote_ledger_hash - also zero for initial setup
+                    vec![output],
                 ) {
-                    Ok(()) => {
+                    Ok(_) => {
+                        // Track pending commitment
+                        {
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap()
+                                .as_secs();
+                            let mut pending = self.pending_reserves_commitments.lock().unwrap();
+                            pending.insert(partner_node_id, (script_pubkey_clone, zero_hash, initial_reserves_sats, now));
+                        }
                         log_info!(
                             self.logger,
                             "Created initial reserves outputs ({} sats) on channel {} with {}",
