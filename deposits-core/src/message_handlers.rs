@@ -609,7 +609,7 @@ pub fn handle_collateral_remove_partner<C: HandlerContext>(
 /// Handle a CollateralAttestation message.
 ///
 /// Received by operators from collateral partners after they process a CollateralIncrease.
-/// The operator stores the attestation as proof and records CollateralStatus on channel ledgers.
+/// The operator stores the attestation as proof and forwards it to channel partners.
 pub fn handle_collateral_attestation<C: HandlerContext>(
     ctx: &C,
     msg: &CollateralAttestationMsg,
@@ -643,7 +643,7 @@ pub fn handle_collateral_attestation<C: HandlerContext>(
 
     // Return response data for the LDK layer to:
     // 1. Store the attestation in ledger state
-    // 2. Create CollateralStatus on channel ledgers
+    // 2. Forward CollateralAttestation to channel ledgers
     // 3. Send to channel partners for bilateral signing
     Ok(HandlerResult::Response(ResponseData::CollateralAttestationProcessed {
         operator: msg.operator,

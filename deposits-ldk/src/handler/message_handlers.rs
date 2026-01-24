@@ -1486,7 +1486,7 @@ where
         // CollateralAttestation is received from a collateral partner after they process
         // our CollateralIncrease. We need to:
         // 1. Store the attestation as proof
-        // 2. Create CollateralStatus on our CHANNEL ledgers (not the collateral ledger)
+        // 2. Forward the attestation to our CHANNEL partners (not the collateral ledger)
         //    to record that collateral is now available
         log_info!(
             self.logger,
@@ -1529,7 +1529,7 @@ where
                         );
 
                         // If the sender is NOT the channel partner, this is a collateral partner
-                        // We should record CollateralStatus on our CHANNEL ledgers (where sender != partner)
+                        // We should forward CollateralAttestation to our CHANNEL ledgers (where sender != partner)
                         if *partner_id != sender_node_id {
                             channel_ledgers_to_update.push((*operator_id, *partner_id));
                         }
@@ -1538,41 +1538,43 @@ where
             }
         }
 
-        // Create CollateralStatus on channel ledgers to record that collateral is now available
-        // This is sent to the channel partner for bilateral signing
+        // Forward CollateralAttestation to channel partners for bilateral signing
+        // (Previously created a separate CollateralStatus, now we forward the full attestation)
         if !channel_ledgers_to_update.is_empty() {
-            let status_update = DepositsMessage::CollateralStatus {
-                collateral_operator: sender_node_id,
+            let attestation_forward = DepositsMessage::CollateralAttestation {
+                operator: msg.operator,
+                collateral_partner: msg.collateral_partner,
                 amount: msg.amount,
                 block_height: msg.block_height,
                 signature: msg.signature,
+                ledger_hash: msg.ledger_hash,
             };
 
             let ledgers = self.ledgers.lock().unwrap();
             for (op_id, part_id) in channel_ledgers_to_update {
                 if let Some(ledger_arc) = ledgers.get(&(op_id, part_id)) {
                     let mut ledger = ledger_arc.write().unwrap();
-                    match ledger.append_v1_mut_with_metadata(status_update.clone()) {
+                    match ledger.append_v1_mut_with_metadata(attestation_forward.clone()) {
                         Ok((prev_hash, new_hash, seq)) => {
                             log_info!(
                                 self.logger,
-                                "💰 COLLATERAL: Recorded CollateralStatus on channel ledger ({}, {}), seq={}, amount={}, from={}",
+                                "💰 COLLATERAL: Recorded CollateralAttestation on channel ledger ({}, {}), seq={}, amount={}, from={}",
                                 op_id, part_id, seq, msg.amount, sender_node_id
                             );
                             ledger.state.received_collateral_amount = ledger.state.received_collateral_amount.saturating_add(msg.amount);
                             if let Err(e) = self.persist_ledger_state(&*ledger) {
-                                log_error!(self.logger, "Failed to persist ledger after CollateralStatus: {}", e);
+                                log_error!(self.logger, "Failed to persist ledger after CollateralAttestation: {}", e);
                             }
 
                             // Queue message for sending to channel partner for bilateral signing
-                            pending_messages.push((part_id, status_update.clone()));
+                            pending_messages.push((part_id, attestation_forward.clone()));
 
                             // Track for broadcast after partner ACK (use partner-specific key)
-                            let message_hash = self.calculate_message_hash(&status_update);
+                            let message_hash = self.calculate_message_hash(&attestation_forward);
                             let unique_key = Self::create_partner_specific_hash(&message_hash, &part_id);
                             {
                                 let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
-                                sent_messages.insert(unique_key, (op_id, part_id, status_update.clone(), prev_hash, new_hash, seq));
+                                sent_messages.insert(unique_key, (op_id, part_id, attestation_forward.clone(), prev_hash, new_hash, seq));
                             }
                             {
                                 let mut pending_acks = self.pending_acks.lock().unwrap();
@@ -1580,13 +1582,13 @@ where
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap()
                                     .as_secs();
-                                pending_acks.insert(unique_key, (status_update.message_type(), timestamp));
+                                pending_acks.insert(unique_key, (attestation_forward.message_type(), timestamp));
                             }
                         }
                         Err(e) => {
                             log_error!(
                                 self.logger,
-                                "❌ COLLATERAL: Failed to add CollateralStatus to channel ledger ({}, {}): {}",
+                                "❌ COLLATERAL: Failed to add CollateralAttestation to channel ledger ({}, {}): {}",
                                 op_id, part_id, e
                             );
                         }
@@ -1595,12 +1597,12 @@ where
             }
         }
 
-        // Send pending messages (CollateralStatus to channel partners)
+        // Send pending messages (CollateralAttestation to channel partners)
         for (peer_id, msg_to_send) in pending_messages {
             if let Err(e) = self.send_message(peer_id, msg_to_send.clone()) {
-                log_error!(self.logger, "💰 COLLATERAL: Failed to send CollateralStatus to {}: {:?}", peer_id, e);
+                log_error!(self.logger, "💰 COLLATERAL: Failed to send CollateralAttestation to {}: {:?}", peer_id, e);
             } else {
-                log_info!(self.logger, "💰 COLLATERAL: Sent CollateralStatus to channel partner {}", peer_id);
+                log_info!(self.logger, "💰 COLLATERAL: Sent CollateralAttestation to channel partner {}", peer_id);
             }
         }
 

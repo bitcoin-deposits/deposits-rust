@@ -278,11 +278,6 @@ ldk_wire_wrapper! {
 }
 
 ldk_wire_wrapper! {
-    /// LDK wrapper for `deposits_core::CollateralStatusMsg`
-    LdkCollateralStatusMsg => deposits_core::CollateralStatusMsg
-}
-
-ldk_wire_wrapper! {
     /// LDK wrapper for `deposits_core::CollateralConsentRequestMsg`
     LdkCollateralConsentRequestMsg => deposits_core::CollateralConsentRequestMsg
 }

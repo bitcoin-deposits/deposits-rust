@@ -194,7 +194,7 @@ pub use wire_messages::{
     // Collateral messages
     CollateralIncreaseMsg, CollateralDecreaseMsg,
     CollateralAddPartnerMsg, CollateralRemovePartnerMsg,
-    CollateralAttestationMsg, CollateralStatusMsg,
+    CollateralAttestationMsg,
     CollateralConsentRequestMsg, CollateralConsentResponseMsg,
     // Fee and lifecycle messages
     FeeCollectMsg, LedgerCloseMsg,

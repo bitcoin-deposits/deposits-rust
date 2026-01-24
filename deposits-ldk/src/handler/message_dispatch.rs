@@ -49,9 +49,9 @@ where
 
         // Deferred oneshot notification for CollateralAttestation
         // We need to notify the waiter AFTER handle_collateral_attestation completes,
-        // so that CollateralStatus is in pending_acks before the waiter continues.
+        // so that CollateralAttestation is in pending_acks before the waiter continues.
         // This fixes a race condition where the waiter would check pending_acks before
-        // CollateralStatus was added.
+        // CollateralAttestation was added.
         let mut deferred_collateral_oneshot: Option<tokio::sync::oneshot::Sender<Result<(), String>>> = None;
 
         // Handle ACK messages specially - they don't need validation or further ACKs
@@ -149,7 +149,7 @@ where
                     }
 
                     // DEFER oneshot notification until AFTER handle_collateral_attestation completes
-                    // This ensures CollateralStatus is in pending_acks before the waiter continues
+                    // This ensures CollateralAttestation is in pending_acks before the waiter continues
                     deferred_collateral_oneshot = {
                         let mut pending_oneshot_acks = self.pending_oneshot_acks.lock().unwrap();
                         pending_oneshot_acks.remove(&hash)
@@ -363,11 +363,11 @@ where
                     signature: *signature,
                     ledger_hash: *ledger_hash,
                 };
-                // Call handler FIRST to add CollateralStatus to pending_acks
+                // Call handler FIRST to add CollateralAttestation to pending_acks
                 let result = self.handle_collateral_attestation(&msg, sender_node_id);
 
                 // NOW send the deferred oneshot notification
-                // This ensures CollateralStatus is in pending_acks before the waiter continues
+                // This ensures CollateralAttestation is in pending_acks before the waiter continues
                 if let Some(oneshot_tx) = deferred_collateral_oneshot.take() {
                     log_info!(self.logger, "💰 OPERATOR: Sending deferred oneshot after handle_collateral_attestation");
                     let _ = oneshot_tx.send(Ok(()));
@@ -748,9 +748,9 @@ where
                                 }
                             }
 
-                            // NOTE: Partner does NOT create CollateralStatus entries here.
-                            // Only the OPERATOR creates CollateralStatus on their channel ledgers
-                            // after receiving the attestation. The partner's role is to:
+                            // NOTE: Partner does NOT forward CollateralAttestation entries here.
+                            // Only the OPERATOR forwards CollateralAttestation to their channel ledgers
+                            // after receiving it. The partner's role is to:
                             // 1. Append CollateralIncrease to the shared ledger
                             // 2. Send CollateralAttestation back as proof
 
@@ -948,12 +948,12 @@ where
                                 pending_messages.push((sender_node_id, ack));
                             }
 
-                            // Special handling for CollateralStatus: update received_collateral_amount
+                            // Special handling for CollateralAttestation: update received_collateral_amount
                             // This allows partners to track collateral received from operators
-                            if let DepositsMessage::CollateralStatus { collateral_operator, amount, .. } = message {
+                            if let DepositsMessage::CollateralAttestation { operator, amount, .. } = message {
                                 ledger.state.received_collateral_amount = ledger.state.received_collateral_amount.saturating_add(amount);
                                 log_info!(self.logger, "💰 PARTNER: Updated received_collateral_amount to {} (added {} from {})",
-                                    ledger.state.received_collateral_amount, amount, collateral_operator);
+                                    ledger.state.received_collateral_amount, amount, operator);
                             }
 
                             // Mark that we should persist the ledger after releasing locks (only on success)

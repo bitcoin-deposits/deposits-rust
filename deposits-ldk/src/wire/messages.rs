@@ -50,7 +50,7 @@ pub use deposits_core::{
     // Collateral messages
     CollateralIncreaseMsg, CollateralDecreaseMsg,
     CollateralAddPartnerMsg, CollateralRemovePartnerMsg,
-    CollateralAttestationMsg, CollateralStatusMsg,
+    CollateralAttestationMsg,
     CollateralConsentRequestMsg, CollateralConsentResponseMsg,
     // Fee and lifecycle messages
     FeeCollectMsg, LedgerCloseMsg,
@@ -85,7 +85,7 @@ pub use super::adapters::{
     // Collateral wrappers
     LdkCollateralIncreaseMsg, LdkCollateralDecreaseMsg,
     LdkCollateralAddPartnerMsg, LdkCollateralRemovePartnerMsg,
-    LdkCollateralAttestationMsg, LdkCollateralStatusMsg,
+    LdkCollateralAttestationMsg,
     LdkCollateralConsentRequestMsg, LdkCollateralConsentResponseMsg,
     // Fee and lifecycle wrappers
     LdkFeeCollectMsg, LdkLedgerCloseMsg,

@@ -192,35 +192,35 @@ where
             // For now, log but don't fail - we'll add strict enforcement later
         }
 
-        // Wait for pending CollateralStatus ACKs to complete
-        // The CollateralAttestation triggers sending of CollateralStatus to channel partners.
+        // Wait for pending CollateralAttestation ACKs to complete
+        // The CollateralAttestation is forwarded to channel partners.
         // We must wait for those ACKs before sending the cosign request, otherwise the
         // partner will see 0 collateral.
         //
         // Note: The oneshot notification is now deferred in message_dispatch.rs until AFTER
-        // handle_collateral_attestation completes, so CollateralStatus is already in
+        // handle_collateral_attestation completes, so CollateralAttestation is already in
         // pending_acks when we reach this point. No initial delay needed.
         {
-            use super::messages::consts::COLLATERAL_STATUS;
+            use super::messages::consts::COLLATERAL_ATTESTATION;
 
             let start = std::time::Instant::now();
             let timeout = Duration::from_millis(5000);
 
             loop {
-                let pending_collateral_status = {
+                let pending_collateral_attestation = {
                     let pending_acks = self.pending_acks.lock().unwrap();
                     pending_acks.iter()
-                        .filter(|(_, (msg_type, _))| *msg_type == COLLATERAL_STATUS)
+                        .filter(|(_, (msg_type, _))| *msg_type == COLLATERAL_ATTESTATION)
                         .count()
                 };
 
-                if pending_collateral_status == 0 {
-                    log_debug!(self.logger, "✅ All CollateralStatus ACKs received");
+                if pending_collateral_attestation == 0 {
+                    log_debug!(self.logger, "✅ All CollateralAttestation ACKs received");
                     break;
                 }
 
                 if start.elapsed() > timeout {
-                    log_warn!(self.logger, "⚠️ Timeout waiting for {} CollateralStatus ACK(s)", pending_collateral_status);
+                    log_warn!(self.logger, "⚠️ Timeout waiting for {} CollateralAttestation ACK(s)", pending_collateral_attestation);
                     break;
                 }
 

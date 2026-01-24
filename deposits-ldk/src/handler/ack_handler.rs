@@ -95,7 +95,7 @@ where
             println!("🟢 HANDLE_ACK: Checking ledger for hash {:02x?} from {}", &ack_msg.message_hash[0..4], sender);
 
             // Check and remove pending ACK
-            // Try both original message_hash and partner-specific hash (for messages like CollateralStatus
+            // Try both original message_hash and partner-specific hash (for messages like CollateralAttestation
             // that are sent to multiple partners with the same content)
             let partner_specific_hash = Self::create_partner_specific_hash(&ack_msg.message_hash, &sender);
             let (original_message_type, lookup_hash) = {
@@ -136,7 +136,7 @@ where
                     // Get new_hash BEFORE broadcasting (broadcast removes the entry)
                     // For some message types (AddCollateralPartner, etc.), the operator appends AFTER
                     // receiving ACK, so new_hash won't be set yet. Skip in that case.
-                    // Use lookup_hash which may be partner-specific for CollateralStatus messages.
+                    // Use lookup_hash which may be partner-specific for CollateralAttestation messages.
                     let new_hash_opt = {
                         let sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
                         sent_messages.get(&lookup_hash).map(|(_, _, _, _, new_hash, _)| *new_hash)
@@ -184,7 +184,7 @@ where
                     }
 
                     // Now broadcast (this removes entry from sent_messages_for_broadcast)
-                    // Use lookup_hash which may be partner-specific for CollateralStatus messages.
+                    // Use lookup_hash which may be partner-specific for CollateralAttestation messages.
                     let should_broadcast = new_hash_opt.map(|h| h != [0u8; 32]).unwrap_or(false);
                     if should_broadcast {
                         println!("[ACK] broadcast hash={:02x?} sender={} has_sig={}",

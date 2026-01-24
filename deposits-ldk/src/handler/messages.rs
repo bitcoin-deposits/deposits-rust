@@ -81,7 +81,7 @@ pub use crate::wire::messages::{
     // Collateral operations (core types re-exported)
     CollateralIncreaseMsg, CollateralDecreaseMsg,
     // LDK-only collateral types (defined in wire/messages.rs)
-    CollateralAddPartnerMsg, CollateralRemovePartnerMsg, CollateralStatusMsg,
+    CollateralAddPartnerMsg, CollateralRemovePartnerMsg,
     CollateralConsentRequestMsg, CollateralConsentResponseMsg,
     // Fee and ledger close (re-exported from deposits-core)
     FeeCollectMsg, LedgerCloseMsg,
@@ -111,7 +111,7 @@ pub use crate::wire::messages::{
     LdkDepositOpenMsg, LdkDepositCloseMsg, LdkDepositUpdateMsg,
     LdkCollateralIncreaseMsg, LdkCollateralDecreaseMsg,
     LdkCollateralAddPartnerMsg, LdkCollateralRemovePartnerMsg,
-    LdkCollateralAttestationMsg, LdkCollateralStatusMsg,
+    LdkCollateralAttestationMsg,
     LdkCollateralConsentRequestMsg, LdkCollateralConsentResponseMsg,
     LdkFeeCollectMsg, LdkLedgerCloseMsg,
     LdkReceivingCreditPaymentMsg, LdkSendingLockPaymentMsg,
@@ -386,13 +386,6 @@ pub enum DepositsMessage {
         consent_granted: bool,
         collateral_partner_signature: [u8; 64],
     },
-    /// Collateral status - uses inline fields (legacy CollateralStatusMsg retained for deserialization)
-    CollateralStatus {
-        collateral_operator: PublicKey,
-        amount: u64,
-        block_height: u32,
-        signature: [u8; 64],
-    },
     /// Fee collection - uses inline fields (legacy FeeCollectMsg/MaintenanceFeeCollectMsg retained for deserialization)
     MaintenanceFeeCollect {
         pubkey: PublicKey,
@@ -606,7 +599,6 @@ impl DepositsMessage {
             Self::CollateralAttestation { .. } => COLLATERAL_ATTESTATION,
             Self::CollateralConsentRequest { .. } => COLLATERAL_CONSENT_REQUEST,
             Self::CollateralConsentResponse { .. } => COLLATERAL_CONSENT_RESPONSE,
-            Self::CollateralStatus { .. } => COLLATERAL_STATUS,
             Self::MaintenanceFeeCollect { .. } => MAINTENANCE_FEE_COLLECT,
             Self::LedgerClose { .. } => LEDGER_CLOSE,
             Self::ChannelCloseTombstone { .. } => CHANNEL_CLOSE_TOMBSTONE,
@@ -682,7 +674,6 @@ impl DepositsMessage {
             Self::CollateralAttestation { .. } => "CollateralAttestation",
             Self::CollateralConsentRequest { .. } => "CollateralConsentRequest",
             Self::CollateralConsentResponse { .. } => "CollateralConsentResponse",
-            Self::CollateralStatus { .. } => "CollateralStatus",
             Self::MaintenanceFeeCollect { .. } => "MaintenanceFeeCollect",
             Self::LedgerClose { .. } => "LedgerClose",
             Self::ChannelCloseTombstone { .. } => "ChannelCloseTombstone",
@@ -791,7 +782,6 @@ impl DepositsMessage {
             Self::CollateralAttestation { collateral_partner, .. } => Some(*collateral_partner),
             Self::CollateralConsentRequest { partner_id, .. } => Some(*partner_id),
             Self::CollateralConsentResponse { partner_id, .. } => Some(*partner_id),
-            Self::CollateralStatus { .. } => None, // CollateralStatus doesn't track partner
             Self::MaintenanceFeeCollect { .. } => None,
             Self::LedgerClose { partner_id, .. } => Some(*partner_id),
             Self::ChannelCloseTombstone { partner_pubkey, .. } => Some(*partner_pubkey),
@@ -1744,24 +1734,6 @@ impl DepositsMessage {
                     operator_signature: [0u8; 64],
                 })
             }
-            Self::CollateralStatus { collateral_operator, amount, block_height, signature } => {
-                // No direct V2 equivalent - use placeholder LedgerUpdate
-                DepositsMessageCore::LedgerUpdate(LedgerUpdateMsgV2 {
-                    operator_id: collateral_operator,
-                    partner_id: collateral_operator,
-                    operation: LedgerOperation::CollateralAttestation {
-                        collateral_operator,
-                        amount,
-                        block_height,
-                        signature,
-                        ledger_hash: [0u8; 32],
-                    },
-                    sequence_number: 0,
-                    previous_hash: [0u8; 32],
-                    current_hash: [0u8; 32],
-                    operator_signature: [0u8; 64],
-                })
-            }
             Self::MaintenanceFeeCollect { pubkey, amount, block_height } => {
                 DepositsMessageCore::LedgerUpdate(LedgerUpdateMsgV2 {
                     operator_id: pubkey,
@@ -2422,7 +2394,7 @@ pub struct QuorumStateSyncMsg {
 // Import all V1 message type constants from deposits-ldk
 pub use crate::wire::message_types::{
     RESERVES_ADD_OUTPUT, RESERVES_REMOVE_OUTPUT, RESERVES_INCREASE, RESERVES_DECREASE,
-    RESERVES_UPDATE_OUTPUT, UPDATE_RESERVES, ACCEPT_RESERVES, COLLATERAL_INCREASE, COLLATERAL_DECREASE, COLLATERAL_STATUS,
+    RESERVES_UPDATE_OUTPUT, UPDATE_RESERVES, ACCEPT_RESERVES, COLLATERAL_INCREASE, COLLATERAL_DECREASE,
     DEPOSIT_OPEN, DEPOSIT_CLOSE, DEPOSIT_UPDATE, DEPOSIT_LOCK_TRANSFER, DEPOSIT_FAIL_TRANSFER,
     DEPOSIT_FULFILL_TRANSFER, LEDGER_CLOSE, MAINTENANCE_FEE_COLLECT, RECEIVING_COSIGN_INVOICE,
     RECEIVING_CREDIT_PAYMENT, UNCREDITED_PAYMENT, SENDING_LOCK_PAYMENT, SENDING_FAIL_PAYMENT,
@@ -2453,7 +2425,7 @@ pub mod consts {
     // V1 compatibility constants from deposits-ldk
     pub use crate::wire::message_types::{
         RESERVES_ADD_OUTPUT, RESERVES_REMOVE_OUTPUT, RESERVES_INCREASE, RESERVES_DECREASE,
-        RESERVES_UPDATE_OUTPUT, UPDATE_RESERVES, ACCEPT_RESERVES, COLLATERAL_INCREASE, COLLATERAL_DECREASE, COLLATERAL_STATUS,
+        RESERVES_UPDATE_OUTPUT, UPDATE_RESERVES, ACCEPT_RESERVES, COLLATERAL_INCREASE, COLLATERAL_DECREASE,
         DEPOSIT_OPEN, DEPOSIT_CLOSE, DEPOSIT_UPDATE, DEPOSIT_LOCK_TRANSFER, DEPOSIT_FAIL_TRANSFER,
         DEPOSIT_FULFILL_TRANSFER, LEDGER_CLOSE, MAINTENANCE_FEE_COLLECT, RECEIVING_COSIGN_INVOICE,
         RECEIVING_CREDIT_PAYMENT, UNCREDITED_PAYMENT, SENDING_LOCK_PAYMENT, SENDING_FAIL_PAYMENT,
@@ -2749,17 +2721,6 @@ impl Readable for DepositsMessage {
                     }
                 });
             }
-            COLLATERAL_STATUS => {
-                return LdkCollateralStatusMsg::read(reader).map(|w| {
-                    let m = w.0;
-                    Self::CollateralStatus {
-                        collateral_operator: m.collateral_operator,
-                        amount: m.amount,
-                        block_height: m.block_height,
-                        signature: m.signature,
-                    }
-                });
-            }
             COLLATERAL_CONSENT_REQUEST => {
                 return LdkCollateralConsentRequestMsg::read(reader).map(|w| {
                     let m = w.0;
@@ -2964,9 +2925,6 @@ impl Writeable for DepositsMessage {
             }
             Self::CollateralDecrease { partner_id, new_amount, block_height } => {
                 LdkCollateralDecreaseMsg::from(CollateralDecreaseMsg { partner_id: *partner_id, new_amount: *new_amount, block_height: *block_height }).write(writer)
-            }
-            Self::CollateralStatus { collateral_operator, amount, block_height, signature } => {
-                LdkCollateralStatusMsg::from(CollateralStatusMsg { collateral_operator: *collateral_operator, amount: *amount, block_height: *block_height, signature: *signature }).write(writer)
             }
             Self::CollateralAttestation { operator, collateral_partner, amount, block_height, signature, ledger_hash } => {
                 LdkCollateralAttestationMsg::from(CollateralAttestationMsg { operator: *operator, collateral_partner: *collateral_partner, amount: *amount, block_height: *block_height, signature: *signature, ledger_hash: *ledger_hash }).write(writer)
@@ -3209,18 +3167,6 @@ impl lightning::ln::wire::CustomMessageReader for DepositsMessageReader {
                             partner_id: m.partner_id,
                             new_amount: m.new_amount,
                             block_height: m.block_height,
-                        })
-                    });
-            }
-            COLLATERAL_STATUS => {
-                return LdkCollateralStatusMsg::read(buffer)
-                    .map(|w| {
-                        let m = w.0;
-                        Some(DepositsMessage::CollateralStatus {
-                            collateral_operator: m.collateral_operator,
-                            amount: m.amount,
-                            block_height: m.block_height,
-                            signature: m.signature,
                         })
                     });
             }

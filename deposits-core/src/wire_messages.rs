@@ -1038,36 +1038,6 @@ impl WireDecode for CollateralAttestationMsg {
     }
 }
 
-/// V1-compatible collateral status message
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CollateralStatusMsg {
-    pub collateral_operator: PublicKey,
-    pub amount: u64,
-    pub block_height: u32,
-    pub signature: [u8; 64],
-}
-
-impl WireEncode for CollateralStatusMsg {
-    fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
-        write_pubkey(writer, &self.collateral_operator)?;
-        write_u64(writer, self.amount)?;
-        write_u32(writer, self.block_height)?;
-        write_bytes64(writer, &self.signature)?;
-        Ok(())
-    }
-}
-
-impl WireDecode for CollateralStatusMsg {
-    fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
-        Ok(Self {
-            collateral_operator: read_pubkey(reader)?,
-            amount: read_u64(reader)?,
-            block_height: read_u32(reader)?,
-            signature: read_bytes64(reader)?,
-        })
-    }
-}
-
 /// V1-compatible collateral consent request message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CollateralConsentRequestMsg {
