@@ -81,7 +81,7 @@ pub use constants::{
     COLLATERAL_REPORTING_PERIOD_BLOCKS, DEPOSITS_PROTOCOL_VERSION,
 };
 pub use error::{DepositsError, DepositsResult};
-pub use messages::{DepositsMessage, LedgerOperation};
+pub use messages::{DepositsMessage, LedgerOperation, HashStrategy};
 pub use recovery::{
     RecoveryManager, RecoveryPhase, RecoveryVote, RecoveryOutcome, RecoveryError,
     ClaimEligibility, RecoveryPool, RecoveryCandidate, select_recovery_partner,
