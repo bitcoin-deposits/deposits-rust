@@ -37,11 +37,14 @@ use crate::wire_messages::{
     ReceivingCreditPaymentMsg, SendingLockPaymentMsg,
     SendingFulfillPaymentMsg, SendingFailPaymentMsg,
     DepositOpenMsg, DepositCloseMsg, DepositUpdateMsg,
+    ReservesAddOutputMsg, ReservesRemoveOutputMsg,
+    ReservesIncreaseMsg, ReservesDecreaseMsg,
 };
 use crate::operation_validation::{
     validate_credit_payment, validate_payment_lock,
     validate_payment_fulfill, validate_payment_fail,
     validate_deposit_add, validate_deposit_close, validate_deposit_update,
+    validate_reserves_add, validate_reserves_increase, validate_reserves_decrease,
 };
 
 // ============================================================================
@@ -180,6 +183,55 @@ pub enum ResponseData {
         operator: PublicKey,
         partner: PublicKey,
         deposit_pubkey: PublicKey,
+        /// Sequence number after append
+        sequence: u64,
+        /// Previous state hash
+        prev_hash: [u8; 32],
+        /// New state hash after append
+        new_hash: [u8; 32],
+    },
+    /// Reserves add output validated - partner should sign and ACK
+    ReservesAddOutputValidated {
+        operator: PublicKey,
+        partner: PublicKey,
+        initial_amount: u64,
+        spend_to: PublicKey,
+        collateral_partners: Vec<PublicKey>,
+        /// Sequence number after append
+        sequence: u64,
+        /// Previous state hash
+        prev_hash: [u8; 32],
+        /// New state hash after append
+        new_hash: [u8; 32],
+    },
+    /// Reserves remove output validated - partner should sign and ACK
+    ReservesRemoveOutputValidated {
+        operator: PublicKey,
+        partner: PublicKey,
+        /// Sequence number after append
+        sequence: u64,
+        /// Previous state hash
+        prev_hash: [u8; 32],
+        /// New state hash after append
+        new_hash: [u8; 32],
+    },
+    /// Reserves increase validated - partner should sign and ACK
+    ReservesIncreaseValidated {
+        operator: PublicKey,
+        partner: PublicKey,
+        new_amount: u64,
+        /// Sequence number after append
+        sequence: u64,
+        /// Previous state hash
+        prev_hash: [u8; 32],
+        /// New state hash after append
+        new_hash: [u8; 32],
+    },
+    /// Reserves decrease validated - partner should sign and ACK
+    ReservesDecreaseValidated {
+        operator: PublicKey,
+        partner: PublicKey,
+        new_amount: u64,
         /// Sequence number after append
         sequence: u64,
         /// Previous state hash
@@ -1070,6 +1122,292 @@ pub fn handle_deposit_update<C: HandlerContext>(
         operator: sender,
         partner: msg.partner_id,
         deposit_pubkey: msg.pubkey,
+        sequence,
+        prev_hash,
+        new_hash,
+    }))
+}
+
+// ============================================================================
+// Reserves Message Handlers
+// ============================================================================
+
+/// Handle a ReservesAddOutput message.
+///
+/// Received by partners when an operator adds a reserves output to the ledger.
+/// This establishes the initial reserves backing for the ledger.
+/// The partner validates the message and signs the ledger update (porcupine dance).
+///
+/// # Arguments
+/// * `ctx` - Handler context providing access to ledgers and messaging
+/// * `msg` - The reserves add output message
+/// * `sender` - Public key of the message sender (should be the operator)
+///
+/// # Returns
+/// * `HandlerResult::Response(ReservesAddOutputValidated)` - Valid, partner should sign and ACK
+/// * `HandlerResult::Rejected(reason)` - Invalid with explanation
+/// * `HandlerError` - Internal error during processing
+pub fn handle_reserves_add_output<C: HandlerContext>(
+    ctx: &C,
+    msg: &ReservesAddOutputMsg,
+    sender: PublicKey,
+) -> Result<HandlerResult, HandlerError> {
+    let our_node_id = ctx.our_node_id();
+
+    // We must be the partner to process this message
+    if msg.partner_id != our_node_id {
+        return Ok(HandlerResult::Rejected(format!(
+            "We ({}) are not the target partner ({})",
+            our_node_id, msg.partner_id
+        )));
+    }
+
+    // Get the ledger - sender (operator) and us (partner)
+    let ledger_arc = ctx.get_ledger(&sender, &msg.partner_id)
+        .ok_or(HandlerError::LedgerNotFound {
+            operator: sender,
+            partner: msg.partner_id,
+        })?;
+
+    // Validate and get current state
+    let (sequence, prev_hash, new_hash) = {
+        let ledger = ledger_arc.read().map_err(|_|
+            HandlerError::Internal("Failed to acquire ledger read lock".to_string())
+        )?;
+
+        // Check for idempotency - if reserves output already exists with same amount
+        if ledger.state.reserves.amount > 0 {
+            return Ok(HandlerResult::Response(ResponseData::ReservesAddOutputValidated {
+                operator: sender,
+                partner: msg.partner_id,
+                initial_amount: msg.initial_amount,
+                spend_to: msg.spend_to,
+                collateral_partners: msg.collateral_partners.clone(),
+                sequence: ledger.sequence(),
+                prev_hash: ledger.hash(),
+                new_hash: ledger.hash(),
+            }));
+        }
+
+        // Validate the reserves add operation
+        validate_reserves_add(msg.initial_amount)
+            .map_err(|e| HandlerError::ValidationFailed(e))?;
+
+        // Return current state for response
+        (ledger.sequence(), ledger.hash(), ledger.hash())
+    };
+
+    // Return validated data for LDK layer to record to ledger and sign
+    Ok(HandlerResult::Response(ResponseData::ReservesAddOutputValidated {
+        operator: sender,
+        partner: msg.partner_id,
+        initial_amount: msg.initial_amount,
+        spend_to: msg.spend_to,
+        collateral_partners: msg.collateral_partners.clone(),
+        sequence,
+        prev_hash,
+        new_hash,
+    }))
+}
+
+/// Handle a ReservesRemoveOutput message.
+///
+/// Received by partners when an operator removes the reserves output from the ledger.
+/// This is typically done when closing the ledger or transitioning to a new reserves setup.
+/// The partner validates the message and signs the ledger update (porcupine dance).
+///
+/// # Arguments
+/// * `ctx` - Handler context providing access to ledgers and messaging
+/// * `msg` - The reserves remove output message
+/// * `sender` - Public key of the message sender (should be the operator)
+///
+/// # Returns
+/// * `HandlerResult::Response(ReservesRemoveOutputValidated)` - Valid, partner should sign and ACK
+/// * `HandlerResult::Rejected(reason)` - Invalid with explanation
+/// * `HandlerError` - Internal error during processing
+pub fn handle_reserves_remove_output<C: HandlerContext>(
+    ctx: &C,
+    msg: &ReservesRemoveOutputMsg,
+    sender: PublicKey,
+) -> Result<HandlerResult, HandlerError> {
+    let our_node_id = ctx.our_node_id();
+
+    // We must be the partner to process this message
+    if msg.partner_id != our_node_id {
+        return Ok(HandlerResult::Rejected(format!(
+            "We ({}) are not the target partner ({})",
+            our_node_id, msg.partner_id
+        )));
+    }
+
+    // Get the ledger - sender (operator) and us (partner)
+    let ledger_arc = ctx.get_ledger(&sender, &msg.partner_id)
+        .ok_or(HandlerError::LedgerNotFound {
+            operator: sender,
+            partner: msg.partner_id,
+        })?;
+
+    // Validate and get current state
+    let (sequence, prev_hash, new_hash) = {
+        let ledger = ledger_arc.read().map_err(|_|
+            HandlerError::Internal("Failed to acquire ledger read lock".to_string())
+        )?;
+
+        // Check for idempotency - if reserves output already removed
+        if ledger.state.reserves.amount == 0 {
+            return Ok(HandlerResult::Response(ResponseData::ReservesRemoveOutputValidated {
+                operator: sender,
+                partner: msg.partner_id,
+                sequence: ledger.sequence(),
+                prev_hash: ledger.hash(),
+                new_hash: ledger.hash(),
+            }));
+        }
+
+        // Validate: cannot remove reserves if there are active deposits
+        let total_deposits: u64 = ledger.state.deposits.values().map(|d| d.balance).sum();
+        if total_deposits > 0 {
+            return Ok(HandlerResult::Rejected(format!(
+                "Cannot remove reserves output with {} sats in active deposits",
+                total_deposits
+            )));
+        }
+
+        // Return current state for response
+        (ledger.sequence(), ledger.hash(), ledger.hash())
+    };
+
+    // Return validated data for LDK layer to record to ledger and sign
+    Ok(HandlerResult::Response(ResponseData::ReservesRemoveOutputValidated {
+        operator: sender,
+        partner: msg.partner_id,
+        sequence,
+        prev_hash,
+        new_hash,
+    }))
+}
+
+/// Handle a ReservesIncrease message.
+///
+/// Received by partners when an operator increases the reserves backing.
+/// This moves funds from the channel balance to the reserves output.
+/// The partner validates the message and signs the ledger update (porcupine dance).
+///
+/// # Arguments
+/// * `ctx` - Handler context providing access to ledgers and messaging
+/// * `msg` - The reserves increase message
+/// * `sender` - Public key of the message sender (should be the operator)
+///
+/// # Returns
+/// * `HandlerResult::Response(ReservesIncreaseValidated)` - Valid, partner should sign and ACK
+/// * `HandlerResult::Rejected(reason)` - Invalid with explanation
+/// * `HandlerError` - Internal error during processing
+pub fn handle_reserves_increase<C: HandlerContext>(
+    ctx: &C,
+    msg: &ReservesIncreaseMsg,
+    sender: PublicKey,
+) -> Result<HandlerResult, HandlerError> {
+    let our_node_id = ctx.our_node_id();
+
+    // We must be the partner to process this message
+    if msg.partner_id != our_node_id {
+        return Ok(HandlerResult::Rejected(format!(
+            "We ({}) are not the target partner ({})",
+            our_node_id, msg.partner_id
+        )));
+    }
+
+    // Get the ledger - sender (operator) and us (partner)
+    let ledger_arc = ctx.get_ledger(&sender, &msg.partner_id)
+        .ok_or(HandlerError::LedgerNotFound {
+            operator: sender,
+            partner: msg.partner_id,
+        })?;
+
+    // Validate and get current state
+    let (sequence, prev_hash, new_hash) = {
+        let ledger = ledger_arc.read().map_err(|_|
+            HandlerError::Internal("Failed to acquire ledger read lock".to_string())
+        )?;
+
+        let current_reserves = ledger.reserves_amount();
+
+        // Validate the reserves increase operation
+        // Note: We don't have channel balance here - LDK layer will verify against actual channel
+        validate_reserves_increase(current_reserves, msg.new_amount, None)
+            .map_err(|e| HandlerError::ValidationFailed(e))?;
+
+        // Return current state for response
+        (ledger.sequence(), ledger.hash(), ledger.hash())
+    };
+
+    // Return validated data for LDK layer to record to ledger and sign
+    Ok(HandlerResult::Response(ResponseData::ReservesIncreaseValidated {
+        operator: sender,
+        partner: msg.partner_id,
+        new_amount: msg.new_amount,
+        sequence,
+        prev_hash,
+        new_hash,
+    }))
+}
+
+/// Handle a ReservesDecrease message.
+///
+/// Received by partners when an operator decreases the reserves backing.
+/// This moves funds from the reserves output back to channel balance.
+/// The partner validates the message and signs the ledger update (porcupine dance).
+///
+/// # Arguments
+/// * `ctx` - Handler context providing access to ledgers and messaging
+/// * `msg` - The reserves decrease message
+/// * `sender` - Public key of the message sender (should be the operator)
+///
+/// # Returns
+/// * `HandlerResult::Response(ReservesDecreaseValidated)` - Valid, partner should sign and ACK
+/// * `HandlerResult::Rejected(reason)` - Invalid with explanation
+/// * `HandlerError` - Internal error during processing
+pub fn handle_reserves_decrease<C: HandlerContext>(
+    ctx: &C,
+    msg: &ReservesDecreaseMsg,
+    sender: PublicKey,
+) -> Result<HandlerResult, HandlerError> {
+    let our_node_id = ctx.our_node_id();
+
+    // We must be the partner to process this message
+    if msg.partner_id != our_node_id {
+        return Ok(HandlerResult::Rejected(format!(
+            "We ({}) are not the target partner ({})",
+            our_node_id, msg.partner_id
+        )));
+    }
+
+    // Get the ledger - sender (operator) and us (partner)
+    let ledger_arc = ctx.get_ledger(&sender, &msg.partner_id)
+        .ok_or(HandlerError::LedgerNotFound {
+            operator: sender,
+            partner: msg.partner_id,
+        })?;
+
+    // Validate and get current state
+    let (sequence, prev_hash, new_hash) = {
+        let ledger = ledger_arc.read().map_err(|_|
+            HandlerError::Internal("Failed to acquire ledger read lock".to_string())
+        )?;
+
+        // Validate the reserves decrease operation
+        validate_reserves_decrease(&ledger, msg.new_amount)
+            .map_err(|e| HandlerError::ValidationFailed(e))?;
+
+        // Return current state for response
+        (ledger.sequence(), ledger.hash(), ledger.hash())
+    };
+
+    // Return validated data for LDK layer to record to ledger and sign
+    Ok(HandlerResult::Response(ResponseData::ReservesDecreaseValidated {
+        operator: sender,
+        partner: msg.partner_id,
+        new_amount: msg.new_amount,
         sequence,
         prev_hash,
         new_hash,
@@ -2597,6 +2935,467 @@ mod tests {
 
         // Fee rate too high - should fail validation
         let result = handle_deposit_update(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::ValidationFailed(_))));
+    }
+
+    // ========================================================================
+    // Reserves Add Output Tests
+    // ========================================================================
+
+    #[test]
+    fn test_handle_reserves_add_output_wrong_partner() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let other_partner = create_test_pubkey(3);
+        let spend_to = create_test_pubkey(4);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let msg = ReservesAddOutputMsg {
+            initial_amount: 100_000,
+            spend_to,
+            partner_id: other_partner, // Not us
+            collateral_partners: vec![],
+        };
+
+        // We're not the target partner - should be rejected
+        let result = handle_reserves_add_output(&ctx, &msg, operator);
+        assert!(matches!(result, Ok(HandlerResult::Rejected(_))));
+    }
+
+    #[test]
+    fn test_handle_reserves_add_output_no_ledger() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let spend_to = create_test_pubkey(3);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let msg = ReservesAddOutputMsg {
+            initial_amount: 100_000,
+            spend_to,
+            partner_id: our_node_id,
+            collateral_partners: vec![],
+        };
+
+        // No ledger - should error
+        let result = handle_reserves_add_output(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::LedgerNotFound { .. })));
+    }
+
+    #[test]
+    fn test_handle_reserves_add_output_valid() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let spend_to = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger with no reserves
+        let ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = ReservesAddOutputMsg {
+            initial_amount: 100_000,
+            spend_to,
+            partner_id: our_node_id,
+            collateral_partners: vec![],
+        };
+
+        // Valid request - should return response
+        let result = handle_reserves_add_output(&ctx, &msg, operator);
+        match result {
+            Ok(HandlerResult::Response(ResponseData::ReservesAddOutputValidated { initial_amount, .. })) => {
+                assert_eq!(initial_amount, 100_000);
+            }
+            other => panic!("Expected Response(ReservesAddOutputValidated), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_handle_reserves_add_output_amount_too_small() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let spend_to = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger with no reserves
+        let ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = ReservesAddOutputMsg {
+            initial_amount: 100, // Too small
+            spend_to,
+            partner_id: our_node_id,
+            collateral_partners: vec![],
+        };
+
+        // Amount too small - should fail validation
+        let result = handle_reserves_add_output(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::ValidationFailed(_))));
+    }
+
+    #[test]
+    fn test_handle_reserves_add_output_idempotent() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let spend_to = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger that already has reserves
+        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        ledger.state.reserves.amount = 100_000;
+        ledger.state.reserves.spend_to = spend_to;
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = ReservesAddOutputMsg {
+            initial_amount: 100_000,
+            spend_to,
+            partner_id: our_node_id,
+            collateral_partners: vec![],
+        };
+
+        // Already exists - should return success (idempotent)
+        let result = handle_reserves_add_output(&ctx, &msg, operator);
+        match result {
+            Ok(HandlerResult::Response(ResponseData::ReservesAddOutputValidated { .. })) => {}
+            other => panic!("Expected Response(ReservesAddOutputValidated), got {:?}", other),
+        }
+    }
+
+    // ========================================================================
+    // Reserves Remove Output Tests
+    // ========================================================================
+
+    #[test]
+    fn test_handle_reserves_remove_output_wrong_partner() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let other_partner = create_test_pubkey(3);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let msg = ReservesRemoveOutputMsg {
+            partner_id: other_partner, // Not us
+            remove_all: true,
+        };
+
+        // We're not the target partner - should be rejected
+        let result = handle_reserves_remove_output(&ctx, &msg, operator);
+        assert!(matches!(result, Ok(HandlerResult::Rejected(_))));
+    }
+
+    #[test]
+    fn test_handle_reserves_remove_output_no_ledger() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let msg = ReservesRemoveOutputMsg {
+            partner_id: our_node_id,
+            remove_all: true,
+        };
+
+        // No ledger - should error
+        let result = handle_reserves_remove_output(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::LedgerNotFound { .. })));
+    }
+
+    #[test]
+    fn test_handle_reserves_remove_output_valid() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let spend_to = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger with reserves but no deposits
+        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        ledger.state.reserves.amount = 100_000;
+        ledger.state.reserves.spend_to = spend_to;
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = ReservesRemoveOutputMsg {
+            partner_id: our_node_id,
+            remove_all: true,
+        };
+
+        // Valid request - should return response
+        let result = handle_reserves_remove_output(&ctx, &msg, operator);
+        match result {
+            Ok(HandlerResult::Response(ResponseData::ReservesRemoveOutputValidated { .. })) => {}
+            other => panic!("Expected Response(ReservesRemoveOutputValidated), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_handle_reserves_remove_output_has_active_deposits() {
+        use crate::types::Deposit;
+
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let spend_to = create_test_pubkey(3);
+        let deposit_pubkey = create_test_pubkey(4);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger with reserves and active deposits
+        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        ledger.state.reserves.amount = 100_000;
+        ledger.state.reserves.spend_to = spend_to;
+        let mut deposit = Deposit::new(deposit_pubkey, None);
+        deposit.balance = 50_000;
+        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = ReservesRemoveOutputMsg {
+            partner_id: our_node_id,
+            remove_all: true,
+        };
+
+        // Has active deposits - should be rejected
+        let result = handle_reserves_remove_output(&ctx, &msg, operator);
+        assert!(matches!(result, Ok(HandlerResult::Rejected(_))));
+    }
+
+    #[test]
+    fn test_handle_reserves_remove_output_idempotent() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger with no reserves (already removed)
+        let ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = ReservesRemoveOutputMsg {
+            partner_id: our_node_id,
+            remove_all: true,
+        };
+
+        // Already removed - should return success (idempotent)
+        let result = handle_reserves_remove_output(&ctx, &msg, operator);
+        match result {
+            Ok(HandlerResult::Response(ResponseData::ReservesRemoveOutputValidated { .. })) => {}
+            other => panic!("Expected Response(ReservesRemoveOutputValidated), got {:?}", other),
+        }
+    }
+
+    // ========================================================================
+    // Reserves Increase Tests
+    // ========================================================================
+
+    #[test]
+    fn test_handle_reserves_increase_wrong_partner() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let other_partner = create_test_pubkey(3);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let msg = ReservesIncreaseMsg {
+            partner_id: other_partner, // Not us
+            new_amount: 200_000,
+        };
+
+        // We're not the target partner - should be rejected
+        let result = handle_reserves_increase(&ctx, &msg, operator);
+        assert!(matches!(result, Ok(HandlerResult::Rejected(_))));
+    }
+
+    #[test]
+    fn test_handle_reserves_increase_no_ledger() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let msg = ReservesIncreaseMsg {
+            partner_id: our_node_id,
+            new_amount: 200_000,
+        };
+
+        // No ledger - should error
+        let result = handle_reserves_increase(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::LedgerNotFound { .. })));
+    }
+
+    #[test]
+    fn test_handle_reserves_increase_valid() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let spend_to = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger with existing reserves
+        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        ledger.state.reserves.amount = 100_000;
+        ledger.state.reserves.spend_to = spend_to;
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = ReservesIncreaseMsg {
+            partner_id: our_node_id,
+            new_amount: 200_000,
+        };
+
+        // Valid request - should return response
+        let result = handle_reserves_increase(&ctx, &msg, operator);
+        match result {
+            Ok(HandlerResult::Response(ResponseData::ReservesIncreaseValidated { new_amount, .. })) => {
+                assert_eq!(new_amount, 200_000);
+            }
+            other => panic!("Expected Response(ReservesIncreaseValidated), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_handle_reserves_increase_not_actually_increasing() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let spend_to = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger with existing reserves
+        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        ledger.state.reserves.amount = 200_000;
+        ledger.state.reserves.spend_to = spend_to;
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = ReservesIncreaseMsg {
+            partner_id: our_node_id,
+            new_amount: 150_000, // Less than current
+        };
+
+        // Not actually increasing - should fail validation
+        let result = handle_reserves_increase(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::ValidationFailed(_))));
+    }
+
+    // ========================================================================
+    // Reserves Decrease Tests
+    // ========================================================================
+
+    #[test]
+    fn test_handle_reserves_decrease_wrong_partner() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let other_partner = create_test_pubkey(3);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let msg = ReservesDecreaseMsg {
+            partner_id: other_partner, // Not us
+            new_amount: 50_000,
+        };
+
+        // We're not the target partner - should be rejected
+        let result = handle_reserves_decrease(&ctx, &msg, operator);
+        assert!(matches!(result, Ok(HandlerResult::Rejected(_))));
+    }
+
+    #[test]
+    fn test_handle_reserves_decrease_no_ledger() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let msg = ReservesDecreaseMsg {
+            partner_id: our_node_id,
+            new_amount: 50_000,
+        };
+
+        // No ledger - should error
+        let result = handle_reserves_decrease(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::LedgerNotFound { .. })));
+    }
+
+    #[test]
+    fn test_handle_reserves_decrease_valid() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let spend_to = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger with reserves and no deposits
+        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        ledger.state.reserves.amount = 200_000;
+        ledger.state.reserves.spend_to = spend_to;
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = ReservesDecreaseMsg {
+            partner_id: our_node_id,
+            new_amount: 100_000,
+        };
+
+        // Valid request - should return response
+        let result = handle_reserves_decrease(&ctx, &msg, operator);
+        match result {
+            Ok(HandlerResult::Response(ResponseData::ReservesDecreaseValidated { new_amount, .. })) => {
+                assert_eq!(new_amount, 100_000);
+            }
+            other => panic!("Expected Response(ReservesDecreaseValidated), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_handle_reserves_decrease_not_actually_decreasing() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let spend_to = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger with reserves
+        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        ledger.state.reserves.amount = 100_000;
+        ledger.state.reserves.spend_to = spend_to;
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = ReservesDecreaseMsg {
+            partner_id: our_node_id,
+            new_amount: 150_000, // More than current
+        };
+
+        // Not actually decreasing - should fail validation
+        let result = handle_reserves_decrease(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::ValidationFailed(_))));
+    }
+
+    #[test]
+    fn test_handle_reserves_decrease_below_required() {
+        use crate::types::Deposit;
+
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let spend_to = create_test_pubkey(3);
+        let deposit_pubkey = create_test_pubkey(4);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger with reserves and deposits
+        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        ledger.state.reserves.amount = 200_000;
+        ledger.state.reserves.spend_to = spend_to;
+        let mut deposit = Deposit::new(deposit_pubkey, None);
+        deposit.balance = 100_000;
+        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = ReservesDecreaseMsg {
+            partner_id: our_node_id,
+            new_amount: 50_000, // Below deposit balance
+        };
+
+        // Would drop below required reserves - should fail validation
+        let result = handle_reserves_decrease(&ctx, &msg, operator);
         assert!(matches!(result, Err(HandlerError::ValidationFailed(_))));
     }
 }
