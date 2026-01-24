@@ -221,4 +221,4 @@ that ~10K lines of protocol logic moved from ldk to core.
 12. ✅ **Remove duplicate get_message_category** (was missing V2/quorum/recovery types, now re-exports from deposits-core) - commit 300ce6a
 13. ✅ **Logger abstraction in deposits-ldk** (572 log calls across 38 files migrated to deposits-core macros) - commit ac01065
 14. ✅ **Wire message structs** (42 message types moved to deposits-core with WireEncode/WireDecode) - commits 189f17e, 30104e1, b4e7236, a6f904f
-15. **ChannelManagerOps** (blocked by CommitmentExtraOutput Lightning dependency)
+15. ✅ **ChannelManagerOps** (CommitmentExtraOutput + ChannelId types created in core) - commit 699059c
