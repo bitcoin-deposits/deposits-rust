@@ -84,23 +84,8 @@ pub(super) use super::constants::{
     LAZY_SYNC_DELAY_SECS,
 };
 
-/// Build a Taproot reserves script_pubkey for the given VoterSet.
-/// This creates a P2TR output with tiered spending thresholds.
-///
-/// The VoterSet defines the voters for reserve spending:
-/// - Tie-breaker: The channel partner (required for immediate spend)
-/// - Other voters: Collateral partners from other channels (if any)
-pub(super) fn build_taproot_reserves_script(
-    voter_set: VoterSet,
-    ledger_hash: [u8; 32],
-    network: Network,
-) -> Result<ScriptBuf, DepositsError> {
-    // Build Taproot output with default threshold configuration
-    let builder = TapscriptReservesBuilder::with_defaults(voter_set, network, ledger_hash);
-    let output = builder.build()?;
-
-    Ok(output.script_pubkey())
-}
+// Re-export build_taproot_reserves_script from deposits-core
+pub(super) use deposits_core::build_taproot_reserves_script;
 
 /// Bitcoin Deposits protocol message handler
 pub struct DepositsHandler<L: Deref + Clone>

@@ -100,7 +100,7 @@ pub use traits::{
 };
 pub use tapscript_reserves::{
     TapscriptReservesBuilder, TaprootReservesOutput, VoterSet, Voter,
-    ThresholdConfig, ThresholdTier, verify_taproot_reserves,
+    ThresholdConfig, ThresholdTier, verify_taproot_reserves, build_taproot_reserves_script,
 };
 pub use types::{
     Deposit, FeeStructure, PendingInvoice, ReservesOutput, Invoice,

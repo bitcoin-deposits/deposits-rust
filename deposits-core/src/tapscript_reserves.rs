@@ -468,6 +468,30 @@ pub fn verify_taproot_reserves(
     }
 }
 
+/// Build a Taproot reserves script_pubkey for the given VoterSet.
+///
+/// This creates a P2TR output with tiered spending thresholds for reserves.
+/// The VoterSet defines the voters for reserve spending:
+/// - Tie-breaker: The channel partner (required for immediate spend)
+/// - Other voters: Collateral partners from other channels (if any)
+///
+/// # Arguments
+/// * `voter_set` - The set of voters who can authorize reserve spends
+/// * `ledger_hash` - The current ledger hash to embed in the Taproot tree
+/// * `network` - Bitcoin network (mainnet, testnet, etc.)
+///
+/// # Returns
+/// The script_pubkey for the P2TR reserves output
+pub fn build_taproot_reserves_script(
+    voter_set: VoterSet,
+    ledger_hash: [u8; 32],
+    network: bitcoin::Network,
+) -> DepositsResult<ScriptBuf> {
+    let builder = TapscriptReservesBuilder::with_defaults(voter_set, network, ledger_hash);
+    let output = builder.build()?;
+    Ok(output.script_pubkey())
+}
+
 /// Parameters for building a deterministic spend transaction
 #[derive(Clone, Debug)]
 pub struct SpendTxParams {
