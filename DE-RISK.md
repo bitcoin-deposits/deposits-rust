@@ -222,3 +222,121 @@ that ~10K lines of protocol logic moved from ldk to core.
 13. ✅ **Logger abstraction in deposits-ldk** (572 log calls across 38 files migrated to deposits-core macros) - commit ac01065
 14. ✅ **Wire message structs** (42 message types moved to deposits-core with WireEncode/WireDecode) - commits 189f17e, 30104e1, b4e7236, a6f904f
 15. ✅ **ChannelManagerOps** (CommitmentExtraOutput + ChannelId types created in core) - commit 699059c
+
+---
+
+## Phase 2: Handler Logic Extraction
+
+Analysis shows 74% of top handler files is generic protocol logic. Target: ~5,000 lines.
+
+### 2.1 message_validation.rs → deposits-core (Priority: HIGHEST)
+
+**Current location:** `deposits-ldk/src/handler/message_validation.rs` (~1,732 lines)
+
+**Generic:** 88% (~1,532 lines)
+**LDK-specific:** 12% (~200 lines) - trait bounds, logger
+
+**What to move:**
+- `validate_operation()` function (140 lines)
+- All 17 validation method implementations
+- Validation is pure computation - no async, no message sending
+
+**Blocker:** Needs `ValidationContext` trait for ledger access
+
+**Impact:** ~1,500 lines moved
+
+---
+
+### 2.2 message_handlers.rs → deposits-core (Priority: HIGH)
+
+**Current location:** `deposits-ldk/src/handler/message_handlers.rs` (~2,483 lines)
+
+**Generic:** 85% (~2,113 lines)
+**LDK-specific:** 15% (~370 lines) - LightningError, message queueing
+
+**What to move:**
+- 22 protocol handler functions (quorum, recovery, collateral, payment)
+- Core business logic for each message type
+
+**Blockers:**
+- Need `HandlerContext` trait for ledger/message access
+- Need generic `HandlerError` to replace `LightningError`
+- `send_message()` needs transport abstraction
+
+**Impact:** ~1,700 lines moved
+
+---
+
+### 2.3 recovery_ops.rs → deposits-core (Priority: HIGH)
+
+**Current location:** `deposits-ldk/src/handler/recovery_ops.rs` (~1,602 lines)
+
+**Generic:** 75% (~1,202 lines)
+**LDK-specific:** 25% (~400 lines) - logging, signing, messaging
+
+**What to move:**
+- Recovery state machines
+- Claim initiation and validation
+- Signature collection logic
+- Fraud proof (accusation) logic
+
+**Blockers:**
+- Heavy logger dependency (40+ calls)
+- Message transport abstraction needed
+- Signature operations need abstraction
+
+**Impact:** ~1,000 lines moved
+
+---
+
+### 2.4 messages.rs core definitions (Priority: MEDIUM)
+
+**Current location:** `deposits-ldk/src/handler/messages.rs` (~3,502 lines)
+
+**Generic:** 62% (~2,172 lines)
+**LDK-specific:** 38% (~1,330 lines) - Readable/Writeable impls
+
+**What to move:**
+- `DepositsMessage` enum definition
+- Helper methods (message_type, to_operation, descriptive_name)
+- V1/V2 conversion logic
+
+**Impact:** ~900 lines moved
+
+---
+
+### Required Abstractions
+
+```rust
+// deposits-core/src/traits.rs
+
+pub trait ValidationContext {
+    fn get_ledger(&self, operator: PublicKey, partner: PublicKey)
+        -> Option<Arc<RwLock<Ledger>>>;
+    fn get_our_node_id(&self) -> PublicKey;
+}
+
+pub trait HandlerContext: ValidationContext {
+    fn send_message(&self, peer: PublicKey, msg: impl Into<Vec<u8>>)
+        -> Result<(), HandlerError>;
+    fn emit_event(&self, event: DepositEvent);
+}
+
+pub trait RecoveryContext: HandlerContext {
+    fn get_recovery_manager(&self) -> Arc<Mutex<RecoveryManager>>;
+    fn get_claim_manager(&self) -> Arc<Mutex<ClaimManager>>;
+}
+```
+
+---
+
+### Phase 2 Implementation Order
+
+16. **ValidationContext trait** - abstraction for ledger access
+17. **message_validation.rs** - move validation logic (~1,500 lines)
+18. **HandlerError type** - generic error to replace LightningError
+19. **HandlerContext trait** - abstraction for message sending
+20. **message_handlers.rs** - move handler logic (~1,700 lines)
+21. **RecoveryContext trait** - abstraction for recovery state
+22. **recovery_ops.rs** - move recovery logic (~1,000 lines)
+23. **DepositsMessage enum** - move to core (~900 lines)
