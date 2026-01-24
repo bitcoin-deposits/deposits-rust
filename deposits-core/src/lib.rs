@@ -236,6 +236,8 @@ pub use message_handlers::{
     handle_quorum_join_request, handle_quorum_vote_request,
     handle_recovery_vote,
     handle_collateral_consent_request, handle_collateral_consent_response,
+    handle_collateral_add_partner, handle_collateral_remove_partner,
+    handle_collateral_attestation, handle_uncredited_payment,
     // Helper functions
     make_ledger_id,
 };

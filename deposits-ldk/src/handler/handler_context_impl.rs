@@ -132,6 +132,13 @@ where
                     operator, partner, error
                 );
             }
+            ProtocolEvent::UncreditedPaymentReceived { operator, partner, payment_hash, amount_msat } => {
+                log_warn!(
+                    self.logger,
+                    "Protocol event: UncreditedPaymentReceived (fraud proof) - operator={}, partner={}, amount={}",
+                    operator, partner, amount_msat
+                );
+            }
         }
     }
 

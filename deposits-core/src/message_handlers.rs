@@ -32,6 +32,8 @@ use crate::traits::ProtocolEvent;
 use crate::wire_messages::{
     QuorumJoinRequestMsgWire, QuorumVoteRequestMsg, RecoveryVoteMsg,
     CollateralConsentRequestMsg, CollateralConsentResponseMsg,
+    CollateralAddPartnerMsg, CollateralRemovePartnerMsg,
+    CollateralAttestationMsg, UncreditedPaymentMsg,
 };
 
 // ============================================================================
@@ -64,6 +66,44 @@ pub enum ResponseData {
     QuorumJoin {
         accepted: bool,
         rejection_reason: Option<String>,
+    },
+    /// Collateral partner added - response with signature data for ACK
+    CollateralPartnerAdded {
+        operator_id: PublicKey,
+        partner_id: PublicKey,
+        collateral_partner: PublicKey,
+        /// Sequence number after append
+        sequence: u64,
+        /// Previous state hash
+        prev_hash: [u8; 32],
+        /// New state hash after append
+        new_hash: [u8; 32],
+    },
+    /// Collateral partner removed - response with signature data for ACK
+    CollateralPartnerRemoved {
+        partner_id: PublicKey,
+        collateral_partner: PublicKey,
+        /// Sequence number after append
+        sequence: u64,
+        /// Previous state hash
+        prev_hash: [u8; 32],
+        /// New state hash after append
+        new_hash: [u8; 32],
+    },
+    /// Collateral attestation processed
+    CollateralAttestationProcessed {
+        operator: PublicKey,
+        collateral_partner: PublicKey,
+        amount: u64,
+    },
+    /// Uncredited payment accusation - emit event for node layer
+    UncreditedPaymentAccusation {
+        operator: PublicKey,
+        partner: PublicKey,
+        payment_hash: [u8; 32],
+        deposit_pubkey: PublicKey,
+        amount_msat: u64,
+        settlement_sequence: u64,
     },
 }
 
@@ -253,6 +293,228 @@ pub fn handle_collateral_consent_response<C: HandlerContext>(
     Ok(HandlerResult::Ok)
 }
 
+/// Handle a CollateralAddPartner message.
+///
+/// Received by partners when an operator adds a collateral partner to a ledger.
+/// The partner validates and appends to their copy of the ledger.
+pub fn handle_collateral_add_partner<C: HandlerContext>(
+    ctx: &C,
+    msg: &CollateralAddPartnerMsg,
+    sender: PublicKey,
+) -> Result<HandlerResult, HandlerError> {
+    let our_node_id = ctx.our_node_id();
+
+    // We must be the partner_id to process this message
+    if msg.partner_id != our_node_id {
+        return Ok(HandlerResult::Rejected(format!(
+            "We ({}) are not the target partner ({})",
+            our_node_id, msg.partner_id
+        )));
+    }
+
+    // Get the ledger - sender (operator) and us (partner)
+    let ledger_arc = ctx.get_ledger(&sender, &msg.partner_id)
+        .ok_or(HandlerError::LedgerNotFound {
+            operator: sender,
+            partner: msg.partner_id,
+        })?;
+
+    // Check for idempotency and get state
+    {
+        let ledger = ledger_arc.read().map_err(|_|
+            HandlerError::Internal("Failed to acquire ledger read lock".to_string())
+        )?;
+
+        // Idempotency check: if collateral partner already exists, return success
+        if ledger.state.collateral_partners.contains(&msg.collateral_partner) {
+            return Ok(HandlerResult::Response(ResponseData::CollateralPartnerAdded {
+                operator_id: msg.operator_id,
+                partner_id: msg.partner_id,
+                collateral_partner: msg.collateral_partner,
+                sequence: ledger.sequence(),
+                prev_hash: ledger.hash(),
+                new_hash: ledger.hash(),
+            }));
+        }
+    }
+
+    // Append to ledger - this requires write access
+    // The actual append happens in the LDK layer which has mutable access
+    // Here we validate and return the data needed for the response
+    //
+    // Note: The core logic validates that this is a legitimate add request.
+    // The LDK layer will:
+    // 1. Call append_v1_mut_with_metadata on the ledger
+    // 2. Sign the update as partner (porcupine dance)
+    // 3. Send the ACK with signature
+    // 4. Sync with QuorumManager if applicable
+
+    // For now, return Ok to indicate the request is valid
+    // The LDK layer handles the actual mutation and signing
+    Ok(HandlerResult::Ok)
+}
+
+/// Handle a CollateralRemovePartner message.
+///
+/// Received by partners when an operator removes a collateral partner from a ledger.
+/// The partner validates and appends to their copy of the ledger.
+pub fn handle_collateral_remove_partner<C: HandlerContext>(
+    ctx: &C,
+    msg: &CollateralRemovePartnerMsg,
+    sender: PublicKey,
+) -> Result<HandlerResult, HandlerError> {
+    let our_node_id = ctx.our_node_id();
+
+    // We must be the partner_id to process this message
+    if msg.partner_id != our_node_id {
+        return Ok(HandlerResult::Rejected(format!(
+            "We ({}) are not the target partner ({})",
+            our_node_id, msg.partner_id
+        )));
+    }
+
+    // Get the ledger - sender (operator) and us (partner)
+    let ledger_arc = ctx.get_ledger(&sender, &msg.partner_id)
+        .ok_or(HandlerError::LedgerNotFound {
+            operator: sender,
+            partner: msg.partner_id,
+        })?;
+
+    // Validate the collateral partner exists
+    {
+        let ledger = ledger_arc.read().map_err(|_|
+            HandlerError::Internal("Failed to acquire ledger read lock".to_string())
+        )?;
+
+        // Check that the collateral partner exists
+        if !ledger.state.collateral_partners.contains(&msg.collateral_partner) {
+            return Ok(HandlerResult::Rejected(format!(
+                "Collateral partner {} not found in ledger",
+                msg.collateral_partner
+            )));
+        }
+    }
+
+    // The actual removal happens in the LDK layer
+    // Return Ok to indicate the request is valid
+    Ok(HandlerResult::Ok)
+}
+
+/// Handle a CollateralAttestation message.
+///
+/// Received by operators from collateral partners after they process a CollateralIncrease.
+/// The operator stores the attestation as proof and records CollateralStatus on channel ledgers.
+pub fn handle_collateral_attestation<C: HandlerContext>(
+    ctx: &C,
+    msg: &CollateralAttestationMsg,
+    sender: PublicKey,
+) -> Result<HandlerResult, HandlerError> {
+    let our_node_id = ctx.our_node_id();
+
+    // The sender should be the collateral partner
+    if sender != msg.collateral_partner {
+        return Ok(HandlerResult::Rejected(format!(
+            "Sender {} doesn't match collateral_partner {}",
+            sender, msg.collateral_partner
+        )));
+    }
+
+    // We should be the operator
+    if msg.operator != our_node_id {
+        return Ok(HandlerResult::Rejected(format!(
+            "We ({}) are not the operator ({})",
+            our_node_id, msg.operator
+        )));
+    }
+
+    // Verify the attestation makes sense
+    // - Amount should be positive
+    if msg.amount == 0 {
+        return Ok(HandlerResult::Rejected(
+            "Attestation amount must be positive".to_string()
+        ));
+    }
+
+    // Return response data for the LDK layer to:
+    // 1. Store the attestation in ledger state
+    // 2. Create CollateralStatus on channel ledgers
+    // 3. Send to channel partners for bilateral signing
+    Ok(HandlerResult::Response(ResponseData::CollateralAttestationProcessed {
+        operator: msg.operator,
+        collateral_partner: msg.collateral_partner,
+        amount: msg.amount,
+    }))
+}
+
+/// Handle an UncreditedPayment accusation message.
+///
+/// This is a fraud proof broadcast by a partner claiming the operator
+/// failed to credit a payment they received. Collateral partners must:
+/// 1. Verify the preimage matches the payment hash
+/// 2. Check if the ledger has a credit for this payment
+/// 3. Store the accusation for dispute resolution
+/// 4. Consider force-closing their own channel with the operator
+pub fn handle_uncredited_payment<C: HandlerContext>(
+    ctx: &C,
+    msg: &UncreditedPaymentMsg,
+    sender: PublicKey,
+) -> Result<HandlerResult, HandlerError> {
+    use bitcoin::hashes::{sha256, Hash};
+
+    // 1. Verify preimage matches payment hash
+    let computed_hash = sha256::Hash::hash(&msg.preimage);
+    if computed_hash.as_byte_array() != &msg.payment_hash {
+        return Ok(HandlerResult::Rejected(format!(
+            "Invalid preimage - computed hash doesn't match payment_hash"
+        )));
+    }
+
+    // 2. Verify the accuser is the partner for this ledger
+    if msg.partner != sender {
+        return Ok(HandlerResult::Rejected(format!(
+            "Sender {} is not the claimed partner {}",
+            sender, msg.partner
+        )));
+    }
+
+    // 3. Check if we have the relevant ledger and if there's a credit
+    if let Some(ledger_arc) = ctx.get_ledger(&msg.operator, &msg.partner) {
+        let ledger = ledger_arc.read().map_err(|_|
+            HandlerError::Internal("Failed to acquire ledger lock".to_string())
+        )?;
+
+        // Check if there's a credit for this payment hash in the ledger
+        if ledger.has_credit_for_payment(&msg.payment_hash) {
+            // The ledger has a credit - accusation appears invalid
+            return Ok(HandlerResult::Rejected(
+                "Ledger has a credit for this payment - accusation appears invalid".to_string()
+            ));
+        }
+    }
+    // If we don't have the ledger, we can still process the accusation
+
+    // 4. Emit event for node layer to:
+    //    - Store the accusation
+    //    - Force-close any channel with the operator
+    //    - Forward to our own collateral partners
+    ctx.emit_event(ProtocolEvent::UncreditedPaymentReceived {
+        operator: msg.operator,
+        partner: msg.partner,
+        payment_hash: msg.payment_hash,
+        amount_msat: msg.amount_msat,
+    });
+
+    // Return the accusation data for higher layers to act on
+    Ok(HandlerResult::Response(ResponseData::UncreditedPaymentAccusation {
+        operator: msg.operator,
+        partner: msg.partner,
+        payment_hash: msg.payment_hash,
+        deposit_pubkey: msg.deposit_pubkey,
+        amount_msat: msg.amount_msat,
+        settlement_sequence: msg.settlement_sequence,
+    }))
+}
+
 // ============================================================================
 // Helper Functions
 // ============================================================================
@@ -404,6 +666,389 @@ mod tests {
                 assert!(consent_granted, "Should grant consent when we have channel with operator");
             }
             other => panic!("Expected Response(CollateralConsent), got {:?}", other),
+        }
+    }
+
+    // ========================================================================
+    // Collateral Add/Remove Partner Tests
+    // ========================================================================
+
+    #[test]
+    fn test_handle_collateral_add_partner_wrong_partner() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let other_partner = create_test_pubkey(3);
+        let collateral_partner = create_test_pubkey(4);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let msg = CollateralAddPartnerMsg {
+            operator_id: operator,
+            partner_id: other_partner, // Not us
+            collateral_partner,
+            collateral_partner_signature: [0u8; 64],
+        };
+
+        // We're not the target partner - should be rejected
+        let result = handle_collateral_add_partner(&ctx, &msg, operator);
+        assert!(matches!(result, Ok(HandlerResult::Rejected(_))));
+    }
+
+    #[test]
+    fn test_handle_collateral_add_partner_no_ledger() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let collateral_partner = create_test_pubkey(3);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let msg = CollateralAddPartnerMsg {
+            operator_id: operator,
+            partner_id: our_node_id,
+            collateral_partner,
+            collateral_partner_signature: [0u8; 64],
+        };
+
+        // No ledger exists - should error
+        let result = handle_collateral_add_partner(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::LedgerNotFound { .. })));
+    }
+
+    #[test]
+    fn test_handle_collateral_add_partner_valid() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let collateral_partner = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger where operator is the operator and we are the partner
+        let ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = CollateralAddPartnerMsg {
+            operator_id: operator,
+            partner_id: our_node_id,
+            collateral_partner,
+            collateral_partner_signature: [0u8; 64],
+        };
+
+        // Valid request - should return Ok (actual mutation happens in LDK layer)
+        let result = handle_collateral_add_partner(&ctx, &msg, operator);
+        assert!(matches!(result, Ok(HandlerResult::Ok)));
+    }
+
+    #[test]
+    fn test_handle_collateral_add_partner_idempotent() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let collateral_partner = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger with the collateral partner already added
+        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        ledger.state.collateral_partners.push(collateral_partner);
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = CollateralAddPartnerMsg {
+            operator_id: operator,
+            partner_id: our_node_id,
+            collateral_partner,
+            collateral_partner_signature: [0u8; 64],
+        };
+
+        // Already exists - should return success (idempotent)
+        let result = handle_collateral_add_partner(&ctx, &msg, operator);
+        match result {
+            Ok(HandlerResult::Response(ResponseData::CollateralPartnerAdded { .. })) => {}
+            other => panic!("Expected Response(CollateralPartnerAdded), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_handle_collateral_remove_partner_wrong_partner() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let other_partner = create_test_pubkey(3);
+        let collateral_partner = create_test_pubkey(4);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let msg = CollateralRemovePartnerMsg {
+            partner_id: other_partner, // Not us
+            collateral_partner,
+            operator_signature: [0u8; 64],
+        };
+
+        // We're not the target partner - should be rejected
+        let result = handle_collateral_remove_partner(&ctx, &msg, operator);
+        assert!(matches!(result, Ok(HandlerResult::Rejected(_))));
+    }
+
+    #[test]
+    fn test_handle_collateral_remove_partner_not_found() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let collateral_partner = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger without the collateral partner
+        let ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = CollateralRemovePartnerMsg {
+            partner_id: our_node_id,
+            collateral_partner,
+            operator_signature: [0u8; 64],
+        };
+
+        // Collateral partner doesn't exist - should be rejected
+        let result = handle_collateral_remove_partner(&ctx, &msg, operator);
+        assert!(matches!(result, Ok(HandlerResult::Rejected(_))));
+    }
+
+    #[test]
+    fn test_handle_collateral_remove_partner_valid() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let collateral_partner = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger with the collateral partner
+        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        ledger.state.collateral_partners.push(collateral_partner);
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = CollateralRemovePartnerMsg {
+            partner_id: our_node_id,
+            collateral_partner,
+            operator_signature: [0u8; 64],
+        };
+
+        // Valid request - should return Ok
+        let result = handle_collateral_remove_partner(&ctx, &msg, operator);
+        assert!(matches!(result, Ok(HandlerResult::Ok)));
+    }
+
+    // ========================================================================
+    // Collateral Attestation Tests
+    // ========================================================================
+
+    #[test]
+    fn test_handle_collateral_attestation_wrong_sender() {
+        let our_node_id = create_test_pubkey(1);
+        let collateral_partner = create_test_pubkey(2);
+        let wrong_sender = create_test_pubkey(3);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let msg = CollateralAttestationMsg {
+            operator: our_node_id,
+            collateral_partner,
+            amount: 100_000,
+            block_height: 100,
+            signature: [0u8; 64],
+            ledger_hash: [0u8; 32],
+        };
+
+        // Wrong sender - should be rejected
+        let result = handle_collateral_attestation(&ctx, &msg, wrong_sender);
+        assert!(matches!(result, Ok(HandlerResult::Rejected(_))));
+    }
+
+    #[test]
+    fn test_handle_collateral_attestation_not_operator() {
+        let our_node_id = create_test_pubkey(1);
+        let other_operator = create_test_pubkey(2);
+        let collateral_partner = create_test_pubkey(3);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let msg = CollateralAttestationMsg {
+            operator: other_operator, // Not us
+            collateral_partner,
+            amount: 100_000,
+            block_height: 100,
+            signature: [0u8; 64],
+            ledger_hash: [0u8; 32],
+        };
+
+        // We're not the operator - should be rejected
+        let result = handle_collateral_attestation(&ctx, &msg, collateral_partner);
+        assert!(matches!(result, Ok(HandlerResult::Rejected(_))));
+    }
+
+    #[test]
+    fn test_handle_collateral_attestation_zero_amount() {
+        let our_node_id = create_test_pubkey(1);
+        let collateral_partner = create_test_pubkey(2);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let msg = CollateralAttestationMsg {
+            operator: our_node_id,
+            collateral_partner,
+            amount: 0, // Zero
+            block_height: 100,
+            signature: [0u8; 64],
+            ledger_hash: [0u8; 32],
+        };
+
+        // Zero amount - should be rejected
+        let result = handle_collateral_attestation(&ctx, &msg, collateral_partner);
+        assert!(matches!(result, Ok(HandlerResult::Rejected(_))));
+    }
+
+    #[test]
+    fn test_handle_collateral_attestation_valid() {
+        let our_node_id = create_test_pubkey(1);
+        let collateral_partner = create_test_pubkey(2);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let msg = CollateralAttestationMsg {
+            operator: our_node_id,
+            collateral_partner,
+            amount: 100_000,
+            block_height: 100,
+            signature: [0u8; 64],
+            ledger_hash: [0u8; 32],
+        };
+
+        // Valid attestation
+        let result = handle_collateral_attestation(&ctx, &msg, collateral_partner);
+        match result {
+            Ok(HandlerResult::Response(ResponseData::CollateralAttestationProcessed { amount, .. })) => {
+                assert_eq!(amount, 100_000);
+            }
+            other => panic!("Expected Response(CollateralAttestationProcessed), got {:?}", other),
+        }
+    }
+
+    // ========================================================================
+    // Uncredited Payment Tests
+    // ========================================================================
+
+    #[test]
+    fn test_handle_uncredited_payment_invalid_preimage() {
+        use bitcoin::hashes::{sha256, Hash};
+
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let partner = create_test_pubkey(3);
+        let deposit_pubkey = create_test_pubkey(4);
+
+        let ctx = TestContext::new(our_node_id);
+
+        // Create a preimage - we'll use the wrong hash to trigger rejection
+        let preimage = [42u8; 32];
+        // Don't use the correct hash - use a wrong one
+
+        let msg = UncreditedPaymentMsg {
+            operator,
+            partner,
+            payment_hash: [0u8; 32], // Wrong hash
+            preimage,
+            deposit_pubkey,
+            amount_msat: 1_000_000,
+            invoice_cosignature: [0u8; 64],
+            settlement_sequence: 10,
+            settlement_ledger_hash: [0u8; 32],
+            settlement_block_height: 100,
+            accuser_signature: [0u8; 64],
+        };
+
+        // Invalid preimage - should be rejected
+        let result = handle_uncredited_payment(&ctx, &msg, partner);
+        assert!(matches!(result, Ok(HandlerResult::Rejected(_))));
+    }
+
+    #[test]
+    fn test_handle_uncredited_payment_wrong_sender() {
+        use bitcoin::hashes::{sha256, Hash};
+
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let partner = create_test_pubkey(3);
+        let wrong_sender = create_test_pubkey(4);
+        let deposit_pubkey = create_test_pubkey(5);
+
+        let ctx = TestContext::new(our_node_id);
+
+        // Create a preimage and compute its hash
+        let preimage = [42u8; 32];
+        let correct_hash = sha256::Hash::hash(&preimage);
+
+        let msg = UncreditedPaymentMsg {
+            operator,
+            partner,
+            payment_hash: *correct_hash.as_byte_array(),
+            preimage,
+            deposit_pubkey,
+            amount_msat: 1_000_000,
+            invoice_cosignature: [0u8; 64],
+            settlement_sequence: 10,
+            settlement_ledger_hash: [0u8; 32],
+            settlement_block_height: 100,
+            accuser_signature: [0u8; 64],
+        };
+
+        // Wrong sender - should be rejected
+        let result = handle_uncredited_payment(&ctx, &msg, wrong_sender);
+        assert!(matches!(result, Ok(HandlerResult::Rejected(_))));
+    }
+
+    #[test]
+    fn test_handle_uncredited_payment_valid() {
+        use bitcoin::hashes::{sha256, Hash};
+
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let partner = create_test_pubkey(3);
+        let deposit_pubkey = create_test_pubkey(4);
+
+        let ctx = TestContext::new(our_node_id);
+
+        // Create a preimage and compute its hash
+        let preimage = [42u8; 32];
+        let correct_hash = sha256::Hash::hash(&preimage);
+
+        let msg = UncreditedPaymentMsg {
+            operator,
+            partner,
+            payment_hash: *correct_hash.as_byte_array(),
+            preimage,
+            deposit_pubkey,
+            amount_msat: 1_000_000,
+            invoice_cosignature: [0u8; 64],
+            settlement_sequence: 10,
+            settlement_ledger_hash: [0u8; 32],
+            settlement_block_height: 100,
+            accuser_signature: [0u8; 64],
+        };
+
+        // Valid accusation (no ledger to check for credit)
+        let result = handle_uncredited_payment(&ctx, &msg, partner);
+        match result {
+            Ok(HandlerResult::Response(ResponseData::UncreditedPaymentAccusation { amount_msat, .. })) => {
+                assert_eq!(amount_msat, 1_000_000);
+            }
+            other => panic!("Expected Response(UncreditedPaymentAccusation), got {:?}", other),
+        }
+
+        // Check that event was emitted
+        let events = ctx.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ProtocolEvent::UncreditedPaymentReceived { operator: op, partner: p, amount_msat: amt, .. } => {
+                assert_eq!(*op, operator);
+                assert_eq!(*p, partner);
+                assert_eq!(*amt, 1_000_000);
+            }
+            other => panic!("Expected UncreditedPaymentReceived event, got {:?}", other),
         }
     }
 }

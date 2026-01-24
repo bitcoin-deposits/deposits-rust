@@ -907,6 +907,13 @@ pub enum ProtocolEvent {
         partner: PublicKey,
         error: String,
     },
+    /// An uncredited payment accusation was received
+    UncreditedPaymentReceived {
+        operator: PublicKey,
+        partner: PublicKey,
+        payment_hash: [u8; 32],
+        amount_msat: u64,
+    },
 }
 
 // ============================================================================
