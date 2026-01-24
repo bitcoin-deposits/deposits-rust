@@ -246,6 +246,44 @@ pub fn get_message_category(message_type: u16) -> Option<&'static str> {
     }
 }
 
+/// Convert a message type ID to its constant name (V2 messages only)
+pub fn type_id_to_const_name(type_id: u16) -> &'static str {
+    match type_id {
+        LEDGER_UPDATE => "LEDGER_UPDATE",
+        LEDGER_UPDATE_RESPONSE => "LEDGER_UPDATE_RESPONSE",
+        HANDSHAKE => "HANDSHAKE",
+        HANDSHAKE_RESPONSE => "HANDSHAKE_RESPONSE",
+        SYNC => "SYNC",
+        SYNC_RESPONSE => "SYNC_RESPONSE",
+        RECOVERY => "RECOVERY",
+        RECOVERY_RESPONSE => "RECOVERY_RESPONSE",
+        COORDINATION => "COORDINATION",
+        COORDINATION_RESPONSE => "COORDINATION_RESPONSE",
+        RELAY => "RELAY",
+        RELAY_RESPONSE => "RELAY_RESPONSE",
+        _ => "UNKNOWN",
+    }
+}
+
+/// Convert a message type ID to its variant name (V2 messages only)
+pub fn type_id_to_variant_name(type_id: u16) -> Option<&'static str> {
+    match type_id {
+        LEDGER_UPDATE => Some("LedgerUpdate"),
+        LEDGER_UPDATE_RESPONSE => Some("LedgerUpdateResponse"),
+        HANDSHAKE => Some("Handshake"),
+        HANDSHAKE_RESPONSE => Some("HandshakeResponse"),
+        SYNC => Some("Sync"),
+        SYNC_RESPONSE => Some("SyncResponse"),
+        RECOVERY => Some("Recovery"),
+        RECOVERY_RESPONSE => Some("RecoveryResponse"),
+        COORDINATION => Some("Coordination"),
+        COORDINATION_RESPONSE => Some("CoordinationResponse"),
+        RELAY => Some("Relay"),
+        RELAY_RESPONSE => Some("RelayResponse"),
+        _ => None,
+    }
+}
+
 // ============================================================================
 // Hash Strategy
 // ============================================================================
