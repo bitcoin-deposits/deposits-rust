@@ -281,12 +281,13 @@ impl ChannelLedger {
                 }
                 // If equal, no update needed
             }
-            DepositsMessage::ReceivingCosignInvoice { ref pending_invoice } => {
+            DepositsMessage::ReceivingCosignInvoice { amount, payment_hash, expires, assigned_deposit, ref invoice_id, ref bolt11 } => {
                 // Partner is requesting us to cosign an invoice
                 // We need to validate that adequate reserves exist for this invoice exposure
                 // and create a signature as proof of cosigning
                 // HACK MVP: Use reserves.amount which will be updated to reflect operator's channel balance
-                let signature = self.cosign_invoice(pending_invoice.clone(), self.reserves.amount)?;
+                let pending_invoice = PendingInvoice::new(amount, payment_hash, expires, assigned_deposit, invoice_id.clone(), bolt11.clone());
+                let signature = self.cosign_invoice(pending_invoice, self.reserves.amount)?;
                 cosignature = Some(signature);
             }
             DepositsMessage::SendingLockPayment { pubkey, amount, payment_id, sequence_number, scriptpubkey_signature } => {

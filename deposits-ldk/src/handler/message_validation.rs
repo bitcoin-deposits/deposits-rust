@@ -95,11 +95,10 @@ where
     match operation {
         LedgerOperation::DepositOpen { pubkey, fees, payment_hash, invoice, cosigner_guarantee_signature } => {
             use crate::wire::messages::DepositOpenMsg;
-            use crate::wire::types::FeeStructure as WireFeeStructure;
             handler.validate_add_deposit(&DepositOpenMsg {
                 partner_id: partner_pubkey,
                 pubkey: *pubkey,
-                fees: fees.clone().map(WireFeeStructure::from),
+                fees: fees.clone(),
                 payment_hash: *payment_hash,
                 invoice: invoice.clone(),
                 cosigner_guarantee_signature: *cosigner_guarantee_signature,
@@ -114,11 +113,10 @@ where
         }
         LedgerOperation::DepositUpdate { pubkey, new_fees } => {
             use crate::wire::messages::DepositUpdateMsg;
-            use crate::wire::types::FeeStructure as WireFeeStructure;
             handler.validate_update_deposit(&DepositUpdateMsg {
                 partner_id: partner_pubkey,
                 pubkey: *pubkey,
-                new_fees: WireFeeStructure::from(new_fees.clone()),
+                new_fees: new_fees.clone(),
             }, sender)
         }
         LedgerOperation::PaymentLock { pubkey, amount, payment_id, sequence_number, scriptpubkey_signature } => {
@@ -241,15 +239,15 @@ where
         // Handle special cases that don't convert to LedgerOperation
         match message {
             // Invoice Cosigning Validation
-            DepositsMessage::ReceivingCosignInvoice { ref pending_invoice } => {
-                use crate::wire::messages::ReceivingCosignInvoiceMsg as WireReceivingCosignInvoiceMsg;
-                self.validate_receiving_cosign_invoice(&WireReceivingCosignInvoiceMsg {
-                    amount: pending_invoice.amount,
-                    payment_hash: pending_invoice.payment_hash,
-                    expires: pending_invoice.expires,
-                    assigned_deposit: pending_invoice.assigned_deposit,
-                    invoice_id: pending_invoice.invoice_id.clone(),
-                    bolt11: pending_invoice.bolt11.clone(),
+            DepositsMessage::ReceivingCosignInvoice { amount, payment_hash, expires, assigned_deposit, ref invoice_id, ref bolt11 } => {
+                use crate::wire::messages::ReceivingCosignInvoiceMsg;
+                self.validate_receiving_cosign_invoice(&ReceivingCosignInvoiceMsg {
+                    amount: *amount,
+                    payment_hash: *payment_hash,
+                    expires: *expires,
+                    assigned_deposit: *assigned_deposit,
+                    invoice_id: invoice_id.clone(),
+                    bolt11: bolt11.clone(),
                 }, sender)
             },
 
@@ -268,13 +266,8 @@ where
 
         if let Some(ledger_arc) = ledgers.get(&(sender, self.our_node_id)) {
             let ledger = ledger_arc.read().unwrap();
-            // Convert wire FeeStructure to core FeeStructure if present
-            let core_fees = msg.fees.as_ref().map(|f| deposits_core::types::FeeStructure {
-                annualized_fixed: f.annualized_fixed,
-                annualized_bps: f.annualized_bps,
-                frequency_blocks: f.frequency_blocks,
-            });
-            deposits_core::validate_deposit_add(&ledger, msg.pubkey, core_fees.as_ref())
+            // FeeStructure is already the core type (re-exported from deposits_core)
+            deposits_core::validate_deposit_add(&ledger, msg.pubkey, msg.fees.as_ref())
         } else {
             Err(format!("No channel ledger found for sender {}", sender))
         }
@@ -296,13 +289,8 @@ where
 
         if let Some(ledger_arc) = ledgers.get(&(sender, self.our_node_id)) {
             let ledger = ledger_arc.read().unwrap();
-            // Convert wire FeeStructure to core FeeStructure
-            let core_fees = deposits_core::types::FeeStructure {
-                annualized_fixed: msg.new_fees.annualized_fixed,
-                annualized_bps: msg.new_fees.annualized_bps,
-                frequency_blocks: msg.new_fees.frequency_blocks,
-            };
-            deposits_core::validate_deposit_update(&ledger, msg.pubkey, &core_fees)
+            // FeeStructure is already the core type (re-exported from deposits_core)
+            deposits_core::validate_deposit_update(&ledger, msg.pubkey, &msg.new_fees)
         } else {
             Err(format!("No channel ledger found for sender {}", sender))
         }
@@ -561,7 +549,7 @@ mod tests {
         let sender = create_test_pubkey(5);
         let msg = crate::wire::messages::DepositUpdateMsg {
             pubkey: create_test_pubkey(6),
-            new_fees: crate::wire::types::FeeStructure::default(),
+            new_fees: deposits_core::FeeStructure::default(),
             partner_id: create_test_pubkey(7),
         };
 

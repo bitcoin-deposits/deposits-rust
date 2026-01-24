@@ -776,14 +776,14 @@ where
                              message.message_type());
 
                     // Generate cosignature for ReceivingCosignInvoice
-                    let cosignature = if let DepositsMessage::ReceivingCosignInvoice { ref pending_invoice } = message {
-                        println!("🔐 PARTNER: Generating cosignature for invoice (payment_hash: {:02x?})", &pending_invoice.payment_hash[0..4]);
+                    let cosignature = if let DepositsMessage::ReceivingCosignInvoice { amount, payment_hash, expires, assigned_deposit, ref invoice_id, ref bolt11 } = message {
+                        println!("🔐 PARTNER: Generating cosignature for invoice (payment_hash: {:02x?})", &payment_hash[0..4]);
                         // Generate proper 64-byte Schnorr signature over invoice data
                         let mut sig_input = Vec::new();
-                        sig_input.extend_from_slice(&pending_invoice.payment_hash);
-                        sig_input.extend_from_slice(&pending_invoice.amount.to_le_bytes());
-                        sig_input.extend_from_slice(&pending_invoice.expires.to_le_bytes());
-                        sig_input.extend_from_slice(&pending_invoice.assigned_deposit.serialize());
+                        sig_input.extend_from_slice(&payment_hash);
+                        sig_input.extend_from_slice(&amount.to_le_bytes());
+                        sig_input.extend_from_slice(&expires.to_le_bytes());
+                        sig_input.extend_from_slice(&assigned_deposit.serialize());
 
                         let sig_bytes = match self.sign_attestation_content(&sig_input) {
                             Ok(sig) => sig.to_vec(),
@@ -797,35 +797,34 @@ where
                         // Store cosigned invoice for fraud proof validation
                         // Key: (operator, payment_hash)
                         let cosigned_invoice = CosignedInvoice {
-                            deposit_pubkey: pending_invoice.assigned_deposit,
-                            payment_hash: pending_invoice.payment_hash,
-                            amount: pending_invoice.amount,
-                            expires: pending_invoice.expires,
+                            deposit_pubkey: assigned_deposit,
+                            payment_hash,
+                            amount,
+                            expires,
                             cosignature: sig_bytes.clone(),
                         };
                         {
                             let mut invoices = self.cosigned_invoices.lock().unwrap();
-                            let key = (sender_node_id, pending_invoice.payment_hash);
+                            let key = (sender_node_id, payment_hash);
                             invoices.insert(key, cosigned_invoice);
                             println!("📋 PARTNER: Stored cosigned invoice for fraud proof validation (operator: {}, payment_hash: {:02x?})",
-                                     sender_node_id, &pending_invoice.payment_hash[0..4]);
+                                     sender_node_id, &payment_hash[0..4]);
                         }
 
                         // Add invoice to partner's ledger (deposit.invoices)
-                        let pending = &pending_invoice;
-                        if let Some(deposit) = ledger.state.deposits.get_mut(&pending.assigned_deposit) {
+                        if let Some(deposit) = ledger.state.deposits.get_mut(&assigned_deposit) {
                             // Create invoice directly as core type for storage
                             let invoice = deposits_core::Invoice {
-                                id: pending.invoice_id.clone(),
-                                payment_hash: pending.payment_hash,
-                                amount: pending.amount,
-                                expires: pending.expires,
-                                assigned_deposit: pending.assigned_deposit,
-                                bolt11: pending.bolt11.clone(),
+                                id: invoice_id.clone(),
+                                payment_hash,
+                                amount,
+                                expires,
+                                assigned_deposit,
+                                bolt11: bolt11.clone(),
                             };
                             deposit.invoices.push(invoice);
                             log_info!(self.logger, "📋 PARTNER: Added invoice to deposit {} (payment_hash: {:02x?})",
-                                     pending.assigned_deposit, &pending.payment_hash[0..4]);
+                                     assigned_deposit, &payment_hash[0..4]);
                         }
 
                         Some(sig_bytes)

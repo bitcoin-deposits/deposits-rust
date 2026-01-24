@@ -246,18 +246,17 @@ where
             bolt11: bolt11.clone(),
         };
 
-        let pending_invoice = PendingInvoice::new(
+        let invoice_id_clone = invoice_id.clone();
+        let bolt11_clone = bolt11.clone();
+
+        // STEP 3: Create ReceivingCosignInvoice message with inline fields
+        let message = DepositsMessage::ReceivingCosignInvoice {
             amount,
             payment_hash,
             expires,
-            deposit_pubkey,
-            invoice_id,
-            bolt11,
-        );
-
-        // STEP 3: Create ReceivingCosignInvoice message
-        let message = DepositsMessage::ReceivingCosignInvoice {
-            pending_invoice,
+            assigned_deposit: deposit_pubkey,
+            invoice_id: invoice_id_clone,
+            bolt11: bolt11_clone,
         };
 
         // Calculate message hash for tracking

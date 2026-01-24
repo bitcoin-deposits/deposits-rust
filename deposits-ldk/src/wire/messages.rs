@@ -11,28 +11,62 @@
 //! These structs implement LDK's `Readable` and `Writeable` traits for
 //! wire serialization.
 //!
-//! ## Note on Type Duplication
+//! ## Architecture
 //!
-//! Some types here are similar to those in `deposits_core::wire_messages`, but have
-//! different field structures optimized for the LDK wire protocol. The core types
-//! are designed for the abstract protocol, while these are designed for LDK integration.
+//! Message types are organized as follows:
 //!
-//! When using adapters.rs for LDK serialization of deposits-core types, use the
-//! `LdkXxxMsg` wrapper types. For LDK-specific wire protocol needs, use the types
-//! defined directly in this module.
+//! - **Core types** (from `deposits_core`): The canonical struct definitions
+//!   with `WireEncode`/`WireDecode` implementations
+//! - **LDK wrappers** (from `adapters.rs`): Newtype wrappers that implement
+//!   LDK's `Readable`/`Writeable` traits
+//! - **LDK-only types** (defined here): Additional message types specific to
+//!   LDK integration that are not needed in deposits-core
+//!
+//! ## Usage
+//!
+//! For struct construction and field access, use the core types directly:
+//! ```ignore
+//! use deposits_ldk::wire::ReservesIncreaseMsg;
+//! let msg = ReservesIncreaseMsg { partner_id: pk, new_amount: 100_000 };
+//! ```
+//!
+//! For LDK serialization, use the LdkXxxMsg wrappers:
+//! ```ignore
+//! use deposits_ldk::wire::LdkReservesIncreaseMsg;
+//! use lightning::util::ser::{Readable, Writeable};
+//! let ldk_msg = LdkReservesIncreaseMsg::from(msg);
+//! let bytes = ldk_msg.encode();
+//! ```
 
 use bitcoin::secp256k1::PublicKey;
 use lightning::ln::msgs::DecodeError;
 use lightning::util::ser::{Readable, Writeable, Writer};
 
-use super::types::FeeStructure;
-
 // ============================================================================
-// Re-exports for LDK wrappers around deposits-core types
+// Re-exports from deposits-core (canonical struct definitions)
 // ============================================================================
 
-// LDK wrapper types from adapters.rs - use these when you need LDK Readable/Writeable
-// for deposits-core types
+pub use deposits_core::{
+    // Reserves messages
+    ReservesIncreaseMsg, ReservesDecreaseMsg, ReservesAddOutputMsg,
+    ReservesRemoveOutputMsg, ReservesUpdateOutputMsg,
+    UpdateReservesMsg, AcceptReservesMsg,
+    // Deposit messages
+    DepositOpenMsg, DepositCloseMsg, DepositUpdateMsg,
+    // Collateral messages
+    CollateralIncreaseMsg, CollateralDecreaseMsg,
+    // Fee and lifecycle messages
+    FeeCollectMsg, LedgerCloseMsg,
+    // Payment messages
+    ReceivingCreditPaymentMsg, SendingLockPaymentMsg,
+    SendingFailPaymentMsg, SendingFulfillPaymentMsg,
+    ReceivingCosignInvoiceMsg,
+};
+
+// ============================================================================
+// Re-exports from adapters.rs (LDK Readable/Writeable wrappers)
+// ============================================================================
+
 pub use super::adapters::{
     LdkReservesIncreaseMsg, LdkReservesDecreaseMsg, LdkReservesAddOutputMsg,
     LdkReservesRemoveOutputMsg, LdkReservesUpdateOutputMsg,
@@ -46,497 +80,18 @@ pub use super::adapters::{
 };
 
 // ============================================================================
-// Reserves Messages
+// Type alias for backwards compatibility
 // ============================================================================
 
-/// V1-compatible reserves increase message
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ReservesIncreaseMsg {
-    pub partner_id: PublicKey,
-    pub new_amount: u64,
-}
-
-impl Writeable for ReservesIncreaseMsg {
-    fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
-        self.partner_id.serialize().write(writer)?;
-        self.new_amount.write(writer)?;
-        Ok(())
-    }
-}
-
-impl Readable for ReservesIncreaseMsg {
-    fn read<R: lightning::io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
-        let pubkey_bytes: [u8; 33] = Readable::read(reader)?;
-        let partner_id =
-            PublicKey::from_slice(&pubkey_bytes).map_err(|_| DecodeError::InvalidValue)?;
-        let new_amount: u64 = Readable::read(reader)?;
-        Ok(Self {
-            partner_id,
-            new_amount,
-        })
-    }
-}
-
-/// V1-compatible reserves decrease message
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ReservesDecreaseMsg {
-    pub partner_id: PublicKey,
-    pub new_amount: u64,
-}
-
-impl Writeable for ReservesDecreaseMsg {
-    fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
-        self.partner_id.serialize().write(writer)?;
-        self.new_amount.write(writer)?;
-        Ok(())
-    }
-}
-
-impl Readable for ReservesDecreaseMsg {
-    fn read<R: lightning::io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
-        let pubkey_bytes: [u8; 33] = Readable::read(reader)?;
-        let partner_id =
-            PublicKey::from_slice(&pubkey_bytes).map_err(|_| DecodeError::InvalidValue)?;
-        let new_amount: u64 = Readable::read(reader)?;
-        Ok(Self {
-            partner_id,
-            new_amount,
-        })
-    }
-}
-
-/// V1-compatible reserves add output message
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ReservesAddOutputMsg {
-    pub initial_amount: u64,
-    pub spend_to: PublicKey,
-    pub partner_id: PublicKey,
-    pub collateral_partners: Vec<PublicKey>,
-}
-
-impl Writeable for ReservesAddOutputMsg {
-    fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
-        self.initial_amount.write(writer)?;
-        self.spend_to.serialize().write(writer)?;
-        self.partner_id.serialize().write(writer)?;
-        (self.collateral_partners.len() as u16).write(writer)?;
-        for pk in &self.collateral_partners {
-            pk.serialize().write(writer)?;
-        }
-        Ok(())
-    }
-}
-
-impl Readable for ReservesAddOutputMsg {
-    fn read<R: lightning::io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
-        let initial_amount: u64 = Readable::read(reader)?;
-        let spend_to_bytes: [u8; 33] = Readable::read(reader)?;
-        let spend_to =
-            PublicKey::from_slice(&spend_to_bytes).map_err(|_| DecodeError::InvalidValue)?;
-        let partner_bytes: [u8; 33] = Readable::read(reader)?;
-        let partner_id =
-            PublicKey::from_slice(&partner_bytes).map_err(|_| DecodeError::InvalidValue)?;
-        let count: u16 = Readable::read(reader)?;
-        let mut collateral_partners = Vec::with_capacity(count as usize);
-        for _ in 0..count {
-            let pk_bytes: [u8; 33] = Readable::read(reader)?;
-            let pk = PublicKey::from_slice(&pk_bytes).map_err(|_| DecodeError::InvalidValue)?;
-            collateral_partners.push(pk);
-        }
-        Ok(Self {
-            initial_amount,
-            spend_to,
-            partner_id,
-            collateral_partners,
-        })
-    }
-}
-
-/// V1-compatible reserves remove output message
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ReservesRemoveOutputMsg {
-    pub partner_id: PublicKey,
-    pub remove_all: bool,
-}
-
-impl Writeable for ReservesRemoveOutputMsg {
-    fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
-        self.partner_id.serialize().write(writer)?;
-        (self.remove_all as u8).write(writer)?;
-        Ok(())
-    }
-}
-
-impl Readable for ReservesRemoveOutputMsg {
-    fn read<R: lightning::io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
-        let pubkey_bytes: [u8; 33] = Readable::read(reader)?;
-        let partner_id =
-            PublicKey::from_slice(&pubkey_bytes).map_err(|_| DecodeError::InvalidValue)?;
-        let remove_all_byte: u8 = Readable::read(reader)?;
-        Ok(Self {
-            partner_id,
-            remove_all: remove_all_byte != 0,
-        })
-    }
-}
-
-/// V1-compatible reserves update output message
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ReservesUpdateOutputMsg {
-    pub partner_id: PublicKey,
-    pub spend_to: PublicKey,
-}
-
-impl Writeable for ReservesUpdateOutputMsg {
-    fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
-        self.partner_id.serialize().write(writer)?;
-        self.spend_to.serialize().write(writer)?;
-        Ok(())
-    }
-}
-
-impl Readable for ReservesUpdateOutputMsg {
-    fn read<R: lightning::io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
-        let partner_bytes: [u8; 33] = Readable::read(reader)?;
-        let partner_id =
-            PublicKey::from_slice(&partner_bytes).map_err(|_| DecodeError::InvalidValue)?;
-        let spend_to_bytes: [u8; 33] = Readable::read(reader)?;
-        let spend_to =
-            PublicKey::from_slice(&spend_to_bytes).map_err(|_| DecodeError::InvalidValue)?;
-        Ok(Self {
-            partner_id,
-            spend_to,
-        })
-    }
-}
+/// Type alias for MaintenanceFeeCollect
+pub type MaintenanceFeeCollectMsg = FeeCollectMsg;
 
 // ============================================================================
-// Reserves Commitment Protocol Messages (Custom messages for generic extra outputs API)
+// LDK-only Message Types (not in deposits-core)
 // ============================================================================
-
-/// UpdateReserves message - sent to propose reserves commitment to counterparty
-///
-/// This custom message is sent after calling propose_extra_outputs() on the
-/// ChannelManager to notify the counterparty of the proposed extra outputs.
-/// The counterparty should respond with AcceptReserves after validation.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UpdateReservesMsg {
-    /// The Lightning channel ID
-    pub channel_id: [u8; 32],
-    /// Reserves amount in satoshis
-    pub reserves_sats: u64,
-    /// The script pubkey for the reserves output
-    pub script_pubkey: Vec<u8>,
-    /// Our ledger hash being committed
-    pub ledger_hash: [u8; 32],
-    /// Remote ledger hash for bidirectional verification
-    pub remote_ledger_hash: [u8; 32],
-}
-
-impl Writeable for UpdateReservesMsg {
-    fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
-        writer.write_all(&self.channel_id)?;
-        self.reserves_sats.write(writer)?;
-        (self.script_pubkey.len() as u16).write(writer)?;
-        writer.write_all(&self.script_pubkey)?;
-        writer.write_all(&self.ledger_hash)?;
-        writer.write_all(&self.remote_ledger_hash)?;
-        Ok(())
-    }
-}
-
-impl Readable for UpdateReservesMsg {
-    fn read<R: lightning::io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
-        let mut channel_id = [0u8; 32];
-        reader.read_exact(&mut channel_id).map_err(|_| DecodeError::ShortRead)?;
-        let reserves_sats: u64 = Readable::read(reader)?;
-        let script_len: u16 = Readable::read(reader)?;
-        let mut script_pubkey = vec![0u8; script_len as usize];
-        reader.read_exact(&mut script_pubkey).map_err(|_| DecodeError::ShortRead)?;
-        let mut ledger_hash = [0u8; 32];
-        reader.read_exact(&mut ledger_hash).map_err(|_| DecodeError::ShortRead)?;
-        let mut remote_ledger_hash = [0u8; 32];
-        reader.read_exact(&mut remote_ledger_hash).map_err(|_| DecodeError::ShortRead)?;
-        Ok(Self {
-            channel_id,
-            reserves_sats,
-            script_pubkey,
-            ledger_hash,
-            remote_ledger_hash,
-        })
-    }
-}
-
-/// AcceptReserves message - response to UpdateReserves indicating acceptance
-///
-/// Sent by the counterparty after validating and accepting the proposed
-/// reserves commitment via accept_extra_outputs_proposal().
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AcceptReservesMsg {
-    /// The Lightning channel ID
-    pub channel_id: [u8; 32],
-}
-
-impl Writeable for AcceptReservesMsg {
-    fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
-        writer.write_all(&self.channel_id)?;
-        Ok(())
-    }
-}
-
-impl Readable for AcceptReservesMsg {
-    fn read<R: lightning::io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
-        let mut channel_id = [0u8; 32];
-        reader.read_exact(&mut channel_id).map_err(|_| DecodeError::ShortRead)?;
-        Ok(Self { channel_id })
-    }
-}
-
-// ============================================================================
-// Deposit Messages
-// ============================================================================
-
-/// V1-compatible deposit open message
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DepositOpenMsg {
-    pub partner_id: PublicKey,
-    pub pubkey: PublicKey,
-    pub fees: Option<FeeStructure>,
-    pub payment_hash: Option<[u8; 32]>,
-    pub invoice: Option<String>,
-    pub cosigner_guarantee_signature: Option<[u8; 64]>,
-}
-
-impl Writeable for DepositOpenMsg {
-    fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
-        self.partner_id.serialize().write(writer)?;
-        self.pubkey.serialize().write(writer)?;
-        // Optional fees
-        if let Some(ref fees) = self.fees {
-            1u8.write(writer)?;
-            fees.write(writer)?;
-        } else {
-            0u8.write(writer)?;
-        }
-        // Optional payment_hash
-        if let Some(ref hash) = self.payment_hash {
-            1u8.write(writer)?;
-            writer.write_all(hash)?;
-        } else {
-            0u8.write(writer)?;
-        }
-        // Optional invoice
-        if let Some(ref inv) = self.invoice {
-            1u8.write(writer)?;
-            (inv.len() as u16).write(writer)?;
-            writer.write_all(inv.as_bytes())?;
-        } else {
-            0u8.write(writer)?;
-        }
-        // Optional cosigner signature
-        if let Some(ref sig) = self.cosigner_guarantee_signature {
-            1u8.write(writer)?;
-            writer.write_all(sig)?;
-        } else {
-            0u8.write(writer)?;
-        }
-        Ok(())
-    }
-}
-
-impl Readable for DepositOpenMsg {
-    fn read<R: lightning::io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
-        let partner_bytes: [u8; 33] = Readable::read(reader)?;
-        let partner_id =
-            PublicKey::from_slice(&partner_bytes).map_err(|_| DecodeError::InvalidValue)?;
-        let pubkey_bytes: [u8; 33] = Readable::read(reader)?;
-        let pubkey =
-            PublicKey::from_slice(&pubkey_bytes).map_err(|_| DecodeError::InvalidValue)?;
-
-        // Optional fees
-        let has_fees: u8 = Readable::read(reader)?;
-        let fees = if has_fees != 0 {
-            Some(FeeStructure::read(reader)?)
-        } else {
-            None
-        };
-
-        // Optional payment_hash
-        let has_hash: u8 = Readable::read(reader)?;
-        let payment_hash = if has_hash != 0 {
-            let mut hash = [0u8; 32];
-            reader
-                .read_exact(&mut hash)
-                .map_err(|_| DecodeError::ShortRead)?;
-            Some(hash)
-        } else {
-            None
-        };
-
-        // Optional invoice
-        let has_invoice: u8 = Readable::read(reader)?;
-        let invoice = if has_invoice != 0 {
-            let len: u16 = Readable::read(reader)?;
-            let mut bytes = vec![0u8; len as usize];
-            reader
-                .read_exact(&mut bytes)
-                .map_err(|_| DecodeError::ShortRead)?;
-            Some(String::from_utf8(bytes).map_err(|_| DecodeError::InvalidValue)?)
-        } else {
-            None
-        };
-
-        // Optional cosigner signature
-        let has_sig: u8 = Readable::read(reader)?;
-        let cosigner_guarantee_signature = if has_sig != 0 {
-            let mut sig = [0u8; 64];
-            reader
-                .read_exact(&mut sig)
-                .map_err(|_| DecodeError::ShortRead)?;
-            Some(sig)
-        } else {
-            None
-        };
-
-        Ok(Self {
-            partner_id,
-            pubkey,
-            fees,
-            payment_hash,
-            invoice,
-            cosigner_guarantee_signature,
-        })
-    }
-}
-
-/// V1-compatible deposit close message
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DepositCloseMsg {
-    pub partner_id: PublicKey,
-    pub pubkey: PublicKey,
-}
-
-impl Writeable for DepositCloseMsg {
-    fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
-        self.partner_id.serialize().write(writer)?;
-        self.pubkey.serialize().write(writer)?;
-        Ok(())
-    }
-}
-
-impl Readable for DepositCloseMsg {
-    fn read<R: lightning::io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
-        let partner_bytes: [u8; 33] = Readable::read(reader)?;
-        let partner_id =
-            PublicKey::from_slice(&partner_bytes).map_err(|_| DecodeError::InvalidValue)?;
-        let pubkey_bytes: [u8; 33] = Readable::read(reader)?;
-        let pubkey =
-            PublicKey::from_slice(&pubkey_bytes).map_err(|_| DecodeError::InvalidValue)?;
-        Ok(Self { partner_id, pubkey })
-    }
-}
-
-/// V1-compatible deposit update message
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DepositUpdateMsg {
-    pub partner_id: PublicKey,
-    pub pubkey: PublicKey,
-    pub new_fees: FeeStructure,
-}
-
-impl Writeable for DepositUpdateMsg {
-    fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
-        self.partner_id.serialize().write(writer)?;
-        self.pubkey.serialize().write(writer)?;
-        self.new_fees.write(writer)?;
-        Ok(())
-    }
-}
-
-impl Readable for DepositUpdateMsg {
-    fn read<R: lightning::io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
-        let partner_bytes: [u8; 33] = Readable::read(reader)?;
-        let partner_id =
-            PublicKey::from_slice(&partner_bytes).map_err(|_| DecodeError::InvalidValue)?;
-        let pubkey_bytes: [u8; 33] = Readable::read(reader)?;
-        let pubkey =
-            PublicKey::from_slice(&pubkey_bytes).map_err(|_| DecodeError::InvalidValue)?;
-        let new_fees = FeeStructure::read(reader)?;
-        Ok(Self {
-            partner_id,
-            pubkey,
-            new_fees,
-        })
-    }
-}
-
-// ============================================================================
-// Collateral Messages
-// ============================================================================
-
-/// V1-compatible collateral increase message
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CollateralIncreaseMsg {
-    pub partner_id: PublicKey,
-    pub new_amount: u64,
-    pub block_height: u32,
-}
-
-impl Writeable for CollateralIncreaseMsg {
-    fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
-        self.partner_id.serialize().write(writer)?;
-        self.new_amount.write(writer)?;
-        self.block_height.write(writer)?;
-        Ok(())
-    }
-}
-
-impl Readable for CollateralIncreaseMsg {
-    fn read<R: lightning::io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
-        let pubkey_bytes: [u8; 33] = Readable::read(reader)?;
-        let partner_id =
-            PublicKey::from_slice(&pubkey_bytes).map_err(|_| DecodeError::InvalidValue)?;
-        let new_amount: u64 = Readable::read(reader)?;
-        let block_height: u32 = Readable::read(reader)?;
-        Ok(Self {
-            partner_id,
-            new_amount,
-            block_height,
-        })
-    }
-}
-
-/// V1-compatible collateral decrease message
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CollateralDecreaseMsg {
-    pub partner_id: PublicKey,
-    pub new_amount: u64,
-    pub block_height: u32,
-}
-
-impl Writeable for CollateralDecreaseMsg {
-    fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
-        self.partner_id.serialize().write(writer)?;
-        self.new_amount.write(writer)?;
-        self.block_height.write(writer)?;
-        Ok(())
-    }
-}
-
-impl Readable for CollateralDecreaseMsg {
-    fn read<R: lightning::io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
-        let pubkey_bytes: [u8; 33] = Readable::read(reader)?;
-        let partner_id =
-            PublicKey::from_slice(&pubkey_bytes).map_err(|_| DecodeError::InvalidValue)?;
-        let new_amount: u64 = Readable::read(reader)?;
-        let block_height: u32 = Readable::read(reader)?;
-        Ok(Self {
-            partner_id,
-            new_amount,
-            block_height,
-        })
-    }
-}
+//
+// The following message types are specific to LDK integration and are not
+// needed in the core protocol. They have native Readable/Writeable impls.
 
 /// V1-compatible collateral add partner message
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -615,222 +170,6 @@ impl Readable for CollateralRemovePartnerMsg {
             collateral_partner,
             operator_signature,
         })
-    }
-}
-
-// ============================================================================
-// Fee Messages
-// ============================================================================
-
-/// V1-compatible fee collect message
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FeeCollectMsg {
-    pub pubkey: PublicKey,
-    pub amount: u64,
-    pub block_height: u32,
-}
-
-impl Writeable for FeeCollectMsg {
-    fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
-        self.pubkey.serialize().write(writer)?;
-        self.amount.write(writer)?;
-        self.block_height.write(writer)?;
-        Ok(())
-    }
-}
-
-impl Readable for FeeCollectMsg {
-    fn read<R: lightning::io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
-        let pubkey_bytes: [u8; 33] = Readable::read(reader)?;
-        let pubkey =
-            PublicKey::from_slice(&pubkey_bytes).map_err(|_| DecodeError::InvalidValue)?;
-        let amount: u64 = Readable::read(reader)?;
-        let block_height: u32 = Readable::read(reader)?;
-        Ok(Self {
-            pubkey,
-            amount,
-            block_height,
-        })
-    }
-}
-
-/// Type alias for MaintenanceFeeCollect
-pub type MaintenanceFeeCollectMsg = FeeCollectMsg;
-
-// ============================================================================
-// Ledger Close Message
-// ============================================================================
-
-/// V1-compatible ledger close message
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LedgerCloseMsg {
-    pub partner_id: PublicKey,
-}
-
-impl Writeable for LedgerCloseMsg {
-    fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
-        self.partner_id.serialize().write(writer)?;
-        Ok(())
-    }
-}
-
-impl Readable for LedgerCloseMsg {
-    fn read<R: lightning::io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
-        let pubkey_bytes: [u8; 33] = Readable::read(reader)?;
-        let partner_id =
-            PublicKey::from_slice(&pubkey_bytes).map_err(|_| DecodeError::InvalidValue)?;
-        Ok(Self { partner_id })
-    }
-}
-
-// ============================================================================
-// Payment Messages
-// ============================================================================
-
-/// V1-compatible receiving credit payment message
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ReceivingCreditPaymentMsg {
-    pub payment_hash: [u8; 32],
-    pub deposit_pubkey: PublicKey,
-    pub amount: u64,
-    pub invoice_id: String,
-    pub partner_id: PublicKey,
-    pub sequence_number: u64,
-}
-
-impl Writeable for ReceivingCreditPaymentMsg {
-    fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
-        writer.write_all(&self.payment_hash)?;
-        self.deposit_pubkey.serialize().write(writer)?;
-        self.amount.write(writer)?;
-        (self.invoice_id.len() as u16).write(writer)?;
-        writer.write_all(self.invoice_id.as_bytes())?;
-        self.partner_id.serialize().write(writer)?;
-        self.sequence_number.write(writer)?;
-        Ok(())
-    }
-}
-
-impl Readable for ReceivingCreditPaymentMsg {
-    fn read<R: lightning::io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
-        let mut payment_hash = [0u8; 32];
-        reader.read_exact(&mut payment_hash).map_err(|_| DecodeError::ShortRead)?;
-        let pk_bytes: [u8; 33] = Readable::read(reader)?;
-        let deposit_pubkey = PublicKey::from_slice(&pk_bytes).map_err(|_| DecodeError::InvalidValue)?;
-        let amount: u64 = Readable::read(reader)?;
-        let len: u16 = Readable::read(reader)?;
-        let mut bytes = vec![0u8; len as usize];
-        reader.read_exact(&mut bytes).map_err(|_| DecodeError::ShortRead)?;
-        let invoice_id = String::from_utf8(bytes).map_err(|_| DecodeError::InvalidValue)?;
-        let partner_bytes: [u8; 33] = Readable::read(reader)?;
-        let partner_id = PublicKey::from_slice(&partner_bytes).map_err(|_| DecodeError::InvalidValue)?;
-        let sequence_number: u64 = Readable::read(reader)?;
-        Ok(Self { payment_hash, deposit_pubkey, amount, invoice_id, partner_id, sequence_number })
-    }
-}
-
-/// V1-compatible sending lock payment message
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SendingLockPaymentMsg {
-    pub pubkey: PublicKey,
-    pub amount: u64,
-    pub payment_id: [u8; 32],
-    pub sequence_number: u64,
-    pub scriptpubkey_signature: [u8; 64],
-}
-
-impl Writeable for SendingLockPaymentMsg {
-    fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
-        self.pubkey.serialize().write(writer)?;
-        self.amount.write(writer)?;
-        writer.write_all(&self.payment_id)?;
-        self.sequence_number.write(writer)?;
-        writer.write_all(&self.scriptpubkey_signature)?;
-        Ok(())
-    }
-}
-
-impl Readable for SendingLockPaymentMsg {
-    fn read<R: lightning::io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
-        let pk_bytes: [u8; 33] = Readable::read(reader)?;
-        let pubkey = PublicKey::from_slice(&pk_bytes).map_err(|_| DecodeError::InvalidValue)?;
-        let amount: u64 = Readable::read(reader)?;
-        let mut payment_id = [0u8; 32];
-        reader.read_exact(&mut payment_id).map_err(|_| DecodeError::ShortRead)?;
-        let sequence_number: u64 = Readable::read(reader)?;
-        let mut scriptpubkey_signature = [0u8; 64];
-        reader.read_exact(&mut scriptpubkey_signature).map_err(|_| DecodeError::ShortRead)?;
-        Ok(Self { pubkey, amount, payment_id, sequence_number, scriptpubkey_signature })
-    }
-}
-
-/// V1-compatible sending fail payment message
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SendingFailPaymentMsg {
-    pub pubkey: PublicKey,
-    pub amount: u64,
-    pub payment_id: [u8; 32],
-    pub sequence_number: u64,
-}
-
-impl Writeable for SendingFailPaymentMsg {
-    fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
-        self.pubkey.serialize().write(writer)?;
-        self.amount.write(writer)?;
-        writer.write_all(&self.payment_id)?;
-        self.sequence_number.write(writer)?;
-        Ok(())
-    }
-}
-
-impl Readable for SendingFailPaymentMsg {
-    fn read<R: lightning::io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
-        let pk_bytes: [u8; 33] = Readable::read(reader)?;
-        let pubkey = PublicKey::from_slice(&pk_bytes).map_err(|_| DecodeError::InvalidValue)?;
-        let amount: u64 = Readable::read(reader)?;
-        let mut payment_id = [0u8; 32];
-        reader.read_exact(&mut payment_id).map_err(|_| DecodeError::ShortRead)?;
-        let sequence_number: u64 = Readable::read(reader)?;
-        Ok(Self { pubkey, amount, payment_id, sequence_number })
-    }
-}
-
-/// V1-compatible sending fulfill payment message
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SendingFulfillPaymentMsg {
-    pub pubkey: PublicKey,
-    pub amount: u64,
-    pub payment_id: [u8; 32],
-    pub sequence_number: u64,
-    pub scriptpubkey_signature: [u8; 64],
-    pub preimage: [u8; 32],
-}
-
-impl Writeable for SendingFulfillPaymentMsg {
-    fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
-        self.pubkey.serialize().write(writer)?;
-        self.amount.write(writer)?;
-        writer.write_all(&self.payment_id)?;
-        self.sequence_number.write(writer)?;
-        writer.write_all(&self.scriptpubkey_signature)?;
-        writer.write_all(&self.preimage)?;
-        Ok(())
-    }
-}
-
-impl Readable for SendingFulfillPaymentMsg {
-    fn read<R: lightning::io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
-        let pk_bytes: [u8; 33] = Readable::read(reader)?;
-        let pubkey = PublicKey::from_slice(&pk_bytes).map_err(|_| DecodeError::InvalidValue)?;
-        let amount: u64 = Readable::read(reader)?;
-        let mut payment_id = [0u8; 32];
-        reader.read_exact(&mut payment_id).map_err(|_| DecodeError::ShortRead)?;
-        let sequence_number: u64 = Readable::read(reader)?;
-        let mut scriptpubkey_signature = [0u8; 64];
-        reader.read_exact(&mut scriptpubkey_signature).map_err(|_| DecodeError::ShortRead)?;
-        let mut preimage = [0u8; 32];
-        reader.read_exact(&mut preimage).map_err(|_| DecodeError::ShortRead)?;
-        Ok(Self { pubkey, amount, payment_id, sequence_number, scriptpubkey_signature, preimage })
     }
 }
 
@@ -1854,59 +1193,6 @@ impl Readable for QuorumVoteMsg {
 // Additional Payment Messages
 // ============================================================================
 
-/// V1-compatible receiving cosign invoice message
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ReceivingCosignInvoiceMsg {
-    pub amount: u64,
-    pub payment_hash: [u8; 32],
-    pub expires: u64,
-    pub assigned_deposit: PublicKey,
-    pub invoice_id: String,
-    pub bolt11: String,
-}
-
-impl Writeable for ReceivingCosignInvoiceMsg {
-    fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
-        self.amount.write(writer)?;
-        writer.write_all(&self.payment_hash)?;
-        self.expires.write(writer)?;
-        self.assigned_deposit.serialize().write(writer)?;
-        (self.invoice_id.len() as u16).write(writer)?;
-        writer.write_all(self.invoice_id.as_bytes())?;
-        (self.bolt11.len() as u16).write(writer)?;
-        writer.write_all(self.bolt11.as_bytes())?;
-        Ok(())
-    }
-}
-
-impl Readable for ReceivingCosignInvoiceMsg {
-    fn read<R: lightning::io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
-        let amount: u64 = Readable::read(reader)?;
-        let mut payment_hash = [0u8; 32];
-        reader.read_exact(&mut payment_hash).map_err(|_| DecodeError::ShortRead)?;
-        let expires: u64 = Readable::read(reader)?;
-        let deposit_bytes: [u8; 33] = Readable::read(reader)?;
-        let assigned_deposit =
-            PublicKey::from_slice(&deposit_bytes).map_err(|_| DecodeError::InvalidValue)?;
-        let id_len: u16 = Readable::read(reader)?;
-        let mut id_bytes = vec![0u8; id_len as usize];
-        reader.read_exact(&mut id_bytes).map_err(|_| DecodeError::ShortRead)?;
-        let invoice_id = String::from_utf8(id_bytes).map_err(|_| DecodeError::InvalidValue)?;
-        let bolt11_len: u16 = Readable::read(reader)?;
-        let mut bolt11_bytes = vec![0u8; bolt11_len as usize];
-        reader.read_exact(&mut bolt11_bytes).map_err(|_| DecodeError::ShortRead)?;
-        let bolt11 = String::from_utf8(bolt11_bytes).map_err(|_| DecodeError::InvalidValue)?;
-        Ok(Self {
-            amount,
-            payment_hash,
-            expires,
-            assigned_deposit,
-            invoice_id,
-            bolt11,
-        })
-    }
-}
-
 /// V1-compatible uncredited payment message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UncreditedPaymentMsg {
@@ -1997,102 +1283,56 @@ mod tests {
     }
 
     #[test]
-    fn test_reserves_increase_roundtrip() {
-        let original = ReservesIncreaseMsg {
-            partner_id: test_pubkey(),
-            new_amount: 100000,
-        };
-        let mut buffer = Vec::new();
-        original.write(&mut buffer).unwrap();
+    fn test_collateral_add_partner_roundtrip() {
+        use lightning::util::ser::Writeable;
 
-        let mut reader = &buffer[..];
-        let decoded = ReservesIncreaseMsg::read(&mut reader).unwrap();
-
-        assert_eq!(original, decoded);
-    }
-
-    #[test]
-    fn test_reserves_add_output_roundtrip() {
-        let original = ReservesAddOutputMsg {
-            initial_amount: 50000,
-            spend_to: test_pubkey(),
+        let msg = CollateralAddPartnerMsg {
+            operator_id: test_pubkey(),
             partner_id: test_pubkey2(),
-            collateral_partners: vec![test_pubkey()],
+            collateral_partner: test_pubkey(),
+            collateral_partner_signature: [42u8; 64],
         };
-        let mut buffer = Vec::new();
-        original.write(&mut buffer).unwrap();
 
-        let mut reader = &buffer[..];
-        let decoded = ReservesAddOutputMsg::read(&mut reader).unwrap();
+        let encoded = msg.encode();
+        let decoded: CollateralAddPartnerMsg =
+            Readable::read(&mut lightning::io::Cursor::new(&encoded)).unwrap();
 
-        assert_eq!(original, decoded);
+        assert_eq!(msg, decoded);
     }
 
     #[test]
-    fn test_deposit_open_roundtrip() {
-        let original = DepositOpenMsg {
-            partner_id: test_pubkey(),
-            pubkey: test_pubkey2(),
-            fees: Some(FeeStructure::new(1000, 50, 144)),
-            payment_hash: Some([42u8; 32]),
-            invoice: Some("lnbc1...".to_string()),
-            cosigner_guarantee_signature: Some([99u8; 64]),
+    fn test_quorum_vote_roundtrip() {
+        use lightning::util::ser::Writeable;
+
+        let msg = QuorumVoteMsg {
+            vote_round_id: [1u8; 32],
+            voter_pubkey: test_pubkey(),
+            vote: true,
+            voter_sequence: 42,
+            voter_state_hash: [2u8; 32],
+            evidence: Some(vec![1, 2, 3, 4]),
+            signature: [3u8; 64],
+            spend_signature: Some([4u8; 64]),
         };
-        let mut buffer = Vec::new();
-        original.write(&mut buffer).unwrap();
 
-        let mut reader = &buffer[..];
-        let decoded = DepositOpenMsg::read(&mut reader).unwrap();
+        let encoded = msg.encode();
+        let decoded: QuorumVoteMsg =
+            Readable::read(&mut lightning::io::Cursor::new(&encoded)).unwrap();
 
-        assert_eq!(original, decoded);
+        assert_eq!(msg, decoded);
     }
 
     #[test]
-    fn test_deposit_open_minimal_roundtrip() {
-        let original = DepositOpenMsg {
+    fn test_core_types_reexported() {
+        // Test that core types are accessible through re-exports
+        let msg = ReservesIncreaseMsg {
             partner_id: test_pubkey(),
-            pubkey: test_pubkey2(),
-            fees: None,
-            payment_hash: None,
-            invoice: None,
-            cosigner_guarantee_signature: None,
+            new_amount: 100_000,
         };
-        let mut buffer = Vec::new();
-        original.write(&mut buffer).unwrap();
+        assert_eq!(msg.new_amount, 100_000);
 
-        let mut reader = &buffer[..];
-        let decoded = DepositOpenMsg::read(&mut reader).unwrap();
-
-        assert_eq!(original, decoded);
-    }
-
-    #[test]
-    fn test_collateral_increase_roundtrip() {
-        let original = CollateralIncreaseMsg {
-            partner_id: test_pubkey(),
-            new_amount: 200000,
-            block_height: 800000,
-        };
-        let mut buffer = Vec::new();
-        original.write(&mut buffer).unwrap();
-
-        let mut reader = &buffer[..];
-        let decoded = CollateralIncreaseMsg::read(&mut reader).unwrap();
-
-        assert_eq!(original, decoded);
-    }
-
-    #[test]
-    fn test_ledger_close_roundtrip() {
-        let original = LedgerCloseMsg {
-            partner_id: test_pubkey(),
-        };
-        let mut buffer = Vec::new();
-        original.write(&mut buffer).unwrap();
-
-        let mut reader = &buffer[..];
-        let decoded = LedgerCloseMsg::read(&mut reader).unwrap();
-
-        assert_eq!(original, decoded);
+        // Test LDK wrapper
+        let ldk_msg = LdkReservesIncreaseMsg::from(msg.clone());
+        assert_eq!(ldk_msg.0.new_amount, 100_000);
     }
 }

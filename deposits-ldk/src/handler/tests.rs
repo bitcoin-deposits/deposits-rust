@@ -580,12 +580,12 @@ fn test_broadcast_uncredited_payment_accusation_with_ledger() {
     assert_eq!(*target, operator);
     match msg {
         DepositsMessage::UncreditedPayment { operator: msg_operator, partner, payment_hash: msg_payment_hash, preimage: msg_preimage, deposit_pubkey: msg_deposit_pubkey, amount_msat, .. } => {
-            assert_eq!(*msg_operator, operator);
-            assert_eq!(*partner, our_node_id);
-            assert_eq!(*msg_payment_hash, payment_hash);
-            assert_eq!(*msg_preimage, preimage);
-            assert_eq!(*msg_deposit_pubkey, deposit_pubkey);
-            assert_eq!(*amount_msat, 50_000_000);
+            assert_eq!(msg_operator, &operator);
+            assert_eq!(partner, &our_node_id);
+            assert_eq!(msg_payment_hash, &payment_hash);
+            assert_eq!(msg_preimage, &preimage);
+            assert_eq!(msg_deposit_pubkey, &deposit_pubkey);
+            assert_eq!(amount_msat, &50_000_000);
         }
         _ => panic!("Expected UncreditedPayment message"),
     }
@@ -942,9 +942,9 @@ fn test_fraud_proof_accepted_with_valid_cosigned_invoice() {
     let (_, msg) = &pending[0];
     match msg {
         DepositsMessage::UncreditedPayment { payment_hash: msg_payment_hash, preimage: msg_preimage, deposit_pubkey: msg_deposit_pubkey, .. } => {
-            assert_eq!(*msg_payment_hash, payment_hash);
-            assert_eq!(*msg_preimage, preimage);
-            assert_eq!(*msg_deposit_pubkey, deposit_pubkey);
+            assert_eq!(msg_payment_hash, &payment_hash);
+            assert_eq!(msg_preimage, &preimage);
+            assert_eq!(msg_deposit_pubkey, &deposit_pubkey);
         }
         _ => panic!("Expected UncreditedPayment message"),
     }
@@ -1037,9 +1037,9 @@ fn test_received_fraud_proof_forwards_to_collateral_partners() {
     for (_, msg) in &pending {
         match msg {
             DepositsMessage::UncreditedPayment { operator: fwd_operator, payment_hash: fwd_payment_hash, preimage: fwd_preimage, .. } => {
-                assert_eq!(*fwd_operator, operator);
-                assert_eq!(*fwd_payment_hash, payment_hash);
-                assert_eq!(*fwd_preimage, preimage);
+                assert_eq!(fwd_operator, &operator);
+                assert_eq!(fwd_payment_hash, &payment_hash);
+                assert_eq!(fwd_preimage, &preimage);
             }
             _ => panic!("Expected forwarded UncreditedPayment message"),
         }

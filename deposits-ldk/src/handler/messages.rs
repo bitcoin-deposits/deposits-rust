@@ -71,22 +71,25 @@ pub use crate::wire::types::{FeeStructure, PendingInvoice};
 // They are used for wire encoding during peer-to-peer communication.
 
 pub use crate::wire::messages::{
-    // Reserves operations
+    // Reserves operations (re-exported from deposits-core)
     ReservesIncreaseMsg, ReservesDecreaseMsg, ReservesAddOutputMsg,
     ReservesRemoveOutputMsg, ReservesUpdateOutputMsg,
     // Reserves commitment protocol (custom messages for generic extra outputs API)
     UpdateReservesMsg, AcceptReservesMsg,
-    // Deposit operations
+    // Deposit operations (re-exported from deposits-core)
     DepositOpenMsg, DepositCloseMsg, DepositUpdateMsg,
-    // Collateral operations
-    CollateralIncreaseMsg, CollateralDecreaseMsg, CollateralAddPartnerMsg,
-    CollateralRemovePartnerMsg, CollateralStatusMsg,
+    // Collateral operations (core types re-exported)
+    CollateralIncreaseMsg, CollateralDecreaseMsg,
+    // LDK-only collateral types (defined in wire/messages.rs)
+    CollateralAddPartnerMsg, CollateralRemovePartnerMsg, CollateralStatusMsg,
     CollateralConsentRequestMsg, CollateralConsentResponseMsg,
-    // Fee and ledger close
+    // Fee and ledger close (re-exported from deposits-core)
     FeeCollectMsg, LedgerCloseMsg,
-    // Payment messages
+    // Payment messages (re-exported from deposits-core)
     ReceivingCreditPaymentMsg, SendingLockPaymentMsg, SendingFailPaymentMsg,
-    SendingFulfillPaymentMsg, UncreditedPaymentMsg,
+    SendingFulfillPaymentMsg, ReceivingCosignInvoiceMsg,
+    // LDK-only types (defined in wire/messages.rs)
+    UncreditedPaymentMsg,
     // Transfer messages
     DepositLockTransferMsg, DepositFailTransferMsg, DepositFulfillTransferMsg,
     // Sync and channel close
@@ -101,10 +104,17 @@ pub use crate::wire::messages::{
     RelayNwcRequestMsg, RelayNwcResponseMsg, RelayNwcDeliveryProofMsg,
     // Collateral attestation (now has serde derives and available_collateral())
     CollateralAttestationMsg,
+    // LDK wrappers for Readable/Writeable serialization (used in DepositsMessage Readable impl)
+    LdkReservesIncreaseMsg, LdkReservesDecreaseMsg, LdkReservesAddOutputMsg,
+    LdkReservesRemoveOutputMsg, LdkReservesUpdateOutputMsg,
+    LdkUpdateReservesMsg, LdkAcceptReservesMsg,
+    LdkDepositOpenMsg, LdkDepositCloseMsg, LdkDepositUpdateMsg,
+    LdkCollateralIncreaseMsg, LdkCollateralDecreaseMsg,
+    LdkFeeCollectMsg, LdkLedgerCloseMsg,
+    LdkReceivingCreditPaymentMsg, LdkSendingLockPaymentMsg,
+    LdkSendingFailPaymentMsg, LdkSendingFulfillPaymentMsg,
+    LdkReceivingCosignInvoiceMsg,
 };
-// Note: The following are kept local due to structural differences or special needs:
-// - ReceivingCosignInvoiceMsg: uses PendingInvoice wrapper
-// - QuorumStateSyncMsg: uses Vec<SignedUpdateMsg>
 
 // ============================================================================
 // LedgerOperation Extensions
@@ -214,7 +224,7 @@ pub enum DepositsMessage {
     DepositOpen {
         partner_id: PublicKey,
         pubkey: PublicKey,
-        fees: Option<FeeStructure>,
+        fees: Option<deposits_core::FeeStructure>,
         payment_hash: Option<[u8; 32]>,
         invoice: Option<String>,
         cosigner_guarantee_signature: Option<[u8; 64]>,
@@ -228,7 +238,7 @@ pub enum DepositsMessage {
     DepositUpdate {
         partner_id: PublicKey,
         pubkey: PublicKey,
-        new_fees: FeeStructure,
+        new_fees: deposits_core::FeeStructure,
     },
     /// Reserves add output - uses inline fields (legacy ReservesAddOutputMsg removed)
     ReservesAddOutput {
@@ -279,9 +289,14 @@ pub enum DepositsMessage {
         partner_id: PublicKey,
         sequence_number: u64,
     },
-    /// Cosign invoice request - uses inline fields (legacy ReceivingCosignInvoiceMsg retained for deserialization)
+    /// Cosign invoice request - uses inline fields matching deposits_core::ReceivingCosignInvoiceMsg
     ReceivingCosignInvoice {
-        pending_invoice: PendingInvoice,
+        amount: u64,
+        payment_hash: [u8; 32],
+        expires: u64,
+        assigned_deposit: PublicKey,
+        invoice_id: String,
+        bolt11: String,
     },
     /// Payment lock (sending) - uses inline fields (legacy SendingLockPaymentMsg retained for deserialization)
     SendingLockPayment {
@@ -1155,7 +1170,7 @@ impl DepositsMessage {
             Self::DepositOpen { pubkey, fees, payment_hash, invoice, cosigner_guarantee_signature, .. } => {
                 Some(LedgerOperation::DepositOpen {
                     pubkey: *pubkey,
-                    fees: fees.as_ref().map(|f| f.0.clone()),
+                    fees: fees.clone(),
                     payment_hash: *payment_hash,
                     invoice: invoice.clone(),
                     cosigner_guarantee_signature: *cosigner_guarantee_signature,
@@ -1167,7 +1182,7 @@ impl DepositsMessage {
             Self::DepositUpdate { pubkey, new_fees, .. } => {
                 Some(LedgerOperation::DepositUpdate {
                     pubkey: *pubkey,
-                    new_fees: new_fees.0.clone(),
+                    new_fees: new_fees.clone(),
                 })
             }
             Self::ReservesAddOutput { initial_amount, spend_to, collateral_partners, .. } => {
@@ -1442,7 +1457,7 @@ impl DepositsMessage {
                     partner_id,
                     operation: LedgerOperation::DepositOpen {
                         pubkey,
-                        fees: fees.as_ref().map(|f| f.0.clone()),
+                        fees: fees.clone(),
                         payment_hash,
                         invoice: invoice.clone(),
                         cosigner_guarantee_signature,
@@ -1470,7 +1485,7 @@ impl DepositsMessage {
                     partner_id,
                     operation: LedgerOperation::DepositUpdate {
                         pubkey,
-                        new_fees: new_fees.0.clone(),
+                        new_fees: new_fees.clone(),
                     },
                     sequence_number: 0,
                     previous_hash: [0u8; 32],
@@ -1554,18 +1569,17 @@ impl DepositsMessage {
                     operator_signature: [0u8; 64],
                 })
             }
-            Self::ReceivingCosignInvoice { pending_invoice } => {
-                // CosignInvoice is in CoordinationMsg - extract fields from PendingInvoice
-                let pi = pending_invoice;
+            Self::ReceivingCosignInvoice { amount, payment_hash, expires, assigned_deposit, ref invoice_id, ref bolt11 } => {
+                // CosignInvoice is in CoordinationMsg
                 DepositsMessageCore::Coordination(CoordinationMsg::CosignInvoice {
-                    operator_id: pi.assigned_deposit, // placeholder
-                    partner_id: pi.assigned_deposit,   // placeholder
-                    amount: pi.amount,
-                    payment_hash: pi.payment_hash,
-                    expires: pi.expires,
-                    assigned_deposit: pi.assigned_deposit,
-                    invoice_id: pi.invoice_id.clone(),
-                    bolt11_invoice: pi.bolt11.clone(),
+                    operator_id: assigned_deposit, // placeholder
+                    partner_id: assigned_deposit,   // placeholder
+                    amount,
+                    payment_hash,
+                    expires,
+                    assigned_deposit,
+                    invoice_id: invoice_id.clone(),
+                    bolt11_invoice: bolt11.clone(),
                 })
             }
             Self::SendingLockPayment { pubkey, amount, payment_id, sequence_number, scriptpubkey_signature } => {
@@ -2343,11 +2357,8 @@ pub type SignedUpdateMsg = LedgerUpdateMsg;
 /// Type alias for MaintenanceFeeCollect
 pub type MaintenanceFeeCollectMsg = FeeCollectMsg;
 
-/// V1-compatible receiving cosign invoice message (local - uses PendingInvoice wrapper)
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ReceivingCosignInvoiceMsg {
-    pub pending_invoice: PendingInvoice,
-}
+// Note: ReceivingCosignInvoiceMsg is now imported from deposits-core/wire::messages
+// It has the same fields as PendingInvoice: amount, payment_hash, expires, assigned_deposit, invoice_id, bolt11
 
 // Note: From implementations for quorum types were removed because they violate orphan rules
 // when QuorumJoinRequestMsg/QuorumJoinResponseMsg are imported from deposits-ldk.
@@ -2456,29 +2467,7 @@ pub use deposits_core::messages::{type_id_to_const_name, type_id_to_variant_name
 // Imported types from deposits-ldk already have their Readable/Writeable impls.
 
 // CollateralAttestationMsg Writeable/Readable now comes from deposits-ldk
-
-impl Writeable for ReceivingCosignInvoiceMsg {
-    fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
-        use deposits_core::tlv::TlvEncode;
-        let bytes = self.pending_invoice.tlv_encode();
-        // Write length-prefixed TLV data
-        (bytes.len() as u32).write(writer)?;
-        writer.write_all(&bytes)
-    }
-}
-
-impl Readable for ReceivingCosignInvoiceMsg {
-    fn read<R: io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
-        use deposits_core::tlv::TlvDecode;
-        // Read length-prefixed TLV data
-        let len: u32 = Readable::read(reader)?;
-        let mut bytes = vec![0u8; len as usize];
-        reader.read_exact(&mut bytes).map_err(|_| DecodeError::ShortRead)?;
-        let core_invoice = deposits_core::PendingInvoice::tlv_decode(&bytes)
-            .map_err(|_| DecodeError::InvalidValue)?;
-        Ok(Self { pending_invoice: PendingInvoice(core_invoice) })
-    }
-}
+// ReceivingCosignInvoiceMsg Readable/Writeable now comes from LdkReceivingCosignInvoiceMsg wrapper
 
 // V1 SignedUpdate (LedgerUpdateMsg) encoding - includes partner_signature
 impl Writeable for LedgerUpdateMsg {
@@ -2563,77 +2552,104 @@ impl Readable for DepositsMessage {
         // These need the reader passed directly to their Readable impl
         match msg_type {
             RECEIVING_CREDIT_PAYMENT => {
-                return ReceivingCreditPaymentMsg::read(reader).map(|m| Self::ReceivingCreditPayment {
-                    payment_hash: m.payment_hash,
-                    deposit_pubkey: m.deposit_pubkey,
-                    amount: m.amount,
-                    invoice_id: m.invoice_id,
-                    partner_id: m.partner_id,
-                    sequence_number: m.sequence_number,
+                return LdkReceivingCreditPaymentMsg::read(reader).map(|w| {
+                    let m = w.0;
+                    Self::ReceivingCreditPayment {
+                        payment_hash: m.payment_hash,
+                        deposit_pubkey: m.deposit_pubkey,
+                        amount: m.amount,
+                        invoice_id: m.invoice_id,
+                        partner_id: m.partner_id,
+                        sequence_number: m.sequence_number,
+                    }
                 });
             }
             SENDING_LOCK_PAYMENT => {
-                return SendingLockPaymentMsg::read(reader).map(|m| Self::SendingLockPayment {
-                    pubkey: m.pubkey,
-                    amount: m.amount,
-                    payment_id: m.payment_id,
-                    sequence_number: m.sequence_number,
-                    scriptpubkey_signature: m.scriptpubkey_signature,
+                return LdkSendingLockPaymentMsg::read(reader).map(|w| {
+                    let m = w.0;
+                    Self::SendingLockPayment {
+                        pubkey: m.pubkey,
+                        amount: m.amount,
+                        payment_id: m.payment_id,
+                        sequence_number: m.sequence_number,
+                        scriptpubkey_signature: m.scriptpubkey_signature,
+                    }
                 });
             }
             SENDING_FAIL_PAYMENT => {
-                return SendingFailPaymentMsg::read(reader).map(|m| Self::SendingFailPayment {
-                    pubkey: m.pubkey,
-                    amount: m.amount,
-                    payment_id: m.payment_id,
-                    sequence_number: m.sequence_number,
+                return LdkSendingFailPaymentMsg::read(reader).map(|w| {
+                    let m = w.0;
+                    Self::SendingFailPayment {
+                        pubkey: m.pubkey,
+                        amount: m.amount,
+                        payment_id: m.payment_id,
+                        sequence_number: m.sequence_number,
+                    }
                 });
             }
             SENDING_FULFILL_PAYMENT => {
-                return SendingFulfillPaymentMsg::read(reader).map(|m| Self::SendingFulfillPayment {
-                    pubkey: m.pubkey,
-                    amount: m.amount,
-                    payment_id: m.payment_id,
-                    sequence_number: m.sequence_number,
-                    scriptpubkey_signature: m.scriptpubkey_signature,
-                    preimage: m.preimage,
+                return LdkSendingFulfillPaymentMsg::read(reader).map(|w| {
+                    let m = w.0;
+                    Self::SendingFulfillPayment {
+                        pubkey: m.pubkey,
+                        amount: m.amount,
+                        payment_id: m.payment_id,
+                        sequence_number: m.sequence_number,
+                        scriptpubkey_signature: m.scriptpubkey_signature,
+                        preimage: m.preimage,
+                    }
                 });
             }
             DEPOSIT_OPEN => {
-                return DepositOpenMsg::read(reader).map(|m| Self::DepositOpen {
-                    partner_id: m.partner_id,
-                    pubkey: m.pubkey,
-                    fees: m.fees,
-                    payment_hash: m.payment_hash,
-                    invoice: m.invoice,
-                    cosigner_guarantee_signature: m.cosigner_guarantee_signature,
+                return LdkDepositOpenMsg::read(reader).map(|w| {
+                    let m = w.0;
+                    Self::DepositOpen {
+                        partner_id: m.partner_id,
+                        pubkey: m.pubkey,
+                        fees: m.fees,
+                        payment_hash: m.payment_hash,
+                        invoice: m.invoice,
+                        cosigner_guarantee_signature: m.cosigner_guarantee_signature,
+                    }
                 });
             }
             DEPOSIT_CLOSE => {
-                return DepositCloseMsg::read(reader).map(|m| Self::DepositClose {
-                    partner_id: m.partner_id,
-                    pubkey: m.pubkey,
+                return LdkDepositCloseMsg::read(reader).map(|w| {
+                    let m = w.0;
+                    Self::DepositClose {
+                        partner_id: m.partner_id,
+                        pubkey: m.pubkey,
+                    }
                 });
             }
             RESERVES_ADD_OUTPUT => {
-                return ReservesAddOutputMsg::read(reader).map(|m| Self::ReservesAddOutput {
-                    initial_amount: m.initial_amount,
-                    spend_to: m.spend_to,
-                    partner_id: m.partner_id,
-                    collateral_partners: m.collateral_partners,
+                return LdkReservesAddOutputMsg::read(reader).map(|w| {
+                    let m = w.0;
+                    Self::ReservesAddOutput {
+                        initial_amount: m.initial_amount,
+                        spend_to: m.spend_to,
+                        partner_id: m.partner_id,
+                        collateral_partners: m.collateral_partners,
+                    }
                 });
             }
             RESERVES_REMOVE_OUTPUT => {
-                return ReservesRemoveOutputMsg::read(reader).map(|m| Self::ReservesRemoveOutput {
-                    partner_id: m.partner_id,
-                    remove_all: m.remove_all,
+                return LdkReservesRemoveOutputMsg::read(reader).map(|w| {
+                    let m = w.0;
+                    Self::ReservesRemoveOutput {
+                        partner_id: m.partner_id,
+                        remove_all: m.remove_all,
+                    }
                 });
             }
             MAINTENANCE_FEE_COLLECT => {
-                return FeeCollectMsg::read(reader).map(|m| Self::MaintenanceFeeCollect {
-                    pubkey: m.pubkey,
-                    amount: m.amount,
-                    block_height: m.block_height,
+                return LdkFeeCollectMsg::read(reader).map(|w| {
+                    let m = w.0;
+                    Self::MaintenanceFeeCollect {
+                        pubkey: m.pubkey,
+                        amount: m.amount,
+                        block_height: m.block_height,
+                    }
                 });
             }
             CHANNEL_CLOSE_TOMBSTONE => {
@@ -2647,49 +2663,70 @@ impl Readable for DepositsMessage {
                 });
             }
             RESERVES_INCREASE => {
-                return ReservesIncreaseMsg::read(reader).map(|m| Self::ReservesIncrease {
-                    partner_id: m.partner_id,
-                    new_amount: m.new_amount,
+                return LdkReservesIncreaseMsg::read(reader).map(|w| {
+                    let m = w.0;
+                    Self::ReservesIncrease {
+                        partner_id: m.partner_id,
+                        new_amount: m.new_amount,
+                    }
                 });
             }
             RESERVES_DECREASE => {
-                return ReservesDecreaseMsg::read(reader).map(|m| Self::ReservesDecrease {
-                    partner_id: m.partner_id,
-                    new_amount: m.new_amount,
+                return LdkReservesDecreaseMsg::read(reader).map(|w| {
+                    let m = w.0;
+                    Self::ReservesDecrease {
+                        partner_id: m.partner_id,
+                        new_amount: m.new_amount,
+                    }
                 });
             }
             RESERVES_UPDATE_OUTPUT => {
-                return ReservesUpdateOutputMsg::read(reader).map(|m| Self::ReservesUpdateOutput {
-                    partner_id: m.partner_id,
-                    spend_to: m.spend_to,
+                return LdkReservesUpdateOutputMsg::read(reader).map(|w| {
+                    let m = w.0;
+                    Self::ReservesUpdateOutput {
+                        partner_id: m.partner_id,
+                        spend_to: m.spend_to,
+                    }
                 });
             }
             UPDATE_RESERVES => {
-                return UpdateReservesMsg::read(reader).map(|m| Self::UpdateReserves {
-                    channel_id: m.channel_id,
-                    reserves_sats: m.reserves_sats,
-                    script_pubkey: m.script_pubkey,
-                    ledger_hash: m.ledger_hash,
-                    remote_ledger_hash: m.remote_ledger_hash,
+                return LdkUpdateReservesMsg::read(reader).map(|w| {
+                    let m = w.0;
+                    Self::UpdateReserves {
+                        channel_id: m.channel_id,
+                        reserves_sats: m.reserves_sats,
+                        script_pubkey: m.script_pubkey,
+                        ledger_hash: m.ledger_hash,
+                        remote_ledger_hash: m.remote_ledger_hash,
+                    }
                 });
             }
             ACCEPT_RESERVES => {
-                return AcceptReservesMsg::read(reader).map(|m| Self::AcceptReserves {
-                    channel_id: m.channel_id,
+                return LdkAcceptReservesMsg::read(reader).map(|w| {
+                    let m = w.0;
+                    Self::AcceptReserves {
+                        channel_id: m.channel_id,
+                    }
                 });
             }
             COLLATERAL_INCREASE => {
-                return CollateralIncreaseMsg::read(reader).map(|m| Self::CollateralIncrease {
-                    partner_id: m.partner_id,
-                    new_amount: m.new_amount,
-                    block_height: m.block_height,
+                return LdkCollateralIncreaseMsg::read(reader).map(|w| {
+                    let m = w.0;
+                    Self::CollateralIncrease {
+                        partner_id: m.partner_id,
+                        new_amount: m.new_amount,
+                        block_height: m.block_height,
+                    }
                 });
             }
             COLLATERAL_DECREASE => {
-                return CollateralDecreaseMsg::read(reader).map(|m| Self::CollateralDecrease {
-                    partner_id: m.partner_id,
-                    new_amount: m.new_amount,
-                    block_height: m.block_height,
+                return LdkCollateralDecreaseMsg::read(reader).map(|w| {
+                    let m = w.0;
+                    Self::CollateralDecrease {
+                        partner_id: m.partner_id,
+                        new_amount: m.new_amount,
+                        block_height: m.block_height,
+                    }
                 });
             }
             COLLATERAL_STATUS => {
@@ -2741,8 +2778,16 @@ impl Readable for DepositsMessage {
                 });
             }
             RECEIVING_COSIGN_INVOICE => {
-                return ReceivingCosignInvoiceMsg::read(reader).map(|m| Self::ReceivingCosignInvoice {
-                    pending_invoice: m.pending_invoice,
+                return LdkReceivingCosignInvoiceMsg::read(reader).map(|w| {
+                    let m = w.0;
+                    Self::ReceivingCosignInvoice {
+                        amount: m.amount,
+                        payment_hash: m.payment_hash,
+                        expires: m.expires,
+                        assigned_deposit: m.assigned_deposit,
+                        invoice_id: m.invoice_id,
+                        bolt11: m.bolt11,
+                    }
                 });
             }
             SIGNED_UPDATE => {
@@ -2820,60 +2865,67 @@ impl Writeable for DepositsMessage {
         //
         // For V2 message types and V1 aliases that map to V2, use encode().
         match self {
-            // === V1 message types - serialize using V1 Writeable directly ===
+            // === V1 message types - serialize using LdkXxxMsg wrappers ===
             Self::DepositOpen { partner_id, pubkey, fees, payment_hash, invoice, cosigner_guarantee_signature } => {
-                DepositOpenMsg { partner_id: *partner_id, pubkey: *pubkey, fees: fees.clone(), payment_hash: *payment_hash, invoice: invoice.clone(), cosigner_guarantee_signature: *cosigner_guarantee_signature }.write(writer)
+                LdkDepositOpenMsg::from(DepositOpenMsg { partner_id: *partner_id, pubkey: *pubkey, fees: fees.clone(), payment_hash: *payment_hash, invoice: invoice.clone(), cosigner_guarantee_signature: *cosigner_guarantee_signature }).write(writer)
             }
             Self::DepositClose { partner_id, pubkey } => {
-                DepositCloseMsg { partner_id: *partner_id, pubkey: *pubkey }.write(writer)
+                LdkDepositCloseMsg::from(DepositCloseMsg { partner_id: *partner_id, pubkey: *pubkey }).write(writer)
             }
             Self::ReservesAddOutput { initial_amount, spend_to, partner_id, collateral_partners } => {
-                ReservesAddOutputMsg { initial_amount: *initial_amount, spend_to: *spend_to, partner_id: *partner_id, collateral_partners: collateral_partners.clone() }.write(writer)
+                LdkReservesAddOutputMsg::from(ReservesAddOutputMsg { initial_amount: *initial_amount, spend_to: *spend_to, partner_id: *partner_id, collateral_partners: collateral_partners.clone() }).write(writer)
             }
             Self::ReservesRemoveOutput { partner_id, remove_all } => {
-                ReservesRemoveOutputMsg { partner_id: *partner_id, remove_all: *remove_all }.write(writer)
+                LdkReservesRemoveOutputMsg::from(ReservesRemoveOutputMsg { partner_id: *partner_id, remove_all: *remove_all }).write(writer)
             }
             Self::ReservesIncrease { partner_id, new_amount } => {
-                ReservesIncreaseMsg { partner_id: *partner_id, new_amount: *new_amount }.write(writer)
+                LdkReservesIncreaseMsg::from(ReservesIncreaseMsg { partner_id: *partner_id, new_amount: *new_amount }).write(writer)
             }
             Self::ReservesDecrease { partner_id, new_amount } => {
-                ReservesDecreaseMsg { partner_id: *partner_id, new_amount: *new_amount }.write(writer)
+                LdkReservesDecreaseMsg::from(ReservesDecreaseMsg { partner_id: *partner_id, new_amount: *new_amount }).write(writer)
             }
             Self::ReservesUpdateOutput { partner_id, spend_to } => {
-                ReservesUpdateOutputMsg { partner_id: *partner_id, spend_to: *spend_to }.write(writer)
+                LdkReservesUpdateOutputMsg::from(ReservesUpdateOutputMsg { partner_id: *partner_id, spend_to: *spend_to }).write(writer)
             }
             Self::UpdateReserves { channel_id, reserves_sats, script_pubkey, ledger_hash, remote_ledger_hash } => {
-                UpdateReservesMsg {
+                LdkUpdateReservesMsg::from(UpdateReservesMsg {
                     channel_id: *channel_id,
                     reserves_sats: *reserves_sats,
                     script_pubkey: script_pubkey.clone(),
                     ledger_hash: *ledger_hash,
                     remote_ledger_hash: *remote_ledger_hash,
-                }.write(writer)
+                }).write(writer)
             }
             Self::AcceptReserves { channel_id } => {
-                AcceptReservesMsg { channel_id: *channel_id }.write(writer)
+                LdkAcceptReservesMsg::from(AcceptReservesMsg { channel_id: *channel_id }).write(writer)
             }
             Self::ReceivingCreditPayment { payment_hash, deposit_pubkey, amount, invoice_id, partner_id, sequence_number } => {
-                ReceivingCreditPaymentMsg { payment_hash: *payment_hash, deposit_pubkey: *deposit_pubkey, amount: *amount, invoice_id: invoice_id.clone(), partner_id: *partner_id, sequence_number: *sequence_number }.write(writer)
+                LdkReceivingCreditPaymentMsg::from(ReceivingCreditPaymentMsg { payment_hash: *payment_hash, deposit_pubkey: *deposit_pubkey, amount: *amount, invoice_id: invoice_id.clone(), partner_id: *partner_id, sequence_number: *sequence_number }).write(writer)
             }
-            Self::ReceivingCosignInvoice { pending_invoice } => {
-                ReceivingCosignInvoiceMsg { pending_invoice: pending_invoice.clone() }.write(writer)
+            Self::ReceivingCosignInvoice { amount, payment_hash, expires, assigned_deposit, ref invoice_id, ref bolt11 } => {
+                LdkReceivingCosignInvoiceMsg::from(ReceivingCosignInvoiceMsg {
+                    amount: *amount,
+                    payment_hash: *payment_hash,
+                    expires: *expires,
+                    assigned_deposit: *assigned_deposit,
+                    invoice_id: invoice_id.clone(),
+                    bolt11: bolt11.clone(),
+                }).write(writer)
             }
             Self::SendingLockPayment { pubkey, amount, payment_id, sequence_number, scriptpubkey_signature } => {
-                SendingLockPaymentMsg { pubkey: *pubkey, amount: *amount, payment_id: *payment_id, sequence_number: *sequence_number, scriptpubkey_signature: *scriptpubkey_signature }.write(writer)
+                LdkSendingLockPaymentMsg::from(SendingLockPaymentMsg { pubkey: *pubkey, amount: *amount, payment_id: *payment_id, sequence_number: *sequence_number, scriptpubkey_signature: *scriptpubkey_signature }).write(writer)
             }
             Self::SendingFulfillPayment { pubkey, amount, payment_id, sequence_number, scriptpubkey_signature, preimage } => {
-                SendingFulfillPaymentMsg { pubkey: *pubkey, amount: *amount, payment_id: *payment_id, sequence_number: *sequence_number, scriptpubkey_signature: *scriptpubkey_signature, preimage: *preimage }.write(writer)
+                LdkSendingFulfillPaymentMsg::from(SendingFulfillPaymentMsg { pubkey: *pubkey, amount: *amount, payment_id: *payment_id, sequence_number: *sequence_number, scriptpubkey_signature: *scriptpubkey_signature, preimage: *preimage }).write(writer)
             }
             Self::SendingFailPayment { pubkey, amount, payment_id, sequence_number } => {
-                SendingFailPaymentMsg { pubkey: *pubkey, amount: *amount, payment_id: *payment_id, sequence_number: *sequence_number }.write(writer)
+                LdkSendingFailPaymentMsg::from(SendingFailPaymentMsg { pubkey: *pubkey, amount: *amount, payment_id: *payment_id, sequence_number: *sequence_number }).write(writer)
             }
             Self::CollateralIncrease { partner_id, new_amount, block_height } => {
-                CollateralIncreaseMsg { partner_id: *partner_id, new_amount: *new_amount, block_height: *block_height }.write(writer)
+                LdkCollateralIncreaseMsg::from(CollateralIncreaseMsg { partner_id: *partner_id, new_amount: *new_amount, block_height: *block_height }).write(writer)
             }
             Self::CollateralDecrease { partner_id, new_amount, block_height } => {
-                CollateralDecreaseMsg { partner_id: *partner_id, new_amount: *new_amount, block_height: *block_height }.write(writer)
+                LdkCollateralDecreaseMsg::from(CollateralDecreaseMsg { partner_id: *partner_id, new_amount: *new_amount, block_height: *block_height }).write(writer)
             }
             Self::CollateralStatus { collateral_operator, amount, block_height, signature } => {
                 CollateralStatusMsg { collateral_operator: *collateral_operator, amount: *amount, block_height: *block_height, signature: *signature }.write(writer)
@@ -2894,14 +2946,14 @@ impl Writeable for DepositsMessage {
                 CollateralConsentResponseMsg { operator_id: *operator_id, partner_id: *partner_id, consent_granted: *consent_granted, collateral_partner_signature: *collateral_partner_signature }.write(writer)
             }
             Self::MaintenanceFeeCollect { pubkey, amount, block_height } => {
-                FeeCollectMsg { pubkey: *pubkey, amount: *amount, block_height: *block_height }.write(writer)
+                LdkFeeCollectMsg::from(FeeCollectMsg { pubkey: *pubkey, amount: *amount, block_height: *block_height }).write(writer)
             }
             Self::ChannelCloseTombstone { operator_pubkey, partner_pubkey, timestamp, channel_id, close_reason, sequence_number } => {
                 ChannelCloseTombstoneMsg { operator_pubkey: *operator_pubkey, partner_pubkey: *partner_pubkey, timestamp: *timestamp, channel_id: *channel_id, close_reason: close_reason.clone(), sequence_number: *sequence_number }.write(writer)
             }
             Self::SignedUpdate(m) => m.write(writer),
             Self::LedgerClose { partner_id } => {
-                LedgerCloseMsg { partner_id: *partner_id }.write(writer)
+                LdkLedgerCloseMsg::from(LedgerCloseMsg { partner_id: *partner_id }).write(writer)
             }
 
             // === V2 message types and V1 aliases that map to V2 - use encode() ===
@@ -2947,135 +2999,180 @@ impl lightning::ln::wire::CustomMessageReader for DepositsMessageReader {
             return Ok(None);
         }
 
-        // Try V1 message types first (with Readable implementations)
+        // Try V1 message types first (using LdkXxxMsg wrappers for Readable)
         match message_type {
             RECEIVING_CREDIT_PAYMENT => {
-                return ReceivingCreditPaymentMsg::read(buffer)
-                    .map(|m| Some(DepositsMessage::ReceivingCreditPayment {
-                        payment_hash: m.payment_hash,
-                        deposit_pubkey: m.deposit_pubkey,
-                        amount: m.amount,
-                        invoice_id: m.invoice_id,
-                        partner_id: m.partner_id,
-                        sequence_number: m.sequence_number,
-                    }));
+                return LdkReceivingCreditPaymentMsg::read(buffer)
+                    .map(|w| {
+                        let m = w.0;
+                        Some(DepositsMessage::ReceivingCreditPayment {
+                            payment_hash: m.payment_hash,
+                            deposit_pubkey: m.deposit_pubkey,
+                            amount: m.amount,
+                            invoice_id: m.invoice_id,
+                            partner_id: m.partner_id,
+                            sequence_number: m.sequence_number,
+                        })
+                    });
             }
             SENDING_LOCK_PAYMENT => {
-                return SendingLockPaymentMsg::read(buffer)
-                    .map(|m| Some(DepositsMessage::SendingLockPayment {
-                        pubkey: m.pubkey,
-                        amount: m.amount,
-                        payment_id: m.payment_id,
-                        sequence_number: m.sequence_number,
-                        scriptpubkey_signature: m.scriptpubkey_signature,
-                    }));
+                return LdkSendingLockPaymentMsg::read(buffer)
+                    .map(|w| {
+                        let m = w.0;
+                        Some(DepositsMessage::SendingLockPayment {
+                            pubkey: m.pubkey,
+                            amount: m.amount,
+                            payment_id: m.payment_id,
+                            sequence_number: m.sequence_number,
+                            scriptpubkey_signature: m.scriptpubkey_signature,
+                        })
+                    });
             }
             SENDING_FAIL_PAYMENT => {
-                return SendingFailPaymentMsg::read(buffer)
-                    .map(|m| Some(DepositsMessage::SendingFailPayment {
-                        pubkey: m.pubkey,
-                        amount: m.amount,
-                        payment_id: m.payment_id,
-                        sequence_number: m.sequence_number,
-                    }));
+                return LdkSendingFailPaymentMsg::read(buffer)
+                    .map(|w| {
+                        let m = w.0;
+                        Some(DepositsMessage::SendingFailPayment {
+                            pubkey: m.pubkey,
+                            amount: m.amount,
+                            payment_id: m.payment_id,
+                            sequence_number: m.sequence_number,
+                        })
+                    });
             }
             SENDING_FULFILL_PAYMENT => {
-                return SendingFulfillPaymentMsg::read(buffer)
-                    .map(|m| Some(DepositsMessage::SendingFulfillPayment {
-                        pubkey: m.pubkey,
-                        amount: m.amount,
-                        payment_id: m.payment_id,
-                        sequence_number: m.sequence_number,
-                        scriptpubkey_signature: m.scriptpubkey_signature,
-                        preimage: m.preimage,
-                    }));
+                return LdkSendingFulfillPaymentMsg::read(buffer)
+                    .map(|w| {
+                        let m = w.0;
+                        Some(DepositsMessage::SendingFulfillPayment {
+                            pubkey: m.pubkey,
+                            amount: m.amount,
+                            payment_id: m.payment_id,
+                            sequence_number: m.sequence_number,
+                            scriptpubkey_signature: m.scriptpubkey_signature,
+                            preimage: m.preimage,
+                        })
+                    });
             }
             DEPOSIT_OPEN => {
-                return DepositOpenMsg::read(buffer)
-                    .map(|m| Some(DepositsMessage::DepositOpen {
-                        partner_id: m.partner_id,
-                        pubkey: m.pubkey,
-                        fees: m.fees,
-                        payment_hash: m.payment_hash,
-                        invoice: m.invoice,
-                        cosigner_guarantee_signature: m.cosigner_guarantee_signature,
-                    }));
+                return LdkDepositOpenMsg::read(buffer)
+                    .map(|w| {
+                        let m = w.0;
+                        Some(DepositsMessage::DepositOpen {
+                            partner_id: m.partner_id,
+                            pubkey: m.pubkey,
+                            fees: m.fees,
+                            payment_hash: m.payment_hash,
+                            invoice: m.invoice,
+                            cosigner_guarantee_signature: m.cosigner_guarantee_signature,
+                        })
+                    });
             }
             DEPOSIT_CLOSE => {
-                return DepositCloseMsg::read(buffer)
-                    .map(|m| Some(DepositsMessage::DepositClose {
-                        partner_id: m.partner_id,
-                        pubkey: m.pubkey,
-                    }));
+                return LdkDepositCloseMsg::read(buffer)
+                    .map(|w| {
+                        let m = w.0;
+                        Some(DepositsMessage::DepositClose {
+                            partner_id: m.partner_id,
+                            pubkey: m.pubkey,
+                        })
+                    });
             }
             RESERVES_ADD_OUTPUT => {
-                return ReservesAddOutputMsg::read(buffer)
-                    .map(|m| Some(DepositsMessage::ReservesAddOutput {
-                        initial_amount: m.initial_amount,
-                        spend_to: m.spend_to,
-                        partner_id: m.partner_id,
-                        collateral_partners: m.collateral_partners,
-                    }));
+                return LdkReservesAddOutputMsg::read(buffer)
+                    .map(|w| {
+                        let m = w.0;
+                        Some(DepositsMessage::ReservesAddOutput {
+                            initial_amount: m.initial_amount,
+                            spend_to: m.spend_to,
+                            partner_id: m.partner_id,
+                            collateral_partners: m.collateral_partners,
+                        })
+                    });
             }
             RESERVES_REMOVE_OUTPUT => {
-                return ReservesRemoveOutputMsg::read(buffer)
-                    .map(|m| Some(DepositsMessage::ReservesRemoveOutput {
-                        partner_id: m.partner_id,
-                        remove_all: m.remove_all,
-                    }));
+                return LdkReservesRemoveOutputMsg::read(buffer)
+                    .map(|w| {
+                        let m = w.0;
+                        Some(DepositsMessage::ReservesRemoveOutput {
+                            partner_id: m.partner_id,
+                            remove_all: m.remove_all,
+                        })
+                    });
             }
             RESERVES_INCREASE => {
-                return ReservesIncreaseMsg::read(buffer)
-                    .map(|m| Some(DepositsMessage::ReservesIncrease {
-                        partner_id: m.partner_id,
-                        new_amount: m.new_amount,
-                    }));
+                return LdkReservesIncreaseMsg::read(buffer)
+                    .map(|w| {
+                        let m = w.0;
+                        Some(DepositsMessage::ReservesIncrease {
+                            partner_id: m.partner_id,
+                            new_amount: m.new_amount,
+                        })
+                    });
             }
             RESERVES_DECREASE => {
-                return ReservesDecreaseMsg::read(buffer)
-                    .map(|m| Some(DepositsMessage::ReservesDecrease {
-                        partner_id: m.partner_id,
-                        new_amount: m.new_amount,
-                    }));
+                return LdkReservesDecreaseMsg::read(buffer)
+                    .map(|w| {
+                        let m = w.0;
+                        Some(DepositsMessage::ReservesDecrease {
+                            partner_id: m.partner_id,
+                            new_amount: m.new_amount,
+                        })
+                    });
             }
             RESERVES_UPDATE_OUTPUT => {
-                return ReservesUpdateOutputMsg::read(buffer)
-                    .map(|m| Some(DepositsMessage::ReservesUpdateOutput {
-                        partner_id: m.partner_id,
-                        spend_to: m.spend_to,
-                    }));
+                return LdkReservesUpdateOutputMsg::read(buffer)
+                    .map(|w| {
+                        let m = w.0;
+                        Some(DepositsMessage::ReservesUpdateOutput {
+                            partner_id: m.partner_id,
+                            spend_to: m.spend_to,
+                        })
+                    });
             }
             UPDATE_RESERVES => {
-                return UpdateReservesMsg::read(buffer)
-                    .map(|m| Some(DepositsMessage::UpdateReserves {
-                        channel_id: m.channel_id,
-                        reserves_sats: m.reserves_sats,
-                        script_pubkey: m.script_pubkey,
-                        ledger_hash: m.ledger_hash,
-                        remote_ledger_hash: m.remote_ledger_hash,
-                    }));
+                return LdkUpdateReservesMsg::read(buffer)
+                    .map(|w| {
+                        let m = w.0;
+                        Some(DepositsMessage::UpdateReserves {
+                            channel_id: m.channel_id,
+                            reserves_sats: m.reserves_sats,
+                            script_pubkey: m.script_pubkey,
+                            ledger_hash: m.ledger_hash,
+                            remote_ledger_hash: m.remote_ledger_hash,
+                        })
+                    });
             }
             ACCEPT_RESERVES => {
-                return AcceptReservesMsg::read(buffer)
-                    .map(|m| Some(DepositsMessage::AcceptReserves {
-                        channel_id: m.channel_id,
-                    }));
+                return LdkAcceptReservesMsg::read(buffer)
+                    .map(|w| {
+                        let m = w.0;
+                        Some(DepositsMessage::AcceptReserves {
+                            channel_id: m.channel_id,
+                        })
+                    });
             }
             COLLATERAL_INCREASE => {
-                return CollateralIncreaseMsg::read(buffer)
-                    .map(|m| Some(DepositsMessage::CollateralIncrease {
-                        partner_id: m.partner_id,
-                        new_amount: m.new_amount,
-                        block_height: m.block_height,
-                    }));
+                return LdkCollateralIncreaseMsg::read(buffer)
+                    .map(|w| {
+                        let m = w.0;
+                        Some(DepositsMessage::CollateralIncrease {
+                            partner_id: m.partner_id,
+                            new_amount: m.new_amount,
+                            block_height: m.block_height,
+                        })
+                    });
             }
             COLLATERAL_DECREASE => {
-                return CollateralDecreaseMsg::read(buffer)
-                    .map(|m| Some(DepositsMessage::CollateralDecrease {
-                        partner_id: m.partner_id,
-                        new_amount: m.new_amount,
-                        block_height: m.block_height,
-                    }));
+                return LdkCollateralDecreaseMsg::read(buffer)
+                    .map(|w| {
+                        let m = w.0;
+                        Some(DepositsMessage::CollateralDecrease {
+                            partner_id: m.partner_id,
+                            new_amount: m.new_amount,
+                            block_height: m.block_height,
+                        })
+                    });
             }
             COLLATERAL_STATUS => {
                 return CollateralStatusMsg::read(buffer)
@@ -3087,12 +3184,15 @@ impl lightning::ln::wire::CustomMessageReader for DepositsMessageReader {
                     }));
             }
             MAINTENANCE_FEE_COLLECT => {
-                return FeeCollectMsg::read(buffer)
-                    .map(|m| Some(DepositsMessage::MaintenanceFeeCollect {
-                        pubkey: m.pubkey,
-                        amount: m.amount,
-                        block_height: m.block_height,
-                    }));
+                return LdkFeeCollectMsg::read(buffer)
+                    .map(|w| {
+                        let m = w.0;
+                        Some(DepositsMessage::MaintenanceFeeCollect {
+                            pubkey: m.pubkey,
+                            amount: m.amount,
+                            block_height: m.block_height,
+                        })
+                    });
             }
             CHANNEL_CLOSE_TOMBSTONE => {
                 return ChannelCloseTombstoneMsg::read(buffer)
@@ -3151,16 +3251,27 @@ impl lightning::ln::wire::CustomMessageReader for DepositsMessageReader {
                     }));
             }
             RECEIVING_COSIGN_INVOICE => {
-                return ReceivingCosignInvoiceMsg::read(buffer)
-                    .map(|m| Some(DepositsMessage::ReceivingCosignInvoice {
-                        pending_invoice: m.pending_invoice,
-                    }));
+                return LdkReceivingCosignInvoiceMsg::read(buffer)
+                    .map(|w| {
+                        let m = w.0;
+                        Some(DepositsMessage::ReceivingCosignInvoice {
+                            amount: m.amount,
+                            payment_hash: m.payment_hash,
+                            expires: m.expires,
+                            assigned_deposit: m.assigned_deposit,
+                            invoice_id: m.invoice_id,
+                            bolt11: m.bolt11,
+                        })
+                    });
             }
             LEDGER_CLOSE => {
-                return LedgerCloseMsg::read(buffer)
-                    .map(|m| Some(DepositsMessage::LedgerClose {
-                        partner_id: m.partner_id,
-                    }));
+                return LdkLedgerCloseMsg::read(buffer)
+                    .map(|w| {
+                        let m = w.0;
+                        Some(DepositsMessage::LedgerClose {
+                            partner_id: m.partner_id,
+                        })
+                    });
             }
             SIGNED_UPDATE => {
                 // Use V1 decoding to preserve partner_signature

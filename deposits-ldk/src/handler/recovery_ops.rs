@@ -921,7 +921,7 @@ mod tests {
         assert_eq!(*target, operator);
         match msg {
             DepositsMessage::RecoveryVote { is_conforming, .. } => {
-                assert!(*is_conforming, "Should vote conforming when ledger exists");
+                assert!(is_conforming, "Should vote conforming when ledger exists");
             }
             _ => panic!("Expected RecoveryVote message"),
         }
@@ -1122,7 +1122,7 @@ mod tests {
                         is_conforming: *is_conforming,
                         validated_hash: *validated_hash,
                         validated_sequence: *validated_sequence,
-                        substitute_nomination: *substitute_nomination,
+                        substitute_nomination: substitute_nomination.clone(),
                         discovered_violation: *discovered_violation,
                         signature: *signature,
                     })
@@ -1176,7 +1176,7 @@ mod tests {
         let vote_msg = pending.iter().find_map(|(_, msg)| {
             match msg {
                 DepositsMessage::RecoveryVote { is_conforming, discovered_violation, .. } => {
-                    Some((*is_conforming, *discovered_violation))
+                    Some((is_conforming, discovered_violation))
                 }
                 _ => None,
             }
@@ -1185,7 +1185,7 @@ mod tests {
         assert!(vote_msg.is_some(), "Expected RecoveryVote message");
         let (is_conforming, discovered_violation) = vote_msg.unwrap();
         assert!(!is_conforming, "Should vote non-conforming when no ledger");
-        assert!(discovered_violation, "Should mark violation discovered");
+        assert!(*discovered_violation, "Should mark violation discovered");
     }
 
     // ==================== Claim Initiation Tests ====================
@@ -1414,7 +1414,7 @@ mod tests {
         let accusation_msg = pending.iter().find_map(|(_, msg)| {
             match msg {
                 DepositsMessage::UncreditedPayment { payment_hash: ph, preimage: pr, deposit_pubkey: dp, amount_msat: amt, .. } => {
-                    Some((*ph, *pr, *dp, *amt))
+                    Some((ph, pr, dp, amt))
                 }
                 _ => None,
             }
@@ -1422,10 +1422,10 @@ mod tests {
 
         assert!(accusation_msg.is_some(), "Expected UncreditedPayment message to be queued");
         let (msg_payment_hash, msg_preimage, msg_deposit_pubkey, msg_amount_msat) = accusation_msg.unwrap();
-        assert_eq!(msg_payment_hash, payment_hash);
-        assert_eq!(msg_preimage, preimage);
-        assert_eq!(msg_deposit_pubkey, deposit_pubkey);
-        assert_eq!(msg_amount_msat, 50_000);
+        assert_eq!(*msg_payment_hash, payment_hash);
+        assert_eq!(*msg_preimage, preimage);
+        assert_eq!(*msg_deposit_pubkey, deposit_pubkey);
+        assert_eq!(*msg_amount_msat, 50_000);
     }
 
     #[test]

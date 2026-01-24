@@ -78,11 +78,11 @@ where
         } else {
             // Handle special cases that don't convert to LedgerOperation
             match message {
-                DepositsMessage::ReceivingCosignInvoice { ref pending_invoice } => {
+                DepositsMessage::ReceivingCosignInvoice { amount, assigned_deposit, ref invoice_id, .. } => {
                     Some(DepositsEvent::InvoiceCosigned {
-                        invoice_id: pending_invoice.invoice_id.clone(),
-                        deposit_pubkey: pending_invoice.assigned_deposit,
-                        amount: pending_invoice.amount,
+                        invoice_id: invoice_id.clone(),
+                        deposit_pubkey: *assigned_deposit,
+                        amount: *amount,
                     })
                 }
                 DepositsMessage::SignedUpdate(update_msg) => {
