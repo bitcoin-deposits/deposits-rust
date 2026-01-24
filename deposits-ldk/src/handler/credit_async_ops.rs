@@ -20,7 +20,7 @@ use deposits_core::LedgerManager;
 use super::messages::{DepositsMessage, LedgerUpdateMsg, LedgerOperation};
 use super::ledger_ext::LedgerExt;
 use deposits_core::LedgerValidator;
-use lightning::{log_error, log_info};
+use deposits_core::{log_error, log_info};
 use lightning::util::logger::Logger as LdkLogger;
 
 use std::ops::Deref;

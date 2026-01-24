@@ -14,7 +14,7 @@ use bitcoin::secp256k1::PublicKey;
 
 use super::core::DepositsHandler;
 use deposits_core::DepositsError;
-use lightning::log_info;
+use deposits_core::log_info;
 use lightning::util::logger::Logger as LdkLogger;
 
 use std::ops::Deref;

@@ -17,7 +17,7 @@ use super::ledger_ext::SignedLedgerUpdateLogExt;
 use deposits_core::DepositsError;
 use super::messages::{DepositsMessage, LedgerUpdateMsg, LedgerOperation};
 use deposits_core::quorum::LedgerId;
-use lightning::{log_debug, log_error, log_info};
+use deposits_core::{log_debug, log_error, log_info};
 use lightning::util::logger::Logger as LdkLogger;
 
 use std::ops::Deref;

@@ -21,7 +21,7 @@ use deposits_core::DepositsError;
 use super::messages::{DepositsMessage, QuorumJoinRequestMsg};
 use super::protocol_stub::DepositsProtocol;
 use deposits_core::quorum::QuorumManager;
-use lightning::{log_debug, log_info};
+use deposits_core::{log_debug, log_info};
 use lightning::util::logger::Logger as LdkLogger;
 
 use std::ops::Deref;

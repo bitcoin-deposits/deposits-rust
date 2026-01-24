@@ -23,7 +23,7 @@ use deposits_core::VoterSet;
 use deposits_core::Invoice;
 use deposits_core::LedgerValidator;
 use lightning::ln::chan_utils::CommitmentExtraOutput;
-use lightning::{log_debug, log_error, log_info, log_warn};
+use deposits_core::{log_debug, log_error, log_info, log_warn};
 use lightning::util::logger::Logger as LdkLogger;
 
 use std::ops::Deref;

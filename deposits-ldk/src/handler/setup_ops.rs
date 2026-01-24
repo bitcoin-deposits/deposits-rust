@@ -16,7 +16,7 @@ use std::ops::Deref;
 
 use super::core::DepositsHandler;
 use crate::channel_manager_ops::ChannelManagerOps;
-use lightning::{log_debug, log_info};
+use deposits_core::{log_debug, log_info};
 use lightning::util::logger::Logger as LdkLogger;
 
 impl<L: Deref + Clone> DepositsHandler<L>

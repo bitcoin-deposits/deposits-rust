@@ -52,23 +52,6 @@ macro_rules! ldk_log {
     }
 }
 
-/// Log at info level - exported for use by other modules
-#[macro_export]
-macro_rules! log_info {
-    ($logger:expr, $($arg:tt)*) => {
-        lightning::util::logger::Logger::log($logger.deref(), lightning::util::logger::Record::new(
-            lightning::util::logger::Level::Info,
-            None,
-            None,
-            format_args!($($arg)*),
-            "deposits_ldk",
-            file!(),
-            line!(),
-            None,
-        ))
-    }
-}
-
 impl<L: Deref + Send + Sync> CoreLogger for LdkLoggerAdapter<L>
 where
     L::Target: LdkLogger,

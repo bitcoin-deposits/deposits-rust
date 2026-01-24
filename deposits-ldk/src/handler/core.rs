@@ -48,9 +48,8 @@ use deposits_core::quorum::{QuorumManager, LedgerId};
 use deposits_core::{TapscriptReservesBuilder, VoterSet};
 use super::DepositsEvent;
 use crate::DepositsEventEmitter;
-use lightning::{log_debug, log_error, log_info};
+use deposits_core::{log_debug, log_error, log_info, log_warn};
 use lightning::util::logger::Logger as LdkLogger;
-use lightning::log_warn;
 use bitcoin::{Network, ScriptBuf};
 
 // Re-export types from handler_types for backward compatibility

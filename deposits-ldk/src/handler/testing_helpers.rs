@@ -145,7 +145,7 @@ where
     #[cfg(feature = "bitcoin-deposits-non-conforming")]
     pub fn drop_all_ledgers(&self) -> usize {
         use lightning::util::persist::KVStoreSync;
-        use lightning::log_warn;
+        use deposits_core::log_warn;
         use lightning::util::logger::Logger as LdkLogger;
 
         let mut ledgers = self.ledgers.lock().unwrap();

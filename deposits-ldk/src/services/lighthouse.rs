@@ -16,7 +16,7 @@ use std::sync::{Arc, RwLock};
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Block, BlockHash, Network, ScriptBuf, Transaction, Txid};
 use lightning::util::logger::Logger as LdkLogger;
-use lightning::{log_debug, log_info, log_warn};
+use deposits_core::{log_debug, log_info, log_warn};
 
 use bitcoin::secp256k1::Keypair;
 

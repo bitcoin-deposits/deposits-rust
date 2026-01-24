@@ -17,7 +17,7 @@ use super::core::DepositsHandler;
 use deposits_core::DepositsError;
 use super::ledger_ext::LedgerExt;
 use deposits_core::quorum::LedgerId;
-use lightning::{log_info, log_warn};
+use deposits_core::{log_info, log_warn};
 use lightning::util::logger::Logger as LdkLogger;
 
 use std::ops::Deref;

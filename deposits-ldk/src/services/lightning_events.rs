@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use bitcoin::secp256k1::PublicKey;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::util::logger::Logger as LdkLogger;
-use lightning::{log_info, log_warn};
+use deposits_core::{log_info, log_warn};
 
 use crate::handler::DepositsHandler;
 use crate::handler::{PaymentTracking, LedgerOperationsExt};

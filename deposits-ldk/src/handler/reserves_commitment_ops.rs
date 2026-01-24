@@ -18,7 +18,7 @@ use deposits_core::DepositsError;
 use super::ledger_ext::LedgerExt;
 use deposits_core::VoterSet;
 use lightning::ln::chan_utils::CommitmentExtraOutput;
-use lightning::{log_debug, log_error, log_info};
+use deposits_core::{log_debug, log_error, log_info};
 use lightning::util::logger::Logger as LdkLogger;
 
 use std::ops::Deref;

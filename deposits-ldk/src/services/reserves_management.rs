@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use bitcoin::secp256k1::PublicKey;
 use lightning::util::logger::Logger as LdkLogger;
-use lightning::{log_info, log_warn, log_debug};
+use deposits_core::{log_info, log_warn, log_debug};
 
 use crate::handler::{DepositsHandler, ReservesOperations, DepositOperations};
 use super::ServiceError;

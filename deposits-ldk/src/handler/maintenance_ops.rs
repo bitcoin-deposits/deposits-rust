@@ -15,7 +15,7 @@ use bitcoin::secp256k1::PublicKey;
 use std::sync::Arc;
 
 use super::core::{DepositsHandler, STALE_ACK_THRESHOLD_SECS, LAZY_SYNC_DELAY_SECS};
-use lightning::{log_debug, log_info};
+use deposits_core::{log_debug, log_info};
 use lightning::util::logger::Logger as LdkLogger;
 
 use std::ops::Deref;

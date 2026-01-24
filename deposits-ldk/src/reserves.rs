@@ -23,8 +23,7 @@ use bitcoin::secp256k1::Secp256k1;
 use std::collections::HashMap;
 use std::str::FromStr;
 
-use std::ops::Deref;
-use crate::log_info;
+use deposits_core::log_info;
 
 // Re-export core types for backwards compatibility
 pub use deposits_core::{

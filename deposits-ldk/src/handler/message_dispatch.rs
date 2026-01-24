@@ -18,7 +18,7 @@ use super::message_validation::MessageValidation;
 use super::messages::DepositsMessage;
 use super::ledger_ext::LedgerExt;
 // use deposits_core::Invoice; // Currently unused
-use lightning::{log_debug, log_error, log_info, log_warn};
+use deposits_core::{log_debug, log_error, log_info, log_warn};
 use lightning::util::logger::Logger as LdkLogger;
 
 use std::ops::Deref;

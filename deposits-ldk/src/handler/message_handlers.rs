@@ -17,9 +17,8 @@ use lightning::util::logger::Logger;
 use super::core::DepositsHandler;
 use super::ledger_ext::LedgerExt;
 use super::messages::*;
-use lightning::{log_debug, log_error, log_info};
+use deposits_core::{log_debug, log_error, log_info, log_warn};
 use lightning::util::logger::Logger as LdkLogger;
-use lightning::log_warn;
 
 use std::ops::Deref;
 
@@ -140,7 +139,7 @@ where
         _sender: PublicKey,
     ) -> Result<(), LightningError> {
         use deposits_core::quorum::LedgerId;
-        use lightning::log_warn;
+        use deposits_core::log_warn;
 
         log_info!(
             self.logger,
@@ -243,7 +242,7 @@ where
         msg: &QuorumVoteRequestMsg,
         sender_node_id: PublicKey,
     ) -> Result<(), LightningError> {
-        use lightning::log_warn;
+        use deposits_core::log_warn;
         use std::collections::HashMap;
 
         log_info!(
@@ -569,7 +568,7 @@ where
         msg: &RecoveryVoteMsg,
         _sender: PublicKey,
     ) -> Result<(), LightningError> {
-        use lightning::log_warn;
+        use deposits_core::log_warn;
 
         log_info!(
             self.logger,
@@ -660,7 +659,7 @@ where
         _sender: PublicKey,
     ) -> Result<(), LightningError> {
         use bitcoin::secp256k1::{Secp256k1, Message, Keypair};
-        use lightning::log_warn;
+        use deposits_core::log_warn;
 
         log_info!(
             self.logger,
@@ -754,7 +753,7 @@ where
         msg: &RecoveryClaimSignatureMsg,
         _sender: PublicKey,
     ) -> Result<(), LightningError> {
-        use lightning::log_warn;
+        use deposits_core::log_warn;
 
         log_info!(
             self.logger,
@@ -865,7 +864,7 @@ where
         sender_node_id: PublicKey,
     ) -> Result<(), LightningError> {
         use deposits_core::quorum::LedgerId;
-        use lightning::log_warn;
+        use deposits_core::log_warn;
 
         log_info!(
             self.logger,
@@ -1074,7 +1073,7 @@ where
         sender_node_id: PublicKey,
     ) -> Result<(), LightningError> {
         use deposits_core::quorum::LedgerId;
-        use lightning::log_warn;
+        use deposits_core::log_warn;
 
         log_info!(
             self.logger,
@@ -1254,7 +1253,7 @@ where
         msg: &super::messages::CollateralConsentRequestMsg,
         sender_node_id: PublicKey,
     ) -> Result<(), LightningError> {
-        use lightning::log_warn;
+        use deposits_core::log_warn;
 
         // Verify the request is from the operator claiming to be the operator
         if sender_node_id != msg.operator_id {
@@ -1364,7 +1363,7 @@ where
         sender_node_id: PublicKey,
     ) -> Result<(), LightningError> {
         use bitcoin::secp256k1::ecdsa::Signature;
-        use lightning::log_warn;
+        use deposits_core::log_warn;
 
         log_info!(
             self.logger,
@@ -1482,7 +1481,7 @@ where
         msg: &crate::wire::messages::CollateralAttestationMsg,
         sender_node_id: PublicKey,
     ) -> Result<(), LightningError> {
-        use lightning::log_warn;
+        use deposits_core::log_warn;
 
         // CollateralAttestation is received from a collateral partner after they process
         // our CollateralIncrease. We need to:

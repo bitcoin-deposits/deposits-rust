@@ -98,8 +98,8 @@ pub use super::messages::DepositsMessage;
 // Re-export ledger extension traits
 pub use super::ledger_ext::{LedgerExt, SignedLedgerUpdateExt, SignedLedgerUpdateLogExt};
 
-// Logger macros - re-export from lightning
-pub use lightning::{log_error, log_warn, log_info, log_debug, log_trace};
+// Logger macros - re-export from deposits_core (tracing-backed)
+pub use deposits_core::{log_error, log_warn, log_info, log_debug, log_trace};
 
 // Base64 encoding (used in some handlers)
 pub use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};

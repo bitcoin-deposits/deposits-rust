@@ -20,7 +20,7 @@ use tokio::sync::oneshot;
 use super::core::DepositsHandler;
 use deposits_core::DepositsError;
 use super::messages::DepositsMessage;
-use lightning::{log_debug, log_info};
+use deposits_core::{log_debug, log_info};
 use lightning::util::logger::Logger as LdkLogger;
 
 use std::ops::Deref;

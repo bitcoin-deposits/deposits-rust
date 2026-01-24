@@ -20,9 +20,8 @@ use lightning_types::features::InitFeatures;
 use super::core::{DepositsHandler, ProtocolStats};
 use super::messages::{DepositsMessage, LedgerOperation};
 use super::DepositsEvent;
-use lightning::log_debug;
+use deposits_core::{log_debug, log_warn};
 use lightning::util::logger::Logger as LdkLogger;
-use lightning::log_warn;
 
 use std::ops::Deref;
 
@@ -164,7 +163,7 @@ where
         partner_node_id: PublicKey,
         secret_key: bitcoin::secp256k1::SecretKey,
     ) -> Result<(), deposits_core::DepositsError> {
-        use lightning::log_info;
+        use deposits_core::log_info;
 
         let mut private_keys = self.ledger_private_keys.lock().unwrap();
         private_keys.insert(partner_node_id, secret_key);
