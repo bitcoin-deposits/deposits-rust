@@ -78,6 +78,7 @@ pub mod traits;
 pub mod types;
 pub mod validation;
 pub mod wire_messages;
+pub mod message_validation;
 
 // Re-exports for convenience
 pub use constants::{
@@ -211,4 +212,17 @@ pub use wire_messages::{
     RecoveryVoteMsg, RecoveryClaimRequestMsg, RecoveryClaimSignatureMsg, RecoveryClaimCompleteMsg,
     // Relay messages
     RelayNwcRequestMsg, RelayNwcResponseMsg, RelayNwcDeliveryProofMsg,
+};
+pub use message_validation::{
+    // ValidationContext trait for implementing message validation
+    ValidationContext,
+    // LedgerOperation validation
+    validate_ledger_operation,
+    // Message validation functions (with _msg suffix to distinguish from operation_validation)
+    validate_add_deposit_msg, validate_remove_deposit_msg, validate_update_deposit_msg,
+    validate_sending_lock_payment_msg, validate_sending_fulfill_payment_msg, validate_sending_fail_payment_msg,
+    validate_receiving_credit_payment_msg, validate_reserves_add_output_msg, validate_reserves_remove_msg,
+    validate_reserves_increase_msg, validate_reserves_decrease_msg,
+    validate_fee_collect_msg, validate_collateral_increase_msg, validate_collateral_decrease_msg,
+    validate_receiving_cosign_invoice_msg, validate_ledger_close_msg,
 };

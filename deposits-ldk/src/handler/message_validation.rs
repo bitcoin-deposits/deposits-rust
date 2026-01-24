@@ -3,9 +3,17 @@
 //! This module provides validation functions for all deposit protocol messages.
 //! Each validation function checks message-specific constraints before the message
 //! is accepted and applied to the ledger.
+//!
+//! The validation is split between:
+//! - **deposits-core**: Pure validation logic via `ValidationContext` trait
+//! - **deposits-ldk**: LDK-specific `MessageValidation` trait and context implementation
+//!
+//! `DepositsHandler` implements both `ValidationContext` (for core validation) and
+//! `MessageValidation` (for message dispatch and LDK-specific checks).
 
 use bitcoin::secp256k1::PublicKey;
 use std::ops::Deref;
+use std::sync::{Arc, RwLock};
 
 use super::messages::{
     DepositsMessage,
@@ -15,9 +23,41 @@ use super::messages::{
     SendingLockPaymentMsg,
 };
 use lightning::util::logger::Logger as LdkLogger;
+use deposits_core::{Ledger, ValidationContext};
 
 use super::core::DepositsHandler;
 use super::reserves_ops::ReservesOperations;
+
+// ============================================================================
+// ValidationContext Implementation
+// ============================================================================
+
+/// Implement ValidationContext from deposits-core for DepositsHandler
+///
+/// This allows the core validation functions to access ledger state and
+/// channel information through a generic interface.
+impl<L: Deref + Clone + Send + Sync> ValidationContext for DepositsHandler<L>
+where
+    L::Target: LdkLogger,
+{
+    fn get_ledger(&self, operator: &PublicKey, partner: &PublicKey) -> Option<Arc<RwLock<Ledger>>> {
+        let ledgers = self.ledgers.lock().unwrap();
+        ledgers.get(&(*operator, *partner)).cloned()
+    }
+
+    fn our_node_id(&self) -> PublicKey {
+        self.our_node_id
+    }
+
+    fn get_commitment_tx_reserves_amount(&self, operator: PublicKey) -> Option<u64> {
+        // Use the ReservesOperations trait method
+        ReservesOperations::get_commitment_tx_reserves_amount(self, operator)
+    }
+}
+
+// ============================================================================
+// MessageValidation Trait (LDK-specific)
+// ============================================================================
 
 /// Extension trait for message validation operations on DepositsHandler
 pub trait MessageValidation {
