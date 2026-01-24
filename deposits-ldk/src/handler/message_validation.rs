@@ -266,28 +266,15 @@ where
     fn validate_add_deposit(&self, msg: &crate::wire::messages::DepositOpenMsg, sender: PublicKey) -> Result<(), String> {
         let ledgers = self.ledgers.lock().unwrap();
 
-        // Sender is the operator, we are the partner
         if let Some(ledger_arc) = ledgers.get(&(sender, self.our_node_id)) {
             let ledger = ledger_arc.read().unwrap();
-
-            // Check if deposit already exists
-            if ledger.state.deposits.contains_key(&msg.pubkey) {
-                return Err(format!("Deposit with pubkey {} already exists", msg.pubkey));
-            }
-
-            // Validate the deposit pubkey is valid
-            if msg.pubkey.serialize().iter().all(|&b| b == 0) {
-                return Err("Invalid pubkey: all zeros".to_string());
-            }
-
-            // Validate fee structure is reasonable
-            if let Some(fees) = &msg.fees {
-                if fees.annualized_bps > 10000 {
-                    return Err(format!("Fee rate too high: {} bps exceeds maximum of 10000 bps", fees.annualized_bps));
-                }
-            }
-
-            Ok(())
+            // Convert wire FeeStructure to core FeeStructure if present
+            let core_fees = msg.fees.as_ref().map(|f| deposits_core::types::FeeStructure {
+                annualized_fixed: f.annualized_fixed,
+                annualized_bps: f.annualized_bps,
+                frequency_blocks: f.frequency_blocks,
+            });
+            deposits_core::validate_deposit_add(&ledger, msg.pubkey, core_fees.as_ref())
         } else {
             Err(format!("No channel ledger found for sender {}", sender))
         }
@@ -298,23 +285,7 @@ where
 
         if let Some(ledger_arc) = ledgers.get(&(sender, self.our_node_id)) {
             let ledger = ledger_arc.read().unwrap();
-
-            // Check if deposit exists
-            if let Some(deposit) = ledger.state.deposits.get(&msg.pubkey) {
-                // Can't remove deposit with outstanding balance
-                if deposit.balance > 0 {
-                    return Err(format!("Cannot remove deposit with outstanding balance: {} msat", deposit.balance));
-                }
-
-                // Can't remove deposit with locked balance
-                if deposit.locked_balance > 0 {
-                    return Err(format!("Cannot remove deposit with locked balance: {} msat", deposit.locked_balance));
-                }
-
-                Ok(())
-            } else {
-                Err(format!("Deposit with pubkey {} does not exist", msg.pubkey))
-            }
+            deposits_core::validate_deposit_close(&ledger, msg.pubkey)
         } else {
             Err(format!("No channel ledger found for sender {}", sender))
         }
@@ -325,18 +296,13 @@ where
 
         if let Some(ledger_arc) = ledgers.get(&(sender, self.our_node_id)) {
             let ledger = ledger_arc.read().unwrap();
-
-            // Check if deposit exists
-            if !ledger.state.deposits.contains_key(&msg.pubkey) {
-                return Err(format!("Deposit with pubkey {} does not exist", msg.pubkey));
-            }
-
-            // Validate fee structure is reasonable
-            if msg.new_fees.annualized_bps > 10000 {
-                return Err(format!("Fee rate too high: {} bps exceeds maximum of 10000 bps", msg.new_fees.annualized_bps));
-            }
-
-            Ok(())
+            // Convert wire FeeStructure to core FeeStructure
+            let core_fees = deposits_core::types::FeeStructure {
+                annualized_fixed: msg.new_fees.annualized_fixed,
+                annualized_bps: msg.new_fees.annualized_bps,
+                frequency_blocks: msg.new_fees.frequency_blocks,
+            };
+            deposits_core::validate_deposit_update(&ledger, msg.pubkey, &core_fees)
         } else {
             Err(format!("No channel ledger found for sender {}", sender))
         }
@@ -435,63 +401,29 @@ where
     fn validate_collateral_increase(&self, msg: &crate::wire::messages::CollateralIncreaseMsg, sender: PublicKey) -> Result<(), String> {
         let ledgers = self.ledgers.lock().unwrap();
 
-        // Find the sender's ledger with us (sender is operator, we are partner)
-        // The collateral they're committing must be backed by their reserves
         if let Some(ledger_arc) = ledgers.get(&(sender, self.our_node_id)) {
             let ledger = ledger_arc.read().unwrap();
-
-            // The sender (operator) is committing collateral to us (partner)
-            // Their collateral commitment cannot exceed their reserves in this channel
-            if msg.new_amount > ledger.reserves_amount() {
-                return Err(format!(
-                    "Collateral increase exceeds reserves: {} sats committed > {} sats reserves",
-                    msg.new_amount, ledger.reserves_amount()
-                ));
-            }
-
-            // Validate new_amount is actually an increase
-            if msg.new_amount <= ledger.state.collateral_amount {
-                return Err(format!(
-                    "CollateralIncrease must increase collateral: {} is not greater than current {}",
-                    msg.new_amount, ledger.state.collateral_amount
-                ));
-            }
-
-            Ok(())
+            deposits_core::validate_collateral_increase(
+                ledger.state.collateral_amount,
+                msg.new_amount,
+                ledger.reserves_amount(),
+            )
         } else {
             Err(format!("No channel ledger found for sender {}", sender))
         }
     }
 
     fn validate_collateral_decrease(&self, msg: &crate::wire::messages::CollateralDecreaseMsg, sender: PublicKey) -> Result<(), String> {
-        use deposits_core::COLLATERAL_REPORTING_PERIOD_BLOCKS;
-
         let ledgers = self.ledgers.lock().unwrap();
 
-        // Find the sender's ledger with us (sender is operator, we are partner)
         if let Some(ledger_arc) = ledgers.get(&(sender, self.our_node_id)) {
             let ledger = ledger_arc.read().unwrap();
-
-            // Validate new_amount is actually a decrease
-            if msg.new_amount >= ledger.state.collateral_amount {
-                return Err(format!(
-                    "CollateralDecrease must decrease collateral: {} is not less than current {}",
-                    msg.new_amount, ledger.state.collateral_amount
-                ));
-            }
-
-            // CONSTRAINT: collateraldecrease doesn't happen in the same reporting period as collateralincrease
-            if let Some(last_increase_block) = ledger.state.last_collateral_increase_block {
-                let earliest_allowed_decrease = last_increase_block.saturating_add(COLLATERAL_REPORTING_PERIOD_BLOCKS);
-                if msg.block_height < earliest_allowed_decrease {
-                    return Err(format!(
-                        "CollateralDecrease too soon after increase: block {} < earliest allowed {} (last increase {} + period {})",
-                        msg.block_height, earliest_allowed_decrease, last_increase_block, COLLATERAL_REPORTING_PERIOD_BLOCKS
-                    ));
-                }
-            }
-
-            Ok(())
+            deposits_core::validate_collateral_decrease(
+                ledger.state.collateral_amount,
+                msg.new_amount,
+                msg.block_height,
+                ledger.state.last_collateral_increase_block,
+            )
         } else {
             Err(format!("No channel ledger found for sender {}", sender))
         }
@@ -500,69 +432,30 @@ where
     fn validate_reserves_increase(&self, msg: &crate::wire::messages::ReservesIncreaseMsg, sender: PublicKey) -> Result<(), String> {
         use super::reserves_ops::ReservesOperations;
 
-        // CONSTRAINT: reservesincrease doesn't increase reserves past channel balance
-        // The partner validates that operator's declared reserves don't exceed their channel capacity
+        // Get channel balance for optional constraint check (LDK-specific)
+        let channel_balance = self.get_commitment_tx_reserves_amount(sender);
 
-        // Get the commitment tx reserves (what's actually committed in the channel)
-        // This represents the maximum the operator can have as reserves
-        if let Some(channel_reserves) = self.get_commitment_tx_reserves_amount(sender) {
-            // The new reserves amount cannot exceed what's actually in the commitment tx
-            // Note: In practice, the commitment tx reserves should match or be updated atomically
-            // This check ensures the ledger's declared reserves don't exceed reality
-            if msg.new_amount > channel_reserves {
-                return Err(format!(
-                    "Reserves increase exceeds channel commitment: {} sats declared > {} sats in commitment tx",
-                    msg.new_amount, channel_reserves
-                ));
-            }
-        }
-        // If we can't get channel reserves (no channel manager), we can't validate this constraint
-        // In production, this should always be available; in tests, we skip this validation
-
-        // Also validate that this is actually an increase
+        // Get current reserves
         let ledgers = self.ledgers.lock().unwrap();
         if let Some(ledger_arc) = ledgers.get(&(sender, self.our_node_id)) {
             let ledger = ledger_arc.read().unwrap();
-            if msg.new_amount <= ledger.reserves_amount() {
-                return Err(format!(
-                    "ReservesIncrease must increase reserves: {} is not greater than current {}",
-                    msg.new_amount, ledger.reserves_amount()
-                ));
-            }
+            deposits_core::validate_reserves_increase(
+                ledger.reserves_amount(),
+                msg.new_amount,
+                channel_balance,
+            )
+        } else {
+            // No ledger - just do basic validation without current reserves check
+            deposits_core::validate_reserves_increase(0, msg.new_amount, channel_balance)
         }
-
-        Ok(())
     }
 
     fn validate_reserves_decrease(&self, msg: &crate::wire::messages::ReservesDecreaseMsg, sender: PublicKey) -> Result<(), String> {
-        use deposits_core::LedgerValidator;
-
         let ledgers = self.ledgers.lock().unwrap();
 
-        // Find the sender's ledger with us (sender is operator, we are partner)
         if let Some(ledger_arc) = ledgers.get(&(sender, self.our_node_id)) {
             let ledger = ledger_arc.read().unwrap();
-
-            // Validate new_amount is actually a decrease
-            if msg.new_amount >= ledger.reserves_amount() {
-                return Err(format!(
-                    "ReservesDecrease must decrease reserves: {} is not less than current {}",
-                    msg.new_amount, ledger.reserves_amount()
-                ));
-            }
-
-            // CONSTRAINT: reservesdecrease doesn't fall below ledger requirement
-            // Calculate the minimum reserves required to back all deposits
-            let minimum_required = LedgerValidator::calculate_minimum_reserves(&ledger);
-
-            if msg.new_amount < minimum_required {
-                return Err(format!(
-                    "ReservesDecrease would fall below requirement: {} sats < {} sats minimum required to back deposits",
-                    msg.new_amount, minimum_required
-                ));
-            }
-
-            Ok(())
+            deposits_core::validate_reserves_decrease(&ledger, msg.new_amount)
         } else {
             Err(format!("No channel ledger found for sender {}", sender))
         }
@@ -574,55 +467,13 @@ where
         // Sender is the operator, we are the partner being asked to cosign
         if let Some(ledger_arc) = ledgers.get(&(sender, self.our_node_id)) {
             let ledger = ledger_arc.read().unwrap();
-
-            // Wire message has fields directly on msg (not nested in pending_invoice)
-            // Check if the assigned deposit exists
-            if !ledger.state.deposits.contains_key(&msg.assigned_deposit) {
-                return Err(format!("Deposit with pubkey {} does not exist", msg.assigned_deposit));
-            }
-
-            // Check amount is positive
-            if msg.amount == 0 {
-                return Err("Invoice amount must be greater than zero".to_string());
-            }
-
-            // Check amount is reasonable (not too large)
-            if msg.amount > 100_000_000_000 { // 1 BTC in msat
-                return Err(format!("Invoice amount too large: {} msat", msg.amount));
-            }
-
-            // CRITICAL: Check that cosigning this invoice wouldn't exceed reserves capacity
-            // Total deposits + this new invoice amount must not exceed reserves
-            let current_deposits: u64 = ledger.state.deposits.values().map(|d| d.balance).sum();
-            // Invoice amount is in msat, deposits are in msat
-            let new_total_deposits = current_deposits.saturating_add(msg.amount);
-
-            if new_total_deposits > ledger.reserves_amount() {
-                return Err(format!(
-                    "Cosigning would exceed reserves: potential deposits {} msat > reserves {} msat",
-                    new_total_deposits, ledger.reserves_amount()
-                ));
-            }
-
-            // CRITICAL: Check that cosigning wouldn't exceed declared collateral
-            if new_total_deposits > ledger.state.received_collateral_amount {
-                return Err(format!(
-                    "Cosigning would exceed collateral: potential deposits {} msat > collateral {} msat",
-                    new_total_deposits, ledger.state.received_collateral_amount
-                ));
-            }
-
-            // Check invoice ID is not obviously fake
-            if msg.invoice_id.is_empty() {
-                return Err("Invoice ID cannot be empty".to_string());
-            }
-
-            // Check payment hash is not obviously fake (all same bytes)
-            if msg.payment_hash.iter().all(|&b| b == msg.payment_hash[0]) {
-                return Err("Invalid payment hash: appears to be fake".to_string());
-            }
-
-            Ok(())
+            deposits_core::validate_cosign_invoice(
+                &ledger,
+                msg.assigned_deposit,
+                msg.amount,
+                &msg.invoice_id,
+                &msg.payment_hash,
+            )
         } else {
             Err(format!("No channel ledger found for sender {}", sender))
         }
@@ -635,7 +486,7 @@ where
         if let Some(ledger_arc) = ledgers.get(&(sender, self.our_node_id)) {
             let ledger = ledger_arc.read().unwrap();
 
-            // Check that the partner_id matches us
+            // Check that the partner_id matches us (context-specific check)
             if msg.partner_id != self.our_node_id {
                 return Err(format!(
                     "LedgerClose partner_id {} does not match our node {}",
@@ -643,25 +494,8 @@ where
                 ));
             }
 
-            // Check for outstanding balances - deposits should be empty or zero-balance
-            let total_balance: u64 = ledger.state.deposits.values().map(|d| d.balance).sum();
-            if total_balance > 0 {
-                return Err(format!(
-                    "Cannot close ledger with outstanding deposit balance: {} msat",
-                    total_balance
-                ));
-            }
-
-            // Check for locked balances (pending payments)
-            let total_locked: u64 = ledger.state.deposits.values().map(|d| d.locked_balance).sum();
-            if total_locked > 0 {
-                return Err(format!(
-                    "Cannot close ledger with locked payments: {} msat",
-                    total_locked
-                ));
-            }
-
-            Ok(())
+            // Delegate balance checks to core
+            deposits_core::validate_ledger_close(&ledger)
         } else {
             Err(format!("No channel ledger found for sender {}", sender))
         }

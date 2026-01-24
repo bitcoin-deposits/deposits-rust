@@ -319,10 +319,14 @@ pub fn validate_fee_collect(
 // Deposit Validations
 // ============================================================================
 
+/// Maximum fee rate in basis points (100% = 10000 bps)
+pub const MAX_FEE_RATE_BPS: u16 = 10000;
+
 /// Validate a deposit add operation
 ///
 /// Checks:
 /// - Deposit doesn't already exist
+/// - Pubkey is not all zeros
 /// - Fee structure is valid (if provided)
 pub fn validate_deposit_add(
     ledger: &Ledger,
@@ -334,10 +338,21 @@ pub fn validate_deposit_add(
         return Err(format!("Deposit with pubkey {} already exists", deposit_pubkey));
     }
 
+    // Validate pubkey is not all zeros
+    if deposit_pubkey.serialize().iter().all(|&b| b == 0) {
+        return Err("Invalid pubkey: all zeros".to_string());
+    }
+
     // Validate fee structure if provided
     if let Some(fee_struct) = fees {
         if fee_struct.frequency_blocks == 0 {
             return Err("Fee frequency must be greater than zero".to_string());
+        }
+        if fee_struct.annualized_bps > MAX_FEE_RATE_BPS {
+            return Err(format!(
+                "Fee rate too high: {} bps exceeds maximum of {} bps",
+                fee_struct.annualized_bps, MAX_FEE_RATE_BPS
+            ));
         }
     }
 
@@ -381,13 +396,27 @@ pub fn validate_deposit_close(
 ///
 /// Checks:
 /// - Deposit exists
+/// - New fee structure is valid
 pub fn validate_deposit_update(
     ledger: &Ledger,
     deposit_pubkey: PublicKey,
+    new_fees: &FeeStructure,
 ) -> ValidationResult {
     if !ledger.state.deposits.contains_key(&deposit_pubkey) {
         return Err(format!("Deposit with pubkey {} does not exist", deposit_pubkey));
     }
+
+    // Validate new fee structure
+    if new_fees.frequency_blocks == 0 {
+        return Err("Fee frequency must be greater than zero".to_string());
+    }
+    if new_fees.annualized_bps > MAX_FEE_RATE_BPS {
+        return Err(format!(
+            "Fee rate too high: {} bps exceeds maximum of {} bps",
+            new_fees.annualized_bps, MAX_FEE_RATE_BPS
+        ));
+    }
+
     Ok(())
 }
 
@@ -399,34 +428,164 @@ pub fn validate_deposit_update(
 ///
 /// Checks:
 /// - New amount is greater than current
+/// - New amount doesn't exceed reserves backing
 pub fn validate_collateral_increase(
     current_collateral: u64,
     new_amount: u64,
+    reserves_amount: u64,
 ) -> ValidationResult {
     if new_amount <= current_collateral {
         return Err(format!(
-            "New collateral amount {} must be greater than current {}",
+            "CollateralIncrease must increase collateral: {} is not greater than current {}",
             new_amount, current_collateral
         ));
     }
+
+    if new_amount > reserves_amount {
+        return Err(format!(
+            "Collateral increase exceeds reserves: {} sats committed > {} sats reserves",
+            new_amount, reserves_amount
+        ));
+    }
+
     Ok(())
 }
+
+/// Collateral reporting period in blocks (used to prevent decrease right after increase)
+pub use crate::constants::COLLATERAL_REPORTING_PERIOD_BLOCKS;
 
 /// Validate a collateral decrease operation
 ///
 /// Checks:
 /// - New amount is less than current
-/// - Not in same reporting period as increase (caller must check)
+/// - Not in same reporting period as increase
 pub fn validate_collateral_decrease(
     current_collateral: u64,
     new_amount: u64,
+    block_height: u32,
+    last_increase_block: Option<u32>,
 ) -> ValidationResult {
     if new_amount >= current_collateral {
         return Err(format!(
-            "New collateral amount {} must be less than current {}",
+            "CollateralDecrease must decrease collateral: {} is not less than current {}",
             new_amount, current_collateral
         ));
     }
+
+    // Check timing constraint
+    if let Some(last_increase) = last_increase_block {
+        let earliest_allowed = last_increase.saturating_add(COLLATERAL_REPORTING_PERIOD_BLOCKS);
+        if block_height < earliest_allowed {
+            return Err(format!(
+                "CollateralDecrease too soon after increase: block {} < earliest allowed {} (last increase {} + period {})",
+                block_height, earliest_allowed, last_increase, COLLATERAL_REPORTING_PERIOD_BLOCKS
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// Invoice Validations
+// ============================================================================
+
+/// Validate a cosign invoice operation
+///
+/// Checks:
+/// - Deposit exists
+/// - Amount is positive
+/// - Amount is reasonable (< 1 BTC in msat)
+/// - Invoice ID is not empty
+/// - Payment hash is not obviously fake
+/// - Cosigning wouldn't exceed reserves backing
+/// - Cosigning wouldn't exceed collateral backing
+pub fn validate_cosign_invoice(
+    ledger: &Ledger,
+    assigned_deposit: PublicKey,
+    amount: u64,
+    invoice_id: &str,
+    payment_hash: &[u8; 32],
+) -> ValidationResult {
+    // Check if the assigned deposit exists
+    if !ledger.state.deposits.contains_key(&assigned_deposit) {
+        return Err(format!("Deposit with pubkey {} does not exist", assigned_deposit));
+    }
+
+    // Check amount is positive
+    if amount == 0 {
+        return Err("Invoice amount must be greater than zero".to_string());
+    }
+
+    // Check amount is reasonable (not too large)
+    const MAX_INVOICE_MSAT: u64 = 100_000_000_000; // 1 BTC in msat
+    if amount > MAX_INVOICE_MSAT {
+        return Err(format!("Invoice amount too large: {} msat (max {})", amount, MAX_INVOICE_MSAT));
+    }
+
+    // Check invoice ID is not empty
+    if invoice_id.is_empty() {
+        return Err("Invoice ID cannot be empty".to_string());
+    }
+
+    // Check payment hash is not obviously fake (all same bytes)
+    if payment_hash.iter().all(|&b| b == payment_hash[0]) {
+        return Err("Invalid payment hash: appears to be fake".to_string());
+    }
+
+    // CRITICAL: Check that cosigning this invoice wouldn't exceed reserves capacity
+    // Total deposits + this new invoice amount must not exceed reserves
+    let current_deposits: u64 = ledger.state.deposits.values().map(|d| d.balance).sum();
+    let new_total_deposits = current_deposits.saturating_add(amount);
+
+    if new_total_deposits > ledger.reserves_amount() {
+        return Err(format!(
+            "Cosigning would exceed reserves: potential deposits {} msat > reserves {} msat",
+            new_total_deposits, ledger.reserves_amount()
+        ));
+    }
+
+    // CRITICAL: Check that cosigning wouldn't exceed declared collateral
+    if new_total_deposits > ledger.state.received_collateral_amount {
+        return Err(format!(
+            "Cosigning would exceed collateral: potential deposits {} msat > collateral {} msat",
+            new_total_deposits, ledger.state.received_collateral_amount
+        ));
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// Ledger Validations
+// ============================================================================
+
+/// Validate a ledger close operation
+///
+/// Checks:
+/// - Total deposit balance is zero
+/// - No locked balances (pending payments)
+///
+/// Note: The caller must separately verify that the partner_id matches the expected value.
+pub fn validate_ledger_close(ledger: &Ledger) -> ValidationResult {
+    // Check for outstanding balances - deposits should be empty or zero-balance
+    let total_balance: u64 = ledger.state.deposits.values().map(|d| d.balance).sum();
+    if total_balance > 0 {
+        return Err(format!(
+            "Cannot close ledger with outstanding deposit balance: {} msat",
+            total_balance
+        ));
+    }
+
+    // Check for locked balances (pending payments)
+    let total_locked: u64 = ledger.state.deposits.values().map(|d| d.locked_balance).sum();
+    if total_locked > 0 {
+        return Err(format!(
+            "Cannot close ledger with locked payments: {} msat",
+            total_locked
+        ));
+    }
+
     Ok(())
 }
 
@@ -508,15 +667,31 @@ mod tests {
 
     #[test]
     fn test_validate_collateral_increase() {
-        assert!(validate_collateral_increase(1000, 2000).is_ok());
-        assert!(validate_collateral_increase(1000, 1000).is_err());
-        assert!(validate_collateral_increase(1000, 500).is_err());
+        // Valid increase within reserves
+        assert!(validate_collateral_increase(1000, 2000, 5000).is_ok());
+
+        // Not actually increasing
+        assert!(validate_collateral_increase(1000, 1000, 5000).is_err());
+        assert!(validate_collateral_increase(1000, 500, 5000).is_err());
+
+        // Exceeds reserves
+        assert!(validate_collateral_increase(1000, 6000, 5000).is_err());
     }
 
     #[test]
     fn test_validate_collateral_decrease() {
-        assert!(validate_collateral_decrease(2000, 1000).is_ok());
-        assert!(validate_collateral_decrease(1000, 1000).is_err());
-        assert!(validate_collateral_decrease(1000, 1500).is_err());
+        // Valid decrease, no timing constraint
+        assert!(validate_collateral_decrease(2000, 1000, 1000, None).is_ok());
+
+        // Not actually decreasing
+        assert!(validate_collateral_decrease(1000, 1000, 1000, None).is_err());
+        assert!(validate_collateral_decrease(1000, 1500, 1000, None).is_err());
+
+        // Timing constraint: too soon after increase
+        // COLLATERAL_REPORTING_PERIOD_BLOCKS is typically 144 blocks
+        assert!(validate_collateral_decrease(2000, 1000, 100, Some(50)).is_err());
+
+        // Timing constraint: after reporting period
+        assert!(validate_collateral_decrease(2000, 1000, 1000, Some(50)).is_ok());
     }
 }

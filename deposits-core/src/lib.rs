@@ -164,6 +164,12 @@ pub use operation_validation::{
     validate_deposit_add, validate_deposit_close, validate_deposit_update,
     // Collateral validations
     validate_collateral_increase, validate_collateral_decrease,
+    // Invoice validations
+    validate_cosign_invoice,
+    // Ledger validations
+    validate_ledger_close,
+    // Constants
+    MAX_FEE_RATE_BPS,
     // Result type
     ValidationResult,
 };
