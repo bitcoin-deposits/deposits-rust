@@ -103,20 +103,35 @@ ProposalStatus            // enum
 
 ---
 
-### 2.2 Abstract Logger Layer
+### 2.2 Logger Migration Path (COMPLETED)
 
-**Current state:**
-- Every handler module imports `lightning::{log_debug, log_info, log_error, ...}`
-- Handler parameterized by `L::Target: LdkLogger` throughout
+**Status:** ✅ Infrastructure complete
 
-**Refactoring approach:**
-1. Create abstract `Logger` trait in deposits-core
-2. deposits-ldk provides adapter wrapping LDK logger
-3. Handler uses core logger trait
+**What was done:**
+1. Added `tracing` crate to deposits-core
+2. Created LDK-compatible macros (`log_info!`, `log_debug!`, etc.) backed by tracing
+3. Migrated `QuorumProcessor`, `CollateralProcessor`, `RecoveryProcessor` to use tracing
 
-**Why:**
-- Core doesn't need LDK macro dependencies
-- Easier to support other Lightning implementations
+**Migration path for deposits-ldk code:**
+```rust
+// Before (deposits-ldk with LDK macros):
+use lightning::{log_info, log_debug};
+log_info!(self.logger, "Processing {}", msg);
+
+// After (in deposits-core with tracing-backed macros):
+use deposits_core::{log_info, log_debug};
+log_info!(self.logger, "Processing {}", msg);  // Same syntax!
+```
+
+**For new code, prefer structured tracing:**
+```rust
+tracing::info!(peer = %peer_id, seq = n, "Processing message");
+```
+
+**Why keep LDK macros in deposits-ldk:**
+- LDK macros provide Lightning-specific context (channel_id, peer_id, payment_hash)
+- This context is valuable for debugging Lightning operations
+- No need to migrate existing deposits-ldk code unless moving to deposits-core
 - Cleaner dependency graph
 
 **Impact:** Architectural change across ~30 handler modules
