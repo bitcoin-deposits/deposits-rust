@@ -193,11 +193,11 @@ tracing::info!(peer = %peer_id, seq = n, "Processing message");
 | Metric | Before | Current |
 |--------|--------|---------|
 | deposits-ldk size | ~27K lines | ~39K lines |
-| deposits-core size | ~10K lines | ~23K lines |
-| **Core ratio** | ~27% | **37%** |
+| deposits-core size | ~10K lines | ~26K lines |
+| **Core ratio** | ~27% | **40%** |
 
 Note: Total lines increased due to added functionality. The key metric is
-that ~13K lines of protocol logic moved from ldk to core.
+that ~16K lines of protocol logic moved from ldk to core.
 
 - **Better reusability** for non-LDK Lightning implementations
 - **Cleaner dependency graph** with clear layer separation
@@ -268,25 +268,32 @@ Analysis shows 74% of top handler files is generic protocol logic. Target: ~5,00
 
 ---
 
-### 2.3 recovery_ops.rs → deposits-core (Priority: HIGH)
+### 2.3 recovery_ops.rs → deposits-core (ASSESSED - Orchestration Only)
 
 **Current location:** `deposits-ldk/src/handler/recovery_ops.rs` (~1,602 lines)
 
-**Generic:** 75% (~1,202 lines)
-**LDK-specific:** 25% (~400 lines) - logging, signing, messaging
+**Assessment:** After analysis, this file is orchestration code, NOT core logic.
 
-**What to move:**
-- Recovery state machines
-- Claim initiation and validation
-- Signature collection logic
-- Fraud proof (accusation) logic
+**What's already in deposits-core:**
+- `RecoveryManager` - state machine for recovery phases (962 lines)
+- `RecoveryPhase`, `RecoveryVote`, `RecoveryPool` - core types
+- `ClaimManager` - claim building and signature collection (947 lines)
+- `BroadcastResult`, `ClaimableReserves` - transaction types
 
-**Blockers:**
-- Heavy logger dependency (40+ calls)
-- Message transport abstraction needed
-- Signature operations need abstraction
+**What stays in deposits-ldk (orchestration):**
+- `start_recovery_tracking` - wraps `recovery_manager.start_recovery()` with logging
+- `on_recovery_entropy_block` - gets LDK state, calls core, broadcasts vote messages
+- `initiate_claim_and_request_signatures` - coordinates claim using core types
+- `broadcast_recovery_claim` - uses LDK's `BroadcasterInterface`
+- `broadcast_uncredited_payment_accusation` - force-closes channel, broadcasts fraud proof
 
-**Impact:** ~1,000 lines moved
+**Why NOT to move:**
+- Core recovery logic already extracted to deposits-core (~1,900 lines)
+- Remaining code coordinates LDK-specific state (ledgers, channel_manager, connected peers)
+- Uses `BroadcasterInterface` for transaction broadcast
+- Tests are LDK-specific integration tests (~850 lines)
+
+**Impact:** None needed - already complete
 
 ---
 
@@ -337,7 +344,6 @@ pub trait RecoveryContext: HandlerContext {
 17. ✅ **message_validation.rs** - move validation logic (~870 lines) - commit ce3aeba
 18. ✅ **HandlerError type** - generic error to replace LightningError - commit 8e83769
 19. ✅ **HandlerContext trait** - abstraction for message sending - commit 8e83769
-20. ✅ **message_handlers.rs** - move handler logic (13 handlers, ~1.8K lines) - commits 8e83769, ae6ca67, 43a42c2
-21. **RecoveryContext trait** - abstraction for recovery state
-22. **recovery_ops.rs** - move recovery logic (~1,000 lines)
-23. **DepositsMessage enum** - move to core (~900 lines)
+20. ✅ **message_handlers.rs** - move handler logic (27 handlers, ~3K lines) - commits 8e83769, ae6ca67, 43a42c2, 487ecc9
+21. ✅ **recovery_ops.rs** - ASSESSED: core logic already in recovery.rs/recovery_claim.rs (~1.9K lines), remaining is LDK orchestration
+22. **DepositsMessage enum** - move to core (~900 lines)
