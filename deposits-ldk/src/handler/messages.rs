@@ -3305,51 +3305,7 @@ impl lightning::ln::wire::CustomMessageReader for DepositsMessageReader {
 // Re-export is_deposits_message_type from deposits-core
 pub use deposits_core::messages::is_deposits_message_type;
 
-// ============================================================================
-// Serde helpers for byte arrays (kept for API compatibility)
-// ============================================================================
-
-pub mod serde_arrays {
-    use serde::{Deserializer, Serializer, Deserialize, Serialize};
-
-    pub fn serialize<S>(bytes: &[u8; 64], serializer: S) -> Result<S::Ok, S::Error>
-    where S: Serializer {
-        bytes.as_slice().serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 64], D::Error>
-    where D: Deserializer<'de> {
-        let vec: Vec<u8> = Vec::deserialize(deserializer)?;
-        if vec.len() == 64 {
-            let mut array = [0u8; 64];
-            array.copy_from_slice(&vec);
-            Ok(array)
-        } else {
-            Err(serde::de::Error::custom(format!("Expected 64 bytes, got {}", vec.len())))
-        }
-    }
-}
-
-pub mod serde_arrays_32 {
-    use serde::{Deserializer, Serializer, Deserialize, Serialize};
-
-    pub fn serialize<S>(bytes: &[u8; 32], serializer: S) -> Result<S::Ok, S::Error>
-    where S: Serializer {
-        bytes.as_slice().serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 32], D::Error>
-    where D: Deserializer<'de> {
-        let vec: Vec<u8> = Vec::deserialize(deserializer)?;
-        if vec.len() == 32 {
-            let mut array = [0u8; 32];
-            array.copy_from_slice(&vec);
-            Ok(array)
-        } else {
-            Err(serde::de::Error::custom(format!("Expected 32 bytes, got {}", vec.len())))
-        }
-    }
-}
+// Note: serde helpers for byte arrays are available in deposits-core::types::{serde_32, serde_64, serde_opt_64}
 
 #[cfg(test)]
 mod tests {
