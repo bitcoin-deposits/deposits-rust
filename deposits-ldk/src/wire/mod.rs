@@ -36,6 +36,7 @@
 //! }
 //! ```
 
+pub mod adapters;
 pub mod codec;
 pub mod message_types;
 pub mod messages;
