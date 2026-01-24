@@ -2260,8 +2260,7 @@ where
         remote_ledger_hash: &[u8; 32],
         sender_node_id: PublicKey,
     ) -> Result<(), LightningError> {
-        use lightning::ln::types::ChannelId;
-        use lightning::ln::chan_utils::CommitmentExtraOutput;
+        use deposits_core::{ChannelId, CommitmentExtraOutput};
 
         log_info!(
             self.logger,
@@ -2272,7 +2271,7 @@ where
             &ledger_hash[0..8]
         );
 
-        let channel_id_typed = ChannelId(*channel_id);
+        let channel_id_typed = ChannelId::new(*channel_id);
 
         // Get the channel manager
         let cm = match &self.channel_manager {
@@ -2289,7 +2288,7 @@ where
         // Convert script_pubkey bytes to ScriptBuf
         let script = bitcoin::ScriptBuf::from_bytes(script_pubkey.to_vec());
 
-        // Build the CommitmentExtraOutput
+        // Build the CommitmentExtraOutput (deposits-core type)
         let output = CommitmentExtraOutput {
             amount_satoshis: reserves_sats,
             script_pubkey: script,
@@ -2433,7 +2432,7 @@ where
         channel_id: &[u8; 32],
         sender_node_id: PublicKey,
     ) -> Result<(), LightningError> {
-        use lightning::ln::types::ChannelId;
+        use deposits_core::ChannelId;
 
         log_info!(
             self.logger,
@@ -2442,7 +2441,7 @@ where
             hex::encode(&channel_id[..8])
         );
 
-        let channel_id_typed = ChannelId(*channel_id);
+        let channel_id_typed = ChannelId::new(*channel_id);
 
         // Get the channel manager
         let cm = match &self.channel_manager {

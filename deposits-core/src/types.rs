@@ -1530,6 +1530,59 @@ impl TlvDecode for CollateralAttestation {
 }
 
 // ============================================================================
+// Commitment Extra Output
+// ============================================================================
+
+/// Extra output to be added to commitment transactions (for reserves).
+/// This is a deposits-core equivalent of lightning::ln::chan_utils::CommitmentExtraOutput.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitmentExtraOutput {
+    /// Amount in satoshis for this output.
+    pub amount_satoshis: u64,
+    /// Script pubkey for this output.
+    pub script_pubkey: bitcoin::ScriptBuf,
+}
+
+// ============================================================================
+// Channel ID
+// ============================================================================
+
+/// A 32-byte channel identifier.
+/// This is a deposits-core equivalent of lightning::ln::types::ChannelId.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub struct ChannelId(pub [u8; 32]);
+
+impl ChannelId {
+    /// Create a new ChannelId from a 32-byte array.
+    pub fn new(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Get the inner bytes.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl From<[u8; 32]> for ChannelId {
+    fn from(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+}
+
+impl From<ChannelId> for [u8; 32] {
+    fn from(id: ChannelId) -> Self {
+        id.0
+    }
+}
+
+impl std::fmt::Display for ChannelId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex::encode(self.0))
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 

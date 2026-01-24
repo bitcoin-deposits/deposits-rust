@@ -5,235 +5,65 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-//! Channel Manager Operations Trait
+//! Channel Manager Operations - LDK Adapter
 //!
-//! This module defines the `ChannelManagerOps` trait that abstracts all the
-//! channel manager operations needed by the Bitcoin Deposits handler.
-//!
-//! The trait allows deposits-ldk to be independent of ldk-node's ChannelManager
-//! while still being able to use its functionality when wired up.
+//! This module re-exports the `ChannelManagerOps` trait and related types from deposits-core,
+//! and provides conversion functions between deposits-core types and LDK types.
 
-use bitcoin::secp256k1::PublicKey;
-use lightning::ln::chan_utils::CommitmentExtraOutput;
-use lightning::ln::types::ChannelId;
+// Re-export the trait and types from deposits-core
+pub use deposits_core::{
+    ChannelManagerOps, ChannelDetails, NullChannelManager,
+    CommitmentExtraOutput, ChannelId,
+};
 
-/// Channel details for reserves operations
-#[derive(Clone, Debug)]
-pub struct ChannelDetails {
-    /// The channel ID
-    pub channel_id: ChannelId,
-    /// Funding transaction outpoint (txid, vout)
-    pub funding_txo: Option<(bitcoin::Txid, u32)>,
-    /// Counterparty node public key
-    pub counterparty_node_id: PublicKey,
-    /// Whether the channel is usable
-    pub is_usable: bool,
-    /// Channel capacity in satoshis
-    pub channel_value_satoshis: u64,
-    /// Our balance in millisatoshis
-    pub balance_msat: u64,
-    /// Local reserves info (amount in sats, ledger hash)
-    pub local_reserves: Option<(u64, [u8; 32])>,
-    /// Remote reserves info (amount in sats, ledger hash)
-    pub remote_reserves: Option<(u64, [u8; 32])>,
-}
+use lightning::ln::chan_utils::CommitmentExtraOutput as LdkCommitmentExtraOutput;
+use lightning::ln::types::ChannelId as LdkChannelId;
 
-/// Trait for channel manager operations needed by the deposits handler.
-///
-/// This trait abstracts LDK's ChannelManager so that:
-/// 1. deposits-ldk can compile independently of ldk-node
-/// 2. ldk-node can provide the real implementation at runtime
-/// 3. Tests can use mock implementations
-pub trait ChannelManagerOps: Send + Sync {
-    /// List all channels with a specific counterparty
-    fn list_channels_with_counterparty(&self, node_id: &PublicKey) -> Vec<ChannelDetails>;
+// ============================================================================
+// Conversion Functions: deposits-core -> LDK
+// ============================================================================
 
-    /// List all channels
-    fn list_channels(&self) -> Vec<ChannelDetails>;
-
-    /// Get the current best block height
-    fn current_best_block_height(&self) -> u32;
-
-    /// Propose extra outputs to be included in commitment transactions.
-    ///
-    /// Returns Ok(true) if the proposal is ready to be sent, Ok(false) if queued.
-    /// The caller must send a custom message to notify the counterparty.
-    fn propose_extra_outputs(
-        &self,
-        node_id: &PublicKey,
-        channel_id: &ChannelId,
-        outputs: Vec<CommitmentExtraOutput>,
-    ) -> Result<bool, String>;
-
-    /// Called when counterparty proposes extra outputs via custom message.
-    ///
-    /// Stores the proposal in pending state for validation.
-    fn receive_extra_outputs_proposal(
-        &self,
-        node_id: &PublicKey,
-        channel_id: &ChannelId,
-        outputs: Vec<CommitmentExtraOutput>,
-        user_data: Vec<u8>,
-    ) -> Result<(), String>;
-
-    /// Accept the counterparty's pending extra outputs proposal.
-    fn accept_extra_outputs_proposal(
-        &self,
-        node_id: &PublicKey,
-        channel_id: &ChannelId,
-    ) -> Result<(), String>;
-
-    /// Reject the counterparty's pending extra outputs proposal.
-    fn reject_extra_outputs_proposal(
-        &self,
-        node_id: &PublicKey,
-        channel_id: &ChannelId,
-    ) -> Result<(), String>;
-
-    /// Called when counterparty accepts our extra outputs proposal.
-    fn extra_outputs_accepted(
-        &self,
-        node_id: &PublicKey,
-        channel_id: &ChannelId,
-    ) -> Result<(), String>;
-
-    /// Get current extra outputs for a channel.
-    ///
-    /// Returns (holder_outputs, counterparty_outputs).
-    fn get_channel_extra_outputs(
-        &self,
-        node_id: &PublicKey,
-        channel_id: &ChannelId,
-    ) -> Result<(Vec<CommitmentExtraOutput>, Vec<CommitmentExtraOutput>), String>;
-
-    /// Clear all extra outputs from a channel.
-    fn clear_channel_extra_outputs(
-        &self,
-        node_id: &PublicKey,
-        channel_id: &ChannelId,
-    ) -> Result<(), String>;
-
-    /// Force close a channel with the latest transaction
-    fn force_close_broadcasting_latest_txn(
-        &self,
-        channel_id: &ChannelId,
-        counterparty_node_id: &PublicKey,
-        reason: String,
-    ) -> Result<(), String>;
-
-    /// Get the remote reserves amount for a channel
-    fn get_channel_remote_reserves_amount(
-        &self,
-        node_id: &PublicKey,
-        channel_id: &ChannelId,
-    ) -> Option<u64>;
-
-    /// Get the local reserves amount for a channel
-    fn get_channel_local_reserves_amount(
-        &self,
-        node_id: &PublicKey,
-        channel_id: &ChannelId,
-    ) -> Option<u64>;
-}
-
-/// A null implementation of ChannelManagerOps that does nothing.
-/// Used when channel manager is not set.
-pub struct NullChannelManager;
-
-impl ChannelManagerOps for NullChannelManager {
-    fn list_channels_with_counterparty(&self, _node_id: &PublicKey) -> Vec<ChannelDetails> {
-        Vec::new()
-    }
-
-    fn list_channels(&self) -> Vec<ChannelDetails> {
-        Vec::new()
-    }
-
-    fn current_best_block_height(&self) -> u32 {
-        0
-    }
-
-    fn propose_extra_outputs(
-        &self,
-        _node_id: &PublicKey,
-        _channel_id: &ChannelId,
-        _outputs: Vec<CommitmentExtraOutput>,
-    ) -> Result<bool, String> {
-        Ok(true)
-    }
-
-    fn receive_extra_outputs_proposal(
-        &self,
-        _node_id: &PublicKey,
-        _channel_id: &ChannelId,
-        _outputs: Vec<CommitmentExtraOutput>,
-        _user_data: Vec<u8>,
-    ) -> Result<(), String> {
-        Ok(())
-    }
-
-    fn accept_extra_outputs_proposal(
-        &self,
-        _node_id: &PublicKey,
-        _channel_id: &ChannelId,
-    ) -> Result<(), String> {
-        Ok(())
-    }
-
-    fn reject_extra_outputs_proposal(
-        &self,
-        _node_id: &PublicKey,
-        _channel_id: &ChannelId,
-    ) -> Result<(), String> {
-        Ok(())
-    }
-
-    fn extra_outputs_accepted(
-        &self,
-        _node_id: &PublicKey,
-        _channel_id: &ChannelId,
-    ) -> Result<(), String> {
-        Ok(())
-    }
-
-    fn get_channel_extra_outputs(
-        &self,
-        _node_id: &PublicKey,
-        _channel_id: &ChannelId,
-    ) -> Result<(Vec<CommitmentExtraOutput>, Vec<CommitmentExtraOutput>), String> {
-        Ok((Vec::new(), Vec::new()))
-    }
-
-    fn clear_channel_extra_outputs(
-        &self,
-        _node_id: &PublicKey,
-        _channel_id: &ChannelId,
-    ) -> Result<(), String> {
-        Ok(())
-    }
-
-    fn force_close_broadcasting_latest_txn(
-        &self,
-        _channel_id: &ChannelId,
-        _counterparty_node_id: &PublicKey,
-        _reason: String,
-    ) -> Result<(), String> {
-        Ok(())
-    }
-
-    fn get_channel_remote_reserves_amount(
-        &self,
-        _node_id: &PublicKey,
-        _channel_id: &ChannelId,
-    ) -> Option<u64> {
-        None
-    }
-
-    fn get_channel_local_reserves_amount(
-        &self,
-        _node_id: &PublicKey,
-        _channel_id: &ChannelId,
-    ) -> Option<u64> {
-        None
+/// Convert a deposits-core CommitmentExtraOutput to LDK's CommitmentExtraOutput
+pub fn to_ldk_commitment_extra_output(output: &CommitmentExtraOutput) -> LdkCommitmentExtraOutput {
+    LdkCommitmentExtraOutput {
+        amount_satoshis: output.amount_satoshis,
+        script_pubkey: output.script_pubkey.clone(),
     }
 }
+
+/// Convert a Vec of deposits-core CommitmentExtraOutput to LDK's CommitmentExtraOutput
+pub fn to_ldk_commitment_extra_outputs(outputs: &[CommitmentExtraOutput]) -> Vec<LdkCommitmentExtraOutput> {
+    outputs.iter().map(to_ldk_commitment_extra_output).collect()
+}
+
+/// Convert a deposits-core ChannelId to LDK's ChannelId
+pub fn to_ldk_channel_id(id: &ChannelId) -> LdkChannelId {
+    LdkChannelId::from_bytes(*id.as_bytes())
+}
+
+// ============================================================================
+// Conversion Functions: LDK -> deposits-core
+// ============================================================================
+
+/// Convert LDK's CommitmentExtraOutput to deposits-core CommitmentExtraOutput
+pub fn from_ldk_commitment_extra_output(output: &LdkCommitmentExtraOutput) -> CommitmentExtraOutput {
+    CommitmentExtraOutput {
+        amount_satoshis: output.amount_satoshis,
+        script_pubkey: output.script_pubkey.clone(),
+    }
+}
+
+/// Convert a Vec of LDK's CommitmentExtraOutput to deposits-core CommitmentExtraOutput
+pub fn from_ldk_commitment_extra_outputs(outputs: &[LdkCommitmentExtraOutput]) -> Vec<CommitmentExtraOutput> {
+    outputs.iter().map(from_ldk_commitment_extra_output).collect()
+}
+
+/// Convert LDK's ChannelId to deposits-core ChannelId
+pub fn from_ldk_channel_id(id: &LdkChannelId) -> ChannelId {
+    ChannelId::new(id.0)
+}
+
+// Note: We cannot implement From trait here due to Rust's orphan rules.
+// The conversion functions above should be used instead:
+// - to_ldk_commitment_extra_output / from_ldk_commitment_extra_output
+// - to_ldk_channel_id / from_ldk_channel_id

@@ -53,29 +53,30 @@
 #![allow(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+pub mod channel_manager_ops;
 pub mod constants;
 pub mod error;
 pub mod handler;
+pub mod handler_traits;
+pub mod handler_types;
 pub mod ledger;
 #[macro_use]
 pub mod logging;
 pub mod message_processor;
 pub mod messages;
+pub mod operation_validation;
+pub mod payment_tracker;
 pub mod quorum;
 pub mod recovery;
 pub mod recovery_claim;
+pub mod reserves_proposal;
+pub mod signature_utils;
 pub mod tapscript_reserves;
 pub mod time_utils;
 pub mod tlv;
 pub mod traits;
 pub mod types;
 pub mod validation;
-pub mod handler_types;
-pub mod handler_traits;
-pub mod payment_tracker;
-pub mod reserves_proposal;
-pub mod signature_utils;
-pub mod operation_validation;
 pub mod wire_messages;
 
 // Re-exports for convenience
@@ -110,8 +111,13 @@ pub use types::{
     DepositInfo, InvoiceInfo, ReservesStatus, CollateralAttestation,
     AuditResult, Violation, CrossLedgerViolation, LedgerStateUpdate,
     QuorumJoinRequestMsg, QuorumJoinResponseMsg, QuorumVoteMsg,
+    // Channel types
+    CommitmentExtraOutput, ChannelId,
     // Serde helper modules for serializing/deserializing Bitcoin types
     serde_pubkey, serde_32, serde_64, serde_opt_64, serde_pubkey_map, serde_pubkey_vec,
+};
+pub use channel_manager_ops::{
+    ChannelManagerOps, ChannelDetails, NullChannelManager,
 };
 pub use validation::{
     ValidationRules, OperationValidator, LedgerConformanceValidator,
