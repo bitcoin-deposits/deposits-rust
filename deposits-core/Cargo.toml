@@ -25,6 +25,9 @@ thiserror = "1.0"
 # Hex encoding for debugging
 hex = "0.4"
 
+# Logging
+tracing = "0.1"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 

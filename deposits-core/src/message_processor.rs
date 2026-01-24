@@ -11,9 +11,9 @@
 //! Lightning implementation. The LDK-specific handler delegates to these processors.
 
 use bitcoin::secp256k1::PublicKey;
+use tracing::{debug, info, warn};
 
 use crate::quorum::{LedgerId, QuorumManager, QuorumMember};
-use crate::traits::{Logger, LogLevel};
 
 /// Result of processing a quorum message
 #[derive(Debug)]
@@ -79,22 +79,19 @@ pub struct QuorumVote {
 ///
 /// This processor handles the pure protocol logic for quorum operations,
 /// independent of any Lightning implementation.
-pub struct QuorumProcessor<L: Logger> {
+pub struct QuorumProcessor {
     /// Our node's public key
     node_id: PublicKey,
     /// The quorum manager
     quorum_manager: QuorumManager,
-    /// Logger
-    logger: L,
 }
 
-impl<L: Logger> QuorumProcessor<L> {
+impl QuorumProcessor {
     /// Create a new quorum processor
-    pub fn new(node_id: PublicKey, quorum_manager: QuorumManager, logger: L) -> Self {
+    pub fn new(node_id: PublicKey, quorum_manager: QuorumManager) -> Self {
         Self {
             node_id,
             quorum_manager,
-            logger,
         }
     }
 
@@ -114,14 +111,11 @@ impl<L: Logger> QuorumProcessor<L> {
         request: &QuorumJoinRequest,
         sender: PublicKey,
     ) -> QuorumMessageResult {
-        self.logger.log(
-            LogLevel::Info,
-            &format!(
-                "Processing quorum join request from {} for ledger ({}, {})",
-                request.requester,
-                request.ledger_id.operator_id,
-                request.ledger_id.partner_id
-            ),
+        info!(
+            requester = %request.requester,
+            operator = %request.ledger_id.operator_id,
+            partner = %request.ledger_id.partner_id,
+            "Processing quorum join request"
         );
 
         // Verify the request is from the requester
@@ -156,13 +150,10 @@ impl<L: Logger> QuorumProcessor<L> {
                 let members = self.quorum_manager.list_members(&request.ledger_id)
                     .unwrap_or_default();
 
-                self.logger.log(
-                    LogLevel::Info,
-                    &format!(
-                        "Accepted {} into quorum (now {} members)",
-                        request.requester,
-                        members.len()
-                    ),
+                info!(
+                    requester = %request.requester,
+                    member_count = members.len(),
+                    "Accepted member into quorum"
                 );
 
                 QuorumMessageResult::Accepted {
@@ -176,10 +167,7 @@ impl<L: Logger> QuorumProcessor<L> {
                 }
             }
             Err(e) => {
-                self.logger.log(
-                    LogLevel::Warn,
-                    &format!("Rejected join request: {:?}", e),
-                );
+                warn!(error = ?e, "Rejected join request");
 
                 QuorumMessageResult::Rejected {
                     response: QuorumResponse {
@@ -200,15 +188,12 @@ impl<L: Logger> QuorumProcessor<L> {
         sync: &QuorumStateSync,
         _sender: PublicKey,
     ) -> QuorumMessageResult {
-        self.logger.log(
-            LogLevel::Debug,
-            &format!(
-                "Processing state sync for ledger ({}, {}): seq {}-{}",
-                sync.ledger_id.operator_id,
-                sync.ledger_id.partner_id,
-                sync.from_sequence,
-                sync.to_sequence
-            ),
+        debug!(
+            operator = %sync.ledger_id.operator_id,
+            partner = %sync.ledger_id.partner_id,
+            from_seq = sync.from_sequence,
+            to_seq = sync.to_sequence,
+            "Processing state sync"
         );
 
         // Update member's known state
@@ -222,16 +207,13 @@ impl<L: Logger> QuorumProcessor<L> {
         vote: &QuorumVote,
         sender: PublicKey,
     ) -> QuorumMessageResult {
-        self.logger.log(
-            LogLevel::Debug,
-            &format!(
-                "Processing vote from {} for ledger ({}, {}): vote={}, seq={}",
-                sender,
-                vote.ledger_id.operator_id,
-                vote.ledger_id.partner_id,
-                vote.vote,
-                vote.sequence
-            ),
+        debug!(
+            sender = %sender,
+            operator = %vote.ledger_id.operator_id,
+            partner = %vote.ledger_id.partner_id,
+            vote = vote.vote,
+            sequence = vote.sequence,
+            "Processing vote"
         );
 
         // Verify sender matches voter
@@ -262,10 +244,7 @@ impl<L: Logger> QuorumProcessor<L> {
         if add {
             match self.quorum_manager.add_member(ledger_id, member) {
                 Ok(()) => {
-                    self.logger.log(
-                        LogLevel::Info,
-                        &format!("Added {} to quorum", member),
-                    );
+                    info!(member = %member, "Added member to quorum");
                     QuorumMessageResult::Processed
                 }
                 Err(e) => QuorumMessageResult::Error(format!("{:?}", e)),
@@ -273,10 +252,7 @@ impl<L: Logger> QuorumProcessor<L> {
         } else {
             match self.quorum_manager.remove_member(ledger_id, &member) {
                 Ok(()) => {
-                    self.logger.log(
-                        LogLevel::Info,
-                        &format!("Removed {} from quorum", member),
-                    );
+                    info!(member = %member, "Removed member from quorum");
                     QuorumMessageResult::Processed
                 }
                 Err(e) => QuorumMessageResult::Error(format!("{:?}", e)),
@@ -306,17 +282,16 @@ pub enum CollateralMessageResult {
 ///
 /// This processor handles collateral partner management, consent flow,
 /// and attestations.
-pub struct CollateralProcessor<L: Logger> {
+pub struct CollateralProcessor {
     /// Our node's public key
+    #[allow(dead_code)]
     node_id: PublicKey,
-    /// Logger
-    logger: L,
 }
 
-impl<L: Logger> CollateralProcessor<L> {
+impl CollateralProcessor {
     /// Create a new collateral processor
-    pub fn new(node_id: PublicKey, logger: L) -> Self {
-        Self { node_id, logger }
+    pub fn new(node_id: PublicKey) -> Self {
+        Self { node_id }
     }
 
     /// Verify consent signature
@@ -350,10 +325,7 @@ impl<L: Logger> CollateralProcessor<L> {
     pub fn should_grant_consent(&self, operator: &PublicKey) -> bool {
         // Default policy: grant consent if we have a relationship with the operator
         // The actual implementation should check if we have a ledger with this operator
-        self.logger.log(
-            LogLevel::Debug,
-            &format!("Checking consent policy for operator {}", operator),
-        );
+        debug!(operator = %operator, "Checking consent policy");
         true // Placeholder - actual logic depends on ledger state
     }
 
@@ -400,17 +372,16 @@ pub enum RecoveryMessageResult {
 ///
 /// This processor handles recovery voting, claim requests, and signature
 /// collection for the recovery protocol.
-pub struct RecoveryProcessor<L: Logger> {
+pub struct RecoveryProcessor {
     /// Our node's public key
+    #[allow(dead_code)]
     node_id: PublicKey,
-    /// Logger
-    logger: L,
 }
 
-impl<L: Logger> RecoveryProcessor<L> {
+impl RecoveryProcessor {
     /// Create a new recovery processor
-    pub fn new(node_id: PublicKey, logger: L) -> Self {
-        Self { node_id, logger }
+    pub fn new(node_id: PublicKey) -> Self {
+        Self { node_id }
     }
 
     /// Calculate voting threshold for recovery
@@ -433,12 +404,12 @@ impl<L: Logger> RecoveryProcessor<L> {
 
         let should_vote = inactive_time > timeout_seconds;
 
-        self.logger.log(
-            LogLevel::Debug,
-            &format!(
-                "Recovery vote decision for {}: inactive={}s, timeout={}s, vote={}",
-                operator, inactive_time, timeout_seconds, should_vote
-            ),
+        debug!(
+            operator = %operator,
+            inactive_secs = inactive_time,
+            timeout_secs = timeout_seconds,
+            should_vote = should_vote,
+            "Recovery vote decision"
         );
 
         should_vote
@@ -454,12 +425,12 @@ impl<L: Logger> RecoveryProcessor<L> {
         let threshold = Self::calculate_threshold(total_voters);
         let eligible = votes_for_claimer >= threshold;
 
-        self.logger.log(
-            LogLevel::Debug,
-            &format!(
-                "Claim eligibility for {}: votes={}, threshold={}, eligible={}",
-                claimer, votes_for_claimer, threshold, eligible
-            ),
+        debug!(
+            claimer = %claimer,
+            votes = votes_for_claimer,
+            threshold = threshold,
+            eligible = eligible,
+            "Claim eligibility check"
         );
 
         eligible
@@ -469,7 +440,6 @@ impl<L: Logger> RecoveryProcessor<L> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::traits::NullLogger;
     use bitcoin::secp256k1::{Secp256k1, SecretKey};
 
     fn test_pubkey(seed: u8) -> PublicKey {
@@ -480,11 +450,11 @@ mod tests {
 
     #[test]
     fn test_recovery_threshold() {
-        assert_eq!(RecoveryProcessor::<NullLogger>::calculate_threshold(3), 2);
-        assert_eq!(RecoveryProcessor::<NullLogger>::calculate_threshold(4), 3);
-        assert_eq!(RecoveryProcessor::<NullLogger>::calculate_threshold(5), 4);
-        assert_eq!(RecoveryProcessor::<NullLogger>::calculate_threshold(6), 4);
-        assert_eq!(RecoveryProcessor::<NullLogger>::calculate_threshold(10), 7);
+        assert_eq!(RecoveryProcessor::calculate_threshold(3), 2);
+        assert_eq!(RecoveryProcessor::calculate_threshold(4), 3);
+        assert_eq!(RecoveryProcessor::calculate_threshold(5), 4);
+        assert_eq!(RecoveryProcessor::calculate_threshold(6), 4);
+        assert_eq!(RecoveryProcessor::calculate_threshold(10), 7);
     }
 
     #[test]
@@ -496,7 +466,7 @@ mod tests {
         let operator = test_pubkey(2);
         let partner = test_pubkey(3);
 
-        let processor = CollateralProcessor::new(pubkey, NullLogger);
+        let processor = CollateralProcessor::new(pubkey);
 
         // Create signature
         let sig = processor.create_consent_signature(&operator, &partner, &secret);
