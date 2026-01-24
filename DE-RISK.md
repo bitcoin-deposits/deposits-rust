@@ -190,10 +190,13 @@ tracing::info!(peer = %peer_id, seq = n, "Processing message");
 
 ## Expected Benefits
 
-| Metric | Before | After |
-|--------|--------|-------|
-| deposits-ldk size | ~27K lines | ~22K lines |
-| deposits-core size | ~10K lines | ~15K lines |
+| Metric | Before | Current |
+|--------|--------|---------|
+| deposits-ldk size | ~27K lines | ~39K lines |
+| deposits-core size | ~10K lines | ~20K lines |
+
+Note: Total lines increased due to added functionality. The key metric is
+that ~10K lines of protocol logic moved from ldk to core.
 
 - **Better reusability** for non-LDK Lightning implementations
 - **Cleaner dependency graph** with clear layer separation
@@ -216,5 +219,6 @@ tracing::info!(peer = %peer_id, seq = n, "Processing message");
 10. ✅ **build_taproot_reserves_script** (pure function moved to deposits-core) - commit 8f3feab
 11. ✅ **Remove duplicate requires_acknowledgment** (was V2-only, now re-exports from deposits-core) - commit e8d2fc8
 12. ✅ **Remove duplicate get_message_category** (was missing V2/quorum/recovery types, now re-exports from deposits-core) - commit 300ce6a
-13. **Logger abstraction in deposits-ldk** (425 log calls across 29 files - could migrate to tracing or keep LDK macros)
-14. **ChannelManagerOps** (blocked by CommitmentExtraOutput Lightning dependency)
+13. ✅ **Logger abstraction in deposits-ldk** (572 log calls across 38 files migrated to deposits-core macros) - commit ac01065
+14. ✅ **Wire message structs** (42 message types moved to deposits-core with WireEncode/WireDecode) - commits 189f17e, 30104e1, b4e7236, a6f904f
+15. **ChannelManagerOps** (blocked by CommitmentExtraOutput Lightning dependency)
