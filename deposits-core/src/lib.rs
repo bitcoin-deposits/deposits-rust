@@ -57,6 +57,8 @@ pub mod constants;
 pub mod error;
 pub mod handler;
 pub mod ledger;
+#[macro_use]
+pub mod logging;
 pub mod message_processor;
 pub mod messages;
 pub mod quorum;
