@@ -194,5 +194,7 @@ ProposalStatus            // enum
 3. ✅ **Wire message constants & utilities** (message type constants, utility functions) - commit 3bebb5d
 4. ✅ **HashStrategy** (commitment sync strategy based on message type) - commit 1d8e73a
 5. ✅ **Signature utilities** (already moved)
-6. **Logger abstraction** (enables further moves)
-7. **ChannelManagerOps** (after logger abstraction resolves Lightning dependency)
+6. ✅ **V2 message type name utilities** (type_id_to_const_name, type_id_to_variant_name) - commit ecf582b
+7. ✅ **Dead code cleanup** (duplicate is_deposits_message_type, unused serde_arrays modules) - commits a9db34e, 80c857d
+8. **Logger abstraction** (enables further moves - 425 log calls across 29 files)
+9. **ChannelManagerOps** (after logger abstraction resolves Lightning dependency)
