@@ -879,6 +879,14 @@ pub enum CoordinationMsg {
         signature: [u8; 64],
         spend_signature: Option<[u8; 64]>,
     },
+    /// Propose extra outputs for reserves commitment
+    UpdateReserves {
+        channel_id: [u8; 32],
+        reserves_sats: u64,
+        script_pubkey: Vec<u8>,
+        ledger_hash: [u8; 32],
+        remote_ledger_hash: [u8; 32],
+    },
 }
 
 impl CoordinationMsg {
@@ -889,6 +897,7 @@ impl CoordinationMsg {
             Self::QuorumJoinRequest { partner_id, .. } => Some(*partner_id),
             Self::QuorumVoteRequest { partner_id, .. } => Some(*partner_id),
             Self::QuorumVote { .. } => None,
+            Self::UpdateReserves { .. } => None, // Channel-level, not ledger-level
         }
     }
 }
@@ -940,6 +949,10 @@ pub enum CoordinationResponseMsg {
         timestamp: u64,
         operator_signature: [u8; 64],
     },
+    /// Accept proposed reserves commitment
+    AcceptReserves {
+        channel_id: [u8; 32],
+    },
 }
 
 impl CoordinationResponseMsg {
@@ -950,6 +963,7 @@ impl CoordinationResponseMsg {
             Self::QuorumJoinResponse { .. } => None,
             Self::QuorumStateSync { partner_id, .. } => Some(*partner_id),
             Self::QuorumMembershipChange { partner_id, .. } => Some(*partner_id),
+            Self::AcceptReserves { .. } => None, // Channel-level, not ledger-level
         }
     }
 }
@@ -1802,6 +1816,14 @@ impl BinaryCodec for CoordinationMsg {
                 write_64(w, signature)?;
                 write_option(w, spend_signature, |w, s| write_64(w, s))?;
             }
+            Self::UpdateReserves { channel_id, reserves_sats, script_pubkey, ledger_hash, remote_ledger_hash } => {
+                write_u8(w, 5)?;
+                write_32(w, channel_id)?;
+                write_u64(w, *reserves_sats)?;
+                write_bytes(w, script_pubkey)?;
+                write_32(w, ledger_hash)?;
+                write_32(w, remote_ledger_hash)?;
+            }
         }
         Ok(())
     }
@@ -1853,6 +1875,13 @@ impl BinaryCodec for CoordinationMsg {
                 evidence: read_option(r, read_bytes)?,
                 signature: read_64(r)?,
                 spend_signature: read_option(r, read_64)?,
+            }),
+            5 => Ok(Self::UpdateReserves {
+                channel_id: read_32(r)?,
+                reserves_sats: read_u64(r)?,
+                script_pubkey: read_bytes(r)?,
+                ledger_hash: read_32(r)?,
+                remote_ledger_hash: read_32(r)?,
             }),
             d => Err(CodecError::InvalidDiscriminant(d)),
         }
@@ -1907,6 +1936,10 @@ impl BinaryCodec for CoordinationResponseMsg {
                 write_u64(w, *timestamp)?;
                 write_64(w, operator_signature)?;
             }
+            Self::AcceptReserves { channel_id } => {
+                write_u8(w, 5)?;
+                write_32(w, channel_id)?;
+            }
         }
         Ok(())
     }
@@ -1951,6 +1984,9 @@ impl BinaryCodec for CoordinationResponseMsg {
                 new_threshold: read_u16(r)?,
                 timestamp: read_u64(r)?,
                 operator_signature: read_64(r)?,
+            }),
+            5 => Ok(Self::AcceptReserves {
+                channel_id: read_32(r)?,
             }),
             d => Err(CodecError::InvalidDiscriminant(d)),
         }
@@ -2908,6 +2944,12 @@ mod coordination_tlv {
     pub const VOTER_STATE_HASH: u64 = 50;
     pub const EVIDENCE: u64 = 52;
     pub const SPEND_SIGNATURE: u64 = 54;
+    // UpdateReserves fields
+    pub const CHANNEL_ID: u64 = 56;
+    pub const RESERVES_SATS: u64 = 58;
+    pub const SCRIPT_PUBKEY: u64 = 60;
+    pub const LEDGER_HASH: u64 = 62;
+    pub const REMOTE_LEDGER_HASH: u64 = 64;
 }
 
 impl TlvEncode for CoordinationMsg {
@@ -2998,6 +3040,18 @@ impl TlvEncode for CoordinationMsg {
                 }
                 builder.build()
             }
+            Self::UpdateReserves {
+                channel_id, reserves_sats, script_pubkey, ledger_hash, remote_ledger_hash,
+            } => {
+                TlvBuilder::new()
+                    .u8_field(DISCRIMINANT, 5)
+                    .bytes_field(CHANNEL_ID, channel_id)
+                    .u64_field(RESERVES_SATS, *reserves_sats)
+                    .bytes_field(SCRIPT_PUBKEY, script_pubkey)
+                    .bytes_field(LEDGER_HASH, ledger_hash)
+                    .bytes_field(REMOTE_LEDGER_HASH, remote_ledger_hash)
+                    .build()
+            }
         }
     }
 }
@@ -3062,6 +3116,13 @@ impl TlvDecode for CoordinationMsg {
                 signature: reader.read_bytes(SIGNATURE)?,
                 spend_signature: reader.read_bytes_opt(SPEND_SIGNATURE)?,
             }),
+            5 => Ok(Self::UpdateReserves {
+                channel_id: reader.read_bytes(CHANNEL_ID)?,
+                reserves_sats: reader.read_u64(RESERVES_SATS)?,
+                script_pubkey: reader.read_raw(SCRIPT_PUBKEY)?.to_vec(),
+                ledger_hash: reader.read_bytes(LEDGER_HASH)?,
+                remote_ledger_hash: reader.read_bytes(REMOTE_LEDGER_HASH)?,
+            }),
             d => Err(TlvError::InvalidFieldValue {
                 field_type: DISCRIMINANT,
                 reason: format!("unknown CoordinationMsg discriminant: {}", d),
@@ -3093,6 +3154,8 @@ mod coordination_response_tlv {
     pub const NEW_THRESHOLD: u64 = 38;
     pub const TIMESTAMP: u64 = 40;
     pub const OPERATOR_SIGNATURE: u64 = 42;
+    // AcceptReserves fields
+    pub const CHANNEL_ID: u64 = 44;
 }
 
 impl TlvEncode for CoordinationResponseMsg {
@@ -3174,6 +3237,12 @@ impl TlvEncode for CoordinationResponseMsg {
                     .bytes_field(OPERATOR_SIGNATURE, operator_signature)
                     .build()
             }
+            Self::AcceptReserves { channel_id } => {
+                TlvBuilder::new()
+                    .u8_field(DISCRIMINANT, 5)
+                    .bytes_field(CHANNEL_ID, channel_id)
+                    .build()
+            }
         }
     }
 }
@@ -3247,6 +3316,9 @@ impl TlvDecode for CoordinationResponseMsg {
                     operator_signature: reader.read_bytes(OPERATOR_SIGNATURE)?,
                 })
             },
+            5 => Ok(Self::AcceptReserves {
+                channel_id: reader.read_bytes(CHANNEL_ID)?,
+            }),
             d => Err(TlvError::InvalidFieldValue {
                 field_type: DISCRIMINANT,
                 reason: format!("unknown CoordinationResponseMsg discriminant: {}", d),
