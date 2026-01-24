@@ -914,6 +914,27 @@ pub enum ProtocolEvent {
         payment_hash: [u8; 32],
         amount_msat: u64,
     },
+    /// Fees were collected from a deposit
+    FeeCollected {
+        operator: PublicKey,
+        partner: PublicKey,
+        deposit_pubkey: PublicKey,
+        amount: u64,
+        block_height: u32,
+    },
+    /// A ledger was closed
+    LedgerClosed {
+        operator: PublicKey,
+        partner: PublicKey,
+    },
+    /// An invoice cosign was requested
+    InvoiceCosignRequested {
+        operator: PublicKey,
+        partner: PublicKey,
+        deposit_pubkey: PublicKey,
+        amount: u64,
+        payment_hash: [u8; 32],
+    },
 }
 
 // ============================================================================

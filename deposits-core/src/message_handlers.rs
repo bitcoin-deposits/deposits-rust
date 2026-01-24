@@ -39,12 +39,14 @@ use crate::wire_messages::{
     DepositOpenMsg, DepositCloseMsg, DepositUpdateMsg,
     ReservesAddOutputMsg, ReservesRemoveOutputMsg,
     ReservesIncreaseMsg, ReservesDecreaseMsg,
+    FeeCollectMsg, LedgerCloseMsg, ReceivingCosignInvoiceMsg,
 };
 use crate::operation_validation::{
     validate_credit_payment, validate_payment_lock,
     validate_payment_fulfill, validate_payment_fail,
     validate_deposit_add, validate_deposit_close, validate_deposit_update,
     validate_reserves_add, validate_reserves_increase, validate_reserves_decrease,
+    validate_fee_collect, validate_ledger_close, validate_cosign_invoice,
 };
 
 // ============================================================================
@@ -238,6 +240,41 @@ pub enum ResponseData {
         prev_hash: [u8; 32],
         /// New state hash after append
         new_hash: [u8; 32],
+    },
+    /// Fee collection validated - partner should sign and ACK
+    FeeCollectValidated {
+        operator: PublicKey,
+        partner: PublicKey,
+        deposit_pubkey: PublicKey,
+        amount: u64,
+        block_height: u32,
+        /// Sequence number after append
+        sequence: u64,
+        /// Previous state hash
+        prev_hash: [u8; 32],
+        /// New state hash after append
+        new_hash: [u8; 32],
+    },
+    /// Ledger close validated - partner should sign and ACK
+    LedgerCloseValidated {
+        operator: PublicKey,
+        partner: PublicKey,
+        /// Sequence number after append
+        sequence: u64,
+        /// Previous state hash
+        prev_hash: [u8; 32],
+        /// New state hash after append
+        new_hash: [u8; 32],
+    },
+    /// Invoice cosign validated - partner should sign the invoice
+    CosignInvoiceValidated {
+        operator: PublicKey,
+        partner: PublicKey,
+        deposit_pubkey: PublicKey,
+        amount: u64,
+        payment_hash: [u8; 32],
+        invoice_id: String,
+        bolt11: String,
     },
 }
 
@@ -1411,6 +1448,210 @@ pub fn handle_reserves_decrease<C: HandlerContext>(
         sequence,
         prev_hash,
         new_hash,
+    }))
+}
+
+// ============================================================================
+// Fee and Ledger Lifecycle Handlers
+// ============================================================================
+
+/// Handle a FeeCollect message.
+///
+/// Received by partners when an operator collects fees from a deposit.
+/// The partner validates the fee collection and signs the ledger update (porcupine dance).
+///
+/// # Arguments
+/// * `ctx` - Handler context providing access to ledgers and messaging
+/// * `msg` - The fee collect message
+/// * `sender` - Public key of the message sender (should be the operator)
+///
+/// # Returns
+/// * `HandlerResult::Response(FeeCollectValidated)` - Fee collection is valid, partner should sign and ACK
+/// * `HandlerResult::Rejected(reason)` - Fee collection is invalid with explanation
+/// * `HandlerError` - Internal error during processing
+pub fn handle_fee_collect<C: HandlerContext>(
+    ctx: &C,
+    msg: &FeeCollectMsg,
+    sender: PublicKey,
+) -> Result<HandlerResult, HandlerError> {
+    let our_node_id = ctx.our_node_id();
+
+    // Get the ledger - sender (operator) and us (partner)
+    let ledger_arc = ctx.get_ledger(&sender, &our_node_id)
+        .ok_or(HandlerError::LedgerNotFound {
+            operator: sender,
+            partner: our_node_id,
+        })?;
+
+    // Validate the fee collection
+    let (sequence, prev_hash, new_hash) = {
+        let ledger = ledger_arc.read().map_err(|_|
+            HandlerError::Internal("Failed to acquire ledger read lock".to_string())
+        )?;
+
+        // Validate the fee collect operation
+        validate_fee_collect(
+            &ledger,
+            msg.pubkey,
+            msg.amount,
+            msg.block_height,
+        ).map_err(|e| HandlerError::ValidationFailed(e))?;
+
+        // Return current state for response
+        (ledger.sequence(), ledger.hash(), ledger.hash())
+    };
+
+    // Emit event for fee collection
+    ctx.emit_event(ProtocolEvent::FeeCollected {
+        operator: sender,
+        partner: our_node_id,
+        deposit_pubkey: msg.pubkey,
+        amount: msg.amount,
+        block_height: msg.block_height,
+    });
+
+    // Return validated data for LDK layer to record to ledger and sign
+    Ok(HandlerResult::Response(ResponseData::FeeCollectValidated {
+        operator: sender,
+        partner: our_node_id,
+        deposit_pubkey: msg.pubkey,
+        amount: msg.amount,
+        block_height: msg.block_height,
+        sequence,
+        prev_hash,
+        new_hash,
+    }))
+}
+
+/// Handle a LedgerClose message.
+///
+/// Received by partners when an operator requests to close the ledger relationship.
+/// The partner validates that the ledger can be safely closed (no outstanding balances).
+///
+/// # Arguments
+/// * `ctx` - Handler context providing access to ledgers and messaging
+/// * `msg` - The ledger close message
+/// * `sender` - Public key of the message sender (should be the operator)
+///
+/// # Returns
+/// * `HandlerResult::Response(LedgerCloseValidated)` - Close is valid, partner should sign and ACK
+/// * `HandlerResult::Rejected(reason)` - Close is invalid with explanation
+/// * `HandlerError` - Internal error during processing
+pub fn handle_ledger_close<C: HandlerContext>(
+    ctx: &C,
+    msg: &LedgerCloseMsg,
+    sender: PublicKey,
+) -> Result<HandlerResult, HandlerError> {
+    let our_node_id = ctx.our_node_id();
+
+    // We must be the partner to process this message
+    if msg.partner_id != our_node_id {
+        return Ok(HandlerResult::Rejected(format!(
+            "We ({}) are not the target partner ({})",
+            our_node_id, msg.partner_id
+        )));
+    }
+
+    // Get the ledger - sender (operator) and us (partner)
+    let ledger_arc = ctx.get_ledger(&sender, &our_node_id)
+        .ok_or(HandlerError::LedgerNotFound {
+            operator: sender,
+            partner: our_node_id,
+        })?;
+
+    // Validate the ledger close
+    let (sequence, prev_hash, new_hash) = {
+        let ledger = ledger_arc.read().map_err(|_|
+            HandlerError::Internal("Failed to acquire ledger read lock".to_string())
+        )?;
+
+        // Validate the ledger can be closed
+        validate_ledger_close(&ledger)
+            .map_err(|e| HandlerError::ValidationFailed(e))?;
+
+        // Return current state for response
+        (ledger.sequence(), ledger.hash(), ledger.hash())
+    };
+
+    // Emit event for ledger close
+    ctx.emit_event(ProtocolEvent::LedgerClosed {
+        operator: sender,
+        partner: our_node_id,
+    });
+
+    // Return validated data for LDK layer to record to ledger and sign
+    Ok(HandlerResult::Response(ResponseData::LedgerCloseValidated {
+        operator: sender,
+        partner: our_node_id,
+        sequence,
+        prev_hash,
+        new_hash,
+    }))
+}
+
+/// Handle a ReceivingCosignInvoice message.
+///
+/// Received by partners when an operator requests cosigning an invoice for a deposit.
+/// This is part of the invoice cosigning flow where the partner validates and signs
+/// the invoice to prove their consent to the incoming payment assignment.
+///
+/// # Arguments
+/// * `ctx` - Handler context providing access to ledgers and messaging
+/// * `msg` - The cosign invoice message
+/// * `sender` - Public key of the message sender (should be the operator)
+///
+/// # Returns
+/// * `HandlerResult::Response(CosignInvoiceValidated)` - Cosign is valid, partner should sign
+/// * `HandlerResult::Rejected(reason)` - Cosign is invalid with explanation
+/// * `HandlerError` - Internal error during processing
+pub fn handle_receiving_cosign_invoice<C: HandlerContext>(
+    ctx: &C,
+    msg: &ReceivingCosignInvoiceMsg,
+    sender: PublicKey,
+) -> Result<HandlerResult, HandlerError> {
+    let our_node_id = ctx.our_node_id();
+
+    // Get the ledger - sender (operator) and us (partner)
+    let ledger_arc = ctx.get_ledger(&sender, &our_node_id)
+        .ok_or(HandlerError::LedgerNotFound {
+            operator: sender,
+            partner: our_node_id,
+        })?;
+
+    // Validate the cosign invoice request
+    {
+        let ledger = ledger_arc.read().map_err(|_|
+            HandlerError::Internal("Failed to acquire ledger read lock".to_string())
+        )?;
+
+        // Validate the cosign operation
+        validate_cosign_invoice(
+            &ledger,
+            msg.assigned_deposit,
+            msg.amount,
+            &msg.invoice_id,
+            &msg.payment_hash,
+        ).map_err(|e| HandlerError::ValidationFailed(e))?;
+    }
+
+    // Emit event for invoice cosign request
+    ctx.emit_event(ProtocolEvent::InvoiceCosignRequested {
+        operator: sender,
+        partner: our_node_id,
+        deposit_pubkey: msg.assigned_deposit,
+        amount: msg.amount,
+        payment_hash: msg.payment_hash,
+    });
+
+    // Return validated data for LDK layer to sign the invoice
+    Ok(HandlerResult::Response(ResponseData::CosignInvoiceValidated {
+        operator: sender,
+        partner: our_node_id,
+        deposit_pubkey: msg.assigned_deposit,
+        amount: msg.amount,
+        payment_hash: msg.payment_hash,
+        invoice_id: msg.invoice_id.clone(),
+        bolt11: msg.bolt11.clone(),
     }))
 }
 
@@ -3396,6 +3637,462 @@ mod tests {
 
         // Would drop below required reserves - should fail validation
         let result = handle_reserves_decrease(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::ValidationFailed(_))));
+    }
+
+    // ========================================================================
+    // Fee Collect Tests
+    // ========================================================================
+
+    #[test]
+    fn test_handle_fee_collect_no_ledger() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let msg = FeeCollectMsg {
+            pubkey: deposit_pubkey,
+            amount: 1000,
+            block_height: 100,
+        };
+
+        // No ledger exists - should error
+        let result = handle_fee_collect(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::LedgerNotFound { .. })));
+    }
+
+    #[test]
+    fn test_handle_fee_collect_deposit_not_found() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger without the deposit
+        let ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = FeeCollectMsg {
+            pubkey: deposit_pubkey,
+            amount: 1000,
+            block_height: 100,
+        };
+
+        // Deposit doesn't exist - should fail validation
+        let result = handle_fee_collect(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::ValidationFailed(_))));
+    }
+
+    #[test]
+    fn test_handle_fee_collect_valid() {
+        use crate::types::{Deposit, FeeStructure};
+
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger with a deposit that has balance and is eligible for fee collection
+        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut deposit = Deposit::new(deposit_pubkey, Some(FeeStructure {
+            annualized_fixed: 0,
+            annualized_bps: 100,
+            frequency_blocks: 100,
+        }));
+        deposit.balance = 100_000;
+        deposit.last_fee_assessment = 0; // Fee eligible from the start
+        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = FeeCollectMsg {
+            pubkey: deposit_pubkey,
+            amount: 1000,
+            block_height: 100, // On schedule
+        };
+
+        // Valid fee collection
+        let result = handle_fee_collect(&ctx, &msg, operator);
+        match result {
+            Ok(HandlerResult::Response(ResponseData::FeeCollectValidated { amount, block_height, .. })) => {
+                assert_eq!(amount, 1000);
+                assert_eq!(block_height, 100);
+            }
+            other => panic!("Expected Response(FeeCollectValidated), got {:?}", other),
+        }
+
+        // Check that event was emitted
+        let events = ctx.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ProtocolEvent::FeeCollected { operator: op, amount: amt, .. } => {
+                assert_eq!(*op, operator);
+                assert_eq!(*amt, 1000);
+            }
+            other => panic!("Expected FeeCollected event, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_handle_fee_collect_too_early() {
+        use crate::types::{Deposit, FeeStructure};
+
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger with a deposit where fees were recently collected
+        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut deposit = Deposit::new(deposit_pubkey, Some(FeeStructure {
+            annualized_fixed: 0,
+            annualized_bps: 100,
+            frequency_blocks: 100,
+        }));
+        deposit.balance = 100_000;
+        deposit.last_fee_assessment = 50; // Collected at block 50
+        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = FeeCollectMsg {
+            pubkey: deposit_pubkey,
+            amount: 1000,
+            block_height: 100, // Too early - need to wait until block 150
+        };
+
+        // Fee collection too early - should fail validation
+        let result = handle_fee_collect(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::ValidationFailed(_))));
+    }
+
+    // ========================================================================
+    // Ledger Close Tests
+    // ========================================================================
+
+    #[test]
+    fn test_handle_ledger_close_no_ledger() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let msg = LedgerCloseMsg {
+            partner_id: our_node_id,
+        };
+
+        // No ledger exists - should error
+        let result = handle_ledger_close(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::LedgerNotFound { .. })));
+    }
+
+    #[test]
+    fn test_handle_ledger_close_wrong_partner() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let wrong_partner = create_test_pubkey(3);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let msg = LedgerCloseMsg {
+            partner_id: wrong_partner, // Not us
+        };
+
+        // We're not the target partner - should be rejected
+        let result = handle_ledger_close(&ctx, &msg, operator);
+        assert!(matches!(result, Ok(HandlerResult::Rejected(_))));
+    }
+
+    #[test]
+    fn test_handle_ledger_close_outstanding_balance() {
+        use crate::types::Deposit;
+
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger with a deposit that has balance
+        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut deposit = Deposit::new(deposit_pubkey, None);
+        deposit.balance = 100_000; // Has balance
+        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = LedgerCloseMsg {
+            partner_id: our_node_id,
+        };
+
+        // Outstanding balance - should fail validation
+        let result = handle_ledger_close(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::ValidationFailed(_))));
+    }
+
+    #[test]
+    fn test_handle_ledger_close_locked_balance() {
+        use crate::types::Deposit;
+
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger with a deposit that has locked balance
+        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut deposit = Deposit::new(deposit_pubkey, None);
+        deposit.balance = 0;
+        deposit.locked_balance = 50_000; // Has locked balance
+        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = LedgerCloseMsg {
+            partner_id: our_node_id,
+        };
+
+        // Locked balance - should fail validation
+        let result = handle_ledger_close(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::ValidationFailed(_))));
+    }
+
+    #[test]
+    fn test_handle_ledger_close_valid_empty() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create an empty ledger
+        let ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = LedgerCloseMsg {
+            partner_id: our_node_id,
+        };
+
+        // Valid close of empty ledger
+        let result = handle_ledger_close(&ctx, &msg, operator);
+        match result {
+            Ok(HandlerResult::Response(ResponseData::LedgerCloseValidated { operator: op, partner, .. })) => {
+                assert_eq!(op, operator);
+                assert_eq!(partner, our_node_id);
+            }
+            other => panic!("Expected Response(LedgerCloseValidated), got {:?}", other),
+        }
+
+        // Check that event was emitted
+        let events = ctx.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ProtocolEvent::LedgerClosed { operator: op, partner } => {
+                assert_eq!(*op, operator);
+                assert_eq!(*partner, our_node_id);
+            }
+            other => panic!("Expected LedgerClosed event, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_handle_ledger_close_valid_zero_balance_deposits() {
+        use crate::types::Deposit;
+
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger with zero-balance deposits
+        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let deposit = Deposit::new(deposit_pubkey, None); // Balance defaults to 0
+        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = LedgerCloseMsg {
+            partner_id: our_node_id,
+        };
+
+        // Valid close with zero-balance deposits
+        let result = handle_ledger_close(&ctx, &msg, operator);
+        assert!(matches!(result, Ok(HandlerResult::Response(ResponseData::LedgerCloseValidated { .. }))));
+    }
+
+    // ========================================================================
+    // Cosign Invoice Tests
+    // ========================================================================
+
+    #[test]
+    fn test_handle_receiving_cosign_invoice_no_ledger() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let msg = ReceivingCosignInvoiceMsg {
+            amount: 100_000,
+            payment_hash: [0xAB; 32],
+            expires: 3600,
+            assigned_deposit: deposit_pubkey,
+            invoice_id: "test_invoice".to_string(),
+            bolt11: "lnbc1...".to_string(),
+        };
+
+        // No ledger exists - should error
+        let result = handle_receiving_cosign_invoice(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::LedgerNotFound { .. })));
+    }
+
+    #[test]
+    fn test_handle_receiving_cosign_invoice_deposit_not_found() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger without the deposit
+        let ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = ReceivingCosignInvoiceMsg {
+            amount: 100_000,
+            payment_hash: [0xAB; 32],
+            expires: 3600,
+            assigned_deposit: deposit_pubkey,
+            invoice_id: "test_invoice".to_string(),
+            bolt11: "lnbc1...".to_string(),
+        };
+
+        // Deposit doesn't exist - should fail validation
+        let result = handle_receiving_cosign_invoice(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::ValidationFailed(_))));
+    }
+
+    #[test]
+    fn test_handle_receiving_cosign_invoice_zero_amount() {
+        use crate::types::Deposit;
+
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+        let spend_to = create_test_pubkey(4);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger with a deposit
+        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let deposit = Deposit::new(deposit_pubkey, None);
+        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ledger.state.reserves.amount = 200_000;
+        ledger.state.reserves.spend_to = spend_to;
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = ReceivingCosignInvoiceMsg {
+            amount: 0, // Zero amount
+            payment_hash: [0xAB; 32],
+            expires: 3600,
+            assigned_deposit: deposit_pubkey,
+            invoice_id: "test_invoice".to_string(),
+            bolt11: "lnbc1...".to_string(),
+        };
+
+        // Zero amount - should fail validation
+        let result = handle_receiving_cosign_invoice(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::ValidationFailed(_))));
+    }
+
+    #[test]
+    fn test_handle_receiving_cosign_invoice_valid() {
+        use crate::types::Deposit;
+
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+        let spend_to = create_test_pubkey(4);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger with a deposit, sufficient reserves, and collateral
+        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let deposit = Deposit::new(deposit_pubkey, None);
+        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ledger.state.reserves.amount = 200_000;
+        ledger.state.reserves.spend_to = spend_to;
+        ledger.state.received_collateral_amount = 200_000; // Set collateral to allow invoice
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        // Use a varied payment hash (not all same bytes to pass validation)
+        let mut payment_hash = [0u8; 32];
+        for i in 0..32 {
+            payment_hash[i] = i as u8;
+        }
+
+        let msg = ReceivingCosignInvoiceMsg {
+            amount: 100_000,
+            payment_hash,
+            expires: 3600,
+            assigned_deposit: deposit_pubkey,
+            invoice_id: "test_invoice".to_string(),
+            bolt11: "lnbc1...".to_string(),
+        };
+
+        // Valid cosign invoice request
+        let result = handle_receiving_cosign_invoice(&ctx, &msg, operator);
+        match result {
+            Ok(HandlerResult::Response(ResponseData::CosignInvoiceValidated { amount, deposit_pubkey: dp, .. })) => {
+                assert_eq!(amount, 100_000);
+                assert_eq!(dp, deposit_pubkey);
+            }
+            other => panic!("Expected Response(CosignInvoiceValidated), got {:?}", other),
+        }
+
+        // Check that event was emitted
+        let events = ctx.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ProtocolEvent::InvoiceCosignRequested { operator: op, amount: amt, .. } => {
+                assert_eq!(*op, operator);
+                assert_eq!(*amt, 100_000);
+            }
+            other => panic!("Expected InvoiceCosignRequested event, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_handle_receiving_cosign_invoice_exceeds_reserves() {
+        use crate::types::Deposit;
+
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+        let spend_to = create_test_pubkey(4);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger with a deposit but insufficient reserves
+        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let deposit = Deposit::new(deposit_pubkey, None);
+        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ledger.state.reserves.amount = 50_000; // Only 50k reserves
+        ledger.state.reserves.spend_to = spend_to;
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = ReceivingCosignInvoiceMsg {
+            amount: 100_000, // Would exceed reserves
+            payment_hash: [0xAB; 32],
+            expires: 3600,
+            assigned_deposit: deposit_pubkey,
+            invoice_id: "test_invoice".to_string(),
+            bolt11: "lnbc1...".to_string(),
+        };
+
+        // Exceeds reserves - should fail validation
+        let result = handle_receiving_cosign_invoice(&ctx, &msg, operator);
         assert!(matches!(result, Err(HandlerError::ValidationFailed(_))));
     }
 }

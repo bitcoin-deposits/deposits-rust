@@ -241,6 +241,8 @@ pub use message_handlers::{
     // Payment handler functions
     handle_receiving_credit_payment, handle_sending_lock_payment,
     handle_sending_fulfill_payment, handle_sending_fail_payment,
+    // Fee and lifecycle handler functions
+    handle_fee_collect, handle_ledger_close, handle_receiving_cosign_invoice,
     // Helper functions
     make_ledger_id,
 };

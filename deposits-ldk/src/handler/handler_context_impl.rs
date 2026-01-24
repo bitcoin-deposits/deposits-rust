@@ -139,6 +139,27 @@ where
                     operator, partner, amount_msat
                 );
             }
+            ProtocolEvent::FeeCollected { operator, partner, deposit_pubkey, amount, block_height } => {
+                log_info!(
+                    self.logger,
+                    "Protocol event: FeeCollected - operator={}, partner={}, deposit={}, amount={}, block={}",
+                    operator, partner, deposit_pubkey, amount, block_height
+                );
+            }
+            ProtocolEvent::LedgerClosed { operator, partner } => {
+                log_info!(
+                    self.logger,
+                    "Protocol event: LedgerClosed - operator={}, partner={}",
+                    operator, partner
+                );
+            }
+            ProtocolEvent::InvoiceCosignRequested { operator, partner, deposit_pubkey, amount, payment_hash } => {
+                log_info!(
+                    self.logger,
+                    "Protocol event: InvoiceCosignRequested - operator={}, partner={}, deposit={}, amount={}",
+                    operator, partner, deposit_pubkey, amount
+                );
+            }
         }
     }
 
