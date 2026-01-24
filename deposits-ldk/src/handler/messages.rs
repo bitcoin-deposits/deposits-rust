@@ -110,10 +110,27 @@ pub use crate::wire::messages::{
     LdkUpdateReservesMsg, LdkAcceptReservesMsg,
     LdkDepositOpenMsg, LdkDepositCloseMsg, LdkDepositUpdateMsg,
     LdkCollateralIncreaseMsg, LdkCollateralDecreaseMsg,
+    LdkCollateralAddPartnerMsg, LdkCollateralRemovePartnerMsg,
+    LdkCollateralAttestationMsg, LdkCollateralStatusMsg,
+    LdkCollateralConsentRequestMsg, LdkCollateralConsentResponseMsg,
     LdkFeeCollectMsg, LdkLedgerCloseMsg,
     LdkReceivingCreditPaymentMsg, LdkSendingLockPaymentMsg,
     LdkSendingFailPaymentMsg, LdkSendingFulfillPaymentMsg,
     LdkReceivingCosignInvoiceMsg,
+    // Transfer wrappers
+    LdkDepositLockTransferMsg, LdkDepositFailTransferMsg, LdkDepositFulfillTransferMsg,
+    // Sync wrappers
+    LdkSyncRequestMsg, LdkChannelCloseTombstoneMsg,
+    // Quorum wrappers
+    LdkQuorumJoinRequestMsgWire, LdkQuorumJoinResponseMsgWire, LdkQuorumVoteMsgWire,
+    LdkQuorumMembershipChangeMsg, LdkQuorumStateSyncMsg, LdkQuorumVoteRequestMsg,
+    // Recovery wrappers
+    LdkRecoveryVoteMsg, LdkRecoveryClaimRequestMsg, LdkRecoveryClaimSignatureMsg,
+    LdkRecoveryClaimCompleteMsg,
+    // Relay wrappers
+    LdkRelayNwcRequestMsg, LdkRelayNwcResponseMsg, LdkRelayNwcDeliveryProofMsg,
+    // Other wrappers
+    LdkUncreditedPaymentMsg,
 };
 
 // ============================================================================
@@ -2653,13 +2670,16 @@ impl Readable for DepositsMessage {
                 });
             }
             CHANNEL_CLOSE_TOMBSTONE => {
-                return ChannelCloseTombstoneMsg::read(reader).map(|m| Self::ChannelCloseTombstone {
-                    operator_pubkey: m.operator_pubkey,
-                    partner_pubkey: m.partner_pubkey,
-                    timestamp: m.timestamp,
-                    channel_id: m.channel_id,
-                    close_reason: m.close_reason,
-                    sequence_number: m.sequence_number,
+                return LdkChannelCloseTombstoneMsg::read(reader).map(|w| {
+                    let m = w.0;
+                    Self::ChannelCloseTombstone {
+                        operator_pubkey: m.operator_pubkey,
+                        partner_pubkey: m.partner_pubkey,
+                        timestamp: m.timestamp,
+                        channel_id: m.channel_id,
+                        close_reason: m.close_reason,
+                        sequence_number: m.sequence_number,
+                    }
                 });
             }
             RESERVES_INCREASE => {
@@ -2730,51 +2750,69 @@ impl Readable for DepositsMessage {
                 });
             }
             COLLATERAL_STATUS => {
-                return CollateralStatusMsg::read(reader).map(|m| Self::CollateralStatus {
-                    collateral_operator: m.collateral_operator,
-                    amount: m.amount,
-                    block_height: m.block_height,
-                    signature: m.signature,
+                return LdkCollateralStatusMsg::read(reader).map(|w| {
+                    let m = w.0;
+                    Self::CollateralStatus {
+                        collateral_operator: m.collateral_operator,
+                        amount: m.amount,
+                        block_height: m.block_height,
+                        signature: m.signature,
+                    }
                 });
             }
             COLLATERAL_CONSENT_REQUEST => {
-                return CollateralConsentRequestMsg::read(reader).map(|m| Self::CollateralConsentRequest {
-                    operator_id: m.operator_id,
-                    partner_id: m.partner_id,
-                    operator_signature: m.operator_signature,
+                return LdkCollateralConsentRequestMsg::read(reader).map(|w| {
+                    let m = w.0;
+                    Self::CollateralConsentRequest {
+                        operator_id: m.operator_id,
+                        partner_id: m.partner_id,
+                        operator_signature: m.operator_signature,
+                    }
                 });
             }
             COLLATERAL_CONSENT_RESPONSE => {
-                return CollateralConsentResponseMsg::read(reader).map(|m| Self::CollateralConsentResponse {
-                    operator_id: m.operator_id,
-                    partner_id: m.partner_id,
-                    consent_granted: m.consent_granted,
-                    collateral_partner_signature: m.collateral_partner_signature,
+                return LdkCollateralConsentResponseMsg::read(reader).map(|w| {
+                    let m = w.0;
+                    Self::CollateralConsentResponse {
+                        operator_id: m.operator_id,
+                        partner_id: m.partner_id,
+                        consent_granted: m.consent_granted,
+                        collateral_partner_signature: m.collateral_partner_signature,
+                    }
                 });
             }
             COLLATERAL_ADD_PARTNER => {
-                return CollateralAddPartnerMsg::read(reader).map(|m| Self::CollateralAddPartner {
-                    operator_id: m.operator_id,
-                    partner_id: m.partner_id,
-                    collateral_partner: m.collateral_partner,
-                    collateral_partner_signature: m.collateral_partner_signature,
+                return LdkCollateralAddPartnerMsg::read(reader).map(|w| {
+                    let m = w.0;
+                    Self::CollateralAddPartner {
+                        operator_id: m.operator_id,
+                        partner_id: m.partner_id,
+                        collateral_partner: m.collateral_partner,
+                        collateral_partner_signature: m.collateral_partner_signature,
+                    }
                 });
             }
             COLLATERAL_REMOVE_PARTNER => {
-                return CollateralRemovePartnerMsg::read(reader).map(|m| Self::CollateralRemovePartner {
-                    partner_id: m.partner_id,
-                    collateral_partner: m.collateral_partner,
-                    operator_signature: m.operator_signature,
+                return LdkCollateralRemovePartnerMsg::read(reader).map(|w| {
+                    let m = w.0;
+                    Self::CollateralRemovePartner {
+                        partner_id: m.partner_id,
+                        collateral_partner: m.collateral_partner,
+                        operator_signature: m.operator_signature,
+                    }
                 });
             }
             COLLATERAL_ATTESTATION => {
-                return CollateralAttestationMsg::read(reader).map(|m| Self::CollateralAttestation {
-                    operator: m.operator,
-                    collateral_partner: m.collateral_partner,
-                    amount: m.amount,
-                    block_height: m.block_height,
-                    signature: m.signature,
-                    ledger_hash: m.ledger_hash,
+                return LdkCollateralAttestationMsg::read(reader).map(|w| {
+                    let m = w.0;
+                    Self::CollateralAttestation {
+                        operator: m.operator,
+                        collateral_partner: m.collateral_partner,
+                        amount: m.amount,
+                        block_height: m.block_height,
+                        signature: m.signature,
+                        ledger_hash: m.ledger_hash,
+                    }
                 });
             }
             RECEIVING_COSIGN_INVOICE => {
@@ -2928,28 +2966,28 @@ impl Writeable for DepositsMessage {
                 LdkCollateralDecreaseMsg::from(CollateralDecreaseMsg { partner_id: *partner_id, new_amount: *new_amount, block_height: *block_height }).write(writer)
             }
             Self::CollateralStatus { collateral_operator, amount, block_height, signature } => {
-                CollateralStatusMsg { collateral_operator: *collateral_operator, amount: *amount, block_height: *block_height, signature: *signature }.write(writer)
+                LdkCollateralStatusMsg::from(CollateralStatusMsg { collateral_operator: *collateral_operator, amount: *amount, block_height: *block_height, signature: *signature }).write(writer)
             }
             Self::CollateralAttestation { operator, collateral_partner, amount, block_height, signature, ledger_hash } => {
-                CollateralAttestationMsg { operator: *operator, collateral_partner: *collateral_partner, amount: *amount, block_height: *block_height, signature: *signature, ledger_hash: *ledger_hash }.write(writer)
+                LdkCollateralAttestationMsg::from(CollateralAttestationMsg { operator: *operator, collateral_partner: *collateral_partner, amount: *amount, block_height: *block_height, signature: *signature, ledger_hash: *ledger_hash }).write(writer)
             }
             Self::CollateralAddPartner { operator_id, partner_id, collateral_partner, collateral_partner_signature } => {
-                CollateralAddPartnerMsg { operator_id: *operator_id, partner_id: *partner_id, collateral_partner: *collateral_partner, collateral_partner_signature: *collateral_partner_signature }.write(writer)
+                LdkCollateralAddPartnerMsg::from(CollateralAddPartnerMsg { operator_id: *operator_id, partner_id: *partner_id, collateral_partner: *collateral_partner, collateral_partner_signature: *collateral_partner_signature }).write(writer)
             }
             Self::CollateralRemovePartner { partner_id, collateral_partner, operator_signature } => {
-                CollateralRemovePartnerMsg { partner_id: *partner_id, collateral_partner: *collateral_partner, operator_signature: *operator_signature }.write(writer)
+                LdkCollateralRemovePartnerMsg::from(CollateralRemovePartnerMsg { partner_id: *partner_id, collateral_partner: *collateral_partner, operator_signature: *operator_signature }).write(writer)
             }
             Self::CollateralConsentRequest { operator_id, partner_id, operator_signature } => {
-                CollateralConsentRequestMsg { operator_id: *operator_id, partner_id: *partner_id, operator_signature: *operator_signature }.write(writer)
+                LdkCollateralConsentRequestMsg::from(CollateralConsentRequestMsg { operator_id: *operator_id, partner_id: *partner_id, operator_signature: *operator_signature }).write(writer)
             }
             Self::CollateralConsentResponse { operator_id, partner_id, consent_granted, collateral_partner_signature } => {
-                CollateralConsentResponseMsg { operator_id: *operator_id, partner_id: *partner_id, consent_granted: *consent_granted, collateral_partner_signature: *collateral_partner_signature }.write(writer)
+                LdkCollateralConsentResponseMsg::from(CollateralConsentResponseMsg { operator_id: *operator_id, partner_id: *partner_id, consent_granted: *consent_granted, collateral_partner_signature: *collateral_partner_signature }).write(writer)
             }
             Self::MaintenanceFeeCollect { pubkey, amount, block_height } => {
                 LdkFeeCollectMsg::from(FeeCollectMsg { pubkey: *pubkey, amount: *amount, block_height: *block_height }).write(writer)
             }
             Self::ChannelCloseTombstone { operator_pubkey, partner_pubkey, timestamp, channel_id, close_reason, sequence_number } => {
-                ChannelCloseTombstoneMsg { operator_pubkey: *operator_pubkey, partner_pubkey: *partner_pubkey, timestamp: *timestamp, channel_id: *channel_id, close_reason: close_reason.clone(), sequence_number: *sequence_number }.write(writer)
+                LdkChannelCloseTombstoneMsg::from(ChannelCloseTombstoneMsg { operator_pubkey: *operator_pubkey, partner_pubkey: *partner_pubkey, timestamp: *timestamp, channel_id: *channel_id, close_reason: close_reason.clone(), sequence_number: *sequence_number }).write(writer)
             }
             Self::SignedUpdate(m) => m.write(writer),
             Self::LedgerClose { partner_id } => {
@@ -3175,13 +3213,16 @@ impl lightning::ln::wire::CustomMessageReader for DepositsMessageReader {
                     });
             }
             COLLATERAL_STATUS => {
-                return CollateralStatusMsg::read(buffer)
-                    .map(|m| Some(DepositsMessage::CollateralStatus {
-                        collateral_operator: m.collateral_operator,
-                        amount: m.amount,
-                        block_height: m.block_height,
-                        signature: m.signature,
-                    }));
+                return LdkCollateralStatusMsg::read(buffer)
+                    .map(|w| {
+                        let m = w.0;
+                        Some(DepositsMessage::CollateralStatus {
+                            collateral_operator: m.collateral_operator,
+                            amount: m.amount,
+                            block_height: m.block_height,
+                            signature: m.signature,
+                        })
+                    });
             }
             MAINTENANCE_FEE_COLLECT => {
                 return LdkFeeCollectMsg::read(buffer)
@@ -3195,60 +3236,78 @@ impl lightning::ln::wire::CustomMessageReader for DepositsMessageReader {
                     });
             }
             CHANNEL_CLOSE_TOMBSTONE => {
-                return ChannelCloseTombstoneMsg::read(buffer)
-                    .map(|m| Some(DepositsMessage::ChannelCloseTombstone {
-                        operator_pubkey: m.operator_pubkey,
-                        partner_pubkey: m.partner_pubkey,
-                        timestamp: m.timestamp,
-                        channel_id: m.channel_id,
-                        close_reason: m.close_reason,
-                        sequence_number: m.sequence_number,
-                    }));
+                return LdkChannelCloseTombstoneMsg::read(buffer)
+                    .map(|w| {
+                        let m = w.0;
+                        Some(DepositsMessage::ChannelCloseTombstone {
+                            operator_pubkey: m.operator_pubkey,
+                            partner_pubkey: m.partner_pubkey,
+                            timestamp: m.timestamp,
+                            channel_id: m.channel_id,
+                            close_reason: m.close_reason,
+                            sequence_number: m.sequence_number,
+                        })
+                    });
             }
             COLLATERAL_CONSENT_REQUEST => {
-                return CollateralConsentRequestMsg::read(buffer)
-                    .map(|m| Some(DepositsMessage::CollateralConsentRequest {
-                        operator_id: m.operator_id,
-                        partner_id: m.partner_id,
-                        operator_signature: m.operator_signature,
-                    }));
+                return LdkCollateralConsentRequestMsg::read(buffer)
+                    .map(|w| {
+                        let m = w.0;
+                        Some(DepositsMessage::CollateralConsentRequest {
+                            operator_id: m.operator_id,
+                            partner_id: m.partner_id,
+                            operator_signature: m.operator_signature,
+                        })
+                    });
             }
             COLLATERAL_CONSENT_RESPONSE => {
-                return CollateralConsentResponseMsg::read(buffer)
-                    .map(|m| Some(DepositsMessage::CollateralConsentResponse {
-                        operator_id: m.operator_id,
-                        partner_id: m.partner_id,
-                        consent_granted: m.consent_granted,
-                        collateral_partner_signature: m.collateral_partner_signature,
-                    }));
+                return LdkCollateralConsentResponseMsg::read(buffer)
+                    .map(|w| {
+                        let m = w.0;
+                        Some(DepositsMessage::CollateralConsentResponse {
+                            operator_id: m.operator_id,
+                            partner_id: m.partner_id,
+                            consent_granted: m.consent_granted,
+                            collateral_partner_signature: m.collateral_partner_signature,
+                        })
+                    });
             }
             COLLATERAL_ADD_PARTNER => {
-                return CollateralAddPartnerMsg::read(buffer)
-                    .map(|m| Some(DepositsMessage::CollateralAddPartner {
-                        operator_id: m.operator_id,
-                        partner_id: m.partner_id,
-                        collateral_partner: m.collateral_partner,
-                        collateral_partner_signature: m.collateral_partner_signature,
-                    }));
+                return LdkCollateralAddPartnerMsg::read(buffer)
+                    .map(|w| {
+                        let m = w.0;
+                        Some(DepositsMessage::CollateralAddPartner {
+                            operator_id: m.operator_id,
+                            partner_id: m.partner_id,
+                            collateral_partner: m.collateral_partner,
+                            collateral_partner_signature: m.collateral_partner_signature,
+                        })
+                    });
             }
             COLLATERAL_REMOVE_PARTNER => {
-                return CollateralRemovePartnerMsg::read(buffer)
-                    .map(|m| Some(DepositsMessage::CollateralRemovePartner {
-                        partner_id: m.partner_id,
-                        collateral_partner: m.collateral_partner,
-                        operator_signature: m.operator_signature,
-                    }));
+                return LdkCollateralRemovePartnerMsg::read(buffer)
+                    .map(|w| {
+                        let m = w.0;
+                        Some(DepositsMessage::CollateralRemovePartner {
+                            partner_id: m.partner_id,
+                            collateral_partner: m.collateral_partner,
+                            operator_signature: m.operator_signature,
+                        })
+                    });
             }
             COLLATERAL_ATTESTATION => {
-                return CollateralAttestationMsg::read(buffer)
-                    .map(|m| Some(DepositsMessage::CollateralAttestation {
-                        operator: m.operator,
-                        collateral_partner: m.collateral_partner,
-                        amount: m.amount,
-                        block_height: m.block_height,
-                        signature: m.signature,
-                        ledger_hash: m.ledger_hash,
-                    }));
+                return LdkCollateralAttestationMsg::read(buffer)
+                    .map(|w| {
+                        let m = w.0;
+                        Some(DepositsMessage::CollateralAttestation {
+                            operator: m.operator,
+                            collateral_partner: m.collateral_partner,
+                            amount: m.amount,
+                            block_height: m.block_height,
+                            signature: m.signature,
+                            ledger_hash: m.ledger_hash,
+                        })
+                    });
             }
             RECEIVING_COSIGN_INVOICE => {
                 return LdkReceivingCosignInvoiceMsg::read(buffer)

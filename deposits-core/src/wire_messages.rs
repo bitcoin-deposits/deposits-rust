@@ -19,7 +19,7 @@
 use bitcoin::secp256k1::PublicKey;
 use std::io::{self, Read, Write};
 
-use crate::types::FeeStructure;
+use crate::types::{FeeStructure, QuorumJoinRequestMsg, QuorumJoinResponseMsg, QuorumVoteMsg};
 
 // ============================================================================
 // Wire Codec Traits
@@ -218,6 +218,119 @@ impl WireDecode for FeeStructure {
             annualized_fixed: read_u64(reader)?,
             annualized_bps: read_u16(reader)?,
             frequency_blocks: read_u32(reader)?,
+        })
+    }
+}
+
+// ============================================================================
+// WireEncode/WireDecode for types.rs Quorum types
+// ============================================================================
+
+impl WireEncode for QuorumJoinRequestMsg {
+    fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
+        write_pubkey(writer, &self.requester_pubkey)?;
+        write_pubkey(writer, &self.operator_id)?;
+        write_pubkey(writer, &self.partner_id)?;
+        write_u16(writer, self.protocol_version)?;
+        write_u64(writer, self.timestamp)?;
+        write_bytes64(writer, &self.signature)?;
+        Ok(())
+    }
+}
+
+impl WireDecode for QuorumJoinRequestMsg {
+    fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
+        Ok(Self {
+            requester_pubkey: read_pubkey(reader)?,
+            operator_id: read_pubkey(reader)?,
+            partner_id: read_pubkey(reader)?,
+            protocol_version: read_u16(reader)?,
+            timestamp: read_u64(reader)?,
+            signature: read_bytes64(reader)?,
+        })
+    }
+}
+
+impl WireEncode for QuorumJoinResponseMsg {
+    fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
+        write_u8(writer, self.accepted as u8)?;
+        write_u16(writer, self.members.len() as u16)?;
+        for pk in &self.members {
+            write_pubkey(writer, pk)?;
+        }
+        write_u16(writer, self.threshold)?;
+        write_u64(writer, self.last_sequence)?;
+        write_bytes32(writer, &self.current_state_hash)?;
+        write_optional(writer, &self.rejection_reason, |w, s| write_string(w, s))?;
+        Ok(())
+    }
+}
+
+impl WireDecode for QuorumJoinResponseMsg {
+    fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
+        let accepted = read_u8(reader)? != 0;
+        let count = read_u16(reader)? as usize;
+        let mut members = Vec::with_capacity(count);
+        for _ in 0..count {
+            members.push(read_pubkey(reader)?);
+        }
+        Ok(Self {
+            accepted,
+            members,
+            threshold: read_u16(reader)?,
+            last_sequence: read_u64(reader)?,
+            current_state_hash: read_bytes32(reader)?,
+            rejection_reason: read_optional(reader, read_string)?,
+        })
+    }
+}
+
+impl WireEncode for QuorumVoteMsg {
+    fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
+        write_bytes32(writer, &self.vote_round_id)?;
+        write_pubkey(writer, &self.voter_pubkey)?;
+        write_u8(writer, self.vote as u8)?;
+        write_u64(writer, self.voter_sequence)?;
+        write_bytes32(writer, &self.voter_state_hash)?;
+        // Write evidence as optional
+        write_optional(writer, &self.evidence, |w, ev| {
+            write_u32(w, ev.len() as u32)?;
+            w.write_all(ev)?;
+            Ok(())
+        })?;
+        write_bytes64(writer, &self.signature)?;
+        // Write spend_signature as optional
+        write_optional(writer, &self.spend_signature, |w, sig| write_bytes64(w, sig))?;
+        Ok(())
+    }
+}
+
+impl WireDecode for QuorumVoteMsg {
+    fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
+        let vote_round_id = read_bytes32(reader)?;
+        let voter_pubkey = read_pubkey(reader)?;
+        let vote = read_u8(reader)? != 0;
+        let voter_sequence = read_u64(reader)?;
+        let voter_state_hash = read_bytes32(reader)?;
+        // Read optional evidence
+        let evidence = read_optional(reader, |r| {
+            let len = read_u32(r)? as usize;
+            let mut ev = vec![0u8; len];
+            r.read_exact(&mut ev)?;
+            Ok(ev)
+        })?;
+        let signature = read_bytes64(reader)?;
+        // Read optional spend_signature
+        let spend_signature = read_optional(reader, read_bytes64)?;
+        Ok(Self {
+            vote_round_id,
+            voter_pubkey,
+            vote,
+            voter_sequence,
+            voter_state_hash,
+            evidence,
+            signature,
+            spend_signature,
         })
     }
 }
@@ -813,6 +926,981 @@ impl WireDecode for ReceivingCosignInvoiceMsg {
             assigned_deposit: read_pubkey(reader)?,
             invoice_id: read_string(reader)?,
             bolt11: read_string(reader)?,
+        })
+    }
+}
+
+// ============================================================================
+// Collateral Messages
+// ============================================================================
+
+/// V1-compatible collateral add partner message
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CollateralAddPartnerMsg {
+    pub operator_id: PublicKey,
+    pub partner_id: PublicKey,
+    pub collateral_partner: PublicKey,
+    pub collateral_partner_signature: [u8; 64],
+}
+
+impl WireEncode for CollateralAddPartnerMsg {
+    fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
+        write_pubkey(writer, &self.operator_id)?;
+        write_pubkey(writer, &self.partner_id)?;
+        write_pubkey(writer, &self.collateral_partner)?;
+        write_bytes64(writer, &self.collateral_partner_signature)?;
+        Ok(())
+    }
+}
+
+impl WireDecode for CollateralAddPartnerMsg {
+    fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
+        Ok(Self {
+            operator_id: read_pubkey(reader)?,
+            partner_id: read_pubkey(reader)?,
+            collateral_partner: read_pubkey(reader)?,
+            collateral_partner_signature: read_bytes64(reader)?,
+        })
+    }
+}
+
+/// V1-compatible collateral remove partner message
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CollateralRemovePartnerMsg {
+    pub partner_id: PublicKey,
+    pub collateral_partner: PublicKey,
+    pub operator_signature: [u8; 64],
+}
+
+impl WireEncode for CollateralRemovePartnerMsg {
+    fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
+        write_pubkey(writer, &self.partner_id)?;
+        write_pubkey(writer, &self.collateral_partner)?;
+        write_bytes64(writer, &self.operator_signature)?;
+        Ok(())
+    }
+}
+
+impl WireDecode for CollateralRemovePartnerMsg {
+    fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
+        Ok(Self {
+            partner_id: read_pubkey(reader)?,
+            collateral_partner: read_pubkey(reader)?,
+            operator_signature: read_bytes64(reader)?,
+        })
+    }
+}
+
+/// V1-compatible collateral attestation message
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CollateralAttestationMsg {
+    #[serde(with = "crate::types::serde_pubkey")]
+    pub operator: PublicKey,
+    #[serde(with = "crate::types::serde_pubkey")]
+    pub collateral_partner: PublicKey,
+    pub amount: u64,
+    pub block_height: u32,
+    #[serde(with = "crate::types::serde_64")]
+    pub signature: [u8; 64],
+    #[serde(with = "crate::types::serde_32")]
+    pub ledger_hash: [u8; 32],
+}
+
+impl CollateralAttestationMsg {
+    /// Get the available collateral amount
+    pub fn available_collateral(&self) -> u64 {
+        self.amount
+    }
+}
+
+impl WireEncode for CollateralAttestationMsg {
+    fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
+        write_pubkey(writer, &self.operator)?;
+        write_pubkey(writer, &self.collateral_partner)?;
+        write_u64(writer, self.amount)?;
+        write_u32(writer, self.block_height)?;
+        write_bytes64(writer, &self.signature)?;
+        write_bytes32(writer, &self.ledger_hash)?;
+        Ok(())
+    }
+}
+
+impl WireDecode for CollateralAttestationMsg {
+    fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
+        Ok(Self {
+            operator: read_pubkey(reader)?,
+            collateral_partner: read_pubkey(reader)?,
+            amount: read_u64(reader)?,
+            block_height: read_u32(reader)?,
+            signature: read_bytes64(reader)?,
+            ledger_hash: read_bytes32(reader)?,
+        })
+    }
+}
+
+/// V1-compatible collateral status message
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CollateralStatusMsg {
+    pub collateral_operator: PublicKey,
+    pub amount: u64,
+    pub block_height: u32,
+    pub signature: [u8; 64],
+}
+
+impl WireEncode for CollateralStatusMsg {
+    fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
+        write_pubkey(writer, &self.collateral_operator)?;
+        write_u64(writer, self.amount)?;
+        write_u32(writer, self.block_height)?;
+        write_bytes64(writer, &self.signature)?;
+        Ok(())
+    }
+}
+
+impl WireDecode for CollateralStatusMsg {
+    fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
+        Ok(Self {
+            collateral_operator: read_pubkey(reader)?,
+            amount: read_u64(reader)?,
+            block_height: read_u32(reader)?,
+            signature: read_bytes64(reader)?,
+        })
+    }
+}
+
+/// V1-compatible collateral consent request message
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CollateralConsentRequestMsg {
+    pub operator_id: PublicKey,
+    pub partner_id: PublicKey,
+    pub operator_signature: [u8; 64],
+}
+
+impl WireEncode for CollateralConsentRequestMsg {
+    fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
+        write_pubkey(writer, &self.operator_id)?;
+        write_pubkey(writer, &self.partner_id)?;
+        write_bytes64(writer, &self.operator_signature)?;
+        Ok(())
+    }
+}
+
+impl WireDecode for CollateralConsentRequestMsg {
+    fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
+        Ok(Self {
+            operator_id: read_pubkey(reader)?,
+            partner_id: read_pubkey(reader)?,
+            operator_signature: read_bytes64(reader)?,
+        })
+    }
+}
+
+/// V1-compatible collateral consent response message
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CollateralConsentResponseMsg {
+    pub operator_id: PublicKey,
+    pub partner_id: PublicKey,
+    pub consent_granted: bool,
+    pub collateral_partner_signature: [u8; 64],
+}
+
+impl WireEncode for CollateralConsentResponseMsg {
+    fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
+        write_pubkey(writer, &self.operator_id)?;
+        write_pubkey(writer, &self.partner_id)?;
+        write_u8(writer, self.consent_granted as u8)?;
+        write_bytes64(writer, &self.collateral_partner_signature)?;
+        Ok(())
+    }
+}
+
+impl WireDecode for CollateralConsentResponseMsg {
+    fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
+        Ok(Self {
+            operator_id: read_pubkey(reader)?,
+            partner_id: read_pubkey(reader)?,
+            consent_granted: read_u8(reader)? != 0,
+            collateral_partner_signature: read_bytes64(reader)?,
+        })
+    }
+}
+
+// ============================================================================
+// Transfer Messages
+// ============================================================================
+
+/// V1-compatible deposit lock transfer message
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DepositLockTransferMsg {
+    pub partner_id: PublicKey,
+    pub pubkey: PublicKey,
+    pub amount: u64,
+    pub transfer_id: [u8; 32],
+}
+
+impl WireEncode for DepositLockTransferMsg {
+    fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
+        write_pubkey(writer, &self.partner_id)?;
+        write_pubkey(writer, &self.pubkey)?;
+        write_u64(writer, self.amount)?;
+        write_bytes32(writer, &self.transfer_id)?;
+        Ok(())
+    }
+}
+
+impl WireDecode for DepositLockTransferMsg {
+    fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
+        Ok(Self {
+            partner_id: read_pubkey(reader)?,
+            pubkey: read_pubkey(reader)?,
+            amount: read_u64(reader)?,
+            transfer_id: read_bytes32(reader)?,
+        })
+    }
+}
+
+/// V1-compatible deposit fail transfer message
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DepositFailTransferMsg {
+    pub partner_id: PublicKey,
+    pub pubkey: PublicKey,
+    pub transfer_id: [u8; 32],
+}
+
+impl WireEncode for DepositFailTransferMsg {
+    fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
+        write_pubkey(writer, &self.partner_id)?;
+        write_pubkey(writer, &self.pubkey)?;
+        write_bytes32(writer, &self.transfer_id)?;
+        Ok(())
+    }
+}
+
+impl WireDecode for DepositFailTransferMsg {
+    fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
+        Ok(Self {
+            partner_id: read_pubkey(reader)?,
+            pubkey: read_pubkey(reader)?,
+            transfer_id: read_bytes32(reader)?,
+        })
+    }
+}
+
+/// V1-compatible deposit fulfill transfer message
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DepositFulfillTransferMsg {
+    pub partner_id: PublicKey,
+    pub pubkey: PublicKey,
+    pub amount: u64,
+    pub transfer_id: [u8; 32],
+}
+
+impl WireEncode for DepositFulfillTransferMsg {
+    fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
+        write_pubkey(writer, &self.partner_id)?;
+        write_pubkey(writer, &self.pubkey)?;
+        write_u64(writer, self.amount)?;
+        write_bytes32(writer, &self.transfer_id)?;
+        Ok(())
+    }
+}
+
+impl WireDecode for DepositFulfillTransferMsg {
+    fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
+        Ok(Self {
+            partner_id: read_pubkey(reader)?,
+            pubkey: read_pubkey(reader)?,
+            amount: read_u64(reader)?,
+            transfer_id: read_bytes32(reader)?,
+        })
+    }
+}
+
+// ============================================================================
+// Sync Messages
+// ============================================================================
+
+/// V1-compatible sync request message
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SyncRequestMsg {
+    pub partner_id: PublicKey,
+    pub operator_id: PublicKey,
+    pub last_known_sequence: u64,
+}
+
+impl WireEncode for SyncRequestMsg {
+    fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
+        write_pubkey(writer, &self.partner_id)?;
+        write_pubkey(writer, &self.operator_id)?;
+        write_u64(writer, self.last_known_sequence)?;
+        Ok(())
+    }
+}
+
+impl WireDecode for SyncRequestMsg {
+    fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
+        Ok(Self {
+            partner_id: read_pubkey(reader)?,
+            operator_id: read_pubkey(reader)?,
+            last_known_sequence: read_u64(reader)?,
+        })
+    }
+}
+
+/// V1-compatible channel close tombstone message
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelCloseTombstoneMsg {
+    pub operator_pubkey: PublicKey,
+    pub partner_pubkey: PublicKey,
+    pub timestamp: u64,
+    pub channel_id: [u8; 32],
+    pub close_reason: Option<String>,
+    pub sequence_number: u64,
+}
+
+impl WireEncode for ChannelCloseTombstoneMsg {
+    fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
+        write_pubkey(writer, &self.operator_pubkey)?;
+        write_pubkey(writer, &self.partner_pubkey)?;
+        write_u64(writer, self.timestamp)?;
+        write_bytes32(writer, &self.channel_id)?;
+        write_optional(writer, &self.close_reason, |w, s| write_string(w, s))?;
+        write_u64(writer, self.sequence_number)?;
+        Ok(())
+    }
+}
+
+impl WireDecode for ChannelCloseTombstoneMsg {
+    fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
+        Ok(Self {
+            operator_pubkey: read_pubkey(reader)?,
+            partner_pubkey: read_pubkey(reader)?,
+            timestamp: read_u64(reader)?,
+            channel_id: read_bytes32(reader)?,
+            close_reason: read_optional(reader, read_string)?,
+            sequence_number: read_u64(reader)?,
+        })
+    }
+}
+
+// ============================================================================
+// Quorum Messages
+// ============================================================================
+
+/// V1-compatible quorum join request message
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuorumJoinRequestMsgWire {
+    pub requester_pubkey: PublicKey,
+    pub operator_id: PublicKey,
+    pub partner_id: PublicKey,
+    pub protocol_version: u16,
+    pub timestamp: u64,
+    pub signature: [u8; 64],
+}
+
+impl WireEncode for QuorumJoinRequestMsgWire {
+    fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
+        write_pubkey(writer, &self.requester_pubkey)?;
+        write_pubkey(writer, &self.operator_id)?;
+        write_pubkey(writer, &self.partner_id)?;
+        write_u16(writer, self.protocol_version)?;
+        write_u64(writer, self.timestamp)?;
+        write_bytes64(writer, &self.signature)?;
+        Ok(())
+    }
+}
+
+impl WireDecode for QuorumJoinRequestMsgWire {
+    fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
+        Ok(Self {
+            requester_pubkey: read_pubkey(reader)?,
+            operator_id: read_pubkey(reader)?,
+            partner_id: read_pubkey(reader)?,
+            protocol_version: read_u16(reader)?,
+            timestamp: read_u64(reader)?,
+            signature: read_bytes64(reader)?,
+        })
+    }
+}
+
+/// V1-compatible quorum join response message
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuorumJoinResponseMsgWire {
+    pub accepted: bool,
+    pub members: Vec<PublicKey>,
+    pub threshold: u16,
+    pub last_sequence: u64,
+    pub current_state_hash: [u8; 32],
+    pub rejection_reason: Option<String>,
+}
+
+impl WireEncode for QuorumJoinResponseMsgWire {
+    fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
+        write_u8(writer, self.accepted as u8)?;
+        write_u16(writer, self.members.len() as u16)?;
+        for pk in &self.members {
+            write_pubkey(writer, pk)?;
+        }
+        write_u16(writer, self.threshold)?;
+        write_u64(writer, self.last_sequence)?;
+        write_bytes32(writer, &self.current_state_hash)?;
+        write_optional(writer, &self.rejection_reason, |w, s| write_string(w, s))?;
+        Ok(())
+    }
+}
+
+impl WireDecode for QuorumJoinResponseMsgWire {
+    fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
+        let accepted = read_u8(reader)? != 0;
+        let count = read_u16(reader)? as usize;
+        let mut members = Vec::with_capacity(count);
+        for _ in 0..count {
+            members.push(read_pubkey(reader)?);
+        }
+        Ok(Self {
+            accepted,
+            members,
+            threshold: read_u16(reader)?,
+            last_sequence: read_u64(reader)?,
+            current_state_hash: read_bytes32(reader)?,
+            rejection_reason: read_optional(reader, read_string)?,
+        })
+    }
+}
+
+/// V1-compatible quorum membership change message
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuorumMembershipChangeMsg {
+    pub operator_id: PublicKey,
+    pub partner_id: PublicKey,
+    pub change_type: String,
+    pub member_pubkey: PublicKey,
+    pub new_members: Vec<PublicKey>,
+}
+
+impl WireEncode for QuorumMembershipChangeMsg {
+    fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
+        write_pubkey(writer, &self.operator_id)?;
+        write_pubkey(writer, &self.partner_id)?;
+        write_string(writer, &self.change_type)?;
+        write_pubkey(writer, &self.member_pubkey)?;
+        write_u16(writer, self.new_members.len() as u16)?;
+        for pk in &self.new_members {
+            write_pubkey(writer, pk)?;
+        }
+        Ok(())
+    }
+}
+
+impl WireDecode for QuorumMembershipChangeMsg {
+    fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
+        let operator_id = read_pubkey(reader)?;
+        let partner_id = read_pubkey(reader)?;
+        let change_type = read_string(reader)?;
+        let member_pubkey = read_pubkey(reader)?;
+        let count = read_u16(reader)? as usize;
+        let mut new_members = Vec::with_capacity(count);
+        for _ in 0..count {
+            new_members.push(read_pubkey(reader)?);
+        }
+        Ok(Self {
+            operator_id,
+            partner_id,
+            change_type,
+            member_pubkey,
+            new_members,
+        })
+    }
+}
+
+/// V1-compatible quorum state sync message
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuorumStateSyncMsg {
+    pub operator_id: PublicKey,
+    pub partner_id: PublicKey,
+    pub updates: Vec<Vec<u8>>,
+    pub start_sequence: u64,
+    pub is_final: bool,
+}
+
+impl WireEncode for QuorumStateSyncMsg {
+    fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
+        write_pubkey(writer, &self.operator_id)?;
+        write_pubkey(writer, &self.partner_id)?;
+        write_u16(writer, self.updates.len() as u16)?;
+        for update in &self.updates {
+            write_u32(writer, update.len() as u32)?;
+            writer.write_all(update)?;
+        }
+        write_u64(writer, self.start_sequence)?;
+        write_u8(writer, self.is_final as u8)?;
+        Ok(())
+    }
+}
+
+impl WireDecode for QuorumStateSyncMsg {
+    fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
+        let operator_id = read_pubkey(reader)?;
+        let partner_id = read_pubkey(reader)?;
+        let count = read_u16(reader)? as usize;
+        let mut updates = Vec::with_capacity(count);
+        for _ in 0..count {
+            let len = read_u32(reader)? as usize;
+            let mut update = vec![0u8; len];
+            reader.read_exact(&mut update)?;
+            updates.push(update);
+        }
+        Ok(Self {
+            operator_id,
+            partner_id,
+            updates,
+            start_sequence: read_u64(reader)?,
+            is_final: read_u8(reader)? != 0,
+        })
+    }
+}
+
+/// V1-compatible quorum vote request message
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuorumVoteRequestMsg {
+    pub operator_id: PublicKey,
+    pub partner_id: PublicKey,
+    pub vote_round_id: [u8; 32],
+    pub sequence_number: u64,
+    pub state_hash: [u8; 32],
+    pub claimed_reserves: u64,
+    pub collateral_amounts: Vec<u64>,
+    pub reserves_outpoint: Vec<u8>,
+    pub destination_script: Vec<u8>,
+    pub fee_rate_sat_vbyte: u64,
+}
+
+impl WireEncode for QuorumVoteRequestMsg {
+    fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
+        write_pubkey(writer, &self.operator_id)?;
+        write_pubkey(writer, &self.partner_id)?;
+        write_bytes32(writer, &self.vote_round_id)?;
+        write_u64(writer, self.sequence_number)?;
+        write_bytes32(writer, &self.state_hash)?;
+        write_u64(writer, self.claimed_reserves)?;
+        write_u16(writer, self.collateral_amounts.len() as u16)?;
+        for amount in &self.collateral_amounts {
+            write_u64(writer, *amount)?;
+        }
+        write_u16(writer, self.reserves_outpoint.len() as u16)?;
+        writer.write_all(&self.reserves_outpoint)?;
+        write_u16(writer, self.destination_script.len() as u16)?;
+        writer.write_all(&self.destination_script)?;
+        write_u64(writer, self.fee_rate_sat_vbyte)?;
+        Ok(())
+    }
+}
+
+impl WireDecode for QuorumVoteRequestMsg {
+    fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
+        let operator_id = read_pubkey(reader)?;
+        let partner_id = read_pubkey(reader)?;
+        let vote_round_id = read_bytes32(reader)?;
+        let sequence_number = read_u64(reader)?;
+        let state_hash = read_bytes32(reader)?;
+        let claimed_reserves = read_u64(reader)?;
+        let coll_count = read_u16(reader)? as usize;
+        let mut collateral_amounts = Vec::with_capacity(coll_count);
+        for _ in 0..coll_count {
+            collateral_amounts.push(read_u64(reader)?);
+        }
+        let outpoint_len = read_u16(reader)? as usize;
+        let mut reserves_outpoint = vec![0u8; outpoint_len];
+        reader.read_exact(&mut reserves_outpoint)?;
+        let script_len = read_u16(reader)? as usize;
+        let mut destination_script = vec![0u8; script_len];
+        reader.read_exact(&mut destination_script)?;
+        let fee_rate_sat_vbyte = read_u64(reader)?;
+        Ok(Self {
+            operator_id,
+            partner_id,
+            vote_round_id,
+            sequence_number,
+            state_hash,
+            claimed_reserves,
+            collateral_amounts,
+            reserves_outpoint,
+            destination_script,
+            fee_rate_sat_vbyte,
+        })
+    }
+}
+
+/// V1-compatible quorum vote message
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuorumVoteMsgWire {
+    pub vote_round_id: [u8; 32],
+    pub voter_pubkey: PublicKey,
+    pub vote: bool,
+    pub voter_sequence: u64,
+    pub voter_state_hash: [u8; 32],
+    pub evidence: Option<Vec<u8>>,
+    pub signature: [u8; 64],
+    pub spend_signature: Option<[u8; 64]>,
+}
+
+impl WireEncode for QuorumVoteMsgWire {
+    fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
+        write_bytes32(writer, &self.vote_round_id)?;
+        write_pubkey(writer, &self.voter_pubkey)?;
+        write_u8(writer, self.vote as u8)?;
+        write_u64(writer, self.voter_sequence)?;
+        write_bytes32(writer, &self.voter_state_hash)?;
+        // Write evidence as optional
+        write_optional(writer, &self.evidence, |w, ev| {
+            write_u32(w, ev.len() as u32)?;
+            w.write_all(ev)?;
+            Ok(())
+        })?;
+        write_bytes64(writer, &self.signature)?;
+        // Write spend_signature as optional
+        write_optional(writer, &self.spend_signature, |w, sig| write_bytes64(w, sig))?;
+        Ok(())
+    }
+}
+
+impl WireDecode for QuorumVoteMsgWire {
+    fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
+        let vote_round_id = read_bytes32(reader)?;
+        let voter_pubkey = read_pubkey(reader)?;
+        let vote = read_u8(reader)? != 0;
+        let voter_sequence = read_u64(reader)?;
+        let voter_state_hash = read_bytes32(reader)?;
+        // Read optional evidence
+        let evidence = read_optional(reader, |r| {
+            let len = read_u32(r)? as usize;
+            let mut ev = vec![0u8; len];
+            r.read_exact(&mut ev)?;
+            Ok(ev)
+        })?;
+        let signature = read_bytes64(reader)?;
+        // Read optional spend_signature
+        let spend_signature = read_optional(reader, read_bytes64)?;
+        Ok(Self {
+            vote_round_id,
+            voter_pubkey,
+            vote,
+            voter_sequence,
+            voter_state_hash,
+            evidence,
+            signature,
+            spend_signature,
+        })
+    }
+}
+
+// ============================================================================
+// Recovery Messages
+// ============================================================================
+
+/// V1-compatible recovery vote message
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecoveryVoteMsg {
+    pub operator: PublicKey,
+    pub partner: PublicKey,
+    pub voter: PublicKey,
+    pub is_conforming: bool,
+    pub validated_hash: [u8; 32],
+    pub validated_sequence: u64,
+    pub substitute_nomination: Option<PublicKey>,
+    pub discovered_violation: bool,
+    pub signature: [u8; 64],
+}
+
+impl WireEncode for RecoveryVoteMsg {
+    fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
+        write_pubkey(writer, &self.operator)?;
+        write_pubkey(writer, &self.partner)?;
+        write_pubkey(writer, &self.voter)?;
+        write_u8(writer, self.is_conforming as u8)?;
+        write_bytes32(writer, &self.validated_hash)?;
+        write_u64(writer, self.validated_sequence)?;
+        write_optional(writer, &self.substitute_nomination, |w, pk| write_pubkey(w, pk))?;
+        write_u8(writer, self.discovered_violation as u8)?;
+        write_bytes64(writer, &self.signature)?;
+        Ok(())
+    }
+}
+
+impl WireDecode for RecoveryVoteMsg {
+    fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
+        Ok(Self {
+            operator: read_pubkey(reader)?,
+            partner: read_pubkey(reader)?,
+            voter: read_pubkey(reader)?,
+            is_conforming: read_u8(reader)? != 0,
+            validated_hash: read_bytes32(reader)?,
+            validated_sequence: read_u64(reader)?,
+            substitute_nomination: read_optional(reader, read_pubkey)?,
+            discovered_violation: read_u8(reader)? != 0,
+            signature: read_bytes64(reader)?,
+        })
+    }
+}
+
+/// V1-compatible recovery claim request message
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecoveryClaimRequestMsg {
+    pub operator: PublicKey,
+    pub partner: PublicKey,
+    pub claimant: PublicKey,
+    pub tier_index: u8,
+    pub unsigned_tx: Vec<u8>,
+    pub sighash: [u8; 32],
+    pub destination_script: Vec<u8>,
+    pub block_height: u32,
+}
+
+impl WireEncode for RecoveryClaimRequestMsg {
+    fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
+        write_pubkey(writer, &self.operator)?;
+        write_pubkey(writer, &self.partner)?;
+        write_pubkey(writer, &self.claimant)?;
+        write_u8(writer, self.tier_index)?;
+        write_u32(writer, self.unsigned_tx.len() as u32)?;
+        writer.write_all(&self.unsigned_tx)?;
+        write_bytes32(writer, &self.sighash)?;
+        write_u16(writer, self.destination_script.len() as u16)?;
+        writer.write_all(&self.destination_script)?;
+        write_u32(writer, self.block_height)?;
+        Ok(())
+    }
+}
+
+impl WireDecode for RecoveryClaimRequestMsg {
+    fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
+        let operator = read_pubkey(reader)?;
+        let partner = read_pubkey(reader)?;
+        let claimant = read_pubkey(reader)?;
+        let tier_index = read_u8(reader)?;
+        let tx_len = read_u32(reader)? as usize;
+        let mut unsigned_tx = vec![0u8; tx_len];
+        reader.read_exact(&mut unsigned_tx)?;
+        let sighash = read_bytes32(reader)?;
+        let script_len = read_u16(reader)? as usize;
+        let mut destination_script = vec![0u8; script_len];
+        reader.read_exact(&mut destination_script)?;
+        let block_height = read_u32(reader)?;
+        Ok(Self {
+            operator,
+            partner,
+            claimant,
+            tier_index,
+            unsigned_tx,
+            sighash,
+            destination_script,
+            block_height,
+        })
+    }
+}
+
+/// V1-compatible recovery claim signature message
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecoveryClaimSignatureMsg {
+    pub operator: PublicKey,
+    pub partner: PublicKey,
+    pub signer: PublicKey,
+    pub sighash: [u8; 32],
+    pub signature: [u8; 64],
+}
+
+impl WireEncode for RecoveryClaimSignatureMsg {
+    fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
+        write_pubkey(writer, &self.operator)?;
+        write_pubkey(writer, &self.partner)?;
+        write_pubkey(writer, &self.signer)?;
+        write_bytes32(writer, &self.sighash)?;
+        write_bytes64(writer, &self.signature)?;
+        Ok(())
+    }
+}
+
+impl WireDecode for RecoveryClaimSignatureMsg {
+    fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
+        Ok(Self {
+            operator: read_pubkey(reader)?,
+            partner: read_pubkey(reader)?,
+            signer: read_pubkey(reader)?,
+            sighash: read_bytes32(reader)?,
+            signature: read_bytes64(reader)?,
+        })
+    }
+}
+
+/// V1-compatible recovery claim complete message
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecoveryClaimCompleteMsg {
+    pub operator: PublicKey,
+    pub partner: PublicKey,
+    pub new_operator: PublicKey,
+    pub claim_txid: [u8; 32],
+    pub confirmation_block: u32,
+    pub reason_code: u8,
+}
+
+impl WireEncode for RecoveryClaimCompleteMsg {
+    fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
+        write_pubkey(writer, &self.operator)?;
+        write_pubkey(writer, &self.partner)?;
+        write_pubkey(writer, &self.new_operator)?;
+        write_bytes32(writer, &self.claim_txid)?;
+        write_u32(writer, self.confirmation_block)?;
+        write_u8(writer, self.reason_code)?;
+        Ok(())
+    }
+}
+
+impl WireDecode for RecoveryClaimCompleteMsg {
+    fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
+        Ok(Self {
+            operator: read_pubkey(reader)?,
+            partner: read_pubkey(reader)?,
+            new_operator: read_pubkey(reader)?,
+            claim_txid: read_bytes32(reader)?,
+            confirmation_block: read_u32(reader)?,
+            reason_code: read_u8(reader)?,
+        })
+    }
+}
+
+// ============================================================================
+// Relay Messages
+// ============================================================================
+
+/// V1-compatible relay NWC request message
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelayNwcRequestMsg {
+    pub request_id: [u8; 32],
+    pub encrypted_content: Vec<u8>,
+}
+
+impl WireEncode for RelayNwcRequestMsg {
+    fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
+        write_bytes32(writer, &self.request_id)?;
+        write_u32(writer, self.encrypted_content.len() as u32)?;
+        writer.write_all(&self.encrypted_content)?;
+        Ok(())
+    }
+}
+
+impl WireDecode for RelayNwcRequestMsg {
+    fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
+        let request_id = read_bytes32(reader)?;
+        let len = read_u32(reader)? as usize;
+        let mut encrypted_content = vec![0u8; len];
+        reader.read_exact(&mut encrypted_content)?;
+        Ok(Self { request_id, encrypted_content })
+    }
+}
+
+/// V1-compatible relay NWC response message
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelayNwcResponseMsg {
+    pub request_id: [u8; 32],
+    pub encrypted_content: Vec<u8>,
+}
+
+impl WireEncode for RelayNwcResponseMsg {
+    fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
+        write_bytes32(writer, &self.request_id)?;
+        write_u32(writer, self.encrypted_content.len() as u32)?;
+        writer.write_all(&self.encrypted_content)?;
+        Ok(())
+    }
+}
+
+impl WireDecode for RelayNwcResponseMsg {
+    fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
+        let request_id = read_bytes32(reader)?;
+        let len = read_u32(reader)? as usize;
+        let mut encrypted_content = vec![0u8; len];
+        reader.read_exact(&mut encrypted_content)?;
+        Ok(Self { request_id, encrypted_content })
+    }
+}
+
+/// V1-compatible relay NWC delivery proof message
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelayNwcDeliveryProofMsg {
+    pub request_id: [u8; 32],
+    pub proof: Vec<u8>,
+}
+
+impl WireEncode for RelayNwcDeliveryProofMsg {
+    fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
+        write_bytes32(writer, &self.request_id)?;
+        write_u32(writer, self.proof.len() as u32)?;
+        writer.write_all(&self.proof)?;
+        Ok(())
+    }
+}
+
+impl WireDecode for RelayNwcDeliveryProofMsg {
+    fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
+        let request_id = read_bytes32(reader)?;
+        let len = read_u32(reader)? as usize;
+        let mut proof = vec![0u8; len];
+        reader.read_exact(&mut proof)?;
+        Ok(Self { request_id, proof })
+    }
+}
+
+// ============================================================================
+// Other Messages
+// ============================================================================
+
+/// V1-compatible uncredited payment message
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UncreditedPaymentMsg {
+    pub operator: PublicKey,
+    pub partner: PublicKey,
+    pub payment_hash: [u8; 32],
+    pub preimage: [u8; 32],
+    pub deposit_pubkey: PublicKey,
+    pub amount_msat: u64,
+    pub invoice_cosignature: [u8; 64],
+    pub settlement_sequence: u64,
+    pub settlement_ledger_hash: [u8; 32],
+    pub settlement_block_height: u32,
+    pub accuser_signature: [u8; 64],
+}
+
+impl WireEncode for UncreditedPaymentMsg {
+    fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
+        write_pubkey(writer, &self.operator)?;
+        write_pubkey(writer, &self.partner)?;
+        write_bytes32(writer, &self.payment_hash)?;
+        write_bytes32(writer, &self.preimage)?;
+        write_pubkey(writer, &self.deposit_pubkey)?;
+        write_u64(writer, self.amount_msat)?;
+        write_bytes64(writer, &self.invoice_cosignature)?;
+        write_u64(writer, self.settlement_sequence)?;
+        write_bytes32(writer, &self.settlement_ledger_hash)?;
+        write_u32(writer, self.settlement_block_height)?;
+        write_bytes64(writer, &self.accuser_signature)?;
+        Ok(())
+    }
+}
+
+impl WireDecode for UncreditedPaymentMsg {
+    fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
+        Ok(Self {
+            operator: read_pubkey(reader)?,
+            partner: read_pubkey(reader)?,
+            payment_hash: read_bytes32(reader)?,
+            preimage: read_bytes32(reader)?,
+            deposit_pubkey: read_pubkey(reader)?,
+            amount_msat: read_u64(reader)?,
+            invoice_cosignature: read_bytes64(reader)?,
+            settlement_sequence: read_u64(reader)?,
+            settlement_ledger_hash: read_bytes32(reader)?,
+            settlement_block_height: read_u32(reader)?,
+            accuser_signature: read_bytes64(reader)?,
         })
     }
 }

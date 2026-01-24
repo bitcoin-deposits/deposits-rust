@@ -258,6 +258,159 @@ ldk_wire_wrapper! {
     LdkReceivingCosignInvoiceMsg => deposits_core::ReceivingCosignInvoiceMsg
 }
 
+// ============================================================================
+// Collateral Message Wrappers (additional)
+// ============================================================================
+
+ldk_wire_wrapper! {
+    /// LDK wrapper for `deposits_core::CollateralAddPartnerMsg`
+    LdkCollateralAddPartnerMsg => deposits_core::CollateralAddPartnerMsg
+}
+
+ldk_wire_wrapper! {
+    /// LDK wrapper for `deposits_core::CollateralRemovePartnerMsg`
+    LdkCollateralRemovePartnerMsg => deposits_core::CollateralRemovePartnerMsg
+}
+
+ldk_wire_wrapper! {
+    /// LDK wrapper for `deposits_core::CollateralAttestationMsg`
+    LdkCollateralAttestationMsg => deposits_core::CollateralAttestationMsg
+}
+
+ldk_wire_wrapper! {
+    /// LDK wrapper for `deposits_core::CollateralStatusMsg`
+    LdkCollateralStatusMsg => deposits_core::CollateralStatusMsg
+}
+
+ldk_wire_wrapper! {
+    /// LDK wrapper for `deposits_core::CollateralConsentRequestMsg`
+    LdkCollateralConsentRequestMsg => deposits_core::CollateralConsentRequestMsg
+}
+
+ldk_wire_wrapper! {
+    /// LDK wrapper for `deposits_core::CollateralConsentResponseMsg`
+    LdkCollateralConsentResponseMsg => deposits_core::CollateralConsentResponseMsg
+}
+
+// ============================================================================
+// Transfer Message Wrappers
+// ============================================================================
+
+ldk_wire_wrapper! {
+    /// LDK wrapper for `deposits_core::DepositLockTransferMsg`
+    LdkDepositLockTransferMsg => deposits_core::DepositLockTransferMsg
+}
+
+ldk_wire_wrapper! {
+    /// LDK wrapper for `deposits_core::DepositFailTransferMsg`
+    LdkDepositFailTransferMsg => deposits_core::DepositFailTransferMsg
+}
+
+ldk_wire_wrapper! {
+    /// LDK wrapper for `deposits_core::DepositFulfillTransferMsg`
+    LdkDepositFulfillTransferMsg => deposits_core::DepositFulfillTransferMsg
+}
+
+// ============================================================================
+// Sync Message Wrappers
+// ============================================================================
+
+ldk_wire_wrapper! {
+    /// LDK wrapper for `deposits_core::SyncRequestMsg`
+    LdkSyncRequestMsg => deposits_core::SyncRequestMsg
+}
+
+ldk_wire_wrapper! {
+    /// LDK wrapper for `deposits_core::ChannelCloseTombstoneMsg`
+    LdkChannelCloseTombstoneMsg => deposits_core::ChannelCloseTombstoneMsg
+}
+
+// ============================================================================
+// Quorum Message Wrappers
+// ============================================================================
+
+ldk_wire_wrapper! {
+    /// LDK wrapper for `deposits_core::QuorumJoinRequestMsgWire`
+    LdkQuorumJoinRequestMsgWire => deposits_core::QuorumJoinRequestMsgWire
+}
+
+ldk_wire_wrapper! {
+    /// LDK wrapper for `deposits_core::QuorumJoinResponseMsgWire`
+    LdkQuorumJoinResponseMsgWire => deposits_core::QuorumJoinResponseMsgWire
+}
+
+ldk_wire_wrapper! {
+    /// LDK wrapper for `deposits_core::QuorumVoteMsgWire`
+    LdkQuorumVoteMsgWire => deposits_core::QuorumVoteMsgWire
+}
+
+ldk_wire_wrapper! {
+    /// LDK wrapper for `deposits_core::QuorumMembershipChangeMsg`
+    LdkQuorumMembershipChangeMsg => deposits_core::QuorumMembershipChangeMsg
+}
+
+ldk_wire_wrapper! {
+    /// LDK wrapper for `deposits_core::QuorumStateSyncMsg`
+    LdkQuorumStateSyncMsg => deposits_core::QuorumStateSyncMsg
+}
+
+ldk_wire_wrapper! {
+    /// LDK wrapper for `deposits_core::QuorumVoteRequestMsg`
+    LdkQuorumVoteRequestMsg => deposits_core::QuorumVoteRequestMsg
+}
+
+// ============================================================================
+// Recovery Message Wrappers
+// ============================================================================
+
+ldk_wire_wrapper! {
+    /// LDK wrapper for `deposits_core::RecoveryVoteMsg`
+    LdkRecoveryVoteMsg => deposits_core::RecoveryVoteMsg
+}
+
+ldk_wire_wrapper! {
+    /// LDK wrapper for `deposits_core::RecoveryClaimRequestMsg`
+    LdkRecoveryClaimRequestMsg => deposits_core::RecoveryClaimRequestMsg
+}
+
+ldk_wire_wrapper! {
+    /// LDK wrapper for `deposits_core::RecoveryClaimSignatureMsg`
+    LdkRecoveryClaimSignatureMsg => deposits_core::RecoveryClaimSignatureMsg
+}
+
+ldk_wire_wrapper! {
+    /// LDK wrapper for `deposits_core::RecoveryClaimCompleteMsg`
+    LdkRecoveryClaimCompleteMsg => deposits_core::RecoveryClaimCompleteMsg
+}
+
+// ============================================================================
+// Relay Message Wrappers
+// ============================================================================
+
+ldk_wire_wrapper! {
+    /// LDK wrapper for `deposits_core::RelayNwcRequestMsg`
+    LdkRelayNwcRequestMsg => deposits_core::RelayNwcRequestMsg
+}
+
+ldk_wire_wrapper! {
+    /// LDK wrapper for `deposits_core::RelayNwcResponseMsg`
+    LdkRelayNwcResponseMsg => deposits_core::RelayNwcResponseMsg
+}
+
+ldk_wire_wrapper! {
+    /// LDK wrapper for `deposits_core::RelayNwcDeliveryProofMsg`
+    LdkRelayNwcDeliveryProofMsg => deposits_core::RelayNwcDeliveryProofMsg
+}
+
+// ============================================================================
+// Other Message Wrappers
+// ============================================================================
+
+ldk_wire_wrapper! {
+    /// LDK wrapper for `deposits_core::UncreditedPaymentMsg`
+    LdkUncreditedPaymentMsg => deposits_core::UncreditedPaymentMsg
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

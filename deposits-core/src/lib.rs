@@ -185,10 +185,24 @@ pub use wire_messages::{
     DepositOpenMsg, DepositCloseMsg, DepositUpdateMsg,
     // Collateral messages
     CollateralIncreaseMsg, CollateralDecreaseMsg,
+    CollateralAddPartnerMsg, CollateralRemovePartnerMsg,
+    CollateralAttestationMsg, CollateralStatusMsg,
+    CollateralConsentRequestMsg, CollateralConsentResponseMsg,
     // Fee and lifecycle messages
     FeeCollectMsg, LedgerCloseMsg,
     // Payment messages
     ReceivingCreditPaymentMsg, SendingLockPaymentMsg,
     SendingFailPaymentMsg, SendingFulfillPaymentMsg,
-    ReceivingCosignInvoiceMsg,
+    ReceivingCosignInvoiceMsg, UncreditedPaymentMsg,
+    // Transfer messages
+    DepositLockTransferMsg, DepositFailTransferMsg, DepositFulfillTransferMsg,
+    // Sync messages
+    SyncRequestMsg, ChannelCloseTombstoneMsg,
+    // Quorum messages (wire-specific versions with Wire suffix)
+    QuorumJoinRequestMsgWire, QuorumJoinResponseMsgWire, QuorumVoteMsgWire,
+    QuorumMembershipChangeMsg, QuorumStateSyncMsg, QuorumVoteRequestMsg,
+    // Recovery messages
+    RecoveryVoteMsg, RecoveryClaimRequestMsg, RecoveryClaimSignatureMsg, RecoveryClaimCompleteMsg,
+    // Relay messages
+    RelayNwcRequestMsg, RelayNwcResponseMsg, RelayNwcDeliveryProofMsg,
 };
