@@ -189,8 +189,10 @@ ProposalStatus            // enum
 
 ## Implementation Order
 
-1. **PaymentTracking impl** (smallest, proves the pattern)
-2. **Reserve proposal types** (significant impact, clear boundaries)
-3. **Wire message definitions** (largest impact, requires careful split)
-4. **Logger abstraction** (enables further moves)
-5. **ChannelManagerOps** (after logger abstraction resolves Lightning dependency)
+1. ✅ **PaymentTracking impl** (smallest, proves the pattern) - commit 649aab5
+2. ✅ **Reserve proposal types** (significant impact, clear boundaries) - commit 99a5f27
+3. ✅ **Wire message constants & utilities** (message type constants, utility functions) - commit 3bebb5d
+4. ✅ **HashStrategy** (commitment sync strategy based on message type) - commit 1d8e73a
+5. ✅ **Signature utilities** (already moved)
+6. **Logger abstraction** (enables further moves)
+7. **ChannelManagerOps** (after logger abstraction resolves Lightning dependency)
