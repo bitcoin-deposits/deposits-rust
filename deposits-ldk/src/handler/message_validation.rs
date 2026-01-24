@@ -78,8 +78,7 @@ pub trait MessageValidation {
     fn validate_ledger_close(&self, msg: &crate::wire::messages::LedgerCloseMsg, sender: PublicKey) -> Result<(), String>;
 }
 
-// Use verify_payment_signature from deposits-core
-use deposits_core::verify_payment_signature;
+// verify_payment_signature is now called internally by deposits_core validation functions
 
 /// Unified validation of LedgerOperation (handles both V1 converted to operation and V2 native)
 fn validate_operation<L: Deref + Clone>(
@@ -348,154 +347,55 @@ where
 
         if let Some(ledger_arc) = ledgers.get(&(sender, self.our_node_id)) {
             let ledger = ledger_arc.read().unwrap();
-
-            // Check if deposit exists
-            if let Some(deposit) = ledger.state.deposits.get(&msg.pubkey) {
-                let available_balance = deposit.balance.saturating_sub(deposit.locked_balance);
-
-                // Check sufficient balance
-                if available_balance < msg.amount {
-                    return Err(format!("Insufficient available balance: {} < {}", available_balance, msg.amount));
-                }
-
-                // Check amount is positive
-                if msg.amount == 0 {
-                    return Err("Payment amount must be greater than zero".to_string());
-                }
-
-                // Verify scriptpubkey signature (constraint: sendinglockpayment includes scriptpubkey signature)
-                if !verify_payment_signature(&msg.pubkey, &msg.payment_id, msg.amount, &msg.scriptpubkey_signature) {
-                    return Err("Invalid scriptpubkey signature for payment lock".to_string());
-                }
-
-                Ok(())
-            } else {
-                Err(format!("Deposit with pubkey {} does not exist", msg.pubkey))
-            }
+            deposits_core::validate_payment_lock(
+                &ledger,
+                msg.pubkey,
+                msg.amount,
+                &msg.payment_id,
+                &msg.scriptpubkey_signature,
+            )
         } else {
             Err(format!("No channel ledger found for sender {}", sender))
         }
     }
 
     fn validate_sending_fulfill_payment(&self, msg: &crate::wire::messages::SendingFulfillPaymentMsg, _sender: PublicKey) -> Result<(), String> {
-        // Payment locks only exist on the operator's side (the sender).
-        // The partner (receiver of this message) doesn't track payment locks.
-        // So we can't validate locks here - just validate the message structure.
-
-        // Basic validation: ensure amount is positive
-        if msg.amount == 0 {
-            return Err("Payment amount must be greater than zero".to_string());
-        }
-
-        // Verify scriptpubkey signature (constraint: sendingfulfillpayment includes scriptpubkey signature)
-        if !verify_payment_signature(&msg.pubkey, &msg.payment_id, msg.amount, &msg.scriptpubkey_signature) {
-            return Err("Invalid scriptpubkey signature for payment fulfill".to_string());
-        }
-
-        // Verify preimage matches payment_id (payment_hash)
-        // The payment_id IS the payment_hash, so SHA256(preimage) should equal payment_id
-        use bitcoin::hashes::{sha256, Hash};
-        let computed_hash = sha256::Hash::hash(&msg.preimage);
-        if computed_hash.as_byte_array() != &msg.payment_id {
-            return Err("Preimage does not match payment hash".to_string());
-        }
-
-        Ok(())
+        deposits_core::validate_payment_fulfill(
+            &msg.pubkey,
+            msg.amount,
+            &msg.payment_id,
+            &msg.scriptpubkey_signature,
+            &msg.preimage,
+        )
     }
 
     fn validate_sending_fail_payment(&self, msg: &crate::wire::messages::SendingFailPaymentMsg, _sender: PublicKey) -> Result<(), String> {
-        // Payment locks only exist on the operator's side (the sender).
-        // The partner (receiver of this message) doesn't track payment locks.
-        // So we can't validate locks here - just validate the message structure.
-
-        // Basic validation: ensure amount is positive
-        if msg.amount == 0 {
-            return Err("Payment amount must be greater than zero".to_string());
-        }
-
-        Ok(())
+        deposits_core::validate_payment_fail(msg.amount)
     }
 
     fn validate_receiving_credit_payment(&self, msg: &crate::wire::messages::ReceivingCreditPaymentMsg, sender: PublicKey) -> Result<(), String> {
+        // Demo-specific fake invoice check (TODO: move to separate layer)
+        if msg.invoice_id.contains("fake") || msg.invoice_id.contains("424242") {
+            return Err(format!("Invalid invoice ID: {}", msg.invoice_id));
+        }
+
         let ledgers = self.ledgers.lock().unwrap();
 
         if let Some(ledger_arc) = ledgers.get(&(sender, self.our_node_id)) {
             let ledger = ledger_arc.read().unwrap();
-
-            // Check if deposit exists
-            if !ledger.state.deposits.contains_key(&msg.deposit_pubkey) {
-                return Err(format!("Deposit with pubkey {} does not exist", msg.deposit_pubkey));
-            }
-
-            // Check amount is positive
-            if msg.amount == 0 {
-                return Err("Credit amount must be greater than zero".to_string());
-            }
-
-            // Reject suspicious fake invoices (for demo purposes)
-            if msg.invoice_id.contains("fake") || msg.invoice_id.contains("424242") {
-                return Err(format!("Invalid invoice ID: {}", msg.invoice_id));
-            }
-
-            // Check payment hash is not obviously fake (all same bytes)
-            if msg.payment_hash.iter().all(|&b| b == msg.payment_hash[0]) {
-                return Err("Invalid payment hash: appears to be fake".to_string());
-            }
-
-            // Check amount is reasonable (not too large for a single payment)
-            if msg.amount > 100_000_000 { // 1 BTC limit per credit
-                return Err(format!("Credit amount too large: {} sats", msg.amount));
-            }
-
-            // CONSTRAINT 4: Check that credit doesn't exceed reserves backing
-            // Total deposits after credit must not exceed ledger reserves
-            let current_deposits: u64 = ledger.state.deposits.values().map(|d| d.balance).sum();
-            let new_total_deposits = current_deposits.saturating_add(msg.amount);
-
-            if new_total_deposits > ledger.reserves_amount() {
-                return Err(format!(
-                    "Credit would exceed reserves: new deposits {} sats > reserves {} sats",
-                    new_total_deposits, ledger.reserves_amount()
-                ));
-            }
-
-            // CONSTRAINT: Check that credit doesn't exceed declared collateral (100%+100% model)
-            // Total deposits must not exceed received collateral from collateral partners.
-            // Collateral is committed via CollateralIncrease during invoice creation, so it
-            // should be in place before any credit payments arrive.
-            if new_total_deposits > ledger.state.received_collateral_amount {
-                return Err(format!(
-                    "Credit would exceed declared collateral: new deposits {} sats > received collateral {} sats",
-                    new_total_deposits, ledger.state.received_collateral_amount
-                ));
-            }
-
-            Ok(())
+            deposits_core::validate_credit_payment(
+                &ledger,
+                msg.deposit_pubkey,
+                msg.amount,
+                &msg.payment_hash,
+            )
         } else {
             Err(format!("No channel ledger found for sender {}", sender))
         }
     }
 
     fn validate_reserves_add(&self, msg: &crate::wire::messages::ReservesAddOutputMsg, _sender: PublicKey) -> Result<(), String> {
-        use deposits_core::{MIN_RESERVES_OUTPUT_SATS, MAX_RESERVES_OUTPUT_SATS};
-
-        // Validate minimum amount (must be economically spendable)
-        if msg.initial_amount < MIN_RESERVES_OUTPUT_SATS {
-            return Err(format!(
-                "Initial reserves amount {} sats is below minimum {} sats required for economic spendability",
-                msg.initial_amount, MIN_RESERVES_OUTPUT_SATS
-            ));
-        }
-
-        // Validate maximum amount (prevents accidental huge reserves)
-        if msg.initial_amount > MAX_RESERVES_OUTPUT_SATS {
-            return Err(format!(
-                "Initial reserves amount {} sats exceeds maximum {} sats allowed",
-                msg.initial_amount, MAX_RESERVES_OUTPUT_SATS
-            ));
-        }
-
-        Ok(())
+        deposits_core::validate_reserves_add(msg.initial_amount)
     }
 
     fn validate_reserves_remove(&self, msg: &super::messages::ReservesRemoveOutputMsg, sender: PublicKey) -> Result<(), String> {
@@ -526,28 +426,7 @@ where
 
         if let Some(ledger_arc) = ledgers.get(&(sender, self.our_node_id)) {
             let ledger = ledger_arc.read().unwrap();
-
-            // Check if deposit exists and has sufficient balance
-            if let Some(deposit) = ledger.state.deposits.get(&msg.pubkey) {
-                let available = deposit.balance.saturating_sub(deposit.locked_balance);
-                if available < msg.amount {
-                    return Err(format!("Insufficient balance for fees: {} available < {} requested", available, msg.amount));
-                }
-
-                // CONSTRAINT 8: Check that fee collection happens on or after schedule
-                // Fees can only be collected after last_fee_assessment + frequency_blocks
-                let earliest_allowed_block = deposit.last_fee_assessment.saturating_add(deposit.fees.frequency_blocks);
-                if msg.block_height < earliest_allowed_block {
-                    return Err(format!(
-                        "Fee collection too early: block {} < earliest allowed {} (last assessment {} + frequency {})",
-                        msg.block_height, earliest_allowed_block, deposit.last_fee_assessment, deposit.fees.frequency_blocks
-                    ));
-                }
-
-                Ok(())
-            } else {
-                Err(format!("Deposit with pubkey {} does not exist", msg.pubkey))
-            }
+            deposits_core::validate_fee_collect(&ledger, msg.pubkey, msg.amount, msg.block_height)
         } else {
             Err(format!("No channel ledger found for sender {}", sender))
         }
