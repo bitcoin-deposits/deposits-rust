@@ -368,25 +368,32 @@ impl WireDecode for ReservesUpdateOutputMsg {
 // ============================================================================
 
 /// UpdateReserves message - sent to propose reserves commitment to counterparty
+///
+/// This custom message is sent after calling propose_extra_outputs() on the
+/// ChannelManager to notify the counterparty of the proposed extra outputs.
+/// The counterparty should respond with AcceptReserves after validation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UpdateReservesMsg {
     /// The Lightning channel ID
     pub channel_id: [u8; 32],
-    /// The reserves amount in satoshis
-    pub reserves_amount: u64,
-    /// The ledger hash to commit
+    /// Reserves amount in satoshis
+    pub reserves_sats: u64,
+    /// The script pubkey for the reserves output
+    pub script_pubkey: Vec<u8>,
+    /// Our ledger hash being committed
     pub ledger_hash: [u8; 32],
-    /// Reserves output scriptpubkey (serialized)
-    pub reserves_script: Vec<u8>,
+    /// Remote ledger hash for bidirectional verification
+    pub remote_ledger_hash: [u8; 32],
 }
 
 impl WireEncode for UpdateReservesMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
         write_bytes32(writer, &self.channel_id)?;
-        write_u64(writer, self.reserves_amount)?;
+        write_u64(writer, self.reserves_sats)?;
+        write_u16(writer, self.script_pubkey.len() as u16)?;
+        writer.write_all(&self.script_pubkey)?;
         write_bytes32(writer, &self.ledger_hash)?;
-        write_u16(writer, self.reserves_script.len() as u16)?;
-        writer.write_all(&self.reserves_script)?;
+        write_bytes32(writer, &self.remote_ledger_hash)?;
         Ok(())
     }
 }
@@ -394,43 +401,43 @@ impl WireEncode for UpdateReservesMsg {
 impl WireDecode for UpdateReservesMsg {
     fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
         let channel_id = read_bytes32(reader)?;
-        let reserves_amount = read_u64(reader)?;
-        let ledger_hash = read_bytes32(reader)?;
+        let reserves_sats = read_u64(reader)?;
         let script_len = read_u16(reader)? as usize;
-        let mut reserves_script = vec![0u8; script_len];
-        reader.read_exact(&mut reserves_script)?;
+        let mut script_pubkey = vec![0u8; script_len];
+        reader.read_exact(&mut script_pubkey)?;
+        let ledger_hash = read_bytes32(reader)?;
+        let remote_ledger_hash = read_bytes32(reader)?;
         Ok(Self {
             channel_id,
-            reserves_amount,
+            reserves_sats,
+            script_pubkey,
             ledger_hash,
-            reserves_script,
+            remote_ledger_hash,
         })
     }
 }
 
-/// AcceptReserves message - sent to accept a reserves commitment proposal
+/// AcceptReserves message - response to UpdateReserves indicating acceptance
+///
+/// Sent by the counterparty after validating and accepting the proposed
+/// reserves commitment via accept_extra_outputs_proposal().
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AcceptReservesMsg {
     /// The Lightning channel ID
     pub channel_id: [u8; 32],
-    /// Whether the proposal is accepted
-    pub accepted: bool,
 }
 
 impl WireEncode for AcceptReservesMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
         write_bytes32(writer, &self.channel_id)?;
-        write_u8(writer, self.accepted as u8)?;
         Ok(())
     }
 }
 
 impl WireDecode for AcceptReservesMsg {
     fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
-        Ok(Self {
-            channel_id: read_bytes32(reader)?,
-            accepted: read_u8(reader)? != 0,
-        })
+        let channel_id = read_bytes32(reader)?;
+        Ok(Self { channel_id })
     }
 }
 
@@ -534,12 +541,14 @@ impl WireDecode for DepositUpdateMsg {
 pub struct CollateralIncreaseMsg {
     pub partner_id: PublicKey,
     pub new_amount: u64,
+    pub block_height: u32,
 }
 
 impl WireEncode for CollateralIncreaseMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
         write_pubkey(writer, &self.partner_id)?;
         write_u64(writer, self.new_amount)?;
+        write_u32(writer, self.block_height)?;
         Ok(())
     }
 }
@@ -549,6 +558,7 @@ impl WireDecode for CollateralIncreaseMsg {
         Ok(Self {
             partner_id: read_pubkey(reader)?,
             new_amount: read_u64(reader)?,
+            block_height: read_u32(reader)?,
         })
     }
 }
@@ -558,12 +568,14 @@ impl WireDecode for CollateralIncreaseMsg {
 pub struct CollateralDecreaseMsg {
     pub partner_id: PublicKey,
     pub new_amount: u64,
+    pub block_height: u32,
 }
 
 impl WireEncode for CollateralDecreaseMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
         write_pubkey(writer, &self.partner_id)?;
         write_u64(writer, self.new_amount)?;
+        write_u32(writer, self.block_height)?;
         Ok(())
     }
 }
@@ -573,6 +585,7 @@ impl WireDecode for CollateralDecreaseMsg {
         Ok(Self {
             partner_id: read_pubkey(reader)?,
             new_amount: read_u64(reader)?,
+            block_height: read_u32(reader)?,
         })
     }
 }
@@ -771,20 +784,22 @@ impl WireDecode for SendingFulfillPaymentMsg {
 /// V1-compatible receiving cosign invoice message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReceivingCosignInvoiceMsg {
-    pub partner_id: PublicKey,
-    pub assigned_deposit: PublicKey,
     pub amount: u64,
     pub payment_hash: [u8; 32],
+    pub expires: u64,
+    pub assigned_deposit: PublicKey,
     pub invoice_id: String,
+    pub bolt11: String,
 }
 
 impl WireEncode for ReceivingCosignInvoiceMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
-        write_pubkey(writer, &self.partner_id)?;
-        write_pubkey(writer, &self.assigned_deposit)?;
         write_u64(writer, self.amount)?;
         write_bytes32(writer, &self.payment_hash)?;
+        write_u64(writer, self.expires)?;
+        write_pubkey(writer, &self.assigned_deposit)?;
         write_string(writer, &self.invoice_id)?;
+        write_string(writer, &self.bolt11)?;
         Ok(())
     }
 }
@@ -792,11 +807,12 @@ impl WireEncode for ReceivingCosignInvoiceMsg {
 impl WireDecode for ReceivingCosignInvoiceMsg {
     fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
         Ok(Self {
-            partner_id: read_pubkey(reader)?,
-            assigned_deposit: read_pubkey(reader)?,
             amount: read_u64(reader)?,
             payment_hash: read_bytes32(reader)?,
+            expires: read_u64(reader)?,
+            assigned_deposit: read_pubkey(reader)?,
             invoice_id: read_string(reader)?,
+            bolt11: read_string(reader)?,
         })
     }
 }

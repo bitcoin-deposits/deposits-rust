@@ -11,14 +11,39 @@
 //! These structs implement LDK's `Readable` and `Writeable` traits for
 //! wire serialization.
 //!
-//! The V1 protocol uses individual message types for each operation, while
-//! V2 consolidates these into `LedgerUpdate` with operation discriminants.
+//! ## Note on Type Duplication
+//!
+//! Some types here are similar to those in `deposits_core::wire_messages`, but have
+//! different field structures optimized for the LDK wire protocol. The core types
+//! are designed for the abstract protocol, while these are designed for LDK integration.
+//!
+//! When using adapters.rs for LDK serialization of deposits-core types, use the
+//! `LdkXxxMsg` wrapper types. For LDK-specific wire protocol needs, use the types
+//! defined directly in this module.
 
 use bitcoin::secp256k1::PublicKey;
 use lightning::ln::msgs::DecodeError;
 use lightning::util::ser::{Readable, Writeable, Writer};
 
 use super::types::FeeStructure;
+
+// ============================================================================
+// Re-exports for LDK wrappers around deposits-core types
+// ============================================================================
+
+// LDK wrapper types from adapters.rs - use these when you need LDK Readable/Writeable
+// for deposits-core types
+pub use super::adapters::{
+    LdkReservesIncreaseMsg, LdkReservesDecreaseMsg, LdkReservesAddOutputMsg,
+    LdkReservesRemoveOutputMsg, LdkReservesUpdateOutputMsg,
+    LdkUpdateReservesMsg, LdkAcceptReservesMsg,
+    LdkDepositOpenMsg, LdkDepositCloseMsg, LdkDepositUpdateMsg,
+    LdkCollateralIncreaseMsg, LdkCollateralDecreaseMsg,
+    LdkFeeCollectMsg, LdkLedgerCloseMsg,
+    LdkReceivingCreditPaymentMsg, LdkSendingLockPaymentMsg,
+    LdkSendingFailPaymentMsg, LdkSendingFulfillPaymentMsg,
+    LdkReceivingCosignInvoiceMsg,
+};
 
 // ============================================================================
 // Reserves Messages
