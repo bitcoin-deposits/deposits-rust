@@ -75,6 +75,7 @@ pub mod handler_traits;
 pub mod payment_tracker;
 pub mod reserves_proposal;
 pub mod signature_utils;
+pub mod operation_validation;
 
 // Re-exports for convenience
 pub use constants::{
@@ -151,4 +152,18 @@ pub use signature_utils::{
 pub use tlv::{
     TlvEncode, TlvDecode, TlvStream, TlvBuilder, TlvReader,
     TlvError, TlvResult,
+};
+pub use operation_validation::{
+    // Reserves validations
+    validate_reserves_add, validate_reserves_increase, validate_reserves_decrease,
+    // Payment validations
+    validate_credit_payment, validate_payment_lock, validate_payment_fulfill, validate_payment_fail,
+    // Fee validations
+    validate_fee_collect,
+    // Deposit validations
+    validate_deposit_add, validate_deposit_close, validate_deposit_update,
+    // Collateral validations
+    validate_collateral_increase, validate_collateral_decrease,
+    // Result type
+    ValidationResult,
 };
