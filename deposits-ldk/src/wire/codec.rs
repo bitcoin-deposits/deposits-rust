@@ -121,25 +121,7 @@ impl MessageCodec {
 
     /// Get message category from message type
     pub fn get_message_category(message_type: u16) -> Option<&'static str> {
-        match message_type {
-            RESERVES_ADD_OUTPUT | RESERVES_REMOVE_OUTPUT | RESERVES_INCREASE |
-            RESERVES_DECREASE | RESERVES_UPDATE_OUTPUT => Some("reserves"),
-
-            DEPOSIT_OPEN | DEPOSIT_CLOSE | DEPOSIT_UPDATE | DEPOSIT_LOCK_TRANSFER |
-            DEPOSIT_FAIL_TRANSFER | DEPOSIT_FULFILL_TRANSFER => Some("ledger"),
-
-            MAINTENANCE_FEE_COLLECT => Some("maintenance"),
-
-            RECEIVING_COSIGN_INVOICE | RECEIVING_CREDIT_PAYMENT | UNCREDITED_PAYMENT => Some("receiving"),
-
-            SENDING_LOCK_PAYMENT | SENDING_FAIL_PAYMENT | SENDING_FULFILL_PAYMENT => Some("sending"),
-
-            COLLATERAL_INCREASE | COLLATERAL_DECREASE | COLLATERAL_STATUS |
-            COLLATERAL_ATTESTATION | COLLATERAL_ADD_PARTNER | COLLATERAL_REMOVE_PARTNER |
-            COLLATERAL_CONSENT_REQUEST | COLLATERAL_CONSENT_RESPONSE => Some("collateral"),
-
-            _ => None,
-        }
+        super::message_types::get_message_category(message_type)
     }
 }
 
@@ -259,8 +241,9 @@ mod tests {
     
     #[test]
     fn test_message_categories() {
+        // Now using deposits-core's get_message_category via message_types re-export
         assert_eq!(MessageCodec::get_message_category(RESERVES_ADD_OUTPUT), Some("reserves"));
-        assert_eq!(MessageCodec::get_message_category(DEPOSIT_OPEN), Some("ledger"));
+        assert_eq!(MessageCodec::get_message_category(DEPOSIT_OPEN), Some("deposit"));
         assert_eq!(MessageCodec::get_message_category(MAINTENANCE_FEE_COLLECT), Some("maintenance"));
         assert_eq!(MessageCodec::get_message_category(RECEIVING_COSIGN_INVOICE), Some("receiving"));
         assert_eq!(MessageCodec::get_message_category(RECEIVING_CREDIT_PAYMENT), Some("receiving"));
