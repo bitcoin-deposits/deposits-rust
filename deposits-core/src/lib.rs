@@ -76,6 +76,7 @@ pub mod payment_tracker;
 pub mod reserves_proposal;
 pub mod signature_utils;
 pub mod operation_validation;
+pub mod wire_messages;
 
 // Re-exports for convenience
 pub use constants::{
@@ -172,4 +173,22 @@ pub use operation_validation::{
     MAX_FEE_RATE_BPS,
     // Result type
     ValidationResult,
+};
+pub use wire_messages::{
+    // Traits
+    WireEncode, WireDecode, WireError,
+    // Reserves messages
+    ReservesIncreaseMsg, ReservesDecreaseMsg, ReservesAddOutputMsg,
+    ReservesRemoveOutputMsg, ReservesUpdateOutputMsg,
+    UpdateReservesMsg, AcceptReservesMsg,
+    // Deposit messages
+    DepositOpenMsg, DepositCloseMsg, DepositUpdateMsg,
+    // Collateral messages
+    CollateralIncreaseMsg, CollateralDecreaseMsg,
+    // Fee and lifecycle messages
+    FeeCollectMsg, LedgerCloseMsg,
+    // Payment messages
+    ReceivingCreditPaymentMsg, SendingLockPaymentMsg,
+    SendingFailPaymentMsg, SendingFulfillPaymentMsg,
+    ReceivingCosignInvoiceMsg,
 };
