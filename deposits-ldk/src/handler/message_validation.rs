@@ -78,53 +78,8 @@ pub trait MessageValidation {
     fn validate_ledger_close(&self, msg: &crate::wire::messages::LedgerCloseMsg, sender: PublicKey) -> Result<(), String>;
 }
 
-/// Helper functions for message validation
-impl<L: Deref + Clone> DepositsHandler<L>
-where
-    L::Target: LdkLogger,
-{
-    /// Verify a Schnorr signature proving ownership of a deposit's scriptpubkey
-    ///
-    /// The signed message is: SHA256(pubkey || payment_id || amount)
-    /// This proves the deposit owner authorized this specific payment.
-    fn verify_payment_signature(
-        pubkey: &PublicKey,
-        payment_id: &[u8; 32],
-        amount: u64,
-        signature: &[u8; 64],
-    ) -> bool {
-        use bitcoin::hashes::{sha256, Hash};
-        use bitcoin::secp256k1::{Secp256k1, Message};
-        use bitcoin::secp256k1::schnorr::Signature;
-
-        // Skip validation for placeholder signatures (all zeros) during development
-        // TODO: Remove this bypass once wallet signing is implemented
-        if signature.iter().all(|&b| b == 0) {
-            return true;  // Accept placeholder signatures for now
-        }
-
-        // Build the message to verify
-        let mut message_data = Vec::with_capacity(33 + 32 + 8);
-        message_data.extend_from_slice(&pubkey.serialize());
-        message_data.extend_from_slice(payment_id);
-        message_data.extend_from_slice(&amount.to_le_bytes());
-
-        let message_hash = sha256::Hash::hash(&message_data);
-        let secp = Secp256k1::verification_only();
-
-        // Parse the signature
-        let sig = match Signature::from_slice(signature) {
-            Ok(s) => s,
-            Err(_) => return false,
-        };
-
-        // Get x-only pubkey for Schnorr verification
-        let x_only = pubkey.x_only_public_key().0;
-        let msg = Message::from_digest(message_hash.to_byte_array());
-
-        secp.verify_schnorr(&sig, &msg, &x_only).is_ok()
-    }
-}
+// Use verify_payment_signature from deposits-core
+use deposits_core::verify_payment_signature;
 
 /// Unified validation of LedgerOperation (handles both V1 converted to operation and V2 native)
 fn validate_operation<L: Deref + Clone>(
@@ -409,7 +364,7 @@ where
                 }
 
                 // Verify scriptpubkey signature (constraint: sendinglockpayment includes scriptpubkey signature)
-                if !Self::verify_payment_signature(&msg.pubkey, &msg.payment_id, msg.amount, &msg.scriptpubkey_signature) {
+                if !verify_payment_signature(&msg.pubkey, &msg.payment_id, msg.amount, &msg.scriptpubkey_signature) {
                     return Err("Invalid scriptpubkey signature for payment lock".to_string());
                 }
 
@@ -433,7 +388,7 @@ where
         }
 
         // Verify scriptpubkey signature (constraint: sendingfulfillpayment includes scriptpubkey signature)
-        if !Self::verify_payment_signature(&msg.pubkey, &msg.payment_id, msg.amount, &msg.scriptpubkey_signature) {
+        if !verify_payment_signature(&msg.pubkey, &msg.payment_id, msg.amount, &msg.scriptpubkey_signature) {
             return Err("Invalid scriptpubkey signature for payment fulfill".to_string());
         }
 

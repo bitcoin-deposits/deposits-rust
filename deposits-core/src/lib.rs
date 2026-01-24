@@ -146,7 +146,7 @@ pub use reserves_proposal::{
 };
 pub use signature_utils::{
     create_deposit_guarantee_signature, verify_deposit_guarantee_signature,
-    create_payment_authorization_signature,
+    create_payment_authorization_signature, verify_payment_signature,
 };
 pub use tlv::{
     TlvEncode, TlvDecode, TlvStream, TlvBuilder, TlvReader,

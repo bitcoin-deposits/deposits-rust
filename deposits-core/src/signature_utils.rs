@@ -75,6 +75,49 @@ pub fn verify_deposit_guarantee_signature(
     }
 }
 
+/// Verify a Schnorr signature proving ownership of a deposit's scriptpubkey
+///
+/// The signed message is: SHA256(pubkey || payment_id || amount)
+/// This proves the deposit owner authorized this specific payment.
+///
+/// Returns true if the signature is valid, false otherwise.
+/// Note: All-zero signatures are accepted during development (placeholder).
+pub fn verify_payment_signature(
+    pubkey: &PublicKey,
+    payment_id: &[u8; 32],
+    amount: u64,
+    signature: &[u8; 64],
+) -> bool {
+    use bitcoin::secp256k1::schnorr::Signature;
+
+    // Skip validation for placeholder signatures (all zeros) during development
+    // TODO: Remove this bypass once wallet signing is implemented
+    if signature.iter().all(|&b| b == 0) {
+        return true;  // Accept placeholder signatures for now
+    }
+
+    // Build the message to verify
+    let mut message_data = Vec::with_capacity(33 + 32 + 8);
+    message_data.extend_from_slice(&pubkey.serialize());
+    message_data.extend_from_slice(payment_id);
+    message_data.extend_from_slice(&amount.to_le_bytes());
+
+    let message_hash = sha256::Hash::hash(&message_data);
+    let secp = Secp256k1::verification_only();
+
+    // Parse the signature
+    let sig = match Signature::from_slice(signature) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    // Get x-only pubkey for Schnorr verification
+    let x_only = pubkey.x_only_public_key().0;
+    let msg = Message::from_digest(message_hash.to_byte_array());
+
+    secp.verify_schnorr(&sig, &msg, &x_only).is_ok()
+}
+
 /// Create a payment authorization signature (for testing and wallet integration)
 /// The deposit owner's private key signs: "PAY:{amount}:{invoice}:{preimage_hex}"
 pub fn create_payment_authorization_signature(
@@ -154,5 +197,27 @@ mod tests {
         // Should successfully create authorization signature
         let sig = create_payment_authorization_signature(&secret, amount, invoice, &preimage).unwrap();
         assert_eq!(sig.len(), 64);
+    }
+
+    #[test]
+    fn test_verify_payment_signature_placeholder() {
+        let (_secret, public) = create_test_keypair();
+        let payment_id = [1u8; 32];
+        let amount = 1000u64;
+        let placeholder_sig = [0u8; 64];
+
+        // Placeholder signatures should be accepted during development
+        assert!(verify_payment_signature(&public, &payment_id, amount, &placeholder_sig));
+    }
+
+    #[test]
+    fn test_verify_payment_signature_invalid() {
+        let (_secret, public) = create_test_keypair();
+        let payment_id = [1u8; 32];
+        let amount = 1000u64;
+        let invalid_sig = [1u8; 64]; // Non-zero but invalid signature
+
+        // Invalid signatures should be rejected
+        assert!(!verify_payment_signature(&public, &payment_id, amount, &invalid_sig));
     }
 }
