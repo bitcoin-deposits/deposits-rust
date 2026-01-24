@@ -196,5 +196,6 @@ ProposalStatus            // enum
 5. ✅ **Signature utilities** (already moved)
 6. ✅ **V2 message type name utilities** (type_id_to_const_name, type_id_to_variant_name) - commit ecf582b
 7. ✅ **Dead code cleanup** (duplicate is_deposits_message_type, unused serde_arrays modules) - commits a9db34e, 80c857d
-8. **Logger abstraction** (enables further moves - 425 log calls across 29 files)
-9. **ChannelManagerOps** (after logger abstraction resolves Lightning dependency)
+8. ✅ **Tracing in deposits-core** (add tracing crate, migrate message processors) - commit 6a5b0ff
+9. **Logger abstraction in deposits-ldk** (425 log calls across 29 files - could migrate to tracing or keep LDK macros)
+10. **ChannelManagerOps** (blocked by CommitmentExtraOutput Lightning dependency)
