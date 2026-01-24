@@ -17,7 +17,7 @@
 
 use bitcoin::secp256k1::PublicKey;
 use lightning::ln::peer_handler::CustomMessageHandler;
-use deposits_core::{Invoice, ReservesStatus, SignedLedgerUpdate};
+use deposits_core::{Invoice, ReservesStatus, SignedLedgerUpdate, DepositInvoiceIndex};
 use deposits_core::{Ledger, LedgerRole, LedgerUpdate, LedgerManager, LedgerValidator};
 use lightning::ln::wire::CustomMessageReader;
 use lightning::ln::msgs::{DecodeError, LightningError, ErrorAction};
@@ -217,12 +217,11 @@ where
     /// NOT stored in the ledger to prevent spam attacks
     pub(crate) cosigned_invoices: Mutex<HashMap<(PublicKey, [u8; 32]), CosignedInvoice>>,
 
-    /// O(1) index for payment-to-deposit lookups
-    /// Key: payment_hash -> (partner_id, deposit_pubkey, invoice_id, bolt11)
+    /// O(1) index for payment-to-deposit lookups (from deposits-core)
     /// This is an index, not the source of truth - deposit.invoices in the ledger is the SOT.
     /// Populated when invoice is cosigned, cleaned up when payment is credited.
     /// CRITICAL: Must check this BEFORE calling claim_funds() to prevent uncredited payments
-    pub(crate) payment_deposits: Mutex<HashMap<[u8; 32], (PublicKey, PublicKey, String, String)>>,
+    pub(crate) payment_index: DepositInvoiceIndex,
 
     /// Per-channel operation locks to prevent commitment signature races
     /// Only one operation can be in-flight per channel at a time
@@ -348,7 +347,7 @@ where
             peers_refreshed_after_reconnect: Mutex::new(std::collections::HashSet::new()),
             connected_peers: Mutex::new(std::collections::HashSet::new()),
             cosigned_invoices: Mutex::new(HashMap::new()),
-            payment_deposits: Mutex::new(HashMap::new()),
+            payment_index: DepositInvoiceIndex::new(),
             channel_operation_locks: Mutex::new(HashMap::new()),
             channel_operation_locks_async: tokio::sync::Mutex::new(HashMap::new()),
             pending_lazy_syncs: Mutex::new(HashMap::new()),

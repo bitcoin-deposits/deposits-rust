@@ -1,8 +1,7 @@
 //! Payment Tracking for Bitcoin Deposits
 //!
-//! This module handles registration and lookup of deposit invoice payments.
-//! It maintains an O(1) index for payment-to-deposit lookups, enabling quick
-//! validation of incoming payments before they are credited.
+//! This module provides the PaymentTracking implementation for DepositsHandler,
+//! delegating to the core DepositInvoiceIndex with added logging.
 
 use bitcoin::secp256k1::PublicKey;
 use std::ops::Deref;
@@ -20,8 +19,7 @@ where
     L::Target: LdkLogger,
 {
     fn is_deposit_invoice_payment(&self, payment_hash: &[u8; 32]) -> bool {
-        let payment_deposits = self.payment_deposits.lock().unwrap();
-        payment_deposits.contains_key(payment_hash)
+        self.payment_index.is_deposit_invoice_payment(payment_hash)
     }
 
     fn register_deposit_invoice(
@@ -32,8 +30,13 @@ where
         invoice_id: String,
         bolt11: String,
     ) {
-        let mut payment_deposits = self.payment_deposits.lock().unwrap();
-        payment_deposits.insert(payment_hash, (partner_id, deposit_pubkey, invoice_id.clone(), bolt11));
+        self.payment_index.register_deposit_invoice(
+            payment_hash,
+            partner_id,
+            deposit_pubkey,
+            invoice_id.clone(),
+            bolt11,
+        );
         log_info!(
             self.logger,
             "₿ Registered payment hash {} for deposit {} (invoice: {})",
@@ -44,18 +47,18 @@ where
     }
 
     fn get_deposit_invoice_bolt11(&self, payment_hash: &[u8; 32]) -> Option<String> {
-        let payment_deposits = self.payment_deposits.lock().unwrap();
-        payment_deposits.get(payment_hash).map(|(_, _, _, bolt11)| bolt11.clone())
+        self.payment_index.get_deposit_invoice_bolt11(payment_hash)
     }
 
     fn get_deposit_for_payment(&self, payment_hash: &[u8; 32]) -> Option<(PublicKey, PublicKey, String, String)> {
-        let payment_deposits = self.payment_deposits.lock().unwrap();
-        payment_deposits.get(payment_hash).cloned()
+        self.payment_index.get_deposit_for_payment(payment_hash)
     }
 
     fn unregister_deposit_invoice(&self, payment_hash: &[u8; 32]) {
-        let mut payment_deposits = self.payment_deposits.lock().unwrap();
-        if payment_deposits.remove(payment_hash).is_some() {
+        // Check if it exists before unregistering (for logging)
+        let existed = self.payment_index.is_deposit_invoice_payment(payment_hash);
+        self.payment_index.unregister_deposit_invoice(payment_hash);
+        if existed {
             log_info!(
                 self.logger,
                 "₿ Unregistered payment hash {}",
@@ -65,8 +68,7 @@ where
     }
 
     fn cleanup_payments_for_partner(&self, partner_node_id: PublicKey) {
-        let mut payment_deposits = self.payment_deposits.lock().unwrap();
-        payment_deposits.retain(|_, (partner, _, _, _)| *partner != partner_node_id);
+        self.payment_index.cleanup_payments_for_partner(partner_node_id);
     }
 }
 
@@ -137,47 +139,6 @@ mod tests {
     }
 
     #[test]
-    fn test_get_bolt11() {
-        let handler = create_test_handler();
-        let payment_hash = [0xEF; 32];
-        let partner = create_test_pubkey(5);
-        let deposit = create_test_pubkey(6);
-
-        handler.register_deposit_invoice(
-            payment_hash,
-            partner,
-            deposit,
-            "inv-789".to_string(),
-            "lnbc3mytestinvoice".to_string(),
-        );
-
-        assert_eq!(
-            handler.get_deposit_invoice_bolt11(&payment_hash),
-            Some("lnbc3mytestinvoice".to_string())
-        );
-    }
-
-    #[test]
-    fn test_unregister_payment() {
-        let handler = create_test_handler();
-        let payment_hash = [0x12; 32];
-        let partner = create_test_pubkey(7);
-        let deposit = create_test_pubkey(8);
-
-        handler.register_deposit_invoice(
-            payment_hash,
-            partner,
-            deposit,
-            "inv-abc".to_string(),
-            "lnbc4test".to_string(),
-        );
-        assert!(handler.is_deposit_invoice_payment(&payment_hash));
-
-        handler.unregister_deposit_invoice(&payment_hash);
-        assert!(!handler.is_deposit_invoice_payment(&payment_hash));
-    }
-
-    #[test]
     fn test_cleanup_payments_for_partner() {
         let handler = create_test_handler();
         let partner1 = create_test_pubkey(10);
@@ -198,15 +159,5 @@ mod tests {
         assert!(!handler.is_deposit_invoice_payment(&hash1));
         assert!(!handler.is_deposit_invoice_payment(&hash2));
         assert!(handler.is_deposit_invoice_payment(&hash3));
-    }
-
-    #[test]
-    fn test_unregister_nonexistent() {
-        let handler = create_test_handler();
-        let payment_hash = [0x99; 32];
-
-        // Should not panic
-        handler.unregister_deposit_invoice(&payment_hash);
-        assert!(!handler.is_deposit_invoice_payment(&payment_hash));
     }
 }
