@@ -36,10 +36,12 @@ use crate::wire_messages::{
     CollateralAttestationMsg, UncreditedPaymentMsg,
     ReceivingCreditPaymentMsg, SendingLockPaymentMsg,
     SendingFulfillPaymentMsg, SendingFailPaymentMsg,
+    DepositOpenMsg, DepositCloseMsg, DepositUpdateMsg,
 };
 use crate::operation_validation::{
     validate_credit_payment, validate_payment_lock,
     validate_payment_fulfill, validate_payment_fail,
+    validate_deposit_add, validate_deposit_close, validate_deposit_update,
 };
 
 // ============================================================================
@@ -148,6 +150,42 @@ pub enum ResponseData {
         amount: u64,
         payment_id: [u8; 32],
         sequence_number: u64,
+    },
+    /// Deposit open validated - partner should sign and ACK
+    DepositOpenValidated {
+        operator: PublicKey,
+        partner: PublicKey,
+        deposit_pubkey: PublicKey,
+        /// Sequence number after append
+        sequence: u64,
+        /// Previous state hash
+        prev_hash: [u8; 32],
+        /// New state hash after append
+        new_hash: [u8; 32],
+    },
+    /// Deposit close validated - partner should sign and ACK
+    DepositCloseValidated {
+        operator: PublicKey,
+        partner: PublicKey,
+        deposit_pubkey: PublicKey,
+        /// Sequence number after append
+        sequence: u64,
+        /// Previous state hash
+        prev_hash: [u8; 32],
+        /// New state hash after append
+        new_hash: [u8; 32],
+    },
+    /// Deposit update validated - partner should sign and ACK
+    DepositUpdateValidated {
+        operator: PublicKey,
+        partner: PublicKey,
+        deposit_pubkey: PublicKey,
+        /// Sequence number after append
+        sequence: u64,
+        /// Previous state hash
+        prev_hash: [u8; 32],
+        /// New state hash after append
+        new_hash: [u8; 32],
     },
 }
 
@@ -815,6 +853,226 @@ pub fn handle_sending_fail_payment<C: HandlerContext>(
         amount: msg.amount,
         payment_id: msg.payment_id,
         sequence_number: msg.sequence_number,
+    }))
+}
+
+// ============================================================================
+// Deposit Message Handlers
+// ============================================================================
+
+/// Handle a DepositOpen message.
+///
+/// Received by partners when an operator opens a new deposit.
+/// The partner validates the deposit and signs the ledger update (porcupine dance).
+///
+/// # Arguments
+/// * `ctx` - Handler context providing access to ledgers and messaging
+/// * `msg` - The deposit open message
+/// * `sender` - Public key of the message sender (should be the operator)
+///
+/// # Returns
+/// * `HandlerResult::Response(DepositOpenValidated)` - Deposit is valid, partner should sign and ACK
+/// * `HandlerResult::Rejected(reason)` - Deposit is invalid with explanation
+/// * `HandlerError` - Internal error during processing
+pub fn handle_deposit_open<C: HandlerContext>(
+    ctx: &C,
+    msg: &DepositOpenMsg,
+    sender: PublicKey,
+) -> Result<HandlerResult, HandlerError> {
+    let our_node_id = ctx.our_node_id();
+
+    // We must be the partner to process this message
+    if msg.partner_id != our_node_id {
+        return Ok(HandlerResult::Rejected(format!(
+            "We ({}) are not the target partner ({})",
+            our_node_id, msg.partner_id
+        )));
+    }
+
+    // Get the ledger - sender (operator) and us (partner)
+    let ledger_arc = ctx.get_ledger(&sender, &msg.partner_id)
+        .ok_or(HandlerError::LedgerNotFound {
+            operator: sender,
+            partner: msg.partner_id,
+        })?;
+
+    // Validate the deposit open
+    let (sequence, prev_hash, new_hash) = {
+        let ledger = ledger_arc.read().map_err(|_|
+            HandlerError::Internal("Failed to acquire ledger read lock".to_string())
+        )?;
+
+        // Check for idempotency - if deposit already exists, return success
+        if ledger.state.deposits.contains_key(&msg.pubkey) {
+            return Ok(HandlerResult::Response(ResponseData::DepositOpenValidated {
+                operator: sender,
+                partner: msg.partner_id,
+                deposit_pubkey: msg.pubkey,
+                sequence: ledger.sequence(),
+                prev_hash: ledger.hash(),
+                new_hash: ledger.hash(),
+            }));
+        }
+
+        // Validate the deposit add operation
+        validate_deposit_add(
+            &ledger,
+            msg.pubkey,
+            msg.fees.as_ref(),
+        ).map_err(|e| HandlerError::ValidationFailed(e))?;
+
+        // Return current state for response
+        // Note: Actual ledger mutation happens in LDK layer
+        (ledger.sequence(), ledger.hash(), ledger.hash())
+    };
+
+    // Return validated data for LDK layer to record to ledger and sign
+    Ok(HandlerResult::Response(ResponseData::DepositOpenValidated {
+        operator: sender,
+        partner: msg.partner_id,
+        deposit_pubkey: msg.pubkey,
+        sequence,
+        prev_hash,
+        new_hash,
+    }))
+}
+
+/// Handle a DepositClose message.
+///
+/// Received by partners when an operator closes a deposit.
+/// The partner validates the deposit can be closed and signs the ledger update.
+///
+/// # Arguments
+/// * `ctx` - Handler context providing access to ledgers and messaging
+/// * `msg` - The deposit close message
+/// * `sender` - Public key of the message sender (should be the operator)
+///
+/// # Returns
+/// * `HandlerResult::Response(DepositCloseValidated)` - Close is valid, partner should sign and ACK
+/// * `HandlerResult::Rejected(reason)` - Close is invalid with explanation
+/// * `HandlerError` - Internal error during processing
+pub fn handle_deposit_close<C: HandlerContext>(
+    ctx: &C,
+    msg: &DepositCloseMsg,
+    sender: PublicKey,
+) -> Result<HandlerResult, HandlerError> {
+    let our_node_id = ctx.our_node_id();
+
+    // We must be the partner to process this message
+    if msg.partner_id != our_node_id {
+        return Ok(HandlerResult::Rejected(format!(
+            "We ({}) are not the target partner ({})",
+            our_node_id, msg.partner_id
+        )));
+    }
+
+    // Get the ledger - sender (operator) and us (partner)
+    let ledger_arc = ctx.get_ledger(&sender, &msg.partner_id)
+        .ok_or(HandlerError::LedgerNotFound {
+            operator: sender,
+            partner: msg.partner_id,
+        })?;
+
+    // Validate the deposit close
+    let (sequence, prev_hash, new_hash) = {
+        let ledger = ledger_arc.read().map_err(|_|
+            HandlerError::Internal("Failed to acquire ledger read lock".to_string())
+        )?;
+
+        // Check for idempotency - if deposit doesn't exist, it may have already been closed
+        if !ledger.state.deposits.contains_key(&msg.pubkey) {
+            return Ok(HandlerResult::Response(ResponseData::DepositCloseValidated {
+                operator: sender,
+                partner: msg.partner_id,
+                deposit_pubkey: msg.pubkey,
+                sequence: ledger.sequence(),
+                prev_hash: ledger.hash(),
+                new_hash: ledger.hash(),
+            }));
+        }
+
+        // Validate the deposit close operation
+        validate_deposit_close(
+            &ledger,
+            msg.pubkey,
+        ).map_err(|e| HandlerError::ValidationFailed(e))?;
+
+        // Return current state for response
+        (ledger.sequence(), ledger.hash(), ledger.hash())
+    };
+
+    // Return validated data for LDK layer to record to ledger and sign
+    Ok(HandlerResult::Response(ResponseData::DepositCloseValidated {
+        operator: sender,
+        partner: msg.partner_id,
+        deposit_pubkey: msg.pubkey,
+        sequence,
+        prev_hash,
+        new_hash,
+    }))
+}
+
+/// Handle a DepositUpdate message.
+///
+/// Received by partners when an operator updates a deposit's fee structure.
+/// The partner validates the update and signs the ledger update.
+///
+/// # Arguments
+/// * `ctx` - Handler context providing access to ledgers and messaging
+/// * `msg` - The deposit update message
+/// * `sender` - Public key of the message sender (should be the operator)
+///
+/// # Returns
+/// * `HandlerResult::Response(DepositUpdateValidated)` - Update is valid, partner should sign and ACK
+/// * `HandlerResult::Rejected(reason)` - Update is invalid with explanation
+/// * `HandlerError` - Internal error during processing
+pub fn handle_deposit_update<C: HandlerContext>(
+    ctx: &C,
+    msg: &DepositUpdateMsg,
+    sender: PublicKey,
+) -> Result<HandlerResult, HandlerError> {
+    let our_node_id = ctx.our_node_id();
+
+    // We must be the partner to process this message
+    if msg.partner_id != our_node_id {
+        return Ok(HandlerResult::Rejected(format!(
+            "We ({}) are not the target partner ({})",
+            our_node_id, msg.partner_id
+        )));
+    }
+
+    // Get the ledger - sender (operator) and us (partner)
+    let ledger_arc = ctx.get_ledger(&sender, &msg.partner_id)
+        .ok_or(HandlerError::LedgerNotFound {
+            operator: sender,
+            partner: msg.partner_id,
+        })?;
+
+    // Validate the deposit update
+    let (sequence, prev_hash, new_hash) = {
+        let ledger = ledger_arc.read().map_err(|_|
+            HandlerError::Internal("Failed to acquire ledger read lock".to_string())
+        )?;
+
+        // Validate the deposit update operation
+        validate_deposit_update(
+            &ledger,
+            msg.pubkey,
+            &msg.new_fees,
+        ).map_err(|e| HandlerError::ValidationFailed(e))?;
+
+        // Return current state for response
+        (ledger.sequence(), ledger.hash(), ledger.hash())
+    };
+
+    // Return validated data for LDK layer to record to ledger and sign
+    Ok(HandlerResult::Response(ResponseData::DepositUpdateValidated {
+        operator: sender,
+        partner: msg.partner_id,
+        deposit_pubkey: msg.pubkey,
+        sequence,
+        prev_hash,
+        new_hash,
     }))
 }
 
@@ -1829,5 +2087,516 @@ mod tests {
             }
             other => panic!("Expected Response(FailPaymentValidated), got {:?}", other),
         }
+    }
+
+    // ========================================================================
+    // Deposit Open Tests
+    // ========================================================================
+
+    #[test]
+    fn test_handle_deposit_open_wrong_partner() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let other_partner = create_test_pubkey(3);
+        let deposit_pubkey = create_test_pubkey(4);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let msg = DepositOpenMsg {
+            partner_id: other_partner, // Not us
+            pubkey: deposit_pubkey,
+            fees: None,
+            payment_hash: None,
+            invoice: None,
+            cosigner_guarantee_signature: None,
+        };
+
+        // We're not the target partner - should be rejected
+        let result = handle_deposit_open(&ctx, &msg, operator);
+        assert!(matches!(result, Ok(HandlerResult::Rejected(_))));
+    }
+
+    #[test]
+    fn test_handle_deposit_open_no_ledger() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let msg = DepositOpenMsg {
+            partner_id: our_node_id,
+            pubkey: deposit_pubkey,
+            fees: None,
+            payment_hash: None,
+            invoice: None,
+            cosigner_guarantee_signature: None,
+        };
+
+        // No ledger exists - should error
+        let result = handle_deposit_open(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::LedgerNotFound { .. })));
+    }
+
+    #[test]
+    fn test_handle_deposit_open_valid() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger
+        let ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = DepositOpenMsg {
+            partner_id: our_node_id,
+            pubkey: deposit_pubkey,
+            fees: None,
+            payment_hash: None,
+            invoice: None,
+            cosigner_guarantee_signature: None,
+        };
+
+        // Valid deposit open - should return DepositOpenValidated
+        let result = handle_deposit_open(&ctx, &msg, operator);
+        match result {
+            Ok(HandlerResult::Response(ResponseData::DepositOpenValidated { deposit_pubkey: pk, .. })) => {
+                assert_eq!(pk, deposit_pubkey);
+            }
+            other => panic!("Expected Response(DepositOpenValidated), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_handle_deposit_open_idempotent() {
+        use crate::types::Deposit;
+
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger with the deposit already added
+        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let deposit = Deposit::new(deposit_pubkey, None);
+        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = DepositOpenMsg {
+            partner_id: our_node_id,
+            pubkey: deposit_pubkey,
+            fees: None,
+            payment_hash: None,
+            invoice: None,
+            cosigner_guarantee_signature: None,
+        };
+
+        // Already exists - should return success (idempotent)
+        let result = handle_deposit_open(&ctx, &msg, operator);
+        match result {
+            Ok(HandlerResult::Response(ResponseData::DepositOpenValidated { .. })) => {}
+            other => panic!("Expected Response(DepositOpenValidated), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_handle_deposit_open_with_fees() {
+        use crate::types::FeeStructure;
+
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger
+        let ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let fees = FeeStructure {
+            annualized_fixed: 1000,
+            annualized_bps: 50,
+            frequency_blocks: 144,
+        };
+
+        let msg = DepositOpenMsg {
+            partner_id: our_node_id,
+            pubkey: deposit_pubkey,
+            fees: Some(fees),
+            payment_hash: None,
+            invoice: None,
+            cosigner_guarantee_signature: None,
+        };
+
+        // Valid deposit open with fees - should succeed
+        let result = handle_deposit_open(&ctx, &msg, operator);
+        assert!(matches!(result, Ok(HandlerResult::Response(ResponseData::DepositOpenValidated { .. }))));
+    }
+
+    #[test]
+    fn test_handle_deposit_open_invalid_fees() {
+        use crate::types::FeeStructure;
+
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger
+        let ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        // Invalid fee structure with zero frequency
+        let invalid_fees = FeeStructure {
+            annualized_fixed: 1000,
+            annualized_bps: 50,
+            frequency_blocks: 0, // Invalid
+        };
+
+        let msg = DepositOpenMsg {
+            partner_id: our_node_id,
+            pubkey: deposit_pubkey,
+            fees: Some(invalid_fees),
+            payment_hash: None,
+            invoice: None,
+            cosigner_guarantee_signature: None,
+        };
+
+        // Invalid fees - should fail validation
+        let result = handle_deposit_open(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::ValidationFailed(_))));
+    }
+
+    // ========================================================================
+    // Deposit Close Tests
+    // ========================================================================
+
+    #[test]
+    fn test_handle_deposit_close_wrong_partner() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let other_partner = create_test_pubkey(3);
+        let deposit_pubkey = create_test_pubkey(4);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let msg = DepositCloseMsg {
+            partner_id: other_partner, // Not us
+            pubkey: deposit_pubkey,
+        };
+
+        // We're not the target partner - should be rejected
+        let result = handle_deposit_close(&ctx, &msg, operator);
+        assert!(matches!(result, Ok(HandlerResult::Rejected(_))));
+    }
+
+    #[test]
+    fn test_handle_deposit_close_no_ledger() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let msg = DepositCloseMsg {
+            partner_id: our_node_id,
+            pubkey: deposit_pubkey,
+        };
+
+        // No ledger exists - should error
+        let result = handle_deposit_close(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::LedgerNotFound { .. })));
+    }
+
+    #[test]
+    fn test_handle_deposit_close_valid() {
+        use crate::types::Deposit;
+
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger with a deposit that has zero balance
+        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let deposit = Deposit::new(deposit_pubkey, None); // balance=0 by default
+        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = DepositCloseMsg {
+            partner_id: our_node_id,
+            pubkey: deposit_pubkey,
+        };
+
+        // Valid deposit close - should return DepositCloseValidated
+        let result = handle_deposit_close(&ctx, &msg, operator);
+        match result {
+            Ok(HandlerResult::Response(ResponseData::DepositCloseValidated { deposit_pubkey: pk, .. })) => {
+                assert_eq!(pk, deposit_pubkey);
+            }
+            other => panic!("Expected Response(DepositCloseValidated), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_handle_deposit_close_non_zero_balance() {
+        use crate::types::Deposit;
+
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger with a deposit that has non-zero balance
+        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut deposit = Deposit::new(deposit_pubkey, None);
+        deposit.balance = 50_000; // Non-zero balance
+        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = DepositCloseMsg {
+            partner_id: our_node_id,
+            pubkey: deposit_pubkey,
+        };
+
+        // Non-zero balance - should fail validation
+        let result = handle_deposit_close(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::ValidationFailed(_))));
+    }
+
+    #[test]
+    fn test_handle_deposit_close_locked_balance() {
+        use crate::types::Deposit;
+
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger with a deposit that has locked balance
+        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut deposit = Deposit::new(deposit_pubkey, None);
+        deposit.locked_balance = 10_000; // Has locked funds
+        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = DepositCloseMsg {
+            partner_id: our_node_id,
+            pubkey: deposit_pubkey,
+        };
+
+        // Locked balance - should fail validation
+        let result = handle_deposit_close(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::ValidationFailed(_))));
+    }
+
+    #[test]
+    fn test_handle_deposit_close_idempotent() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger without the deposit (already closed)
+        let ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = DepositCloseMsg {
+            partner_id: our_node_id,
+            pubkey: deposit_pubkey,
+        };
+
+        // Deposit doesn't exist - should return success (idempotent)
+        let result = handle_deposit_close(&ctx, &msg, operator);
+        match result {
+            Ok(HandlerResult::Response(ResponseData::DepositCloseValidated { .. })) => {}
+            other => panic!("Expected Response(DepositCloseValidated), got {:?}", other),
+        }
+    }
+
+    // ========================================================================
+    // Deposit Update Tests
+    // ========================================================================
+
+    #[test]
+    fn test_handle_deposit_update_wrong_partner() {
+        use crate::types::FeeStructure;
+
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let other_partner = create_test_pubkey(3);
+        let deposit_pubkey = create_test_pubkey(4);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let msg = DepositUpdateMsg {
+            partner_id: other_partner, // Not us
+            pubkey: deposit_pubkey,
+            new_fees: FeeStructure::default(),
+        };
+
+        // We're not the target partner - should be rejected
+        let result = handle_deposit_update(&ctx, &msg, operator);
+        assert!(matches!(result, Ok(HandlerResult::Rejected(_))));
+    }
+
+    #[test]
+    fn test_handle_deposit_update_no_ledger() {
+        use crate::types::FeeStructure;
+
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let msg = DepositUpdateMsg {
+            partner_id: our_node_id,
+            pubkey: deposit_pubkey,
+            new_fees: FeeStructure::default(),
+        };
+
+        // No ledger exists - should error
+        let result = handle_deposit_update(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::LedgerNotFound { .. })));
+    }
+
+    #[test]
+    fn test_handle_deposit_update_deposit_not_found() {
+        use crate::types::FeeStructure;
+
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger without the deposit
+        let ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = DepositUpdateMsg {
+            partner_id: our_node_id,
+            pubkey: deposit_pubkey,
+            new_fees: FeeStructure::default(),
+        };
+
+        // Deposit not found - should fail validation
+        let result = handle_deposit_update(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::ValidationFailed(_))));
+    }
+
+    #[test]
+    fn test_handle_deposit_update_valid() {
+        use crate::types::{Deposit, FeeStructure};
+
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger with the deposit
+        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let deposit = Deposit::new(deposit_pubkey, None);
+        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let new_fees = FeeStructure {
+            annualized_fixed: 2000,
+            annualized_bps: 100,
+            frequency_blocks: 288,
+        };
+
+        let msg = DepositUpdateMsg {
+            partner_id: our_node_id,
+            pubkey: deposit_pubkey,
+            new_fees,
+        };
+
+        // Valid deposit update - should return DepositUpdateValidated
+        let result = handle_deposit_update(&ctx, &msg, operator);
+        match result {
+            Ok(HandlerResult::Response(ResponseData::DepositUpdateValidated { deposit_pubkey: pk, .. })) => {
+                assert_eq!(pk, deposit_pubkey);
+            }
+            other => panic!("Expected Response(DepositUpdateValidated), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_handle_deposit_update_invalid_fees() {
+        use crate::types::{Deposit, FeeStructure};
+
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger with the deposit
+        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let deposit = Deposit::new(deposit_pubkey, None);
+        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        // Invalid fee structure with zero frequency
+        let invalid_fees = FeeStructure {
+            annualized_fixed: 2000,
+            annualized_bps: 100,
+            frequency_blocks: 0, // Invalid
+        };
+
+        let msg = DepositUpdateMsg {
+            partner_id: our_node_id,
+            pubkey: deposit_pubkey,
+            new_fees: invalid_fees,
+        };
+
+        // Invalid fees - should fail validation
+        let result = handle_deposit_update(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::ValidationFailed(_))));
+    }
+
+    #[test]
+    fn test_handle_deposit_update_fee_rate_too_high() {
+        use crate::types::{Deposit, FeeStructure};
+
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger with the deposit
+        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let deposit = Deposit::new(deposit_pubkey, None);
+        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        // Fee rate too high (over 100%)
+        let invalid_fees = FeeStructure {
+            annualized_fixed: 0,
+            annualized_bps: 15000, // 150% - too high
+            frequency_blocks: 144,
+        };
+
+        let msg = DepositUpdateMsg {
+            partner_id: our_node_id,
+            pubkey: deposit_pubkey,
+            new_fees: invalid_fees,
+        };
+
+        // Fee rate too high - should fail validation
+        let result = handle_deposit_update(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::ValidationFailed(_))));
     }
 }
