@@ -193,10 +193,11 @@ tracing::info!(peer = %peer_id, seq = n, "Processing message");
 | Metric | Before | Current |
 |--------|--------|---------|
 | deposits-ldk size | ~27K lines | ~39K lines |
-| deposits-core size | ~10K lines | ~20K lines |
+| deposits-core size | ~10K lines | ~23K lines |
+| **Core ratio** | ~27% | **37%** |
 
 Note: Total lines increased due to added functionality. The key metric is
-that ~10K lines of protocol logic moved from ldk to core.
+that ~13K lines of protocol logic moved from ldk to core.
 
 - **Better reusability** for non-LDK Lightning implementations
 - **Cleaner dependency graph** with clear layer separation
@@ -332,11 +333,11 @@ pub trait RecoveryContext: HandlerContext {
 
 ### Phase 2 Implementation Order
 
-16. **ValidationContext trait** - abstraction for ledger access
-17. **message_validation.rs** - move validation logic (~1,500 lines)
-18. **HandlerError type** - generic error to replace LightningError
-19. **HandlerContext trait** - abstraction for message sending
-20. **message_handlers.rs** - move handler logic (~1,700 lines)
+16. ✅ **ValidationContext trait** - abstraction for ledger access - commit ce3aeba
+17. ✅ **message_validation.rs** - move validation logic (~870 lines) - commit ce3aeba
+18. ✅ **HandlerError type** - generic error to replace LightningError - commit 8e83769
+19. ✅ **HandlerContext trait** - abstraction for message sending - commit 8e83769
+20. ✅ **message_handlers.rs** - move handler logic (13 handlers, ~1.8K lines) - commits 8e83769, ae6ca67, 43a42c2
 21. **RecoveryContext trait** - abstraction for recovery state
 22. **recovery_ops.rs** - move recovery logic (~1,000 lines)
 23. **DepositsMessage enum** - move to core (~900 lines)
