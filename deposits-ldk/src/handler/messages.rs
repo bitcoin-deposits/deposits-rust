@@ -3302,10 +3302,8 @@ impl lightning::ln::wire::CustomMessageReader for DepositsMessageReader {
     }
 }
 
-/// Check if a message type ID is a deposits protocol message
-pub fn is_deposits_message_type(type_id: u16) -> bool {
-    ALL_MESSAGE_TYPES.contains(&type_id)
-}
+// Re-export is_deposits_message_type from deposits-core
+pub use deposits_core::messages::is_deposits_message_type;
 
 // ============================================================================
 // Serde helpers for byte arrays (kept for API compatibility)
