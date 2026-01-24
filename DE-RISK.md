@@ -297,19 +297,27 @@ Analysis shows 74% of top handler files is generic protocol logic. Target: ~5,00
 
 ---
 
-### 2.4 messages.rs core definitions (Priority: MEDIUM)
+### 2.4 messages.rs core definitions (ALREADY COMPLETE)
 
-**Current location:** `deposits-ldk/src/handler/messages.rs` (~3,502 lines)
+**deposits-core/src/messages.rs** (~4,021 lines):
+- `DepositsMessage` enum - 12 clean V2 message types
+- `LedgerOperation` enum - 21 operation variants
+- `RecoveryMsg`, `CoordinationMsg`, `RelayMsg` and response types
+- Helper methods: `message_type()`, `partner_id()`, `to_operation()`, `encode()`, `decode()`
 
-**Generic:** 62% (~2,172 lines)
-**LDK-specific:** 38% (~1,330 lines) - Readable/Writeable impls
+**deposits-ldk/src/handler/messages.rs** (~3,502 lines):
+- LDK-specific `DepositsMessage` with ~60+ variants for:
+  - V1 backward compatibility aliases
+  - `Readable`/`Writeable` trait implementations
+  - Legacy message type wrappers
 
-**What to move:**
-- `DepositsMessage` enum definition
-- Helper methods (message_type, to_operation, descriptive_name)
-- V1/V2 conversion logic
+**Why this split is correct:**
+- Clean V2 protocol types are in core
+- LDK adapter provides V1 compatibility and LDK wire encoding
+- Core types are reusable with other Lightning implementations
+- LDK-specific code handles wire format details
 
-**Impact:** ~900 lines moved
+**Impact:** Already complete
 
 ---
 
@@ -346,4 +354,4 @@ pub trait RecoveryContext: HandlerContext {
 19. ✅ **HandlerContext trait** - abstraction for message sending - commit 8e83769
 20. ✅ **message_handlers.rs** - move handler logic (27 handlers, ~3K lines) - commits 8e83769, ae6ca67, 43a42c2, 487ecc9
 21. ✅ **recovery_ops.rs** - ASSESSED: core logic already in recovery.rs/recovery_claim.rs (~1.9K lines), remaining is LDK orchestration
-22. **DepositsMessage enum** - move to core (~900 lines)
+22. ✅ **DepositsMessage enum** - ALREADY COMPLETE: clean V2 types in core/messages.rs (4K lines), LDK adapter for V1 compat
