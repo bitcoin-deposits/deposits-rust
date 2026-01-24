@@ -214,5 +214,7 @@ tracing::info!(peer = %peer_id, seq = n, "Processing message");
 8. ✅ **Tracing in deposits-core** (add tracing crate, migrate message processors) - commit 6a5b0ff
 9. ✅ **LDK-compatible logging macros** (log_info!, log_debug!, etc. backed by tracing) - commit 12c03d6
 10. ✅ **build_taproot_reserves_script** (pure function moved to deposits-core) - commit 8f3feab
-11. **Logger abstraction in deposits-ldk** (425 log calls across 29 files - could migrate to tracing or keep LDK macros)
-12. **ChannelManagerOps** (blocked by CommitmentExtraOutput Lightning dependency)
+11. ✅ **Remove duplicate requires_acknowledgment** (was V2-only, now re-exports from deposits-core) - commit e8d2fc8
+12. ✅ **Remove duplicate get_message_category** (was missing V2/quorum/recovery types, now re-exports from deposits-core) - commit 300ce6a
+13. **Logger abstraction in deposits-ldk** (425 log calls across 29 files - could migrate to tracing or keep LDK macros)
+14. **ChannelManagerOps** (blocked by CommitmentExtraOutput Lightning dependency)
