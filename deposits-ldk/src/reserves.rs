@@ -2,6 +2,9 @@
 //!
 //! This module handles the creation, validation, and management of ReservesOutputs
 //! that are added to Lightning commitment transactions for Bitcoin Deposits protocol.
+//!
+//! Core types (`ReservesOutputProposal`, `SpendingPolicy`, `EmergencyRecovery`,
+//! `ProposalStatus`) are defined in `deposits-core` and re-exported here.
 
 use deposits_core::{
     DepositsError, DepositsResult,
@@ -17,113 +20,16 @@ use bitcoin::{
 use bitcoin::hashes::{Hash, HashEngine, sha256};
 use bitcoin::secp256k1::Secp256k1;
 
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::str::FromStr;
 
 use std::ops::Deref;
 use crate::log_info;
 
-// Serde helper for large arrays
-mod serde_arrays {
-    use serde::{Deserializer, Serializer, Deserialize, Serialize};
-
-    pub fn serialize<S>(bytes: &Option<[u8; 64]>, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match bytes {
-            Some(array) => array.as_slice().serialize(serializer),
-            None => serializer.serialize_none(),
-        }
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<[u8; 64]>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let opt: Option<Vec<u8>> = Option::deserialize(deserializer)?;
-        match opt {
-            Some(vec) => {
-                if vec.len() == 64 {
-                    let mut array = [0u8; 64];
-                    array.copy_from_slice(&vec);
-                    Ok(Some(array))
-                } else {
-                    Err(serde::de::Error::custom(format!("Expected 64 bytes, got {}", vec.len())))
-                }
-            }
-            None => Ok(None),
-        }
-    }
-}
-
-/// Represents a proposed ReservesOutput for inclusion in commitment transactions
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReservesOutputProposal {
-    /// Unique identifier for this proposal
-    pub proposal_id: [u8; 32],
-    /// Amount to be held in reserves (in satoshis)
-    pub amount: u64,
-    /// The Lightning partner this reserves output is shared with
-    pub partner_pubkey: PublicKey,
-    /// Ledger ID that disambiguates multiple ledgers
-    pub ledger_id: u16,
-    /// Taproot address where funds will be sent (as string)
-    pub reserves_address: String,
-    /// Spending conditions for the reserves output
-    pub spending_policy: SpendingPolicy,
-    /// Timeout block height for emergency recovery
-    pub emergency_timeout: u32,
-    /// Operator signature over proposal parameters
-    #[serde(with = "serde_arrays")]
-    pub operator_signature: Option<[u8; 64]>,
-    /// Ledger hash to embed in the Taproot output
-    pub ledger_hash: [u8; 32],
-}
-
-/// Defines who can spend from the reserves output under what conditions
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SpendingPolicy {
-    /// Normal cooperative spending (both parties sign)
-    pub cooperative_spending: bool,
-    /// Partner can unilaterally spend after timeout
-    pub partner_unilateral_timeout: u32,
-    /// Operator can unilaterally spend for valid deposits only
-    pub operator_deposit_spending: bool,
-    /// Emergency recovery conditions
-    pub emergency_recovery: EmergencyRecovery,
-}
-
-/// Emergency recovery spending conditions
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EmergencyRecovery {
-    /// Partner can recover after this timeout (blocks)
-    pub partner_timeout: u32,
-    /// Operator's emergency key for recovery
-    pub operator_emergency_key: PublicKey,
-    /// Additional recovery conditions
-    pub require_proof_of_reserves: bool,
-}
-
-/// Current status of a reserves output proposal
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ProposalStatus {
-    /// Proposal created but not yet sent
-    Draft,
-    /// Proposal sent to partner, awaiting response
-    Pending,
-    /// Partner accepted the proposal
-    Accepted,
-    /// Partner rejected the proposal
-    Rejected(String),
-    /// Proposal timed out
-    TimedOut,
-    /// Reserves output created and added to commitment transaction
-    Active,
-    /// Reserves output spent/removed
-    Closed,
-}
+// Re-export core types for backwards compatibility
+pub use deposits_core::{
+    ReservesOutputProposal, SpendingPolicy, EmergencyRecovery, ProposalStatus,
+};
 
 /// Manages reserves output proposals and their lifecycle
 pub struct ReservesOutputManager<L>
@@ -274,33 +180,18 @@ where
         &self,
         proposal: &ReservesOutputProposal,
     ) -> DepositsResult<bool> {
-        // Verify the address is correctly derived (same as create_proposal)
+        // Use core validation for basic parameters
+        proposal.validate()?;
+
+        // Additional validation: verify the address is correctly derived
         let operator_pubkey = self.operator_secret_key.public_key(&Secp256k1::new());
         let expected_address = self.create_reserves_address(operator_pubkey, proposal.partner_pubkey, proposal.ledger_id)?;
 
-        // Validate reserves address matches expected derivation
         if proposal.reserves_address != expected_address.to_string() {
             return Err(DepositsError::InvalidAddress(
                 "Reserves address doesn't match expected derivation".to_string()
             ));
         }
-
-        // Validate amount is reasonable (minimum 1000 sats, maximum 100M sats)
-        if proposal.amount < 1000 || proposal.amount > 100_000_000 {
-            return Err(DepositsError::InvalidAmount(
-                "Reserves amount out of acceptable range".to_string()
-            ));
-        }
-
-        // Validate timeout is reasonable (minimum 144 blocks = 1 day)
-        if proposal.emergency_timeout < 144 {
-            return Err(DepositsError::InvalidTimeout(
-                "Emergency timeout too short".to_string()
-            ));
-        }
-
-        // Validate spending policy
-        self.validate_spending_policy(&proposal.spending_policy)?;
 
         // TODO: Verify partner signature when we receive proposals from partners
 
@@ -551,34 +442,23 @@ where
 
         Ok(bitcoin::Address::p2wpkh(&compressed_pk, self.network))
     }
-
-    /// Validate spending policy parameters
-    fn validate_spending_policy(
-        &self,
-        policy: &SpendingPolicy,
-    ) -> DepositsResult<()> {
-        // Partner timeout must be reasonable
-        if policy.partner_unilateral_timeout < 144 {
-            return Err(DepositsError::InvalidTimeout(
-                "Partner unilateral timeout too short".to_string()
-            ));
-        }
-
-        // Emergency recovery timeout must be longer than partner timeout
-        if policy.emergency_recovery.partner_timeout <= policy.partner_unilateral_timeout {
-            return Err(DepositsError::InvalidTimeout(
-                "Emergency recovery timeout must be longer than partner timeout".to_string()
-            ));
-        }
-
-        Ok(())
-    }
 }
 
-/// Helper functions for reserves output management
-impl ReservesOutputProposal {
+/// Extension methods for ReservesOutputProposal that require Bitcoin transaction types
+pub trait ReservesOutputProposalExt {
     /// Create a spending transaction for cooperative spending
-    pub fn create_cooperative_spend(
+    fn create_cooperative_spend(
+        &self,
+        destination: &Address,
+        fee_rate: u64,
+    ) -> DepositsResult<Transaction>;
+
+    /// Get the expected script pubkey for this reserves output
+    fn script_pubkey(&self) -> ScriptBuf;
+}
+
+impl ReservesOutputProposalExt for ReservesOutputProposal {
+    fn create_cooperative_spend(
         &self,
         destination: &Address,
         fee_rate: u64, // sats per vbyte
@@ -613,13 +493,7 @@ impl ReservesOutputProposal {
         Ok(tx)
     }
 
-    /// Check if emergency timeout has been reached
-    pub fn is_emergency_timeout_reached(&self, current_height: u32) -> bool {
-        current_height >= self.emergency_timeout
-    }
-
-    /// Get the expected script pubkey for this reserves output
-    pub fn script_pubkey(&self) -> ScriptBuf {
+    fn script_pubkey(&self) -> ScriptBuf {
         Address::from_str(&self.reserves_address).unwrap().assume_checked().script_pubkey()
     }
 }

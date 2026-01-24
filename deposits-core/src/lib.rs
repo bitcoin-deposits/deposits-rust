@@ -71,6 +71,7 @@ pub mod validation;
 pub mod handler_types;
 pub mod handler_traits;
 pub mod payment_tracker;
+pub mod reserves_proposal;
 pub mod signature_utils;
 
 // Re-exports for convenience
@@ -137,6 +138,10 @@ pub use handler_traits::{
     // as they have LDK-specific types (Arc<RwLock<Ledger>>, BroadcasterInterface)
 };
 pub use payment_tracker::DepositInvoiceIndex;
+pub use reserves_proposal::{
+    ReservesOutputProposal, SpendingPolicy, EmergencyRecovery, ProposalStatus,
+    serde_arrays,
+};
 pub use signature_utils::{
     create_deposit_guarantee_signature, verify_deposit_guarantee_signature,
     create_payment_authorization_signature,
