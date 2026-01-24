@@ -396,9 +396,4 @@ where
         engine.input(&buffer);
         sha256::Hash::from_engine(engine).to_byte_array()
     }
-
-    /// Check if a message type requires acknowledgment
-    pub(super) fn requires_acknowledgment(message_type: u16) -> bool {
-        super::messages::consts::requires_acknowledgment(message_type)
-    }
 }

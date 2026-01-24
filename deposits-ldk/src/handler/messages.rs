@@ -2438,25 +2438,15 @@ pub mod consts {
         RELAY_NWC_RESPONSE, RELAY_NWC_DELIVERY_PROOF,
     };
 
-    // Re-export helper function
-    pub use super::requires_acknowledgment;
+    // Re-export utility functions from deposits-core
+    pub use deposits_core::messages::{
+        requires_acknowledgment, is_deposits_message_type, get_message_category,
+        type_id_to_const_name, type_id_to_variant_name,
+        MESSAGES_REQUIRING_ACK, ALL_V1_MESSAGE_TYPES, ALL_V2_MESSAGE_TYPES,
+    };
 }
 
-// Note: ALL_MESSAGE_TYPES has been consolidated into deposits-core as
-// ALL_V1_MESSAGE_TYPES and ALL_V2_MESSAGE_TYPES. Use is_deposits_message_type()
-// from deposits-core to check if a message type is a deposits protocol message.
-
-/// Messages that require acknowledgment (V2 only - for V1 use deposits_core::MESSAGES_REQUIRING_ACK)
-pub const MESSAGES_REQUIRING_ACK: &[u16] = &[
-    LEDGER_UPDATE,
-];
-
-/// Check if a message type requires acknowledgment
-pub fn requires_acknowledgment(type_id: u16) -> bool {
-    MESSAGES_REQUIRING_ACK.contains(&type_id)
-}
-
-// Re-export message type name functions from deposits-core
+// Re-export message type name functions from deposits-core for backwards compatibility
 pub use deposits_core::messages::{type_id_to_const_name, type_id_to_variant_name};
 
 // ============================================================================
