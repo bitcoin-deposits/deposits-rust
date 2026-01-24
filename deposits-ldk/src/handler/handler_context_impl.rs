@@ -160,6 +160,34 @@ where
                     operator, partner, deposit_pubkey, amount
                 );
             }
+            ProtocolEvent::RecoveryClaimRequested { operator, partner, claimant, tier_index } => {
+                log_info!(
+                    self.logger,
+                    "Protocol event: RecoveryClaimRequested - operator={}, partner={}, claimant={}, tier={}",
+                    operator, partner, claimant, tier_index
+                );
+            }
+            ProtocolEvent::RecoveryClaimSignatureReceived { operator, partner, signer } => {
+                log_info!(
+                    self.logger,
+                    "Protocol event: RecoveryClaimSignatureReceived - operator={}, partner={}, signer={}",
+                    operator, partner, signer
+                );
+            }
+            ProtocolEvent::RecoveryClaimCompleted { old_operator, partner, new_operator, claim_txid, confirmation_block } => {
+                log_info!(
+                    self.logger,
+                    "Protocol event: RecoveryClaimCompleted - old_operator={}, partner={}, new_operator={}",
+                    old_operator, partner, new_operator
+                );
+            }
+            ProtocolEvent::ChannelClosed { operator, partner, channel_id, reason } => {
+                log_info!(
+                    self.logger,
+                    "Protocol event: ChannelClosed - operator={}, partner={}, reason={:?}",
+                    operator, partner, reason
+                );
+            }
         }
     }
 

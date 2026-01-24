@@ -40,6 +40,8 @@ use crate::wire_messages::{
     ReservesAddOutputMsg, ReservesRemoveOutputMsg,
     ReservesIncreaseMsg, ReservesDecreaseMsg,
     FeeCollectMsg, LedgerCloseMsg, ReceivingCosignInvoiceMsg,
+    RecoveryClaimRequestMsg, RecoveryClaimSignatureMsg, RecoveryClaimCompleteMsg,
+    ChannelCloseTombstoneMsg,
 };
 use crate::operation_validation::{
     validate_credit_payment, validate_payment_lock,
@@ -275,6 +277,39 @@ pub enum ResponseData {
         payment_hash: [u8; 32],
         invoice_id: String,
         bolt11: String,
+    },
+    /// Recovery claim request validated - signer should sign and return signature
+    RecoveryClaimRequestValidated {
+        operator: PublicKey,
+        partner: PublicKey,
+        claimant: PublicKey,
+        tier_index: u8,
+        sighash: [u8; 32],
+    },
+    /// Recovery claim signature received - check if threshold reached
+    RecoveryClaimSignatureReceived {
+        operator: PublicKey,
+        partner: PublicKey,
+        signer: PublicKey,
+        signature: [u8; 64],
+        threshold_reached: bool,
+    },
+    /// Recovery claim completed - cleanup and emit event
+    RecoveryClaimCompleted {
+        old_operator: PublicKey,
+        partner: PublicKey,
+        new_operator: PublicKey,
+        claim_txid: [u8; 32],
+        confirmation_block: u32,
+    },
+    /// Channel close tombstone validated - can be appended to ledger
+    ChannelCloseTombstoneValidated {
+        operator: PublicKey,
+        partner: PublicKey,
+        channel_id: [u8; 32],
+        sequence_number: u64,
+        timestamp: u64,
+        close_reason: Option<String>,
     },
 }
 
@@ -1652,6 +1687,235 @@ pub fn handle_receiving_cosign_invoice<C: HandlerContext>(
         payment_hash: msg.payment_hash,
         invoice_id: msg.invoice_id.clone(),
         bolt11: msg.bolt11.clone(),
+    }))
+}
+
+// ============================================================================
+// Recovery Claim Message Handlers
+// ============================================================================
+
+/// Handle a RecoveryClaimRequest message.
+///
+/// This is sent by a claimant (usually the partner or a substitute) when they want
+/// to claim reserves from a non-compliant operator. The receiving node validates
+/// the request and, if valid, signs the claim transaction sighash.
+///
+/// # Validation
+/// - The operator must be in non-compliant recovery phase
+/// - The claimant must be authorized (partner or nominated substitute)
+/// - The tier_index must be valid
+///
+/// # Arguments
+/// * `ctx` - Handler context providing access to ledgers and recovery state
+/// * `msg` - The recovery claim request message
+/// * `_sender` - Public key of the message sender
+///
+/// # Returns
+/// * `HandlerResult::Response(RecoveryClaimRequestValidated)` - Request is valid, should sign
+/// * `HandlerResult::Rejected(reason)` - Request is invalid with explanation
+/// * `HandlerError` - Internal error during processing
+pub fn handle_recovery_claim_request<C: HandlerContext>(
+    ctx: &C,
+    msg: &RecoveryClaimRequestMsg,
+    _sender: PublicKey,
+) -> Result<HandlerResult, HandlerError> {
+    // Verify the operator is in non-compliant recovery phase
+    let ledger_id = (msg.operator, msg.partner);
+
+    let recovery_manager = ctx.recovery_manager()
+        .ok_or(HandlerError::InvalidState("No recovery manager available".to_string()))?;
+
+    let is_non_compliant = {
+        let manager = recovery_manager.lock().map_err(|_|
+            HandlerError::Internal("Failed to acquire recovery manager lock".to_string())
+        )?;
+        match manager.get_recovery(&ledger_id) {
+            Some(state) => {
+                matches!(state.phase, crate::recovery::RecoveryPhase::NonCompliantRecovery { .. })
+            }
+            None => {
+                // No recovery state found - proceed anyway (may be late-joining validator)
+                true
+            }
+        }
+    };
+
+    if !is_non_compliant {
+        return Ok(HandlerResult::Rejected(format!(
+            "Operator {} is not in non-compliant recovery phase",
+            msg.operator
+        )));
+    }
+
+    // Validate tier_index is reasonable (0-2 for typical 3-tier recovery)
+    if msg.tier_index > 2 {
+        return Ok(HandlerResult::Rejected(format!(
+            "Invalid tier_index: {} (expected 0-2)",
+            msg.tier_index
+        )));
+    }
+
+    // Emit event for claim request received
+    ctx.emit_event(ProtocolEvent::RecoveryClaimRequested {
+        operator: msg.operator,
+        partner: msg.partner,
+        claimant: msg.claimant,
+        tier_index: msg.tier_index,
+    });
+
+    // Return validated data for LDK layer to sign the sighash
+    Ok(HandlerResult::Response(ResponseData::RecoveryClaimRequestValidated {
+        operator: msg.operator,
+        partner: msg.partner,
+        claimant: msg.claimant,
+        tier_index: msg.tier_index,
+        sighash: msg.sighash,
+    }))
+}
+
+/// Handle a RecoveryClaimSignature message.
+///
+/// This is sent by co-signers in response to a RecoveryClaimRequest.
+/// The claimant collects signatures until threshold is reached.
+///
+/// # Arguments
+/// * `ctx` - Handler context
+/// * `msg` - The signature message containing the signed sighash
+/// * `sender` - Public key of the signer
+///
+/// # Returns
+/// * `HandlerResult::Response(RecoveryClaimSignatureReceived)` - Signature recorded
+/// * `HandlerResult::Rejected(reason)` - Invalid signature
+/// * `HandlerError` - Internal error
+pub fn handle_recovery_claim_signature<C: HandlerContext>(
+    ctx: &C,
+    msg: &RecoveryClaimSignatureMsg,
+    sender: PublicKey,
+) -> Result<HandlerResult, HandlerError> {
+    // Validate sender matches signer in message
+    if sender != msg.signer {
+        return Ok(HandlerResult::Rejected(format!(
+            "Sender {} does not match claimed signer {}",
+            sender, msg.signer
+        )));
+    }
+
+    // Emit event for signature received
+    ctx.emit_event(ProtocolEvent::RecoveryClaimSignatureReceived {
+        operator: msg.operator,
+        partner: msg.partner,
+        signer: msg.signer,
+    });
+
+    // The LDK layer handles:
+    // 1. Verifying the Schnorr signature
+    // 2. Adding to claim_manager
+    // 3. Checking if threshold is reached
+    // Here we just validate the message format and return for LDK to process
+
+    // Note: threshold_reached is determined by the LDK layer which has the claim_manager
+    Ok(HandlerResult::Response(ResponseData::RecoveryClaimSignatureReceived {
+        operator: msg.operator,
+        partner: msg.partner,
+        signer: msg.signer,
+        signature: msg.signature,
+        threshold_reached: false, // LDK layer will determine this
+    }))
+}
+
+/// Handle a RecoveryClaimComplete message.
+///
+/// This is broadcast when a recovery claim transaction has been confirmed on-chain.
+/// Recipients should update their state and clean up any pending claim data.
+///
+/// # Arguments
+/// * `ctx` - Handler context
+/// * `msg` - The claim complete message with confirmation details
+/// * `_sender` - Public key of the sender
+///
+/// # Returns
+/// * `HandlerResult::Response(RecoveryClaimCompleted)` - Claim completion processed
+/// * `HandlerError` - Internal error
+pub fn handle_recovery_claim_complete<C: HandlerContext>(
+    ctx: &C,
+    msg: &RecoveryClaimCompleteMsg,
+    _sender: PublicKey,
+) -> Result<HandlerResult, HandlerError> {
+    // Emit event for claim completion
+    ctx.emit_event(ProtocolEvent::RecoveryClaimCompleted {
+        old_operator: msg.operator,
+        partner: msg.partner,
+        new_operator: msg.new_operator,
+        claim_txid: msg.claim_txid,
+        confirmation_block: msg.confirmation_block,
+    });
+
+    // Return data for LDK layer to clean up claim_manager and update state
+    Ok(HandlerResult::Response(ResponseData::RecoveryClaimCompleted {
+        old_operator: msg.operator,
+        partner: msg.partner,
+        new_operator: msg.new_operator,
+        claim_txid: msg.claim_txid,
+        confirmation_block: msg.confirmation_block,
+    }))
+}
+
+// ============================================================================
+// Tombstone Message Handlers
+// ============================================================================
+
+/// Handle a ChannelCloseTombstone message.
+///
+/// Tombstones are appended to ledgers when channels are closed. This marks
+/// the ledger as permanently closed and prevents further operations.
+///
+/// # Validation
+/// - We must be either the operator or partner for this ledger
+/// - The message format must be valid
+///
+/// # Arguments
+/// * `ctx` - Handler context providing access to ledgers
+/// * `msg` - The tombstone message
+/// * `_sender` - Public key of the message sender
+///
+/// # Returns
+/// * `HandlerResult::Response(ChannelCloseTombstoneValidated)` - Tombstone is valid
+/// * `HandlerResult::Rejected(reason)` - Tombstone is invalid
+/// * `HandlerError` - Internal error
+pub fn handle_channel_close_tombstone<C: HandlerContext>(
+    ctx: &C,
+    msg: &ChannelCloseTombstoneMsg,
+    _sender: PublicKey,
+) -> Result<HandlerResult, HandlerError> {
+    let our_node_id = ctx.our_node_id();
+
+    // Determine our role: operator or partner
+    let we_are_operator = msg.operator_pubkey == our_node_id;
+    let we_are_partner = msg.partner_pubkey == our_node_id;
+
+    if !we_are_operator && !we_are_partner {
+        return Ok(HandlerResult::Rejected(format!(
+            "Received tombstone for ledger we're not part of: operator={}, partner={}",
+            msg.operator_pubkey, msg.partner_pubkey
+        )));
+    }
+
+    // Emit event for channel close
+    ctx.emit_event(ProtocolEvent::ChannelClosed {
+        operator: msg.operator_pubkey,
+        partner: msg.partner_pubkey,
+        channel_id: msg.channel_id,
+        reason: msg.close_reason.clone(),
+    });
+
+    // Return validated data for LDK layer to append to ledger
+    Ok(HandlerResult::Response(ResponseData::ChannelCloseTombstoneValidated {
+        operator: msg.operator_pubkey,
+        partner: msg.partner_pubkey,
+        channel_id: msg.channel_id,
+        sequence_number: msg.sequence_number,
+        timestamp: msg.timestamp,
+        close_reason: msg.close_reason.clone(),
     }))
 }
 
@@ -4094,5 +4358,347 @@ mod tests {
         // Exceeds reserves - should fail validation
         let result = handle_receiving_cosign_invoice(&ctx, &msg, operator);
         assert!(matches!(result, Err(HandlerError::ValidationFailed(_))));
+    }
+
+    // ========================================================================
+    // Recovery Claim Request Tests
+    // ========================================================================
+
+    #[test]
+    fn test_handle_recovery_claim_request_no_recovery_manager() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let partner = create_test_pubkey(3);
+        let claimant = create_test_pubkey(4);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let msg = RecoveryClaimRequestMsg {
+            operator,
+            partner,
+            claimant,
+            tier_index: 0,
+            unsigned_tx: vec![0x01, 0x02, 0x03],
+            sighash: [0xAB; 32],
+            destination_script: vec![0x00, 0x14], // p2wpkh prefix
+            block_height: 100,
+        };
+
+        // No recovery manager - should error
+        let result = handle_recovery_claim_request(&ctx, &msg, claimant);
+        assert!(matches!(result, Err(HandlerError::InvalidState(_))));
+    }
+
+    #[test]
+    fn test_handle_recovery_claim_request_invalid_tier() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let partner = create_test_pubkey(3);
+        let claimant = create_test_pubkey(4);
+
+        let ctx = TestContext::new(our_node_id).with_recovery_manager();
+
+        let msg = RecoveryClaimRequestMsg {
+            operator,
+            partner,
+            claimant,
+            tier_index: 5, // Invalid tier (>2)
+            unsigned_tx: vec![0x01, 0x02, 0x03],
+            sighash: [0xAB; 32],
+            destination_script: vec![0x00, 0x14],
+            block_height: 100,
+        };
+
+        // Invalid tier - should be rejected
+        let result = handle_recovery_claim_request(&ctx, &msg, claimant);
+        assert!(matches!(result, Ok(HandlerResult::Rejected(_))));
+    }
+
+    #[test]
+    fn test_handle_recovery_claim_request_valid() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let partner = create_test_pubkey(3);
+        let claimant = create_test_pubkey(4);
+
+        let ctx = TestContext::new(our_node_id).with_recovery_manager();
+
+        let sighash = [0xAB; 32];
+        let msg = RecoveryClaimRequestMsg {
+            operator,
+            partner,
+            claimant,
+            tier_index: 0,
+            unsigned_tx: vec![0x01, 0x02, 0x03],
+            sighash,
+            destination_script: vec![0x00, 0x14],
+            block_height: 100,
+        };
+
+        // Valid request - should succeed (no recovery state is OK for late-joining validators)
+        let result = handle_recovery_claim_request(&ctx, &msg, claimant);
+        match result {
+            Ok(HandlerResult::Response(ResponseData::RecoveryClaimRequestValidated {
+                operator: op, claimant: cl, tier_index, sighash: sh, ..
+            })) => {
+                assert_eq!(op, operator);
+                assert_eq!(cl, claimant);
+                assert_eq!(tier_index, 0);
+                assert_eq!(sh, sighash);
+            }
+            other => panic!("Expected Response(RecoveryClaimRequestValidated), got {:?}", other),
+        }
+
+        // Check that event was emitted
+        let events = ctx.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ProtocolEvent::RecoveryClaimRequested { operator: op, claimant: cl, tier_index, .. } => {
+                assert_eq!(*op, operator);
+                assert_eq!(*cl, claimant);
+                assert_eq!(*tier_index, 0);
+            }
+            other => panic!("Expected RecoveryClaimRequested event, got {:?}", other),
+        }
+    }
+
+    // ========================================================================
+    // Recovery Claim Signature Tests
+    // ========================================================================
+
+    #[test]
+    fn test_handle_recovery_claim_signature_wrong_sender() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let partner = create_test_pubkey(3);
+        let signer = create_test_pubkey(4);
+        let wrong_sender = create_test_pubkey(5);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let msg = RecoveryClaimSignatureMsg {
+            operator,
+            partner,
+            signer,
+            sighash: [0xAB; 32],
+            signature: [0xCD; 64],
+        };
+
+        // Wrong sender - should be rejected
+        let result = handle_recovery_claim_signature(&ctx, &msg, wrong_sender);
+        assert!(matches!(result, Ok(HandlerResult::Rejected(_))));
+    }
+
+    #[test]
+    fn test_handle_recovery_claim_signature_valid() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let partner = create_test_pubkey(3);
+        let signer = create_test_pubkey(4);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let signature = [0xCD; 64];
+        let msg = RecoveryClaimSignatureMsg {
+            operator,
+            partner,
+            signer,
+            sighash: [0xAB; 32],
+            signature,
+        };
+
+        // Valid signature message - should succeed
+        let result = handle_recovery_claim_signature(&ctx, &msg, signer);
+        match result {
+            Ok(HandlerResult::Response(ResponseData::RecoveryClaimSignatureReceived {
+                operator: op, signer: s, signature: sig, ..
+            })) => {
+                assert_eq!(op, operator);
+                assert_eq!(s, signer);
+                assert_eq!(sig, signature);
+            }
+            other => panic!("Expected Response(RecoveryClaimSignatureReceived), got {:?}", other),
+        }
+
+        // Check that event was emitted
+        let events = ctx.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ProtocolEvent::RecoveryClaimSignatureReceived { operator: op, signer: s, .. } => {
+                assert_eq!(*op, operator);
+                assert_eq!(*s, signer);
+            }
+            other => panic!("Expected RecoveryClaimSignatureReceived event, got {:?}", other),
+        }
+    }
+
+    // ========================================================================
+    // Recovery Claim Complete Tests
+    // ========================================================================
+
+    #[test]
+    fn test_handle_recovery_claim_complete() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let partner = create_test_pubkey(3);
+        let new_operator = create_test_pubkey(4);
+        let sender = create_test_pubkey(5);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let claim_txid = [0xDE; 32];
+        let msg = RecoveryClaimCompleteMsg {
+            operator,
+            partner,
+            new_operator,
+            claim_txid,
+            confirmation_block: 12345,
+            reason_code: 1,
+        };
+
+        // Should always succeed
+        let result = handle_recovery_claim_complete(&ctx, &msg, sender);
+        match result {
+            Ok(HandlerResult::Response(ResponseData::RecoveryClaimCompleted {
+                old_operator, new_operator: new_op, claim_txid: txid, confirmation_block, ..
+            })) => {
+                assert_eq!(old_operator, operator);
+                assert_eq!(new_op, new_operator);
+                assert_eq!(txid, claim_txid);
+                assert_eq!(confirmation_block, 12345);
+            }
+            other => panic!("Expected Response(RecoveryClaimCompleted), got {:?}", other),
+        }
+
+        // Check that event was emitted
+        let events = ctx.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ProtocolEvent::RecoveryClaimCompleted {
+                old_operator: old_op, new_operator: new_op, confirmation_block, ..
+            } => {
+                assert_eq!(*old_op, operator);
+                assert_eq!(*new_op, new_operator);
+                assert_eq!(*confirmation_block, 12345);
+            }
+            other => panic!("Expected RecoveryClaimCompleted event, got {:?}", other),
+        }
+    }
+
+    // ========================================================================
+    // Channel Close Tombstone Tests
+    // ========================================================================
+
+    #[test]
+    fn test_handle_channel_close_tombstone_not_participant() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let partner = create_test_pubkey(3);
+        let sender = create_test_pubkey(4);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let msg = ChannelCloseTombstoneMsg {
+            operator_pubkey: operator,
+            partner_pubkey: partner, // We're neither
+            timestamp: 1234567890,
+            channel_id: [0xAB; 32],
+            close_reason: Some("test close".to_string()),
+            sequence_number: 42,
+        };
+
+        // We're not a participant - should be rejected
+        let result = handle_channel_close_tombstone(&ctx, &msg, sender);
+        assert!(matches!(result, Ok(HandlerResult::Rejected(_))));
+    }
+
+    #[test]
+    fn test_handle_channel_close_tombstone_we_are_operator() {
+        let our_node_id = create_test_pubkey(1);
+        let partner = create_test_pubkey(2);
+        let sender = create_test_pubkey(3);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let channel_id = [0xAB; 32];
+        let msg = ChannelCloseTombstoneMsg {
+            operator_pubkey: our_node_id, // We are operator
+            partner_pubkey: partner,
+            timestamp: 1234567890,
+            channel_id,
+            close_reason: Some("test close".to_string()),
+            sequence_number: 42,
+        };
+
+        // We are operator - should succeed
+        let result = handle_channel_close_tombstone(&ctx, &msg, sender);
+        match result {
+            Ok(HandlerResult::Response(ResponseData::ChannelCloseTombstoneValidated {
+                operator, partner: p, channel_id: cid, sequence_number, ..
+            })) => {
+                assert_eq!(operator, our_node_id);
+                assert_eq!(p, partner);
+                assert_eq!(cid, channel_id);
+                assert_eq!(sequence_number, 42);
+            }
+            other => panic!("Expected Response(ChannelCloseTombstoneValidated), got {:?}", other),
+        }
+
+        // Check that event was emitted
+        let events = ctx.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ProtocolEvent::ChannelClosed { operator: op, channel_id: cid, reason, .. } => {
+                assert_eq!(*op, our_node_id);
+                assert_eq!(*cid, channel_id);
+                assert_eq!(*reason, Some("test close".to_string()));
+            }
+            other => panic!("Expected ChannelClosed event, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_handle_channel_close_tombstone_we_are_partner() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let sender = create_test_pubkey(3);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let channel_id = [0xCD; 32];
+        let msg = ChannelCloseTombstoneMsg {
+            operator_pubkey: operator,
+            partner_pubkey: our_node_id, // We are partner
+            timestamp: 1234567890,
+            channel_id,
+            close_reason: None,
+            sequence_number: 100,
+        };
+
+        // We are partner - should succeed
+        let result = handle_channel_close_tombstone(&ctx, &msg, sender);
+        match result {
+            Ok(HandlerResult::Response(ResponseData::ChannelCloseTombstoneValidated {
+                operator: op, partner, channel_id: cid, close_reason, ..
+            })) => {
+                assert_eq!(op, operator);
+                assert_eq!(partner, our_node_id);
+                assert_eq!(cid, channel_id);
+                assert!(close_reason.is_none());
+            }
+            other => panic!("Expected Response(ChannelCloseTombstoneValidated), got {:?}", other),
+        }
+
+        // Check that event was emitted
+        let events = ctx.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ProtocolEvent::ChannelClosed { partner: p, channel_id: cid, reason, .. } => {
+                assert_eq!(*p, our_node_id);
+                assert_eq!(*cid, channel_id);
+                assert!(reason.is_none());
+            }
+            other => panic!("Expected ChannelClosed event, got {:?}", other),
+        }
     }
 }

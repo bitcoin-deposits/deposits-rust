@@ -935,6 +935,34 @@ pub enum ProtocolEvent {
         amount: u64,
         payment_hash: [u8; 32],
     },
+    /// A recovery claim was requested
+    RecoveryClaimRequested {
+        operator: PublicKey,
+        partner: PublicKey,
+        claimant: PublicKey,
+        tier_index: u8,
+    },
+    /// A recovery claim signature was received
+    RecoveryClaimSignatureReceived {
+        operator: PublicKey,
+        partner: PublicKey,
+        signer: PublicKey,
+    },
+    /// A recovery claim was completed
+    RecoveryClaimCompleted {
+        old_operator: PublicKey,
+        partner: PublicKey,
+        new_operator: PublicKey,
+        claim_txid: [u8; 32],
+        confirmation_block: u32,
+    },
+    /// A channel was closed (tombstone received)
+    ChannelClosed {
+        operator: PublicKey,
+        partner: PublicKey,
+        channel_id: [u8; 32],
+        reason: Option<String>,
+    },
 }
 
 // ============================================================================
