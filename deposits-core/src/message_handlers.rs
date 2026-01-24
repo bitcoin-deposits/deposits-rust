@@ -34,6 +34,12 @@ use crate::wire_messages::{
     CollateralConsentRequestMsg, CollateralConsentResponseMsg,
     CollateralAddPartnerMsg, CollateralRemovePartnerMsg,
     CollateralAttestationMsg, UncreditedPaymentMsg,
+    ReceivingCreditPaymentMsg, SendingLockPaymentMsg,
+    SendingFulfillPaymentMsg, SendingFailPaymentMsg,
+};
+use crate::operation_validation::{
+    validate_credit_payment, validate_payment_lock,
+    validate_payment_fulfill, validate_payment_fail,
 };
 
 // ============================================================================
@@ -104,6 +110,44 @@ pub enum ResponseData {
         deposit_pubkey: PublicKey,
         amount_msat: u64,
         settlement_sequence: u64,
+    },
+    /// Credit payment validated - partner should sign and ACK
+    CreditPaymentValidated {
+        operator: PublicKey,
+        partner: PublicKey,
+        deposit_pubkey: PublicKey,
+        amount: u64,
+        payment_hash: [u8; 32],
+        invoice_id: String,
+        sequence_number: u64,
+    },
+    /// Lock payment validated - partner should sign and ACK
+    LockPaymentValidated {
+        operator: PublicKey,
+        partner: PublicKey,
+        deposit_pubkey: PublicKey,
+        amount: u64,
+        payment_id: [u8; 32],
+        sequence_number: u64,
+    },
+    /// Fulfill payment validated - partner should sign and ACK
+    FulfillPaymentValidated {
+        operator: PublicKey,
+        partner: PublicKey,
+        deposit_pubkey: PublicKey,
+        amount: u64,
+        payment_id: [u8; 32],
+        preimage: [u8; 32],
+        sequence_number: u64,
+    },
+    /// Fail payment validated - partner should sign and ACK
+    FailPaymentValidated {
+        operator: PublicKey,
+        partner: PublicKey,
+        deposit_pubkey: PublicKey,
+        amount: u64,
+        payment_id: [u8; 32],
+        sequence_number: u64,
     },
 }
 
@@ -512,6 +556,265 @@ pub fn handle_uncredited_payment<C: HandlerContext>(
         deposit_pubkey: msg.deposit_pubkey,
         amount_msat: msg.amount_msat,
         settlement_sequence: msg.settlement_sequence,
+    }))
+}
+
+// ============================================================================
+// Payment Message Handlers
+// ============================================================================
+
+/// Handle a ReceivingCreditPayment message.
+///
+/// Received by partners when an operator credits a deposit after receiving
+/// a Lightning payment. The partner validates the credit and signs the ledger
+/// update (porcupine dance).
+///
+/// # Arguments
+/// * `ctx` - Handler context providing access to ledgers and messaging
+/// * `msg` - The credit payment message
+/// * `sender` - Public key of the message sender (should be the operator)
+///
+/// # Returns
+/// * `HandlerResult::Response(CreditPaymentValidated)` - Credit is valid, partner should sign and ACK
+/// * `HandlerResult::Rejected(reason)` - Credit is invalid with explanation
+/// * `HandlerError` - Internal error during processing
+pub fn handle_receiving_credit_payment<C: HandlerContext>(
+    ctx: &C,
+    msg: &ReceivingCreditPaymentMsg,
+    sender: PublicKey,
+) -> Result<HandlerResult, HandlerError> {
+    let our_node_id = ctx.our_node_id();
+
+    // We must be the partner to process this message
+    if msg.partner_id != our_node_id {
+        return Ok(HandlerResult::Rejected(format!(
+            "We ({}) are not the target partner ({})",
+            our_node_id, msg.partner_id
+        )));
+    }
+
+    // Get the ledger - sender (operator) and us (partner)
+    let ledger_arc = ctx.get_ledger(&sender, &msg.partner_id)
+        .ok_or(HandlerError::LedgerNotFound {
+            operator: sender,
+            partner: msg.partner_id,
+        })?;
+
+    // Validate the credit payment
+    {
+        let ledger = ledger_arc.read().map_err(|_|
+            HandlerError::Internal("Failed to acquire ledger read lock".to_string())
+        )?;
+
+        validate_credit_payment(
+            &ledger,
+            msg.deposit_pubkey,
+            msg.amount,
+            &msg.payment_hash,
+        ).map_err(|e| HandlerError::ValidationFailed(e))?;
+    }
+
+    // Emit event for credit being received
+    ctx.emit_event(ProtocolEvent::PaymentCredited {
+        operator: sender,
+        partner: msg.partner_id,
+        deposit_pubkey: msg.deposit_pubkey,
+        amount: msg.amount,
+        payment_hash: msg.payment_hash,
+    });
+
+    // Return validated data for LDK layer to record to ledger and sign
+    Ok(HandlerResult::Response(ResponseData::CreditPaymentValidated {
+        operator: sender,
+        partner: msg.partner_id,
+        deposit_pubkey: msg.deposit_pubkey,
+        amount: msg.amount,
+        payment_hash: msg.payment_hash,
+        invoice_id: msg.invoice_id.clone(),
+        sequence_number: msg.sequence_number,
+    }))
+}
+
+/// Handle a SendingLockPayment message.
+///
+/// Received by partners when an operator locks balance for an outbound payment.
+/// The partner validates the lock and signs the ledger update.
+///
+/// # Arguments
+/// * `ctx` - Handler context providing access to ledgers and messaging
+/// * `msg` - The lock payment message
+/// * `sender` - Public key of the message sender (should be the operator)
+///
+/// # Returns
+/// * `HandlerResult::Response(LockPaymentValidated)` - Lock is valid, partner should sign and ACK
+/// * `HandlerResult::Rejected(reason)` - Lock is invalid with explanation
+/// * `HandlerError` - Internal error during processing
+pub fn handle_sending_lock_payment<C: HandlerContext>(
+    ctx: &C,
+    msg: &SendingLockPaymentMsg,
+    sender: PublicKey,
+) -> Result<HandlerResult, HandlerError> {
+    let our_node_id = ctx.our_node_id();
+
+    // Get the ledger - sender (operator) and us (partner)
+    let ledger_arc = ctx.get_ledger(&sender, &our_node_id)
+        .ok_or(HandlerError::LedgerNotFound {
+            operator: sender,
+            partner: our_node_id,
+        })?;
+
+    // Validate the payment lock
+    {
+        let ledger = ledger_arc.read().map_err(|_|
+            HandlerError::Internal("Failed to acquire ledger read lock".to_string())
+        )?;
+
+        validate_payment_lock(
+            &ledger,
+            msg.pubkey,
+            msg.amount,
+            &msg.payment_id,
+            &msg.scriptpubkey_signature,
+        ).map_err(|e| HandlerError::ValidationFailed(e))?;
+    }
+
+    // Return validated data for LDK layer to record to ledger and sign
+    Ok(HandlerResult::Response(ResponseData::LockPaymentValidated {
+        operator: sender,
+        partner: our_node_id,
+        deposit_pubkey: msg.pubkey,
+        amount: msg.amount,
+        payment_id: msg.payment_id,
+        sequence_number: msg.sequence_number,
+    }))
+}
+
+/// Handle a SendingFulfillPayment message.
+///
+/// Received by partners when an operator fulfills a payment (preimage received).
+/// The partner validates the fulfill and signs the ledger update.
+///
+/// # Arguments
+/// * `ctx` - Handler context providing access to ledgers and messaging
+/// * `msg` - The fulfill payment message
+/// * `sender` - Public key of the message sender (should be the operator)
+///
+/// # Returns
+/// * `HandlerResult::Response(FulfillPaymentValidated)` - Fulfill is valid, partner should sign and ACK
+/// * `HandlerResult::Rejected(reason)` - Fulfill is invalid with explanation
+/// * `HandlerError` - Internal error during processing
+pub fn handle_sending_fulfill_payment<C: HandlerContext>(
+    ctx: &C,
+    msg: &SendingFulfillPaymentMsg,
+    sender: PublicKey,
+) -> Result<HandlerResult, HandlerError> {
+    let our_node_id = ctx.our_node_id();
+
+    // Get the ledger - sender (operator) and us (partner)
+    let ledger_arc = ctx.get_ledger(&sender, &our_node_id)
+        .ok_or(HandlerError::LedgerNotFound {
+            operator: sender,
+            partner: our_node_id,
+        })?;
+
+    // Validate the payment fulfill - verifies preimage matches payment_id
+    validate_payment_fulfill(
+        &msg.pubkey,
+        msg.amount,
+        &msg.payment_id,
+        &msg.scriptpubkey_signature,
+        &msg.preimage,
+    ).map_err(|e| HandlerError::ValidationFailed(e))?;
+
+    // Also verify deposit exists in ledger
+    {
+        let ledger = ledger_arc.read().map_err(|_|
+            HandlerError::Internal("Failed to acquire ledger read lock".to_string())
+        )?;
+
+        if !ledger.state.deposits.contains_key(&msg.pubkey) {
+            return Ok(HandlerResult::Rejected(format!(
+                "Deposit with pubkey {} does not exist",
+                msg.pubkey
+            )));
+        }
+    }
+
+    // Emit event for payment being sent
+    ctx.emit_event(ProtocolEvent::PaymentSent {
+        operator: sender,
+        partner: our_node_id,
+        deposit_pubkey: msg.pubkey,
+        amount: msg.amount,
+        payment_id: msg.payment_id,
+    });
+
+    // Return validated data for LDK layer to record to ledger and sign
+    Ok(HandlerResult::Response(ResponseData::FulfillPaymentValidated {
+        operator: sender,
+        partner: our_node_id,
+        deposit_pubkey: msg.pubkey,
+        amount: msg.amount,
+        payment_id: msg.payment_id,
+        preimage: msg.preimage,
+        sequence_number: msg.sequence_number,
+    }))
+}
+
+/// Handle a SendingFailPayment message.
+///
+/// Received by partners when an operator fails a payment (payment didn't complete).
+/// The partner validates the fail and signs the ledger update to unlock the balance.
+///
+/// # Arguments
+/// * `ctx` - Handler context providing access to ledgers and messaging
+/// * `msg` - The fail payment message
+/// * `sender` - Public key of the message sender (should be the operator)
+///
+/// # Returns
+/// * `HandlerResult::Response(FailPaymentValidated)` - Fail is valid, partner should sign and ACK
+/// * `HandlerResult::Rejected(reason)` - Fail is invalid with explanation
+/// * `HandlerError` - Internal error during processing
+pub fn handle_sending_fail_payment<C: HandlerContext>(
+    ctx: &C,
+    msg: &SendingFailPaymentMsg,
+    sender: PublicKey,
+) -> Result<HandlerResult, HandlerError> {
+    let our_node_id = ctx.our_node_id();
+
+    // Get the ledger - sender (operator) and us (partner)
+    let ledger_arc = ctx.get_ledger(&sender, &our_node_id)
+        .ok_or(HandlerError::LedgerNotFound {
+            operator: sender,
+            partner: our_node_id,
+        })?;
+
+    // Validate the payment fail
+    validate_payment_fail(msg.amount)
+        .map_err(|e| HandlerError::ValidationFailed(e))?;
+
+    // Also verify deposit exists in ledger
+    {
+        let ledger = ledger_arc.read().map_err(|_|
+            HandlerError::Internal("Failed to acquire ledger read lock".to_string())
+        )?;
+
+        if !ledger.state.deposits.contains_key(&msg.pubkey) {
+            return Ok(HandlerResult::Rejected(format!(
+                "Deposit with pubkey {} does not exist",
+                msg.pubkey
+            )));
+        }
+    }
+
+    // Return validated data for LDK layer to record to ledger and sign
+    Ok(HandlerResult::Response(ResponseData::FailPaymentValidated {
+        operator: sender,
+        partner: our_node_id,
+        deposit_pubkey: msg.pubkey,
+        amount: msg.amount,
+        payment_id: msg.payment_id,
+        sequence_number: msg.sequence_number,
     }))
 }
 
@@ -934,8 +1237,6 @@ mod tests {
 
     #[test]
     fn test_handle_uncredited_payment_invalid_preimage() {
-        use bitcoin::hashes::{sha256, Hash};
-
         let our_node_id = create_test_pubkey(1);
         let operator = create_test_pubkey(2);
         let partner = create_test_pubkey(3);
@@ -1049,6 +1350,484 @@ mod tests {
                 assert_eq!(*amt, 1_000_000);
             }
             other => panic!("Expected UncreditedPaymentReceived event, got {:?}", other),
+        }
+    }
+
+    // ========================================================================
+    // Receiving Credit Payment Tests
+    // ========================================================================
+
+    #[test]
+    fn test_handle_receiving_credit_payment_wrong_partner() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let other_partner = create_test_pubkey(3);
+        let deposit_pubkey = create_test_pubkey(4);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let msg = ReceivingCreditPaymentMsg {
+            payment_hash: [0xAB; 32],
+            deposit_pubkey,
+            amount: 100_000,
+            invoice_id: "test_invoice".to_string(),
+            partner_id: other_partner, // Not us
+            sequence_number: 0,
+        };
+
+        // We're not the target partner - should be rejected
+        let result = handle_receiving_credit_payment(&ctx, &msg, operator);
+        assert!(matches!(result, Ok(HandlerResult::Rejected(_))));
+    }
+
+    #[test]
+    fn test_handle_receiving_credit_payment_no_ledger() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let msg = ReceivingCreditPaymentMsg {
+            payment_hash: [0xAB; 32],
+            deposit_pubkey,
+            amount: 100_000,
+            invoice_id: "test_invoice".to_string(),
+            partner_id: our_node_id,
+            sequence_number: 0,
+        };
+
+        // No ledger exists - should error
+        let result = handle_receiving_credit_payment(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::LedgerNotFound { .. })));
+    }
+
+    #[test]
+    fn test_handle_receiving_credit_payment_deposit_not_found() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger without the deposit
+        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        ledger.state.reserves.amount = 100_000;
+        ledger.state.received_collateral_amount = 100_000;
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        // Create payment hash that's not all the same byte
+        let mut payment_hash = [0u8; 32];
+        for i in 0..32 { payment_hash[i] = i as u8; }
+
+        let msg = ReceivingCreditPaymentMsg {
+            payment_hash,
+            deposit_pubkey, // This deposit doesn't exist
+            amount: 50_000,
+            invoice_id: "test_invoice".to_string(),
+            partner_id: our_node_id,
+            sequence_number: 0,
+        };
+
+        // Deposit not found - should fail validation
+        let result = handle_receiving_credit_payment(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::ValidationFailed(_))));
+    }
+
+    #[test]
+    fn test_handle_receiving_credit_payment_valid() {
+        use crate::types::Deposit;
+
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger with the deposit
+        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        ledger.state.reserves.amount = 100_000;
+        ledger.state.received_collateral_amount = 100_000;
+        let deposit = Deposit::new(deposit_pubkey, None);
+        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        // Create payment hash that's not all the same byte
+        let mut payment_hash = [0u8; 32];
+        for i in 0..32 { payment_hash[i] = i as u8; }
+
+        let msg = ReceivingCreditPaymentMsg {
+            payment_hash,
+            deposit_pubkey,
+            amount: 50_000,
+            invoice_id: "test_invoice".to_string(),
+            partner_id: our_node_id,
+            sequence_number: 0,
+        };
+
+        // Valid credit - should return CreditPaymentValidated
+        let result = handle_receiving_credit_payment(&ctx, &msg, operator);
+        match result {
+            Ok(HandlerResult::Response(ResponseData::CreditPaymentValidated { amount, .. })) => {
+                assert_eq!(amount, 50_000);
+            }
+            other => panic!("Expected Response(CreditPaymentValidated), got {:?}", other),
+        }
+
+        // Check that event was emitted
+        let events = ctx.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ProtocolEvent::PaymentCredited { amount: amt, .. } => {
+                assert_eq!(*amt, 50_000);
+            }
+            other => panic!("Expected PaymentCredited event, got {:?}", other),
+        }
+    }
+
+    // ========================================================================
+    // Sending Lock Payment Tests
+    // ========================================================================
+
+    #[test]
+    fn test_handle_sending_lock_payment_no_ledger() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let msg = SendingLockPaymentMsg {
+            pubkey: deposit_pubkey,
+            amount: 50_000,
+            payment_id: [0xAB; 32],
+            sequence_number: 0,
+            scriptpubkey_signature: [0u8; 64], // Placeholder accepted during dev
+        };
+
+        // No ledger exists - should error
+        let result = handle_sending_lock_payment(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::LedgerNotFound { .. })));
+    }
+
+    #[test]
+    fn test_handle_sending_lock_payment_deposit_not_found() {
+        use crate::types::Deposit;
+
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+        let other_deposit = create_test_pubkey(4);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger with a different deposit
+        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let deposit = Deposit::new(other_deposit, None);
+        ledger.state.deposits.insert(other_deposit, deposit);
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = SendingLockPaymentMsg {
+            pubkey: deposit_pubkey, // Different deposit
+            amount: 50_000,
+            payment_id: [0xAB; 32],
+            sequence_number: 0,
+            scriptpubkey_signature: [0u8; 64],
+        };
+
+        // Deposit not found - should fail validation
+        let result = handle_sending_lock_payment(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::ValidationFailed(_))));
+    }
+
+    #[test]
+    fn test_handle_sending_lock_payment_insufficient_balance() {
+        use crate::types::Deposit;
+
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger with a deposit that has low balance
+        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut deposit = Deposit::new(deposit_pubkey, None);
+        deposit.balance = 10_000; // Low balance
+        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = SendingLockPaymentMsg {
+            pubkey: deposit_pubkey,
+            amount: 50_000, // More than balance
+            payment_id: [0xAB; 32],
+            sequence_number: 0,
+            scriptpubkey_signature: [0u8; 64],
+        };
+
+        // Insufficient balance - should fail validation
+        let result = handle_sending_lock_payment(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::ValidationFailed(_))));
+    }
+
+    #[test]
+    fn test_handle_sending_lock_payment_valid() {
+        use crate::types::Deposit;
+
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger with a deposit that has sufficient balance
+        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut deposit = Deposit::new(deposit_pubkey, None);
+        deposit.balance = 100_000;
+        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = SendingLockPaymentMsg {
+            pubkey: deposit_pubkey,
+            amount: 50_000,
+            payment_id: [0xAB; 32],
+            sequence_number: 0,
+            scriptpubkey_signature: [0u8; 64], // Placeholder accepted during dev
+        };
+
+        // Valid lock - should return LockPaymentValidated
+        let result = handle_sending_lock_payment(&ctx, &msg, operator);
+        match result {
+            Ok(HandlerResult::Response(ResponseData::LockPaymentValidated { amount, .. })) => {
+                assert_eq!(amount, 50_000);
+            }
+            other => panic!("Expected Response(LockPaymentValidated), got {:?}", other),
+        }
+    }
+
+    // ========================================================================
+    // Sending Fulfill Payment Tests
+    // ========================================================================
+
+    #[test]
+    fn test_handle_sending_fulfill_payment_no_ledger() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let msg = SendingFulfillPaymentMsg {
+            pubkey: deposit_pubkey,
+            amount: 50_000,
+            payment_id: [0xAB; 32],
+            sequence_number: 0,
+            scriptpubkey_signature: [0u8; 64],
+            preimage: [0x42; 32],
+        };
+
+        // No ledger exists - should error
+        let result = handle_sending_fulfill_payment(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::LedgerNotFound { .. })));
+    }
+
+    #[test]
+    fn test_handle_sending_fulfill_payment_invalid_preimage() {
+        use crate::types::Deposit;
+
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger with the deposit
+        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let deposit = Deposit::new(deposit_pubkey, None);
+        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        // Create a preimage that doesn't match the payment_id
+        let preimage = [42u8; 32];
+        let wrong_payment_id = [0xAB; 32]; // Doesn't match SHA256(preimage)
+
+        let msg = SendingFulfillPaymentMsg {
+            pubkey: deposit_pubkey,
+            amount: 50_000,
+            payment_id: wrong_payment_id,
+            sequence_number: 0,
+            scriptpubkey_signature: [0u8; 64],
+            preimage,
+        };
+
+        // Invalid preimage - should fail validation
+        let result = handle_sending_fulfill_payment(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::ValidationFailed(_))));
+    }
+
+    #[test]
+    fn test_handle_sending_fulfill_payment_valid() {
+        use bitcoin::hashes::{sha256, Hash};
+        use crate::types::Deposit;
+
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger with the deposit
+        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut deposit = Deposit::new(deposit_pubkey, None);
+        deposit.balance = 100_000;
+        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        // Create a valid preimage and compute its hash
+        let preimage = [42u8; 32];
+        let payment_hash = sha256::Hash::hash(&preimage);
+
+        let msg = SendingFulfillPaymentMsg {
+            pubkey: deposit_pubkey,
+            amount: 50_000,
+            payment_id: *payment_hash.as_byte_array(),
+            sequence_number: 0,
+            scriptpubkey_signature: [0u8; 64], // Placeholder accepted during dev
+            preimage,
+        };
+
+        // Valid fulfill - should return FulfillPaymentValidated
+        let result = handle_sending_fulfill_payment(&ctx, &msg, operator);
+        match result {
+            Ok(HandlerResult::Response(ResponseData::FulfillPaymentValidated { amount, preimage: p, .. })) => {
+                assert_eq!(amount, 50_000);
+                assert_eq!(p, preimage);
+            }
+            other => panic!("Expected Response(FulfillPaymentValidated), got {:?}", other),
+        }
+
+        // Check that event was emitted
+        let events = ctx.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ProtocolEvent::PaymentSent { amount: amt, .. } => {
+                assert_eq!(*amt, 50_000);
+            }
+            other => panic!("Expected PaymentSent event, got {:?}", other),
+        }
+    }
+
+    // ========================================================================
+    // Sending Fail Payment Tests
+    // ========================================================================
+
+    #[test]
+    fn test_handle_sending_fail_payment_no_ledger() {
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+
+        let ctx = TestContext::new(our_node_id);
+
+        let msg = SendingFailPaymentMsg {
+            pubkey: deposit_pubkey,
+            amount: 50_000,
+            payment_id: [0xAB; 32],
+            sequence_number: 0,
+        };
+
+        // No ledger exists - should error
+        let result = handle_sending_fail_payment(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::LedgerNotFound { .. })));
+    }
+
+    #[test]
+    fn test_handle_sending_fail_payment_zero_amount() {
+        use crate::types::Deposit;
+
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger with the deposit
+        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let deposit = Deposit::new(deposit_pubkey, None);
+        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = SendingFailPaymentMsg {
+            pubkey: deposit_pubkey,
+            amount: 0, // Zero amount
+            payment_id: [0xAB; 32],
+            sequence_number: 0,
+        };
+
+        // Zero amount - should fail validation
+        let result = handle_sending_fail_payment(&ctx, &msg, operator);
+        assert!(matches!(result, Err(HandlerError::ValidationFailed(_))));
+    }
+
+    #[test]
+    fn test_handle_sending_fail_payment_deposit_not_found() {
+        use crate::types::Deposit;
+
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+        let other_deposit = create_test_pubkey(4);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger with a different deposit
+        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let deposit = Deposit::new(other_deposit, None);
+        ledger.state.deposits.insert(other_deposit, deposit);
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = SendingFailPaymentMsg {
+            pubkey: deposit_pubkey, // Different deposit
+            amount: 50_000,
+            payment_id: [0xAB; 32],
+            sequence_number: 0,
+        };
+
+        // Deposit not found - should be rejected
+        let result = handle_sending_fail_payment(&ctx, &msg, operator);
+        assert!(matches!(result, Ok(HandlerResult::Rejected(_))));
+    }
+
+    #[test]
+    fn test_handle_sending_fail_payment_valid() {
+        use crate::types::Deposit;
+
+        let our_node_id = create_test_pubkey(1);
+        let operator = create_test_pubkey(2);
+        let deposit_pubkey = create_test_pubkey(3);
+
+        let mut ctx = TestContext::new(our_node_id);
+
+        // Create a ledger with the deposit
+        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let deposit = Deposit::new(deposit_pubkey, None);
+        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ctx.add_ledger(operator, our_node_id, ledger);
+
+        let msg = SendingFailPaymentMsg {
+            pubkey: deposit_pubkey,
+            amount: 50_000,
+            payment_id: [0xAB; 32],
+            sequence_number: 0,
+        };
+
+        // Valid fail - should return FailPaymentValidated
+        let result = handle_sending_fail_payment(&ctx, &msg, operator);
+        match result {
+            Ok(HandlerResult::Response(ResponseData::FailPaymentValidated { amount, .. })) => {
+                assert_eq!(amount, 50_000);
+            }
+            other => panic!("Expected Response(FailPaymentValidated), got {:?}", other),
         }
     }
 }

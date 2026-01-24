@@ -238,6 +238,9 @@ pub use message_handlers::{
     handle_collateral_consent_request, handle_collateral_consent_response,
     handle_collateral_add_partner, handle_collateral_remove_partner,
     handle_collateral_attestation, handle_uncredited_payment,
+    // Payment handler functions
+    handle_receiving_credit_payment, handle_sending_lock_payment,
+    handle_sending_fulfill_payment, handle_sending_fail_payment,
     // Helper functions
     make_ledger_id,
 };
