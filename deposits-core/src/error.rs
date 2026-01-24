@@ -13,6 +13,35 @@ use thiserror::Error;
 /// Result type for deposits operations.
 pub type DepositsResult<T> = Result<T, DepositsError>;
 
+/// Error type for protocol message handlers.
+/// Replaces LDK's LightningError for Lightning-agnostic handling.
+#[derive(Debug, Clone)]
+pub enum HandlerError {
+    /// Validation failed
+    ValidationFailed(String),
+    /// Ledger not found
+    LedgerNotFound { operator: PublicKey, partner: PublicKey },
+    /// Invalid state for operation
+    InvalidState(String),
+    /// Internal error
+    Internal(String),
+}
+
+impl std::fmt::Display for HandlerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ValidationFailed(msg) => write!(f, "validation failed: {}", msg),
+            Self::LedgerNotFound { operator, partner } => {
+                write!(f, "ledger not found: operator={}, partner={}", operator, partner)
+            }
+            Self::InvalidState(msg) => write!(f, "invalid state: {}", msg),
+            Self::Internal(msg) => write!(f, "internal error: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for HandlerError {}
+
 /// Errors that can occur in the deposits protocol.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum DepositsError {

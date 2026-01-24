@@ -79,6 +79,7 @@ pub mod types;
 pub mod validation;
 pub mod wire_messages;
 pub mod message_validation;
+pub mod message_handlers;
 
 // Re-exports for convenience
 pub use constants::{
@@ -86,7 +87,7 @@ pub use constants::{
     MIN_EMERGENCY_TIMEOUT_BLOCKS, MAX_EMERGENCY_TIMEOUT_BLOCKS, MIN_RESERVES_RATIO_PERCENT,
     COLLATERAL_REPORTING_PERIOD_BLOCKS, DEPOSITS_PROTOCOL_VERSION,
 };
-pub use error::{DepositsError, DepositsResult};
+pub use error::{DepositsError, DepositsResult, HandlerError};
 pub use messages::{DepositsMessage, LedgerOperation, HashStrategy};
 pub use recovery::{
     RecoveryManager, RecoveryPhase, RecoveryVote, RecoveryOutcome, RecoveryError,
@@ -216,6 +217,8 @@ pub use wire_messages::{
 pub use message_validation::{
     // ValidationContext trait for implementing message validation
     ValidationContext,
+    // HandlerContext trait for implementing message handlers (extends ValidationContext)
+    HandlerContext,
     // LedgerOperation validation
     validate_ledger_operation,
     // Message validation functions (with _msg suffix to distinguish from operation_validation)
@@ -225,4 +228,14 @@ pub use message_validation::{
     validate_reserves_increase_msg, validate_reserves_decrease_msg,
     validate_fee_collect_msg, validate_collateral_increase_msg, validate_collateral_decrease_msg,
     validate_receiving_cosign_invoice_msg, validate_ledger_close_msg,
+};
+pub use message_handlers::{
+    // Handler result types
+    HandlerResult, ResponseData,
+    // Core handler functions
+    handle_quorum_join_request, handle_quorum_vote_request,
+    handle_recovery_vote,
+    handle_collateral_consent_request, handle_collateral_consent_response,
+    // Helper functions
+    make_ledger_id,
 };

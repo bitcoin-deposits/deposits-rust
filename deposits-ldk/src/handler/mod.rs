@@ -84,6 +84,7 @@ mod signature_utils;
 mod handler_types;
 mod constants;
 pub mod validation_ext;
+mod handler_context_impl;
 
 // Test module
 #[cfg(test)]
@@ -131,5 +132,8 @@ pub use ledger_ext::{LedgerExt, SignedLedgerUpdateExt, SignedLedgerUpdateLogExt}
 
 // Re-export validation extension trait
 pub use validation_ext::LedgerConformanceValidatorExt;
+
+// Re-export core handler extension trait
+pub use handler_context_impl::CoreHandlerExt;
 
 // Re-export constants (internal use)

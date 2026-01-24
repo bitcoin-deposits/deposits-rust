@@ -100,6 +100,35 @@ pub trait ValidationContext: Send + Sync {
 }
 
 // ============================================================================
+// Handler Context (extends ValidationContext for message handling)
+// ============================================================================
+
+use crate::error::HandlerError;
+use crate::messages::DepositsMessage;
+use crate::recovery::RecoveryManager;
+use bitcoin::secp256k1::SecretKey;
+use std::sync::Mutex;
+
+/// Context for handling protocol messages.
+/// Extends ValidationContext with message sending and event emission.
+pub trait HandlerContext: ValidationContext {
+    /// Queue a message to be sent to a peer
+    fn queue_message(&self, peer: PublicKey, msg: DepositsMessage) -> Result<(), HandlerError>;
+
+    /// Emit a protocol event (deposit event, recovery event, etc.)
+    fn emit_event(&self, event: crate::traits::ProtocolEvent);
+
+    /// Get recovery manager access
+    fn recovery_manager(&self) -> Option<Arc<Mutex<RecoveryManager>>>;
+
+    /// Get our secret key for signing (optional, for handlers that need it)
+    fn our_secret_key(&self) -> Option<SecretKey> { None }
+
+    /// Get the current block height
+    fn current_block_height(&self) -> u32 { 0 }
+}
+
+// ============================================================================
 // LedgerOperation Validation (for V2 protocol)
 // ============================================================================
 
