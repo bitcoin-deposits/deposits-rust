@@ -1448,7 +1448,37 @@ impl DepositsMessage {
     /// Convert from V2 message to our enum
     pub fn from_v2(msg: DepositsMessageCore) -> Self {
         match msg {
-            DepositsMessageCore::LedgerUpdate(m) => Self::LedgerUpdate(m.into()),
+            DepositsMessageCore::LedgerUpdate(m) => {
+                // Unwrap specific operations to their V1 variants for handler compatibility
+                match &m.operation {
+                    LedgerOperation::CollateralAddPartner { collateral_partner, collateral_partner_signature } => {
+                        Self::CollateralAddPartner {
+                            operator_id: m.operator_id,
+                            partner_id: m.partner_id,
+                            collateral_partner: *collateral_partner,
+                            collateral_partner_signature: *collateral_partner_signature,
+                        }
+                    }
+                    LedgerOperation::CollateralRemovePartner { collateral_partner, operator_signature } => {
+                        Self::CollateralRemovePartner {
+                            partner_id: m.partner_id,
+                            collateral_partner: *collateral_partner,
+                            operator_signature: *operator_signature,
+                        }
+                    }
+                    LedgerOperation::CollateralAttestation { collateral_operator, amount, block_height, signature, ledger_hash } => {
+                        Self::CollateralAttestation {
+                            operator: m.operator_id,
+                            collateral_partner: *collateral_operator,
+                            amount: *amount,
+                            block_height: *block_height,
+                            signature: *signature,
+                            ledger_hash: *ledger_hash,
+                        }
+                    }
+                    _ => Self::LedgerUpdate(m.into()),
+                }
+            }
             DepositsMessageCore::LedgerUpdateResponse(m) => Self::LedgerUpdateResponse(m.into()),
             DepositsMessageCore::Handshake(m) => Self::Handshake(m.into()),
             DepositsMessageCore::HandshakeResponse(m) => Self::HandshakeResponse(m.into()),
