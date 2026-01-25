@@ -628,6 +628,93 @@ impl DepositsMessage {
         }
     }
 
+    /// Get the V2 wire format type ID for this message.
+    /// V1 variants are mapped to their V2 equivalents:
+    /// - Ledger operations (Deposit*, Reserves*, Collateral*, Fee*, etc.) → LEDGER_UPDATE
+    /// - Coordination types (Quorum*, CollateralConsent*, CosignInvoice, UpdateReserves) → COORDINATION
+    /// - Coordination responses (QuorumJoin/State/Vote/Membership, CollateralConsent, AcceptReserves) → COORDINATION_RESPONSE
+    /// - Recovery types (RecoveryVote, RecoveryClaimRequest, UncreditedPayment, RecoveryClaimComplete) → RECOVERY
+    /// - Recovery responses (RecoveryClaimSignature) → RECOVERY_RESPONSE
+    pub fn v2_type_id(&self) -> u16 {
+        use self::consts::*;
+        match self {
+            // Core V2 types - return as-is
+            Self::LedgerUpdate(_) => LEDGER_UPDATE,
+            Self::LedgerUpdateResponse(_) => LEDGER_UPDATE_RESPONSE,
+            Self::Handshake(_) => HANDSHAKE,
+            Self::HandshakeResponse(_) => HANDSHAKE_RESPONSE,
+            Self::Sync(_) => SYNC,
+            Self::SyncResponse(_) => SYNC_RESPONSE,
+            Self::Recovery(_) => RECOVERY,
+            Self::RecoveryResponse(_) => RECOVERY_RESPONSE,
+            Self::Coordination(_) => COORDINATION,
+            Self::CoordinationResponse(_) => COORDINATION_RESPONSE,
+            Self::Relay(_) => RELAY,
+            Self::RelayResponse(_) => RELAY_RESPONSE,
+
+            // V1 aliases that map directly to V2
+            Self::LedgerOpenRequest(_) => HANDSHAKE,
+            Self::LedgerOpenResponse(_) => HANDSHAKE_RESPONSE,
+            Self::Ack(_) => LEDGER_UPDATE_RESPONSE,
+            Self::SignedUpdate(_) => LEDGER_UPDATE,
+            Self::SyncRequest(_) => SYNC,
+
+            // V1 ledger operations → LEDGER_UPDATE
+            Self::DepositOpen { .. } |
+            Self::DepositClose { .. } |
+            Self::DepositUpdate { .. } |
+            Self::ReservesAddOutput { .. } |
+            Self::ReservesRemoveOutput { .. } |
+            Self::ReservesIncrease { .. } |
+            Self::ReservesDecrease { .. } |
+            Self::ReservesUpdateOutput { .. } |
+            Self::ReceivingCreditPayment { .. } |
+            Self::SendingLockPayment { .. } |
+            Self::SendingFulfillPayment { .. } |
+            Self::SendingFailPayment { .. } |
+            Self::CollateralAddPartner { .. } |
+            Self::CollateralRemovePartner { .. } |
+            Self::CollateralIncrease { .. } |
+            Self::CollateralDecrease { .. } |
+            Self::CollateralAttestation { .. } |
+            Self::MaintenanceFeeCollect { .. } |
+            Self::LedgerClose { .. } |
+            Self::ChannelCloseTombstone { .. } |
+            Self::DepositLockTransfer { .. } |
+            Self::DepositFulfillTransfer { .. } |
+            Self::DepositFailTransfer { .. } => LEDGER_UPDATE,
+
+            // V1 coordination types → COORDINATION
+            Self::ReceivingCosignInvoice { .. } |
+            Self::CollateralConsentRequest { .. } |
+            Self::QuorumJoinRequest { .. } |
+            Self::QuorumVoteRequest { .. } |
+            Self::QuorumVote { .. } |
+            Self::UpdateReserves { .. } => COORDINATION,
+
+            // V1 coordination responses → COORDINATION_RESPONSE
+            Self::CollateralConsentResponse { .. } |
+            Self::QuorumJoinResponse { .. } |
+            Self::QuorumStateSync { .. } |
+            Self::QuorumMembershipChange { .. } |
+            Self::AcceptReserves { .. } => COORDINATION_RESPONSE,
+
+            // V1 recovery types → RECOVERY
+            Self::RecoveryVote { .. } |
+            Self::RecoveryClaimRequest { .. } |
+            Self::RecoveryClaimComplete { .. } |
+            Self::UncreditedPayment { .. } => RECOVERY,
+
+            // V1 recovery responses → RECOVERY_RESPONSE
+            Self::RecoveryClaimSignature { .. } => RECOVERY_RESPONSE,
+
+            // V1 relay types → RELAY/RELAY_RESPONSE
+            Self::RelayNwcRequest(_) => RELAY,
+            Self::RelayNwcResponse(_) => RELAY_RESPONSE,
+            Self::RelayNwcDeliveryProof(_) => RELAY,
+        }
+    }
+
     pub fn variant_name(&self) -> &'static str {
         match self {
             // Core V2 types
@@ -2858,118 +2945,22 @@ impl Readable for DepositsMessage {
 
 impl Writeable for DepositsMessage {
     fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
-        // V1 message types with custom Readable/Writeable implementations must be
-        // serialized directly using their V1 format. Using encode() -> into_v2()
-        // would produce the wrong wire format (V2 format with V1 type prefix).
-        //
-        // For V2 message types and V1 aliases that map to V2, use encode().
-        match self {
-            // === V1 message types - serialize using LdkXxxMsg wrappers ===
-            Self::DepositOpen { partner_id, pubkey, fees, payment_hash, invoice, cosigner_guarantee_signature } => {
-                LdkDepositOpenMsg::from(DepositOpenMsg { partner_id: *partner_id, pubkey: *pubkey, fees: fees.clone(), payment_hash: *payment_hash, invoice: invoice.clone(), cosigner_guarantee_signature: *cosigner_guarantee_signature }).write(writer)
-            }
-            Self::DepositClose { partner_id, pubkey } => {
-                LdkDepositCloseMsg::from(DepositCloseMsg { partner_id: *partner_id, pubkey: *pubkey }).write(writer)
-            }
-            Self::ReservesAddOutput { initial_amount, spend_to, partner_id, collateral_partners } => {
-                LdkReservesAddOutputMsg::from(ReservesAddOutputMsg { initial_amount: *initial_amount, spend_to: *spend_to, partner_id: *partner_id, collateral_partners: collateral_partners.clone() }).write(writer)
-            }
-            Self::ReservesRemoveOutput { partner_id, remove_all } => {
-                LdkReservesRemoveOutputMsg::from(ReservesRemoveOutputMsg { partner_id: *partner_id, remove_all: *remove_all }).write(writer)
-            }
-            Self::ReservesIncrease { partner_id, new_amount } => {
-                LdkReservesIncreaseMsg::from(ReservesIncreaseMsg { partner_id: *partner_id, new_amount: *new_amount }).write(writer)
-            }
-            Self::ReservesDecrease { partner_id, new_amount } => {
-                LdkReservesDecreaseMsg::from(ReservesDecreaseMsg { partner_id: *partner_id, new_amount: *new_amount }).write(writer)
-            }
-            Self::ReservesUpdateOutput { partner_id, spend_to } => {
-                LdkReservesUpdateOutputMsg::from(ReservesUpdateOutputMsg { partner_id: *partner_id, spend_to: *spend_to }).write(writer)
-            }
-            Self::UpdateReserves { channel_id, reserves_sats, script_pubkey, ledger_hash, remote_ledger_hash } => {
-                LdkUpdateReservesMsg::from(UpdateReservesMsg {
-                    channel_id: *channel_id,
-                    reserves_sats: *reserves_sats,
-                    script_pubkey: script_pubkey.clone(),
-                    ledger_hash: *ledger_hash,
-                    remote_ledger_hash: *remote_ledger_hash,
-                }).write(writer)
-            }
-            Self::AcceptReserves { channel_id } => {
-                LdkAcceptReservesMsg::from(AcceptReservesMsg { channel_id: *channel_id }).write(writer)
-            }
-            Self::ReceivingCreditPayment { payment_hash, deposit_pubkey, amount, invoice_id, partner_id, sequence_number } => {
-                LdkReceivingCreditPaymentMsg::from(ReceivingCreditPaymentMsg { payment_hash: *payment_hash, deposit_pubkey: *deposit_pubkey, amount: *amount, invoice_id: invoice_id.clone(), partner_id: *partner_id, sequence_number: *sequence_number }).write(writer)
-            }
-            Self::ReceivingCosignInvoice { amount, payment_hash, expires, assigned_deposit, ref invoice_id, ref bolt11 } => {
-                LdkReceivingCosignInvoiceMsg::from(ReceivingCosignInvoiceMsg {
-                    amount: *amount,
-                    payment_hash: *payment_hash,
-                    expires: *expires,
-                    assigned_deposit: *assigned_deposit,
-                    invoice_id: invoice_id.clone(),
-                    bolt11: bolt11.clone(),
-                }).write(writer)
-            }
-            Self::SendingLockPayment { pubkey, amount, payment_id, sequence_number, scriptpubkey_signature } => {
-                LdkSendingLockPaymentMsg::from(SendingLockPaymentMsg { pubkey: *pubkey, amount: *amount, payment_id: *payment_id, sequence_number: *sequence_number, scriptpubkey_signature: *scriptpubkey_signature }).write(writer)
-            }
-            Self::SendingFulfillPayment { pubkey, amount, payment_id, sequence_number, scriptpubkey_signature, preimage } => {
-                LdkSendingFulfillPaymentMsg::from(SendingFulfillPaymentMsg { pubkey: *pubkey, amount: *amount, payment_id: *payment_id, sequence_number: *sequence_number, scriptpubkey_signature: *scriptpubkey_signature, preimage: *preimage }).write(writer)
-            }
-            Self::SendingFailPayment { pubkey, amount, payment_id, sequence_number } => {
-                LdkSendingFailPaymentMsg::from(SendingFailPaymentMsg { pubkey: *pubkey, amount: *amount, payment_id: *payment_id, sequence_number: *sequence_number }).write(writer)
-            }
-            Self::CollateralIncrease { partner_id, new_amount, block_height } => {
-                LdkCollateralIncreaseMsg::from(CollateralIncreaseMsg { partner_id: *partner_id, new_amount: *new_amount, block_height: *block_height }).write(writer)
-            }
-            Self::CollateralDecrease { partner_id, new_amount, block_height } => {
-                LdkCollateralDecreaseMsg::from(CollateralDecreaseMsg { partner_id: *partner_id, new_amount: *new_amount, block_height: *block_height }).write(writer)
-            }
-            Self::CollateralAttestation { operator, collateral_partner, amount, block_height, signature, ledger_hash } => {
-                LdkCollateralAttestationMsg::from(CollateralAttestationMsg { operator: *operator, collateral_partner: *collateral_partner, amount: *amount, block_height: *block_height, signature: *signature, ledger_hash: *ledger_hash }).write(writer)
-            }
-            Self::CollateralAddPartner { operator_id, partner_id, collateral_partner, collateral_partner_signature } => {
-                LdkCollateralAddPartnerMsg::from(CollateralAddPartnerMsg { operator_id: *operator_id, partner_id: *partner_id, collateral_partner: *collateral_partner, collateral_partner_signature: *collateral_partner_signature }).write(writer)
-            }
-            Self::CollateralRemovePartner { partner_id, collateral_partner, operator_signature } => {
-                LdkCollateralRemovePartnerMsg::from(CollateralRemovePartnerMsg { partner_id: *partner_id, collateral_partner: *collateral_partner, operator_signature: *operator_signature }).write(writer)
-            }
-            Self::CollateralConsentRequest { operator_id, partner_id, operator_signature } => {
-                LdkCollateralConsentRequestMsg::from(CollateralConsentRequestMsg { operator_id: *operator_id, partner_id: *partner_id, operator_signature: *operator_signature }).write(writer)
-            }
-            Self::CollateralConsentResponse { operator_id, partner_id, consent_granted, collateral_partner_signature } => {
-                LdkCollateralConsentResponseMsg::from(CollateralConsentResponseMsg { operator_id: *operator_id, partner_id: *partner_id, consent_granted: *consent_granted, collateral_partner_signature: *collateral_partner_signature }).write(writer)
-            }
-            Self::MaintenanceFeeCollect { pubkey, amount, block_height } => {
-                LdkFeeCollectMsg::from(FeeCollectMsg { pubkey: *pubkey, amount: *amount, block_height: *block_height }).write(writer)
-            }
-            Self::ChannelCloseTombstone { operator_pubkey, partner_pubkey, timestamp, channel_id, close_reason, sequence_number } => {
-                LdkChannelCloseTombstoneMsg::from(ChannelCloseTombstoneMsg { operator_pubkey: *operator_pubkey, partner_pubkey: *partner_pubkey, timestamp: *timestamp, channel_id: *channel_id, close_reason: close_reason.clone(), sequence_number: *sequence_number }).write(writer)
-            }
-            Self::SignedUpdate(m) => m.write(writer),
-            Self::LedgerClose { partner_id } => {
-                LdkLedgerCloseMsg::from(LedgerCloseMsg { partner_id: *partner_id }).write(writer)
-            }
-
-            // === V2 message types and V1 aliases that map to V2 - use encode() ===
-            _ => {
-                // LDK adds the type prefix separately via type_id(), so we only write payload
-                // encode() returns [type: u16][payload], so skip first 2 bytes
-                let bytes = self.encode();
-                if bytes.len() >= 2 {
-                    writer.write_all(&bytes[2..])
-                } else {
-                    Ok(())
-                }
-            }
+        // Always use V2 wire format. V1 variants are converted to V2 via into_v2().
+        // encode() returns [type: u16][payload], but LDK adds the type prefix
+        // separately via type_id(), so we only write the payload (skip first 2 bytes).
+        let bytes = self.encode();
+        if bytes.len() >= 2 {
+            writer.write_all(&bytes[2..])
+        } else {
+            Ok(())
         }
     }
 }
 
 impl lightning::ln::wire::Type for DepositsMessage {
     fn type_id(&self) -> u16 {
-        self.message_type()
+        // Always use V2 wire format type IDs
+        self.v2_type_id()
     }
 }
 
