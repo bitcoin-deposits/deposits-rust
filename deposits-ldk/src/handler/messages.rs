@@ -1435,7 +1435,9 @@ impl DepositsMessage {
     /// Encode message to bytes (for wire protocol)
     /// Format: [type: u16 BE][payload bytes]
     pub fn encode(&self) -> Vec<u8> {
-        self.clone().into_v2().encode()
+        let v2 = self.clone().into_v2();
+        println!("🟢 ENCODE: {} -> V2 type {:?}", self.variant_name(), std::mem::discriminant(&v2));
+        v2.encode()
     }
 
     /// Decode message from bytes
@@ -1528,6 +1530,15 @@ impl DepositsMessage {
                             operator_signature,
                         }
                     }
+                    CoordinationMsg::UpdateReserves { channel_id, reserves_sats, script_pubkey, ledger_hash, remote_ledger_hash } => {
+                        Self::UpdateReserves {
+                            channel_id,
+                            reserves_sats,
+                            script_pubkey,
+                            ledger_hash,
+                            remote_ledger_hash,
+                        }
+                    }
                     _ => Self::Coordination(m),
                 }
             }
@@ -1540,6 +1551,11 @@ impl DepositsMessage {
                             partner_id,
                             consent_granted,
                             collateral_partner_signature,
+                        }
+                    }
+                    CoordinationResponseMsg::AcceptReserves { channel_id } => {
+                        Self::AcceptReserves {
+                            channel_id,
                         }
                     }
                     _ => Self::CoordinationResponse(m),
@@ -2129,37 +2145,19 @@ impl DepositsMessage {
                 })
             }
 
-            // UpdateReserves and AcceptReserves are deposits-ldk specific messages
-            // that don't have a V2 core equivalent. For logging purposes (encode() method),
-            // we use a placeholder LedgerUpdate. Actual wire encoding uses Writeable directly.
-            Self::UpdateReserves { reserves_sats, ledger_hash, .. } => {
-                DepositsMessageCore::LedgerUpdate(LedgerUpdateMsgV2 {
-                    operator_id: PublicKey::from_slice(&[2; 33]).unwrap_or_else(|_| {
-                        PublicKey::from_slice(&[3; 33]).unwrap()
-                    }),
-                    partner_id: PublicKey::from_slice(&[2; 33]).unwrap_or_else(|_| {
-                        PublicKey::from_slice(&[3; 33]).unwrap()
-                    }),
-                    operation: LedgerOperation::ReservesIncrease { new_amount: reserves_sats },
-                    sequence_number: 0,
-                    previous_hash: [0u8; 32],
-                    current_hash: ledger_hash,
-                    operator_signature: [0u8; 64],
+            // UpdateReserves and AcceptReserves now have V2 equivalents in deposits-core
+            Self::UpdateReserves { channel_id, reserves_sats, ref script_pubkey, ledger_hash, remote_ledger_hash } => {
+                DepositsMessageCore::Coordination(CoordinationMsg::UpdateReserves {
+                    channel_id,
+                    reserves_sats,
+                    script_pubkey: script_pubkey.clone(),
+                    ledger_hash,
+                    remote_ledger_hash,
                 })
             }
             Self::AcceptReserves { channel_id } => {
-                DepositsMessageCore::LedgerUpdate(LedgerUpdateMsgV2 {
-                    operator_id: PublicKey::from_slice(&[2; 33]).unwrap_or_else(|_| {
-                        PublicKey::from_slice(&[3; 33]).unwrap()
-                    }),
-                    partner_id: PublicKey::from_slice(&[2; 33]).unwrap_or_else(|_| {
-                        PublicKey::from_slice(&[3; 33]).unwrap()
-                    }),
-                    operation: LedgerOperation::ReservesIncrease { new_amount: 0 },
-                    sequence_number: 0,
-                    previous_hash: channel_id,
-                    current_hash: [0u8; 32],
-                    operator_signature: [0u8; 64],
+                DepositsMessageCore::CoordinationResponse(CoordinationResponseMsg::AcceptReserves {
+                    channel_id,
                 })
             }
         }
@@ -3018,6 +3016,8 @@ impl Writeable for DepositsMessage {
         // encode() returns [type: u16][payload], but LDK adds the type prefix
         // separately via type_id(), so we only write the payload (skip first 2 bytes).
         let bytes = self.encode();
+        println!("🟡 WRITEABLE::WRITE called for {}, encode returned {} bytes, first 4: {:02x?}",
+            self.variant_name(), bytes.len(), &bytes[..bytes.len().min(4)]);
         if bytes.len() >= 2 {
             writer.write_all(&bytes[2..])
         } else {
@@ -3029,7 +3029,10 @@ impl Writeable for DepositsMessage {
 impl lightning::ln::wire::Type for DepositsMessage {
     fn type_id(&self) -> u16 {
         // Always use V2 wire format type IDs
-        self.v2_type_id()
+        let v2_id = self.v2_type_id();
+        let v1_id = self.message_type();
+        println!("🔴 TYPE_ID CALLED: v1={:#06x}, v2={:#06x}, variant={}", v1_id, v2_id, self.variant_name());
+        v2_id
     }
 }
 
