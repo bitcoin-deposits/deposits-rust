@@ -2373,10 +2373,14 @@ where
                     &ledger_hash[0..8]
                 );
                 ledger.state.channel_deepest_commitment_hash = *ledger_hash;
+                // CRITICAL: Also update reserves amount so validation checks pass
+                // The operator is telling us their reserves amount via UpdateReserves
+                ledger.state.reserves.amount = reserves_sats;
                 log_info!(
                     self.logger,
-                    "🔒 Updated partner copy channel_deepest_commitment_hash to {:02x?}",
-                    &ledger_hash[0..8]
+                    "🔒 Updated partner ledger: commitment_hash={:02x?}, reserves={} sats",
+                    &ledger_hash[0..8],
+                    reserves_sats
                 );
                 // Persist the updated commitment hash
                 if let Err(e) = self.persist_ledger_state(&ledger) {
