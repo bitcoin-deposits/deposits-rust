@@ -1491,10 +1491,30 @@ impl DepositsMessage {
                             bolt11: bolt11_invoice,
                         }
                     }
+                    CoordinationMsg::CollateralConsentRequest { operator_id, partner_id, operator_signature } => {
+                        Self::CollateralConsentRequest {
+                            operator_id,
+                            partner_id,
+                            operator_signature,
+                        }
+                    }
                     _ => Self::Coordination(m),
                 }
             }
-            DepositsMessageCore::CoordinationResponse(m) => Self::CoordinationResponse(m),
+            DepositsMessageCore::CoordinationResponse(m) => {
+                // Unwrap specific coordination response messages to their V1 variants
+                match m {
+                    CoordinationResponseMsg::CollateralConsentResponse { operator_id, partner_id, consent_granted, collateral_partner_signature, .. } => {
+                        Self::CollateralConsentResponse {
+                            operator_id,
+                            partner_id,
+                            consent_granted,
+                            collateral_partner_signature,
+                        }
+                    }
+                    _ => Self::CoordinationResponse(m),
+                }
+            }
             DepositsMessageCore::Relay(m) => Self::Relay(m),
             DepositsMessageCore::RelayResponse(m) => Self::RelayResponse(m),
         }
@@ -1828,17 +1848,13 @@ impl DepositsMessage {
                     operator_signature,
                 })
             }
-            Self::CollateralConsentResponse { operator_id, partner_id, .. } => {
-                // No direct V2 equivalent - use placeholder LedgerUpdate
-                // (V1 was never deployed, this is just for compilation)
-                DepositsMessageCore::LedgerUpdate(LedgerUpdateMsgV2 {
+            Self::CollateralConsentResponse { operator_id, partner_id, consent_granted, collateral_partner_signature } => {
+                DepositsMessageCore::CoordinationResponse(CoordinationResponseMsg::CollateralConsentResponse {
+                    request_hash: [0u8; 32], // V1 doesn't have request_hash
                     operator_id,
                     partner_id,
-                    operation: LedgerOperation::LedgerClose, // placeholder
-                    sequence_number: 0,
-                    previous_hash: [0u8; 32],
-                    current_hash: [0u8; 32],
-                    operator_signature: [0u8; 64],
+                    consent_granted,
+                    collateral_partner_signature,
                 })
             }
             Self::MaintenanceFeeCollect { pubkey, amount, block_height } => {
