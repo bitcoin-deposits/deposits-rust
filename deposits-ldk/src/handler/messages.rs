@@ -1476,7 +1476,24 @@ impl DepositsMessage {
             }
             DepositsMessageCore::Recovery(m) => Self::Recovery(m),
             DepositsMessageCore::RecoveryResponse(m) => Self::RecoveryResponse(m),
-            DepositsMessageCore::Coordination(m) => Self::Coordination(m),
+            DepositsMessageCore::Coordination(m) => {
+                // Unwrap specific coordination messages to their V1 variants for handler compatibility
+                match m {
+                    CoordinationMsg::CosignInvoice { operator_id, partner_id, amount, payment_hash, expires, assigned_deposit, invoice_id, bolt11_invoice } => {
+                        Self::ReceivingCosignInvoice {
+                            operator_id,
+                            partner_id,
+                            amount,
+                            payment_hash,
+                            expires,
+                            assigned_deposit,
+                            invoice_id,
+                            bolt11: bolt11_invoice,
+                        }
+                    }
+                    _ => Self::Coordination(m),
+                }
+            }
             DepositsMessageCore::CoordinationResponse(m) => Self::CoordinationResponse(m),
             DepositsMessageCore::Relay(m) => Self::Relay(m),
             DepositsMessageCore::RelayResponse(m) => Self::RelayResponse(m),
