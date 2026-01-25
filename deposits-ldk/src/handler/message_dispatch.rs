@@ -776,7 +776,7 @@ where
                              message.message_type());
 
                     // Generate cosignature for ReceivingCosignInvoice
-                    let cosignature = if let DepositsMessage::ReceivingCosignInvoice { amount, payment_hash, expires, assigned_deposit, ref invoice_id, ref bolt11 } = message {
+                    let cosignature = if let DepositsMessage::ReceivingCosignInvoice { operator_id: _, partner_id: _, amount, payment_hash, expires, assigned_deposit, ref invoice_id, ref bolt11 } = message {
                         println!("🔐 PARTNER: Generating cosignature for invoice (payment_hash: {:02x?})", &payment_hash[0..4]);
                         // Generate proper 64-byte Schnorr signature over invoice data
                         let mut sig_input = Vec::new();

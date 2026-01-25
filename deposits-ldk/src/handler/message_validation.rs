@@ -279,7 +279,7 @@ where
         // Handle special cases that don't convert to LedgerOperation
         match message {
             // Invoice Cosigning Validation
-            DepositsMessage::ReceivingCosignInvoice { amount, payment_hash, expires, assigned_deposit, ref invoice_id, ref bolt11 } => {
+            DepositsMessage::ReceivingCosignInvoice { operator_id: _, partner_id: _, amount, payment_hash, expires, assigned_deposit, ref invoice_id, ref bolt11 } => {
                 use crate::wire::messages::ReceivingCosignInvoiceMsg;
                 self.validate_receiving_cosign_invoice(&ReceivingCosignInvoiceMsg {
                     amount: *amount,

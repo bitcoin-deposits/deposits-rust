@@ -307,7 +307,10 @@ pub enum DepositsMessage {
         sequence_number: u64,
     },
     /// Cosign invoice request - uses inline fields matching deposits_core::ReceivingCosignInvoiceMsg
+    /// Added operator_id and partner_id for V2 wire format compatibility
     ReceivingCosignInvoice {
+        operator_id: PublicKey,
+        partner_id: PublicKey,
         amount: u64,
         payment_hash: [u8; 32],
         expires: u64,
@@ -1663,11 +1666,11 @@ impl DepositsMessage {
                     operator_signature: [0u8; 64],
                 })
             }
-            Self::ReceivingCosignInvoice { amount, payment_hash, expires, assigned_deposit, ref invoice_id, ref bolt11 } => {
+            Self::ReceivingCosignInvoice { operator_id, partner_id, amount, payment_hash, expires, assigned_deposit, ref invoice_id, ref bolt11 } => {
                 // CosignInvoice is in CoordinationMsg
                 DepositsMessageCore::Coordination(CoordinationMsg::CosignInvoice {
-                    operator_id: assigned_deposit, // placeholder
-                    partner_id: assigned_deposit,   // placeholder
+                    operator_id,
+                    partner_id,
                     amount,
                     payment_hash,
                     expires,
@@ -2864,9 +2867,12 @@ impl Readable for DepositsMessage {
                 });
             }
             RECEIVING_COSIGN_INVOICE => {
+                // V1 format doesn't have operator_id/partner_id - use assigned_deposit as placeholder
                 return LdkReceivingCosignInvoiceMsg::read(reader).map(|w| {
                     let m = w.0;
                     Self::ReceivingCosignInvoice {
+                        operator_id: m.assigned_deposit, // V1 placeholder
+                        partner_id: m.assigned_deposit,  // V1 placeholder
                         amount: m.amount,
                         payment_hash: m.payment_hash,
                         expires: m.expires,
@@ -3247,10 +3253,13 @@ impl lightning::ln::wire::CustomMessageReader for DepositsMessageReader {
                     });
             }
             RECEIVING_COSIGN_INVOICE => {
+                // V1 format doesn't have operator_id/partner_id - use assigned_deposit as placeholder
                 return LdkReceivingCosignInvoiceMsg::read(buffer)
                     .map(|w| {
                         let m = w.0;
                         Some(DepositsMessage::ReceivingCosignInvoice {
+                            operator_id: m.assigned_deposit, // V1 placeholder
+                            partner_id: m.assigned_deposit,  // V1 placeholder
                             amount: m.amount,
                             payment_hash: m.payment_hash,
                             expires: m.expires,

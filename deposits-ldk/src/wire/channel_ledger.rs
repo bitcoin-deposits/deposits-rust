@@ -281,7 +281,7 @@ impl ChannelLedger {
                 }
                 // If equal, no update needed
             }
-            DepositsMessage::ReceivingCosignInvoice { amount, payment_hash, expires, assigned_deposit, ref invoice_id, ref bolt11 } => {
+            DepositsMessage::ReceivingCosignInvoice { operator_id: _, partner_id: _, amount, payment_hash, expires, assigned_deposit, ref invoice_id, ref bolt11 } => {
                 // Partner is requesting us to cosign an invoice
                 // We need to validate that adequate reserves exist for this invoice exposure
                 // and create a signature as proof of cosigning

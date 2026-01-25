@@ -251,6 +251,8 @@ where
 
         // STEP 3: Create ReceivingCosignInvoice message with inline fields
         let message = DepositsMessage::ReceivingCosignInvoice {
+            operator_id: self.our_node_id,
+            partner_id: partner_node_id,
             amount,
             payment_hash,
             expires,
