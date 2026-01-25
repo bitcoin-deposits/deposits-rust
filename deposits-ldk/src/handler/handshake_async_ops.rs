@@ -505,7 +505,7 @@ where
                                 .unwrap()
                                 .as_secs();
                             let mut pending = self.pending_reserves_commitments.lock().unwrap();
-                            pending.insert(partner_node_id, (script_pubkey_clone, zero_hash, initial_reserves_sats, now));
+                            pending.insert(partner_node_id, (script_pubkey_clone.clone(), zero_hash, initial_reserves_sats, now));
                         }
                         log_info!(
                             self.logger,
@@ -514,6 +514,47 @@ where
                             hex::encode(channel.channel_id.0),
                             partner_node_id
                         );
+
+                        // Update ledger's reserves amount to match the commitment output
+                        // This ensures reserves_amount() returns the correct value for validation
+                        {
+                            let ledgers = self.ledgers.lock().unwrap();
+                            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+                                let mut ledger = ledger_arc.write().unwrap();
+                                ledger.state.reserves.amount = initial_reserves_sats;
+                                log_info!(
+                                    self.logger,
+                                    "Set initial ledger reserves amount to {} sats",
+                                    initial_reserves_sats
+                                );
+                            }
+                        }
+
+                        // Send UpdateReserves message to notify partner of the initial reserves
+                        // This coordinates the commitment transaction state between both parties
+                        let script_pubkey_bytes = script_pubkey_clone.as_bytes().to_vec();
+                        let update_msg = DepositsMessage::UpdateReserves {
+                            channel_id: channel.channel_id.0,
+                            reserves_sats: initial_reserves_sats,
+                            script_pubkey: script_pubkey_bytes,
+                            ledger_hash: zero_hash,
+                            remote_ledger_hash: [0u8; 32], // Partner's ledger doesn't exist yet
+                        };
+                        if let Err(e) = self.send_message(partner_node_id, update_msg) {
+                            log_error!(
+                                self.logger,
+                                "Failed to send initial UpdateReserves to {}: {:?}",
+                                partner_node_id,
+                                e
+                            );
+                        } else {
+                            log_info!(
+                                self.logger,
+                                "📤 Sent initial UpdateReserves to {} ({} sats, zero hash)",
+                                partner_node_id,
+                                initial_reserves_sats
+                            );
+                        }
                     },
                     Err(e) => {
                         log_error!(
