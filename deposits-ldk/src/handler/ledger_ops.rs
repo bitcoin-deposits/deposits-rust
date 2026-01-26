@@ -1,10 +1,11 @@
 //! Ledger Operations for Bitcoin Deposits
 //!
-//! This module provides ledger query and management operations including
-//! hash lookups, ledger listing, and update retrieval.
+//! This module delegates core ledger query operations to deposits-core's Handler.
+//! Both DepositsHandler and core Handler share the same ledger storage,
+//! so delegation produces identical results while centralizing the logic.
 //!
-//! The core trait `LedgerOperations` is re-exported from deposits-core.
-//! This module extends it with LDK-specific methods in `LedgerOperationsExt`.
+//! LDK-specific methods that require channel_manager access remain in the
+//! `LedgerOperationsExt` trait, which cannot be moved to deposits-core.
 
 use bitcoin::secp256k1::PublicKey;
 use std::collections::HashMap;
@@ -82,8 +83,19 @@ where
     L::Target: LdkLogger,
 {
     fn get_ledger_hash(&self, partner_node_id: PublicKey) -> Result<[u8; 32], DepositsError> {
+        // Delegate to core_handler (shares same ledgers)
+        // Note: Core returns Err(LedgerNotFound) when no ledger, we return Ok([0u8; 32])
+        // Keep existing behavior for backwards compatibility
+        if let Some(ref handler) = self.core_handler {
+            // Use fully-qualified syntax to call the trait method (not the inherent method)
+            return match <_ as LedgerOperations>::get_ledger_hash(handler.as_ref(), partner_node_id) {
+                Ok(hash) => Ok(hash),
+                Err(DepositsError::LedgerNotFound) => Ok([0u8; 32]),
+                Err(e) => Err(e),
+            };
+        }
+        // Fallback
         let ledgers = self.ledgers.lock().unwrap();
-
         if let Some(ledger) = ledgers.get(&(self.our_node_id, partner_node_id)) {
             let ledger = ledger.read().unwrap();
             Ok(ledger.tail_hash())
@@ -93,16 +105,17 @@ where
     }
 
     fn get_ledger_hashes(&self, partner_node_id: PublicKey) -> (Option<[u8; 32]>, Option<[u8; 32]>) {
+        if let Some(ref handler) = self.core_handler {
+            return <_ as LedgerOperations>::get_ledger_hashes(handler.as_ref(), partner_node_id);
+        }
+        // Fallback
         let ledgers = self.ledgers.lock().unwrap();
-
         let local_hash = ledgers
             .get(&(self.our_node_id, partner_node_id))
             .map(|ledger| ledger.read().unwrap().state.channel_deepest_commitment_hash);
-
         let remote_hash = ledgers
             .get(&(partner_node_id, self.our_node_id))
             .map(|ledger| ledger.read().unwrap().state.channel_deepest_commitment_hash);
-
         (local_hash, remote_hash)
     }
 
@@ -110,20 +123,17 @@ where
         &self,
         counterparty_node_id: PublicKey,
     ) -> (Option<[u8; 32]>, Option<[u8; 32]>) {
+        // This requires channel_manager - cannot delegate to core
         let Some(ref cm) = self.channel_manager else {
             return (None, None);
         };
-
         let channels = cm.list_channels();
         let channel = channels.iter().find(|ch| ch.counterparty_node_id == counterparty_node_id);
-
         let Some(ch) = channel else {
             return (None, None);
         };
-
         let local_hash = ch.local_reserves.as_ref().map(|r| r.1);
         let remote_hash = ch.remote_reserves.as_ref().map(|r| r.1);
-
         (local_hash, remote_hash)
     }
 
@@ -138,15 +148,25 @@ where
                 counterparty_node_id);
             return true;
         }
-
+        if let Some(ref handler) = self.core_handler {
+            let is_valid = <_ as LedgerOperations>::validate_ledger_hash_for_reserves(
+                handler.as_ref(), counterparty_node_id, ledger_hash);
+            if is_valid {
+                log_debug!(self.logger, "Validated ledger hash {} for reserves with partner {}",
+                    crate::hex_utils::to_string(ledger_hash),
+                    counterparty_node_id);
+            } else {
+                log_debug!(self.logger, "Rejecting unknown ledger hash {} for reserves with partner {}",
+                    crate::hex_utils::to_string(ledger_hash),
+                    counterparty_node_id);
+            }
+            return is_valid;
+        }
+        // Fallback
         let ledgers = self.ledgers.lock().unwrap();
         let ledger_key = (*counterparty_node_id, self.our_node_id);
-
         if let Some(ledger_arc) = ledgers.get(&ledger_key) {
             let ledger = ledger_arc.read().unwrap();
-
-            // Delegate to deposits-core's pure hash lookup function
-            // find_hash_sequence returns Some(seq) if hash exists in history, None otherwise
             if ledger.find_hash_sequence(ledger_hash).is_some() {
                 log_debug!(self.logger, "Validated ledger hash {} for reserves with partner {}",
                     crate::hex_utils::to_string(ledger_hash),
@@ -154,7 +174,6 @@ where
                 return true;
             }
         }
-
         log_debug!(self.logger, "Rejecting unknown ledger hash {} for reserves with partner {}",
             crate::hex_utils::to_string(ledger_hash),
             counterparty_node_id);
@@ -162,22 +181,32 @@ where
     }
 
     fn get_ledger_sequence(&self, partner_node_id: PublicKey) -> Result<u64, DepositsError> {
+        if let Some(ref handler) = self.core_handler {
+            return <_ as LedgerOperations>::get_ledger_sequence(handler.as_ref(), partner_node_id);
+        }
+        // Fallback
         let ledgers = self.ledgers.lock().unwrap();
-
         if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
             let ledger = ledger_arc.read().unwrap();
             return Ok(ledger.history.len() as u64);
         }
-
         Err(DepositsError::LedgerNotFound)
     }
 
     fn has_ledger_with(&self, partner_node_id: PublicKey) -> bool {
+        if let Some(ref handler) = self.core_handler {
+            return <_ as LedgerOperations>::has_ledger_with(handler.as_ref(), partner_node_id);
+        }
+        // Fallback
         let ledgers = self.ledgers.lock().unwrap();
         ledgers.contains_key(&(self.our_node_id, partner_node_id))
     }
 
     fn list_operator_ledgers(&self) -> Vec<PublicKey> {
+        if let Some(ref handler) = self.core_handler {
+            return <_ as LedgerOperations>::list_operator_ledgers(handler.as_ref());
+        }
+        // Fallback
         let ledgers = self.ledgers.lock().unwrap();
         ledgers.keys()
             .filter(|(operator, _partner)| *operator == self.our_node_id)
@@ -186,6 +215,10 @@ where
     }
 
     fn list_partner_ledgers(&self) -> Vec<PublicKey> {
+        if let Some(ref handler) = self.core_handler {
+            return <_ as LedgerOperations>::list_partner_ledgers(handler.as_ref());
+        }
+        // Fallback
         let ledgers = self.ledgers.lock().unwrap();
         ledgers.keys()
             .filter(|(_operator, partner)| *partner == self.our_node_id)
