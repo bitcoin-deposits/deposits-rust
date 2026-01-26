@@ -45,7 +45,8 @@ where
     node_id: PublicKey,
 
     /// Ledgers indexed by (operator, partner)
-    ledgers: Mutex<HashMap<(PublicKey, PublicKey), Arc<RwLock<Ledger>>>>,
+    /// Uses Arc to enable sharing with external systems (e.g., DepositsHandler)
+    ledgers: Arc<Mutex<HashMap<(PublicKey, PublicKey), Arc<RwLock<Ledger>>>>>,
 
     /// Storage
     storage: Arc<S>,
@@ -87,8 +88,39 @@ where
     E: EventEmitter,
     L: Logger,
 {
-    /// Create a new handler
+    /// Create a new handler with fresh ledger storage
     pub fn new(
+        storage: Arc<S>,
+        transport: Arc<T>,
+        payments: Arc<P>,
+        channels: Arc<C>,
+        broadcaster: Arc<B>,
+        chain: Arc<H>,
+        signer: Arc<G>,
+        events: Arc<E>,
+        logger: Arc<L>,
+    ) -> Self {
+        Self::with_ledgers(
+            Arc::new(Mutex::new(HashMap::new())),
+            storage,
+            transport,
+            payments,
+            channels,
+            broadcaster,
+            chain,
+            signer,
+            events,
+            logger,
+        )
+    }
+
+    /// Create a new handler with shared ledger storage
+    ///
+    /// This constructor allows the handler to share ledger state with an external
+    /// system (e.g., DepositsHandler in deposits-ldk). Operations on the handler
+    /// will affect the shared ledgers.
+    pub fn with_ledgers(
+        ledgers: Arc<Mutex<HashMap<(PublicKey, PublicKey), Arc<RwLock<Ledger>>>>>,
         storage: Arc<S>,
         transport: Arc<T>,
         payments: Arc<P>,
@@ -102,7 +134,7 @@ where
         let node_id = signer.node_pubkey();
         Self {
             node_id,
-            ledgers: Mutex::new(HashMap::new()),
+            ledgers,
             storage,
             transport,
             payments,
@@ -113,6 +145,13 @@ where
             events,
             logger,
         }
+    }
+
+    /// Get a reference to the shared ledgers
+    ///
+    /// This allows external systems to access the ledger storage for sharing.
+    pub fn ledgers(&self) -> &Arc<Mutex<HashMap<(PublicKey, PublicKey), Arc<RwLock<Ledger>>>>> {
+        &self.ledgers
     }
 
     /// Get our node ID

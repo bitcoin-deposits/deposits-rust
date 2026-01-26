@@ -105,8 +105,10 @@ where
         let events = Arc::new(LdkEventAdapter::new(self.event_queue.clone()));
         let logger = Arc::new(LdkLoggerAdapter::new(self.logger.clone()));
 
-        // Create the core handler
-        let handler = deposits_core::Handler::new(
+        // Create the core handler with shared ledgers
+        // This allows both DepositsHandler and core Handler to operate on the same ledger state
+        let handler = deposits_core::Handler::with_ledgers(
+            self.ledgers.clone(), // Share ledger storage
             storage,
             transport,
             payments,
@@ -119,6 +121,6 @@ where
         );
 
         self.core_handler = Some(Arc::new(handler));
-        log_info!(self.logger, "Core protocol handler initialized successfully");
+        log_info!(self.logger, "Core protocol handler initialized with shared ledgers");
     }
 }

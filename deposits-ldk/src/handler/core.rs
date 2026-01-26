@@ -113,8 +113,8 @@ where
 {
     /// Unified ledger storage keyed by (operator_id, partner_id) tuple
     /// Each ledger has an `our_role` field indicating if we're Operator, Partner, or Auditor
-    /// Replaces the previous ledgers, ledgers, and ledgers
-    pub(crate) ledgers: Mutex<HashMap<(PublicKey, PublicKey), Arc<RwLock<Ledger>>>>,
+    /// Uses Arc to enable sharing with core Handler
+    pub(crate) ledgers: Arc<Mutex<HashMap<(PublicKey, PublicKey), Arc<RwLock<Ledger>>>>>,
 
     /// Legacy protocol implementations (will be removed in future phases)
     /// TODO: Remove this once full migration is complete
@@ -327,7 +327,7 @@ where
         network: Network,
     ) -> Result<Self, deposits_core::DepositsError> {
         let handler = Self {
-            ledgers: Mutex::new(HashMap::new()),
+            ledgers: Arc::new(Mutex::new(HashMap::new())),
             protocols: Mutex::new(HashMap::new()),
             event_queue,
             message_reader: DepositsMessageReader,
