@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::Arc;
-use super::messages::DepositsMessage;
+use super::messages::{DepositsMessage, LedgerUpdateMsg, LedgerOperation, RecoveryMsg};
 use super::protocol_stub::DepositsProtocol;
 use crate::event::EventQueue;
 use crate::types::DynStore;
@@ -106,12 +106,15 @@ fn test_message_queuing() {
     // Mark peer as connected so messages can be drained
     mark_peer_connected(&handler, peer_key);
 
-    let message = DepositsMessage::ReservesAddOutput {
-        initial_amount: 1000,
-        spend_to: peer_key,
-        partner_id: peer_key,
-        collateral_partners: vec![],
-    };
+    let message = DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
+        peer_key, // operator
+        peer_key, // partner
+        LedgerOperation::ReservesAdd {
+            amount: 1000,
+            spend_to: peer_key,
+            collateral_partners: vec![],
+        },
+    ));
 
     // Queue message
     let result = handler.send_message(peer_key, message);
@@ -575,11 +578,11 @@ fn test_broadcast_uncredited_payment_accusation_with_ledger() {
     let pending = handler.get_and_clear_pending_msg();
     assert!(!pending.is_empty(), "Expected at least one pending message");
 
-    // Verify the message is an UncreditedPayment
+    // Verify the message is an UncreditedPayment (V2 format)
     let (target, msg) = &pending[0];
     assert_eq!(*target, operator);
     match msg {
-        DepositsMessage::UncreditedPayment { operator: msg_operator, partner, payment_hash: msg_payment_hash, preimage: msg_preimage, deposit_pubkey: msg_deposit_pubkey, amount_msat, .. } => {
+        DepositsMessage::Recovery(RecoveryMsg::UncreditedPayment { operator: msg_operator, partner, payment_hash: msg_payment_hash, preimage: msg_preimage, deposit_pubkey: msg_deposit_pubkey, amount_msat, .. }) => {
             assert_eq!(msg_operator, &operator);
             assert_eq!(partner, &our_node_id);
             assert_eq!(msg_payment_hash, &payment_hash);
@@ -587,7 +590,7 @@ fn test_broadcast_uncredited_payment_accusation_with_ledger() {
             assert_eq!(msg_deposit_pubkey, &deposit_pubkey);
             assert_eq!(amount_msat, &50_000_000);
         }
-        _ => panic!("Expected UncreditedPayment message"),
+        _ => panic!("Expected Recovery(RecoveryMsg::UncreditedPayment) message"),
     }
 }
 
@@ -788,16 +791,19 @@ fn test_fraud_proof_rejected_when_already_credited() {
     }.into()];
     ledger.state.deposits.insert(deposit_pubkey, deposit);
 
-    // Add a ReceivingCreditPayment to the ledger updates (simulating payment was credited)
+    // Add a PaymentCredit to the ledger updates (simulating payment was credited)
     // sequence_number must be 0 (first update in empty ledger)
-    let credit_msg = DepositsMessage::ReceivingCreditPayment {
-        payment_hash,
-        amount: 50_000,
-        deposit_pubkey,
-        invoice_id: hex::encode(&payment_hash),
-        partner_id: our_node_id,
-        sequence_number: 0, // Must match ledger.history.len()
-    };
+    let credit_msg = DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
+        operator,
+        our_node_id,
+        LedgerOperation::PaymentCredit {
+            payment_hash,
+            amount: 50_000,
+            deposit_pubkey,
+            invoice_id: hex::encode(&payment_hash),
+            sequence_number: 0, // Must match ledger.history.len()
+        },
+    ));
     let append_result = ledger.append_v1_mut(credit_msg);
     assert!(append_result.is_ok(), "append_mut should succeed: {:?}", append_result);
     assert_eq!(ledger.history.len(), 1, "Should have 1 update after appending credit");
@@ -938,15 +944,15 @@ fn test_fraud_proof_accepted_with_valid_cosigned_invoice() {
     let pending = handler.get_and_clear_pending_msg();
     assert!(!pending.is_empty(), "Expected pending messages");
 
-    // Verify it's an UncreditedPayment
+    // Verify it's an UncreditedPayment (V2 format)
     let (_, msg) = &pending[0];
     match msg {
-        DepositsMessage::UncreditedPayment { payment_hash: msg_payment_hash, preimage: msg_preimage, deposit_pubkey: msg_deposit_pubkey, .. } => {
+        DepositsMessage::Recovery(RecoveryMsg::UncreditedPayment { payment_hash: msg_payment_hash, preimage: msg_preimage, deposit_pubkey: msg_deposit_pubkey, .. }) => {
             assert_eq!(msg_payment_hash, &payment_hash);
             assert_eq!(msg_preimage, &preimage);
             assert_eq!(msg_deposit_pubkey, &deposit_pubkey);
         }
-        _ => panic!("Expected UncreditedPayment message"),
+        _ => panic!("Expected Recovery(RecoveryMsg::UncreditedPayment) message"),
     }
 }
 
@@ -1005,8 +1011,8 @@ fn test_received_fraud_proof_forwards_to_collateral_partners() {
     mark_peer_connected(&handler, collateral1);
     mark_peer_connected(&handler, collateral2);
 
-    // Create the accusation message (as if received from accuser)
-    let accusation = DepositsMessage::UncreditedPayment {
+    // Create the accusation message (as if received from accuser) - V2 format
+    let accusation = DepositsMessage::Recovery(RecoveryMsg::UncreditedPayment {
         operator,
         partner: accuser, // The original accuser
         payment_hash,
@@ -1018,7 +1024,7 @@ fn test_received_fraud_proof_forwards_to_collateral_partners() {
         settlement_ledger_hash: [0u8; 32],
         settlement_block_height: 100,
         accuser_signature: [0u8; 64],
-    };
+    });
 
     // Handle the message as if it came from the accuser
     let result = handler.handle_custom_message(accusation, accuser);
@@ -1033,15 +1039,15 @@ fn test_received_fraud_proof_forwards_to_collateral_partners() {
     assert!(targets.contains(&collateral2), "Should forward to collateral2");
     assert!(!targets.contains(&accuser), "Should NOT send back to original sender");
 
-    // Verify all forwarded messages are UncreditedPayment
+    // Verify all forwarded messages are UncreditedPayment (V2 format)
     for (_, msg) in &pending {
         match msg {
-            DepositsMessage::UncreditedPayment { operator: fwd_operator, payment_hash: fwd_payment_hash, preimage: fwd_preimage, .. } => {
+            DepositsMessage::Recovery(RecoveryMsg::UncreditedPayment { operator: fwd_operator, payment_hash: fwd_payment_hash, preimage: fwd_preimage, .. }) => {
                 assert_eq!(fwd_operator, &operator);
                 assert_eq!(fwd_payment_hash, &payment_hash);
                 assert_eq!(fwd_preimage, &preimage);
             }
-            _ => panic!("Expected forwarded UncreditedPayment message"),
+            _ => panic!("Expected forwarded Recovery(RecoveryMsg::UncreditedPayment) message"),
         }
     }
 }
@@ -1908,13 +1914,16 @@ fn test_has_pending_messages() {
     // Initially no pending messages
     assert!(!handler.has_pending_messages());
 
-    // Queue a message
-    let message = DepositsMessage::ReservesAddOutput {
-        initial_amount: 1000,
-        spend_to: peer_key,
-        partner_id: peer_key,
-        collateral_partners: vec![],
-    };
+    // Queue a message (V2 format)
+    let message = DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
+        peer_key, // operator
+        peer_key, // partner
+        LedgerOperation::ReservesAdd {
+            amount: 1000,
+            spend_to: peer_key,
+            collateral_partners: vec![],
+        },
+    ));
     handler.send_message(peer_key, message).unwrap();
 
     // Should have pending messages

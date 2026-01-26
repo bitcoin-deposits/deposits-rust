@@ -15,8 +15,17 @@ use lightning::ln::msgs::{LightningError, ErrorAction};
 
 use super::core::{DepositsHandler, CosignedInvoice};
 use super::message_validation::MessageValidation;
-use super::messages::DepositsMessage;
+use super::messages::{DepositsMessage, LedgerUpdateResponseMsg, LedgerUpdateMsg, LedgerOperation, CoordinationMsg, CoordinationResponseMsg, RecoveryMsg, RecoveryResponseMsg};
+use super::messages::consts::LEDGER_UPDATE;
 use super::ledger_ext::LedgerExt;
+use crate::wire::messages::{
+    QuorumJoinResponseMsg, QuorumStateSyncMsg, QuorumVoteRequestMsg, QuorumVoteMsg,
+    QuorumMembershipChangeMsg, CollateralAttestationMsg,
+    CollateralAddPartnerMsg, CollateralRemovePartnerMsg,
+    CollateralConsentRequestMsg, CollateralConsentResponseMsg,
+    RecoveryVoteMsg, RecoveryClaimRequestMsg, RecoveryClaimSignatureMsg, RecoveryClaimCompleteMsg,
+    UncreditedPaymentMsg, UpdateReservesMsg, AcceptReservesMsg, ChannelCloseTombstoneMsg,
+};
 // use deposits_core::Invoice; // Currently unused
 use deposits_core::{log_debug, log_error, log_info, log_warn};
 use lightning::util::logger::Logger as LdkLogger;
@@ -55,9 +64,8 @@ where
         let mut deferred_collateral_oneshot: Option<tokio::sync::oneshot::Sender<Result<(), String>>> = None;
 
         // Handle ACK messages specially - they don't need validation or further ACKs
-        // Both Ack (V1) and LedgerUpdateResponse (V2) are ACK messages
+        // LedgerUpdateResponse is the V2 ACK message
         let ack_msg = match &message {
-            DepositsMessage::Ack(msg) => Some(msg.clone()),
             DepositsMessage::LedgerUpdateResponse(msg) => Some(msg.clone()),
             _ => None,
         };
@@ -75,361 +83,338 @@ where
 
         // Handle CollateralAttestation as ACK when received from channel partner
         // Partner sends attestation instead of regular ACK for CollateralIncrease/CollateralDecrease
-        if let DepositsMessage::CollateralAttestation { operator, collateral_partner, amount, block_height, signature, ledger_hash } = &message {
-            // Check if we're the operator for a ledger with this sender as partner
-            // and have a pending CollateralIncrease/CollateralDecrease
-            let is_from_channel_partner = {
-                let ledgers = self.ledgers.lock().unwrap();
-                ledgers.contains_key(&(self.our_node_id, sender_node_id))
-            };
-
-            if is_from_channel_partner && *operator == self.our_node_id {
-                log_info!(
-                    self.logger,
-                    "💰 OPERATOR: Received CollateralAttestation from channel partner {} - amount={}",
-                    sender_node_id,
-                    amount
-                );
-
-                // Find and complete any pending collateral message to this partner
-                let pending_collateral_hash = {
-                    let pending_acks = self.pending_acks.lock().unwrap();
-                    // Look for pending collateral messages - both V1 format (COLLATERAL_INCREASE/COLLATERAL_DECREASE)
-                    // and V2 format (LEDGER_UPDATE which wraps CollateralIncrease/CollateralDecrease operations)
-                    pending_acks.iter()
-                        .find(|(_, (msg_type, _))| {
-                            *msg_type == super::messages::consts::COLLATERAL_INCREASE ||
-                            *msg_type == super::messages::consts::COLLATERAL_DECREASE ||
-                            *msg_type == super::messages::consts::LEDGER_UPDATE
-                        })
-                        .map(|(hash, _)| *hash)
+        // V2 format: CollateralAttestation is inside LedgerUpdate as a LedgerOperation
+        if let DepositsMessage::LedgerUpdate(ref update_msg) = &message {
+            if let LedgerOperation::CollateralAttestation { collateral_operator: operator, amount, block_height, signature, ledger_hash, .. } = &update_msg.operation {
+                let collateral_partner = update_msg.partner_pubkey;
+                // Check if we're the operator for a ledger with this sender as partner
+                // and have a pending CollateralIncrease/CollateralDecrease
+                let is_from_channel_partner = {
+                    let ledgers = self.ledgers.lock().unwrap();
+                    ledgers.contains_key(&(self.our_node_id, sender_node_id))
                 };
 
-                if let Some(hash) = pending_collateral_hash {
-                    // Remove from pending ACKs
-                    {
-                        let mut pending_acks = self.pending_acks.lock().unwrap();
-                        pending_acks.remove(&hash);
+                if is_from_channel_partner && *operator == self.our_node_id {
+                    log_info!(
+                        self.logger,
+                        "💰 OPERATOR: Received CollateralAttestation from channel partner {} - amount={}",
+                        sender_node_id,
+                        amount
+                    );
+
+                    // Find and complete any pending collateral message to this partner
+                    let pending_collateral_hash = {
+                        let pending_acks = self.pending_acks.lock().unwrap();
+                        // Look for pending collateral messages - V2 format (LEDGER_UPDATE which wraps CollateralIncrease/CollateralDecrease operations)
+                        pending_acks.iter()
+                            .find(|(_, (msg_type, _))| {
+                                *msg_type == LEDGER_UPDATE ||
+                                *msg_type == super::messages::consts::LEDGER_UPDATE
+                            })
+                            .map(|(hash, _)| *hash)
+                    };
+
+                    if let Some(hash) = pending_collateral_hash {
+                        // Remove from pending ACKs
+                        {
+                            let mut pending_acks = self.pending_acks.lock().unwrap();
+                            pending_acks.remove(&hash);
+                        }
+
+                        // Store the attestation in the ledger BEFORE notifying the oneshot
+                        // This ensures the attestation (with ledger_hash) is available when
+                        // increase_collateral_on_ledger resumes and needs to verify the hash
+                        {
+                            let ledgers = self.ledgers.lock().unwrap();
+                            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, sender_node_id)) {
+                                let mut ledger = ledger_arc.write().unwrap();
+                                // Convert to core attestation type
+                                let attestation = deposits_core::types::CollateralAttestation::new(
+                                    *operator,
+                                    collateral_partner,
+                                    *amount,
+                                    *block_height,
+                                    *signature,
+                                    *ledger_hash,
+                                );
+                                ledger.state.collateral_attestations.insert(sender_node_id, attestation);
+                                log_info!(
+                                    self.logger,
+                                    "💰 OPERATOR: Stored attestation from channel partner {} in ledger (hash={:02x?})",
+                                    sender_node_id,
+                                    &ledger_hash[0..8]
+                                );
+                            }
+                        }
+
+                        // DEFER oneshot notification until AFTER handle_collateral_attestation completes
+                        // This ensures CollateralAttestation is in pending_acks before the waiter continues
+                        deferred_collateral_oneshot = {
+                            let mut pending_oneshot_acks = self.pending_oneshot_acks.lock().unwrap();
+                            pending_oneshot_acks.remove(&hash)
+                        };
+
+                        log_info!(
+                            self.logger,
+                            "💰 OPERATOR: CollateralAttestation treated as ACK for pending collateral message"
+                        );
                     }
 
-                    // Construct the legacy struct for storage
-                    let attestation_msg = crate::wire::messages::CollateralAttestationMsg {
+                    // Continue to process the attestation normally (for broadcasting, etc.)
+                }
+            }
+        }
+
+        // Handle quorum/coordination messages - infrastructure-level peer coordination
+        // V2 format: Quorum messages are inside Coordination/CoordinationResponse
+        match &message {
+            DepositsMessage::Coordination(coord_msg) => match coord_msg {
+                CoordinationMsg::QuorumJoinRequest { requester_pubkey, operator_id, partner_id, protocol_version, timestamp, signature } => {
+                    let msg = crate::wire::messages::QuorumJoinRequestMsg {
+                        requester_pubkey: *requester_pubkey,
+                        operator_id: *operator_id,
+                        partner_id: *partner_id,
+                        protocol_version: *protocol_version,
+                        timestamp: *timestamp,
+                        signature: *signature,
+                    };
+                    return self.handle_quorum_join_request(&msg, sender_node_id);
+                }
+                CoordinationMsg::QuorumVoteRequest { vote_round_id, operator_id, partner_id, sequence_number, state_hash, claimed_reserves, ref collateral_amounts, ref reserves_outpoint, ref destination_script, fee_rate_sat_vbyte, .. } => {
+                    let msg = QuorumVoteRequestMsg {
+                        operator_id: *operator_id,
+                        partner_id: *partner_id,
+                        vote_round_id: *vote_round_id,
+                        sequence_number: *sequence_number,
+                        state_hash: *state_hash,
+                        claimed_reserves: *claimed_reserves,
+                        collateral_amounts: collateral_amounts.clone(),
+                        reserves_outpoint: reserves_outpoint.clone(),
+                        destination_script: destination_script.clone(),
+                        fee_rate_sat_vbyte: *fee_rate_sat_vbyte,
+                    };
+                    return self.handle_quorum_vote_request(&msg, sender_node_id);
+                }
+                CoordinationMsg::QuorumVote { vote_round_id, voter_pubkey, vote, voter_sequence, voter_state_hash, ref evidence, signature, spend_signature } => {
+                    let msg = QuorumVoteMsg {
+                        vote_round_id: *vote_round_id,
+                        voter_pubkey: *voter_pubkey,
+                        vote: *vote,
+                        voter_sequence: *voter_sequence,
+                        voter_state_hash: *voter_state_hash,
+                        evidence: evidence.clone(),
+                        signature: *signature,
+                        spend_signature: *spend_signature,
+                    };
+                    return self.handle_quorum_vote(&msg, sender_node_id);
+                }
+                CoordinationMsg::CollateralConsentRequest { operator_id, partner_id, operator_signature } => {
+                    let msg = CollateralConsentRequestMsg {
+                        operator_id: *operator_id,
+                        partner_id: *partner_id,
+                        operator_signature: *operator_signature,
+                    };
+                    return self.handle_collateral_consent_request(&msg, sender_node_id);
+                }
+                CoordinationMsg::UpdateReserves { channel_id, reserves_sats, ref script_pubkey, ledger_hash, remote_ledger_hash } => {
+                    return self.handle_update_reserves(
+                        channel_id,
+                        *reserves_sats,
+                        script_pubkey,
+                        ledger_hash,
+                        remote_ledger_hash,
+                        sender_node_id,
+                    );
+                }
+                CoordinationMsg::CosignInvoice { .. } => {
+                    // CosignInvoice is handled in the partner processing section below
+                    // (see is_coordination_message handling around line 765)
+                    // Don't return early - let it fall through
+                }
+                _ => {}
+            }
+            DepositsMessage::CoordinationResponse(coord_resp) => match coord_resp {
+                CoordinationResponseMsg::QuorumJoinResponse { accepted, ref members, threshold, last_sequence, current_state_hash, ref rejection_reason, .. } => {
+                    let msg = QuorumJoinResponseMsg {
+                        accepted: *accepted,
+                        members: members.clone(),
+                        threshold: *threshold,
+                        last_sequence: *last_sequence,
+                        current_state_hash: *current_state_hash,
+                        rejection_reason: rejection_reason.clone(),
+                    };
+                    return self.handle_quorum_join_response(&msg, sender_node_id);
+                }
+                CoordinationResponseMsg::QuorumStateSync { operator_id, partner_id, ref updates, start_sequence, is_final, .. } => {
+                    // Convert SignedLedgerUpdate to Vec<u8> for wire format
+                    use deposits_core::messages::BinaryCodec;
+                    let updates_bytes: Vec<Vec<u8>> = updates.iter().map(|u| {
+                        let mut buf = Vec::new();
+                        let _ = u.write_to(&mut buf);
+                        buf
+                    }).collect();
+                    let msg = QuorumStateSyncMsg {
+                        operator_id: *operator_id,
+                        partner_id: *partner_id,
+                        updates: updates_bytes,
+                        start_sequence: *start_sequence,
+                        is_final: *is_final,
+                    };
+                    return self.handle_quorum_state_sync(&msg, sender_node_id);
+                }
+                CoordinationResponseMsg::QuorumMembershipChange { operator_id, partner_id, ref change_type, member_pubkey, ref new_members, .. } => {
+                    let msg = QuorumMembershipChangeMsg {
+                        operator_id: *operator_id,
+                        partner_id: *partner_id,
+                        change_type: change_type.clone(),
+                        member_pubkey: *member_pubkey,
+                        new_members: new_members.clone(),
+                    };
+                    return self.handle_quorum_membership_change(&msg, sender_node_id);
+                }
+                CoordinationResponseMsg::CollateralConsentResponse { operator_id, partner_id, consent_granted, collateral_partner_signature, .. } => {
+                    let msg = CollateralConsentResponseMsg {
+                        operator_id: *operator_id,
+                        partner_id: *partner_id,
+                        consent_granted: *consent_granted,
+                        collateral_partner_signature: *collateral_partner_signature,
+                    };
+                    return self.handle_collateral_consent_response(&msg, sender_node_id);
+                }
+                CoordinationResponseMsg::AcceptReserves { channel_id, .. } => {
+                    return self.handle_accept_reserves(channel_id, sender_node_id);
+                }
+                _ => {}
+            }
+            // Recovery Messages - V2 format uses Recovery/RecoveryResponse
+            DepositsMessage::Recovery(recovery_msg) => match recovery_msg {
+                RecoveryMsg::Vote { operator, partner, voter, is_conforming, validated_hash, validated_sequence, substitute_nomination, discovered_violation, signature } => {
+                    let msg = RecoveryVoteMsg {
                         operator: *operator,
+                        partner: *partner,
+                        voter: *voter,
+                        is_conforming: *is_conforming,
+                        validated_hash: *validated_hash,
+                        validated_sequence: *validated_sequence,
+                        substitute_nomination: *substitute_nomination,
+                        discovered_violation: *discovered_violation,
+                        signature: *signature,
+                    };
+                    return self.handle_recovery_vote(&msg, sender_node_id);
+                }
+                RecoveryMsg::ClaimRequest { operator, partner, claimant, tier_index, ref unsigned_tx, sighash, ref destination_script, block_height } => {
+                    let msg = RecoveryClaimRequestMsg {
+                        operator: *operator,
+                        partner: *partner,
+                        claimant: *claimant,
+                        tier_index: *tier_index,
+                        unsigned_tx: unsigned_tx.clone(),
+                        sighash: *sighash,
+                        destination_script: destination_script.clone(),
+                        block_height: *block_height,
+                    };
+                    return self.handle_recovery_claim_request(&msg, sender_node_id);
+                }
+                RecoveryMsg::ClaimComplete { operator, partner, new_operator, claim_txid, confirmation_block, reason_code } => {
+                    let msg = RecoveryClaimCompleteMsg {
+                        operator: *operator,
+                        partner: *partner,
+                        new_operator: *new_operator,
+                        claim_txid: *claim_txid,
+                        confirmation_block: *confirmation_block,
+                        reason_code: *reason_code,
+                    };
+                    return self.handle_recovery_claim_complete(&msg, sender_node_id);
+                }
+                RecoveryMsg::UncreditedPayment { operator, partner, payment_hash, preimage, deposit_pubkey, amount_msat, invoice_cosignature, settlement_sequence, settlement_ledger_hash, settlement_block_height, accuser_signature } => {
+                    let msg = UncreditedPaymentMsg {
+                        operator: *operator,
+                        partner: *partner,
+                        payment_hash: *payment_hash,
+                        preimage: *preimage,
+                        deposit_pubkey: *deposit_pubkey,
+                        amount_msat: *amount_msat,
+                        invoice_cosignature: *invoice_cosignature,
+                        settlement_sequence: *settlement_sequence,
+                        settlement_ledger_hash: *settlement_ledger_hash,
+                        settlement_block_height: *settlement_block_height,
+                        accuser_signature: *accuser_signature,
+                    };
+                    return self.handle_uncredited_payment(&msg, sender_node_id);
+                }
+            }
+            DepositsMessage::RecoveryResponse(recovery_resp) => match recovery_resp {
+                RecoveryResponseMsg::ClaimSignature { signer, sighash, signature, .. } => {
+                    // Extract operator/partner from context (sender is typically the signer)
+                    let msg = RecoveryClaimSignatureMsg {
+                        operator: sender_node_id, // Will be verified by handler
+                        partner: self.our_node_id,
+                        signer: *signer,
+                        sighash: *sighash,
+                        signature: *signature,
+                    };
+                    return self.handle_recovery_claim_signature(&msg, sender_node_id);
+                }
+                _ => {}
+            }
+            // Handle LedgerUpdate messages for CollateralAddPartner, CollateralRemovePartner, CollateralAttestation
+            DepositsMessage::LedgerUpdate(ref update_msg) => match &update_msg.operation {
+                LedgerOperation::CollateralAddPartner { collateral_partner, collateral_partner_signature } => {
+                    let msg = CollateralAddPartnerMsg {
+                        operator_id: update_msg.operator_pubkey,
+                        partner_id: update_msg.partner_pubkey,
                         collateral_partner: *collateral_partner,
+                        collateral_partner_signature: *collateral_partner_signature,
+                    };
+                    return self.handle_collateral_add_partner(&msg, sender_node_id);
+                }
+                LedgerOperation::CollateralRemovePartner { collateral_partner, operator_signature } => {
+                    let msg = CollateralRemovePartnerMsg {
+                        partner_id: update_msg.partner_pubkey,
+                        collateral_partner: *collateral_partner,
+                        operator_signature: *operator_signature,
+                    };
+                    return self.handle_collateral_remove_partner(&msg, sender_node_id);
+                }
+                LedgerOperation::CollateralAttestation { collateral_operator, amount, block_height, signature, ledger_hash } => {
+                    let msg = crate::wire::messages::CollateralAttestationMsg {
+                        operator: *collateral_operator,
+                        collateral_partner: update_msg.partner_pubkey,
                         amount: *amount,
                         block_height: *block_height,
                         signature: *signature,
                         ledger_hash: *ledger_hash,
                     };
+                    // Call handler FIRST to add CollateralAttestation to pending_acks
+                    let result = self.handle_collateral_attestation(&msg, sender_node_id);
 
-                    // Store the attestation in the ledger BEFORE notifying the oneshot
-                    // This ensures the attestation (with ledger_hash) is available when
-                    // increase_collateral_on_ledger resumes and needs to verify the hash
-                    {
-                        let ledgers = self.ledgers.lock().unwrap();
-                        if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, sender_node_id)) {
-                            let mut ledger = ledger_arc.write().unwrap();
-                            // Convert V1 message type to core attestation type
-                            let attestation = deposits_core::types::CollateralAttestation::new(
-                                attestation_msg.operator,
-                                attestation_msg.collateral_partner,
-                                attestation_msg.amount,
-                                attestation_msg.block_height,
-                                attestation_msg.signature,
-                                attestation_msg.ledger_hash,
-                            );
-                            ledger.state.collateral_attestations.insert(sender_node_id, attestation);
-                            log_info!(
-                                self.logger,
-                                "💰 OPERATOR: Stored attestation from channel partner {} in ledger (hash={:02x?})",
-                                sender_node_id,
-                                &attestation_msg.ledger_hash[0..8]
-                            );
-                        }
+                    // NOW send the deferred oneshot notification
+                    // This ensures CollateralAttestation is in pending_acks before the waiter continues
+                    if let Some(oneshot_tx) = deferred_collateral_oneshot.take() {
+                        log_info!(self.logger, "💰 OPERATOR: Sending deferred oneshot after handle_collateral_attestation");
+                        let _ = oneshot_tx.send(Ok(()));
                     }
 
-                    // DEFER oneshot notification until AFTER handle_collateral_attestation completes
-                    // This ensures CollateralAttestation is in pending_acks before the waiter continues
-                    deferred_collateral_oneshot = {
-                        let mut pending_oneshot_acks = self.pending_oneshot_acks.lock().unwrap();
-                        pending_oneshot_acks.remove(&hash)
+                    return result;
+                }
+                LedgerOperation::Tombstone { channel_id, close_reason, timestamp } => {
+                    let tombstone_msg = ChannelCloseTombstoneMsg {
+                        operator_pubkey: update_msg.operator_pubkey,
+                        partner_pubkey: update_msg.partner_pubkey,
+                        timestamp: *timestamp,
+                        channel_id: *channel_id,
+                        close_reason: close_reason.clone(),
+                        sequence_number: update_msg.sequence_number,
                     };
-
-                    log_info!(
-                        self.logger,
-                        "💰 OPERATOR: CollateralAttestation treated as ACK for pending collateral message"
-                    );
+                    return self.handle_channel_close_tombstone(&tombstone_msg, &message, sender_node_id);
                 }
-
-                // Continue to process the attestation normally (for broadcasting, etc.)
+                _ => {} // Other LedgerUpdate operations handled below
             }
+            _ => {} // Not a coordination/recovery message, continue processing
         }
 
-        // Handle quorum messages - infrastructure-level peer coordination
-        match &message {
-            DepositsMessage::QuorumJoinRequest { requester_pubkey, operator_id, partner_id, protocol_version, timestamp, signature } => {
-                // Delegate to extracted handler in message_handlers.rs
-                let msg = crate::wire::messages::QuorumJoinRequestMsg {
-                    requester_pubkey: *requester_pubkey,
-                    operator_id: *operator_id,
-                    partner_id: *partner_id,
-                    protocol_version: *protocol_version,
-                    timestamp: *timestamp,
-                    signature: *signature,
-                };
-                return self.handle_quorum_join_request(&msg, sender_node_id);
-            }
-
-            DepositsMessage::QuorumJoinResponse { accepted, ref members, threshold, last_sequence, current_state_hash, ref rejection_reason } => {
-                // Delegate to extracted handler in message_handlers.rs
-                let msg = super::messages::QuorumJoinResponseMsg {
-                    accepted: *accepted,
-                    members: members.clone(),
-                    threshold: *threshold,
-                    last_sequence: *last_sequence,
-                    current_state_hash: *current_state_hash,
-                    rejection_reason: rejection_reason.clone(),
-                };
-                return self.handle_quorum_join_response(&msg, sender_node_id);
-            }
-
-            DepositsMessage::QuorumStateSync { operator_id, partner_id, ref updates, start_sequence, is_final } => {
-                // Delegate to extracted handler in message_handlers.rs
-                let msg = super::messages::QuorumStateSyncMsg {
-                    operator_id: *operator_id,
-                    partner_id: *partner_id,
-                    updates: updates.clone(),
-                    start_sequence: *start_sequence,
-                    is_final: *is_final,
-                };
-                return self.handle_quorum_state_sync(&msg, sender_node_id);
-            }
-
-            DepositsMessage::QuorumVoteRequest { operator_id, partner_id, vote_round_id, sequence_number, state_hash, claimed_reserves, ref collateral_amounts, ref reserves_outpoint, ref destination_script, fee_rate_sat_vbyte } => {
-                // Delegate to extracted handler in message_handlers.rs
-                let msg = super::messages::QuorumVoteRequestMsg {
-                    operator_id: *operator_id,
-                    partner_id: *partner_id,
-                    vote_round_id: *vote_round_id,
-                    sequence_number: *sequence_number,
-                    state_hash: *state_hash,
-                    claimed_reserves: *claimed_reserves,
-                    collateral_amounts: collateral_amounts.clone(),
-                    reserves_outpoint: reserves_outpoint.clone(),
-                    destination_script: destination_script.clone(),
-                    fee_rate_sat_vbyte: *fee_rate_sat_vbyte,
-                };
-                return self.handle_quorum_vote_request(&msg, sender_node_id);
-            }
-
-            DepositsMessage::QuorumVote { vote_round_id, voter_pubkey, vote, voter_sequence, voter_state_hash, ref evidence, signature, spend_signature } => {
-                // Delegate to extracted handler in message_handlers.rs
-                let msg = super::messages::QuorumVoteMsg {
-                    vote_round_id: *vote_round_id,
-                    voter_pubkey: *voter_pubkey,
-                    vote: *vote,
-                    voter_sequence: *voter_sequence,
-                    voter_state_hash: *voter_state_hash,
-                    evidence: evidence.clone(),
-                    signature: *signature,
-                    spend_signature: *spend_signature,
-                };
-                return self.handle_quorum_vote(&msg, sender_node_id);
-            }
-
-            DepositsMessage::QuorumMembershipChange { operator_id, partner_id, ref change_type, member_pubkey, ref new_members } => {
-                // Delegate to extracted handler in message_handlers.rs
-                let msg = super::messages::QuorumMembershipChangeMsg {
-                    operator_id: *operator_id,
-                    partner_id: *partner_id,
-                    change_type: change_type.clone(),
-                    member_pubkey: *member_pubkey,
-                    new_members: new_members.clone(),
-                };
-                return self.handle_quorum_membership_change(&msg, sender_node_id);
-            }
-
-            // Recovery Messages (0x808F-0x8095)
-            DepositsMessage::RecoveryVote { operator, partner, voter, is_conforming, validated_hash, validated_sequence, substitute_nomination, discovered_violation, signature } => {
-                // Delegate to extracted handler in message_handlers.rs
-                let msg = super::messages::RecoveryVoteMsg {
-                    operator: *operator,
-                    partner: *partner,
-                    voter: *voter,
-                    is_conforming: *is_conforming,
-                    validated_hash: *validated_hash,
-                    validated_sequence: *validated_sequence,
-                    substitute_nomination: *substitute_nomination,
-                    discovered_violation: *discovered_violation,
-                    signature: *signature,
-                };
-                return self.handle_recovery_vote(&msg, sender_node_id);
-            }
-
-            DepositsMessage::RecoveryClaimRequest { operator, partner, claimant, tier_index, ref unsigned_tx, sighash, ref destination_script, block_height } => {
-                // Delegate to extracted handler in message_handlers.rs
-                let msg = super::messages::RecoveryClaimRequestMsg {
-                    operator: *operator,
-                    partner: *partner,
-                    claimant: *claimant,
-                    tier_index: *tier_index,
-                    unsigned_tx: unsigned_tx.clone(),
-                    sighash: *sighash,
-                    destination_script: destination_script.clone(),
-                    block_height: *block_height,
-                };
-                return self.handle_recovery_claim_request(&msg, sender_node_id);
-            }
-
-            DepositsMessage::RecoveryClaimSignature { operator, partner, signer, sighash, signature } => {
-                // Delegate to extracted handler in message_handlers.rs
-                let msg = super::messages::RecoveryClaimSignatureMsg {
-                    operator: *operator,
-                    partner: *partner,
-                    signer: *signer,
-                    sighash: *sighash,
-                    signature: *signature,
-                };
-                return self.handle_recovery_claim_signature(&msg, sender_node_id);
-            }
-
-            DepositsMessage::RecoveryClaimComplete { operator, partner, new_operator, claim_txid, confirmation_block, reason_code } => {
-                // Delegate to extracted handler in message_handlers.rs
-                let msg = super::messages::RecoveryClaimCompleteMsg {
-                    operator: *operator,
-                    partner: *partner,
-                    new_operator: *new_operator,
-                    claim_txid: *claim_txid,
-                    confirmation_block: *confirmation_block,
-                    reason_code: *reason_code,
-                };
-                return self.handle_recovery_claim_complete(&msg, sender_node_id);
-            }
-
-            // Voter Registration Messages (0x8097)
-            DepositsMessage::CollateralAddPartner { operator_id, partner_id, collateral_partner, collateral_partner_signature } => {
-                // Delegate to extracted handler in message_handlers.rs
-                let msg = super::messages::CollateralAddPartnerMsg {
-                    operator_id: *operator_id,
-                    partner_id: *partner_id,
-                    collateral_partner: *collateral_partner,
-                    collateral_partner_signature: *collateral_partner_signature,
-                };
-                return self.handle_collateral_add_partner(&msg, sender_node_id);
-            }
-
-            // Voter Registration Messages (0x8099) - Remove collateral partner
-            DepositsMessage::CollateralRemovePartner { partner_id, collateral_partner, operator_signature } => {
-                // Delegate to extracted handler in message_handlers.rs
-                let msg = super::messages::CollateralRemovePartnerMsg {
-                    partner_id: *partner_id,
-                    collateral_partner: *collateral_partner,
-                    operator_signature: *operator_signature,
-                };
-                return self.handle_collateral_remove_partner(&msg, sender_node_id);
-            }
-
-            // Collateral Consent Request (0x809B) - Operator asking us to be a collateral partner
-            DepositsMessage::CollateralConsentRequest { operator_id, partner_id, operator_signature } => {
-                // Delegate to extracted handler in message_handlers.rs
-                let msg = super::messages::CollateralConsentRequestMsg {
-                    operator_id: *operator_id,
-                    partner_id: *partner_id,
-                    operator_signature: *operator_signature,
-                };
-                return self.handle_collateral_consent_request(&msg, sender_node_id);
-            }
-
-            // Collateral Consent Response (0x809D) - Response from potential collateral partner
-            DepositsMessage::CollateralConsentResponse { operator_id, partner_id, consent_granted, collateral_partner_signature } => {
-                // Delegate to extracted handler in message_handlers.rs
-                let msg = super::messages::CollateralConsentResponseMsg {
-                    operator_id: *operator_id,
-                    partner_id: *partner_id,
-                    consent_granted: *consent_granted,
-                    collateral_partner_signature: *collateral_partner_signature,
-                };
-                return self.handle_collateral_consent_response(&msg, sender_node_id);
-            }
-
-            // Collateral Attestation Messages (0x808D)
-            DepositsMessage::CollateralAttestation { operator, collateral_partner, amount, block_height, signature, ledger_hash } => {
-                // Delegate to extracted handler in message_handlers.rs
-                let msg = crate::wire::messages::CollateralAttestationMsg {
-                    operator: *operator,
-                    collateral_partner: *collateral_partner,
-                    amount: *amount,
-                    block_height: *block_height,
-                    signature: *signature,
-                    ledger_hash: *ledger_hash,
-                };
-                // Call handler FIRST to add CollateralAttestation to pending_acks
-                let result = self.handle_collateral_attestation(&msg, sender_node_id);
-
-                // NOW send the deferred oneshot notification
-                // This ensures CollateralAttestation is in pending_acks before the waiter continues
-                if let Some(oneshot_tx) = deferred_collateral_oneshot.take() {
-                    log_info!(self.logger, "💰 OPERATOR: Sending deferred oneshot after handle_collateral_attestation");
-                    let _ = oneshot_tx.send(Ok(()));
-                }
-
-                return result;
-            }
-
-            // Uncredited Payment Accusation (0x8035) - Partner broadcasting proof of unpaid settlement
-            DepositsMessage::UncreditedPayment { operator, partner, payment_hash, preimage, deposit_pubkey, amount_msat, invoice_cosignature, settlement_sequence, settlement_ledger_hash, settlement_block_height, accuser_signature } => {
-                // Delegate to extracted handler in message_handlers.rs
-                let msg = super::messages::UncreditedPaymentMsg {
-                    operator: *operator,
-                    partner: *partner,
-                    payment_hash: *payment_hash,
-                    preimage: *preimage,
-                    deposit_pubkey: *deposit_pubkey,
-                    amount_msat: *amount_msat,
-                    invoice_cosignature: *invoice_cosignature,
-                    settlement_sequence: *settlement_sequence,
-                    settlement_ledger_hash: *settlement_ledger_hash,
-                    settlement_block_height: *settlement_block_height,
-                    accuser_signature: *accuser_signature,
-                };
-                return self.handle_uncredited_payment(&msg, sender_node_id);
-            }
-
-            // UpdateReserves custom message (0x80E1) - Reserves commitment protocol
-            // Counterparty is proposing extra outputs for the commitment transaction
-            DepositsMessage::UpdateReserves { ref channel_id, reserves_sats, ref script_pubkey, ref ledger_hash, ref remote_ledger_hash } => {
-                return self.handle_update_reserves(
-                    channel_id,
-                    *reserves_sats,
-                    script_pubkey,
-                    ledger_hash,
-                    remote_ledger_hash,
-                    sender_node_id,
-                );
-            }
-
-            // AcceptReserves custom message (0x80E3) - Reserves commitment protocol
-            // Counterparty has accepted our proposed extra outputs
-            DepositsMessage::AcceptReserves { ref channel_id } => {
-                return self.handle_accept_reserves(channel_id, sender_node_id);
-            }
-
-            _ => {} // Not a quorum/recovery/voter/collateral/accusation message, continue processing
-        }
-
-        // Handle ChannelCloseTombstone messages specially - append to ledger and mark as closed
-        if let DepositsMessage::ChannelCloseTombstone { ref operator_pubkey, ref partner_pubkey, timestamp, ref channel_id, ref close_reason, sequence_number } = message {
-            // Delegate to extracted handler in message_handlers.rs
-            let tombstone_msg = super::messages::ChannelCloseTombstoneMsg {
-                operator_pubkey: *operator_pubkey,
-                partner_pubkey: *partner_pubkey,
-                timestamp,
-                channel_id: *channel_id,
-                close_reason: close_reason.clone(),
-                sequence_number,
-            };
-            return self.handle_channel_close_tombstone(&tombstone_msg, &message, sender_node_id);
-        }
+        // Note: ChannelCloseTombstone is now handled via LedgerUpdate with LedgerOperation::Tombstone
+        // (see the LedgerOperation::Tombstone match arm above around line 392)
 
         // Check if this is a third-party audit message (we are neither operator nor partner)
         // Delegate to extracted handler in message_handlers.rs
@@ -440,10 +425,14 @@ where
         // Handle SignedAuditUpdate specially when we're the PARTNER
         // The partner should receive authoritative updates from operator and store in ledgers
         // NOT process through apply_state_only() which is for ledger update messages
-        if let DepositsMessage::SignedUpdate(ref signed_msg) = message {
-            // Delegate to extracted handler in message_handlers.rs
-            if self.handle_signed_update_as_partner(signed_msg, sender_node_id)? {
-                return Ok(());
+        // V2: SignedUpdate is now just a LedgerUpdate with signatures
+        if let DepositsMessage::LedgerUpdate(ref update_msg) = message {
+            // Check if this is a signed update by looking for operator signature
+            if update_msg.operator_signature != [0u8; 64] {
+                // Delegate to extracted handler in message_handlers.rs
+                if self.handle_signed_update_as_partner(update_msg, sender_node_id)? {
+                    return Ok(());
+                }
             }
         }
 
@@ -465,8 +454,9 @@ where
                 let is_collateral_op = message.to_operation().map_or(false, |op|
                     matches!(op, LedgerOperation::CollateralIncrease { .. } | LedgerOperation::CollateralDecrease { .. })
                 );
-                let needs_special_response = matches!(message, DepositsMessage::ReceivingCosignInvoice { .. })
-                    || is_collateral_op;
+                // V2: ReceivingCosignInvoice is now Coordination(CosignInvoice)
+                let is_cosign = matches!(&message, DepositsMessage::Coordination(CoordinationMsg::CosignInvoice { .. }));
+                let needs_special_response = is_cosign || is_collateral_op;
 
                 if !needs_special_response {
                     // IMPORTANT: Don't send simple ACK for messages that will get porcupine ACK later
@@ -516,10 +506,10 @@ where
         }
 
         // HANDSHAKE: Handle ledger creation handshake messages
-        // Match both V2 Handshake and V1 alias LedgerOpenRequest
+        // V2: Only Handshake variant exists
         match &message {
-            DepositsMessage::LedgerOpenRequest(init_msg) | DepositsMessage::Handshake(init_msg) => {
-                println!("🟢 HANDSHAKE: Received Handshake/LedgerOpenRequest from {} (version {}, partner_id: {})",
+            DepositsMessage::Handshake(init_msg) => {
+                println!("🟢 HANDSHAKE: Received Handshake from {} (version {}, partner_id: {})",
                     sender_node_id, init_msg.protocol_version, init_msg.partner_id);
                 // Delegate to extracted handler in message_handlers.rs
                 return self.handle_ledger_open_request(init_msg, &message, sender_node_id);
@@ -528,9 +518,9 @@ where
         }
 
         // HANDSHAKE RESPONSE: Treat HandshakeResponse as ACK for pending Handshake
-        // Match both V2 HandshakeResponse and V1 alias LedgerOpenResponse
+        // V2: Only HandshakeResponse variant exists
         match &message {
-            DepositsMessage::LedgerOpenResponse(resp_msg) | DepositsMessage::HandshakeResponse(resp_msg) => {
+            DepositsMessage::HandshakeResponse(resp_msg) => {
                 log_info!(self.logger, "📨 Received HandshakeResponse from {} (accepted={})", sender_node_id, resp_msg.accepted);
 
                 // Find and remove any pending ACK for HANDSHAKE type from this sender
@@ -591,12 +581,10 @@ where
         // Skip automatic ACK sending for ledger open messages and ACK messages themselves
         // - Ledger open messages have their own response semantics
         // - ACK messages should never be ACKed (would create infinite loop)
+        // V2: Only Handshake, HandshakeResponse, and LedgerUpdateResponse exist
         let should_skip_auto_ack = matches!(message,
-            DepositsMessage::LedgerOpenRequest(_) |
-            DepositsMessage::LedgerOpenResponse(_) |
             DepositsMessage::Handshake(_) |
             DepositsMessage::HandshakeResponse(_) |
-            DepositsMessage::Ack(_) |
             DepositsMessage::LedgerUpdateResponse(_)
         );
 
@@ -629,7 +617,8 @@ where
                 }
 
                 // Check if this is a coordination message that doesn't modify ledger state
-                let is_coordination_message = matches!(message, DepositsMessage::ReceivingCosignInvoice { .. });
+                // V2: ReceivingCosignInvoice is now Coordination(CosignInvoice)
+                let is_coordination_message = matches!(message, DepositsMessage::Coordination(CoordinationMsg::CosignInvoice { .. }));
 
                 // Check if this is a collateral commitment message that needs attestation response
                 // Uses to_operation() to handle both V1 format and V2 LedgerUpdate format uniformly
@@ -725,34 +714,30 @@ where
                             );
 
                             // Send attestation as the response (serves as ACK)
-                            let attestation_msg = DepositsMessage::CollateralAttestation {
-                                operator: attestation.operator,
-                                collateral_partner: attestation.collateral_partner,
-                                amount: attestation.amount,
-                                block_height: attestation.block_height,
-                                signature: attestation.signature,
-                                ledger_hash: attestation.ledger_hash,
-                            };
+                            // V2: CollateralAttestation is now inside LedgerUpdate
+                            let attestation_msg = DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
+                                attestation.operator,
+                                attestation.collateral_partner,
+                                LedgerOperation::CollateralAttestation {
+                                    collateral_operator: attestation.operator,
+                                    amount: attestation.amount,
+                                    block_height: attestation.block_height,
+                                    signature: attestation.signature,
+                                    ledger_hash: attestation.ledger_hash,
+                                },
+                            ));
                             pending_messages.push((sender_node_id, attestation_msg.clone()));
 
-                            // Also broadcast attestation to other partners/auditors
-                            // They need to know the current collateral level
-                            // NOTE: We're already holding the ledgers lock from the outer scope,
-                            // so we use the existing `ledgers` variable instead of re-locking
-                            for ((op_id, part_id), _) in ledgers.iter() {
-                                // Broadcast to all partners except:
-                                // - the operator we just responded to
-                                // - ourselves (if we are the partner in another ledger)
-                                if *part_id != sender_node_id && *op_id != sender_node_id && *part_id != self.our_node_id {
-                                    pending_messages.push((*part_id, attestation_msg.clone()));
-                                }
-                            }
-
-                            // NOTE: Partner does NOT forward CollateralAttestation entries here.
-                            // Only the OPERATOR forwards CollateralAttestation to their channel ledgers
-                            // after receiving it. The partner's role is to:
+                            // NOTE: Partner does NOT broadcast CollateralAttestation to other partners.
+                            // Only the OPERATOR forwards CollateralAttestation to channel ledgers
+                            // via handle_collateral_attestation after receiving it.
+                            // The partner's role is to:
                             // 1. Append CollateralIncrease to the shared ledger
-                            // 2. Send CollateralAttestation back as proof
+                            // 2. Send CollateralAttestation back to the operator as proof
+                            //
+                            // Previously there was a broadcast loop here that sent attestations to
+                            // all other partners, but this caused an infinite forwarding loop when
+                            // the collateral partner graph had cycles (e.g., A->B, B->C, C->A).
 
                             // Mark that we should persist
                             should_persist = true;
@@ -775,8 +760,10 @@ where
                     log_info!(self.logger, "🔵 PARTNER: Processing coordination message type {} (no ledger update)",
                              message.message_type());
 
-                    // Generate cosignature for ReceivingCosignInvoice
-                    let cosignature = if let DepositsMessage::ReceivingCosignInvoice { operator_id: _, partner_id: _, amount, payment_hash, expires, assigned_deposit, ref invoice_id, ref bolt11 } = message {
+                    // Generate cosignature for CosignInvoice
+                    // V2: ReceivingCosignInvoice is now Coordination(CosignInvoice)
+                    let cosignature = if let DepositsMessage::Coordination(CoordinationMsg::CosignInvoice { operator_id: _, partner_id: _, amount, payment_hash, expires, assigned_deposit, ref invoice_id, ref bolt11_invoice }) = message {
+                        let bolt11 = bolt11_invoice;
                         println!("🔐 PARTNER: Generating cosignature for invoice (payment_hash: {:02x?})", &payment_hash[0..4]);
                         // Generate proper 64-byte Schnorr signature over invoice data
                         let mut sig_input = Vec::new();
@@ -833,7 +820,7 @@ where
                     };
 
                     // Send ACK with cosignature (no ledger update needed)
-                    use super::messages::{DepositsMessage, AckMsg};
+                    use super::messages::{DepositsMessage, LedgerUpdateResponseMsg};
                     let message_hash = self.calculate_message_hash(&message);
                     // Convert Vec<u8> cosignature to [u8; 64] - now properly 64 bytes from Schnorr signature
                     let cosig_array: Option<[u8; 64]> = cosignature.as_ref().and_then(|v| {
@@ -846,20 +833,20 @@ where
                             None
                         }
                     });
-                    let ack = DepositsMessage::Ack(AckMsg {
-                        acked_message_type: message.message_type(),
+                    let ack = DepositsMessage::LedgerUpdateResponse(LedgerUpdateResponseMsg {
                         message_hash,
                         success: true,
                         error_message: None,
+                        partner_signature: cosig_array,
+                        confirmed_sequence: 0,
+                        confirmed_hash: message_hash,
+                        // V1 compat fields
+                        acked_message_type: message.message_type(),
                         cosignature: cosig_array,
                         update_signature: None,
                         update_sequence: None,
                         update_prev_hash: None,
                         update_curr_hash: None,
-                        // V2 required fields (no ledger update, so use defaults)
-                        partner_signature: cosig_array,
-                        confirmed_sequence: 0,
-                        confirmed_hash: message_hash,
                     });
 
                     println!("📤 PARTNER: Queueing ACK with cosignature for coordination message type {}, hash: {:02x?}",
@@ -922,23 +909,23 @@ where
                                 };
 
                                 // Send ACK with porcupine dance signature
-                                use super::messages::AckMsg;
+                                use super::messages::LedgerUpdateResponseMsg;
                                 let message_hash = self.calculate_message_hash(&message);
 
-                                let ack = DepositsMessage::Ack(AckMsg {
-                                    acked_message_type: message.message_type(),
+                                let ack = DepositsMessage::LedgerUpdateResponse(LedgerUpdateResponseMsg {
                                     message_hash,
                                     success: true,
                                     error_message: None,
+                                    partner_signature: partner_sig,
+                                    confirmed_sequence: seq,
+                                    confirmed_hash: new_hash,
+                                    // V1 compat fields
+                                    acked_message_type: message.message_type(),
                                     cosignature: None,
                                     update_signature: partner_sig,
                                     update_sequence: Some(seq),
                                     update_prev_hash: Some(prev_hash),
                                     update_curr_hash: Some(new_hash),
-                                    // V2 required fields
-                                    partner_signature: partner_sig,
-                                    confirmed_sequence: seq,
-                                    confirmed_hash: new_hash,
                                 });
 
                                 println!("📤 PARTNER: Queueing ACK with porcupine signature for message type {}, seq={}, hash={:02x?}",
@@ -950,10 +937,12 @@ where
 
                             // Special handling for CollateralAttestation: update received_collateral_amount
                             // This allows partners to track collateral received from operators
-                            if let DepositsMessage::CollateralAttestation { operator, amount, .. } = message {
-                                ledger.state.received_collateral_amount = ledger.state.received_collateral_amount.saturating_add(amount);
-                                log_info!(self.logger, "💰 PARTNER: Updated received_collateral_amount to {} (added {} from {})",
-                                    ledger.state.received_collateral_amount, amount, operator);
+                            if let DepositsMessage::LedgerUpdate(ref msg) = message {
+                                if let super::messages::LedgerOperation::CollateralAttestation { collateral_operator, amount, .. } = &msg.operation {
+                                    ledger.state.received_collateral_amount = ledger.state.received_collateral_amount.saturating_add(*amount);
+                                    log_info!(self.logger, "💰 PARTNER: Updated received_collateral_amount to {} (added {} from {})",
+                                        ledger.state.received_collateral_amount, amount, collateral_operator);
+                                }
                             }
 
                             // Mark that we should persist the ledger after releasing locks (only on success)

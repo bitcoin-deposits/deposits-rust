@@ -14,7 +14,9 @@
 use bitcoin::secp256k1::PublicKey;
 
 use super::core::DepositsHandler;
+use super::messages::{DepositsMessage, LedgerUpdateMsg, LedgerOperation};
 use deposits_core::DepositsError;
+use deposits_core::messages::CoordinationMsg;
 use super::ledger_ext::LedgerExt;
 use deposits_core::quorum::LedgerId;
 use deposits_core::{log_info, log_warn};
@@ -73,11 +75,11 @@ where
         log_info!(self.logger, "📨 Requesting consent from collateral partner {} to back ledger with partner {}",
             collateral_partner, partner_node_id);
 
-        let consent_request = DepositsMessage::CollateralConsentRequest {
+        let consent_request = DepositsMessage::Coordination(CoordinationMsg::CollateralConsentRequest {
             operator_id: self.our_node_id,
             partner_id: partner_node_id,
             operator_signature: [0u8; 64],
-        };
+        });
 
         // Send consent request and wait for response
         let collateral_partner_signature = self.request_collateral_consent(
@@ -87,13 +89,15 @@ where
 
         log_info!(self.logger, "✅ Received consent signature from collateral partner {}", collateral_partner);
 
-        // Step 2: Create the AddCollateralPartner message with both signatures
-        let message = DepositsMessage::CollateralAddPartner {
-            operator_id: self.our_node_id,
-            partner_id: partner_node_id,
-            collateral_partner,
-            collateral_partner_signature,
-        };
+        // Step 2: Create the AddCollateralPartner message with both signatures (V2 format)
+        let message = DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
+            self.our_node_id,
+            partner_node_id,
+            LedgerOperation::CollateralAddPartner {
+                collateral_partner,
+                collateral_partner_signature,
+            },
+        ));
 
         let message_hash = self.calculate_message_hash(&message);
         let message_type = message.message_type();
@@ -217,12 +221,15 @@ where
             }
         }
 
-        // Create the message (signature is placeholder for now)
-        let message = DepositsMessage::CollateralRemovePartner {
-            partner_id: partner_node_id,
-            collateral_partner,
-            operator_signature: [0u8; 64],
-        };
+        // Create the message (signature is placeholder for now) (V2 format)
+        let message = DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
+            self.our_node_id,  // operator
+            partner_node_id,
+            LedgerOperation::CollateralRemovePartner {
+                collateral_partner,
+                operator_signature: [0u8; 64],
+            },
+        ));
 
         let message_hash = self.calculate_message_hash(&message);
         let message_type = message.message_type();

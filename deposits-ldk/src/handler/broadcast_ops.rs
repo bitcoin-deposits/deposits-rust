@@ -245,8 +245,7 @@ where
             // If we have a signed update, wrap it in SignedAuditUpdate message
             // Otherwise, send the raw message for backward compatibility
             let message_to_send = if let Some(ref signed_update) = signed_update {
-                println!("🟢 BROADCAST: Wrapping in SignedAuditUpdate for recipient {}", audit_recipient_id);
-                use super::messages::SignedUpdateMsg;
+                println!("🟢 BROADCAST: Wrapping in LedgerUpdate for recipient {}", audit_recipient_id);
                 // Extract actual operation from original message to avoid placeholder issues
                 // Use to_operation() which handles all message types (LedgerUpdate, Handshake, etc.)
                 let operation = original_message.to_operation().unwrap_or_else(|| {
@@ -256,7 +255,7 @@ where
                     LedgerOperation::LedgerClose
                 });
                 println!("🟢 BROADCAST_OP: Using operation {:?} for variant {}", operation, original_message.variant_name());
-                DepositsMessage::SignedUpdate(SignedUpdateMsg {
+                DepositsMessage::LedgerUpdate(LedgerUpdateMsg {
                     message: signed_update.message.clone(),
                     message_type: signed_update.message_type,
                     operator_signature: signed_update.operator_signature,
@@ -401,8 +400,8 @@ where
         }
 
         // Broadcast to all auditors - use the actual PaymentFulfill operation
-        let audit_message = DepositsMessage::SignedUpdate(
-            super::messages::SignedUpdateMsg {
+        let audit_message = DepositsMessage::LedgerUpdate(
+            LedgerUpdateMsg {
                 message: signed_update.message.clone(),
                 message_type: signed_update.message_type,
                 operator_signature: signed_update.operator_signature,

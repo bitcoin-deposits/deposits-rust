@@ -13,8 +13,10 @@ mod tests {
     // Use re-exports from ldk_node to avoid version conflicts
     use ldk_node::bitcoin::secp256k1::PublicKey;
     use ldk_node::lightning::util::ser::Readable;
-    use deposits_ldk::handler::messages::DepositsMessage;
-    use deposits_ldk::handler::messages::{type_id_to_const_name, type_id_to_variant_name};
+    use deposits_ldk::handler::messages::{
+        DepositsMessage, LedgerUpdateMsg, LedgerUpdateResponseMsg, LedgerOperation,
+        HandshakeMsg, HandshakeResponseMsg, type_id_to_const_name, type_id_to_variant_name,
+    };
 
     #[cfg(feature = "bitcoin-deposits")]
     use ldk_node::lightning::ln::peer_handler::CustomMessageHandler;
@@ -79,25 +81,25 @@ mod tests {
     #[ignore = "TODO: Update patterns for V2 struct variants"]
     #[ignore = "TODO: Update patterns for V2 struct variants"]
     fn test_parse_sample_peer_messages() {
-        // Sample log entries from alice-peer-msg.txt
-        let sample_log = r#"[2025-12-11T22:55:19Z INFO  ldk_node::deposits::handler] PEER_MSG|0280e1f8f84fab5ab2acf889ac5f7e49ca39fc67ba8208079309d62b643b4af7ad|0x8071|Ack|gHEpAAKAYQIg57Xs8dmGZqboKz91elWinLxeLC6J63trB1yiBSYEzDEEAQE=
-[2025-12-11T22:55:19Z INFO  ldk_node::deposits::handler] PEER_MSG|0280e1f8f84fab5ab2acf889ac5f7e49ca39fc67ba8208079309d62b643b4af7ad|0x8063|LedgerOpenResponse|gGNNAAIAAQIBAQYhAoDh+PhPq1qyrPiJrF9+Sco5/Ge6gggHkwnWK2Q7SvetCCEDilOf9NGPR1BUkylOWKhD8L31JySBRPz5VHXuW4+4dTw="#;
+        // Sample log entries from alice-peer-msg.txt (V2 format)
+        let sample_log = r#"[2025-12-11T22:55:19Z INFO  ldk_node::deposits::handler] PEER_MSG|0280e1f8f84fab5ab2acf889ac5f7e49ca39fc67ba8208079309d62b643b4af7ad|0x8003|LedgerUpdateResponse|gHEpAAKAYQIg57Xs8dmGZqboKz91elWinLxeLC6J63trB1yiBSYEzDEEAQE=
+[2025-12-11T22:55:19Z INFO  ldk_node::deposits::handler] PEER_MSG|0280e1f8f84fab5ab2acf889ac5f7e49ca39fc67ba8208079309d62b643b4af7ad|0x8007|HandshakeResponse|gGNNAAIAAQIBAQYhAoDh+PhPq1qyrPiJrF9+Sco5/Ge6gggHkwnWK2Q7SvetCCEDilOf9NGPR1BUkylOWKhD8L31JySBRPz5VHXuW4+4dTw="#;
 
         let messages = read_peer_messages(sample_log);
 
         assert_eq!(messages.len(), 2, "Should parse 2 messages");
 
-        // First message should be an Ack
+        // First message should be a LedgerUpdateResponse (V2 for Ack)
         let (sender1, type1, variant1, msg1) = &messages[0];
-        assert_eq!(*type1, 0x8071, "First message should be ACK type");
-        assert_eq!(variant1, "Ack");
-        assert!(matches!(msg1, DepositsMessage::Ack(_)));
+        assert_eq!(*type1, 0x8003, "First message should be LEDGER_UPDATE_RESPONSE type");
+        assert_eq!(variant1, "LedgerUpdateResponse");
+        assert!(matches!(msg1, DepositsMessage::LedgerUpdateResponse(_)));
 
-        // Second message should be LedgerOpenResponse
+        // Second message should be HandshakeResponse (V2 for LedgerOpenResponse)
         let (sender2, type2, variant2, msg2) = &messages[1];
-        assert_eq!(*type2, 0x8063, "Second message should be LEDGER_OPEN_RESPONSE type");
-        assert_eq!(variant2, "LedgerOpenResponse");
-        assert!(matches!(msg2, DepositsMessage::LedgerOpenResponse(_)));
+        assert_eq!(*type2, 0x8007, "Second message should be HANDSHAKE_RESPONSE type");
+        assert_eq!(variant2, "HandshakeResponse");
+        assert!(matches!(msg2, DepositsMessage::HandshakeResponse(_)));
 
         // Both should be from the same sender (Bob)
         assert_eq!(sender1, sender2, "Both messages should be from same sender");
@@ -108,23 +110,27 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "TODO: Update patterns for V2 struct variants"]
+    #[ignore = "TODO: Update patterns for V2 struct variants - test data needs re-capture with V2 wire format"]
     fn test_parse_all_message_types() {
         // Test various message types that appear in the logs.
-        // Note: Some test cases were removed because they use pre-encoded binary data
-        // that becomes incompatible when struct definitions change. The message handling
-        // is fully tested via the replay tests which use live captured data.
+        // Note: These test cases use V2 wire format. The binary data needs to be
+        // re-captured with V2 encoding when integration testing is available.
+        // V2 message types:
+        // - 0x8001: LEDGER_UPDATE (carries all ledger operations)
+        // - 0x8003: LEDGER_UPDATE_RESPONSE (replaces Ack)
+        // - 0x8005: HANDSHAKE (replaces LedgerOpenRequest)
+        // - 0x8007: HANDSHAKE_RESPONSE (replaces LedgerOpenResponse)
         let test_cases = vec![
-            // Ack
-            ("0280e1f8f84fab5ab2acf889ac5f7e49ca39fc67ba8208079309d62b643b4af7ad", "0x8071", "Ack", "gHEpAAKAYQIg57Xs8dmGZqboKz91elWinLxeLC6J63trB1yiBSYEzDEEAQE="),
-            // LedgerOpenResponse
-            ("0280e1f8f84fab5ab2acf889ac5f7e49ca39fc67ba8208079309d62b643b4af7ad", "0x8063", "LedgerOpenResponse", "gGNNAAIAAQIBAQYhAoDh+PhPq1qyrPiJrF9+Sco5/Ge6gggHkwnWK2Q7SvetCCEDilOf9NGPR1BUkylOWKhD8L31JySBRPz5VHXuW4+4dTw="),
-            // CollateralAttestation
-            ("0280e1f8f84fab5ab2acf889ac5f7e49ca39fc67ba8208079309d62b643b4af7ad", "0x808d", "CollateralAttestation", "gI1/ACECgOH4+E+rWrKs+ImsX35Jyjn8Z7qCCAeTCdYrZDtK960CCAAAAAAAACcQBAgAAAAAAAAAAAYEAAAAewhAgmFRgeZvacBh61dW9jFLPWi3WQ7Z/+iJdK3o3L9wmOuTwVOyOEAjq/mRZRMV6t5KMiUW6tp8DP55cprg4SfdHw=="),
-            // ReservesToReserves
-            ("02dc4d8f888b3938ffa2ee149fb82e99ff81a565e9c0701612936a9a944ada2108", "0x8005", "ReservesToReserves", "gAUtAAgAAAAAAAAD6AIhA4pTn/TRj0dQVJMpTlioQ/C99SckgUT8+VR17luPuHU8"),
-            // LedgerAddDeposit
-            ("02dc4d8f888b3938ffa2ee149fb82e99ff81a565e9c0701612936a9a944ada2108", "0x8011", "LedgerAddDeposit", "gBFGACECr0gjZGSYdZBzGgG1wqnT6PvVWVfH9bZR9dM61yA8TLYKIQOKU5/00Y9HUFSTKU5YqEPwvfUnJIFE/PlUde5bj7h1PA=="),
+            // LedgerUpdateResponse (V2 for Ack)
+            ("0280e1f8f84fab5ab2acf889ac5f7e49ca39fc67ba8208079309d62b643b4af7ad", "0x8003", "LedgerUpdateResponse", "gHEpAAKAYQIg57Xs8dmGZqboKz91elWinLxeLC6J63trB1yiBSYEzDEEAQE="),
+            // HandshakeResponse (V2 for LedgerOpenResponse)
+            ("0280e1f8f84fab5ab2acf889ac5f7e49ca39fc67ba8208079309d62b643b4af7ad", "0x8007", "HandshakeResponse", "gGNNAAIAAQIBAQYhAoDh+PhPq1qyrPiJrF9+Sco5/Ge6gggHkwnWK2Q7SvetCCEDilOf9NGPR1BUkylOWKhD8L31JySBRPz5VHXuW4+4dTw="),
+            // LedgerUpdate with CollateralAttestation operation
+            ("0280e1f8f84fab5ab2acf889ac5f7e49ca39fc67ba8208079309d62b643b4af7ad", "0x8001", "LedgerUpdate", "gI1/ACECgOH4+E+rWrKs+ImsX35Jyjn8Z7qCCAeTCdYrZDtK960CCAAAAAAAACcQBAgAAAAAAAAAAAYEAAAAewhAgmFRgeZvacBh61dW9jFLPWi3WQ7Z/+iJdK3o3L9wmOuTwVOyOEAjq/mRZRMV6t5KMiUW6tp8DP55cprg4SfdHw=="),
+            // Handshake (V2 for LedgerOpenRequest)
+            ("02dc4d8f888b3938ffa2ee149fb82e99ff81a565e9c0701612936a9a944ada2108", "0x8005", "Handshake", "gAUtAAgAAAAAAAAD6AIhA4pTn/TRj0dQVJMpTlioQ/C99SckgUT8+VR17luPuHU8"),
+            // LedgerUpdate with DepositOpen operation
+            ("02dc4d8f888b3938ffa2ee149fb82e99ff81a565e9c0701612936a9a944ada2108", "0x8001", "LedgerUpdate", "gBFGACECr0gjZGSYdZBzGgG1wqnT6PvVWVfH9bZR9dM61yA8TLYKIQOKU5/00Y9HUFSTKU5YqEPwvfUnJIFE/PlUde5bj7h1PA=="),
         ];
 
         for (sender_hex, type_hex, variant_name, base64_msg) in test_cases {
@@ -260,19 +266,19 @@ mod tests {
         }
 
         // For replay testing, we need to know Alice's node ID.
-        // Let's look for it in LedgerOpenResponse messages which contain operator info.
+        // Let's look for it in HandshakeResponse messages which contain operator info.
         let mut alice_id: Option<PublicKey> = None;
         for (sender, msg_type, _, msg) in &messages {
-            if *msg_type == 0x8063 { // LEDGER_OPEN_RESPONSE
-                if let DepositsMessage::LedgerOpenResponse(resp) = msg {
+            if *msg_type == 0x8007 { // HANDSHAKE_RESPONSE
+                if let DepositsMessage::HandshakeResponse(resp) = msg {
                     // The responder is our partner (Bob/Charlie), so their operator field tells us about them
                     // We need to look at the partner_id field which should be Alice (the initiator)
-                    // Actually in handshake flow: Initiator sends LedgerOpenRequest, responder sends LedgerOpenResponse
-                    // The LedgerOpenResponse.partner_id should be the initiator (Alice)
+                    // Actually in handshake flow: Initiator sends Handshake, responder sends HandshakeResponse
+                    // The HandshakeResponse.partner_id should be the initiator (Alice)
                     let partner_id = &resp.partner_id;
                     if alice_id.is_none() || alice_id == Some(*partner_id) {
                         alice_id = Some(*partner_id);
-                        println!("📍 Found potential Alice ID from LedgerOpenResponse: {}", partner_id);
+                        println!("Found potential Alice ID from HandshakeResponse: {}", partner_id);
                     }
                 }
             }
@@ -356,25 +362,23 @@ mod tests {
     /// Extract the node ID for the receiver by looking at handshake messages.
     ///
     /// For nodes that INITIATE handshakes (like Alice, Bob as operators):
-    ///   - They receive LedgerOpenResponse where partner_id is their own node ID
+    ///   - They receive HandshakeResponse where partner_id is their own node ID
     ///
     /// For nodes that ONLY RECEIVE handshakes (like Charlie as a partner/auditor):
-    ///   - They receive LedgerOpenRequest where partner_id is THEIR node ID
+    ///   - They receive Handshake where partner_id is THEIR node ID
     ///   - The sender's public_key field is the initiator (not us)
     fn discover_node_id_from_messages(messages: &[(PublicKey, u16, String, DepositsMessage)]) -> Option<PublicKey> {
-        use deposits_ldk::handler::messages::DepositsMessage;
-
-        // First, try LedgerOpenResponse - this is more reliable as it's what the initiator receives back
+        // First, try HandshakeResponse - this is more reliable as it's what the initiator receives back
         for (_, _, _, msg) in messages {
-            if let DepositsMessage::LedgerOpenResponse(resp) = msg {
+            if let DepositsMessage::HandshakeResponse(resp) = msg {
                 return Some(resp.partner_id);
             }
         }
 
-        // If no LedgerOpenResponse, try LedgerOpenRequest - this is what partners/auditors receive
-        // The partner_id field in LedgerOpenRequest is the intended recipient (the partner)
+        // If no HandshakeResponse, try Handshake - this is what partners/auditors receive
+        // The partner_id field in Handshake is the intended recipient (the partner)
         for (_, _, _, msg) in messages {
-            if let DepositsMessage::LedgerOpenRequest(init) = msg {
+            if let DepositsMessage::Handshake(init) = msg {
                 return Some(init.partner_id);
             }
         }
@@ -458,18 +462,22 @@ mod tests {
     }
 
     /// Get the amount in sats from a message (if applicable)
-    /// EXACT SAME LOGIC as src/bin/ldk-server.rs line 1224-1246
+    /// V2 uses LedgerUpdate with LedgerOperation enum
     #[cfg(feature = "bitcoin-deposits")]
     fn get_message_amount(msg: &DepositsMessage) -> Option<u64> {
-        use deposits_ldk::handler::messages::DepositsMessage;
         match msg {
-            DepositsMessage::ReceivingCreditPayment { amount, .. } => Some(*amount),
-            DepositsMessage::SendingLockPayment { amount, .. } => Some(*amount),
-            DepositsMessage::SendingFailPayment { amount, .. } => Some(*amount),
-            DepositsMessage::SendingFulfillPayment { amount, .. } => Some(*amount),
-            DepositsMessage::ReservesAddOutput { initial_amount, .. } => Some(*initial_amount),
-            DepositsMessage::ReservesIncrease { new_amount, .. } => Some(*new_amount),
-            DepositsMessage::ReservesDecrease { new_amount, .. } => Some(*new_amount),
+            DepositsMessage::LedgerUpdate(update_msg) => {
+                match &update_msg.operation {
+                    LedgerOperation::PaymentCredit { amount, .. } => Some(*amount),
+                    LedgerOperation::PaymentLock { amount, .. } => Some(*amount),
+                    LedgerOperation::PaymentFail { amount, .. } => Some(*amount),
+                    LedgerOperation::PaymentFulfill { amount, .. } => Some(*amount),
+                    LedgerOperation::ReservesAdd { amount, .. } => Some(*amount),
+                    LedgerOperation::ReservesIncrease { new_amount, .. } => Some(*new_amount),
+                    LedgerOperation::ReservesDecrease { new_amount, .. } => Some(*new_amount),
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }

@@ -19,7 +19,7 @@ use tokio::sync::oneshot;
 
 use super::core::DepositsHandler;
 use deposits_core::DepositsError;
-use super::messages::DepositsMessage;
+use super::messages::{DepositsMessage, LedgerUpdateResponseMsg};
 use deposits_core::{log_debug, log_info};
 use lightning::util::logger::Logger as LdkLogger;
 
@@ -46,25 +46,23 @@ where
 
         // Store message for broadcasting with prev_hash
         // We'll update with new_hash later after applying the update
-        // Skip Ack, SignedAuditUpdate, and coordination messages that are NOT ledger updates
+        // Skip ACK responses and coordination messages that are NOT ledger updates
         if !matches!(message,
             // Skip coordination/control messages that are NOT bilateral ledger updates:
-            DepositsMessage::Ack(_) |                       // ACK responses
-            DepositsMessage::LedgerUpdateResponse(_) |      // V2 ACK
-            DepositsMessage::SignedUpdate(_) |         // Audit broadcasts (already delivered)
+            DepositsMessage::LedgerUpdateResponse(_) |      // ACK responses
             // NOTE: LedgerUpdate IS a real ledger update that needs broadcast tracking
             // (removed from skip list so V2 messages work like V1 messages)
-            DepositsMessage::ReceivingCosignInvoice { .. } |    // Cosigning coordination
-            DepositsMessage::CollateralConsentRequest { .. } |  // Collateral consent flow
-            DepositsMessage::CollateralConsentResponse { .. } |
-            DepositsMessage::LedgerOpenRequest(_) |             // Ledger open sequence
-            DepositsMessage::LedgerOpenResponse(_) |
-            DepositsMessage::Handshake(_) |                 // V2 ledger open sequence
+            DepositsMessage::Coordination(_) |              // Collateral consent, quorum votes
+            DepositsMessage::CoordinationResponse(_) |      // Collateral consent responses
+            DepositsMessage::Handshake(_) |                 // Ledger open sequence
             DepositsMessage::HandshakeResponse(_) |
-            DepositsMessage::SyncRequest(_) |          // Audit sync coordination
+            DepositsMessage::Sync(_) |                      // Audit sync coordination
             DepositsMessage::SyncResponse(_) |
-            DepositsMessage::Sync(_)                   // V2 sync
-            // NOTE: ChannelCloseTombstone IS a real ledger update that needs broadcast
+            DepositsMessage::Recovery(_) |                  // Recovery operations
+            DepositsMessage::RecoveryResponse(_) |
+            DepositsMessage::Relay(_) |                     // NWC relay
+            DepositsMessage::RelayResponse(_)
+            // NOTE: LedgerUpdate with Tombstone IS a real ledger update that needs broadcast
         ) {
             // No-op: Callers are responsible for inserting into sent_messages_for_broadcast
             // with the correct hash BEFORE calling send_message. The hash is deterministic
@@ -801,7 +799,7 @@ where
             }
         });
 
-        let ack_msg = super::messages::AckMsg {
+        let ack_msg = LedgerUpdateResponseMsg {
             acked_message_type: message_type,
             message_hash,
             success,
@@ -817,7 +815,7 @@ where
             confirmed_hash: message_hash,
         };
 
-        let ack_message = DepositsMessage::Ack(ack_msg);
+        let ack_message = DepositsMessage::LedgerUpdateResponse(ack_msg);
 
         // Queue the acknowledgment for sending
         {

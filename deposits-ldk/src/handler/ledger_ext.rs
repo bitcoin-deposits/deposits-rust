@@ -16,7 +16,8 @@
 
 use bitcoin::secp256k1::PublicKey;
 
-use super::messages::{DepositsMessage, CollateralAttestationMsg};
+use super::messages::DepositsMessage;
+use crate::wire::messages::CollateralAttestationMsg;
 use deposits_core::SignedLedgerUpdate;
 use deposits_core::DepositsError;
 
@@ -178,27 +179,30 @@ impl LedgerExt for Ledger {
     }
 
     fn apply_state_only(&mut self, message: &DepositsMessage) -> Result<(), DepositsError> {
-        // Extract operation from V1 message and apply to state
+        // Extract operation from V2 message and apply to state
         if let Some(operation) = message.to_operation() {
             self.apply_state_changes(&operation)?;
         } else {
-            // Handle special V1 messages that don't have a LedgerOperation
+            // Handle special messages that don't have a LedgerOperation
             match message {
-                DepositsMessage::LedgerOpenRequest(_) => {
+                DepositsMessage::Handshake(_) => {
                     // Ledger opened - state already initialized
                 }
-                DepositsMessage::CollateralAttestation { operator, collateral_partner, amount, block_height, signature, ledger_hash } => {
-                    // V1 CollateralAttestation - convert to core type
-                    if *collateral_partner == self.state.partner_key || self.state.collateral_partners.contains(collateral_partner) {
-                        let attestation = deposits_core::CollateralAttestation {
-                            operator_id: *operator,
-                            collateral_partner: *collateral_partner,
-                            amount: *amount,
-                            block_height: *block_height,
-                            signature: *signature,
-                            ledger_hash: *ledger_hash,
-                        };
-                        self.state.collateral_attestations.insert(*collateral_partner, attestation);
+                DepositsMessage::LedgerUpdate(ref update_msg) => {
+                    // V2 CollateralAttestation is inside LedgerUpdate
+                    if let deposits_core::messages::LedgerOperation::CollateralAttestation { collateral_operator, amount, block_height, signature, ledger_hash } = &update_msg.operation {
+                        let collateral_partner = update_msg.partner_pubkey;
+                        if collateral_partner == self.state.partner_key || self.state.collateral_partners.contains(&collateral_partner) {
+                            let attestation = deposits_core::CollateralAttestation {
+                                operator_id: *collateral_operator,
+                                collateral_partner,
+                                amount: *amount,
+                                block_height: *block_height,
+                                signature: *signature,
+                                ledger_hash: *ledger_hash,
+                            };
+                            self.state.collateral_attestations.insert(collateral_partner, attestation);
+                        }
                     }
                 }
                 _ => {

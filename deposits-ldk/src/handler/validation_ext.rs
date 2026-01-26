@@ -328,7 +328,7 @@ impl ReplayLedgerState {
 
         // Handle special messages that don't have to_operation()
         match msg {
-            DepositsMessage::LedgerOpenRequest(_) => {
+            DepositsMessage::Handshake(_) => {
                 // Ledger opened - no state change
             }
             _ => {

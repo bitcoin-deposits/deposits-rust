@@ -7,6 +7,7 @@ use bitcoin::secp256k1::PublicKey;
 use std::ops::Deref;
 
 use super::messages::DepositsMessage;
+use crate::wire::messages::{RecoveryVoteMsg, RecoveryClaimRequestMsg, RecoveryClaimCompleteMsg, UncreditedPaymentMsg};
 use deposits_core::{log_info, log_error, log_warn};
 use lightning::util::logger::Logger as LdkLogger;
 
@@ -162,7 +163,7 @@ where
         ).map_err(|e| format!("Failed to create signed vote: {:?}", e))?;
 
         // Create vote message
-        let vote_msg = super::messages::RecoveryVoteMsg {
+        let vote_msg = RecoveryVoteMsg {
             operator,
             partner,
             voter: self.our_node_id,
@@ -174,7 +175,9 @@ where
             signature: vote.signature,
         };
 
-        let message = super::messages::DepositsMessage::RecoveryVote {
+        // V2 format: Recovery messages use Recovery(RecoveryMsg::...)
+        use deposits_core::messages::RecoveryMsg;
+        let message = super::messages::DepositsMessage::Recovery(RecoveryMsg::Vote {
             operator: vote_msg.operator,
             partner: vote_msg.partner,
             voter: vote_msg.voter,
@@ -184,7 +187,7 @@ where
             substitute_nomination: vote_msg.substitute_nomination,
             discovered_violation: vote_msg.discovered_violation,
             signature: vote_msg.signature,
-        };
+        });
 
         // Broadcast to operator and partner
         let mut broadcast_targets = vec![operator, partner];
@@ -348,7 +351,7 @@ where
         );
 
         // Create claim request message
-        let claim_request = super::messages::RecoveryClaimRequestMsg {
+        let claim_request = RecoveryClaimRequestMsg {
             operator,
             partner,
             claimant: self.our_node_id,
@@ -359,7 +362,9 @@ where
             block_height: current_block_height,
         };
 
-        let message = super::messages::DepositsMessage::RecoveryClaimRequest {
+        // V2 format: Recovery messages use Recovery(RecoveryMsg::...)
+        use deposits_core::messages::RecoveryMsg;
+        let message = super::messages::DepositsMessage::Recovery(RecoveryMsg::ClaimRequest {
             operator: claim_request.operator,
             partner: claim_request.partner,
             claimant: claim_request.claimant,
@@ -368,7 +373,7 @@ where
             sighash: claim_request.sighash,
             destination_script: claim_request.destination_script,
             block_height: claim_request.block_height,
-        };
+        });
 
         // Broadcast to all voters
         let broadcast_targets: Vec<PublicKey> = reserves.voter_set.all_voters()
@@ -454,7 +459,7 @@ where
         );
 
         // Broadcast RecoveryClaimComplete message
-        let complete_msg = super::messages::RecoveryClaimCompleteMsg {
+        let complete_msg = RecoveryClaimCompleteMsg {
             operator,
             partner,
             new_operator: self.our_node_id,
@@ -463,14 +468,16 @@ where
             reason_code: 1,
         };
 
-        let message = super::messages::DepositsMessage::RecoveryClaimComplete {
+        // V2 format: Recovery messages use Recovery(RecoveryMsg::...)
+        use deposits_core::messages::RecoveryMsg;
+        let message = super::messages::DepositsMessage::Recovery(RecoveryMsg::ClaimComplete {
             operator: complete_msg.operator,
             partner: complete_msg.partner,
             new_operator: complete_msg.new_operator,
             claim_txid: complete_msg.claim_txid,
             confirmation_block: complete_msg.confirmation_block,
             reason_code: complete_msg.reason_code,
-        };
+        });
 
         let broadcast_targets: Vec<PublicKey> = voter_set_pubkeys
             .into_iter()
@@ -657,7 +664,7 @@ where
         // Construct accusation message
         let accuser_signature = [0u8; 64]; // TODO: Sign properly
 
-        let accusation_msg = super::messages::UncreditedPaymentMsg {
+        let accusation_msg = UncreditedPaymentMsg {
             operator,
             partner: self.our_node_id,
             payment_hash,
@@ -671,7 +678,9 @@ where
             accuser_signature,
         };
 
-        let message = DepositsMessage::UncreditedPayment {
+        // V2 format: UncreditedPayment is now Recovery(RecoveryMsg::UncreditedPayment)
+        use deposits_core::messages::RecoveryMsg;
+        let message = DepositsMessage::Recovery(RecoveryMsg::UncreditedPayment {
             operator: accusation_msg.operator,
             partner: accusation_msg.partner,
             payment_hash: accusation_msg.payment_hash,
@@ -683,7 +692,7 @@ where
             settlement_ledger_hash: accusation_msg.settlement_ledger_hash,
             settlement_block_height: accusation_msg.settlement_block_height,
             accuser_signature: accusation_msg.accuser_signature,
-        };
+        });
 
         // Broadcast to all collateral partners
         let mut broadcast_targets = collateral_partners;
@@ -915,14 +924,15 @@ mod tests {
         let pending = handler.get_and_clear_pending_msg();
         assert!(!pending.is_empty(), "Expected vote message to be queued");
 
-        // Verify it's a RecoveryVote message
+        // Verify it's a RecoveryVote message (V2 format: Recovery(RecoveryMsg::Vote {...}))
+        use deposits_core::messages::RecoveryMsg;
         let (target, msg) = &pending[0];
         assert_eq!(*target, operator);
         match msg {
-            DepositsMessage::RecoveryVote { is_conforming, .. } => {
+            DepositsMessage::Recovery(RecoveryMsg::Vote { is_conforming, .. }) => {
                 assert!(is_conforming, "Should vote conforming when ledger exists");
             }
-            _ => panic!("Expected RecoveryVote message"),
+            _ => panic!("Expected Recovery(RecoveryMsg::Vote) message"),
         }
     }
 
@@ -1110,20 +1120,22 @@ mod tests {
         let pending = handler.get_and_clear_pending_msg();
         assert!(!pending.is_empty(), "Expected vote message to be queued");
 
-        // Find the RecoveryVote message
+        // Find the RecoveryVote message (V2 format: Recovery(RecoveryMsg::Vote {...}))
+        use deposits_core::messages::RecoveryMsg;
+        use crate::wire::messages::RecoveryVoteMsg;
         let vote_msg = pending.iter().find_map(|(_, msg)| {
             match msg {
-                DepositsMessage::RecoveryVote { operator, partner, voter, is_conforming, validated_hash, validated_sequence, substitute_nomination, discovered_violation, signature } => {
-                    Some(handler_messages::RecoveryVoteMsg {
-                        operator: *operator,
-                        partner: *partner,
-                        voter: *voter,
-                        is_conforming: *is_conforming,
-                        validated_hash: *validated_hash,
-                        validated_sequence: *validated_sequence,
-                        substitute_nomination: substitute_nomination.clone(),
-                        discovered_violation: *discovered_violation,
-                        signature: *signature,
+                DepositsMessage::Recovery(RecoveryMsg::Vote { operator: op, partner: pr, voter: vt, is_conforming: ic, validated_hash: vh, validated_sequence: vs, substitute_nomination: sn, discovered_violation: dv, signature: sig }) => {
+                    Some(RecoveryVoteMsg {
+                        operator: *op,
+                        partner: *pr,
+                        voter: *vt,
+                        is_conforming: *ic,
+                        validated_hash: *vh,
+                        validated_sequence: *vs,
+                        substitute_nomination: sn.clone(),
+                        discovered_violation: *dv,
+                        signature: *sig,
                     })
                 }
                 _ => None,
@@ -1172,19 +1184,21 @@ mod tests {
         let pending = handler.get_and_clear_pending_msg();
         assert!(!pending.is_empty(), "Expected vote message to be queued");
 
+        // V2 format: Recovery(RecoveryMsg::Vote {...})
+        use deposits_core::messages::RecoveryMsg;
         let vote_msg = pending.iter().find_map(|(_, msg)| {
             match msg {
-                DepositsMessage::RecoveryVote { is_conforming, discovered_violation, .. } => {
+                DepositsMessage::Recovery(RecoveryMsg::Vote { is_conforming, discovered_violation, .. }) => {
                     Some((is_conforming, discovered_violation))
                 }
                 _ => None,
             }
         });
 
-        assert!(vote_msg.is_some(), "Expected RecoveryVote message");
+        assert!(vote_msg.is_some(), "Expected Recovery(RecoveryMsg::Vote) message");
         let (is_conforming, discovered_violation) = vote_msg.unwrap();
         assert!(!is_conforming, "Should vote non-conforming when no ledger");
-        assert!(*discovered_violation, "Should mark violation discovered");
+        assert!(discovered_violation, "Should mark violation discovered");
     }
 
     // ==================== Claim Initiation Tests ====================
@@ -1408,18 +1422,19 @@ mod tests {
         // The accusation should go through (even without a real channel to force close)
         assert!(result.is_ok(), "Expected success, got: {:?}", result);
 
-        // Check that an UncreditedPayment message was queued
+        // Check that an UncreditedPayment message was queued (V2 format: Recovery(RecoveryMsg::UncreditedPayment {...}))
         let pending = handler.get_and_clear_pending_msg();
+        use deposits_core::messages::RecoveryMsg;
         let accusation_msg = pending.iter().find_map(|(_, msg)| {
             match msg {
-                DepositsMessage::UncreditedPayment { payment_hash: ph, preimage: pr, deposit_pubkey: dp, amount_msat: amt, .. } => {
+                DepositsMessage::Recovery(RecoveryMsg::UncreditedPayment { payment_hash: ph, preimage: pr, deposit_pubkey: dp, amount_msat: amt, .. }) => {
                     Some((ph, pr, dp, amt))
                 }
                 _ => None,
             }
         });
 
-        assert!(accusation_msg.is_some(), "Expected UncreditedPayment message to be queued");
+        assert!(accusation_msg.is_some(), "Expected Recovery(RecoveryMsg::UncreditedPayment) message to be queued");
         let (msg_payment_hash, msg_preimage, msg_deposit_pubkey, msg_amount_msat) = accusation_msg.unwrap();
         assert_eq!(*msg_payment_hash, payment_hash);
         assert_eq!(*msg_preimage, preimage);
@@ -1556,11 +1571,12 @@ mod tests {
         let pending = handler.get_and_clear_pending_msg();
         assert!(!pending.is_empty(), "Expected vote message(s) to be queued");
 
-        // All should be RecoveryVote messages
+        // All should be RecoveryVote messages (V2 format: Recovery(RecoveryMsg::Vote {...}))
+        use deposits_core::messages::RecoveryMsg;
         let vote_targets: Vec<PublicKey> = pending.iter()
             .filter_map(|(target, msg)| {
                 match msg {
-                    DepositsMessage::RecoveryVote { .. } => Some(*target),
+                    DepositsMessage::Recovery(RecoveryMsg::Vote { .. }) => Some(*target),
                     _ => None,
                 }
             })

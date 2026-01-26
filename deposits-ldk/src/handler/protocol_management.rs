@@ -18,7 +18,7 @@ use std::sync::{Arc, RwLock};
 
 use super::core::DepositsHandler;
 use deposits_core::DepositsError;
-use super::messages::{DepositsMessage, QuorumJoinRequestMsg};
+use super::messages::{DepositsMessage, CoordinationMsg, CoordinationResponseMsg};
 use super::protocol_stub::DepositsProtocol;
 use deposits_core::quorum::QuorumManager;
 use deposits_core::{log_debug, log_info};
@@ -87,15 +87,6 @@ where
             .unwrap_or_default()
             .as_secs();
 
-        let join_request = QuorumJoinRequestMsg {
-            requester_pubkey: self.our_node_id,
-            operator_id,
-            partner_id,
-            protocol_version: deposits_core::constants::DEPOSITS_PROTOCOL_VERSION,
-            timestamp,
-            signature: [0u8; 64],
-        };
-
         log_info!(
             self.logger,
             "📋 QUORUM: Sending join request to {} for ledger ({}, {})",
@@ -104,20 +95,20 @@ where
             partner_id
         );
 
-        // Queue the message for sending
+        // Queue the message for sending (V2 format)
         self.outbound_messages
             .lock()
             .unwrap()
             .entry(target_node_id)
             .or_insert_with(Vec::new)
-            .push(DepositsMessage::QuorumJoinRequest {
-                requester_pubkey: join_request.requester_pubkey,
-                operator_id: join_request.operator_id,
-                partner_id: join_request.partner_id,
-                protocol_version: join_request.protocol_version,
-                timestamp: join_request.timestamp,
-                signature: join_request.signature,
-            });
+            .push(DepositsMessage::Coordination(CoordinationMsg::QuorumJoinRequest {
+                requester_pubkey: self.our_node_id,
+                operator_id,
+                partner_id,
+                protocol_version: deposits_core::constants::DEPOSITS_PROTOCOL_VERSION,
+                timestamp,
+                signature: [0u8; 64],
+            }));
 
         Ok(())
     }
@@ -172,13 +163,14 @@ where
             );
 
             // Send empty final batch to indicate sync complete
-            let sync_msg = DepositsMessage::QuorumStateSync {
+            let sync_msg = DepositsMessage::CoordinationResponse(CoordinationResponseMsg::QuorumStateSync {
+                request_hash: [0u8; 32],
                 operator_id,
                 partner_id,
                 updates: Vec::new(),
                 start_sequence: 0,
                 is_final: true,
-            };
+            });
 
             self.outbound_messages
                 .lock()
@@ -199,28 +191,27 @@ where
             partner_id
         );
 
-        // Convert to SignedAuditUpdateMsg and send in batches
-        use super::messages::{SignedUpdateMsg, LedgerOperation};
+        // Send updates in batches using V2 format (updates_to_send is Vec<deposits_core::SignedLedgerUpdate> from types.rs)
+        // Need to convert to deposits_core::messages::SignedLedgerUpdate (V2 format)
+        use deposits_core::messages::SignedLedgerUpdate as V2SignedLedgerUpdate;
+        use deposits_core::messages::LedgerOperation;
         use super::ledger_ext::SignedLedgerUpdateExt;
 
         let total_batches = (updates_to_send.len() + BATCH_SIZE - 1) / BATCH_SIZE;
 
         for (batch_idx, chunk) in updates_to_send.chunks(BATCH_SIZE).enumerate() {
-            let audit_updates: Vec<SignedUpdateMsg> = chunk.iter().map(|update| {
-                // Extract actual operation from message bytes to avoid placeholder issues
+            // Convert deposits_core::SignedLedgerUpdate (V1) to deposits_core::messages::SignedLedgerUpdate (V2)
+            let v2_updates: Vec<V2SignedLedgerUpdate> = chunk.iter().map(|update| {
+                // Extract operation from message bytes using extension trait
                 let operation = update.get_operation().unwrap_or(LedgerOperation::ReservesRemove);
-                SignedUpdateMsg {
-                    message: update.message.clone(),
-                    message_type: update.message_type,
-                    operator_signature: update.operator_signature,
-                    partner_signature: Some(update.partner_signature),
-                    operator_pubkey: update.operator_pubkey,
-                    partner_pubkey: update.partner_pubkey,
+                V2SignedLedgerUpdate {
                     sequence_number: update.sequence_number,
-                    previous_state_hash: update.previous_state_hash,
-                    current_state_hash: update.current_state_hash,
-                    timestamp: update.timestamp,
                     operation,
+                    previous_hash: update.previous_state_hash,
+                    current_hash: update.current_state_hash,
+                    operator_signature: update.operator_signature,
+                    partner_signature: update.partner_signature,
+                    timestamp: update.timestamp,
                 }
             }).collect();
 
@@ -232,18 +223,19 @@ where
                 "📋 QUORUM: Sending batch {}/{} ({} updates, start_seq={}, is_final={})",
                 batch_idx + 1,
                 total_batches,
-                audit_updates.len(),
+                v2_updates.len(),
                 start_sequence,
                 is_final
             );
 
-            let sync_msg = DepositsMessage::QuorumStateSync {
+            let sync_msg = DepositsMessage::CoordinationResponse(CoordinationResponseMsg::QuorumStateSync {
+                request_hash: [0u8; 32],
                 operator_id,
                 partner_id,
-                updates: audit_updates,
+                updates: v2_updates,
                 start_sequence,
                 is_final,
-            };
+            });
 
             self.outbound_messages
                 .lock()

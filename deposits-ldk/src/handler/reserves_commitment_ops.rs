@@ -15,6 +15,7 @@ use bitcoin::secp256k1::PublicKey;
 use super::core::{build_taproot_reserves_script, DepositsHandler};
 use super::messages::DepositsMessage;
 use deposits_core::DepositsError;
+use deposits_core::messages::CoordinationMsg;
 use super::ledger_ext::LedgerExt;
 use deposits_core::VoterSet;
 use deposits_core::CommitmentExtraOutput;
@@ -187,13 +188,13 @@ where
                 // Send the UpdateReserves custom message to notify the counterparty
                 // The generic extra outputs API sets pending state but doesn't send messages,
                 // so we need to send this custom message for the counterparty to know about the proposal
-                let update_msg = DepositsMessage::UpdateReserves {
+                let update_msg = DepositsMessage::Coordination(CoordinationMsg::UpdateReserves {
                     channel_id: channel.channel_id.0,
                     reserves_sats,
                     script_pubkey: script_pubkey_bytes,
                     ledger_hash: holder_ledger_hash,
                     remote_ledger_hash,
-                };
+                });
 
                 if let Err(e) = self.send_message(partner_node_id, update_msg) {
                     log_error!(
@@ -391,13 +392,13 @@ where
                 );
 
                 // Send the UpdateReserves custom message to notify the counterparty
-                let update_msg = DepositsMessage::UpdateReserves {
+                let update_msg = DepositsMessage::Coordination(CoordinationMsg::UpdateReserves {
                     channel_id: channel.channel_id.0,
                     reserves_sats,
                     script_pubkey: script_pubkey_bytes,
                     ledger_hash,
                     remote_ledger_hash,
-                };
+                });
 
                 if let Err(e) = self.send_message(partner_node_id, update_msg) {
                     log_error!(

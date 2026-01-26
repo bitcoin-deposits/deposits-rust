@@ -33,28 +33,28 @@ where
         message: &DepositsMessage,
         sender: PublicKey,
     ) -> Result<(), DepositsError> {
-        // Handle SignedAuditUpdate messages specially - they contain signatures
-        if let DepositsMessage::SignedUpdate(signed_msg) = message {
+        // Handle LedgerUpdate messages specially - they contain signatures
+        if let DepositsMessage::LedgerUpdate(ref update_msg) = message {
             log_info!(
                 self.logger,
-                "📋 AUDIT: Received signed audit update seq={} from operator {} -> partner {}",
-                signed_msg.sequence_number,
-                signed_msg.operator_pubkey,
-                signed_msg.partner_pubkey
+                "📋 AUDIT: Received ledger update seq={} from operator {} -> partner {}",
+                update_msg.sequence_number,
+                update_msg.operator_pubkey,
+                update_msg.partner_pubkey
             );
 
             // Convert to SignedLedgerUpdate and verify/store
             let signed_update = deposits_core::SignedLedgerUpdate {
-                message: signed_msg.message.clone(),
-                message_type: signed_msg.message_type,
-                operator_signature: signed_msg.operator_signature,
-                partner_signature: signed_msg.partner_signature.unwrap_or([0u8; 64]),
-                operator_pubkey: signed_msg.operator_pubkey,
-                partner_pubkey: signed_msg.partner_pubkey,
-                sequence_number: signed_msg.sequence_number,
-                previous_state_hash: signed_msg.previous_state_hash,
-                current_state_hash: signed_msg.current_state_hash,
-                timestamp: signed_msg.timestamp,
+                message: update_msg.message.clone(),
+                message_type: update_msg.message_type,
+                operator_signature: update_msg.operator_signature,
+                partner_signature: update_msg.partner_signature.unwrap_or([0u8; 64]),
+                operator_pubkey: update_msg.operator_pubkey,
+                partner_pubkey: update_msg.partner_pubkey,
+                sequence_number: update_msg.sequence_number,
+                previous_state_hash: update_msg.previous_state_hash,
+                current_state_hash: update_msg.current_state_hash,
+                timestamp: update_msg.timestamp,
             };
 
             // Verify and store the signed update
@@ -132,25 +132,25 @@ where
         };
 
         // Apply the message to the audit ledger
-        // LedgerOpenRequest needs special handling to set the ledger address
-        if let DepositsMessage::LedgerOpenRequest(msg) = message {
+        // Handshake needs special handling to set the ledger address
+        if let DepositsMessage::Handshake(ref handshake_msg) = message {
             let mut ledger = ledger_arc.write().unwrap();
 
             // Parse and validate the ledger address
-            match msg.ledger_address.parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>() {
+            match handshake_msg.ledger_address.parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>() {
                 Ok(unchecked_addr) => {
                     match unchecked_addr.require_network(bitcoin::Network::Regtest) {
                         Ok(validated_addr) => {
                             ledger.state.ledger_address = validated_addr.to_string();
 
-                            // Apply LedgerOpenRequest if this is the first update
+                            // Apply Handshake if this is the first update
                             if ledger.history.is_empty() {
-                                if let Err(e) = ledger.append_v1_mut(DepositsMessage::LedgerOpenRequest(msg.clone())) {
-                                    log_error!(self.logger, "📋 AUDIT: Failed to apply LedgerOpenRequest: {}", e);
+                                if let Err(e) = ledger.append_v1_mut(DepositsMessage::Handshake(handshake_msg.clone())) {
+                                    log_error!(self.logger, "📋 AUDIT: Failed to apply Handshake: {}", e);
                                 }
                             }
 
-                            log_info!(self.logger, "📋 AUDIT: LedgerOpenRequest processed (operator={}, partner={})",
+                            log_info!(self.logger, "📋 AUDIT: Handshake processed (operator={}, partner={})",
                                      operator_id, partner_id);
 
                             drop(ledger);
@@ -169,7 +169,7 @@ where
                 }
             }
         } else if message.is_ledger_operation() {
-            // Unified handling for all ledger operations (V1 variants, V2 LedgerUpdate, SignedUpdate)
+            // Unified handling for all ledger operations (V2 LedgerUpdate)
             // The ledger.append_v1_mut() handles all message types via apply_operation()
             let mut ledger = ledger_arc.write().unwrap();
             let result = ledger.append_v1_mut(message.clone());

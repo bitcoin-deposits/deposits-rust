@@ -1766,7 +1766,7 @@ impl NWCService {
 
                             // Sequence number is assigned atomically in handle_sending_lock_payment
                             // TODO: Sign with deposit's scriptpubkey private key for ownership proof
-                            let lock_msg = deposits_ldk::handler::messages::SendingLockPaymentMsg {
+                            let lock_msg = deposits_ldk::wire::messages::SendingLockPaymentMsg {
                                 payment_id: payment_hash_bytes, // Use payment_hash as payment_id
                                 pubkey: *deposit_pubkey,
                                 amount: amount_msat,
@@ -1791,7 +1791,7 @@ impl NWCService {
 
                                     // Release the lock on failed payment initiation
                                     // Sequence number is assigned atomically in handle_sending_fail_payment_async
-                                    let fail_msg = deposits_ldk::handler::messages::SendingFailPaymentMsg {
+                                    let fail_msg = deposits_ldk::wire::messages::SendingFailPaymentMsg {
                                         payment_id: payment_hash_bytes,
                                         pubkey: *deposit_pubkey,
                                         amount: amount_msat,
@@ -1827,7 +1827,7 @@ impl NWCService {
                                     // Sequence number is assigned atomically in handle_sending_fulfill_payment_async
                                     // TODO: Sign with deposit's scriptpubkey private key for ownership proof
                                     let preimage_bytes = preimage_opt.unwrap_or([0u8; 32]);
-                                    let fulfill_msg = deposits_ldk::handler::messages::SendingFulfillPaymentMsg {
+                                    let fulfill_msg = deposits_ldk::wire::messages::SendingFulfillPaymentMsg {
                                         payment_id: payment_hash_bytes,
                                         pubkey: *deposit_pubkey,
                                         amount: amount_msat,
@@ -1872,7 +1872,7 @@ impl NWCService {
                                     println!("❌ {}, unlocking deposit", error);
 
                                     // Sequence number is assigned atomically in handle_sending_fail_payment_async
-                                    let fail_msg = deposits_ldk::handler::messages::SendingFailPaymentMsg {
+                                    let fail_msg = deposits_ldk::wire::messages::SendingFailPaymentMsg {
                                         payment_id: payment_hash_bytes,
                                         pubkey: *deposit_pubkey,
                                         amount: amount_msat,
@@ -1890,7 +1890,7 @@ impl NWCService {
                                     println!("❌ {}, unlocking deposit", error);
 
                                     // Sequence number is assigned atomically in handle_sending_fail_payment_async
-                                    let fail_msg = deposits_ldk::handler::messages::SendingFailPaymentMsg {
+                                    let fail_msg = deposits_ldk::wire::messages::SendingFailPaymentMsg {
                                         payment_id: payment_hash_bytes,
                                         pubkey: *deposit_pubkey,
                                         amount: amount_msat,
@@ -3759,7 +3759,7 @@ impl NWCServiceTaskContext {
                             // Different-node payment: use Lightning with lock/fulfill flow
                             // Sequence number is assigned atomically in handle_sending_lock_payment
                             // TODO: Sign with deposit's scriptpubkey private key for ownership proof
-                            let lock_msg = deposits_ldk::handler::messages::SendingLockPaymentMsg {
+                            let lock_msg = deposits_ldk::wire::messages::SendingLockPaymentMsg {
                                 payment_id: payment_hash_bytes,
                                 pubkey: *deposit_pubkey,
                                 amount: amount_msat,
@@ -3778,7 +3778,7 @@ impl NWCServiceTaskContext {
                                 Err(e) => {
                                     // Release the lock on failed payment initiation
                                     // Sequence number is assigned atomically in handle_sending_fail_payment_async
-                                    let fail_msg = deposits_ldk::handler::messages::SendingFailPaymentMsg {
+                                    let fail_msg = deposits_ldk::wire::messages::SendingFailPaymentMsg {
                                         payment_id: payment_hash_bytes,
                                         pubkey: *deposit_pubkey,
                                         amount: amount_msat,
@@ -3808,7 +3808,7 @@ impl NWCServiceTaskContext {
                                     // Sequence number is assigned atomically in handle_sending_fulfill_payment_async
                                     // TODO: Sign with deposit's scriptpubkey private key for ownership proof
                                     let preimage_bytes = preimage_opt.unwrap_or([0u8; 32]);
-                                    let fulfill_msg = deposits_ldk::handler::messages::SendingFulfillPaymentMsg {
+                                    let fulfill_msg = deposits_ldk::wire::messages::SendingFulfillPaymentMsg {
                                         payment_id: payment_hash_bytes,
                                         pubkey: *deposit_pubkey,
                                         amount: amount_msat,
@@ -3833,7 +3833,7 @@ impl NWCServiceTaskContext {
                                 }
                                 Ok(Ok(Err(error_msg))) => {
                                     // Sequence number is assigned atomically in handle_sending_fail_payment_async
-                                    let fail_msg = deposits_ldk::handler::messages::SendingFailPaymentMsg {
+                                    let fail_msg = deposits_ldk::wire::messages::SendingFailPaymentMsg {
                                         payment_id: payment_hash_bytes,
                                         pubkey: *deposit_pubkey,
                                         amount: amount_msat,
@@ -3847,7 +3847,7 @@ impl NWCServiceTaskContext {
                                 }
                                 Err(_) => {
                                     // Timeout - sequence number is assigned atomically in handler
-                                    let fail_msg = deposits_ldk::handler::messages::SendingFailPaymentMsg {
+                                    let fail_msg = deposits_ldk::wire::messages::SendingFailPaymentMsg {
                                         payment_id: payment_hash_bytes,
                                         pubkey: *deposit_pubkey,
                                         amount: amount_msat,

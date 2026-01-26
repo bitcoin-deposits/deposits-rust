@@ -20,6 +20,8 @@ use lightning::util::ser::{Readable, Writeable, Writer};
 use lightning::io;
 
 use crate::handler::messages::DepositsMessage;
+
+#[cfg(test)]
 use super::message_types::*;
 
 // Re-export the DepositsMessageReader from the handler messages module

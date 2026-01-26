@@ -33,7 +33,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
 use deposits_core::DepositsError;
 use super::messages::DepositsMessage;
-use super::messages::{LedgerOpenRequestMsg, LedgerOpenResponseMsg, QuorumJoinRequestMsg, DepositsMessageReader};
+use super::messages::{HandshakeMsg, HandshakeResponseMsg, DepositsMessageReader};
 use super::message_validation::MessageValidation;
 use super::channel_locks::ChannelLocks;
 use super::payment_tracking::PaymentTracking;

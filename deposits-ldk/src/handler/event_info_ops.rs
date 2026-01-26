@@ -25,7 +25,7 @@ use lightning::util::logger::Logger as LdkLogger;
 
 use std::ops::Deref;
 
-/// Generate event from a LedgerOperation (unified handler for V1 and V2)
+/// Generate event from a LedgerOperation (V2 only)
 fn event_from_operation(operation: &LedgerOperation) -> Option<DepositsEvent> {
     match operation {
         LedgerOperation::DepositOpen { pubkey, .. } => {
@@ -65,32 +65,15 @@ where
     L::Target: LdkLogger,
 {
     /// Generate appropriate events based on message type
-    /// Uses to_operation() to handle both V1 and V2 message formats uniformly
+    /// Uses to_operation() to extract LedgerOperation from LedgerUpdate messages
     pub(super) fn generate_protocol_event(
         &self,
         message: &DepositsMessage,
         _sender_node_id: PublicKey,
     ) {
-        let event = if let Some(operation) = message.to_operation() {
-            // Unified handling for V1 variants and V2 LedgerUpdate via to_operation()
-            event_from_operation(&operation)
-        } else {
-            // Handle special cases that don't convert to LedgerOperation
-            match message {
-                DepositsMessage::ReceivingCosignInvoice { amount, assigned_deposit, ref invoice_id, .. } => {
-                    Some(DepositsEvent::InvoiceCosigned {
-                        invoice_id: invoice_id.clone(),
-                        deposit_pubkey: *assigned_deposit,
-                        amount: *amount,
-                    })
-                }
-                DepositsMessage::SignedUpdate(update_msg) => {
-                    // SignedUpdate has operation field but isn't covered by to_operation()
-                    event_from_operation(&update_msg.operation)
-                }
-                _ => None,
-            }
-        };
+        // V2: All ledger operations are wrapped in LedgerUpdate
+        // to_operation() extracts the LedgerOperation from LedgerUpdate messages
+        let event = message.to_operation().and_then(|op| event_from_operation(&op));
 
         if let Some(event) = event {
             let _ = self.event_queue.emit_deposits_event(event);

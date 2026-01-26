@@ -65,31 +65,21 @@ where
         // Get prev_hash BEFORE appending
         let prev_hash = ledger_guard.tail_hash();
 
-        // Calculate the sequence number for this tombstone (0-based, equals index of new entry)
-        // This is computed BEFORE append, so len() gives us the next index
-        let sequence_number = ledger_guard.history.len() as u64;
+        // Note: sequence number will be computed by the ledger append
 
-        // Create ChannelCloseTombstone message with sequence_number
-        let tombstone_msg = super::messages::ChannelCloseTombstoneMsg {
-            operator_pubkey: self.our_node_id,
-            partner_pubkey: partner_node_id,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+        // Create Tombstone message via V2 LedgerUpdate
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let tombstone = super::messages::DepositsMessage::new_tombstone(
+            self.our_node_id,
+            partner_node_id,
             channel_id,
-            close_reason: Some("Channel force-closed".to_string()),
-            sequence_number,
-        };
-
-        let tombstone = super::messages::DepositsMessage::ChannelCloseTombstone {
-            operator_pubkey: tombstone_msg.operator_pubkey,
-            partner_pubkey: tombstone_msg.partner_pubkey,
-            timestamp: tombstone_msg.timestamp,
-            channel_id: tombstone_msg.channel_id,
-            close_reason: tombstone_msg.close_reason,
-            sequence_number: tombstone_msg.sequence_number,
-        };
+            Some("Channel force-closed".to_string()),
+            timestamp,
+        );
         let message_hash = self.calculate_message_hash(&tombstone);
 
         // Extract values before mem::replace
@@ -114,6 +104,8 @@ where
         match ledger_owned.append_v1(tombstone.clone()) {
             Ok((updated_ledger, new_hash)) => {
                 *ledger_guard = updated_ledger;
+                // Get sequence number from updated ledger (0-indexed, so len-1)
+                let sequence_number = ledger_guard.history.len().saturating_sub(1) as u64;
                 log_info!(
                     self.logger,
                     "✅ Tombstone appended to local ledger. Ledger is now closed."

@@ -11,7 +11,8 @@ use bitcoin::secp256k1::PublicKey;
 
 use super::core::DepositsHandler;
 use deposits_core::DepositsError;
-use super::messages::{LedgerUpdateMsg, LedgerOperation};
+use deposits_core::messages::CoordinationMsg;
+use super::messages::{DepositsMessage, LedgerUpdateMsg, LedgerOperation};
 use super::ledger_ext::LedgerExt;
 use deposits_core::quorum::LedgerId;
 use deposits_core::{log_debug, log_error, log_info, log_warn};
@@ -69,11 +70,11 @@ where
         log_info!(self.logger, "📨 Requesting consent from collateral partner {} to back ledger with partner {}",
             collateral_partner, partner_node_id);
 
-        let consent_request = DepositsMessage::CollateralConsentRequest {
+        let consent_request = DepositsMessage::Coordination(CoordinationMsg::CollateralConsentRequest {
             operator_id: self.our_node_id,
             partner_id: partner_node_id,
             operator_signature: [0u8; 64],
-        };
+        });
 
         // Use async version - doesn't block the executor!
         let collateral_partner_signature = self.request_collateral_consent_async(

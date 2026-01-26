@@ -19,7 +19,7 @@ use super::core::DepositsHandler;
 use deposits_core::DepositsError;
 use deposits_core::{Ledger, LedgerRole, LedgerManager};
 use super::ledger_ext::LedgerExt;
-use super::messages::{DepositsMessage, LedgerOpenRequestMsg};
+use super::messages::{DepositsMessage, HandshakeMsg};
 use deposits_core::{log_info, log_warn};
 use lightning::util::logger::Logger as LdkLogger;
 
@@ -151,8 +151,7 @@ where
         };
 
         // Create handshake message
-        use super::messages::LedgerOpenRequestMsg;
-        let handshake_msg = DepositsMessage::LedgerOpenRequest(LedgerOpenRequestMsg {
+        let handshake_msg = DepositsMessage::Handshake(HandshakeMsg {
             protocol_version: deposits_core::constants::DEPOSITS_PROTOCOL_VERSION,
             min_protocol_version: deposits_core::constants::DEPOSITS_PROTOCOL_VERSION,
             features: 0,
@@ -208,7 +207,7 @@ where
         &self,
         operator_node_id: PublicKey,
         multisig_address: bitcoin::Address,
-        handshake_msg: LedgerOpenRequestMsg,
+        handshake_msg: HandshakeMsg,
     ) -> Result<(), DepositsError> {
         // Use LedgerManager to create the ledger (they are operator, we are partner)
         // The handshake_msg is a protocol message, not a ledger operation, so we use create_empty_ledger
@@ -222,7 +221,7 @@ where
 
         // Extract the ledger from validator and append the handshake message to history
         let mut ledger = _manager.into_ledger();
-        ledger.append_v1_mut(DepositsMessage::LedgerOpenRequest(handshake_msg))?;
+        ledger.append_v1_mut(DepositsMessage::Handshake(handshake_msg))?;
 
         // Persist the ledger to storage
         self.persist_ledger_state(&ledger)?;
@@ -272,8 +271,7 @@ where
         };
 
         // Create handshake message
-        use super::messages::LedgerOpenRequestMsg;
-        let handshake_msg = DepositsMessage::LedgerOpenRequest(LedgerOpenRequestMsg {
+        let handshake_msg = DepositsMessage::Handshake(HandshakeMsg {
             protocol_version: deposits_core::constants::DEPOSITS_PROTOCOL_VERSION,
             min_protocol_version: deposits_core::constants::DEPOSITS_PROTOCOL_VERSION,
             features: 0,

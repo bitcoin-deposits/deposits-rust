@@ -98,37 +98,11 @@ where
 }
 
 /// Extract amount, deposit pubkey, and description from a decoded message
+/// V2 format: All ledger operations are inside LedgerUpdate messages
 fn extract_operation_details(msg: &DepositsMessage) -> (Option<u64>, Option<String>, Option<String>) {
     match msg {
-        DepositsMessage::DepositOpen { pubkey, .. } =>
-            (None, Some(pubkey.to_string()), None),
-        DepositsMessage::DepositClose { pubkey, .. } =>
-            (None, Some(pubkey.to_string()), None),
-        DepositsMessage::ReceivingCreditPayment { deposit_pubkey, amount, .. } =>
-            (Some(*amount), Some(deposit_pubkey.to_string()), None),
-        DepositsMessage::SendingLockPayment { pubkey, amount, .. } =>
-            (Some(*amount), Some(pubkey.to_string()), None),
-        DepositsMessage::SendingFailPayment { pubkey, amount, .. } =>
-            (Some(*amount), Some(pubkey.to_string()), None),
-        DepositsMessage::SendingFulfillPayment { pubkey, amount, .. } =>
-            (Some(*amount), Some(pubkey.to_string()), None),
-        DepositsMessage::ReservesAddOutput { initial_amount, .. } =>
-            (Some(*initial_amount), None, None),
-        DepositsMessage::ReservesIncrease { new_amount, .. } =>
-            (Some(*new_amount), None, None),
-        DepositsMessage::ReservesDecrease { new_amount, .. } =>
-            (Some(*new_amount), None, None),
-        DepositsMessage::CollateralAddPartner { collateral_partner, .. } =>
-            (None, None, Some(format!("partner:{}", &collateral_partner.to_string()[..8]))),
-        DepositsMessage::CollateralAttestation { amount, collateral_partner, .. } =>
-            (Some(*amount), None, Some(format!("partner:{}", &collateral_partner.to_string()[..8]))),
-        DepositsMessage::CollateralIncrease { new_amount, partner_id, .. } =>
-            (Some(*new_amount), None, Some(format!("partner:{}", &partner_id.to_string()[..8]))),
-        DepositsMessage::CollateralDecrease { new_amount, partner_id, .. } =>
-            (Some(*new_amount), None, Some(format!("partner:{}", &partner_id.to_string()[..8]))),
         // V2 LedgerUpdate - extract from inner operation
         DepositsMessage::LedgerUpdate(m) => extract_from_ledger_operation(&m.operation),
-        DepositsMessage::SignedUpdate(m) => extract_from_ledger_operation(&m.operation),
         _ => (None, None, None),
     }
 }

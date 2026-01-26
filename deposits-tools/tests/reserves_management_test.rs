@@ -3,7 +3,7 @@
 #[cfg(test)]
 mod tests {
     use deposits_ldk::wire::channel_ledger::ChannelLedger;
-    use deposits_ldk::handler::messages::{DepositsMessage, ReservesIncreaseMsg, ReservesDecreaseMsg};
+    use deposits_ldk::handler::messages::{DepositsMessage, LedgerUpdateMsg, LedgerOperation};
     use deposits_core::DepositsError;
     use deposits_core::constants::MIN_RESERVES_RATIO_PERCENT;
     use ldk_node::bitcoin::secp256k1::{Secp256k1, SecretKey, PublicKey};
@@ -81,11 +81,12 @@ mod tests {
         println!("\nTest 4: Add adequate reserves, then add balance - should work");
         ledger.mark_committed_to_channel(hash_from_int(2)); // Allow changes
 
-        // Add exactly enough reserves using new message-based API
-        ledger.apply_update(DepositsMessage::ReservesIncrease {
-            new_amount: required_reserves,
-            partner_id: partner_key,
-        }).expect("Should add reserves");
+        // Add exactly enough reserves using V2 LedgerUpdate API
+        ledger.apply_update(DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
+            operator_key,
+            partner_key,
+            LedgerOperation::ReservesIncrease { new_amount: required_reserves },
+        ))).expect("Should add reserves");
         println!("   Added {} sats to reserves", required_reserves);
 
         ledger.mark_committed_to_channel(hash_from_int(3)); // Allow changes
@@ -123,10 +124,11 @@ mod tests {
         ledger.mark_committed_to_channel(hash_from_int(5)); // Allow changes
 
         let excess_reserves = 100_000; // 100k extra reserves
-        ledger.apply_update(DepositsMessage::ReservesIncrease {
-            new_amount: excess_reserves,
-            partner_id: partner_key,
-        }).expect("Should add excess reserves");
+        ledger.apply_update(DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
+            operator_key,
+            partner_key,
+            LedgerOperation::ReservesIncrease { new_amount: excess_reserves },
+        ))).expect("Should add excess reserves");
 
         let status = ledger.get_reserves_status();
         assert_eq!(status.excess_amount, excess_reserves, "Should track excess reserves");
@@ -171,10 +173,11 @@ mod tests {
         let additional_reserves_needed = total_required - final_status.current_amount;
 
         ledger.mark_committed_to_channel(hash_from_int(9)); // Allow changes
-        ledger.apply_update(DepositsMessage::ReservesIncrease {
-            new_amount: additional_reserves_needed,
-            partner_id: partner_key,
-        }).expect("Should add additional reserves");
+        ledger.apply_update(DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
+            operator_key,
+            partner_key,
+            LedgerOperation::ReservesIncrease { new_amount: additional_reserves_needed },
+        ))).expect("Should add additional reserves");
 
         ledger.mark_committed_to_channel(hash_from_int(10)); // Allow changes
 
@@ -227,10 +230,11 @@ mod tests {
         let initial_reserves = 150_000; // 150k reserves
         let deposit_balance = 100_000;  // 100k deposit
 
-        ledger.apply_update(DepositsMessage::ReservesIncrease {
-            new_amount: initial_reserves,
-            partner_id: partner_key,
-        }).unwrap();
+        ledger.apply_update(DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
+            operator_key,
+            partner_key,
+            LedgerOperation::ReservesIncrease { new_amount: initial_reserves },
+        ))).unwrap();
         ledger.mark_committed_to_channel(hash_from_int(2));
 
         ledger.add_balance_to_deposit(deposit_key, deposit_balance).unwrap();
@@ -248,10 +252,11 @@ mod tests {
         println!("\nTest 2: Reduce reserves - verify tracking");
         let reduction = 30_000;
         ledger.mark_committed_to_channel(hash_from_int(4));
-        ledger.apply_update(DepositsMessage::ReservesDecrease {
-            new_amount: reduction,
-            partner_id: partner_key,
-        }).expect("Should reduce reserves");
+        ledger.apply_update(DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
+            operator_key,
+            partner_key,
+            LedgerOperation::ReservesDecrease { new_amount: reduction },
+        ))).expect("Should reduce reserves");
 
         let status_after = ledger.get_reserves_status();
         assert_eq!(status_after.current_amount, initial_reserves - reduction);
@@ -266,10 +271,11 @@ mod tests {
         println!("\nTest 4: Reduce below minimum and check validation fails");
         // Reduce by 30k more to get to 90k (below 100k required)
         ledger.mark_committed_to_channel(hash_from_int(5));
-        ledger.apply_update(DepositsMessage::ReservesDecrease {
-            new_amount: 30_000,
-            partner_id: partner_key,
-        }).expect("Message processing succeeds");
+        ledger.apply_update(DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
+            operator_key,
+            partner_key,
+            LedgerOperation::ReservesDecrease { new_amount: 30_000 },
+        ))).expect("Message processing succeeds");
 
         let final_status = ledger.get_reserves_status();
         println!("   After second reduction: {} sats reserves", final_status.current_amount);

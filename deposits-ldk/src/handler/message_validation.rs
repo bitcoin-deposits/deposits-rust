@@ -15,15 +15,14 @@ use bitcoin::secp256k1::PublicKey;
 use std::ops::Deref;
 use std::sync::{Arc, RwLock};
 
-use super::messages::{
-    DepositsMessage,
-    ReceivingCreditPaymentMsg,
-    SendingFailPaymentMsg,
-    SendingFulfillPaymentMsg,
-    SendingLockPaymentMsg,
-};
+use super::messages::DepositsMessage;
 use lightning::util::logger::Logger as LdkLogger;
 use deposits_core::{Ledger, ValidationContext};
+use crate::wire::messages::{
+    ReservesRemoveOutputMsg, ReservesAddOutputMsg,
+    SendingLockPaymentMsg, SendingFulfillPaymentMsg, SendingFailPaymentMsg,
+    ReceivingCreditPaymentMsg,
+};
 
 use super::core::DepositsHandler;
 use super::reserves_ops::ReservesOperations;
@@ -89,7 +88,7 @@ pub trait MessageValidation {
     fn validate_reserves_add(&self, msg: &crate::wire::messages::ReservesAddOutputMsg, sender: PublicKey) -> Result<(), String>;
 
     /// Validate ReservesRemoveOutput message
-    fn validate_reserves_remove(&self, msg: &super::messages::ReservesRemoveOutputMsg, sender: PublicKey) -> Result<(), String>;
+    fn validate_reserves_remove(&self, msg: &ReservesRemoveOutputMsg, sender: PublicKey) -> Result<(), String>;
 
     /// Validate FeeCollect message
     fn validate_fee_collect(&self, msg: &crate::wire::messages::FeeCollectMsg, sender: PublicKey) -> Result<(), String>;
@@ -206,7 +205,7 @@ where
             }, sender)
         }
         LedgerOperation::ReservesRemove => {
-            use super::messages::ReservesRemoveOutputMsg;
+            use crate::wire::messages::ReservesRemoveOutputMsg;
             handler.validate_reserves_remove(&ReservesRemoveOutputMsg {
                 partner_id: partner_pubkey,
                 remove_all: true,
@@ -278,8 +277,10 @@ where
 
         // Handle special cases that don't convert to LedgerOperation
         match message {
-            // Invoice Cosigning Validation
-            DepositsMessage::ReceivingCosignInvoice { operator_id: _, partner_id: _, amount, payment_hash, expires, assigned_deposit, ref invoice_id, ref bolt11 } => {
+            // Invoice Cosigning Validation (V2: Coordination(CoordinationMsg::CosignInvoice))
+            DepositsMessage::Coordination(deposits_core::messages::CoordinationMsg::CosignInvoice {
+                amount, payment_hash, expires, assigned_deposit, ref invoice_id, ref bolt11_invoice, ..
+            }) => {
                 use crate::wire::messages::ReceivingCosignInvoiceMsg;
                 self.validate_receiving_cosign_invoice(&ReceivingCosignInvoiceMsg {
                     amount: *amount,
@@ -287,12 +288,12 @@ where
                     expires: *expires,
                     assigned_deposit: *assigned_deposit,
                     invoice_id: invoice_id.clone(),
-                    bolt11: bolt11.clone(),
+                    bolt11: bolt11_invoice.clone(),
                 }, sender)
             },
 
-            // SignedUpdate - delegate to operation validation
-            DepositsMessage::SignedUpdate(update_msg) => {
+            // LedgerUpdate - delegate to operation validation (was SignedUpdate in V1)
+            DepositsMessage::LedgerUpdate(update_msg) => {
                 validate_operation(self, &update_msg.operation, update_msg.partner_pubkey, sender)
             },
 
@@ -392,7 +393,7 @@ where
         deposits_core::validate_reserves_add(msg.initial_amount)
     }
 
-    fn validate_reserves_remove(&self, msg: &super::messages::ReservesRemoveOutputMsg, sender: PublicKey) -> Result<(), String> {
+    fn validate_reserves_remove(&self, msg: &ReservesRemoveOutputMsg, sender: PublicKey) -> Result<(), String> {
         // First check if we have a ledger for this sender
         let has_ledger = {
             let ledgers = self.ledgers.lock().unwrap();
@@ -715,7 +716,7 @@ mod tests {
     fn test_validate_reserves_remove_no_ledger() {
         let handler = create_test_handler();
         let sender = create_test_pubkey(18);
-        let msg = handler_messages::ReservesRemoveOutputMsg {
+        let msg = crate::wire::messages::ReservesRemoveOutputMsg {
             remove_all: false,
             partner_id: create_test_pubkey(19),
         };
@@ -932,40 +933,43 @@ mod tests {
     // ========================================================================
     // Signature Verification Helper Tests
     // ========================================================================
+    // NOTE: These tests are commented out because verify_payment_signature
+    // function was removed during V2 migration. Signature verification is now
+    // handled via deposits_core::signature_utils.
 
-    #[test]
-    fn test_verify_payment_signature_placeholder_accepted() {
-        // During development, placeholder signatures (all zeros) are accepted
-        let pubkey = create_test_pubkey(50);
-        let payment_id = [0xAB; 32];
-        let amount = 1000u64;
-        let placeholder_sig = [0u8; 64];
+    // #[test]
+    // fn test_verify_payment_signature_placeholder_accepted() {
+    //     // During development, placeholder signatures (all zeros) are accepted
+    //     let pubkey = create_test_pubkey(50);
+    //     let payment_id = [0xAB; 32];
+    //     let amount = 1000u64;
+    //     let placeholder_sig = [0u8; 64];
+    //
+    //     let result = super::DepositsHandler::<std::sync::Arc<lightning::util::test_utils::TestLogger>>::verify_payment_signature(
+    //         &pubkey,
+    //         &payment_id,
+    //         amount,
+    //         &placeholder_sig,
+    //     );
+    //     assert!(result, "Placeholder signature should be accepted during development");
+    // }
 
-        let result = super::DepositsHandler::<std::sync::Arc<lightning::util::test_utils::TestLogger>>::verify_payment_signature(
-            &pubkey,
-            &payment_id,
-            amount,
-            &placeholder_sig,
-        );
-        assert!(result, "Placeholder signature should be accepted during development");
-    }
-
-    #[test]
-    fn test_verify_payment_signature_invalid_rejected() {
-        // Non-zero invalid signatures should be rejected
-        let pubkey = create_test_pubkey(51);
-        let payment_id = [0xAB; 32];
-        let amount = 1000u64;
-        let invalid_sig = [0xFF; 64]; // Invalid signature (not all zeros)
-
-        let result = super::DepositsHandler::<std::sync::Arc<lightning::util::test_utils::TestLogger>>::verify_payment_signature(
-            &pubkey,
-            &payment_id,
-            amount,
-            &invalid_sig,
-        );
-        assert!(!result, "Invalid signature should be rejected");
-    }
+    // #[test]
+    // fn test_verify_payment_signature_invalid_rejected() {
+    //     // Non-zero invalid signatures should be rejected
+    //     let pubkey = create_test_pubkey(51);
+    //     let payment_id = [0xAB; 32];
+    //     let amount = 1000u64;
+    //     let invalid_sig = [0xFF; 64]; // Invalid signature (not all zeros)
+    //
+    //     let result = super::DepositsHandler::<std::sync::Arc<lightning::util::test_utils::TestLogger>>::verify_payment_signature(
+    //         &pubkey,
+    //         &payment_id,
+    //         amount,
+    //         &invalid_sig,
+    //     );
+    //     assert!(!result, "Invalid signature should be rejected");
+    // }
 
     // ========================================================================
     // CONSTRAINT: collateraldecrease doesn't happen in same period as collateralincrease

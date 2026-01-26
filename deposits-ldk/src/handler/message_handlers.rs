@@ -12,13 +12,21 @@
 
 use bitcoin::secp256k1::PublicKey;
 use lightning::ln::msgs::{LightningError, ErrorAction};
-use lightning::util::logger::Logger;
 
 use super::core::DepositsHandler;
 use super::ledger_ext::LedgerExt;
 use super::messages::*;
+use deposits_core::messages::{CoordinationMsg, CoordinationResponseMsg, RecoveryMsg, RecoveryResponseMsg};
 use deposits_core::{log_debug, log_error, log_info, log_warn};
 use lightning::util::logger::Logger as LdkLogger;
+use crate::wire::messages::{
+    QuorumJoinRequestMsg, QuorumJoinResponseMsg, QuorumStateSyncMsg,
+    QuorumVoteRequestMsg, QuorumVoteMsg, QuorumMembershipChangeMsg,
+    CollateralAddPartnerMsg, CollateralRemovePartnerMsg,
+    CollateralConsentRequestMsg, CollateralConsentResponseMsg,
+    RecoveryVoteMsg, RecoveryClaimRequestMsg, RecoveryClaimSignatureMsg, RecoveryClaimCompleteMsg,
+    UncreditedPaymentMsg, ChannelCloseTombstoneMsg,
+};
 
 use std::ops::Deref;
 
@@ -44,8 +52,16 @@ where
             msg.partner_id
         );
 
-        // Delegate to QuorumManager (convert to core type using helper function)
-        match self.quorum_manager.handle_join_request(&quorum_join_request_to_core(&msg)) {
+        // Convert wire message to core type and delegate to QuorumManager
+        let core_msg = deposits_core::types::QuorumJoinRequestMsg {
+            requester_pubkey: msg.requester_pubkey,
+            operator_id: msg.operator_id,
+            partner_id: msg.partner_id,
+            protocol_version: msg.protocol_version,
+            timestamp: msg.timestamp,
+            signature: msg.signature,
+        };
+        match self.quorum_manager.handle_join_request(&core_msg) {
             Ok(response) => {
                 let accepted = response.accepted;
 
@@ -65,16 +81,16 @@ where
                     );
                 }
 
-                // Queue response (convert from core type using helper function)
-                let response_into = quorum_join_response_from_core(response);
-                let response_msg = DepositsMessage::QuorumJoinResponse {
-                    accepted: response_into.accepted,
-                    members: response_into.members,
-                    threshold: response_into.threshold,
-                    last_sequence: response_into.last_sequence,
-                    current_state_hash: response_into.current_state_hash,
-                    rejection_reason: response_into.rejection_reason,
-                };
+                // Convert core response to V2 DepositsMessage format
+                let response_msg = DepositsMessage::CoordinationResponse(CoordinationResponseMsg::QuorumJoinResponse {
+                    request_hash: [0u8; 32], // Will be filled by wire layer
+                    accepted: response.accepted,
+                    members: response.members.clone(),
+                    threshold: response.threshold as u16,
+                    last_sequence: response.last_sequence,
+                    current_state_hash: response.current_state_hash,
+                    rejection_reason: response.rejection_reason.clone(),
+                });
                 self.outbound_messages
                     .lock()
                     .unwrap()
@@ -151,32 +167,47 @@ where
         );
 
         // Process each update in the batch
+        // msg.updates is now Vec<Vec<u8>> (raw bytes) - need to decode each
         let mut applied_count = 0;
         let mut error_count = 0;
 
-        for signed_msg in &msg.updates {
-            // Convert SignedAuditUpdateMsg to SignedLedgerUpdate
-            let signed_update = deposits_core::SignedLedgerUpdate {
-                message: signed_msg.message.clone(),
-                message_type: signed_msg.message_type,
-                operator_signature: signed_msg.operator_signature,
-                partner_signature: signed_msg.partner_signature.unwrap_or([0u8; 64]),
-                operator_pubkey: signed_msg.operator_pubkey,
-                partner_pubkey: signed_msg.partner_pubkey,
-                sequence_number: signed_msg.sequence_number,
-                previous_state_hash: signed_msg.previous_state_hash,
-                current_state_hash: signed_msg.current_state_hash,
-                timestamp: signed_msg.timestamp,
-            };
-
-            // Verify and store the update
-            match self.verify_and_store_signed_update(signed_update) {
-                Ok(()) => applied_count += 1,
+        for update_bytes in &msg.updates {
+            // Decode the raw bytes into a SignedLedgerUpdate
+            use deposits_core::messages::BinaryCodec;
+            let mut cursor = std::io::Cursor::new(update_bytes);
+            match deposits_core::messages::SignedLedgerUpdate::read_from(&mut cursor) {
+                Ok(signed_update) => {
+                    let seq = signed_update.sequence_number;
+                    // Verify and store the update - convert V2 SignedLedgerUpdate to V1 format
+                    let v1_update = deposits_core::SignedLedgerUpdate {
+                        message: Vec::new(), // Not used in V2
+                        message_type: 0,     // Not used in V2
+                        operator_signature: signed_update.operator_signature,
+                        partner_signature: signed_update.partner_signature,
+                        operator_pubkey: msg.operator_id,
+                        partner_pubkey: msg.partner_id,
+                        sequence_number: signed_update.sequence_number,
+                        previous_state_hash: signed_update.previous_hash,
+                        current_state_hash: signed_update.current_hash,
+                        timestamp: signed_update.timestamp,
+                    };
+                    match self.verify_and_store_signed_update(v1_update) {
+                        Ok(()) => applied_count += 1,
+                        Err(e) => {
+                            log_warn!(
+                                self.logger,
+                                "📋 QUORUM: Failed to apply update seq={}: {:?}",
+                                seq,
+                                e
+                            );
+                            error_count += 1;
+                        }
+                    }
+                }
                 Err(e) => {
                     log_warn!(
                         self.logger,
-                        "📋 QUORUM: Failed to apply update seq={}: {:?}",
-                        signed_msg.sequence_number,
+                        "📋 QUORUM: Failed to decode update: {:?}",
                         e
                     );
                     error_count += 1;
@@ -399,7 +430,7 @@ where
             hex::encode(&msg.vote_round_id[..8])
         );
 
-        if let Err(e) = self.send_message(sender_node_id, DepositsMessage::QuorumVote {
+        if let Err(e) = self.send_message(sender_node_id, DepositsMessage::Coordination(CoordinationMsg::QuorumVote {
             vote_round_id: vote_msg.vote_round_id,
             voter_pubkey: vote_msg.voter_pubkey,
             vote: vote_msg.vote,
@@ -408,7 +439,7 @@ where
             evidence: vote_msg.evidence,
             signature: vote_msg.signature,
             spend_signature: vote_msg.spend_signature,
-        }) {
+        })) {
             log_warn!(
                 self.logger,
                 "📋 QUORUM: Failed to send vote to {}: {:?}",
@@ -736,13 +767,12 @@ where
             .unwrap()
             .entry(msg.claimant)
             .or_insert_with(Vec::new)
-            .push(DepositsMessage::RecoveryClaimSignature {
-                operator: response.operator,
-                partner: response.partner,
+            .push(DepositsMessage::RecoveryResponse(RecoveryResponseMsg::ClaimSignature {
+                request_hash: msg.sighash, // Use sighash as the request identifier
                 signer: response.signer,
                 sighash: response.sighash,
                 signature: response.signature,
-            });
+            }));
 
         Ok(())
     }
@@ -860,7 +890,7 @@ where
     /// Handle CollateralAddPartner message
     pub(super) fn handle_collateral_add_partner(
         &self,
-        msg: &super::messages::CollateralAddPartnerMsg,
+        msg: &CollateralAddPartnerMsg,
         sender_node_id: PublicKey,
     ) -> Result<(), LightningError> {
         use deposits_core::quorum::LedgerId;
@@ -904,12 +934,14 @@ where
                 drop(ledger_guard);
                 drop(ledgers);
                 // Send ACK even though already exists - this is idempotent behavior
-                let add_partner_msg = DepositsMessage::CollateralAddPartner {
-                    operator_id: msg.operator_id,
-                    partner_id: msg.partner_id,
-                    collateral_partner: msg.collateral_partner,
-                    collateral_partner_signature: msg.collateral_partner_signature,
-                };
+                let add_partner_msg = DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
+                    msg.operator_id,
+                    msg.partner_id,
+                    LedgerOperation::CollateralAddPartner {
+                        collateral_partner: msg.collateral_partner,
+                        collateral_partner_signature: msg.collateral_partner_signature,
+                    },
+                ));
                 if let Err(e) = self.send_acknowledgment(&add_partner_msg, true, None, None, sender_node_id) {
                     log_warn!(self.logger, "📋 PARTNER: Failed to send ACK for duplicate AddCollateralPartner: {:?}", e);
                 }
@@ -918,12 +950,14 @@ where
 
             // Append to hash chain with proper porcupine dance signing
             // Partner creates their own hash entry, signs it, and sends signature in ACK
-            let add_partner_msg = DepositsMessage::CollateralAddPartner {
-                operator_id: msg.operator_id,
-                partner_id: msg.partner_id,
-                collateral_partner: msg.collateral_partner,
-                collateral_partner_signature: msg.collateral_partner_signature,
-            };
+            let add_partner_msg = DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
+                msg.operator_id,
+                msg.partner_id,
+                LedgerOperation::CollateralAddPartner {
+                    collateral_partner: msg.collateral_partner,
+                    collateral_partner_signature: msg.collateral_partner_signature,
+                },
+            ));
             match ledger_guard.append_v1_mut_with_metadata(add_partner_msg.clone()) {
                 Ok((prev_hash, new_hash, seq)) => {
                     log_info!(
@@ -997,7 +1031,7 @@ where
 
                     // Send ACK with porcupine dance signature
                     let message_hash = Self::create_message_hash(&add_partner_msg);
-                    let ack = DepositsMessage::Ack(super::messages::AckMsg {
+                    let ack = DepositsMessage::LedgerUpdateResponse(LedgerUpdateResponseMsg {
                         acked_message_type: add_partner_msg.message_type(),
                         message_hash,
                         success: true,
@@ -1046,12 +1080,14 @@ where
             );
 
             // Send NACK so operator knows the ledger wasn't found
-            let add_partner_msg = DepositsMessage::CollateralAddPartner {
-                operator_id: msg.operator_id,
-                partner_id: msg.partner_id,
-                collateral_partner: msg.collateral_partner,
-                collateral_partner_signature: msg.collateral_partner_signature,
-            };
+            let add_partner_msg = DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
+                msg.operator_id,
+                msg.partner_id,
+                LedgerOperation::CollateralAddPartner {
+                    collateral_partner: msg.collateral_partner,
+                    collateral_partner_signature: msg.collateral_partner_signature,
+                },
+            ));
             if let Err(e) = self.send_acknowledgment(
                 &add_partner_msg,
                 false,
@@ -1069,7 +1105,7 @@ where
     /// Handle CollateralRemovePartner message
     pub(super) fn handle_collateral_remove_partner(
         &self,
-        msg: &super::messages::CollateralRemovePartnerMsg,
+        msg: &CollateralRemovePartnerMsg,
         sender_node_id: PublicKey,
     ) -> Result<(), LightningError> {
         use deposits_core::quorum::LedgerId;
@@ -1102,12 +1138,15 @@ where
         if let Some(ledger_arc) = ledgers.get_mut(&ledger_key) {
             let mut ledger_guard = ledger_arc.write().unwrap();
 
-            // Append to hash chain with proper porcupine dance signing
-            let remove_partner_msg = DepositsMessage::CollateralRemovePartner {
-                partner_id: msg.partner_id,
-                collateral_partner: msg.collateral_partner,
-                operator_signature: msg.operator_signature,
-            };
+            // Append to hash chain with proper porcupine dance signing (V2 format)
+            let remove_partner_msg = DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
+                sender_node_id,  // operator
+                msg.partner_id,  // partner
+                LedgerOperation::CollateralRemovePartner {
+                    collateral_partner: msg.collateral_partner,
+                    operator_signature: msg.operator_signature,
+                },
+            ));
             match ledger_guard.append_v1_mut_with_metadata(remove_partner_msg.clone()) {
                 Ok((prev_hash, new_hash, seq)) => {
                     log_info!(
@@ -1179,7 +1218,7 @@ where
 
                     // Send ACK with porcupine dance signature
                     let message_hash = Self::create_message_hash(&remove_partner_msg);
-                    let ack = DepositsMessage::Ack(super::messages::AckMsg {
+                    let ack = DepositsMessage::LedgerUpdateResponse(LedgerUpdateResponseMsg {
                         acked_message_type: remove_partner_msg.message_type(),
                         message_hash,
                         success: true,
@@ -1227,12 +1266,15 @@ where
                 msg.partner_id
             );
 
-            // Send NACK so operator knows the ledger wasn't found
-            let remove_partner_msg = DepositsMessage::CollateralRemovePartner {
-                partner_id: msg.partner_id,
-                collateral_partner: msg.collateral_partner,
-                operator_signature: msg.operator_signature,
-            };
+            // Send NACK so operator knows the ledger wasn't found (V2 format)
+            let remove_partner_msg = DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
+                sender_node_id,  // operator
+                msg.partner_id,  // partner
+                LedgerOperation::CollateralRemovePartner {
+                    collateral_partner: msg.collateral_partner,
+                    operator_signature: msg.operator_signature,
+                },
+            ));
             if let Err(e) = self.send_acknowledgment(
                 &remove_partner_msg,
                 false,
@@ -1250,7 +1292,7 @@ where
     /// Handle CollateralConsentRequest message
     pub(super) fn handle_collateral_consent_request(
         &self,
-        msg: &super::messages::CollateralConsentRequestMsg,
+        msg: &CollateralConsentRequestMsg,
         sender_node_id: PublicKey,
     ) -> Result<(), LightningError> {
         use deposits_core::log_warn;
@@ -1305,12 +1347,13 @@ where
             [0u8; 64]
         };
 
-        let response = DepositsMessage::CollateralConsentResponse {
+        let response = DepositsMessage::CoordinationResponse(CoordinationResponseMsg::CollateralConsentResponse {
+            request_hash: [0u8; 32], // Will be filled by wire layer
             operator_id: msg.operator_id,
             partner_id: msg.partner_id,
             consent_granted,
             collateral_partner_signature: signature,
-        };
+        });
 
         if consent_granted {
             log_info!(
@@ -1342,10 +1385,11 @@ where
                 msg.partner_id
             );
 
-            let sync_request = DepositsMessage::SyncRequest(super::messages::SyncRequestMsg {
+            let sync_request = DepositsMessage::Sync(SyncMsg {
                 operator_id: msg.operator_id,
                 partner_id: msg.partner_id,
-                last_known_sequence: 0, // Start from beginning since we're new to this ledger
+                from_sequence: 0, // Start from beginning since we're new to this ledger
+                to_sequence: None,
             });
 
             if let Err(e) = self.send_message(msg.operator_id, sync_request) {
@@ -1359,7 +1403,7 @@ where
     /// Handle CollateralConsentResponse message
     pub(super) fn handle_collateral_consent_response(
         &self,
-        msg: &super::messages::CollateralConsentResponseMsg,
+        msg: &CollateralConsentResponseMsg,
         sender_node_id: PublicKey,
     ) -> Result<(), LightningError> {
         use bitcoin::secp256k1::ecdsa::Signature;
@@ -1418,12 +1462,12 @@ where
         }
 
         // Find the pending consent request and complete it
-        // Calculate the hash of the original request for lookup
-        let original_request = DepositsMessage::CollateralConsentRequest {
+        // Calculate the hash of the original request for lookup (V2 format)
+        let original_request = DepositsMessage::Coordination(CoordinationMsg::CollateralConsentRequest {
             operator_id: msg.operator_id,
             partner_id: msg.partner_id,
             operator_signature: [0u8; 64], // This should match what we sent
-        };
+        });
         let request_hash = self.calculate_message_hash(&original_request);
 
         // Complete the pending request
@@ -1457,12 +1501,13 @@ where
             if let Err(e) = self.send_audit_update_to_new_collateral_partner(
                 msg.partner_id,  // The channel partner for this ledger
                 sender_node_id,  // The new collateral partner who just granted consent
-                &DepositsMessage::CollateralConsentResponse {
+                &DepositsMessage::CoordinationResponse(CoordinationResponseMsg::CollateralConsentResponse {
+                    request_hash: [0u8; 32], // Will be filled by wire layer
                     operator_id: msg.operator_id,
                     partner_id: msg.partner_id,
                     consent_granted: msg.consent_granted,
                     collateral_partner_signature: msg.collateral_partner_signature,
-                },
+                }),
             ) {
                 log_warn!(
                     self.logger,
@@ -1571,14 +1616,17 @@ where
         // Forward CollateralAttestation to channel partners for bilateral signing
         // (Previously created a separate CollateralStatus, now we forward the full attestation)
         if !channel_ledgers_to_update.is_empty() {
-            let attestation_forward = DepositsMessage::CollateralAttestation {
-                operator: msg.operator,
-                collateral_partner: msg.collateral_partner,
-                amount: msg.amount,
-                block_height: msg.block_height,
-                signature: msg.signature,
-                ledger_hash: msg.ledger_hash,
-            };
+            let attestation_forward = DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
+                msg.operator,
+                msg.collateral_partner,
+                LedgerOperation::CollateralAttestation {
+                    collateral_operator: msg.operator,
+                    amount: msg.amount,
+                    block_height: msg.block_height,
+                    signature: msg.signature,
+                    ledger_hash: msg.ledger_hash,
+                },
+            ));
 
             let ledgers = self.ledgers.lock().unwrap();
             for (op_id, part_id) in channel_ledgers_to_update {
@@ -1636,15 +1684,18 @@ where
             }
         }
 
-        // Simple ACK for the attestation itself
-        let attestation_msg = DepositsMessage::CollateralAttestation {
-            operator: msg.operator,
-            collateral_partner: msg.collateral_partner,
-            amount: msg.amount,
-            block_height: msg.block_height,
-            signature: msg.signature,
-            ledger_hash: msg.ledger_hash,
-        };
+        // Simple ACK for the attestation itself (V2 format)
+        let attestation_msg = DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
+            msg.operator,
+            msg.collateral_partner,
+            LedgerOperation::CollateralAttestation {
+                collateral_operator: msg.operator,
+                amount: msg.amount,
+                block_height: msg.block_height,
+                signature: msg.signature,
+                ledger_hash: msg.ledger_hash,
+            },
+        ));
         if let Err(e) = self.send_acknowledgment(&attestation_msg, true, None, None, sender_node_id) {
             log_warn!(self.logger, "💰 COLLATERAL: Failed to send ACK: {:?}", e);
         }
@@ -1658,7 +1709,7 @@ where
     /// Partner broadcasting proof of unpaid settlement
     pub(super) fn handle_uncredited_payment(
         &self,
-        msg: &super::messages::UncreditedPaymentMsg,
+        msg: &UncreditedPaymentMsg,
         sender_node_id: PublicKey,
     ) -> Result<(), LightningError> {
         use bitcoin::hashes::{sha256, Hash};
@@ -1804,7 +1855,7 @@ where
                 };
 
                 // Forward the accusation to our collateral partners (excluding the sender)
-                let accusation_msg = DepositsMessage::UncreditedPayment {
+                let accusation_msg = DepositsMessage::Recovery(RecoveryMsg::UncreditedPayment {
                     operator: msg.operator,
                     partner: msg.partner,
                     payment_hash: msg.payment_hash,
@@ -1816,7 +1867,7 @@ where
                     settlement_ledger_hash: msg.settlement_ledger_hash,
                     settlement_block_height: msg.settlement_block_height,
                     accuser_signature: msg.accuser_signature,
-                };
+                });
                 for partner in our_collateral_partners {
                     if partner != sender_node_id {
                         log_info!(
@@ -1839,7 +1890,7 @@ where
     /// Append to ledger and mark as closed
     pub(super) fn handle_channel_close_tombstone(
         &self,
-        tombstone_msg: &super::messages::ChannelCloseTombstoneMsg,
+        tombstone_msg: &ChannelCloseTombstoneMsg,
         message: &DepositsMessage,
         sender_node_id: PublicKey,
     ) -> Result<(), LightningError> {
@@ -2066,7 +2117,7 @@ where
     /// Handle LedgerOpenRequest message - respond to ledger creation handshake
     pub(super) fn handle_ledger_open_request(
         &self,
-        init_msg: &LedgerOpenRequestMsg,
+        init_msg: &HandshakeMsg,
         message: &DepositsMessage,
         sender_node_id: PublicKey,
     ) -> Result<(), LightningError> {
@@ -2080,7 +2131,7 @@ where
                     Ok(validated_addr) => validated_addr,
                     Err(e) => {
                         log_error!(self.logger, "Invalid network for ledger address: {}", e);
-                        let response = DepositsMessage::LedgerOpenResponse(LedgerOpenResponseMsg {
+                        let response = DepositsMessage::HandshakeResponse(HandshakeResponseMsg {
                             protocol_version: init_msg.protocol_version,
                             accepted: false,
                             error_reason: Some(format!("Invalid network: {}", e)),
@@ -2093,7 +2144,7 @@ where
                 },
                 Err(e) => {
                     log_error!(self.logger, "Failed to parse ledger address: {}", e);
-                    let response = DepositsMessage::LedgerOpenResponse(LedgerOpenResponseMsg {
+                    let response = DepositsMessage::HandshakeResponse(HandshakeResponseMsg {
                         protocol_version: init_msg.protocol_version,
                         accepted: false,
                         error_reason: Some(format!("Invalid address: {}", e)),
@@ -2110,7 +2161,7 @@ where
                 log_error!(self.logger, "Failed to initialize ledger as partner for operator {}: {}", sender_node_id, e);
 
                 // Send rejection response
-                let response = DepositsMessage::LedgerOpenResponse(LedgerOpenResponseMsg {
+                let response = DepositsMessage::HandshakeResponse(HandshakeResponseMsg {
                     protocol_version: init_msg.protocol_version,
                     accepted: false,
                     error_reason: Some(format!("Failed to initialize ledger: {}", e)),
@@ -2122,7 +2173,7 @@ where
             }
 
             // Send acceptance response
-            let response = DepositsMessage::LedgerOpenResponse(LedgerOpenResponseMsg {
+            let response = DepositsMessage::HandshakeResponse(HandshakeResponseMsg {
                 protocol_version: init_msg.protocol_version,
                 accepted: true,
                 error_reason: None,
@@ -2148,7 +2199,7 @@ where
             );
         } else {
             // Send rejection response - ledger already exists
-            let response = DepositsMessage::LedgerOpenResponse(LedgerOpenResponseMsg {
+            let response = DepositsMessage::HandshakeResponse(HandshakeResponseMsg {
                 protocol_version: init_msg.protocol_version,
                 accepted: false,
                 error_reason: Some("Ledger already exists".to_string()),
@@ -2200,7 +2251,7 @@ where
             message.message_type(), sender_node_id, is_for_us);
 
         // Handle AuditSyncRequest messages specially - they're requests for us to send updates
-        if let DepositsMessage::SyncRequest(ref request) = message {
+        if let DepositsMessage::Sync(ref request) = message {
             log_info!(
                 self.logger,
                 "📋 SYNC: Received sync request from {}",
@@ -2446,10 +2497,10 @@ where
             }
         }
 
-        // Send AcceptReserves response
-        let accept_msg = DepositsMessage::AcceptReserves {
+        // Send AcceptReserves response (V2 format)
+        let accept_msg = DepositsMessage::CoordinationResponse(CoordinationResponseMsg::AcceptReserves {
             channel_id: *channel_id,
-        };
+        });
 
         if let Err(e) = self.send_message(sender_node_id, accept_msg) {
             log_error!(

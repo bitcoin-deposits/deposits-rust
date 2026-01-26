@@ -13,6 +13,7 @@
 use bitcoin::secp256k1::PublicKey;
 
 use super::core::DepositsHandler;
+use super::messages::LedgerUpdateResponseMsg;
 use deposits_core::DepositsError;
 use deposits_core::{log_debug, log_error};
 use lightning::util::logger::Logger as LdkLogger;
@@ -24,7 +25,7 @@ where
     L::Target: LdkLogger,
 {
     /// Handle received acknowledgment message
-    pub(super) fn handle_received_ack(&self, ack_msg: super::messages::AckMsg, sender: PublicKey) -> Result<(), DepositsError> {
+    pub(super) fn handle_received_ack(&self, ack_msg: LedgerUpdateResponseMsg, sender: PublicKey) -> Result<(), DepositsError> {
         // First, notify any waiting threads
         let result = if ack_msg.success {
             Ok(())
@@ -133,13 +134,23 @@ where
                     drop(ledger); // Release ledger lock
                     drop(ledgers); // Release ledgers lock
 
-                    // Get new_hash BEFORE broadcasting (broadcast removes the entry)
+                    // Get new_hash and check message type BEFORE broadcasting (broadcast removes the entry)
                     // For some message types (AddCollateralPartner, etc.), the operator appends AFTER
                     // receiving ACK, so new_hash won't be set yet. Skip in that case.
                     // Use lookup_hash which may be partner-specific for CollateralAttestation messages.
-                    let new_hash_opt = {
+                    let (new_hash_opt, is_collateral_attestation) = {
                         let sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
-                        sent_messages.get(&lookup_hash).map(|(_, _, _, _, new_hash, _)| *new_hash)
+                        if let Some((_, _, msg, _, new_hash, _)) = sent_messages.get(&lookup_hash) {
+                            // Check if this is a CollateralAttestation message
+                            // CollateralAttestation is already forwarded via handle_collateral_attestation,
+                            // so we should NOT broadcast it again to avoid infinite loops
+                            let is_attestation = msg.to_operation().map_or(false, |op| {
+                                matches!(op, super::messages::LedgerOperation::CollateralAttestation { .. })
+                            });
+                            (Some(*new_hash), is_attestation)
+                        } else {
+                            (None, false)
+                        }
                     };
 
                     // Update partner_deepest_ack_hash BEFORE broadcasting
@@ -185,8 +196,17 @@ where
 
                     // Now broadcast (this removes entry from sent_messages_for_broadcast)
                     // Use lookup_hash which may be partner-specific for CollateralAttestation messages.
-                    let should_broadcast = new_hash_opt.map(|h| h != [0u8; 32]).unwrap_or(false);
-                    if should_broadcast {
+                    // IMPORTANT: Do NOT broadcast CollateralAttestation - it's already forwarded via
+                    // handle_collateral_attestation. Broadcasting it would cause infinite loops.
+                    let should_broadcast = new_hash_opt.map(|h| h != [0u8; 32]).unwrap_or(false)
+                        && !is_collateral_attestation;
+                    if is_collateral_attestation {
+                        println!("[ACK] skip broadcast hash={:02x?} - CollateralAttestation (forwarded via handler)",
+                            &lookup_hash[0..4]);
+                        // Clean up the sent_messages entry since we won't broadcast it
+                        let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
+                        sent_messages.remove(&lookup_hash);
+                    } else if should_broadcast {
                         println!("[ACK] broadcast hash={:02x?} sender={} has_sig={}",
                             &lookup_hash[0..4], sender, ack_msg.update_signature.is_some());
                         if let Err(e) = self.broadcast_message_to_other_partners(
@@ -222,9 +242,17 @@ where
                 if ack_msg.success {
                     // For fire-and-forget operations, we need to update partner_deepest_ack_hash
                     // when the ACK is received, so the background flush task will commit it.
-                    let new_hash_opt = {
+                    let (new_hash_opt, is_collateral_attestation_ff) = {
                         let sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
-                        sent_messages.get(&ack_msg.message_hash).map(|(_, _, _, _, new_hash, _)| *new_hash)
+                        if let Some((_, _, msg, _, new_hash, _)) = sent_messages.get(&ack_msg.message_hash) {
+                            // Check if this is a CollateralAttestation message
+                            let is_attestation = msg.to_operation().map_or(false, |op| {
+                                matches!(op, super::messages::LedgerOperation::CollateralAttestation { .. })
+                            });
+                            (Some(*new_hash), is_attestation)
+                        } else {
+                            (None, false)
+                        }
                     };
 
                     if let Some(new_hash) = new_hash_opt {
@@ -274,18 +302,24 @@ where
                             }
 
                             // Broadcast SignedAuditUpdate to channel partner and quorum members
-                            // IMPORTANT: Must happen BEFORE cleanup (broadcast reads from sent_messages_for_broadcast)
-                            println!("[ACK] broadcast (fire-and-forget) hash={:02x?} sender={} has_sig={}",
-                                &ack_msg.message_hash[0..4], sender, ack_msg.update_signature.is_some());
-                            if let Err(e) = self.broadcast_message_to_other_partners(
-                                ack_msg.message_hash,
-                                sender,
-                                ack_msg.update_signature,
-                            ) {
-                                log_error!(self.logger, "Failed to broadcast fire-and-forget message to partners: {}", e);
-                                println!("[ACK] BROADCAST FAILED (fire-and-forget): {}", e);
+                            // IMPORTANT: Do NOT broadcast CollateralAttestation - it's already forwarded
+                            // via handle_collateral_attestation. Broadcasting would cause infinite loops.
+                            if is_collateral_attestation_ff {
+                                println!("[ACK] skip broadcast (fire-and-forget) hash={:02x?} - CollateralAttestation",
+                                    &ack_msg.message_hash[0..4]);
                             } else {
-                                println!("[ACK] BROADCAST OK (fire-and-forget) hash={:02x?}", &ack_msg.message_hash[0..4]);
+                                println!("[ACK] broadcast (fire-and-forget) hash={:02x?} sender={} has_sig={}",
+                                    &ack_msg.message_hash[0..4], sender, ack_msg.update_signature.is_some());
+                                if let Err(e) = self.broadcast_message_to_other_partners(
+                                    ack_msg.message_hash,
+                                    sender,
+                                    ack_msg.update_signature,
+                                ) {
+                                    log_error!(self.logger, "Failed to broadcast fire-and-forget message to partners: {}", e);
+                                    println!("[ACK] BROADCAST FAILED (fire-and-forget): {}", e);
+                                } else {
+                                    println!("[ACK] BROADCAST OK (fire-and-forget) hash={:02x?}", &ack_msg.message_hash[0..4]);
+                                }
                             }
 
                             // Clean up the entry from sent_messages_for_broadcast now that ACK is processed

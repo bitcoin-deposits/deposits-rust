@@ -12,9 +12,9 @@ use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::{Secp256k1, SecretKey, PublicKey};
 
 use deposits_ldk::handler::messages::{
-    DepositsMessage, UncreditedPaymentMsg,
+    DepositsMessage, RecoveryMsg,
 };
-use deposits_ldk::handler::messages::UNCREDITED_PAYMENT;
+use deposits_ldk::wire::messages::UncreditedPaymentMsg;
 
 /// Generate a test public key from a seed byte
 fn generate_test_pubkey(seed: u8) -> PublicKey {
@@ -87,7 +87,9 @@ fn test_uncredited_payment_msg_roundtrip() {
 
 #[test]
 fn test_uncredited_payment_msg_type() {
-    let msg = DepositsMessage::UncreditedPayment {
+    use deposits_ldk::handler::messages::RECOVERY;
+
+    let msg = DepositsMessage::Recovery(RecoveryMsg::UncreditedPayment {
         operator: generate_test_pubkey(1),
         partner: generate_test_pubkey(2),
         payment_hash: [0xAA; 32],
@@ -99,10 +101,11 @@ fn test_uncredited_payment_msg_type() {
         settlement_ledger_hash: [0xCC; 32],
         settlement_block_height: 800_000,
         accuser_signature: [0u8; 64],
-    };
+    });
 
-    assert_eq!(msg.message_type(), UNCREDITED_PAYMENT);
-    assert_eq!(msg.message_type(), 0x8035);
+    // V2: UncreditedPayment is now a variant of RecoveryMsg, which uses RECOVERY type (0x800D)
+    assert_eq!(msg.message_type(), RECOVERY);
+    assert_eq!(msg.message_type(), 0x800D);
 }
 
 // =============================================================================

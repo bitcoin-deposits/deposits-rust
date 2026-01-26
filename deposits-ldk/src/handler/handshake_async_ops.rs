@@ -17,7 +17,8 @@ use tokio::sync::oneshot;
 
 use super::core::{build_taproot_reserves_script, DepositsHandler};
 use deposits_core::DepositsError;
-use super::messages::{LedgerUpdateMsg, LedgerOperation};
+use super::messages::{LedgerUpdateMsg, LedgerOperation, DepositsMessage, HandshakeMsg};
+use deposits_core::messages::CoordinationMsg;
 use super::ledger_ext::{LedgerExt, SignedLedgerUpdateExt};
 use deposits_core::VoterSet;
 use deposits_core::Invoice;
@@ -192,35 +193,34 @@ where
             // For now, log but don't fail - we'll add strict enforcement later
         }
 
-        // Wait for pending CollateralAttestation ACKs to complete
-        // The CollateralAttestation is forwarded to channel partners.
+        // Wait for pending LedgerUpdate ACKs to complete
+        // CollateralAttestation is forwarded to channel partners as a LedgerUpdate.
         // We must wait for those ACKs before sending the cosign request, otherwise the
         // partner will see 0 collateral.
         //
-        // Note: The oneshot notification is now deferred in message_dispatch.rs until AFTER
-        // handle_collateral_attestation completes, so CollateralAttestation is already in
-        // pending_acks when we reach this point. No initial delay needed.
+        // Note: V2 uses LEDGER_UPDATE for all ledger operations including CollateralAttestation.
+        // We wait for all pending LedgerUpdate ACKs here.
         {
-            use super::messages::consts::COLLATERAL_ATTESTATION;
+            use super::messages::consts::LEDGER_UPDATE;
 
             let start = std::time::Instant::now();
             let timeout = Duration::from_millis(5000);
 
             loop {
-                let pending_collateral_attestation = {
+                let pending_ledger_updates = {
                     let pending_acks = self.pending_acks.lock().unwrap();
                     pending_acks.iter()
-                        .filter(|(_, (msg_type, _))| *msg_type == COLLATERAL_ATTESTATION)
+                        .filter(|(_, (msg_type, _))| *msg_type == LEDGER_UPDATE)
                         .count()
                 };
 
-                if pending_collateral_attestation == 0 {
-                    log_debug!(self.logger, "✅ All CollateralAttestation ACKs received");
+                if pending_ledger_updates == 0 {
+                    log_debug!(self.logger, "✅ All LedgerUpdate ACKs received");
                     break;
                 }
 
                 if start.elapsed() > timeout {
-                    log_warn!(self.logger, "⚠️ Timeout waiting for {} CollateralAttestation ACK(s)", pending_collateral_attestation);
+                    log_warn!(self.logger, "⚠️ Timeout waiting for {} LedgerUpdate ACK(s)", pending_ledger_updates);
                     break;
                 }
 
@@ -249,8 +249,9 @@ where
         let invoice_id_clone = invoice_id.clone();
         let bolt11_clone = bolt11.clone();
 
-        // STEP 3: Create ReceivingCosignInvoice message with inline fields
-        let message = DepositsMessage::ReceivingCosignInvoice {
+        // STEP 3: Create CosignInvoice message (V2 format)
+        use deposits_core::messages::CoordinationMsg;
+        let message = DepositsMessage::Coordination(CoordinationMsg::CosignInvoice {
             operator_id: self.our_node_id,
             partner_id: partner_node_id,
             amount,
@@ -258,8 +259,8 @@ where
             expires,
             assigned_deposit: deposit_pubkey,
             invoice_id: invoice_id_clone,
-            bolt11: bolt11_clone,
-        };
+            bolt11_invoice: bolt11_clone,
+        });
 
         // Calculate message hash for tracking
         let message_hash = self.calculate_message_hash(&message);
@@ -275,11 +276,11 @@ where
                      &message_hash[0..4], pending_cosignature_requests.len());
         }
 
-        // NOTE: ReceivingCosignInvoice is a coordination message, NOT a ledger update
+        // NOTE: CosignInvoice is a coordination message, NOT a ledger update
         // It doesn't modify state, so we don't add pending ACK or track it in the ledger chain
 
         // Send the message
-        println!("📤 OPERATOR: Sending ReceivingCosignInvoice message (type {}) to {}",
+        println!("📤 OPERATOR: Sending CosignInvoice message (type {}) to {}",
                  message.message_type(), partner_node_id);
         self.send_message(partner_node_id, message.clone())?;
 
@@ -339,7 +340,7 @@ where
         partner_node_id: PublicKey,
         ledger_address: bitcoin::Address,
     ) -> Result<(), DepositsError> {
-        use super::messages::{DepositsMessage, LedgerOpenRequestMsg};
+        use super::messages::{DepositsMessage, HandshakeMsg};
 
         // Check if ledger already exists
         {
@@ -367,8 +368,8 @@ where
             ([0u8; 32], 0u16)
         };
 
-        // Send LedgerOpenRequest with the ledger address and funding outpoint
-        let init_msg = DepositsMessage::LedgerOpenRequest(LedgerOpenRequestMsg {
+        // Send Handshake with the ledger address and funding outpoint
+        let init_msg = DepositsMessage::Handshake(HandshakeMsg {
             protocol_version: 1,
             min_protocol_version: 1,
             features: 0,
@@ -393,7 +394,7 @@ where
             println!("🔵 ADDED PENDING ACK: hash={:02x?}, type={}", &message_hash[0..4], message_type);
         }
 
-        // Wait for LedgerOpenRequestResponse with ACK
+        // Wait for HandshakeResponse with ACK
         match self.send_message_with_ack_async(partner_node_id, init_msg, 30000).await {
             Ok(()) => {
             }
@@ -409,10 +410,10 @@ where
 
         self.initialize_ledger(partner_node_id, ledger_address)?;
 
-        // Broadcast LedgerOpenRequest to all other partners (auditors)
+        // Broadcast Handshake to all other partners (auditors)
         // This is the first update (seq=0 in ledger, seq=1 in SignedAuditUpdate)
         {
-            // Get the LedgerOpenRequest message from the ledger (first update)
+            // Get the Handshake message from the ledger (first update)
             let (handshake_msg_opt, new_hash) = {
                 let ledgers = self.ledgers.lock().unwrap();
                 if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
@@ -428,7 +429,7 @@ where
             };
 
             if let Some(handshake_msg) = handshake_msg_opt {
-                let prev_hash = [0u8; 32]; // LedgerOpenRequest is the first update
+                let prev_hash = [0u8; 32]; // Handshake is the first update
                 let chain_index = 0u64; // First update in the chain (0-based, index 0)
 
                 // Store in sent_messages_for_broadcast for SignedAuditUpdate broadcast
@@ -437,9 +438,9 @@ where
                     sent_messages.insert(message_hash, (self.our_node_id, partner_node_id, handshake_msg, prev_hash, new_hash, chain_index));
                 }
 
-                println!("🟢 TRIGGERING broadcast after LedgerOpenRequest append");
+                println!("🟢 TRIGGERING broadcast after Handshake append");
                 if let Err(e) = self.broadcast_message_to_other_partners(message_hash, partner_node_id, None) {
-                    log_warn!(self.logger, "Failed to broadcast LedgerOpenRequest to other partners: {:?}", e);
+                    log_warn!(self.logger, "Failed to broadcast Handshake to other partners: {:?}", e);
                 }
             }
         }
@@ -540,13 +541,13 @@ where
                         let script_pubkey_bytes = script_pubkey_clone.as_bytes().to_vec();
                         println!("🔧 [INIT] OPERATOR sending UpdateReserves to {} with {} sats",
                             partner_node_id, initial_reserves_sats);
-                        let update_msg = DepositsMessage::UpdateReserves {
+                        let update_msg = DepositsMessage::Coordination(CoordinationMsg::UpdateReserves {
                             channel_id: channel.channel_id.0,
                             reserves_sats: initial_reserves_sats,
                             script_pubkey: script_pubkey_bytes,
                             ledger_hash: zero_hash,
                             remote_ledger_hash: [0u8; 32], // Partner's ledger doesn't exist yet
-                        };
+                        });
                         if let Err(e) = self.send_message(partner_node_id, update_msg) {
                             println!("❌ [INIT] OPERATOR failed to send UpdateReserves: {:?}", e);
                             log_error!(
@@ -584,9 +585,9 @@ where
             }
         }
 
-        // Broadcast the LedgerOpenRequest to all other partners as signed audit update
+        // Broadcast the Handshake to all other partners as signed audit update
         // IMPORTANT: Use same funding info as the original message for consistent hash
-        let init_msg_for_broadcast = DepositsMessage::LedgerOpenRequest(LedgerOpenRequestMsg {
+        let init_msg_for_broadcast = DepositsMessage::Handshake(HandshakeMsg {
             protocol_version: 1,
             min_protocol_version: 1,
             features: 0,
@@ -609,12 +610,12 @@ where
         };
 
         // Store message for broadcasting (so broadcast_message_to_other_partners can find it)
-        // For LedgerOpenRequest, prev_hash is [0u8; 32] (genesis) and new_hash is the ledger's current hash
+        // For Handshake, prev_hash is [0u8; 32] (genesis) and new_hash is the ledger's current hash
         let (prev_hash, new_hash, sequence_number) = {
             let ledgers = self.ledgers.lock().unwrap();
             if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
                 let ledger = ledger_arc.read().unwrap();
-                // LedgerOpenRequest uses 0-based sequence for SignedAuditUpdate
+                // Handshake uses 0-based sequence for SignedAuditUpdate
                 let seq = ledger.history.len() as u64; // 0-based (index of entry being added)
                 ([0u8; 32], ledger.tail_hash(), seq)
             } else {
@@ -630,7 +631,7 @@ where
         if let Err(e) = self.broadcast_message_to_other_partners(message_hash, partner_node_id, None) {
             log_error!(
                 self.logger,
-                "Failed to broadcast LedgerOpenRequest to auditors: {}",
+                "Failed to broadcast Handshake to auditors: {}",
                 e
             );
         }

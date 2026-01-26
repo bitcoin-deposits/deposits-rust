@@ -14,7 +14,7 @@ use bitcoin::secp256k1::PublicKey;
 
 use super::core::DepositsHandler;
 use deposits_core::DepositsError;
-use super::messages::DepositsMessage;
+use super::messages::{DepositsMessage, SyncMsg};
 use super::ledger_ext::{SignedLedgerUpdateExt, SignedLedgerUpdateLogExt};
 use deposits_core::{log_debug, log_error, log_info, log_warn};
 use lightning::util::logger::Logger as LdkLogger;
@@ -379,7 +379,7 @@ where
     /// When an auditor requests missing updates, we send them all updates after their last known sequence
     pub(super) fn handle_audit_sync_request(
         &self,
-        request: &super::messages::SyncRequestMsg,
+        request: &SyncMsg,
         requester: PublicKey,
     ) -> Result<(), DepositsError> {
         log_info!(
@@ -388,14 +388,14 @@ where
             requester,
             request.operator_id,
             request.partner_id,
-            request.last_known_sequence
+            request.from_sequence
         );
 
         // Load our stored signed updates for this ledger
         let logs = self.signed_update_logs.lock().unwrap();
         let updates_to_send = if let Some(log) = logs.get(&(request.operator_id, request.partner_id)) {
             // Get updates since the requested sequence
-            let updates = log.get_updates_since(request.last_known_sequence);
+            let updates = log.get_updates_since(request.from_sequence);
 
             log_info!(
                 self.logger,
@@ -417,13 +417,13 @@ where
 
         drop(logs); // Release lock before sending
 
-        // Convert SignedLedgerUpdate to SignedAuditUpdateMsg for transmission
-        use super::messages::{SignedUpdateMsg, LedgerOperation};
+        // Convert SignedLedgerUpdate to LedgerUpdateMsg for transmission
+        use super::messages::{LedgerUpdateMsg, LedgerOperation};
         use super::ledger_ext::SignedLedgerUpdateExt;
-        let audit_updates: Vec<SignedUpdateMsg> = updates_to_send.iter().map(|update| {
+        let audit_updates: Vec<LedgerUpdateMsg> = updates_to_send.iter().map(|update| {
             // Extract actual operation from message bytes to avoid placeholder issues
             let operation = update.get_operation().unwrap_or(LedgerOperation::ReservesRemove);
-            SignedUpdateMsg {
+            LedgerUpdateMsg {
                 message: update.message.clone(),
                 message_type: update.message_type,
                 operator_signature: update.operator_signature,
@@ -638,7 +638,7 @@ where
         collateral_partner: PublicKey,
         _message: &DepositsMessage,  // Not used anymore - we send all updates
     ) -> Result<(), DepositsError> {
-        use super::messages::SignedUpdateMsg;
+        use super::messages::LedgerUpdateMsg;
 
         log_info!(
             self.logger,
@@ -734,9 +734,9 @@ where
                 }
             };
 
-            // Wrap in SignedAuditUpdateMsg and send - extract actual operation from original message
+            // Wrap in LedgerUpdateMsg and send - extract actual operation from original message
             let operation = msg.to_operation().unwrap_or(LedgerOperation::ReservesRemove);
-            let audit_msg = DepositsMessage::SignedUpdate(SignedUpdateMsg {
+            let audit_msg = DepositsMessage::LedgerUpdate(LedgerUpdateMsg {
                 message: signed_update.message.clone(),
                 message_type: signed_update.message_type,
                 operator_signature: signed_update.operator_signature,
