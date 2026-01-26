@@ -80,7 +80,9 @@ where
         let secret = SecretKey::from_slice(&[1; 32]).unwrap();
         let test_node_id = PublicKey::from_secret_key(&secp, &secret);
 
-        Self::new(event_queue, logger, kv_store, test_node_id, bitcoin::Network::Regtest).expect("Test handler creation should not fail")
+        let mut handler = Self::new(event_queue, logger, kv_store, test_node_id, bitcoin::Network::Regtest).expect("Test handler creation should not fail");
+        handler.initialize_core_handler();
+        handler
     }
 
     /// Create a test handler with a specific node ID for replay testing
@@ -137,7 +139,9 @@ where
         let kv_store: Arc<DynStore> = Arc::new(TestMemoryStore(RwLock::new(HashMap::new())));
         let event_queue = Arc::new(EventQueue::new(logger.clone()));
 
-        Self::new(event_queue, logger, kv_store, node_id, bitcoin::Network::Regtest).expect("Test handler creation should not fail")
+        let mut handler = Self::new(event_queue, logger, kv_store, node_id, bitcoin::Network::Regtest).expect("Test handler creation should not fail");
+        handler.initialize_core_handler();
+        handler
     }
 
     /// Drop all ledgers and related state (NON-CONFORMING - for testing only)

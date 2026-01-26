@@ -83,40 +83,18 @@ where
     L::Target: LdkLogger,
 {
     fn get_ledger_hash(&self, partner_node_id: PublicKey) -> Result<[u8; 32], DepositsError> {
-        // Delegate to core_handler (shares same ledgers)
-        // Note: Core returns Err(LedgerNotFound) when no ledger, we return Ok([0u8; 32])
-        // Keep existing behavior for backwards compatibility
-        if let Some(ref handler) = self.core_handler {
-            // Use fully-qualified syntax to call the trait method (not the inherent method)
-            return match <_ as LedgerOperations>::get_ledger_hash(handler.as_ref(), partner_node_id) {
-                Ok(hash) => Ok(hash),
-                Err(DepositsError::LedgerNotFound) => Ok([0u8; 32]),
-                Err(e) => Err(e),
-            };
-        }
-        // Fallback
-        let ledgers = self.ledgers.lock().unwrap();
-        if let Some(ledger) = ledgers.get(&(self.our_node_id, partner_node_id)) {
-            let ledger = ledger.read().unwrap();
-            Ok(ledger.tail_hash())
-        } else {
-            Ok([0u8; 32])
+        let handler = self.core_handler.as_ref().expect("core_handler must be initialized");
+        // Core returns Err(LedgerNotFound) when no ledger, we return Ok([0u8; 32]) for backwards compatibility
+        match <_ as LedgerOperations>::get_ledger_hash(handler.as_ref(), partner_node_id) {
+            Ok(hash) => Ok(hash),
+            Err(DepositsError::LedgerNotFound) => Ok([0u8; 32]),
+            Err(e) => Err(e),
         }
     }
 
     fn get_ledger_hashes(&self, partner_node_id: PublicKey) -> (Option<[u8; 32]>, Option<[u8; 32]>) {
-        if let Some(ref handler) = self.core_handler {
-            return <_ as LedgerOperations>::get_ledger_hashes(handler.as_ref(), partner_node_id);
-        }
-        // Fallback
-        let ledgers = self.ledgers.lock().unwrap();
-        let local_hash = ledgers
-            .get(&(self.our_node_id, partner_node_id))
-            .map(|ledger| ledger.read().unwrap().state.channel_deepest_commitment_hash);
-        let remote_hash = ledgers
-            .get(&(partner_node_id, self.our_node_id))
-            .map(|ledger| ledger.read().unwrap().state.channel_deepest_commitment_hash);
-        (local_hash, remote_hash)
+        let handler = self.core_handler.as_ref().expect("core_handler must be initialized");
+        <_ as LedgerOperations>::get_ledger_hashes(handler.as_ref(), partner_node_id)
     }
 
     fn get_committed_ledger_hashes_from_channel(
@@ -142,88 +120,45 @@ where
         counterparty_node_id: &PublicKey,
         ledger_hash: &[u8; 32],
     ) -> bool {
-        // Zero hash is always valid (handled by deposits-core, but short-circuit for logging)
+        // Zero hash is always valid
         if ledger_hash == &[0u8; 32] {
             log_debug!(self.logger, "Accepting zero ledger hash for reserves with partner {}",
                 counterparty_node_id);
             return true;
         }
-        if let Some(ref handler) = self.core_handler {
-            let is_valid = <_ as LedgerOperations>::validate_ledger_hash_for_reserves(
-                handler.as_ref(), counterparty_node_id, ledger_hash);
-            if is_valid {
-                log_debug!(self.logger, "Validated ledger hash {} for reserves with partner {}",
-                    crate::hex_utils::to_string(ledger_hash),
-                    counterparty_node_id);
-            } else {
-                log_debug!(self.logger, "Rejecting unknown ledger hash {} for reserves with partner {}",
-                    crate::hex_utils::to_string(ledger_hash),
-                    counterparty_node_id);
-            }
-            return is_valid;
+        let handler = self.core_handler.as_ref().expect("core_handler must be initialized");
+        let is_valid = <_ as LedgerOperations>::validate_ledger_hash_for_reserves(
+            handler.as_ref(), counterparty_node_id, ledger_hash);
+        if is_valid {
+            log_debug!(self.logger, "Validated ledger hash {} for reserves with partner {}",
+                crate::hex_utils::to_string(ledger_hash),
+                counterparty_node_id);
+        } else {
+            log_debug!(self.logger, "Rejecting unknown ledger hash {} for reserves with partner {}",
+                crate::hex_utils::to_string(ledger_hash),
+                counterparty_node_id);
         }
-        // Fallback
-        let ledgers = self.ledgers.lock().unwrap();
-        let ledger_key = (*counterparty_node_id, self.our_node_id);
-        if let Some(ledger_arc) = ledgers.get(&ledger_key) {
-            let ledger = ledger_arc.read().unwrap();
-            if ledger.find_hash_sequence(ledger_hash).is_some() {
-                log_debug!(self.logger, "Validated ledger hash {} for reserves with partner {}",
-                    crate::hex_utils::to_string(ledger_hash),
-                    counterparty_node_id);
-                return true;
-            }
-        }
-        log_debug!(self.logger, "Rejecting unknown ledger hash {} for reserves with partner {}",
-            crate::hex_utils::to_string(ledger_hash),
-            counterparty_node_id);
-        false
+        is_valid
     }
 
     fn get_ledger_sequence(&self, partner_node_id: PublicKey) -> Result<u64, DepositsError> {
-        if let Some(ref handler) = self.core_handler {
-            return <_ as LedgerOperations>::get_ledger_sequence(handler.as_ref(), partner_node_id);
-        }
-        // Fallback
-        let ledgers = self.ledgers.lock().unwrap();
-        if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
-            let ledger = ledger_arc.read().unwrap();
-            return Ok(ledger.history.len() as u64);
-        }
-        Err(DepositsError::LedgerNotFound)
+        let handler = self.core_handler.as_ref().expect("core_handler must be initialized");
+        <_ as LedgerOperations>::get_ledger_sequence(handler.as_ref(), partner_node_id)
     }
 
     fn has_ledger_with(&self, partner_node_id: PublicKey) -> bool {
-        if let Some(ref handler) = self.core_handler {
-            return <_ as LedgerOperations>::has_ledger_with(handler.as_ref(), partner_node_id);
-        }
-        // Fallback
-        let ledgers = self.ledgers.lock().unwrap();
-        ledgers.contains_key(&(self.our_node_id, partner_node_id))
+        let handler = self.core_handler.as_ref().expect("core_handler must be initialized");
+        <_ as LedgerOperations>::has_ledger_with(handler.as_ref(), partner_node_id)
     }
 
     fn list_operator_ledgers(&self) -> Vec<PublicKey> {
-        if let Some(ref handler) = self.core_handler {
-            return <_ as LedgerOperations>::list_operator_ledgers(handler.as_ref());
-        }
-        // Fallback
-        let ledgers = self.ledgers.lock().unwrap();
-        ledgers.keys()
-            .filter(|(operator, _partner)| *operator == self.our_node_id)
-            .map(|(_operator, partner)| *partner)
-            .collect()
+        let handler = self.core_handler.as_ref().expect("core_handler must be initialized");
+        <_ as LedgerOperations>::list_operator_ledgers(handler.as_ref())
     }
 
     fn list_partner_ledgers(&self) -> Vec<PublicKey> {
-        if let Some(ref handler) = self.core_handler {
-            return <_ as LedgerOperations>::list_partner_ledgers(handler.as_ref());
-        }
-        // Fallback
-        let ledgers = self.ledgers.lock().unwrap();
-        ledgers.keys()
-            .filter(|(_operator, partner)| *partner == self.our_node_id)
-            .map(|(operator, _partner)| *operator)
-            .collect()
+        let handler = self.core_handler.as_ref().expect("core_handler must be initialized");
+        <_ as LedgerOperations>::list_partner_ledgers(handler.as_ref())
     }
 }
 

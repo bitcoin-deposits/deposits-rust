@@ -64,6 +64,9 @@ where
             }
         }
         log_info!(self.logger, "Finished refreshing channel commitments for {} ledgers", partners_to_refresh.len());
+
+        // Initialize core handler now that channel_manager is available
+        self.initialize_core_handler();
     }
 
     /// Set the node's secret key for signing audit messages

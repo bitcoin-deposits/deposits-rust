@@ -38,7 +38,9 @@ fn create_test_handler() -> DepositsHandler<Arc<TestLogger>> {
     let secret = SecretKey::from_slice(&[1; 32]).unwrap();
     let test_node_id = PublicKey::from_secret_key(&secp, &secret);
 
-    DepositsHandler::new(event_queue, logger, kv_store, test_node_id, bitcoin::Network::Regtest).expect("Test handler creation should not fail")
+    let mut handler = DepositsHandler::new(event_queue, logger, kv_store, test_node_id, bitcoin::Network::Regtest).expect("Test handler creation should not fail");
+    handler.initialize_core_handler();
+    handler
 }
 
 fn create_test_pubkey() -> PublicKey {

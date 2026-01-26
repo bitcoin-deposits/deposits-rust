@@ -20,163 +20,72 @@ where
     L::Target: LdkLogger,
 {
     fn list_deposits(&self) -> Result<Vec<PublicKey>, DepositsError> {
-        // Delegate to core_handler (shares same ledgers)
-        if let Some(ref handler) = self.core_handler {
-            return handler.list_deposits();
-        }
-        // Fallback: direct implementation for when core_handler isn't initialized
-        let mut all_deposits = Vec::new();
-        let ledgers = self.ledgers.lock().unwrap();
-        for ledger_arc in ledgers.values() {
-            let ledger = ledger_arc.read().unwrap();
-            for deposit in ledger.state.deposits.values() {
-                all_deposits.push(deposit.pubkey);
-            }
-        }
-        Ok(all_deposits)
+        self.core_handler
+            .as_ref()
+            .expect("core_handler must be initialized")
+            .list_deposits()
     }
 
     fn list_deposits_for_depositor(
         &self,
         depositor_pubkey: PublicKey,
     ) -> Result<Vec<PublicKey>, DepositsError> {
-        if let Some(ref handler) = self.core_handler {
-            return handler.list_deposits_for_depositor(depositor_pubkey);
-        }
-        let mut depositor_deposits = Vec::new();
-        let ledgers = self.ledgers.lock().unwrap();
-        for ledger_arc in ledgers.values() {
-            let ledger = ledger_arc.read().unwrap();
-            if let Some(deposit) = ledger.state.deposits.get(&depositor_pubkey) {
-                depositor_deposits.push(deposit.pubkey);
-            }
-        }
-        Ok(depositor_deposits)
+        self.core_handler
+            .as_ref()
+            .expect("core_handler must be initialized")
+            .list_deposits_for_depositor(depositor_pubkey)
     }
 
     fn list_deposits_for_pubkey(
         &self,
         deposit_pubkey: PublicKey,
     ) -> Result<Vec<PublicKey>, DepositsError> {
-        if let Some(ref handler) = self.core_handler {
-            return handler.list_deposits_for_pubkey(deposit_pubkey);
-        }
-        let mut matching_deposits = Vec::new();
-        let ledgers = self.ledgers.lock().unwrap();
-        for ledger_arc in ledgers.values() {
-            let ledger = ledger_arc.read().unwrap();
-            for deposit in ledger.state.deposits.values() {
-                if deposit.pubkey == deposit_pubkey {
-                    matching_deposits.push(deposit.pubkey);
-                }
-            }
-        }
-        Ok(matching_deposits)
+        self.core_handler
+            .as_ref()
+            .expect("core_handler must be initialized")
+            .list_deposits_for_pubkey(deposit_pubkey)
     }
 
     fn get_deposit_balance(&self, deposit_pubkey: PublicKey) -> Result<u64, DepositsError> {
-        if let Some(ref handler) = self.core_handler {
-            return handler.get_deposit_balance(deposit_pubkey);
-        }
-        let ledgers = self.ledgers.lock().unwrap();
-        for ledger_arc in ledgers.values() {
-            let ledger = ledger_arc.read().unwrap();
-            if let Some(deposit) = ledger.state.deposits.get(&deposit_pubkey) {
-                return Ok(deposit.balance.saturating_sub(deposit.locked_balance));
-            }
-        }
-        Err(DepositsError::DepositNotFound)
+        self.core_handler
+            .as_ref()
+            .expect("core_handler must be initialized")
+            .get_deposit_balance(deposit_pubkey)
     }
 
     fn find_deposit_by_payment_hash(&self, payment_hash: &[u8; 32]) -> Option<(PublicKey, PublicKey, u64)> {
-        if let Some(ref handler) = self.core_handler {
-            return handler.find_deposit_by_payment_hash(payment_hash);
-        }
-        let ledgers = self.ledgers.lock().unwrap();
-        for ((operator_id, partner_id), ledger_arc) in ledgers.iter() {
-            if *operator_id == self.our_node_id {
-                let ledger = ledger_arc.read().unwrap();
-                for (deposit_pubkey, deposit) in ledger.state.deposits.iter() {
-                    for invoice in &deposit.invoices {
-                        if &invoice.payment_hash == payment_hash {
-                            return Some((*partner_id, *deposit_pubkey, invoice.amount));
-                        }
-                    }
-                }
-            }
-        }
-        None
+        self.core_handler
+            .as_ref()
+            .expect("core_handler must be initialized")
+            .find_deposit_by_payment_hash(payment_hash)
     }
 
     fn get_active_depositors(&self) -> Vec<PublicKey> {
-        if let Some(ref handler) = self.core_handler {
-            return handler.get_active_depositors();
-        }
-        let mut active_depositors = Vec::new();
-        let ledgers = self.ledgers.lock().unwrap();
-        for ledger_arc in ledgers.values() {
-            let ledger = ledger_arc.read().unwrap();
-            for (depositor_pubkey, deposit) in &ledger.state.deposits {
-                if deposit.balance > 0 {
-                    active_depositors.push(*depositor_pubkey);
-                }
-            }
-        }
-        active_depositors
+        self.core_handler
+            .as_ref()
+            .expect("core_handler must be initialized")
+            .get_active_depositors()
     }
 
     fn get_total_deposit_balances(&self, partner_node_id: PublicKey) -> Option<u64> {
-        if let Some(ref handler) = self.core_handler {
-            return handler.get_total_deposit_balances(partner_node_id);
-        }
-        let ledgers = self.ledgers.lock().unwrap();
-        if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
-            let ledger = ledger_arc.read().unwrap();
-            let total = ledger.state.deposits.values()
-                .map(|deposit| deposit.balance)
-                .sum();
-            Some(total)
-        } else {
-            None
-        }
+        self.core_handler
+            .as_ref()
+            .expect("core_handler must be initialized")
+            .get_total_deposit_balances(partner_node_id)
     }
 
     fn get_deposits_for_partner(&self, partner_node_id: PublicKey) -> Option<Vec<(PublicKey, u64, u64)>> {
-        if let Some(ref handler) = self.core_handler {
-            return handler.get_deposits_for_partner(partner_node_id);
-        }
-        let ledgers = self.ledgers.lock().unwrap();
-        if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
-            let ledger = ledger_arc.read().unwrap();
-            let deposits: Vec<(PublicKey, u64, u64)> = ledger.state.deposits.iter()
-                .map(|(depositor_pubkey, deposit)| (*depositor_pubkey, deposit.balance, deposit.locked_balance))
-                .collect();
-            Some(deposits)
-        } else {
-            None
-        }
+        self.core_handler
+            .as_ref()
+            .expect("core_handler must be initialized")
+            .get_deposits_for_partner(partner_node_id)
     }
 
     fn get_max_outstanding_invoice_amount(&self, partner_node_id: PublicKey) -> Option<u64> {
-        if let Some(ref handler) = self.core_handler {
-            return handler.get_max_outstanding_invoice_amount(partner_node_id);
-        }
-        let ledgers = self.ledgers.lock().unwrap();
-        if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
-            let ledger = ledger_arc.read().unwrap();
-            let max_amount = ledger.state.deposits.values()
-                .flat_map(|deposit| &deposit.invoices)
-                .filter(|invoice| {
-                    use deposits_core::time_utils::is_expired;
-                    !is_expired(invoice.expires)
-                })
-                .map(|invoice| invoice.amount)
-                .max()
-                .unwrap_or(0);
-            Some(max_amount)
-        } else {
-            None
-        }
+        self.core_handler
+            .as_ref()
+            .expect("core_handler must be initialized")
+            .get_max_outstanding_invoice_amount(partner_node_id)
     }
 }
 
@@ -271,7 +180,6 @@ mod tests {
     }
 
     use deposits_core::Ledger;
-    use deposits_core::{Deposit, FeeStructure, Invoice};
     use std::sync::RwLock;
 
     /// Helper to add an operator ledger (where handler's node is operator)
@@ -298,7 +206,6 @@ mod tests {
         let ledgers = handler.ledgers.lock().unwrap();
         if let Some(ledger_arc) = ledgers.get(&(handler.our_node_id, partner)) {
             let mut ledger = ledger_arc.write().unwrap();
-            // Use deposits-core Deposit type
             let mut deposit = deposits_core::Deposit::new(deposit_pubkey, None);
             deposit.balance = balance;
             deposit.locked_balance = locked_balance;
@@ -319,7 +226,7 @@ mod tests {
         if let Some(ledger_arc) = ledgers.get(&(handler.our_node_id, partner)) {
             let mut ledger = ledger_arc.write().unwrap();
             if let Some(deposit) = ledger.state.deposits.get_mut(&deposit_pubkey) {
-                let invoice: deposits_core::Invoice = deposits_core::Invoice {
+                let invoice = deposits_core::Invoice {
                     id: "test-invoice".to_string(),
                     payment_hash,
                     amount,
@@ -412,7 +319,6 @@ mod tests {
 
         add_operator_ledger(&handler, partner);
         add_deposit_to_ledger(&handler, partner, deposit, 100_000, 0);
-        // Use a far-future expiration so invoice isn't expired
         add_invoice_to_deposit(&handler, partner, deposit, payment_hash, 50_000, u64::MAX);
 
         let result = handler.find_deposit_by_payment_hash(&payment_hash);
@@ -475,7 +381,6 @@ mod tests {
         let deposits = deposits.unwrap();
         assert_eq!(deposits.len(), 2);
 
-        // Check deposit details
         for (pubkey, balance, locked) in &deposits {
             if *pubkey == deposit1 {
                 assert_eq!(*balance, 100_000);
@@ -495,16 +400,14 @@ mod tests {
 
         add_operator_ledger(&handler, partner);
         add_deposit_to_ledger(&handler, partner, deposit, 100_000, 0);
-        // Add multiple invoices with far-future expiration
         add_invoice_to_deposit(&handler, partner, deposit, [0x01; 32], 50_000, u64::MAX);
 
-        // Need to add more invoices differently since our helper replaces
         {
             let ledgers = handler.ledgers.lock().unwrap();
             if let Some(ledger_arc) = ledgers.get(&(handler.our_node_id, partner)) {
                 let mut ledger = ledger_arc.write().unwrap();
                 if let Some(dep) = ledger.state.deposits.get_mut(&deposit) {
-                    let invoice2: deposits_core::Invoice = deposits_core::Invoice {
+                    let invoice2 = deposits_core::Invoice {
                         id: "test-invoice-2".to_string(),
                         payment_hash: [0x02; 32],
                         amount: 100_000,
@@ -513,7 +416,7 @@ mod tests {
                         bolt11: "lntb2test".to_string(),
                     };
                     dep.invoices.push(invoice2);
-                    let invoice3: deposits_core::Invoice = deposits_core::Invoice {
+                    let invoice3 = deposits_core::Invoice {
                         id: "test-invoice-3".to_string(),
                         payment_hash: [0x03; 32],
                         amount: 75_000,
