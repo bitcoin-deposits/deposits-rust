@@ -1503,7 +1503,7 @@ where
         {
             let ledgers = self.ledgers.lock().unwrap();
             for ((operator_id, partner_id), ledger_arc) in ledgers.iter() {
-                // Only process ledgers where we're the operator
+                // Case 1: We're the OPERATOR receiving from collateral partner
                 if *operator_id == self.our_node_id {
                     let ledger = ledger_arc.read().unwrap();
                     if ledger.state.collateral_partners.contains(&sender_node_id) {
@@ -1533,6 +1533,36 @@ where
                         if *partner_id != sender_node_id {
                             channel_ledgers_to_update.push((*operator_id, *partner_id));
                         }
+                    }
+                }
+                // Case 2: We're the PARTNER receiving from the OPERATOR
+                // The operator forwards attestations to channel partners after receiving them from collateral partners
+                else if *partner_id == self.our_node_id && *operator_id == sender_node_id {
+                    let mut ledger = ledger_arc.write().unwrap();
+                    // Store attestation
+                    let attestation = deposits_core::types::CollateralAttestation::new(
+                        msg.operator,
+                        msg.collateral_partner,
+                        msg.amount,
+                        msg.block_height,
+                        msg.signature,
+                        msg.ledger_hash,
+                    );
+                    ledger.state.collateral_attestations.insert(msg.collateral_partner, attestation);
+
+                    // Update received_collateral_amount - this is the critical fix!
+                    ledger.state.received_collateral_amount = ledger.state.received_collateral_amount.saturating_add(msg.amount);
+                    log_info!(
+                        self.logger,
+                        "💰 COLLATERAL: Partner received attestation from operator {} - updated received_collateral_amount to {} for ledger ({}, {})",
+                        sender_node_id,
+                        ledger.state.received_collateral_amount,
+                        operator_id,
+                        partner_id
+                    );
+
+                    if let Err(e) = self.persist_ledger_state(&*ledger) {
+                        log_error!(self.logger, "Failed to persist ledger after partner CollateralAttestation: {}", e);
                     }
                 }
             }
@@ -2368,14 +2398,26 @@ where
             if let Some(ledger_arc) = ledgers.get(&partner_ledger_key) {
                 let mut ledger = ledger_arc.write().unwrap();
                 println!(
-                    "[HANDLE_UPDATE_RESERVES] FOUND ledger! Updating commitment hash from {:02x?} to {:02x?}",
+                    "🔧 [PARTNER] FOUND ledger ({}, {})! reserves BEFORE: {} sats",
+                    sender_node_id, self.our_node_id, ledger.state.reserves.amount
+                );
+                println!(
+                    "🔧 [PARTNER] Updating commitment hash from {:02x?} to {:02x?}",
                     &ledger.state.channel_deepest_commitment_hash[0..8],
                     &ledger_hash[0..8]
                 );
                 ledger.state.channel_deepest_commitment_hash = *ledger_hash;
                 // CRITICAL: Also update reserves amount so validation checks pass
                 // The operator is telling us their reserves amount via UpdateReserves
+                println!(
+                    "🔧 [PARTNER] Updating reserves: {} -> {} sats",
+                    ledger.state.reserves.amount, reserves_sats
+                );
                 ledger.state.reserves.amount = reserves_sats;
+                println!(
+                    "✅ [PARTNER] Ledger updated! reserves AFTER: {} sats",
+                    ledger.state.reserves.amount
+                );
                 log_info!(
                     self.logger,
                     "🔒 Updated partner ledger: commitment_hash={:02x?}, reserves={} sats",

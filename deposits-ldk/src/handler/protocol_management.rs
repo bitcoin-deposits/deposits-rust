@@ -201,11 +201,14 @@ where
 
         // Convert to SignedAuditUpdateMsg and send in batches
         use super::messages::{SignedUpdateMsg, LedgerOperation};
+        use super::ledger_ext::SignedLedgerUpdateExt;
 
         let total_batches = (updates_to_send.len() + BATCH_SIZE - 1) / BATCH_SIZE;
 
         for (batch_idx, chunk) in updates_to_send.chunks(BATCH_SIZE).enumerate() {
             let audit_updates: Vec<SignedUpdateMsg> = chunk.iter().map(|update| {
+                // Extract actual operation from message bytes to avoid placeholder issues
+                let operation = update.get_operation().unwrap_or(LedgerOperation::ReservesRemove);
                 SignedUpdateMsg {
                     message: update.message.clone(),
                     message_type: update.message_type,
@@ -217,7 +220,7 @@ where
                     previous_state_hash: update.previous_state_hash,
                     current_state_hash: update.current_state_hash,
                     timestamp: update.timestamp,
-                    operation: LedgerOperation::ReservesRemove, // Placeholder - actual operation is in message bytes
+                    operation,
                 }
             }).collect();
 

@@ -492,17 +492,29 @@ where
     fn validate_receiving_cosign_invoice(&self, msg: &crate::wire::messages::ReceivingCosignInvoiceMsg, sender: PublicKey) -> Result<(), String> {
         let ledgers = self.ledgers.lock().unwrap();
 
+        println!("🔍 [COSIGN_VALIDATE] Checking ledger ({}, {}) for cosign validation",
+            sender, self.our_node_id);
+        println!("🔍 [COSIGN_VALIDATE] Available ledger keys:");
+        for (k, _) in ledgers.iter() {
+            println!("   - ({}, {})", k.0, k.1);
+        }
+
         // Sender is the operator, we are the partner being asked to cosign
         if let Some(ledger_arc) = ledgers.get(&(sender, self.our_node_id)) {
             let ledger = ledger_arc.read().unwrap();
-            deposits_core::validate_cosign_invoice(
+            println!("🔍 [COSIGN_VALIDATE] FOUND ledger! reserves_amount={} sats, invoice_amount={} msat",
+                ledger.reserves_amount(), msg.amount);
+            let result = deposits_core::validate_cosign_invoice(
                 &ledger,
                 msg.assigned_deposit,
                 msg.amount,
                 &msg.invoice_id,
                 &msg.payment_hash,
-            )
+            );
+            println!("🔍 [COSIGN_VALIDATE] Result: {:?}", result);
+            result
         } else {
+            println!("❌ [COSIGN_VALIDATE] NO ledger found for ({}, {})", sender, self.our_node_id);
             Err(format!("No channel ledger found for sender {}", sender))
         }
     }

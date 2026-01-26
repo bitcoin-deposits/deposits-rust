@@ -521,18 +521,25 @@ where
                             let ledgers = self.ledgers.lock().unwrap();
                             if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
                                 let mut ledger = ledger_arc.write().unwrap();
+                                println!("🔧 [INIT] OPERATOR updating own ledger reserves: {} -> {} sats",
+                                    ledger.state.reserves.amount, initial_reserves_sats);
                                 ledger.state.reserves.amount = initial_reserves_sats;
                                 log_info!(
                                     self.logger,
                                     "Set initial ledger reserves amount to {} sats",
                                     initial_reserves_sats
                                 );
+                            } else {
+                                println!("🔧 [INIT] OPERATOR ledger not found for ({}, {})",
+                                    self.our_node_id, partner_node_id);
                             }
                         }
 
                         // Send UpdateReserves message to notify partner of the initial reserves
                         // This coordinates the commitment transaction state between both parties
                         let script_pubkey_bytes = script_pubkey_clone.as_bytes().to_vec();
+                        println!("🔧 [INIT] OPERATOR sending UpdateReserves to {} with {} sats",
+                            partner_node_id, initial_reserves_sats);
                         let update_msg = DepositsMessage::UpdateReserves {
                             channel_id: channel.channel_id.0,
                             reserves_sats: initial_reserves_sats,
@@ -541,6 +548,7 @@ where
                             remote_ledger_hash: [0u8; 32], // Partner's ledger doesn't exist yet
                         };
                         if let Err(e) = self.send_message(partner_node_id, update_msg) {
+                            println!("❌ [INIT] OPERATOR failed to send UpdateReserves: {:?}", e);
                             log_error!(
                                 self.logger,
                                 "Failed to send initial UpdateReserves to {}: {:?}",
@@ -548,6 +556,8 @@ where
                                 e
                             );
                         } else {
+                            println!("✅ [INIT] OPERATOR sent UpdateReserves to {} ({} sats)",
+                                partner_node_id, initial_reserves_sats);
                             log_info!(
                                 self.logger,
                                 "📤 Sent initial UpdateReserves to {} ({} sats, zero hash)",

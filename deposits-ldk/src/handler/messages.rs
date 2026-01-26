@@ -2659,12 +2659,17 @@ impl Readable for LedgerUpdateMsg {
             None
         };
 
-        // For V1 SignedUpdate, the actual operation is in the `message` bytes
-        // The operation field is a placeholder - V1 code uses message_type + message
+        // For V1 SignedUpdate, extract the actual operation from the `message` bytes
+        // The message bytes contain a serialized DepositsMessage that can be decoded
+        let operation = crate::wire::MessageCodec::decode_message_with_type(message_type, &message)
+            .ok()
+            .and_then(|msg| msg.to_operation())
+            .unwrap_or(deposits_core::LedgerOperation::ReservesRemove);
+
         Ok(Self {
             operator_pubkey,
             partner_pubkey,
-            operation: deposits_core::LedgerOperation::ReservesRemove, // Placeholder for V1
+            operation,
             sequence_number,
             previous_state_hash,
             current_state_hash,

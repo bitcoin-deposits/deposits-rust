@@ -247,6 +247,15 @@ where
             let message_to_send = if let Some(ref signed_update) = signed_update {
                 println!("🟢 BROADCAST: Wrapping in SignedAuditUpdate for recipient {}", audit_recipient_id);
                 use super::messages::SignedUpdateMsg;
+                // Extract actual operation from original message to avoid placeholder issues
+                // Use to_operation() which handles all message types (LedgerUpdate, Handshake, etc.)
+                let operation = original_message.to_operation().unwrap_or_else(|| {
+                    // Fallback for non-ledger messages (Handshake, coordination, etc.)
+                    // Use LedgerClose which is a benign no-op that doesn't modify reserves
+                    println!("🟡 BROADCAST_OP: No operation found for variant {}, using LedgerClose placeholder", original_message.variant_name());
+                    LedgerOperation::LedgerClose
+                });
+                println!("🟢 BROADCAST_OP: Using operation {:?} for variant {}", operation, original_message.variant_name());
                 DepositsMessage::SignedUpdate(SignedUpdateMsg {
                     message: signed_update.message.clone(),
                     message_type: signed_update.message_type,
@@ -258,7 +267,7 @@ where
                     previous_state_hash: signed_update.previous_state_hash,
                     current_state_hash: signed_update.current_state_hash,
                     timestamp: signed_update.timestamp,
-                    operation: LedgerOperation::ReservesRemove, // Placeholder - actual operation is in message bytes
+                    operation,
                 })
             } else {
                 println!("🔴 BROADCAST: Sending raw message type {:#06x} to {} (no signature)",
@@ -391,7 +400,7 @@ where
             }
         }
 
-        // Broadcast to all auditors
+        // Broadcast to all auditors - use the actual PaymentFulfill operation
         let audit_message = DepositsMessage::SignedUpdate(
             super::messages::SignedUpdateMsg {
                 message: signed_update.message.clone(),
@@ -404,7 +413,14 @@ where
                 previous_state_hash: signed_update.previous_state_hash,
                 current_state_hash: signed_update.current_state_hash,
                 timestamp: signed_update.timestamp,
-                operation: LedgerOperation::ReservesRemove, // Placeholder - actual operation is in message bytes
+                operation: LedgerOperation::PaymentFulfill {
+                    pubkey: fulfill_msg.pubkey,
+                    amount: fulfill_msg.amount,
+                    payment_id: fulfill_msg.payment_id,
+                    sequence_number: fulfill_msg.sequence_number,
+                    scriptpubkey_signature: fulfill_msg.scriptpubkey_signature,
+                    preimage: fulfill_msg.preimage,
+                },
             }
         );
 

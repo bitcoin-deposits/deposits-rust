@@ -419,7 +419,10 @@ where
 
         // Convert SignedLedgerUpdate to SignedAuditUpdateMsg for transmission
         use super::messages::{SignedUpdateMsg, LedgerOperation};
+        use super::ledger_ext::SignedLedgerUpdateExt;
         let audit_updates: Vec<SignedUpdateMsg> = updates_to_send.iter().map(|update| {
+            // Extract actual operation from message bytes to avoid placeholder issues
+            let operation = update.get_operation().unwrap_or(LedgerOperation::ReservesRemove);
             SignedUpdateMsg {
                 message: update.message.clone(),
                 message_type: update.message_type,
@@ -431,7 +434,7 @@ where
                 previous_state_hash: update.previous_state_hash,
                 current_state_hash: update.current_state_hash,
                 timestamp: update.timestamp,
-                operation: LedgerOperation::ReservesRemove, // Placeholder - actual operation is in message bytes
+                operation,
             }
         }).collect();
 
@@ -731,7 +734,8 @@ where
                 }
             };
 
-            // Wrap in SignedAuditUpdateMsg and send
+            // Wrap in SignedAuditUpdateMsg and send - extract actual operation from original message
+            let operation = msg.to_operation().unwrap_or(LedgerOperation::ReservesRemove);
             let audit_msg = DepositsMessage::SignedUpdate(SignedUpdateMsg {
                 message: signed_update.message.clone(),
                 message_type: signed_update.message_type,
@@ -743,7 +747,7 @@ where
                 previous_state_hash: signed_update.previous_state_hash,
                 current_state_hash: signed_update.current_state_hash,
                 timestamp: signed_update.timestamp,
-                operation: LedgerOperation::ReservesRemove, // Placeholder - actual operation is in message bytes
+                operation,
             });
 
             if let Err(e) = self.send_message(collateral_partner, audit_msg) {

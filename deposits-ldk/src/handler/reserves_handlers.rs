@@ -27,13 +27,20 @@ where
 {
     /// Add reserves to a channel via proper protocol (sends ReservesIncrease message)
     pub fn add_reserves_to_channel(&self, partner_node_id: PublicKey, additional_reserves: u64) -> Result<(), DepositsError> {
+        println!("🔧 [RESERVES] add_reserves_to_channel called: partner={}, additional={} sats",
+            partner_node_id, additional_reserves);
+
         // Calculate absolute new_amount = current + additional_reserves
         let new_amount = {
             let ledgers = self.ledgers.lock().unwrap();
             if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
                 let ledger = ledger_arc.read().unwrap();
+                let current = ledger.reserves_amount();
+                println!("🔧 [RESERVES] Current reserves: {} sats, new total will be: {} sats",
+                    current, current.saturating_add(additional_reserves));
                 ledger.reserves_amount().saturating_add(additional_reserves)
             } else {
+                println!("❌ [RESERVES] Ledger not found for ({}, {})", self.our_node_id, partner_node_id);
                 return Err(DepositsError::LedgerNotFound);
             }
         };

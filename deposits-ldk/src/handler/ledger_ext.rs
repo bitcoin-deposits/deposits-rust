@@ -30,10 +30,15 @@ pub use deposits_core::ledger::{Ledger, LedgerRole, LedgerUpdate, LedgerValidato
 /// Extension trait for decoding messages from SignedLedgerUpdate.
 ///
 /// The deposits-core SignedLedgerUpdate stores serialized message bytes.
-/// This trait provides a method to decode them into ldk-node's DepositsMessage type.
+/// This trait provides methods to decode them into ldk-node's DepositsMessage type
+/// or extract the LedgerOperation.
 pub trait SignedLedgerUpdateExt {
     /// Decode the message bytes into a DepositsMessage.
     fn get_message(&self) -> Result<DepositsMessage, DepositsError>;
+
+    /// Extract the LedgerOperation from the message bytes.
+    /// Returns None if the message doesn't represent a ledger operation.
+    fn get_operation(&self) -> Option<deposits_core::messages::LedgerOperation>;
 }
 
 impl SignedLedgerUpdateExt for deposits_core::types::SignedLedgerUpdate {
@@ -50,6 +55,24 @@ impl SignedLedgerUpdateExt for deposits_core::types::SignedLedgerUpdate {
         reader.read(self.message_type, &mut slice)
             .map_err(|_| DepositsError::SerializationError)?
             .ok_or(DepositsError::SerializationError)
+    }
+
+    fn get_operation(&self) -> Option<deposits_core::messages::LedgerOperation> {
+        // First try to decode using the stored message_type
+        if let Ok(msg) = self.get_message() {
+            return msg.to_operation();
+        }
+
+        // Fallback: try decoding from raw bytes (may have type prefix)
+        if self.message.len() >= 2 {
+            let msg_type = u16::from_be_bytes([self.message[0], self.message[1]]);
+            let msg_data = &self.message[2..];
+            if let Ok(msg) = crate::wire::MessageCodec::decode_message_with_type(msg_type, msg_data) {
+                return msg.to_operation();
+            }
+        }
+
+        None
     }
 }
 
