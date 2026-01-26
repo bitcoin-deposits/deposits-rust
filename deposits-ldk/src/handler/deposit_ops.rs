@@ -1,7 +1,8 @@
 //! Deposit Operations for Bitcoin Deposits
 //!
-//! This module provides deposit query and management operations including
-//! listing deposits, checking balances, and finding deposits.
+//! This module delegates deposit query operations to the core Handler.
+//! Both DepositsHandler and core Handler share the same ledger storage,
+//! so delegation produces identical results while centralizing the logic.
 
 use bitcoin::secp256k1::PublicKey;
 use std::ops::Deref;
@@ -19,8 +20,12 @@ where
     L::Target: LdkLogger,
 {
     fn list_deposits(&self) -> Result<Vec<PublicKey>, DepositsError> {
+        // Delegate to core_handler (shares same ledgers)
+        if let Some(ref handler) = self.core_handler {
+            return handler.list_deposits();
+        }
+        // Fallback: direct implementation for when core_handler isn't initialized
         let mut all_deposits = Vec::new();
-
         let ledgers = self.ledgers.lock().unwrap();
         for ledger_arc in ledgers.values() {
             let ledger = ledger_arc.read().unwrap();
@@ -28,7 +33,6 @@ where
                 all_deposits.push(deposit.pubkey);
             }
         }
-
         Ok(all_deposits)
     }
 
@@ -36,8 +40,10 @@ where
         &self,
         depositor_pubkey: PublicKey,
     ) -> Result<Vec<PublicKey>, DepositsError> {
+        if let Some(ref handler) = self.core_handler {
+            return handler.list_deposits_for_depositor(depositor_pubkey);
+        }
         let mut depositor_deposits = Vec::new();
-
         let ledgers = self.ledgers.lock().unwrap();
         for ledger_arc in ledgers.values() {
             let ledger = ledger_arc.read().unwrap();
@@ -45,7 +51,6 @@ where
                 depositor_deposits.push(deposit.pubkey);
             }
         }
-
         Ok(depositor_deposits)
     }
 
@@ -53,8 +58,10 @@ where
         &self,
         deposit_pubkey: PublicKey,
     ) -> Result<Vec<PublicKey>, DepositsError> {
+        if let Some(ref handler) = self.core_handler {
+            return handler.list_deposits_for_pubkey(deposit_pubkey);
+        }
         let mut matching_deposits = Vec::new();
-
         let ledgers = self.ledgers.lock().unwrap();
         for ledger_arc in ledgers.values() {
             let ledger = ledger_arc.read().unwrap();
@@ -64,26 +71,28 @@ where
                 }
             }
         }
-
         Ok(matching_deposits)
     }
 
     fn get_deposit_balance(&self, deposit_pubkey: PublicKey) -> Result<u64, DepositsError> {
+        if let Some(ref handler) = self.core_handler {
+            return handler.get_deposit_balance(deposit_pubkey);
+        }
         let ledgers = self.ledgers.lock().unwrap();
-
         for ledger_arc in ledgers.values() {
             let ledger = ledger_arc.read().unwrap();
             if let Some(deposit) = ledger.state.deposits.get(&deposit_pubkey) {
                 return Ok(deposit.balance.saturating_sub(deposit.locked_balance));
             }
         }
-
         Err(DepositsError::DepositNotFound)
     }
 
     fn find_deposit_by_payment_hash(&self, payment_hash: &[u8; 32]) -> Option<(PublicKey, PublicKey, u64)> {
+        if let Some(ref handler) = self.core_handler {
+            return handler.find_deposit_by_payment_hash(payment_hash);
+        }
         let ledgers = self.ledgers.lock().unwrap();
-
         for ((operator_id, partner_id), ledger_arc) in ledgers.iter() {
             if *operator_id == self.our_node_id {
                 let ledger = ledger_arc.read().unwrap();
@@ -96,14 +105,15 @@ where
                 }
             }
         }
-
         None
     }
 
     fn get_active_depositors(&self) -> Vec<PublicKey> {
+        if let Some(ref handler) = self.core_handler {
+            return handler.get_active_depositors();
+        }
         let mut active_depositors = Vec::new();
         let ledgers = self.ledgers.lock().unwrap();
-
         for ledger_arc in ledgers.values() {
             let ledger = ledger_arc.read().unwrap();
             for (depositor_pubkey, deposit) in &ledger.state.deposits {
@@ -112,13 +122,14 @@ where
                 }
             }
         }
-
         active_depositors
     }
 
     fn get_total_deposit_balances(&self, partner_node_id: PublicKey) -> Option<u64> {
+        if let Some(ref handler) = self.core_handler {
+            return handler.get_total_deposit_balances(partner_node_id);
+        }
         let ledgers = self.ledgers.lock().unwrap();
-
         if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
             let ledger = ledger_arc.read().unwrap();
             let total = ledger.state.deposits.values()
@@ -131,8 +142,10 @@ where
     }
 
     fn get_deposits_for_partner(&self, partner_node_id: PublicKey) -> Option<Vec<(PublicKey, u64, u64)>> {
+        if let Some(ref handler) = self.core_handler {
+            return handler.get_deposits_for_partner(partner_node_id);
+        }
         let ledgers = self.ledgers.lock().unwrap();
-
         if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
             let ledger = ledger_arc.read().unwrap();
             let deposits: Vec<(PublicKey, u64, u64)> = ledger.state.deposits.iter()
@@ -145,8 +158,10 @@ where
     }
 
     fn get_max_outstanding_invoice_amount(&self, partner_node_id: PublicKey) -> Option<u64> {
+        if let Some(ref handler) = self.core_handler {
+            return handler.get_max_outstanding_invoice_amount(partner_node_id);
+        }
         let ledgers = self.ledgers.lock().unwrap();
-
         if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
             let ledger = ledger_arc.read().unwrap();
             let max_amount = ledger.state.deposits.values()
