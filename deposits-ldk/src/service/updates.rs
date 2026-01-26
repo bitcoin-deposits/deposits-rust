@@ -23,7 +23,7 @@ pub fn handle_get_ledger_updates<L>(
     request: GetLedgerUpdatesRequest,
 ) -> Result<GetLedgerUpdatesResponse, DepositsError>
 where
-    L: Deref + Clone,
+    L: Deref + Clone + Send + Sync,
     L::Target: LdkLogger,
 {
     let partner_id = PublicKey::from_str(&request.ledger_id)

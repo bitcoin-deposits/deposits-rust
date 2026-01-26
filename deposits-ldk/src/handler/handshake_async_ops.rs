@@ -35,7 +35,7 @@ fn calculate_reserves_with_headroom(required: u64) -> u64 {
     required.saturating_add(required / 5)
 }
 
-impl<L: Deref + Clone> DepositsHandler<L>
+impl<L: Deref + Clone + Send + Sync> DepositsHandler<L>
 where
     L::Target: LdkLogger,
 {

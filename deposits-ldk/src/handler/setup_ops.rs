@@ -19,7 +19,7 @@ use crate::channel_manager_ops::ChannelManagerOps;
 use deposits_core::{log_debug, log_info};
 use lightning::util::logger::Logger as LdkLogger;
 
-impl<L: Deref + Clone> DepositsHandler<L>
+impl<L: Deref + Clone + Send + Sync> DepositsHandler<L>
 where
     L::Target: LdkLogger,
 {
@@ -71,5 +71,54 @@ where
     /// Required for operators who need to sign ledger updates for auditors
     pub fn set_node_secret_key(&mut self, secret_key: bitcoin::secp256k1::SecretKey) {
         self.node_secret_key = Some(secret_key);
+    }
+
+    /// Initialize the core protocol handler from deposits-core
+    ///
+    /// This creates and configures the core Handler with LDK adapters.
+    /// Should be called after set_channel_manager and set_node_secret_key.
+    ///
+    /// The core handler enables testing protocol logic in deposits-core
+    /// and will gradually take over operations from LDK-specific code.
+    pub fn initialize_core_handler(&mut self) {
+        use super::ldk_adapters::{
+            LdkStorageAdapter, LdkTransportAdapter, LdkLoggerAdapter,
+            LdkChainAdapter, LdkEventAdapter, LdkSignerAdapter,
+            LdkPaymentAdapter, LdkChannelAdapter, LdkBroadcasterAdapter,
+        };
+
+        log_info!(self.logger, "Initializing core protocol handler...");
+
+        // Create adapters
+        let storage = Arc::new(LdkStorageAdapter::new(self.kv_store.clone()));
+        let transport = Arc::new(LdkTransportAdapter::new(
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())), // Will be connected to outbound_messages
+            Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())), // Will be connected to connected_peers
+        ));
+        // Create a new payment index for the core handler
+        // In a full migration, this would share state with DepositsHandler's payment_index
+        let payments = Arc::new(LdkPaymentAdapter::new(Arc::new(deposits_core::DepositInvoiceIndex::new())));
+        let channels = Arc::new(LdkChannelAdapter::new(self.channel_manager.clone()));
+        let broadcaster = Arc::new(LdkBroadcasterAdapter::new(None)); // No broadcaster configured yet
+        let chain = Arc::new(LdkChainAdapter::new(self.channel_manager.clone()));
+        let signer = Arc::new(LdkSignerAdapter::new(self.our_node_id, self.node_secret_key));
+        let events = Arc::new(LdkEventAdapter::new(self.event_queue.clone()));
+        let logger = Arc::new(LdkLoggerAdapter::new(self.logger.clone()));
+
+        // Create the core handler
+        let handler = deposits_core::Handler::new(
+            storage,
+            transport,
+            payments,
+            channels,
+            broadcaster,
+            chain,
+            signer,
+            events,
+            logger,
+        );
+
+        self.core_handler = Some(Arc::new(handler));
+        log_info!(self.logger, "Core protocol handler initialized successfully");
     }
 }

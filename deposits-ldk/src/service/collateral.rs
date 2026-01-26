@@ -52,7 +52,7 @@ pub fn handle_remove_collateral_partner<L>(
     request: RemoveCollateralPartnerRequest,
 ) -> Result<RemoveCollateralPartnerResponse, DepositsError>
 where
-    L: Deref + Clone,
+    L: Deref + Clone + Send + Sync,
     L::Target: LdkLogger,
 {
     let partner_id = PublicKey::from_str(&request.partner_node_id)
@@ -82,7 +82,7 @@ pub fn handle_get_collateral_info<L>(
     request: GetCollateralInfoRequest,
 ) -> Result<GetCollateralInfoResponse, DepositsError>
 where
-    L: Deref + Clone,
+    L: Deref + Clone + Send + Sync,
     L::Target: LdkLogger,
 {
     let partner_id = PublicKey::from_str(&request.partner_node_id)

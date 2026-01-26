@@ -291,12 +291,8 @@ where
             ));
         }
 
-        let tier_index: u8 = match &eligibility {
-            deposits_core::recovery::ClaimEligibility::SelectedPartnerOnly { .. } => 0,
-            deposits_core::recovery::ClaimEligibility::AnyThreePartners => 1,
-            deposits_core::recovery::ClaimEligibility::AnySinglePartner => 2,
-            deposits_core::recovery::ClaimEligibility::CommunityFallback => 3,
-        };
+        // Use deposits-core's tier_index() method for consistent tier mapping
+        let tier_index = eligibility.tier_index();
 
         log_info!(
             self.logger,
@@ -524,17 +520,8 @@ where
         amount_msat: u64,
         invoice_cosignature: [u8; 64],
     ) -> Result<(), String> {
-        use bitcoin::hashes::{sha256, Hash};
-
-        // Verify preimage matches payment hash
-        let computed_hash = sha256::Hash::hash(&preimage);
-        if computed_hash.as_byte_array() != &payment_hash {
-            return Err(format!(
-                "Invalid preimage: SHA256(preimage) = {} but payment_hash = {}",
-                hex::encode(computed_hash.as_byte_array()),
-                hex::encode(&payment_hash)
-            ));
-        }
+        // Verify preimage matches payment hash using deposits-core's pure validation
+        deposits_core::recovery::validate_preimage(&preimage, &payment_hash)?;
 
         let ledger_key = (operator, self.our_node_id);
 

@@ -1162,6 +1162,89 @@ impl SignedLedgerUpdateLog {
             pending_updates: HashMap::new(),
         }
     }
+
+    /// Add an update to the log with sequence and hash chain validation.
+    ///
+    /// Validates that:
+    /// - The sequence number matches the expected next sequence
+    /// - The previous hash matches the last update's current hash (or zeros if first)
+    pub fn add_update(&mut self, update: SignedLedgerUpdate) -> Result<(), crate::DepositsError> {
+        // Verify sequence number
+        if update.sequence_number != self.next_sequence {
+            return Err(crate::DepositsError::InvalidState(
+                format!("Sequence mismatch: expected {}, got {}", self.next_sequence, update.sequence_number)
+            ));
+        }
+
+        // Verify chain continuity (previous hash should match last update's hash)
+        let expected_prev = if let Some(last) = self.updates.last() {
+            last.current_state_hash
+        } else {
+            [0u8; 32]
+        };
+        if update.previous_state_hash != expected_prev {
+            return Err(crate::DepositsError::InvalidState(
+                format!("Hash chain broken: expected {}, got {}",
+                    hex::encode(expected_prev), hex::encode(update.previous_state_hash))
+            ));
+        }
+
+        // Add to log
+        self.updates.push(update);
+        self.next_sequence += 1;
+        Ok(())
+    }
+
+    /// Verify the hash chain integrity of all updates.
+    ///
+    /// Checks that:
+    /// - Sequence numbers are contiguous starting from 0
+    /// - Each update's previous_state_hash matches the prior update's current_state_hash
+    pub fn verify_chain(&self) -> Result<(), crate::DepositsError> {
+        let mut expected_prev = [0u8; 32];
+        for (i, update) in self.updates.iter().enumerate() {
+            if update.sequence_number != i as u64 {
+                return Err(crate::DepositsError::InvalidState(
+                    format!("Sequence mismatch at index {}: expected {}, got {}", i, i, update.sequence_number)
+                ));
+            }
+            if update.previous_state_hash != expected_prev {
+                return Err(crate::DepositsError::InvalidState(
+                    format!("Hash chain broken at index {}", i)
+                ));
+            }
+            expected_prev = update.current_state_hash;
+        }
+        Ok(())
+    }
+
+    /// Get all updates with sequence numbers greater than the given value.
+    pub fn get_updates_since(&self, since_sequence: u64) -> Vec<SignedLedgerUpdate> {
+        self.updates
+            .iter()
+            .filter(|u| u.sequence_number > since_sequence)
+            .cloned()
+            .collect()
+    }
+
+    /// Get the tail (most recent) hash from the update chain.
+    ///
+    /// Returns zeros if there are no updates yet.
+    pub fn tail_hash(&self) -> [u8; 32] {
+        self.updates.last()
+            .map(|u| u.current_state_hash)
+            .unwrap_or([0u8; 32])
+    }
+
+    /// Get the number of updates in this log.
+    pub fn len(&self) -> usize {
+        self.updates.len()
+    }
+
+    /// Check if this log is empty.
+    pub fn is_empty(&self) -> bool {
+        self.updates.is_empty()
+    }
 }
 
 // ============================================================================

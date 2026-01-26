@@ -14,7 +14,7 @@ use super::core::DepositsHandler;
 // Re-export trait from deposits-core for backwards compatibility
 pub use deposits_core::handler_traits::DepositOperations;
 
-impl<L: Deref + Clone> DepositOperations for DepositsHandler<L>
+impl<L: Deref + Clone + Send + Sync> DepositOperations for DepositsHandler<L>
 where
     L::Target: LdkLogger,
 {

@@ -27,7 +27,7 @@ use lightning::util::logger::Logger as LdkLogger;
 
 use std::ops::Deref;
 
-impl<L: Deref + Clone> CustomMessageReader for DepositsHandler<L>
+impl<L: Deref + Clone + Send + Sync> CustomMessageReader for DepositsHandler<L>
 where
     L::Target: LdkLogger,
 {
@@ -42,7 +42,7 @@ where
     }
 }
 
-impl<L: Deref + Clone> CustomMessageHandler for DepositsHandler<L>
+impl<L: Deref + Clone + Send + Sync> CustomMessageHandler for DepositsHandler<L>
 where
     L::Target: LdkLogger,
 {

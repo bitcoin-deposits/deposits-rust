@@ -112,7 +112,7 @@ where
     }
 }
 
-impl<L: Deref + Clone> Clone for EventQueue<L>
+impl<L: Deref + Clone + Send + Sync> Clone for EventQueue<L>
 where
     L::Target: LdkLogger,
 {

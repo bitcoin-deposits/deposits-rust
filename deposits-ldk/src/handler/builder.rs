@@ -19,7 +19,7 @@ use crate::DepositsEventEmitter;
 use lightning::util::logger::Logger as LdkLogger;
 
 /// Builder for creating Bitcoin Deposits message handlers
-pub struct DepositsHandlerBuilder<L: Deref + Clone>
+pub struct DepositsHandlerBuilder<L: Deref + Clone + Send + Sync>
 where
     L::Target: LdkLogger,
 {
@@ -27,7 +27,7 @@ where
     logger: Option<L>,
 }
 
-impl<L: Deref + Clone> DepositsHandlerBuilder<L>
+impl<L: Deref + Clone + Send + Sync> DepositsHandlerBuilder<L>
 where
     L::Target: LdkLogger,
 {
@@ -68,7 +68,7 @@ where
     }
 }
 
-impl<L: Deref + Clone> Default for DepositsHandlerBuilder<L>
+impl<L: Deref + Clone + Send + Sync> Default for DepositsHandlerBuilder<L>
 where
     L::Target: LdkLogger,
 {

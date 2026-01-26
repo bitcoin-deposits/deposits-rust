@@ -120,7 +120,7 @@ pub trait MessageValidation {
 // verify_payment_signature is now called internally by deposits_core validation functions
 
 /// Unified validation of LedgerOperation (handles both V1 converted to operation and V2 native)
-fn validate_operation<L: Deref + Clone>(
+fn validate_operation<L: Deref + Clone + Send + Sync>(
     handler: &DepositsHandler<L>,
     operation: &deposits_core::messages::LedgerOperation,
     partner_pubkey: PublicKey,
@@ -263,7 +263,7 @@ where
     }
 }
 
-impl<L: Deref + Clone> MessageValidation for DepositsHandler<L>
+impl<L: Deref + Clone + Send + Sync> MessageValidation for DepositsHandler<L>
 where
     L::Target: LdkLogger,
 {
@@ -403,7 +403,7 @@ where
         if has_ledger {
             // As the partner, use commitment tx reserves amount (not ledger's declared amount)
             // This is the source of truth for what the operator has actually committed
-            let commitment_reserves = self.get_commitment_tx_reserves_amount(sender).unwrap_or(0);
+            let commitment_reserves = ValidationContext::get_commitment_tx_reserves_amount(self, sender).unwrap_or(0);
 
             // If remove_all is false, this is a partial removal - validate reserves exist in commitment tx
             if !msg.remove_all && commitment_reserves == 0 {
@@ -462,7 +462,7 @@ where
         use super::reserves_ops::ReservesOperations;
 
         // Get channel balance for optional constraint check (LDK-specific)
-        let channel_balance = self.get_commitment_tx_reserves_amount(sender);
+        let channel_balance = ValidationContext::get_commitment_tx_reserves_amount(self, sender);
 
         // Get current reserves
         let ledgers = self.ledgers.lock().unwrap();
@@ -788,7 +788,7 @@ mod tests {
 
         let result = handler.validate_reserves_increase(&msg, operator);
         assert!(result.is_err(), "ReservesIncrease to lower amount should fail");
-        assert!(result.unwrap_err().contains("not greater than current"));
+        assert!(result.unwrap_err().contains("must be greater than current"));
     }
 
     #[test]
@@ -819,7 +819,7 @@ mod tests {
 
         let result = handler.validate_reserves_increase(&msg, operator);
         assert!(result.is_err(), "ReservesIncrease to same amount should fail");
-        assert!(result.unwrap_err().contains("not greater than current"));
+        assert!(result.unwrap_err().contains("must be greater than current"));
     }
 
     #[test]
@@ -1102,7 +1102,7 @@ mod tests {
 
         let result = handler.validate_collateral_decrease(&msg, operator);
         assert!(result.is_err(), "Decrease to higher value should fail");
-        assert!(result.unwrap_err().contains("must decrease"));
+        assert!(result.unwrap_err().contains("is not less than current"));
     }
 
     // ==================== ReservesDecrease Validation Tests ====================
@@ -1151,7 +1151,7 @@ mod tests {
 
         let result = handler.validate_reserves_decrease(&msg, operator);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("must decrease"));
+        assert!(result.unwrap_err().contains("must be less than current"));
     }
 
     #[test]
@@ -1182,7 +1182,7 @@ mod tests {
 
         let result = handler.validate_reserves_decrease(&msg, operator);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("must decrease"));
+        assert!(result.unwrap_err().contains("must be less than current"));
     }
 
     #[test]
@@ -1220,7 +1220,7 @@ mod tests {
 
         let result = handler.validate_reserves_decrease(&msg, operator);
         assert!(result.is_err(), "Should fail when decrease falls below requirement");
-        assert!(result.unwrap_err().contains("below requirement"));
+        assert!(result.unwrap_err().contains("must maintain at least"));
     }
 
     #[test]
@@ -1447,9 +1447,14 @@ mod tests {
         }
 
         // Try to cosign invoice for 25k - would push total to 55k, exceeding 50k reserves
+        // Use a payment hash that doesn't look fake (not all same bytes)
+        let mut payment_hash = [0u8; 32];
+        for i in 0..32 {
+            payment_hash[i] = (i as u8).wrapping_add(0xAB);
+        }
         let msg = crate::wire::messages::ReceivingCosignInvoiceMsg {
             amount: 25_000,
-            payment_hash: [0xAB; 32],
+            payment_hash,
             expires: 1000000,
             assigned_deposit: deposit_pubkey,
             invoice_id: "test_invoice".to_string(),
@@ -1458,7 +1463,7 @@ mod tests {
 
         let result = handler.validate_receiving_cosign_invoice(&msg, operator);
         assert!(result.is_err(), "Should reject when cosigning would exceed reserves");
-        assert!(result.unwrap_err().contains("exceed reserves"));
+        assert!(result.unwrap_err().contains("would exceed reserves"));
     }
 
     #[test]
@@ -1487,9 +1492,14 @@ mod tests {
         }
 
         // Try to cosign invoice for 25k - would push total to 55k, exceeding 50k collateral
+        // Use a payment hash that doesn't look fake (not all same bytes)
+        let mut payment_hash = [0u8; 32];
+        for i in 0..32 {
+            payment_hash[i] = (i as u8).wrapping_add(0xCD);
+        }
         let msg = crate::wire::messages::ReceivingCosignInvoiceMsg {
             amount: 25_000,
-            payment_hash: [0xAB; 32],
+            payment_hash,
             expires: 1000000,
             assigned_deposit: deposit_pubkey,
             invoice_id: "test_invoice".to_string(),
@@ -1498,7 +1508,7 @@ mod tests {
 
         let result = handler.validate_receiving_cosign_invoice(&msg, operator);
         assert!(result.is_err(), "Should reject when cosigning would exceed collateral");
-        assert!(result.unwrap_err().contains("exceed collateral"));
+        assert!(result.unwrap_err().contains("would exceed collateral"));
     }
 
     #[test]

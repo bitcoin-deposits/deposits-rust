@@ -20,7 +20,7 @@ use lightning::util::logger::Logger as LdkLogger;
 
 use std::ops::Deref;
 
-impl<L: Deref + Clone> DepositsHandler<L>
+impl<L: Deref + Clone + Send + Sync> DepositsHandler<L>
 where
     L::Target: LdkLogger,
 {

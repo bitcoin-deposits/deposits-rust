@@ -77,7 +77,7 @@ pub trait LedgerOperationsExt {
 }
 
 // Implement the core LedgerOperations trait from deposits-core
-impl<L: Deref + Clone> LedgerOperations for DepositsHandler<L>
+impl<L: Deref + Clone + Send + Sync> LedgerOperations for DepositsHandler<L>
 where
     L::Target: LdkLogger,
 {
@@ -132,7 +132,7 @@ where
         counterparty_node_id: &PublicKey,
         ledger_hash: &[u8; 32],
     ) -> bool {
-        // Zero hash is always valid
+        // Zero hash is always valid (handled by deposits-core, but short-circuit for logging)
         if ledger_hash == &[0u8; 32] {
             log_debug!(self.logger, "Accepting zero ledger hash for reserves with partner {}",
                 counterparty_node_id);
@@ -145,21 +145,10 @@ where
         if let Some(ledger_arc) = ledgers.get(&ledger_key) {
             let ledger = ledger_arc.read().unwrap();
 
-            // Check if the hash exists in the ledger's update chain
-            let hash_exists = ledger.history.iter().any(|update| {
-                update.current_state_hash == *ledger_hash
-            });
-
-            if hash_exists {
+            // Delegate to deposits-core's pure hash lookup function
+            // find_hash_sequence returns Some(seq) if hash exists in history, None otherwise
+            if ledger.find_hash_sequence(ledger_hash).is_some() {
                 log_debug!(self.logger, "Validated ledger hash {} for reserves with partner {}",
-                    crate::hex_utils::to_string(ledger_hash),
-                    counterparty_node_id);
-                return true;
-            }
-
-            // Also check if it's the current tail hash
-            if ledger.tail_hash() == *ledger_hash {
-                log_debug!(self.logger, "Validated ledger hash {} (tail) for reserves with partner {}",
                     crate::hex_utils::to_string(ledger_hash),
                     counterparty_node_id);
                 return true;
@@ -206,7 +195,7 @@ where
 }
 
 // Implement the LDK-specific extension trait
-impl<L: Deref + Clone> LedgerOperationsExt for DepositsHandler<L>
+impl<L: Deref + Clone + Send + Sync> LedgerOperationsExt for DepositsHandler<L>
 where
     L::Target: LdkLogger,
 {

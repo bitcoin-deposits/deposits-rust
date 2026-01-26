@@ -60,7 +60,7 @@ fn event_from_operation(operation: &LedgerOperation) -> Option<DepositsEvent> {
     }
 }
 
-impl<L: Deref + Clone> DepositsHandler<L>
+impl<L: Deref + Clone + Send + Sync> DepositsHandler<L>
 where
     L::Target: LdkLogger,
 {

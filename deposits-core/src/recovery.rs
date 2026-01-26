@@ -46,6 +46,34 @@ pub const WEEK_BLOCKS: u32 = 1008;
 pub const TWO_WEEKS_BLOCKS: u32 = 2016;
 pub const THREE_WEEKS_BLOCKS: u32 = 3024;
 
+// ============================================================================
+// Pure Validation Functions
+// ============================================================================
+
+/// Validate that a preimage matches a payment hash.
+///
+/// This is a cryptographic check used in recovery fraud proofs to verify
+/// that a claimed payment actually occurred.
+///
+/// # Arguments
+/// * `preimage` - The 32-byte preimage to verify
+/// * `payment_hash` - The expected SHA256 hash of the preimage
+///
+/// # Returns
+/// * `Ok(())` if the preimage hashes to the payment_hash
+/// * `Err(String)` if the preimage doesn't match
+pub fn validate_preimage(preimage: &[u8; 32], payment_hash: &[u8; 32]) -> Result<(), String> {
+    let computed_hash = sha256::Hash::hash(preimage);
+    if computed_hash.as_byte_array() != payment_hash {
+        return Err(format!(
+            "Invalid preimage: computed hash {} does not match payment hash {}",
+            hex::encode(computed_hash.as_byte_array()),
+            hex::encode(payment_hash)
+        ));
+    }
+    Ok(())
+}
+
 /// State of a ledger recovery process
 #[derive(Clone, Debug)]
 pub enum RecoveryPhase {
@@ -284,6 +312,21 @@ impl ClaimEligibility {
                 // Community mechanism - always true for now
                 true
             }
+        }
+    }
+
+    /// Get the tier index for this eligibility level (0-3).
+    ///
+    /// - Tier 0: Selected partner only (first day)
+    /// - Tier 1: Any 3 partners (day 1 to week 1)
+    /// - Tier 2: Any single partner (week 1 to week 2)
+    /// - Tier 3: Community fallback (after week 2)
+    pub fn tier_index(&self) -> u8 {
+        match self {
+            ClaimEligibility::SelectedPartnerOnly { .. } => 0,
+            ClaimEligibility::AnyThreePartners => 1,
+            ClaimEligibility::AnySinglePartner => 2,
+            ClaimEligibility::CommunityFallback => 3,
         }
     }
 }

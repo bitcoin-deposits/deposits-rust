@@ -56,7 +56,7 @@ pub enum LightningEvent {
 type ChannelPartnerMap = Arc<RwLock<HashMap<[u8; 32], PublicKey>>>;
 
 /// Service that automatically handles Lightning events for Bitcoin Deposits
-pub struct LightningEventService<L: Deref + Clone>
+pub struct LightningEventService<L: Deref + Clone + Send + Sync>
 where
     L::Target: LdkLogger,
 {
@@ -80,7 +80,7 @@ where
     logger: L,
 }
 
-impl<L: Deref + Clone> LightningEventService<L>
+impl<L: Deref + Clone + Send + Sync> LightningEventService<L>
 where
     L::Target: LdkLogger,
 {
@@ -527,7 +527,7 @@ where
 // NOTE: These methods are placeholders for future channel extension integration
 // They are currently unused and commented out because process_events() is now async
 /*
-impl<L: Deref + Clone> LightningEventService<L>
+impl<L: Deref + Clone + Send + Sync> LightningEventService<L>
 where
     L::Target: LdkLogger,
 {

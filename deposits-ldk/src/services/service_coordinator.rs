@@ -12,7 +12,7 @@ use super::{
 
 /// Main Bitcoin Deposits service coordinator
 /// This orchestrates all the individual services
-pub struct DepositsService<L: Deref + Clone>
+pub struct DepositsService<L: Deref + Clone + Send + Sync>
 where
     L::Target: LdkLogger,
 {
@@ -37,7 +37,7 @@ where
     logger: L,
 }
 
-impl<L: Deref + Clone> DepositsService<L>
+impl<L: Deref + Clone + Send + Sync> DepositsService<L>
 where
     L::Target: LdkLogger,
 {

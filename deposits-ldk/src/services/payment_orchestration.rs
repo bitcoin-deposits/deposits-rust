@@ -6,14 +6,14 @@ use lightning::util::logger::Logger as LdkLogger;
 use super::ServiceError;
 
 /// Placeholder for payment orchestration service
-pub struct PaymentOrchestrationService<L: Deref + Clone>
+pub struct PaymentOrchestrationService<L: Deref + Clone + Send + Sync>
 where
     L::Target: LdkLogger,
 {
     _logger: L,
 }
 
-impl<L: Deref + Clone> PaymentOrchestrationService<L>
+impl<L: Deref + Clone + Send + Sync> PaymentOrchestrationService<L>
 where
     L::Target: LdkLogger,
 {

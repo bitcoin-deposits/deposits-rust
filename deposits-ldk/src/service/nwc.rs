@@ -50,7 +50,7 @@ pub fn handle_get_nwc_info<L>(
     _request: GetNwcInfoRequest,
 ) -> Result<GetNwcInfoResponse, DepositsError>
 where
-    L: Deref + Clone,
+    L: Deref + Clone + Send + Sync,
     L::Target: LdkLogger,
 {
     let node_pubkey = handler.our_node_id();
@@ -72,7 +72,7 @@ pub fn handle_get_nwc_connect<L>(
     _request: GetNwcConnectRequest,
 ) -> Result<GetNwcConnectResponse, DepositsError>
 where
-    L: Deref + Clone,
+    L: Deref + Clone + Send + Sync,
     L::Target: LdkLogger,
 {
     let node_pubkey = handler.our_node_id();
@@ -129,7 +129,7 @@ pub fn handle_get_deposit_nwc<L>(
     request: GetDepositNwcRequest,
 ) -> Result<GetDepositNwcResponse, DepositsError>
 where
-    L: Deref + Clone,
+    L: Deref + Clone + Send + Sync,
     L::Target: LdkLogger,
 {
     // Parse the deposit pubkey from hex

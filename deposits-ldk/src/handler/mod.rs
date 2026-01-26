@@ -85,6 +85,7 @@ mod handler_types;
 mod constants;
 pub mod validation_ext;
 mod handler_context_impl;
+pub mod ldk_adapters;
 
 // Test module
 #[cfg(test)]

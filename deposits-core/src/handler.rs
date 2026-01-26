@@ -645,6 +645,255 @@ where
     }
 }
 
+// ============================================================================
+// Handler Trait Implementations
+// ============================================================================
+
+impl<S, T, P, C, B, H, G, E, L> crate::handler_traits::DepositOperations for Handler<S, T, P, C, B, H, G, E, L>
+where
+    S: Storage,
+    T: PeerTransport,
+    P: PaymentTracker,
+    C: ChannelRegistry,
+    B: Broadcaster,
+    H: ChainSource,
+    G: SignatureProvider,
+    E: EventEmitter,
+    L: Logger,
+{
+    fn list_deposits(&self) -> Result<Vec<PublicKey>, crate::DepositsError> {
+        let mut all_deposits = Vec::new();
+        let ledgers = self.ledgers.lock().unwrap();
+        for ledger_arc in ledgers.values() {
+            let ledger = ledger_arc.read().unwrap();
+            for deposit in ledger.state.deposits.values() {
+                all_deposits.push(deposit.pubkey);
+            }
+        }
+        Ok(all_deposits)
+    }
+
+    fn list_deposits_for_depositor(
+        &self,
+        depositor_pubkey: PublicKey,
+    ) -> Result<Vec<PublicKey>, crate::DepositsError> {
+        let mut depositor_deposits = Vec::new();
+        let ledgers = self.ledgers.lock().unwrap();
+        for ledger_arc in ledgers.values() {
+            let ledger = ledger_arc.read().unwrap();
+            if let Some(deposit) = ledger.state.deposits.get(&depositor_pubkey) {
+                depositor_deposits.push(deposit.pubkey);
+            }
+        }
+        Ok(depositor_deposits)
+    }
+
+    fn list_deposits_for_pubkey(
+        &self,
+        deposit_pubkey: PublicKey,
+    ) -> Result<Vec<PublicKey>, crate::DepositsError> {
+        let mut matching_deposits = Vec::new();
+        let ledgers = self.ledgers.lock().unwrap();
+        for ledger_arc in ledgers.values() {
+            let ledger = ledger_arc.read().unwrap();
+            for deposit in ledger.state.deposits.values() {
+                if deposit.pubkey == deposit_pubkey {
+                    matching_deposits.push(deposit.pubkey);
+                }
+            }
+        }
+        Ok(matching_deposits)
+    }
+
+    fn get_deposit_balance(&self, deposit_pubkey: PublicKey) -> Result<u64, crate::DepositsError> {
+        let ledgers = self.ledgers.lock().unwrap();
+        for ledger_arc in ledgers.values() {
+            let ledger = ledger_arc.read().unwrap();
+            if let Some(deposit) = ledger.state.deposits.get(&deposit_pubkey) {
+                return Ok(deposit.balance.saturating_sub(deposit.locked_balance));
+            }
+        }
+        Err(crate::DepositsError::DepositNotFound)
+    }
+
+    fn find_deposit_by_payment_hash(&self, payment_hash: &[u8; 32]) -> Option<(PublicKey, PublicKey, u64)> {
+        let ledgers = self.ledgers.lock().unwrap();
+        for ((operator_id, partner_id), ledger_arc) in ledgers.iter() {
+            if *operator_id == self.node_id {
+                let ledger = ledger_arc.read().unwrap();
+                for (deposit_pubkey, deposit) in ledger.state.deposits.iter() {
+                    for invoice in &deposit.invoices {
+                        if &invoice.payment_hash == payment_hash {
+                            return Some((*partner_id, *deposit_pubkey, invoice.amount));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn get_active_depositors(&self) -> Vec<PublicKey> {
+        let mut active_depositors = Vec::new();
+        let ledgers = self.ledgers.lock().unwrap();
+        for ledger_arc in ledgers.values() {
+            let ledger = ledger_arc.read().unwrap();
+            for (depositor_pubkey, deposit) in &ledger.state.deposits {
+                if deposit.balance > 0 {
+                    active_depositors.push(*depositor_pubkey);
+                }
+            }
+        }
+        active_depositors
+    }
+
+    fn get_total_deposit_balances(&self, partner_node_id: PublicKey) -> Option<u64> {
+        let ledgers = self.ledgers.lock().unwrap();
+        if let Some(ledger_arc) = ledgers.get(&(self.node_id, partner_node_id)) {
+            let ledger = ledger_arc.read().unwrap();
+            let total = ledger.state.deposits.values()
+                .map(|deposit| deposit.balance)
+                .sum();
+            Some(total)
+        } else {
+            None
+        }
+    }
+
+    fn get_deposits_for_partner(&self, partner_node_id: PublicKey) -> Option<Vec<(PublicKey, u64, u64)>> {
+        let ledgers = self.ledgers.lock().unwrap();
+        if let Some(ledger_arc) = ledgers.get(&(self.node_id, partner_node_id)) {
+            let ledger = ledger_arc.read().unwrap();
+            let deposits: Vec<(PublicKey, u64, u64)> = ledger.state.deposits.iter()
+                .map(|(depositor_pubkey, deposit)| (*depositor_pubkey, deposit.balance, deposit.locked_balance))
+                .collect();
+            Some(deposits)
+        } else {
+            None
+        }
+    }
+
+    fn get_max_outstanding_invoice_amount(&self, partner_node_id: PublicKey) -> Option<u64> {
+        let ledgers = self.ledgers.lock().unwrap();
+        if let Some(ledger_arc) = ledgers.get(&(self.node_id, partner_node_id)) {
+            let ledger = ledger_arc.read().unwrap();
+            let max_invoice = ledger.state.deposits.values()
+                .flat_map(|d| d.invoices.iter())
+                .map(|inv| inv.amount)
+                .max()
+                .unwrap_or(0);
+            Some(max_invoice)
+        } else {
+            None
+        }
+    }
+}
+
+impl<S, T, P, C, B, H, G, E, L> crate::handler_traits::LedgerOperations for Handler<S, T, P, C, B, H, G, E, L>
+where
+    S: Storage,
+    T: PeerTransport,
+    P: PaymentTracker,
+    C: ChannelRegistry,
+    B: Broadcaster,
+    H: ChainSource,
+    G: SignatureProvider,
+    E: EventEmitter,
+    L: Logger,
+{
+    fn get_ledger_hash(&self, partner_node_id: PublicKey) -> Result<[u8; 32], crate::DepositsError> {
+        let ledgers = self.ledgers.lock().unwrap();
+        if let Some(ledger_arc) = ledgers.get(&(self.node_id, partner_node_id)) {
+            let ledger = ledger_arc.read().unwrap();
+            Ok(ledger.tail_hash())
+        } else {
+            Err(crate::DepositsError::LedgerNotFound)
+        }
+    }
+
+    fn get_ledger_hashes(&self, partner_node_id: PublicKey) -> (Option<[u8; 32]>, Option<[u8; 32]>) {
+        let ledgers = self.ledgers.lock().unwrap();
+
+        // Local hash (where we are operator)
+        let local_hash = ledgers.get(&(self.node_id, partner_node_id))
+            .map(|arc| {
+                let ledger = arc.read().unwrap();
+                ledger.state.channel_deepest_commitment_hash
+            });
+
+        // Remote hash (where they are operator)
+        let remote_hash = ledgers.get(&(partner_node_id, self.node_id))
+            .map(|arc| {
+                let ledger = arc.read().unwrap();
+                ledger.state.channel_deepest_commitment_hash
+            });
+
+        (local_hash, remote_hash)
+    }
+
+    fn get_committed_ledger_hashes_from_channel(
+        &self,
+        _counterparty_node_id: PublicKey,
+    ) -> (Option<[u8; 32]>, Option<[u8; 32]>) {
+        // This requires channel manager access - return None for now
+        // Implementations with channel access can override
+        (None, None)
+    }
+
+    fn validate_ledger_hash_for_reserves(
+        &self,
+        counterparty_node_id: &PublicKey,
+        ledger_hash: &[u8; 32],
+    ) -> bool {
+        // Zero hash is always valid
+        if ledger_hash == &[0u8; 32] {
+            return true;
+        }
+
+        let ledgers = self.ledgers.lock().unwrap();
+        let ledger_key = (*counterparty_node_id, self.node_id);
+
+        if let Some(ledger_arc) = ledgers.get(&ledger_key) {
+            let ledger = ledger_arc.read().unwrap();
+            // Delegate to deposits-core's pure hash lookup
+            ledger.find_hash_sequence(ledger_hash).is_some()
+        } else {
+            false
+        }
+    }
+
+    fn get_ledger_sequence(&self, partner_node_id: PublicKey) -> Result<u64, crate::DepositsError> {
+        let ledgers = self.ledgers.lock().unwrap();
+        if let Some(ledger_arc) = ledgers.get(&(self.node_id, partner_node_id)) {
+            let ledger = ledger_arc.read().unwrap();
+            Ok(ledger.sequence())
+        } else {
+            Err(crate::DepositsError::LedgerNotFound)
+        }
+    }
+
+    fn has_ledger_with(&self, partner_node_id: PublicKey) -> bool {
+        let ledgers = self.ledgers.lock().unwrap();
+        ledgers.contains_key(&(self.node_id, partner_node_id))
+    }
+
+    fn list_operator_ledgers(&self) -> Vec<PublicKey> {
+        let ledgers = self.ledgers.lock().unwrap();
+        ledgers.keys()
+            .filter(|(op, _)| *op == self.node_id)
+            .map(|(_, partner)| *partner)
+            .collect()
+    }
+
+    fn list_partner_ledgers(&self) -> Vec<PublicKey> {
+        let ledgers = self.ledgers.lock().unwrap();
+        ledgers.keys()
+            .filter(|(_, partner)| *partner == self.node_id)
+            .map(|(op, _)| *op)
+            .collect()
+    }
+}
+
 impl<S, T, P, C, B, H, G, E, L> MessageHandler for Handler<S, T, P, C, B, H, G, E, L>
 where
     S: Storage,
@@ -860,5 +1109,129 @@ mod tests {
         // Remove ledger
         assert!(handler.remove_ledger(test_pubkey(), partner));
         assert!(!handler.has_ledger_with(partner));
+    }
+
+    #[test]
+    fn test_deposit_operations_trait() {
+        use crate::handler_traits::DepositOperations;
+
+        let handler = Handler::new(
+            Arc::new(MockStorage),
+            Arc::new(MockTransport),
+            Arc::new(MockPayments),
+            Arc::new(MockChannels),
+            Arc::new(MockBroadcaster),
+            Arc::new(MockChain),
+            Arc::new(MockSigner),
+            Arc::new(MockEvents),
+            Arc::new(NullLogger),
+        );
+
+        let partner = {
+            let secp = Secp256k1::new();
+            let secret = SecretKey::from_slice(&[2u8; 32]).unwrap();
+            PublicKey::from_secret_key(&secp, &secret)
+        };
+
+        // Create a ledger
+        handler.create_operator_ledger(partner, "tb1q...".to_string()).unwrap();
+
+        // Initially no deposits
+        assert!(handler.list_deposits().unwrap().is_empty());
+        assert!(handler.get_active_depositors().is_empty());
+        assert_eq!(handler.get_total_deposit_balances(partner), Some(0));
+        assert!(handler.get_deposits_for_partner(partner).unwrap().is_empty());
+
+        // Add a deposit to the ledger
+        let deposit_pubkey = {
+            let secp = Secp256k1::new();
+            let secret = SecretKey::from_slice(&[3u8; 32]).unwrap();
+            PublicKey::from_secret_key(&secp, &secret)
+        };
+
+        {
+            let ledger_arc = handler.get_ledger(test_pubkey(), partner).unwrap();
+            let mut ledger = ledger_arc.write().unwrap();
+            let mut deposit = crate::types::Deposit::new(deposit_pubkey, None);
+            deposit.balance = 100_000;
+            deposit.locked_balance = 10_000;
+            ledger.state.deposits.insert(deposit_pubkey, deposit);
+        }
+
+        // Now we should see the deposit
+        let deposits = handler.list_deposits().unwrap();
+        assert_eq!(deposits.len(), 1);
+        assert_eq!(deposits[0], deposit_pubkey);
+
+        // Check balance (balance - locked)
+        let balance = handler.get_deposit_balance(deposit_pubkey).unwrap();
+        assert_eq!(balance, 90_000);
+
+        // Check total balances
+        assert_eq!(handler.get_total_deposit_balances(partner), Some(100_000));
+
+        // Check active depositors
+        let active = handler.get_active_depositors();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0], deposit_pubkey);
+
+        // Check deposits for partner
+        let partner_deposits = handler.get_deposits_for_partner(partner).unwrap();
+        assert_eq!(partner_deposits.len(), 1);
+        assert_eq!(partner_deposits[0], (deposit_pubkey, 100_000, 10_000));
+    }
+
+    #[test]
+    fn test_ledger_operations_trait() {
+        use crate::handler_traits::LedgerOperations;
+
+        let handler = Handler::new(
+            Arc::new(MockStorage),
+            Arc::new(MockTransport),
+            Arc::new(MockPayments),
+            Arc::new(MockChannels),
+            Arc::new(MockBroadcaster),
+            Arc::new(MockChain),
+            Arc::new(MockSigner),
+            Arc::new(MockEvents),
+            Arc::new(NullLogger),
+        );
+
+        let partner = {
+            let secp = Secp256k1::new();
+            let secret = SecretKey::from_slice(&[2u8; 32]).unwrap();
+            PublicKey::from_secret_key(&secp, &secret)
+        };
+
+        // No ledger yet - use trait methods which take partner_node_id
+        assert!(!<_ as LedgerOperations>::has_ledger_with(&handler, partner));
+        assert!(<_ as LedgerOperations>::get_ledger_hash(&handler, partner).is_err());
+        assert!(<_ as LedgerOperations>::get_ledger_sequence(&handler, partner).is_err());
+
+        // Create ledger
+        handler.create_operator_ledger(partner, "tb1q...".to_string()).unwrap();
+
+        // Now we have a ledger - use trait methods
+        assert!(<_ as LedgerOperations>::has_ledger_with(&handler, partner));
+
+        // Check hash (should be zeros for empty ledger)
+        let hash = <_ as LedgerOperations>::get_ledger_hash(&handler, partner).unwrap();
+        assert_eq!(hash, [0u8; 32]);
+
+        // Check sequence
+        let seq = <_ as LedgerOperations>::get_ledger_sequence(&handler, partner).unwrap();
+        assert_eq!(seq, 0);
+
+        // Check hashes
+        let (local, remote) = <_ as LedgerOperations>::get_ledger_hashes(&handler, partner);
+        assert_eq!(local, Some([0u8; 32])); // commitment hash starts at zero
+        assert_eq!(remote, None); // no remote ledger
+
+        // Validate hash for reserves
+        assert!(<_ as LedgerOperations>::validate_ledger_hash_for_reserves(&handler, &partner, &[0u8; 32])); // zero is always valid
+
+        // List ledgers - these are already trait methods
+        assert_eq!(<_ as LedgerOperations>::list_operator_ledgers(&handler), vec![partner]);
+        assert!(<_ as LedgerOperations>::list_partner_ledgers(&handler).is_empty());
     }
 }

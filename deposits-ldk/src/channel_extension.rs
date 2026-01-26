@@ -143,7 +143,7 @@ impl CommitmentReservesOutput {
 /// channels at the protocol level, not just as an enhancement layer.
 pub struct DepositsChannelExtension<L>
 where
-    L: std::ops::Deref + Clone,
+    L: std::ops::Deref + Clone + Send + Sync,
     L::Target: LdkLogger,
 {
     /// Channel ID this extension belongs to
@@ -173,7 +173,7 @@ where
 
 impl<L> DepositsChannelExtension<L>
 where
-    L: std::ops::Deref + Clone,
+    L: std::ops::Deref + Clone + Send + Sync,
     L::Target: LdkLogger,
 {
     /// Create a new channel extension

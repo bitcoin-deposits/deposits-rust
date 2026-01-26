@@ -47,7 +47,7 @@ fn create_test_pubkey() -> PublicKey {
 
 /// Helper to mark a peer as connected for testing
 /// Required because get_and_clear_pending_msg only drains messages for connected peers
-fn mark_peer_connected<L: Deref + Clone>(handler: &DepositsHandler<L>, peer: PublicKey)
+fn mark_peer_connected<L: Deref + Clone + Send + Sync>(handler: &DepositsHandler<L>, peer: PublicKey)
 where
     L::Target: Logger,
 {

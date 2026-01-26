@@ -422,67 +422,23 @@ pub trait SignedLedgerUpdateLogExt {
 
 impl SignedLedgerUpdateLogExt for deposits_core::SignedLedgerUpdateLog {
     fn add_update(&mut self, update: deposits_core::SignedLedgerUpdate) -> Result<(), DepositsError> {
-        // Verify sequence number
-        if update.sequence_number != self.next_sequence {
-            return Err(DepositsError::InvalidState(
-                format!("Sequence mismatch: expected {}, got {}", self.next_sequence, update.sequence_number)
-            ));
-        }
-
-        // Verify chain continuity (previous hash should match last update's hash)
-        let expected_prev = if let Some(last) = self.updates.last() {
-            last.current_state_hash
-        } else {
-            [0u8; 32]
-        };
-        if update.previous_state_hash != expected_prev {
-            return Err(DepositsError::InvalidState(
-                format!("Hash chain broken: expected {:?}, got {:?}",
-                    hex::encode(expected_prev), hex::encode(update.previous_state_hash))
-            ));
-        }
-
-        // Add to log
-        self.updates.push(update);
-        self.next_sequence += 1;
-        Ok(())
+        // Delegate to the core implementation
+        deposits_core::SignedLedgerUpdateLog::add_update(self, update)
     }
 
     fn verify_chain(&self) -> Result<(), DepositsError> {
-        let mut expected_prev = [0u8; 32];
-        for (i, update) in self.updates.iter().enumerate() {
-            if update.sequence_number != i as u64 {
-                return Err(DepositsError::InvalidState(
-                    format!("Sequence mismatch at index {}: expected {}, got {}", i, i, update.sequence_number)
-                ));
-            }
-            if update.previous_state_hash != expected_prev {
-                return Err(DepositsError::InvalidState(
-                    format!("Hash chain broken at index {}", i)
-                ));
-            }
-            expected_prev = update.current_state_hash;
-        }
-        Ok(())
+        // Delegate to the core implementation
+        deposits_core::SignedLedgerUpdateLog::verify_chain(self)
     }
 
     fn get_updates_since(&self, since_sequence: u64) -> Vec<deposits_core::SignedLedgerUpdate> {
-        self.updates
-            .iter()
-            .filter(|u| u.sequence_number > since_sequence)
-            .cloned()
-            .collect()
+        // Delegate to the core implementation
+        deposits_core::SignedLedgerUpdateLog::get_updates_since(self, since_sequence)
     }
 
     fn create_signing_data(update: &deposits_core::SignedLedgerUpdate) -> Vec<u8> {
-        let mut data = Vec::new();
-        data.extend_from_slice(&update.message);
-        data.extend_from_slice(&update.message_type.to_le_bytes());
-        data.extend_from_slice(&update.sequence_number.to_le_bytes());
-        data.extend_from_slice(&update.previous_state_hash);
-        data.extend_from_slice(&update.current_state_hash);
-        data.extend_from_slice(&update.timestamp.to_le_bytes());
-        data
+        // Delegate to the core implementation - partner_signing_data provides the same format
+        update.partner_signing_data()
     }
 }
 

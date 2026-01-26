@@ -17,7 +17,7 @@ use super::core::DepositsHandler;
 // (deposits-core uses ReservesQueryOps to avoid conflict with the adapter trait)
 pub use deposits_core::handler_traits::ReservesQueryOps as ReservesOperations;
 
-impl<L: Deref + Clone> ReservesOperations for DepositsHandler<L>
+impl<L: Deref + Clone + Send + Sync> ReservesOperations for DepositsHandler<L>
 where
     L::Target: LdkLogger,
 {

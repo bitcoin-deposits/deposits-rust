@@ -23,7 +23,7 @@ pub fn handle_get_reserves_status<L>(
     request: GetReservesStatusRequest,
 ) -> Result<GetReservesStatusResponse, DepositsError>
 where
-    L: Deref + Clone,
+    L: Deref + Clone + Send + Sync,
     L::Target: LdkLogger,
 {
     let partner_id = PublicKey::from_str(&request.partner_node_id)
@@ -53,7 +53,7 @@ pub fn handle_add_reserves<L>(
     request: AddReservesRequest,
 ) -> Result<AddReservesResponse, DepositsError>
 where
-    L: Deref + Clone,
+    L: Deref + Clone + Send + Sync,
     L::Target: LdkLogger,
 {
     let partner_id = PublicKey::from_str(&request.partner_node_id)

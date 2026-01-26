@@ -15,7 +15,7 @@ pub use deposits_core::handler_traits::CollateralOperations;
 // Re-export types that were previously in core.rs
 pub use deposits_core::handler_types::{CollateralInfo, CollateralPartnerInfo};
 
-impl<L: Deref + Clone> CollateralOperations for DepositsHandler<L>
+impl<L: Deref + Clone + Send + Sync> CollateralOperations for DepositsHandler<L>
 where
     L::Target: LdkLogger,
 {

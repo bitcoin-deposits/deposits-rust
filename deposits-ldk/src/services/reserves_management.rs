@@ -30,7 +30,7 @@ pub struct ReservesStatus {
 }
 
 /// Service that automatically maintains adequate reserves
-pub struct ReservesManagementService<L: Deref + Clone>
+pub struct ReservesManagementService<L: Deref + Clone + Send + Sync>
 where
     L::Target: LdkLogger,
 {
@@ -50,7 +50,7 @@ where
     logger: L,
 }
 
-impl<L: Deref + Clone> ReservesManagementService<L>
+impl<L: Deref + Clone + Send + Sync> ReservesManagementService<L>
 where
     L::Target: LdkLogger,
 {

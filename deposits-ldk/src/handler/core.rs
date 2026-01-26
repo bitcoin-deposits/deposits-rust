@@ -52,6 +52,26 @@ use deposits_core::{log_debug, log_error, log_info, log_warn};
 use lightning::util::logger::Logger as LdkLogger;
 use bitcoin::{Network, ScriptBuf};
 
+// Import LDK adapters for core handler integration
+use super::ldk_adapters::{
+    LdkStorageAdapter, LdkTransportAdapter, LdkLoggerAdapter,
+    LdkChainAdapter, LdkEventAdapter, LdkSignerAdapter,
+    LdkPaymentAdapter, LdkChannelAdapter, LdkBroadcasterAdapter,
+};
+
+/// Type alias for the core protocol handler with LDK adapters
+pub type CoreHandler<L> = deposits_core::Handler<
+    LdkStorageAdapter,
+    LdkTransportAdapter,
+    LdkPaymentAdapter,
+    LdkChannelAdapter,
+    LdkBroadcasterAdapter,
+    LdkChainAdapter,
+    LdkSignerAdapter,
+    LdkEventAdapter,
+    LdkLoggerAdapter<L>,
+>;
+
 // Re-export types from handler_types for backward compatibility
 pub use super::handler_types::{
     CosignedInvoice,
@@ -87,7 +107,7 @@ pub(super) use super::constants::{
 pub(super) use deposits_core::build_taproot_reserves_script;
 
 /// Bitcoin Deposits protocol message handler
-pub struct DepositsHandler<L: Deref + Clone>
+pub struct DepositsHandler<L: Deref + Clone + Send + Sync>
 where
     L::Target: LdkLogger,
 {
@@ -243,9 +263,14 @@ where
     /// Key: partner_id -> (expected_script_pubkey, ledger_hash, reserves_sats, timestamp_sent)
     /// Set when propose_extra_outputs is called, cleared when outputs appear in channel
     pub(super) pending_reserves_commitments: Mutex<HashMap<PublicKey, (ScriptBuf, [u8; 32], u64, u64)>>,
+
+    /// Core protocol handler from deposits-core
+    /// This contains the pure protocol logic and will gradually take over
+    /// operations from the LDK-specific code
+    pub(crate) core_handler: Option<Arc<CoreHandler<L>>>,
 }
 
-impl<L: Deref + Clone> DepositsHandler<L>
+impl<L: Deref + Clone + Send + Sync> DepositsHandler<L>
 where
     L::Target: LdkLogger,
 {
@@ -345,6 +370,7 @@ where
             )),
             network,
             pending_reserves_commitments: Mutex::new(HashMap::new()),
+            core_handler: None, // Initialized lazily when channel_manager is set
         };
 
         // Recover existing ledgers on startup - propagate errors

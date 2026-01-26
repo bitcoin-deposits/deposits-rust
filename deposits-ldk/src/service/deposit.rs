@@ -54,7 +54,7 @@ pub fn handle_list_deposits<L>(
     request: ListDepositsRequest,
 ) -> Result<ListDepositsResponse, DepositsError>
 where
-    L: Deref + Clone,
+    L: Deref + Clone + Send + Sync,
     L::Target: LdkLogger,
 {
     let deposits: Vec<DepositInfo> = if let Some(ledger_id) = request.ledger_id {

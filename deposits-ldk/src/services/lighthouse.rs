@@ -131,7 +131,7 @@ pub struct WatchedChannel {
 }
 
 /// Lighthouse service for monitoring blockchain for reserves outputs
-pub struct LighthouseService<L: Deref + Clone>
+pub struct LighthouseService<L: Deref + Clone + Send + Sync>
 where
     L::Target: LdkLogger,
 {
@@ -164,7 +164,7 @@ where
     logger: L,
 }
 
-impl<L: Deref + Clone> LighthouseService<L>
+impl<L: Deref + Clone + Send + Sync> LighthouseService<L>
 where
     L::Target: LdkLogger,
 {
