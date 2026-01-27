@@ -117,165 +117,21 @@ pub trait MessageValidation {
     fn validate_ledger_close(&self, msg: &crate::wire::messages::LedgerCloseMsg, sender: PublicKey) -> Result<(), String>;
 }
 
-// verify_payment_signature is now called internally by deposits_core validation functions
-
-/// Unified validation of LedgerOperation (handles both V1 converted to operation and V2 native)
-fn validate_operation<L: Deref + Clone + Send + Sync>(
-    handler: &DepositsHandler<L>,
-    operation: &deposits_core::messages::LedgerOperation,
-    partner_pubkey: PublicKey,
-    sender: PublicKey,
-) -> Result<(), String>
-where
-    L::Target: LdkLogger,
-{
-    use deposits_core::messages::LedgerOperation;
-
-    match operation {
-        LedgerOperation::DepositOpen { pubkey, fees, payment_hash, invoice, cosigner_guarantee_signature } => {
-            use crate::wire::messages::DepositOpenMsg;
-            handler.validate_add_deposit(&DepositOpenMsg {
-                partner_id: partner_pubkey,
-                pubkey: *pubkey,
-                fees: fees.clone(),
-                payment_hash: *payment_hash,
-                invoice: invoice.clone(),
-                cosigner_guarantee_signature: *cosigner_guarantee_signature,
-            }, sender)
-        }
-        LedgerOperation::DepositClose { pubkey } => {
-            use crate::wire::messages::DepositCloseMsg;
-            handler.validate_remove_deposit(&DepositCloseMsg {
-                partner_id: partner_pubkey,
-                pubkey: *pubkey,
-            }, sender)
-        }
-        LedgerOperation::DepositUpdate { pubkey, new_fees } => {
-            use crate::wire::messages::DepositUpdateMsg;
-            handler.validate_update_deposit(&DepositUpdateMsg {
-                partner_id: partner_pubkey,
-                pubkey: *pubkey,
-                new_fees: new_fees.clone(),
-            }, sender)
-        }
-        LedgerOperation::PaymentLock { pubkey, amount, payment_id, sequence_number, scriptpubkey_signature } => {
-            handler.validate_sending_lock_payment(&SendingLockPaymentMsg {
-                pubkey: *pubkey,
-                amount: *amount,
-                payment_id: *payment_id,
-                sequence_number: *sequence_number,
-                scriptpubkey_signature: *scriptpubkey_signature,
-            }, sender)
-        }
-        LedgerOperation::PaymentFulfill { pubkey, amount, payment_id, sequence_number, scriptpubkey_signature, preimage } => {
-            handler.validate_sending_fulfill_payment(&SendingFulfillPaymentMsg {
-                pubkey: *pubkey,
-                amount: *amount,
-                payment_id: *payment_id,
-                sequence_number: *sequence_number,
-                scriptpubkey_signature: *scriptpubkey_signature,
-                preimage: *preimage,
-            }, sender)
-        }
-        LedgerOperation::PaymentFail { pubkey, amount, payment_id, sequence_number } => {
-            handler.validate_sending_fail_payment(&SendingFailPaymentMsg {
-                pubkey: *pubkey,
-                amount: *amount,
-                payment_id: *payment_id,
-                sequence_number: *sequence_number,
-            }, sender)
-        }
-        LedgerOperation::PaymentCredit { payment_hash, deposit_pubkey, amount, invoice_id, sequence_number } => {
-            handler.validate_receiving_credit_payment(&ReceivingCreditPaymentMsg {
-                payment_hash: *payment_hash,
-                deposit_pubkey: *deposit_pubkey,
-                amount: *amount,
-                invoice_id: invoice_id.clone(),
-                partner_id: partner_pubkey,
-                sequence_number: *sequence_number,
-            }, sender)
-        }
-        LedgerOperation::ReservesAdd { amount, spend_to, collateral_partners } => {
-            use crate::wire::messages::ReservesAddOutputMsg;
-            handler.validate_reserves_add(&ReservesAddOutputMsg {
-                initial_amount: *amount,
-                spend_to: *spend_to,
-                partner_id: partner_pubkey,
-                collateral_partners: collateral_partners.clone(),
-            }, sender)
-        }
-        LedgerOperation::ReservesRemove => {
-            use crate::wire::messages::ReservesRemoveOutputMsg;
-            handler.validate_reserves_remove(&ReservesRemoveOutputMsg {
-                partner_id: partner_pubkey,
-                remove_all: true,
-            }, sender)
-        }
-        LedgerOperation::ReservesIncrease { new_amount } => {
-            use crate::wire::messages::ReservesIncreaseMsg;
-            handler.validate_reserves_increase(&ReservesIncreaseMsg {
-                new_amount: *new_amount,
-                partner_id: partner_pubkey,
-            }, sender)
-        }
-        LedgerOperation::ReservesDecrease { new_amount } => {
-            use crate::wire::messages::ReservesDecreaseMsg;
-            handler.validate_reserves_decrease(&ReservesDecreaseMsg {
-                new_amount: *new_amount,
-                partner_id: partner_pubkey,
-            }, sender)
-        }
-        LedgerOperation::CollateralIncrease { new_amount, block_height } => {
-            handler.validate_collateral_increase(&crate::wire::messages::CollateralIncreaseMsg {
-                partner_id: partner_pubkey,
-                new_amount: *new_amount,
-                block_height: *block_height,
-            }, sender)
-        }
-        LedgerOperation::CollateralDecrease { new_amount, block_height } => {
-            handler.validate_collateral_decrease(&crate::wire::messages::CollateralDecreaseMsg {
-                partner_id: partner_pubkey,
-                new_amount: *new_amount,
-                block_height: *block_height,
-            }, sender)
-        }
-        LedgerOperation::FeeCollect { pubkey, amount, block_height } => {
-            handler.validate_fee_collect(&crate::wire::messages::FeeCollectMsg {
-                pubkey: *pubkey,
-                amount: *amount,
-                block_height: *block_height,
-            }, sender)
-        }
-        LedgerOperation::LedgerClose => {
-            handler.validate_ledger_close(&crate::wire::messages::LedgerCloseMsg {
-                partner_id: partner_pubkey,
-            }, sender)
-        }
-        // Operations without specific validation
-        LedgerOperation::ReservesUpdateSpendTo { .. } |
-        LedgerOperation::TransferLock { .. } |
-        LedgerOperation::TransferFail { .. } |
-        LedgerOperation::TransferFulfill { .. } |
-        LedgerOperation::CollateralAttestation { .. } |
-        LedgerOperation::CollateralAddPartner { .. } |
-        LedgerOperation::CollateralRemovePartner { .. } |
-        LedgerOperation::Tombstone { .. } => Ok(()),
-    }
-}
+// NOTE: validate_operation function removed - LedgerUpdate validation now happens in the
+// generic core handler (handle_ledger_update) which validates during append_operation.
 
 impl<L: Deref + Clone + Send + Sync> MessageValidation for DepositsHandler<L>
 where
     L::Target: LdkLogger,
 {
     fn validate_message(&self, message: &DepositsMessage, sender: PublicKey) -> Result<(), String> {
-        // Handle messages that convert to LedgerOperation uniformly (V1 and V2)
-        if let Some(operation) = message.to_operation() {
-            if let Some(partner_pubkey) = message.partner_id() {
-                return validate_operation(self, &operation, partner_pubkey, sender);
-            }
+        // Skip validation for LedgerUpdate messages - the generic handler validates during append
+        // This avoids redundant validation since handle_ledger_update does full validation
+        if matches!(message, DepositsMessage::LedgerUpdate(_)) {
+            return Ok(());
         }
 
-        // Handle special cases that don't convert to LedgerOperation
+        // Handle special message types that need validation
         match message {
             // Invoice Cosigning Validation (V2: Coordination(CoordinationMsg::CosignInvoice))
             DepositsMessage::Coordination(deposits_core::messages::CoordinationMsg::CosignInvoice {
@@ -292,12 +148,8 @@ where
                 }, sender)
             },
 
-            // LedgerUpdate - delegate to operation validation (was SignedUpdate in V1)
-            DepositsMessage::LedgerUpdate(update_msg) => {
-                validate_operation(self, &update_msg.operation, update_msg.partner_pubkey, sender)
-            },
-
             // Messages that don't require validation (non-ledger-modifying)
+            // Note: LedgerUpdate is handled at the start of this function
             _ => Ok(()),
         }
     }

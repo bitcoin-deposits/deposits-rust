@@ -598,86 +598,21 @@ where
     pub(super) fn handle_recovery_vote(
         &self,
         msg: &RecoveryVoteMsg,
-        _sender: PublicKey,
+        sender: PublicKey,
     ) -> Result<(), LightningError> {
-        use deposits_core::log_warn;
-
         log_info!(
             self.logger,
             "🔄 RECOVERY: Received vote from {} for operator {} (conforming={})",
-            msg.voter,
-            msg.operator,
-            msg.is_conforming
+            msg.voter, msg.operator, msg.is_conforming
         );
 
-        // Convert message to RecoveryVote struct
-        let vote = deposits_core::recovery::RecoveryVote {
-            voter: msg.voter,
-            is_conforming: msg.is_conforming,
-            validated_hash: msg.validated_hash,
-            validated_sequence: msg.validated_sequence,
-            substitute_nomination: msg.substitute_nomination,
-            discovered_violation: msg.discovered_violation,
-            signature: msg.signature,
-        };
-
-        // Submit vote to recovery manager (it handles signature verification)
-        let ledger_id = (msg.operator, msg.partner);
-        let vote_result = {
-            let mut recovery_manager = self.recovery_manager.lock().unwrap();
-            recovery_manager.submit_vote(ledger_id, vote)
-        };
-
-        match vote_result {
-            Ok(result) => {
-                log_info!(
-                    self.logger,
-                    "🔄 RECOVERY: Vote recorded - operator {} partner {} voter {} conforming={} (total={}, conforming={}, non-conforming={})",
-                    msg.operator,
-                    msg.partner,
-                    msg.voter,
-                    msg.is_conforming,
-                    result.total_votes,
-                    result.conforming_votes,
-                    result.non_conforming_votes
-                );
-
-                // Check for non-compliance determination
-                let non_conforming_threshold = if result.total_votes <= 2 {
-                    1  // For 2-of-2 ledgers
-                } else {
-                    (result.total_votes / 2) + 1  // Strict majority
-                };
-
-                if result.non_conforming_votes >= non_conforming_threshold {
-                    log_info!(
-                        self.logger,
-                        "🔄 RECOVERY: NON-COMPLIANCE DETERMINED! operator {} partner {} ({}/{} non-conforming votes)",
-                        msg.operator,
-                        msg.partner,
-                        result.non_conforming_votes,
-                        result.total_votes
-                    );
-
-                    // Emit RecoveryNonCompliant event
-                    let _ = self.event_queue.emit_deposits_event(
-                        super::events::DepositsEvent::RecoveryNonCompliant {
-                            operator_id: msg.operator,
-                            partner_id: msg.partner,
-                            non_conforming_votes: result.non_conforming_votes as u32,
-                            total_votes: result.total_votes as u32,
-                        },
-                    );
-                }
+        // Delegate to core handler
+        match core_handlers::handle_recovery_vote(self, msg, sender) {
+            Ok(_) => {
+                log_info!(self.logger, "🔄 RECOVERY: Vote processed successfully");
             }
             Err(e) => {
-                log_warn!(
-                    self.logger,
-                    "🔄 RECOVERY: Failed to submit vote from {} for operator {}: {:?}",
-                    msg.voter,
-                    msg.operator,
-                    e
-                );
+                log_warn!(self.logger, "🔄 RECOVERY: Vote handler failed: {:?}", e);
             }
         }
 
