@@ -1004,6 +1004,51 @@ impl From<SyncMsg> for SyncMsgV2 {
     }
 }
 
+impl From<SyncResponseMsgV2> for SyncResponseMsg {
+    fn from(v2: SyncResponseMsgV2) -> Self {
+        Self {
+            operator_id: v2.operator_id,
+            partner_id: v2.partner_id,
+            updates: v2.updates.into_iter().map(|u| LedgerUpdateMsg {
+                operator_pubkey: v2.operator_id,
+                partner_pubkey: v2.partner_id,
+                operation: u.operation,
+                sequence_number: u.sequence_number,
+                previous_state_hash: u.previous_hash,
+                current_state_hash: u.current_hash,
+                operator_signature: u.operator_signature,
+                message_type: deposits_core::messages::LEDGER_UPDATE,
+                message: Vec::new(), // Rebuilt at send time
+                timestamp: u.timestamp,
+                partner_signature: Some(u.partner_signature),
+            }).collect(),
+        }
+    }
+}
+
+impl From<SyncResponseMsg> for SyncResponseMsgV2 {
+    fn from(local: SyncResponseMsg) -> Self {
+        let current_sequence = local.updates.last().map(|u| u.sequence_number).unwrap_or(0);
+        let current_hash = local.updates.last().map(|u| u.current_state_hash).unwrap_or([0u8; 32]);
+        Self {
+            operator_id: local.operator_id,
+            partner_id: local.partner_id,
+            request_hash: [0u8; 32], // Set at send time
+            updates: local.updates.into_iter().map(|u| deposits_core::messages::SignedLedgerUpdate {
+                sequence_number: u.sequence_number,
+                operation: u.operation,
+                previous_hash: u.previous_state_hash,
+                current_hash: u.current_state_hash,
+                operator_signature: u.operator_signature,
+                partner_signature: u.partner_signature.unwrap_or([0u8; 64]),
+                timestamp: u.timestamp,
+            }).collect(),
+            current_sequence,
+            current_hash,
+        }
+    }
+}
+
 /// Sync response message (local type)
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SyncResponseMsg {

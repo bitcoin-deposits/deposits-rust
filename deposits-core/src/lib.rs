@@ -243,6 +243,8 @@ pub use message_handlers::{
     handle_sending_fulfill_payment, handle_sending_fail_payment,
     // Fee and lifecycle handler functions
     handle_fee_collect, handle_ledger_close, handle_receiving_cosign_invoice,
+    // Generic ledger update handler
+    handle_ledger_update,
     // Helper functions
     make_ledger_id,
 };

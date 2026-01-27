@@ -434,9 +434,16 @@ pub fn validate_collateral_increase(
     new_amount: u64,
     reserves_amount: u64,
 ) -> ValidationResult {
-    if new_amount <= current_collateral {
+    // Allow idempotent case: if already at target, return Ok (no-op)
+    // This handles state sync issues where operator thinks collateral is 0
+    // but partner has it at the target value from a previous interaction
+    if new_amount == current_collateral {
+        return Ok(()); // Idempotent - already at target
+    }
+
+    if new_amount < current_collateral {
         return Err(format!(
-            "CollateralIncrease must increase collateral: {} is not greater than current {}",
+            "CollateralIncrease must increase collateral: {} is less than current {}",
             new_amount, current_collateral
         ));
     }
@@ -670,8 +677,10 @@ mod tests {
         // Valid increase within reserves
         assert!(validate_collateral_increase(1000, 2000, 5000).is_ok());
 
-        // Not actually increasing
-        assert!(validate_collateral_increase(1000, 1000, 5000).is_err());
+        // Idempotent: same amount is OK (handles state sync issues)
+        assert!(validate_collateral_increase(1000, 1000, 5000).is_ok());
+
+        // Decrease is not allowed via CollateralIncrease
         assert!(validate_collateral_increase(1000, 500, 5000).is_err());
 
         // Exceeds reserves

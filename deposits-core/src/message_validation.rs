@@ -110,7 +110,7 @@ use bitcoin::secp256k1::SecretKey;
 use std::sync::Mutex;
 
 /// Context for handling protocol messages.
-/// Extends ValidationContext with message sending and event emission.
+/// Extends ValidationContext with message sending, signing, and persistence.
 pub trait HandlerContext: ValidationContext {
     /// Queue a message to be sent to a peer
     fn queue_message(&self, peer: PublicKey, msg: DepositsMessage) -> Result<(), HandlerError>;
@@ -126,6 +126,52 @@ pub trait HandlerContext: ValidationContext {
 
     /// Get the current block height
     fn current_block_height(&self) -> u32 { 0 }
+
+    /// Sign a ledger update as partner (porcupine dance).
+    /// Returns the 64-byte signature or None if signing is not available.
+    fn sign_ledger_update(
+        &self,
+        message_bytes: &[u8],
+        message_type: u16,
+        sequence: u64,
+        prev_hash: &[u8; 32],
+        new_hash: &[u8; 32],
+    ) -> Option<[u8; 64]> {
+        let _ = (message_bytes, message_type, sequence, prev_hash, new_hash);
+        None
+    }
+
+    /// Persist ledger state to storage.
+    /// Returns Ok(()) on success or error message on failure.
+    fn persist_ledger(&self, operator: &PublicKey, partner: &PublicKey) -> Result<(), String> {
+        let _ = (operator, partner);
+        Ok(()) // Default: no-op
+    }
+
+    /// Sync quorum membership after collateral partner change.
+    fn sync_quorum_member(&self, operator: PublicKey, partner: PublicKey, collateral_partner: PublicKey, add: bool) {
+        let _ = (operator, partner, collateral_partner, add);
+        // Default: no-op
+    }
+
+    /// Send a ledger update ACK to a peer.
+    /// This is called by core handlers after successfully processing a ledger update.
+    /// The LDK implementation constructs and sends the appropriate ACK message.
+    fn send_ledger_update_ack(
+        &self,
+        peer: PublicKey,
+        message_hash: [u8; 32],
+        message_type: u16,
+        success: bool,
+        error_message: Option<String>,
+        sequence: u64,
+        prev_hash: [u8; 32],
+        new_hash: [u8; 32],
+        partner_signature: Option<[u8; 64]>,
+    ) -> Result<(), HandlerError> {
+        let _ = (peer, message_hash, message_type, success, error_message, sequence, prev_hash, new_hash, partner_signature);
+        Ok(()) // Default: no-op
+    }
 }
 
 // ============================================================================

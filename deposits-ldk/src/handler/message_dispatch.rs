@@ -357,25 +357,10 @@ where
                 }
                 _ => {}
             }
-            // Handle LedgerUpdate messages for CollateralAddPartner, CollateralRemovePartner, CollateralAttestation
+            // Handle LedgerUpdate messages for CollateralAttestation (special handling)
+            // NOTE: CollateralAddPartner and CollateralRemovePartner are now handled by the generic handler
+            // which properly sends ACKs for both idempotent and non-idempotent cases
             DepositsMessage::LedgerUpdate(ref update_msg) => match &update_msg.operation {
-                LedgerOperation::CollateralAddPartner { collateral_partner, collateral_partner_signature } => {
-                    let msg = CollateralAddPartnerMsg {
-                        operator_id: update_msg.operator_pubkey,
-                        partner_id: update_msg.partner_pubkey,
-                        collateral_partner: *collateral_partner,
-                        collateral_partner_signature: *collateral_partner_signature,
-                    };
-                    return self.handle_collateral_add_partner(&msg, sender_node_id);
-                }
-                LedgerOperation::CollateralRemovePartner { collateral_partner, operator_signature } => {
-                    let msg = CollateralRemovePartnerMsg {
-                        partner_id: update_msg.partner_pubkey,
-                        collateral_partner: *collateral_partner,
-                        operator_signature: *operator_signature,
-                    };
-                    return self.handle_collateral_remove_partner(&msg, sender_node_id);
-                }
                 LedgerOperation::CollateralAttestation { collateral_operator, amount, block_height, signature, ledger_hash } => {
                     let msg = crate::wire::messages::CollateralAttestationMsg {
                         operator: *collateral_operator,
@@ -593,6 +578,48 @@ where
             return Ok(());
         }
 
+        // GENERIC HANDLER: Route LedgerUpdate messages to core handler when possible
+        // This uses the provider pattern so all logic (validate/append/sign/persist/ack) is in core
+        if let DepositsMessage::LedgerUpdate(ref update_msg) = message {
+            // Check if this operation can use the generic handler
+            // Skip: CollateralIncrease/Decrease (need attestation response), CosignInvoice (no ledger update)
+            // Skip: CollateralAttestation (handled earlier as special ACK), Tombstone (special handling)
+            let use_generic_handler = !matches!(&update_msg.operation,
+                LedgerOperation::CollateralIncrease { .. } |
+                LedgerOperation::CollateralDecrease { .. } |
+                LedgerOperation::CollateralAttestation { .. } |
+                LedgerOperation::Tombstone { .. }
+            );
+
+            if use_generic_handler {
+                // Convert to core message type - core will compute the hash internally
+                let core_msg: deposits_core::messages::LedgerUpdateMsg = update_msg.clone().into();
+
+                log_info!(
+                    self.logger,
+                    "🔄 PARTNER: Using generic core handler for {:?}",
+                    update_msg.operation
+                );
+
+                match deposits_core::handle_ledger_update(self, &core_msg) {
+                    Ok(_) => {
+                        // Core handler sent the ACK via provider
+                        self.generate_protocol_event(&message, sender_node_id);
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        log_error!(self.logger, "❌ PARTNER: Generic handler failed: {:?}", e);
+                        // Send NACK
+                        let _ = self.send_acknowledgment(&message, false, Some(format!("{:?}", e)), None, sender_node_id);
+                        return Err(LightningError {
+                            err: format!("Handler error: {:?}", e),
+                            action: ErrorAction::IgnoreError,
+                        });
+                    }
+                }
+            }
+        }
+
         let mut should_persist = false;
         let mut ledger_not_found = false;
         // Collect messages to send AFTER releasing locks to avoid deadlock
@@ -727,6 +754,18 @@ where
                                 },
                             ));
                             pending_messages.push((sender_node_id, attestation_msg.clone()));
+
+                            // CRITICAL: Update received_collateral_amount for the partner
+                            // When the partner processes CollateralIncrease, THEY are the collateral
+                            // that backs this ledger. In the simple 2-node case where the channel partner
+                            // IS the collateral partner, received_collateral_amount should equal
+                            // collateral_amount. Use SET (not ADD) because new_collateral_amount is absolute.
+                            ledger.state.received_collateral_amount = new_collateral_amount;
+                            log_info!(
+                                self.logger,
+                                "💰 PARTNER: Set received_collateral_amount to {} (own collateral commitment)",
+                                ledger.state.received_collateral_amount
+                            );
 
                             // NOTE: Partner does NOT broadcast CollateralAttestation to other partners.
                             // Only the OPERATOR forwards CollateralAttestation to channel ledgers

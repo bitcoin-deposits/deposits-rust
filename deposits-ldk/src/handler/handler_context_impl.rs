@@ -33,25 +33,59 @@ where
     L::Target: LdkLogger,
 {
     fn queue_message(&self, peer: PublicKey, msg: CoreDepositsMessage) -> Result<(), HandlerError> {
-        // Convert the core DepositsMessage (V2) to LDK DepositsMessage (V1)
-        // For now, we can only handle certain message types that have equivalents
-        // The V2 consolidated protocol is different from V1, so we need
-        // to handle this conversion carefully.
-        //
-        // For the current handlers (collateral consent, quorum, recovery),
-        // we use the ResponseData approach instead of directly queuing V2 messages.
-        //
-        // This method is provided for completeness but the current implementation
-        // returns an error for unsupported message types.
+        use super::messages::{DepositsMessage, LedgerUpdateResponseMsg};
+        use deposits_core::messages::{
+            DepositsMessage as CoreMsg,
+            LedgerUpdateResponseMsg as CoreLedgerUpdateResponseMsg,
+        };
 
-        log_warn!(
-            self.logger,
-            "queue_message called with V2 message type - conversion not yet implemented"
-        );
+        // Convert core DepositsMessage to local DepositsMessage
+        let local_msg = match msg {
+            CoreMsg::LedgerUpdateResponse(v2_resp) => {
+                // Convert V2 response to local format
+                let local_resp: LedgerUpdateResponseMsg = v2_resp.into();
+                DepositsMessage::LedgerUpdateResponse(local_resp)
+            }
+            CoreMsg::LedgerUpdate(v2_update) => {
+                use super::messages::LedgerUpdateMsg;
+                let local_update: LedgerUpdateMsg = v2_update.into();
+                DepositsMessage::LedgerUpdate(local_update)
+            }
+            // Other message types pass through (they use the same core types)
+            CoreMsg::Handshake(m) => {
+                use super::messages::HandshakeMsg;
+                DepositsMessage::Handshake(m.into())
+            }
+            CoreMsg::HandshakeResponse(m) => {
+                use super::messages::HandshakeResponseMsg;
+                DepositsMessage::HandshakeResponse(m.into())
+            }
+            CoreMsg::Sync(m) => {
+                use super::messages::SyncMsg;
+                DepositsMessage::Sync(m.into())
+            }
+            CoreMsg::SyncResponse(m) => {
+                use super::messages::SyncResponseMsg;
+                DepositsMessage::SyncResponse(m.into())
+            }
+            CoreMsg::Recovery(m) => DepositsMessage::Recovery(m),
+            CoreMsg::RecoveryResponse(m) => DepositsMessage::RecoveryResponse(m),
+            CoreMsg::Coordination(m) => DepositsMessage::Coordination(m),
+            CoreMsg::CoordinationResponse(m) => DepositsMessage::CoordinationResponse(m),
+            CoreMsg::Relay(m) => DepositsMessage::Relay(m),
+            CoreMsg::RelayResponse(m) => DepositsMessage::RelayResponse(m),
+        };
 
-        Err(HandlerError::Internal(
-            "V2 message queuing not yet implemented - use ResponseData instead".to_string()
-        ))
+        // Queue the message for sending
+        {
+            let mut outbound = self.outbound_messages.lock().unwrap();
+            outbound.entry(peer).or_default().push(local_msg.clone());
+        }
+
+        // Trigger immediate send
+        self.trigger_immediate_send(peer, local_msg.message_type());
+
+        Ok(())
     }
 
     fn emit_event(&self, event: ProtocolEvent) {
@@ -213,6 +247,100 @@ where
         // Get current block height from chain source if available
         // For now, return 0 - this would need to be wired to the chain monitor
         0
+    }
+
+    fn sign_ledger_update(
+        &self,
+        message_bytes: &[u8],
+        message_type: u16,
+        sequence: u64,
+        prev_hash: &[u8; 32],
+        new_hash: &[u8; 32],
+    ) -> Option<[u8; 64]> {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        match self.sign_as_partner(message_bytes, message_type, sequence, prev_hash, new_hash, timestamp) {
+            Ok(sig) => Some(sig),
+            Err(e) => {
+                log_warn!(self.logger, "Failed to sign ledger update: {:?}", e);
+                None
+            }
+        }
+    }
+
+    fn persist_ledger(&self, operator: &PublicKey, partner: &PublicKey) -> Result<(), String> {
+        let ledgers = self.ledgers.lock().unwrap();
+        if let Some(ledger_arc) = ledgers.get(&(*operator, *partner)) {
+            let ledger = ledger_arc.read().map_err(|e| format!("Lock error: {:?}", e))?;
+            self.persist_ledger_state(&*ledger)
+                .map_err(|e| format!("Persist error: {:?}", e))
+        } else {
+            Err(format!("Ledger not found for ({}, {})", operator, partner))
+        }
+    }
+
+    fn sync_quorum_member(&self, operator: PublicKey, partner: PublicKey, collateral_partner: PublicKey, add: bool) {
+        use deposits_core::quorum::LedgerId;
+
+        let ledger_id = LedgerId::new(operator, partner);
+        if add {
+            if let Err(e) = self.quorum_manager.add_member(&ledger_id, collateral_partner) {
+                log_info!(self.logger, "Quorum add_member (expected to fail for partners): {:?}", e);
+            }
+        } else {
+            if let Err(e) = self.quorum_manager.remove_member(&ledger_id, &collateral_partner) {
+                log_info!(self.logger, "Quorum remove_member (expected to fail for partners): {:?}", e);
+            }
+        }
+    }
+
+    fn send_ledger_update_ack(
+        &self,
+        peer: PublicKey,
+        message_hash: [u8; 32],
+        message_type: u16,
+        success: bool,
+        error_message: Option<String>,
+        sequence: u64,
+        prev_hash: [u8; 32],
+        new_hash: [u8; 32],
+        partner_signature: Option<[u8; 64]>,
+    ) -> Result<(), HandlerError> {
+        use super::messages::{DepositsMessage, LedgerUpdateResponseMsg};
+
+        let ack = DepositsMessage::LedgerUpdateResponse(LedgerUpdateResponseMsg {
+            message_hash,
+            success,
+            error_message,
+            partner_signature,
+            confirmed_sequence: sequence,
+            confirmed_hash: new_hash,
+            // V1 compat fields
+            acked_message_type: message_type,
+            cosignature: None,
+            update_signature: partner_signature,
+            update_sequence: Some(sequence),
+            update_prev_hash: Some(prev_hash),
+            update_curr_hash: Some(new_hash),
+        });
+
+        log_info!(
+            self.logger,
+            "📤 Sending ledger update ACK to {} (seq={}, success={}, hash={:02x?})",
+            peer, sequence, success, &new_hash[0..8]
+        );
+
+        // Queue and trigger immediate send
+        {
+            let mut outbound = self.outbound_messages.lock().unwrap();
+            outbound.entry(peer).or_default().push(ack.clone());
+        }
+        self.trigger_immediate_send(peer, ack.message_type());
+
+        Ok(())
     }
 }
 

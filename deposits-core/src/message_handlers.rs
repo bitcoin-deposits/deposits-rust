@@ -314,6 +314,229 @@ pub enum ResponseData {
 }
 
 // ============================================================================
+// Generic LedgerUpdate Handler
+// ============================================================================
+
+/// Handle ANY LedgerUpdate message generically.
+///
+/// This is the single entry point for all ledger-modifying operations.
+/// LDK dispatch code calls this instead of operation-specific handlers.
+///
+/// The handler:
+/// 1. Validates we are the partner
+/// 2. Validates the operation based on type
+/// 3. Appends operation to ledger
+/// 4. Signs the update (porcupine dance)
+/// 5. Persists the ledger
+/// 6. Sends ACK via provider
+///
+/// # Arguments
+/// * `ctx` - Handler context providing access to ledgers, signing, persistence
+/// * `msg` - The full LedgerUpdateMsg (core computes the hash from this)
+///
+/// # Returns
+/// * `Ok(HandlerResult::Ok)` - Operation succeeded, ACK sent via provider
+/// * `Ok(HandlerResult::Rejected(reason))` - Operation rejected, NACK sent via provider
+/// * `Err(HandlerError)` - Internal error
+pub fn handle_ledger_update<C: HandlerContext>(
+    ctx: &C,
+    msg: &crate::messages::LedgerUpdateMsg,
+) -> Result<HandlerResult, HandlerError> {
+    use crate::messages::{LedgerOperation, BinaryCodec, LEDGER_UPDATE};
+    use bitcoin::hashes::{Hash, sha256};
+
+    let operator = msg.operator_id;
+    let partner = msg.partner_id;
+    let operation = msg.operation.clone();
+
+    // Compute message hash from serialized message
+    let mut msg_bytes = Vec::new();
+    msg.write_to(&mut msg_bytes).map_err(|e| HandlerError::Internal(format!("Serialization error: {}", e)))?;
+    let message_hash: [u8; 32] = sha256::Hash::hash(&msg_bytes).to_byte_array();
+    let message_type = LEDGER_UPDATE;
+
+    let our_node_id = ctx.our_node_id();
+
+    // We must be the partner to process this message
+    if partner != our_node_id {
+        return Ok(HandlerResult::Rejected(format!(
+            "We ({}) are not the target partner ({})",
+            our_node_id, partner
+        )));
+    }
+
+    // Get the ledger
+    let ledger_arc = ctx.get_ledger(&operator, &partner)
+        .ok_or(HandlerError::LedgerNotFound { operator, partner })?;
+
+    // Validate and append based on operation type
+    let (prev_hash, new_hash, sequence, message_bytes, is_idempotent) = {
+        let mut ledger = ledger_arc.write().map_err(|_|
+            HandlerError::Internal("Failed to acquire ledger write lock".to_string())
+        )?;
+
+        // Check for idempotent operations first - these still need ACKs but don't modify state
+        let is_idempotent = match &operation {
+            LedgerOperation::CollateralAddPartner { collateral_partner, .. } => {
+                ledger.state.collateral_partners.contains(collateral_partner)
+            }
+            LedgerOperation::CollateralRemovePartner { collateral_partner, .. } => {
+                !ledger.state.collateral_partners.contains(collateral_partner)
+            }
+            LedgerOperation::DepositOpen { pubkey, .. } => {
+                ledger.state.deposits.contains_key(pubkey)
+            }
+            LedgerOperation::DepositClose { pubkey } => {
+                !ledger.state.deposits.contains_key(pubkey)
+            }
+            LedgerOperation::ReservesRemove => {
+                ledger.reserves_amount() == 0
+            }
+            _ => false,
+        };
+
+        if is_idempotent {
+            // For idempotent operations, return current ledger state for ACK
+            // Don't append to history, just send ACK with current state
+            let current_hash = ledger.tail_hash();
+            let current_seq = ledger.state.sequence;
+            (current_hash, current_hash, current_seq, Vec::new(), true)
+        } else {
+            // Operation-specific validation
+            match &operation {
+                // Deposit operations (non-idempotent cases already filtered above)
+                LedgerOperation::DepositOpen { pubkey, fees, .. } => {
+                    validate_deposit_add(&ledger, *pubkey, fees.as_ref())
+                        .map_err(|e| HandlerError::ValidationFailed(e))?;
+                }
+                LedgerOperation::DepositClose { pubkey } => {
+                    validate_deposit_close(&ledger, *pubkey)
+                        .map_err(|e| HandlerError::ValidationFailed(e))?;
+                }
+                LedgerOperation::DepositUpdate { pubkey, new_fees } => {
+                    validate_deposit_update(&ledger, *pubkey, new_fees)
+                        .map_err(|e| HandlerError::ValidationFailed(e))?;
+                }
+
+                // Payment operations
+                LedgerOperation::PaymentCredit { payment_hash, deposit_pubkey, amount, .. } => {
+                    validate_credit_payment(&ledger, *deposit_pubkey, *amount, payment_hash)
+                        .map_err(|e| HandlerError::ValidationFailed(e))?;
+                }
+                LedgerOperation::PaymentLock { pubkey, amount, payment_id, scriptpubkey_signature, .. } => {
+                    validate_payment_lock(&ledger, *pubkey, *amount, payment_id, scriptpubkey_signature)
+                        .map_err(|e| HandlerError::ValidationFailed(e))?;
+                }
+                LedgerOperation::PaymentFulfill { pubkey, amount, payment_id, scriptpubkey_signature, preimage, .. } => {
+                    validate_payment_fulfill(pubkey, *amount, payment_id, scriptpubkey_signature, preimage)
+                        .map_err(|e| HandlerError::ValidationFailed(e))?;
+                }
+                LedgerOperation::PaymentFail { amount, .. } => {
+                    validate_payment_fail(*amount)
+                        .map_err(|e| HandlerError::ValidationFailed(e))?;
+                }
+
+                // Reserves operations
+                LedgerOperation::ReservesAdd { amount, .. } => {
+                    validate_reserves_add(*amount)
+                        .map_err(|e| HandlerError::ValidationFailed(e))?;
+                }
+                LedgerOperation::ReservesIncrease { new_amount } => {
+                    validate_reserves_increase(ledger.reserves_amount(), *new_amount, None)
+                        .map_err(|e| HandlerError::ValidationFailed(e))?;
+                }
+                LedgerOperation::ReservesDecrease { new_amount } => {
+                    validate_reserves_decrease(&ledger, *new_amount)
+                        .map_err(|e| HandlerError::ValidationFailed(e))?;
+                }
+
+                // Fee collection
+                LedgerOperation::FeeCollect { pubkey, amount, block_height } => {
+                    validate_fee_collect(&ledger, *pubkey, *amount, *block_height)
+                        .map_err(|e| HandlerError::ValidationFailed(e))?;
+                }
+
+                // Ledger close
+                LedgerOperation::LedgerClose => {
+                    validate_ledger_close(&ledger)
+                        .map_err(|e| HandlerError::ValidationFailed(e))?;
+                }
+
+                // Operations that don't need pre-validation (validated during append)
+                // or have already been checked for idempotency above
+                LedgerOperation::CollateralAddPartner { .. } |
+                LedgerOperation::CollateralRemovePartner { .. } |
+                LedgerOperation::ReservesRemove |
+                LedgerOperation::ReservesUpdateSpendTo { .. } |
+                LedgerOperation::TransferLock { .. } |
+                LedgerOperation::TransferFail { .. } |
+                LedgerOperation::TransferFulfill { .. } |
+                LedgerOperation::CollateralIncrease { .. } |
+                LedgerOperation::CollateralDecrease { .. } |
+                LedgerOperation::CollateralAttestation { .. } |
+                LedgerOperation::Tombstone { .. } => {}
+            }
+
+            // Append operation to ledger
+            let (prev, new, seq) = ledger.append_operation(operation.clone(), LEDGER_UPDATE)
+                .map_err(|e| HandlerError::ValidationFailed(e.to_string()))?;
+
+            // Get message bytes for signing
+            let bytes = ledger.history.last()
+                .map(|u| u.message.clone())
+                .unwrap_or_default();
+
+            (prev, new, seq, bytes, false)
+        }
+    };
+
+    // Sign the update (only for non-idempotent operations)
+    let partner_sig = if !is_idempotent && !message_bytes.is_empty() {
+        ctx.sign_ledger_update(&message_bytes, LEDGER_UPDATE, sequence, &prev_hash, &new_hash)
+    } else {
+        None
+    };
+
+    // Update signature in ledger and persist (only for non-idempotent operations)
+    if !is_idempotent {
+        if let Some(sig) = partner_sig {
+            let mut ledger = ledger_arc.write().map_err(|_|
+                HandlerError::Internal("Failed to acquire ledger write lock".to_string())
+            )?;
+            ledger.sign_last_update(None, Some(sig));
+        }
+        let _ = ctx.persist_ledger(&operator, &partner);
+
+        // Sync quorum for collateral partner changes
+        match &operation {
+            LedgerOperation::CollateralAddPartner { collateral_partner, .. } => {
+                ctx.sync_quorum_member(operator, partner, *collateral_partner, true);
+            }
+            LedgerOperation::CollateralRemovePartner { collateral_partner, .. } => {
+                ctx.sync_quorum_member(operator, partner, *collateral_partner, false);
+            }
+            _ => {}
+        }
+    }
+
+    // Send ACK via provider - ALWAYS send, even for idempotent operations
+    // This ensures the operator doesn't timeout waiting for a response
+    ctx.send_ledger_update_ack(
+        operator,
+        message_hash,
+        message_type,
+        true,
+        None,
+        sequence,
+        prev_hash,
+        new_hash,
+        partner_sig,
+    )?;
+
+    Ok(HandlerResult::Ok)
+}
+
+// ============================================================================
 // Quorum Message Handlers
 // ============================================================================
 
@@ -502,7 +725,7 @@ pub fn handle_collateral_consent_response<C: HandlerContext>(
 /// Handle a CollateralAddPartner message.
 ///
 /// Received by partners when an operator adds a collateral partner to a ledger.
-/// The partner validates and appends to their copy of the ledger.
+/// This handler does the complete flow: validate, mutate, sign, persist, sync, send ACK.
 pub fn handle_collateral_add_partner<C: HandlerContext>(
     ctx: &C,
     msg: &CollateralAddPartnerMsg,
@@ -527,54 +750,63 @@ pub fn handle_collateral_add_partner<C: HandlerContext>(
             partner: msg.partner_id,
         })?;
 
-    // Check for idempotency first (read lock)
-    {
-        let ledger = ledger_arc.read().map_err(|_|
-            HandlerError::Internal("Failed to acquire ledger read lock".to_string())
-        )?;
+    let operation = LedgerOperation::CollateralAddPartner {
+        collateral_partner: msg.collateral_partner,
+        collateral_partner_signature: msg.collateral_partner_signature,
+    };
 
-        if ledger.state.collateral_partners.contains(&msg.collateral_partner) {
-            return Ok(HandlerResult::Response(ResponseData::CollateralPartnerAdded {
-                operator_id: msg.operator_id,
-                partner_id: msg.partner_id,
-                collateral_partner: msg.collateral_partner,
-                sequence: ledger.sequence(),
-                prev_hash: ledger.hash(),
-                new_hash: ledger.hash(),
-            }));
-        }
-    }
-
-    // Append to ledger (write lock)
-    let (prev_hash, new_hash, sequence) = {
+    // Check for idempotency and append (single write lock scope)
+    let (prev_hash, new_hash, sequence, message_bytes, is_idempotent) = {
         let mut ledger = ledger_arc.write().map_err(|_|
             HandlerError::Internal("Failed to acquire ledger write lock".to_string())
         )?;
 
-        let operation = LedgerOperation::CollateralAddPartner {
-            collateral_partner: msg.collateral_partner,
-            collateral_partner_signature: msg.collateral_partner_signature,
-        };
+        // Idempotency check
+        if ledger.state.collateral_partners.contains(&msg.collateral_partner) {
+            let seq = ledger.sequence();
+            let hash = ledger.hash();
+            (hash, hash, seq, Vec::new(), true)
+        } else {
+            // Append operation
+            let (prev, new, seq) = ledger.append_operation(operation.clone(), LEDGER_UPDATE)
+                .map_err(|e| HandlerError::ValidationFailed(e.to_string()))?;
 
-        ledger.append_operation(operation, LEDGER_UPDATE)
-            .map_err(|e| HandlerError::ValidationFailed(e.to_string()))?
+            // Get message bytes for signing
+            let bytes = ledger.history.last()
+                .map(|u| u.message.clone())
+                .unwrap_or_default();
+
+            (prev, new, seq, bytes, false)
+        }
     };
 
-    // Return success with data for ACK construction
-    Ok(HandlerResult::Response(ResponseData::CollateralPartnerAdded {
-        operator_id: msg.operator_id,
-        partner_id: msg.partner_id,
-        collateral_partner: msg.collateral_partner,
-        sequence,
-        prev_hash,
-        new_hash,
-    }))
+    // Sign the update (if not idempotent)
+    let partner_sig = if !is_idempotent && !message_bytes.is_empty() {
+        ctx.sign_ledger_update(&message_bytes, LEDGER_UPDATE, sequence, &prev_hash, &new_hash)
+    } else {
+        None
+    };
+
+    // Update signature in ledger and persist (if not idempotent)
+    if !is_idempotent {
+        if let Some(sig) = partner_sig {
+            let mut ledger = ledger_arc.write().map_err(|_|
+                HandlerError::Internal("Failed to acquire ledger write lock".to_string())
+            )?;
+            ledger.sign_last_update(None, Some(sig));
+        }
+        let _ = ctx.persist_ledger(&sender, &msg.partner_id);
+        ctx.sync_quorum_member(sender, msg.partner_id, msg.collateral_partner, true);
+    }
+
+    // NOTE: ACK is sent by LDK dispatch code which has access to the correct message hash
+    Ok(HandlerResult::Ok)
 }
 
 /// Handle a CollateralRemovePartner message.
 ///
 /// Received by partners when an operator removes a collateral partner from a ledger.
-/// The partner validates and appends to their copy of the ledger.
+/// This handler does the complete flow: validate, mutate, sign, persist, sync, send ACK.
 pub fn handle_collateral_remove_partner<C: HandlerContext>(
     ctx: &C,
     msg: &CollateralRemovePartnerMsg,
@@ -599,47 +831,57 @@ pub fn handle_collateral_remove_partner<C: HandlerContext>(
             partner: msg.partner_id,
         })?;
 
-    // Check collateral partner exists (read lock)
-    {
-        let ledger = ledger_arc.read().map_err(|_|
-            HandlerError::Internal("Failed to acquire ledger read lock".to_string())
-        )?;
+    let operation = LedgerOperation::CollateralRemovePartner {
+        collateral_partner: msg.collateral_partner,
+        operator_signature: msg.operator_signature,
+    };
 
-        if !ledger.state.collateral_partners.contains(&msg.collateral_partner) {
-            // Idempotent: if already removed, return success
-            return Ok(HandlerResult::Response(ResponseData::CollateralPartnerRemoved {
-                partner_id: msg.partner_id,
-                collateral_partner: msg.collateral_partner,
-                sequence: ledger.sequence(),
-                prev_hash: ledger.hash(),
-                new_hash: ledger.hash(),
-            }));
-        }
-    }
-
-    // Append to ledger (write lock)
-    let (prev_hash, new_hash, sequence) = {
+    // Check for idempotency and append (single write lock scope)
+    let (prev_hash, new_hash, sequence, message_bytes, is_idempotent) = {
         let mut ledger = ledger_arc.write().map_err(|_|
             HandlerError::Internal("Failed to acquire ledger write lock".to_string())
         )?;
 
-        let operation = LedgerOperation::CollateralRemovePartner {
-            collateral_partner: msg.collateral_partner,
-            operator_signature: msg.operator_signature,
-        };
+        // Idempotency check - if already removed, return success
+        if !ledger.state.collateral_partners.contains(&msg.collateral_partner) {
+            let seq = ledger.sequence();
+            let hash = ledger.hash();
+            (hash, hash, seq, Vec::new(), true)
+        } else {
+            // Append operation
+            let (prev, new, seq) = ledger.append_operation(operation.clone(), LEDGER_UPDATE)
+                .map_err(|e| HandlerError::ValidationFailed(e.to_string()))?;
 
-        ledger.append_operation(operation, LEDGER_UPDATE)
-            .map_err(|e| HandlerError::ValidationFailed(e.to_string()))?
+            // Get message bytes for signing
+            let bytes = ledger.history.last()
+                .map(|u| u.message.clone())
+                .unwrap_or_default();
+
+            (prev, new, seq, bytes, false)
+        }
     };
 
-    // Return success with data for ACK construction
-    Ok(HandlerResult::Response(ResponseData::CollateralPartnerRemoved {
-        partner_id: msg.partner_id,
-        collateral_partner: msg.collateral_partner,
-        sequence,
-        prev_hash,
-        new_hash,
-    }))
+    // Sign the update (if not idempotent)
+    let partner_sig = if !is_idempotent && !message_bytes.is_empty() {
+        ctx.sign_ledger_update(&message_bytes, LEDGER_UPDATE, sequence, &prev_hash, &new_hash)
+    } else {
+        None
+    };
+
+    // Update signature in ledger and persist (if not idempotent)
+    if !is_idempotent {
+        if let Some(sig) = partner_sig {
+            let mut ledger = ledger_arc.write().map_err(|_|
+                HandlerError::Internal("Failed to acquire ledger write lock".to_string())
+            )?;
+            ledger.sign_last_update(None, Some(sig));
+        }
+        let _ = ctx.persist_ledger(&sender, &msg.partner_id);
+        ctx.sync_quorum_member(sender, msg.partner_id, msg.collateral_partner, false);
+    }
+
+    // NOTE: ACK is sent by LDK dispatch code which has access to the correct message hash
+    Ok(HandlerResult::Ok)
 }
 
 /// Handle a CollateralAttestation message.
@@ -1039,6 +1281,8 @@ pub fn handle_deposit_open<C: HandlerContext>(
     msg: &DepositOpenMsg,
     sender: PublicKey,
 ) -> Result<HandlerResult, HandlerError> {
+    use crate::messages::{LedgerOperation, LEDGER_UPDATE};
+
     let our_node_id = ctx.our_node_id();
 
     // We must be the partner to process this message
@@ -1056,66 +1300,88 @@ pub fn handle_deposit_open<C: HandlerContext>(
             partner: msg.partner_id,
         })?;
 
-    // Validate the deposit open
-    let (sequence, prev_hash, new_hash) = {
-        let ledger = ledger_arc.read().map_err(|_|
-            HandlerError::Internal("Failed to acquire ledger read lock".to_string())
-        )?;
-
-        // Check for idempotency - if deposit already exists, return success
-        if ledger.state.deposits.contains_key(&msg.pubkey) {
-            return Ok(HandlerResult::Response(ResponseData::DepositOpenValidated {
-                operator: sender,
-                partner: msg.partner_id,
-                deposit_pubkey: msg.pubkey,
-                sequence: ledger.sequence(),
-                prev_hash: ledger.hash(),
-                new_hash: ledger.hash(),
-            }));
-        }
-
-        // Validate the deposit add operation
-        validate_deposit_add(
-            &ledger,
-            msg.pubkey,
-            msg.fees.as_ref(),
-        ).map_err(|e| HandlerError::ValidationFailed(e))?;
-
-        // Return current state for response
-        // Note: Actual ledger mutation happens in LDK layer
-        (ledger.sequence(), ledger.hash(), ledger.hash())
+    let operation = LedgerOperation::DepositOpen {
+        pubkey: msg.pubkey,
+        fees: msg.fees.clone(),
+        payment_hash: msg.payment_hash,
+        invoice: msg.invoice.clone(),
+        cosigner_guarantee_signature: msg.cosigner_guarantee_signature,
     };
 
-    // Return validated data for LDK layer to record to ledger and sign
-    Ok(HandlerResult::Response(ResponseData::DepositOpenValidated {
+    // Check for idempotency and append (single write lock scope)
+    let (prev_hash, new_hash, sequence, message_bytes, is_idempotent) = {
+        let mut ledger = ledger_arc.write().map_err(|_|
+            HandlerError::Internal("Failed to acquire ledger write lock".to_string())
+        )?;
+
+        // Idempotency check
+        if ledger.state.deposits.contains_key(&msg.pubkey) {
+            let seq = ledger.sequence();
+            let hash = ledger.hash();
+            (hash, hash, seq, Vec::new(), true)
+        } else {
+            // Validate first
+            validate_deposit_add(
+                &ledger,
+                msg.pubkey,
+                msg.fees.as_ref(),
+            ).map_err(|e| HandlerError::ValidationFailed(e))?;
+
+            // Append operation
+            let (prev, new, seq) = ledger.append_operation(operation.clone(), LEDGER_UPDATE)
+                .map_err(|e| HandlerError::ValidationFailed(e.to_string()))?;
+
+            // Get message bytes for signing
+            let bytes = ledger.history.last()
+                .map(|u| u.message.clone())
+                .unwrap_or_default();
+
+            (prev, new, seq, bytes, false)
+        }
+    };
+
+    // Sign the update (if not idempotent)
+    let partner_sig = if !is_idempotent && !message_bytes.is_empty() {
+        ctx.sign_ledger_update(&message_bytes, LEDGER_UPDATE, sequence, &prev_hash, &new_hash)
+    } else {
+        None
+    };
+
+    // Update signature in ledger and persist (if not idempotent)
+    if !is_idempotent {
+        if let Some(sig) = partner_sig {
+            let mut ledger = ledger_arc.write().map_err(|_|
+                HandlerError::Internal("Failed to acquire ledger write lock".to_string())
+            )?;
+            ledger.sign_last_update(None, Some(sig));
+        }
+        let _ = ctx.persist_ledger(&sender, &msg.partner_id);
+    }
+
+    // NOTE: ACK is sent by LDK dispatch code which has access to the correct message hash
+
+    // Emit event
+    ctx.emit_event(crate::traits::ProtocolEvent::DepositOpened {
         operator: sender,
         partner: msg.partner_id,
         deposit_pubkey: msg.pubkey,
-        sequence,
-        prev_hash,
-        new_hash,
-    }))
+        initial_balance: 0,
+    });
+
+    Ok(HandlerResult::Ok)
 }
 
 /// Handle a DepositClose message.
 ///
 /// Received by partners when an operator closes a deposit.
-/// The partner validates the deposit can be closed and signs the ledger update.
-///
-/// # Arguments
-/// * `ctx` - Handler context providing access to ledgers and messaging
-/// * `msg` - The deposit close message
-/// * `sender` - Public key of the message sender (should be the operator)
-///
-/// # Returns
-/// * `HandlerResult::Response(DepositCloseValidated)` - Close is valid, partner should sign and ACK
-/// * `HandlerResult::Rejected(reason)` - Close is invalid with explanation
-/// * `HandlerError` - Internal error during processing
+/// This handler does the complete flow: validate, mutate, sign, persist, send ACK.
 pub fn handle_deposit_close<C: HandlerContext>(
     ctx: &C,
     msg: &DepositCloseMsg,
     sender: PublicKey,
 ) -> Result<HandlerResult, HandlerError> {
+    use crate::messages::{LedgerOperation, LEDGER_UPDATE};
+
     let our_node_id = ctx.our_node_id();
 
     // We must be the partner to process this message
@@ -1133,64 +1399,90 @@ pub fn handle_deposit_close<C: HandlerContext>(
             partner: msg.partner_id,
         })?;
 
-    // Validate the deposit close
-    let (sequence, prev_hash, new_hash) = {
-        let ledger = ledger_arc.read().map_err(|_|
-            HandlerError::Internal("Failed to acquire ledger read lock".to_string())
-        )?;
-
-        // Check for idempotency - if deposit doesn't exist, it may have already been closed
-        if !ledger.state.deposits.contains_key(&msg.pubkey) {
-            return Ok(HandlerResult::Response(ResponseData::DepositCloseValidated {
-                operator: sender,
-                partner: msg.partner_id,
-                deposit_pubkey: msg.pubkey,
-                sequence: ledger.sequence(),
-                prev_hash: ledger.hash(),
-                new_hash: ledger.hash(),
-            }));
-        }
-
-        // Validate the deposit close operation
-        validate_deposit_close(
-            &ledger,
-            msg.pubkey,
-        ).map_err(|e| HandlerError::ValidationFailed(e))?;
-
-        // Return current state for response
-        (ledger.sequence(), ledger.hash(), ledger.hash())
+    let operation = LedgerOperation::DepositClose {
+        pubkey: msg.pubkey,
     };
 
-    // Return validated data for LDK layer to record to ledger and sign
-    Ok(HandlerResult::Response(ResponseData::DepositCloseValidated {
-        operator: sender,
-        partner: msg.partner_id,
-        deposit_pubkey: msg.pubkey,
-        sequence,
-        prev_hash,
-        new_hash,
-    }))
+    // Check for idempotency and append (single write lock scope)
+    let (prev_hash, new_hash, sequence, message_bytes, is_idempotent, final_balance) = {
+        let mut ledger = ledger_arc.write().map_err(|_|
+            HandlerError::Internal("Failed to acquire ledger write lock".to_string())
+        )?;
+
+        // Idempotency check - if deposit doesn't exist, already closed
+        if !ledger.state.deposits.contains_key(&msg.pubkey) {
+            let seq = ledger.sequence();
+            let hash = ledger.hash();
+            (hash, hash, seq, Vec::new(), true, 0u64)
+        } else {
+            // Get final balance before close
+            let final_balance = ledger.state.deposits.get(&msg.pubkey)
+                .map(|d| d.balance)
+                .unwrap_or(0);
+
+            // Validate first
+            validate_deposit_close(
+                &ledger,
+                msg.pubkey,
+            ).map_err(|e| HandlerError::ValidationFailed(e))?;
+
+            // Append operation
+            let (prev, new, seq) = ledger.append_operation(operation.clone(), LEDGER_UPDATE)
+                .map_err(|e| HandlerError::ValidationFailed(e.to_string()))?;
+
+            // Get message bytes for signing
+            let bytes = ledger.history.last()
+                .map(|u| u.message.clone())
+                .unwrap_or_default();
+
+            (prev, new, seq, bytes, false, final_balance)
+        }
+    };
+
+    // Sign the update (if not idempotent)
+    let partner_sig = if !is_idempotent && !message_bytes.is_empty() {
+        ctx.sign_ledger_update(&message_bytes, LEDGER_UPDATE, sequence, &prev_hash, &new_hash)
+    } else {
+        None
+    };
+
+    // Update signature in ledger and persist (if not idempotent)
+    if !is_idempotent {
+        if let Some(sig) = partner_sig {
+            let mut ledger = ledger_arc.write().map_err(|_|
+                HandlerError::Internal("Failed to acquire ledger write lock".to_string())
+            )?;
+            ledger.sign_last_update(None, Some(sig));
+        }
+        let _ = ctx.persist_ledger(&sender, &msg.partner_id);
+    }
+
+    // NOTE: ACK is sent by LDK dispatch code which has access to the correct message hash
+
+    // Emit event
+    if !is_idempotent {
+        ctx.emit_event(crate::traits::ProtocolEvent::DepositClosed {
+            operator: sender,
+            partner: msg.partner_id,
+            deposit_pubkey: msg.pubkey,
+            final_balance,
+        });
+    }
+
+    Ok(HandlerResult::Ok)
 }
 
 /// Handle a DepositUpdate message.
 ///
 /// Received by partners when an operator updates a deposit's fee structure.
-/// The partner validates the update and signs the ledger update.
-///
-/// # Arguments
-/// * `ctx` - Handler context providing access to ledgers and messaging
-/// * `msg` - The deposit update message
-/// * `sender` - Public key of the message sender (should be the operator)
-///
-/// # Returns
-/// * `HandlerResult::Response(DepositUpdateValidated)` - Update is valid, partner should sign and ACK
-/// * `HandlerResult::Rejected(reason)` - Update is invalid with explanation
-/// * `HandlerError` - Internal error during processing
+/// This handler does the complete flow: validate, mutate, sign, persist, send ACK.
 pub fn handle_deposit_update<C: HandlerContext>(
     ctx: &C,
     msg: &DepositUpdateMsg,
     sender: PublicKey,
 ) -> Result<HandlerResult, HandlerError> {
+    use crate::messages::{LedgerOperation, LEDGER_UPDATE};
+
     let our_node_id = ctx.our_node_id();
 
     // We must be the partner to process this message
@@ -1208,32 +1500,55 @@ pub fn handle_deposit_update<C: HandlerContext>(
             partner: msg.partner_id,
         })?;
 
-    // Validate the deposit update
-    let (sequence, prev_hash, new_hash) = {
-        let ledger = ledger_arc.read().map_err(|_|
-            HandlerError::Internal("Failed to acquire ledger read lock".to_string())
+    let operation = LedgerOperation::DepositUpdate {
+        pubkey: msg.pubkey,
+        new_fees: msg.new_fees.clone(),
+    };
+
+    // Validate and append (single write lock scope)
+    let (prev_hash, new_hash, sequence, message_bytes) = {
+        let mut ledger = ledger_arc.write().map_err(|_|
+            HandlerError::Internal("Failed to acquire ledger write lock".to_string())
         )?;
 
-        // Validate the deposit update operation
+        // Validate first
         validate_deposit_update(
             &ledger,
             msg.pubkey,
             &msg.new_fees,
         ).map_err(|e| HandlerError::ValidationFailed(e))?;
 
-        // Return current state for response
-        (ledger.sequence(), ledger.hash(), ledger.hash())
+        // Append operation
+        let (prev, new, seq) = ledger.append_operation(operation.clone(), LEDGER_UPDATE)
+            .map_err(|e| HandlerError::ValidationFailed(e.to_string()))?;
+
+        // Get message bytes for signing
+        let bytes = ledger.history.last()
+            .map(|u| u.message.clone())
+            .unwrap_or_default();
+
+        (prev, new, seq, bytes)
     };
 
-    // Return validated data for LDK layer to record to ledger and sign
-    Ok(HandlerResult::Response(ResponseData::DepositUpdateValidated {
-        operator: sender,
-        partner: msg.partner_id,
-        deposit_pubkey: msg.pubkey,
-        sequence,
-        prev_hash,
-        new_hash,
-    }))
+    // Sign the update
+    let partner_sig = if !message_bytes.is_empty() {
+        ctx.sign_ledger_update(&message_bytes, LEDGER_UPDATE, sequence, &prev_hash, &new_hash)
+    } else {
+        None
+    };
+
+    // Update signature in ledger and persist
+    if let Some(sig) = partner_sig {
+        let mut ledger = ledger_arc.write().map_err(|_|
+            HandlerError::Internal("Failed to acquire ledger write lock".to_string())
+        )?;
+        ledger.sign_last_update(None, Some(sig));
+    }
+    let _ = ctx.persist_ledger(&sender, &msg.partner_id);
+
+    // NOTE: ACK is sent by LDK dispatch code which has access to the correct message hash
+
+    Ok(HandlerResult::Ok)
 }
 
 // ============================================================================
@@ -2198,12 +2513,9 @@ mod tests {
             collateral_partner_signature: [0u8; 64],
         };
 
-        // Already exists - should return success (idempotent)
+        // Already exists - should return Ok (idempotent success)
         let result = handle_collateral_add_partner(&ctx, &msg, operator);
-        match result {
-            Ok(HandlerResult::Response(ResponseData::CollateralPartnerAdded { .. })) => {}
-            other => panic!("Expected Response(CollateralPartnerAdded), got {:?}", other),
-        }
+        assert!(matches!(result, Ok(HandlerResult::Ok)));
     }
 
     #[test]
@@ -2244,9 +2556,9 @@ mod tests {
             operator_signature: [0u8; 64],
         };
 
-        // Collateral partner doesn't exist - should be rejected
+        // Collateral partner doesn't exist - should return Ok (idempotent, already removed)
         let result = handle_collateral_remove_partner(&ctx, &msg, operator);
-        assert!(matches!(result, Ok(HandlerResult::Rejected(_))));
+        assert!(matches!(result, Ok(HandlerResult::Ok)));
     }
 
     #[test]
@@ -3038,14 +3350,9 @@ mod tests {
             cosigner_guarantee_signature: None,
         };
 
-        // Valid deposit open - should return DepositOpenValidated
+        // Valid deposit open - should return Ok (handler does complete flow)
         let result = handle_deposit_open(&ctx, &msg, operator);
-        match result {
-            Ok(HandlerResult::Response(ResponseData::DepositOpenValidated { deposit_pubkey: pk, .. })) => {
-                assert_eq!(pk, deposit_pubkey);
-            }
-            other => panic!("Expected Response(DepositOpenValidated), got {:?}", other),
-        }
+        assert!(matches!(result, Ok(HandlerResult::Ok)));
     }
 
     #[test]
@@ -3073,12 +3380,9 @@ mod tests {
             cosigner_guarantee_signature: None,
         };
 
-        // Already exists - should return success (idempotent)
+        // Already exists - should return Ok (idempotent success)
         let result = handle_deposit_open(&ctx, &msg, operator);
-        match result {
-            Ok(HandlerResult::Response(ResponseData::DepositOpenValidated { .. })) => {}
-            other => panic!("Expected Response(DepositOpenValidated), got {:?}", other),
-        }
+        assert!(matches!(result, Ok(HandlerResult::Ok)));
     }
 
     #[test]
@@ -3112,7 +3416,7 @@ mod tests {
 
         // Valid deposit open with fees - should succeed
         let result = handle_deposit_open(&ctx, &msg, operator);
-        assert!(matches!(result, Ok(HandlerResult::Response(ResponseData::DepositOpenValidated { .. }))));
+        assert!(matches!(result, Ok(HandlerResult::Ok)));
     }
 
     #[test]
@@ -3212,14 +3516,9 @@ mod tests {
             pubkey: deposit_pubkey,
         };
 
-        // Valid deposit close - should return DepositCloseValidated
+        // Valid deposit close - should return Ok (handler does complete flow)
         let result = handle_deposit_close(&ctx, &msg, operator);
-        match result {
-            Ok(HandlerResult::Response(ResponseData::DepositCloseValidated { deposit_pubkey: pk, .. })) => {
-                assert_eq!(pk, deposit_pubkey);
-            }
-            other => panic!("Expected Response(DepositCloseValidated), got {:?}", other),
-        }
+        assert!(matches!(result, Ok(HandlerResult::Ok)));
     }
 
     #[test]
@@ -3293,12 +3592,9 @@ mod tests {
             pubkey: deposit_pubkey,
         };
 
-        // Deposit doesn't exist - should return success (idempotent)
+        // Deposit doesn't exist - should return Ok (idempotent success)
         let result = handle_deposit_close(&ctx, &msg, operator);
-        match result {
-            Ok(HandlerResult::Response(ResponseData::DepositCloseValidated { .. })) => {}
-            other => panic!("Expected Response(DepositCloseValidated), got {:?}", other),
-        }
+        assert!(matches!(result, Ok(HandlerResult::Ok)));
     }
 
     // ========================================================================
@@ -3401,14 +3697,9 @@ mod tests {
             new_fees,
         };
 
-        // Valid deposit update - should return DepositUpdateValidated
+        // Valid deposit update - should return Ok (handler does complete flow)
         let result = handle_deposit_update(&ctx, &msg, operator);
-        match result {
-            Ok(HandlerResult::Response(ResponseData::DepositUpdateValidated { deposit_pubkey: pk, .. })) => {
-                assert_eq!(pk, deposit_pubkey);
-            }
-            other => panic!("Expected Response(DepositUpdateValidated), got {:?}", other),
-        }
+        assert!(matches!(result, Ok(HandlerResult::Ok)));
     }
 
     #[test]

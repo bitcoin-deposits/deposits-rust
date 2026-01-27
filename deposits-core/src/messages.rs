@@ -1458,6 +1458,32 @@ impl BinaryCodec for LedgerOperation {
     }
 }
 
+// LedgerUpdateMsg codec (for computing message hash in handlers)
+impl BinaryCodec for LedgerUpdateMsg {
+    fn write_to<W: Write>(&self, w: &mut W) -> Result<(), CodecError> {
+        write_pubkey(w, &self.operator_id)?;
+        write_pubkey(w, &self.partner_id)?;
+        self.operation.write_to(w)?;
+        write_u64(w, self.sequence_number)?;
+        write_32(w, &self.previous_hash)?;
+        write_32(w, &self.current_hash)?;
+        write_64(w, &self.operator_signature)?;
+        Ok(())
+    }
+
+    fn read_from<R: Read>(r: &mut R) -> Result<Self, CodecError> {
+        Ok(Self {
+            operator_id: read_pubkey(r)?,
+            partner_id: read_pubkey(r)?,
+            operation: LedgerOperation::read_from(r)?,
+            sequence_number: read_u64(r)?,
+            previous_hash: read_32(r)?,
+            current_hash: read_32(r)?,
+            operator_signature: read_64(r)?,
+        })
+    }
+}
+
 // SignedLedgerUpdate codec
 impl BinaryCodec for SignedLedgerUpdate {
     fn write_to<W: Write>(&self, w: &mut W) -> Result<(), CodecError> {
