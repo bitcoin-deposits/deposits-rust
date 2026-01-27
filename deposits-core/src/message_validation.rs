@@ -105,7 +105,9 @@ pub trait ValidationContext: Send + Sync {
 
 use crate::error::HandlerError;
 use crate::messages::DepositsMessage;
+use crate::quorum::QuorumManager;
 use crate::recovery::RecoveryManager;
+use crate::recovery_claim::ClaimManager;
 use bitcoin::secp256k1::SecretKey;
 use std::sync::Mutex;
 
@@ -120,6 +122,12 @@ pub trait HandlerContext: ValidationContext {
 
     /// Get recovery manager access
     fn recovery_manager(&self) -> Option<Arc<Mutex<RecoveryManager>>>;
+
+    /// Get claim manager access for recovery claims
+    fn claim_manager(&self) -> Option<Arc<Mutex<ClaimManager>>> { None }
+
+    /// Get quorum manager access (returns reference, not Arc since it's not behind Mutex)
+    fn quorum_manager(&self) -> Option<&QuorumManager> { None }
 
     /// Get our secret key for signing (optional, for handlers that need it)
     fn our_secret_key(&self) -> Option<SecretKey> { None }

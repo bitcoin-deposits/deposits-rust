@@ -77,9 +77,16 @@ pub enum ResponseData {
         consent_granted: bool,
         // Signature is populated by the LDK layer which has access to keys
     },
-    /// Quorum join response
+    /// Quorum join response (simple)
     QuorumJoin {
         accepted: bool,
+        rejection_reason: Option<String>,
+    },
+    /// Quorum join response (full)
+    QuorumJoinResponse {
+        accepted: bool,
+        members: Vec<PublicKey>,
+        threshold: u16,
         rejection_reason: Option<String>,
     },
     /// Collateral partner added - response with signature data for ACK
@@ -545,10 +552,13 @@ pub fn handle_ledger_update<C: HandlerContext>(
 /// Core logic for processing join requests, independent of Lightning implementation.
 /// Returns a HandlerResult indicating whether the request should be accepted.
 pub fn handle_quorum_join_request<C: HandlerContext>(
-    _ctx: &C,
+    ctx: &C,
     msg: &QuorumJoinRequestMsgWire,
     sender: PublicKey,
 ) -> Result<HandlerResult, HandlerError> {
+    use crate::types::QuorumJoinRequestMsg as CoreQuorumMsg;
+    use crate::messages::{DepositsMessage, CoordinationResponseMsg};
+
     // Validate: sender should match the requester
     if sender != msg.requester_pubkey {
         return Ok(HandlerResult::Rejected(
@@ -556,13 +566,54 @@ pub fn handle_quorum_join_request<C: HandlerContext>(
         ));
     }
 
-    // For now, return Ok - the actual quorum management happens in the LDK layer
-    // because it requires access to the QuorumManager which is LDK-specific state
-    //
-    // In a full implementation, the HandlerContext would provide access to quorum
-    // management operations.
+    // Get quorum manager
+    let quorum_manager = ctx.quorum_manager()
+        .ok_or(HandlerError::InvalidState("No quorum manager available".to_string()))?;
 
-    Ok(HandlerResult::Ok)
+    // Convert to core type and delegate to QuorumManager
+    let core_msg = CoreQuorumMsg {
+        requester_pubkey: msg.requester_pubkey,
+        operator_id: msg.operator_id,
+        partner_id: msg.partner_id,
+        protocol_version: msg.protocol_version,
+        timestamp: msg.timestamp,
+        signature: msg.signature,
+    };
+
+    match quorum_manager.handle_join_request(&core_msg) {
+        Ok(response) => {
+            // Queue response message
+            let response_msg = DepositsMessage::CoordinationResponse(CoordinationResponseMsg::QuorumJoinResponse {
+                request_hash: [0u8; 32], // Wire layer will fill this
+                accepted: response.accepted,
+                members: response.members.clone(),
+                threshold: response.threshold as u16,
+                last_sequence: response.last_sequence,
+                current_state_hash: response.current_state_hash,
+                rejection_reason: response.rejection_reason.clone(),
+            });
+            ctx.queue_message(sender, response_msg)?;
+
+            // Emit event if accepted
+            if response.accepted {
+                ctx.emit_event(ProtocolEvent::QuorumMemberJoined {
+                    operator: msg.operator_id,
+                    partner: msg.partner_id,
+                    member: msg.requester_pubkey,
+                });
+            }
+
+            Ok(HandlerResult::Response(ResponseData::QuorumJoinResponse {
+                accepted: response.accepted,
+                members: response.members,
+                threshold: response.threshold,
+                rejection_reason: response.rejection_reason,
+            }))
+        }
+        Err(e) => {
+            Ok(HandlerResult::Rejected(format!("Quorum join failed: {:?}", e)))
+        }
+    }
 }
 
 /// Handle a QuorumVoteRequest message.

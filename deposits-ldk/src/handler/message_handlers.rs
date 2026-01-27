@@ -48,73 +48,28 @@ where
         log_info!(
             self.logger,
             "📋 QUORUM: Received join request from {} for ledger ({}, {})",
-            msg.requester_pubkey,
-            msg.operator_id,
-            msg.partner_id
+            msg.requester_pubkey, msg.operator_id, msg.partner_id
         );
 
-        // Convert wire message to core type and delegate to QuorumManager
-        let core_msg = deposits_core::types::QuorumJoinRequestMsg {
-            requester_pubkey: msg.requester_pubkey,
-            operator_id: msg.operator_id,
-            partner_id: msg.partner_id,
-            protocol_version: msg.protocol_version,
-            timestamp: msg.timestamp,
-            signature: msg.signature,
-        };
-        match self.quorum_manager.handle_join_request(&core_msg) {
-            Ok(response) => {
-                let accepted = response.accepted;
-
+        // Delegate to core handler
+        match core_handlers::handle_quorum_join_request(self, msg, sender_node_id) {
+            Ok(deposits_core::HandlerResult::Response(
+                deposits_core::ResponseData::QuorumJoinResponse { accepted, members, .. }
+            )) => {
                 if accepted {
-                    log_info!(
-                        self.logger,
-                        "📋 QUORUM: Accepted {} into quorum (now {} members)",
-                        msg.requester_pubkey,
-                        response.members.len()
-                    );
-                } else {
-                    log_info!(
-                        self.logger,
-                        "📋 QUORUM: Rejected join request from {}: {:?}",
-                        msg.requester_pubkey,
-                        response.rejection_reason
-                    );
+                    log_info!(self.logger, "📋 QUORUM: Accepted {} (now {} members)",
+                        msg.requester_pubkey, members.len());
+                    // Send state sync to new member
+                    self.send_state_sync_to_member(msg.requester_pubkey, msg.operator_id, msg.partner_id);
                 }
-
-                // Convert core response to V2 DepositsMessage format
-                let response_msg = DepositsMessage::CoordinationResponse(CoordinationResponseMsg::QuorumJoinResponse {
-                    request_hash: [0u8; 32], // Will be filled by wire layer
-                    accepted: response.accepted,
-                    members: response.members.clone(),
-                    threshold: response.threshold as u16,
-                    last_sequence: response.last_sequence,
-                    current_state_hash: response.current_state_hash,
-                    rejection_reason: response.rejection_reason.clone(),
-                });
-                self.outbound_messages
-                    .lock()
-                    .unwrap()
-                    .entry(sender_node_id)
-                    .or_insert_with(Vec::new)
-                    .push(response_msg);
-
-                // If accepted, send state sync to new member
-                if accepted {
-                    self.send_state_sync_to_member(
-                        msg.requester_pubkey,
-                        msg.operator_id,
-                        msg.partner_id,
-                    );
-                }
+            }
+            Ok(deposits_core::HandlerResult::Rejected(reason)) => {
+                log_info!(self.logger, "📋 QUORUM: Rejected: {}", reason);
             }
             Err(e) => {
-                log_error!(
-                    self.logger,
-                    "📋 QUORUM: Failed to handle join request: {:?}",
-                    e
-                );
+                log_error!(self.logger, "📋 QUORUM: Handler failed: {:?}", e);
             }
+            _ => {}
         }
 
         Ok(())
@@ -620,201 +575,165 @@ where
     }
 
     /// Handle RecoveryClaimRequest message
+    ///
+    /// Core handler validates the request and emits events.
+    /// LDK layer handles signing and queueing the response.
     pub(super) fn handle_recovery_claim_request(
         &self,
         msg: &RecoveryClaimRequestMsg,
-        _sender: PublicKey,
+        sender: PublicKey,
     ) -> Result<(), LightningError> {
         use bitcoin::secp256k1::{Secp256k1, Message, Keypair};
-        use deposits_core::log_warn;
 
         log_info!(
             self.logger,
             "🔄 RECOVERY: Received claim request from {} for operator {} tier {}",
-            msg.claimant,
-            msg.operator,
-            msg.tier_index
+            msg.claimant, msg.operator, msg.tier_index
         );
 
-        // Verify the operator is in non-compliant recovery phase
-        let ledger_id = (msg.operator, msg.partner);
-        let is_non_compliant = {
-            let recovery_manager = self.recovery_manager.lock().unwrap();
-            match recovery_manager.get_recovery(&ledger_id) {
-                Some(state) => {
-                    matches!(state.phase, deposits_core::recovery::RecoveryPhase::NonCompliantRecovery { .. })
-                }
-                None => {
-                    log_warn!(
-                        self.logger,
-                        "🔄 RECOVERY: No recovery state found for operator {} partner {} - proceeding anyway",
-                        msg.operator, msg.partner
-                    );
-                    true
-                }
-            }
-        };
+        // Delegate to core handler for validation
+        match core_handlers::handle_recovery_claim_request(self, msg, sender) {
+            Ok(HandlerResult::Response(ResponseData::RecoveryClaimRequestValidated {
+                claimant, sighash, ..
+            })) => {
+                // Core validated - now sign the claim transaction
+                let secp = Secp256k1::new();
+                let secret_key = match self.node_secret_key {
+                    Some(sk) => sk,
+                    None => {
+                        log_warn!(self.logger, "🔄 RECOVERY: No signing key available");
+                        return Ok(());
+                    }
+                };
+                let keypair = Keypair::from_secret_key(&secp, &secret_key);
 
-        if !is_non_compliant {
-            log_warn!(
-                self.logger,
-                "🔄 RECOVERY: Operator {} is not in non-compliant recovery phase - ignoring claim request",
-                msg.operator
-            );
-            return Ok(());
+                // Sign the sighash
+                let sighash_msg = Message::from_digest(sighash);
+                let signature = secp.sign_schnorr_no_aux_rand(&sighash_msg, &keypair);
+
+                log_info!(self.logger, "🔄 RECOVERY: Sending claim signature to {}", claimant);
+
+                // Queue the response
+                self.outbound_messages
+                    .lock()
+                    .unwrap()
+                    .entry(claimant)
+                    .or_default()
+                    .push(DepositsMessage::RecoveryResponse(RecoveryResponseMsg::ClaimSignature {
+                        request_hash: sighash,
+                        signer: self.our_node_id,
+                        sighash,
+                        signature: signature.serialize(),
+                    }));
+            }
+            Ok(HandlerResult::Rejected(reason)) => {
+                log_warn!(self.logger, "🔄 RECOVERY: Claim request rejected: {}", reason);
+            }
+            Err(e) => {
+                log_warn!(self.logger, "🔄 RECOVERY: Claim request handler failed: {:?}", e);
+            }
+            _ => {}
         }
-
-        // Sign the claim transaction if we have the key
-        let secp = Secp256k1::new();
-        let secret_key = match self.node_secret_key {
-            Some(sk) => sk,
-            None => {
-                log_warn!(
-                    self.logger,
-                    "🔄 RECOVERY: No signing key available for claim request"
-                );
-                return Ok(());
-            }
-        };
-        let keypair = Keypair::from_secret_key(&secp, &secret_key);
-
-        // Sign the sighash
-        let sighash_msg = Message::from_digest(msg.sighash);
-        let signature = secp.sign_schnorr_no_aux_rand(&sighash_msg, &keypair);
-
-        // Send signature response
-        let response = RecoveryClaimSignatureMsg {
-            operator: msg.operator,
-            partner: msg.partner,
-            signer: self.our_node_id,
-            sighash: msg.sighash,
-            signature: signature.serialize(),
-        };
-
-        log_info!(
-            self.logger,
-            "🔄 RECOVERY: Sending claim signature to {} for sighash {}",
-            msg.claimant,
-            hex::encode(&msg.sighash[..8])
-        );
-
-        self.outbound_messages
-            .lock()
-            .unwrap()
-            .entry(msg.claimant)
-            .or_insert_with(Vec::new)
-            .push(DepositsMessage::RecoveryResponse(RecoveryResponseMsg::ClaimSignature {
-                request_hash: msg.sighash, // Use sighash as the request identifier
-                signer: response.signer,
-                sighash: response.sighash,
-                signature: response.signature,
-            }));
 
         Ok(())
     }
 
     /// Handle RecoveryClaimSignature message
+    ///
+    /// Core handler validates and emits events.
+    /// LDK layer handles claim_manager operations and threshold checking.
     pub(super) fn handle_recovery_claim_signature(
         &self,
         msg: &RecoveryClaimSignatureMsg,
-        _sender: PublicKey,
+        sender: PublicKey,
     ) -> Result<(), LightningError> {
-        use deposits_core::log_warn;
-
         log_info!(
             self.logger,
             "🔄 RECOVERY: Received claim signature from {} for sighash {}",
-            msg.signer,
-            hex::encode(&msg.sighash[..8])
+            msg.signer, hex::encode(&msg.sighash[..8])
         );
 
-        // Add signature to claim manager (it handles verification)
-        let ledger_id = (msg.operator, msg.partner);
-        let add_result = {
-            let mut claim_manager = self.claim_manager.lock().unwrap();
-            claim_manager.add_peer_signature(&ledger_id, &msg.signer, msg.signature)
-        };
+        // Delegate to core handler for validation
+        match core_handlers::handle_recovery_claim_signature(self, msg, sender) {
+            Ok(HandlerResult::Response(ResponseData::RecoveryClaimSignatureReceived { .. })) => {
+                // Core validated - now add to claim manager
+                let ledger_id = (msg.operator, msg.partner);
+                let add_result = {
+                    let mut claim_manager = self.claim_manager.lock().unwrap();
+                    claim_manager.add_peer_signature(&ledger_id, &msg.signer, msg.signature)
+                };
 
-        match add_result {
-            Ok(has_sufficient) => {
-                log_info!(
-                    self.logger,
-                    "🔄 RECOVERY: Claim signature stored - operator {} partner {} signer {} (threshold_met={})",
-                    msg.operator,
-                    msg.partner,
-                    msg.signer,
-                    has_sufficient
-                );
-
-                // Emit RecoveryClaimReady event when threshold is met
-                if has_sufficient {
-                    log_info!(
-                        self.logger,
-                        "🔄 RECOVERY: Signature threshold reached for operator {} partner {} - claim ready!",
-                        msg.operator,
-                        msg.partner
-                    );
-
-                    let _ = self.event_queue.emit_deposits_event(
-                        super::events::DepositsEvent::RecoveryClaimReady {
-                            operator_id: msg.operator,
-                            partner_id: msg.partner,
-                        },
-                    );
+                match add_result {
+                    Ok(has_sufficient) => {
+                        log_info!(self.logger, "🔄 RECOVERY: Signature stored (threshold_met={})", has_sufficient);
+                        if has_sufficient {
+                            let _ = self.event_queue.emit_deposits_event(
+                                super::events::DepositsEvent::RecoveryClaimReady {
+                                    operator_id: msg.operator,
+                                    partner_id: msg.partner,
+                                },
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        log_warn!(self.logger, "🔄 RECOVERY: Failed to add signature: {:?}", e);
+                    }
                 }
             }
-            Err(e) => {
-                log_warn!(
-                    self.logger,
-                    "🔄 RECOVERY: Failed to add signature from {} for operator {}: {:?}",
-                    msg.signer,
-                    msg.operator,
-                    e
-                );
+            Ok(HandlerResult::Rejected(reason)) => {
+                log_warn!(self.logger, "🔄 RECOVERY: Signature rejected: {}", reason);
             }
+            Err(e) => {
+                log_warn!(self.logger, "🔄 RECOVERY: Signature handler failed: {:?}", e);
+            }
+            _ => {}
         }
 
         Ok(())
     }
 
     /// Handle RecoveryClaimComplete message
+    /// Handle RecoveryClaimComplete message
+    ///
+    /// Core handler emits protocol events.
+    /// LDK layer handles claim_manager cleanup and LDK-specific events.
     pub(super) fn handle_recovery_claim_complete(
         &self,
         msg: &RecoveryClaimCompleteMsg,
-        _sender: PublicKey,
+        sender: PublicKey,
     ) -> Result<(), LightningError> {
         log_info!(
             self.logger,
-            "🔄 RECOVERY: Claim complete for operator {} - new operator {} (txid: {}, block: {})",
-            msg.operator,
-            msg.new_operator,
-            hex::encode(&msg.claim_txid[..8]),
-            msg.confirmation_block
+            "🔄 RECOVERY: Claim complete for operator {} - new operator {}",
+            msg.operator, msg.new_operator
         );
 
-        // Clean up the completed claim from ClaimManager
-        let ledger_id = (msg.operator, msg.partner);
-        {
-            let mut claim_manager = self.claim_manager.lock().unwrap();
-            if let Some(_removed) = claim_manager.remove_claim(&ledger_id) {
-                log_info!(
-                    self.logger,
-                    "🔄 RECOVERY: Removed completed claim for operator {} partner {}",
-                    msg.operator, msg.partner
+        // Delegate to core handler
+        match core_handlers::handle_recovery_claim_complete(self, msg, sender) {
+            Ok(HandlerResult::Response(ResponseData::RecoveryClaimCompleted { .. })) => {
+                // Core validated and emitted events - now clean up claim_manager
+                let ledger_id = (msg.operator, msg.partner);
+                {
+                    let mut claim_manager = self.claim_manager.lock().unwrap();
+                    claim_manager.remove_claim(&ledger_id);
+                }
+
+                // Emit LDK-specific event
+                let _ = self.event_queue.emit_deposits_event(
+                    super::events::DepositsEvent::RecoveryClaimCompleted {
+                        old_operator: msg.operator,
+                        partner_id: msg.partner,
+                        new_operator: msg.new_operator,
+                        claim_txid: msg.claim_txid,
+                        confirmation_block: msg.confirmation_block,
+                    },
                 );
             }
+            Err(e) => {
+                log_warn!(self.logger, "🔄 RECOVERY: Claim complete handler failed: {:?}", e);
+            }
+            _ => {}
         }
-
-        // Emit event for node layer
-        let _ = self.event_queue.emit_deposits_event(
-            super::events::DepositsEvent::RecoveryClaimCompleted {
-                old_operator: msg.operator,
-                partner_id: msg.partner,
-                new_operator: msg.new_operator,
-                claim_txid: msg.claim_txid,
-                confirmation_block: msg.confirmation_block,
-            },
-        );
 
         Ok(())
     }

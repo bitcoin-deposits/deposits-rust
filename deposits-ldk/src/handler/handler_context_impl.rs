@@ -222,6 +222,13 @@ where
                     operator, partner, reason
                 );
             }
+            ProtocolEvent::QuorumMemberJoined { operator, partner, member } => {
+                log_info!(
+                    self.logger,
+                    "Protocol event: QuorumMemberJoined - operator={}, partner={}, member={}",
+                    operator, partner, member
+                );
+            }
         }
     }
 
@@ -237,6 +244,17 @@ where
         // For now, we return None and the handlers will need to access the
         // recovery manager directly through the DepositsHandler
         None
+    }
+
+    fn claim_manager(&self) -> Option<Arc<Mutex<deposits_core::recovery_claim::ClaimManager>>> {
+        // Same limitation as recovery_manager - we have Mutex<ClaimManager> not Arc<Mutex<ClaimManager>>
+        // TODO: Refactor DepositsHandler to use Arc<Mutex<ClaimManager>>
+        None
+    }
+
+    fn quorum_manager(&self) -> Option<&deposits_core::quorum::QuorumManager> {
+        // Return a reference to our quorum manager
+        Some(&self.quorum_manager)
     }
 
     fn our_secret_key(&self) -> Option<SecretKey> {

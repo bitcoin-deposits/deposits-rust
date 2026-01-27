@@ -963,6 +963,12 @@ pub enum ProtocolEvent {
         channel_id: [u8; 32],
         reason: Option<String>,
     },
+    /// A quorum member joined
+    QuorumMemberJoined {
+        operator: PublicKey,
+        partner: PublicKey,
+        member: PublicKey,
+    },
 }
 
 // ============================================================================
