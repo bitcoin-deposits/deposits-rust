@@ -509,6 +509,88 @@ impl Ledger {
         Ok(update)
     }
 
+    /// Append an operation to the ledger with full history tracking.
+    ///
+    /// This method:
+    /// 1. Validates the operation
+    /// 2. Serializes it to bytes using TLV encoding
+    /// 3. Creates a SignedLedgerUpdate (unsigned - caller should sign)
+    /// 4. Applies state changes
+    /// 5. Appends to history
+    ///
+    /// Returns (previous_hash, new_hash, sequence_number) for signing.
+    pub fn append_operation(
+        &mut self,
+        operation: LedgerOperation,
+        message_type: u16,
+    ) -> DepositsResult<([u8; 32], [u8; 32], u64)> {
+        use crate::tlv::TlvEncode;
+        use bitcoin::hashes::{Hash, sha256};
+
+        // Check if ledger is closed
+        if self.is_closed() {
+            return Err(DepositsError::InvalidState(
+                "Cannot append to closed ledger".to_string(),
+            ));
+        }
+
+        // Validate the operation
+        self.validate_operation(&operation)?;
+
+        // Serialize the operation
+        let message_bytes = operation.tlv_encode();
+
+        // Compute hashes
+        let prev_hash = self.state.hash;
+        let sequence = self.state.sequence + 1;
+
+        let mut hash_input = Vec::new();
+        hash_input.extend_from_slice(&sequence.to_le_bytes());
+        hash_input.extend_from_slice(&prev_hash);
+        hash_input.extend_from_slice(&message_bytes);
+        let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
+
+        // Create SignedLedgerUpdate (unsigned - caller should populate signatures)
+        let signed_update = SignedLedgerUpdate {
+            message: message_bytes,
+            message_type,
+            operator_signature: [0u8; 64],
+            partner_signature: [0u8; 64],
+            operator_pubkey: self.state.operator_key,
+            partner_pubkey: self.state.partner_key,
+            sequence_number: sequence,
+            previous_state_hash: prev_hash,
+            current_state_hash: new_hash,
+            timestamp: crate::now_unix_timestamp(),
+        };
+
+        // Apply state changes
+        self.apply_state_changes(&operation)?;
+
+        // Update sequence and hash
+        self.state.sequence = sequence;
+        self.state.hash = new_hash;
+
+        // Append to history
+        self.history.push(signed_update);
+
+        Ok((prev_hash, new_hash, sequence))
+    }
+
+    /// Update the signature on the last history entry.
+    ///
+    /// This is used after `append_operation` to add signatures from the porcupine dance.
+    pub fn sign_last_update(&mut self, operator_sig: Option<[u8; 64]>, partner_sig: Option<[u8; 64]>) {
+        if let Some(update) = self.history.last_mut() {
+            if let Some(sig) = operator_sig {
+                update.operator_signature = sig;
+            }
+            if let Some(sig) = partner_sig {
+                update.partner_signature = sig;
+            }
+        }
+    }
+
     /// Validate an operation before applying.
     fn validate_operation(&self, operation: &LedgerOperation) -> DepositsResult<()> {
         match operation {

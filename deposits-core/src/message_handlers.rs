@@ -508,6 +508,8 @@ pub fn handle_collateral_add_partner<C: HandlerContext>(
     msg: &CollateralAddPartnerMsg,
     sender: PublicKey,
 ) -> Result<HandlerResult, HandlerError> {
+    use crate::messages::{LedgerOperation, LEDGER_UPDATE};
+
     let our_node_id = ctx.our_node_id();
 
     // We must be the partner_id to process this message
@@ -525,13 +527,12 @@ pub fn handle_collateral_add_partner<C: HandlerContext>(
             partner: msg.partner_id,
         })?;
 
-    // Check for idempotency and get state
+    // Check for idempotency first (read lock)
     {
         let ledger = ledger_arc.read().map_err(|_|
             HandlerError::Internal("Failed to acquire ledger read lock".to_string())
         )?;
 
-        // Idempotency check: if collateral partner already exists, return success
         if ledger.state.collateral_partners.contains(&msg.collateral_partner) {
             return Ok(HandlerResult::Response(ResponseData::CollateralPartnerAdded {
                 operator_id: msg.operator_id,
@@ -544,20 +545,30 @@ pub fn handle_collateral_add_partner<C: HandlerContext>(
         }
     }
 
-    // Append to ledger - this requires write access
-    // The actual append happens in the LDK layer which has mutable access
-    // Here we validate and return the data needed for the response
-    //
-    // Note: The core logic validates that this is a legitimate add request.
-    // The LDK layer will:
-    // 1. Call append_v1_mut_with_metadata on the ledger
-    // 2. Sign the update as partner (porcupine dance)
-    // 3. Send the ACK with signature
-    // 4. Sync with QuorumManager if applicable
+    // Append to ledger (write lock)
+    let (prev_hash, new_hash, sequence) = {
+        let mut ledger = ledger_arc.write().map_err(|_|
+            HandlerError::Internal("Failed to acquire ledger write lock".to_string())
+        )?;
 
-    // For now, return Ok to indicate the request is valid
-    // The LDK layer handles the actual mutation and signing
-    Ok(HandlerResult::Ok)
+        let operation = LedgerOperation::CollateralAddPartner {
+            collateral_partner: msg.collateral_partner,
+            collateral_partner_signature: msg.collateral_partner_signature,
+        };
+
+        ledger.append_operation(operation, LEDGER_UPDATE)
+            .map_err(|e| HandlerError::ValidationFailed(e.to_string()))?
+    };
+
+    // Return success with data for ACK construction
+    Ok(HandlerResult::Response(ResponseData::CollateralPartnerAdded {
+        operator_id: msg.operator_id,
+        partner_id: msg.partner_id,
+        collateral_partner: msg.collateral_partner,
+        sequence,
+        prev_hash,
+        new_hash,
+    }))
 }
 
 /// Handle a CollateralRemovePartner message.
@@ -569,6 +580,8 @@ pub fn handle_collateral_remove_partner<C: HandlerContext>(
     msg: &CollateralRemovePartnerMsg,
     sender: PublicKey,
 ) -> Result<HandlerResult, HandlerError> {
+    use crate::messages::{LedgerOperation, LEDGER_UPDATE};
+
     let our_node_id = ctx.our_node_id();
 
     // We must be the partner_id to process this message
@@ -586,24 +599,47 @@ pub fn handle_collateral_remove_partner<C: HandlerContext>(
             partner: msg.partner_id,
         })?;
 
-    // Validate the collateral partner exists
+    // Check collateral partner exists (read lock)
     {
         let ledger = ledger_arc.read().map_err(|_|
             HandlerError::Internal("Failed to acquire ledger read lock".to_string())
         )?;
 
-        // Check that the collateral partner exists
         if !ledger.state.collateral_partners.contains(&msg.collateral_partner) {
-            return Ok(HandlerResult::Rejected(format!(
-                "Collateral partner {} not found in ledger",
-                msg.collateral_partner
-            )));
+            // Idempotent: if already removed, return success
+            return Ok(HandlerResult::Response(ResponseData::CollateralPartnerRemoved {
+                partner_id: msg.partner_id,
+                collateral_partner: msg.collateral_partner,
+                sequence: ledger.sequence(),
+                prev_hash: ledger.hash(),
+                new_hash: ledger.hash(),
+            }));
         }
     }
 
-    // The actual removal happens in the LDK layer
-    // Return Ok to indicate the request is valid
-    Ok(HandlerResult::Ok)
+    // Append to ledger (write lock)
+    let (prev_hash, new_hash, sequence) = {
+        let mut ledger = ledger_arc.write().map_err(|_|
+            HandlerError::Internal("Failed to acquire ledger write lock".to_string())
+        )?;
+
+        let operation = LedgerOperation::CollateralRemovePartner {
+            collateral_partner: msg.collateral_partner,
+            operator_signature: msg.operator_signature,
+        };
+
+        ledger.append_operation(operation, LEDGER_UPDATE)
+            .map_err(|e| HandlerError::ValidationFailed(e.to_string()))?
+    };
+
+    // Return success with data for ACK construction
+    Ok(HandlerResult::Response(ResponseData::CollateralPartnerRemoved {
+        partner_id: msg.partner_id,
+        collateral_partner: msg.collateral_partner,
+        sequence,
+        prev_hash,
+        new_hash,
+    }))
 }
 
 /// Handle a CollateralAttestation message.

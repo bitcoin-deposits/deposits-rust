@@ -889,6 +889,9 @@ where
     // ========================================================================
 
     /// Handle CollateralAddPartner message
+    ///
+    /// Core handler does validation and ledger mutation.
+    /// LDK layer handles signing, persistence, quorum sync, and ACK sending.
     pub(super) fn handle_collateral_add_partner(
         &self,
         msg: &CollateralAddPartnerMsg,
@@ -898,143 +901,147 @@ where
 
         log_info!(
             self.logger,
-            "📋 VOTER: Received AddCollateralPartner from {} - adding {} to ledger with partner {}",
-            sender_node_id,
-            msg.collateral_partner,
-            msg.partner_id
+            "📋 VOTER: Received AddCollateralPartner from {} - adding {}",
+            sender_node_id, msg.collateral_partner
         );
 
-        // Delegate validation to core handler
+        // Core handler does validation AND mutation
         let result = core_handlers::handle_collateral_add_partner(self, msg, sender_node_id);
-
-        // Build the message for ACK/NACK responses
-        let add_partner_msg = DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
-            msg.operator_id,
-            msg.partner_id,
-            LedgerOperation::CollateralAddPartner {
-                collateral_partner: msg.collateral_partner,
-                collateral_partner_signature: msg.collateral_partner_signature,
-            },
-        ));
 
         match result {
             Err(e) => {
-                // Core validation failed (e.g., ledger not found)
-                log_warn!(self.logger, "📋 VOTER: Core validation failed: {:?}", e);
-                if let Err(ack_err) = self.send_acknowledgment(
-                    &add_partner_msg, false, Some(format!("{:?}", e)), None, sender_node_id
-                ) {
-                    log_warn!(self.logger, "📋 VOTER: Failed to send NACK: {:?}", ack_err);
-                }
+                log_warn!(self.logger, "📋 VOTER: Handler failed: {:?}", e);
+                self.send_collateral_nack(msg.operator_id, msg.partner_id,
+                    LedgerOperation::CollateralAddPartner {
+                        collateral_partner: msg.collateral_partner,
+                        collateral_partner_signature: msg.collateral_partner_signature,
+                    }, format!("{:?}", e), sender_node_id);
             }
             Ok(HandlerResult::Rejected(reason)) => {
-                // Validation rejected (e.g., not the target partner)
                 log_warn!(self.logger, "📋 VOTER: Rejected: {}", reason);
             }
             Ok(HandlerResult::Response(ResponseData::CollateralPartnerAdded { sequence, prev_hash, new_hash, .. })) => {
-                // Idempotent case - partner already exists, send ACK with existing data
-                log_info!(self.logger, "📋 PARTNER: Collateral partner {} already exists, sending ACK (idempotent)", msg.collateral_partner);
-                if let Err(e) = self.send_acknowledgment(&add_partner_msg, true, None, None, sender_node_id) {
-                    log_warn!(self.logger, "📋 PARTNER: Failed to send ACK for duplicate: {:?}", e);
-                }
+                // Success - sign, persist, sync quorum, send ACK
+                self.finalize_collateral_add(msg, sender_node_id, sequence, prev_hash, new_hash);
             }
-            Ok(HandlerResult::Ok) | Ok(HandlerResult::Response(_)) => {
-                // Validation passed - proceed with mutation
-                self.do_collateral_add_partner_mutation(msg, sender_node_id, add_partner_msg);
-            }
+            Ok(_) => {}
         }
 
         Ok(())
     }
 
-    /// Perform the mutation phase for adding a collateral partner.
-    /// Called after core validation passes.
-    fn do_collateral_add_partner_mutation(
+    /// Finalize adding a collateral partner: sign, persist, sync quorum, send ACK
+    fn finalize_collateral_add(
         &self,
         msg: &CollateralAddPartnerMsg,
         sender_node_id: PublicKey,
-        add_partner_msg: DepositsMessage,
+        sequence: u64,
+        prev_hash: [u8; 32],
+        new_hash: [u8; 32],
     ) {
         use deposits_core::quorum::LedgerId;
 
-        let ledger_key = (sender_node_id, msg.partner_id);
-        let mut ledgers = self.ledgers.lock().unwrap();
-        let Some(ledger_arc) = ledgers.get_mut(&ledger_key) else {
-            // Should not happen since core validated ledger exists
-            log_warn!(self.logger, "📋 VOTER: Ledger disappeared after validation");
-            return;
+        // Get message bytes from history for signing
+        let message_bytes = {
+            let ledgers = self.ledgers.lock().unwrap();
+            if let Some(ledger_arc) = ledgers.get(&(sender_node_id, msg.partner_id)) {
+                let ledger = ledger_arc.read().unwrap();
+                ledger.history.last().map(|u| u.message.clone()).unwrap_or_default()
+            } else {
+                Vec::new()
+            }
         };
 
-        let mut ledger_guard = ledger_arc.write().unwrap();
-        match ledger_guard.append_v1_mut_with_metadata(add_partner_msg.clone()) {
-            Ok((prev_hash, new_hash, seq)) => {
-                log_info!(
-                    self.logger,
-                    "📋 VOTER: Appended collateral partner {} to ledger, seq={}, hash={:02x?}",
-                    msg.collateral_partner, seq, &new_hash[0..8]
-                );
+        // Sign the update
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let partner_sig = self.sign_as_partner(
+            &message_bytes, deposits_core::messages::LEDGER_UPDATE, sequence, &prev_hash, &new_hash, timestamp
+        ).ok();
 
-                // Get message bytes and sign
-                let message_bytes = ledger_guard.history.last()
-                    .map(|u| u.message.clone())
-                    .unwrap_or_default();
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-
-                let partner_sig = self.sign_as_partner(
-                    &message_bytes, add_partner_msg.message_type(), seq, &prev_hash, &new_hash, timestamp
-                ).ok();
-
-                // Persist state
-                if let Err(e) = self.persist_ledger_state(&*ledger_guard) {
-                    log_warn!(self.logger, "📋 VOTER: Failed to persist ledger: {:?}", e);
-                }
-
-                drop(ledger_guard);
-                drop(ledgers);
-
-                // Sync quorum (expected to fail for partners)
-                let ledger_id = LedgerId::new(sender_node_id, msg.partner_id);
-                let _ = self.quorum_manager.add_member(&ledger_id, msg.collateral_partner);
-
-                // Send ACK
-                let message_hash = Self::create_message_hash(&add_partner_msg);
-                let ack = DepositsMessage::LedgerUpdateResponse(LedgerUpdateResponseMsg {
-                    acked_message_type: add_partner_msg.message_type(),
-                    message_hash,
-                    success: true,
-                    error_message: None,
-                    cosignature: None,
-                    update_signature: partner_sig,
-                    update_sequence: Some(seq),
-                    update_prev_hash: Some(prev_hash),
-                    update_curr_hash: Some(new_hash),
-                    partner_signature: partner_sig,
-                    confirmed_sequence: seq,
-                    confirmed_hash: new_hash,
-                });
-
-                {
-                    let mut outbound = self.outbound_messages.lock().unwrap();
-                    outbound.entry(sender_node_id).or_default().push(ack.clone());
-                }
-                self.trigger_immediate_send(sender_node_id, ack.message_type());
-                log_info!(self.logger, "📋 VOTER: Sent ACK with porcupine signature");
-            }
-            Err(e) => {
-                log_warn!(self.logger, "📋 VOTER: Failed to append: {:?}", e);
-                drop(ledger_guard);
-                drop(ledgers);
-                if let Err(ack_err) = self.send_acknowledgment(&add_partner_msg, false, Some(format!("{:?}", e)), None, sender_node_id) {
-                    log_warn!(self.logger, "📋 VOTER: Failed to send NACK: {:?}", ack_err);
+        // Update signature in ledger history and persist
+        {
+            let ledgers = self.ledgers.lock().unwrap();
+            if let Some(ledger_arc) = ledgers.get(&(sender_node_id, msg.partner_id)) {
+                let mut ledger = ledger_arc.write().unwrap();
+                ledger.sign_last_update(None, partner_sig);
+                if let Err(e) = self.persist_ledger_state(&*ledger) {
+                    log_warn!(self.logger, "📋 VOTER: Failed to persist: {:?}", e);
                 }
             }
         }
+
+        // Sync quorum (expected to fail for partners)
+        let ledger_id = LedgerId::new(sender_node_id, msg.partner_id);
+        let _ = self.quorum_manager.add_member(&ledger_id, msg.collateral_partner);
+
+        // Send ACK
+        self.send_collateral_ack(msg.operator_id, msg.partner_id,
+            LedgerOperation::CollateralAddPartner {
+                collateral_partner: msg.collateral_partner,
+                collateral_partner_signature: msg.collateral_partner_signature,
+            }, sequence, prev_hash, new_hash, partner_sig, sender_node_id);
+
+        log_info!(self.logger, "📋 VOTER: Added collateral partner {}, seq={}", msg.collateral_partner, sequence);
+    }
+
+    /// Send a NACK for a collateral operation
+    fn send_collateral_nack(
+        &self,
+        operator_id: PublicKey,
+        partner_id: PublicKey,
+        operation: LedgerOperation,
+        error: String,
+        peer: PublicKey,
+    ) {
+        let msg = DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(operator_id, partner_id, operation));
+        if let Err(e) = self.send_acknowledgment(&msg, false, Some(error), None, peer) {
+            log_warn!(self.logger, "📋 VOTER: Failed to send NACK: {:?}", e);
+        }
+    }
+
+    /// Send an ACK for a collateral operation
+    fn send_collateral_ack(
+        &self,
+        operator_id: PublicKey,
+        partner_id: PublicKey,
+        operation: LedgerOperation,
+        sequence: u64,
+        prev_hash: [u8; 32],
+        new_hash: [u8; 32],
+        partner_sig: Option<[u8; 64]>,
+        peer: PublicKey,
+    ) {
+        let msg = DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(operator_id, partner_id, operation));
+        let message_hash = Self::create_message_hash(&msg);
+        let ack = DepositsMessage::LedgerUpdateResponse(LedgerUpdateResponseMsg {
+            acked_message_type: msg.message_type(),
+            message_hash,
+            success: true,
+            error_message: None,
+            cosignature: None,
+            update_signature: partner_sig,
+            update_sequence: Some(sequence),
+            update_prev_hash: Some(prev_hash),
+            update_curr_hash: Some(new_hash),
+            partner_signature: partner_sig,
+            confirmed_sequence: sequence,
+            confirmed_hash: new_hash,
+        });
+
+        {
+            let mut outbound = self.outbound_messages.lock().unwrap();
+            outbound.entry(peer).or_default().push(ack.clone());
+        }
+        self.trigger_immediate_send(peer, ack.message_type());
     }
 
     /// Handle CollateralRemovePartner message
+    ///
+    /// Core handler does validation and ledger mutation.
+    /// LDK layer handles signing, persistence, quorum sync, and ACK sending.
     pub(super) fn handle_collateral_remove_partner(
         &self,
         msg: &CollateralRemovePartnerMsg,
@@ -1044,134 +1051,90 @@ where
 
         log_info!(
             self.logger,
-            "📋 VOTER: Received RemoveCollateralPartner from {} - removing {} from ledger with partner {}",
-            sender_node_id,
-            msg.collateral_partner,
-            msg.partner_id
+            "📋 VOTER: Received RemoveCollateralPartner from {} - removing {}",
+            sender_node_id, msg.collateral_partner
         );
 
-        // Delegate validation to core handler
+        // Core handler does validation AND mutation
         let result = core_handlers::handle_collateral_remove_partner(self, msg, sender_node_id);
-
-        // Build the message for ACK/NACK responses
-        let remove_partner_msg = DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
-            sender_node_id,
-            msg.partner_id,
-            LedgerOperation::CollateralRemovePartner {
-                collateral_partner: msg.collateral_partner,
-                operator_signature: msg.operator_signature,
-            },
-        ));
 
         match result {
             Err(e) => {
-                log_warn!(self.logger, "📋 VOTER: Core validation failed: {:?}", e);
-                if let Err(ack_err) = self.send_acknowledgment(
-                    &remove_partner_msg, false, Some(format!("{:?}", e)), None, sender_node_id
-                ) {
-                    log_warn!(self.logger, "📋 VOTER: Failed to send NACK: {:?}", ack_err);
-                }
+                log_warn!(self.logger, "📋 VOTER: Handler failed: {:?}", e);
+                self.send_collateral_nack(sender_node_id, msg.partner_id,
+                    LedgerOperation::CollateralRemovePartner {
+                        collateral_partner: msg.collateral_partner,
+                        operator_signature: msg.operator_signature,
+                    }, format!("{:?}", e), sender_node_id);
             }
             Ok(HandlerResult::Rejected(reason)) => {
                 log_warn!(self.logger, "📋 VOTER: Rejected: {}", reason);
             }
-            Ok(HandlerResult::Response(ResponseData::CollateralPartnerRemoved { .. })) => {
-                // Idempotent case - partner already removed
-                log_info!(self.logger, "📋 PARTNER: Collateral partner {} already removed, sending ACK", msg.collateral_partner);
-                if let Err(e) = self.send_acknowledgment(&remove_partner_msg, true, None, None, sender_node_id) {
-                    log_warn!(self.logger, "📋 PARTNER: Failed to send ACK: {:?}", e);
-                }
+            Ok(HandlerResult::Response(ResponseData::CollateralPartnerRemoved { sequence, prev_hash, new_hash, .. })) => {
+                // Success - sign, persist, sync quorum, send ACK
+                self.finalize_collateral_remove(msg, sender_node_id, sequence, prev_hash, new_hash);
             }
-            Ok(HandlerResult::Ok) | Ok(HandlerResult::Response(_)) => {
-                // Validation passed - proceed with mutation
-                self.do_collateral_remove_partner_mutation(msg, sender_node_id, remove_partner_msg);
-            }
+            Ok(_) => {}
         }
 
         Ok(())
     }
 
-    /// Perform the mutation phase for removing a collateral partner.
-    fn do_collateral_remove_partner_mutation(
+    /// Finalize removing a collateral partner: sign, persist, sync quorum, send ACK
+    fn finalize_collateral_remove(
         &self,
         msg: &CollateralRemovePartnerMsg,
         sender_node_id: PublicKey,
-        remove_partner_msg: DepositsMessage,
+        sequence: u64,
+        prev_hash: [u8; 32],
+        new_hash: [u8; 32],
     ) {
         use deposits_core::quorum::LedgerId;
 
-        let ledger_key = (sender_node_id, msg.partner_id);
-        let mut ledgers = self.ledgers.lock().unwrap();
-        let Some(ledger_arc) = ledgers.get_mut(&ledger_key) else {
-            log_warn!(self.logger, "📋 VOTER: Ledger disappeared after validation");
-            return;
+        // Get message bytes from history for signing
+        let message_bytes = {
+            let ledgers = self.ledgers.lock().unwrap();
+            if let Some(ledger_arc) = ledgers.get(&(sender_node_id, msg.partner_id)) {
+                let ledger = ledger_arc.read().unwrap();
+                ledger.history.last().map(|u| u.message.clone()).unwrap_or_default()
+            } else {
+                Vec::new()
+            }
         };
 
-        let mut ledger_guard = ledger_arc.write().unwrap();
-        match ledger_guard.append_v1_mut_with_metadata(remove_partner_msg.clone()) {
-            Ok((prev_hash, new_hash, seq)) => {
-                log_info!(
-                    self.logger,
-                    "📋 VOTER: Appended remove collateral partner {} to ledger, seq={}, hash={:02x?}",
-                    msg.collateral_partner, seq, &new_hash[0..8]
-                );
+        // Sign the update
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let partner_sig = self.sign_as_partner(
+            &message_bytes, deposits_core::messages::LEDGER_UPDATE, sequence, &prev_hash, &new_hash, timestamp
+        ).ok();
 
-                let message_bytes = ledger_guard.history.last()
-                    .map(|u| u.message.clone())
-                    .unwrap_or_default();
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-
-                let partner_sig = self.sign_as_partner(
-                    &message_bytes, remove_partner_msg.message_type(), seq, &prev_hash, &new_hash, timestamp
-                ).ok();
-
-                if let Err(e) = self.persist_ledger_state(&*ledger_guard) {
-                    log_warn!(self.logger, "📋 VOTER: Failed to persist ledger: {:?}", e);
-                }
-
-                drop(ledger_guard);
-                drop(ledgers);
-
-                // Sync quorum
-                let ledger_id = LedgerId::new(sender_node_id, msg.partner_id);
-                let _ = self.quorum_manager.remove_member(&ledger_id, &msg.collateral_partner);
-
-                // Send ACK
-                let message_hash = Self::create_message_hash(&remove_partner_msg);
-                let ack = DepositsMessage::LedgerUpdateResponse(LedgerUpdateResponseMsg {
-                    acked_message_type: remove_partner_msg.message_type(),
-                    message_hash,
-                    success: true,
-                    error_message: None,
-                    cosignature: None,
-                    update_signature: partner_sig,
-                    update_sequence: Some(seq),
-                    update_prev_hash: Some(prev_hash),
-                    update_curr_hash: Some(new_hash),
-                    partner_signature: partner_sig,
-                    confirmed_sequence: seq,
-                    confirmed_hash: new_hash,
-                });
-
-                {
-                    let mut outbound = self.outbound_messages.lock().unwrap();
-                    outbound.entry(sender_node_id).or_default().push(ack.clone());
-                }
-                self.trigger_immediate_send(sender_node_id, ack.message_type());
-                log_info!(self.logger, "📋 VOTER: Sent ACK with porcupine signature");
-            }
-            Err(e) => {
-                log_warn!(self.logger, "📋 VOTER: Failed to append: {:?}", e);
-                drop(ledger_guard);
-                drop(ledgers);
-                if let Err(ack_err) = self.send_acknowledgment(&remove_partner_msg, false, Some(format!("{:?}", e)), None, sender_node_id) {
-                    log_warn!(self.logger, "📋 VOTER: Failed to send NACK: {:?}", ack_err);
+        // Update signature in ledger history and persist
+        {
+            let ledgers = self.ledgers.lock().unwrap();
+            if let Some(ledger_arc) = ledgers.get(&(sender_node_id, msg.partner_id)) {
+                let mut ledger = ledger_arc.write().unwrap();
+                ledger.sign_last_update(None, partner_sig);
+                if let Err(e) = self.persist_ledger_state(&*ledger) {
+                    log_warn!(self.logger, "📋 VOTER: Failed to persist: {:?}", e);
                 }
             }
         }
+
+        // Sync quorum
+        let ledger_id = LedgerId::new(sender_node_id, msg.partner_id);
+        let _ = self.quorum_manager.remove_member(&ledger_id, &msg.collateral_partner);
+
+        // Send ACK
+        self.send_collateral_ack(sender_node_id, msg.partner_id,
+            LedgerOperation::CollateralRemovePartner {
+                collateral_partner: msg.collateral_partner,
+                operator_signature: msg.operator_signature,
+            }, sequence, prev_hash, new_hash, partner_sig, sender_node_id);
+
+        log_info!(self.logger, "📋 VOTER: Removed collateral partner {}, seq={}", msg.collateral_partner, sequence);
     }
 
     /// Handle CollateralConsentRequest message
