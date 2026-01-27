@@ -129,7 +129,7 @@ pub use ledger::{
     Ledger, LedgerRole, LedgerValidator, LedgerManager,
     // Note: LedgerUpdate is exported from types module
 };
-pub use handler::Handler;
+pub use handler::{Handler, PendingAck};
 pub use message_processor::{
     QuorumProcessor, QuorumMessageResult, QuorumResponse,
     QuorumJoinRequest, QuorumStateSync, QuorumVote,

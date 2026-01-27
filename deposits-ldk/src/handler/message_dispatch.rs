@@ -107,9 +107,9 @@ where
                         let pending_acks = self.pending_acks.lock().unwrap();
                         // Look for pending collateral messages - V2 format (LEDGER_UPDATE which wraps CollateralIncrease/CollateralDecrease operations)
                         pending_acks.iter()
-                            .find(|(_, (msg_type, _))| {
-                                *msg_type == LEDGER_UPDATE ||
-                                *msg_type == super::messages::consts::LEDGER_UPDATE
+                            .find(|(_, ack)| {
+                                ack.message_type == LEDGER_UPDATE ||
+                                ack.message_type == super::messages::consts::LEDGER_UPDATE
                             })
                             .map(|(hash, _)| *hash)
                     };
@@ -529,9 +529,9 @@ where
                     let mut pending_acks = self.pending_acks.lock().unwrap();
                     // Find any pending ACK with HANDSHAKE type (0x8005)
                     let mut found_hash = None;
-                    for (hash, (msg_type, _timestamp)) in pending_acks.iter() {
+                    for (hash, ack) in pending_acks.iter() {
                         // HANDSHAKE type is 0x8005 = 32773
-                        if *msg_type == 0x8005 {
+                        if ack.message_type == 0x8005 {
                             found_hash = Some(*hash);
                             break;
                         }

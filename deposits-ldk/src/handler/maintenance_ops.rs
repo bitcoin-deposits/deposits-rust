@@ -44,13 +44,13 @@ where
             let mut pending_acks = self.pending_acks.lock().unwrap();
             let initial_count = pending_acks.len();
 
-            pending_acks.retain(|hash, (msg_type, timestamp)| {
-                let age_secs = now.saturating_sub(*timestamp);
+            pending_acks.retain(|hash, ack| {
+                let age_secs = now.saturating_sub(ack.timestamp);
                 if age_secs > STALE_ACK_THRESHOLD_SECS {
                     log_debug!(
                         self.logger,
                         "🧹 Clearing stale pending ACK: hash={:02x?}, type={:#06x}, age={}s",
-                        &hash[0..4], msg_type, age_secs
+                        &hash[0..4], ack.message_type, age_secs
                     );
                     false // Remove
                 } else {

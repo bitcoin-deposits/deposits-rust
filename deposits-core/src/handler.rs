@@ -24,6 +24,17 @@ use crate::traits::{
     HandleError,
 };
 
+/// Information about a pending ACK
+#[derive(Clone, Debug)]
+pub struct PendingAck {
+    /// The message type awaiting ACK
+    pub message_type: u16,
+    /// When the message was sent (unix timestamp)
+    pub timestamp: u64,
+    /// The peer we're waiting for ACK from
+    pub peer: PublicKey,
+}
+
 /// The main protocol handler
 ///
 /// This struct manages all protocol state and implements message handling.
@@ -47,6 +58,11 @@ where
     /// Ledgers indexed by (operator, partner)
     /// Uses Arc to enable sharing with external systems (e.g., DepositsHandler)
     ledgers: Arc<Mutex<HashMap<(PublicKey, PublicKey), Arc<RwLock<Ledger>>>>>,
+
+    /// Pending ACKs: message_hash -> (message_type, timestamp, peer)
+    /// Tracks which messages are waiting for acknowledgment
+    /// Uses Arc to enable sharing with external systems (e.g., DepositsHandler)
+    pending_acks: Arc<Mutex<HashMap<[u8; 32], PendingAck>>>,
 
     /// Storage
     storage: Arc<S>,
@@ -88,7 +104,7 @@ where
     E: EventEmitter,
     L: Logger,
 {
-    /// Create a new handler with fresh ledger storage
+    /// Create a new handler with fresh state
     pub fn new(
         storage: Arc<S>,
         transport: Arc<T>,
@@ -100,7 +116,8 @@ where
         events: Arc<E>,
         logger: Arc<L>,
     ) -> Self {
-        Self::with_ledgers(
+        Self::with_shared_state(
+            Arc::new(Mutex::new(HashMap::new())),
             Arc::new(Mutex::new(HashMap::new())),
             storage,
             transport,
@@ -114,7 +131,7 @@ where
         )
     }
 
-    /// Create a new handler with shared ledger storage
+    /// Create a new handler with shared ledger storage (backwards compatible)
     ///
     /// This constructor allows the handler to share ledger state with an external
     /// system (e.g., DepositsHandler in deposits-ldk). Operations on the handler
@@ -131,10 +148,43 @@ where
         events: Arc<E>,
         logger: Arc<L>,
     ) -> Self {
+        Self::with_shared_state(
+            ledgers,
+            Arc::new(Mutex::new(HashMap::new())),
+            storage,
+            transport,
+            payments,
+            channels,
+            broadcaster,
+            chain,
+            signer,
+            events,
+            logger,
+        )
+    }
+
+    /// Create a new handler with fully shared state
+    ///
+    /// This constructor allows sharing both ledgers and pending_acks with an
+    /// external system (e.g., DepositsHandler in deposits-ldk).
+    pub fn with_shared_state(
+        ledgers: Arc<Mutex<HashMap<(PublicKey, PublicKey), Arc<RwLock<Ledger>>>>>,
+        pending_acks: Arc<Mutex<HashMap<[u8; 32], PendingAck>>>,
+        storage: Arc<S>,
+        transport: Arc<T>,
+        payments: Arc<P>,
+        channels: Arc<C>,
+        broadcaster: Arc<B>,
+        chain: Arc<H>,
+        signer: Arc<G>,
+        events: Arc<E>,
+        logger: Arc<L>,
+    ) -> Self {
         let node_id = signer.node_pubkey();
         Self {
             node_id,
             ledgers,
+            pending_acks,
             storage,
             transport,
             payments,
@@ -152,6 +202,65 @@ where
     /// This allows external systems to access the ledger storage for sharing.
     pub fn ledgers(&self) -> &Arc<Mutex<HashMap<(PublicKey, PublicKey), Arc<RwLock<Ledger>>>>> {
         &self.ledgers
+    }
+
+    /// Get a reference to the shared pending ACKs
+    ///
+    /// This allows external systems to access the pending ACK state for sharing.
+    pub fn pending_acks(&self) -> &Arc<Mutex<HashMap<[u8; 32], PendingAck>>> {
+        &self.pending_acks
+    }
+
+    // ========================================================================
+    // ACK Management
+    // ========================================================================
+
+    /// Register a message as pending ACK
+    ///
+    /// Called when sending a message that requires acknowledgment.
+    /// Returns the message hash for tracking.
+    pub fn register_pending_ack(&self, hash: [u8; 32], message_type: u16, peer: PublicKey) {
+        let ack = PendingAck {
+            message_type,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            peer,
+        };
+        self.pending_acks.lock().unwrap().insert(hash, ack);
+        self.logger.log(
+            LogLevel::Debug,
+            &format!("Registered pending ACK for hash {:02x?}... type={:#06x}", &hash[..4], message_type),
+        );
+    }
+
+    /// Complete a pending ACK
+    ///
+    /// Called when an ACK is received for a previously sent message.
+    /// Returns the pending ACK info if found.
+    pub fn complete_pending_ack(&self, hash: &[u8; 32]) -> Option<PendingAck> {
+        let result = self.pending_acks.lock().unwrap().remove(hash);
+        if let Some(ref ack) = result {
+            self.logger.log(
+                LogLevel::Debug,
+                &format!("Completed pending ACK for hash {:02x?}... type={:#06x}", &hash[..4], ack.message_type),
+            );
+        }
+        result
+    }
+
+    /// Check if a message hash has a pending ACK
+    pub fn has_pending_ack(&self, hash: &[u8; 32]) -> bool {
+        self.pending_acks.lock().unwrap().contains_key(hash)
+    }
+
+    /// Get all pending ACKs (for cleanup/timeout handling)
+    pub fn get_all_pending_acks(&self) -> Vec<([u8; 32], PendingAck)> {
+        self.pending_acks.lock().unwrap()
+            .iter()
+            .map(|(h, a)| (*h, a.clone()))
+            .collect()
     }
 
     /// Get our node ID

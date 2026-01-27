@@ -120,7 +120,11 @@ where
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
                         .as_secs();
-                    pending_acks.insert(message_hash, (message_type, timestamp));
+                    pending_acks.insert(message_hash, deposits_core::PendingAck {
+                        message_type,
+                        timestamp,
+                        peer: partner_node_id,
+                    });
                 }
                     println!("🔵 ADDED PENDING ACK: hash={:02x?}, type={}", &message_hash[0..4], message_type);
                 }
@@ -210,7 +214,7 @@ where
                 let pending_ledger_updates = {
                     let pending_acks = self.pending_acks.lock().unwrap();
                     pending_acks.iter()
-                        .filter(|(_, (msg_type, _))| *msg_type == LEDGER_UPDATE)
+                        .filter(|(_, ack)| ack.message_type == LEDGER_UPDATE)
                         .count()
                 };
 
@@ -390,7 +394,11 @@ where
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs();
-            pending_acks.insert(message_hash, (message_type, timestamp));
+            pending_acks.insert(message_hash, deposits_core::PendingAck {
+                message_type,
+                timestamp,
+                peer: partner_node_id,
+            });
             println!("🔵 ADDED PENDING ACK: hash={:02x?}, type={}", &message_hash[0..4], message_type);
         }
 

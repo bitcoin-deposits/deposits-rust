@@ -155,7 +155,11 @@ where
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs();
-            pending_acks.insert(message_hash, (message_type, timestamp));
+            pending_acks.insert(message_hash, deposits_core::PendingAck {
+                message_type,
+                timestamp,
+                peer: partner_node_id,
+            });
         }
 
         // Check peer connection status before sending
@@ -236,7 +240,11 @@ where
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs();
-            pending_acks.insert(message_hash, (message_type, timestamp));
+            pending_acks.insert(message_hash, deposits_core::PendingAck {
+                message_type,
+                timestamp,
+                peer: partner_node_id,
+            });
         }
 
         // Check peer connection status before sending
@@ -317,7 +325,11 @@ where
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs();
-            pending_acks.insert(message_hash, (message_type, timestamp));
+            pending_acks.insert(message_hash, deposits_core::PendingAck {
+                message_type,
+                timestamp,
+                peer: partner_node_id,
+            });
         }
 
         log_info!(self.logger, "Sending ReservesRemove message to partner {}", partner_node_id);

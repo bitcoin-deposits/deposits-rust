@@ -102,12 +102,12 @@ where
             let (original_message_type, lookup_hash) = {
                 let mut pending_acks = self.pending_acks.lock().unwrap();
                 // Try original hash first
-                if let Some((msg_type, _timestamp)) = pending_acks.remove(&ack_msg.message_hash) {
-                    (Some(msg_type), ack_msg.message_hash)
-                } else if let Some((msg_type, _timestamp)) = pending_acks.remove(&partner_specific_hash) {
+                if let Some(ack) = pending_acks.remove(&ack_msg.message_hash) {
+                    (Some(ack.message_type), ack_msg.message_hash)
+                } else if let Some(ack) = pending_acks.remove(&partner_specific_hash) {
                     // Fallback to partner-specific hash
                     println!("🟡 HANDLE_ACK: Found pending ACK using partner-specific hash {:02x?}", &partner_specific_hash[0..4]);
-                    (Some(msg_type), partner_specific_hash)
+                    (Some(ack.message_type), partner_specific_hash)
                 } else {
                     (None, ack_msg.message_hash)
                 }

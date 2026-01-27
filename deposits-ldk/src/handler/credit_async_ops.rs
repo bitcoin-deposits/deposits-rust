@@ -20,7 +20,7 @@ use deposits_core::LedgerManager;
 use super::messages::{DepositsMessage, LedgerUpdateMsg, LedgerOperation};
 use super::ledger_ext::LedgerExt;
 use deposits_core::LedgerValidator;
-use deposits_core::{log_error, log_info};
+use deposits_core::{log_error, log_info, PendingAck};
 use lightning::util::logger::Logger as LdkLogger;
 
 use std::ops::Deref;
@@ -91,7 +91,11 @@ where
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
                     .as_secs();
-                pending_acks.insert(reserves_message_hash, (message_type, timestamp));
+                pending_acks.insert(reserves_message_hash, PendingAck {
+                    message_type,
+                    timestamp,
+                    peer: partner_node_id,
+                });
                 println!("🔵 ADDED PENDING ACK: hash={:02x?}, type={}", &reserves_message_hash[0..4], message_type);
             }
 
@@ -221,7 +225,11 @@ where
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs();
-            pending_acks.insert(credit_message_hash, (message_type, timestamp));
+            pending_acks.insert(credit_message_hash, PendingAck {
+                message_type,
+                timestamp,
+                peer: partner_node_id,
+            });
             println!("🔵 ADDED PENDING ACK: hash={:02x?}, type={}", &credit_message_hash[0..4], message_type);
         }
 
@@ -478,7 +486,11 @@ where
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
                         .as_secs();
-                    pending_acks.insert(message_hash, (message_type, timestamp));
+                    pending_acks.insert(message_hash, PendingAck {
+                        message_type,
+                        timestamp,
+                        peer: partner_node_id,
+                    });
                 }
                 println!("🔵 ADDED PENDING ACK: hash={:02x?}, type={}", &message_hash[0..4], message_type);
             }

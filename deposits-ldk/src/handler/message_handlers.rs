@@ -1660,7 +1660,11 @@ where
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap()
                                     .as_secs();
-                                pending_acks.insert(unique_key, (attestation_forward.message_type(), timestamp));
+                                pending_acks.insert(unique_key, deposits_core::PendingAck {
+                                    message_type: attestation_forward.message_type(),
+                                    timestamp,
+                                    peer: part_id,
+                                });
                             }
                         }
                         Err(e) => {

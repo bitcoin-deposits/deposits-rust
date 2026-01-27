@@ -189,9 +189,10 @@ where
     /// chain_index is the position of this update in the ledger's hash chain (like block height)
     pub(crate) sent_messages_for_broadcast: Mutex<HashMap<[u8; 32], (PublicKey, PublicKey, DepositsMessage, [u8; 32], [u8; 32], u64)>>,
 
-    /// Track pending ACKs (message_hash -> (message_type, timestamp))
+    /// Track pending ACKs (message_hash -> PendingAck)
     /// Used by operators to track which messages are waiting for ACKs from partners
-    pub(crate) pending_acks: Mutex<HashMap<[u8; 32], (u16, u64)>>,
+    /// Shared with core_handler for delegation
+    pub(crate) pending_acks: Arc<Mutex<HashMap<[u8; 32], deposits_core::PendingAck>>>,
 
     /// Signed ledger update logs for third-party auditing
     /// Key: (operator_id, partner_id) -> log of signed updates
@@ -349,7 +350,7 @@ where
             last_msg_queued: std::sync::atomic::AtomicU64::new(0),
             our_node_id,
             sent_messages_for_broadcast: Mutex::new(HashMap::new()),
-            pending_acks: Mutex::new(HashMap::new()),
+            pending_acks: Arc::new(Mutex::new(HashMap::new())),
             signed_update_logs: Mutex::new(HashMap::new()),
             broadcast_sequence_numbers: Mutex::new(HashMap::new()),
             node_secret_key: None, // Will be set via set_node_secret_key() if needed for signing

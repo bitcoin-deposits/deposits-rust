@@ -108,10 +108,11 @@ where
         let events = Arc::new(LdkEventAdapter::new(self.event_queue.clone()));
         let logger = Arc::new(LdkLoggerAdapter::new(self.logger.clone()));
 
-        // Create the core handler with shared ledgers
-        // This allows both DepositsHandler and core Handler to operate on the same ledger state
-        let handler = deposits_core::Handler::with_ledgers(
-            self.ledgers.clone(), // Share ledger storage
+        // Create the core handler with shared state
+        // This allows both DepositsHandler and core Handler to operate on the same state
+        let handler = deposits_core::Handler::with_shared_state(
+            self.ledgers.clone(),       // Share ledger storage
+            self.pending_acks.clone(),  // Share pending ACK tracking
             storage,
             transport,
             payments,
@@ -124,6 +125,6 @@ where
         );
 
         self.core_handler = Some(Arc::new(handler));
-        log_info!(self.logger, "Core protocol handler initialized with shared ledgers");
+        log_info!(self.logger, "Core protocol handler initialized with shared state");
     }
 }
