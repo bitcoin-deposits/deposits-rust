@@ -10,7 +10,7 @@
 use bitcoin::secp256k1::PublicKey;
 use super::core::DepositsHandler;
 use deposits_core::DepositsError;
-use super::messages::{DepositsMessage, LedgerUpdateMsg, LedgerUpdateMsgExt, LedgerOperation};
+use super::messages::DepositsMessage;
 use deposits_core::quorum::LedgerId;
 use deposits_core::{log_debug, log_error, log_info};
 use lightning::util::logger::Logger as LdkLogger;

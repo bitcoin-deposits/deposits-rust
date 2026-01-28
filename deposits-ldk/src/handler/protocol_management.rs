@@ -13,8 +13,7 @@
 //! - Quorum join requests and state sync
 
 use bitcoin::secp256k1::PublicKey;
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use super::core::DepositsHandler;
 use deposits_core::DepositsError;

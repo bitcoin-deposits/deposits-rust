@@ -23,7 +23,6 @@ use lightning::util::logger::Logger as LdkLogger;
 use crate::wire::messages::{
     QuorumJoinRequestMsg, QuorumJoinResponseMsg, QuorumStateSyncMsg,
     QuorumVoteRequestMsg, QuorumVoteMsg, QuorumMembershipChangeMsg,
-    CollateralAddPartnerMsg, CollateralRemovePartnerMsg,
     CollateralConsentRequestMsg, CollateralConsentResponseMsg,
     RecoveryVoteMsg, RecoveryClaimRequestMsg, RecoveryClaimSignatureMsg, RecoveryClaimCompleteMsg,
     UncreditedPaymentMsg, ChannelCloseTombstoneMsg,

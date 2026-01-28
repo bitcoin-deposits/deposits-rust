@@ -17,7 +17,7 @@ use std::sync::{Arc, RwLock};
 
 use super::core::DepositsHandler;
 use deposits_core::DepositsError;
-use deposits_core::{Ledger, LedgerRole, LedgerManager};
+use deposits_core::{LedgerRole, LedgerManager};
 use super::ledger_ext::LedgerExt;
 use super::messages::{DepositsMessage, HandshakeMsg};
 use deposits_core::{log_info, log_warn};
