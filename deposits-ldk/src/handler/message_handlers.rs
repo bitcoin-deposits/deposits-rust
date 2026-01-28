@@ -23,7 +23,7 @@ use lightning::util::logger::Logger as LdkLogger;
 use crate::wire::messages::{
     QuorumJoinRequestMsg, QuorumJoinResponseMsg, QuorumStateSyncMsg,
     QuorumVoteRequestMsg, QuorumVoteMsg, QuorumMembershipChangeMsg,
-    CollateralConsentRequestMsg, CollateralConsentResponseMsg,
+    CollateralConsentResponseMsg,
     RecoveryClaimRequestMsg, RecoveryClaimSignatureMsg, RecoveryClaimCompleteMsg,
     UncreditedPaymentMsg, ChannelCloseTombstoneMsg,
 };
@@ -571,75 +571,7 @@ where
     // NOTE: send_collateral_nack, send_collateral_ack, finalize_collateral_add, finalize_collateral_remove
     // have been removed - all that logic is now in core handlers via HandlerContext provider methods.
 
-    /// Handle CollateralConsentRequest message
-    /// Handle CollateralConsentRequest message.
-    ///
-    /// Core handler validates the request, LDK layer handles signing and sending.
-    pub(super) fn handle_collateral_consent_request(
-        &self,
-        msg: &CollateralConsentRequestMsg,
-        sender_node_id: PublicKey,
-    ) -> Result<(), LightningError> {
-        log_info!(
-            self.logger,
-            "📋 CONSENT: Received request from {} for ledger ({}, {})",
-            sender_node_id, msg.operator_id, msg.partner_id
-        );
-
-        // Delegate to core handler for validation and decision
-        match core_handlers::handle_collateral_consent_request(self, msg, sender_node_id) {
-            Ok(HandlerResult::Response(ResponseData::CollateralConsent {
-                operator_id, partner_id, consent_granted
-            })) => {
-                // Sign consent if granting
-                let signature = if consent_granted {
-                    self.sign_collateral_consent(&operator_id, &partner_id)
-                } else {
-                    [0u8; 64]
-                };
-
-                // Send response
-                let response = DepositsMessage::CoordinationResponse(
-                    CoordinationResponseMsg::CollateralConsentResponse {
-                        request_hash: [0u8; 32],
-                        operator_id,
-                        partner_id,
-                        consent_granted,
-                        collateral_partner_signature: signature,
-                    }
-                );
-
-                if let Err(e) = self.send_message(sender_node_id, response) {
-                    log_warn!(self.logger, "📋 CONSENT: Failed to send response: {:?}", e);
-                }
-
-                // If consent granted, request sync of the ledger state
-                if consent_granted {
-                    log_info!(self.logger, "📋 CONSENT: Granted, requesting state sync");
-                    let sync_request = DepositsMessage::Sync(SyncMsg {
-                        operator_id,
-                        partner_id,
-                        last_known_sequence: 0,
-                        last_known_hash: [0u8; 32],
-                    });
-                    if let Err(e) = self.send_message(operator_id, sync_request) {
-                        log_warn!(self.logger, "📋 CONSENT: Failed to send SyncRequest: {:?}", e);
-                    }
-                } else {
-                    log_info!(self.logger, "📋 CONSENT: Denied");
-                }
-            }
-            Ok(HandlerResult::Rejected(reason)) => {
-                log_warn!(self.logger, "📋 CONSENT: Rejected: {}", reason);
-            }
-            Err(e) => {
-                log_error!(self.logger, "📋 CONSENT: Handler failed: {:?}", e);
-            }
-            _ => {}
-        }
-
-        Ok(())
-    }
+    // NOTE: handle_collateral_consent_request removed - dispatch calls core directly via providers
 
     /// Handle CollateralConsentResponse message
     /// Handle CollateralConsentResponse message.

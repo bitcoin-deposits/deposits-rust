@@ -134,7 +134,6 @@ pub use ledger_ext::{LedgerExt, SignedLedgerUpdateExt, SignedLedgerUpdateLogExt}
 // Re-export validation extension trait
 pub use validation_ext::LedgerConformanceValidatorExt;
 
-// Re-export core handler extension trait
-pub use handler_context_impl::CoreHandlerExt;
+// NOTE: CoreHandlerExt removed - dispatch calls core handlers directly via providers
 
 // Re-export constants (internal use)

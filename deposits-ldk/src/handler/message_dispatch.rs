@@ -200,12 +200,18 @@ where
                     return self.handle_quorum_vote(&msg, sender_node_id);
                 }
                 CoordinationMsg::CollateralConsentRequest { operator_id, partner_id, operator_signature } => {
+                    // Direct dispatch to core - core handles signing and message sending via providers
+                    log_info!(self.logger, "📋 CONSENT: Request from {} for ({}, {})", sender_node_id, operator_id, partner_id);
                     let msg = CollateralConsentRequestMsg {
                         operator_id: *operator_id,
                         partner_id: *partner_id,
                         operator_signature: *operator_signature,
                     };
-                    return self.handle_collateral_consent_request(&msg, sender_node_id);
+                    match deposits_core::handle_collateral_consent_request(self, &msg, sender_node_id) {
+                        Ok(_) => log_info!(self.logger, "📋 CONSENT: Processed"),
+                        Err(e) => log_warn!(self.logger, "📋 CONSENT: Failed: {:?}", e),
+                    }
+                    return Ok(());
                 }
                 CoordinationMsg::UpdateReserves { channel_id, reserves_sats, ref script_pubkey, ledger_hash, remote_ledger_hash } => {
                     return self.handle_update_reserves(

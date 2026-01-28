@@ -449,50 +449,7 @@ where
     }
 }
 
-/// Extension trait for using core handlers with LDK
-pub trait CoreHandlerExt<L: Deref + Clone + Send + Sync>
-where
-    L::Target: LdkLogger,
-{
-    /// Handle a collateral consent request using core logic
-    fn handle_collateral_consent_request_core(
-        &self,
-        msg: &deposits_core::wire_messages::CollateralConsentRequestMsg,
-        sender: PublicKey,
-    ) -> Result<deposits_core::message_handlers::HandlerResult, HandlerError>;
-
-    /// Handle a collateral consent response using core logic
-    fn handle_collateral_consent_response_core(
-        &self,
-        msg: &deposits_core::wire_messages::CollateralConsentResponseMsg,
-        sender: PublicKey,
-    ) -> Result<deposits_core::message_handlers::HandlerResult, HandlerError>;
-
-    // NOTE: handle_recovery_vote_core removed - dispatch calls deposits_core::handle_recovery_vote directly
-}
-
-impl<L: Deref + Clone + Send + Sync> CoreHandlerExt<L> for DepositsHandler<L>
-where
-    L::Target: LdkLogger,
-{
-    fn handle_collateral_consent_request_core(
-        &self,
-        msg: &deposits_core::wire_messages::CollateralConsentRequestMsg,
-        sender: PublicKey,
-    ) -> Result<deposits_core::message_handlers::HandlerResult, HandlerError> {
-        deposits_core::handle_collateral_consent_request(self, msg, sender)
-    }
-
-    fn handle_collateral_consent_response_core(
-        &self,
-        msg: &deposits_core::wire_messages::CollateralConsentResponseMsg,
-        sender: PublicKey,
-    ) -> Result<deposits_core::message_handlers::HandlerResult, HandlerError> {
-        deposits_core::handle_collateral_consent_response(self, msg, sender)
-    }
-
-    // NOTE: handle_recovery_vote_core impl removed - dispatch calls deposits_core::handle_recovery_vote directly
-}
+// NOTE: CoreHandlerExt trait removed - dispatch calls core handlers directly via providers
 
 #[cfg(test)]
 mod tests {

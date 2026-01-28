@@ -50,6 +50,7 @@ use crate::operation_validation::{
     validate_reserves_add, validate_reserves_increase, validate_reserves_decrease,
     validate_fee_collect, validate_ledger_close, validate_cosign_invoice,
 };
+use crate::messages::{DepositsMessage, CoordinationResponseMsg, SyncMsg};
 
 // ============================================================================
 // Handler Result Types
@@ -721,6 +722,7 @@ pub fn handle_recovery_vote<C: HandlerContext>(
 /// Handle a CollateralConsentRequest message.
 ///
 /// Sent by operators requesting consent from potential collateral partners.
+/// Uses providers to sign and send responses directly.
 pub fn handle_collateral_consent_request<C: HandlerContext>(
     ctx: &C,
     msg: &CollateralConsentRequestMsg,
@@ -738,16 +740,43 @@ pub fn handle_collateral_consent_request<C: HandlerContext>(
     // Check if we have an operator channel with the requesting operator
     // This would be the channel where our reserves would serve as collateral
     let has_channel_with_operator = ctx.get_ledger(&msg.operator_id, &our_node_id).is_some();
-
     let consent_granted = has_channel_with_operator;
 
-    // Return response data - the LDK layer will construct the actual message
-    // and sign it with the node's private key
-    Ok(HandlerResult::Response(ResponseData::CollateralConsent {
-        operator_id: msg.operator_id,
-        partner_id: msg.partner_id,
-        consent_granted,
-    }))
+    // Sign the consent (content: "COLLATERAL_CONSENT" + operator + partner)
+    let signature = if consent_granted {
+        let mut sign_content = Vec::new();
+        sign_content.extend_from_slice(b"COLLATERAL_CONSENT");
+        sign_content.extend_from_slice(&msg.operator_id.serialize());
+        sign_content.extend_from_slice(&msg.partner_id.serialize());
+        ctx.sign_message(&sign_content).unwrap_or([0u8; 64])
+    } else {
+        [0u8; 64]
+    };
+
+    // Queue the response message
+    let response = DepositsMessage::CoordinationResponse(
+        CoordinationResponseMsg::CollateralConsentResponse {
+            request_hash: [0u8; 32],
+            operator_id: msg.operator_id,
+            partner_id: msg.partner_id,
+            consent_granted,
+            collateral_partner_signature: signature,
+        }
+    );
+    ctx.queue_message(sender, response)?;
+
+    // If consent granted, request state sync from the operator
+    if consent_granted {
+        let sync_request = DepositsMessage::Sync(SyncMsg {
+            operator_id: msg.operator_id,
+            partner_id: msg.partner_id,
+            last_known_sequence: 0,
+            last_known_hash: [0u8; 32],
+        });
+        ctx.queue_message(msg.operator_id, sync_request)?;
+    }
+
+    Ok(HandlerResult::Ok)
 }
 
 /// Handle a CollateralConsentResponse message.
