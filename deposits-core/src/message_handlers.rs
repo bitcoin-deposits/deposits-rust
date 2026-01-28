@@ -810,20 +810,38 @@ pub fn handle_collateral_consent_request<C: HandlerContext>(
 ///
 /// Received by operators after requesting consent from collateral partners.
 pub fn handle_collateral_consent_response<C: HandlerContext>(
-    _ctx: &C,
+    ctx: &C,
     msg: &CollateralConsentResponseMsg,
-    _sender: PublicKey,
+    sender: PublicKey,
 ) -> Result<HandlerResult, HandlerError> {
-    // The sender is the collateral partner
-
+    // Verify signature if consent granted
     if msg.consent_granted {
-        // In the full implementation:
-        // 1. Verify the signature
-        // 2. Add the collateral partner to the ledger
-        // 3. Send state sync to the new partner
-        // 4. Emit event
-        // These operations are handled in the LDK layer which has access to
-        // the full ledger state and signing keys
+        if !ctx.verify_consent_signature(
+            msg.operator_id,
+            msg.partner_id,
+            msg.collateral_partner_signature,
+            sender,
+        ) {
+            return Ok(HandlerResult::Rejected("Invalid consent signature".to_string()));
+        }
+    }
+
+    // Complete pending consent request via provider
+    ctx.complete_consent_request(
+        msg.operator_id,
+        msg.partner_id,
+        msg.consent_granted,
+        msg.collateral_partner_signature,
+    );
+
+    // Send audit to new collateral partner if granted
+    if msg.consent_granted {
+        ctx.send_audit_to_collateral_partner(
+            msg.operator_id,
+            msg.partner_id,
+            sender,
+            msg.collateral_partner_signature,
+        );
     }
 
     Ok(HandlerResult::Ok)

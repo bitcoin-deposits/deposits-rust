@@ -367,6 +367,48 @@ pub trait HandlerContext: ValidationContext {
         let _ = (vote_round_id, voter, vote, spend_signature);
         None // Default: not implemented
     }
+
+    // ========================================================================
+    // Collateral Consent Methods
+    // ========================================================================
+
+    /// Complete a pending collateral consent request.
+    /// Returns true if a pending request was found and completed.
+    fn complete_consent_request(
+        &self,
+        operator: PublicKey,
+        partner: PublicKey,
+        granted: bool,
+        signature: [u8; 64],
+    ) -> bool {
+        let _ = (operator, partner, granted, signature);
+        false // Default: no pending request found
+    }
+
+    /// Send audit history to a new collateral partner.
+    fn send_audit_to_collateral_partner(
+        &self,
+        operator: PublicKey,
+        partner: PublicKey,
+        new_collateral_partner: PublicKey,
+        signature: [u8; 64],
+    ) {
+        let _ = (operator, partner, new_collateral_partner, signature);
+        // Default: no-op
+    }
+
+    /// Verify a collateral consent signature.
+    /// Returns true if signature is valid.
+    fn verify_consent_signature(
+        &self,
+        operator: PublicKey,
+        partner: PublicKey,
+        signature: [u8; 64],
+        signer: PublicKey,
+    ) -> bool {
+        let _ = (operator, partner, signature, signer);
+        false // Default: not implemented
+    }
 }
 
 // ============================================================================

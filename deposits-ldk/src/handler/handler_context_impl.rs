@@ -631,6 +631,98 @@ where
             None
         }
     }
+
+    fn complete_consent_request(
+        &self,
+        operator: PublicKey,
+        partner: PublicKey,
+        granted: bool,
+        signature: [u8; 64],
+    ) -> bool {
+        use super::messages::{DepositsMessage, CoordinationMsg};
+
+        // Calculate the hash for the original consent request
+        let original = DepositsMessage::Coordination(CoordinationMsg::CollateralConsentRequest {
+            operator_id: operator,
+            partner_id: partner,
+            operator_signature: [0u8; 64],
+        });
+        let hash = self.calculate_message_hash(&original);
+
+        let mut pending = self.pending_consent_requests.lock().unwrap();
+        if let Some(tx) = pending.remove(&hash) {
+            if granted {
+                let _ = tx.send(Ok(signature));
+            } else {
+                let _ = tx.send(Err("Collateral partner denied consent".to_string()));
+            }
+            log_info!(self.logger, "📋 CONSENT: Completed pending request (granted={})", granted);
+            true
+        } else {
+            log_warn!(self.logger, "📋 CONSENT: No pending request for hash {:02x?}", &hash[..8]);
+            false
+        }
+    }
+
+    fn send_audit_to_collateral_partner(
+        &self,
+        operator: PublicKey,
+        partner: PublicKey,
+        new_collateral_partner: PublicKey,
+        signature: [u8; 64],
+    ) {
+        use super::messages::{DepositsMessage, CoordinationResponseMsg};
+
+        log_info!(self.logger, "📋 SYNC: Sending audit history to new collateral partner {}", new_collateral_partner);
+
+        let response = DepositsMessage::CoordinationResponse(CoordinationResponseMsg::CollateralConsentResponse {
+            request_hash: [0u8; 32],
+            operator_id: operator,
+            partner_id: partner,
+            consent_granted: true,
+            collateral_partner_signature: signature,
+        });
+
+        if let Err(e) = self.send_audit_update_to_new_collateral_partner(partner, new_collateral_partner, &response) {
+            log_warn!(self.logger, "📋 SYNC: Failed to send audit history: {:?}", e);
+        }
+    }
+
+    fn verify_consent_signature(
+        &self,
+        operator: PublicKey,
+        partner: PublicKey,
+        signature: [u8; 64],
+        signer: PublicKey,
+    ) -> bool {
+        use bitcoin::hashes::{Hash, sha256};
+        use bitcoin::secp256k1::{Secp256k1, Message, ecdsa::Signature};
+
+        let mut preimage = Vec::new();
+        preimage.extend_from_slice(b"COLLATERAL_CONSENT");
+        preimage.extend_from_slice(&operator.serialize());
+        preimage.extend_from_slice(&partner.serialize());
+
+        let hash = sha256::Hash::hash(&preimage);
+        let secp_msg = Message::from_digest(hash.to_byte_array());
+        let secp = Secp256k1::new();
+
+        match Signature::from_compact(&signature) {
+            Ok(sig) => {
+                if secp.verify_ecdsa(&secp_msg, &sig, &signer).is_ok() {
+                    log_info!(self.logger, "📋 CONSENT: Verified signature from {}", signer);
+                    true
+                } else {
+                    log_warn!(self.logger, "📋 CONSENT: Invalid signature from {}", signer);
+                    false
+                }
+            }
+            Err(e) => {
+                log_warn!(self.logger, "📋 CONSENT: Malformed signature from {}: {}", signer, e);
+                false
+            }
+        }
+    }
 }
 
 // NOTE: CoreHandlerExt trait removed - dispatch calls core handlers directly via providers

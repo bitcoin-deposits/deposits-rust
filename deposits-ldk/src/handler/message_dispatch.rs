@@ -267,13 +267,19 @@ where
                     return Ok(());
                 }
                 CoordinationResponseMsg::CollateralConsentResponse { operator_id, partner_id, consent_granted, collateral_partner_signature, .. } => {
+                    // Direct dispatch to core - core handles signature verification, consent completion, and audit sending via providers
+                    log_info!(self.logger, "📋 CONSENT: Response from {} - granted={}", sender_node_id, consent_granted);
                     let msg = CollateralConsentResponseMsg {
                         operator_id: *operator_id,
                         partner_id: *partner_id,
                         consent_granted: *consent_granted,
                         collateral_partner_signature: *collateral_partner_signature,
                     };
-                    return self.handle_collateral_consent_response(&msg, sender_node_id);
+                    match deposits_core::handle_collateral_consent_response(self, &msg, sender_node_id) {
+                        Ok(_) => log_info!(self.logger, "📋 CONSENT: Response processed"),
+                        Err(e) => log_warn!(self.logger, "📋 CONSENT: Response failed: {:?}", e),
+                    }
+                    return Ok(());
                 }
                 CoordinationResponseMsg::AcceptReserves { channel_id, .. } => {
                     return self.handle_accept_reserves(channel_id, sender_node_id);

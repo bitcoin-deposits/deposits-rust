@@ -23,7 +23,6 @@ use lightning::util::logger::Logger as LdkLogger;
 use crate::wire::messages::{
     QuorumStateSyncMsg,
     QuorumVoteRequestMsg,
-    CollateralConsentResponseMsg,
     ChannelCloseTombstoneMsg,
 };
 
@@ -266,96 +265,7 @@ where
 
     // NOTE: handle_collateral_consent_request removed - dispatch calls core directly via providers
 
-    /// Handle CollateralConsentResponse message
-    /// Handle CollateralConsentResponse message.
-    ///
-    /// Received when a collateral partner responds to our consent request.
-    pub(super) fn handle_collateral_consent_response(
-        &self,
-        msg: &CollateralConsentResponseMsg,
-        sender_node_id: PublicKey,
-    ) -> Result<(), LightningError> {
-        log_info!(self.logger, "📋 CONSENT: Received response from {} - granted={}", sender_node_id, msg.consent_granted);
-
-        // Verify signature if consent granted
-        if msg.consent_granted && !self.verify_consent_signature(msg, sender_node_id) {
-            return Ok(());
-        }
-
-        // Complete pending consent request
-        self.complete_pending_consent(msg);
-
-        // Send audit history to new collateral partner
-        if msg.consent_granted {
-            self.send_audit_to_collateral_partner(msg, sender_node_id);
-        }
-
-        Ok(())
-    }
-
-    /// Verify the collateral consent signature
-    fn verify_consent_signature(&self, msg: &CollateralConsentResponseMsg, sender: PublicKey) -> bool {
-        use bitcoin::hashes::{Hash, sha256};
-        use bitcoin::secp256k1::{Secp256k1, Message, ecdsa::Signature};
-
-        let mut preimage = Vec::new();
-        preimage.extend_from_slice(b"COLLATERAL_CONSENT");
-        preimage.extend_from_slice(&msg.operator_id.serialize());
-        preimage.extend_from_slice(&msg.partner_id.serialize());
-
-        let hash = sha256::Hash::hash(&preimage);
-        let secp_msg = Message::from_digest(hash.to_byte_array());
-        let secp = Secp256k1::new();
-
-        match Signature::from_compact(&msg.collateral_partner_signature) {
-            Ok(sig) => {
-                if secp.verify_ecdsa(&secp_msg, &sig, &sender).is_ok() {
-                    log_info!(self.logger, "📋 CONSENT: Verified signature from {}", sender);
-                    true
-                } else {
-                    log_warn!(self.logger, "📋 CONSENT: Invalid signature from {}", sender);
-                    false
-                }
-            }
-            Err(e) => {
-                log_warn!(self.logger, "📋 CONSENT: Malformed signature from {}: {}", sender, e);
-                false
-            }
-        }
-    }
-
-    /// Complete a pending consent request
-    fn complete_pending_consent(&self, msg: &CollateralConsentResponseMsg) {
-        let original = DepositsMessage::Coordination(CoordinationMsg::CollateralConsentRequest {
-            operator_id: msg.operator_id, partner_id: msg.partner_id, operator_signature: [0u8; 64],
-        });
-        let hash = self.calculate_message_hash(&original);
-
-        let mut pending = self.pending_consent_requests.lock().unwrap();
-        if let Some(tx) = pending.remove(&hash) {
-            if msg.consent_granted {
-                let _ = tx.send(Ok(msg.collateral_partner_signature));
-            } else {
-                let _ = tx.send(Err("Collateral partner denied consent".to_string()));
-            }
-        } else {
-            log_warn!(self.logger, "📋 CONSENT: No pending request for hash {:02x?}", &hash[..8]);
-        }
-    }
-
-    /// Send audit history to new collateral partner
-    fn send_audit_to_collateral_partner(&self, msg: &CollateralConsentResponseMsg, sender: PublicKey) {
-        log_info!(self.logger, "📋 SYNC: Sending audit history to new collateral partner {}", sender);
-
-        let response = DepositsMessage::CoordinationResponse(CoordinationResponseMsg::CollateralConsentResponse {
-            request_hash: [0u8; 32], operator_id: msg.operator_id, partner_id: msg.partner_id,
-            consent_granted: msg.consent_granted, collateral_partner_signature: msg.collateral_partner_signature,
-        });
-
-        if let Err(e) = self.send_audit_update_to_new_collateral_partner(msg.partner_id, sender, &response) {
-            log_warn!(self.logger, "📋 SYNC: Failed to send audit history: {:?}", e);
-        }
-    }
+    // NOTE: handle_collateral_consent_response removed - dispatch calls core directly via providers
 
     /// Handle CollateralAttestation message
     /// Handle CollateralAttestation message.
