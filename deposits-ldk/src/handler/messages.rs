@@ -728,8 +728,8 @@ impl From<HandshakeMsgV2> for HandshakeMsg {
             protocol_version: v2.protocol_version,
             min_protocol_version: v2.min_protocol_version,
             features: v2.features,
-            public_key: v2.operator_pubkey,
-            partner_id: v2.partner_pubkey,
+            public_key: v2.operator_id,
+            partner_id: v2.partner_id,
             ledger_address: v2.ledger_address,
             funding_txid: v2.funding_txid,
             funding_vout: v2.funding_vout,
@@ -743,8 +743,8 @@ impl From<HandshakeMsg> for HandshakeMsgV2 {
             protocol_version: local.protocol_version,
             min_protocol_version: local.min_protocol_version,
             features: local.features,
-            operator_pubkey: local.public_key,
-            partner_pubkey: local.partner_id,
+            operator_id: local.public_key,
+            partner_id: local.partner_id,
             ledger_address: local.ledger_address,
             funding_txid: local.funding_txid,
             funding_vout: local.funding_vout,
@@ -768,8 +768,8 @@ impl From<HandshakeResponseMsgV2> for HandshakeResponseMsg {
             protocol_version: v2.protocol_version,
             accepted: v2.accepted,
             error_reason: v2.error,
-            public_key: v2.partner_pubkey,
-            partner_id: v2.partner_pubkey,
+            public_key: v2.partner_id,
+            partner_id: v2.partner_id,
         }
     }
 }
@@ -781,7 +781,7 @@ impl From<HandshakeResponseMsg> for HandshakeResponseMsgV2 {
             protocol_version: local.protocol_version,
             accepted: local.accepted,
             error: local.error_reason,
-            partner_pubkey: local.partner_id,
+            partner_id: local.partner_id,
         }
     }
 }

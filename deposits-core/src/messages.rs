@@ -393,8 +393,8 @@ impl DepositsMessage {
         match self {
             Self::LedgerUpdate(m) => Some(m.partner_id),
             Self::LedgerUpdateResponse(m) => Some(m.partner_id),
-            Self::Handshake(m) => Some(m.partner_pubkey),
-            Self::HandshakeResponse(m) => Some(m.partner_pubkey),
+            Self::Handshake(m) => Some(m.partner_id),
+            Self::HandshakeResponse(m) => Some(m.partner_id),
             Self::Sync(m) => Some(m.partner_id),
             Self::SyncResponse(m) => Some(m.partner_id),
             Self::Recovery(m) => m.partner_id(),
@@ -661,9 +661,9 @@ pub struct HandshakeMsg {
     /// Feature flags
     pub features: u32,
     /// Operator's public key
-    pub operator_pubkey: PublicKey,
+    pub operator_id: PublicKey,
     /// Partner's public key
-    pub partner_pubkey: PublicKey,
+    pub partner_id: PublicKey,
     /// Ledger address string
     pub ledger_address: String,
     /// Funding transaction ID
@@ -684,7 +684,7 @@ pub struct HandshakeResponseMsg {
     /// Error reason if rejected
     pub error: Option<String>,
     /// Partner's public key
-    pub partner_pubkey: PublicKey,
+    pub partner_id: PublicKey,
 }
 
 // ============================================================================
@@ -1535,8 +1535,8 @@ impl DepositsMessage {
                 write_u16(w, m.protocol_version)?;
                 write_u16(w, m.min_protocol_version)?;
                 write_u32(w, m.features)?;
-                write_pubkey(w, &m.operator_pubkey)?;
-                write_pubkey(w, &m.partner_pubkey)?;
+                write_pubkey(w, &m.operator_id)?;
+                write_pubkey(w, &m.partner_id)?;
                 write_string(w, &m.ledger_address)?;
                 write_32(w, &m.funding_txid)?;
                 write_u16(w, m.funding_vout)?;
@@ -1546,7 +1546,7 @@ impl DepositsMessage {
                 write_u16(w, m.protocol_version)?;
                 write_bool(w, m.accepted)?;
                 write_option(w, &m.error, |w, s| write_string(w, s))?;
-                write_pubkey(w, &m.partner_pubkey)?;
+                write_pubkey(w, &m.partner_id)?;
             }
             Self::Sync(m) => {
                 write_pubkey(w, &m.operator_id)?;
@@ -1597,8 +1597,8 @@ impl DepositsMessage {
                 protocol_version: read_u16(r)?,
                 min_protocol_version: read_u16(r)?,
                 features: read_u32(r)?,
-                operator_pubkey: read_pubkey(r)?,
-                partner_pubkey: read_pubkey(r)?,
+                operator_id: read_pubkey(r)?,
+                partner_id: read_pubkey(r)?,
                 ledger_address: read_string(r)?,
                 funding_txid: read_32(r)?,
                 funding_vout: read_u16(r)?,
@@ -1608,7 +1608,7 @@ impl DepositsMessage {
                 protocol_version: read_u16(r)?,
                 accepted: read_bool(r)?,
                 error: read_option(r, read_string)?,
-                partner_pubkey: read_pubkey(r)?,
+                partner_id: read_pubkey(r)?,
             })),
             SYNC => Ok(Self::Sync(SyncMsg {
                 operator_id: read_pubkey(r)?,
@@ -2526,8 +2526,8 @@ impl TlvEncode for HandshakeMsg {
             .u16_field(PROTOCOL_VERSION, self.protocol_version)
             .u16_field(MIN_PROTOCOL_VERSION, self.min_protocol_version)
             .u32_field(FEATURES, self.features)
-            .pubkey_field(OPERATOR_PUBKEY, &self.operator_pubkey)
-            .pubkey_field(PARTNER_PUBKEY, &self.partner_pubkey)
+            .pubkey_field(OPERATOR_PUBKEY, &self.operator_id)
+            .pubkey_field(PARTNER_PUBKEY, &self.partner_id)
             .string_field(LEDGER_ADDRESS, &self.ledger_address)
             .bytes_field(FUNDING_TXID, &self.funding_txid)
             .u16_field(FUNDING_VOUT, self.funding_vout)
@@ -2543,8 +2543,8 @@ impl TlvDecode for HandshakeMsg {
             protocol_version: reader.read_u16(PROTOCOL_VERSION)?,
             min_protocol_version: reader.read_u16(MIN_PROTOCOL_VERSION)?,
             features: reader.read_u32(FEATURES)?,
-            operator_pubkey: reader.read_pubkey(OPERATOR_PUBKEY)?,
-            partner_pubkey: reader.read_pubkey(PARTNER_PUBKEY)?,
+            operator_id: reader.read_pubkey(OPERATOR_PUBKEY)?,
+            partner_id: reader.read_pubkey(PARTNER_PUBKEY)?,
             ledger_address: reader.read_string(LEDGER_ADDRESS)?,
             funding_txid: reader.read_bytes(FUNDING_TXID)?,
             funding_vout: reader.read_u16(FUNDING_VOUT)?,
@@ -2573,7 +2573,7 @@ impl TlvEncode for HandshakeResponseMsg {
             builder = builder.string_field(ERROR, err);
         }
 
-        builder.pubkey_field(PARTNER_PUBKEY, &self.partner_pubkey).build()
+        builder.pubkey_field(PARTNER_PUBKEY, &self.partner_id).build()
     }
 }
 
@@ -2586,7 +2586,7 @@ impl TlvDecode for HandshakeResponseMsg {
             protocol_version: reader.read_u16(PROTOCOL_VERSION)?,
             accepted: reader.read_u8(ACCEPTED)? != 0,
             error: reader.read_string_opt(ERROR)?,
-            partner_pubkey: reader.read_pubkey(PARTNER_PUBKEY)?,
+            partner_id: reader.read_pubkey(PARTNER_PUBKEY)?,
         })
     }
 }
@@ -3623,8 +3623,8 @@ mod tests {
             protocol_version: PROTOCOL_VERSION,
             min_protocol_version: MIN_PROTOCOL_VERSION,
             features: 0,
-            operator_pubkey: test_pubkey(),
-            partner_pubkey: test_pubkey(),
+            operator_id: test_pubkey(),
+            partner_id: test_pubkey(),
             ledger_address: "tb1q...".to_string(),
             funding_txid: [0x11; 32],
             funding_vout: 0,
@@ -3790,8 +3790,8 @@ mod tests {
             protocol_version: PROTOCOL_VERSION,
             min_protocol_version: MIN_PROTOCOL_VERSION,
             features: 0,
-            operator_pubkey: test_pubkey(),
-            partner_pubkey: test_pubkey(),
+            operator_id: test_pubkey(),
+            partner_id: test_pubkey(),
             ledger_address: "tb1q...".to_string(),
             funding_txid: [0x11; 32],
             funding_vout: 0,
@@ -3811,7 +3811,7 @@ mod tests {
             protocol_version: PROTOCOL_VERSION,
             accepted: true,
             error: None,
-            partner_pubkey: test_pubkey(),
+            partner_id: test_pubkey(),
         };
 
         let encoded = msg.tlv_encode();
@@ -4047,8 +4047,8 @@ mod tests {
                 protocol_version: PROTOCOL_VERSION,
                 min_protocol_version: 1,
                 features: 0,
-                operator_pubkey: test_pubkey(),
-                partner_pubkey: test_pubkey(),
+                operator_id: test_pubkey(),
+                partner_id: test_pubkey(),
                 ledger_address: "test-ledger".to_string(),
                 funding_txid: [0xEE; 32],
                 funding_vout: 0,

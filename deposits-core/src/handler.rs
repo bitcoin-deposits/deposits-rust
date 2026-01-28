@@ -629,7 +629,7 @@ where
         // Create handshake response
         let response = crate::messages::HandshakeResponseMsg {
             request_hash: [0u8; 32], // TODO: Hash the request
-            partner_pubkey: self.node_id,
+            partner_id: self.node_id,
             accepted: true,
             protocol_version: crate::messages::PROTOCOL_VERSION,
             error: None,
