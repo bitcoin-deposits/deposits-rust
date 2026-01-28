@@ -21,7 +21,6 @@ use deposits_core::message_handlers::{self as core_handlers, HandlerResult, Resp
 use deposits_core::{log_debug, log_error, log_info, log_warn};
 use lightning::util::logger::Logger as LdkLogger;
 use crate::wire::messages::{
-    QuorumStateSyncMsg,
     QuorumVoteRequestMsg,
     ChannelCloseTombstoneMsg,
 };
@@ -38,113 +37,7 @@ where
 
     // NOTE: handle_quorum_join_request removed - dispatch calls core directly via send_quorum_state_sync provider
     // NOTE: handle_quorum_join_response removed - inlined in dispatch (just logging)
-
-    /// Handle QuorumStateSync message
-    pub(super) fn handle_quorum_state_sync(
-        &self,
-        msg: &QuorumStateSyncMsg,
-        _sender: PublicKey,
-    ) -> Result<(), LightningError> {
-        use deposits_core::quorum::LedgerId;
-        use deposits_core::log_warn;
-
-        log_info!(
-            self.logger,
-            "📋 QUORUM: Received state sync for ledger ({}, {}) - {} updates from seq {}",
-            msg.operator_id,
-            msg.partner_id,
-            msg.updates.len(),
-            msg.start_sequence
-        );
-
-        // Process each update in the batch
-        // msg.updates is Vec<Vec<u8>> (raw bytes) - need to decode each
-        let mut applied_count = 0;
-        let mut error_count = 0;
-
-        for update_bytes in &msg.updates {
-            // Decode the raw bytes into a SignedLedgerUpdate (unified storage format)
-            use deposits_core::messages::BinaryCodec;
-            let mut cursor = std::io::Cursor::new(update_bytes);
-            match deposits_core::types::SignedLedgerUpdate::read_from(&mut cursor) {
-                Ok(signed_update) => {
-                    let seq = signed_update.sequence_number;
-                    // Verify and store the update (already in correct format)
-                    match self.verify_and_store_signed_update(signed_update) {
-                        Ok(()) => applied_count += 1,
-                        Err(e) => {
-                            log_warn!(
-                                self.logger,
-                                "📋 QUORUM: Failed to apply update seq={}: {:?}",
-                                seq,
-                                e
-                            );
-                            error_count += 1;
-                        }
-                    }
-                }
-                Err(e) => {
-                    log_warn!(
-                        self.logger,
-                        "📋 QUORUM: Failed to decode update: {:?}",
-                        e
-                    );
-                    error_count += 1;
-                }
-            }
-        }
-
-        log_info!(
-            self.logger,
-            "📋 QUORUM: Applied {}/{} updates ({} errors)",
-            applied_count,
-            msg.updates.len(),
-            error_count
-        );
-
-        // Update quorum manager with our synced state after final batch
-        if msg.is_final {
-            log_info!(
-                self.logger,
-                "📋 QUORUM: State sync complete - received final batch"
-            );
-
-            // Get our current state from the signed update log
-            let logs = self.signed_update_logs.lock().unwrap();
-            if let Some(log) = logs.get(&(msg.operator_id, msg.partner_id)) {
-                let ledger_id = LedgerId::new(msg.operator_id, msg.partner_id);
-                let sequence = log.next_sequence.saturating_sub(1);
-                let state_hash = if let Some(last_update) = log.updates.last() {
-                    last_update.current_hash
-                } else {
-                    [0u8; 32]
-                };
-
-                // Update our member state in the quorum
-                if let Err(e) = self.quorum_manager.update_member_state(
-                    &ledger_id,
-                    &self.our_node_id,
-                    sequence,
-                    state_hash,
-                ) {
-                    log_warn!(
-                        self.logger,
-                        "📋 QUORUM: Failed to update quorum member state: {:?}",
-                        e
-                    );
-                } else {
-                    log_info!(
-                        self.logger,
-                        "📋 QUORUM: Updated member state to seq={}, hash={:02x?}",
-                        sequence,
-                        &state_hash[0..4]
-                    );
-                }
-            }
-        }
-
-        Ok(())
-    }
+    // NOTE: handle_quorum_state_sync removed - dispatch calls core directly via verify_and_store_signed_update and update_quorum_member_state providers
 
     /// Handle QuorumVoteRequest message
     /// Handle QuorumVoteRequest message.

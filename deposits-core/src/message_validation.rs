@@ -409,6 +409,34 @@ pub trait HandlerContext: ValidationContext {
         let _ = (operator, partner, signature, signer);
         false // Default: not implemented
     }
+
+    // ========================================================================
+    // Quorum State Sync Methods
+    // ========================================================================
+
+    /// Get the current state from the signed update log.
+    /// Returns (sequence_number, state_hash) for the ledger.
+    fn get_signed_update_log_state(
+        &self,
+        operator: &PublicKey,
+        partner: &PublicKey,
+    ) -> Option<(u64, [u8; 32])> {
+        let _ = (operator, partner);
+        None // Default: not available
+    }
+
+    /// Update our member state in the quorum after syncing.
+    /// Called after receiving the final batch of a quorum state sync.
+    fn update_quorum_member_state(
+        &self,
+        operator: PublicKey,
+        partner: PublicKey,
+        sequence: u64,
+        state_hash: [u8; 32],
+    ) -> Result<(), String> {
+        let _ = (operator, partner, sequence, state_hash);
+        Ok(()) // Default: no-op
+    }
 }
 
 // ============================================================================

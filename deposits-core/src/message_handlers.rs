@@ -319,6 +319,12 @@ pub enum ResponseData {
         timestamp: u64,
         close_reason: Option<String>,
     },
+    /// Quorum state sync processed
+    QuorumStateSyncProcessed {
+        applied: u32,
+        errors: u32,
+        total: u32,
+    },
 }
 
 // ============================================================================
@@ -684,6 +690,52 @@ pub fn handle_quorum_vote<C: HandlerContext>(
     }
 
     Ok(HandlerResult::Ok)
+}
+
+/// Handle a QuorumStateSync message.
+///
+/// Process signed updates received during quorum state synchronization.
+/// After the final batch, updates our member state in the quorum manager.
+pub fn handle_quorum_state_sync<C: HandlerContext>(
+    ctx: &C,
+    operator: PublicKey,
+    partner: PublicKey,
+    updates: &[Vec<u8>],
+    _start_sequence: u64,
+    is_final: bool,
+) -> Result<HandlerResult, HandlerError> {
+    use crate::messages::BinaryCodec;
+    use crate::types::SignedLedgerUpdate;
+
+    let mut applied_count = 0;
+    let mut error_count = 0;
+
+    // Process each update in the batch
+    for update_bytes in updates {
+        let mut cursor = std::io::Cursor::new(update_bytes);
+        match SignedLedgerUpdate::read_from(&mut cursor) {
+            Ok(signed_update) => {
+                match ctx.verify_and_store_signed_update(signed_update) {
+                    Ok(()) => applied_count += 1,
+                    Err(_) => error_count += 1,
+                }
+            }
+            Err(_) => error_count += 1,
+        }
+    }
+
+    // Update quorum member state after final batch
+    if is_final {
+        if let Some((sequence, state_hash)) = ctx.get_signed_update_log_state(&operator, &partner) {
+            let _ = ctx.update_quorum_member_state(operator, partner, sequence, state_hash);
+        }
+    }
+
+    Ok(HandlerResult::Response(ResponseData::QuorumStateSyncProcessed {
+        applied: applied_count,
+        errors: error_count,
+        total: updates.len() as u32,
+    }))
 }
 
 // ============================================================================

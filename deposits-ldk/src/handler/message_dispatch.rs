@@ -19,7 +19,7 @@ use super::messages::{DepositsMessage, LedgerUpdateMsg, LedgerUpdateMsgExt, Ledg
 use super::messages::consts::LEDGER_UPDATE;
 use super::ledger_ext::LedgerExt;
 use crate::wire::messages::{
-    QuorumStateSyncMsg, QuorumVoteRequestMsg,
+    QuorumVoteRequestMsg,
     CollateralConsentRequestMsg, CollateralConsentResponseMsg,
     RecoveryVoteMsg, RecoveryClaimRequestMsg, RecoveryClaimSignatureMsg, RecoveryClaimCompleteMsg,
     UncreditedPaymentMsg, ChannelCloseTombstoneMsg,
@@ -251,14 +251,21 @@ where
                         let _ = u.write_to(&mut buf);
                         buf
                     }).collect();
-                    let msg = QuorumStateSyncMsg {
-                        operator_id: *operator_id,
-                        partner_id: *partner_id,
-                        updates: updates_bytes,
-                        start_sequence: *start_sequence,
-                        is_final: *is_final,
-                    };
-                    return self.handle_quorum_state_sync(&msg, sender_node_id);
+                    // Direct dispatch to core - processes updates via verify_and_store_signed_update provider
+                    // After final batch, updates quorum member state via update_quorum_member_state provider
+                    log_info!(self.logger, "📋 QUORUM: State sync for ({}, {}) - {} updates from seq {}", operator_id, partner_id, updates.len(), start_sequence);
+                    match deposits_core::handle_quorum_state_sync(self, *operator_id, *partner_id, &updates_bytes, *start_sequence, *is_final) {
+                        Ok(deposits_core::message_handlers::HandlerResult::Response(
+                            deposits_core::message_handlers::ResponseData::QuorumStateSyncProcessed { applied, errors, total }
+                        )) => {
+                            log_info!(self.logger, "📋 QUORUM: Applied {}/{} updates ({} errors)", applied, total, errors);
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            log_warn!(self.logger, "📋 QUORUM: State sync error: {:?}", e);
+                        }
+                    }
+                    return Ok(());
                 }
                 CoordinationResponseMsg::QuorumMembershipChange { operator_id, partner_id, ref change_type, member_pubkey, ref new_members, .. } => {
                     // Inline - just logging, no core logic needed

@@ -723,6 +723,43 @@ where
             }
         }
     }
+
+    // ========================================================================
+    // Quorum State Sync Methods
+    // ========================================================================
+
+    fn get_signed_update_log_state(
+        &self,
+        operator: &PublicKey,
+        partner: &PublicKey,
+    ) -> Option<(u64, [u8; 32])> {
+        let logs = self.signed_update_logs.lock().unwrap();
+        logs.get(&(*operator, *partner)).map(|log| {
+            let sequence = log.next_sequence.saturating_sub(1);
+            let state_hash = log.updates.last()
+                .map(|u| u.current_hash)
+                .unwrap_or([0u8; 32]);
+            (sequence, state_hash)
+        })
+    }
+
+    fn update_quorum_member_state(
+        &self,
+        operator: PublicKey,
+        partner: PublicKey,
+        sequence: u64,
+        state_hash: [u8; 32],
+    ) -> Result<(), String> {
+        use deposits_core::quorum::LedgerId;
+
+        let ledger_id = LedgerId::new(operator, partner);
+        self.quorum_manager.update_member_state(
+            &ledger_id,
+            &self.our_node_id,
+            sequence,
+            state_hash,
+        ).map_err(|e| format!("{:?}", e))
+    }
 }
 
 // NOTE: CoreHandlerExt trait removed - dispatch calls core handlers directly via providers
