@@ -212,187 +212,100 @@ where
     }
 
     /// Handle QuorumVoteRequest message
+    /// Handle QuorumVoteRequest message.
     pub(super) fn handle_quorum_vote_request(
         &self,
         msg: &QuorumVoteRequestMsg,
         sender_node_id: PublicKey,
     ) -> Result<(), LightningError> {
-        use deposits_core::log_warn;
-        use std::collections::HashMap;
+        log_info!(self.logger, "📋 QUORUM: Vote request for ({}, {}) seq={}", msg.operator_id, msg.partner_id, msg.sequence_number);
 
-        log_info!(
-            self.logger,
-            "📋 QUORUM: Received vote request for ledger ({}, {}) at seq {} with claimed_reserves={}",
-            msg.operator_id,
-            msg.partner_id,
-            msg.sequence_number,
-            msg.claimed_reserves
-        );
-
-        // Look up our local signed_update_logs for this ledger
-        let (updates, our_sequence, our_state_hash) = {
-            let logs = self.signed_update_logs.lock().unwrap();
-            if let Some(log) = logs.get(&(msg.operator_id, msg.partner_id)) {
-                let seq = if log.updates.is_empty() { 0 } else { log.updates.len() as u64 - 1 };
-                let hash = log.updates.last()
-                    .map(|u| u.current_hash)
-                    .unwrap_or([0u8; 32]);
-                (log.updates.clone(), seq, hash)
-            } else {
-                log_info!(
-                    self.logger,
-                    "📋 QUORUM: No local signed_update_logs for ledger ({}, {}), abstaining from vote",
-                    msg.operator_id,
-                    msg.partner_id
-                );
+        // Get our local state
+        let (our_seq, our_hash) = match self.get_local_ledger_state(&msg.operator_id, &msg.partner_id) {
+            Some(state) => state,
+            None => {
+                log_info!(self.logger, "📋 QUORUM: No local state, abstaining");
                 return Ok(());
             }
         };
 
-        // Run conformance validation with 200% backing check
-        // reserves + sum(collateral) >= 200% of deposits
-        // TODO: validate_update_chain not implemented in deposits-core yet, using stub result
-        let _validator = deposits_core::LedgerConformanceValidator::new();
-        let result = deposits_core::ConformanceResult {
-            is_conforming: true,  // Stub: assume conforming during migration
-            final_sequence: msg.sequence_number,
-            final_state_hash: msg.state_hash,
-            computed_reserves: msg.claimed_reserves,
-            total_deposits: 0,
-            violations: vec![],
+        // Initialize vote round
+        self.init_vote_round(msg);
+
+        // Validate and create vote
+        let is_conforming = true; // TODO: implement full conformance validation
+        let vote = is_conforming && our_hash == msg.state_hash;
+        let evidence = if !vote { Some(b"state_mismatch".to_vec()) } else { None };
+
+        // Sign the vote
+        let signature = match self.sign_vote(&msg.vote_round_id, vote, our_seq, &our_hash) {
+            Some(sig) => sig,
+            None => {
+                log_warn!(self.logger, "📋 QUORUM: Cannot sign vote - no secret key");
+                return Ok(());
+            }
         };
 
-        let total_collateral: u64 = msg.collateral_amounts.iter().sum();
-        log_info!(
-            self.logger,
-            "📋 QUORUM: Conformance validation result: conforming={}, our_seq={}, claimed_seq={}, reserves={}, collateral={}, violations={}",
-            result.is_conforming,
-            our_sequence,
-            msg.sequence_number,
-            msg.claimed_reserves,
-            total_collateral,
-            result.violations.len()
-        );
+        // Send vote
+        let vote_msg = DepositsMessage::Coordination(CoordinationMsg::QuorumVote {
+            vote_round_id: msg.vote_round_id, voter_pubkey: self.our_node_id, vote,
+            voter_sequence: our_seq, voter_state_hash: our_hash, evidence, signature,
+            spend_signature: None, // TODO: implement spend signing
+        });
 
-        // Create or update vote round state for tracking signatures
-        // This allows any node to collect signatures and broadcast when threshold is met
-        {
-            use super::core::VoteRoundState;
-            use std::time::{SystemTime, UNIX_EPOCH};
-
-            let mut rounds = self.pending_vote_rounds.lock().unwrap();
-            rounds.entry(msg.vote_round_id).or_insert_with(|| {
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-
-                // Default threshold: majority of quorum members
-                // In practice, this would come from the quorum configuration
-                let threshold = 2; // For 2-of-3 or similar threshold
-
-                VoteRoundState {
-                    operator_id: msg.operator_id,
-                    partner_id: msg.partner_id,
-                    sequence_number: msg.sequence_number,
-                    state_hash: msg.state_hash,
-                    claimed_reserves: msg.claimed_reserves,
-                    reserves_outpoint: msg.reserves_outpoint.clone(),
-                    destination_script: msg.destination_script.clone(),
-                    fee_rate_sat_vbyte: msg.fee_rate_sat_vbyte,
-                    threshold,
-                    votes: HashMap::new(),
-                    tx_broadcast: false,
-                    created_at: now,
-                }
-            });
-        }
-
-        // Create and sign the vote
-        let vote = result.is_conforming && our_state_hash == msg.state_hash;
-
-        // Serialize evidence if non-conforming
-        let evidence = if !vote && !result.violations.is_empty() {
-            Some(format!("{:?}", result.violations).into_bytes())
-        } else {
-            None
-        };
-
-        // Sign the vote: (vote_round_id || vote || voter_sequence || voter_state_hash)
-        let mut signed_data = Vec::new();
-        signed_data.extend_from_slice(&msg.vote_round_id);
-        signed_data.push(if vote { 1 } else { 0 });
-        signed_data.extend_from_slice(&our_sequence.to_le_bytes());
-        signed_data.extend_from_slice(&our_state_hash);
-
-        let signature = if let Some(ref secret_key) = self.node_secret_key {
-            use bitcoin::hashes::{Hash, sha256};
-            use bitcoin::secp256k1::{Secp256k1, Message};
-
-            let secp = Secp256k1::new();
-            let hash = sha256::Hash::hash(&signed_data);
-            let msg_hash = Message::from_digest(hash.to_byte_array());
-            let sig = secp.sign_ecdsa(&msg_hash, secret_key);
-            let mut sig_bytes = [0u8; 64];
-            sig_bytes.copy_from_slice(&sig.serialize_compact());
-            sig_bytes
-        } else {
-            log_warn!(
-                self.logger,
-                "📋 QUORUM: No node secret key available, cannot sign vote"
-            );
-            return Ok(());
-        };
-
-        // TODO: If vote is conforming, compute spend_signature over the deterministic tx sighash
-        // For now, we leave it as None until we implement the tx building logic
-        let spend_signature = if vote {
-            // Future: sign the deterministic spend transaction
-            None // TODO: implement Schnorr signing for spend tx
-        } else {
-            None
-        };
-
-        // Create the vote message
-        let vote_msg = QuorumVoteMsg {
-            vote_round_id: msg.vote_round_id,
-            voter_pubkey: self.our_node_id,
-            vote,
-            voter_sequence: our_sequence,
-            voter_state_hash: our_state_hash,
-            evidence,
-            signature,
-            spend_signature,
-        };
-
-        // Broadcast vote to all quorum members (no special initiator role)
-        // For now, send back to the peer who sent us the request
-        log_info!(
-            self.logger,
-            "📋 QUORUM: Broadcasting vote (conforming={}) for round {:?}",
-            vote,
-            hex::encode(&msg.vote_round_id[..8])
-        );
-
-        if let Err(e) = self.send_message(sender_node_id, DepositsMessage::Coordination(CoordinationMsg::QuorumVote {
-            vote_round_id: vote_msg.vote_round_id,
-            voter_pubkey: vote_msg.voter_pubkey,
-            vote: vote_msg.vote,
-            voter_sequence: vote_msg.voter_sequence,
-            voter_state_hash: vote_msg.voter_state_hash,
-            evidence: vote_msg.evidence,
-            signature: vote_msg.signature,
-            spend_signature: vote_msg.spend_signature,
-        })) {
-            log_warn!(
-                self.logger,
-                "📋 QUORUM: Failed to send vote to {}: {:?}",
-                sender_node_id,
-                e
-            );
+        log_info!(self.logger, "📋 QUORUM: Sending vote (conforming={})", vote);
+        if let Err(e) = self.send_message(sender_node_id, vote_msg) {
+            log_warn!(self.logger, "📋 QUORUM: Failed to send vote: {:?}", e);
         }
 
         Ok(())
+    }
+
+    fn get_local_ledger_state(&self, operator: &PublicKey, partner: &PublicKey) -> Option<(u64, [u8; 32])> {
+        let logs = self.signed_update_logs.lock().unwrap();
+        logs.get(&(*operator, *partner)).map(|log| {
+            let seq = if log.updates.is_empty() { 0 } else { log.updates.len() as u64 - 1 };
+            let hash = log.updates.last().map(|u| u.current_hash).unwrap_or([0u8; 32]);
+            (seq, hash)
+        })
+    }
+
+    fn init_vote_round(&self, msg: &QuorumVoteRequestMsg) {
+        use super::core::VoteRoundState;
+        use std::collections::HashMap;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let mut rounds = self.pending_vote_rounds.lock().unwrap();
+        rounds.entry(msg.vote_round_id).or_insert_with(|| {
+            VoteRoundState {
+                operator_id: msg.operator_id, partner_id: msg.partner_id,
+                sequence_number: msg.sequence_number, state_hash: msg.state_hash,
+                claimed_reserves: msg.claimed_reserves, reserves_outpoint: msg.reserves_outpoint.clone(),
+                destination_script: msg.destination_script.clone(), fee_rate_sat_vbyte: msg.fee_rate_sat_vbyte,
+                threshold: 2, votes: HashMap::new(), tx_broadcast: false,
+                created_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
+            }
+        });
+    }
+
+    fn sign_vote(&self, round_id: &[u8; 32], vote: bool, seq: u64, hash: &[u8; 32]) -> Option<[u8; 64]> {
+        use bitcoin::hashes::{Hash, sha256};
+        use bitcoin::secp256k1::{Secp256k1, Message};
+
+        let secret = self.node_secret_key.as_ref()?;
+
+        let mut data = Vec::new();
+        data.extend_from_slice(round_id);
+        data.push(if vote { 1 } else { 0 });
+        data.extend_from_slice(&seq.to_le_bytes());
+        data.extend_from_slice(hash);
+
+        let secp = Secp256k1::new();
+        let msg_hash = Message::from_digest(sha256::Hash::hash(&data).to_byte_array());
+        let sig = secp.sign_ecdsa(&msg_hash, secret);
+        let mut bytes = [0u8; 64];
+        bytes.copy_from_slice(&sig.serialize_compact());
+        Some(bytes)
     }
 
     /// Handle QuorumVote message
@@ -401,118 +314,67 @@ where
         msg: &QuorumVoteMsg,
         _sender: PublicKey,
     ) -> Result<(), LightningError> {
-        log_info!(
-            self.logger,
-            "📋 QUORUM: Received vote from {} (conforming={}, has_spend_sig={})",
-            msg.voter_pubkey,
-            msg.vote,
-            msg.spend_signature.is_some()
-        );
+        log_info!(self.logger, "📋 QUORUM: Received vote from {} (conforming={}, has_spend_sig={})",
+            msg.voter_pubkey, msg.vote, msg.spend_signature.is_some());
 
-        // Look up the vote round and add this vote
-        let should_broadcast = {
-            let mut rounds = self.pending_vote_rounds.lock().unwrap();
-            if let Some(round) = rounds.get_mut(&msg.vote_round_id) {
-                // Add the vote
-                round.votes.insert(
-                    msg.voter_pubkey,
-                    (msg.vote, msg.spend_signature)
-                );
-
-                log_info!(
-                    self.logger,
-                    "📋 QUORUM: Vote round {:?} now has {}/{} conforming votes",
-                    hex::encode(&msg.vote_round_id[..8]),
-                    round.conforming_vote_count(),
-                    round.threshold
-                );
-
-                // Check if threshold reached and we haven't already broadcast
-                if round.threshold_reached() && !round.tx_broadcast {
-                    round.tx_broadcast = true; // Mark as broadcast to prevent duplicates
-                    Some(round.clone())
-                } else {
-                    None
-                }
-            } else {
-                log_debug!(
-                    self.logger,
-                    "📋 QUORUM: No pending vote round for {:?}, ignoring vote",
-                    hex::encode(&msg.vote_round_id[..8])
-                );
-                None
-            }
-        };
-
-        // If threshold reached, emit event for node layer to build and broadcast
-        if let Some(round) = should_broadcast {
-            log_info!(
-                self.logger,
-                "📋 QUORUM: Threshold reached for round {:?}! Preparing spend tx data...",
-                hex::encode(&msg.vote_round_id[..8])
-            );
-
-            // Collect spend signatures from conforming votes
-            let signatures = round.collect_spend_signatures();
-            log_info!(
-                self.logger,
-                "📋 QUORUM: Collected {} spend signatures for transaction",
-                signatures.len()
-            );
-
-            // Serialize the spend parameters for the node layer
-            // Format: reserves_outpoint || destination_script || amount || fee_rate || signatures
-            let mut spend_data = Vec::new();
-
-            // Append reserves outpoint (36 bytes: 32 txid + 4 vout)
-            spend_data.extend_from_slice(&round.reserves_outpoint);
-
-            // Append destination script length and script
-            spend_data.extend_from_slice(&(round.destination_script.len() as u32).to_le_bytes());
-            spend_data.extend_from_slice(&round.destination_script);
-
-            // Append reserves amount
-            spend_data.extend_from_slice(&round.claimed_reserves.to_le_bytes());
-
-            // Append fee rate
-            spend_data.extend_from_slice(&round.fee_rate_sat_vbyte.to_le_bytes());
-
-            // Append number of signatures
-            spend_data.extend_from_slice(&(signatures.len() as u32).to_le_bytes());
-
-            // Append each (pubkey, signature) pair
-            for (pubkey, sig) in &signatures {
-                spend_data.extend_from_slice(&pubkey.serialize());
-                spend_data.extend_from_slice(sig);
-            }
-
-            log_info!(
-                self.logger,
-                "📋 QUORUM: Prepared {} bytes of spend data with {} signatures",
-                spend_data.len(),
-                signatures.len()
-            );
-
-            // Emit event for node layer to finalize and broadcast
-            let _ = self.event_queue.emit_deposits_event(
-                super::events::DepositsEvent::ReservesSpendReady {
-                    vote_round_id: msg.vote_round_id,
-                    operator_id: round.operator_id,
-                    partner_id: round.partner_id,
-                    signed_tx_bytes: spend_data,
-                    conforming_votes: round.conforming_vote_count() as u32,
-                    threshold: round.threshold as u32,
-                },
-            );
-
-            log_info!(
-                self.logger,
-                "📋 QUORUM: Emitted ReservesSpendReady event for round {:?}",
-                hex::encode(&msg.vote_round_id[..8])
-            );
+        // Add vote to round and check if threshold reached
+        if let Some(round) = self.add_vote_to_round(msg) {
+            log_info!(self.logger, "📋 QUORUM: Threshold reached for round {:?}!", hex::encode(&msg.vote_round_id[..8]));
+            self.emit_spend_ready(&msg.vote_round_id, &round);
         }
 
         Ok(())
+    }
+
+    /// Add vote to round and return round if threshold reached
+    fn add_vote_to_round(&self, msg: &QuorumVoteMsg) -> Option<super::core::VoteRoundState> {
+        let mut rounds = self.pending_vote_rounds.lock().unwrap();
+        let round = rounds.get_mut(&msg.vote_round_id)?;
+
+        round.votes.insert(msg.voter_pubkey, (msg.vote, msg.spend_signature));
+        log_info!(self.logger, "📋 QUORUM: Vote round now has {}/{} conforming votes",
+            round.conforming_vote_count(), round.threshold);
+
+        if round.threshold_reached() && !round.tx_broadcast {
+            round.tx_broadcast = true;
+            Some(round.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Prepare spend data from vote round
+    fn prepare_spend_data(&self, round: &super::core::VoteRoundState) -> Vec<u8> {
+        let signatures = round.collect_spend_signatures();
+        log_info!(self.logger, "📋 QUORUM: Collected {} spend signatures", signatures.len());
+
+        let mut data = Vec::new();
+        data.extend_from_slice(&round.reserves_outpoint);
+        data.extend_from_slice(&(round.destination_script.len() as u32).to_le_bytes());
+        data.extend_from_slice(&round.destination_script);
+        data.extend_from_slice(&round.claimed_reserves.to_le_bytes());
+        data.extend_from_slice(&round.fee_rate_sat_vbyte.to_le_bytes());
+        data.extend_from_slice(&(signatures.len() as u32).to_le_bytes());
+        for (pubkey, sig) in &signatures {
+            data.extend_from_slice(&pubkey.serialize());
+            data.extend_from_slice(sig);
+        }
+        data
+    }
+
+    /// Emit spend ready event when threshold reached
+    fn emit_spend_ready(&self, round_id: &[u8; 32], round: &super::core::VoteRoundState) {
+        let spend_data = self.prepare_spend_data(round);
+        log_info!(self.logger, "📋 QUORUM: Prepared {} bytes of spend data", spend_data.len());
+
+        let _ = self.event_queue.emit_deposits_event(
+            super::events::DepositsEvent::ReservesSpendReady {
+                vote_round_id: *round_id, operator_id: round.operator_id, partner_id: round.partner_id,
+                signed_tx_bytes: spend_data, conforming_votes: round.conforming_vote_count() as u32,
+                threshold: round.threshold as u32,
+            },
+        );
+        log_info!(self.logger, "📋 QUORUM: Emitted ReservesSpendReady event for round {:?}", hex::encode(&round_id[..8]));
     }
 
     /// Handle QuorumMembershipChange message
@@ -1387,105 +1249,69 @@ where
         message: &DepositsMessage,
         sender_node_id: PublicKey,
     ) -> Result<(), LightningError> {
-        // Check if we already have a ledger with this partner (where sender is operator, we are partner)
-        let ledger_exists = self.ledgers.lock().unwrap().contains_key(&(sender_node_id, self.our_node_id));
-
-        if !ledger_exists {
-            // Parse the ledger address from the handshake message (operator provides it)
-            let ledger_address = match init_msg.ledger_address.parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>() {
-                Ok(addr) => match addr.require_network(bitcoin::Network::Regtest) {
-                    Ok(validated_addr) => validated_addr,
-                    Err(e) => {
-                        log_error!(self.logger, "Invalid network for ledger address: {}", e);
-                        let response = DepositsMessage::HandshakeResponse(HandshakeResponseMsg {
-                            request_hash: [0u8; 32],
-                            protocol_version: init_msg.protocol_version,
-                            accepted: false,
-                            error: Some(format!("Invalid network: {}", e)),
-                            partner_id: self.our_node_id,
-                        });
-                        let _ = self.send_message(sender_node_id, response);
-                        return Ok(());
-                    }
-                },
-                Err(e) => {
-                    log_error!(self.logger, "Failed to parse ledger address: {}", e);
-                    let response = DepositsMessage::HandshakeResponse(HandshakeResponseMsg {
-                        request_hash: [0u8; 32],
-                        protocol_version: init_msg.protocol_version,
-                        accepted: false,
-                        error: Some(format!("Invalid address: {}", e)),
-                        partner_id: self.our_node_id,
-                    });
-                    let _ = self.send_message(sender_node_id, response);
-                    return Ok(());
-                }
-            };
-
-            // Initialize the ledger as partner (sender is the operator) using the received message
-            if let Err(e) = self.initialize_ledger_as_partner_with_message(sender_node_id, ledger_address, init_msg.clone()) {
-                log_error!(self.logger, "Failed to initialize ledger as partner for operator {}: {}", sender_node_id, e);
-
-                // Send rejection response
-                let response = DepositsMessage::HandshakeResponse(HandshakeResponseMsg {
-                    request_hash: [0u8; 32],
-                    protocol_version: init_msg.protocol_version,
-                    accepted: false,
-                    error: Some(format!("Failed to initialize ledger: {}", e)),
-                    partner_id: self.our_node_id,
-                });
-                let _ = self.send_message(sender_node_id, response);
-                return Ok(());
-            }
-
-            // Send acceptance response
-            let response = DepositsMessage::HandshakeResponse(HandshakeResponseMsg {
-                request_hash: [0u8; 32],
-                protocol_version: init_msg.protocol_version,
-                accepted: true,
-                error: None,
-                partner_id: self.our_node_id,
-            });
-
-            println!("🟢 HANDSHAKE_RESPONSE: Sending LedgerOpenResponse (accepted=true) to {}", sender_node_id);
-            if let Err(e) = self.send_message(sender_node_id, response) {
-                log_error!(self.logger, "Failed to send LedgerOpenRequestResponse to {}: {}", sender_node_id, e);
-                println!("🔴 HANDSHAKE_RESPONSE: Failed to send response: {:?}", e);
-            } else {
-                println!("🟢 HANDSHAKE_RESPONSE: Response queued successfully for {}", sender_node_id);
-            }
-
-            // NOTE: Responder does NOT send UpdateReserves here
-            // The initiator will send UpdateReserves in initiate_ledger_handshake_async()
-            // If both sides send UpdateReserves, we get duplicate AcceptReserves messages
-            // which causes commitment transaction structure mismatches and force-closes
-            log_info!(
-                self.logger,
-                "RESPONDER: Ledger initialized, waiting for initiator to send UpdateReserves"
-            );
-        } else {
-            // Send rejection response - ledger already exists
-            let response = DepositsMessage::HandshakeResponse(HandshakeResponseMsg {
-                request_hash: [0u8; 32],
-                protocol_version: init_msg.protocol_version,
-                accepted: false,
-                error: Some("Ledger already exists".to_string()),
-                partner_id: self.our_node_id,
-            });
-
-            if let Err(e) = self.send_message(sender_node_id, response) {
-                log_error!(self.logger, "Failed to send LedgerOpenRequestResponse to {}: {}", sender_node_id, e);
-            }
-
+        // Check if ledger already exists
+        if self.ledgers.lock().unwrap().contains_key(&(sender_node_id, self.our_node_id)) {
+            self.send_handshake_rejection(init_msg, sender_node_id, "Ledger already exists");
             return Ok(());
         }
 
-        // Also send ACK to complete the handshake
+        // Validate and initialize ledger
+        let ledger_address = match self.validate_ledger_address(&init_msg.ledger_address) {
+            Ok(addr) => addr,
+            Err(e) => {
+                self.send_handshake_rejection(init_msg, sender_node_id, &e);
+                return Ok(());
+            }
+        };
+
+        if let Err(e) = self.initialize_ledger_as_partner_with_message(sender_node_id, ledger_address, init_msg.clone()) {
+            log_error!(self.logger, "Failed to initialize ledger as partner: {}", e);
+            self.send_handshake_rejection(init_msg, sender_node_id, &format!("Failed to initialize ledger: {}", e));
+            return Ok(());
+        }
+
+        // Send acceptance and ACK
+        self.send_handshake_acceptance(init_msg, sender_node_id);
+        log_info!(self.logger, "RESPONDER: Ledger initialized, waiting for initiator to send UpdateReserves");
+
         if let Err(e) = self.send_acknowledgment(message, true, None, None, sender_node_id) {
-            log_error!(self.logger, "Failed to send LedgerOpenRequest ACK to {}: {}", sender_node_id, e);
+            log_error!(self.logger, "Failed to send LedgerOpenRequest ACK: {}", e);
         }
 
         Ok(())
+    }
+
+    /// Validate ledger address from handshake
+    fn validate_ledger_address(&self, addr_str: &str) -> Result<bitcoin::Address, String> {
+        let addr = addr_str.parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>()
+            .map_err(|e| format!("Invalid address: {}", e))?;
+        addr.require_network(bitcoin::Network::Regtest)
+            .map_err(|e| format!("Invalid network: {}", e))
+    }
+
+    /// Send handshake rejection response
+    fn send_handshake_rejection(&self, init_msg: &HandshakeMsg, peer: PublicKey, error: &str) {
+        log_error!(self.logger, "Handshake rejected: {}", error);
+        let response = DepositsMessage::HandshakeResponse(HandshakeResponseMsg {
+            request_hash: [0u8; 32], protocol_version: init_msg.protocol_version, accepted: false,
+            error: Some(error.to_string()), partner_id: self.our_node_id,
+        });
+        let _ = self.send_message(peer, response);
+    }
+
+    /// Send handshake acceptance response
+    fn send_handshake_acceptance(&self, init_msg: &HandshakeMsg, peer: PublicKey) {
+        let response = DepositsMessage::HandshakeResponse(HandshakeResponseMsg {
+            request_hash: [0u8; 32], protocol_version: init_msg.protocol_version, accepted: true,
+            error: None, partner_id: self.our_node_id,
+        });
+        println!("🟢 HANDSHAKE_RESPONSE: Sending LedgerOpenResponse (accepted=true) to {}", peer);
+        if let Err(e) = self.send_message(peer, response) {
+            log_error!(self.logger, "Failed to send LedgerOpenRequestResponse: {}", e);
+            println!("🔴 HANDSHAKE_RESPONSE: Failed to send response: {:?}", e);
+        } else {
+            println!("🟢 HANDSHAKE_RESPONSE: Response queued successfully for {}", peer);
+        }
     }
 
     // ==================== Third-Party Audit Handlers ====================
@@ -1574,16 +1400,6 @@ where
     // ========================================================================
 
     /// Handle incoming UpdateReserves custom message
-    ///
-    /// This is part of the reserves commitment protocol using the generic extra outputs API.
-    /// When we receive this message, the counterparty is proposing to add extra outputs
-    /// to our commitment transaction for their reserves.
-    ///
-    /// We need to:
-    /// 1. Call receive_extra_outputs_proposal() on the channel manager
-    /// 2. Validate the proposal (check ledger hash, etc.)
-    /// 3. Call accept_extra_outputs_proposal() to accept it
-    /// 4. Send AcceptReserves response
     pub(super) fn handle_update_reserves(
         &self,
         channel_id: &[u8; 32],
@@ -1593,189 +1409,80 @@ where
         remote_ledger_hash: &[u8; 32],
         sender_node_id: PublicKey,
     ) -> Result<(), LightningError> {
-        use deposits_core::{ChannelId, CommitmentExtraOutput};
+        log_info!(self.logger, "📥 Received UpdateReserves from {} - reserves={} sats", sender_node_id, reserves_sats);
 
-        log_info!(
-            self.logger,
-            "📥 Received UpdateReserves from {} for channel {} - reserves={} sats, hash={:02x?}",
-            sender_node_id,
-            hex::encode(&channel_id[..8]),
-            reserves_sats,
-            &ledger_hash[0..8]
-        );
+        // Receive and accept the proposal
+        self.receive_and_accept_extra_outputs(channel_id, reserves_sats, script_pubkey, ledger_hash, remote_ledger_hash, sender_node_id)?;
 
-        let channel_id_typed = ChannelId::new(*channel_id);
+        // Update partner ledger state
+        self.update_partner_ledger_state(sender_node_id, ledger_hash, reserves_sats);
 
-        // Get the channel manager
-        let cm = match &self.channel_manager {
-            Some(cm) => cm,
-            None => {
-                log_error!(self.logger, "Channel manager not available for UpdateReserves handling");
-                return Err(LightningError {
-                    err: "Channel manager not available".to_string(),
-                    action: ErrorAction::IgnoreError,
-                });
-            }
-        };
-
-        // Convert script_pubkey bytes to ScriptBuf
-        let script = bitcoin::ScriptBuf::from_bytes(script_pubkey.to_vec());
-
-        // Build the CommitmentExtraOutput (deposits-core type)
-        let output = CommitmentExtraOutput {
-            amount_satoshis: reserves_sats,
-            script_pubkey: script,
-        };
-
-        // Serialize the ledger hashes as user_data for validation later
-        let mut user_data = Vec::with_capacity(64);
-        user_data.extend_from_slice(ledger_hash);
-        user_data.extend_from_slice(remote_ledger_hash);
-
-        // Call receive_extra_outputs_proposal on the channel manager
-        if let Err(e) = cm.receive_extra_outputs_proposal(
-            &sender_node_id,
-            &channel_id_typed,
-            vec![output],
-            user_data,
-        ) {
-            log_error!(
-                self.logger,
-                "Failed to receive extra outputs proposal from {}: {}",
-                sender_node_id,
-                e
-            );
-            return Err(LightningError {
-                err: format!("Failed to receive proposal: {}", e),
-                action: ErrorAction::IgnoreError,
-            });
-        }
-
-        log_debug!(
-            self.logger,
-            "Stored extra outputs proposal from {} - validating...",
-            sender_node_id
-        );
-
-        // TODO: Validate the proposal
-        // - Check that remote_ledger_hash matches our ledger state
-        // - Check that the script_pubkey is valid for the claimed ledger_hash
-        // For now, we accept all proposals
-
-        // Accept the proposal
-        if let Err(e) = cm.accept_extra_outputs_proposal(&sender_node_id, &channel_id_typed) {
-            log_error!(
-                self.logger,
-                "Failed to accept extra outputs proposal from {}: {}",
-                sender_node_id,
-                e
-            );
-            return Err(LightningError {
-                err: format!("Failed to accept proposal: {}", e),
-                action: ErrorAction::IgnoreError,
-            });
-        }
-
-        log_info!(
-            self.logger,
-            "✅ Accepted UpdateReserves from {} - sending AcceptReserves response",
-            sender_node_id
-        );
-
-        // Update our copy of the sender's ledger's channel_deepest_commitment_hash
-        // The sender is the operator of the ledger, we are the partner
-        // Key is (operator_node_id, partner_node_id) = (sender_node_id, our_node_id)
-        {
-            let partner_ledger_key = (sender_node_id, self.our_node_id);
-            let ledgers = self.ledgers.lock().unwrap();
-
-            // Debug: print all ledger keys we have
-            println!("[HANDLE_UPDATE_RESERVES] Looking for ledger key ({}, {})", sender_node_id, self.our_node_id);
-            println!("[HANDLE_UPDATE_RESERVES] Available ledger keys:");
-            for (k, _) in ledgers.iter() {
-                println!("  - ({}, {})", k.0, k.1);
-            }
-
-            if let Some(ledger_arc) = ledgers.get(&partner_ledger_key) {
-                let mut ledger = ledger_arc.write().unwrap();
-                println!(
-                    "🔧 [PARTNER] FOUND ledger ({}, {})! reserves BEFORE: {} sats",
-                    sender_node_id, self.our_node_id, ledger.state.reserves.amount
-                );
-                println!(
-                    "🔧 [PARTNER] Updating commitment hash from {:02x?} to {:02x?}",
-                    &ledger.state.channel_deepest_commitment_hash[0..8],
-                    &ledger_hash[0..8]
-                );
-                ledger.state.channel_deepest_commitment_hash = *ledger_hash;
-                // CRITICAL: Also update reserves amount so validation checks pass
-                // The operator is telling us their reserves amount via UpdateReserves
-                println!(
-                    "🔧 [PARTNER] Updating reserves: {} -> {} sats",
-                    ledger.state.reserves.amount, reserves_sats
-                );
-                ledger.state.reserves.amount = reserves_sats;
-                println!(
-                    "✅ [PARTNER] Ledger updated! reserves AFTER: {} sats",
-                    ledger.state.reserves.amount
-                );
-                log_info!(
-                    self.logger,
-                    "🔒 Updated partner ledger: commitment_hash={:02x?}, reserves={} sats",
-                    &ledger_hash[0..8],
-                    reserves_sats
-                );
-                // Persist the updated commitment hash
-                if let Err(e) = self.persist_ledger_state(&ledger) {
-                    log_error!(
-                        self.logger,
-                        "Failed to persist partner ledger state after commitment update: {}",
-                        e
-                    );
-                }
-            } else {
-                println!(
-                    "[HANDLE_UPDATE_RESERVES] NO ledger found for key ({}, {})",
-                    sender_node_id, self.our_node_id
-                );
-                log_debug!(
-                    self.logger,
-                    "No partner ledger copy found for {} (key: {:?}), skipping commitment hash update",
-                    sender_node_id,
-                    partner_ledger_key
-                );
-            }
-        }
-
-        // Send AcceptReserves response (V2 format)
-        let accept_msg = DepositsMessage::CoordinationResponse(CoordinationResponseMsg::AcceptReserves {
-            channel_id: *channel_id,
-        });
-
+        // Send AcceptReserves response
+        let accept_msg = DepositsMessage::CoordinationResponse(CoordinationResponseMsg::AcceptReserves { channel_id: *channel_id });
         if let Err(e) = self.send_message(sender_node_id, accept_msg) {
-            log_error!(
-                self.logger,
-                "Failed to send AcceptReserves to {}: {:?}",
-                sender_node_id,
-                e
-            );
+            log_error!(self.logger, "Failed to send AcceptReserves: {:?}", e);
         } else {
-            log_info!(
-                self.logger,
-                "📤 Sent AcceptReserves to {} for channel {}",
-                sender_node_id,
-                hex::encode(&channel_id[..8])
-            );
+            log_info!(self.logger, "📤 Sent AcceptReserves to {}", sender_node_id);
         }
 
         Ok(())
     }
 
+    /// Receive and accept extra outputs proposal on channel manager
+    fn receive_and_accept_extra_outputs(
+        &self,
+        channel_id: &[u8; 32],
+        reserves_sats: u64,
+        script_pubkey: &[u8],
+        ledger_hash: &[u8; 32],
+        remote_ledger_hash: &[u8; 32],
+        sender: PublicKey,
+    ) -> Result<(), LightningError> {
+        use deposits_core::{ChannelId, CommitmentExtraOutput};
+
+        let cm = self.channel_manager.as_ref().ok_or_else(|| LightningError {
+            err: "Channel manager not available".to_string(), action: ErrorAction::IgnoreError,
+        })?;
+
+        let channel_id_typed = ChannelId::new(*channel_id);
+        let output = CommitmentExtraOutput {
+            amount_satoshis: reserves_sats,
+            script_pubkey: bitcoin::ScriptBuf::from_bytes(script_pubkey.to_vec()),
+        };
+
+        let mut user_data = Vec::with_capacity(64);
+        user_data.extend_from_slice(ledger_hash);
+        user_data.extend_from_slice(remote_ledger_hash);
+
+        cm.receive_extra_outputs_proposal(&sender, &channel_id_typed, vec![output], user_data)
+            .map_err(|e| LightningError { err: format!("Failed to receive proposal: {}", e), action: ErrorAction::IgnoreError })?;
+
+        cm.accept_extra_outputs_proposal(&sender, &channel_id_typed)
+            .map_err(|e| LightningError { err: format!("Failed to accept proposal: {}", e), action: ErrorAction::IgnoreError })?;
+
+        log_info!(self.logger, "✅ Accepted UpdateReserves from {}", sender);
+        Ok(())
+    }
+
+    /// Update partner ledger commitment hash and reserves
+    fn update_partner_ledger_state(&self, sender: PublicKey, ledger_hash: &[u8; 32], reserves_sats: u64) {
+        let partner_ledger_key = (sender, self.our_node_id);
+        let ledgers = self.ledgers.lock().unwrap();
+
+        if let Some(ledger_arc) = ledgers.get(&partner_ledger_key) {
+            let mut ledger = ledger_arc.write().unwrap();
+            ledger.state.channel_deepest_commitment_hash = *ledger_hash;
+            ledger.state.reserves.amount = reserves_sats;
+            log_info!(self.logger, "🔒 Updated partner ledger: commitment_hash={:02x?}, reserves={} sats", &ledger_hash[0..8], reserves_sats);
+            if let Err(e) = self.persist_ledger_state(&ledger) {
+                log_error!(self.logger, "Failed to persist partner ledger state: {}", e);
+            }
+        } else {
+            log_debug!(self.logger, "No partner ledger found for {}, skipping commitment hash update", sender);
+        }
+    }
+
     /// Handle incoming AcceptReserves custom message
-    ///
-    /// This is sent by the counterparty in response to our UpdateReserves message.
-    /// It indicates they have accepted our proposed extra outputs.
-    /// We need to call extra_outputs_accepted() on the channel manager to finalize.
     pub(super) fn handle_accept_reserves(
         &self,
         channel_id: &[u8; 32],
@@ -1783,48 +1490,16 @@ where
     ) -> Result<(), LightningError> {
         use deposits_core::ChannelId;
 
-        log_info!(
-            self.logger,
-            "📥 Received AcceptReserves from {} for channel {}",
-            sender_node_id,
-            hex::encode(&channel_id[..8])
-        );
+        log_info!(self.logger, "📥 Received AcceptReserves from {} for channel {}", sender_node_id, hex::encode(&channel_id[..8]));
 
-        let channel_id_typed = ChannelId::new(*channel_id);
+        let cm = self.channel_manager.as_ref().ok_or_else(|| LightningError {
+            err: "Channel manager not available".to_string(), action: ErrorAction::IgnoreError,
+        })?;
 
-        // Get the channel manager
-        let cm = match &self.channel_manager {
-            Some(cm) => cm,
-            None => {
-                log_error!(self.logger, "Channel manager not available for AcceptReserves handling");
-                return Err(LightningError {
-                    err: "Channel manager not available".to_string(),
-                    action: ErrorAction::IgnoreError,
-                });
-            }
-        };
+        cm.extra_outputs_accepted(&sender_node_id, &ChannelId::new(*channel_id))
+            .map_err(|e| LightningError { err: format!("Failed to process acceptance: {}", e), action: ErrorAction::IgnoreError })?;
 
-        // Call extra_outputs_accepted to finalize the proposal
-        if let Err(e) = cm.extra_outputs_accepted(&sender_node_id, &channel_id_typed) {
-            log_error!(
-                self.logger,
-                "Failed to process AcceptReserves from {}: {}",
-                sender_node_id,
-                e
-            );
-            return Err(LightningError {
-                err: format!("Failed to process acceptance: {}", e),
-                action: ErrorAction::IgnoreError,
-            });
-        }
-
-        log_info!(
-            self.logger,
-            "✅ Extra outputs accepted by {} for channel {} - commitment transaction will be updated",
-            sender_node_id,
-            hex::encode(&channel_id[..8])
-        );
-
+        log_info!(self.logger, "✅ Extra outputs accepted by {} - commitment will be updated", sender_node_id);
         Ok(())
     }
 }
