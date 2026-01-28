@@ -146,7 +146,7 @@ where
                 let mut ledger = ledger_arc.write().unwrap();
 
                 // Apply the deposit and capture prev_hash, new_hash, and sequence atomically
-                let (prev, hash, seq) = ledger.append_v1_mut_with_metadata(message_for_broadcast.clone())?;
+                let (prev, hash, seq) = ledger.append_mut_with_metadata(message_for_broadcast.clone())?;
 
                 // CRITICAL: Retrieve partner signature from ACK and store it on the ledger update
                 {

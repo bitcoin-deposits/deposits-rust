@@ -65,10 +65,10 @@ pub use deposits_core::messages::{
 pub use crate::wire::types::{FeeStructure, PendingInvoice};
 
 // ============================================================================
-// V1 Wire Message Structs (from deposits-ldk) - REMOVED
+// Wire Message Types
 // ============================================================================
-// V1 wire message types have been removed. Only V2 types are now used.
-// See deposits-core::messages for the V2 message types.
+// Message types are defined in deposits-core::messages and re-exported above.
+// This module provides type aliases and extension traits for LDK integration.
 
 // ============================================================================
 // LedgerOperation Extensions
@@ -123,13 +123,12 @@ impl LedgerOperationExt for LedgerOperation {
 }
 
 // ============================================================================
-// Main Message Type (V1-compatible enum over V2)
+// Main Message Type
 // ============================================================================
 
-/// Main deposits message type (V2 wire format with V1-compatible API)
+/// Main deposits message type for the Bitcoin Deposits protocol.
 ///
-/// Core V2 types handle all operations, with V1-named variants for backward API compatibility.
-/// Wire format is always V2 - the V1 aliases are just for pattern matching convenience.
+/// This enum wraps the core message types with LDK-specific trait implementations.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DepositsMessage {
     // ==================== Core V2 Types ====================
@@ -843,7 +842,6 @@ impl Readable for DepositsMessage {
 
 impl Writeable for DepositsMessage {
     fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
-        // Always use V2 wire format. V1 variants are converted to V2 via into_v2().
         // encode() returns [type: u16][payload], but LDK adds the type prefix
         // separately via type_id(), so we only write the payload (skip first 2 bytes).
         let bytes = self.encode();
@@ -859,7 +857,6 @@ impl Writeable for DepositsMessage {
 
 impl lightning::ln::wire::Type for DepositsMessage {
     fn type_id(&self) -> u16 {
-        // Always use V2 wire format type IDs
         let v2_id = self.v2_type_id();
         let v1_id = self.message_type();
         println!("🔴 TYPE_ID CALLED: v1={:#06x}, v2={:#06x}, variant={}", v1_id, v2_id, self.variant_name());

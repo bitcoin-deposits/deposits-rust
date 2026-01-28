@@ -58,7 +58,7 @@ where
         // 1. Serialize the message using Lightning's wire protocol
         // IMPORTANT: Use write() which skips the type prefix, NOT encode() which includes it.
         // The message_type is stored separately in SignedLedgerUpdate.message_type.
-        // This must match what append_v1 does in ledger.rs.
+        // This must match what append does in ledger.rs.
         use lightning::util::ser::Writeable;
         let mut message_bytes = Vec::new();
         message.write(&mut message_bytes).expect("Message encoding should never fail");

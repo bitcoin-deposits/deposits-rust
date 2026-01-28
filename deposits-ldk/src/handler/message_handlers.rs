@@ -1150,7 +1150,7 @@ where
             for (op_id, part_id) in channel_ledgers_to_update {
                 if let Some(ledger_arc) = ledgers.get(&(op_id, part_id)) {
                     let mut ledger = ledger_arc.write().unwrap();
-                    match ledger.append_v1_mut_with_metadata(attestation_forward.clone()) {
+                    match ledger.append_mut_with_metadata(attestation_forward.clone()) {
                         Ok((prev_hash, new_hash, seq)) => {
                             log_info!(
                                 self.logger,
@@ -1467,7 +1467,7 @@ where
                     )
                 );
 
-                match ledger_owned.append_v1(message.clone()) {
+                match ledger_owned.append(message.clone()) {
                     Ok((updated_ledger, _new_hash)) => {
                         *ledger_guard = updated_ledger;
                         log_info!(

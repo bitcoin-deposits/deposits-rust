@@ -5,7 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-//! Stub types for legacy V1 protocol components.
+//! Stub types for legacy protocol components.
 //!
 //! These stubs allow the handler code to compile while the migration is in progress.
 //! TODO: Remove these stubs and properly migrate or remove the functionality.
@@ -13,7 +13,7 @@
 use std::ops::Deref;
 use lightning::util::logger::Logger as LdkLogger;
 
-/// Stub for DepositsProtocol (legacy V1 protocol manager).
+/// Stub for DepositsProtocol (legacy protocol manager).
 ///
 /// This is a placeholder that allows compilation. The actual functionality
 /// will be migrated or removed in a future commit.

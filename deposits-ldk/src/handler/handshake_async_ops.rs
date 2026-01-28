@@ -147,7 +147,7 @@ where
                         .as_secs();
 
                     // Apply reserves increase and get all metadata atomically
-                    let (prev, hash, seq) = ledger.append_v1_mut_with_metadata(reserves_msg_for_broadcast.clone())?;
+                    let (prev, hash, seq) = ledger.append_mut_with_metadata(reserves_msg_for_broadcast.clone())?;
 
                     // CRITICAL: Retrieve partner signature from ACK and store it on the ledger update
                     {

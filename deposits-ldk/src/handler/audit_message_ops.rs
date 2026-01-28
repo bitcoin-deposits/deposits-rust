@@ -155,7 +155,7 @@ where
 
                             // Apply Handshake if this is the first update
                             if ledger.history.is_empty() {
-                                if let Err(e) = ledger.append_v1_mut(DepositsMessage::Handshake(handshake_msg.clone())) {
+                                if let Err(e) = ledger.append_mut(DepositsMessage::Handshake(handshake_msg.clone())) {
                                     log_error!(self.logger, "📋 AUDIT: Failed to apply Handshake: {}", e);
                                 }
                             }
@@ -180,9 +180,9 @@ where
             }
         } else if message.is_ledger_operation() {
             // Unified handling for all ledger operations (V2 LedgerUpdate)
-            // The ledger.append_v1_mut() handles all message types via apply_operation()
+            // The ledger.append_mut() handles all message types via apply_operation()
             let mut ledger = ledger_arc.write().unwrap();
-            let result = ledger.append_v1_mut(message.clone());
+            let result = ledger.append_mut(message.clone());
             if let Err(e) = result {
                 log_error!(self.logger, "📋 AUDIT: Failed to apply message type {:#06x} to audit ledger: {}", message.message_type(), e);
             } else {

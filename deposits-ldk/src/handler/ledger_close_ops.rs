@@ -86,7 +86,7 @@ where
                 let ledgers = self.ledgers.lock().unwrap();
                 if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
                     let mut ledger = ledger_arc.write().unwrap();
-                    let hash = ledger.append_v1_mut(message_for_broadcast.clone())?;
+                    let hash = ledger.append_mut(message_for_broadcast.clone())?;
                     let seq = (ledger.history.len() - 1) as u64; // 0-based (index of just-appended entry)
                     // Update partner_deepest_ack_hash since partner just ACKed this update
                     ledger.state.partner_deepest_ack_hash = hash;
@@ -187,7 +187,7 @@ where
             let mut ledgers = self.ledgers.lock().unwrap();
             if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
                 let mut ledger = ledger_arc.write().unwrap();
-                let new_hash = ledger.append_v1_mut(message)?;
+                let new_hash = ledger.append_mut(message)?;
                 // Update partner_deepest_ack_hash since partner just ACKed this update
                 ledger.state.partner_deepest_ack_hash = new_hash;
                 self.persist_ledger_state(&*ledger)?;
@@ -272,7 +272,7 @@ where
             let mut ledgers = self.ledgers.lock().unwrap();
             if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
                 let mut ledger = ledger_arc.write().unwrap();
-                let new_hash = ledger.append_v1_mut(message)?;
+                let new_hash = ledger.append_mut(message)?;
                 // Update partner_deepest_ack_hash since partner just ACKed this update
                 ledger.state.partner_deepest_ack_hash = new_hash;
                 self.persist_ledger_state(&*ledger)?;
@@ -342,7 +342,7 @@ where
             let ledgers = self.ledgers.lock().unwrap();
             if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
                 let mut ledger = ledger_arc.write().unwrap();
-                let new_hash = ledger.append_v1_mut(message)?;
+                let new_hash = ledger.append_mut(message)?;
                 // Update partner_deepest_ack_hash since partner just ACKed this update
                 ledger.state.partner_deepest_ack_hash = new_hash;
                 self.persist_ledger_state(&*ledger)?;

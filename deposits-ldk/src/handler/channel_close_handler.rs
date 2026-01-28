@@ -101,7 +101,7 @@ where
             )
         );
 
-        match ledger_owned.append_v1(tombstone.clone()) {
+        match ledger_owned.append(tombstone.clone()) {
             Ok((updated_ledger, new_hash)) => {
                 *ledger_guard = updated_ledger;
                 // Get sequence number from updated ledger (0-indexed, so len-1)

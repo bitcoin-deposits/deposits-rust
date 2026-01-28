@@ -184,7 +184,7 @@ where
             let ledgers = self.ledgers.lock().unwrap();
             if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
                 let mut ledger = ledger_arc.write().unwrap();
-                let hash = ledger.append_v1_mut(message_for_broadcast.clone())?;
+                let hash = ledger.append_mut(message_for_broadcast.clone())?;
                 let seq = (ledger.history.len() - 1) as u64; // 0-based (index of just-appended entry)
                 (hash, seq)
             } else {

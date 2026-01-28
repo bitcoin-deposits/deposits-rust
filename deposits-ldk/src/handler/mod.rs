@@ -27,7 +27,7 @@
 // Prelude with common imports for all handler modules
 pub mod prelude;
 
-// Message types for handlers (V1-compatible DepositsMessage enum)
+// Message types for handlers (DepositsMessage enum with LDK traits)
 pub mod messages;
 
 // Event types for handlers
@@ -36,7 +36,7 @@ pub mod events;
 // Ledger extension traits
 pub mod ledger_ext;
 
-// Protocol stubs for legacy V1 types (temporary)
+// Protocol stubs for legacy types (temporary)
 pub mod protocol_stub;
 
 // Core module containing DepositsHandler struct and main implementation

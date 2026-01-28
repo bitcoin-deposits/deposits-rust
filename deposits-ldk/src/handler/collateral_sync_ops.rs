@@ -138,7 +138,7 @@ where
                 let prev_hash = ledger.tail_hash();
 
                 // Clone message_for_broadcast because we need it later to send to the collateral partner
-                let new_hash = ledger.append_v1_mut(message_for_broadcast.clone())?;
+                let new_hash = ledger.append_mut(message_for_broadcast.clone())?;
                 let chain_index = (ledger.history.len() - 1) as u64; // 0-based (index of just-appended entry)
 
                 // Update partner_deepest_ack_hash since partner just ACKed this update
@@ -273,7 +273,7 @@ where
                 // Capture prev_hash BEFORE appending
                 let prev_hash = ledger.tail_hash();
 
-                let new_hash = ledger.append_v1_mut(message_for_broadcast.clone())?;
+                let new_hash = ledger.append_mut(message_for_broadcast.clone())?;
                 let chain_index = (ledger.history.len() - 1) as u64; // 0-based (index of just-appended entry)
 
                 // Update partner_deepest_ack_hash since partner just ACKed this update

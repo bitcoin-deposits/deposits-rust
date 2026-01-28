@@ -51,7 +51,6 @@ where
             // Skip coordination/control messages that are NOT bilateral ledger updates:
             DepositsMessage::LedgerUpdateResponse(_) |      // ACK responses
             // NOTE: LedgerUpdate IS a real ledger update that needs broadcast tracking
-            // (removed from skip list so V2 messages work like V1 messages)
             DepositsMessage::Coordination(_) |              // Collateral consent, quorum votes
             DepositsMessage::CoordinationResponse(_) |      // Collateral consent responses
             DepositsMessage::Handshake(_) |                 // Ledger open sequence

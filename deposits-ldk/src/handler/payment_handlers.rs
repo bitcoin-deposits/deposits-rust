@@ -82,7 +82,7 @@ where
                 // Use append_mut_with_metadata to atomically get prev_hash, new_hash, and sequence_number
                 // This prevents race conditions where another thread could append between operations
                 // Returns 0-based sequence number for broadcasting
-                let (prev_hash, new_hash, broadcast_seq) = ledger.append_v1_mut_with_metadata(fulfill_message.clone())?;
+                let (prev_hash, new_hash, broadcast_seq) = ledger.append_mut_with_metadata(fulfill_message.clone())?;
 
                 found_result = Some((*partner, prev_hash, new_hash, fulfill_message, broadcast_seq));
                 break;
@@ -188,7 +188,7 @@ where
                         sequence_number: msg.sequence_number,
                     },
                 );
-                let (prev_hash, new_hash, broadcast_seq) = ledger.append_v1_mut_with_metadata(DepositsMessage::LedgerUpdate(update_msg))?;
+                let (prev_hash, new_hash, broadcast_seq) = ledger.append_mut_with_metadata(DepositsMessage::LedgerUpdate(update_msg))?;
 
                 found_result = Some((*partner, prev_hash, new_hash, msg, broadcast_seq));
                 break;
@@ -293,7 +293,7 @@ where
 
             // Use append_mut_with_metadata to atomically get prev_hash, new_hash, and sequence_number
             // This prevents race conditions where another thread could append between operations
-            let (prev_hash, new_hash, sequence_number) = ledger.append_v1_mut_with_metadata(lock_message.clone()).map_err(|e| {
+            let (prev_hash, new_hash, sequence_number) = ledger.append_mut_with_metadata(lock_message.clone()).map_err(|e| {
                 log_error!(self.logger, "Failed to append PaymentLock update: {}", e);
                 e
             })?;
@@ -388,7 +388,7 @@ where
                     let fail_message = DepositsMessage::LedgerUpdate(update_msg);
 
                     // Apply the update (this modifies state and records in history) and capture new_hash
-                    let new_hash = ledger.append_v1_mut(fail_message.clone()).map_err(|e| {
+                    let new_hash = ledger.append_mut(fail_message.clone()).map_err(|e| {
                         log_error!(self.logger, "Failed to apply PaymentFail update: {}", e);
                         e
                     })?;

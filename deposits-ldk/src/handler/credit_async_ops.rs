@@ -108,7 +108,7 @@ where
                 let ledgers = self.ledgers.lock().unwrap();
                 if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
                     let mut ledger = ledger_arc.write().unwrap();
-                    let (prev, hash, seq) = ledger.append_v1_mut_with_metadata(reserves_msg_for_broadcast.clone())?;
+                    let (prev, hash, seq) = ledger.append_mut_with_metadata(reserves_msg_for_broadcast.clone())?;
 
                     // CRITICAL: Retrieve partner signature from ACK and store it on the ledger update
                     // This is needed for PORCUPINE validation - without it, partner_signature is [0u8; 64]
@@ -197,7 +197,7 @@ where
                 // Record to ledger atomically - no gap between building message and recording
                 // PORCUPINE requires the operator's signature before accepting commitment.
                 // The signature is created when we record to ledger.
-                let (prev, hash, seq) = ledger.append_v1_mut_with_metadata(msg.clone())?;
+                let (prev, hash, seq) = ledger.append_mut_with_metadata(msg.clone())?;
 
                 println!(
                     "📝 ATOMIC RECORD: PaymentCredit hash={:02x?}, prev={:02x?}, seq={}",
@@ -511,7 +511,7 @@ where
                     .as_secs();
 
                 // Apply reserves decrease and capture new_hash
-                let hash = ledger.append_v1_mut(reserves_msg_for_broadcast.clone())?;
+                let hash = ledger.append_mut(reserves_msg_for_broadcast.clone())?;
                 let seq = (ledger.history.len() - 1) as u64; // 0-based (index of just-appended entry)
 
                 // Persist the ledger

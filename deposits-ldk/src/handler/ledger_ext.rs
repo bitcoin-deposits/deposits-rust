@@ -10,7 +10,7 @@
 //! Re-exports the core Ledger from deposits-core with LDK-specific extensions.
 //!
 //! - `Ledger`: Core ledger from deposits-core
-//! - `LedgerExt`: LDK-specific extension methods (construct_voter_set, V1 message handling)
+//! - `LedgerExt`: LDK-specific extension methods (construct_voter_set, message handling)
 //! - `LedgerValidator`: Stateless validation utilities (re-exported from deposits-core)
 //! - `LedgerManager`: Complex multi-step operations (re-exported from deposits-core)
 
@@ -47,9 +47,9 @@ impl SignedLedgerUpdateExt for deposits_core::types::SignedLedgerUpdate {
         use lightning::ln::wire::CustomMessageReader;
         use super::messages::DepositsMessageReader;
 
-        // The message bytes were written using Writeable trait (V1 format),
+        // The message bytes were written using Writeable trait,
         // so we must read using the CustomMessageReader which dispatches
-        // based on message_type to the correct V1 Readable implementation.
+        // based on message_type to the correct Readable implementation.
         let reader = DepositsMessageReader;
         // Use slice reference which implements LengthLimitedRead
         let mut slice = self.message.as_slice();
@@ -85,7 +85,7 @@ impl SignedLedgerUpdateExt for deposits_core::types::SignedLedgerUpdate {
 ///
 /// These methods are specific to the LDK integration layer and handle:
 /// - Taproot reserves output construction (VoterSet)
-/// - V1 message format handling (DepositsMessage enum)
+/// - Message format handling (DepositsMessage enum)
 pub trait LedgerExt {
     /// Construct the VoterSet for this ledger's reserves output.
     ///
@@ -100,19 +100,19 @@ pub trait LedgerExt {
     /// Returns (prev_hash, predicted_hash, sequence_number).
     fn predict_hash_after(&self, message: &DepositsMessage) -> ([u8; 32], [u8; 32], u64);
 
-    /// Apply state changes from a V1 message WITHOUT creating a hash chain entry.
+    /// Apply state changes from a message WITHOUT creating a hash chain entry.
     fn apply_state_only(&mut self, message: &DepositsMessage) -> Result<(), DepositsError>;
 
-    /// Append a V1 message to the ledger (immutable/functional style).
-    /// Usage: `let (ledger, hash) = ledger.append_v1(msg)?;`
-    fn append_v1(self, message: DepositsMessage) -> Result<(Self, [u8; 32]), DepositsError> where Self: Sized;
+    /// Append a message to the ledger (immutable/functional style).
+    /// Usage: `let (ledger, hash) = ledger.append(msg)?;`
+    fn append(self, message: DepositsMessage) -> Result<(Self, [u8; 32]), DepositsError> where Self: Sized;
 
-    /// Mutable version of append_v1 for compatibility with RwLock guards.
-    fn append_v1_mut(&mut self, message: DepositsMessage) -> Result<[u8; 32], DepositsError>;
+    /// Mutable version of append for compatibility with RwLock guards.
+    fn append_mut(&mut self, message: DepositsMessage) -> Result<[u8; 32], DepositsError>;
 
     /// Append and return both prev_hash and new_hash atomically.
     /// Returns (prev_hash, new_hash, sequence_number).
-    fn append_v1_mut_with_metadata(&mut self, message: DepositsMessage) -> Result<([u8; 32], [u8; 32], u64), DepositsError>;
+    fn append_mut_with_metadata(&mut self, message: DepositsMessage) -> Result<([u8; 32], [u8; 32], u64), DepositsError>;
 
     /// Append a signed update to the ledger (validates hash chain continuity).
     fn append_signed(&mut self, update: SignedLedgerUpdate) -> Result<(), DepositsError>;
@@ -214,7 +214,7 @@ impl LedgerExt for Ledger {
         Ok(())
     }
 
-    fn append_v1(mut self, message: DepositsMessage) -> Result<(Self, [u8; 32]), DepositsError> {
+    fn append(mut self, message: DepositsMessage) -> Result<(Self, [u8; 32]), DepositsError> {
         use lightning::util::ser::Writeable;
 
         // Check if ledger is closed
@@ -269,17 +269,17 @@ impl LedgerExt for Ledger {
         Ok((self, update_hash))
     }
 
-    fn append_v1_mut(&mut self, message: DepositsMessage) -> Result<[u8; 32], DepositsError> {
+    fn append_mut(&mut self, message: DepositsMessage) -> Result<[u8; 32], DepositsError> {
         let cloned = self.clone();
-        let (new_ledger, hash) = cloned.append_v1(message)?;
+        let (new_ledger, hash) = cloned.append(message)?;
         *self = new_ledger;
         Ok(hash)
     }
 
-    fn append_v1_mut_with_metadata(&mut self, message: DepositsMessage) -> Result<([u8; 32], [u8; 32], u64), DepositsError> {
+    fn append_mut_with_metadata(&mut self, message: DepositsMessage) -> Result<([u8; 32], [u8; 32], u64), DepositsError> {
         let prev_hash = self.tail_hash();
         let sequence_before = self.history.len() as u64;
-        let new_hash = self.append_v1_mut(message)?;
+        let new_hash = self.append_mut(message)?;
         Ok((prev_hash, new_hash, sequence_before))
     }
 
@@ -364,7 +364,7 @@ impl LedgerExt for Ledger {
                 format!("Partner {} is not a collateral partner for this ledger", partner)
             ));
         }
-        // Convert V1 attestation to core type
+        // Convert wire attestation to core type
         let core_attestation = deposits_core::CollateralAttestation {
             operator_id: attestation.operator,
             collateral_partner: attestation.collateral_partner,
@@ -402,10 +402,9 @@ impl LedgerExt for Ledger {
 // SignedLedgerUpdateLog Extension Trait
 // =============================================================================
 
-/// Extension trait for SignedLedgerUpdateLog with V1-compatible methods.
+/// Extension trait for SignedLedgerUpdateLog with additional convenience methods.
 ///
-/// These methods provide backwards-compatible functionality for the handler
-/// code that was designed for V1 message formats.
+/// These methods provide functionality for the handler code.
 pub trait SignedLedgerUpdateLogExt {
     /// Add an update to the log.
     fn add_update(&mut self, update: deposits_core::SignedLedgerUpdate) -> Result<(), DepositsError>;

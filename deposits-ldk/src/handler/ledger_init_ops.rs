@@ -174,9 +174,9 @@ where
 
         // Extract the ledger from manager and append the handshake message to history
         let mut ledger = _manager.into_ledger();
-        log_info!(self.logger, "DEBUG: Before append_v1_mut, history len = {}", ledger.history.len());
-        let hash = ledger.append_v1_mut(handshake_msg)?;
-        log_info!(self.logger, "DEBUG: After append_v1_mut, history len = {}, new hash = {:02x?}",
+        log_info!(self.logger, "DEBUG: Before append_mut, history len = {}", ledger.history.len());
+        let hash = ledger.append_mut(handshake_msg)?;
+        log_info!(self.logger, "DEBUG: After append_mut, history len = {}, new hash = {:02x?}",
             ledger.history.len(), &hash[0..8]);
 
         // Persist the ledger to storage
@@ -221,7 +221,7 @@ where
 
         // Extract the ledger from validator and append the handshake message to history
         let mut ledger = _manager.into_ledger();
-        ledger.append_v1_mut(DepositsMessage::Handshake(handshake_msg))?;
+        ledger.append_mut(DepositsMessage::Handshake(handshake_msg))?;
 
         // Persist the ledger to storage
         self.persist_ledger_state(&ledger)?;
@@ -294,7 +294,7 @@ where
 
         // Extract the ledger from validator and append the handshake message to history
         let mut ledger = _manager.into_ledger();
-        ledger.append_v1_mut(handshake_msg)?;
+        ledger.append_mut(handshake_msg)?;
 
         // Persist the ledger to storage
         self.persist_ledger_state(&ledger)?;

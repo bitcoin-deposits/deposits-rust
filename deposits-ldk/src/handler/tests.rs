@@ -806,7 +806,7 @@ fn test_fraud_proof_rejected_when_already_credited() {
             sequence_number: 0, // Must match ledger.history.len()
         },
     ));
-    let append_result = ledger.append_v1_mut(credit_msg);
+    let append_result = ledger.append_mut(credit_msg);
     assert!(append_result.is_ok(), "append_mut should succeed: {:?}", append_result);
     assert_eq!(ledger.history.len(), 1, "Should have 1 update after appending credit");
 

@@ -544,7 +544,7 @@ where
 
                         match crate::wire::MessageCodec::decode_message_with_type(msg_type, msg_data) {
                             Ok(msg) => {
-                                // Unified check for PaymentCredit via to_operation() (handles V1, V2 LedgerUpdate, SignedUpdate)
+                                // Check for PaymentCredit via to_operation()
                                 if let Some(deposits_core::messages::LedgerOperation::PaymentCredit { payment_hash: hash, .. }) = msg.to_operation() {
                                     return hash == payment_hash;
                                 }

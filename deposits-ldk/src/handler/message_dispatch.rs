@@ -424,7 +424,7 @@ where
                 );
 
                 // Skip early ACK for messages that need special responses
-                // Uses to_operation() to handle both V1 and V2 formats uniformly
+                // Uses to_operation() to extract the operation from LedgerUpdate
                 use deposits_core::messages::LedgerOperation;
                 let is_collateral_op = message.to_operation().map_or(false, |op|
                     matches!(op, LedgerOperation::CollateralIncrease { .. } | LedgerOperation::CollateralDecrease { .. })
@@ -436,7 +436,7 @@ where
                 if !needs_special_response {
                     // IMPORTANT: Don't send simple ACK for messages that will get porcupine ACK later
                     // Ledger-modifying messages get their ACK after append_mut_with_metadata
-                    // Uses is_ledger_operation() which handles both V1 variants and V2 LedgerUpdate
+                    // Uses is_ledger_operation() to check if message modifies ledger state
                     let will_get_porcupine_ack = message.is_ledger_operation();
 
                     if !will_get_porcupine_ack {
@@ -638,7 +638,7 @@ where
                 let is_coordination_message = matches!(message, DepositsMessage::Coordination(CoordinationMsg::CosignInvoice { .. }));
 
                 // Check if this is a collateral commitment message that needs attestation response
-                // Uses to_operation() to handle both V1 format and V2 LedgerUpdate format uniformly
+                // Uses to_operation() to extract the operation from LedgerUpdate
                 let is_collateral_message = message.to_operation().map_or(false, |op|
                     matches!(op,
                         deposits_core::messages::LedgerOperation::CollateralIncrease { .. }
@@ -652,7 +652,7 @@ where
                              message.message_type());
 
                     // Append to ledger first
-                    match ledger.append_v1_mut_with_metadata(message.clone()) {
+                    match ledger.append_mut_with_metadata(message.clone()) {
                         Ok((prev_hash, new_hash, seq)) => {
                             log_info!(
                                 self.logger,
@@ -884,7 +884,7 @@ where
                     // entries on operator's chain that partner doesn't have). This is expected.
                     // The operator's SignedAuditUpdate uses operator's values, with partner's signature
                     // included as proof of partner participation.
-                    match ledger.append_v1_mut_with_metadata(message.clone()) {
+                    match ledger.append_mut_with_metadata(message.clone()) {
                         Ok((prev_hash, new_hash, seq)) => {
                             log_info!(
                                 self.logger,

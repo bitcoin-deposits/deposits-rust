@@ -92,7 +92,7 @@ pub use crate::events::{CallbackEventEmitter, MemoryEventEmitter, NullEventEmitt
 pub use crate::storage::LdkStorage;
 pub use crate::channels::{LdkChannelRegistry, LdkChannelOperations, LdkReservesOperations};
 
-// Re-export V1-compatible DepositsMessage from local messages module
+// Re-export DepositsMessage from local messages module (with LDK traits)
 pub use super::messages::DepositsMessage;
 
 // Re-export ledger extension traits

@@ -265,9 +265,8 @@ impl ReplayLedgerState {
     }
 
     /// Apply a message to update replay state
-    /// Uses to_operation() for unified V1/V2 handling
     fn apply_message(&mut self, msg: DepositsMessage) -> Result<(), String> {
-        // Handle messages via to_operation() for V1/V2 unification
+        // Handle messages via to_operation() to extract the operation from LedgerUpdate
         if let Some(operation) = msg.to_operation() {
             match operation {
                 LedgerOperation::DepositOpen { pubkey, .. } => {
