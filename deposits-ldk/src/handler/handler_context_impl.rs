@@ -468,12 +468,7 @@ where
         sender: PublicKey,
     ) -> Result<deposits_core::message_handlers::HandlerResult, HandlerError>;
 
-    /// Handle a recovery vote using core logic
-    fn handle_recovery_vote_core(
-        &self,
-        msg: &deposits_core::wire_messages::RecoveryVoteMsg,
-        sender: PublicKey,
-    ) -> Result<deposits_core::message_handlers::HandlerResult, HandlerError>;
+    // NOTE: handle_recovery_vote_core removed - dispatch calls deposits_core::handle_recovery_vote directly
 }
 
 impl<L: Deref + Clone + Send + Sync> CoreHandlerExt<L> for DepositsHandler<L>
@@ -496,13 +491,7 @@ where
         deposits_core::handle_collateral_consent_response(self, msg, sender)
     }
 
-    fn handle_recovery_vote_core(
-        &self,
-        msg: &deposits_core::wire_messages::RecoveryVoteMsg,
-        sender: PublicKey,
-    ) -> Result<deposits_core::message_handlers::HandlerResult, HandlerError> {
-        deposits_core::handle_recovery_vote(self, msg, sender)
-    }
+    // NOTE: handle_recovery_vote_core impl removed - dispatch calls deposits_core::handle_recovery_vote directly
 }
 
 #[cfg(test)]

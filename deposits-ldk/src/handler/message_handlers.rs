@@ -24,13 +24,11 @@ use crate::wire::messages::{
     QuorumJoinRequestMsg, QuorumJoinResponseMsg, QuorumStateSyncMsg,
     QuorumVoteRequestMsg, QuorumVoteMsg, QuorumMembershipChangeMsg,
     CollateralConsentRequestMsg, CollateralConsentResponseMsg,
-    RecoveryVoteMsg, RecoveryClaimRequestMsg, RecoveryClaimSignatureMsg, RecoveryClaimCompleteMsg,
+    RecoveryClaimRequestMsg, RecoveryClaimSignatureMsg, RecoveryClaimCompleteMsg,
     UncreditedPaymentMsg, ChannelCloseTombstoneMsg,
 };
 
 use std::ops::Deref;
-
-use super::macros::delegate_to_core;
 
 impl<L: Deref + Clone + Send + Sync> DepositsHandler<L>
 where
@@ -400,13 +398,7 @@ where
     // Recovery Message Handlers
     // ========================================================================
 
-    // Handle RecoveryVote message
-    delegate_to_core!(
-        handle_recovery_vote,
-        RecoveryVoteMsg,
-        "🔄 RECOVERY: Vote",
-        core_handlers::handle_recovery_vote
-    );
+    // NOTE: handle_recovery_vote removed - dispatch calls core directly
 
     /// Handle RecoveryClaimRequest message
     ///

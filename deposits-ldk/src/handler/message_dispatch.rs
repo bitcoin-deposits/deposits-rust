@@ -279,18 +279,19 @@ where
             // Recovery Messages - V2 format uses Recovery/RecoveryResponse
             DepositsMessage::Recovery(recovery_msg) => match recovery_msg {
                 RecoveryMsg::Vote { operator, partner, voter, is_conforming, validated_hash, validated_sequence, substitute_nomination, discovered_violation, signature } => {
+                    // Direct dispatch to core - no LDK handler wrapper needed
+                    log_info!(self.logger, "🔄 RECOVERY: Vote from {} for ({}, {})", voter, operator, partner);
                     let msg = RecoveryVoteMsg {
-                        operator: *operator,
-                        partner: *partner,
-                        voter: *voter,
-                        is_conforming: *is_conforming,
-                        validated_hash: *validated_hash,
-                        validated_sequence: *validated_sequence,
-                        substitute_nomination: *substitute_nomination,
-                        discovered_violation: *discovered_violation,
-                        signature: *signature,
+                        operator: *operator, partner: *partner, voter: *voter,
+                        is_conforming: *is_conforming, validated_hash: *validated_hash,
+                        validated_sequence: *validated_sequence, substitute_nomination: *substitute_nomination,
+                        discovered_violation: *discovered_violation, signature: *signature,
                     };
-                    return self.handle_recovery_vote(&msg, sender_node_id);
+                    match deposits_core::handle_recovery_vote(self, &msg, sender_node_id) {
+                        Ok(_) => log_info!(self.logger, "🔄 RECOVERY: Vote processed"),
+                        Err(e) => log_warn!(self.logger, "🔄 RECOVERY: Vote failed: {:?}", e),
+                    }
+                    return Ok(());
                 }
                 RecoveryMsg::ClaimRequest { operator, partner, claimant, tier_index, ref unsigned_tx, sighash, ref destination_script, block_height } => {
                     let msg = RecoveryClaimRequestMsg {
