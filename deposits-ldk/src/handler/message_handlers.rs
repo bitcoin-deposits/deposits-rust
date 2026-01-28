@@ -872,316 +872,202 @@ where
     }
 
     /// Handle CollateralConsentResponse message
+    /// Handle CollateralConsentResponse message.
+    ///
+    /// Received when a collateral partner responds to our consent request.
     pub(super) fn handle_collateral_consent_response(
         &self,
         msg: &CollateralConsentResponseMsg,
         sender_node_id: PublicKey,
     ) -> Result<(), LightningError> {
-        use bitcoin::secp256k1::ecdsa::Signature;
-        use deposits_core::log_warn;
+        log_info!(self.logger, "📋 CONSENT: Received response from {} - granted={}", sender_node_id, msg.consent_granted);
 
-        log_info!(
-            self.logger,
-            "📋 CONSENT: Received CollateralConsentResponse from {} - granted={}",
-            sender_node_id,
-            msg.consent_granted
-        );
-
-        // The sender is the collateral partner
-        // Verify the signature if consent was granted
-        if msg.consent_granted {
-            use bitcoin::hashes::{Hash, sha256};
-            use bitcoin::secp256k1::{Secp256k1, Message};
-
-            // Reconstruct the message that was signed
-            // Signs: SHA256("COLLATERAL_CONSENT" || operator_id || partner_id)
-            let mut preimage = Vec::new();
-            preimage.extend_from_slice(b"COLLATERAL_CONSENT");
-            preimage.extend_from_slice(&msg.operator_id.serialize());
-            preimage.extend_from_slice(&msg.partner_id.serialize());
-
-            let message_hash = sha256::Hash::hash(&preimage);
-            let secp_message = Message::from_digest(message_hash.to_byte_array());
-
-            let secp = Secp256k1::new();
-            match Signature::from_compact(&msg.collateral_partner_signature) {
-                Ok(sig) => {
-                    if secp.verify_ecdsa(&secp_message, &sig, &sender_node_id).is_err() {
-                        log_warn!(
-                            self.logger,
-                            "📋 CONSENT: REJECTING consent from {} - invalid signature",
-                            sender_node_id
-                        );
-                        return Ok(());
-                    }
-                    log_info!(
-                        self.logger,
-                        "📋 CONSENT: Verified signature from collateral partner {}",
-                        sender_node_id
-                    );
-                }
-                Err(e) => {
-                    log_warn!(
-                        self.logger,
-                        "📋 CONSENT: REJECTING consent from {} - malformed signature: {}",
-                        sender_node_id,
-                        e
-                    );
-                    return Ok(());
-                }
-            }
+        // Verify signature if consent granted
+        if msg.consent_granted && !self.verify_consent_signature(msg, sender_node_id) {
+            return Ok(());
         }
 
-        // Find the pending consent request and complete it
-        // Calculate the hash of the original request for lookup (V2 format)
-        let original_request = DepositsMessage::Coordination(CoordinationMsg::CollateralConsentRequest {
-            operator_id: msg.operator_id,
-            partner_id: msg.partner_id,
-            operator_signature: [0u8; 64], // This should match what we sent
-        });
-        let request_hash = self.calculate_message_hash(&original_request);
+        // Complete pending consent request
+        self.complete_pending_consent(msg);
 
-        // Complete the pending request
+        // Send audit history to new collateral partner
+        if msg.consent_granted {
+            self.send_audit_to_collateral_partner(msg, sender_node_id);
+        }
+
+        Ok(())
+    }
+
+    /// Verify the collateral consent signature
+    fn verify_consent_signature(&self, msg: &CollateralConsentResponseMsg, sender: PublicKey) -> bool {
+        use bitcoin::hashes::{Hash, sha256};
+        use bitcoin::secp256k1::{Secp256k1, Message, ecdsa::Signature};
+
+        let mut preimage = Vec::new();
+        preimage.extend_from_slice(b"COLLATERAL_CONSENT");
+        preimage.extend_from_slice(&msg.operator_id.serialize());
+        preimage.extend_from_slice(&msg.partner_id.serialize());
+
+        let hash = sha256::Hash::hash(&preimage);
+        let secp_msg = Message::from_digest(hash.to_byte_array());
+        let secp = Secp256k1::new();
+
+        match Signature::from_compact(&msg.collateral_partner_signature) {
+            Ok(sig) => {
+                if secp.verify_ecdsa(&secp_msg, &sig, &sender).is_ok() {
+                    log_info!(self.logger, "📋 CONSENT: Verified signature from {}", sender);
+                    true
+                } else {
+                    log_warn!(self.logger, "📋 CONSENT: Invalid signature from {}", sender);
+                    false
+                }
+            }
+            Err(e) => {
+                log_warn!(self.logger, "📋 CONSENT: Malformed signature from {}: {}", sender, e);
+                false
+            }
+        }
+    }
+
+    /// Complete a pending consent request
+    fn complete_pending_consent(&self, msg: &CollateralConsentResponseMsg) {
+        let original = DepositsMessage::Coordination(CoordinationMsg::CollateralConsentRequest {
+            operator_id: msg.operator_id, partner_id: msg.partner_id, operator_signature: [0u8; 64],
+        });
+        let hash = self.calculate_message_hash(&original);
+
         let mut pending = self.pending_consent_requests.lock().unwrap();
-        if let Some(tx) = pending.remove(&request_hash) {
+        if let Some(tx) = pending.remove(&hash) {
             if msg.consent_granted {
                 let _ = tx.send(Ok(msg.collateral_partner_signature));
             } else {
                 let _ = tx.send(Err("Collateral partner denied consent".to_string()));
             }
         } else {
-            log_warn!(
-                self.logger,
-                "📋 CONSENT: Received response but no pending request found for hash {}",
-                crate::hex_utils::to_string(&request_hash[..8])
-            );
+            log_warn!(self.logger, "📋 CONSENT: No pending request for hash {:02x?}", &hash[..8]);
         }
-        drop(pending);
+    }
 
-        // If consent was granted, sync the full audit history to the new collateral partner
-        // This ensures they receive seq=0 (LedgerOpenRequest) and all subsequent updates
-        if msg.consent_granted {
-            log_info!(
-                self.logger,
-                "📋 SYNC: Sending full audit history to new collateral partner {}",
-                sender_node_id
-            );
+    /// Send audit history to new collateral partner
+    fn send_audit_to_collateral_partner(&self, msg: &CollateralConsentResponseMsg, sender: PublicKey) {
+        log_info!(self.logger, "📋 SYNC: Sending audit history to new collateral partner {}", sender);
 
-            // The operator is us (we sent the request), partner_id is from the message
-            // The new collateral partner is the sender of this response
-            if let Err(e) = self.send_audit_update_to_new_collateral_partner(
-                msg.partner_id,  // The channel partner for this ledger
-                sender_node_id,  // The new collateral partner who just granted consent
-                &DepositsMessage::CoordinationResponse(CoordinationResponseMsg::CollateralConsentResponse {
-                    request_hash: [0u8; 32], // Will be filled by wire layer
-                    operator_id: msg.operator_id,
-                    partner_id: msg.partner_id,
-                    consent_granted: msg.consent_granted,
-                    collateral_partner_signature: msg.collateral_partner_signature,
-                }),
-            ) {
-                log_warn!(
-                    self.logger,
-                    "📋 SYNC: Failed to send audit history to collateral partner: {:?}",
-                    e
-                );
-            }
+        let response = DepositsMessage::CoordinationResponse(CoordinationResponseMsg::CollateralConsentResponse {
+            request_hash: [0u8; 32], operator_id: msg.operator_id, partner_id: msg.partner_id,
+            consent_granted: msg.consent_granted, collateral_partner_signature: msg.collateral_partner_signature,
+        });
+
+        if let Err(e) = self.send_audit_update_to_new_collateral_partner(msg.partner_id, sender, &response) {
+            log_warn!(self.logger, "📋 SYNC: Failed to send audit history: {:?}", e);
         }
-
-        Ok(())
     }
 
     /// Handle CollateralAttestation message
+    /// Handle CollateralAttestation message.
+    ///
+    /// Received from collateral partner after CollateralIncrease. Stores attestation
+    /// and forwards to channel partners.
     pub(super) fn handle_collateral_attestation(
         &self,
         msg: &crate::wire::messages::CollateralAttestationMsg,
         sender_node_id: PublicKey,
     ) -> Result<(), LightningError> {
-        use deposits_core::log_warn;
+        log_info!(self.logger, "💰 COLLATERAL: Received attestation from {} - amount={}", sender_node_id, msg.amount);
 
-        // CollateralAttestation is received from a collateral partner after they process
-        // our CollateralIncrease. We need to:
-        // 1. Store the attestation as proof
-        // 2. Forward the attestation to our CHANNEL partners (not the collateral ledger)
-        //    to record that collateral is now available
-        log_info!(
-            self.logger,
-            "💰 COLLATERAL: Received attestation from {} for operator {} - amount={}",
-            sender_node_id,
-            msg.operator,
-            msg.amount
-        );
+        let is_direct = sender_node_id == msg.collateral_partner;
+        let mut partners_to_forward: Vec<PublicKey> = Vec::new();
 
-        // Collect ledgers where we're operator and sender is a collateral partner
-        let mut channel_ledgers_to_update: Vec<(PublicKey, PublicKey)> = Vec::new();
-        let mut pending_messages: Vec<(PublicKey, DepositsMessage)> = Vec::new();
-
+        // Process attestation based on our role
         {
             let ledgers = self.ledgers.lock().unwrap();
-            // Only forward attestations that we received DIRECTLY from the collateral partner
-            // (not forwarded ones). This prevents infinite forwarding loops.
-            let is_direct_from_collateral_partner = sender_node_id == msg.collateral_partner;
-
-            for ((operator_id, partner_id), ledger_arc) in ledgers.iter() {
-                // Case 1: We're the OPERATOR receiving from a channel partner
-                // Store attestation and potentially forward to other partners
-                if *operator_id == self.our_node_id && *partner_id == sender_node_id {
-                    let mut ledger = ledger_arc.write().unwrap();
-                    // Store attestation as proof on the sender's ledger
-                    let attestation = deposits_core::types::CollateralAttestation::new(
-                        msg.operator,
-                        msg.collateral_partner,
-                        msg.amount,
-                        msg.block_height,
-                        msg.signature,
-                        msg.ledger_hash,
-                    );
-                    ledger.state.collateral_attestations.insert(sender_node_id, attestation);
-                    log_info!(
-                        self.logger,
-                        "💰 COLLATERAL: Stored attestation from channel partner {} on ledger ({}, {})",
-                        sender_node_id,
-                        operator_id,
-                        partner_id
-                    );
-                }
-                // Case 1b: We're the OPERATOR and this is a DIFFERENT channel partner
-                // Forward the attestation to them so they know about available collateral
-                // BUT only if we received it directly from the collateral partner (not forwarded)
-                else if *operator_id == self.our_node_id && *partner_id != sender_node_id && is_direct_from_collateral_partner {
-                    // Forward to other channel partners
-                    channel_ledgers_to_update.push((*operator_id, *partner_id));
-                    log_info!(
-                        self.logger,
-                        "💰 COLLATERAL: Will forward attestation from {} to channel partner {} on ledger ({}, {})",
-                        sender_node_id, partner_id, operator_id, partner_id
-                    );
-                }
-                // Case 2: We're the PARTNER receiving from the OPERATOR
-                // The operator forwards attestations to channel partners after receiving them from collateral partners
-                else if *partner_id == self.our_node_id && *operator_id == sender_node_id {
-                    let mut ledger = ledger_arc.write().unwrap();
-                    // Store attestation
-                    let attestation = deposits_core::types::CollateralAttestation::new(
-                        msg.operator,
-                        msg.collateral_partner,
-                        msg.amount,
-                        msg.block_height,
-                        msg.signature,
-                        msg.ledger_hash,
-                    );
-                    ledger.state.collateral_attestations.insert(msg.collateral_partner, attestation);
-
-                    // Update received_collateral_amount - this is the critical fix!
-                    ledger.state.received_collateral_amount = ledger.state.received_collateral_amount.saturating_add(msg.amount);
-                    log_info!(
-                        self.logger,
-                        "💰 COLLATERAL: Partner received attestation from operator {} - updated received_collateral_amount to {} for ledger ({}, {})",
-                        sender_node_id,
-                        ledger.state.received_collateral_amount,
-                        operator_id,
-                        partner_id
-                    );
-
-                    if let Err(e) = self.persist_ledger_state(&*ledger) {
-                        log_error!(self.logger, "Failed to persist ledger after partner CollateralAttestation: {}", e);
-                    }
+            for ((op, part), ledger_arc) in ledgers.iter() {
+                if *op == self.our_node_id && *part == sender_node_id {
+                    // Operator receiving from channel partner - store attestation
+                    self.store_attestation(&mut ledger_arc.write().unwrap(), msg, sender_node_id);
+                } else if *op == self.our_node_id && *part != sender_node_id && is_direct {
+                    // Operator receiving directly - forward to other partners
+                    partners_to_forward.push(*part);
+                } else if *part == self.our_node_id && *op == sender_node_id {
+                    // Partner receiving from operator
+                    self.store_attestation_as_partner(&mut ledger_arc.write().unwrap(), msg);
                 }
             }
         }
 
-        // Forward CollateralAttestation to channel partners for bilateral signing
-        // (Previously created a separate CollateralStatus, now we forward the full attestation)
-        if !channel_ledgers_to_update.is_empty() {
-            let attestation_forward = DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
-                msg.operator,
-                msg.collateral_partner,
-                LedgerOperation::CollateralAttestation {
-                    collateral_operator: msg.operator,
-                    amount: msg.amount,
-                    block_height: msg.block_height,
-                    signature: msg.signature,
-                    ledger_hash: msg.ledger_hash,
-                },
-            ));
-
-            let ledgers = self.ledgers.lock().unwrap();
-            for (op_id, part_id) in channel_ledgers_to_update {
-                if let Some(ledger_arc) = ledgers.get(&(op_id, part_id)) {
-                    let mut ledger = ledger_arc.write().unwrap();
-                    match ledger.append_mut_with_metadata(attestation_forward.clone()) {
-                        Ok((prev_hash, new_hash, seq)) => {
-                            log_info!(
-                                self.logger,
-                                "💰 COLLATERAL: Recorded CollateralAttestation on channel ledger ({}, {}), seq={}, amount={}, from={}",
-                                op_id, part_id, seq, msg.amount, sender_node_id
-                            );
-                            ledger.state.received_collateral_amount = ledger.state.received_collateral_amount.saturating_add(msg.amount);
-                            if let Err(e) = self.persist_ledger_state(&*ledger) {
-                                log_error!(self.logger, "Failed to persist ledger after CollateralAttestation: {}", e);
-                            }
-
-                            // Queue message for sending to channel partner for bilateral signing
-                            pending_messages.push((part_id, attestation_forward.clone()));
-
-                            // Track for broadcast after partner ACK (use partner-specific key)
-                            let message_hash = self.calculate_message_hash(&attestation_forward);
-                            let unique_key = Self::create_partner_specific_hash(&message_hash, &part_id);
-                            {
-                                let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
-                                sent_messages.insert(unique_key, (op_id, part_id, attestation_forward.clone(), prev_hash, new_hash, seq));
-                            }
-                            {
-                                let mut pending_acks = self.pending_acks.lock().unwrap();
-                                let timestamp = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap()
-                                    .as_secs();
-                                pending_acks.insert(unique_key, deposits_core::PendingAck {
-                                    message_type: attestation_forward.message_type(),
-                                    timestamp,
-                                    peer: part_id,
-                                });
-                            }
-                        }
-                        Err(e) => {
-                            log_error!(
-                                self.logger,
-                                "❌ COLLATERAL: Failed to add CollateralAttestation to channel ledger ({}, {}): {}",
-                                op_id, part_id, e
-                            );
-                        }
-                    }
-                }
-            }
+        // Forward to other channel partners
+        if !partners_to_forward.is_empty() {
+            self.forward_attestation_to_partners(msg, &partners_to_forward);
         }
 
-        // Send pending messages (CollateralAttestation to channel partners)
-        for (peer_id, msg_to_send) in pending_messages {
-            if let Err(e) = self.send_message(peer_id, msg_to_send.clone()) {
-                log_error!(self.logger, "💰 COLLATERAL: Failed to send CollateralAttestation to {}: {:?}", peer_id, e);
-            } else {
-                log_info!(self.logger, "💰 COLLATERAL: Sent CollateralAttestation to channel partner {}", peer_id);
-            }
-        }
-
-        // Simple ACK for the attestation itself (V2 format)
-        let attestation_msg = DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
-            msg.operator,
-            msg.collateral_partner,
-            LedgerOperation::CollateralAttestation {
-                collateral_operator: msg.operator,
-                amount: msg.amount,
-                block_height: msg.block_height,
-                signature: msg.signature,
-                ledger_hash: msg.ledger_hash,
-            },
-        ));
-        if let Err(e) = self.send_acknowledgment(&attestation_msg, true, None, None, sender_node_id) {
+        // Send ACK
+        let ack_msg = self.create_attestation_message(msg);
+        if let Err(e) = self.send_acknowledgment(&ack_msg, true, None, None, sender_node_id) {
             log_warn!(self.logger, "💰 COLLATERAL: Failed to send ACK: {:?}", e);
         }
 
         Ok(())
+    }
+
+    fn store_attestation(&self, ledger: &mut deposits_core::Ledger, msg: &crate::wire::messages::CollateralAttestationMsg, sender: PublicKey) {
+        let attestation = deposits_core::types::CollateralAttestation::new(
+            msg.operator, msg.collateral_partner, msg.amount, msg.block_height, msg.signature, msg.ledger_hash,
+        );
+        ledger.state.collateral_attestations.insert(sender, attestation);
+        log_info!(self.logger, "💰 COLLATERAL: Stored attestation from {}", sender);
+    }
+
+    fn store_attestation_as_partner(&self, ledger: &mut deposits_core::Ledger, msg: &crate::wire::messages::CollateralAttestationMsg) {
+        let attestation = deposits_core::types::CollateralAttestation::new(
+            msg.operator, msg.collateral_partner, msg.amount, msg.block_height, msg.signature, msg.ledger_hash,
+        );
+        ledger.state.collateral_attestations.insert(msg.collateral_partner, attestation);
+        ledger.state.received_collateral_amount = ledger.state.received_collateral_amount.saturating_add(msg.amount);
+        if let Err(e) = self.persist_ledger_state(ledger) {
+            log_error!(self.logger, "Failed to persist ledger: {}", e);
+        }
+        log_info!(self.logger, "💰 COLLATERAL: Partner stored attestation, received_collateral={}", ledger.state.received_collateral_amount);
+    }
+
+    fn create_attestation_message(&self, msg: &crate::wire::messages::CollateralAttestationMsg) -> DepositsMessage {
+        DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
+            msg.operator, msg.collateral_partner,
+            LedgerOperation::CollateralAttestation {
+                collateral_operator: msg.operator, amount: msg.amount, block_height: msg.block_height,
+                signature: msg.signature, ledger_hash: msg.ledger_hash,
+            },
+        ))
+    }
+
+    fn forward_attestation_to_partners(&self, msg: &crate::wire::messages::CollateralAttestationMsg, partners: &[PublicKey]) {
+        let forward_msg = self.create_attestation_message(msg);
+        let ledgers = self.ledgers.lock().unwrap();
+
+        for &partner in partners {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner)) {
+                let mut ledger = ledger_arc.write().unwrap();
+                match ledger.append_mut_with_metadata(forward_msg.clone()) {
+                    Ok((prev_hash, new_hash, seq)) => {
+                        ledger.state.received_collateral_amount = ledger.state.received_collateral_amount.saturating_add(msg.amount);
+                        let _ = self.persist_ledger_state(&*ledger);
+
+                        // Track for broadcast
+                        let hash = self.calculate_message_hash(&forward_msg);
+                        let key = Self::create_partner_specific_hash(&hash, &partner);
+                        self.sent_messages_for_broadcast.lock().unwrap()
+                            .insert(key, (self.our_node_id, partner, forward_msg.clone(), prev_hash, new_hash, seq));
+                        deposits_core::message_validation::HandlerContext::register_pending_ack(self, key, forward_msg.message_type(), partner);
+
+                        // Send to partner
+                        if let Err(e) = self.send_message(partner, forward_msg.clone()) {
+                            log_error!(self.logger, "💰 COLLATERAL: Failed to send to {}: {:?}", partner, e);
+                        } else {
+                            log_info!(self.logger, "💰 COLLATERAL: Forwarded to {}", partner);
+                        }
+                    }
+                    Err(e) => log_error!(self.logger, "❌ COLLATERAL: Failed to append: {}", e),
+                }
+            }
+        }
     }
 
     // ==================== Accusation Message Handlers ====================
