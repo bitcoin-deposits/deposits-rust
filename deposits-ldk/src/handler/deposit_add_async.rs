@@ -160,9 +160,7 @@ where
                         peer: partner_node_id,
                     });
                 }
-                println!("🔵 ADDED PENDING ACK: hash={:02x?}, type={}", &message_hash[0..4], message_type);
             } else {
-                println!("🔴 NO LEDGER FOUND to track pending ACK: hash={:02x?}", &message_hash[0..4]);
             }
         }
 
@@ -197,8 +195,6 @@ where
 
         // Update sent_messages_for_broadcast with correct new_hash and sequence
         {
-            println!("🟣 UPDATE SENT_MESSAGES: hash={:02x?}, type={:#06x}, prev_hash={:02x?}, new_hash={:02x?}, seq={}",
-                &message_hash[0..4], message_for_broadcast.message_type(), &prev_hash[0..8], &new_hash[0..8], sequence_number);
             let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
             sent_messages.insert(message_hash, (self.our_node_id, partner_node_id, message_for_broadcast.clone(), prev_hash, new_hash, sequence_number));
         }

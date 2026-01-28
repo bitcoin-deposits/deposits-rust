@@ -145,8 +145,6 @@ where
                 drop(ledger);
                 drop(ledgers);
 
-                println!("🟣 UPDATE SENT_MESSAGES (AddCollateralPartner): hash={:02x?}, type={:#06x}, prev_hash={:02x?}, new_hash={:02x?}, seq={}",
-                    &message_hash[0..4], message_type, &prev_hash[0..8], &new_hash[0..8], chain_index);
                 {
                     let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
                     sent_messages.insert(message_hash, (self.our_node_id, partner_node_id, message_for_broadcast.clone(), prev_hash, new_hash, chain_index));
@@ -177,7 +175,6 @@ where
                     let mut sigs = self.received_partner_signatures.lock().unwrap();
                     sigs.remove(&message_hash)
                 };
-                println!("🟢 TRIGGERING broadcast after AddCollateralPartner append (has_partner_sig={})", partner_sig.is_some());
                 if let Err(e) = self.broadcast_message_to_other_partners(message_hash, partner_node_id, partner_sig) {
                     log_warn!(self.logger, "Failed to broadcast AddCollateralPartner to other partners: {:?}", e);
                 }

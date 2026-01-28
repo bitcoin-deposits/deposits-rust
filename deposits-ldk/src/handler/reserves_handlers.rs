@@ -27,20 +27,13 @@ where
 {
     /// Add reserves to a channel via proper protocol (sends ReservesIncrease message)
     pub fn add_reserves_to_channel(&self, partner_node_id: PublicKey, additional_reserves: u64) -> Result<(), DepositsError> {
-        println!("🔧 [RESERVES] add_reserves_to_channel called: partner={}, additional={} sats",
-            partner_node_id, additional_reserves);
-
         // Calculate absolute new_amount = current + additional_reserves
         let new_amount = {
             let ledgers = self.ledgers.lock().unwrap();
             if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
                 let ledger = ledger_arc.read().unwrap();
-                let current = ledger.reserves_amount();
-                println!("🔧 [RESERVES] Current reserves: {} sats, new total will be: {} sats",
-                    current, current.saturating_add(additional_reserves));
                 ledger.reserves_amount().saturating_add(additional_reserves)
             } else {
-                println!("❌ [RESERVES] Ledger not found for ({}, {})", self.our_node_id, partner_node_id);
                 return Err(DepositsError::LedgerNotFound);
             }
         };
@@ -82,9 +75,6 @@ where
                         peer: partner_node_id,
                     });
                 }
-                println!("[RESERVES] pending ACK hash={:02x?} type={}", &message_hash[0..4], message_type);
-            } else {
-                println!("[RESERVES] NO LEDGER for pending ACK hash={:02x?}", &message_hash[0..4]);
             }
         }
 
@@ -106,21 +96,13 @@ where
                     if let Some(partner_sig) = sigs.remove(&message_hash) {
                         if let Some(last_update) = ledger.history.last_mut() {
                             last_update.partner_signature = partner_sig;
-                            println!("[RESERVES] stored partner sig seq={}", seq);
                         }
-                    } else {
-                        println!("[RESERVES] no partner sig for hash={:02x?}", &message_hash[0..4]);
                     }
                 }
 
                 // Update partner_deepest_ack_hash since partner just ACKed this update
                 // This is needed BEFORE refresh_reserves_commitment can commit this hash
                 ledger.state.partner_deepest_ack_hash = hash;
-                println!(
-                    "[RESERVES] partner_deepest_ack_hash={:02x?} partner={}",
-                    &hash[0..8],
-                    partner_node_id
-                );
 
                 self.persist_ledger_state(&*ledger)?;
                 (prev, hash, seq)
@@ -132,15 +114,12 @@ where
         // Update sent_messages_for_broadcast with correct new_hash
         // (entry should already exist from send_message pre-insert)
         {
-            println!("[RESERVES] sent_messages hash={:02x?} type={:#06x} prev={:02x?} new={:02x?} seq={}",
-                &message_hash[0..4], message_for_broadcast.message_type(), &prev_hash[0..8], &new_hash[0..8], chain_index);
             let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
             // Always insert/update - insert will replace if key exists
             sent_messages.insert(message_hash, (self.our_node_id, partner_node_id, message_for_broadcast.clone(), prev_hash, new_hash, chain_index));
         }
 
         // Now broadcast with correct hashes
-        println!("[RESERVES] broadcast hash={:02x?}", &message_hash[0..4]);
         if let Err(e) = self.broadcast_message_to_other_partners(message_hash, partner_node_id, None) {
             log_error!(self.logger, "Failed to broadcast after update: {}", e);
         }
@@ -215,9 +194,6 @@ where
                         peer: partner_node_id,
                     });
                 }
-                println!("[RESERVES] pending ACK hash={:02x?} type={}", &message_hash[0..4], message_type);
-            } else {
-                println!("[RESERVES] NO LEDGER for pending ACK hash={:02x?}", &message_hash[0..4]);
             }
         }
 
@@ -238,7 +214,6 @@ where
                     if let Some(partner_sig) = sigs.remove(&message_hash) {
                         if let Some(last_update) = ledger.history.last_mut() {
                             last_update.partner_signature = partner_sig;
-                            println!("[RESERVES] stored partner sig seq={}", seq);
                         }
                     }
                 }
@@ -256,15 +231,12 @@ where
         // Update sent_messages_for_broadcast with correct new_hash
         // (entry should already exist from send_message pre-insert)
         {
-            println!("[RESERVES] sent_messages hash={:02x?} type={:#06x} prev={:02x?} new={:02x?} seq={}",
-                &message_hash[0..4], message_for_broadcast.message_type(), &prev_hash[0..8], &new_hash[0..8], chain_index);
             let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
             // Always insert/update - insert will replace if key exists
             sent_messages.insert(message_hash, (self.our_node_id, partner_node_id, message_for_broadcast.clone(), prev_hash, new_hash, chain_index));
         }
 
         // Now broadcast with correct hashes
-        println!("[RESERVES] broadcast hash={:02x?}", &message_hash[0..4]);
         if let Err(e) = self.broadcast_message_to_other_partners(message_hash, partner_node_id, None) {
             log_error!(self.logger, "Failed to broadcast after update: {}", e);
         }

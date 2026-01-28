@@ -49,13 +49,6 @@ where
             sender_node_id
         );
 
-        // Debug: trace all incoming messages
-        println!("[RECV] type={:#06x} name={} from={}",
-            message.message_type(),
-            message.descriptive_name(),
-            sender_node_id
-        );
-
         // Deferred oneshot notification for CollateralAttestation
         // We need to notify the waiter AFTER handle_collateral_attestation completes,
         // so that CollateralAttestation is in pending_acks before the waiter continues.
@@ -484,8 +477,6 @@ where
         // V2: Only Handshake variant exists
         match &message {
             DepositsMessage::Handshake(init_msg) => {
-                println!("🟢 HANDSHAKE: Received Handshake from {} (version {}, partner_id: {})",
-                    sender_node_id, init_msg.protocol_version, init_msg.partner_id);
                 // Delegate to extracted handler in message_handlers.rs
                 return self.handle_ledger_open_request(init_msg, &message, sender_node_id);
             }
@@ -512,7 +503,6 @@ where
                         }
                     }
                     if let Some(hash) = found_hash {
-                        println!("🟢 HANDSHAKE_RESPONSE: Clearing pending ACK for hash {:02x?}", &hash[0..4]);
                         pending_acks.remove(&hash);
                         Some(hash)
                     } else {
@@ -628,11 +618,6 @@ where
                 log_info!(self.logger, "🟢 PARTNER: Processing message type {} from {} (operator), current history length: {}",
                          message.message_type(), sender_node_id, ledger.history.len());
 
-                // Debug V2 LedgerUpdate processing
-                if let DepositsMessage::LedgerUpdate(ref update_msg) = message {
-                    println!("[PARTNER] V2 LedgerUpdate op={:?}", update_msg.operation);
-                }
-
                 // Check if this is a coordination message that doesn't modify ledger state
                 // V2: ReceivingCosignInvoice is now Coordination(CosignInvoice)
                 let is_coordination_message = matches!(message, DepositsMessage::Coordination(CoordinationMsg::CosignInvoice { .. }));
@@ -682,7 +667,6 @@ where
                             ) {
                                 if let Some(last_update) = ledger.history.last_mut() {
                                     last_update.partner_signature = sig;
-                                    println!("🔏 PARTNER: Stored porcupine signature for collateral message seq={}", seq);
                                 }
                             }
 
@@ -793,7 +777,6 @@ where
                     // V2: ReceivingCosignInvoice is now Coordination(CosignInvoice)
                     let cosignature = if let DepositsMessage::Coordination(CoordinationMsg::CosignInvoice { operator_id: _, partner_id: _, amount, payment_hash, expires, assigned_deposit, ref invoice_id, ref bolt11_invoice }) = message {
                         let bolt11 = bolt11_invoice;
-                        println!("🔐 PARTNER: Generating cosignature for invoice (payment_hash: {:02x?})", &payment_hash[0..4]);
                         // Generate proper 64-byte Schnorr signature over invoice data
                         let mut sig_input = Vec::new();
                         sig_input.extend_from_slice(&payment_hash);
@@ -808,7 +791,6 @@ where
                                 return Ok(());
                             }
                         };
-                        println!("✅ PARTNER: Generated cosignature: {} bytes", sig_bytes.len());
 
                         // Store cosigned invoice for fraud proof validation
                         // Key: (operator, payment_hash)
@@ -823,8 +805,6 @@ where
                             let mut invoices = self.cosigned_invoices.lock().unwrap();
                             let key = (sender_node_id, payment_hash);
                             invoices.insert(key, cosigned_invoice);
-                            println!("📋 PARTNER: Stored cosigned invoice for fraud proof validation (operator: {}, payment_hash: {:02x?})",
-                                     sender_node_id, &payment_hash[0..4]);
                         }
 
                         // Add invoice to partner's ledger (deposit.invoices)
@@ -858,7 +838,6 @@ where
                             arr.copy_from_slice(v);
                             Some(arr)
                         } else {
-                            println!("⚠️ PARTNER: Unexpected cosignature length: {} bytes (expected 64)", v.len());
                             None
                         }
                     });
@@ -872,9 +851,6 @@ where
                         confirmed_sequence: 0,
                         confirmed_hash: message_hash,
                     });
-
-                    println!("📤 PARTNER: Queueing ACK with cosignature for coordination message type {}, hash: {:02x?}",
-                             message.message_type(), &message_hash[0..4]);
 
                     // Defer sending until after lock is released to avoid deadlock
                     pending_messages.push((sender_node_id, ack));
@@ -922,7 +898,6 @@ where
                                         // This is needed for reserves validation when operator commits
                                         if let Some(last_update) = ledger.history.last_mut() {
                                             last_update.partner_signature = sig;
-                                            println!("🔏 PARTNER: Stored porcupine signature in ledger entry seq={}", seq);
                                         }
                                         Some(sig)
                                     },
@@ -946,9 +921,6 @@ where
                                     confirmed_sequence: seq,
                                     confirmed_hash: new_hash,
                                 });
-
-                                println!("📤 PARTNER: Queueing ACK with porcupine signature for message type {}, seq={}, hash={:02x?}",
-                                         message.message_type(), seq, &new_hash[0..4]);
 
                                 // Defer sending until after lock is released to avoid deadlock
                                 pending_messages.push((sender_node_id, ack));

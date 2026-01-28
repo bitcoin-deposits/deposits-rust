@@ -96,7 +96,6 @@ where
                     timestamp,
                     peer: partner_node_id,
                 });
-                println!("🔵 ADDED PENDING ACK: hash={:02x?}, type={}", &reserves_message_hash[0..4], message_type);
             }
 
             // Send and wait for ACK
@@ -117,10 +116,7 @@ where
                         if let Some(partner_sig) = sigs.remove(&reserves_message_hash) {
                             if let Some(last_update) = ledger.history.last_mut() {
                                 last_update.partner_signature = partner_sig;
-                                println!("🔏 OPERATOR: Stored partner signature in ledger entry seq={}", seq);
                             }
-                        } else {
-                            println!("⚠️ OPERATOR: No partner signature found for reserves_message_hash={:02x?}", &reserves_message_hash[0..4]);
                         }
                     }
 
@@ -137,8 +133,6 @@ where
 
             // Update sent_messages_for_broadcast with correct new_hash
             {
-                println!("🟣 UPDATE SENT_MESSAGES: hash={:02x?}, type={:#06x}, prev_hash={:02x?}, new_hash={:02x?}, seq={}",
-                    &reserves_message_hash[0..4], reserves_msg_for_broadcast.message_type(), &prev_hash[0..8], &new_hash[0..8], sequence_number);
                 let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
                 sent_messages.insert(reserves_message_hash, (self.our_node_id, partner_node_id, reserves_msg_for_broadcast.clone(), prev_hash, new_hash, sequence_number));
             }
@@ -199,11 +193,6 @@ where
                 // The signature is created when we record to ledger.
                 let (prev, hash, seq) = ledger.append_mut_with_metadata(msg.clone())?;
 
-                println!(
-                    "📝 ATOMIC RECORD: PaymentCredit hash={:02x?}, prev={:02x?}, seq={}",
-                    &hash[0..8], &prev[0..8], seq
-                );
-
                 self.persist_ledger_state(&*ledger)?;
                 (msg, prev, hash, seq, future_reserves, voter_set)
             } else {
@@ -230,21 +219,12 @@ where
                 timestamp,
                 peer: partner_node_id,
             });
-            println!("🔵 ADDED PENDING ACK: hash={:02x?}, type={}", &credit_message_hash[0..4], message_type);
         }
 
         // Send message and wait for ACK (this delivers our signature to partner for PORCUPINE)
         self.send_message_with_ack_async(partner_node_id, message, 30000).await?;
 
-        println!(
-            "✅ Partner ACKed message, signature delivered. Now committing to channel..."
-        );
-
         // Step 3.4: Wait for any pending reserves to complete
-        println!(
-            "⏳ RECORD-THEN-COMMIT: Waiting for pending reserves to clear for {}",
-            partner_node_id
-        );
         self.wait_for_pending_reserves_clear(partner_node_id, 30000).await?;
 
         // Step 3.5: Send UpdateReserves to commit the hash to the channel
@@ -262,11 +242,6 @@ where
             new_hash,
             30000, // 30 second timeout
         ).await?;
-
-        println!(
-            "✅ RECORD-THEN-COMMIT: Commitment verified with hash {:02x?}",
-            &new_hash[0..8]
-        );
 
         // Update ledger's channel_deepest_commitment_hash after commitment succeeds
         {
@@ -290,7 +265,6 @@ where
                     if let Some(partner_sig) = sigs.remove(&credit_message_hash) {
                         if let Some(last_update) = ledger.history.last_mut() {
                             last_update.partner_signature = partner_sig;
-                            println!("🔏 OPERATOR: Stored partner signature in ledger entry seq={}", chain_index);
                         }
                     }
                 }
@@ -304,8 +278,6 @@ where
 
         // Update sent_messages_for_broadcast with correct new_hash
         {
-            println!("🟣 UPDATE SENT_MESSAGES: hash={:02x?}, type={:#06x}, prev_hash={:02x?}, new_hash={:02x?}, seq={}",
-                &credit_message_hash[0..4], message_for_broadcast.message_type(), &prev_hash[0..8], &new_hash[0..8], chain_index);
             let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
             sent_messages.insert(credit_message_hash, (self.our_node_id, partner_node_id, message_for_broadcast, prev_hash, new_hash, chain_index));
         }
@@ -492,7 +464,6 @@ where
                         peer: partner_node_id,
                     });
                 }
-                println!("🔵 ADDED PENDING ACK: hash={:02x?}, type={}", &message_hash[0..4], message_type);
             }
         }
 
@@ -525,14 +496,11 @@ where
 
         // Update sent_messages_for_broadcast with correct new_hash and broadcast
         {
-            println!("🟣 UPDATE SENT_MESSAGES: hash={:02x?}, type={:#06x}, prev_hash={:02x?}, new_hash={:02x?}, seq={}",
-                &message_hash[0..4], reserves_msg_for_broadcast.message_type(), &prev_hash[0..8], &new_hash[0..8], chain_index);
             let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
             sent_messages.insert(message_hash, (self.our_node_id, partner_node_id, reserves_msg_for_broadcast.clone(), prev_hash, new_hash, chain_index));
         }
 
         // Now broadcast with correct hashes
-        println!("📢 Triggering broadcast after update for hash={:02x?}", &message_hash[0..4]);
         if let Err(e) = self.broadcast_message_to_other_partners(message_hash, partner_node_id, None) {
             log_error!(self.logger, "Failed to broadcast after update: {}", e);
         }

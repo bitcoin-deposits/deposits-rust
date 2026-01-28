@@ -1305,12 +1305,8 @@ where
             request_hash: [0u8; 32], protocol_version: init_msg.protocol_version, accepted: true,
             error: None, partner_id: self.our_node_id,
         });
-        println!("🟢 HANDSHAKE_RESPONSE: Sending LedgerOpenResponse (accepted=true) to {}", peer);
         if let Err(e) = self.send_message(peer, response) {
             log_error!(self.logger, "Failed to send LedgerOpenRequestResponse: {}", e);
-            println!("🔴 HANDSHAKE_RESPONSE: Failed to send response: {:?}", e);
-        } else {
-            println!("🟢 HANDSHAKE_RESPONSE: Response queued successfully for {}", peer);
         }
     }
 
@@ -1338,9 +1334,6 @@ where
         if is_for_us {
             return Ok(false); // Not a third-party audit, continue regular processing
         }
-
-        println!("🟣 THIRD_PARTY_AUDIT: Received msg type {:#06x} from {} (is_for_us={})",
-            message.message_type(), sender_node_id, is_for_us);
 
         // Handle AuditSyncRequest messages specially - they're requests for us to send updates
         if let DepositsMessage::Sync(ref request) = message {
@@ -1386,9 +1379,6 @@ where
                 "Failed to handle third-party audit message: {}",
                 e
             );
-            println!("🔴 ERROR in handle_third_party_audit_message: {}", e);
-        } else {
-            println!("🟢 SUCCESS handle_third_party_audit_message for type {:#06x}", message.message_type());
         }
 
         // Don't send acknowledgment for audit messages - they're informational only

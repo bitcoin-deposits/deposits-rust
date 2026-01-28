@@ -315,8 +315,6 @@ where
             // to avoid race condition where ACK arrives before we set new_hash.
             // send_message inserts with [0u8; 32] placeholder, but we need the real hash.
             {
-                println!("🟣 PRE-INSERT SENT_MESSAGES: hash={:02x?}, type={:#06x}, prev_hash={:02x?}, new_hash={:02x?}, seq={}",
-                    &message_hash[0..4], lock_message_for_broadcast.message_type(), &prev_hash[0..8], &new_hash[0..8], sequence_number);
                 let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
                 sent_messages.insert(message_hash, (operator_id, partner_node_id, lock_message_for_broadcast.clone(), prev_hash, new_hash, sequence_number));
             }

@@ -608,9 +608,7 @@ impl DepositsMessage {
     /// Encode message to bytes (for wire protocol)
     /// Format: [type: u16 BE][payload bytes]
     pub fn encode(&self) -> Vec<u8> {
-        let v2 = self.clone().into_v2();
-        println!("🟢 ENCODE: {} -> V2 type {:?}", self.variant_name(), std::mem::discriminant(&v2));
-        v2.encode()
+        self.clone().into_v2().encode()
     }
 
     /// Decode message from bytes
@@ -845,8 +843,6 @@ impl Writeable for DepositsMessage {
         // encode() returns [type: u16][payload], but LDK adds the type prefix
         // separately via type_id(), so we only write the payload (skip first 2 bytes).
         let bytes = self.encode();
-        println!("🟡 WRITEABLE::WRITE called for {}, encode returned {} bytes, first 4: {:02x?}",
-            self.variant_name(), bytes.len(), &bytes[..bytes.len().min(4)]);
         if bytes.len() >= 2 {
             writer.write_all(&bytes[2..])
         } else {
@@ -857,10 +853,7 @@ impl Writeable for DepositsMessage {
 
 impl lightning::ln::wire::Type for DepositsMessage {
     fn type_id(&self) -> u16 {
-        let v2_id = self.v2_type_id();
-        let v1_id = self.message_type();
-        println!("🔴 TYPE_ID CALLED: v1={:#06x}, v2={:#06x}, variant={}", v1_id, v2_id, self.variant_name());
-        v2_id
+        self.v2_type_id()
     }
 }
 
@@ -876,10 +869,6 @@ impl lightning::ln::wire::CustomMessageReader for DepositsMessageReader {
         buffer: &mut R,
     ) -> Result<Option<Self::CustomMessage>, DecodeError> {
         use self::consts::*;
-
-        // Debug: log all message types we're asked to read
-        println!("MESSAGE_READER: Checking type {:#06x}, is_deposits={}",
-            message_type, is_deposits_message_type(message_type));
 
         // Check if this is a deposits message type
         if !is_deposits_message_type(message_type) {

@@ -126,7 +126,6 @@ where
                         peer: partner_node_id,
                     });
                 }
-                    println!("🔵 ADDED PENDING ACK: hash={:02x?}, type={}", &message_hash[0..4], message_type);
                 }
             }
 
@@ -155,7 +154,6 @@ where
                         if let Some(partner_sig) = sigs.remove(&message_hash) {
                             if let Some(last_update) = ledger.history.last_mut() {
                                 last_update.partner_signature = partner_sig;
-                                println!("🔏 OPERATOR: Stored partner signature in ledger entry seq={}", seq);
                             }
                         }
                     }
@@ -174,14 +172,11 @@ where
 
             // Update sent_messages_for_broadcast with correct new_hash and broadcast
             {
-                println!("🟣 UPDATE SENT_MESSAGES: hash={:02x?}, type={:#06x}, prev_hash={:02x?}, new_hash={:02x?}, seq={}",
-                    &message_hash[0..4], reserves_msg_for_broadcast.message_type(), &prev_hash[0..8], &new_hash[0..8], sequence_number);
                 let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
                 sent_messages.insert(message_hash, (self.our_node_id, partner_node_id, reserves_msg_for_broadcast.clone(), prev_hash, new_hash, sequence_number));
             }
 
             // Now broadcast with correct hashes
-            println!("📢 Triggering broadcast after update for hash={:02x?}", &message_hash[0..4]);
             if let Err(e) = self.broadcast_message_to_other_partners(message_hash, partner_node_id, None) {
                 log_error!(self.logger, "Failed to broadcast after update: {}", e);
             }
@@ -276,16 +271,12 @@ where
         {
             let mut pending_cosignature_requests = self.pending_cosignature_requests.lock().unwrap();
             pending_cosignature_requests.insert(message_hash, tx);
-            println!("🔐 OPERATOR: Registered pending cosignature request for hash {:02x?}, total pending: {}",
-                     &message_hash[0..4], pending_cosignature_requests.len());
         }
 
         // NOTE: CosignInvoice is a coordination message, NOT a ledger update
         // It doesn't modify state, so we don't add pending ACK or track it in the ledger chain
 
         // Send the message
-        println!("📤 OPERATOR: Sending CosignInvoice message (type {}) to {}",
-                 message.message_type(), partner_node_id);
         self.send_message(partner_node_id, message.clone())?;
 
         // Brief yield to let background processor deliver the message
@@ -399,7 +390,6 @@ where
                 timestamp,
                 peer: partner_node_id,
             });
-            println!("🔵 ADDED PENDING ACK: hash={:02x?}, type={}", &message_hash[0..4], message_type);
         }
 
         // Wait for HandshakeResponse with ACK
@@ -446,7 +436,6 @@ where
                     sent_messages.insert(message_hash, (self.our_node_id, partner_node_id, handshake_msg, prev_hash, new_hash, chain_index));
                 }
 
-                println!("🟢 TRIGGERING broadcast after Handshake append");
                 if let Err(e) = self.broadcast_message_to_other_partners(message_hash, partner_node_id, None) {
                     log_warn!(self.logger, "Failed to broadcast Handshake to other partners: {:?}", e);
                 }
@@ -530,25 +519,18 @@ where
                             let ledgers = self.ledgers.lock().unwrap();
                             if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
                                 let mut ledger = ledger_arc.write().unwrap();
-                                println!("🔧 [INIT] OPERATOR updating own ledger reserves: {} -> {} sats",
-                                    ledger.state.reserves.amount, initial_reserves_sats);
                                 ledger.state.reserves.amount = initial_reserves_sats;
                                 log_info!(
                                     self.logger,
                                     "Set initial ledger reserves amount to {} sats",
                                     initial_reserves_sats
                                 );
-                            } else {
-                                println!("🔧 [INIT] OPERATOR ledger not found for ({}, {})",
-                                    self.our_node_id, partner_node_id);
                             }
                         }
 
                         // Send UpdateReserves message to notify partner of the initial reserves
                         // This coordinates the commitment transaction state between both parties
                         let script_pubkey_bytes = script_pubkey_clone.as_bytes().to_vec();
-                        println!("🔧 [INIT] OPERATOR sending UpdateReserves to {} with {} sats",
-                            partner_node_id, initial_reserves_sats);
                         let update_msg = DepositsMessage::Coordination(CoordinationMsg::UpdateReserves {
                             channel_id: channel.channel_id.0,
                             reserves_sats: initial_reserves_sats,
@@ -557,7 +539,6 @@ where
                             remote_ledger_hash: [0u8; 32], // Partner's ledger doesn't exist yet
                         });
                         if let Err(e) = self.send_message(partner_node_id, update_msg) {
-                            println!("❌ [INIT] OPERATOR failed to send UpdateReserves: {:?}", e);
                             log_error!(
                                 self.logger,
                                 "Failed to send initial UpdateReserves to {}: {:?}",
@@ -565,8 +546,6 @@ where
                                 e
                             );
                         } else {
-                            println!("✅ [INIT] OPERATOR sent UpdateReserves to {} ({} sats)",
-                                partner_node_id, initial_reserves_sats);
                             log_info!(
                                 self.logger,
                                 "📤 Sent initial UpdateReserves to {} ({} sats, zero hash)",

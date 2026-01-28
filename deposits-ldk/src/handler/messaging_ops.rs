@@ -73,10 +73,6 @@ where
             let mut guard = self.outbound_messages.lock().unwrap();
             guard.entry(peer_node_id).or_insert_with(Vec::new).push(message);
             let len = guard.get(&peer_node_id).map(|v| v.len()).unwrap_or(0);
-            // Log queue state after adding
-            println!("📬 QUEUE_ADD: type {:#06x} for peer {} (queue now has {} for this peer, {} total)",
-                message_type, peer_node_id, len,
-                guard.values().map(|v| v.len()).sum::<usize>());
             len
         };
 
@@ -231,8 +227,6 @@ where
         let mut last_connected_state = false;
         let mut message_sent = false;
 
-        println!("🔄 ONESHOT_ACK: Starting wait for hash={:02x?}, timeout={}ms", &message_hash[0..4], timeout_ms);
-
         loop {
             let now = std::time::Instant::now();
             let delta = now.duration_since(last_check);
@@ -254,13 +248,10 @@ where
 
             if !message_still_queued && !message_sent {
                 message_sent = true;
-                println!("📨 ONESHOT_ACK: Message sent (removed from queue) hash={:02x?}", &message_hash[0..4]);
             }
 
-            // Log connection state changes
+            // Track connection state changes
             if is_connected != last_connected_state {
-                println!("🔌 ONESHOT_ACK: Peer {} connection changed: {} -> {} (hash={:02x?})",
-                    peer_node_id, last_connected_state, is_connected, &message_hash[0..4]);
                 last_connected_state = is_connected;
             }
 
@@ -271,11 +262,8 @@ where
                 ack_wait_time_elapsed += delta;
             }
 
-            // Log status every 5 seconds
+            // Update status log time every 5 seconds
             if now.duration_since(last_status_log) > Duration::from_secs(5) {
-                println!("⏳ ONESHOT_ACK: hash={:02x?} connected={} sent={} ack_wait={:.1}s total={:.1}s",
-                    &message_hash[0..4], is_connected, message_sent,
-                    ack_wait_time_elapsed.as_secs_f64(), start_time.elapsed().as_secs_f64());
                 last_status_log = now;
             }
 
@@ -604,16 +592,6 @@ where
         }
 
         // Send the message immediately (non-blocking)
-        println!("🔵 SEND_MESSAGE_WITH_ACK: Sending to {} with hash {:02x?}, type {:#06x}",
-            peer_node_id, &message_hash[0..4], message.message_type());
-
-        // Check if peer is connected
-        {
-            let connected = self.connected_peers.lock().unwrap();
-            let is_connected = connected.contains(&peer_node_id);
-            println!("🔵 SEND_MESSAGE_WITH_ACK: Peer {} connected={}", peer_node_id, is_connected);
-        }
-
         match self.send_message(peer_node_id, message) {
             Ok(()) => {}
             Err(e) => {
@@ -720,8 +698,6 @@ where
                             let mut pending = self.pending_reserves_commitments.lock().unwrap();
                             pending.remove(&partner_node_id);
                         }
-                        println!("✅ COMMITMENT VERIFIED: ledger_hash {:02x?} is now committed",
-                                 &expected_ledger_hash[0..8]);
                         return Ok(());
                     }
                 }
@@ -783,8 +759,6 @@ where
             };
 
             if !has_pending {
-                println!("✅ PENDING RESERVES CLEAR: channel {} ready for new UpdateReserves",
-                         channel_id);
                 return Ok(());
             }
 

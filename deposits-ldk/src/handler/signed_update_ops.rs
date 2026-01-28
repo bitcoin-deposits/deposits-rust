@@ -102,7 +102,6 @@ where
                 &secret_key,
             );
 
-            println!("🔏 PORCUPINE: Created final operator signature covering partner signature");
             sig.serialize_compact()
         } else {
             // Fallback: basic signature for backwards compatibility
@@ -644,15 +643,6 @@ where
                 return Ok(());
             }
         };
-
-        // Debug: Print the actual sequence numbers being sent
-        let seqs: Vec<u64> = updates_to_send.iter().map(|(_, seq, _, _)| *seq).collect();
-        println!(
-            "🟢 Sending {} SignedAuditUpdates to new collateral partner {} (seqs: {:?})",
-            updates_to_send.len(),
-            collateral_partner,
-            seqs
-        );
 
         log_info!(
             self.logger,

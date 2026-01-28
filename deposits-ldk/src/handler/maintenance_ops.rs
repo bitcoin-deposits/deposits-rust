@@ -131,14 +131,7 @@ where
             };
 
             if needs_commit {
-                println!(
-                    "🔄 LAZY_SYNC: Committing pending updates for {} (quiet period elapsed)",
-                    partner_id
-                );
-                if let Err(e) = self.refresh_reserves_commitment(partner_id) {
-                    println!("⚠️ LAZY_SYNC: Commit failed for {}: {:?}", partner_id, e);
-                } else {
-                    println!("✅ LAZY_SYNC: Commit succeeded for {}", partner_id);
+                if self.refresh_reserves_commitment(partner_id).is_ok() {
                     lazy_syncs_triggered += 1;
                 }
             }
