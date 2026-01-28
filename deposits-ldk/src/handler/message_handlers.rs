@@ -16,15 +16,14 @@ use lightning::ln::msgs::{LightningError, ErrorAction};
 use super::core::DepositsHandler;
 use super::ledger_ext::LedgerExt;
 use super::messages::*;
-use deposits_core::messages::{CoordinationMsg, CoordinationResponseMsg, RecoveryResponseMsg};
+use deposits_core::messages::{CoordinationMsg, CoordinationResponseMsg};
 use deposits_core::message_handlers::{self as core_handlers, HandlerResult, ResponseData};
 use deposits_core::{log_debug, log_error, log_info, log_warn};
 use lightning::util::logger::Logger as LdkLogger;
 use crate::wire::messages::{
-    QuorumJoinRequestMsg, QuorumJoinResponseMsg, QuorumStateSyncMsg,
-    QuorumVoteRequestMsg, QuorumVoteMsg, QuorumMembershipChangeMsg,
+    QuorumJoinRequestMsg, QuorumStateSyncMsg,
+    QuorumVoteRequestMsg, QuorumVoteMsg,
     CollateralConsentResponseMsg,
-    RecoveryClaimRequestMsg, RecoveryClaimSignatureMsg, RecoveryClaimCompleteMsg,
     ChannelCloseTombstoneMsg,
 };
 
@@ -74,34 +73,7 @@ where
         Ok(())
     }
 
-    /// Handle QuorumJoinResponse message
-    pub(super) fn handle_quorum_join_response(
-        &self,
-        msg: &QuorumJoinResponseMsg,
-        _sender: PublicKey,
-    ) -> Result<(), LightningError> {
-        log_info!(
-            self.logger,
-            "📋 QUORUM: Received join response (accepted={}, members={})",
-            msg.accepted,
-            msg.members.len()
-        );
-
-        if msg.accepted {
-            log_info!(
-                self.logger,
-                "📋 QUORUM: Successfully joined quorum, awaiting state sync"
-            );
-            // State sync will follow via QuorumStateSync message
-        } else {
-            log_info!(
-                self.logger,
-                "📋 QUORUM: Join request rejected: {:?}",
-                msg.rejection_reason
-            );
-        }
-        Ok(())
-    }
+    // NOTE: handle_quorum_join_response removed - inlined in dispatch (just logging)
 
     /// Handle QuorumStateSync message
     pub(super) fn handle_quorum_state_sync(
@@ -376,23 +348,7 @@ where
         log_info!(self.logger, "📋 QUORUM: Emitted ReservesSpendReady event for round {:?}", hex::encode(&round_id[..8]));
     }
 
-    /// Handle QuorumMembershipChange message
-    pub(super) fn handle_quorum_membership_change(
-        &self,
-        msg: &QuorumMembershipChangeMsg,
-        _sender: PublicKey,
-    ) -> Result<(), LightningError> {
-        log_info!(
-            self.logger,
-            "📋 QUORUM: Membership change for ({}, {}): {} {} (now {} members)",
-            msg.operator_id,
-            msg.partner_id,
-            msg.change_type,
-            msg.member_pubkey,
-            msg.new_members.len()
-        );
-        Ok(())
-    }
+    // NOTE: handle_quorum_membership_change removed - inlined in dispatch (just logging)
 
     // ========================================================================
     // Recovery Message Handlers
@@ -400,169 +356,9 @@ where
 
     // NOTE: handle_recovery_vote removed - dispatch calls core directly
 
-    /// Handle RecoveryClaimRequest message
-    ///
-    /// Core handler validates the request and emits events.
-    /// LDK layer handles signing and queueing the response.
-    pub(super) fn handle_recovery_claim_request(
-        &self,
-        msg: &RecoveryClaimRequestMsg,
-        sender: PublicKey,
-    ) -> Result<(), LightningError> {
-        use bitcoin::secp256k1::{Secp256k1, Message, Keypair};
-
-        log_info!(
-            self.logger,
-            "🔄 RECOVERY: Received claim request from {} for operator {} tier {}",
-            msg.claimant, msg.operator, msg.tier_index
-        );
-
-        // Delegate to core handler for validation
-        match core_handlers::handle_recovery_claim_request(self, msg, sender) {
-            Ok(HandlerResult::Response(ResponseData::RecoveryClaimRequestValidated {
-                claimant, sighash, ..
-            })) => {
-                // Core validated - now sign the claim transaction
-                let secp = Secp256k1::new();
-                let secret_key = match self.node_secret_key {
-                    Some(sk) => sk,
-                    None => {
-                        log_warn!(self.logger, "🔄 RECOVERY: No signing key available");
-                        return Ok(());
-                    }
-                };
-                let keypair = Keypair::from_secret_key(&secp, &secret_key);
-
-                // Sign the sighash
-                let sighash_msg = Message::from_digest(sighash);
-                let signature = secp.sign_schnorr_no_aux_rand(&sighash_msg, &keypair);
-
-                log_info!(self.logger, "🔄 RECOVERY: Sending claim signature to {}", claimant);
-
-                // Queue the response
-                self.outbound_messages
-                    .lock()
-                    .unwrap()
-                    .entry(claimant)
-                    .or_default()
-                    .push(DepositsMessage::RecoveryResponse(RecoveryResponseMsg::ClaimSignature {
-                        request_hash: sighash,
-                        signer: self.our_node_id,
-                        sighash,
-                        signature: signature.serialize(),
-                    }));
-            }
-            Ok(HandlerResult::Rejected(reason)) => {
-                log_warn!(self.logger, "🔄 RECOVERY: Claim request rejected: {}", reason);
-            }
-            Err(e) => {
-                log_warn!(self.logger, "🔄 RECOVERY: Claim request handler failed: {:?}", e);
-            }
-            _ => {}
-        }
-
-        Ok(())
-    }
-
-    /// Handle RecoveryClaimSignature message
-    ///
-    /// Core handler validates and emits events.
-    /// LDK layer handles claim_manager operations and threshold checking.
-    pub(super) fn handle_recovery_claim_signature(
-        &self,
-        msg: &RecoveryClaimSignatureMsg,
-        sender: PublicKey,
-    ) -> Result<(), LightningError> {
-        log_info!(
-            self.logger,
-            "🔄 RECOVERY: Received claim signature from {} for sighash {}",
-            msg.signer, hex::encode(&msg.sighash[..8])
-        );
-
-        // Delegate to core handler for validation
-        match core_handlers::handle_recovery_claim_signature(self, msg, sender) {
-            Ok(HandlerResult::Response(ResponseData::RecoveryClaimSignatureReceived { .. })) => {
-                // Core validated - now add to claim manager
-                let ledger_id = (msg.operator, msg.partner);
-                let add_result = {
-                    let mut claim_manager = self.claim_manager.lock().unwrap();
-                    claim_manager.add_peer_signature(&ledger_id, &msg.signer, msg.signature)
-                };
-
-                match add_result {
-                    Ok(has_sufficient) => {
-                        log_info!(self.logger, "🔄 RECOVERY: Signature stored (threshold_met={})", has_sufficient);
-                        if has_sufficient {
-                            let _ = self.event_queue.emit_deposits_event(
-                                super::events::DepositsEvent::RecoveryClaimReady {
-                                    operator_id: msg.operator,
-                                    partner_id: msg.partner,
-                                },
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        log_warn!(self.logger, "🔄 RECOVERY: Failed to add signature: {:?}", e);
-                    }
-                }
-            }
-            Ok(HandlerResult::Rejected(reason)) => {
-                log_warn!(self.logger, "🔄 RECOVERY: Signature rejected: {}", reason);
-            }
-            Err(e) => {
-                log_warn!(self.logger, "🔄 RECOVERY: Signature handler failed: {:?}", e);
-            }
-            _ => {}
-        }
-
-        Ok(())
-    }
-
-    /// Handle RecoveryClaimComplete message
-    /// Handle RecoveryClaimComplete message
-    ///
-    /// Core handler emits protocol events.
-    /// LDK layer handles claim_manager cleanup and LDK-specific events.
-    pub(super) fn handle_recovery_claim_complete(
-        &self,
-        msg: &RecoveryClaimCompleteMsg,
-        sender: PublicKey,
-    ) -> Result<(), LightningError> {
-        log_info!(
-            self.logger,
-            "🔄 RECOVERY: Claim complete for operator {} - new operator {}",
-            msg.operator, msg.new_operator
-        );
-
-        // Delegate to core handler
-        match core_handlers::handle_recovery_claim_complete(self, msg, sender) {
-            Ok(HandlerResult::Response(ResponseData::RecoveryClaimCompleted { .. })) => {
-                // Core validated and emitted events - now clean up claim_manager
-                let ledger_id = (msg.operator, msg.partner);
-                {
-                    let mut claim_manager = self.claim_manager.lock().unwrap();
-                    claim_manager.remove_claim(&ledger_id);
-                }
-
-                // Emit LDK-specific event
-                let _ = self.event_queue.emit_deposits_event(
-                    super::events::DepositsEvent::RecoveryClaimCompleted {
-                        old_operator: msg.operator,
-                        partner_id: msg.partner,
-                        new_operator: msg.new_operator,
-                        claim_txid: msg.claim_txid,
-                        confirmation_block: msg.confirmation_block,
-                    },
-                );
-            }
-            Err(e) => {
-                log_warn!(self.logger, "🔄 RECOVERY: Claim complete handler failed: {:?}", e);
-            }
-            _ => {}
-        }
-
-        Ok(())
-    }
+    // NOTE: handle_recovery_claim_request removed - dispatch calls core directly via sign_schnorr provider
+    // NOTE: handle_recovery_claim_signature removed - dispatch calls core directly via add_claim_signature provider
+    // NOTE: handle_recovery_claim_complete removed - dispatch calls core directly via remove_claim provider
 
     // ========================================================================
     // Collateral/Voter Message Handlers

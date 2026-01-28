@@ -204,11 +204,20 @@ where
                     operator, partner, signer
                 );
             }
-            ProtocolEvent::RecoveryClaimCompleted { old_operator, partner, new_operator, .. } => {
+            ProtocolEvent::RecoveryClaimCompleted { old_operator, partner, new_operator, claim_txid, confirmation_block } => {
                 log_info!(
                     self.logger,
                     "Protocol event: RecoveryClaimCompleted - old_operator={}, partner={}, new_operator={}",
                     old_operator, partner, new_operator
+                );
+                let _ = self.event_queue.emit_deposits_event(
+                    DepositsEvent::RecoveryClaimCompleted {
+                        old_operator,
+                        partner_id: partner,
+                        new_operator,
+                        claim_txid,
+                        confirmation_block,
+                    }
                 );
             }
             ProtocolEvent::ChannelClosed { operator, partner, reason, .. } => {
@@ -519,6 +528,44 @@ where
                 }
             }
         }
+    }
+
+    fn add_claim_signature(
+        &self,
+        operator: PublicKey,
+        partner: PublicKey,
+        signer: PublicKey,
+        signature: [u8; 64],
+    ) -> Result<bool, String> {
+        let ledger_id = (operator, partner);
+        let mut claim_manager = self.claim_manager.lock().unwrap();
+
+        match claim_manager.add_peer_signature(&ledger_id, &signer, signature) {
+            Ok(has_sufficient) => {
+                log_info!(self.logger, "🔄 RECOVERY: Signature stored (threshold_met={})", has_sufficient);
+                if has_sufficient {
+                    // Emit event when threshold is reached
+                    let _ = self.event_queue.emit_deposits_event(
+                        super::events::DepositsEvent::RecoveryClaimReady {
+                            operator_id: operator,
+                            partner_id: partner,
+                        },
+                    );
+                }
+                Ok(has_sufficient)
+            }
+            Err(e) => {
+                log_warn!(self.logger, "🔄 RECOVERY: Failed to add signature: {:?}", e);
+                Err(format!("{:?}", e))
+            }
+        }
+    }
+
+    fn remove_claim(&self, operator: PublicKey, partner: PublicKey) {
+        let ledger_id = (operator, partner);
+        let mut claim_manager = self.claim_manager.lock().unwrap();
+        claim_manager.remove_claim(&ledger_id);
+        log_info!(self.logger, "🔄 RECOVERY: Removed claim for ({}, {})", operator, partner);
     }
 }
 

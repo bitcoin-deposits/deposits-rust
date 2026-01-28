@@ -50,7 +50,7 @@ use crate::operation_validation::{
     validate_reserves_add, validate_reserves_increase, validate_reserves_decrease,
     validate_fee_collect, validate_ledger_close, validate_cosign_invoice,
 };
-use crate::messages::{DepositsMessage, CoordinationResponseMsg, SyncMsg};
+use crate::messages::{DepositsMessage, CoordinationResponseMsg, SyncMsg, RecoveryResponseMsg};
 
 // ============================================================================
 // Handler Result Types
@@ -2201,14 +2201,25 @@ pub fn handle_recovery_claim_request<C: HandlerContext>(
         tier_index: msg.tier_index,
     });
 
-    // Return validated data for LDK layer to sign the sighash
-    Ok(HandlerResult::Response(ResponseData::RecoveryClaimRequestValidated {
-        operator: msg.operator,
-        partner: msg.partner,
-        claimant: msg.claimant,
-        tier_index: msg.tier_index,
+    // Sign the sighash with Schnorr
+    let signature = match ctx.sign_schnorr(&msg.sighash) {
+        Some(sig) => sig,
+        None => {
+            return Ok(HandlerResult::Rejected("No signing key available".to_string()));
+        }
+    };
+
+    // Queue the claim signature response to the claimant
+    let response = DepositsMessage::RecoveryResponse(RecoveryResponseMsg::ClaimSignature {
+        request_hash: msg.sighash,
+        signer: ctx.our_node_id(),
         sighash: msg.sighash,
-    }))
+        signature,
+    });
+
+    ctx.queue_message(msg.claimant, response)?;
+
+    Ok(HandlerResult::Ok)
 }
 
 /// Handle a RecoveryClaimSignature message.
@@ -2245,20 +2256,12 @@ pub fn handle_recovery_claim_signature<C: HandlerContext>(
         signer: msg.signer,
     });
 
-    // The LDK layer handles:
-    // 1. Verifying the Schnorr signature
-    // 2. Adding to claim_manager
-    // 3. Checking if threshold is reached
-    // Here we just validate the message format and return for LDK to process
-
-    // Note: threshold_reached is determined by the LDK layer which has the claim_manager
-    Ok(HandlerResult::Response(ResponseData::RecoveryClaimSignatureReceived {
-        operator: msg.operator,
-        partner: msg.partner,
-        signer: msg.signer,
-        signature: msg.signature,
-        threshold_reached: false, // LDK layer will determine this
-    }))
+    // Add signature to claim manager via provider
+    // This also emits RecoveryClaimReady event if threshold is reached
+    match ctx.add_claim_signature(msg.operator, msg.partner, msg.signer, msg.signature) {
+        Ok(_threshold_reached) => Ok(HandlerResult::Ok),
+        Err(e) => Ok(HandlerResult::Rejected(e)),
+    }
 }
 
 /// Handle a RecoveryClaimComplete message.
@@ -2279,7 +2282,7 @@ pub fn handle_recovery_claim_complete<C: HandlerContext>(
     msg: &RecoveryClaimCompleteMsg,
     _sender: PublicKey,
 ) -> Result<HandlerResult, HandlerError> {
-    // Emit event for claim completion
+    // Emit event for claim completion (this also emits DepositsEvent via provider)
     ctx.emit_event(ProtocolEvent::RecoveryClaimCompleted {
         old_operator: msg.operator,
         partner: msg.partner,
@@ -2288,14 +2291,10 @@ pub fn handle_recovery_claim_complete<C: HandlerContext>(
         confirmation_block: msg.confirmation_block,
     });
 
-    // Return data for LDK layer to clean up claim_manager and update state
-    Ok(HandlerResult::Response(ResponseData::RecoveryClaimCompleted {
-        old_operator: msg.operator,
-        partner: msg.partner,
-        new_operator: msg.new_operator,
-        claim_txid: msg.claim_txid,
-        confirmation_block: msg.confirmation_block,
-    }))
+    // Clean up claim tracking via provider
+    ctx.remove_claim(msg.operator, msg.partner);
+
+    Ok(HandlerResult::Ok)
 }
 
 // ============================================================================

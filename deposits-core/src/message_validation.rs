@@ -132,7 +132,7 @@ pub trait HandlerContext: ValidationContext {
     /// Get our secret key for signing (optional, for handlers that need it)
     fn our_secret_key(&self) -> Option<SecretKey> { None }
 
-    /// Sign arbitrary message content with our node key.
+    /// Sign arbitrary message content with our node key (ECDSA).
     /// Returns 64-byte signature or None if signing unavailable.
     fn sign_message(&self, content: &[u8]) -> Option<[u8; 64]> {
         use bitcoin::hashes::{Hash, sha256};
@@ -146,6 +146,19 @@ pub trait HandlerContext: ValidationContext {
         match secp.sign_ecdsa(&secp_msg, &secret_key) {
             sig => Some(sig.serialize_compact())
         }
+    }
+
+    /// Sign a sighash with Schnorr (BIP340) for recovery claims.
+    /// Returns 64-byte Schnorr signature or None if signing unavailable.
+    fn sign_schnorr(&self, sighash: &[u8; 32]) -> Option<[u8; 64]> {
+        use bitcoin::secp256k1::{Secp256k1, Message, Keypair};
+
+        let secret_key = self.our_secret_key()?;
+        let secp = Secp256k1::new();
+        let keypair = Keypair::from_secret_key(&secp, &secret_key);
+        let msg = Message::from_digest(*sighash);
+        let signature = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
+        Some(signature.serialize())
     }
 
     /// Get the current block height
@@ -300,6 +313,30 @@ pub trait HandlerContext: ValidationContext {
     ) {
         let _ = (accused_operator, accusation_msg);
         // Default: no-op (LDK implementation handles channel closure and rebroadcast)
+    }
+
+    // ========================================================================
+    // Recovery Claim Management Methods
+    // ========================================================================
+
+    /// Add a claim signature and check if threshold is reached.
+    /// Returns Ok(true) if threshold is now reached, Ok(false) otherwise.
+    /// Emits RecoveryClaimReady event if threshold reached.
+    fn add_claim_signature(
+        &self,
+        operator: PublicKey,
+        partner: PublicKey,
+        signer: PublicKey,
+        signature: [u8; 64],
+    ) -> Result<bool, String> {
+        let _ = (operator, partner, signer, signature);
+        Ok(false) // Default: not implemented
+    }
+
+    /// Remove a completed recovery claim from tracking.
+    fn remove_claim(&self, operator: PublicKey, partner: PublicKey) {
+        let _ = (operator, partner);
+        // Default: no-op
     }
 }
 

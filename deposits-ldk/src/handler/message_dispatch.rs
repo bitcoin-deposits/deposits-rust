@@ -19,8 +19,8 @@ use super::messages::{DepositsMessage, LedgerUpdateMsg, LedgerUpdateMsgExt, Ledg
 use super::messages::consts::LEDGER_UPDATE;
 use super::ledger_ext::LedgerExt;
 use crate::wire::messages::{
-    QuorumJoinResponseMsg, QuorumStateSyncMsg, QuorumVoteRequestMsg, QuorumVoteMsg,
-    QuorumMembershipChangeMsg, CollateralConsentRequestMsg, CollateralConsentResponseMsg,
+    QuorumStateSyncMsg, QuorumVoteRequestMsg, QuorumVoteMsg,
+    CollateralConsentRequestMsg, CollateralConsentResponseMsg,
     RecoveryVoteMsg, RecoveryClaimRequestMsg, RecoveryClaimSignatureMsg, RecoveryClaimCompleteMsg,
     UncreditedPaymentMsg, ChannelCloseTombstoneMsg,
 };
@@ -230,16 +230,14 @@ where
                 }
             }
             DepositsMessage::CoordinationResponse(coord_resp) => match coord_resp {
-                CoordinationResponseMsg::QuorumJoinResponse { accepted, ref members, threshold, last_sequence, current_hash, ref rejection_reason, .. } => {
-                    let msg = QuorumJoinResponseMsg {
-                        accepted: *accepted,
-                        members: members.clone(),
-                        threshold: *threshold,
-                        last_sequence: *last_sequence,
-                        current_hash: *current_hash,
-                        rejection_reason: rejection_reason.clone(),
-                    };
-                    return self.handle_quorum_join_response(&msg, sender_node_id);
+                CoordinationResponseMsg::QuorumJoinResponse { accepted, ref members, ref rejection_reason, .. } => {
+                    // Inline - just logging, no core logic needed
+                    if *accepted {
+                        log_info!(self.logger, "📋 QUORUM: Join accepted ({} members), awaiting state sync", members.len());
+                    } else {
+                        log_info!(self.logger, "📋 QUORUM: Join rejected: {:?}", rejection_reason);
+                    }
+                    return Ok(());
                 }
                 CoordinationResponseMsg::QuorumStateSync { operator_id, partner_id, ref updates, start_sequence, is_final, .. } => {
                     // Convert SignedLedgerUpdate to Vec<u8> for wire format
@@ -259,14 +257,10 @@ where
                     return self.handle_quorum_state_sync(&msg, sender_node_id);
                 }
                 CoordinationResponseMsg::QuorumMembershipChange { operator_id, partner_id, ref change_type, member_pubkey, ref new_members, .. } => {
-                    let msg = QuorumMembershipChangeMsg {
-                        operator_id: *operator_id,
-                        partner_id: *partner_id,
-                        change_type: change_type.clone(),
-                        member_pubkey: *member_pubkey,
-                        new_members: new_members.clone(),
-                    };
-                    return self.handle_quorum_membership_change(&msg, sender_node_id);
+                    // Inline - just logging, no core logic needed
+                    log_info!(self.logger, "📋 QUORUM: Membership change for ({}, {}): {} {} (now {} members)",
+                        operator_id, partner_id, change_type, member_pubkey, new_members.len());
+                    return Ok(());
                 }
                 CoordinationResponseMsg::CollateralConsentResponse { operator_id, partner_id, consent_granted, collateral_partner_signature, .. } => {
                     let msg = CollateralConsentResponseMsg {
@@ -300,6 +294,9 @@ where
                     return Ok(());
                 }
                 RecoveryMsg::ClaimRequest { operator, partner, claimant, tier_index, ref unsigned_tx, sighash, ref destination_script, block_height } => {
+                    // Direct dispatch to core - core handles Schnorr signing and message queueing via providers
+                    log_info!(self.logger, "🔄 RECOVERY: Claim request from {} for operator {} tier {}",
+                        claimant, operator, tier_index);
                     let msg = RecoveryClaimRequestMsg {
                         operator: *operator,
                         partner: *partner,
@@ -310,9 +307,16 @@ where
                         destination_script: destination_script.clone(),
                         block_height: *block_height,
                     };
-                    return self.handle_recovery_claim_request(&msg, sender_node_id);
+                    match deposits_core::handle_recovery_claim_request(self, &msg, sender_node_id) {
+                        Ok(_) => log_info!(self.logger, "🔄 RECOVERY: Claim request processed, signature sent"),
+                        Err(e) => log_warn!(self.logger, "🔄 RECOVERY: Claim request failed: {:?}", e),
+                    }
+                    return Ok(());
                 }
                 RecoveryMsg::ClaimComplete { operator, partner, new_operator, claim_txid, confirmation_block, reason_code } => {
+                    // Direct dispatch to core - core handles cleanup and event emission via providers
+                    log_info!(self.logger, "🔄 RECOVERY: Claim complete for operator {} - new operator {}",
+                        operator, new_operator);
                     let msg = RecoveryClaimCompleteMsg {
                         operator: *operator,
                         partner: *partner,
@@ -321,7 +325,11 @@ where
                         confirmation_block: *confirmation_block,
                         reason_code: *reason_code,
                     };
-                    return self.handle_recovery_claim_complete(&msg, sender_node_id);
+                    match deposits_core::handle_recovery_claim_complete(self, &msg, sender_node_id) {
+                        Ok(_) => log_info!(self.logger, "🔄 RECOVERY: Claim complete processed"),
+                        Err(e) => log_warn!(self.logger, "🔄 RECOVERY: Claim complete failed: {:?}", e),
+                    }
+                    return Ok(());
                 }
                 RecoveryMsg::UncreditedPayment { operator, partner, payment_hash, preimage, deposit_pubkey, amount_msat, invoice_cosignature, settlement_sequence, settlement_ledger_hash, settlement_block_height, accuser_signature } => {
                     // Direct dispatch to core - core handles event emission and fraud followup via providers
@@ -348,7 +356,9 @@ where
             }
             DepositsMessage::RecoveryResponse(recovery_resp) => match recovery_resp {
                 RecoveryResponseMsg::ClaimSignature { signer, sighash, signature, .. } => {
-                    // Extract operator/partner from context (sender is typically the signer)
+                    // Direct dispatch to core - core handles claim_manager via provider
+                    log_info!(self.logger, "🔄 RECOVERY: Claim signature from {} for sighash {}",
+                        signer, hex::encode(&sighash[..8]));
                     let msg = RecoveryClaimSignatureMsg {
                         operator: sender_node_id, // Will be verified by handler
                         partner: self.our_node_id,
@@ -356,7 +366,11 @@ where
                         sighash: *sighash,
                         signature: *signature,
                     };
-                    return self.handle_recovery_claim_signature(&msg, sender_node_id);
+                    match deposits_core::handle_recovery_claim_signature(self, &msg, sender_node_id) {
+                        Ok(_) => log_info!(self.logger, "🔄 RECOVERY: Signature processed"),
+                        Err(e) => log_warn!(self.logger, "🔄 RECOVERY: Signature failed: {:?}", e),
+                    }
+                    return Ok(());
                 }
                 _ => {}
             }
