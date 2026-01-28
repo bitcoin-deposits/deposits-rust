@@ -113,19 +113,6 @@ where
         Ok(())
     }
 
-    /// Strategy-aware reserves commitment refresh
-    fn maybe_refresh_reserves_commitment(&self, partner: PublicKey, msg_type: u16) -> Result<(), DepositsError> {
-        use crate::types::HashStrategy;
-        let (needs_sync, strategy) = HashStrategy::for_message_type(msg_type);
-
-        if !needs_sync || strategy == HashStrategy::None || strategy == HashStrategy::PredictedAfterOp {
-            return Ok(());
-        }
-
-        log_info!(self.logger, "📝 HASH_STRATEGY: Syncing for type {} (CurrentCommitted)", msg_type);
-        self.refresh_reserves_commitment(partner)
-    }
-
     /// Commit specific hash to channel (predict-then-commit pattern)
     pub(super) fn commit_specific_hash_to_channel(
         &self,

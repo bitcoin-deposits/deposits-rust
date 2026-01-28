@@ -13,31 +13,7 @@
 //! NOTE: This is currently stubbed out pending migration of CommitmentTransactionEnhancer
 //! and ReservesOutputManager to deposits-ldk.
 
-use bitcoin::secp256k1::PublicKey;
-
-use super::core::DepositsHandler;
-use deposits_core::DepositsError;
-use lightning::util::logger::Logger as LdkLogger;
-
-use std::ops::Deref;
-
-impl<L: Deref + Clone + Send + Sync> DepositsHandler<L>
-where
-    L::Target: LdkLogger,
-{
-    /// Trigger an actual Lightning commitment transaction update with reserves output and ledger hash.
-    ///
-    /// NOTE: This is currently a stub. The actual commitment enhancement functionality
-    /// depends on CommitmentTransactionEnhancer and ReservesOutputManager which need
-    /// to be migrated from ldk-node.
-    pub(super) fn trigger_commitment_transaction_update(
-        &self,
-        _partner_node_id: PublicKey,
-        _ledger_hash: [u8; 32],
-        _commitment_number: u64,
-    ) -> Result<(), DepositsError> {
-        // TODO: Migrate CommitmentTransactionEnhancer and ReservesOutputManager
-        // For now, this is a no-op stub that allows compilation
-        Ok(())
-    }
-}
+// NOTE: Commitment transaction operations have been removed.
+// The trigger_commitment_transaction_update method was a stub and is no longer needed.
+// When CommitmentTransactionEnhancer and ReservesOutputManager are migrated from ldk-node,
+// the necessary methods will be added here.

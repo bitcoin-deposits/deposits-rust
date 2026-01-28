@@ -29,94 +29,11 @@ impl<L: Deref + Clone + Send + Sync> DepositsHandler<L>
 where
     L::Target: LdkLogger,
 {
-    /// Load a channel ledger from storage
-    /// Loads the ledger where we are the operator and partner_id is the partner
-    fn load_ledger_state(&self, partner_id: PublicKey) -> Result<Option<Ledger>, DepositsError> {
-        // Key format: ledger_{hash} where hash = SHA256(operator_id || partner_id)
-        use bitcoin::hashes::{Hash, sha256};
-        let mut key_input = Vec::new();
-        key_input.extend_from_slice(&self.our_node_id.serialize());
-        key_input.extend_from_slice(&partner_id.serialize());
-        let key_hash = sha256::Hash::hash(&key_input);
-        let key = format!("ledger_{}", hex::encode(key_hash.as_byte_array()));
-        match self.kv_store.read("deposits", "ledgers", &key) {
-            Ok(data) => {
-
-                // Check if it looks like JSON (starts with '{' or '[')
-                if data.len() > 0 && (data[0] == b'{' || data[0] == b'[') {
-                }
-
-                // Try to deserialize with current format
-                match bincode::deserialize::<Ledger>(&data) {
-                    Ok(ledger) => {
-                        Ok(Some(ledger))
-                    }
-                    Err(e) => {
-                        // Incompatible format - fail startup
-                        return Err(deposits_core::DepositsError::PersistenceFailed {
-                            reason: format!("Incompatible ledger format for partner {}: {}", partner_id, e)
-                        });
-                    }
-                }
-            }
-            Err(_e) => {
-                Ok(None) // Ledger doesn't exist yet
-            }
-        }
-    }
-
     /// Check if a storage key is a ledger key
     /// New format: "ledger_{hash}" where hash is SHA256(operator || partner)
     /// We can't parse the operator/partner from the hash, so we just verify it's a ledger key
     pub(super) fn is_ledger_key(&self, key: &str) -> bool {
         key.starts_with("ledger_") && key.len() == 71 // "ledger_" + 64 hex chars
-    }
-
-    fn parse_audit_ledger_key(&self, key: &str) -> Option<[u8; 32]> {
-        // Format: audit_{hash_hex}
-        // We can't reconstruct the operator/partner IDs from the hash,
-        // so we'll need to store that mapping separately or use a different approach
-        // For now, just return the hash
-        if let Some(hex_str) = key.strip_prefix("audit_") {
-            if let Ok(hash_bytes) = hex::decode(hex_str) {
-                if hash_bytes.len() == 32 {
-                    let mut hash = [0u8; 32];
-                    hash.copy_from_slice(&hash_bytes);
-                    return Some(hash);
-                }
-            }
-        }
-        None
-    }
-
-    /// Load an audit ledger from storage
-    fn load_audit_ledger_state(&self, operator_id: PublicKey, partner_id: PublicKey) -> Result<Option<Ledger>, DepositsError> {
-        use bitcoin::hashes::{sha256, Hash};
-        let mut hash_input = Vec::new();
-        hash_input.extend_from_slice(&operator_id.serialize());
-        hash_input.extend_from_slice(&partner_id.serialize());
-        let hash = sha256::Hash::hash(&hash_input);
-        let key = format!("audit_{}", hex::encode(&hash[..]));
-
-        match self.kv_store.read("deposits", "audit_ledgers", &key) {
-            Ok(data) => {
-                match bincode::deserialize::<Ledger>(&data) {
-                    Ok(ledger) => {
-                        Ok(Some(ledger))
-                    }
-                    Err(_e) => {
-                        Err(DepositsError::SerializationError)
-                    }
-                }
-            }
-            Err(e) => {
-                if e.to_string().contains("not found") {
-                    Ok(None)
-                } else {
-                    Err(DepositsError::PersistenceFailed { reason: e.to_string() })
-                }
-            }
-        }
     }
 
     pub fn initialize_ledger(

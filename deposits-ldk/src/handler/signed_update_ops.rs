@@ -345,34 +345,6 @@ where
         Ok(())
     }
 
-    /// Load signed ledger update log from storage
-    pub(super) fn load_signed_update_log(
-        &self,
-        operator_id: PublicKey,
-        partner_id: PublicKey,
-    ) -> Result<deposits_core::SignedLedgerUpdateLog, DepositsError> {
-        // Use hashed key (same as persist_signed_update)
-        use bitcoin::hashes::{Hash, sha256};
-        let mut key_input = Vec::new();
-        key_input.extend_from_slice(&operator_id.serialize());
-        key_input.extend_from_slice(&partner_id.serialize());
-        let key_hash = sha256::Hash::hash(&key_input);
-        let key = format!("signed_updates_{}", hex::encode(key_hash.as_byte_array()));
-
-        match self.kv_store.read("deposits", "signed_ledger_updates", &key) {
-            Ok(data) => {
-                bincode::deserialize(&data)
-                    .map_err(|_| DepositsError::InvalidState(
-                        "Failed to deserialize signed update log".to_string()
-                    ))
-            }
-            Err(_) => {
-                // No existing log, create new one
-                Ok(deposits_core::SignedLedgerUpdateLog::new(operator_id, partner_id))
-            }
-        }
-    }
-
     /// Handle audit sync request from another auditor
     ///
     /// When an auditor requests missing updates, we send them all updates after their last known sequence
