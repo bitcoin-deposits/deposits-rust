@@ -1112,17 +1112,17 @@ mod tests {
         use crate::wire::messages::RecoveryVoteMsg;
         let vote_msg = pending.iter().find_map(|(_, msg)| {
             match msg {
-                DepositsMessage::Recovery(RecoveryMsg::Vote { operator: op, partner: pr, voter: vt, is_conforming: ic, validated_hash: vh, validated_sequence: vs, substitute_nomination: sn, discovered_violation: dv, signature: sig }) => {
+                DepositsMessage::Recovery(RecoveryMsg::Vote { operator, partner, voter, is_conforming, validated_hash, validated_sequence, ref substitute_nomination, discovered_violation, signature }) => {
                     Some(RecoveryVoteMsg {
-                        operator: *op,
-                        partner: *pr,
-                        voter: *vt,
-                        is_conforming: *ic,
-                        validated_hash: *vh,
-                        validated_sequence: *vs,
-                        substitute_nomination: sn.clone(),
-                        discovered_violation: *dv,
-                        signature: *sig,
+                        operator: *operator,
+                        partner: *partner,
+                        voter: *voter,
+                        is_conforming: *is_conforming,
+                        validated_hash: *validated_hash,
+                        validated_sequence: *validated_sequence,
+                        substitute_nomination: substitute_nomination.clone(),
+                        discovered_violation: *discovered_violation,
+                        signature: *signature,
                     })
                 }
                 _ => None,

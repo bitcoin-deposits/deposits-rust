@@ -388,14 +388,14 @@ where
             requester,
             request.operator_id,
             request.partner_id,
-            request.from_sequence
+            request.last_known_sequence
         );
 
         // Load our stored signed updates for this ledger
         let logs = self.signed_update_logs.lock().unwrap();
         let updates_to_send = if let Some(log) = logs.get(&(request.operator_id, request.partner_id)) {
             // Get updates since the requested sequence
-            let updates = log.get_updates_since(request.from_sequence);
+            let updates = log.get_updates_since(request.last_known_sequence);
 
             log_info!(
                 self.logger,
@@ -417,33 +417,17 @@ where
 
         drop(logs); // Release lock before sending
 
-        // Convert SignedLedgerUpdate to LedgerUpdateMsg for transmission
-        use super::messages::{LedgerUpdateMsg, LedgerOperation};
-        use super::ledger_ext::SignedLedgerUpdateExt;
-        let audit_updates: Vec<LedgerUpdateMsg> = updates_to_send.iter().map(|update| {
-            // Extract actual operation from message bytes to avoid placeholder issues
-            let operation = update.get_operation().unwrap_or(LedgerOperation::ReservesRemove);
-            LedgerUpdateMsg {
-                message: update.message.clone(),
-                message_type: update.message_type,
-                operator_signature: update.operator_signature,
-                partner_signature: Some(update.partner_signature),
-                operator_id: update.operator_id,
-                partner_id: update.partner_id,
-                sequence_number: update.sequence_number,
-                previous_hash: update.previous_hash,
-                current_hash: update.current_hash,
-                timestamp: update.timestamp,
-                operation,
-            }
-        }).collect();
-
-        // Send response
+        // Send response - SignedLedgerUpdate is the same as StorageSignedLedgerUpdate
         use super::messages::{SyncResponseMsg, DepositsMessage};
+        let current_sequence = updates_to_send.last().map(|u| u.sequence_number).unwrap_or(0);
+        let current_hash = updates_to_send.last().map(|u| u.current_hash).unwrap_or([0u8; 32]);
         let response = DepositsMessage::SyncResponse(SyncResponseMsg {
             operator_id: request.operator_id,
             partner_id: request.partner_id,
-            updates: audit_updates,
+            request_hash: [0u8; 32], // Not tracking request hashes for audit sync
+            updates: updates_to_send.clone(),
+            current_sequence,
+            current_hash,
         });
 
         self.send_message(requester, response)?;
@@ -677,8 +661,8 @@ where
             collateral_partner
         );
 
-        // Send each update as a SignedAuditUpdate
-        use deposits_core::messages::LedgerOperation;
+        // Create signed updates and send as a SyncResponse bundle
+        let mut signed_updates = Vec::new();
         for (msg, sequence_number, prev_hash, current_hash) in updates_to_send {
             // Create the signed update (resync path - no fresh partner signature)
             let signed_update = match self.create_signed_update(
@@ -699,31 +683,28 @@ where
                     continue;
                 }
             };
+            signed_updates.push(signed_update);
+        }
 
-            // Wrap in LedgerUpdateMsg and send - extract actual operation from original message
-            let operation = msg.to_operation().unwrap_or(LedgerOperation::ReservesRemove);
-            let audit_msg = DepositsMessage::LedgerUpdate(LedgerUpdateMsg {
-                message: signed_update.message.clone(),
-                message_type: signed_update.message_type,
-                operator_signature: signed_update.operator_signature,
-                partner_signature: Some(signed_update.partner_signature),
-                operator_id: signed_update.operator_id,
-                partner_id: signed_update.partner_id,
-                sequence_number: signed_update.sequence_number,
-                previous_hash: signed_update.previous_hash,
-                current_hash: signed_update.current_hash,
-                timestamp: signed_update.timestamp,
-                operation,
-            });
+        // Send all updates in a SyncResponse
+        use super::messages::{SyncResponseMsg, DepositsMessage};
+        let current_sequence = signed_updates.last().map(|u| u.sequence_number).unwrap_or(0);
+        let current_hash = signed_updates.last().map(|u| u.current_hash).unwrap_or([0u8; 32]);
+        let sync_response = DepositsMessage::SyncResponse(SyncResponseMsg {
+            operator_id: self.our_node_id,
+            partner_id: partner_node_id,
+            request_hash: [0u8; 32], // Not a request-response, this is a push
+            updates: signed_updates,
+            current_sequence,
+            current_hash,
+        });
 
-            if let Err(e) = self.send_message(collateral_partner, audit_msg) {
-                log_warn!(
-                    self.logger,
-                    "Failed to send audit update seq={} to collateral partner: {:?}",
-                    sequence_number, e
-                );
-                // Continue sending remaining updates
-            }
+        if let Err(e) = self.send_message(collateral_partner, sync_response) {
+            log_warn!(
+                self.logger,
+                "Failed to send audit history to collateral partner: {:?}",
+                e
+            );
         }
 
         log_info!(

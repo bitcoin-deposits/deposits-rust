@@ -15,7 +15,7 @@ use bitcoin::secp256k1::PublicKey;
 use super::core::DepositsHandler;
 use super::ledger_ext::SignedLedgerUpdateLogExt;
 use deposits_core::DepositsError;
-use super::messages::{DepositsMessage, LedgerUpdateMsg, LedgerOperation};
+use super::messages::{DepositsMessage, LedgerUpdateMsg, LedgerUpdateMsgExt, LedgerOperation};
 use deposits_core::quorum::LedgerId;
 use deposits_core::{log_debug, log_error, log_info};
 use lightning::util::logger::Logger as LdkLogger;
@@ -242,31 +242,18 @@ where
                 partner_id
             );
 
-            // If we have a signed update, wrap it in SignedAuditUpdate message
+            // If we have a signed update, send it as a SyncResponse (V2 audit format)
             // Otherwise, send the raw message for backward compatibility
             let message_to_send = if let Some(ref signed_update) = signed_update {
-                println!("🟢 BROADCAST: Wrapping in LedgerUpdate for recipient {}", audit_recipient_id);
-                // Extract actual operation from original message to avoid placeholder issues
-                // Use to_operation() which handles all message types (LedgerUpdate, Handshake, etc.)
-                let operation = original_message.to_operation().unwrap_or_else(|| {
-                    // Fallback for non-ledger messages (Handshake, coordination, etc.)
-                    // Use LedgerClose which is a benign no-op that doesn't modify reserves
-                    println!("🟡 BROADCAST_OP: No operation found for variant {}, using LedgerClose placeholder", original_message.variant_name());
-                    LedgerOperation::LedgerClose
-                });
-                println!("🟢 BROADCAST_OP: Using operation {:?} for variant {}", operation, original_message.variant_name());
-                DepositsMessage::LedgerUpdate(LedgerUpdateMsg {
-                    message: signed_update.message.clone(),
-                    message_type: signed_update.message_type,
-                    operator_signature: signed_update.operator_signature,
-                    partner_signature: Some(signed_update.partner_signature),
+                println!("🟢 BROADCAST: Sending SyncResponse with signed update to recipient {}", audit_recipient_id);
+                // V2: Send signed updates via SyncResponse which can carry SignedLedgerUpdate
+                DepositsMessage::SyncResponse(super::messages::SyncResponseMsg {
                     operator_id: signed_update.operator_id,
                     partner_id: signed_update.partner_id,
-                    sequence_number: signed_update.sequence_number,
-                    previous_hash: signed_update.previous_hash,
+                    request_hash: [0u8; 32], // Not a request-response, this is a push
+                    updates: vec![signed_update.clone()],
+                    current_sequence: signed_update.sequence_number,
                     current_hash: signed_update.current_hash,
-                    timestamp: signed_update.timestamp,
-                    operation,
                 })
             } else {
                 println!("🔴 BROADCAST: Sending raw message type {:#06x} to {} (no signature)",
@@ -399,29 +386,15 @@ where
             }
         }
 
-        // Broadcast to all auditors - use the actual PaymentFulfill operation
-        let audit_message = DepositsMessage::LedgerUpdate(
-            LedgerUpdateMsg {
-                message: signed_update.message.clone(),
-                message_type: signed_update.message_type,
-                operator_signature: signed_update.operator_signature,
-                partner_signature: Some(signed_update.partner_signature),
-                operator_id: signed_update.operator_id,
-                partner_id: signed_update.partner_id,
-                sequence_number: signed_update.sequence_number,
-                previous_hash: signed_update.previous_hash,
-                current_hash: signed_update.current_hash,
-                timestamp: signed_update.timestamp,
-                operation: LedgerOperation::PaymentFulfill {
-                    pubkey: fulfill_msg.pubkey,
-                    amount: fulfill_msg.amount,
-                    payment_id: fulfill_msg.payment_id,
-                    sequence_number: fulfill_msg.sequence_number,
-                    scriptpubkey_signature: fulfill_msg.scriptpubkey_signature,
-                    preimage: fulfill_msg.preimage,
-                },
-            }
-        );
+        // Broadcast to all auditors - V2: use SyncResponse with SignedLedgerUpdate
+        let audit_message = DepositsMessage::SyncResponse(super::messages::SyncResponseMsg {
+            operator_id: signed_update.operator_id,
+            partner_id: signed_update.partner_id,
+            request_hash: [0u8; 32], // Not a request-response, this is a push
+            updates: vec![signed_update.clone()],
+            current_sequence: signed_update.sequence_number,
+            current_hash: signed_update.current_hash,
+        });
 
         for audit_recipient_id in all_partners {
             println!("🔵 BALANCE_WITHDRAWN_BROADCAST: Sending to auditor {}", audit_recipient_id);

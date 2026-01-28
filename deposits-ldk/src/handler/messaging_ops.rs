@@ -800,16 +800,11 @@ where
         });
 
         let ack_msg = LedgerUpdateResponseMsg {
-            acked_message_type: message_type,
-            message_hash,
-            success,
-            error_message: error_msg.clone(),
-            cosignature: cosig_array,
-            update_signature: None,
-            update_sequence: None,
-            update_prev_hash: None,
-            update_curr_hash: None,
-            // V2 required fields
+            operator_id: recipient, // Responding to the operator who sent the message
+            partner_id: self.our_node_id,
+            request_hash: message_hash,
+            accepted: success,
+            error: error_msg.clone(),
             partner_signature: cosig_array,
             confirmed_sequence: 0,
             confirmed_hash: message_hash,

@@ -142,7 +142,6 @@ mod tests {
             operator: test_pubkey(),
             partner: test_pubkey_2(),
             deposit_pubkey: test_pubkey(),
-            initial_balance: 100_000,
         });
 
         assert_eq!(emitter.len(), 1);

@@ -27,47 +27,47 @@ where
     /// Handle received acknowledgment message
     pub(super) fn handle_received_ack(&self, ack_msg: LedgerUpdateResponseMsg, sender: PublicKey) -> Result<(), DepositsError> {
         // First, notify any waiting threads
-        let result = if ack_msg.success {
+        let result = if ack_msg.accepted {
             Ok(())
         } else {
-            Err(ack_msg.error_message.clone().unwrap_or_else(|| "Message rejected by peer".to_string()))
+            Err(ack_msg.error.clone().unwrap_or_else(|| "Message rejected by peer".to_string()))
         };
 
         // Check if we have a pending oneshot ACK waiting for this message hash
         let oneshot_sender = {
             let mut pending_oneshot_acks = self.pending_oneshot_acks.lock().unwrap();
             let pending_count = pending_oneshot_acks.len();
-            let found = pending_oneshot_acks.remove(&ack_msg.message_hash);
+            let found = pending_oneshot_acks.remove(&ack_msg.request_hash);
             println!("🔍 ACK_HANDLER: Looking for hash={:02x?} in pending_oneshot_acks (count={}, found={})",
-                &ack_msg.message_hash[0..4], pending_count, found.is_some());
+                &ack_msg.request_hash[0..4], pending_count, found.is_some());
             found
         };
 
         if let Some(oneshot_tx) = oneshot_sender {
             // Send result to oneshot channel
-            println!("✅ ACK_HANDLER: Signaling oneshot channel for hash={:02x?}, success={}", &ack_msg.message_hash[0..4], ack_msg.success);
+            println!("✅ ACK_HANDLER: Signaling oneshot channel for hash={:02x?}, success={}", &ack_msg.request_hash[0..4], ack_msg.accepted);
             let send_result = oneshot_tx.send(result.clone());
-            println!("✅ ACK_HANDLER: Oneshot send result for hash={:02x?}: {:?}", &ack_msg.message_hash[0..4], send_result.is_ok());
+            println!("✅ ACK_HANDLER: Oneshot send result for hash={:02x?}: {:?}", &ack_msg.request_hash[0..4], send_result.is_ok());
         } else {
-            println!("⚠️ ACK_HANDLER: No oneshot waiting for hash={:02x?}", &ack_msg.message_hash[0..4]);
+            println!("⚠️ ACK_HANDLER: No oneshot waiting for hash={:02x?}", &ack_msg.request_hash[0..4]);
         }
 
         // Check if we have a pending cosignature request waiting for this message hash
         let cosignature_sender = {
             let mut pending_cosignature_requests = self.pending_cosignature_requests.lock().unwrap();
-            pending_cosignature_requests.remove(&ack_msg.message_hash)
+            pending_cosignature_requests.remove(&ack_msg.request_hash)
         };
 
         if let Some(cosig_tx) = cosignature_sender {
             // Send cosignature if present and ACK is successful
-            let cosig_result: Result<Vec<u8>, String> = if ack_msg.success {
-                if let Some(ref signature) = ack_msg.cosignature {
+            let cosig_result: Result<Vec<u8>, String> = if ack_msg.accepted {
+                if let Some(ref signature) = ack_msg.partner_signature {
                     Ok(signature.to_vec())
                 } else {
                     Err("ACK succeeded but no cosignature provided".to_string())
                 }
             } else {
-                Err(ack_msg.error_message.clone().unwrap_or_else(|| "Cosigning rejected by peer".to_string()))
+                Err(ack_msg.error.clone().unwrap_or_else(|| "Cosigning rejected by peer".to_string()))
             };
 
             let _ = cosig_tx.send(cosig_result);
@@ -76,8 +76,8 @@ where
                 self.logger,
                 "Notified cosignature waiting thread for ACK from {} with hash {:02x?}: success={}",
                 sender,
-                &ack_msg.message_hash[0..8],
-                ack_msg.success
+                &ack_msg.request_hash[0..8],
+                ack_msg.accepted
             );
         }
 
@@ -93,30 +93,30 @@ where
         if let Some(ledger_arc) = ledger_arc {
             let ledger = ledger_arc.read().unwrap();
 
-            println!("🟢 HANDLE_ACK: Checking ledger for hash {:02x?} from {}", &ack_msg.message_hash[0..4], sender);
+            println!("🟢 HANDLE_ACK: Checking ledger for hash {:02x?} from {}", &ack_msg.request_hash[0..4], sender);
 
             // Check and remove pending ACK
             // Try both original message_hash and partner-specific hash (for messages like CollateralAttestation
             // that are sent to multiple partners with the same content)
-            let partner_specific_hash = Self::create_partner_specific_hash(&ack_msg.message_hash, &sender);
+            let partner_specific_hash = Self::create_partner_specific_hash(&ack_msg.request_hash, &sender);
             let (original_message_type, lookup_hash) = {
                 let mut pending_acks = self.pending_acks.lock().unwrap();
                 // Try original hash first
-                if let Some(ack) = pending_acks.remove(&ack_msg.message_hash) {
-                    (Some(ack.message_type), ack_msg.message_hash)
+                if let Some(ack) = pending_acks.remove(&ack_msg.request_hash) {
+                    (Some(ack.message_type), ack_msg.request_hash)
                 } else if let Some(ack) = pending_acks.remove(&partner_specific_hash) {
                     // Fallback to partner-specific hash
                     println!("🟡 HANDLE_ACK: Found pending ACK using partner-specific hash {:02x?}", &partner_specific_hash[0..4]);
                     (Some(ack.message_type), partner_specific_hash)
                 } else {
-                    (None, ack_msg.message_hash)
+                    (None, ack_msg.request_hash)
                 }
             };
 
             if let Some(original_message_type) = original_message_type {
-                println!("🟢 HANDLE_ACK: Found pending ACK, type={}, success={}", original_message_type, ack_msg.success);
+                println!("🟢 HANDLE_ACK: Found pending ACK, type={}, success={}", original_message_type, ack_msg.accepted);
 
-                if ack_msg.success {
+                if ack_msg.accepted {
                     // NOTE: We do NOT mark the ledger as Committed here!
                     // The async caller (e.g., add_deposit_async) will apply the actual change
                     // and THEN mark it as committed. Marking it committed here would create
@@ -208,11 +208,11 @@ where
                         sent_messages.remove(&lookup_hash);
                     } else if should_broadcast {
                         println!("[ACK] broadcast hash={:02x?} sender={} has_sig={}",
-                            &lookup_hash[0..4], sender, ack_msg.update_signature.is_some());
+                            &lookup_hash[0..4], sender, ack_msg.partner_signature.is_some());
                         if let Err(e) = self.broadcast_message_to_other_partners(
                             lookup_hash,
                             sender,
-                            ack_msg.update_signature,
+                            ack_msg.partner_signature,
                         ) {
                             log_error!(self.logger, "Failed to broadcast message to other partners: {}", e);
                             println!("[ACK] BROADCAST FAILED: {}", e);
@@ -222,7 +222,7 @@ where
                     } else {
                         println!("[ACK] skip broadcast hash={:02x?} - new_hash not yet available", &lookup_hash[0..4]);
                         // Store partner signature so operator can use it when manually broadcasting
-                        if let Some(sig) = ack_msg.update_signature {
+                        if let Some(sig) = ack_msg.partner_signature {
                             let mut sigs = self.received_partner_signatures.lock().unwrap();
                             sigs.insert(lookup_hash, sig);
                             println!("[ACK] stored partner signature for later");
@@ -231,20 +231,20 @@ where
                 } else {
                     log_error!(self.logger, "Received failed ACK for message type {} from {}: {}",
                               original_message_type, sender,
-                              ack_msg.error_message.unwrap_or_else(|| "No error message provided".to_string()));
+                              ack_msg.error.unwrap_or_else(|| "No error message provided".to_string()));
                 }
             } else {
                 // No pending ACK found - this could be a fire-and-forget message
                 // (SendingLockPayment, SendingFulfillPayment, CollateralAttestation, etc.)
                 // These don't add to pending_acks but DO add to sent_messages_for_broadcast
-                println!("[ACK] no pending ACK, checking sent_messages hash={:02x?}", &ack_msg.message_hash[0..4]);
+                println!("[ACK] no pending ACK, checking sent_messages hash={:02x?}", &ack_msg.request_hash[0..4]);
 
-                if ack_msg.success {
+                if ack_msg.accepted {
                     // For fire-and-forget operations, we need to update partner_deepest_ack_hash
                     // when the ACK is received, so the background flush task will commit it.
                     let (new_hash_opt, is_collateral_attestation_ff) = {
                         let sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
-                        if let Some((_, _, msg, _, new_hash, _)) = sent_messages.get(&ack_msg.message_hash) {
+                        if let Some((_, _, msg, _, new_hash, _)) = sent_messages.get(&ack_msg.request_hash) {
                             // Check if this is a CollateralAttestation message
                             let is_attestation = msg.to_operation().map_or(false, |op| {
                                 matches!(op, super::messages::LedgerOperation::CollateralAttestation { .. })
@@ -306,19 +306,19 @@ where
                             // via handle_collateral_attestation. Broadcasting would cause infinite loops.
                             if is_collateral_attestation_ff {
                                 println!("[ACK] skip broadcast (fire-and-forget) hash={:02x?} - CollateralAttestation",
-                                    &ack_msg.message_hash[0..4]);
+                                    &ack_msg.request_hash[0..4]);
                             } else {
                                 println!("[ACK] broadcast (fire-and-forget) hash={:02x?} sender={} has_sig={}",
-                                    &ack_msg.message_hash[0..4], sender, ack_msg.update_signature.is_some());
+                                    &ack_msg.request_hash[0..4], sender, ack_msg.partner_signature.is_some());
                                 if let Err(e) = self.broadcast_message_to_other_partners(
-                                    ack_msg.message_hash,
+                                    ack_msg.request_hash,
                                     sender,
-                                    ack_msg.update_signature,
+                                    ack_msg.partner_signature,
                                 ) {
                                     log_error!(self.logger, "Failed to broadcast fire-and-forget message to partners: {}", e);
                                     println!("[ACK] BROADCAST FAILED (fire-and-forget): {}", e);
                                 } else {
-                                    println!("[ACK] BROADCAST OK (fire-and-forget) hash={:02x?}", &ack_msg.message_hash[0..4]);
+                                    println!("[ACK] BROADCAST OK (fire-and-forget) hash={:02x?}", &ack_msg.request_hash[0..4]);
                                 }
                             }
 
@@ -326,13 +326,13 @@ where
                             // NOTE: broadcast_message_to_other_partners may have already removed it
                             {
                                 let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
-                                sent_messages.remove(&ack_msg.message_hash);
+                                sent_messages.remove(&ack_msg.request_hash);
                             }
                         }
                     } else {
-                        println!("[ACK] not found in sent_messages hash={:02x?}", &ack_msg.message_hash[0..4]);
+                        println!("[ACK] not found in sent_messages hash={:02x?}", &ack_msg.request_hash[0..4]);
                         log_debug!(self.logger, "Received ACK for message hash {:02x?} from {} (no ledger tracking)",
-                                  &ack_msg.message_hash[0..8], sender);
+                                  &ack_msg.request_hash[0..8], sender);
                     }
                 }
             }

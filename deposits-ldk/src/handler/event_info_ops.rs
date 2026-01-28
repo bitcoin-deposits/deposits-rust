@@ -31,7 +31,6 @@ fn event_from_operation(operation: &LedgerOperation) -> Option<DepositsEvent> {
         LedgerOperation::DepositOpen { pubkey, .. } => {
             Some(DepositsEvent::DepositAdded {
                 pubkey: *pubkey,
-                initial_balance: 0,
             })
         }
         LedgerOperation::DepositClose { pubkey } => {

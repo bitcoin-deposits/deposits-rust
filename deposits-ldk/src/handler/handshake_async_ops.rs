@@ -17,7 +17,7 @@ use tokio::sync::oneshot;
 
 use super::core::{build_taproot_reserves_script, DepositsHandler};
 use deposits_core::DepositsError;
-use super::messages::{LedgerUpdateMsg, LedgerOperation, DepositsMessage, HandshakeMsg};
+use super::messages::{LedgerUpdateMsg, LedgerUpdateMsgExt, LedgerOperation, DepositsMessage, HandshakeMsg};
 use deposits_core::messages::CoordinationMsg;
 use super::ledger_ext::{LedgerExt, SignedLedgerUpdateExt};
 use deposits_core::VoterSet;

@@ -15,7 +15,7 @@ use lightning::ln::msgs::{LightningError, ErrorAction};
 
 use super::core::{DepositsHandler, CosignedInvoice};
 use super::message_validation::MessageValidation;
-use super::messages::{DepositsMessage, LedgerUpdateResponseMsg, LedgerUpdateMsg, LedgerOperation, CoordinationMsg, CoordinationResponseMsg, RecoveryMsg, RecoveryResponseMsg};
+use super::messages::{DepositsMessage, LedgerUpdateResponseMsg, LedgerUpdateMsg, LedgerUpdateMsgExt, LedgerOperation, CoordinationMsg, CoordinationResponseMsg, RecoveryMsg, RecoveryResponseMsg};
 use super::messages::consts::LEDGER_UPDATE;
 use super::ledger_ext::LedgerExt;
 use crate::wire::messages::{
@@ -407,19 +407,9 @@ where
             return Ok(());
         }
 
-        // Handle SignedAuditUpdate specially when we're the PARTNER
-        // The partner should receive authoritative updates from operator and store in ledgers
-        // NOT process through apply_state_only() which is for ledger update messages
-        // V2: SignedUpdate is now just a LedgerUpdate with signatures
-        if let DepositsMessage::LedgerUpdate(ref update_msg) = message {
-            // Check if this is a signed update by looking for operator signature
-            if update_msg.operator_signature != [0u8; 64] {
-                // Delegate to extracted handler in message_handlers.rs
-                if self.handle_signed_update_as_partner(update_msg, sender_node_id)? {
-                    return Ok(());
-                }
-            }
-        }
+        // V2: Signed audit updates come via SyncResponse with Vec<SignedLedgerUpdate>
+        // Individual LedgerUpdateMsg messages are for new operations and go through normal processing
+        // (partner validates, signs, responds with LedgerUpdateResponseMsg containing their signature)
 
         // For non-ACK messages from direct partners, validate and send acknowledgment
         let validation_result = self.validate_message(&message, sender_node_id);
@@ -873,19 +863,14 @@ where
                         }
                     });
                     let ack = DepositsMessage::LedgerUpdateResponse(LedgerUpdateResponseMsg {
-                        message_hash,
-                        success: true,
-                        error_message: None,
+                        operator_id: sender_node_id,
+                        partner_id: self.our_node_id,
+                        request_hash: message_hash,
+                        accepted: true,
+                        error: None,
                         partner_signature: cosig_array,
                         confirmed_sequence: 0,
                         confirmed_hash: message_hash,
-                        // V1 compat fields
-                        acked_message_type: message.message_type(),
-                        cosignature: cosig_array,
-                        update_signature: None,
-                        update_sequence: None,
-                        update_prev_hash: None,
-                        update_curr_hash: None,
                     });
 
                     println!("📤 PARTNER: Queueing ACK with cosignature for coordination message type {}, hash: {:02x?}",
@@ -952,19 +937,14 @@ where
                                 let message_hash = self.calculate_message_hash(&message);
 
                                 let ack = DepositsMessage::LedgerUpdateResponse(LedgerUpdateResponseMsg {
-                                    message_hash,
-                                    success: true,
-                                    error_message: None,
+                                    operator_id: sender_node_id,
+                                    partner_id: self.our_node_id,
+                                    request_hash: message_hash,
+                                    accepted: true,
+                                    error: None,
                                     partner_signature: partner_sig,
                                     confirmed_sequence: seq,
                                     confirmed_hash: new_hash,
-                                    // V1 compat fields
-                                    acked_message_type: message.message_type(),
-                                    cosignature: None,
-                                    update_signature: partner_sig,
-                                    update_sequence: Some(seq),
-                                    update_prev_hash: Some(prev_hash),
-                                    update_curr_hash: Some(new_hash),
                                 });
 
                                 println!("📤 PARTNER: Queueing ACK with porcupine signature for message type {}, seq={}, hash={:02x?}",

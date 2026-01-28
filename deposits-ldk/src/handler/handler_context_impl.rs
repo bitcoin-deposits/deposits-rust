@@ -91,7 +91,7 @@ where
     fn emit_event(&self, event: ProtocolEvent) {
         // Convert core ProtocolEvent to LDK DepositsEvent
         match event {
-            ProtocolEvent::DepositOpened { operator, partner, deposit_pubkey, initial_balance } => {
+            ProtocolEvent::DepositOpened { operator, partner, deposit_pubkey } => {
                 // The DepositsEvent doesn't have a direct mapping, log it
                 log_info!(
                     self.logger,
@@ -330,19 +330,14 @@ where
         use super::messages::{DepositsMessage, LedgerUpdateResponseMsg};
 
         let ack = DepositsMessage::LedgerUpdateResponse(LedgerUpdateResponseMsg {
-            message_hash,
-            success,
-            error_message,
+            operator_id: peer, // Responding to the operator who sent the update
+            partner_id: self.our_node_id,
+            request_hash: message_hash,
+            accepted: success,
+            error: error_message,
             partner_signature,
             confirmed_sequence: sequence,
             confirmed_hash: new_hash,
-            // V1 compat fields
-            acked_message_type: message_type,
-            cosignature: None,
-            update_signature: partner_signature,
-            update_sequence: Some(sequence),
-            update_prev_hash: Some(prev_hash),
-            update_curr_hash: Some(new_hash),
         });
 
         log_info!(

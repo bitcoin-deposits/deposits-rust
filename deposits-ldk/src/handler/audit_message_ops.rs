@@ -33,32 +33,42 @@ where
         message: &DepositsMessage,
         sender: PublicKey,
     ) -> Result<(), DepositsError> {
-        // Handle LedgerUpdate messages specially - they contain signatures
+        // V2: Audit messages come via SyncResponse with Vec<SignedLedgerUpdate>
+        if let DepositsMessage::SyncResponse(ref sync_response) = message {
+            log_info!(
+                self.logger,
+                "📋 AUDIT: Received sync response with {} updates from {} for operator {} -> partner {}",
+                sync_response.updates.len(),
+                sender,
+                sync_response.operator_id,
+                sync_response.partner_id
+            );
+
+            // Process each signed update
+            for signed_update in &sync_response.updates {
+                log_info!(
+                    self.logger,
+                    "📋 AUDIT: Processing signed update seq={}",
+                    signed_update.sequence_number
+                );
+                self.verify_and_store_signed_update(signed_update.clone())?;
+            }
+            return Ok(());
+        }
+
+        // V2: LedgerUpdateMsg no longer carries full signed data for audit purposes
+        // New operations use the regular LedgerUpdate flow, audit sync uses SyncResponse
         if let DepositsMessage::LedgerUpdate(ref update_msg) = message {
             log_info!(
                 self.logger,
-                "📋 AUDIT: Received ledger update seq={} from operator {} -> partner {}",
+                "📋 AUDIT: Received ledger update seq={} from operator {} -> partner {} (will be processed via normal flow)",
                 update_msg.sequence_number,
                 update_msg.operator_id,
                 update_msg.partner_id
             );
-
-            // Convert to SignedLedgerUpdate and verify/store
-            let signed_update = deposits_core::SignedLedgerUpdate {
-                message: update_msg.message.clone(),
-                message_type: update_msg.message_type,
-                operator_signature: update_msg.operator_signature,
-                partner_signature: update_msg.partner_signature.unwrap_or([0u8; 64]),
-                operator_id: update_msg.operator_id,
-                partner_id: update_msg.partner_id,
-                sequence_number: update_msg.sequence_number,
-                previous_hash: update_msg.previous_hash,
-                current_hash: update_msg.current_hash,
-                timestamp: update_msg.timestamp,
-            };
-
-            // Verify and store the signed update
-            return self.verify_and_store_signed_update(signed_update);
+            // In V2, individual LedgerUpdate messages are for new operations, not audit sync
+            // Return Ok to indicate we've seen it, but don't try to store as signed update
+            return Ok(());
         }
 
         // The sender is the operator of the ledger being audited

@@ -629,30 +629,7 @@ impl DepositsMessage {
             DepositsMessageCore::Handshake(m) => Self::Handshake(m.into()),
             DepositsMessageCore::HandshakeResponse(m) => Self::HandshakeResponse(m.into()),
             DepositsMessageCore::Sync(m) => Self::Sync(m.into()),
-            DepositsMessageCore::SyncResponse(m) => {
-                use super::ledger_ext::SignedLedgerUpdateExt;
-                Self::SyncResponse(SyncResponseMsg {
-                    operator_id: m.operator_id,
-                    partner_id: m.partner_id,
-                    updates: m.updates.into_iter().map(|u| {
-                        let operation = u.get_operation()
-                            .unwrap_or(deposits_core::messages::LedgerOperation::ReservesRemove);
-                        LedgerUpdateMsg {
-                            operator_id: u.operator_id,
-                            partner_id: u.partner_id,
-                            operation,
-                            sequence_number: u.sequence_number,
-                            previous_hash: u.previous_hash,
-                            current_hash: u.current_hash,
-                            operator_signature: u.operator_signature,
-                            message_type: u.message_type,
-                            message: u.message,
-                            timestamp: u.timestamp,
-                            partner_signature: Some(u.partner_signature),
-                        }
-                    }).collect(),
-                })
-            }
+            DepositsMessageCore::SyncResponse(m) => Self::SyncResponse(m),
             DepositsMessageCore::Recovery(m) => Self::Recovery(m),
             DepositsMessageCore::RecoveryResponse(m) => Self::RecoveryResponse(m),
             DepositsMessageCore::Coordination(m) => Self::Coordination(m),
@@ -670,29 +647,7 @@ impl DepositsMessage {
             Self::Handshake(m) => DepositsMessageCore::Handshake(m.into()),
             Self::HandshakeResponse(m) => DepositsMessageCore::HandshakeResponse(m.into()),
             Self::Sync(m) => DepositsMessageCore::Sync(m.into()),
-            Self::SyncResponse(m) => {
-                let current_sequence = m.updates.last().map(|u| u.sequence_number).unwrap_or(0);
-                let current_hash = m.updates.last().map(|u| u.current_hash).unwrap_or([0u8; 32]);
-                DepositsMessageCore::SyncResponse(SyncResponseMsgV2 {
-                    operator_id: m.operator_id,
-                    partner_id: m.partner_id,
-                    request_hash: [0u8; 32],
-                    updates: m.updates.into_iter().map(|u| deposits_core::types::SignedLedgerUpdate {
-                        message: u.message,
-                        message_type: u.message_type,
-                        operator_id: u.operator_id,
-                        partner_id: u.partner_id,
-                        sequence_number: u.sequence_number,
-                        previous_hash: u.previous_hash,
-                        current_hash: u.current_hash,
-                        timestamp: u.timestamp,
-                        partner_signature: u.partner_signature.unwrap_or([0u8; 64]),
-                        operator_signature: u.operator_signature,
-                    }).collect(),
-                    current_sequence,
-                    current_hash,
-                })
-            }
+            Self::SyncResponse(m) => DepositsMessageCore::SyncResponse(m),
             Self::Recovery(m) => DepositsMessageCore::Recovery(m),
             Self::RecoveryResponse(m) => DepositsMessageCore::RecoveryResponse(m),
             Self::Coordination(m) => DepositsMessageCore::Coordination(m),
@@ -709,71 +664,38 @@ impl DepositsMessage {
 // These match the field names used throughout the codebase.
 // They can be converted to/from deposits_core V2 types.
 
-/// Handshake message - now uses core type directly
+/// Handshake message - uses core type directly
 pub type HandshakeMsg = HandshakeMsgV2;
 
-/// Handshake response message - now uses core type directly
+/// Handshake response message - uses core type directly
 pub type HandshakeResponseMsg = HandshakeResponseMsgV2;
 
-/// Ledger update message (local type with expected field names)
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LedgerUpdateMsg {
-    pub operator_id: PublicKey,
-    pub partner_id: PublicKey,
-    pub operation: LedgerOperation,
-    pub sequence_number: u64,
-    pub previous_hash: [u8; 32],
-    pub current_hash: [u8; 32],
-    pub operator_signature: [u8; 64],
-    // V1 compatibility fields
-    pub message_type: u16,
-    pub message: Vec<u8>,
-    pub timestamp: u64,
-    pub partner_signature: Option<[u8; 64]>,
+/// Ledger update message - uses core type directly
+pub type LedgerUpdateMsg = LedgerUpdateMsgV2;
+
+/// Extension trait for LedgerUpdateMsg convenience methods
+pub trait LedgerUpdateMsgExt {
+    fn new_with_operation(operator: PublicKey, partner: PublicKey, operation: LedgerOperation) -> LedgerUpdateMsg;
+    fn is_deposit_open(&self) -> bool;
+    fn is_deposit_close(&self) -> bool;
+    fn is_reserves_add(&self) -> bool;
+    fn is_reserves_increase(&self) -> bool;
+    fn is_reserves_decrease(&self) -> bool;
+    fn is_payment_credit(&self) -> bool;
+    fn is_payment_lock(&self) -> bool;
+    fn is_payment_fulfill(&self) -> bool;
+    fn is_payment_fail(&self) -> bool;
+    fn is_collateral_add_partner(&self) -> bool;
+    fn is_collateral_increase(&self) -> bool;
+    fn is_collateral_decrease(&self) -> bool;
+    fn is_fee_collect(&self) -> bool;
+    fn is_tombstone(&self) -> bool;
+    fn is_ledger_close(&self) -> bool;
 }
 
-impl From<LedgerUpdateMsgV2> for LedgerUpdateMsg {
-    fn from(v2: LedgerUpdateMsgV2) -> Self {
-        Self {
-            operator_id: v2.operator_id,
-            partner_id: v2.partner_id,
-            operation: v2.operation.clone(),
-            sequence_number: v2.sequence_number,
-            previous_hash: v2.previous_hash,
-            current_hash: v2.current_hash,
-            operator_signature: v2.operator_signature,
-            // V1 compat fields derived from operation
-            message_type: v2.operation.discriminant() as u16,
-            message: Vec::new(), // V2 uses typed operations, not raw bytes
-            timestamp: 0,
-            partner_signature: None,
-        }
-    }
-}
-
-impl From<LedgerUpdateMsg> for LedgerUpdateMsgV2 {
-    fn from(local: LedgerUpdateMsg) -> Self {
-        Self {
-            operator_id: local.operator_id,
-            partner_id: local.partner_id,
-            operation: local.operation,
-            sequence_number: local.sequence_number,
-            previous_hash: local.previous_hash,
-            current_hash: local.current_hash,
-            operator_signature: local.operator_signature,
-        }
-    }
-}
-
-impl LedgerUpdateMsg {
-    /// Create a new LedgerUpdate with the given operation.
-    /// Metadata (sequence, hashes, signature) will be filled in by the ledger.
-    pub fn new_with_operation(
-        operator: PublicKey,
-        partner: PublicKey,
-        operation: LedgerOperation,
-    ) -> Self {
-        Self {
+impl LedgerUpdateMsgExt for LedgerUpdateMsg {
+    fn new_with_operation(operator: PublicKey, partner: PublicKey, operation: LedgerOperation) -> LedgerUpdateMsg {
+        LedgerUpdateMsg {
             operator_id: operator,
             partner_id: partner,
             operation,
@@ -781,227 +703,81 @@ impl LedgerUpdateMsg {
             previous_hash: [0u8; 32],
             current_hash: [0u8; 32],
             operator_signature: [0u8; 64],
-            message_type: 0,
-            message: Vec::new(),
-            timestamp: 0,
-            partner_signature: None,
         }
     }
 
-    /// Get the operation from this update
-    pub fn operation(&self) -> &LedgerOperation {
-        &self.operation
-    }
-
-    /// Check if this is a specific operation type
-    pub fn is_deposit_open(&self) -> bool {
+    fn is_deposit_open(&self) -> bool {
         matches!(self.operation, LedgerOperation::DepositOpen { .. })
     }
 
-    pub fn is_deposit_close(&self) -> bool {
+    fn is_deposit_close(&self) -> bool {
         matches!(self.operation, LedgerOperation::DepositClose { .. })
     }
 
-    pub fn is_reserves_add(&self) -> bool {
+    fn is_reserves_add(&self) -> bool {
         matches!(self.operation, LedgerOperation::ReservesAdd { .. })
     }
 
-    pub fn is_reserves_increase(&self) -> bool {
+    fn is_reserves_increase(&self) -> bool {
         matches!(self.operation, LedgerOperation::ReservesIncrease { .. })
     }
 
-    pub fn is_reserves_decrease(&self) -> bool {
+    fn is_reserves_decrease(&self) -> bool {
         matches!(self.operation, LedgerOperation::ReservesDecrease { .. })
     }
 
-    pub fn is_payment_credit(&self) -> bool {
+    fn is_payment_credit(&self) -> bool {
         matches!(self.operation, LedgerOperation::PaymentCredit { .. })
     }
 
-    pub fn is_payment_lock(&self) -> bool {
+    fn is_payment_lock(&self) -> bool {
         matches!(self.operation, LedgerOperation::PaymentLock { .. })
     }
 
-    pub fn is_payment_fulfill(&self) -> bool {
+    fn is_payment_fulfill(&self) -> bool {
         matches!(self.operation, LedgerOperation::PaymentFulfill { .. })
     }
 
-    pub fn is_payment_fail(&self) -> bool {
+    fn is_payment_fail(&self) -> bool {
         matches!(self.operation, LedgerOperation::PaymentFail { .. })
     }
 
-    pub fn is_collateral_add_partner(&self) -> bool {
+    fn is_collateral_add_partner(&self) -> bool {
         matches!(self.operation, LedgerOperation::CollateralAddPartner { .. })
     }
 
-    pub fn is_collateral_increase(&self) -> bool {
+    fn is_collateral_increase(&self) -> bool {
         matches!(self.operation, LedgerOperation::CollateralIncrease { .. })
     }
 
-    pub fn is_collateral_decrease(&self) -> bool {
+    fn is_collateral_decrease(&self) -> bool {
         matches!(self.operation, LedgerOperation::CollateralDecrease { .. })
     }
 
-    pub fn is_fee_collect(&self) -> bool {
+    fn is_fee_collect(&self) -> bool {
         matches!(self.operation, LedgerOperation::FeeCollect { .. })
     }
 
-    pub fn is_tombstone(&self) -> bool {
+    fn is_tombstone(&self) -> bool {
         matches!(self.operation, LedgerOperation::Tombstone { .. })
     }
 
-    pub fn is_ledger_close(&self) -> bool {
+    fn is_ledger_close(&self) -> bool {
         matches!(self.operation, LedgerOperation::LedgerClose { .. })
     }
 }
 
-/// Ledger update response message (local type)
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LedgerUpdateResponseMsg {
-    pub message_hash: [u8; 32],
-    pub success: bool,
-    pub error_message: Option<String>,
-    pub partner_signature: Option<[u8; 64]>,
-    pub confirmed_sequence: u64,
-    pub confirmed_hash: [u8; 32],
-    // V1 compatibility fields
-    pub acked_message_type: u16,
-    pub cosignature: Option<[u8; 64]>,
-    pub update_signature: Option<[u8; 64]>,
-    pub update_sequence: Option<u64>,
-    pub update_prev_hash: Option<[u8; 32]>,
-    pub update_curr_hash: Option<[u8; 32]>,
-}
+/// Ledger update response message - uses core type directly
+pub type LedgerUpdateResponseMsg = LedgerUpdateResponseMsgV2;
 
-impl From<LedgerUpdateResponseMsgV2> for LedgerUpdateResponseMsg {
-    fn from(v2: LedgerUpdateResponseMsgV2) -> Self {
-        Self {
-            message_hash: v2.request_hash,
-            success: v2.accepted,
-            error_message: v2.error,
-            partner_signature: v2.partner_signature,
-            confirmed_sequence: v2.confirmed_sequence,
-            confirmed_hash: v2.confirmed_hash,
-            // V1 compat fields
-            acked_message_type: 0,
-            cosignature: v2.partner_signature,
-            update_signature: v2.partner_signature,
-            update_sequence: Some(v2.confirmed_sequence),
-            update_prev_hash: None,
-            update_curr_hash: Some(v2.confirmed_hash),
-        }
-    }
-}
+/// Sync message - uses core type directly
+pub type SyncMsg = SyncMsgV2;
 
-impl From<LedgerUpdateResponseMsg> for LedgerUpdateResponseMsgV2 {
-    fn from(local: LedgerUpdateResponseMsg) -> Self {
-        Self {
-            operator_id: PublicKey::from_slice(&[2; 33]).unwrap(), // Set at send time
-            partner_id: PublicKey::from_slice(&[2; 33]).unwrap(),  // Set at send time
-            request_hash: local.message_hash,
-            accepted: local.success,
-            error: local.error_message,
-            partner_signature: local.partner_signature,
-            confirmed_sequence: local.confirmed_sequence,
-            confirmed_hash: local.confirmed_hash,
-        }
-    }
-}
+/// Sync response message - uses core type directly
+pub type SyncResponseMsg = SyncResponseMsgV2;
 
-/// Sync message (local type)
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SyncMsg {
-    pub operator_id: PublicKey,
-    pub partner_id: PublicKey,
-    pub from_sequence: u64,
-    pub to_sequence: Option<u64>,
-}
-
-impl From<SyncMsgV2> for SyncMsg {
-    fn from(v2: SyncMsgV2) -> Self {
-        Self {
-            operator_id: v2.operator_id,
-            partner_id: v2.partner_id,
-            from_sequence: v2.last_known_sequence,
-            to_sequence: None,
-        }
-    }
-}
-
-impl From<SyncMsg> for SyncMsgV2 {
-    fn from(local: SyncMsg) -> Self {
-        Self {
-            operator_id: local.operator_id,
-            partner_id: local.partner_id,
-            last_known_sequence: local.from_sequence,
-            last_known_hash: [0u8; 32], // Computed at send time
-        }
-    }
-}
-
-impl From<SyncResponseMsgV2> for SyncResponseMsg {
-    fn from(v2: SyncResponseMsgV2) -> Self {
-        use super::ledger_ext::SignedLedgerUpdateExt;
-        Self {
-            operator_id: v2.operator_id,
-            partner_id: v2.partner_id,
-            updates: v2.updates.into_iter().map(|u| {
-                let operation = u.get_operation()
-                    .unwrap_or(deposits_core::messages::LedgerOperation::ReservesRemove);
-                LedgerUpdateMsg {
-                    operator_id: u.operator_id,
-                    partner_id: u.partner_id,
-                    operation,
-                    sequence_number: u.sequence_number,
-                    previous_hash: u.previous_hash,
-                    current_hash: u.current_hash,
-                    operator_signature: u.operator_signature,
-                    message_type: u.message_type,
-                    message: u.message,
-                    timestamp: u.timestamp,
-                    partner_signature: Some(u.partner_signature),
-                }
-            }).collect(),
-        }
-    }
-}
-
-impl From<SyncResponseMsg> for SyncResponseMsgV2 {
-    fn from(local: SyncResponseMsg) -> Self {
-        let current_sequence = local.updates.last().map(|u| u.sequence_number).unwrap_or(0);
-        let current_hash = local.updates.last().map(|u| u.current_hash).unwrap_or([0u8; 32]);
-        Self {
-            operator_id: local.operator_id,
-            partner_id: local.partner_id,
-            request_hash: [0u8; 32], // Set at send time
-            updates: local.updates.into_iter().map(|u| deposits_core::types::SignedLedgerUpdate {
-                message: u.message,
-                message_type: u.message_type,
-                operator_id: u.operator_id,
-                partner_id: u.partner_id,
-                sequence_number: u.sequence_number,
-                previous_hash: u.previous_hash,
-                current_hash: u.current_hash,
-                timestamp: u.timestamp,
-                partner_signature: u.partner_signature.unwrap_or([0u8; 64]),
-                operator_signature: u.operator_signature,
-            }).collect(),
-            current_sequence,
-            current_hash,
-        }
-    }
-}
-
-/// Sync response message (local type)
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SyncResponseMsg {
-    pub operator_id: PublicKey,
-    pub partner_id: PublicKey,
-    pub updates: Vec<LedgerUpdateMsg>,
-}
-
-// Type aliases for backwards compatibility
-pub type SignedUpdateMsg = LedgerUpdateMsg;
+// Type alias for backwards compatibility
+pub type SignedUpdateMsg = deposits_core::SignedLedgerUpdate;
 
 // ============================================================================
 // Message Type Constants (V2 only)
@@ -1029,82 +805,7 @@ pub mod consts {
 // Re-export message type name functions from deposits-core for backwards compatibility
 pub use deposits_core::messages::{type_id_to_const_name, type_id_to_variant_name};
 
-// ============================================================================
-// Writeable/Readable implementations for local message types
-// ============================================================================
-
-// LedgerUpdateMsg encoding
-impl Writeable for LedgerUpdateMsg {
-    fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
-        self.operator_id.write(writer)?;
-        self.partner_id.write(writer)?;
-        self.message_type.write(writer)?;
-        (self.message.len() as u32).write(writer)?;
-        writer.write_all(&self.message)?;
-        self.sequence_number.write(writer)?;
-        writer.write_all(&self.previous_hash)?;
-        writer.write_all(&self.current_hash)?;
-        self.timestamp.write(writer)?;
-        writer.write_all(&self.operator_signature)?;
-        // Write partner_signature: 1 byte flag + optional 64 bytes
-        if let Some(ref sig) = self.partner_signature {
-            1u8.write(writer)?;
-            writer.write_all(sig)?;
-        } else {
-            0u8.write(writer)?;
-        }
-        Ok(())
-    }
-}
-
-impl Readable for LedgerUpdateMsg {
-    fn read<R: io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
-        let operator_id: PublicKey = Readable::read(reader)?;
-        let partner_id: PublicKey = Readable::read(reader)?;
-        let message_type: u16 = Readable::read(reader)?;
-        let message_len: u32 = Readable::read(reader)?;
-        let mut message = vec![0u8; message_len as usize];
-        reader.read_exact(&mut message).map_err(|_| DecodeError::ShortRead)?;
-        let sequence_number: u64 = Readable::read(reader)?;
-        let mut previous_hash = [0u8; 32];
-        reader.read_exact(&mut previous_hash).map_err(|_| DecodeError::ShortRead)?;
-        let mut current_hash = [0u8; 32];
-        reader.read_exact(&mut current_hash).map_err(|_| DecodeError::ShortRead)?;
-        let timestamp: u64 = Readable::read(reader)?;
-        let mut operator_signature = [0u8; 64];
-        reader.read_exact(&mut operator_signature).map_err(|_| DecodeError::ShortRead)?;
-        // Read partner_signature: 1 byte flag + optional 64 bytes
-        let has_partner_sig: u8 = Readable::read(reader)?;
-        let partner_signature = if has_partner_sig == 1 {
-            let mut sig = [0u8; 64];
-            reader.read_exact(&mut sig).map_err(|_| DecodeError::ShortRead)?;
-            Some(sig)
-        } else {
-            None
-        };
-
-        // For V1 SignedUpdate, extract the actual operation from the `message` bytes
-        // The message bytes contain a serialized DepositsMessage that can be decoded
-        let operation = crate::wire::MessageCodec::decode_message_with_type(message_type, &message)
-            .ok()
-            .and_then(|msg| msg.to_operation())
-            .unwrap_or(deposits_core::LedgerOperation::ReservesRemove);
-
-        Ok(Self {
-            operator_id,
-            partner_id,
-            operation,
-            sequence_number,
-            previous_hash,
-            current_hash,
-            operator_signature,
-            message_type,
-            message,
-            timestamp,
-            partner_signature,
-        })
-    }
-}
+// V2 types use TLV encoding from deposits-core - no local Writeable/Readable needed
 
 // ============================================================================
 // LDK Wire Protocol Integration
@@ -1292,10 +993,6 @@ mod tests {
             previous_hash: [0u8; 32],
             current_hash: [0u8; 32],
             operator_signature: [0u8; 64],
-            message_type: op.discriminant() as u16,
-            message: Vec::new(),
-            timestamp: 0,
-            partner_signature: None,
         };
 
         let wrapped = DepositsMessage::LedgerUpdate(msg.clone());

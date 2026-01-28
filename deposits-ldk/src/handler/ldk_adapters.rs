@@ -269,10 +269,9 @@ impl EventEmitter for LdkEventAdapter {
 
         // Convert core ProtocolEvent to LDK DepositsEvent
         let ldk_event = match event {
-            ProtocolEvent::DepositOpened { deposit_pubkey, initial_balance, .. } => {
+            ProtocolEvent::DepositOpened { deposit_pubkey, .. } => {
                 DepositsEvent::DepositAdded {
                     pubkey: deposit_pubkey,
-                    initial_balance,
                 }
             }
             ProtocolEvent::DepositClosed { deposit_pubkey, .. } => {

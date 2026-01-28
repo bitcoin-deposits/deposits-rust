@@ -150,7 +150,7 @@ mod tests {
             protocol_version: 2,
             min_protocol_version: 1,
             features: 0,
-            public_key: test_pubkey,
+            operator_id: test_pubkey,
             partner_id: test_pubkey,
             ledger_address: "test_address".to_string(),
             funding_txid: [0u8; 32],
@@ -185,7 +185,7 @@ mod tests {
                 protocol_version: 2,
                 min_protocol_version: 1,
                 features: 0,
-                public_key: test_pubkey,
+                operator_id: test_pubkey,
                 partner_id: test_pubkey,
                 ledger_address: "test".to_string(),
                 funding_txid: [0u8; 32],
@@ -193,18 +193,18 @@ mod tests {
             }),
             // Handshake response
             DepositsMessage::HandshakeResponse(HandshakeResponseMsg {
+                request_hash: [0u8; 32],
                 protocol_version: 2,
                 accepted: true,
-                error_reason: None,
-                public_key: test_pubkey,
+                error: None,
                 partner_id: test_pubkey,
             }),
             // Sync message
             DepositsMessage::Sync(SyncMsg {
                 operator_id: test_pubkey,
                 partner_id: test_pubkey,
-                from_sequence: 0,
-                to_sequence: Some(10),
+                last_known_sequence: 0,
+                last_known_hash: [0u8; 32],
             }),
         ];
 
@@ -265,7 +265,7 @@ mod tests {
             protocol_version: 2,
             min_protocol_version: 1,
             features: 0,
-            public_key: test_pubkey,
+            operator_id: test_pubkey,
             partner_id: test_pubkey,
             ledger_address: "test".to_string(),
             funding_txid: [0u8; 32],

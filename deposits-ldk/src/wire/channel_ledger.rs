@@ -21,7 +21,7 @@ use deposits_core::{
 };
 use crate::wire::types::{Deposit, ReservesOutput, PendingInvoice, FeeStructure};
 use crate::handler::messages::{
-    DepositsMessage, LedgerUpdateMsg, LedgerOperation,
+    DepositsMessage, LedgerUpdateMsg, LedgerUpdateMsgExt, LedgerOperation,
 };
 
 /// A single ledger update entry - the atomic unit of ledger state transition
@@ -177,7 +177,7 @@ impl ChannelLedger {
         fees: Option<FeeStructure>,
     ) -> Result<(), DepositsError> {
         // Apply the update (this will insert deposit, update consensus hash, and record in history)
-        use crate::handler::messages::{DepositsMessage, LedgerUpdateMsg, LedgerOperation};
+        use crate::handler::messages::{DepositsMessage, LedgerUpdateMsg, LedgerUpdateMsgExt, LedgerOperation};
         let update_msg = LedgerUpdateMsg::new_with_operation(
             self.operator_node_id,
             self.partner_node_id,
@@ -725,7 +725,7 @@ impl ChannelLedger {
         self.validate_reserves_requirement_for_total(total_deposits_after)?;
 
         // If validation passes, apply the update
-        use crate::handler::messages::{LedgerUpdateMsg, LedgerOperation};
+        use crate::handler::messages::{LedgerUpdateMsg, LedgerUpdateMsgExt, LedgerOperation};
         let credit_msg = LedgerUpdateMsg::new_with_operation(
             self.operator_node_id,
             self.partner_node_id,
@@ -775,7 +775,7 @@ impl ChannelLedger {
         }
 
         // Apply the balance credit
-        use crate::handler::messages::{LedgerUpdateMsg, LedgerOperation};
+        use crate::handler::messages::{LedgerUpdateMsg, LedgerUpdateMsgExt, LedgerOperation};
         let credit_msg = LedgerUpdateMsg::new_with_operation(
             self.operator_node_id,
             self.partner_node_id,

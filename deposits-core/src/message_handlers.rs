@@ -1416,7 +1416,6 @@ pub fn handle_deposit_open<C: HandlerContext>(
         operator: sender,
         partner: msg.partner_id,
         deposit_pubkey: msg.pubkey,
-        initial_balance: 0,
     });
 
     Ok(HandlerResult::Ok)

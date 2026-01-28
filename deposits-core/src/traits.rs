@@ -857,7 +857,6 @@ pub enum ProtocolEvent {
         operator: PublicKey,
         partner: PublicKey,
         deposit_pubkey: PublicKey,
-        initial_balance: u64,
     },
     /// A deposit was closed
     DepositClosed {

@@ -900,8 +900,8 @@ where
             let sync_request = DepositsMessage::Sync(SyncMsg {
                 operator_id: msg.operator_id,
                 partner_id: msg.partner_id,
-                from_sequence: 0, // Start from beginning since we're new to this ledger
-                to_sequence: None,
+                last_known_sequence: 0, // Start from beginning since we're new to this ledger
+                last_known_hash: [0u8; 32],
             });
 
             if let Err(e) = self.send_message(msg.operator_id, sync_request) {
@@ -1571,19 +1571,8 @@ where
             sender_node_id
         );
 
-        // Convert to SignedLedgerUpdate
-        let signed_update = deposits_core::SignedLedgerUpdate {
-            message: signed_msg.message.clone(),
-            message_type: signed_msg.message_type,
-            operator_signature: signed_msg.operator_signature,
-            partner_signature: signed_msg.partner_signature.unwrap_or([0u8; 64]),
-            operator_id: signed_msg.operator_id,
-            partner_id: signed_msg.partner_id,
-            sequence_number: signed_msg.sequence_number,
-            previous_hash: signed_msg.previous_hash,
-            current_hash: signed_msg.current_hash,
-            timestamp: signed_msg.timestamp,
-        };
+        // SignedUpdateMsg is already SignedLedgerUpdate, just clone it
+        let signed_update = signed_msg.clone();
 
         // Store in partner ledger using unified Ledger type
         let mut ledgers = self.ledgers.lock().unwrap();
@@ -1798,27 +1787,8 @@ where
                 sender_node_id
             );
 
-            // Convert handler SyncResponseMsg to core SyncResponseMsg
-            let core_response = deposits_core::messages::SyncResponseMsg {
-                operator_id: response.operator_id,
-                partner_id: response.partner_id,
-                request_hash: [0u8; 32], // Not available in handler format
-                updates: response.updates.iter().map(|u| deposits_core::types::SignedLedgerUpdate {
-                    message: u.message.clone(),
-                    message_type: u.message_type,
-                    operator_id: u.operator_id,
-                    partner_id: u.partner_id,
-                    sequence_number: u.sequence_number,
-                    previous_hash: u.previous_hash,
-                    current_hash: u.current_hash,
-                    timestamp: u.timestamp,
-                    partner_signature: u.partner_signature.unwrap_or([0u8; 64]),
-                    operator_signature: u.operator_signature,
-                }).collect(),
-                current_sequence: response.updates.last().map(|u| u.sequence_number).unwrap_or(0),
-                current_hash: response.updates.last().map(|u| u.current_hash).unwrap_or([0u8; 32]),
-            };
-            if let Err(e) = self.handle_audit_sync_response(&core_response, sender_node_id) {
+            // SyncResponseMsg is now the same type as core, just pass it through
+            if let Err(e) = self.handle_audit_sync_response(response, sender_node_id) {
                 log_error!(
                     self.logger,
                     "Failed to handle audit sync response: {}",

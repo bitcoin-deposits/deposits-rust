@@ -32,8 +32,6 @@ pub enum DepositsEvent {
     DepositAdded {
         /// Deposit public key
         pubkey: PublicKey,
-        /// Initial balance (always 0)
-        initial_balance: u64,
     },
 
     /// A deposit was removed from the ledger
@@ -267,7 +265,6 @@ impl_writeable_tlv_based_enum!(DepositsEvent,
 	},
 	(1, DepositAdded) => {
 		(0, pubkey, required),
-		(2, initial_balance, required),
 	},
 	(2, DepositRemoved) => {
 		(0, pubkey, required),
