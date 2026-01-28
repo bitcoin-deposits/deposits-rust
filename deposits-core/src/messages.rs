@@ -140,8 +140,8 @@ pub use consts::*;
 // Message Type Collections
 // ============================================================================
 
-/// All V2 message types
-pub const ALL_V2_MESSAGE_TYPES: &[u16] = &[
+/// Envelope message types - the outer wire message types
+pub const ALL_ENVELOPE_MESSAGE_TYPES: &[u16] = &[
     LEDGER_UPDATE, LEDGER_UPDATE_RESPONSE,
     HANDSHAKE, HANDSHAKE_RESPONSE,
     SYNC, SYNC_RESPONSE,
@@ -150,8 +150,8 @@ pub const ALL_V2_MESSAGE_TYPES: &[u16] = &[
     RELAY, RELAY_RESPONSE,
 ];
 
-/// All V1 message types
-pub const ALL_V1_MESSAGE_TYPES: &[u16] = &[
+/// Operation message types - stored in SignedLedgerUpdate.message_type field
+pub const ALL_OPERATION_MESSAGE_TYPES: &[u16] = &[
     RESERVES_ADD_OUTPUT, RESERVES_REMOVE_OUTPUT, RESERVES_INCREASE,
     RESERVES_DECREASE, RESERVES_UPDATE_OUTPUT, UPDATE_RESERVES, ACCEPT_RESERVES,
     COLLATERAL_INCREASE, COLLATERAL_DECREASE, COLLATERAL_STATUS,
@@ -171,6 +171,12 @@ pub const ALL_V1_MESSAGE_TYPES: &[u16] = &[
     RECOVERY_VOTE, RECOVERY_CLAIM_REQUEST, RECOVERY_CLAIM_SIGNATURE, RECOVERY_CLAIM_COMPLETE,
     RELAY_NWC_REQUEST, RELAY_NWC_RESPONSE, RELAY_NWC_DELIVERY_PROOF,
 ];
+
+// Backwards compatibility aliases
+#[deprecated(note = "Use ALL_ENVELOPE_MESSAGE_TYPES instead")]
+pub const ALL_V2_MESSAGE_TYPES: &[u16] = ALL_ENVELOPE_MESSAGE_TYPES;
+#[deprecated(note = "Use ALL_OPERATION_MESSAGE_TYPES instead")]
+pub const ALL_V1_MESSAGE_TYPES: &[u16] = ALL_OPERATION_MESSAGE_TYPES;
 
 /// Messages that require acknowledgment
 pub const MESSAGES_REQUIRING_ACK: &[u16] = &[
@@ -196,7 +202,7 @@ pub const MESSAGES_REQUIRING_ACK: &[u16] = &[
 
 /// Check if a message type is a Bitcoin Deposits protocol message
 pub fn is_deposits_message_type(message_type: u16) -> bool {
-    ALL_V2_MESSAGE_TYPES.contains(&message_type) || ALL_V1_MESSAGE_TYPES.contains(&message_type)
+    ALL_ENVELOPE_MESSAGE_TYPES.contains(&message_type) || ALL_OPERATION_MESSAGE_TYPES.contains(&message_type)
 }
 
 /// Check if a message type requires acknowledgment

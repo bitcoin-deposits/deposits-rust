@@ -67,7 +67,7 @@ pub use deposits_core::messages::{
     RELAY_NWC_REQUEST, RELAY_NWC_RESPONSE, RELAY_NWC_DELIVERY_PROOF,
 
     // Collections
-    ALL_V1_MESSAGE_TYPES, ALL_V2_MESSAGE_TYPES, MESSAGES_REQUIRING_ACK,
+    ALL_OPERATION_MESSAGE_TYPES, ALL_ENVELOPE_MESSAGE_TYPES, MESSAGES_REQUIRING_ACK,
 
     // Utility functions
     is_deposits_message_type, requires_acknowledgment, get_message_category,
@@ -80,11 +80,11 @@ mod tests {
     #[test]
     fn test_all_message_types_are_odd() {
         // Per BOLT 1: odd types MAY be ignored if not understood
-        for &t in ALL_V1_MESSAGE_TYPES {
-            assert!(t & 1 == 1, "V1 message type 0x{:04X} is not odd", t);
+        for &t in ALL_OPERATION_MESSAGE_TYPES {
+            assert!(t & 1 == 1, "Operation message type 0x{:04X} is not odd", t);
         }
-        for &t in ALL_V2_MESSAGE_TYPES {
-            assert!(t & 1 == 1, "V2 message type 0x{:04X} is not odd", t);
+        for &t in ALL_ENVELOPE_MESSAGE_TYPES {
+            assert!(t & 1 == 1, "Envelope message type 0x{:04X} is not odd", t);
         }
     }
 
