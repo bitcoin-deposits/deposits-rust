@@ -338,6 +338,17 @@ pub trait HandlerContext: ValidationContext {
         let _ = (operator, partner);
         // Default: no-op
     }
+
+    // ========================================================================
+    // Quorum Sync Methods
+    // ========================================================================
+
+    /// Send quorum state sync to a new member.
+    /// Called after accepting a quorum join request.
+    fn send_quorum_state_sync(&self, member: PublicKey, operator: PublicKey, partner: PublicKey) {
+        let _ = (member, operator, partner);
+        // Default: no-op
+    }
 }
 
 // ============================================================================

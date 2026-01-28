@@ -595,21 +595,18 @@ pub fn handle_quorum_join_request<C: HandlerContext>(
             });
             ctx.queue_message(sender, response_msg)?;
 
-            // Emit event if accepted
+            // Emit event and send state sync if accepted
             if response.accepted {
                 ctx.emit_event(ProtocolEvent::QuorumMemberJoined {
                     operator: msg.operator_id,
                     partner: msg.partner_id,
                     member: msg.requester_pubkey,
                 });
+                // Send state sync to new member via provider
+                ctx.send_quorum_state_sync(msg.requester_pubkey, msg.operator_id, msg.partner_id);
             }
 
-            Ok(HandlerResult::Response(ResponseData::QuorumJoinResponse {
-                accepted: response.accepted,
-                members: response.members,
-                threshold: response.threshold,
-                rejection_reason: response.rejection_reason,
-            }))
+            Ok(HandlerResult::Ok)
         }
         Err(e) => {
             Ok(HandlerResult::Rejected(format!("Quorum join failed: {:?}", e)))

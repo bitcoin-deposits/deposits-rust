@@ -161,7 +161,10 @@ where
         match &message {
             DepositsMessage::Coordination(coord_msg) => match coord_msg {
                 CoordinationMsg::QuorumJoinRequest { requester_pubkey, operator_id, partner_id, protocol_version, timestamp, signature } => {
-                    let msg = crate::wire::messages::QuorumJoinRequestMsg {
+                    // Direct dispatch to core - core handles response, event, and state sync via providers
+                    log_info!(self.logger, "📋 QUORUM: Join request from {} for ledger ({}, {})",
+                        requester_pubkey, operator_id, partner_id);
+                    let msg = deposits_core::wire_messages::QuorumJoinRequestMsgWire {
                         requester_pubkey: *requester_pubkey,
                         operator_id: *operator_id,
                         partner_id: *partner_id,
@@ -169,7 +172,11 @@ where
                         timestamp: *timestamp,
                         signature: *signature,
                     };
-                    return self.handle_quorum_join_request(&msg, sender_node_id);
+                    match deposits_core::handle_quorum_join_request(self, &msg, sender_node_id) {
+                        Ok(_) => log_info!(self.logger, "📋 QUORUM: Join request processed"),
+                        Err(e) => log_warn!(self.logger, "📋 QUORUM: Join request failed: {:?}", e),
+                    }
+                    return Ok(());
                 }
                 CoordinationMsg::QuorumVoteRequest { vote_round_id, operator_id, partner_id, sequence_number, state_hash, claimed_reserves, ref collateral_amounts, ref reserves_outpoint, ref destination_script, fee_rate_sat_vbyte, .. } => {
                     let msg = QuorumVoteRequestMsg {

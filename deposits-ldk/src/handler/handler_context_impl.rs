@@ -567,6 +567,10 @@ where
         claim_manager.remove_claim(&ledger_id);
         log_info!(self.logger, "🔄 RECOVERY: Removed claim for ({}, {})", operator, partner);
     }
+
+    fn send_quorum_state_sync(&self, member: PublicKey, operator: PublicKey, partner: PublicKey) {
+        self.send_state_sync_to_member(member, operator, partner);
+    }
 }
 
 // NOTE: CoreHandlerExt trait removed - dispatch calls core handlers directly via providers

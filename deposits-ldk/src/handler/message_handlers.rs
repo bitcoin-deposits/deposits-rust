@@ -21,7 +21,7 @@ use deposits_core::message_handlers::{self as core_handlers, HandlerResult, Resp
 use deposits_core::{log_debug, log_error, log_info, log_warn};
 use lightning::util::logger::Logger as LdkLogger;
 use crate::wire::messages::{
-    QuorumJoinRequestMsg, QuorumStateSyncMsg,
+    QuorumStateSyncMsg,
     QuorumVoteRequestMsg, QuorumVoteMsg,
     CollateralConsentResponseMsg,
     ChannelCloseTombstoneMsg,
@@ -37,42 +37,7 @@ where
     // Quorum Message Handlers
     // ========================================================================
 
-    /// Handle QuorumJoinRequest message
-    pub(super) fn handle_quorum_join_request(
-        &self,
-        msg: &QuorumJoinRequestMsg,
-        sender_node_id: PublicKey,
-    ) -> Result<(), LightningError> {
-        log_info!(
-            self.logger,
-            "📋 QUORUM: Received join request from {} for ledger ({}, {})",
-            msg.requester_pubkey, msg.operator_id, msg.partner_id
-        );
-
-        // Delegate to core handler
-        match core_handlers::handle_quorum_join_request(self, msg, sender_node_id) {
-            Ok(deposits_core::HandlerResult::Response(
-                deposits_core::ResponseData::QuorumJoinResponse { accepted, members, .. }
-            )) => {
-                if accepted {
-                    log_info!(self.logger, "📋 QUORUM: Accepted {} (now {} members)",
-                        msg.requester_pubkey, members.len());
-                    // Send state sync to new member
-                    self.send_state_sync_to_member(msg.requester_pubkey, msg.operator_id, msg.partner_id);
-                }
-            }
-            Ok(deposits_core::HandlerResult::Rejected(reason)) => {
-                log_info!(self.logger, "📋 QUORUM: Rejected: {}", reason);
-            }
-            Err(e) => {
-                log_error!(self.logger, "📋 QUORUM: Handler failed: {:?}", e);
-            }
-            _ => {}
-        }
-
-        Ok(())
-    }
-
+    // NOTE: handle_quorum_join_request removed - dispatch calls core directly via send_quorum_state_sync provider
     // NOTE: handle_quorum_join_response removed - inlined in dispatch (just logging)
 
     /// Handle QuorumStateSync message
