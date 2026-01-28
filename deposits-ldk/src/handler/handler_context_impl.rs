@@ -34,10 +34,7 @@ where
 {
     fn queue_message(&self, peer: PublicKey, msg: CoreDepositsMessage) -> Result<(), HandlerError> {
         use super::messages::{DepositsMessage, LedgerUpdateResponseMsg};
-        use deposits_core::messages::{
-            DepositsMessage as CoreMsg,
-            LedgerUpdateResponseMsg as CoreLedgerUpdateResponseMsg,
-        };
+        use deposits_core::messages::DepositsMessage as CoreMsg;
 
         // Convert core DepositsMessage to local DepositsMessage
         let local_msg = match msg {
@@ -52,22 +49,10 @@ where
                 DepositsMessage::LedgerUpdate(local_update)
             }
             // Other message types pass through (they use the same core types)
-            CoreMsg::Handshake(m) => {
-                use super::messages::HandshakeMsg;
-                DepositsMessage::Handshake(m.into())
-            }
-            CoreMsg::HandshakeResponse(m) => {
-                use super::messages::HandshakeResponseMsg;
-                DepositsMessage::HandshakeResponse(m.into())
-            }
-            CoreMsg::Sync(m) => {
-                use super::messages::SyncMsg;
-                DepositsMessage::Sync(m.into())
-            }
-            CoreMsg::SyncResponse(m) => {
-                use super::messages::SyncResponseMsg;
-                DepositsMessage::SyncResponse(m.into())
-            }
+            CoreMsg::Handshake(m) => DepositsMessage::Handshake(m.into()),
+            CoreMsg::HandshakeResponse(m) => DepositsMessage::HandshakeResponse(m.into()),
+            CoreMsg::Sync(m) => DepositsMessage::Sync(m.into()),
+            CoreMsg::SyncResponse(m) => DepositsMessage::SyncResponse(m.into()),
             CoreMsg::Recovery(m) => DepositsMessage::Recovery(m),
             CoreMsg::RecoveryResponse(m) => DepositsMessage::RecoveryResponse(m),
             CoreMsg::Coordination(m) => DepositsMessage::Coordination(m),

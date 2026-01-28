@@ -11,7 +11,6 @@
 //! for receiving and dispatching Bitcoin Deposits protocol messages.
 
 use bitcoin::secp256k1::PublicKey;
-use lightning::io;
 use lightning::ln::msgs::{DecodeError, LightningError};
 use lightning::ln::peer_handler::CustomMessageHandler;
 use lightning::ln::wire::CustomMessageReader;

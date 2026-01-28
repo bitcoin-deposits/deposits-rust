@@ -7,7 +7,6 @@ use std::str::FromStr;
 
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Address;
-use bitcoin::Network;
 use lightning::util::logger::Logger as LdkLogger;
 
 use crate::handler::{DepositsHandler, LedgerOperations, LedgerOperationsExt};

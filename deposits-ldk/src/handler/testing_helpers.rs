@@ -10,9 +10,6 @@
 //! This module contains constructors and utilities for creating DepositsHandler
 //! instances in test environments.
 
-use bitcoin::secp256k1::PublicKey;
-use std::sync::Arc;
-
 use super::core::DepositsHandler;
 use lightning::util::logger::Logger as LdkLogger;
 

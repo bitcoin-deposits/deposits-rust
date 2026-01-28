@@ -587,8 +587,6 @@ where
         collateral_partner: PublicKey,
         _message: &DepositsMessage,  // Not used anymore - we send all updates
     ) -> Result<(), DepositsError> {
-        use super::messages::LedgerUpdateMsg;
-
         log_info!(
             self.logger,
             "📋 Sending full audit history to new collateral partner {} for ledger ({}, {})",

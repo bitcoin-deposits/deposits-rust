@@ -810,8 +810,6 @@ pub use deposits_core::messages::{type_id_to_const_name, type_id_to_variant_name
 
 impl Readable for DepositsMessage {
     fn read<R: io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
-        use self::consts::*;
-
         // Read message type
         let msg_type: u16 = Readable::read(reader)?;
 

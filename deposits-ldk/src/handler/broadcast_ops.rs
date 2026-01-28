@@ -9,7 +9,6 @@
 
 use bitcoin::secp256k1::PublicKey;
 use super::core::DepositsHandler;
-use super::ledger_ext::SignedLedgerUpdateLogExt;
 use deposits_core::DepositsError;
 use super::messages::{DepositsMessage, LedgerUpdateMsg, LedgerUpdateMsgExt, LedgerOperation};
 use deposits_core::quorum::LedgerId;

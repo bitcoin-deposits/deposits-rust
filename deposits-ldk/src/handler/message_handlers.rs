@@ -1052,9 +1052,6 @@ where
         message: &DepositsMessage,
         sender_node_id: PublicKey,
     ) -> Result<(), LightningError> {
-        use deposits_core::{Ledger, LedgerRole};
-        use std::sync::{Arc, RwLock};
-
         log_info!(
             self.logger,
             "₿ Received ChannelCloseTombstone from {} for channel {}",

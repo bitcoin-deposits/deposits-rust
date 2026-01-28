@@ -15,16 +15,14 @@ use lightning::ln::msgs::{LightningError, ErrorAction};
 
 use super::core::{DepositsHandler, CosignedInvoice};
 use super::message_validation::MessageValidation;
-use super::messages::{DepositsMessage, LedgerUpdateResponseMsg, LedgerUpdateMsg, LedgerUpdateMsgExt, LedgerOperation, CoordinationMsg, CoordinationResponseMsg, RecoveryMsg, RecoveryResponseMsg};
+use super::messages::{DepositsMessage, LedgerUpdateMsg, LedgerUpdateMsgExt, LedgerOperation, CoordinationMsg, CoordinationResponseMsg, RecoveryMsg, RecoveryResponseMsg};
 use super::messages::consts::LEDGER_UPDATE;
 use super::ledger_ext::LedgerExt;
 use crate::wire::messages::{
     QuorumJoinResponseMsg, QuorumStateSyncMsg, QuorumVoteRequestMsg, QuorumVoteMsg,
-    QuorumMembershipChangeMsg, CollateralAttestationMsg,
-    CollateralAddPartnerMsg, CollateralRemovePartnerMsg,
-    CollateralConsentRequestMsg, CollateralConsentResponseMsg,
+    QuorumMembershipChangeMsg, CollateralConsentRequestMsg, CollateralConsentResponseMsg,
     RecoveryVoteMsg, RecoveryClaimRequestMsg, RecoveryClaimSignatureMsg, RecoveryClaimCompleteMsg,
-    UncreditedPaymentMsg, UpdateReservesMsg, AcceptReservesMsg, ChannelCloseTombstoneMsg,
+    UncreditedPaymentMsg, ChannelCloseTombstoneMsg,
 };
 // use deposits_core::Invoice; // Currently unused
 use deposits_core::{log_debug, log_error, log_info, log_warn};

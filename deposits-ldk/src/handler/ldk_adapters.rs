@@ -36,8 +36,6 @@ impl LdkStorageAdapter {
 
 impl Storage for LdkStorageAdapter {
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
-        use lightning::util::persist::KVStore;
-
         // Convert key to string path components
         let key_str = String::from_utf8_lossy(key);
         let parts: Vec<&str> = key_str.split('/').collect();
@@ -57,8 +55,6 @@ impl Storage for LdkStorageAdapter {
     }
 
     fn put(&self, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
-        use lightning::util::persist::KVStore;
-
         let key_str = String::from_utf8_lossy(key);
         let parts: Vec<&str> = key_str.split('/').collect();
 
@@ -75,8 +71,6 @@ impl Storage for LdkStorageAdapter {
     }
 
     fn delete(&self, key: &[u8]) -> Result<(), StorageError> {
-        use lightning::util::persist::KVStore;
-
         let key_str = String::from_utf8_lossy(key);
         let parts: Vec<&str> = key_str.split('/').collect();
 
@@ -93,8 +87,6 @@ impl Storage for LdkStorageAdapter {
     }
 
     fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
-        use lightning::util::persist::KVStore;
-
         let prefix_str = String::from_utf8_lossy(prefix);
         let parts: Vec<&str> = prefix_str.split('/').collect();
 
@@ -355,7 +347,7 @@ impl SignatureProvider for LdkSignerAdapter {
         message_hash: [u8; 32],
         signature: &[u8; 64],
     ) -> bool {
-        use bitcoin::secp256k1::{Secp256k1, Message, XOnlyPublicKey};
+        use bitcoin::secp256k1::{Secp256k1, Message};
         use bitcoin::secp256k1::schnorr::Signature;
 
         let secp = Secp256k1::verification_only();
