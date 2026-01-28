@@ -149,15 +149,6 @@ where
     /// Used when operator broadcasts after receiving ACK (e.g., AddCollateralPartner)
     pub(super) received_partner_signatures: Mutex<HashMap<[u8; 32], [u8; 64]>>,
 
-    /// Lightning Liquidity pattern: Track pending deposit creation requests
-    pending_add_deposit_requests: Mutex<HashMap<u64, oneshot::Sender<Result<(), DepositsError>>>>,
-
-    /// Lightning Liquidity pattern: Track pending remove deposit requests
-    pending_remove_deposit_requests: Mutex<HashMap<u64, oneshot::Sender<Result<(), DepositsError>>>>,
-
-    /// Lightning Liquidity pattern: Track pending cosign invoice requests
-    pending_cosign_requests: Mutex<HashMap<u64, oneshot::Sender<Result<(), DepositsError>>>>,
-
     /// Track pending cosignature requests (message_hash -> oneshot_sender for signature)
     pub(super) pending_cosignature_requests: Mutex<HashMap<[u8; 32], oneshot::Sender<Result<Vec<u8>, String>>>>,
 
@@ -168,9 +159,6 @@ where
     /// Track undelivered consent requests for retry on reconnect (peer_id -> (message_hash, consent_message))
     /// When we send a consent request and the peer disconnects before responding, we resend on reconnect
     pub(super) undelivered_consent_requests: Mutex<HashMap<PublicKey, ([u8; 32], DepositsMessage)>>,
-
-    /// Request ID counter for generating unique request IDs
-    pub(super) next_request_id: std::sync::atomic::AtomicU64,
 
     /// Persistent storage for Bitcoin Deposits data
     pub(super) kv_store: Arc<crate::types::DynStore>,
@@ -198,10 +186,6 @@ where
     /// Key: (operator_id, partner_id) -> log of signed updates
     /// Only contains ledgers where we are neither operator nor partner (third-party audit only)
     pub(crate) signed_update_logs: Mutex<HashMap<(PublicKey, PublicKey), deposits_core::SignedLedgerUpdateLog>>,
-
-    /// For operators: track broadcast sequence numbers for our own ledgers
-    /// Map of (operator_id, partner_id) -> next sequence number to use
-    pub(super) broadcast_sequence_numbers: Mutex<HashMap<(PublicKey, PublicKey), u64>>,
 
     /// Node's secret key for signing ledger updates
     /// This is the Lightning node's identity key, used to sign audit messages
@@ -339,20 +323,15 @@ where
             ledger_private_keys: Mutex::new(HashMap::new()),
             pending_oneshot_acks: Mutex::new(HashMap::new()),
             received_partner_signatures: Mutex::new(HashMap::new()),
-            pending_add_deposit_requests: Mutex::new(HashMap::new()),
-            pending_remove_deposit_requests: Mutex::new(HashMap::new()),
-            pending_cosign_requests: Mutex::new(HashMap::new()),
             pending_cosignature_requests: Mutex::new(HashMap::new()),
             pending_consent_requests: Mutex::new(HashMap::new()),
             undelivered_consent_requests: Mutex::new(HashMap::new()),
-            next_request_id: std::sync::atomic::AtomicU64::new(1),
             kv_store,
             last_msg_queued: std::sync::atomic::AtomicU64::new(0),
             our_node_id,
             sent_messages_for_broadcast: Mutex::new(HashMap::new()),
             pending_acks: Arc::new(Mutex::new(HashMap::new())),
             signed_update_logs: Mutex::new(HashMap::new()),
-            broadcast_sequence_numbers: Mutex::new(HashMap::new()),
             node_secret_key: None, // Will be set via set_node_secret_key() if needed for signing
             peers_refreshed_after_reconnect: Mutex::new(std::collections::HashSet::new()),
             connected_peers: Mutex::new(std::collections::HashSet::new()),

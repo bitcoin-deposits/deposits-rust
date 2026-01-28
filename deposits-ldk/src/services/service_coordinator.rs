@@ -29,12 +29,6 @@ where
     
     /// Reserves management service
     reserves_manager: Arc<ReservesManagementService<L>>,
-    
-    /// Service configuration
-    config: DepositsServiceConfig,
-    
-    /// Logger
-    logger: L,
 }
 
 impl<L: Deref + Clone + Send + Sync> DepositsService<L>
@@ -73,8 +67,6 @@ where
             lightning_events,
             payment_orchestrator,
             reserves_manager,
-            config,
-            logger,
         })
     }
     

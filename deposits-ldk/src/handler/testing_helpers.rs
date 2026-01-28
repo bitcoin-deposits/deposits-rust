@@ -163,7 +163,6 @@ where
         self.pending_acks.lock().unwrap().clear();
         self.pending_consent_requests.lock().unwrap().clear();
         self.pending_oneshot_acks.lock().unwrap().clear();
-        self.broadcast_sequence_numbers.lock().unwrap().clear();
 
         // Clear persisted ledger data
         if let Ok(keys) = self.kv_store.list("deposits", "ledgers") {
