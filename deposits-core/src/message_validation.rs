@@ -205,6 +205,70 @@ pub trait HandlerContext: ValidationContext {
         let _ = threshold_secs;
         vec![] // Default: none
     }
+
+    // ========================================================================
+    // Signed Update Management Methods
+    // ========================================================================
+
+    /// Store a signed update for audit trail.
+    /// Called after a ledger operation is committed to create the audit record.
+    fn store_signed_update(
+        &self,
+        operator: &PublicKey,
+        partner: &PublicKey,
+        update: crate::SignedLedgerUpdate,
+    ) -> Result<(), String> {
+        let _ = (operator, partner, update);
+        Ok(()) // Default: no-op
+    }
+
+    /// Get signed updates for a ledger (for audit sync).
+    fn get_signed_updates(
+        &self,
+        operator: &PublicKey,
+        partner: &PublicKey,
+    ) -> Option<Vec<crate::SignedLedgerUpdate>> {
+        let _ = (operator, partner);
+        None // Default: not available
+    }
+
+    /// Verify and store a signed update received from a peer.
+    /// Used by third-party auditors to validate and store audit records.
+    fn verify_and_store_signed_update(&self, update: crate::SignedLedgerUpdate) -> Result<(), String> {
+        let _ = update;
+        Ok(()) // Default: no-op
+    }
+
+    // ========================================================================
+    // Broadcast Tracking Methods
+    // ========================================================================
+
+    /// Track a message for broadcast after ACK is received.
+    fn track_for_broadcast(
+        &self,
+        msg_hash: [u8; 32],
+        operator: PublicKey,
+        partner: PublicKey,
+        msg: DepositsMessage,
+        prev_hash: [u8; 32],
+        new_hash: [u8; 32],
+        seq: u64,
+    ) {
+        let _ = (msg_hash, operator, partner, msg, prev_hash, new_hash, seq);
+        // Default: no-op
+    }
+
+    /// Complete broadcast after ACK received, returns the tracked info if found.
+    fn complete_broadcast(&self, msg_hash: [u8; 32], partner_sig: Option<[u8; 64]>) -> Result<(), String> {
+        let _ = (msg_hash, partner_sig);
+        Ok(()) // Default: no-op
+    }
+
+    /// Get collateral partners for broadcast (excluding the direct partner).
+    fn get_broadcast_recipients(&self, operator: &PublicKey, partner: &PublicKey) -> Vec<PublicKey> {
+        let _ = (operator, partner);
+        vec![] // Default: none
+    }
 }
 
 // ============================================================================

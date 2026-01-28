@@ -377,6 +377,90 @@ where
             .map(|(hash, ack)| (*hash, ack.clone()))
             .collect()
     }
+
+    fn store_signed_update(
+        &self,
+        operator: &PublicKey,
+        partner: &PublicKey,
+        update: deposits_core::SignedLedgerUpdate,
+    ) -> Result<(), String> {
+        let mut logs = self.signed_update_logs.lock().unwrap();
+        let log = logs.entry((*operator, *partner)).or_insert_with(|| {
+            deposits_core::SignedLedgerUpdateLog {
+                operator_id: *operator,
+                partner_id: *partner,
+                updates: Vec::new(),
+                next_sequence: 0,
+                pending_updates: std::collections::HashMap::new(),
+            }
+        });
+        log.updates.push(update);
+        log.next_sequence = log.updates.len() as u64;
+        Ok(())
+    }
+
+    fn get_signed_updates(
+        &self,
+        operator: &PublicKey,
+        partner: &PublicKey,
+    ) -> Option<Vec<deposits_core::SignedLedgerUpdate>> {
+        let logs = self.signed_update_logs.lock().unwrap();
+        logs.get(&(*operator, *partner)).map(|log| log.updates.clone())
+    }
+
+    fn verify_and_store_signed_update(&self, update: deposits_core::SignedLedgerUpdate) -> Result<(), String> {
+        // Store in signed_update_logs
+        let operator = update.operator_id;
+        let partner = update.partner_id;
+        self.store_signed_update(&operator, &partner, update)
+    }
+
+    fn track_for_broadcast(
+        &self,
+        msg_hash: [u8; 32],
+        operator: PublicKey,
+        partner: PublicKey,
+        msg: deposits_core::messages::DepositsMessage,
+        prev_hash: [u8; 32],
+        new_hash: [u8; 32],
+        seq: u64,
+    ) {
+        // Convert core message to local message type
+        use super::messages::DepositsMessage as LocalMessage;
+        let local_msg: LocalMessage = LocalMessage::from_v2(msg);
+
+        let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
+        sent_messages.insert(msg_hash, (operator, partner, local_msg, prev_hash, new_hash, seq));
+    }
+
+    fn complete_broadcast(&self, msg_hash: [u8; 32], partner_sig: Option<[u8; 64]>) -> Result<(), String> {
+        // Get the tracked message
+        let info = {
+            let sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
+            sent_messages.get(&msg_hash).cloned()
+        };
+
+        if let Some((operator, partner, _msg, _prev_hash, _new_hash, _seq)) = info {
+            // Broadcast to other partners
+            if let Err(e) = self.broadcast_message_to_other_partners(msg_hash, partner, partner_sig) {
+                return Err(format!("Broadcast failed: {:?}", e));
+            }
+            // Remove from tracking
+            let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
+            sent_messages.remove(&msg_hash);
+        }
+
+        Ok(())
+    }
+
+    fn get_broadcast_recipients(&self, operator: &PublicKey, partner: &PublicKey) -> Vec<PublicKey> {
+        use deposits_core::quorum::LedgerId;
+        let ledger_id = LedgerId::new(*operator, *partner);
+        self.quorum_manager
+            .get_quorum(&ledger_id)
+            .map(|members| members.into_iter().filter(|m| m != partner).collect())
+            .unwrap_or_default()
+    }
 }
 
 /// Extension trait for using core handlers with LDK
