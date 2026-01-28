@@ -324,6 +324,8 @@ where
                     return self.handle_recovery_claim_complete(&msg, sender_node_id);
                 }
                 RecoveryMsg::UncreditedPayment { operator, partner, payment_hash, preimage, deposit_pubkey, amount_msat, invoice_cosignature, settlement_sequence, settlement_ledger_hash, settlement_block_height, accuser_signature } => {
+                    // Direct dispatch to core - core handles event emission and fraud followup via providers
+                    log_info!(self.logger, "⚠️ ACCUSATION: UncreditedPayment from {} for operator={}", sender_node_id, operator);
                     let msg = UncreditedPaymentMsg {
                         operator: *operator,
                         partner: *partner,
@@ -337,7 +339,11 @@ where
                         settlement_block_height: *settlement_block_height,
                         accuser_signature: *accuser_signature,
                     };
-                    return self.handle_uncredited_payment(&msg, sender_node_id);
+                    match deposits_core::handle_uncredited_payment(self, &msg, sender_node_id) {
+                        Ok(_) => log_info!(self.logger, "⚠️ ACCUSATION: Processed"),
+                        Err(e) => log_warn!(self.logger, "⚠️ ACCUSATION: Failed: {:?}", e),
+                    }
+                    return Ok(());
                 }
             }
             DepositsMessage::RecoveryResponse(recovery_resp) => match recovery_resp {

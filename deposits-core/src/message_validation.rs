@@ -285,6 +285,22 @@ pub trait HandlerContext: ValidationContext {
         let _ = (operator, partner);
         vec![] // Default: none
     }
+
+    // ========================================================================
+    // Fraud Proof Methods
+    // ========================================================================
+
+    /// Handle followup actions after receiving a valid fraud proof (uncredited payment).
+    /// - Force-close any channel with the accused operator
+    /// - Rebroadcast the accusation to our collateral partners
+    fn handle_fraud_proof_followup(
+        &self,
+        accused_operator: PublicKey,
+        accusation_msg: DepositsMessage,
+    ) {
+        let _ = (accused_operator, accusation_msg);
+        // Default: no-op (LDK implementation handles channel closure and rebroadcast)
+    }
 }
 
 // ============================================================================

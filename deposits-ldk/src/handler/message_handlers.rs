@@ -16,7 +16,7 @@ use lightning::ln::msgs::{LightningError, ErrorAction};
 use super::core::DepositsHandler;
 use super::ledger_ext::LedgerExt;
 use super::messages::*;
-use deposits_core::messages::{CoordinationMsg, CoordinationResponseMsg, RecoveryMsg, RecoveryResponseMsg};
+use deposits_core::messages::{CoordinationMsg, CoordinationResponseMsg, RecoveryResponseMsg};
 use deposits_core::message_handlers::{self as core_handlers, HandlerResult, ResponseData};
 use deposits_core::{log_debug, log_error, log_info, log_warn};
 use lightning::util::logger::Logger as LdkLogger;
@@ -25,7 +25,7 @@ use crate::wire::messages::{
     QuorumVoteRequestMsg, QuorumVoteMsg, QuorumMembershipChangeMsg,
     CollateralConsentResponseMsg,
     RecoveryClaimRequestMsg, RecoveryClaimSignatureMsg, RecoveryClaimCompleteMsg,
-    UncreditedPaymentMsg, ChannelCloseTombstoneMsg,
+    ChannelCloseTombstoneMsg,
 };
 
 use std::ops::Deref;
@@ -772,112 +772,10 @@ where
         }
     }
 
-    // ==================== Accusation Message Handlers ====================
-
-    /// Handle UncreditedPayment accusation message (0x8035)
-    /// Partner broadcasting proof of unpaid settlement
-    /// Handle UncreditedPayment accusation message.
-    ///
-    /// Core handler validates preimage and partner, LDK layer handles force-close and rebroadcast.
-    pub(super) fn handle_uncredited_payment(
-        &self,
-        msg: &UncreditedPaymentMsg,
-        sender_node_id: PublicKey,
-    ) -> Result<(), LightningError> {
-        log_info!(
-            self.logger,
-            "⚠️ ACCUSATION: Received UncreditedPayment from {} - operator={}, payment_hash={}, amount={}",
-            sender_node_id, msg.operator, hex::encode(&msg.payment_hash[..8]), msg.amount_msat
-        );
-
-        // Delegate to core handler for validation
-        match core_handlers::handle_uncredited_payment(self, msg, sender_node_id) {
-            Ok(HandlerResult::Rejected(reason)) => {
-                log_warn!(self.logger, "⚠️ ACCUSATION: Rejected: {}", reason);
-                return Ok(());
-            }
-            Err(e) => {
-                log_error!(self.logger, "⚠️ ACCUSATION: Handler error: {:?}", e);
-                return Ok(());
-            }
-            Ok(HandlerResult::Response(ResponseData::UncreditedPaymentAccusation {
-                operator, partner, payment_hash, deposit_pubkey, amount_msat, settlement_sequence
-            })) => {
-                // Emit event for node layer
-                let _ = self.event_queue.emit_deposits_event(
-                    super::events::DepositsEvent::UncreditedPaymentAccusation {
-                        operator, partner, payment_hash, deposit_pubkey, amount_msat, settlement_sequence,
-                    },
-                );
-
-                // If we have our own channel with this operator, force-close and rebroadcast
-                self.handle_accusation_followup(msg, sender_node_id, operator);
-            }
-            _ => {}
-        }
-
-        Ok(())
-    }
-
-    /// Handle force-close and rebroadcast after valid accusation
-    fn handle_accusation_followup(
-        &self,
-        msg: &UncreditedPaymentMsg,
-        sender_node_id: PublicKey,
-        operator: PublicKey,
-    ) {
-        if operator == self.our_node_id {
-            return;
-        }
-
-        let our_ledger_key = (operator, self.our_node_id);
-        let have_channel = {
-            let ledgers = self.ledgers.lock().unwrap();
-            ledgers.contains_key(&our_ledger_key)
-        };
-
-        if !have_channel {
-            return;
-        }
-
-        log_warn!(self.logger, "⚠️ ACCUSATION: We have channel with accused operator {} - force-closing", operator);
-
-        // Force-close our channel
-        if let Some(ref cm) = self.channel_manager {
-            let channels = cm.list_channels();
-            if let Some(channel) = channels.iter().find(|c| c.counterparty_node_id == operator) {
-                let reason = format!("Fraud proof: operator {} accused of uncredited payment", operator);
-                if let Err(e) = cm.force_close_broadcasting_latest_txn(&channel.channel_id, &operator, reason) {
-                    log_error!(self.logger, "⚠️ ACCUSATION: Force-close failed: {:?}", e);
-                } else {
-                    log_warn!(self.logger, "⚠️ ACCUSATION: Force-closed channel with {}", operator);
-                }
-            }
-        }
-
-        // Rebroadcast to our collateral partners
-        let partners = {
-            let ledgers = self.ledgers.lock().unwrap();
-            ledgers.get(&our_ledger_key)
-                .map(|l| l.read().unwrap().state.collateral_partners.clone())
-                .unwrap_or_default()
-        };
-
-        let accusation_msg = DepositsMessage::Recovery(RecoveryMsg::UncreditedPayment {
-            operator: msg.operator, partner: msg.partner, payment_hash: msg.payment_hash,
-            preimage: msg.preimage, deposit_pubkey: msg.deposit_pubkey, amount_msat: msg.amount_msat,
-            invoice_cosignature: msg.invoice_cosignature, settlement_sequence: msg.settlement_sequence,
-            settlement_ledger_hash: msg.settlement_ledger_hash, settlement_block_height: msg.settlement_block_height,
-            accuser_signature: msg.accuser_signature,
-        });
-
-        for partner in partners {
-            if partner != sender_node_id {
-                log_info!(self.logger, "⚠️ ACCUSATION: Forwarding to collateral partner {}", partner);
-                let _ = self.send_message(partner, accusation_msg.clone());
-            }
-        }
-    }
+    // NOTE: handle_uncredited_payment and handle_accusation_followup removed
+    // - Dispatch calls core directly
+    // - Core emits event via emit_event() provider
+    // - Core calls handle_fraud_proof_followup() provider for force-close and rebroadcast
 
     // ==================== Tombstone Message Handlers ====================
 

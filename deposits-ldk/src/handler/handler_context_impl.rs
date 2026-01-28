@@ -151,11 +151,22 @@ where
                     operator, partner, error
                 );
             }
-            ProtocolEvent::UncreditedPaymentReceived { operator, partner, amount_msat, .. } => {
+            ProtocolEvent::UncreditedPaymentReceived { operator, partner, payment_hash, deposit_pubkey, amount_msat, settlement_sequence } => {
                 log_warn!(
                     self.logger,
                     "Protocol event: UncreditedPaymentReceived (fraud proof) - operator={}, partner={}, amount={}",
                     operator, partner, amount_msat
+                );
+                // Emit the LDK event
+                let _ = self.event_queue.emit_deposits_event(
+                    DepositsEvent::UncreditedPaymentAccusation {
+                        operator,
+                        partner,
+                        payment_hash,
+                        deposit_pubkey,
+                        amount_msat,
+                        settlement_sequence,
+                    }
                 );
             }
             ProtocolEvent::FeeCollected { operator, partner, deposit_pubkey, amount, block_height } => {
@@ -446,6 +457,68 @@ where
             .get_quorum(&ledger_id)
             .map(|members| members.into_iter().filter(|m| m != partner).collect())
             .unwrap_or_default()
+    }
+
+    fn handle_fraud_proof_followup(
+        &self,
+        accused_operator: PublicKey,
+        accusation_msg: deposits_core::messages::DepositsMessage,
+    ) {
+        // Skip if we're the accused operator
+        if accused_operator == self.our_node_id {
+            return;
+        }
+
+        // Check if we have a channel with the accused operator
+        let our_ledger_key = (accused_operator, self.our_node_id);
+        let have_channel = {
+            let ledgers = self.ledgers.lock().unwrap();
+            ledgers.contains_key(&our_ledger_key)
+        };
+
+        if !have_channel {
+            return;
+        }
+
+        log_warn!(
+            self.logger,
+            "⚠️ FRAUD: We have channel with accused operator {} - force-closing",
+            accused_operator
+        );
+
+        // Force-close our channel with the accused operator
+        if let Some(ref cm) = self.channel_manager {
+            let channels = cm.list_channels();
+            if let Some(channel) = channels.iter().find(|c| c.counterparty_node_id == accused_operator) {
+                let reason = format!("Fraud proof: operator {} accused of uncredited payment", accused_operator);
+                if let Err(e) = cm.force_close_broadcasting_latest_txn(&channel.channel_id, &accused_operator, reason) {
+                    log_warn!(self.logger, "⚠️ FRAUD: Force-close failed: {:?}", e);
+                } else {
+                    log_warn!(self.logger, "⚠️ FRAUD: Force-closed channel with {}", accused_operator);
+                }
+            }
+        }
+
+        // Rebroadcast to our collateral partners
+        let partners = {
+            let ledgers = self.ledgers.lock().unwrap();
+            ledgers.get(&our_ledger_key)
+                .map(|l| l.read().unwrap().state.collateral_partners.clone())
+                .unwrap_or_default()
+        };
+
+        // Convert core message to local message type
+        let local_msg = super::messages::DepositsMessage::from_v2(accusation_msg);
+
+        for partner in partners {
+            if partner != self.our_node_id {
+                if let Err(e) = self.send_message(partner, local_msg.clone()) {
+                    log_warn!(self.logger, "⚠️ FRAUD: Failed to rebroadcast to {}: {:?}", partner, e);
+                } else {
+                    log_info!(self.logger, "⚠️ FRAUD: Rebroadcast accusation to {}", partner);
+                }
+            }
+        }
     }
 }
 

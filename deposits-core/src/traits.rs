@@ -911,7 +911,9 @@ pub enum ProtocolEvent {
         operator: PublicKey,
         partner: PublicKey,
         payment_hash: [u8; 32],
+        deposit_pubkey: PublicKey,
         amount_msat: u64,
+        settlement_sequence: u64,
     },
     /// Fees were collected from a deposit
     FeeCollected {

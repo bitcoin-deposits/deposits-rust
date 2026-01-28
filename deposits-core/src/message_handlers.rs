@@ -1057,26 +1057,34 @@ pub fn handle_uncredited_payment<C: HandlerContext>(
     }
     // If we don't have the ledger, we can still process the accusation
 
-    // 4. Emit event for node layer to:
-    //    - Store the accusation
-    //    - Force-close any channel with the operator
-    //    - Forward to our own collateral partners
+    // 4. Emit event for node layer to store the accusation
     ctx.emit_event(ProtocolEvent::UncreditedPaymentReceived {
-        operator: msg.operator,
-        partner: msg.partner,
-        payment_hash: msg.payment_hash,
-        amount_msat: msg.amount_msat,
-    });
-
-    // Return the accusation data for higher layers to act on
-    Ok(HandlerResult::Response(ResponseData::UncreditedPaymentAccusation {
         operator: msg.operator,
         partner: msg.partner,
         payment_hash: msg.payment_hash,
         deposit_pubkey: msg.deposit_pubkey,
         amount_msat: msg.amount_msat,
         settlement_sequence: msg.settlement_sequence,
-    }))
+    });
+
+    // 5. Handle followup: force-close and rebroadcast
+    use crate::messages::RecoveryMsg;
+    let accusation_msg = DepositsMessage::Recovery(RecoveryMsg::UncreditedPayment {
+        operator: msg.operator,
+        partner: msg.partner,
+        payment_hash: msg.payment_hash,
+        preimage: msg.preimage,
+        deposit_pubkey: msg.deposit_pubkey,
+        amount_msat: msg.amount_msat,
+        invoice_cosignature: msg.invoice_cosignature,
+        settlement_sequence: msg.settlement_sequence,
+        settlement_ledger_hash: msg.settlement_ledger_hash,
+        settlement_block_height: msg.settlement_block_height,
+        accuser_signature: msg.accuser_signature,
+    });
+    ctx.handle_fraud_proof_followup(msg.operator, accusation_msg);
+
+    Ok(HandlerResult::Ok)
 }
 
 // ============================================================================
@@ -2861,12 +2869,7 @@ mod tests {
 
         // Valid accusation (no ledger to check for credit)
         let result = handle_uncredited_payment(&ctx, &msg, partner);
-        match result {
-            Ok(HandlerResult::Response(ResponseData::UncreditedPaymentAccusation { amount_msat, .. })) => {
-                assert_eq!(amount_msat, 1_000_000);
-            }
-            other => panic!("Expected Response(UncreditedPaymentAccusation), got {:?}", other),
-        }
+        assert!(matches!(result, Ok(HandlerResult::Ok)), "Expected Ok(HandlerResult::Ok), got {:?}", result);
 
         // Check that event was emitted
         let events = ctx.events.lock().unwrap();
