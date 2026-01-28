@@ -35,8 +35,8 @@ where
     /// * `message` - The ledger operation message
     /// * `partner_id` - The channel partner's node ID
     /// * `sequence_number` - The update's sequence in the ledger
-    /// * `previous_state_hash` - Hash of the previous ledger state
-    /// * `current_state_hash` - Hash after applying this update
+    /// * `previous_hash` - Hash of the previous ledger state
+    /// * `current_hash` - Hash after applying this update
     /// * `partner_signature` - Optional partner signature from ACK (enables full porcupine signing)
     ///
     /// # Signature Format
@@ -47,8 +47,8 @@ where
         message: &DepositsMessage,
         partner_id: PublicKey,
         sequence_number: u64,
-        previous_state_hash: [u8; 32],
-        current_state_hash: [u8; 32],
+        previous_hash: [u8; 32],
+        current_hash: [u8; 32],
         partner_signature: Option<[u8; 64]>,
     ) -> Result<deposits_core::SignedLedgerUpdate, DepositsError> {
         use deposits_core::SignedLedgerUpdate;
@@ -90,8 +90,8 @@ where
             signing_data.extend_from_slice(&message_bytes);
             signing_data.extend_from_slice(&message_type.to_be_bytes());
             signing_data.extend_from_slice(&sequence_number.to_be_bytes());
-            signing_data.extend_from_slice(&previous_state_hash);
-            signing_data.extend_from_slice(&current_state_hash);
+            signing_data.extend_from_slice(&previous_hash);
+            signing_data.extend_from_slice(&current_hash);
             signing_data.extend_from_slice(&timestamp.to_be_bytes());
             signing_data.extend_from_slice(&partner_sig);
 
@@ -109,7 +109,7 @@ where
             self.sign_ledger_update(
                 &message_bytes,
                 sequence_number,
-                &previous_state_hash,
+                &previous_hash,
             )?
         };
 
@@ -119,23 +119,23 @@ where
             message_type,
             operator_signature,
             partner_signature: partner_sig,
-            operator_pubkey: self.our_node_id,
-            partner_pubkey: partner_id,
+            operator_id: self.our_node_id,
+            partner_id: partner_id,
             sequence_number,
-            previous_state_hash,
-            current_state_hash,
+            previous_hash,
+            current_hash,
             timestamp,
         })
     }
 
     /// Sign ledger update data with operator's Lightning node key
     ///
-    /// Signs: message_bytes || sequence_number || previous_state_hash
+    /// Signs: message_bytes || sequence_number || previous_hash
     pub(super) fn sign_ledger_update(
         &self,
         message_bytes: &[u8],
         sequence_number: u64,
-        previous_state_hash: &[u8; 32],
+        previous_hash: &[u8; 32],
     ) -> Result<[u8; 64], DepositsError> {
         use bitcoin::hashes::{Hash, sha256};
         use bitcoin::secp256k1::Secp256k1;
@@ -150,7 +150,7 @@ where
         let mut signing_data = Vec::new();
         signing_data.extend_from_slice(message_bytes);
         signing_data.extend_from_slice(&sequence_number.to_be_bytes());
-        signing_data.extend_from_slice(previous_state_hash);
+        signing_data.extend_from_slice(previous_hash);
 
         // Hash the signing data
         let message_hash = sha256::Hash::hash(&signing_data);
@@ -187,8 +187,8 @@ where
             data.extend_from_slice(&update.message);
             data.extend_from_slice(&update.message_type.to_be_bytes());
             data.extend_from_slice(&update.sequence_number.to_be_bytes());
-            data.extend_from_slice(&update.previous_state_hash);
-            data.extend_from_slice(&update.current_state_hash);
+            data.extend_from_slice(&update.previous_hash);
+            data.extend_from_slice(&update.current_hash);
             data.extend_from_slice(&update.timestamp.to_be_bytes());
             data.extend_from_slice(&update.partner_signature);
             data
@@ -211,7 +211,7 @@ where
         secp.verify_ecdsa(
             &Message::from_digest(message_hash.to_byte_array()),
             &signature,
-            &update.operator_pubkey,
+            &update.operator_id,
         ).map_err(|_| DepositsError::InvalidState(
             "Signature verification failed".to_string()
         ))?;
@@ -228,7 +228,7 @@ where
         signed_update: deposits_core::SignedLedgerUpdate,
     ) -> Result<(), DepositsError> {
         // Skip if we're the operator (we created this update, already have it)
-        if signed_update.operator_pubkey == self.our_node_id {
+        if signed_update.operator_id == self.our_node_id {
             log_debug!(
                 self.logger,
                 "📋 AUDIT: Skipping signed update - we are the operator (already have this update)",
@@ -239,13 +239,13 @@ where
         // If we're the partner, we SHOULD receive and store this update.
         // Partners no longer maintain their own hash chain - they receive authoritative
         // SignedAuditUpdate from operator. This prevents hash divergence.
-        let we_are_partner = signed_update.partner_pubkey == self.our_node_id;
+        let we_are_partner = signed_update.partner_id == self.our_node_id;
         if we_are_partner {
             log_info!(
                 self.logger,
                 "📋 PARTNER: Receiving authoritative SignedAuditUpdate seq={} from operator {} for our partner ledger",
                 signed_update.sequence_number,
-                signed_update.operator_pubkey
+                signed_update.operator_id
             );
         }
 
@@ -256,18 +256,18 @@ where
             self.logger,
             "✅ Verified signature for update seq={} from operator {} -> partner {}",
             signed_update.sequence_number,
-            signed_update.operator_pubkey,
-            signed_update.partner_pubkey
+            signed_update.operator_id,
+            signed_update.partner_id
         );
 
         // 2. Add to local log (verifies sequence/hash chain)
         let mut logs = self.signed_update_logs.lock().unwrap();
 
-        let log = logs.entry((signed_update.operator_pubkey, signed_update.partner_pubkey))
+        let log = logs.entry((signed_update.operator_id, signed_update.partner_id))
             .or_insert_with(|| {
                 deposits_core::SignedLedgerUpdateLog::new(
-                    signed_update.operator_pubkey,
-                    signed_update.partner_pubkey
+                    signed_update.operator_id,
+                    signed_update.partner_id
                 )
             });
 
@@ -286,8 +286,8 @@ where
 
         // 3. Persist to disk
         self.persist_signed_update(
-            signed_update.operator_pubkey,
-            signed_update.partner_pubkey,
+            signed_update.operator_id,
+            signed_update.partner_id,
             signed_update.clone()
         )?;
 
@@ -312,7 +312,7 @@ where
             ))?;
 
         // Persist to disk using hashed key (same as ledger persistence)
-        // Key format: signed_updates_{hash} where hash = SHA256(operator_pubkey || partner_pubkey)
+        // Key format: signed_updates_{hash} where hash = SHA256(operator_id || partner_id)
         use bitcoin::hashes::{Hash, sha256};
         let mut key_input = Vec::new();
         key_input.extend_from_slice(&operator_id.serialize());
@@ -428,11 +428,11 @@ where
                 message_type: update.message_type,
                 operator_signature: update.operator_signature,
                 partner_signature: Some(update.partner_signature),
-                operator_pubkey: update.operator_pubkey,
-                partner_pubkey: update.partner_pubkey,
+                operator_id: update.operator_id,
+                partner_id: update.partner_id,
                 sequence_number: update.sequence_number,
-                previous_state_hash: update.previous_state_hash,
-                current_state_hash: update.current_state_hash,
+                previous_hash: update.previous_hash,
+                current_hash: update.current_hash,
                 timestamp: update.timestamp,
                 operation,
             }
@@ -531,8 +531,8 @@ where
         message_bytes: &[u8],
         message_type: u16,
         sequence_number: u64,
-        previous_state_hash: &[u8; 32],
-        current_state_hash: &[u8; 32],
+        previous_hash: &[u8; 32],
+        current_hash: &[u8; 32],
         timestamp: u64,
     ) -> Result<[u8; 64], DepositsError> {
         use bitcoin::hashes::{Hash, sha256};
@@ -550,8 +550,8 @@ where
         signing_data.extend_from_slice(message_bytes);
         signing_data.extend_from_slice(&message_type.to_be_bytes());
         signing_data.extend_from_slice(&sequence_number.to_be_bytes());
-        signing_data.extend_from_slice(previous_state_hash);
-        signing_data.extend_from_slice(current_state_hash);
+        signing_data.extend_from_slice(previous_hash);
+        signing_data.extend_from_slice(current_hash);
         signing_data.extend_from_slice(&timestamp.to_be_bytes());
 
         // Hash the signing data
@@ -632,7 +632,7 @@ where
                 // For each update, we need: message, sequence_number, previous_hash, current_hash
                 let mut result = Vec::new();
                 for (i, update) in ledger.history.iter().enumerate() {
-                    let current_hash = update.current_state_hash;
+                    let current_hash = update.current_hash;
 
                     // Deserialize the message using SignedLedgerUpdateExt trait
                     // This correctly uses the separate message_type field instead of
@@ -649,7 +649,7 @@ where
                         }
                     };
 
-                    result.push((msg, update.sequence_number, update.previous_state_hash, current_hash));
+                    result.push((msg, update.sequence_number, update.previous_hash, current_hash));
                 }
                 result
             } else {
@@ -707,11 +707,11 @@ where
                 message_type: signed_update.message_type,
                 operator_signature: signed_update.operator_signature,
                 partner_signature: Some(signed_update.partner_signature),
-                operator_pubkey: signed_update.operator_pubkey,
-                partner_pubkey: signed_update.partner_pubkey,
+                operator_id: signed_update.operator_id,
+                partner_id: signed_update.partner_id,
                 sequence_number: signed_update.sequence_number,
-                previous_state_hash: signed_update.previous_state_hash,
-                current_state_hash: signed_update.current_state_hash,
+                previous_hash: signed_update.previous_hash,
+                current_hash: signed_update.current_hash,
                 timestamp: signed_update.timestamp,
                 operation,
             });

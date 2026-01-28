@@ -705,7 +705,7 @@ impl LedgerState {
     /// Update the partner's deepest acknowledged hash.
     ///
     /// Called when partner sends an ACK for one of our messages.
-    /// The new_hash should be the current_state_hash from the ACKed message.
+    /// The new_hash should be the current_hash from the ACKed message.
     pub fn update_partner_ack_hash(&mut self, new_hash: [u8; 32]) {
         self.partner_deepest_ack_hash = new_hash;
     }
@@ -818,18 +818,18 @@ pub struct SignedLedgerUpdate {
     pub message_type: u16,
     /// Operator's public key (Lightning node ID).
     #[serde(with = "serde_pubkey")]
-    pub operator_pubkey: PublicKey,
+    pub operator_id: PublicKey,
     /// Partner's public key (for identifying which ledger this update applies to).
     #[serde(with = "serde_pubkey")]
-    pub partner_pubkey: PublicKey,
+    pub partner_id: PublicKey,
     /// Deterministic sequence number (starts at 0 for LedgerOpened).
     pub sequence_number: u64,
     /// Hash of previous ledger state (creates cryptographic chain).
     #[serde(with = "serde_32")]
-    pub previous_state_hash: [u8; 32],
+    pub previous_hash: [u8; 32],
     /// Hash of current ledger state after this update.
     #[serde(with = "serde_32")]
-    pub current_state_hash: [u8; 32],
+    pub current_hash: [u8; 32],
     /// Timestamp when operator created this update.
     pub timestamp: u64,
     /// Partner's signature over update content.
@@ -847,7 +847,7 @@ impl SignedLedgerUpdate {
 
         let mut hasher = Sha256::new();
         hasher.update(&self.sequence_number.to_le_bytes());
-        hasher.update(&self.previous_state_hash);
+        hasher.update(&self.previous_hash);
         hasher.update(&self.message);
 
         let result = hasher.finalize();
@@ -858,7 +858,7 @@ impl SignedLedgerUpdate {
 
     /// Verify the hash chain.
     pub fn verify_hash(&self) -> bool {
-        self.compute_hash() == self.current_state_hash
+        self.compute_hash() == self.current_hash
     }
 
     // ========================================================================
@@ -875,8 +875,8 @@ impl SignedLedgerUpdate {
         data.extend_from_slice(&self.message);
         data.extend_from_slice(&self.message_type.to_le_bytes());
         data.extend_from_slice(&self.sequence_number.to_le_bytes());
-        data.extend_from_slice(&self.previous_state_hash);
-        data.extend_from_slice(&self.current_state_hash);
+        data.extend_from_slice(&self.previous_hash);
+        data.extend_from_slice(&self.current_hash);
         data.extend_from_slice(&self.timestamp.to_le_bytes());
         data
     }
@@ -904,7 +904,7 @@ impl SignedLedgerUpdate {
         let sig = Signature::from_compact(&self.partner_signature)
             .map_err(|e| format!("Invalid partner signature format: {}", e))?;
 
-        secp.verify_ecdsa(&msg, &sig, &self.partner_pubkey)
+        secp.verify_ecdsa(&msg, &sig, &self.partner_id)
             .map_err(|e| format!("Partner signature verification failed: {}", e))
     }
 
@@ -921,7 +921,7 @@ impl SignedLedgerUpdate {
         let sig = Signature::from_compact(&self.operator_signature)
             .map_err(|e| format!("Invalid operator signature format: {}", e))?;
 
-        secp.verify_ecdsa(&msg, &sig, &self.operator_pubkey)
+        secp.verify_ecdsa(&msg, &sig, &self.operator_id)
             .map_err(|e| format!("Operator signature verification failed: {}", e))
     }
 
@@ -1020,7 +1020,7 @@ pub struct QuorumJoinResponseMsg {
     pub last_sequence: u64,
     /// Current state hash.
     #[serde(with = "serde_32")]
-    pub current_state_hash: [u8; 32],
+    pub current_hash: [u8; 32],
     /// Rejection reason (if rejected).
     pub rejection_reason: Option<String>,
 }
@@ -1178,14 +1178,14 @@ impl SignedLedgerUpdateLog {
 
         // Verify chain continuity (previous hash should match last update's hash)
         let expected_prev = if let Some(last) = self.updates.last() {
-            last.current_state_hash
+            last.current_hash
         } else {
             [0u8; 32]
         };
-        if update.previous_state_hash != expected_prev {
+        if update.previous_hash != expected_prev {
             return Err(crate::DepositsError::InvalidState(
                 format!("Hash chain broken: expected {}, got {}",
-                    hex::encode(expected_prev), hex::encode(update.previous_state_hash))
+                    hex::encode(expected_prev), hex::encode(update.previous_hash))
             ));
         }
 
@@ -1199,7 +1199,7 @@ impl SignedLedgerUpdateLog {
     ///
     /// Checks that:
     /// - Sequence numbers are contiguous starting from 0
-    /// - Each update's previous_state_hash matches the prior update's current_state_hash
+    /// - Each update's previous_hash matches the prior update's current_hash
     pub fn verify_chain(&self) -> Result<(), crate::DepositsError> {
         let mut expected_prev = [0u8; 32];
         for (i, update) in self.updates.iter().enumerate() {
@@ -1208,12 +1208,12 @@ impl SignedLedgerUpdateLog {
                     format!("Sequence mismatch at index {}: expected {}, got {}", i, i, update.sequence_number)
                 ));
             }
-            if update.previous_state_hash != expected_prev {
+            if update.previous_hash != expected_prev {
                 return Err(crate::DepositsError::InvalidState(
                     format!("Hash chain broken at index {}", i)
                 ));
             }
-            expected_prev = update.current_state_hash;
+            expected_prev = update.current_hash;
         }
         Ok(())
     }
@@ -1232,7 +1232,7 @@ impl SignedLedgerUpdateLog {
     /// Returns zeros if there are no updates yet.
     pub fn tail_hash(&self) -> [u8; 32] {
         self.updates.last()
-            .map(|u| u.current_state_hash)
+            .map(|u| u.current_hash)
             .unwrap_or([0u8; 32])
     }
 
@@ -1530,11 +1530,11 @@ impl TlvDecode for ReservesOutput {
 mod signed_update_fields {
     pub const MESSAGE: u64 = 0;
     pub const MESSAGE_TYPE: u64 = 2;
-    pub const OPERATOR_PUBKEY: u64 = 4;
-    pub const PARTNER_PUBKEY: u64 = 6;
+    pub const OPERATOR_ID: u64 = 4;
+    pub const PARTNER_ID: u64 = 6;
     pub const SEQUENCE_NUMBER: u64 = 8;
-    pub const PREVIOUS_STATE_HASH: u64 = 10;
-    pub const CURRENT_STATE_HASH: u64 = 12;
+    pub const PREVIOUS_HASH: u64 = 10;
+    pub const CURRENT_HASH: u64 = 12;
     pub const TIMESTAMP: u64 = 14;
     pub const PARTNER_SIGNATURE: u64 = 16;
     pub const OPERATOR_SIGNATURE: u64 = 18;
@@ -1545,11 +1545,11 @@ impl TlvEncode for SignedLedgerUpdate {
         TlvBuilder::new()
             .bytes_field(signed_update_fields::MESSAGE, &self.message)
             .u16_field(signed_update_fields::MESSAGE_TYPE, self.message_type)
-            .pubkey_field(signed_update_fields::OPERATOR_PUBKEY, &self.operator_pubkey)
-            .pubkey_field(signed_update_fields::PARTNER_PUBKEY, &self.partner_pubkey)
+            .pubkey_field(signed_update_fields::OPERATOR_ID, &self.operator_id)
+            .pubkey_field(signed_update_fields::PARTNER_ID, &self.partner_id)
             .u64_field(signed_update_fields::SEQUENCE_NUMBER, self.sequence_number)
-            .bytes_field(signed_update_fields::PREVIOUS_STATE_HASH, &self.previous_state_hash)
-            .bytes_field(signed_update_fields::CURRENT_STATE_HASH, &self.current_state_hash)
+            .bytes_field(signed_update_fields::PREVIOUS_HASH, &self.previous_hash)
+            .bytes_field(signed_update_fields::CURRENT_HASH, &self.current_hash)
             .u64_field(signed_update_fields::TIMESTAMP, self.timestamp)
             .bytes_field(signed_update_fields::PARTNER_SIGNATURE, &self.partner_signature)
             .bytes_field(signed_update_fields::OPERATOR_SIGNATURE, &self.operator_signature)
@@ -1563,11 +1563,11 @@ impl TlvDecode for SignedLedgerUpdate {
         Ok(Self {
             message: reader.read_raw(signed_update_fields::MESSAGE)?.to_vec(),
             message_type: reader.read_u16(signed_update_fields::MESSAGE_TYPE)?,
-            operator_pubkey: reader.read_pubkey(signed_update_fields::OPERATOR_PUBKEY)?,
-            partner_pubkey: reader.read_pubkey(signed_update_fields::PARTNER_PUBKEY)?,
+            operator_id: reader.read_pubkey(signed_update_fields::OPERATOR_ID)?,
+            partner_id: reader.read_pubkey(signed_update_fields::PARTNER_ID)?,
             sequence_number: reader.read_u64(signed_update_fields::SEQUENCE_NUMBER)?,
-            previous_state_hash: reader.read_bytes(signed_update_fields::PREVIOUS_STATE_HASH)?,
-            current_state_hash: reader.read_bytes(signed_update_fields::CURRENT_STATE_HASH)?,
+            previous_hash: reader.read_bytes(signed_update_fields::PREVIOUS_HASH)?,
+            current_hash: reader.read_bytes(signed_update_fields::CURRENT_HASH)?,
             timestamp: reader.read_u64(signed_update_fields::TIMESTAMP)?,
             partner_signature: reader.read_bytes(signed_update_fields::PARTNER_SIGNATURE)?,
             operator_signature: reader.read_bytes(signed_update_fields::OPERATOR_SIGNATURE)?,
@@ -1736,11 +1736,11 @@ mod tests {
         let update = SignedLedgerUpdate {
             message: vec![1, 2, 3],
             message_type: 1,
-            operator_pubkey: pk,
-            partner_pubkey: pk,
+            operator_id: pk,
+            partner_id: pk,
             sequence_number: 1,
-            previous_state_hash: [0u8; 32],
-            current_state_hash: [0u8; 32],
+            previous_hash: [0u8; 32],
+            current_hash: [0u8; 32],
             timestamp: 0,
             partner_signature: [0u8; 64],
             operator_signature: [0u8; 64],
@@ -1756,11 +1756,11 @@ mod tests {
         let mut update = SignedLedgerUpdate {
             message: vec![1, 2, 3],
             message_type: 1,
-            operator_pubkey: pk,
-            partner_pubkey: pk,
+            operator_id: pk,
+            partner_id: pk,
             sequence_number: 1,
-            previous_state_hash: [0u8; 32],
-            current_state_hash: [0u8; 32],
+            previous_hash: [0u8; 32],
+            current_hash: [0u8; 32],
             timestamp: 1000,
             partner_signature: [0u8; 64],
             operator_signature: [0u8; 64],

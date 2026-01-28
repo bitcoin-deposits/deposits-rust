@@ -260,7 +260,7 @@ impl WireEncode for QuorumJoinResponseMsg {
         }
         write_u16(writer, self.threshold)?;
         write_u64(writer, self.last_sequence)?;
-        write_bytes32(writer, &self.current_state_hash)?;
+        write_bytes32(writer, &self.current_hash)?;
         write_optional(writer, &self.rejection_reason, |w, s| write_string(w, s))?;
         Ok(())
     }
@@ -279,7 +279,7 @@ impl WireDecode for QuorumJoinResponseMsg {
             members,
             threshold: read_u16(reader)?,
             last_sequence: read_u64(reader)?,
-            current_state_hash: read_bytes32(reader)?,
+            current_hash: read_bytes32(reader)?,
             rejection_reason: read_optional(reader, read_string)?,
         })
     }
@@ -1220,8 +1220,8 @@ impl WireDecode for SyncRequestMsg {
 /// V1-compatible channel close tombstone message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChannelCloseTombstoneMsg {
-    pub operator_pubkey: PublicKey,
-    pub partner_pubkey: PublicKey,
+    pub operator_id: PublicKey,
+    pub partner_id: PublicKey,
     pub timestamp: u64,
     pub channel_id: [u8; 32],
     pub close_reason: Option<String>,
@@ -1230,8 +1230,8 @@ pub struct ChannelCloseTombstoneMsg {
 
 impl WireEncode for ChannelCloseTombstoneMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
-        write_pubkey(writer, &self.operator_pubkey)?;
-        write_pubkey(writer, &self.partner_pubkey)?;
+        write_pubkey(writer, &self.operator_id)?;
+        write_pubkey(writer, &self.partner_id)?;
         write_u64(writer, self.timestamp)?;
         write_bytes32(writer, &self.channel_id)?;
         write_optional(writer, &self.close_reason, |w, s| write_string(w, s))?;
@@ -1243,8 +1243,8 @@ impl WireEncode for ChannelCloseTombstoneMsg {
 impl WireDecode for ChannelCloseTombstoneMsg {
     fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
         Ok(Self {
-            operator_pubkey: read_pubkey(reader)?,
-            partner_pubkey: read_pubkey(reader)?,
+            operator_id: read_pubkey(reader)?,
+            partner_id: read_pubkey(reader)?,
             timestamp: read_u64(reader)?,
             channel_id: read_bytes32(reader)?,
             close_reason: read_optional(reader, read_string)?,
@@ -1300,7 +1300,7 @@ pub struct QuorumJoinResponseMsgWire {
     pub members: Vec<PublicKey>,
     pub threshold: u16,
     pub last_sequence: u64,
-    pub current_state_hash: [u8; 32],
+    pub current_hash: [u8; 32],
     pub rejection_reason: Option<String>,
 }
 
@@ -1313,7 +1313,7 @@ impl WireEncode for QuorumJoinResponseMsgWire {
         }
         write_u16(writer, self.threshold)?;
         write_u64(writer, self.last_sequence)?;
-        write_bytes32(writer, &self.current_state_hash)?;
+        write_bytes32(writer, &self.current_hash)?;
         write_optional(writer, &self.rejection_reason, |w, s| write_string(w, s))?;
         Ok(())
     }
@@ -1332,7 +1332,7 @@ impl WireDecode for QuorumJoinResponseMsgWire {
             members,
             threshold: read_u16(reader)?,
             last_sequence: read_u64(reader)?,
-            current_state_hash: read_bytes32(reader)?,
+            current_hash: read_bytes32(reader)?,
             rejection_reason: read_optional(reader, read_string)?,
         })
     }

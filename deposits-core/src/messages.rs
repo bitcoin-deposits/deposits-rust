@@ -917,7 +917,7 @@ pub enum CoordinationResponseMsg {
         members: Vec<PublicKey>,
         threshold: u16,
         last_sequence: u64,
-        current_state_hash: [u8; 32],
+        current_hash: [u8; 32],
         rejection_reason: Option<String>,
     },
     /// Quorum state sync
@@ -1481,11 +1481,11 @@ impl BinaryCodec for StorageSignedLedgerUpdate {
     fn write_to<W: Write>(&self, w: &mut W) -> Result<(), CodecError> {
         write_bytes(w, &self.message)?;
         write_u16(w, self.message_type)?;
-        write_pubkey(w, &self.operator_pubkey)?;
-        write_pubkey(w, &self.partner_pubkey)?;
+        write_pubkey(w, &self.operator_id)?;
+        write_pubkey(w, &self.partner_id)?;
         write_u64(w, self.sequence_number)?;
-        write_32(w, &self.previous_state_hash)?;
-        write_32(w, &self.current_state_hash)?;
+        write_32(w, &self.previous_hash)?;
+        write_32(w, &self.current_hash)?;
         write_u64(w, self.timestamp)?;
         write_64(w, &self.partner_signature)?;
         write_64(w, &self.operator_signature)?;
@@ -1496,11 +1496,11 @@ impl BinaryCodec for StorageSignedLedgerUpdate {
         Ok(Self {
             message: read_bytes(r)?,
             message_type: read_u16(r)?,
-            operator_pubkey: read_pubkey(r)?,
-            partner_pubkey: read_pubkey(r)?,
+            operator_id: read_pubkey(r)?,
+            partner_id: read_pubkey(r)?,
             sequence_number: read_u64(r)?,
-            previous_state_hash: read_32(r)?,
-            current_state_hash: read_32(r)?,
+            previous_hash: read_32(r)?,
+            current_hash: read_32(r)?,
             timestamp: read_u64(r)?,
             partner_signature: read_64(r)?,
             operator_signature: read_64(r)?,
@@ -1929,14 +1929,14 @@ impl BinaryCodec for CoordinationResponseMsg {
                 write_bool(w, *consent_granted)?;
                 write_64(w, collateral_partner_signature)?;
             }
-            Self::QuorumJoinResponse { request_hash, accepted, members, threshold, last_sequence, current_state_hash, rejection_reason } => {
+            Self::QuorumJoinResponse { request_hash, accepted, members, threshold, last_sequence, current_hash, rejection_reason } => {
                 write_u8(w, 2)?;
                 write_32(w, request_hash)?;
                 write_bool(w, *accepted)?;
                 write_vec(w, members, |w, pk| write_pubkey(w, pk))?;
                 write_u16(w, *threshold)?;
                 write_u64(w, *last_sequence)?;
-                write_32(w, current_state_hash)?;
+                write_32(w, current_hash)?;
                 write_option(w, rejection_reason, |w, s| write_string(w, s))?;
             }
             Self::QuorumStateSync { request_hash, operator_id, partner_id, updates, start_sequence, is_final } => {
@@ -1987,7 +1987,7 @@ impl BinaryCodec for CoordinationResponseMsg {
                 members: read_vec(r, read_pubkey)?,
                 threshold: read_u16(r)?,
                 last_sequence: read_u64(r)?,
-                current_state_hash: read_32(r)?,
+                current_hash: read_32(r)?,
                 rejection_reason: read_option(r, read_string)?,
             }),
             3 => Ok(Self::QuorumStateSync {
@@ -3169,7 +3169,7 @@ impl TlvEncode for CoordinationResponseMsg {
             }
             Self::QuorumJoinResponse {
                 request_hash, accepted, members, threshold, last_sequence,
-                current_state_hash, rejection_reason,
+                current_hash, rejection_reason,
             } => {
                 // Encode Vec<PublicKey> as concatenated compressed pubkey bytes (33 bytes each)
                 let members_bytes: Vec<u8> = members.iter()
@@ -3182,7 +3182,7 @@ impl TlvEncode for CoordinationResponseMsg {
                     .bytes_field(MEMBERS, &members_bytes)
                     .u16_field(THRESHOLD, *threshold)
                     .u64_field(LAST_SEQUENCE, *last_sequence)
-                    .bytes_field(CURRENT_STATE_HASH, current_state_hash);
+                    .bytes_field(CURRENT_STATE_HASH, current_hash);
                 if let Some(reason) = rejection_reason {
                     builder = builder.string_field(REJECTION_REASON, reason);
                 }
@@ -3266,7 +3266,7 @@ impl TlvDecode for CoordinationResponseMsg {
                     members,
                     threshold: reader.read_u16(THRESHOLD)?,
                     last_sequence: reader.read_u64(LAST_SEQUENCE)?,
-                    current_state_hash: reader.read_bytes(CURRENT_STATE_HASH)?,
+                    current_hash: reader.read_bytes(CURRENT_STATE_HASH)?,
                     rejection_reason: reader.read_string_opt(REJECTION_REASON)?,
                 })
             },
@@ -3843,11 +3843,11 @@ mod tests {
         let update = StorageSignedLedgerUpdate {
             message: vec![0x80, 0x01, 0xAA, 0xBB], // Sample message bytes
             message_type: 0x8001,
-            operator_pubkey: test_pubkey(),
-            partner_pubkey: test_pubkey(),
+            operator_id: test_pubkey(),
+            partner_id: test_pubkey(),
             sequence_number: 1,
-            previous_state_hash: [0xCC; 32],
-            current_state_hash: [0xDD; 32],
+            previous_hash: [0xCC; 32],
+            current_hash: [0xDD; 32],
             timestamp: 1234567890,
             partner_signature: [0xFF; 64],
             operator_signature: [0xEE; 64],
@@ -3959,7 +3959,7 @@ mod tests {
                 members: vec![test_pubkey(), test_pubkey()],
                 threshold: 2,
                 last_sequence: 100,
-                current_state_hash: [0xDD; 32],
+                current_hash: [0xDD; 32],
                 rejection_reason: None,
             },
         ];

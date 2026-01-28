@@ -51,7 +51,7 @@ where
     /// Channel ID this enhancer belongs to
     pub channel_id: [u8; 32],
     /// Partner's public key
-    pub partner_pubkey: PublicKey,
+    pub partner_id: PublicKey,
     /// Reserves output manager
     reserves_manager: Arc<ReservesOutputManager<L>>,
     /// Currently active reserves outputs for this channel
@@ -66,12 +66,12 @@ where
     /// Create a new commitment transaction enhancer for a channel
     pub fn new(
         channel_id: [u8; 32],
-        partner_pubkey: PublicKey,
+        partner_id: PublicKey,
         reserves_manager: Arc<ReservesOutputManager<L>>,
     ) -> Self {
         Self {
             channel_id,
-            partner_pubkey,
+            partner_id,
             reserves_manager,
             active_reserves: RwLock::new(HashMap::new()),
         }
@@ -87,7 +87,7 @@ where
         // Create the proposal using the reserves manager
         let proposal = self.reserves_manager.create_proposal(
             amount,
-            self.partner_pubkey,
+            self.partner_id,
             ledger_id,
             emergency_timeout,
         )?;
@@ -131,7 +131,7 @@ where
         for (proposal, status) in active_proposals {
             if let ProposalStatus::Accepted = status {
                 // Only add if this is for our channel partner
-                if proposal.partner_pubkey == self.partner_pubkey {
+                if proposal.partner_id == self.partner_id {
                     // Create the reserves output
                     let reserves_output = self.reserves_manager
                         .create_reserves_output(proposal.proposal_id)?;
@@ -490,7 +490,7 @@ mod tests {
         );
 
         assert_eq!(enhancer.channel_id, channel_id);
-        assert_eq!(enhancer.partner_pubkey, partner_pk);
+        assert_eq!(enhancer.partner_id, partner_pk);
         assert_eq!(enhancer.get_total_reserves(), 0);
     }
 
@@ -522,7 +522,7 @@ mod tests {
         ).unwrap();
 
         assert_eq!(proposal.amount, 50000);
-        assert_eq!(proposal.partner_pubkey, partner_pk);
+        assert_eq!(proposal.partner_id, partner_pk);
 
         // Accept the proposal
         enhancer.accept_reserves_proposal(proposal).unwrap();

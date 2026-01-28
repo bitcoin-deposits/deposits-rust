@@ -191,7 +191,7 @@ impl LedgerExt for Ledger {
                 DepositsMessage::LedgerUpdate(ref update_msg) => {
                     // V2 CollateralAttestation is inside LedgerUpdate
                     if let deposits_core::messages::LedgerOperation::CollateralAttestation { collateral_operator, amount, block_height, signature, ledger_hash } = &update_msg.operation {
-                        let collateral_partner = update_msg.partner_pubkey;
+                        let collateral_partner = update_msg.partner_id;
                         if collateral_partner == self.state.partner_key || self.state.collateral_partners.contains(&collateral_partner) {
                             let attestation = deposits_core::CollateralAttestation {
                                 operator_id: *collateral_operator,
@@ -252,11 +252,11 @@ impl LedgerExt for Ledger {
             message_type: message.message_type(),
             operator_signature: [0u8; 64], // Placeholder during migration
             partner_signature: [0u8; 64],
-            operator_pubkey: self.state.operator_key,
-            partner_pubkey: self.state.partner_key,
+            operator_id: self.state.operator_key,
+            partner_id: self.state.partner_key,
             sequence_number: expected_sequence,
-            previous_state_hash: prev_hash,
-            current_state_hash: update_hash,
+            previous_hash: prev_hash,
+            current_hash: update_hash,
             timestamp: deposits_core::now_unix_timestamp(),
         };
 
@@ -286,10 +286,10 @@ impl LedgerExt for Ledger {
     fn append_signed(&mut self, update: SignedLedgerUpdate) -> Result<(), DepositsError> {
         // Verify chain continuity
         let expected_prev = self.tail_hash();
-        if update.previous_state_hash != expected_prev {
+        if update.previous_hash != expected_prev {
             return Err(DepositsError::InvalidState(
                 format!("Hash mismatch: expected {:?}, got {:?}",
-                    hex::encode(expected_prev), hex::encode(update.previous_state_hash))
+                    hex::encode(expected_prev), hex::encode(update.previous_hash))
             ));
         }
 

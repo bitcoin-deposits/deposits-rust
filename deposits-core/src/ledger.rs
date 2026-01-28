@@ -329,7 +329,7 @@ impl Ledger {
     /// Returns zero hash if no updates exist yet.
     pub fn tail_hash(&self) -> [u8; 32] {
         self.history.last()
-            .map(|u| u.current_state_hash)
+            .map(|u| u.current_hash)
             .unwrap_or([0u8; 32])
     }
 
@@ -341,7 +341,7 @@ impl Ledger {
             return Some(0);
         }
         for update in &self.history {
-            if &update.current_state_hash == target_hash {
+            if &update.current_hash == target_hash {
                 return Some(update.sequence_number);
             }
         }
@@ -428,7 +428,7 @@ impl Ledger {
                 }
             }
             self.state.sequence = update.sequence_number;
-            self.state.hash = update.current_state_hash;
+            self.state.hash = update.current_hash;
         }
         Ok(())
     }
@@ -556,11 +556,11 @@ impl Ledger {
             message_type,
             operator_signature: [0u8; 64],
             partner_signature: [0u8; 64],
-            operator_pubkey: self.state.operator_key,
-            partner_pubkey: self.state.partner_key,
+            operator_id: self.state.operator_key,
+            partner_id: self.state.partner_key,
             sequence_number: sequence,
-            previous_state_hash: prev_hash,
-            current_state_hash: new_hash,
+            previous_hash: prev_hash,
+            current_hash: new_hash,
             timestamp: crate::now_unix_timestamp(),
         };
 
@@ -890,12 +890,12 @@ impl LedgerValidator {
             }
 
             // Check previous hash
-            if update.previous_state_hash != expected_previous_hash {
+            if update.previous_hash != expected_previous_hash {
                 return i;
             }
 
             // Next update should reference this update's hash
-            expected_previous_hash = update.current_state_hash;
+            expected_previous_hash = update.current_hash;
         }
 
         ledger.history.len()
@@ -1038,7 +1038,7 @@ impl LedgerValidator {
 
         // Search through history for matching hash
         for update in &ledger.history {
-            if update.current_state_hash == *target_hash {
+            if update.current_hash == *target_hash {
                 return Some(update.sequence_number);
             }
         }

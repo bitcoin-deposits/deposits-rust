@@ -32,7 +32,7 @@ where
     /// Load a channel ledger from storage
     /// Loads the ledger where we are the operator and partner_id is the partner
     fn load_ledger_state(&self, partner_id: PublicKey) -> Result<Option<Ledger>, DepositsError> {
-        // Key format: ledger_{hash} where hash = SHA256(operator_pubkey || partner_pubkey)
+        // Key format: ledger_{hash} where hash = SHA256(operator_id || partner_id)
         use bitcoin::hashes::{Hash, sha256};
         let mut key_input = Vec::new();
         key_input.extend_from_slice(&self.our_node_id.serialize());

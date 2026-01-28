@@ -86,7 +86,7 @@ where
         // V2 format: CollateralAttestation is inside LedgerUpdate as a LedgerOperation
         if let DepositsMessage::LedgerUpdate(ref update_msg) = &message {
             if let LedgerOperation::CollateralAttestation { collateral_operator: operator, amount, block_height, signature, ledger_hash, .. } = &update_msg.operation {
-                let collateral_partner = update_msg.partner_pubkey;
+                let collateral_partner = update_msg.partner_id;
                 // Check if we're the operator for a ledger with this sender as partner
                 // and have a pending CollateralIncrease/CollateralDecrease
                 let is_from_channel_partner = {
@@ -234,13 +234,13 @@ where
                 _ => {}
             }
             DepositsMessage::CoordinationResponse(coord_resp) => match coord_resp {
-                CoordinationResponseMsg::QuorumJoinResponse { accepted, ref members, threshold, last_sequence, current_state_hash, ref rejection_reason, .. } => {
+                CoordinationResponseMsg::QuorumJoinResponse { accepted, ref members, threshold, last_sequence, current_hash, ref rejection_reason, .. } => {
                     let msg = QuorumJoinResponseMsg {
                         accepted: *accepted,
                         members: members.clone(),
                         threshold: *threshold,
                         last_sequence: *last_sequence,
-                        current_state_hash: *current_state_hash,
+                        current_hash: *current_hash,
                         rejection_reason: rejection_reason.clone(),
                     };
                     return self.handle_quorum_join_response(&msg, sender_node_id);
@@ -364,7 +364,7 @@ where
                 LedgerOperation::CollateralAttestation { collateral_operator, amount, block_height, signature, ledger_hash } => {
                     let msg = crate::wire::messages::CollateralAttestationMsg {
                         operator: *collateral_operator,
-                        collateral_partner: update_msg.partner_pubkey,
+                        collateral_partner: update_msg.partner_id,
                         amount: *amount,
                         block_height: *block_height,
                         signature: *signature,
@@ -384,8 +384,8 @@ where
                 }
                 LedgerOperation::Tombstone { channel_id, close_reason, timestamp } => {
                     let tombstone_msg = ChannelCloseTombstoneMsg {
-                        operator_pubkey: update_msg.operator_pubkey,
-                        partner_pubkey: update_msg.partner_pubkey,
+                        operator_id: update_msg.operator_id,
+                        partner_id: update_msg.partner_id,
                         timestamp: *timestamp,
                         channel_id: *channel_id,
                         close_reason: close_reason.clone(),

@@ -180,7 +180,7 @@ where
                 let ledger_id = LedgerId::new(msg.operator_id, msg.partner_id);
                 let sequence = log.next_sequence.saturating_sub(1);
                 let state_hash = if let Some(last_update) = log.updates.last() {
-                    last_update.current_state_hash
+                    last_update.current_hash
                 } else {
                     [0u8; 32]
                 };
@@ -235,7 +235,7 @@ where
             if let Some(log) = logs.get(&(msg.operator_id, msg.partner_id)) {
                 let seq = if log.updates.is_empty() { 0 } else { log.updates.len() as u64 - 1 };
                 let hash = log.updates.last()
-                    .map(|u| u.current_state_hash)
+                    .map(|u| u.current_hash)
                     .unwrap_or([0u8; 32]);
                 (log.updates.clone(), seq, hash)
             } else {
@@ -1427,20 +1427,20 @@ where
         );
 
         // Determine our role: operator or partner
-        let we_are_operator = tombstone_msg.operator_pubkey == self.our_node_id;
-        let we_are_partner = tombstone_msg.partner_pubkey == self.our_node_id;
+        let we_are_operator = tombstone_msg.operator_id == self.our_node_id;
+        let we_are_partner = tombstone_msg.partner_id == self.our_node_id;
 
         if !we_are_operator && !we_are_partner {
             log_warn!(
                 self.logger,
                 "₿ Received tombstone for ledger we're not part of: operator={}, partner={}",
-                tombstone_msg.operator_pubkey,
-                tombstone_msg.partner_pubkey
+                tombstone_msg.operator_id,
+                tombstone_msg.partner_id
             );
             return Ok(());
         }
 
-        let ledger_key = (tombstone_msg.operator_pubkey, tombstone_msg.partner_pubkey);
+        let ledger_key = (tombstone_msg.operator_id, tombstone_msg.partner_id);
 
         if we_are_operator {
             // We are the operator - use ledgers
@@ -1501,10 +1501,10 @@ where
                 log_info!(
                     self.logger,
                     "📋 PARTNER: Creating partner ledger for tombstone from operator {}",
-                    tombstone_msg.operator_pubkey
+                    tombstone_msg.operator_id
                 );
                 Arc::new(RwLock::new(Ledger::new(
-                    tombstone_msg.operator_pubkey,
+                    tombstone_msg.operator_id,
                     self.our_node_id,
                     LedgerRole::Partner,
                     vec![],
@@ -1526,11 +1526,11 @@ where
                 message_type: message.message_type(),
                 operator_signature: [0u8; 64], // No signature for raw tombstone - will be replaced by SignedAuditUpdate if available
                 partner_signature: [0u8; 64],  // No partner signature for raw tombstone
-                operator_pubkey: tombstone_msg.operator_pubkey,
-                partner_pubkey: tombstone_msg.partner_pubkey,
+                operator_id: tombstone_msg.operator_id,
+                partner_id: tombstone_msg.partner_id,
                 sequence_number: tombstone_msg.sequence_number,
-                previous_state_hash: [0u8; 32], // Unknown from raw message
-                current_state_hash: [0u8; 32],  // Unknown from raw message
+                previous_hash: [0u8; 32], // Unknown from raw message
+                current_hash: [0u8; 32],  // Unknown from raw message
                 timestamp: tombstone_msg.timestamp,
             };
 
@@ -1559,8 +1559,8 @@ where
         use deposits_core::{Ledger, LedgerRole};
         use std::sync::{Arc, RwLock};
 
-        // Only handle if we're the partner (operator_pubkey is sender, partner_pubkey is us)
-        if signed_msg.partner_pubkey != self.our_node_id || signed_msg.operator_pubkey != sender_node_id {
+        // Only handle if we're the partner (operator_id is sender, partner_id is us)
+        if signed_msg.partner_id != self.our_node_id || signed_msg.operator_id != sender_node_id {
             return Ok(false); // Not for us as partner, continue regular processing
         }
 
@@ -1577,17 +1577,17 @@ where
             message_type: signed_msg.message_type,
             operator_signature: signed_msg.operator_signature,
             partner_signature: signed_msg.partner_signature.unwrap_or([0u8; 64]),
-            operator_pubkey: signed_msg.operator_pubkey,
-            partner_pubkey: signed_msg.partner_pubkey,
+            operator_id: signed_msg.operator_id,
+            partner_id: signed_msg.partner_id,
             sequence_number: signed_msg.sequence_number,
-            previous_state_hash: signed_msg.previous_state_hash,
-            current_state_hash: signed_msg.current_state_hash,
+            previous_hash: signed_msg.previous_hash,
+            current_hash: signed_msg.current_hash,
             timestamp: signed_msg.timestamp,
         };
 
         // Store in partner ledger using unified Ledger type
         let mut ledgers = self.ledgers.lock().unwrap();
-        let key = (signed_msg.operator_pubkey, self.our_node_id);
+        let key = (signed_msg.operator_id, self.our_node_id);
 
         // Get or create the partner ledger
         let ledger = ledgers.entry(key).or_insert_with(|| {
@@ -1595,10 +1595,10 @@ where
             log_info!(
                 self.logger,
                 "📋 PARTNER: Creating new partner ledger for operator {}",
-                signed_msg.operator_pubkey
+                signed_msg.operator_id
             );
             let new_ledger = Ledger::new(
-                signed_msg.operator_pubkey,
+                signed_msg.operator_id,
                 self.our_node_id,
                 LedgerRole::Partner,
                 vec![], // collateral partners - will be populated from updates
@@ -1806,17 +1806,17 @@ where
                 updates: response.updates.iter().map(|u| deposits_core::types::SignedLedgerUpdate {
                     message: u.message.clone(),
                     message_type: u.message_type,
-                    operator_pubkey: u.operator_pubkey,
-                    partner_pubkey: u.partner_pubkey,
+                    operator_id: u.operator_id,
+                    partner_id: u.partner_id,
                     sequence_number: u.sequence_number,
-                    previous_state_hash: u.previous_state_hash,
-                    current_state_hash: u.current_state_hash,
+                    previous_hash: u.previous_hash,
+                    current_hash: u.current_hash,
                     timestamp: u.timestamp,
                     partner_signature: u.partner_signature.unwrap_or([0u8; 64]),
                     operator_signature: u.operator_signature,
                 }).collect(),
                 current_sequence: response.updates.last().map(|u| u.sequence_number).unwrap_or(0),
-                current_hash: response.updates.last().map(|u| u.current_state_hash).unwrap_or([0u8; 32]),
+                current_hash: response.updates.last().map(|u| u.current_hash).unwrap_or([0u8; 32]),
             };
             if let Err(e) = self.handle_audit_sync_response(&core_response, sender_node_id) {
                 log_error!(

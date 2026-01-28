@@ -90,19 +90,19 @@ impl LedgerConformanceValidatorExt for LedgerConformanceValidator {
             }
 
             // 2. Check operator pubkey
-            if update.operator_pubkey != expected_operator {
+            if update.operator_id != expected_operator {
                 violations.push(ConformanceViolation::OperatorMismatch {
                     expected: expected_operator,
-                    actual: update.operator_pubkey,
+                    actual: update.operator_id,
                 });
             }
 
             // 3. Check hash chain
-            if update.previous_state_hash != previous_hash {
+            if update.previous_hash != previous_hash {
                 violations.push(ConformanceViolation::BrokenHashChain {
                     sequence: update.sequence_number,
                     expected: previous_hash,
-                    actual: update.previous_state_hash,
+                    actual: update.previous_hash,
                 });
             }
 
@@ -122,7 +122,7 @@ impl LedgerConformanceValidatorExt for LedgerConformanceValidator {
             }
 
             // Update previous hash for next iteration
-            previous_hash = update.current_state_hash;
+            previous_hash = update.current_hash;
         }
 
         // 6. Check reserves backing (100% requirement - reserves in this channel)
@@ -164,7 +164,7 @@ impl LedgerConformanceValidatorExt for LedgerConformanceValidator {
         // 8. Check final state hash if claimed
         if let Some(claimed) = claimed_state_hash {
             if !updates.is_empty() {
-                let final_hash = updates.last().unwrap().current_state_hash;
+                let final_hash = updates.last().unwrap().current_hash;
                 if final_hash != claimed {
                     violations.push(ConformanceViolation::StateHashMismatch {
                         computed: final_hash,
@@ -178,7 +178,7 @@ impl LedgerConformanceValidatorExt for LedgerConformanceValidator {
         let final_state_hash = if updates.is_empty() {
             [0u8; 32]
         } else {
-            updates.last().unwrap().current_state_hash
+            updates.last().unwrap().current_hash
         };
 
         ConformanceResult {
@@ -210,7 +210,7 @@ fn verify_update_signature(secp: &Secp256k1<bitcoin::secp256k1::All>, update: &S
     let mut signed_data = Vec::new();
     signed_data.extend_from_slice(&update.message);
     signed_data.extend_from_slice(&update.sequence_number.to_le_bytes());
-    signed_data.extend_from_slice(&update.previous_state_hash);
+    signed_data.extend_from_slice(&update.previous_hash);
 
     // Hash the signed data
     let hash = sha256::Hash::hash(&signed_data);
@@ -223,7 +223,7 @@ fn verify_update_signature(secp: &Secp256k1<bitcoin::secp256k1::All>, update: &S
     };
 
     // Verify the signature
-    secp.verify_ecdsa(&msg, &sig, &update.operator_pubkey).is_ok()
+    secp.verify_ecdsa(&msg, &sig, &update.operator_id).is_ok()
 }
 
 /// Apply an update to the replay state

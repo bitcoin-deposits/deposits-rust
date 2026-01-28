@@ -589,7 +589,7 @@ pub fn handle_quorum_join_request<C: HandlerContext>(
                 members: response.members.clone(),
                 threshold: response.threshold as u16,
                 last_sequence: response.last_sequence,
-                current_state_hash: response.current_state_hash,
+                current_hash: response.current_hash,
                 rejection_reason: response.rejection_reason.clone(),
             });
             ctx.queue_message(sender, response_msg)?;
@@ -2292,28 +2292,28 @@ pub fn handle_channel_close_tombstone<C: HandlerContext>(
     let our_node_id = ctx.our_node_id();
 
     // Determine our role: operator or partner
-    let we_are_operator = msg.operator_pubkey == our_node_id;
-    let we_are_partner = msg.partner_pubkey == our_node_id;
+    let we_are_operator = msg.operator_id == our_node_id;
+    let we_are_partner = msg.partner_id == our_node_id;
 
     if !we_are_operator && !we_are_partner {
         return Ok(HandlerResult::Rejected(format!(
             "Received tombstone for ledger we're not part of: operator={}, partner={}",
-            msg.operator_pubkey, msg.partner_pubkey
+            msg.operator_id, msg.partner_id
         )));
     }
 
     // Emit event for channel close
     ctx.emit_event(ProtocolEvent::ChannelClosed {
-        operator: msg.operator_pubkey,
-        partner: msg.partner_pubkey,
+        operator: msg.operator_id,
+        partner: msg.partner_id,
         channel_id: msg.channel_id,
         reason: msg.close_reason.clone(),
     });
 
     // Return validated data for LDK layer to append to ledger
     Ok(HandlerResult::Response(ResponseData::ChannelCloseTombstoneValidated {
-        operator: msg.operator_pubkey,
-        partner: msg.partner_pubkey,
+        operator: msg.operator_id,
+        partner: msg.partner_id,
         channel_id: msg.channel_id,
         sequence_number: msg.sequence_number,
         timestamp: msg.timestamp,
@@ -4977,8 +4977,8 @@ mod tests {
         let ctx = TestContext::new(our_node_id);
 
         let msg = ChannelCloseTombstoneMsg {
-            operator_pubkey: operator,
-            partner_pubkey: partner, // We're neither
+            operator_id: operator,
+            partner_id: partner, // We're neither
             timestamp: 1234567890,
             channel_id: [0xAB; 32],
             close_reason: Some("test close".to_string()),
@@ -5000,8 +5000,8 @@ mod tests {
 
         let channel_id = [0xAB; 32];
         let msg = ChannelCloseTombstoneMsg {
-            operator_pubkey: our_node_id, // We are operator
-            partner_pubkey: partner,
+            operator_id: our_node_id, // We are operator
+            partner_id: partner,
             timestamp: 1234567890,
             channel_id,
             close_reason: Some("test close".to_string()),
@@ -5045,8 +5045,8 @@ mod tests {
 
         let channel_id = [0xCD; 32];
         let msg = ChannelCloseTombstoneMsg {
-            operator_pubkey: operator,
-            partner_pubkey: our_node_id, // We are partner
+            operator_id: operator,
+            partner_id: our_node_id, // We are partner
             timestamp: 1234567890,
             channel_id,
             close_reason: None,

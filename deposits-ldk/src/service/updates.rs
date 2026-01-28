@@ -47,10 +47,10 @@ where
     let mut ack_reached = false;
     let mut commit_reached = false;
     let ack_seq = all_updates.iter()
-        .find(|u| u.current_state_hash == ack_hash)
+        .find(|u| u.current_hash == ack_hash)
         .map(|u| u.sequence_number);
     let commit_seq = all_updates.iter()
-        .find(|u| u.current_state_hash == commit_hash)
+        .find(|u| u.current_hash == commit_hash)
         .map(|u| u.sequence_number);
 
     // Apply pagination
@@ -83,8 +83,8 @@ where
                 operation_type,
                 signature: update.operator_signature.to_vec(),
                 timestamp: update.timestamp,
-                previous_hash: hex::encode(update.previous_state_hash),
-                current_hash: hex::encode(update.current_state_hash),
+                previous_hash: hex::encode(update.previous_hash),
+                current_hash: hex::encode(update.current_hash),
                 acknowledged,
                 committed,
                 amount_sat,

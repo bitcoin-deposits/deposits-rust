@@ -260,11 +260,11 @@ where
                     message_type: signed_update.message_type,
                     operator_signature: signed_update.operator_signature,
                     partner_signature: Some(signed_update.partner_signature),
-                    operator_pubkey: signed_update.operator_pubkey,
-                    partner_pubkey: signed_update.partner_pubkey,
+                    operator_id: signed_update.operator_id,
+                    partner_id: signed_update.partner_id,
                     sequence_number: signed_update.sequence_number,
-                    previous_state_hash: signed_update.previous_state_hash,
-                    current_state_hash: signed_update.current_state_hash,
+                    previous_hash: signed_update.previous_hash,
+                    current_hash: signed_update.current_hash,
                     timestamp: signed_update.timestamp,
                     operation,
                 })
@@ -310,7 +310,7 @@ where
         &self,
         partner_id: PublicKey,
         fulfill_msg: crate::wire::messages::SendingFulfillPaymentMsg,
-        current_state_hash: [u8; 32],
+        current_hash: [u8; 32],
     ) -> Result<(), DepositsError> {
         
 
@@ -344,12 +344,12 @@ where
 
         // Get sequence number and previous hash from audit log
         let ledger_key = (self.our_node_id, partner_id);
-        let (sequence_number, previous_state_hash) = {
+        let (sequence_number, previous_hash) = {
             let logs = self.signed_update_logs.lock().unwrap();
             if let Some(log) = logs.get(&ledger_key) {
                 let seq = log.next_sequence;
                 let prev_hash = log.updates.last()
-                    .map(|u| u.current_state_hash)
+                    .map(|u| u.current_hash)
                     .unwrap_or([0u8; 32]);
                 (seq, prev_hash)
             } else {
@@ -381,8 +381,8 @@ where
             &message,
             partner_id,
             sequence_number,
-            previous_state_hash,
-            current_state_hash,
+            previous_hash,
+            current_hash,
             None, // Internal broadcast path - no partner signature
         )?;
 
@@ -406,11 +406,11 @@ where
                 message_type: signed_update.message_type,
                 operator_signature: signed_update.operator_signature,
                 partner_signature: Some(signed_update.partner_signature),
-                operator_pubkey: signed_update.operator_pubkey,
-                partner_pubkey: signed_update.partner_pubkey,
+                operator_id: signed_update.operator_id,
+                partner_id: signed_update.partner_id,
                 sequence_number: signed_update.sequence_number,
-                previous_state_hash: signed_update.previous_state_hash,
-                current_state_hash: signed_update.current_state_hash,
+                previous_hash: signed_update.previous_hash,
+                current_hash: signed_update.current_hash,
                 timestamp: signed_update.timestamp,
                 operation: LedgerOperation::PaymentFulfill {
                     pubkey: fulfill_msg.pubkey,

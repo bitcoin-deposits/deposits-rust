@@ -264,7 +264,7 @@ impl QuorumManager {
                 members: quorum.member_pubkeys(),
                 threshold: quorum.config.threshold,
                 last_sequence: 0,
-                current_state_hash: [0u8; 32],
+                current_hash: [0u8; 32],
                 rejection_reason: Some("Already a member".to_string()),
             });
         }
@@ -276,7 +276,7 @@ impl QuorumManager {
                 members: quorum.member_pubkeys(),
                 threshold: quorum.config.threshold,
                 last_sequence: 0,
-                current_state_hash: [0u8; 32],
+                current_hash: [0u8; 32],
                 rejection_reason: Some("Quorum is full".to_string()),
             });
         }
@@ -296,7 +296,7 @@ impl QuorumManager {
             members: quorum.member_pubkeys(),
             threshold: quorum.config.threshold,
             last_sequence: 0, // TODO: Get from ledger
-            current_state_hash: [0u8; 32], // TODO: Get from ledger
+            current_hash: [0u8; 32], // TODO: Get from ledger
             rejection_reason: None,
         })
     }

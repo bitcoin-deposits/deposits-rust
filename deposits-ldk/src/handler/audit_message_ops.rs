@@ -39,8 +39,8 @@ where
                 self.logger,
                 "📋 AUDIT: Received ledger update seq={} from operator {} -> partner {}",
                 update_msg.sequence_number,
-                update_msg.operator_pubkey,
-                update_msg.partner_pubkey
+                update_msg.operator_id,
+                update_msg.partner_id
             );
 
             // Convert to SignedLedgerUpdate and verify/store
@@ -49,11 +49,11 @@ where
                 message_type: update_msg.message_type,
                 operator_signature: update_msg.operator_signature,
                 partner_signature: update_msg.partner_signature.unwrap_or([0u8; 64]),
-                operator_pubkey: update_msg.operator_pubkey,
-                partner_pubkey: update_msg.partner_pubkey,
+                operator_id: update_msg.operator_id,
+                partner_id: update_msg.partner_id,
                 sequence_number: update_msg.sequence_number,
-                previous_state_hash: update_msg.previous_state_hash,
-                current_state_hash: update_msg.current_state_hash,
+                previous_hash: update_msg.previous_hash,
+                current_hash: update_msg.current_hash,
                 timestamp: update_msg.timestamp,
             };
 

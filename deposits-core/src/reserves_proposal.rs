@@ -63,7 +63,7 @@ pub struct ReservesOutputProposal {
     /// Amount to be held in reserves (in satoshis)
     pub amount: u64,
     /// The Lightning partner this reserves output is shared with
-    pub partner_pubkey: PublicKey,
+    pub partner_id: PublicKey,
     /// Ledger ID that disambiguates multiple ledgers
     pub ledger_id: u16,
     /// Taproot address where funds will be sent (as string)
@@ -261,7 +261,7 @@ mod tests {
         let mut proposal = ReservesOutputProposal {
             proposal_id: [0u8; 32],
             amount: 50000,
-            partner_pubkey: partner,
+            partner_id: partner,
             ledger_id: 0,
             reserves_address: "tb1qtest".to_string(),
             spending_policy: SpendingPolicy {
@@ -317,7 +317,7 @@ mod tests {
         let proposal = ReservesOutputProposal {
             proposal_id: [0u8; 32],
             amount: 50000,
-            partner_pubkey: partner,
+            partner_id: partner,
             ledger_id: 0,
             reserves_address: "tb1qtest".to_string(),
             spending_policy: SpendingPolicy::default_with_timeout(1000),

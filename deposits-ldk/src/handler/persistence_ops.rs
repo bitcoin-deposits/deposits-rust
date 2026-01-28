@@ -294,7 +294,7 @@ where
 
     /// Persist a channel ledger to storage
     pub(super) fn persist_ledger_state(&self, ledger: &Ledger) -> Result<(), DepositsError> {
-        // Key format: ledger_{hash} where hash = SHA256(operator_pubkey || partner_pubkey)
+        // Key format: ledger_{hash} where hash = SHA256(operator_id || partner_id)
         // This keeps the key short while still distinguishing Alice->Eve from Eve->Alice
         use bitcoin::hashes::{Hash, sha256};
         let mut key_input = Vec::new();

@@ -26,10 +26,10 @@ where
             let ledger = ledger_arc.read().unwrap();
 
             let collateral_partners: Vec<CollateralPartnerInfo> = ledger.state.collateral_partners.iter()
-                .map(|partner_pubkey| {
-                    let attestation = ledger.state.collateral_attestations.get(partner_pubkey);
+                .map(|partner_id| {
+                    let attestation = ledger.state.collateral_attestations.get(partner_id);
                     CollateralPartnerInfo {
-                        pubkey: *partner_pubkey,
+                        pubkey: *partner_id,
                         collateral_amount: attestation.map(|a| a.amount).unwrap_or(0),
                         block_height: attestation.map(|a| a.block_height).unwrap_or(0),
                         has_attestation: attestation.is_some(),
