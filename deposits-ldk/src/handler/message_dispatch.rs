@@ -537,7 +537,7 @@ where
                         let result = if resp_msg.accepted {
                             Ok(())
                         } else {
-                            Err(resp_msg.error_reason.clone().unwrap_or_else(|| "Handshake rejected".to_string()))
+                            Err(resp_msg.error.clone().unwrap_or_else(|| "Handshake rejected".to_string()))
                         };
                         let _ = oneshot_tx.send(result);
                         log_info!(self.logger, "🟢 Notified handshake waiting task (accepted={})", resp_msg.accepted);
@@ -551,7 +551,7 @@ where
                     log_info!(self.logger, "✅ Ledger handshake accepted by partner {}", sender_node_id);
                 } else {
                     log_warn!(self.logger, "❌ Ledger handshake rejected by partner {}: {:?}",
-                        sender_node_id, resp_msg.error_reason);
+                        sender_node_id, resp_msg.error);
                 }
 
                 return Ok(());

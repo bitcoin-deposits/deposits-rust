@@ -709,82 +709,11 @@ impl DepositsMessage {
 // These match the field names used throughout the codebase.
 // They can be converted to/from deposits_core V2 types.
 
-/// Handshake message (local type with expected field names)
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HandshakeMsg {
-    pub protocol_version: u16,
-    pub min_protocol_version: u16,
-    pub features: u32,
-    pub public_key: PublicKey,
-    pub partner_id: PublicKey,
-    pub ledger_address: String,
-    pub funding_txid: [u8; 32],
-    pub funding_vout: u16,
-}
+/// Handshake message - now uses core type directly
+pub type HandshakeMsg = HandshakeMsgV2;
 
-impl From<HandshakeMsgV2> for HandshakeMsg {
-    fn from(v2: HandshakeMsgV2) -> Self {
-        Self {
-            protocol_version: v2.protocol_version,
-            min_protocol_version: v2.min_protocol_version,
-            features: v2.features,
-            public_key: v2.operator_id,
-            partner_id: v2.partner_id,
-            ledger_address: v2.ledger_address,
-            funding_txid: v2.funding_txid,
-            funding_vout: v2.funding_vout,
-        }
-    }
-}
-
-impl From<HandshakeMsg> for HandshakeMsgV2 {
-    fn from(local: HandshakeMsg) -> Self {
-        Self {
-            protocol_version: local.protocol_version,
-            min_protocol_version: local.min_protocol_version,
-            features: local.features,
-            operator_id: local.public_key,
-            partner_id: local.partner_id,
-            ledger_address: local.ledger_address,
-            funding_txid: local.funding_txid,
-            funding_vout: local.funding_vout,
-        }
-    }
-}
-
-/// Handshake response message (local type)
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HandshakeResponseMsg {
-    pub protocol_version: u16,
-    pub accepted: bool,
-    pub error_reason: Option<String>,
-    pub public_key: PublicKey,
-    pub partner_id: PublicKey,
-}
-
-impl From<HandshakeResponseMsgV2> for HandshakeResponseMsg {
-    fn from(v2: HandshakeResponseMsgV2) -> Self {
-        Self {
-            protocol_version: v2.protocol_version,
-            accepted: v2.accepted,
-            error_reason: v2.error,
-            public_key: v2.partner_id,
-            partner_id: v2.partner_id,
-        }
-    }
-}
-
-impl From<HandshakeResponseMsg> for HandshakeResponseMsgV2 {
-    fn from(local: HandshakeResponseMsg) -> Self {
-        Self {
-            request_hash: [0u8; 32], // Computed at send time
-            protocol_version: local.protocol_version,
-            accepted: local.accepted,
-            error: local.error_reason,
-            partner_id: local.partner_id,
-        }
-    }
-}
+/// Handshake response message - now uses core type directly
+pub type HandshakeResponseMsg = HandshakeResponseMsgV2;
 
 /// Ledger update message (local type with expected field names)
 #[derive(Clone, Debug, PartialEq, Eq)]

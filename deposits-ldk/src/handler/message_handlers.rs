@@ -1654,11 +1654,11 @@ where
                     Err(e) => {
                         log_error!(self.logger, "Invalid network for ledger address: {}", e);
                         let response = DepositsMessage::HandshakeResponse(HandshakeResponseMsg {
+                            request_hash: [0u8; 32],
                             protocol_version: init_msg.protocol_version,
                             accepted: false,
-                            error_reason: Some(format!("Invalid network: {}", e)),
-                            public_key: self.our_node_id,
-                            partner_id: sender_node_id,
+                            error: Some(format!("Invalid network: {}", e)),
+                            partner_id: self.our_node_id,
                         });
                         let _ = self.send_message(sender_node_id, response);
                         return Ok(());
@@ -1667,11 +1667,11 @@ where
                 Err(e) => {
                     log_error!(self.logger, "Failed to parse ledger address: {}", e);
                     let response = DepositsMessage::HandshakeResponse(HandshakeResponseMsg {
+                        request_hash: [0u8; 32],
                         protocol_version: init_msg.protocol_version,
                         accepted: false,
-                        error_reason: Some(format!("Invalid address: {}", e)),
-                        public_key: self.our_node_id,
-                        partner_id: sender_node_id,
+                        error: Some(format!("Invalid address: {}", e)),
+                        partner_id: self.our_node_id,
                     });
                     let _ = self.send_message(sender_node_id, response);
                     return Ok(());
@@ -1684,11 +1684,11 @@ where
 
                 // Send rejection response
                 let response = DepositsMessage::HandshakeResponse(HandshakeResponseMsg {
+                    request_hash: [0u8; 32],
                     protocol_version: init_msg.protocol_version,
                     accepted: false,
-                    error_reason: Some(format!("Failed to initialize ledger: {}", e)),
-                    public_key: self.our_node_id,
-                    partner_id: sender_node_id,
+                    error: Some(format!("Failed to initialize ledger: {}", e)),
+                    partner_id: self.our_node_id,
                 });
                 let _ = self.send_message(sender_node_id, response);
                 return Ok(());
@@ -1696,11 +1696,11 @@ where
 
             // Send acceptance response
             let response = DepositsMessage::HandshakeResponse(HandshakeResponseMsg {
+                request_hash: [0u8; 32],
                 protocol_version: init_msg.protocol_version,
                 accepted: true,
-                error_reason: None,
-                public_key: self.our_node_id,
-                partner_id: sender_node_id,
+                error: None,
+                partner_id: self.our_node_id,
             });
 
             println!("🟢 HANDSHAKE_RESPONSE: Sending LedgerOpenResponse (accepted=true) to {}", sender_node_id);
@@ -1722,11 +1722,11 @@ where
         } else {
             // Send rejection response - ledger already exists
             let response = DepositsMessage::HandshakeResponse(HandshakeResponseMsg {
+                request_hash: [0u8; 32],
                 protocol_version: init_msg.protocol_version,
                 accepted: false,
-                error_reason: Some("Ledger already exists".to_string()),
-                public_key: self.our_node_id,
-                partner_id: sender_node_id,
+                error: Some("Ledger already exists".to_string()),
+                partner_id: self.our_node_id,
             });
 
             if let Err(e) = self.send_message(sender_node_id, response) {
