@@ -760,6 +760,73 @@ where
             state_hash,
         ).map_err(|e| format!("{:?}", e))
     }
+
+    // ========================================================================
+    // Vote Request Methods
+    // ========================================================================
+
+    fn init_vote_round(
+        &self,
+        vote_round_id: [u8; 32],
+        operator: PublicKey,
+        partner: PublicKey,
+        sequence_number: u64,
+        state_hash: [u8; 32],
+        claimed_reserves: u64,
+        reserves_outpoint: Vec<u8>,
+        destination_script: Vec<u8>,
+        fee_rate_sat_vbyte: u64,
+        threshold: usize,
+    ) -> bool {
+        use super::core::VoteRoundState;
+        use std::collections::HashMap;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let mut rounds = self.pending_vote_rounds.lock().unwrap();
+        rounds.entry(vote_round_id).or_insert_with(|| {
+            VoteRoundState {
+                operator_id: operator,
+                partner_id: partner,
+                sequence_number,
+                state_hash,
+                claimed_reserves,
+                reserves_outpoint,
+                destination_script,
+                fee_rate_sat_vbyte,
+                threshold,
+                votes: HashMap::new(),
+                tx_broadcast: false,
+                created_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
+            }
+        });
+        true
+    }
+
+    fn sign_quorum_vote(
+        &self,
+        vote_round_id: &[u8; 32],
+        vote: bool,
+        sequence: u64,
+        state_hash: &[u8; 32],
+    ) -> Option<[u8; 64]> {
+        use bitcoin::hashes::{Hash, sha256};
+        use bitcoin::secp256k1::{Secp256k1, Message};
+
+        let secret = self.node_secret_key.as_ref()?;
+
+        let mut data = Vec::new();
+        data.extend_from_slice(vote_round_id);
+        data.push(if vote { 1 } else { 0 });
+        data.extend_from_slice(&sequence.to_le_bytes());
+        data.extend_from_slice(state_hash);
+
+        let secp = Secp256k1::new();
+        let msg_hash = Message::from_digest(sha256::Hash::hash(&data).to_byte_array());
+        let sig = secp.sign_ecdsa(&msg_hash, secret);
+        let mut bytes = [0u8; 64];
+        bytes.copy_from_slice(&sig.serialize_compact());
+        Some(bytes)
+    }
 }
 
 // NOTE: CoreHandlerExt trait removed - dispatch calls core handlers directly via providers

@@ -20,10 +20,7 @@ use deposits_core::messages::{CoordinationMsg, CoordinationResponseMsg};
 use deposits_core::message_handlers::{self as core_handlers, HandlerResult, ResponseData};
 use deposits_core::{log_debug, log_error, log_info, log_warn};
 use lightning::util::logger::Logger as LdkLogger;
-use crate::wire::messages::{
-    QuorumVoteRequestMsg,
-    ChannelCloseTombstoneMsg,
-};
+use crate::wire::messages::ChannelCloseTombstoneMsg;
 
 use std::ops::Deref;
 
@@ -38,104 +35,7 @@ where
     // NOTE: handle_quorum_join_request removed - dispatch calls core directly via send_quorum_state_sync provider
     // NOTE: handle_quorum_join_response removed - inlined in dispatch (just logging)
     // NOTE: handle_quorum_state_sync removed - dispatch calls core directly via verify_and_store_signed_update and update_quorum_member_state providers
-
-    /// Handle QuorumVoteRequest message
-    /// Handle QuorumVoteRequest message.
-    pub(super) fn handle_quorum_vote_request(
-        &self,
-        msg: &QuorumVoteRequestMsg,
-        sender_node_id: PublicKey,
-    ) -> Result<(), LightningError> {
-        log_info!(self.logger, "📋 QUORUM: Vote request for ({}, {}) seq={}", msg.operator_id, msg.partner_id, msg.sequence_number);
-
-        // Get our local state
-        let (our_seq, our_hash) = match self.get_local_ledger_state(&msg.operator_id, &msg.partner_id) {
-            Some(state) => state,
-            None => {
-                log_info!(self.logger, "📋 QUORUM: No local state, abstaining");
-                return Ok(());
-            }
-        };
-
-        // Initialize vote round
-        self.init_vote_round(msg);
-
-        // Validate and create vote
-        let is_conforming = true; // TODO: implement full conformance validation
-        let vote = is_conforming && our_hash == msg.state_hash;
-        let evidence = if !vote { Some(b"state_mismatch".to_vec()) } else { None };
-
-        // Sign the vote
-        let signature = match self.sign_vote(&msg.vote_round_id, vote, our_seq, &our_hash) {
-            Some(sig) => sig,
-            None => {
-                log_warn!(self.logger, "📋 QUORUM: Cannot sign vote - no secret key");
-                return Ok(());
-            }
-        };
-
-        // Send vote
-        let vote_msg = DepositsMessage::Coordination(CoordinationMsg::QuorumVote {
-            vote_round_id: msg.vote_round_id, voter_pubkey: self.our_node_id, vote,
-            voter_sequence: our_seq, voter_state_hash: our_hash, evidence, signature,
-            spend_signature: None, // TODO: implement spend signing
-        });
-
-        log_info!(self.logger, "📋 QUORUM: Sending vote (conforming={})", vote);
-        if let Err(e) = self.send_message(sender_node_id, vote_msg) {
-            log_warn!(self.logger, "📋 QUORUM: Failed to send vote: {:?}", e);
-        }
-
-        Ok(())
-    }
-
-    fn get_local_ledger_state(&self, operator: &PublicKey, partner: &PublicKey) -> Option<(u64, [u8; 32])> {
-        let logs = self.signed_update_logs.lock().unwrap();
-        logs.get(&(*operator, *partner)).map(|log| {
-            let seq = if log.updates.is_empty() { 0 } else { log.updates.len() as u64 - 1 };
-            let hash = log.updates.last().map(|u| u.current_hash).unwrap_or([0u8; 32]);
-            (seq, hash)
-        })
-    }
-
-    fn init_vote_round(&self, msg: &QuorumVoteRequestMsg) {
-        use super::core::VoteRoundState;
-        use std::collections::HashMap;
-        use std::time::{SystemTime, UNIX_EPOCH};
-
-        let mut rounds = self.pending_vote_rounds.lock().unwrap();
-        rounds.entry(msg.vote_round_id).or_insert_with(|| {
-            VoteRoundState {
-                operator_id: msg.operator_id, partner_id: msg.partner_id,
-                sequence_number: msg.sequence_number, state_hash: msg.state_hash,
-                claimed_reserves: msg.claimed_reserves, reserves_outpoint: msg.reserves_outpoint.clone(),
-                destination_script: msg.destination_script.clone(), fee_rate_sat_vbyte: msg.fee_rate_sat_vbyte,
-                threshold: 2, votes: HashMap::new(), tx_broadcast: false,
-                created_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
-            }
-        });
-    }
-
-    fn sign_vote(&self, round_id: &[u8; 32], vote: bool, seq: u64, hash: &[u8; 32]) -> Option<[u8; 64]> {
-        use bitcoin::hashes::{Hash, sha256};
-        use bitcoin::secp256k1::{Secp256k1, Message};
-
-        let secret = self.node_secret_key.as_ref()?;
-
-        let mut data = Vec::new();
-        data.extend_from_slice(round_id);
-        data.push(if vote { 1 } else { 0 });
-        data.extend_from_slice(&seq.to_le_bytes());
-        data.extend_from_slice(hash);
-
-        let secp = Secp256k1::new();
-        let msg_hash = Message::from_digest(sha256::Hash::hash(&data).to_byte_array());
-        let sig = secp.sign_ecdsa(&msg_hash, secret);
-        let mut bytes = [0u8; 64];
-        bytes.copy_from_slice(&sig.serialize_compact());
-        Some(bytes)
-    }
-
+    // NOTE: handle_quorum_vote_request removed - dispatch calls core directly via init_vote_round and sign_quorum_vote providers
     // NOTE: handle_quorum_vote removed - dispatch calls core directly via add_quorum_vote provider
     // NOTE: handle_quorum_membership_change removed - inlined in dispatch (just logging)
 

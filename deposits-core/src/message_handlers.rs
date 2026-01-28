@@ -50,7 +50,7 @@ use crate::operation_validation::{
     validate_reserves_add, validate_reserves_increase, validate_reserves_decrease,
     validate_fee_collect, validate_ledger_close, validate_cosign_invoice,
 };
-use crate::messages::{DepositsMessage, CoordinationResponseMsg, SyncMsg, RecoveryResponseMsg};
+use crate::messages::{DepositsMessage, CoordinationMsg, CoordinationResponseMsg, SyncMsg, RecoveryResponseMsg};
 
 // ============================================================================
 // Handler Result Types
@@ -627,37 +627,60 @@ pub fn handle_quorum_join_request<C: HandlerContext>(
 pub fn handle_quorum_vote_request<C: HandlerContext>(
     ctx: &C,
     msg: &QuorumVoteRequestMsg,
-    _sender: PublicKey,
+    sender: PublicKey,
 ) -> Result<HandlerResult, HandlerError> {
-    // Get our node ID (for future use in signing)
-    let _our_node_id = ctx.our_node_id();
+    let our_node_id = ctx.our_node_id();
 
-    // Get the ledger to verify we have state for this ledger
-    let ledger_arc = ctx.get_ledger(&msg.operator_id, &msg.partner_id)
-        .ok_or(HandlerError::LedgerNotFound {
-            operator: msg.operator_id,
-            partner: msg.partner_id,
-        })?;
-
-    // Read ledger state for validation
-    let (our_sequence, our_state_hash) = {
-        let ledger = ledger_arc.read().map_err(|_|
-            HandlerError::Internal("Failed to acquire ledger lock".to_string())
-        )?;
-        (ledger.sequence(), ledger.hash())
+    // Get local state from signed update log (more accurate than ledger state)
+    let (our_sequence, our_state_hash) = match ctx.get_signed_update_log_state(&msg.operator_id, &msg.partner_id) {
+        Some(state) => state,
+        None => {
+            // No local state, abstain from voting
+            return Ok(HandlerResult::Ok);
+        }
     };
 
-    // Basic validation: check sequence numbers match
-    let _vote = our_state_hash == msg.state_hash && our_sequence >= msg.sequence_number;
+    // Initialize vote round for tracking
+    ctx.init_vote_round(
+        msg.vote_round_id,
+        msg.operator_id,
+        msg.partner_id,
+        msg.sequence_number,
+        msg.state_hash,
+        msg.claimed_reserves,
+        msg.reserves_outpoint.clone(),
+        msg.destination_script.clone(),
+        msg.fee_rate_sat_vbyte,
+        2, // Default threshold
+    );
 
-    // In the actual implementation, we would:
-    // 1. Run full conformance validation
-    // 2. Sign the vote
-    // 3. Sign the spend transaction if conforming
-    // 4. Queue the vote message
-    //
-    // For now, this demonstrates the structure - the full implementation
-    // with signing happens in the LDK layer which has access to keys.
+    // Validate and create vote
+    let is_conforming = true; // TODO: implement full conformance validation
+    let vote = is_conforming && our_state_hash == msg.state_hash;
+    let evidence = if !vote { Some(b"state_mismatch".to_vec()) } else { None };
+
+    // Sign the vote
+    let signature = match ctx.sign_quorum_vote(&msg.vote_round_id, vote, our_sequence, &our_state_hash) {
+        Some(sig) => sig,
+        None => {
+            // Cannot sign - no secret key available
+            return Ok(HandlerResult::Ok);
+        }
+    };
+
+    // Build and queue vote message
+    let vote_msg = DepositsMessage::Coordination(CoordinationMsg::QuorumVote {
+        vote_round_id: msg.vote_round_id,
+        voter_pubkey: our_node_id,
+        vote,
+        voter_sequence: our_sequence,
+        voter_state_hash: our_state_hash,
+        evidence,
+        signature,
+        spend_signature: None, // TODO: implement spend signing
+    });
+
+    let _ = ctx.queue_message(sender, vote_msg);
 
     Ok(HandlerResult::Ok)
 }

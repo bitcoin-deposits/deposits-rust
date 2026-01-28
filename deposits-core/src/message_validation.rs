@@ -437,6 +437,43 @@ pub trait HandlerContext: ValidationContext {
         let _ = (operator, partner, sequence, state_hash);
         Ok(()) // Default: no-op
     }
+
+    // ========================================================================
+    // Vote Request Methods
+    // ========================================================================
+
+    /// Initialize a vote round when we receive a vote request.
+    /// Returns true if the round was created (or already exists).
+    fn init_vote_round(
+        &self,
+        vote_round_id: [u8; 32],
+        operator: PublicKey,
+        partner: PublicKey,
+        sequence_number: u64,
+        state_hash: [u8; 32],
+        claimed_reserves: u64,
+        reserves_outpoint: Vec<u8>,
+        destination_script: Vec<u8>,
+        fee_rate_sat_vbyte: u64,
+        threshold: usize,
+    ) -> bool {
+        let _ = (vote_round_id, operator, partner, sequence_number, state_hash,
+                 claimed_reserves, reserves_outpoint, destination_script, fee_rate_sat_vbyte, threshold);
+        false // Default: not implemented
+    }
+
+    /// Sign a quorum vote.
+    /// Returns 64-byte signature or None if signing unavailable.
+    fn sign_quorum_vote(
+        &self,
+        vote_round_id: &[u8; 32],
+        vote: bool,
+        sequence: u64,
+        state_hash: &[u8; 32],
+    ) -> Option<[u8; 64]> {
+        let _ = (vote_round_id, vote, sequence, state_hash);
+        None // Default: not implemented
+    }
 }
 
 // ============================================================================

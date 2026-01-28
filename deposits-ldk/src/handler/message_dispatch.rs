@@ -179,6 +179,8 @@ where
                     return Ok(());
                 }
                 CoordinationMsg::QuorumVoteRequest { vote_round_id, operator_id, partner_id, sequence_number, state_hash, claimed_reserves, ref collateral_amounts, ref reserves_outpoint, ref destination_script, fee_rate_sat_vbyte, .. } => {
+                    // Direct dispatch to core - core handles vote signing and message sending via providers
+                    log_info!(self.logger, "📋 QUORUM: Vote request for ({}, {}) seq={}", operator_id, partner_id, sequence_number);
                     let msg = QuorumVoteRequestMsg {
                         operator_id: *operator_id,
                         partner_id: *partner_id,
@@ -191,7 +193,11 @@ where
                         destination_script: destination_script.clone(),
                         fee_rate_sat_vbyte: *fee_rate_sat_vbyte,
                     };
-                    return self.handle_quorum_vote_request(&msg, sender_node_id);
+                    match deposits_core::handle_quorum_vote_request(self, &msg, sender_node_id) {
+                        Ok(_) => log_info!(self.logger, "📋 QUORUM: Vote request processed"),
+                        Err(e) => log_warn!(self.logger, "📋 QUORUM: Vote request failed: {:?}", e),
+                    }
+                    return Ok(());
                 }
                 CoordinationMsg::QuorumVote { vote_round_id, voter_pubkey, vote, spend_signature, .. } => {
                     // Direct dispatch to core - core handles vote tracking and event emission via providers
