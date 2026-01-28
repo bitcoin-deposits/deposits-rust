@@ -1188,187 +1188,116 @@ where
 
     /// Handle UncreditedPayment accusation message (0x8035)
     /// Partner broadcasting proof of unpaid settlement
+    /// Handle UncreditedPayment accusation message.
+    ///
+    /// Core handler validates preimage and partner, LDK layer handles force-close and rebroadcast.
     pub(super) fn handle_uncredited_payment(
         &self,
         msg: &UncreditedPaymentMsg,
         sender_node_id: PublicKey,
     ) -> Result<(), LightningError> {
-        use bitcoin::hashes::{sha256, Hash};
-        use super::messages::DepositsMessage;
-
         log_info!(
             self.logger,
             "⚠️ ACCUSATION: Received UncreditedPayment from {} - operator={}, payment_hash={}, amount={}",
-            sender_node_id,
-            msg.operator,
-            hex::encode(&msg.payment_hash[..8]),
-            msg.amount_msat
+            sender_node_id, msg.operator, hex::encode(&msg.payment_hash[..8]), msg.amount_msat
         );
 
-        // 1. Verify preimage matches payment hash
-        let computed_hash = sha256::Hash::hash(&msg.preimage);
-        if computed_hash.as_byte_array() != &msg.payment_hash {
-            log_warn!(
-                self.logger,
-                "⚠️ ACCUSATION: Invalid preimage - computed hash {} doesn't match payment_hash {}",
-                hex::encode(computed_hash.as_byte_array()),
-                hex::encode(&msg.payment_hash)
-            );
-            return Ok(());
-        }
-
-        // 2. Verify the accuser is the partner for this ledger
-        if msg.partner != sender_node_id {
-            log_warn!(
-                self.logger,
-                "⚠️ ACCUSATION: Sender {} is not the claimed partner {}",
-                sender_node_id,
-                msg.partner
-            );
-            return Ok(());
-        }
-
-        // 3. Check if we have the relevant ledger
-        let ledger_key = (msg.operator, msg.partner);
-        let has_credit = {
-            let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&ledger_key) {
-                let ledger = ledger_arc.read().unwrap();
-                // Check if there's a credit for this payment hash in the ledger
-                ledger.has_credit_for_payment(&msg.payment_hash)
-            } else {
-                // We don't have this ledger - store accusation for later verification
-                false
+        // Delegate to core handler for validation
+        match core_handlers::handle_uncredited_payment(self, msg, sender_node_id) {
+            Ok(HandlerResult::Rejected(reason)) => {
+                log_warn!(self.logger, "⚠️ ACCUSATION: Rejected: {}", reason);
+                return Ok(());
             }
-        };
-
-        if has_credit {
-            log_info!(
-                self.logger,
-                "⚠️ ACCUSATION: Ledger ({}, {}) has a credit for payment_hash {} - accusation appears invalid",
-                msg.operator,
-                msg.partner,
-                hex::encode(&msg.payment_hash[..8])
-            );
-            return Ok(());
-        }
-
-        // 4. Store the accusation for dispute resolution
-        // TODO: Implement accusation storage (AccusationManager)
-        log_warn!(
-            self.logger,
-            "⚠️ ACCUSATION: Storing uncredited payment accusation - operator={}, deposit={}, amount={}, settlement_seq={}",
-            msg.operator,
-            msg.deposit_pubkey,
-            msg.amount_msat,
-            msg.settlement_sequence
-        );
-
-        // 5. Emit event for node layer
-        let _ = self.event_queue.emit_deposits_event(
-            super::events::DepositsEvent::UncreditedPaymentAccusation {
-                operator: msg.operator,
-                partner: msg.partner,
-                payment_hash: msg.payment_hash,
-                deposit_pubkey: msg.deposit_pubkey,
-                amount_msat: msg.amount_msat,
-                settlement_sequence: msg.settlement_sequence,
-            },
-        );
-
-        // 6. If we have our own channel with this operator, force-close it and rebroadcast
-        // This protects us from a proven bad actor
-        if msg.operator != self.our_node_id {
-            // Check if we have a ledger with this operator (we are their partner)
-            let our_ledger_key = (msg.operator, self.our_node_id);
-            let have_channel_with_operator = {
-                let ledgers = self.ledgers.lock().unwrap();
-                ledgers.contains_key(&our_ledger_key)
-            };
-
-            if have_channel_with_operator {
-                log_warn!(
-                    self.logger,
-                    "⚠️ ACCUSATION: We have a channel with accused operator {} - force-closing for protection",
-                    msg.operator
+            Err(e) => {
+                log_error!(self.logger, "⚠️ ACCUSATION: Handler error: {:?}", e);
+                return Ok(());
+            }
+            Ok(HandlerResult::Response(ResponseData::UncreditedPaymentAccusation {
+                operator, partner, payment_hash, deposit_pubkey, amount_msat, settlement_sequence
+            })) => {
+                // Emit event for node layer
+                let _ = self.event_queue.emit_deposits_event(
+                    super::events::DepositsEvent::UncreditedPaymentAccusation {
+                        operator, partner, payment_hash, deposit_pubkey, amount_msat, settlement_sequence,
+                    },
                 );
 
-                // Force-close our channel with this operator
-                if let Some(ref cm) = self.channel_manager {
-                    let channels = cm.list_channels();
-                    if let Some(channel) = channels.iter().find(|c| c.counterparty_node_id == msg.operator) {
-                        let reason = format!(
-                            "Fraud proof received: operator {} accused of uncredited payment (payment_hash={})",
-                            msg.operator,
-                            hex::encode(&msg.payment_hash[..8])
-                        );
-
-                        if let Err(e) = cm.force_close_broadcasting_latest_txn(
-                            &channel.channel_id,
-                            &msg.operator,
-                            reason,
-                        ) {
-                            log_error!(
-                                self.logger,
-                                "⚠️ ACCUSATION: Failed to force-close our channel with operator {}: {:?}",
-                                msg.operator,
-                                e
-                            );
-                        } else {
-                            log_warn!(
-                                self.logger,
-                                "⚠️ ACCUSATION: Force-closed our channel with operator {} due to fraud proof",
-                                msg.operator
-                            );
-                        }
-                    }
-                }
-
-                // Rebroadcast the accusation to our own collateral partners
-                let our_collateral_partners = {
-                    let ledgers = self.ledgers.lock().unwrap();
-                    if let Some(ledger_arc) = ledgers.get(&our_ledger_key) {
-                        let ledger = ledger_arc.read().unwrap();
-                        ledger.state.collateral_partners.clone()
-                    } else {
-                        vec![]
-                    }
-                };
-
-                // Forward the accusation to our collateral partners (excluding the sender)
-                let accusation_msg = DepositsMessage::Recovery(RecoveryMsg::UncreditedPayment {
-                    operator: msg.operator,
-                    partner: msg.partner,
-                    payment_hash: msg.payment_hash,
-                    preimage: msg.preimage,
-                    deposit_pubkey: msg.deposit_pubkey,
-                    amount_msat: msg.amount_msat,
-                    invoice_cosignature: msg.invoice_cosignature,
-                    settlement_sequence: msg.settlement_sequence,
-                    settlement_ledger_hash: msg.settlement_ledger_hash,
-                    settlement_block_height: msg.settlement_block_height,
-                    accuser_signature: msg.accuser_signature,
-                });
-                for partner in our_collateral_partners {
-                    if partner != sender_node_id {
-                        log_info!(
-                            self.logger,
-                            "⚠️ ACCUSATION: Forwarding fraud proof to our collateral partner {}",
-                            partner
-                        );
-                        let _ = self.send_message(partner, accusation_msg.clone());
-                    }
-                }
+                // If we have our own channel with this operator, force-close and rebroadcast
+                self.handle_accusation_followup(msg, sender_node_id, operator);
             }
+            _ => {}
         }
 
         Ok(())
+    }
+
+    /// Handle force-close and rebroadcast after valid accusation
+    fn handle_accusation_followup(
+        &self,
+        msg: &UncreditedPaymentMsg,
+        sender_node_id: PublicKey,
+        operator: PublicKey,
+    ) {
+        if operator == self.our_node_id {
+            return;
+        }
+
+        let our_ledger_key = (operator, self.our_node_id);
+        let have_channel = {
+            let ledgers = self.ledgers.lock().unwrap();
+            ledgers.contains_key(&our_ledger_key)
+        };
+
+        if !have_channel {
+            return;
+        }
+
+        log_warn!(self.logger, "⚠️ ACCUSATION: We have channel with accused operator {} - force-closing", operator);
+
+        // Force-close our channel
+        if let Some(ref cm) = self.channel_manager {
+            let channels = cm.list_channels();
+            if let Some(channel) = channels.iter().find(|c| c.counterparty_node_id == operator) {
+                let reason = format!("Fraud proof: operator {} accused of uncredited payment", operator);
+                if let Err(e) = cm.force_close_broadcasting_latest_txn(&channel.channel_id, &operator, reason) {
+                    log_error!(self.logger, "⚠️ ACCUSATION: Force-close failed: {:?}", e);
+                } else {
+                    log_warn!(self.logger, "⚠️ ACCUSATION: Force-closed channel with {}", operator);
+                }
+            }
+        }
+
+        // Rebroadcast to our collateral partners
+        let partners = {
+            let ledgers = self.ledgers.lock().unwrap();
+            ledgers.get(&our_ledger_key)
+                .map(|l| l.read().unwrap().state.collateral_partners.clone())
+                .unwrap_or_default()
+        };
+
+        let accusation_msg = DepositsMessage::Recovery(RecoveryMsg::UncreditedPayment {
+            operator: msg.operator, partner: msg.partner, payment_hash: msg.payment_hash,
+            preimage: msg.preimage, deposit_pubkey: msg.deposit_pubkey, amount_msat: msg.amount_msat,
+            invoice_cosignature: msg.invoice_cosignature, settlement_sequence: msg.settlement_sequence,
+            settlement_ledger_hash: msg.settlement_ledger_hash, settlement_block_height: msg.settlement_block_height,
+            accuser_signature: msg.accuser_signature,
+        });
+
+        for partner in partners {
+            if partner != sender_node_id {
+                log_info!(self.logger, "⚠️ ACCUSATION: Forwarding to collateral partner {}", partner);
+                let _ = self.send_message(partner, accusation_msg.clone());
+            }
+        }
     }
 
     // ==================== Tombstone Message Handlers ====================
 
     /// Handle ChannelCloseTombstone message
     /// Append to ledger and mark as closed
+    /// Handle ChannelCloseTombstone message.
+    ///
+    /// Core handler validates role and emits event, LDK layer handles ledger updates.
     pub(super) fn handle_channel_close_tombstone(
         &self,
         tombstone_msg: &ChannelCloseTombstoneMsg,
@@ -1385,124 +1314,105 @@ where
             crate::hex_utils::to_string(&tombstone_msg.channel_id)
         );
 
-        // Determine our role: operator or partner
-        let we_are_operator = tombstone_msg.operator_id == self.our_node_id;
-        let we_are_partner = tombstone_msg.partner_id == self.our_node_id;
+        // Delegate to core handler for validation
+        match core_handlers::handle_channel_close_tombstone(self, tombstone_msg, sender_node_id) {
+            Ok(HandlerResult::Rejected(reason)) => {
+                log_warn!(self.logger, "₿ Tombstone rejected: {}", reason);
+                return Ok(());
+            }
+            Err(e) => {
+                log_error!(self.logger, "₿ Tombstone handler error: {:?}", e);
+                return Ok(());
+            }
+            Ok(HandlerResult::Response(ResponseData::ChannelCloseTombstoneValidated {
+                operator, partner, ..
+            })) => {
+                // Apply tombstone to ledger
+                let we_are_operator = operator == self.our_node_id;
+                let ledger_key = (operator, partner);
 
-        if !we_are_operator && !we_are_partner {
-            log_warn!(
-                self.logger,
-                "₿ Received tombstone for ledger we're not part of: operator={}, partner={}",
-                tombstone_msg.operator_id,
-                tombstone_msg.partner_id
-            );
-            return Ok(());
+                if we_are_operator {
+                    self.apply_tombstone_as_operator(&ledger_key, message);
+                } else {
+                    self.apply_tombstone_as_partner(&ledger_key, tombstone_msg, message);
+                }
+            }
+            _ => {}
         }
 
-        let ledger_key = (tombstone_msg.operator_id, tombstone_msg.partner_id);
+        Ok(())
+    }
 
-        if we_are_operator {
-            // We are the operator - use ledgers
-            let mut ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get_mut(&ledger_key) {
-                let mut ledger_guard = ledger_arc.write().unwrap();
+    /// Apply tombstone to operator ledger
+    fn apply_tombstone_as_operator(&self, ledger_key: &(PublicKey, PublicKey), message: &DepositsMessage) {
+        let mut ledgers = self.ledgers.lock().unwrap();
+        if let Some(ledger_arc) = ledgers.get_mut(ledger_key) {
+            let mut ledger_guard = ledger_arc.write().unwrap();
 
-                // Extract values before mem::replace to avoid borrow checker issues
-                let operator_node_id = ledger_guard.operator_key();
-                let partner_node_id = ledger_guard.partner_key();
-                let our_role = ledger_guard.role;
-                let collateral_partners = ledger_guard.state.collateral_partners.clone();
-                let ledger_address = ledger_guard.state.ledger_address.clone();
+            let operator_node_id = ledger_guard.operator_key();
+            let partner_node_id = ledger_guard.partner_key();
+            let our_role = ledger_guard.role;
+            let collateral_partners = ledger_guard.state.collateral_partners.clone();
+            let ledger_address = ledger_guard.state.ledger_address.clone();
 
-                // Take ownership of the ledger
-                let ledger_owned = std::mem::replace(
-                    &mut *ledger_guard,
-                    deposits_core::Ledger::new(
-                        operator_node_id,
-                        partner_node_id,
-                        our_role,
-                        collateral_partners,
-                        ledger_address,
-                    )
-                );
+            let ledger_owned = std::mem::replace(
+                &mut *ledger_guard,
+                deposits_core::Ledger::new(operator_node_id, partner_node_id, our_role, collateral_partners, ledger_address)
+            );
 
-                match ledger_owned.append(message.clone()) {
-                    Ok((updated_ledger, _new_hash)) => {
-                        *ledger_guard = updated_ledger;
-                        log_info!(
-                            self.logger,
-                            "✅ Tombstone appended to operator ledger. Ledger is now closed."
-                        );
-                    }
-                    Err(e) => {
-                        log_error!(
-                            self.logger,
-                            "Failed to append tombstone to operator ledger: {:?}. Ledger state may be inconsistent.",
-                            e
-                        );
-                    }
+            match ledger_owned.append(message.clone()) {
+                Ok((updated_ledger, _)) => {
+                    *ledger_guard = updated_ledger;
+                    log_info!(self.logger, "✅ Tombstone appended to operator ledger. Ledger is now closed.");
                 }
-            } else {
-                log_warn!(
-                    self.logger,
-                    "₿ Received tombstone for non-existent operator ledger: {:?}",
-                    ledger_key
-                );
+                Err(e) => {
+                    log_error!(self.logger, "Failed to append tombstone: {:?}", e);
+                }
             }
         } else {
-            // We are the partner - use ledgers
-            // Partners receive tombstones as SignedAuditUpdate, but may also receive raw tombstone
-            // Convert to SignedLedgerUpdate for consistent storage
-            let mut ledgers = self.ledgers.lock().unwrap();
-
-            // Get or create the partner ledger
-            let ledger = ledgers.entry(ledger_key).or_insert_with(|| {
-                log_info!(
-                    self.logger,
-                    "📋 PARTNER: Creating partner ledger for tombstone from operator {}",
-                    tombstone_msg.operator_id
-                );
-                Arc::new(RwLock::new(Ledger::new(
-                    tombstone_msg.operator_id,
-                    self.our_node_id,
-                    LedgerRole::Partner,
-                    vec![],
-                    String::new(),
-                )))
-            });
-
-            let mut ledger_guard = ledger.write().unwrap();
-
-            // For raw tombstone messages received by partner, we need to create a SignedLedgerUpdate
-            // Use the sequence_number from the tombstone message
-            let signed_update = deposits_core::SignedLedgerUpdate {
-                message: {
-                    use lightning::util::ser::Writeable;
-                    let mut buf = Vec::new();
-                    message.write(&mut buf).unwrap();
-                    buf
-                },
-                message_type: message.message_type(),
-                operator_signature: [0u8; 64], // No signature for raw tombstone - will be replaced by SignedAuditUpdate if available
-                partner_signature: [0u8; 64],  // No partner signature for raw tombstone
-                operator_id: tombstone_msg.operator_id,
-                partner_id: tombstone_msg.partner_id,
-                sequence_number: tombstone_msg.sequence_number,
-                previous_hash: [0u8; 32], // Unknown from raw message
-                current_hash: [0u8; 32],  // Unknown from raw message
-                timestamp: tombstone_msg.timestamp,
-            };
-
-            let count = ledger_guard.insert_signed_unchecked(signed_update);
-            log_info!(
-                self.logger,
-                "✅ Tombstone inserted to partner ledger (seq={}, added {} updates). Ledger is now closed.",
-                tombstone_msg.sequence_number,
-                count
-            );
+            log_warn!(self.logger, "₿ Tombstone for non-existent operator ledger: {:?}", ledger_key);
         }
+    }
 
-        Ok(()) // Tombstone messages don't need ACKs or further processing
+    /// Apply tombstone to partner ledger
+    fn apply_tombstone_as_partner(
+        &self,
+        ledger_key: &(PublicKey, PublicKey),
+        tombstone_msg: &ChannelCloseTombstoneMsg,
+        message: &DepositsMessage,
+    ) {
+        use deposits_core::{Ledger, LedgerRole};
+        use std::sync::{Arc, RwLock};
+
+        let mut ledgers = self.ledgers.lock().unwrap();
+        let ledger = ledgers.entry(*ledger_key).or_insert_with(|| {
+            log_info!(self.logger, "📋 PARTNER: Creating partner ledger for tombstone");
+            Arc::new(RwLock::new(Ledger::new(
+                tombstone_msg.operator_id, self.our_node_id, LedgerRole::Partner, vec![], String::new()
+            )))
+        });
+
+        let mut ledger_guard = ledger.write().unwrap();
+        let signed_update = deposits_core::SignedLedgerUpdate {
+            message: {
+                use lightning::util::ser::Writeable;
+                let mut buf = Vec::new();
+                message.write(&mut buf).unwrap();
+                buf
+            },
+            message_type: message.message_type(),
+            operator_signature: [0u8; 64],
+            partner_signature: [0u8; 64],
+            operator_id: tombstone_msg.operator_id,
+            partner_id: tombstone_msg.partner_id,
+            sequence_number: tombstone_msg.sequence_number,
+            previous_hash: [0u8; 32],
+            current_hash: [0u8; 32],
+            timestamp: tombstone_msg.timestamp,
+        };
+
+        let count = ledger_guard.insert_signed_unchecked(signed_update);
+        log_info!(self.logger, "✅ Tombstone inserted (seq={}, added {}). Ledger closed.", tombstone_msg.sequence_number, count);
     }
 
     // ==================== SignedUpdate Message Handlers ====================
