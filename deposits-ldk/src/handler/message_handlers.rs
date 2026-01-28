@@ -30,6 +30,8 @@ use crate::wire::messages::{
 
 use std::ops::Deref;
 
+use super::macros::delegate_to_core;
+
 impl<L: Deref + Clone + Send + Sync> DepositsHandler<L>
 where
     L::Target: LdkLogger,
@@ -398,30 +400,13 @@ where
     // Recovery Message Handlers
     // ========================================================================
 
-    /// Handle RecoveryVote message
-    pub(super) fn handle_recovery_vote(
-        &self,
-        msg: &RecoveryVoteMsg,
-        sender: PublicKey,
-    ) -> Result<(), LightningError> {
-        log_info!(
-            self.logger,
-            "🔄 RECOVERY: Received vote from {} for operator {} (conforming={})",
-            msg.voter, msg.operator, msg.is_conforming
-        );
-
-        // Delegate to core handler
-        match core_handlers::handle_recovery_vote(self, msg, sender) {
-            Ok(_) => {
-                log_info!(self.logger, "🔄 RECOVERY: Vote processed successfully");
-            }
-            Err(e) => {
-                log_warn!(self.logger, "🔄 RECOVERY: Vote handler failed: {:?}", e);
-            }
-        }
-
-        Ok(())
-    }
+    // Handle RecoveryVote message
+    delegate_to_core!(
+        handle_recovery_vote,
+        RecoveryVoteMsg,
+        "🔄 RECOVERY: Vote",
+        core_handlers::handle_recovery_vote
+    );
 
     /// Handle RecoveryClaimRequest message
     ///

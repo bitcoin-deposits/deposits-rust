@@ -27,6 +27,9 @@
 // Prelude with common imports for all handler modules
 pub mod prelude;
 
+// Macros for handler delegation patterns
+mod macros;
+
 // Message types for handlers (DepositsMessage enum with LDK traits)
 pub mod messages;
 
