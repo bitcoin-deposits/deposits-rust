@@ -478,50 +478,16 @@ where
         let mut stored_count = 0;
         let mut failed_count = 0;
 
-        // Process each update
-        for update_msg in &response.updates {
-            // Convert V2 wire format to storage format
-            // V2 SignedLedgerUpdate has operation instead of message bytes
-            use deposits_core::tlv::TlvEncode;
-
-            // Encode the operation to bytes for storage
-            let message_bytes = update_msg.operation.tlv_encode();
-
-            // Map operation discriminant to V1 message type for backwards compatibility
-            // TODO: Revisit this mapping when removing V1 support entirely
-            let message_type = match update_msg.operation.discriminant() {
-                10 => crate::wire::message_types::DEPOSIT_OPEN,
-                11 => crate::wire::message_types::DEPOSIT_CLOSE,
-                12 => crate::wire::message_types::DEPOSIT_UPDATE,
-                20 => crate::wire::message_types::RECEIVING_CREDIT_PAYMENT,
-                21 => crate::wire::message_types::SENDING_LOCK_PAYMENT,
-                22 => crate::wire::message_types::SENDING_FAIL_PAYMENT,
-                23 => crate::wire::message_types::SENDING_FULFILL_PAYMENT,
-                _ => 0, // Unknown operation
-            };
-
-            // Convert to SignedLedgerUpdate storage format
-            let signed_update = deposits_core::SignedLedgerUpdate {
-                message: message_bytes,
-                message_type,
-                operator_signature: update_msg.operator_signature,
-                partner_signature: update_msg.partner_signature,
-                operator_pubkey: response.operator_id,
-                partner_pubkey: response.partner_id,
-                sequence_number: update_msg.sequence_number,
-                previous_state_hash: update_msg.previous_hash,
-                current_state_hash: update_msg.current_hash,
-                timestamp: update_msg.timestamp,
-            };
-
-            // Verify and store
-            match self.verify_and_store_signed_update(signed_update) {
+        // Process each update - updates are already in storage format (bytes are bytes)
+        for signed_update in &response.updates {
+            // Verify and store (clone since we're iterating by reference)
+            match self.verify_and_store_signed_update(signed_update.clone()) {
                 Ok(()) => {
                     stored_count += 1;
                     log_debug!(
                         self.logger,
                         "📋 SYNC: Successfully stored update seq={}",
-                        update_msg.sequence_number
+                        signed_update.sequence_number
                     );
                 }
                 Err(e) => {
@@ -529,7 +495,7 @@ where
                     log_error!(
                         self.logger,
                         "📋 SYNC: Failed to store update seq={}: {}",
-                        update_msg.sequence_number,
+                        signed_update.sequence_number,
                         e
                     );
                 }

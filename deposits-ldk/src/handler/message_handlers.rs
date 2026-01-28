@@ -123,31 +123,19 @@ where
         );
 
         // Process each update in the batch
-        // msg.updates is now Vec<Vec<u8>> (raw bytes) - need to decode each
+        // msg.updates is Vec<Vec<u8>> (raw bytes) - need to decode each
         let mut applied_count = 0;
         let mut error_count = 0;
 
         for update_bytes in &msg.updates {
-            // Decode the raw bytes into a SignedLedgerUpdate
+            // Decode the raw bytes into a SignedLedgerUpdate (unified storage format)
             use deposits_core::messages::BinaryCodec;
             let mut cursor = std::io::Cursor::new(update_bytes);
-            match deposits_core::messages::SignedLedgerUpdate::read_from(&mut cursor) {
+            match deposits_core::types::SignedLedgerUpdate::read_from(&mut cursor) {
                 Ok(signed_update) => {
                     let seq = signed_update.sequence_number;
-                    // Verify and store the update - convert V2 SignedLedgerUpdate to V1 format
-                    let v1_update = deposits_core::SignedLedgerUpdate {
-                        message: Vec::new(), // Not used in V2
-                        message_type: 0,     // Not used in V2
-                        operator_signature: signed_update.operator_signature,
-                        partner_signature: signed_update.partner_signature,
-                        operator_pubkey: msg.operator_id,
-                        partner_pubkey: msg.partner_id,
-                        sequence_number: signed_update.sequence_number,
-                        previous_state_hash: signed_update.previous_hash,
-                        current_state_hash: signed_update.current_hash,
-                        timestamp: signed_update.timestamp,
-                    };
-                    match self.verify_and_store_signed_update(v1_update) {
+                    // Verify and store the update (already in correct format)
+                    match self.verify_and_store_signed_update(signed_update) {
                         Ok(()) => applied_count += 1,
                         Err(e) => {
                             log_warn!(
@@ -1815,14 +1803,17 @@ where
                 operator_id: response.operator_id,
                 partner_id: response.partner_id,
                 request_hash: [0u8; 32], // Not available in handler format
-                updates: response.updates.iter().map(|u| deposits_core::messages::SignedLedgerUpdate {
+                updates: response.updates.iter().map(|u| deposits_core::types::SignedLedgerUpdate {
+                    message: u.message.clone(),
+                    message_type: u.message_type,
+                    operator_pubkey: u.operator_pubkey,
+                    partner_pubkey: u.partner_pubkey,
                     sequence_number: u.sequence_number,
-                    operation: u.operation.clone(),
-                    previous_hash: u.previous_state_hash,
-                    current_hash: u.current_state_hash,
-                    operator_signature: u.operator_signature,
+                    previous_state_hash: u.previous_state_hash,
+                    current_state_hash: u.current_state_hash,
+                    timestamp: u.timestamp,
                     partner_signature: u.partner_signature.unwrap_or([0u8; 64]),
-                    timestamp: deposits_core::now_unix_timestamp(),
+                    operator_signature: u.operator_signature,
                 }).collect(),
                 current_sequence: response.updates.last().map(|u| u.sequence_number).unwrap_or(0),
                 current_hash: response.updates.last().map(|u| u.current_state_hash).unwrap_or([0u8; 32]),

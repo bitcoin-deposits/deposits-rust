@@ -191,30 +191,11 @@ where
             partner_id
         );
 
-        // Send updates in batches using V2 format (updates_to_send is Vec<deposits_core::SignedLedgerUpdate> from types.rs)
-        // Need to convert to deposits_core::messages::SignedLedgerUpdate (V2 format)
-        use deposits_core::messages::SignedLedgerUpdate as V2SignedLedgerUpdate;
-        use deposits_core::messages::LedgerOperation;
-        use super::ledger_ext::SignedLedgerUpdateExt;
-
+        // Send updates in batches - updates_to_send is Vec<deposits_core::SignedLedgerUpdate> from types.rs
+        // which is the same type used in the message (bytes are bytes, no conversion needed)
         let total_batches = (updates_to_send.len() + BATCH_SIZE - 1) / BATCH_SIZE;
 
         for (batch_idx, chunk) in updates_to_send.chunks(BATCH_SIZE).enumerate() {
-            // Convert deposits_core::SignedLedgerUpdate (V1) to deposits_core::messages::SignedLedgerUpdate (V2)
-            let v2_updates: Vec<V2SignedLedgerUpdate> = chunk.iter().map(|update| {
-                // Extract operation from message bytes using extension trait
-                let operation = update.get_operation().unwrap_or(LedgerOperation::ReservesRemove);
-                V2SignedLedgerUpdate {
-                    sequence_number: update.sequence_number,
-                    operation,
-                    previous_hash: update.previous_state_hash,
-                    current_hash: update.current_state_hash,
-                    operator_signature: update.operator_signature,
-                    partner_signature: update.partner_signature,
-                    timestamp: update.timestamp,
-                }
-            }).collect();
-
             let start_sequence = chunk.first().map(|u| u.sequence_number).unwrap_or(0);
             let is_final = batch_idx == total_batches - 1;
 
@@ -223,7 +204,7 @@ where
                 "📋 QUORUM: Sending batch {}/{} ({} updates, start_seq={}, is_final={})",
                 batch_idx + 1,
                 total_batches,
-                v2_updates.len(),
+                chunk.len(),
                 start_sequence,
                 is_final
             );
@@ -232,7 +213,7 @@ where
                 request_hash: [0u8; 32],
                 operator_id,
                 partner_id,
-                updates: v2_updates,
+                updates: chunk.to_vec(),
                 start_sequence,
                 is_final,
             });

@@ -630,23 +630,26 @@ impl DepositsMessage {
             DepositsMessageCore::HandshakeResponse(m) => Self::HandshakeResponse(m.into()),
             DepositsMessageCore::Sync(m) => Self::Sync(m.into()),
             DepositsMessageCore::SyncResponse(m) => {
-                let op_id = m.operator_id;
-                let partner_id = m.partner_id;
+                use super::ledger_ext::SignedLedgerUpdateExt;
                 Self::SyncResponse(SyncResponseMsg {
-                    operator_id: op_id,
-                    partner_id,
-                    updates: m.updates.into_iter().map(|u| LedgerUpdateMsg {
-                        operator_pubkey: op_id,
-                        partner_pubkey: partner_id,
-                        operation: u.operation.clone(),
-                        sequence_number: u.sequence_number,
-                        previous_state_hash: u.previous_hash,
-                        current_state_hash: u.current_hash,
-                        operator_signature: u.operator_signature,
-                        message_type: u.operation.discriminant() as u16,
-                        message: Vec::new(),
-                        timestamp: u.timestamp,
-                        partner_signature: Some(u.partner_signature),
+                    operator_id: m.operator_id,
+                    partner_id: m.partner_id,
+                    updates: m.updates.into_iter().map(|u| {
+                        let operation = u.get_operation()
+                            .unwrap_or(deposits_core::messages::LedgerOperation::ReservesRemove);
+                        LedgerUpdateMsg {
+                            operator_pubkey: u.operator_pubkey,
+                            partner_pubkey: u.partner_pubkey,
+                            operation,
+                            sequence_number: u.sequence_number,
+                            previous_state_hash: u.previous_state_hash,
+                            current_state_hash: u.current_state_hash,
+                            operator_signature: u.operator_signature,
+                            message_type: u.message_type,
+                            message: u.message,
+                            timestamp: u.timestamp,
+                            partner_signature: Some(u.partner_signature),
+                        }
                     }).collect(),
                 })
             }
@@ -674,14 +677,17 @@ impl DepositsMessage {
                     operator_id: m.operator_id,
                     partner_id: m.partner_id,
                     request_hash: [0u8; 32],
-                    updates: m.updates.into_iter().map(|u| deposits_core::messages::SignedLedgerUpdate {
+                    updates: m.updates.into_iter().map(|u| deposits_core::types::SignedLedgerUpdate {
+                        message: u.message,
+                        message_type: u.message_type,
+                        operator_pubkey: u.operator_pubkey,
+                        partner_pubkey: u.partner_pubkey,
                         sequence_number: u.sequence_number,
-                        operation: u.operation,
-                        previous_hash: u.previous_state_hash,
-                        current_hash: u.current_state_hash,
-                        operator_signature: u.operator_signature,
-                        partner_signature: u.partner_signature.unwrap_or([0u8; 64]),
+                        previous_state_hash: u.previous_state_hash,
+                        current_state_hash: u.current_state_hash,
                         timestamp: u.timestamp,
+                        partner_signature: u.partner_signature.unwrap_or([0u8; 64]),
+                        operator_signature: u.operator_signature,
                     }).collect(),
                     current_sequence,
                     current_hash,
@@ -1006,21 +1012,26 @@ impl From<SyncMsg> for SyncMsgV2 {
 
 impl From<SyncResponseMsgV2> for SyncResponseMsg {
     fn from(v2: SyncResponseMsgV2) -> Self {
+        use super::ledger_ext::SignedLedgerUpdateExt;
         Self {
             operator_id: v2.operator_id,
             partner_id: v2.partner_id,
-            updates: v2.updates.into_iter().map(|u| LedgerUpdateMsg {
-                operator_pubkey: v2.operator_id,
-                partner_pubkey: v2.partner_id,
-                operation: u.operation,
-                sequence_number: u.sequence_number,
-                previous_state_hash: u.previous_hash,
-                current_state_hash: u.current_hash,
-                operator_signature: u.operator_signature,
-                message_type: deposits_core::messages::LEDGER_UPDATE,
-                message: Vec::new(), // Rebuilt at send time
-                timestamp: u.timestamp,
-                partner_signature: Some(u.partner_signature),
+            updates: v2.updates.into_iter().map(|u| {
+                let operation = u.get_operation()
+                    .unwrap_or(deposits_core::messages::LedgerOperation::ReservesRemove);
+                LedgerUpdateMsg {
+                    operator_pubkey: u.operator_pubkey,
+                    partner_pubkey: u.partner_pubkey,
+                    operation,
+                    sequence_number: u.sequence_number,
+                    previous_state_hash: u.previous_state_hash,
+                    current_state_hash: u.current_state_hash,
+                    operator_signature: u.operator_signature,
+                    message_type: u.message_type,
+                    message: u.message,
+                    timestamp: u.timestamp,
+                    partner_signature: Some(u.partner_signature),
+                }
             }).collect(),
         }
     }
@@ -1034,14 +1045,17 @@ impl From<SyncResponseMsg> for SyncResponseMsgV2 {
             operator_id: local.operator_id,
             partner_id: local.partner_id,
             request_hash: [0u8; 32], // Set at send time
-            updates: local.updates.into_iter().map(|u| deposits_core::messages::SignedLedgerUpdate {
+            updates: local.updates.into_iter().map(|u| deposits_core::types::SignedLedgerUpdate {
+                message: u.message,
+                message_type: u.message_type,
+                operator_pubkey: u.operator_pubkey,
+                partner_pubkey: u.partner_pubkey,
                 sequence_number: u.sequence_number,
-                operation: u.operation,
-                previous_hash: u.previous_state_hash,
-                current_hash: u.current_state_hash,
-                operator_signature: u.operator_signature,
-                partner_signature: u.partner_signature.unwrap_or([0u8; 64]),
+                previous_state_hash: u.previous_state_hash,
+                current_state_hash: u.current_state_hash,
                 timestamp: u.timestamp,
+                partner_signature: u.partner_signature.unwrap_or([0u8; 64]),
+                operator_signature: u.operator_signature,
             }).collect(),
             current_sequence,
             current_hash,
