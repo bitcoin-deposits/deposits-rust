@@ -72,10 +72,10 @@ fn print_update(idx: usize, update: &SignedLedgerUpdate) {
         update.message_type,
         msg_type_name
     );
-    println!("      operator: {}", format_pubkey(&update.operator_pubkey));
-    println!("      partner:  {}", format_pubkey(&update.partner_pubkey));
-    println!("      prev_hash: {}", format_hash(&update.previous_state_hash));
-    println!("      curr_hash: {}", format_hash(&update.current_state_hash));
+    println!("      operator: {}", format_pubkey(&update.operator_id));
+    println!("      partner:  {}", format_pubkey(&update.partner_id));
+    println!("      prev_hash: {}", format_hash(&update.previous_hash));
+    println!("      curr_hash: {}", format_hash(&update.current_hash));
     println!("      timestamp: {} ({})", update.timestamp, format_timestamp(update.timestamp));
     println!("      signature: {:02x}{:02x}{:02x}{:02x}...",
         update.operator_signature[0],
@@ -131,12 +131,12 @@ fn decode_and_print(data: &[u8], record_num: usize) {
                 println!("--- Hash Chain Summary ---");
                 for (idx, update) in log.updates.iter().enumerate() {
                     if idx == 0 {
-                        println!("  {} -> {}", format_hash(&update.previous_state_hash), format_hash(&update.current_state_hash));
+                        println!("  {} -> {}", format_hash(&update.previous_hash), format_hash(&update.current_hash));
                     } else {
                         let prev = &log.updates[idx - 1];
-                        let chain_ok = update.previous_state_hash == prev.current_state_hash;
+                        let chain_ok = update.previous_hash == prev.current_hash;
                         let status = if chain_ok { "OK" } else { "BROKEN!" };
-                        println!("  {} -> {} [{}]", format_hash(&update.previous_state_hash), format_hash(&update.current_state_hash), status);
+                        println!("  {} -> {} [{}]", format_hash(&update.previous_hash), format_hash(&update.current_hash), status);
                     }
                 }
             }

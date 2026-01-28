@@ -797,14 +797,14 @@ pub mod consts {
     pub use deposits_core::messages::{
         requires_acknowledgment, is_deposits_message_type, get_message_category,
         type_id_to_const_name, type_id_to_variant_name,
-        MESSAGES_REQUIRING_ACK, ALL_V2_MESSAGE_TYPES,
+        MESSAGES_REQUIRING_ACK, ALL_ENVELOPE_MESSAGE_TYPES, ALL_OPERATION_MESSAGE_TYPES,
     };
 }
 
 // Re-export message type name functions from deposits-core for backwards compatibility
 pub use deposits_core::messages::{type_id_to_const_name, type_id_to_variant_name};
 
-// V2 types use TLV encoding from deposits-core - no local Writeable/Readable needed
+// Core types use TLV encoding from deposits-core - no local Writeable/Readable needed
 
 // ============================================================================
 // LDK Wire Protocol Integration

@@ -212,11 +212,10 @@ mod tests {
             let encoded = MessageCodec::encode_message(&original_msg).unwrap();
             assert!(!encoded.is_empty(), "Encoding should produce bytes");
 
-            // Only test decode for messages with full V2 support
+            // Test decode
             if encoded.len() > 2 {
                 let decoded = MessageCodec::decode_message(&encoded);
-                // Some messages may not fully round-trip due to V1/V2 field differences
-                // but encoding should work
+                // Some messages may not fully round-trip but encoding should work
                 if let Ok(d) = decoded {
                     assert_eq!(original_msg.message_type(), d.message_type());
                 }

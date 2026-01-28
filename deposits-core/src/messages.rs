@@ -5,9 +5,9 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-//! Bitcoin Deposits Protocol V2 Messages
+//! Bitcoin Deposits Protocol Messages
 //!
-//! Consolidated message protocol reducing 46+ message types to 12 (6 request/response pairs).
+//! Consolidated message protocol with 12 message types (6 request/response pairs).
 //! All message types use odd numbers per BOLT 1 "it's OK to be odd" rule for safe ignorability.
 //!
 //! ## Message Types
@@ -42,7 +42,7 @@ pub const MIN_PROTOCOL_VERSION: u16 = 1;
 // ============================================================================
 
 pub mod consts {
-    // V2 Message Types (consolidated protocol)
+    // Envelope Message Types (used for wire transmission)
     pub const LEDGER_UPDATE: u16 = 0x8001;
     pub const LEDGER_UPDATE_RESPONSE: u16 = 0x8003;
     pub const HANDSHAKE: u16 = 0x8005;
@@ -171,12 +171,6 @@ pub const ALL_OPERATION_MESSAGE_TYPES: &[u16] = &[
     RECOVERY_VOTE, RECOVERY_CLAIM_REQUEST, RECOVERY_CLAIM_SIGNATURE, RECOVERY_CLAIM_COMPLETE,
     RELAY_NWC_REQUEST, RELAY_NWC_RESPONSE, RELAY_NWC_DELIVERY_PROOF,
 ];
-
-// Backwards compatibility aliases
-#[deprecated(note = "Use ALL_ENVELOPE_MESSAGE_TYPES instead")]
-pub const ALL_V2_MESSAGE_TYPES: &[u16] = ALL_ENVELOPE_MESSAGE_TYPES;
-#[deprecated(note = "Use ALL_OPERATION_MESSAGE_TYPES instead")]
-pub const ALL_V1_MESSAGE_TYPES: &[u16] = ALL_OPERATION_MESSAGE_TYPES;
 
 /// Messages that require acknowledgment
 pub const MESSAGES_REQUIRING_ACK: &[u16] = &[

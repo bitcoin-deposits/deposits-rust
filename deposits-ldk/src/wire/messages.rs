@@ -5,9 +5,9 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-//! V1 Wire Protocol Message Structs
+//! Wire Protocol Message Structs
 //!
-//! This module contains message structs for the V1 wire protocol format.
+//! This module contains message structs for wire protocol serialization.
 //! These structs implement LDK's `Readable` and `Writeable` traits for
 //! wire serialization.
 //!

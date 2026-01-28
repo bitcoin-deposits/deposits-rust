@@ -503,10 +503,10 @@ mod tests {
     /// Test replaying messages and writing test-updates.txt for comparison
     #[cfg(feature = "bitcoin-deposits")]
     #[test]
-    #[ignore = "TODO: Update for V2 DepositsHandler API"]
+    #[ignore = "TODO: Update for current DepositsHandler API"]
     fn test_write_updates_file() {
-        todo!("Update test for V2 DepositsHandler API - get_all_ledger_updates etc. no longer exist");
-        // The following code is commented out as it uses deprecated V1 API:
+        todo!("Update test for current DepositsHandler API - get_all_ledger_updates etc. no longer exist");
+        // The following code is commented out as it uses deprecated API:
         // use ldk_node::deposits::testing::create_test_handler_with_node_id;
         // use ldk_node::deposits::DepositsHandler;
         // use deposits_ldk::handler::LedgerOperations;

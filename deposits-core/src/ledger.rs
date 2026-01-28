@@ -391,7 +391,7 @@ impl Ledger {
 
         for update in &self.history {
             // Quick filter: only check PaymentCredit message types
-            // PaymentCredit is part of LedgerUpdate (0x8001) or the V1 type (0x8005)
+            // PaymentCredit is part of LedgerUpdate (0x8001) or standalone type (0x8005)
             if update.message_type == 0x8001 || update.message_type == 0x8005 {
                 if let Ok(msg) = DepositsMessage::decode(&update.message) {
                     if let DepositsMessage::LedgerUpdate(lu) = msg {

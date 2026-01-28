@@ -339,7 +339,7 @@ impl WireDecode for QuorumVoteMsg {
 // Reserves Messages
 // ============================================================================
 
-/// V1-compatible reserves increase message
+/// reserves increase message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReservesIncreaseMsg {
     pub partner_id: PublicKey,
@@ -363,7 +363,7 @@ impl WireDecode for ReservesIncreaseMsg {
     }
 }
 
-/// V1-compatible reserves decrease message
+/// reserves decrease message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReservesDecreaseMsg {
     pub partner_id: PublicKey,
@@ -387,7 +387,7 @@ impl WireDecode for ReservesDecreaseMsg {
     }
 }
 
-/// V1-compatible reserves add output message
+/// reserves add output message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReservesAddOutputMsg {
     pub initial_amount: u64,
@@ -428,7 +428,7 @@ impl WireDecode for ReservesAddOutputMsg {
     }
 }
 
-/// V1-compatible reserves remove output message
+/// reserves remove output message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReservesRemoveOutputMsg {
     pub partner_id: PublicKey,
@@ -452,7 +452,7 @@ impl WireDecode for ReservesRemoveOutputMsg {
     }
 }
 
-/// V1-compatible reserves update output message
+/// reserves update output message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReservesUpdateOutputMsg {
     pub partner_id: PublicKey,
@@ -558,7 +558,7 @@ impl WireDecode for AcceptReservesMsg {
 // Deposit Messages
 // ============================================================================
 
-/// V1-compatible deposit open message
+/// deposit open message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DepositOpenMsg {
     pub partner_id: PublicKey,
@@ -594,7 +594,7 @@ impl WireDecode for DepositOpenMsg {
     }
 }
 
-/// V1-compatible deposit close message
+/// deposit close message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DepositCloseMsg {
     pub partner_id: PublicKey,
@@ -618,7 +618,7 @@ impl WireDecode for DepositCloseMsg {
     }
 }
 
-/// V1-compatible deposit update message
+/// deposit update message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DepositUpdateMsg {
     pub partner_id: PublicKey,
@@ -649,7 +649,7 @@ impl WireDecode for DepositUpdateMsg {
 // Collateral Messages
 // ============================================================================
 
-/// V1-compatible collateral increase message
+/// collateral increase message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CollateralIncreaseMsg {
     pub partner_id: PublicKey,
@@ -676,7 +676,7 @@ impl WireDecode for CollateralIncreaseMsg {
     }
 }
 
-/// V1-compatible collateral decrease message
+/// collateral decrease message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CollateralDecreaseMsg {
     pub partner_id: PublicKey,
@@ -707,7 +707,7 @@ impl WireDecode for CollateralDecreaseMsg {
 // Fee and Ledger Close Messages
 // ============================================================================
 
-/// V1-compatible fee collect message
+/// fee collect message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FeeCollectMsg {
     pub pubkey: PublicKey,
@@ -734,7 +734,7 @@ impl WireDecode for FeeCollectMsg {
     }
 }
 
-/// V1-compatible ledger close message
+/// ledger close message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LedgerCloseMsg {
     pub partner_id: PublicKey,
@@ -759,7 +759,7 @@ impl WireDecode for LedgerCloseMsg {
 // Payment Messages
 // ============================================================================
 
-/// V1-compatible receiving credit payment message
+/// receiving credit payment message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReceivingCreditPaymentMsg {
     pub payment_hash: [u8; 32],
@@ -795,7 +795,7 @@ impl WireDecode for ReceivingCreditPaymentMsg {
     }
 }
 
-/// V1-compatible sending lock payment message
+/// sending lock payment message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SendingLockPaymentMsg {
     pub pubkey: PublicKey,
@@ -828,7 +828,7 @@ impl WireDecode for SendingLockPaymentMsg {
     }
 }
 
-/// V1-compatible sending fail payment message
+/// sending fail payment message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SendingFailPaymentMsg {
     pub pubkey: PublicKey,
@@ -858,7 +858,7 @@ impl WireDecode for SendingFailPaymentMsg {
     }
 }
 
-/// V1-compatible sending fulfill payment message
+/// sending fulfill payment message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SendingFulfillPaymentMsg {
     pub pubkey: PublicKey,
@@ -894,7 +894,7 @@ impl WireDecode for SendingFulfillPaymentMsg {
     }
 }
 
-/// V1-compatible receiving cosign invoice message
+/// receiving cosign invoice message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReceivingCosignInvoiceMsg {
     pub amount: u64,
@@ -934,7 +934,7 @@ impl WireDecode for ReceivingCosignInvoiceMsg {
 // Collateral Messages
 // ============================================================================
 
-/// V1-compatible collateral add partner message
+/// collateral add partner message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CollateralAddPartnerMsg {
     pub operator_id: PublicKey,
@@ -964,7 +964,7 @@ impl WireDecode for CollateralAddPartnerMsg {
     }
 }
 
-/// V1-compatible collateral remove partner message
+/// collateral remove partner message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CollateralRemovePartnerMsg {
     pub partner_id: PublicKey,
@@ -991,7 +991,7 @@ impl WireDecode for CollateralRemovePartnerMsg {
     }
 }
 
-/// V1-compatible collateral attestation message
+/// collateral attestation message
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CollateralAttestationMsg {
     #[serde(with = "crate::types::serde_pubkey")]
@@ -1038,7 +1038,7 @@ impl WireDecode for CollateralAttestationMsg {
     }
 }
 
-/// V1-compatible collateral consent request message
+/// collateral consent request message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CollateralConsentRequestMsg {
     pub operator_id: PublicKey,
@@ -1065,7 +1065,7 @@ impl WireDecode for CollateralConsentRequestMsg {
     }
 }
 
-/// V1-compatible collateral consent response message
+/// collateral consent response message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CollateralConsentResponseMsg {
     pub operator_id: PublicKey,
@@ -1099,7 +1099,7 @@ impl WireDecode for CollateralConsentResponseMsg {
 // Transfer Messages
 // ============================================================================
 
-/// V1-compatible deposit lock transfer message
+/// deposit lock transfer message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DepositLockTransferMsg {
     pub partner_id: PublicKey,
@@ -1129,7 +1129,7 @@ impl WireDecode for DepositLockTransferMsg {
     }
 }
 
-/// V1-compatible deposit fail transfer message
+/// deposit fail transfer message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DepositFailTransferMsg {
     pub partner_id: PublicKey,
@@ -1156,7 +1156,7 @@ impl WireDecode for DepositFailTransferMsg {
     }
 }
 
-/// V1-compatible deposit fulfill transfer message
+/// deposit fulfill transfer message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DepositFulfillTransferMsg {
     pub partner_id: PublicKey,
@@ -1190,7 +1190,7 @@ impl WireDecode for DepositFulfillTransferMsg {
 // Sync Messages
 // ============================================================================
 
-/// V1-compatible sync request message
+/// sync request message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SyncRequestMsg {
     pub partner_id: PublicKey,
@@ -1217,7 +1217,7 @@ impl WireDecode for SyncRequestMsg {
     }
 }
 
-/// V1-compatible channel close tombstone message
+/// channel close tombstone message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChannelCloseTombstoneMsg {
     pub operator_id: PublicKey,
@@ -1257,7 +1257,7 @@ impl WireDecode for ChannelCloseTombstoneMsg {
 // Quorum Messages
 // ============================================================================
 
-/// V1-compatible quorum join request message
+/// quorum join request message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QuorumJoinRequestMsgWire {
     pub requester_pubkey: PublicKey,
@@ -1293,7 +1293,7 @@ impl WireDecode for QuorumJoinRequestMsgWire {
     }
 }
 
-/// V1-compatible quorum join response message
+/// quorum join response message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QuorumJoinResponseMsgWire {
     pub accepted: bool,
@@ -1338,7 +1338,7 @@ impl WireDecode for QuorumJoinResponseMsgWire {
     }
 }
 
-/// V1-compatible quorum membership change message
+/// quorum membership change message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QuorumMembershipChangeMsg {
     pub operator_id: PublicKey,
@@ -1383,7 +1383,7 @@ impl WireDecode for QuorumMembershipChangeMsg {
     }
 }
 
-/// V1-compatible quorum state sync message
+/// quorum state sync message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QuorumStateSyncMsg {
     pub operator_id: PublicKey,
@@ -1430,7 +1430,7 @@ impl WireDecode for QuorumStateSyncMsg {
     }
 }
 
-/// V1-compatible quorum vote request message
+/// quorum vote request message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QuorumVoteRequestMsg {
     pub operator_id: PublicKey,
@@ -1501,7 +1501,7 @@ impl WireDecode for QuorumVoteRequestMsg {
     }
 }
 
-/// V1-compatible quorum vote message
+/// quorum vote message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QuorumVoteMsgWire {
     pub vote_round_id: [u8; 32],
@@ -1568,7 +1568,7 @@ impl WireDecode for QuorumVoteMsgWire {
 // Recovery Messages
 // ============================================================================
 
-/// V1-compatible recovery vote message
+/// recovery vote message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecoveryVoteMsg {
     pub operator: PublicKey,
@@ -1613,7 +1613,7 @@ impl WireDecode for RecoveryVoteMsg {
     }
 }
 
-/// V1-compatible recovery claim request message
+/// recovery claim request message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecoveryClaimRequestMsg {
     pub operator: PublicKey,
@@ -1669,7 +1669,7 @@ impl WireDecode for RecoveryClaimRequestMsg {
     }
 }
 
-/// V1-compatible recovery claim signature message
+/// recovery claim signature message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecoveryClaimSignatureMsg {
     pub operator: PublicKey,
@@ -1702,7 +1702,7 @@ impl WireDecode for RecoveryClaimSignatureMsg {
     }
 }
 
-/// V1-compatible recovery claim complete message
+/// recovery claim complete message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecoveryClaimCompleteMsg {
     pub operator: PublicKey,
@@ -1742,7 +1742,7 @@ impl WireDecode for RecoveryClaimCompleteMsg {
 // Relay Messages
 // ============================================================================
 
-/// V1-compatible relay NWC request message
+/// relay NWC request message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RelayNwcRequestMsg {
     pub request_id: [u8; 32],
@@ -1768,7 +1768,7 @@ impl WireDecode for RelayNwcRequestMsg {
     }
 }
 
-/// V1-compatible relay NWC response message
+/// relay NWC response message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RelayNwcResponseMsg {
     pub request_id: [u8; 32],
@@ -1794,7 +1794,7 @@ impl WireDecode for RelayNwcResponseMsg {
     }
 }
 
-/// V1-compatible relay NWC delivery proof message
+/// relay NWC delivery proof message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RelayNwcDeliveryProofMsg {
     pub request_id: [u8; 32],
@@ -1824,7 +1824,7 @@ impl WireDecode for RelayNwcDeliveryProofMsg {
 // Other Messages
 // ============================================================================
 
-/// V1-compatible uncredited payment message
+/// uncredited payment message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UncreditedPaymentMsg {
     pub operator: PublicKey,

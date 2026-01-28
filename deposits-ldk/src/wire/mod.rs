@@ -13,13 +13,12 @@
 //!
 //! ## Architecture
 //!
-//! The wire protocol uses V1 message types for backwards compatibility with
-//! existing Lightning nodes, while the internal protocol uses V2 consolidated
-//! message types from `deposits-core`.
+//! The wire protocol provides encoding/decoding for all Bitcoin Deposits
+//! message types using the consolidated format from `deposits-core`.
 //!
 //! ## Modules
 //!
-//! - [`message_types`]: V1 message type constants
+//! - [`message_types`]: Message type constants
 //! - [`reader`]: CustomMessageReader implementation
 //!
 //! ## Usage

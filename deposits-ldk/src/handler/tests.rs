@@ -749,7 +749,7 @@ fn test_fraud_proof_rejected_without_cosigned_invoice() {
 }
 
 #[test]
-#[ignore = "Requires investigation of V1 message decoding in MessageCodec::decode_message_with_type"]
+#[ignore = "Requires investigation of message decoding in MessageCodec::decode_message_with_type"]
 fn test_fraud_proof_rejected_when_already_credited() {
     use bitcoin::hashes::{sha256, Hash};
     use deposits_core::Ledger;

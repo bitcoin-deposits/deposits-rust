@@ -13,7 +13,7 @@ mod tests {
         DepositsMessage, LedgerUpdateMsg, LedgerUpdateResponseMsg, LedgerOperation,
         HandshakeMsg, HandshakeResponseMsg, CoordinationMsg, CoordinationResponseMsg,
     };
-    // V1 wire message structs from deposits-core for struct construction
+    // Wire message structs from deposits-core for struct construction
     use deposits_ldk::wire::messages::{
         CollateralAddPartnerMsg, CollateralRemovePartnerMsg,
         CollateralConsentRequestMsg, CollateralConsentResponseMsg, CollateralAttestationMsg,
@@ -382,7 +382,7 @@ mod tests {
         let partner = generate_test_pubkey(2);
         let collateral = generate_test_pubkey(3);
 
-        // V1 wire message struct for encoding test (still used for backwards compat)
+        // Wire message struct for encoding test
         let msg_with_consent = CollateralAddPartnerMsg {
             operator_id: operator,
             partner_id: partner,

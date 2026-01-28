@@ -12,7 +12,7 @@
 
 // Re-export all message type constants from deposits-core
 pub use deposits_core::messages::{
-    // V2 Core Message Types
+    // Envelope Message Types (used for wire transmission)
     LEDGER_UPDATE, LEDGER_UPDATE_RESPONSE,
     HANDSHAKE, HANDSHAKE_RESPONSE,
     SYNC, SYNC_RESPONSE,
@@ -20,7 +20,7 @@ pub use deposits_core::messages::{
     COORDINATION, COORDINATION_RESPONSE,
     RELAY, RELAY_RESPONSE,
 
-    // V1 Legacy Message Types
+    // Operation Message Types (used in SignedLedgerUpdate.message_type)
     // Reserves operations
     RESERVES_ADD_OUTPUT, RESERVES_REMOVE_OUTPUT, RESERVES_INCREASE,
     RESERVES_DECREASE, RESERVES_UPDATE_OUTPUT,
@@ -90,11 +90,11 @@ mod tests {
 
     #[test]
     fn test_is_deposits_message_type() {
-        // V2 types
+        // Envelope types
         assert!(is_deposits_message_type(LEDGER_UPDATE));
         assert!(is_deposits_message_type(HANDSHAKE));
 
-        // V1 types
+        // Operation types
         assert!(is_deposits_message_type(DEPOSIT_OPEN));
         assert!(is_deposits_message_type(RESERVES_ADD_OUTPUT));
 
