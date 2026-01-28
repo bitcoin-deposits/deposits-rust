@@ -233,23 +233,11 @@ where
     }
 
     fn recovery_manager(&self) -> Option<Arc<Mutex<RecoveryManager>>> {
-        // Return a clone of our recovery manager wrapped in Arc
-        // We need to convert from Mutex to Arc<Mutex>
-        // Since we already have a Mutex<RecoveryManager>, we need to handle this
-        // by creating an Arc wrapper
-        //
-        // This is a limitation of the current design - ideally the handler would
-        // already use Arc<Mutex<RecoveryManager>>
-        //
-        // For now, we return None and the handlers will need to access the
-        // recovery manager directly through the DepositsHandler
-        None
+        Some(Arc::clone(&self.recovery_manager))
     }
 
     fn claim_manager(&self) -> Option<Arc<Mutex<deposits_core::recovery_claim::ClaimManager>>> {
-        // Same limitation as recovery_manager - we have Mutex<ClaimManager> not Arc<Mutex<ClaimManager>>
-        // TODO: Refactor DepositsHandler to use Arc<Mutex<ClaimManager>>
-        None
+        Some(Arc::clone(&self.claim_manager))
     }
 
     fn quorum_manager(&self) -> Option<&deposits_core::quorum::QuorumManager> {
@@ -262,9 +250,10 @@ where
     }
 
     fn current_block_height(&self) -> u32 {
-        // Get current block height from chain source if available
-        // For now, return 0 - this would need to be wired to the chain monitor
-        0
+        self.channel_manager
+            .as_ref()
+            .map(|cm| cm.current_best_block_height())
+            .unwrap_or(0)
     }
 
     fn sign_ledger_update(
@@ -354,6 +343,39 @@ where
         self.trigger_immediate_send(peer, ack.message_type());
 
         Ok(())
+    }
+
+    fn register_pending_ack(&self, hash: [u8; 32], msg_type: u16, peer: PublicKey) {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let mut pending_acks = self.pending_acks.lock().unwrap();
+        pending_acks.insert(hash, deposits_core::PendingAck {
+            message_type: msg_type,
+            timestamp,
+            peer,
+        });
+    }
+
+    fn complete_pending_ack(&self, hash: &[u8; 32]) -> Option<deposits_core::PendingAck> {
+        let mut pending_acks = self.pending_acks.lock().unwrap();
+        pending_acks.remove(hash)
+    }
+
+    fn get_timed_out_acks(&self, threshold_secs: u64) -> Vec<([u8; 32], deposits_core::PendingAck)> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let pending_acks = self.pending_acks.lock().unwrap();
+        pending_acks
+            .iter()
+            .filter(|(_, ack)| now.saturating_sub(ack.timestamp) > threshold_secs)
+            .map(|(hash, ack)| (*hash, ack.clone()))
+            .collect()
     }
 }
 

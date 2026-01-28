@@ -252,10 +252,10 @@ where
     pub(crate) quorum_manager: QuorumManager,
 
     /// Recovery manager for tracking force-close recovery processes
-    pub(crate) recovery_manager: Mutex<deposits_core::recovery::RecoveryManager>,
+    pub(crate) recovery_manager: Arc<Mutex<deposits_core::recovery::RecoveryManager>>,
 
     /// Claim manager for aggregating signatures and executing claims
-    pub(crate) claim_manager: Mutex<deposits_core::recovery_claim::ClaimManager>,
+    pub(crate) claim_manager: Arc<Mutex<deposits_core::recovery_claim::ClaimManager>>,
 
     /// Bitcoin network (mainnet, testnet, regtest, etc.)
     pub(super) network: Network,
@@ -363,12 +363,12 @@ where
             pending_lazy_syncs: Mutex::new(HashMap::new()),
             pending_vote_rounds: Mutex::new(HashMap::new()),
             quorum_manager: QuorumManager::new(our_node_id),
-            recovery_manager: Mutex::new(deposits_core::recovery::RecoveryManager::new(our_node_id)),
-            claim_manager: Mutex::new(deposits_core::recovery_claim::ClaimManager::new(
+            recovery_manager: Arc::new(Mutex::new(deposits_core::recovery::RecoveryManager::new(our_node_id))),
+            claim_manager: Arc::new(Mutex::new(deposits_core::recovery_claim::ClaimManager::new(
                 our_node_id,
                 None, // Secret key set via set_node_secret_key() after construction
                 deposits_core::recovery_claim::ClaimConfig::default(),
-            )),
+            ))),
             network,
             pending_reserves_commitments: Mutex::new(HashMap::new()),
             core_handler: None, // Initialized lazily when channel_manager is set

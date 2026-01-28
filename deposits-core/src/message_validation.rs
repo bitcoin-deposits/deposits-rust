@@ -180,6 +180,31 @@ pub trait HandlerContext: ValidationContext {
         let _ = (peer, message_hash, message_type, success, error_message, sequence, prev_hash, new_hash, partner_signature);
         Ok(()) // Default: no-op
     }
+
+    // ========================================================================
+    // ACK Tracking Methods
+    // ========================================================================
+
+    /// Register a message as pending ACK.
+    /// Called when an operator sends a message that requires acknowledgment.
+    fn register_pending_ack(&self, hash: [u8; 32], msg_type: u16, peer: PublicKey) {
+        let _ = (hash, msg_type, peer);
+        // Default: no-op
+    }
+
+    /// Complete a pending ACK, returning the pending ack info if found.
+    /// Called when an ACK is received for a previously sent message.
+    fn complete_pending_ack(&self, hash: &[u8; 32]) -> Option<crate::PendingAck> {
+        let _ = hash;
+        None // Default: not found
+    }
+
+    /// Check for timed-out ACKs.
+    /// Returns list of (hash, pending_ack) pairs that have exceeded the threshold.
+    fn get_timed_out_acks(&self, threshold_secs: u64) -> Vec<([u8; 32], crate::PendingAck)> {
+        let _ = threshold_secs;
+        vec![] // Default: none
+    }
 }
 
 // ============================================================================
