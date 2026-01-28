@@ -738,7 +738,7 @@ where
         let poll_interval = Duration::from_millis(50); // Poll every 50ms
 
         // Get channel ID for querying
-        let channel_id = {
+        let _channel_id = {
             if let Some(ref cm) = self.channel_manager {
                 let channels = cm.list_channels_with_counterparty(&partner_node_id);
                 if let Some(channel) = channels.first() {

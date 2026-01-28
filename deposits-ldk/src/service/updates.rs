@@ -44,8 +44,8 @@ where
 
     // Build set of hashes that are acknowledged/committed
     // An update is acknowledged if its hash appears at or before the ack_hash in the chain
-    let mut ack_reached = false;
-    let mut commit_reached = false;
+    let _ack_reached = false;
+    let _commit_reached = false;
     let ack_seq = all_updates.iter()
         .find(|u| u.current_hash == ack_hash)
         .map(|u| u.sequence_number);

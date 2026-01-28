@@ -35,6 +35,7 @@ where
     /// Should be called periodically (e.g., every 1 second) by a background task
     pub fn flush_stale_updates(&self) -> (usize, usize) {
         let now = deposits_core::time_utils::now_unix_timestamp();
+        #[allow(unused_variables)]
         let mut stale_acks_cleared = 0;
         let mut broadcasts_retried = 0;
 
@@ -200,8 +201,8 @@ where
     {
         use std::time::Duration;
 
-        let logger = handler.logger.clone();
-        log_info!(logger, "📋 Starting background flush task (1s interval)");
+        let _logger = handler.logger.clone();
+        log_info!(_logger, "📋 Starting background flush task (1s interval)");
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));

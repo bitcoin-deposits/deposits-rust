@@ -409,7 +409,7 @@ where
         &self,
         operator: PublicKey,
         partner: PublicKey,
-        broadcaster: &B,
+        _broadcaster: &B,
     ) -> Result<deposits_core::recovery_claim::BroadcastResult, String> {
         use bitcoin::hashes::Hash;
 

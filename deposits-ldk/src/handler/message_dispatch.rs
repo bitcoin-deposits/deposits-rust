@@ -222,7 +222,6 @@ where
                     // (see is_coordination_message handling around line 765)
                     // Don't return early - let it fall through
                 }
-                _ => {}
             }
             DepositsMessage::CoordinationResponse(coord_resp) => match coord_resp {
                 CoordinationResponseMsg::QuorumJoinResponse { accepted, ref members, threshold, last_sequence, current_hash, ref rejection_reason, .. } => {

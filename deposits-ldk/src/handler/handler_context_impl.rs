@@ -84,28 +84,28 @@ where
                     operator, partner, deposit_pubkey
                 );
             }
-            ProtocolEvent::DepositClosed { operator, partner, deposit_pubkey, _final_balance } => {
+            ProtocolEvent::DepositClosed { operator, partner, deposit_pubkey, .. } => {
                 log_info!(
                     self.logger,
                     "Protocol event: DepositClosed - operator={}, partner={}, deposit={}",
                     operator, partner, deposit_pubkey
                 );
             }
-            ProtocolEvent::PaymentCredited { operator, partner, deposit_pubkey, amount, _payment_hash } => {
+            ProtocolEvent::PaymentCredited { operator, partner, deposit_pubkey, amount, .. } => {
                 log_info!(
                     self.logger,
                     "Protocol event: PaymentCredited - operator={}, partner={}, deposit={}, amount={}",
                     operator, partner, deposit_pubkey, amount
                 );
             }
-            ProtocolEvent::PaymentSent { operator, partner, deposit_pubkey, amount, _payment_id } => {
+            ProtocolEvent::PaymentSent { operator, partner, deposit_pubkey, amount, .. } => {
                 log_info!(
                     self.logger,
                     "Protocol event: PaymentSent - operator={}, partner={}, deposit={}, amount={}",
                     operator, partner, deposit_pubkey, amount
                 );
             }
-            ProtocolEvent::LedgerSynced { operator, partner, sequence, _hash } => {
+            ProtocolEvent::LedgerSynced { operator, partner, sequence, .. } => {
                 log_info!(
                     self.logger,
                     "Protocol event: LedgerSynced - operator={}, partner={}, seq={}",
@@ -151,7 +151,7 @@ where
                     operator, partner, error
                 );
             }
-            ProtocolEvent::UncreditedPaymentReceived { operator, partner, _payment_hash, amount_msat } => {
+            ProtocolEvent::UncreditedPaymentReceived { operator, partner, amount_msat, .. } => {
                 log_warn!(
                     self.logger,
                     "Protocol event: UncreditedPaymentReceived (fraud proof) - operator={}, partner={}, amount={}",
@@ -172,7 +172,7 @@ where
                     operator, partner
                 );
             }
-            ProtocolEvent::InvoiceCosignRequested { operator, partner, deposit_pubkey, amount, _payment_hash } => {
+            ProtocolEvent::InvoiceCosignRequested { operator, partner, deposit_pubkey, amount, .. } => {
                 log_info!(
                     self.logger,
                     "Protocol event: InvoiceCosignRequested - operator={}, partner={}, deposit={}, amount={}",
@@ -193,14 +193,14 @@ where
                     operator, partner, signer
                 );
             }
-            ProtocolEvent::RecoveryClaimCompleted { old_operator, partner, new_operator, _claim_txid, _confirmation_block } => {
+            ProtocolEvent::RecoveryClaimCompleted { old_operator, partner, new_operator, .. } => {
                 log_info!(
                     self.logger,
                     "Protocol event: RecoveryClaimCompleted - old_operator={}, partner={}, new_operator={}",
                     old_operator, partner, new_operator
                 );
             }
-            ProtocolEvent::ChannelClosed { operator, partner, _channel_id, reason } => {
+            ProtocolEvent::ChannelClosed { operator, partner, reason, .. } => {
                 log_info!(
                     self.logger,
                     "Protocol event: ChannelClosed - operator={}, partner={}, reason={:?}",
@@ -244,9 +244,9 @@ where
     fn sign_ledger_update(
         &self,
         message_bytes: &[u8],
-        _message_type: u16,
+        message_type: u16,
         sequence: u64,
-        _prev_hash: &[u8; 32],
+        prev_hash: &[u8; 32],
         new_hash: &[u8; 32],
     ) -> Option<[u8; 64]> {
         let timestamp = std::time::SystemTime::now()
@@ -289,6 +289,7 @@ where
         }
     }
 
+    #[allow(unused_variables)]
     fn send_ledger_update_ack(
         &self,
         peer: PublicKey,
