@@ -11,9 +11,11 @@
 //! instances in test environments.
 
 use super::core::DepositsHandler;
+use bitcoin::secp256k1::PublicKey;
 use lightning::util::logger::Logger as LdkLogger;
 
 use std::ops::Deref;
+use std::sync::Arc;
 
 impl<L: Deref + Clone + Send + Sync + 'static> DepositsHandler<L>
 where
