@@ -332,6 +332,35 @@ where
         }
     }
 
+    /// Sign a collateral consent message.
+    /// Returns the 64-byte signature or zeros if no secret key available.
+    pub fn sign_collateral_consent(&self, operator_id: &PublicKey, partner_id: &PublicKey) -> [u8; 64] {
+        use bitcoin::hashes::{Hash, sha256};
+        use bitcoin::secp256k1::{Secp256k1, Message};
+        use deposits_core::log_warn;
+
+        match self.node_secret_key {
+            Some(secret_key) => {
+                // Sign: SHA256("COLLATERAL_CONSENT" || operator_id || partner_id)
+                let mut preimage = Vec::new();
+                preimage.extend_from_slice(b"COLLATERAL_CONSENT");
+                preimage.extend_from_slice(&operator_id.serialize());
+                preimage.extend_from_slice(&partner_id.serialize());
+
+                let message_hash = sha256::Hash::hash(&preimage);
+                let secp_message = Message::from_digest(message_hash.to_byte_array());
+
+                let secp = Secp256k1::new();
+                let sig = secp.sign_ecdsa(&secp_message, &secret_key);
+                sig.serialize_compact()
+            }
+            None => {
+                log_warn!(self.logger, "📋 CONSENT: No secret key available for signing");
+                [0u8; 64]
+            }
+        }
+    }
+
     /// Request consent from a collateral partner to back a ledger
     /// Sends a CollateralConsentRequest and waits for CollateralConsentResponse with signature
     pub(super) fn request_collateral_consent(

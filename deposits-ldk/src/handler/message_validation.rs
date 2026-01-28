@@ -18,11 +18,7 @@ use std::sync::{Arc, RwLock};
 use super::messages::DepositsMessage;
 use lightning::util::logger::Logger as LdkLogger;
 use deposits_core::{Ledger, ValidationContext};
-use crate::wire::messages::{
-    ReservesRemoveOutputMsg, ReservesAddOutputMsg,
-    SendingLockPaymentMsg, SendingFulfillPaymentMsg, SendingFailPaymentMsg,
-    ReceivingCreditPaymentMsg,
-};
+use crate::wire::messages::ReservesRemoveOutputMsg;
 
 use super::core::DepositsHandler;
 use super::reserves_ops::ReservesOperations;
@@ -155,243 +151,67 @@ where
     }
 
     fn validate_add_deposit(&self, msg: &crate::wire::messages::DepositOpenMsg, sender: PublicKey) -> Result<(), String> {
-        let ledgers = self.ledgers.lock().unwrap();
-
-        if let Some(ledger_arc) = ledgers.get(&(sender, self.our_node_id)) {
-            let ledger = ledger_arc.read().unwrap();
-            // FeeStructure is already the core type (re-exported from deposits_core)
-            deposits_core::validate_deposit_add(&ledger, msg.pubkey, msg.fees.as_ref())
-        } else {
-            Err(format!("No channel ledger found for sender {}", sender))
-        }
+        deposits_core::validate_add_deposit_msg(self, msg, sender)
     }
 
     fn validate_remove_deposit(&self, msg: &crate::wire::messages::DepositCloseMsg, sender: PublicKey) -> Result<(), String> {
-        let ledgers = self.ledgers.lock().unwrap();
-
-        if let Some(ledger_arc) = ledgers.get(&(sender, self.our_node_id)) {
-            let ledger = ledger_arc.read().unwrap();
-            deposits_core::validate_deposit_close(&ledger, msg.pubkey)
-        } else {
-            Err(format!("No channel ledger found for sender {}", sender))
-        }
+        deposits_core::validate_remove_deposit_msg(self, msg, sender)
     }
 
     fn validate_update_deposit(&self, msg: &crate::wire::messages::DepositUpdateMsg, sender: PublicKey) -> Result<(), String> {
-        let ledgers = self.ledgers.lock().unwrap();
-
-        if let Some(ledger_arc) = ledgers.get(&(sender, self.our_node_id)) {
-            let ledger = ledger_arc.read().unwrap();
-            // FeeStructure is already the core type (re-exported from deposits_core)
-            deposits_core::validate_deposit_update(&ledger, msg.pubkey, &msg.new_fees)
-        } else {
-            Err(format!("No channel ledger found for sender {}", sender))
-        }
+        deposits_core::validate_update_deposit_msg(self, msg, sender)
     }
 
     fn validate_sending_lock_payment(&self, msg: &crate::wire::messages::SendingLockPaymentMsg, sender: PublicKey) -> Result<(), String> {
-        let ledgers = self.ledgers.lock().unwrap();
-
-        if let Some(ledger_arc) = ledgers.get(&(sender, self.our_node_id)) {
-            let ledger = ledger_arc.read().unwrap();
-            deposits_core::validate_payment_lock(
-                &ledger,
-                msg.pubkey,
-                msg.amount,
-                &msg.payment_id,
-                &msg.scriptpubkey_signature,
-            )
-        } else {
-            Err(format!("No channel ledger found for sender {}", sender))
-        }
+        deposits_core::validate_sending_lock_payment_msg(self, msg, sender)
     }
 
     fn validate_sending_fulfill_payment(&self, msg: &crate::wire::messages::SendingFulfillPaymentMsg, _sender: PublicKey) -> Result<(), String> {
-        deposits_core::validate_payment_fulfill(
-            &msg.pubkey,
-            msg.amount,
-            &msg.payment_id,
-            &msg.scriptpubkey_signature,
-            &msg.preimage,
-        )
+        deposits_core::validate_sending_fulfill_payment_msg(msg)
     }
 
     fn validate_sending_fail_payment(&self, msg: &crate::wire::messages::SendingFailPaymentMsg, _sender: PublicKey) -> Result<(), String> {
-        deposits_core::validate_payment_fail(msg.amount)
+        deposits_core::validate_sending_fail_payment_msg(msg)
     }
 
     fn validate_receiving_credit_payment(&self, msg: &crate::wire::messages::ReceivingCreditPaymentMsg, sender: PublicKey) -> Result<(), String> {
-        // Demo-specific fake invoice check (TODO: move to separate layer)
-        if msg.invoice_id.contains("fake") || msg.invoice_id.contains("424242") {
-            return Err(format!("Invalid invoice ID: {}", msg.invoice_id));
-        }
-
-        let ledgers = self.ledgers.lock().unwrap();
-
-        if let Some(ledger_arc) = ledgers.get(&(sender, self.our_node_id)) {
-            let ledger = ledger_arc.read().unwrap();
-            deposits_core::validate_credit_payment(
-                &ledger,
-                msg.deposit_pubkey,
-                msg.amount,
-                &msg.payment_hash,
-            )
-        } else {
-            Err(format!("No channel ledger found for sender {}", sender))
-        }
+        deposits_core::validate_receiving_credit_payment_msg(self, msg, sender)
     }
 
     fn validate_reserves_add(&self, msg: &crate::wire::messages::ReservesAddOutputMsg, _sender: PublicKey) -> Result<(), String> {
-        deposits_core::validate_reserves_add(msg.initial_amount)
+        deposits_core::validate_reserves_add_output_msg(msg)
     }
 
     fn validate_reserves_remove(&self, msg: &ReservesRemoveOutputMsg, sender: PublicKey) -> Result<(), String> {
-        // First check if we have a ledger for this sender
-        let has_ledger = {
-            let ledgers = self.ledgers.lock().unwrap();
-            ledgers.get(&(sender, self.our_node_id)).is_some()
-        };
-
-        if has_ledger {
-            // As the partner, use commitment tx reserves amount (not ledger's declared amount)
-            // This is the source of truth for what the operator has actually committed
-            let commitment_reserves = ValidationContext::get_commitment_tx_reserves_amount(self, sender).unwrap_or(0);
-
-            // If remove_all is false, this is a partial removal - validate reserves exist in commitment tx
-            if !msg.remove_all && commitment_reserves == 0 {
-                return Err("Cannot remove reserves: no reserves committed in channel".to_string());
-            }
-
-            Ok(())
-        } else {
-            Err(format!("No channel ledger found for sender {}", sender))
-        }
+        deposits_core::validate_reserves_remove_msg(self, msg, sender)
     }
 
     fn validate_fee_collect(&self, msg: &crate::wire::messages::FeeCollectMsg, sender: PublicKey) -> Result<(), String> {
-        let ledgers = self.ledgers.lock().unwrap();
-
-        if let Some(ledger_arc) = ledgers.get(&(sender, self.our_node_id)) {
-            let ledger = ledger_arc.read().unwrap();
-            deposits_core::validate_fee_collect(&ledger, msg.pubkey, msg.amount, msg.block_height)
-        } else {
-            Err(format!("No channel ledger found for sender {}", sender))
-        }
+        deposits_core::validate_fee_collect_msg(self, msg, sender)
     }
 
     fn validate_collateral_increase(&self, msg: &crate::wire::messages::CollateralIncreaseMsg, sender: PublicKey) -> Result<(), String> {
-        let ledgers = self.ledgers.lock().unwrap();
-
-        if let Some(ledger_arc) = ledgers.get(&(sender, self.our_node_id)) {
-            let ledger = ledger_arc.read().unwrap();
-            deposits_core::validate_collateral_increase(
-                ledger.state.collateral_amount,
-                msg.new_amount,
-                ledger.reserves_amount(),
-            )
-        } else {
-            Err(format!("No channel ledger found for sender {}", sender))
-        }
+        deposits_core::validate_collateral_increase_msg(self, msg, sender)
     }
 
     fn validate_collateral_decrease(&self, msg: &crate::wire::messages::CollateralDecreaseMsg, sender: PublicKey) -> Result<(), String> {
-        let ledgers = self.ledgers.lock().unwrap();
-
-        if let Some(ledger_arc) = ledgers.get(&(sender, self.our_node_id)) {
-            let ledger = ledger_arc.read().unwrap();
-            deposits_core::validate_collateral_decrease(
-                ledger.state.collateral_amount,
-                msg.new_amount,
-                msg.block_height,
-                ledger.state.last_collateral_increase_block,
-            )
-        } else {
-            Err(format!("No channel ledger found for sender {}", sender))
-        }
+        deposits_core::validate_collateral_decrease_msg(self, msg, sender)
     }
 
     fn validate_reserves_increase(&self, msg: &crate::wire::messages::ReservesIncreaseMsg, sender: PublicKey) -> Result<(), String> {
-        use super::reserves_ops::ReservesOperations;
-
-        // Get channel balance for optional constraint check (LDK-specific)
-        let channel_balance = ValidationContext::get_commitment_tx_reserves_amount(self, sender);
-
-        // Get current reserves
-        let ledgers = self.ledgers.lock().unwrap();
-        if let Some(ledger_arc) = ledgers.get(&(sender, self.our_node_id)) {
-            let ledger = ledger_arc.read().unwrap();
-            deposits_core::validate_reserves_increase(
-                ledger.reserves_amount(),
-                msg.new_amount,
-                channel_balance,
-            )
-        } else {
-            // No ledger - just do basic validation without current reserves check
-            deposits_core::validate_reserves_increase(0, msg.new_amount, channel_balance)
-        }
+        deposits_core::validate_reserves_increase_msg(self, msg, sender)
     }
 
     fn validate_reserves_decrease(&self, msg: &crate::wire::messages::ReservesDecreaseMsg, sender: PublicKey) -> Result<(), String> {
-        let ledgers = self.ledgers.lock().unwrap();
-
-        if let Some(ledger_arc) = ledgers.get(&(sender, self.our_node_id)) {
-            let ledger = ledger_arc.read().unwrap();
-            deposits_core::validate_reserves_decrease(&ledger, msg.new_amount)
-        } else {
-            Err(format!("No channel ledger found for sender {}", sender))
-        }
+        deposits_core::validate_reserves_decrease_msg(self, msg, sender)
     }
 
     fn validate_receiving_cosign_invoice(&self, msg: &crate::wire::messages::ReceivingCosignInvoiceMsg, sender: PublicKey) -> Result<(), String> {
-        let ledgers = self.ledgers.lock().unwrap();
-
-        println!("🔍 [COSIGN_VALIDATE] Checking ledger ({}, {}) for cosign validation",
-            sender, self.our_node_id);
-        println!("🔍 [COSIGN_VALIDATE] Available ledger keys:");
-        for (k, _) in ledgers.iter() {
-            println!("   - ({}, {})", k.0, k.1);
-        }
-
-        // Sender is the operator, we are the partner being asked to cosign
-        if let Some(ledger_arc) = ledgers.get(&(sender, self.our_node_id)) {
-            let ledger = ledger_arc.read().unwrap();
-            println!("🔍 [COSIGN_VALIDATE] FOUND ledger! reserves_amount={} sats, invoice_amount={} msat",
-                ledger.reserves_amount(), msg.amount);
-            let result = deposits_core::validate_cosign_invoice(
-                &ledger,
-                msg.assigned_deposit,
-                msg.amount,
-                &msg.invoice_id,
-                &msg.payment_hash,
-            );
-            println!("🔍 [COSIGN_VALIDATE] Result: {:?}", result);
-            result
-        } else {
-            println!("❌ [COSIGN_VALIDATE] NO ledger found for ({}, {})", sender, self.our_node_id);
-            Err(format!("No channel ledger found for sender {}", sender))
-        }
+        deposits_core::validate_receiving_cosign_invoice_msg(self, msg, sender)
     }
 
     fn validate_ledger_close(&self, msg: &crate::wire::messages::LedgerCloseMsg, sender: PublicKey) -> Result<(), String> {
-        let ledgers = self.ledgers.lock().unwrap();
-
-        // Sender is the operator, we are the partner
-        if let Some(ledger_arc) = ledgers.get(&(sender, self.our_node_id)) {
-            let ledger = ledger_arc.read().unwrap();
-
-            // Check that the partner_id matches us (context-specific check)
-            if msg.partner_id != self.our_node_id {
-                return Err(format!(
-                    "LedgerClose partner_id {} does not match our node {}",
-                    msg.partner_id, self.our_node_id
-                ));
-            }
-
-            // Delegate balance checks to core
-            deposits_core::validate_ledger_close(&ledger)
-        } else {
-            Err(format!("No channel ledger found for sender {}", sender))
-        }
+        deposits_core::validate_ledger_close_msg(self, msg, sender)
     }
 }
 

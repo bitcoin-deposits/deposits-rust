@@ -802,111 +802,70 @@ where
     // have been removed - all that logic is now in core handlers via HandlerContext provider methods.
 
     /// Handle CollateralConsentRequest message
+    /// Handle CollateralConsentRequest message.
+    ///
+    /// Core handler validates the request, LDK layer handles signing and sending.
     pub(super) fn handle_collateral_consent_request(
         &self,
         msg: &CollateralConsentRequestMsg,
         sender_node_id: PublicKey,
     ) -> Result<(), LightningError> {
-        use deposits_core::log_warn;
+        log_info!(
+            self.logger,
+            "📋 CONSENT: Received request from {} for ledger ({}, {})",
+            sender_node_id, msg.operator_id, msg.partner_id
+        );
 
-        // Verify the request is from the operator claiming to be the operator
-        if sender_node_id != msg.operator_id {
-            log_warn!(
-                self.logger,
-                "📋 CONSENT: Rejecting - sender {} doesn't match claimed operator {}",
-                sender_node_id,
-                msg.operator_id
-            );
-            return Ok(());
-        }
-
-        // Check if we have an operator channel with the requesting operator
-        // This would be the channel where our reserves would serve as collateral
-        let has_channel_with_operator = {
-            let ledgers = self.ledgers.lock().unwrap();
-            ledgers.contains_key(&(msg.operator_id, self.our_node_id))
-        };
-
-        let consent_granted = has_channel_with_operator;
-
-        // Create consent response with our signature
-        let signature = if consent_granted {
-            // Sign: SHA256("COLLATERAL_CONSENT" || operator_id || partner_id)
-            match self.node_secret_key {
-                Some(secret_key) => {
-                    use bitcoin::hashes::{Hash, sha256};
-                    use bitcoin::secp256k1::{Secp256k1, Message};
-
-                    // Construct the message to sign
-                    let mut preimage = Vec::new();
-                    preimage.extend_from_slice(b"COLLATERAL_CONSENT");
-                    preimage.extend_from_slice(&msg.operator_id.serialize());
-                    preimage.extend_from_slice(&msg.partner_id.serialize());
-
-                    let message_hash = sha256::Hash::hash(&preimage);
-                    let secp_message = Message::from_digest(message_hash.to_byte_array());
-
-                    let secp = Secp256k1::new();
-                    let sig = secp.sign_ecdsa(&secp_message, &secret_key);
-                    sig.serialize_compact()
-                }
-                None => {
-                    log_warn!(self.logger, "📋 CONSENT: No secret key available for signing");
+        // Delegate to core handler for validation and decision
+        match core_handlers::handle_collateral_consent_request(self, msg, sender_node_id) {
+            Ok(HandlerResult::Response(ResponseData::CollateralConsent {
+                operator_id, partner_id, consent_granted
+            })) => {
+                // Sign consent if granting
+                let signature = if consent_granted {
+                    self.sign_collateral_consent(&operator_id, &partner_id)
+                } else {
                     [0u8; 64]
+                };
+
+                // Send response
+                let response = DepositsMessage::CoordinationResponse(
+                    CoordinationResponseMsg::CollateralConsentResponse {
+                        request_hash: [0u8; 32],
+                        operator_id,
+                        partner_id,
+                        consent_granted,
+                        collateral_partner_signature: signature,
+                    }
+                );
+
+                if let Err(e) = self.send_message(sender_node_id, response) {
+                    log_warn!(self.logger, "📋 CONSENT: Failed to send response: {:?}", e);
+                }
+
+                // If consent granted, request sync of the ledger state
+                if consent_granted {
+                    log_info!(self.logger, "📋 CONSENT: Granted, requesting state sync");
+                    let sync_request = DepositsMessage::Sync(SyncMsg {
+                        operator_id,
+                        partner_id,
+                        last_known_sequence: 0,
+                        last_known_hash: [0u8; 32],
+                    });
+                    if let Err(e) = self.send_message(operator_id, sync_request) {
+                        log_warn!(self.logger, "📋 CONSENT: Failed to send SyncRequest: {:?}", e);
+                    }
+                } else {
+                    log_info!(self.logger, "📋 CONSENT: Denied");
                 }
             }
-        } else {
-            [0u8; 64]
-        };
-
-        let response = DepositsMessage::CoordinationResponse(CoordinationResponseMsg::CollateralConsentResponse {
-            request_hash: [0u8; 32], // Will be filled by wire layer
-            operator_id: msg.operator_id,
-            partner_id: msg.partner_id,
-            consent_granted,
-            collateral_partner_signature: signature,
-        });
-
-        if consent_granted {
-            log_info!(
-                self.logger,
-                "📋 CONSENT: Granting consent to back ledger ({}, {}) as collateral partner",
-                msg.operator_id,
-                msg.partner_id
-            );
-        } else {
-            log_warn!(
-                self.logger,
-                "📋 CONSENT: Denying consent - no operator channel with {}",
-                msg.operator_id
-            );
-        }
-
-        // Send response back to operator
-        if let Err(e) = self.send_message(sender_node_id, response) {
-            log_warn!(self.logger, "📋 CONSENT: Failed to send CollateralConsentResponse: {:?}", e);
-        }
-
-        // If consent granted, request sync of the ledger state we're backing
-        // As a collateral partner, we need to track the ledger's state
-        if consent_granted {
-            log_info!(
-                self.logger,
-                "📋 CONSENT: Requesting sync of ledger ({}, {}) that we're backing as collateral",
-                msg.operator_id,
-                msg.partner_id
-            );
-
-            let sync_request = DepositsMessage::Sync(SyncMsg {
-                operator_id: msg.operator_id,
-                partner_id: msg.partner_id,
-                last_known_sequence: 0, // Start from beginning since we're new to this ledger
-                last_known_hash: [0u8; 32],
-            });
-
-            if let Err(e) = self.send_message(msg.operator_id, sync_request) {
-                log_warn!(self.logger, "📋 CONSENT: Failed to send SyncRequest: {:?}", e);
+            Ok(HandlerResult::Rejected(reason)) => {
+                log_warn!(self.logger, "📋 CONSENT: Rejected: {}", reason);
             }
+            Err(e) => {
+                log_error!(self.logger, "📋 CONSENT: Handler failed: {:?}", e);
+            }
+            _ => {}
         }
 
         Ok(())
