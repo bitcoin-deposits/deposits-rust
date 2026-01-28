@@ -19,7 +19,7 @@ use super::messages::{DepositsMessage, LedgerUpdateMsg, LedgerUpdateMsgExt, Ledg
 use super::messages::consts::LEDGER_UPDATE;
 use super::ledger_ext::LedgerExt;
 use crate::wire::messages::{
-    QuorumStateSyncMsg, QuorumVoteRequestMsg, QuorumVoteMsg,
+    QuorumStateSyncMsg, QuorumVoteRequestMsg,
     CollateralConsentRequestMsg, CollateralConsentResponseMsg,
     RecoveryVoteMsg, RecoveryClaimRequestMsg, RecoveryClaimSignatureMsg, RecoveryClaimCompleteMsg,
     UncreditedPaymentMsg, ChannelCloseTombstoneMsg,
@@ -193,18 +193,15 @@ where
                     };
                     return self.handle_quorum_vote_request(&msg, sender_node_id);
                 }
-                CoordinationMsg::QuorumVote { vote_round_id, voter_pubkey, vote, voter_sequence, voter_state_hash, ref evidence, signature, spend_signature } => {
-                    let msg = QuorumVoteMsg {
-                        vote_round_id: *vote_round_id,
-                        voter_pubkey: *voter_pubkey,
-                        vote: *vote,
-                        voter_sequence: *voter_sequence,
-                        voter_state_hash: *voter_state_hash,
-                        evidence: evidence.clone(),
-                        signature: *signature,
-                        spend_signature: *spend_signature,
-                    };
-                    return self.handle_quorum_vote(&msg, sender_node_id);
+                CoordinationMsg::QuorumVote { vote_round_id, voter_pubkey, vote, spend_signature, .. } => {
+                    // Direct dispatch to core - core handles vote tracking and event emission via providers
+                    log_info!(self.logger, "📋 QUORUM: Vote from {} (conforming={}, has_spend_sig={})",
+                        voter_pubkey, vote, spend_signature.is_some());
+                    match deposits_core::handle_quorum_vote(self, *vote_round_id, *voter_pubkey, *vote, *spend_signature) {
+                        Ok(_) => log_info!(self.logger, "📋 QUORUM: Vote processed"),
+                        Err(e) => log_warn!(self.logger, "📋 QUORUM: Vote failed: {:?}", e),
+                    }
+                    return Ok(());
                 }
                 CoordinationMsg::CollateralConsentRequest { operator_id, partner_id, operator_signature } => {
                     // Direct dispatch to core - core handles signing and message sending via providers

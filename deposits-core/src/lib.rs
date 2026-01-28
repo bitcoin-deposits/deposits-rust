@@ -233,7 +233,7 @@ pub use message_handlers::{
     // Handler result types
     HandlerResult, ResponseData,
     // Core handler functions
-    handle_quorum_join_request, handle_quorum_vote_request,
+    handle_quorum_join_request, handle_quorum_vote_request, handle_quorum_vote,
     handle_recovery_vote, handle_recovery_claim_request, handle_recovery_claim_signature, handle_recovery_claim_complete,
     handle_collateral_consent_request, handle_collateral_consent_response,
     handle_collateral_add_partner, handle_collateral_remove_partner,

@@ -656,6 +656,36 @@ pub fn handle_quorum_vote_request<C: HandlerContext>(
     Ok(HandlerResult::Ok)
 }
 
+/// Handle a QuorumVote message.
+///
+/// This is a vote received from a quorum member in response to a vote request.
+/// The vote is added to the pending round and if threshold is reached,
+/// the ReservesSpendReady event is emitted.
+pub fn handle_quorum_vote<C: HandlerContext>(
+    ctx: &C,
+    vote_round_id: [u8; 32],
+    voter: PublicKey,
+    vote: bool,
+    spend_signature: Option<[u8; 64]>,
+) -> Result<HandlerResult, HandlerError> {
+    // Add vote via provider and check if threshold reached
+    if let Some((operator, partner, spend_data, conforming_votes, threshold)) =
+        ctx.add_quorum_vote(vote_round_id, voter, vote, spend_signature)
+    {
+        // Emit spend ready event
+        ctx.emit_event(ProtocolEvent::ReservesSpendReady {
+            vote_round_id,
+            operator,
+            partner,
+            signed_tx_bytes: spend_data,
+            conforming_votes,
+            threshold,
+        });
+    }
+
+    Ok(HandlerResult::Ok)
+}
+
 // ============================================================================
 // Recovery Message Handlers
 // ============================================================================

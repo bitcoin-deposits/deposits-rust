@@ -234,6 +234,23 @@ where
                     operator, partner, member
                 );
             }
+            ProtocolEvent::ReservesSpendReady { vote_round_id, operator, partner, signed_tx_bytes, conforming_votes, threshold } => {
+                log_info!(
+                    self.logger,
+                    "Protocol event: ReservesSpendReady - operator={}, partner={}, votes={}/{}",
+                    operator, partner, conforming_votes, threshold
+                );
+                let _ = self.event_queue.emit_deposits_event(
+                    DepositsEvent::ReservesSpendReady {
+                        vote_round_id,
+                        operator_id: operator,
+                        partner_id: partner,
+                        signed_tx_bytes,
+                        conforming_votes,
+                        threshold,
+                    }
+                );
+            }
         }
     }
 
@@ -570,6 +587,49 @@ where
 
     fn send_quorum_state_sync(&self, member: PublicKey, operator: PublicKey, partner: PublicKey) {
         self.send_state_sync_to_member(member, operator, partner);
+    }
+
+    fn add_quorum_vote(
+        &self,
+        vote_round_id: [u8; 32],
+        voter: PublicKey,
+        vote: bool,
+        spend_signature: Option<[u8; 64]>,
+    ) -> Option<(PublicKey, PublicKey, Vec<u8>, u32, u32)> {
+        let mut rounds = self.pending_vote_rounds.lock().unwrap();
+        let round = rounds.get_mut(&vote_round_id)?;
+
+        round.votes.insert(voter, (vote, spend_signature));
+        log_info!(self.logger, "📋 QUORUM: Vote round now has {}/{} conforming votes",
+            round.conforming_vote_count(), round.threshold);
+
+        if round.threshold_reached() && !round.tx_broadcast {
+            round.tx_broadcast = true;
+
+            // Prepare spend data
+            let signatures = round.collect_spend_signatures();
+            let mut data = Vec::new();
+            data.extend_from_slice(&round.reserves_outpoint);
+            data.extend_from_slice(&(round.destination_script.len() as u32).to_le_bytes());
+            data.extend_from_slice(&round.destination_script);
+            data.extend_from_slice(&round.claimed_reserves.to_le_bytes());
+            data.extend_from_slice(&round.fee_rate_sat_vbyte.to_le_bytes());
+            data.extend_from_slice(&(signatures.len() as u32).to_le_bytes());
+            for (pubkey, sig) in &signatures {
+                data.extend_from_slice(&pubkey.serialize());
+                data.extend_from_slice(sig);
+            }
+
+            Some((
+                round.operator_id,
+                round.partner_id,
+                data,
+                round.conforming_vote_count() as u32,
+                round.threshold as u32,
+            ))
+        } else {
+            None
+        }
     }
 }
 

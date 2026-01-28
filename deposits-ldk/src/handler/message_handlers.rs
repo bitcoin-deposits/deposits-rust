@@ -22,7 +22,7 @@ use deposits_core::{log_debug, log_error, log_info, log_warn};
 use lightning::util::logger::Logger as LdkLogger;
 use crate::wire::messages::{
     QuorumStateSyncMsg,
-    QuorumVoteRequestMsg, QuorumVoteMsg,
+    QuorumVoteRequestMsg,
     CollateralConsentResponseMsg,
     ChannelCloseTombstoneMsg,
 };
@@ -244,75 +244,7 @@ where
         Some(bytes)
     }
 
-    /// Handle QuorumVote message
-    pub(super) fn handle_quorum_vote(
-        &self,
-        msg: &QuorumVoteMsg,
-        _sender: PublicKey,
-    ) -> Result<(), LightningError> {
-        log_info!(self.logger, "📋 QUORUM: Received vote from {} (conforming={}, has_spend_sig={})",
-            msg.voter_pubkey, msg.vote, msg.spend_signature.is_some());
-
-        // Add vote to round and check if threshold reached
-        if let Some(round) = self.add_vote_to_round(msg) {
-            log_info!(self.logger, "📋 QUORUM: Threshold reached for round {:?}!", hex::encode(&msg.vote_round_id[..8]));
-            self.emit_spend_ready(&msg.vote_round_id, &round);
-        }
-
-        Ok(())
-    }
-
-    /// Add vote to round and return round if threshold reached
-    fn add_vote_to_round(&self, msg: &QuorumVoteMsg) -> Option<super::core::VoteRoundState> {
-        let mut rounds = self.pending_vote_rounds.lock().unwrap();
-        let round = rounds.get_mut(&msg.vote_round_id)?;
-
-        round.votes.insert(msg.voter_pubkey, (msg.vote, msg.spend_signature));
-        log_info!(self.logger, "📋 QUORUM: Vote round now has {}/{} conforming votes",
-            round.conforming_vote_count(), round.threshold);
-
-        if round.threshold_reached() && !round.tx_broadcast {
-            round.tx_broadcast = true;
-            Some(round.clone())
-        } else {
-            None
-        }
-    }
-
-    /// Prepare spend data from vote round
-    fn prepare_spend_data(&self, round: &super::core::VoteRoundState) -> Vec<u8> {
-        let signatures = round.collect_spend_signatures();
-        log_info!(self.logger, "📋 QUORUM: Collected {} spend signatures", signatures.len());
-
-        let mut data = Vec::new();
-        data.extend_from_slice(&round.reserves_outpoint);
-        data.extend_from_slice(&(round.destination_script.len() as u32).to_le_bytes());
-        data.extend_from_slice(&round.destination_script);
-        data.extend_from_slice(&round.claimed_reserves.to_le_bytes());
-        data.extend_from_slice(&round.fee_rate_sat_vbyte.to_le_bytes());
-        data.extend_from_slice(&(signatures.len() as u32).to_le_bytes());
-        for (pubkey, sig) in &signatures {
-            data.extend_from_slice(&pubkey.serialize());
-            data.extend_from_slice(sig);
-        }
-        data
-    }
-
-    /// Emit spend ready event when threshold reached
-    fn emit_spend_ready(&self, round_id: &[u8; 32], round: &super::core::VoteRoundState) {
-        let spend_data = self.prepare_spend_data(round);
-        log_info!(self.logger, "📋 QUORUM: Prepared {} bytes of spend data", spend_data.len());
-
-        let _ = self.event_queue.emit_deposits_event(
-            super::events::DepositsEvent::ReservesSpendReady {
-                vote_round_id: *round_id, operator_id: round.operator_id, partner_id: round.partner_id,
-                signed_tx_bytes: spend_data, conforming_votes: round.conforming_vote_count() as u32,
-                threshold: round.threshold as u32,
-            },
-        );
-        log_info!(self.logger, "📋 QUORUM: Emitted ReservesSpendReady event for round {:?}", hex::encode(&round_id[..8]));
-    }
-
+    // NOTE: handle_quorum_vote removed - dispatch calls core directly via add_quorum_vote provider
     // NOTE: handle_quorum_membership_change removed - inlined in dispatch (just logging)
 
     // ========================================================================

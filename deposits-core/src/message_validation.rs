@@ -349,6 +349,24 @@ pub trait HandlerContext: ValidationContext {
         let _ = (member, operator, partner);
         // Default: no-op
     }
+
+    // ========================================================================
+    // Vote Round Methods
+    // ========================================================================
+
+    /// Add a vote to a pending vote round.
+    /// Returns Some(spend_ready_data) if threshold reached, None otherwise.
+    /// The spend_ready_data contains: (operator, partner, signed_tx_bytes, conforming_votes, threshold)
+    fn add_quorum_vote(
+        &self,
+        vote_round_id: [u8; 32],
+        voter: PublicKey,
+        vote: bool,
+        spend_signature: Option<[u8; 64]>,
+    ) -> Option<(PublicKey, PublicKey, Vec<u8>, u32, u32)> {
+        let _ = (vote_round_id, voter, vote, spend_signature);
+        None // Default: not implemented
+    }
 }
 
 // ============================================================================

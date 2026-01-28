@@ -970,6 +970,15 @@ pub enum ProtocolEvent {
         partner: PublicKey,
         member: PublicKey,
     },
+    /// Reserves spend ready after vote threshold reached
+    ReservesSpendReady {
+        vote_round_id: [u8; 32],
+        operator: PublicKey,
+        partner: PublicKey,
+        signed_tx_bytes: Vec<u8>,
+        conforming_votes: u32,
+        threshold: u32,
+    },
 }
 
 // ============================================================================
