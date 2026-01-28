@@ -56,7 +56,7 @@ pub mod consts {
     pub const RELAY: u16 = 0x8015;
     pub const RELAY_RESPONSE: u16 = 0x8017;
 
-    // V1 Legacy Message Types (individual operations)
+    // Operation Message Types (used in SignedLedgerUpdate.message_type)
     // Reserves operations
     pub const RESERVES_ADD_OUTPUT: u16 = 0x80C1;
     pub const RESERVES_REMOVE_OUTPUT: u16 = 0x80C3;
@@ -107,7 +107,7 @@ pub mod consts {
     pub const SIGNED_UPDATE: u16 = 0x8057;
     pub const SYNC_REQUEST: u16 = 0x8059;
 
-    // Ledger establishment (V1 aliases for Handshake)
+    // Ledger establishment (aliases for Handshake)
     pub const LEDGER_OPEN_REQUEST: u16 = 0x8061;
     pub const LEDGER_OPEN_RESPONSE: u16 = 0x8063;
 
