@@ -17,10 +17,17 @@ use deposits_core::messages::DepositsMessage;
 use deposits_core::traits::ProtocolEvent;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
+use tokio::sync::mpsc;
 
-use crate::nostr::NostrTransport;
 use crate::wallet::Wallet;
 use crate::Error;
+
+/// Outbound message to be sent via Nostr
+#[derive(Debug)]
+pub struct OutboundMessage {
+    pub peer: PublicKey,
+    pub message: DepositsMessage,
+}
 
 /// The main handler for deposits-bdk
 ///
@@ -38,8 +45,8 @@ pub struct DepositsHandler {
     /// Pending events to be processed
     events: Mutex<Vec<ProtocolEvent>>,
 
-    /// Nostr transport for peer messaging
-    nostr: Arc<NostrTransport>,
+    /// Outbound message queue (for async sending)
+    outbound_tx: mpsc::UnboundedSender<OutboundMessage>,
 
     /// BDK wallet for on-chain operations
     wallet: Arc<Wallet>,
@@ -47,23 +54,29 @@ pub struct DepositsHandler {
 
 impl DepositsHandler {
     /// Create a new handler
+    ///
+    /// Returns the handler and a receiver for outbound messages that should
+    /// be sent via Nostr transport asynchronously.
     pub fn new(
         secret_key: SecretKey,
-        nostr: Arc<NostrTransport>,
         wallet: Arc<Wallet>,
-    ) -> Self {
+    ) -> (Self, mpsc::UnboundedReceiver<OutboundMessage>) {
         use bitcoin::secp256k1::Secp256k1;
         let secp = Secp256k1::new();
         let our_node_id = PublicKey::from_secret_key(&secp, &secret_key);
 
-        Self {
+        let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
+
+        let handler = Self {
             our_node_id,
             secret_key,
             ledgers: Mutex::new(HashMap::new()),
             events: Mutex::new(Vec::new()),
-            nostr,
+            outbound_tx,
             wallet,
-        }
+        };
+
+        (handler, outbound_rx)
     }
 
     /// Process an incoming message from a peer
@@ -147,10 +160,10 @@ impl ValidationContext for DepositsHandler {
 
 impl HandlerContext for DepositsHandler {
     fn queue_message(&self, peer: PublicKey, msg: DepositsMessage) -> Result<(), HandlerError> {
-        // Send via Nostr
-        self.nostr
-            .send_message(peer, msg)
-            .map_err(|e| HandlerError::Internal(format!("Nostr send failed: {}", e)))
+        // Queue the message for async sending
+        self.outbound_tx
+            .send(OutboundMessage { peer, message: msg })
+            .map_err(|_| HandlerError::Internal("Outbound channel closed".to_string()))
     }
 
     fn emit_event(&self, event: ProtocolEvent) {

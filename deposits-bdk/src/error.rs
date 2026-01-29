@@ -32,4 +32,7 @@ pub enum Error {
 
     #[error("Invalid state: {0}")]
     InvalidState(String),
+
+    #[error("NWC error: {0}")]
+    Nwc(String),
 }

@@ -43,8 +43,12 @@
 
 pub mod error;
 pub mod handler;
+pub mod lightning;
+pub mod node;
 pub mod nostr;
 pub mod wallet;
 
 pub use error::Error;
 pub use handler::DepositsHandler;
+pub use lightning::LightningClient;
+pub use node::{Node, NodeConfig};
