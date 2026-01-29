@@ -608,11 +608,13 @@ mod tests {
             protocol_version: 1,
             min_protocol_version: 1,
             features: 0,
-            public_key: generate_test_pubkey(1),
+            operator_id: generate_test_pubkey(1),
             partner_id: generate_test_pubkey(2),
             ledger_address: "bcrt1qtest".to_string(),
             funding_txid: [0u8; 32],
             funding_vout: 0,
+            reserves_amount: 100_000_000,
+            collateral_enforcement_block: 0,
         });
 
         // V2 uses HANDSHAKE (0x8005)

@@ -1,14 +1,15 @@
 # Docker Compose for deposits-bdk network
 #
-# This mirrors docker-compose-deposits.yml but uses deposits-bdk nodes
+# This mirrors ../docker-compose-deposits.yml but uses deposits-bdk nodes
 # instead of LDK nodes. The key difference:
 # - LDK nodes use Lightning channels for reserves and Lightning wire protocol for messaging
 # - BDK nodes use on-chain UTXOs for reserves and Nostr for messaging
 #
 # Usage:
-#   docker-compose -f docker-compose-deposits-bdk.yml up -d
-#   docker-compose -f docker-compose-deposits-bdk.yml logs -f
-#   docker-compose -f docker-compose-deposits-bdk.yml down -v
+#   cd deposits-tools/bdk
+#   docker-compose up -d
+#   docker-compose logs -f
+#   docker-compose down -v
 
 services:
   # Strfry Nostr relay for peer messaging
@@ -19,7 +20,7 @@ services:
       - "7778:7777"
     volumes:
       - bdk_nostr_data:/app/strfry-db
-      - ./permissive-write-policy.py:/app/write-policy.py:ro
+      - ../permissive-write-policy.py:/app/write-policy.py:ro
     environment:
       - STRFRY_BIND=0.0.0.0:7777
     networks:
@@ -91,8 +92,8 @@ services:
   # deposits-bdk Node 1 - Alice (Operator)
   bdk-alice:
     build:
-      context: ../../
-      dockerfile: deposits-rust/deposits-tools/Dockerfile.deposits-bdk
+      context: ../../../
+      dockerfile: deposits-rust/deposits-tools/bdk/Dockerfile
     container_name: bdk-alice
     command:
       - "run"
@@ -101,7 +102,7 @@ services:
       - "--network"
       - "regtest"
       - "--electrum"
-      - "tcp://electrs:3002"
+      - "http://electrs:3002"
       - "--relay"
       - "ws://nostr-relay:7777"
       - "--data-dir"
@@ -124,8 +125,8 @@ services:
   # deposits-bdk Node 2 - Bob (Operator)
   bdk-bob:
     build:
-      context: ../../
-      dockerfile: deposits-rust/deposits-tools/Dockerfile.deposits-bdk
+      context: ../../../
+      dockerfile: deposits-rust/deposits-tools/bdk/Dockerfile
     container_name: bdk-bob
     command:
       - "run"
@@ -134,7 +135,7 @@ services:
       - "--network"
       - "regtest"
       - "--electrum"
-      - "tcp://electrs:3002"
+      - "http://electrs:3002"
       - "--relay"
       - "ws://nostr-relay:7777"
       - "--data-dir"
@@ -157,8 +158,8 @@ services:
   # deposits-bdk Node 3 - Charlie (Partner)
   bdk-charlie:
     build:
-      context: ../../
-      dockerfile: deposits-rust/deposits-tools/Dockerfile.deposits-bdk
+      context: ../../../
+      dockerfile: deposits-rust/deposits-tools/bdk/Dockerfile
     container_name: bdk-charlie
     command:
       - "run"
@@ -167,7 +168,7 @@ services:
       - "--network"
       - "regtest"
       - "--electrum"
-      - "tcp://electrs:3002"
+      - "http://electrs:3002"
       - "--relay"
       - "ws://nostr-relay:7777"
       - "--data-dir"
@@ -192,8 +193,8 @@ services:
     profiles:
       - dev
     build:
-      context: ../../
-      dockerfile: deposits-rust/deposits-tools/Dockerfile.deposits-bdk
+      context: ../../../
+      dockerfile: deposits-rust/deposits-tools/bdk/Dockerfile
     container_name: bdk-diana
     command:
       - "run"
@@ -202,7 +203,7 @@ services:
       - "--network"
       - "regtest"
       - "--electrum"
-      - "tcp://electrs:3002"
+      - "http://electrs:3002"
       - "--relay"
       - "ws://nostr-relay:7777"
       - "--data-dir"
@@ -227,8 +228,8 @@ services:
     profiles:
       - dev
     build:
-      context: ../../
-      dockerfile: deposits-rust/deposits-tools/Dockerfile.deposits-bdk
+      context: ../../../
+      dockerfile: deposits-rust/deposits-tools/bdk/Dockerfile
     container_name: bdk-eve
     command:
       - "run"
@@ -237,7 +238,7 @@ services:
       - "--network"
       - "regtest"
       - "--electrum"
-      - "tcp://electrs:3002"
+      - "http://electrs:3002"
       - "--relay"
       - "ws://nostr-relay:7777"
       - "--data-dir"
@@ -297,10 +298,10 @@ services:
       - dev
     environment:
       - RUST_LOG=info,deposits_bdk=debug
-      - ELECTRUM_URL=tcp://electrs:3002
+      - ELECTRUM_URL=http://electrs:3002
       - NOSTR_RELAY=ws://nostr-relay:7777
     volumes:
-      - ../..:/workspace
+      - ../../..:/workspace
     depends_on:
       bitcoin:
         condition: service_healthy

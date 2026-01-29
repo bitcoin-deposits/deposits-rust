@@ -35,4 +35,13 @@ pub enum Error {
 
     #[error("NWC error: {0}")]
     Nwc(String),
+
+    #[error("No reserves found. Create reserves first with 'reserves' command.")]
+    NoReserves,
+
+    #[error("Protocol error: {0}")]
+    Protocol(String),
+
+    #[error("Deposit offer not found")]
+    OfferNotFound,
 }

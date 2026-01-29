@@ -12,7 +12,7 @@ deposits-core = { path = "../deposits-core" }
 # Bitcoin
 bitcoin = { version = "0.32", features = ["serde"] }
 bdk_wallet = "1.0"
-bdk_electrum = "0.20"
+bdk_esplora = { version = "0.20", features = ["blocking"] }
 bdk_file_store = "0.18"
 
 # Nostr for peer messaging

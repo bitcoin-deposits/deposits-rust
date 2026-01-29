@@ -45,23 +45,8 @@ Operator {
     state_root: hash of current ledger state
     reserves: on-chain UTXOs backing the ledger
     collateral_partners: set of operators holding recovery capability
-    collateral_enforcement_block: u64 (collateral requirements enforced from this block)
 }
 ```
-
-The `collateral_enforcement_block` is set at ledger creation and immutable.
-
-**What is always enforced (regardless of block):**
-- Ledger conformance (valid transactions, correct signatures)
-- State root correctness
-- Reserve sufficiency
-- Partner validation of updates
-
-**What is deferred until `collateral_enforcement_block`:**
-- Collateral size requirements (partners must have ledgers >= half size)
-- The 51% security threshold guarantee
-
-Before `collateral_enforcement_block`, ledger operations are validated but the economic backstop is not guaranteed. Non-conforming ledgers are still invalid—there's just no assurance that partners have sufficient capital at risk to make recovery reliable.
 
 **Operator obligations**:
 - Only sign conforming ledger updates
@@ -362,99 +347,9 @@ No protocol-level governance. Participants vote with capital.
 
 ---
 
-## Bootstrap and Network Initialization
-
-### The Bootstrap Problem
-
-Collateral size requirements create a circular dependency:
-- To operate, you need collateral partners
-- To be a partner, your ledger must be half the size
-- To have a ledger, you need to operate
-
-### Solution: Deferred Collateral Requirements
-
-Each ledger declares a `collateral_enforcement_block`. Before this block, collateral size requirements are relaxed. Ledger validation is always enforced.
-
-```
-Ledger Genesis {
-    operator: pubkey
-    genesis_block: 0
-    collateral_enforcement_block: N
-    initial_partners: [pubkeys]
-    ...
-}
-```
-
-### What's Always Enforced
-
-Regardless of `collateral_enforcement_block`:
-- Ledger updates must be conforming
-- Transactions must satisfy spend scripts
-- State roots must be correct
-- Reserves must cover balances
-- Partners validate all updates
-- Non-conforming updates invalidate the ledger
-
-### What's Deferred
-
-Before `collateral_enforcement_block`:
-- Partners don't need ledgers >= half size
-- The 51% capital threshold is not guaranteed
-- Recovery may not be economically reliable
-
-This is trust with validation, not trust without validation.
-
-### Bootstrap Phase (block < collateral_enforcement_block)
-
-- Operators establish collateral deposits with each other
-- Recovery transactions are signed and distributed
-- Partners validate everything—just without size requirements
-- Users see `collateral_enforcement_block` and understand the guarantee level
-- Rational operators build collateral web toward full requirements
-
-### Enforcement Phase (block >= collateral_enforcement_block)
-
-- Collateral size requirements enforced
-- 51% security threshold applies
-- Full protocol guarantees in effect
-- Non-compliant partner relationships are invalid
-
-### Founding a New Network
-
-1. Initial operators agree on a future `collateral_enforcement_block`
-2. Each opens ledger with same `collateral_enforcement_block`
-3. Operators cross-establish collateral deposits
-4. Build partner relationships toward size requirements
-5. At `collateral_enforcement_block`, network has full economic guarantees
-
-### Joining an Established Network
-
-New operators joining after bootstrap:
-- Set `collateral_enforcement_block = genesis_block` (or small buffer)
-- Must have properly-sized partners before opening
-- No grace period—network infrastructure exists
-- Users see enforcement is immediate
-
-### User Visibility
-
-Users can inspect any ledger's `collateral_enforcement_block`:
-- In future → validation enforced, collateral guarantees not yet
-- In past → full enforcement, 51% threshold applies
-
-This is explicit in the protocol. Users make informed decisions based on the guarantee level.
-
----
-
 ## Implementation Phases
 
-### Phase 0: Bootstrap Network
-
-- Founding operators with `collateral_enforcement_block` in future
-- Cross-establish collateral deposits
-- Validation enforced, size requirements relaxed
-- Grow until `collateral_enforcement_block` arrives
-
-### Phase 1: Single Operator (can run in parallel with Phase 0)
+### Phase 1: Single Operator
 
 - Transparent ledger with state updates
 - On-chain reserves (single-sig + timelock)
@@ -487,15 +382,13 @@ This is explicit in the protocol. Users make informed decisions based on the gua
 
 1. **Optimal collateral ratios**: What ratios make the game theory work at different network sizes?
 
-2. **Privacy layer**: Can we add privacy without breaking accountability? Selective disclosure?
+2. **Partner discovery**: How do new operators find partners? Reputation bootstrapping?
 
-3. **Governance**: How do protocol upgrades happen? Soft forks within the deposit network?
+3. **Privacy layer**: Can we add privacy without breaking accountability? Selective disclosure?
 
-4. **Dust and rent**: Minimum balances? Ongoing fees for inactive deposits?
+4. **Governance**: How do protocol upgrades happen? Soft forks within the deposit network?
 
-5. **Collateral enforcement block selection**: For new networks, how far in the future should `collateral_enforcement_block` be set? What's the right tradeoff between bootstrap time and user protection?
-
-6. **Partner discovery**: How do operators find each other? Is there a registry, or pure word-of-mouth?
+5. **Dust and rent**: Minimum balances? Ongoing fees for inactive deposits?
 
 ---
 

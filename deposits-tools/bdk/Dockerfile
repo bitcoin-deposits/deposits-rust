@@ -1,7 +1,7 @@
 # Dockerfile for deposits-bdk nodes
 # Builds the deposits-bdk CLI and runs it
 
-FROM rust:1.75-bookworm as builder
+FROM rust:1.85-bookworm AS builder
 
 # Install dependencies
 RUN apt-get update && apt-get install -y \
@@ -13,13 +13,12 @@ RUN apt-get update && apt-get install -y \
 # Create app directory
 WORKDIR /app
 
-# Copy workspace files
-COPY deposits-rust/Cargo.toml ./Cargo.toml
+# Copy only what deposits-bdk needs (exclude deposits-ldk which requires rust-lightning)
 COPY deposits-rust/deposits-core ./deposits-core
-COPY deposits-rust/deposits-ldk ./deposits-ldk
 COPY deposits-rust/deposits-bdk ./deposits-bdk
-COPY deposits-rust/deposits-nwc ./deposits-nwc
-COPY deposits-rust/deposits-tools ./deposits-tools
+
+# Create a minimal workspace Cargo.toml for Docker build
+RUN echo '[workspace]\nmembers = ["deposits-core", "deposits-bdk"]\nresolver = "2"' > Cargo.toml
 
 # Build deposits-bdk
 RUN cargo build --release -p deposits-bdk --bin deposits-bdk

@@ -155,6 +155,8 @@ mod tests {
             ledger_address: "test_address".to_string(),
             funding_txid: [0u8; 32],
             funding_vout: 0,
+            reserves_amount: 100_000_000,
+            collateral_enforcement_block: 0,
         });
 
         // encode_message produces payload only (no type prefix) for Lightning wire format
@@ -190,6 +192,8 @@ mod tests {
                 ledger_address: "test".to_string(),
                 funding_txid: [0u8; 32],
                 funding_vout: 0,
+                reserves_amount: 100_000_000,
+                collateral_enforcement_block: 0,
             }),
             // Handshake response
             DepositsMessage::HandshakeResponse(HandshakeResponseMsg {
@@ -269,6 +273,8 @@ mod tests {
             ledger_address: "test".to_string(),
             funding_txid: [0u8; 32],
             funding_vout: 0,
+            reserves_amount: 100_000_000,
+            collateral_enforcement_block: 0,
         });
 
         // encode_message produces payload only (no type prefix) for Lightning wire format

@@ -666,10 +666,21 @@ pub struct HandshakeMsg {
     pub partner_id: PublicKey,
     /// Ledger address string
     pub ledger_address: String,
-    /// Funding transaction ID
+    /// Funding transaction ID (reserves UTXO)
     pub funding_txid: [u8; 32],
     /// Funding output index
     pub funding_vout: u16,
+    /// Reserves amount in satoshis
+    pub reserves_amount: u64,
+    /// Block height at which collateral size requirements are enforced.
+    ///
+    /// Set to 0 for immediate enforcement (joining an established network).
+    /// Set to a future block for bootstrap phase (allows cross-establishing
+    /// collateral before requirements kick in).
+    ///
+    /// Before this block: ledger validation enforced, collateral size requirements relaxed.
+    /// After this block: full 51% capital threshold applies.
+    pub collateral_enforcement_block: u64,
 }
 
 /// Response to handshake
@@ -1540,6 +1551,8 @@ impl DepositsMessage {
                 write_string(w, &m.ledger_address)?;
                 write_32(w, &m.funding_txid)?;
                 write_u16(w, m.funding_vout)?;
+                write_u64(w, m.reserves_amount)?;
+                write_u64(w, m.collateral_enforcement_block)?;
             }
             Self::HandshakeResponse(m) => {
                 write_32(w, &m.request_hash)?;
@@ -1602,6 +1615,8 @@ impl DepositsMessage {
                 ledger_address: read_string(r)?,
                 funding_txid: read_32(r)?,
                 funding_vout: read_u16(r)?,
+                reserves_amount: read_u64(r)?,
+                collateral_enforcement_block: read_u64(r)?,
             })),
             HANDSHAKE_RESPONSE => Ok(Self::HandshakeResponse(HandshakeResponseMsg {
                 request_hash: read_32(r)?,
@@ -2517,6 +2532,8 @@ mod handshake_tlv {
     pub const LEDGER_ADDRESS: u64 = 10;
     pub const FUNDING_TXID: u64 = 12;
     pub const FUNDING_VOUT: u64 = 14;
+    pub const RESERVES_AMOUNT: u64 = 16;
+    pub const COLLATERAL_ENFORCEMENT_BLOCK: u64 = 18;
 }
 
 impl TlvEncode for HandshakeMsg {
@@ -2531,6 +2548,8 @@ impl TlvEncode for HandshakeMsg {
             .string_field(LEDGER_ADDRESS, &self.ledger_address)
             .bytes_field(FUNDING_TXID, &self.funding_txid)
             .u16_field(FUNDING_VOUT, self.funding_vout)
+            .u64_field(RESERVES_AMOUNT, self.reserves_amount)
+            .u64_field(COLLATERAL_ENFORCEMENT_BLOCK, self.collateral_enforcement_block)
             .build()
     }
 }
@@ -2548,6 +2567,8 @@ impl TlvDecode for HandshakeMsg {
             ledger_address: reader.read_string(LEDGER_ADDRESS)?,
             funding_txid: reader.read_bytes(FUNDING_TXID)?,
             funding_vout: reader.read_u16(FUNDING_VOUT)?,
+            reserves_amount: reader.read_u64_opt(RESERVES_AMOUNT)?.unwrap_or(0),
+            collateral_enforcement_block: reader.read_u64_opt(COLLATERAL_ENFORCEMENT_BLOCK)?.unwrap_or(0),
         })
     }
 }
@@ -3628,6 +3649,8 @@ mod tests {
             ledger_address: "tb1q...".to_string(),
             funding_txid: [0x11; 32],
             funding_vout: 0,
+            reserves_amount: 100_000_000, // 1 BTC
+            collateral_enforcement_block: 1000, // Bootstrap until block 1000
         });
 
         let encoded = msg.encode();
@@ -3795,6 +3818,8 @@ mod tests {
             ledger_address: "tb1q...".to_string(),
             funding_txid: [0x11; 32],
             funding_vout: 0,
+            reserves_amount: 100_000_000,
+            collateral_enforcement_block: 0, // Immediate enforcement
         };
 
         let encoded = msg.tlv_encode();
@@ -4052,6 +4077,8 @@ mod tests {
                 ledger_address: "test-ledger".to_string(),
                 funding_txid: [0xEE; 32],
                 funding_vout: 0,
+                reserves_amount: 50_000_000,
+                collateral_enforcement_block: 500,
             }),
             DepositsMessage::Sync(SyncMsg {
                 operator_id: test_pubkey(),

@@ -15,7 +15,10 @@ use deposits_core::ledger::Ledger;
 use deposits_core::message_validation::{HandlerContext, ValidationContext};
 use deposits_core::messages::DepositsMessage;
 use deposits_core::traits::ProtocolEvent;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::mpsc;
 
@@ -29,6 +32,14 @@ pub struct OutboundMessage {
     pub message: DepositsMessage,
 }
 
+/// Serializable ledger entry for persistence
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LedgerEntry {
+    operator: String,
+    partner: String,
+    ledger: Ledger,
+}
+
 /// The main handler for deposits-bdk
 ///
 /// This implements `HandlerContext` to enable all core protocol logic.
@@ -40,7 +51,7 @@ pub struct DepositsHandler {
     secret_key: SecretKey,
 
     /// Ledgers indexed by (operator, partner)
-    ledgers: Mutex<HashMap<(PublicKey, PublicKey), Arc<RwLock<Ledger>>>>,
+    pub ledgers: Mutex<HashMap<(PublicKey, PublicKey), Arc<RwLock<Ledger>>>>,
 
     /// Pending events to be processed
     events: Mutex<Vec<ProtocolEvent>>,
@@ -50,6 +61,9 @@ pub struct DepositsHandler {
 
     /// BDK wallet for on-chain operations
     wallet: Arc<Wallet>,
+
+    /// Data directory for persistence
+    data_dir: PathBuf,
 }
 
 impl DepositsHandler {
@@ -60,6 +74,7 @@ impl DepositsHandler {
     pub fn new(
         secret_key: SecretKey,
         wallet: Arc<Wallet>,
+        data_dir: PathBuf,
     ) -> (Self, mpsc::UnboundedReceiver<OutboundMessage>) {
         use bitcoin::secp256k1::Secp256k1;
         let secp = Secp256k1::new();
@@ -67,16 +82,98 @@ impl DepositsHandler {
 
         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
 
+        // Load existing ledgers from disk
+        let ledgers = Self::load_ledgers_from_disk(&data_dir);
+
         let handler = Self {
             our_node_id,
             secret_key,
-            ledgers: Mutex::new(HashMap::new()),
+            ledgers: Mutex::new(ledgers),
             events: Mutex::new(Vec::new()),
             outbound_tx,
             wallet,
+            data_dir,
         };
 
         (handler, outbound_rx)
+    }
+
+    /// Load ledgers from disk
+    fn load_ledgers_from_disk(data_dir: &PathBuf) -> HashMap<(PublicKey, PublicKey), Arc<RwLock<Ledger>>> {
+        let ledgers_file = data_dir.join("ledgers.json");
+        if !ledgers_file.exists() {
+            return HashMap::new();
+        }
+
+        let contents = match fs::read_to_string(&ledgers_file) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("Failed to read ledgers file: {}", e);
+                return HashMap::new();
+            }
+        };
+
+        let entries: Vec<LedgerEntry> = match serde_json::from_str(&contents) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("Failed to parse ledgers file: {}", e);
+                return HashMap::new();
+            }
+        };
+
+        let mut ledgers = HashMap::new();
+        for entry in entries {
+            let operator = match entry.operator.parse::<PublicKey>() {
+                Ok(pk) => pk,
+                Err(e) => {
+                    tracing::warn!("Invalid operator pubkey in ledger: {}", e);
+                    continue;
+                }
+            };
+            let partner = match entry.partner.parse::<PublicKey>() {
+                Ok(pk) => pk,
+                Err(e) => {
+                    tracing::warn!("Invalid partner pubkey in ledger: {}", e);
+                    continue;
+                }
+            };
+            ledgers.insert((operator, partner), Arc::new(RwLock::new(entry.ledger)));
+        }
+
+        tracing::info!("Loaded {} ledgers from disk", ledgers.len());
+        ledgers
+    }
+
+    /// Save all ledgers to disk
+    fn save_ledgers_to_disk(&self) -> Result<(), String> {
+        // Ensure data directory exists
+        if !self.data_dir.exists() {
+            fs::create_dir_all(&self.data_dir)
+                .map_err(|e| format!("Failed to create data dir: {}", e))?;
+        }
+
+        let ledgers = self.ledgers.lock().unwrap();
+        let entries: Vec<LedgerEntry> = ledgers
+            .iter()
+            .map(|((operator, partner), ledger_arc)| {
+                let ledger = ledger_arc.read().unwrap();
+                LedgerEntry {
+                    operator: operator.to_string(),
+                    partner: partner.to_string(),
+                    ledger: ledger.clone(),
+                }
+            })
+            .collect();
+
+        let contents = serde_json::to_string_pretty(&entries)
+            .map_err(|e| format!("Failed to serialize ledgers: {}", e))?;
+
+        let ledgers_file = self.data_dir.join("ledgers.json");
+        fs::write(&ledgers_file, contents)
+            .map_err(|e| format!("Failed to write ledgers file: {}", e))?;
+
+        tracing::info!("Saved {} ledgers to disk", entries.len());
+        Ok(())
     }
 
     /// Process an incoming message from a peer
@@ -113,7 +210,8 @@ impl DepositsHandler {
         partner: PublicKey,
     ) -> Arc<RwLock<Ledger>> {
         let mut ledgers = self.ledgers.lock().unwrap();
-        ledgers
+        let is_new = !ledgers.contains_key(&(operator, partner));
+        let ledger = ledgers
             .entry((operator, partner))
             .or_insert_with(|| {
                 let role = if operator == self.our_node_id {
@@ -129,7 +227,17 @@ impl DepositsHandler {
                     String::new(),
                 )))
             })
-            .clone()
+            .clone();
+
+        // If we created a new ledger, save to disk
+        if is_new {
+            drop(ledgers); // Release lock before saving
+            if let Err(e) = self.save_ledgers_to_disk() {
+                tracing::error!("Failed to save ledgers after creation: {}", e);
+            }
+        }
+
+        ledger
     }
 }
 
@@ -186,9 +294,8 @@ impl HandlerContext for DepositsHandler {
         self.wallet.get_block_height().unwrap_or(0)
     }
 
-    fn persist_ledger(&self, operator: &PublicKey, partner: &PublicKey) -> Result<(), String> {
-        // TODO: Implement persistence
-        let _ = (operator, partner);
-        Ok(())
+    fn persist_ledger(&self, _operator: &PublicKey, _partner: &PublicKey) -> Result<(), String> {
+        // Save all ledgers to disk (could optimize to save just the specific one)
+        self.save_ledgers_to_disk()
     }
 }

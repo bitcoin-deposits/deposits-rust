@@ -147,13 +147,54 @@ impl Ledger {
         collateral_partners: Vec<PublicKey>,
         ledger_address: String,
     ) -> Self {
-        let mut state = LedgerState::new(operator_key, partner_key, ledger_address);
+        Self::with_enforcement_block(
+            operator_key,
+            partner_key,
+            role,
+            collateral_partners,
+            ledger_address,
+            None,
+        )
+    }
+
+    /// Create a new ledger with explicit collateral enforcement block.
+    ///
+    /// - `enforcement_block = None`: Immediate enforcement (for joining established networks)
+    /// - `enforcement_block = Some(future_block)`: Deferred enforcement (for bootstrap phase)
+    ///
+    /// During bootstrap, operators can cross-establish collateral partnerships before
+    /// the size requirements kick in. After the enforcement block, partners must have
+    /// ledgers >= half the operator's ledger size.
+    pub fn with_enforcement_block(
+        operator_key: PublicKey,
+        partner_key: PublicKey,
+        role: LedgerRole,
+        collateral_partners: Vec<PublicKey>,
+        ledger_address: String,
+        collateral_enforcement_block: Option<u64>,
+    ) -> Self {
+        let mut state = LedgerState::with_enforcement_block(
+            operator_key,
+            partner_key,
+            ledger_address,
+            collateral_enforcement_block,
+        );
         state.collateral_partners = collateral_partners;
         Self {
             state,
             role,
             history: Vec::new(),
         }
+    }
+
+    /// Check if collateral size requirements are enforced at the given block.
+    pub fn is_collateral_enforced(&self, current_block: u64) -> bool {
+        self.state.is_collateral_enforced(current_block)
+    }
+
+    /// Get the collateral enforcement block (None for immediate enforcement).
+    pub fn collateral_enforcement_block(&self) -> Option<u64> {
+        self.state.collateral_enforcement_block
     }
 
     /// Get the current sequence number.

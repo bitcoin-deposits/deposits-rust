@@ -20,11 +20,8 @@ use tokio::sync::mpsc;
 use crate::Error;
 
 /// Default relay URLs for the network
-pub const DEFAULT_RELAYS: &[&str] = &[
-    "wss://relay.damus.io",
-    "wss://nos.lol",
-    "wss://relay.nostr.band",
-];
+/// Empty by default - relays should be explicitly configured
+pub const DEFAULT_RELAYS: &[&str] = &[];
 
 /// Nostr transport for deposits protocol messages
 pub struct NostrTransport {

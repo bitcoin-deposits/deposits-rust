@@ -113,6 +113,11 @@ pub use types::{
     DepositInfo, InvoiceInfo, ReservesStatus, CollateralAttestation,
     AuditResult, Violation, CrossLedgerViolation, LedgerStateUpdate,
     QuorumJoinRequestMsg, QuorumJoinResponseMsg, QuorumVoteMsg,
+    // On-chain deposit funding
+    DepositOffer, DepositOfferStatus,
+    // On-chain withdrawal
+    OnChainWithdrawal, OnChainWithdrawalStatus,
+    WithdrawalLockResult, WithdrawalCompleteResult,
     // Channel types
     CommitmentExtraOutput, ChannelId,
     // Serde helper modules for serializing/deserializing Bitcoin types
@@ -157,6 +162,8 @@ pub use reserves_proposal::{
 pub use signature_utils::{
     create_deposit_guarantee_signature, verify_deposit_guarantee_signature,
     create_payment_authorization_signature, verify_payment_signature,
+    create_deposit_offer_signature, verify_deposit_offer_signature,
+    create_withdrawal_signature, verify_withdrawal_signature,
 };
 pub use tlv::{
     TlvEncode, TlvDecode, TlvStream, TlvBuilder, TlvReader,

@@ -146,6 +146,150 @@ pub fn create_payment_authorization_signature(
     Ok(signature.serialize_compact().to_vec())
 }
 
+/// Create a deposit offer signature (operator's commitment to credit deposit with on-chain funds)
+///
+/// The operator signs the offer parameters to commit to crediting the deposit
+/// when funds are received at the specified address.
+pub fn create_deposit_offer_signature(
+    operator_secret: &SecretKey,
+    operator_id: &PublicKey,
+    partner_id: &PublicKey,
+    deposit_pubkey: &PublicKey,
+    funding_address: &str,
+    max_amount_sats: u64,
+    min_amount_sats: u64,
+    deadline_block: u32,
+) -> Result<[u8; 64], DepositsError> {
+    use crate::types::DepositOffer;
+
+    // Create the canonical signing message
+    let signing_message = DepositOffer::signing_message(
+        operator_id,
+        partner_id,
+        deposit_pubkey,
+        funding_address,
+        max_amount_sats,
+        min_amount_sats,
+        deadline_block,
+    );
+
+    // Hash the message
+    let message_hash = sha256::Hash::hash(signing_message.as_bytes());
+    let secp_message = Message::from_digest_slice(message_hash.as_ref())
+        .map_err(|_| DepositsError::ProtocolViolation {
+            violation_type: "invalid_message_hash".to_string(),
+            details: "Failed to create secp256k1 message from hash".to_string(),
+        })?;
+
+    // Sign the message
+    let secp = Secp256k1::signing_only();
+    let signature = secp.sign_ecdsa(&secp_message, operator_secret);
+
+    Ok(signature.serialize_compact())
+}
+
+/// Verify a deposit offer signature
+///
+/// Verifies that the operator committed to the specified deposit offer parameters.
+pub fn verify_deposit_offer_signature(
+    offer: &crate::types::DepositOffer,
+) -> Result<bool, DepositsError> {
+    // Get the signing message
+    let signing_message = offer.get_signing_message();
+
+    // Hash the message
+    let message_hash = sha256::Hash::hash(signing_message.as_bytes());
+    let secp_message = Message::from_digest_slice(message_hash.as_ref())
+        .map_err(|_| DepositsError::ProtocolViolation {
+            violation_type: "invalid_message_hash".to_string(),
+            details: "Failed to create secp256k1 message from hash".to_string(),
+        })?;
+
+    // Parse signature
+    let signature = Signature::from_compact(&offer.operator_signature)
+        .map_err(|_| DepositsError::ProtocolViolation {
+            violation_type: "invalid_signature".to_string(),
+            details: "Failed to parse deposit offer signature".to_string(),
+        })?;
+
+    // Verify signature against operator's public key
+    let secp = Secp256k1::verification_only();
+    match secp.verify_ecdsa(&secp_message, &signature, &offer.operator_id) {
+        Ok(_) => Ok(true),
+        Err(_) => Ok(false),
+    }
+}
+
+/// Create a withdrawal authorization signature (depositor authorizes withdrawal)
+///
+/// The depositor signs the withdrawal parameters to authorize the operator
+/// to send funds to the specified address. The nonce ensures uniqueness.
+pub fn create_withdrawal_signature(
+    depositor_secret: &SecretKey,
+    nonce: &[u8; 32],
+    deposit_pubkey: &PublicKey,
+    destination_address: &str,
+    amount_sats: u64,
+    fee_sats: u64,
+) -> Result<[u8; 64], DepositsError> {
+    use crate::types::OnChainWithdrawal;
+
+    // Create the canonical signing message
+    let signing_message = OnChainWithdrawal::signing_message(
+        nonce,
+        deposit_pubkey,
+        destination_address,
+        amount_sats,
+        fee_sats,
+    );
+
+    // Hash the message
+    let message_hash = sha256::Hash::hash(signing_message.as_bytes());
+    let secp_message = Message::from_digest_slice(message_hash.as_ref())
+        .map_err(|_| DepositsError::ProtocolViolation {
+            violation_type: "invalid_message_hash".to_string(),
+            details: "Failed to create secp256k1 message from hash".to_string(),
+        })?;
+
+    // Sign the message
+    let secp = Secp256k1::signing_only();
+    let signature = secp.sign_ecdsa(&secp_message, depositor_secret);
+
+    Ok(signature.serialize_compact())
+}
+
+/// Verify a withdrawal authorization signature
+///
+/// Verifies that the depositor authorized the withdrawal to the specified address.
+pub fn verify_withdrawal_signature(
+    withdrawal: &crate::types::OnChainWithdrawal,
+) -> Result<bool, DepositsError> {
+    // Get the signing message
+    let signing_message = withdrawal.get_signing_message();
+
+    // Hash the message
+    let message_hash = sha256::Hash::hash(signing_message.as_bytes());
+    let secp_message = Message::from_digest_slice(message_hash.as_ref())
+        .map_err(|_| DepositsError::ProtocolViolation {
+            violation_type: "invalid_message_hash".to_string(),
+            details: "Failed to create secp256k1 message from hash".to_string(),
+        })?;
+
+    // Parse signature
+    let signature = Signature::from_compact(&withdrawal.depositor_signature)
+        .map_err(|_| DepositsError::ProtocolViolation {
+            violation_type: "invalid_signature".to_string(),
+            details: "Failed to parse withdrawal signature".to_string(),
+        })?;
+
+    // Verify signature against depositor's public key
+    let secp = Secp256k1::verification_only();
+    match secp.verify_ecdsa(&secp_message, &signature, &withdrawal.deposit_pubkey) {
+        Ok(_) => Ok(true),
+        Err(_) => Ok(false),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,5 +363,227 @@ mod tests {
 
         // Invalid signatures should be rejected
         assert!(!verify_payment_signature(&public, &payment_id, amount, &invalid_sig));
+    }
+
+    #[test]
+    fn test_deposit_offer_signature_roundtrip() {
+        use crate::types::DepositOffer;
+
+        let (operator_secret, operator_pubkey) = create_test_keypair();
+
+        // Create another keypair for partner
+        let secp = Secp256k1::new();
+        let partner_secret = SecretKey::from_slice(&[2u8; 32]).unwrap();
+        let partner_pubkey = PublicKey::from_secret_key(&secp, &partner_secret);
+
+        // And one for deposit
+        let deposit_secret = SecretKey::from_slice(&[3u8; 32]).unwrap();
+        let deposit_pubkey = PublicKey::from_secret_key(&secp, &deposit_secret);
+
+        let funding_address = "bc1qtest123456789";
+        let max_amount_sats = 1_000_000u64;
+        let min_amount_sats = 10_000u64;
+        let deadline_block = 800_000u32;
+
+        // Create signature
+        let sig = create_deposit_offer_signature(
+            &operator_secret,
+            &operator_pubkey,
+            &partner_pubkey,
+            &deposit_pubkey,
+            funding_address,
+            max_amount_sats,
+            min_amount_sats,
+            deadline_block,
+        ).unwrap();
+
+        // Create the offer struct
+        let signing_message = DepositOffer::signing_message(
+            &operator_pubkey,
+            &partner_pubkey,
+            &deposit_pubkey,
+            funding_address,
+            max_amount_sats,
+            min_amount_sats,
+            deadline_block,
+        );
+        let offer_id = DepositOffer::compute_offer_id(&signing_message);
+
+        let offer = DepositOffer {
+            operator_id: operator_pubkey,
+            partner_id: partner_pubkey,
+            deposit_pubkey,
+            funding_address: funding_address.to_string(),
+            max_amount_sats,
+            min_amount_sats,
+            deadline_block,
+            created_at_block: 799_000,
+            offer_id,
+            operator_signature: sig,
+        };
+
+        // Verify signature
+        let valid = verify_deposit_offer_signature(&offer).unwrap();
+        assert!(valid, "Deposit offer signature should be valid");
+    }
+
+    #[test]
+    fn test_deposit_offer_signature_wrong_amount() {
+        use crate::types::DepositOffer;
+
+        let (operator_secret, operator_pubkey) = create_test_keypair();
+        let secp = Secp256k1::new();
+        let partner_secret = SecretKey::from_slice(&[2u8; 32]).unwrap();
+        let partner_pubkey = PublicKey::from_secret_key(&secp, &partner_secret);
+        let deposit_secret = SecretKey::from_slice(&[3u8; 32]).unwrap();
+        let deposit_pubkey = PublicKey::from_secret_key(&secp, &deposit_secret);
+
+        let funding_address = "bc1qtest123456789";
+        let max_amount_sats = 1_000_000u64;
+        let min_amount_sats = 10_000u64;
+        let deadline_block = 800_000u32;
+
+        // Create signature with original amount
+        let sig = create_deposit_offer_signature(
+            &operator_secret,
+            &operator_pubkey,
+            &partner_pubkey,
+            &deposit_pubkey,
+            funding_address,
+            max_amount_sats,
+            min_amount_sats,
+            deadline_block,
+        ).unwrap();
+
+        // Create offer with different amount
+        let signing_message = DepositOffer::signing_message(
+            &operator_pubkey,
+            &partner_pubkey,
+            &deposit_pubkey,
+            funding_address,
+            max_amount_sats + 1000, // Different amount!
+            min_amount_sats,
+            deadline_block,
+        );
+        let offer_id = DepositOffer::compute_offer_id(&signing_message);
+
+        let offer = DepositOffer {
+            operator_id: operator_pubkey,
+            partner_id: partner_pubkey,
+            deposit_pubkey,
+            funding_address: funding_address.to_string(),
+            max_amount_sats: max_amount_sats + 1000, // Different amount!
+            min_amount_sats,
+            deadline_block,
+            created_at_block: 799_000,
+            offer_id,
+            operator_signature: sig, // Signed with original amount
+        };
+
+        // Verify should fail - signature doesn't match modified amount
+        let valid = verify_deposit_offer_signature(&offer).unwrap();
+        assert!(!valid, "Signature should be invalid for modified amount");
+    }
+
+    #[test]
+    fn test_withdrawal_signature_roundtrip() {
+        use crate::types::OnChainWithdrawal;
+
+        let (depositor_secret, deposit_pubkey) = create_test_keypair();
+
+        let nonce = [42u8; 32];
+        let destination_address = "bc1qwithdrawal123456789";
+        let amount_sats = 500_000u64;
+        let fee_sats = 1_000u64;
+
+        // Create signature
+        let sig = create_withdrawal_signature(
+            &depositor_secret,
+            &nonce,
+            &deposit_pubkey,
+            destination_address,
+            amount_sats,
+            fee_sats,
+        ).unwrap();
+
+        // Create the withdrawal struct
+        let signing_message = OnChainWithdrawal::signing_message(
+            &nonce,
+            &deposit_pubkey,
+            destination_address,
+            amount_sats,
+            fee_sats,
+        );
+        let withdrawal_id = OnChainWithdrawal::compute_withdrawal_id(&signing_message);
+
+        let withdrawal = OnChainWithdrawal {
+            withdrawal_id,
+            nonce,
+            deposit_pubkey,
+            destination_address: destination_address.to_string(),
+            amount_sats,
+            fee_sats,
+            requested_at_block: 800_000,
+            memo: Some("Test withdrawal".to_string()),
+            depositor_signature: sig,
+        };
+
+        // Verify signature
+        let valid = verify_withdrawal_signature(&withdrawal).unwrap();
+        assert!(valid, "Withdrawal signature should be valid");
+
+        // Verify OP_RETURN data
+        let op_return = withdrawal.op_return_data();
+        assert_eq!(&op_return[0..5], b"WDRL:");
+        assert_eq!(&op_return[5..33], &withdrawal_id[..28]);
+        assert!(withdrawal.verify_op_return(&op_return));
+    }
+
+    #[test]
+    fn test_withdrawal_signature_wrong_amount() {
+        use crate::types::OnChainWithdrawal;
+
+        let (depositor_secret, deposit_pubkey) = create_test_keypair();
+
+        let nonce = [42u8; 32];
+        let destination_address = "bc1qwithdrawal123456789";
+        let amount_sats = 500_000u64;
+        let fee_sats = 1_000u64;
+
+        // Create signature with original amount
+        let sig = create_withdrawal_signature(
+            &depositor_secret,
+            &nonce,
+            &deposit_pubkey,
+            destination_address,
+            amount_sats,
+            fee_sats,
+        ).unwrap();
+
+        // Create withdrawal with different amount
+        let signing_message = OnChainWithdrawal::signing_message(
+            &nonce,
+            &deposit_pubkey,
+            destination_address,
+            amount_sats + 1000, // Different amount!
+            fee_sats,
+        );
+        let withdrawal_id = OnChainWithdrawal::compute_withdrawal_id(&signing_message);
+
+        let withdrawal = OnChainWithdrawal {
+            withdrawal_id,
+            nonce,
+            deposit_pubkey,
+            destination_address: destination_address.to_string(),
+            amount_sats: amount_sats + 1000, // Different amount!
+            fee_sats,
+            requested_at_block: 800_000,
+            memo: None,
+            depositor_signature: sig, // Signed with original amount
+        };
+
+        // Verify should fail - signature doesn't match modified amount
+        let valid = verify_withdrawal_signature(&withdrawal).unwrap();
+        assert!(!valid, "Signature should be invalid for modified amount");
     }
 }

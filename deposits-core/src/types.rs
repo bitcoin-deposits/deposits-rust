@@ -554,6 +554,24 @@ pub struct LedgerState {
     /// COLLATERAL_REPORTING_PERIOD_BLOCKS of an increase.
     #[serde(default)]
     pub last_collateral_increase_block: Option<u32>,
+    /// Block height at which collateral size requirements are enforced.
+    ///
+    /// Before this block:
+    /// - Ledger conformance is always enforced (valid signatures, state roots)
+    /// - Partner validation is always required
+    /// - Collateral SIZE requirements are NOT enforced (partners don't need ledgers >= half size)
+    /// - The 51% security threshold is NOT guaranteed
+    ///
+    /// After this block:
+    /// - Full collateral size requirements enforced
+    /// - 51% capital threshold applies
+    /// - Non-compliant partner relationships are invalid
+    ///
+    /// This enables network bootstrap where operators can cross-establish collateral
+    /// before the requirements kick in. Set to None for immediate enforcement (joining
+    /// an established network), or Some(future_block) for bootstrap phase.
+    #[serde(default)]
+    pub collateral_enforcement_block: Option<u64>,
     /// Collateral received from other operators that backs this ledger's deposits.
     /// In the 100%+100% model, deposits need 100% reserves + 100% received collateral.
     #[serde(default)]
@@ -594,6 +612,19 @@ pub struct LedgerState {
 impl LedgerState {
     /// Create a new empty ledger state.
     pub fn new(operator_key: PublicKey, partner_key: PublicKey, ledger_address: String) -> Self {
+        Self::with_enforcement_block(operator_key, partner_key, ledger_address, None)
+    }
+
+    /// Create a new ledger state with explicit collateral enforcement block.
+    ///
+    /// - `enforcement_block = None`: Immediate enforcement (for joining established networks)
+    /// - `enforcement_block = Some(future_block)`: Deferred enforcement (for bootstrap)
+    pub fn with_enforcement_block(
+        operator_key: PublicKey,
+        partner_key: PublicKey,
+        ledger_address: String,
+        collateral_enforcement_block: Option<u64>,
+    ) -> Self {
         Self {
             operator_key,
             partner_key,
@@ -604,6 +635,7 @@ impl LedgerState {
             collateral_partners: Vec::new(),
             collateral_amount: 0,
             last_collateral_increase_block: None,
+            collateral_enforcement_block,
             received_collateral_amount: 0,
             collateral_attestations: HashMap::new(),
             partner_deepest_ack_hash: [0u8; 32],
@@ -612,6 +644,18 @@ impl LedgerState {
             pending_updates: HashMap::new(),
             sequence: 0,
             hash: [0u8; 32],
+        }
+    }
+
+    /// Check if collateral size requirements are enforced at the given block.
+    ///
+    /// Returns true if:
+    /// - No enforcement block is set (immediate enforcement), OR
+    /// - Current block >= enforcement block
+    pub fn is_collateral_enforced(&self, current_block: u64) -> bool {
+        match self.collateral_enforcement_block {
+            None => true, // Immediate enforcement
+            Some(enforcement_block) => current_block >= enforcement_block,
         }
     }
 
@@ -1663,6 +1707,335 @@ impl std::fmt::Display for ChannelId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", hex::encode(self.0))
     }
+}
+
+// ============================================================================
+// Deposit Offer (On-Chain Funding Commitment)
+// ============================================================================
+
+/// A signed offer to credit a deposit with on-chain funds.
+///
+/// This structure represents an operator's commitment to credit a deposit
+/// with funds sent to a specific Bitcoin address, up to a maximum amount,
+/// before a deadline block height. The offer is signed by the operator,
+/// creating a verifiable commitment.
+///
+/// Used for on-chain deposit funding (without Lightning invoices).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DepositOffer {
+    /// The operator making the offer.
+    #[serde(with = "serde_pubkey")]
+    pub operator_id: PublicKey,
+
+    /// The partner for whom this deposit is being opened.
+    #[serde(with = "serde_pubkey")]
+    pub partner_id: PublicKey,
+
+    /// The deposit pubkey (identifier for the deposit).
+    #[serde(with = "serde_pubkey")]
+    pub deposit_pubkey: PublicKey,
+
+    /// Bitcoin address to receive funds (bech32 or other address format).
+    pub funding_address: String,
+
+    /// Maximum amount in satoshis that will be credited.
+    pub max_amount_sats: u64,
+
+    /// Minimum amount in satoshis (to cover processing costs).
+    pub min_amount_sats: u64,
+
+    /// Deadline block height - offer expires after this block.
+    pub deadline_block: u32,
+
+    /// Block height when offer was created.
+    pub created_at_block: u32,
+
+    /// Unique offer ID (hash of offer parameters before signature).
+    #[serde(with = "serde_32")]
+    pub offer_id: [u8; 32],
+
+    /// Operator's signature over the offer commitment.
+    /// Signs: "DEPOSIT_OFFER:{offer_id}:{operator}:{partner}:{deposit}:{address}:{max}:{min}:{deadline}"
+    #[serde(with = "serde_64")]
+    pub operator_signature: [u8; 64],
+}
+
+impl DepositOffer {
+    /// Create the message to be signed for an offer.
+    ///
+    /// Returns the canonical message format that should be signed by the operator.
+    pub fn signing_message(
+        operator_id: &PublicKey,
+        partner_id: &PublicKey,
+        deposit_pubkey: &PublicKey,
+        funding_address: &str,
+        max_amount_sats: u64,
+        min_amount_sats: u64,
+        deadline_block: u32,
+    ) -> String {
+        // Create a deterministic message that commits to all offer parameters
+        format!(
+            "DEPOSIT_OFFER:{}:{}:{}:{}:{}:{}:{}",
+            hex::encode(operator_id.serialize()),
+            hex::encode(partner_id.serialize()),
+            hex::encode(deposit_pubkey.serialize()),
+            funding_address,
+            max_amount_sats,
+            min_amount_sats,
+            deadline_block,
+        )
+    }
+
+    /// Compute the offer ID from the signing message.
+    pub fn compute_offer_id(signing_message: &str) -> [u8; 32] {
+        use bitcoin::hashes::{sha256, Hash};
+        let hash = sha256::Hash::hash(signing_message.as_bytes());
+        hash.to_byte_array()
+    }
+
+    /// Check if the offer has expired.
+    pub fn is_expired(&self, current_block: u32) -> bool {
+        current_block > self.deadline_block
+    }
+
+    /// Check if an amount is within the offer's limits.
+    pub fn is_amount_valid(&self, amount_sats: u64) -> bool {
+        amount_sats >= self.min_amount_sats && amount_sats <= self.max_amount_sats
+    }
+
+    /// Get the signing message for this offer.
+    pub fn get_signing_message(&self) -> String {
+        Self::signing_message(
+            &self.operator_id,
+            &self.partner_id,
+            &self.deposit_pubkey,
+            &self.funding_address,
+            self.max_amount_sats,
+            self.min_amount_sats,
+            self.deadline_block,
+        )
+    }
+}
+
+/// Status of a deposit offer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DepositOfferStatus {
+    /// Offer is active and awaiting funding.
+    Pending,
+    /// Funds have been received and are awaiting confirmation.
+    FundingReceived {
+        /// Transaction ID of the funding transaction.
+        txid: String,
+        /// Amount received in satoshis.
+        amount_sats: u64,
+        /// Block height when payment was detected.
+        detected_at_block: u32,
+    },
+    /// Funds have been confirmed and deposit credited.
+    Completed {
+        /// Transaction ID of the funding transaction.
+        txid: String,
+        /// Amount credited in satoshis.
+        amount_sats: u64,
+        /// Block height when confirmed.
+        confirmed_at_block: u32,
+    },
+    /// Offer expired without funding.
+    Expired {
+        /// Block height when expired.
+        expired_at_block: u32,
+    },
+    /// Offer was cancelled by the operator.
+    Cancelled,
+}
+
+// ============================================================================
+// On-Chain Withdrawal (Deposit -> Bitcoin Address)
+// ============================================================================
+
+/// A request to withdraw funds from a deposit to a Bitcoin address.
+///
+/// This is the on-chain equivalent of paying a Lightning invoice.
+/// The flow is:
+/// 1. Lock: Reserve funds in the deposit for the withdrawal
+/// 2. Complete: Broadcast the transaction and record the txid as evidence
+///
+/// Unlike Lightning, there's no "fail" after broadcast - the transaction
+/// either confirms or we wait. Cancellation is only possible before broadcast.
+///
+/// The transaction MUST include an OP_RETURN output with the withdrawal_id
+/// to prove the operator executed this specific withdrawal request and didn't
+/// just wait for a coincidental payment to the same address.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OnChainWithdrawal {
+    /// Unique withdrawal ID (hash of withdrawal parameters + nonce).
+    /// This MUST appear in an OP_RETURN output of the fulfilling transaction.
+    #[serde(with = "serde_32")]
+    pub withdrawal_id: [u8; 32],
+
+    /// Random nonce to ensure withdrawal_id uniqueness.
+    /// Generated by the depositor when creating the withdrawal request.
+    #[serde(with = "serde_32")]
+    pub nonce: [u8; 32],
+
+    /// The deposit pubkey withdrawing funds.
+    #[serde(with = "serde_pubkey")]
+    pub deposit_pubkey: PublicKey,
+
+    /// Bitcoin address to send funds to.
+    pub destination_address: String,
+
+    /// Amount to withdraw in satoshis.
+    pub amount_sats: u64,
+
+    /// Fee to pay for the transaction in satoshis.
+    pub fee_sats: u64,
+
+    /// Block height when withdrawal was requested.
+    pub requested_at_block: u32,
+
+    /// Optional memo/description.
+    pub memo: Option<String>,
+
+    /// Depositor's signature authorizing the withdrawal.
+    /// Signs: "WITHDRAWAL:{nonce}:{deposit}:{address}:{amount}:{fee}"
+    #[serde(with = "serde_64")]
+    pub depositor_signature: [u8; 64],
+}
+
+impl OnChainWithdrawal {
+    /// Create the message to be signed for a withdrawal authorization.
+    ///
+    /// The nonce ensures each withdrawal request is unique, even if the
+    /// same depositor requests the same amount to the same address twice.
+    pub fn signing_message(
+        nonce: &[u8; 32],
+        deposit_pubkey: &PublicKey,
+        destination_address: &str,
+        amount_sats: u64,
+        fee_sats: u64,
+    ) -> String {
+        format!(
+            "WITHDRAWAL:{}:{}:{}:{}:{}",
+            hex::encode(nonce),
+            hex::encode(deposit_pubkey.serialize()),
+            destination_address,
+            amount_sats,
+            fee_sats,
+        )
+    }
+
+    /// Compute the withdrawal ID from the signing message.
+    ///
+    /// The withdrawal_id uniquely identifies this withdrawal request and
+    /// MUST be included in an OP_RETURN output of the fulfilling transaction.
+    pub fn compute_withdrawal_id(signing_message: &str) -> [u8; 32] {
+        use bitcoin::hashes::{sha256, Hash};
+        let hash = sha256::Hash::hash(signing_message.as_bytes());
+        hash.to_byte_array()
+    }
+
+    /// Get the signing message for this withdrawal.
+    pub fn get_signing_message(&self) -> String {
+        Self::signing_message(
+            &self.nonce,
+            &self.deposit_pubkey,
+            &self.destination_address,
+            self.amount_sats,
+            self.fee_sats,
+        )
+    }
+
+    /// Total amount debited from deposit (amount + fee).
+    pub fn total_debit(&self) -> u64 {
+        self.amount_sats.saturating_add(self.fee_sats)
+    }
+
+    /// Get the OP_RETURN data that must be included in the transaction.
+    ///
+    /// Format: "WDRL:" + withdrawal_id (first 28 bytes to fit in 80 byte OP_RETURN)
+    /// This proves the transaction was made specifically for this withdrawal.
+    /// Returns a 33-byte array: 5 bytes prefix + 28 bytes of withdrawal_id.
+    pub fn op_return_data(&self) -> [u8; 33] {
+        let mut data = [0u8; 33];
+        data[0..5].copy_from_slice(b"WDRL:");
+        data[5..33].copy_from_slice(&self.withdrawal_id[..28]); // 5 + 28 = 33 bytes
+        data
+    }
+
+    /// Verify that a transaction contains the required OP_RETURN commitment.
+    ///
+    /// Returns true if the transaction has an OP_RETURN output containing
+    /// the withdrawal_id, proving it was made for this specific withdrawal.
+    pub fn verify_op_return(&self, op_return_data: &[u8]) -> bool {
+        let expected = self.op_return_data();
+        op_return_data == &expected[..]
+    }
+}
+
+/// Status of an on-chain withdrawal.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OnChainWithdrawalStatus {
+    /// Withdrawal is pending - funds locked in deposit.
+    Locked {
+        /// Block height when locked.
+        locked_at_block: u32,
+    },
+
+    /// Transaction has been broadcast.
+    Broadcast {
+        /// Transaction ID.
+        txid: String,
+        /// Block height when broadcast.
+        broadcast_at_block: u32,
+    },
+
+    /// Transaction has been confirmed - withdrawal complete.
+    Completed {
+        /// Transaction ID.
+        txid: String,
+        /// Block height when confirmed.
+        confirmed_at_block: u32,
+        /// Number of confirmations.
+        confirmations: u32,
+    },
+
+    /// Withdrawal was cancelled before broadcast (funds unlocked).
+    Cancelled {
+        /// Block height when cancelled.
+        cancelled_at_block: u32,
+        /// Reason for cancellation.
+        reason: String,
+    },
+}
+
+/// Result of locking funds for an on-chain withdrawal.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WithdrawalLockResult {
+    /// The withdrawal request.
+    pub withdrawal: OnChainWithdrawal,
+    /// Previous deposit balance (millisatoshis).
+    pub previous_balance_msats: u64,
+    /// New deposit balance after lock (millisatoshis).
+    pub new_balance_msats: u64,
+    /// Amount locked (millisatoshis).
+    pub locked_amount_msats: u64,
+}
+
+/// Result of completing an on-chain withdrawal.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WithdrawalCompleteResult {
+    /// The withdrawal ID.
+    #[serde(with = "serde_32")]
+    pub withdrawal_id: [u8; 32],
+    /// Transaction ID of the broadcast transaction.
+    pub txid: String,
+    /// Amount withdrawn (satoshis).
+    pub amount_sats: u64,
+    /// Fee paid (satoshis).
+    pub fee_sats: u64,
+    /// Final deposit balance (millisatoshis).
+    pub final_balance_msats: u64,
 }
 
 // ============================================================================

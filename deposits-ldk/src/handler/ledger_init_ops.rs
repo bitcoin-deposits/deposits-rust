@@ -68,6 +68,8 @@ where
         };
 
         // Create handshake message
+        // Note: In LDK context, reserves come from commitment tx, not separate UTXOs
+        // reserves_amount will be updated when reserves are explicitly set
         let handshake_msg = DepositsMessage::Handshake(HandshakeMsg {
             protocol_version: deposits_core::constants::DEPOSITS_PROTOCOL_VERSION,
             min_protocol_version: deposits_core::constants::DEPOSITS_PROTOCOL_VERSION,
@@ -77,6 +79,8 @@ where
             ledger_address: multisig_address.to_string(),
             funding_txid,
             funding_vout,
+            reserves_amount: 0, // Will be set when reserves are established
+            collateral_enforcement_block: 0, // Immediate enforcement (joining established network)
         });
 
         // Use LedgerManager to create the ledger (we are operator)
@@ -188,6 +192,7 @@ where
         };
 
         // Create handshake message
+        // Note: In LDK context, reserves come from commitment tx, not separate UTXOs
         let handshake_msg = DepositsMessage::Handshake(HandshakeMsg {
             protocol_version: deposits_core::constants::DEPOSITS_PROTOCOL_VERSION,
             min_protocol_version: deposits_core::constants::DEPOSITS_PROTOCOL_VERSION,
@@ -197,6 +202,8 @@ where
             ledger_address: multisig_address.to_string(),
             funding_txid,
             funding_vout,
+            reserves_amount: 0, // Partner doesn't set reserves directly
+            collateral_enforcement_block: 0, // Immediate enforcement
         });
 
         // Use LedgerManager to create the ledger (they are operator, we are partner)

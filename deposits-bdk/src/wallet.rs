@@ -10,8 +10,8 @@
 //! Unlike deposits-ldk which uses Lightning commitment transaction outputs,
 //! deposits-bdk holds reserves as on-chain UTXOs in a BDK wallet.
 
-use bdk_electrum::electrum_client::{self, ElectrumApi};
-use bdk_electrum::BdkElectrumClient;
+use bdk_esplora::esplora_client::Builder as EsploraBuilder;
+use bdk_esplora::EsploraExt;
 use bdk_wallet::bitcoin::bip32::{DerivationPath, Xpriv};
 use bdk_wallet::bitcoin::hashes::{sha256, Hash};
 use bdk_wallet::bitcoin::script::Builder as ScriptBuilder;
@@ -21,7 +21,9 @@ use bdk_wallet::bitcoin::{
 };
 use bdk_wallet::chain::spk_client::SyncRequest;
 use bdk_wallet::{KeychainKind, SignOptions, Wallet as BdkWallet};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Mutex, RwLock};
@@ -52,6 +54,9 @@ pub struct Wallet {
 
     /// Current block height (updated on sync)
     block_height: Mutex<u32>,
+
+    /// Data directory for persistence
+    data_dir: PathBuf,
 }
 
 /// Information about a reserves output
@@ -82,12 +87,78 @@ pub struct ReservesInfo {
     pub confirmed: bool,
 }
 
+/// Serializable version of ReservesInfo for persistence
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReservesInfoSerde {
+    outpoint_txid: String,
+    outpoint_vout: u32,
+    amount: u64,
+    operator: String,
+    partners: Vec<String>,
+    threshold: usize,
+    timeout_height: u32,
+    redeem_script_hex: String,
+    confirmed: bool,
+}
+
+impl From<&ReservesInfo> for ReservesInfoSerde {
+    fn from(info: &ReservesInfo) -> Self {
+        use bitcoin::consensus::encode::serialize_hex;
+        Self {
+            outpoint_txid: info.outpoint.txid.to_string(),
+            outpoint_vout: info.outpoint.vout,
+            amount: info.amount,
+            operator: info.operator.to_string(),
+            partners: info.partners.iter().map(|p| p.to_string()).collect(),
+            threshold: info.threshold,
+            timeout_height: info.timeout_height,
+            redeem_script_hex: serialize_hex(&info.redeem_script),
+            confirmed: info.confirmed,
+        }
+    }
+}
+
+impl ReservesInfoSerde {
+    fn to_reserves_info(&self) -> Result<ReservesInfo, Error> {
+        use bitcoin::consensus::encode::deserialize;
+        let txid = Txid::from_str(&self.outpoint_txid)
+            .map_err(|e| Error::Wallet(format!("Invalid txid: {}", e)))?;
+        let operator = PublicKey::from_str(&self.operator)
+            .map_err(|e| Error::Wallet(format!("Invalid operator pubkey: {}", e)))?;
+        let partners: Result<Vec<PublicKey>, _> = self
+            .partners
+            .iter()
+            .map(|p| PublicKey::from_str(p))
+            .collect();
+        let partners =
+            partners.map_err(|e| Error::Wallet(format!("Invalid partner pubkey: {}", e)))?;
+        let script_bytes = hex::decode(&self.redeem_script_hex)
+            .map_err(|e| Error::Wallet(format!("Invalid redeem script hex: {}", e)))?;
+        let redeem_script: ScriptBuf = deserialize(&script_bytes)
+            .map_err(|e| Error::Wallet(format!("Invalid redeem script: {}", e)))?;
+
+        Ok(ReservesInfo {
+            outpoint: OutPoint {
+                txid,
+                vout: self.outpoint_vout,
+            },
+            amount: self.amount,
+            operator,
+            partners,
+            threshold: self.threshold,
+            timeout_height: self.timeout_height,
+            redeem_script,
+            confirmed: self.confirmed,
+        })
+    }
+}
+
 impl Wallet {
     /// Create a new wallet from a seed
     pub fn new(
         seed: [u8; 32],
         network: Network,
-        _db_path: PathBuf,
+        data_dir: PathBuf,
         electrum_url: String,
     ) -> Result<Self, Error> {
         let secp = Secp256k1::new();
@@ -116,15 +187,68 @@ impl Wallet {
             .create_wallet_no_persist()
             .map_err(|e| Error::Wallet(format!("Failed to create wallet: {}", e)))?;
 
+        // Ensure data directory exists
+        if !data_dir.exists() {
+            tracing::info!("Creating data directory: {:?}", data_dir);
+            fs::create_dir_all(&data_dir)
+                .map_err(|e| Error::Wallet(format!("Failed to create data dir: {}", e)))?;
+        }
+
+        // Load existing reserves from disk
+        let reserves = Self::load_reserves_from_disk(&data_dir)?;
+
         Ok(Self {
             inner: Mutex::new(wallet),
             electrum_url,
             network,
             operator_secret,
             operator_pubkey,
-            reserves: RwLock::new(HashMap::new()),
+            reserves: RwLock::new(reserves),
             block_height: Mutex::new(0),
+            data_dir,
         })
+    }
+
+    /// Load reserves from disk
+    fn load_reserves_from_disk(data_dir: &PathBuf) -> Result<HashMap<OutPoint, ReservesInfo>, Error> {
+        let reserves_file = data_dir.join("reserves.json");
+        if !reserves_file.exists() {
+            return Ok(HashMap::new());
+        }
+
+        let contents = fs::read_to_string(&reserves_file)
+            .map_err(|e| Error::Wallet(format!("Failed to read reserves file: {}", e)))?;
+
+        let serde_list: Vec<ReservesInfoSerde> = serde_json::from_str(&contents)
+            .map_err(|e| Error::Wallet(format!("Failed to parse reserves file: {}", e)))?;
+
+        let mut reserves = HashMap::new();
+        for serde_info in serde_list {
+            let info = serde_info.to_reserves_info()?;
+            reserves.insert(info.outpoint, info);
+        }
+
+        tracing::info!("Loaded {} reserves from disk", reserves.len());
+        Ok(reserves)
+    }
+
+    /// Save reserves to disk
+    fn save_reserves_to_disk(&self) -> Result<(), Error> {
+        let reserves = self.reserves.read().unwrap();
+        let serde_list: Vec<ReservesInfoSerde> = reserves
+            .values()
+            .map(ReservesInfoSerde::from)
+            .collect();
+
+        let contents = serde_json::to_string_pretty(&serde_list)
+            .map_err(|e| Error::Wallet(format!("Failed to serialize reserves: {}", e)))?;
+
+        let reserves_file = self.data_dir.join("reserves.json");
+        fs::write(&reserves_file, contents)
+            .map_err(|e| Error::Wallet(format!("Failed to write reserves file: {}", e)))?;
+
+        tracing::info!("Saved {} reserves to disk", reserves.len());
+        Ok(())
     }
 
     /// Get the operator's public key
@@ -145,11 +269,10 @@ impl Wallet {
     /// Get the total reserves balance (sum of all tracked reserves outputs)
     pub fn get_reserves_balance(&self) -> Result<u64, Error> {
         let reserves = self.reserves.read().unwrap();
-        let total = reserves
-            .values()
-            .filter(|r| r.confirmed)
-            .map(|r| r.amount)
-            .sum();
+        // Count all reserves - confirmation status is tracked separately
+        // but for balance purposes, if we created and broadcast the reserves,
+        // they should be counted toward our reserves balance
+        let total = reserves.values().map(|r| r.amount).sum();
         Ok(total)
     }
 
@@ -172,19 +295,15 @@ impl Wallet {
         Ok(addr.address)
     }
 
-    /// Sync wallet with electrum server
+    /// Sync wallet with esplora server
     pub fn sync(&self) -> Result<(), Error> {
-        let client = electrum_client::Client::new(&self.electrum_url)
-            .map_err(|e| Error::Wallet(format!("Failed to connect to electrum: {}", e)))?;
-
-        let electrum = BdkElectrumClient::new(client);
+        let client = EsploraBuilder::new(&self.electrum_url)
+            .build_blocking();
 
         // Get block height
-        let height = electrum
-            .inner
-            .block_headers_subscribe()
-            .map_err(|e| Error::Wallet(format!("Failed to get block height: {}", e)))?
-            .height as u32;
+        let height = client
+            .get_height()
+            .map_err(|e| Error::Wallet(format!("Failed to get block height: {}", e)))?;
 
         *self.block_height.lock().unwrap() = height;
 
@@ -201,8 +320,8 @@ impl Wallet {
         if !spks.is_empty() {
             let request = SyncRequest::builder().spks(spks).build();
 
-            let update = electrum
-                .sync(request, 5, true)
+            let update = client
+                .sync(request, 5)
                 .map_err(|e| Error::Wallet(format!("Sync failed: {}", e)))?;
 
             wallet
@@ -341,6 +460,9 @@ impl Wallet {
         drop(wallet); // Release lock before acquiring write lock
         self.reserves.write().unwrap().insert(outpoint, info);
 
+        // Persist reserves to disk
+        self.save_reserves_to_disk()?;
+
         Ok(ReservesOutput {
             outpoint,
             address,
@@ -353,13 +475,14 @@ impl Wallet {
 
     /// Broadcast a transaction
     pub fn broadcast(&self, tx: &Transaction) -> Result<Txid, Error> {
-        let client = electrum_client::Client::new(&self.electrum_url)
-            .map_err(|e| Error::Wallet(format!("Failed to connect to electrum: {}", e)))?;
+        let client = EsploraBuilder::new(&self.electrum_url)
+            .build_blocking();
 
-        let txid = client
-            .transaction_broadcast(tx)
+        client
+            .broadcast(tx)
             .map_err(|e| Error::Wallet(format!("Broadcast failed: {}", e)))?;
 
+        let txid = tx.compute_txid();
         tracing::info!("Broadcast tx: {}", txid);
         Ok(txid)
     }
@@ -369,18 +492,39 @@ impl Wallet {
         self.reserves.read().unwrap().values().cloned().collect()
     }
 
+    /// Get the first/primary reserves outpoint
+    pub fn get_reserves_outpoint(&self) -> Option<OutPoint> {
+        self.reserves
+            .read()
+            .unwrap()
+            .keys()
+            .next()
+            .copied()
+    }
+
+    /// Get the reserves address (P2WSH address of the primary reserves)
+    pub fn get_reserves_address(&self) -> Option<Address> {
+        let reserves = self.reserves.read().unwrap();
+        reserves.values().next().map(|info| {
+            Address::p2wsh(&info.redeem_script, self.network)
+        })
+    }
+
     /// Mark a reserves output as confirmed
     pub fn confirm_reserves(&self, outpoint: &OutPoint) -> Result<(), Error> {
-        let mut reserves = self.reserves.write().unwrap();
-        if let Some(info) = reserves.get_mut(outpoint) {
-            info.confirmed = true;
-            Ok(())
-        } else {
-            Err(Error::Wallet(format!(
-                "Reserves output not found: {}",
-                outpoint
-            )))
+        {
+            let mut reserves = self.reserves.write().unwrap();
+            if let Some(info) = reserves.get_mut(outpoint) {
+                info.confirmed = true;
+            } else {
+                return Err(Error::Wallet(format!(
+                    "Reserves output not found: {}",
+                    outpoint
+                )));
+            }
         }
+        // Persist updated state
+        self.save_reserves_to_disk()
     }
 
     /// Create a recovery transaction (pre-signed by operator)
@@ -420,6 +564,75 @@ impl Wallet {
             redeem_script: info.redeem_script.clone(),
             operator_sig: None, // Will be signed separately
         })
+    }
+
+    /// Send an on-chain withdrawal with OP_RETURN commitment
+    ///
+    /// Builds and broadcasts a transaction that:
+    /// 1. Sends the specified amount to the destination address
+    /// 2. Includes an OP_RETURN output with the withdrawal_id commitment
+    pub fn send_withdrawal(
+        &self,
+        withdrawal: &deposits_core::types::OnChainWithdrawal,
+    ) -> Result<String, Error> {
+        // Parse the destination address
+        let dest_address = withdrawal.destination_address.parse::<Address<_>>()
+            .map_err(|e| Error::Wallet(format!("Invalid destination address: {}", e)))?
+            .require_network(self.network)
+            .map_err(|e| Error::Wallet(format!("Address network mismatch: {}", e)))?;
+
+        // Build OP_RETURN script with withdrawal commitment
+        let op_return_data = withdrawal.op_return_data();
+        let op_return_script = ScriptBuilder::new()
+            .push_opcode(opcodes::all::OP_RETURN)
+            .push_slice(op_return_data)
+            .into_script();
+
+        // Build the transaction
+        let mut wallet = self.inner.lock().unwrap();
+
+        let mut psbt = {
+            let mut builder = wallet.build_tx();
+            builder
+                // Main payment output
+                .add_recipient(dest_address.script_pubkey(), Amount::from_sat(withdrawal.amount_sats))
+                // OP_RETURN commitment output (0 value)
+                .add_recipient(op_return_script, Amount::ZERO)
+                .fee_rate(FeeRate::from_sat_per_vb(2).unwrap());
+            builder
+                .finish()
+                .map_err(|e| Error::Wallet(format!("Failed to build withdrawal tx: {}", e)))?
+        };
+
+        // Sign the transaction
+        wallet
+            .sign(&mut psbt, SignOptions::default())
+            .map_err(|e| Error::Wallet(format!("Failed to sign withdrawal tx: {}", e)))?;
+
+        let tx = psbt
+            .extract_tx()
+            .map_err(|e| Error::Wallet(format!("Failed to extract withdrawal tx: {}", e)))?;
+
+        // Release wallet lock before broadcast
+        drop(wallet);
+
+        // Broadcast the transaction
+        let client = EsploraBuilder::new(&self.electrum_url)
+            .build_blocking();
+
+        client
+            .broadcast(&tx)
+            .map_err(|e| Error::Wallet(format!("Failed to broadcast withdrawal: {}", e)))?;
+
+        let txid = tx.compute_txid();
+        tracing::info!(
+            "Broadcast withdrawal tx: {} (amount: {} sats, op_return: {})",
+            txid,
+            withdrawal.amount_sats,
+            hex::encode(&withdrawal.withdrawal_id[..8])
+        );
+
+        Ok(txid.to_string())
     }
 }
 

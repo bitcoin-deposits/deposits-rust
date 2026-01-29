@@ -372,6 +372,8 @@ where
             ledger_address: ledger_address.to_string(),
             funding_txid,
             funding_vout,
+            reserves_amount: 0, // Will be set when reserves are established
+            collateral_enforcement_block: 0, // Immediate enforcement
         });
 
         let message_hash = self.calculate_message_hash(&init_msg);
@@ -582,6 +584,8 @@ where
             ledger_address: ledger_addr_str,
             funding_txid,
             funding_vout,
+            reserves_amount: 0, // Will be set when reserves are established
+            collateral_enforcement_block: 0, // Immediate enforcement
         });
 
         // Calculate message hash for tracking
