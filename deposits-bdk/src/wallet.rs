@@ -634,6 +634,49 @@ impl Wallet {
 
         Ok(txid.to_string())
     }
+
+    /// Check if an address has received funds
+    ///
+    /// Returns Some((txid, amount_sats)) for the first unspent transaction to this address,
+    /// or None if no funds have been received.
+    pub fn check_address_received(
+        &self,
+        address: &Address<bitcoin::address::NetworkUnchecked>,
+    ) -> Result<Option<(String, u64)>, Error> {
+        let client = EsploraBuilder::new(&self.electrum_url)
+            .build_blocking();
+
+        // Get the script pubkey for this address
+        let address_checked = address.clone()
+            .require_network(self.network)
+            .map_err(|e| Error::Wallet(format!("Address network mismatch: {}", e)))?;
+
+        let script_pubkey = address_checked.script_pubkey();
+
+        // Query the esplora API for transactions to this script
+        let txs = client
+            .scripthash_txs(&script_pubkey, None)
+            .map_err(|e| Error::Wallet(format!("Failed to query address: {}", e)))?;
+
+        // Look for confirmed transactions that have outputs to this address
+        for tx in txs {
+            // Find outputs that match our address
+            for (vout, output) in tx.vout.iter().enumerate() {
+                if output.scriptpubkey == script_pubkey {
+                    // Found a matching output
+                    tracing::info!(
+                        "Found funding tx {} vout {} with {} sats",
+                        tx.txid,
+                        vout,
+                        output.value
+                    );
+                    return Ok(Some((tx.txid.to_string(), output.value)));
+                }
+            }
+        }
+
+        Ok(None)
+    }
 }
 
 /// A reserves output ready for broadcast

@@ -12,8 +12,9 @@ use bitcoin::secp256k1::{PublicKey, Secp256k1};
 use bitcoin::Network;
 use deposits_core::ledger::Ledger;
 use deposits_core::message_validation::HandlerContext;
+use deposits_core::messages::LedgerOperation;
 use deposits_core::types::{
-    DepositOffer, DepositOfferStatus,
+    Deposit, DepositOffer, DepositOfferStatus, FeeStructure,
     OnChainWithdrawal, OnChainWithdrawalStatus,
     WithdrawalLockResult, WithdrawalCompleteResult,
 };
@@ -801,5 +802,342 @@ impl Node {
 
         tracing::info!("Saved {} withdrawals to disk", withdrawals.len());
         Ok(())
+    }
+
+    // ========================================================================
+    // Deposit Management
+    // ========================================================================
+
+    /// Open a new deposit in a ledger
+    ///
+    /// Creates a deposit for a given public key in the ledger with the partner.
+    /// This applies a DepositOpen operation to the ledger.
+    pub fn open_deposit(
+        &self,
+        partner: PublicKey,
+        deposit_pubkey: PublicKey,
+        fees: Option<FeeStructure>,
+    ) -> Result<Deposit, Error> {
+        let ledger_arc = self.handler.get_or_create_ledger(self.node_id, partner);
+
+        let deposit = {
+            let mut ledger = ledger_arc.write().unwrap();
+
+            // Check if deposit already exists
+            if ledger.state.deposits.contains_key(&deposit_pubkey) {
+                return Err(Error::Protocol(format!(
+                    "Deposit already exists for pubkey {}",
+                    deposit_pubkey
+                )));
+            }
+
+            // Apply the DepositOpen operation
+            let operation = LedgerOperation::DepositOpen {
+                pubkey: deposit_pubkey,
+                fees: fees.clone(),
+                payment_hash: None,
+                invoice: None,
+                cosigner_guarantee_signature: None,
+            };
+
+            ledger.apply_operation(&operation)
+                .map_err(|e| Error::Protocol(format!("Failed to open deposit: {:?}", e)))?;
+
+            // Return the created deposit
+            ledger.state.deposits.get(&deposit_pubkey)
+                .cloned()
+                .ok_or_else(|| Error::Protocol("Deposit not found after creation".to_string()))?
+        };
+
+        // Persist the ledger
+        if let Err(e) = self.handler.persist_ledger(&self.node_id, &partner) {
+            tracing::error!("Failed to persist ledger: {}", e);
+        }
+
+        tracing::info!(
+            "Opened deposit {} in ledger with partner {}",
+            deposit_pubkey,
+            partner
+        );
+
+        Ok(deposit)
+    }
+
+    /// Credit a deposit with received funds
+    ///
+    /// This applies a PaymentCredit operation to add funds to a deposit.
+    /// Used when on-chain funding is received for a deposit offer.
+    pub fn credit_deposit(
+        &self,
+        partner: PublicKey,
+        deposit_pubkey: PublicKey,
+        amount_msats: u64,
+        payment_hash: [u8; 32],
+        invoice_id: String,
+    ) -> Result<u64, Error> {
+        let ledger_arc = self.handler.get_or_create_ledger(self.node_id, partner);
+
+        let new_balance = {
+            let mut ledger = ledger_arc.write().unwrap();
+
+            // Check if deposit exists
+            if !ledger.state.deposits.contains_key(&deposit_pubkey) {
+                return Err(Error::Protocol(format!(
+                    "Deposit not found for pubkey {}",
+                    deposit_pubkey
+                )));
+            }
+
+            // Get the next sequence number for this deposit's operations
+            let sequence_number = ledger.sequence() + 1;
+
+            // Apply the PaymentCredit operation
+            let operation = LedgerOperation::PaymentCredit {
+                payment_hash,
+                deposit_pubkey,
+                amount: amount_msats,
+                invoice_id,
+                sequence_number,
+            };
+
+            ledger.apply_operation(&operation)
+                .map_err(|e| Error::Protocol(format!("Failed to credit deposit: {:?}", e)))?;
+
+            // Return the new balance
+            ledger.state.deposits.get(&deposit_pubkey)
+                .map(|d| d.balance)
+                .unwrap_or(0)
+        };
+
+        // Persist the ledger
+        if let Err(e) = self.handler.persist_ledger(&self.node_id, &partner) {
+            tracing::error!("Failed to persist ledger: {}", e);
+        }
+
+        tracing::info!(
+            "Credited deposit {} with {} msats, new balance: {} msats",
+            deposit_pubkey,
+            amount_msats,
+            new_balance
+        );
+
+        Ok(new_balance)
+    }
+
+    /// Get a deposit by pubkey from a ledger
+    pub fn get_deposit(
+        &self,
+        partner: PublicKey,
+        deposit_pubkey: PublicKey,
+    ) -> Option<Deposit> {
+        let ledgers = self.handler.ledgers.lock().unwrap();
+        if let Some(ledger_arc) = ledgers.get(&(self.node_id, partner)) {
+            let ledger = ledger_arc.read().unwrap();
+            return ledger.state.deposits.get(&deposit_pubkey).cloned();
+        }
+        None
+    }
+
+    /// List all deposits in a ledger
+    pub fn list_deposits(&self, partner: PublicKey) -> Vec<(PublicKey, Deposit)> {
+        let ledgers = self.handler.ledgers.lock().unwrap();
+        if let Some(ledger_arc) = ledgers.get(&(self.node_id, partner)) {
+            let ledger = ledger_arc.read().unwrap();
+            return ledger.state.deposits.iter()
+                .map(|(k, v)| (*k, v.clone()))
+                .collect();
+        }
+        Vec::new()
+    }
+
+    /// Transfer funds between two deposits (internal transfer)
+    ///
+    /// Locks funds from source deposit and fulfills transfer to destination deposit.
+    /// Both deposits must be in the same ledger.
+    pub fn transfer_between_deposits(
+        &self,
+        partner: PublicKey,
+        source_pubkey: PublicKey,
+        dest_pubkey: PublicKey,
+        amount_msats: u64,
+    ) -> Result<([u8; 32], u64, u64), Error> {
+        let ledger_arc = self.handler.get_or_create_ledger(self.node_id, partner);
+
+        // Generate a unique transfer ID
+        let transfer_id = Self::generate_nonce();
+
+        let (source_balance, dest_balance) = {
+            let mut ledger = ledger_arc.write().unwrap();
+
+            // Check both deposits exist
+            if !ledger.state.deposits.contains_key(&source_pubkey) {
+                return Err(Error::Protocol(format!(
+                    "Source deposit not found: {}",
+                    source_pubkey
+                )));
+            }
+            if !ledger.state.deposits.contains_key(&dest_pubkey) {
+                return Err(Error::Protocol(format!(
+                    "Destination deposit not found: {}",
+                    dest_pubkey
+                )));
+            }
+
+            // Check source has sufficient balance
+            let source_balance = ledger.state.deposits.get(&source_pubkey)
+                .map(|d| d.balance)
+                .unwrap_or(0);
+            if source_balance < amount_msats {
+                return Err(Error::Protocol(format!(
+                    "Insufficient balance: {} msats available, {} msats requested",
+                    source_balance, amount_msats
+                )));
+            }
+
+            // Lock funds from source
+            let lock_op = LedgerOperation::TransferLock {
+                pubkey: source_pubkey,
+                amount: amount_msats,
+                transfer_id,
+            };
+            ledger.apply_operation(&lock_op)
+                .map_err(|e| Error::Protocol(format!("Failed to lock transfer: {:?}", e)))?;
+
+            // Fulfill transfer to destination
+            let fulfill_op = LedgerOperation::TransferFulfill {
+                pubkey: dest_pubkey,
+                amount: amount_msats,
+                transfer_id,
+            };
+            ledger.apply_operation(&fulfill_op)
+                .map_err(|e| Error::Protocol(format!("Failed to fulfill transfer: {:?}", e)))?;
+
+            // Get updated balances
+            let new_source = ledger.state.deposits.get(&source_pubkey)
+                .map(|d| d.balance)
+                .unwrap_or(0);
+            let new_dest = ledger.state.deposits.get(&dest_pubkey)
+                .map(|d| d.balance)
+                .unwrap_or(0);
+
+            (new_source, new_dest)
+        };
+
+        // Persist the ledger
+        if let Err(e) = self.handler.persist_ledger(&self.node_id, &partner) {
+            tracing::error!("Failed to persist ledger: {}", e);
+        }
+
+        tracing::info!(
+            "Transferred {} msats from {} to {}: new balances {} / {}",
+            amount_msats,
+            source_pubkey,
+            dest_pubkey,
+            source_balance,
+            dest_balance
+        );
+
+        Ok((transfer_id, source_balance, dest_balance))
+    }
+
+    /// Complete a deposit offer by crediting the deposit
+    ///
+    /// This should be called when on-chain funding is detected for a deposit offer.
+    /// It marks the offer as funded and credits the deposit.
+    pub fn complete_deposit_offer(
+        &self,
+        offer_id: &[u8; 32],
+        funding_txid: String,
+        funding_amount_sats: u64,
+    ) -> Result<u64, Error> {
+        // Get the offer
+        let (offer, status) = self.get_deposit_offer(offer_id)
+            .ok_or(Error::OfferNotFound)?;
+
+        // Check offer is in correct state
+        if !matches!(status, DepositOfferStatus::Pending) {
+            return Err(Error::Protocol(format!(
+                "Deposit offer not in Pending state: {:?}",
+                status
+            )));
+        }
+
+        // Check amount is within bounds
+        if funding_amount_sats < offer.min_amount_sats {
+            return Err(Error::Protocol(format!(
+                "Funding amount {} sats below minimum {} sats",
+                funding_amount_sats, offer.min_amount_sats
+            )));
+        }
+        let credited_amount = funding_amount_sats.min(offer.max_amount_sats);
+
+        // Check deadline
+        let current_block = self.wallet.get_block_height()?;
+        if offer.is_expired(current_block) {
+            return Err(Error::Protocol("Deposit offer has expired".to_string()));
+        }
+
+        // Credit the deposit (convert sats to msats)
+        let amount_msats = credited_amount * 1000;
+        let payment_hash = *offer_id; // Use offer_id as payment hash
+        let invoice_id = format!("deposit_offer:{}", hex::encode(&offer_id[..8]));
+
+        let new_balance = self.credit_deposit(
+            offer.partner_id,
+            offer.deposit_pubkey,
+            amount_msats,
+            payment_hash,
+            invoice_id,
+        )?;
+
+        // Update offer status
+        {
+            let mut offers = self.deposit_offers.lock().unwrap();
+            if let Some((_, ref mut current_status)) = offers.get_mut(offer_id) {
+                *current_status = DepositOfferStatus::Completed {
+                    txid: funding_txid,
+                    amount_sats: credited_amount,
+                    confirmed_at_block: current_block,
+                };
+            }
+        }
+        self.save_deposit_offers()?;
+
+        tracing::info!(
+            "Completed deposit offer {}: credited {} msats to {}",
+            hex::encode(&offer_id[..8]),
+            amount_msats,
+            offer.deposit_pubkey
+        );
+
+        Ok(new_balance)
+    }
+
+    /// Check if a deposit offer's funding address has received funds
+    ///
+    /// Returns Some((txid, amount_sats)) if funds are detected, None otherwise.
+    pub fn check_deposit_offer_funding(&self, offer_id: &[u8; 32]) -> Result<Option<(String, u64)>, Error> {
+        let (offer, status) = self.get_deposit_offer(offer_id)
+            .ok_or(Error::OfferNotFound)?;
+
+        // Only check pending offers
+        if !matches!(status, DepositOfferStatus::Pending) {
+            return Ok(None);
+        }
+
+        // Parse the funding address and check for received funds
+        let address = offer.funding_address.parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>()
+            .map_err(|e| Error::Protocol(format!("Invalid funding address: {}", e)))?;
+
+        // Check wallet for received funds to this address
+        // This requires syncing the wallet first
+        self.wallet.sync()?;
+
+        // Check if any transactions have been received to this address
+        if let Some((txid, amount)) = self.wallet.check_address_received(&address)? {
+            return Ok(Some((txid, amount)));
+        }
+
+        Ok(None)
     }
 }

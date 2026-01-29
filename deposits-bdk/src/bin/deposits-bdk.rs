@@ -84,6 +84,18 @@ DEPOSIT SUBCOMMANDS:
     deposit offer <partner_pubkey> <deposit_pubkey> <max_sats> <min_sats> <blocks_valid>
                     Create a signed deposit offer for on-chain funding
     deposit list    List all deposit offers
+    deposit open <partner_pubkey> <deposit_pubkey>
+                    Open a new deposit in a ledger
+    deposit ls <partner_pubkey>
+                    List all deposits in a ledger
+    deposit credit <partner_pubkey> <deposit_pubkey> <amount_msats> <invoice_id>
+                    Manually credit a deposit
+    deposit transfer <partner_pubkey> <from_deposit> <to_deposit> <amount_msats>
+                    Transfer funds between deposits in the same ledger
+    deposit check <offer_id>
+                    Check if a deposit offer has been funded
+    deposit complete <offer_id> <txid> <amount_sats>
+                    Complete a funded deposit offer and credit the deposit
 
 WITHDRAW SUBCOMMANDS:
     withdraw lock <deposit_pubkey> <address> <amount_sats> <fee_sats> <signature>
@@ -573,16 +585,22 @@ async fn partner_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 /// Handle deposit subcommands
 async fn deposit_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {
-        eprintln!("Usage: deposits-bdk deposit <offer|list> [args...]");
+        eprintln!("Usage: deposits-bdk deposit <offer|list|open|ls|credit|transfer|check|complete> [args...]");
         return Ok(());
     }
 
     match args[0].as_str() {
         "offer" => deposit_offer(&args[1..]).await,
         "list" => deposit_list(&args[1..]).await,
+        "open" => deposit_open(&args[1..]).await,
+        "ls" => deposit_ls(&args[1..]).await,
+        "credit" => deposit_credit(&args[1..]).await,
+        "transfer" => deposit_transfer(&args[1..]).await,
+        "check" => deposit_check(&args[1..]).await,
+        "complete" => deposit_complete(&args[1..]).await,
         cmd => {
             eprintln!("Unknown deposit subcommand: {}", cmd);
-            eprintln!("Usage: deposits-bdk deposit <offer|list> [args...]");
+            eprintln!("Usage: deposits-bdk deposit <offer|list|open|ls|credit|transfer|check|complete> [args...]");
             Ok(())
         }
     }
@@ -720,6 +738,350 @@ async fn deposit_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         println!("    Deposit: {}", offer.deposit_pubkey);
         println!();
     }
+
+    Ok(())
+}
+
+/// Open a new deposit in a ledger
+async fn deposit_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    // Parse positional arguments: <partner_pubkey> <deposit_pubkey>
+    let mut positional: Vec<String> = Vec::new();
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else {
+            positional.push(args[i].clone());
+        }
+        i += 1;
+    }
+
+    if positional.len() < 2 {
+        eprintln!("Usage: deposits-bdk deposit open <partner_pubkey> <deposit_pubkey> [options]");
+        eprintln!("\nExample:");
+        eprintln!("  deposits-bdk deposit open 02abc...partner 02def...deposit");
+        eprintln!("\nThis opens a new deposit in the ledger with the given partner.");
+        return Ok(());
+    }
+
+    let partner_pubkey = PublicKey::from_str(&positional[0])
+        .map_err(|e| format!("Invalid partner pubkey: {}", e))?;
+    let deposit_pubkey = PublicKey::from_str(&positional[1])
+        .map_err(|e| format!("Invalid deposit pubkey: {}", e))?;
+
+    let config = parse_config(&config_args)?;
+    let node = Node::new(config).await?;
+
+    println!("Opening deposit...");
+    println!("  Partner: {}", partner_pubkey);
+    println!("  Deposit pubkey: {}", deposit_pubkey);
+
+    let deposit = node.open_deposit(partner_pubkey, deposit_pubkey, None)?;
+
+    println!("\nDeposit opened!");
+    println!("  Pubkey: {}", deposit.pubkey);
+    println!("  Balance: {} msats", deposit.balance);
+
+    Ok(())
+}
+
+/// List deposits in a specific ledger
+async fn deposit_ls(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    // Parse positional arguments: <partner_pubkey>
+    let mut partner_pubkey_str: Option<String> = None;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else if partner_pubkey_str.is_none() {
+            partner_pubkey_str = Some(args[i].clone());
+        }
+        i += 1;
+    }
+
+    let partner_pubkey_str = partner_pubkey_str.ok_or("Partner pubkey required")?;
+    let partner_pubkey = PublicKey::from_str(&partner_pubkey_str)
+        .map_err(|e| format!("Invalid partner pubkey: {}", e))?;
+
+    let config = parse_config(&config_args)?;
+    let node = Node::new(config).await?;
+
+    let deposits = node.list_deposits(partner_pubkey);
+
+    if deposits.is_empty() {
+        println!("No deposits found in ledger with partner {}", partner_pubkey);
+        return Ok(());
+    }
+
+    println!("Deposits in ledger with {} ({} total):", partner_pubkey, deposits.len());
+    println!();
+
+    for (pubkey, deposit) in deposits {
+        println!("  Deposit: {}", pubkey);
+        println!("    Balance: {} msats ({} sats)", deposit.balance, deposit.balance / 1000);
+        println!("    Locked: {} msats", deposit.locked_balance);
+        let fees = &deposit.fees;
+        println!("    Fees: {} fixed + {} bps every {} blocks",
+            fees.annualized_fixed, fees.annualized_bps, fees.frequency_blocks);
+        println!();
+    }
+
+    Ok(())
+}
+
+/// Credit a deposit manually
+async fn deposit_credit(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    // Parse positional arguments: <partner_pubkey> <deposit_pubkey> <amount_msats> <invoice_id>
+    let mut positional: Vec<String> = Vec::new();
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else {
+            positional.push(args[i].clone());
+        }
+        i += 1;
+    }
+
+    if positional.len() < 4 {
+        eprintln!("Usage: deposits-bdk deposit credit <partner_pubkey> <deposit_pubkey> <amount_msats> <invoice_id> [options]");
+        eprintln!("\nExample:");
+        eprintln!("  deposits-bdk deposit credit 02abc...partner 02def...deposit 1000000 inv123");
+        eprintln!("\nThis credits the deposit with the specified amount.");
+        return Ok(());
+    }
+
+    let partner_pubkey = PublicKey::from_str(&positional[0])
+        .map_err(|e| format!("Invalid partner pubkey: {}", e))?;
+    let deposit_pubkey = PublicKey::from_str(&positional[1])
+        .map_err(|e| format!("Invalid deposit pubkey: {}", e))?;
+    let amount_msats: u64 = positional[2]
+        .parse()
+        .map_err(|_| format!("Invalid amount_msats: {}", positional[2]))?;
+    let invoice_id = positional[3].clone();
+
+    // Generate a payment hash
+    use bitcoin::hashes::{sha256, Hash};
+    let payment_hash = sha256::Hash::hash(invoice_id.as_bytes()).to_byte_array();
+
+    let config = parse_config(&config_args)?;
+    let node = Node::new(config).await?;
+
+    println!("Crediting deposit...");
+    println!("  Partner: {}", partner_pubkey);
+    println!("  Deposit: {}", deposit_pubkey);
+    println!("  Amount: {} msats ({} sats)", amount_msats, amount_msats / 1000);
+    println!("  Invoice ID: {}", invoice_id);
+
+    let new_balance = node.credit_deposit(
+        partner_pubkey,
+        deposit_pubkey,
+        amount_msats,
+        payment_hash,
+        invoice_id,
+    )?;
+
+    println!("\nDeposit credited!");
+    println!("  New balance: {} msats ({} sats)", new_balance, new_balance / 1000);
+
+    Ok(())
+}
+
+/// Transfer between deposits in the same ledger
+async fn deposit_transfer(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    // Parse positional arguments: <partner_pubkey> <from_deposit> <to_deposit> <amount_msats>
+    let mut positional: Vec<String> = Vec::new();
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else {
+            positional.push(args[i].clone());
+        }
+        i += 1;
+    }
+
+    if positional.len() < 4 {
+        eprintln!("Usage: deposits-bdk deposit transfer <partner_pubkey> <from_deposit> <to_deposit> <amount_msats> [options]");
+        eprintln!("\nExample:");
+        eprintln!("  deposits-bdk deposit transfer 02abc...partner 02def...from 02ghi...to 1000000");
+        eprintln!("\nThis transfers funds from one deposit to another within the same ledger.");
+        return Ok(());
+    }
+
+    let partner_pubkey = PublicKey::from_str(&positional[0])
+        .map_err(|e| format!("Invalid partner pubkey: {}", e))?;
+    let from_deposit = PublicKey::from_str(&positional[1])
+        .map_err(|e| format!("Invalid from_deposit pubkey: {}", e))?;
+    let to_deposit = PublicKey::from_str(&positional[2])
+        .map_err(|e| format!("Invalid to_deposit pubkey: {}", e))?;
+    let amount_msats: u64 = positional[3]
+        .parse()
+        .map_err(|_| format!("Invalid amount_msats: {}", positional[3]))?;
+
+    let config = parse_config(&config_args)?;
+    let node = Node::new(config).await?;
+
+    println!("Transferring funds...");
+    println!("  Partner: {}", partner_pubkey);
+    println!("  From: {}", from_deposit);
+    println!("  To: {}", to_deposit);
+    println!("  Amount: {} msats ({} sats)", amount_msats, amount_msats / 1000);
+
+    let (transfer_id, from_balance, to_balance) = node.transfer_between_deposits(
+        partner_pubkey,
+        from_deposit,
+        to_deposit,
+        amount_msats,
+    )?;
+
+    println!("\nTransfer complete!");
+    println!("  Transfer ID: {}", hex::encode(&transfer_id[..8]));
+    println!("  From balance: {} msats ({} sats)", from_balance, from_balance / 1000);
+    println!("  To balance: {} msats ({} sats)", to_balance, to_balance / 1000);
+
+    Ok(())
+}
+
+/// Check if a deposit offer has been funded
+async fn deposit_check(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    // Parse positional arguments: <offer_id>
+    let mut offer_id_str: Option<String> = None;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else if offer_id_str.is_none() {
+            offer_id_str = Some(args[i].clone());
+        }
+        i += 1;
+    }
+
+    let offer_id_str = offer_id_str.ok_or("Offer ID required")?;
+    let offer_id_bytes = hex::decode(&offer_id_str)
+        .map_err(|e| format!("Invalid offer ID hex: {}", e))?;
+
+    if offer_id_bytes.len() != 32 {
+        return Err("Offer ID must be 32 bytes (64 hex characters)".into());
+    }
+
+    let mut offer_id = [0u8; 32];
+    offer_id.copy_from_slice(&offer_id_bytes);
+
+    let config = parse_config(&config_args)?;
+    let node = Node::new(config).await?;
+
+    println!("Checking deposit offer funding...");
+    println!("  Offer ID: {}", hex::encode(&offer_id[..8]));
+
+    // Sync wallet first
+    node.sync_wallet()?;
+
+    // Check for funding
+    match node.check_deposit_offer_funding(&offer_id)? {
+        Some((txid, amount_sats)) => {
+            println!("\nFunding detected!");
+            println!("  Transaction: {}", txid);
+            println!("  Amount: {} sats", amount_sats);
+            println!("\nUse 'deposit complete <offer_id> <txid> <amount_sats>' to credit the deposit.");
+        }
+        None => {
+            println!("\nNo funding detected yet.");
+            if let Some((offer, _)) = node.get_deposit_offer(&offer_id) {
+                println!("  Funding address: {}", offer.funding_address);
+                println!("  Waiting for payment of {} - {} sats", offer.min_amount_sats, offer.max_amount_sats);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Complete a deposit offer by crediting the deposit
+async fn deposit_complete(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    // Parse positional arguments: <offer_id> <txid> <amount_sats>
+    let mut positional: Vec<String> = Vec::new();
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else {
+            positional.push(args[i].clone());
+        }
+        i += 1;
+    }
+
+    if positional.len() < 3 {
+        eprintln!("Usage: deposits-bdk deposit complete <offer_id> <txid> <amount_sats> [options]");
+        eprintln!("\nExample:");
+        eprintln!("  deposits-bdk deposit complete abc123...offerid tx123...txid 100000");
+        eprintln!("\nThis marks the deposit offer as complete and credits the deposit.");
+        return Ok(());
+    }
+
+    let offer_id_bytes = hex::decode(&positional[0])
+        .map_err(|e| format!("Invalid offer ID hex: {}", e))?;
+
+    if offer_id_bytes.len() != 32 {
+        return Err("Offer ID must be 32 bytes (64 hex characters)".into());
+    }
+
+    let mut offer_id = [0u8; 32];
+    offer_id.copy_from_slice(&offer_id_bytes);
+
+    let txid = positional[1].clone();
+    let amount_sats: u64 = positional[2]
+        .parse()
+        .map_err(|_| format!("Invalid amount_sats: {}", positional[2]))?;
+
+    let config = parse_config(&config_args)?;
+    let node = Node::new(config).await?;
+
+    println!("Completing deposit offer...");
+    println!("  Offer ID: {}", hex::encode(&offer_id[..8]));
+    println!("  Transaction: {}", txid);
+    println!("  Amount: {} sats", amount_sats);
+
+    let new_balance = node.complete_deposit_offer(&offer_id, txid, amount_sats)?;
+
+    println!("\nDeposit offer completed!");
+    println!("  New balance: {} msats ({} sats)", new_balance, new_balance / 1000);
 
     Ok(())
 }
