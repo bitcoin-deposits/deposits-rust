@@ -151,6 +151,19 @@ show_ledgers() {
     elif echo "$output" | grep -q "Ledgers"; then
         # Show ledger details
         echo "$output" | grep -E "Ledger|Operator:|Partner:|Sequence:|Deposits:|Reserves:|Enforcement" | sed 's/^/  /'
+
+        # For each partner, show history
+        local partners=$(echo "$output" | grep "Partner:" | awk '{print $2}')
+        for partner in $partners; do
+            echo ""
+            echo "  History for ledger $partner:"
+            local history=$(run_bdk_cmd "$node" ledger history "$partner" 2>&1)
+            if echo "$history" | grep -q "Updates for ledger"; then
+                echo "$history" | grep -v "^Updates for ledger" | sed 's/^/    /'
+            else
+                echo "    (no history)"
+            fi
+        done
     else
         echo "  (error querying ledgers)"
     fi

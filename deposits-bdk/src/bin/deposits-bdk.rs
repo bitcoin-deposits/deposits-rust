@@ -75,6 +75,8 @@ LEDGER SUBCOMMANDS:
                     Open a ledger with a partner. Set enforcement_block to a
                     future block for bootstrap phase, or 0 for immediate enforcement.
     ledger list     List all ledgers
+    ledger history <partner_pubkey>
+                    Show hash chain history for a ledger
 
 PARTNER SUBCOMMANDS:
     partner request <pubkey>   Send collateral partnership request
@@ -379,16 +381,17 @@ async fn create_reserves(args: &[String]) -> Result<(), Box<dyn std::error::Erro
 /// Handle ledger subcommands
 async fn ledger_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {
-        eprintln!("Usage: deposits-bdk ledger <open|list> [args...]");
+        eprintln!("Usage: deposits-bdk ledger <open|list|history> [args...]");
         return Ok(());
     }
 
     match args[0].as_str() {
         "open" => ledger_open(&args[1..]).await,
         "list" => ledger_list(&args[1..]).await,
+        "history" => ledger_history(&args[1..]).await,
         cmd => {
             eprintln!("Unknown ledger subcommand: {}", cmd);
-            eprintln!("Usage: deposits-bdk ledger <open|list> [args...]");
+            eprintln!("Usage: deposits-bdk ledger <open|list|history> [args...]");
             Ok(())
         }
     }
@@ -500,6 +503,175 @@ async fn ledger_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     }
 
     Ok(())
+}
+
+/// Show ledger history (hash chain updates)
+async fn ledger_history(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    // Parse positional argument: <partner_pubkey>
+    let mut partner_pubkey_str: Option<String> = None;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else if partner_pubkey_str.is_none() {
+            partner_pubkey_str = Some(args[i].clone());
+        }
+        i += 1;
+    }
+
+    let partner_pubkey_str = partner_pubkey_str.ok_or("Partner pubkey required")?;
+    let partner_pubkey = PublicKey::from_str(&partner_pubkey_str)
+        .map_err(|e| format!("Invalid partner pubkey: {}", e))?;
+
+    let config = parse_config(&config_args)?;
+    let node = Node::new(config).await?;
+
+    // Get the ledger
+    let ledger = node.get_ledger(partner_pubkey)
+        .ok_or("Ledger not found")?;
+
+    // Print header
+    println!("Updates for ledger {}:", partner_pubkey);
+
+    if ledger.history.is_empty() {
+        println!("  (no updates)");
+        return Ok(());
+    }
+
+    // Print each update in the history
+    for update in &ledger.history {
+        let seq = update.sequence_number;
+        let prev = &update.previous_hash;
+        let curr = &update.current_hash;
+
+        // Determine signature status
+        let has_partner_sig = update.partner_signature != [0u8; 64];
+        let has_operator_sig = update.operator_signature != [0u8; 64];
+        let sig_status = if has_partner_sig && has_operator_sig {
+            "✓"
+        } else if has_partner_sig || has_operator_sig {
+            "·"
+        } else {
+            " "
+        };
+
+        // Lock status (both signatures = committed)
+        let lock_status = if has_partner_sig && has_operator_sig {
+            "🔒"
+        } else {
+            "  "
+        };
+
+        // Get operation name and details
+        let (op_name, op_details) = format_operation(update.message_type, &update.message);
+
+        println!("{:>4} [{:08x}~{:08x}] {}{} {}{}",
+            seq,
+            u32::from_be_bytes([prev[0], prev[1], prev[2], prev[3]]),
+            u32::from_be_bytes([curr[0], curr[1], curr[2], curr[3]]),
+            sig_status,
+            lock_status,
+            op_name,
+            if op_details.is_empty() { String::new() } else { format!("  {}", op_details) }
+        );
+    }
+
+    Ok(())
+}
+
+/// Format an operation type and extract details from the message
+fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
+    use deposits_core::messages::consts::*;
+
+    let name = match msg_type {
+        HANDSHAKE => "Handshake",
+        RESERVES_ADD_OUTPUT => "ReservesAdd",
+        RESERVES_REMOVE_OUTPUT => "ReservesRemove",
+        RESERVES_INCREASE => "ReservesIncrease",
+        RESERVES_DECREASE => "ReservesDecrease",
+        RESERVES_UPDATE_OUTPUT => "ReservesUpdate",
+        COLLATERAL_INCREASE => "CollateralIncrease",
+        COLLATERAL_DECREASE => "CollateralDecrease",
+        COLLATERAL_STATUS => "CollateralStatus",
+        COLLATERAL_ATTESTATION => "CollateralAttestation",
+        COLLATERAL_ADD_PARTNER => "CollateralAddPartner",
+        COLLATERAL_REMOVE_PARTNER => "CollateralRemovePartner",
+        DEPOSIT_OPEN => "DepositOpen",
+        DEPOSIT_CLOSE => "DepositClose",
+        DEPOSIT_UPDATE => "DepositUpdate",
+        DEPOSIT_LOCK_TRANSFER => "TransferLock",
+        DEPOSIT_FAIL_TRANSFER => "TransferFail",
+        DEPOSIT_FULFILL_TRANSFER => "TransferFulfill",
+        SENDING_LOCK_PAYMENT => "PaymentLock",
+        SENDING_FAIL_PAYMENT => "PaymentFail",
+        SENDING_FULFILL_PAYMENT => "PaymentFulfill",
+        RECEIVING_CREDIT_PAYMENT => "PaymentCredit",
+        RECEIVING_COSIGN_INVOICE => "CosignInvoice",
+        MAINTENANCE_FEE_COLLECT => "FeeCollect",
+        LEDGER_CLOSE => "LedgerClose",
+        _ => "Unknown",
+    }.to_string();
+
+    // Try to extract details from the message
+    let details = if !message.is_empty() {
+        match msg_type {
+            RESERVES_INCREASE | RESERVES_DECREASE => {
+                if message.len() >= 8 {
+                    let amt = u64::from_le_bytes([
+                        message[0], message[1], message[2], message[3],
+                        message[4], message[5], message[6], message[7],
+                    ]);
+                    if amt > 0 && amt < 1_000_000_000_000 {
+                        format!("{} sat", amt)
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                }
+            }
+            DEPOSIT_OPEN | DEPOSIT_CLOSE => {
+                if message.len() >= 33 {
+                    format!("pk:{:02x}{:02x}{:02x}{:02x}", message[0], message[1], message[2], message[3])
+                } else {
+                    String::new()
+                }
+            }
+            COLLATERAL_ADD_PARTNER | COLLATERAL_REMOVE_PARTNER => {
+                if message.len() >= 33 {
+                    format!("partner:{:02x}{:02x}{:02x}{:02x}", message[0], message[1], message[2], message[3])
+                } else {
+                    String::new()
+                }
+            }
+            COLLATERAL_ATTESTATION => {
+                if message.len() >= 8 {
+                    let amt = u64::from_le_bytes([
+                        message[0], message[1], message[2], message[3],
+                        message[4], message[5], message[6], message[7],
+                    ]);
+                    if amt > 0 && amt < 1_000_000_000_000 {
+                        format!("{} sat", amt)
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                }
+            }
+            _ => String::new(),
+        }
+    } else {
+        String::new()
+    };
+
+    (name, details)
 }
 
 /// Handle partner subcommands

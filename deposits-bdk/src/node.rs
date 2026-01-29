@@ -1140,4 +1140,29 @@ impl Node {
 
         Ok(None)
     }
+
+    /// Get ledger history (for display purposes)
+    ///
+    /// Returns the list of signed updates in the ledger's history.
+    pub fn get_ledger_history(
+        &self,
+        partner: PublicKey,
+    ) -> Option<Vec<deposits_core::types::SignedLedgerUpdate>> {
+        let ledgers = self.handler.ledgers.lock().unwrap();
+        if let Some(ledger_arc) = ledgers.get(&(self.node_id, partner)) {
+            let ledger = ledger_arc.read().unwrap();
+            return Some(ledger.history.clone());
+        }
+        None
+    }
+
+    /// Get a specific ledger
+    pub fn get_ledger(&self, partner: PublicKey) -> Option<Ledger> {
+        let ledgers = self.handler.ledgers.lock().unwrap();
+        if let Some(ledger_arc) = ledgers.get(&(self.node_id, partner)) {
+            let ledger = ledger_arc.read().unwrap();
+            return Some(ledger.clone());
+        }
+        None
+    }
 }
