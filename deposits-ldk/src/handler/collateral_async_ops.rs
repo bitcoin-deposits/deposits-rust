@@ -72,7 +72,7 @@ where
 
         let consent_request = DepositsMessage::Coordination(CoordinationMsg::CollateralConsentRequest {
             operator_id: self.our_node_id,
-            partner_id: partner_node_id,
+            reserves_id: partner_node_id,
             operator_signature: [0u8; 64],
         });
 
@@ -301,7 +301,7 @@ where
             total_shortfall, available_ledgers.len());
 
         // STEP 2: Increase collateral on each available ledger
-        for (i, partner_id) in available_ledgers.iter().enumerate() {
+        for (i, reserves_id) in available_ledgers.iter().enumerate() {
             // First ledger gets any remainder
             let increase_amount = if i == 0 {
                 per_ledger_increase + remainder
@@ -313,7 +313,7 @@ where
                 continue;
             }
 
-            self.increase_collateral_on_ledger(*partner_id, increase_amount).await?;
+            self.increase_collateral_on_ledger(*reserves_id, increase_amount).await?;
         }
 
         Ok(())
@@ -414,7 +414,7 @@ where
         let per_ledger_increase = shortfall.saturating_div(available_ledgers.len() as u64);
         let remainder = shortfall % (available_ledgers.len() as u64);
 
-        for (i, partner_id) in available_ledgers.iter().enumerate() {
+        for (i, reserves_id) in available_ledgers.iter().enumerate() {
             let increase_amount = if i == 0 {
                 per_ledger_increase + remainder
             } else {
@@ -423,9 +423,9 @@ where
             if increase_amount > 0 {
                 // First ensure reserves on the collateral-providing ledger are sufficient
                 // Collateral commitment cannot exceed reserves on that ledger
-                self.ensure_reserves_for_collateral(*partner_id, increase_amount).await?;
+                self.ensure_reserves_for_collateral(*reserves_id, increase_amount).await?;
                 // Then commit the collateral
-                self.increase_collateral_on_ledger(*partner_id, increase_amount).await?;
+                self.increase_collateral_on_ledger(*reserves_id, increase_amount).await?;
             }
         }
 
@@ -433,14 +433,14 @@ where
     }
 
     /// Ensure reserves on a ledger are sufficient to support a collateral commitment
-    async fn ensure_reserves_for_collateral(&self, partner_id: PublicKey, collateral_needed: u64) -> Result<(), DepositsError> {
+    async fn ensure_reserves_for_collateral(&self, reserves_id: PublicKey, collateral_needed: u64) -> Result<(), DepositsError> {
         use super::messages::DepositsMessage;
         use super::core::calculate_reserves_with_headroom;
 
         // Check current reserves and collateral on this ledger
         let (current_reserves, current_collateral) = {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, reserves_id)) {
                 let ledger = ledger_arc.read().unwrap();
                 (ledger.reserves_amount(), ledger.state.collateral_amount)
             } else {
@@ -454,18 +454,18 @@ where
 
         if current_reserves >= headroom {
             log_debug!(self.logger, "✅ RESERVES: Ledger with {} already has sufficient reserves ({}) for collateral ({})",
-                partner_id, current_reserves, total_collateral_needed);
+                reserves_id, current_reserves, total_collateral_needed);
             return Ok(());
         }
 
         let reserves_increase = headroom.saturating_sub(current_reserves);
         log_info!(self.logger, "🔄 RESERVES: Increasing reserves on ledger with {} by {} sats to support collateral",
-            partner_id, reserves_increase);
+            reserves_id, reserves_increase);
 
         // Send ReservesIncrease message (V2 format)
         let update_msg = LedgerUpdateMsg::new_with_operation(
             self.our_node_id,    // operator
-            partner_id,          // partner
+            reserves_id,          // partner
             LedgerOperation::ReservesIncrease { new_amount: headroom },
         );
         let reserves_msg = DepositsMessage::LedgerUpdate(update_msg);
@@ -484,17 +484,17 @@ where
             pending_acks.insert(message_hash, deposits_core::PendingAck {
                 message_type,
                 timestamp,
-                peer: partner_id,
+                peer: reserves_id,
             });
         }
 
         // Send and wait for ACK
-        self.send_message_with_ack_async(partner_id, reserves_msg, 30000).await?;
+        self.send_message_with_ack_async(reserves_id, reserves_msg, 30000).await?;
 
         // Apply the update locally
         let (prev_hash, new_hash, sequence_number) = {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, reserves_id)) {
                 let mut ledger = ledger_arc.write().unwrap();
                 ledger.state.last_updated = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -523,14 +523,14 @@ where
         // Broadcast to other partners
         {
             let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
-            sent_messages.insert(message_hash, (self.our_node_id, partner_id, reserves_msg_for_broadcast, prev_hash, new_hash, sequence_number));
+            sent_messages.insert(message_hash, (self.our_node_id, reserves_id, reserves_msg_for_broadcast, prev_hash, new_hash, sequence_number));
         }
-        if let Err(e) = self.broadcast_message_to_other_partners(message_hash, partner_id, None) {
+        if let Err(e) = self.broadcast_message_to_other_partners(message_hash, reserves_id, None) {
             log_error!(self.logger, "Failed to broadcast reserves increase: {}", e);
         }
 
         log_info!(self.logger, "✅ RESERVES: Increased reserves to {} sats on ledger with {}",
-            headroom, partner_id);
+            headroom, reserves_id);
 
         Ok(())
     }
@@ -538,13 +538,13 @@ where
     /// Increase collateral commitment on a specific ledger
     /// Sends CollateralIncrease message and waits for ACK
     /// `increase_by` is the delta amount to add to current collateral
-    async fn increase_collateral_on_ledger(&self, partner_id: PublicKey, increase_by: u64) -> Result<(), DepositsError> {
+    async fn increase_collateral_on_ledger(&self, reserves_id: PublicKey, increase_by: u64) -> Result<(), DepositsError> {
         use super::messages::DepositsMessage;
 
         // Calculate absolute new_amount = current + increase_by
         let new_amount = {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, reserves_id)) {
                 let ledger = ledger_arc.read().unwrap();
                 ledger.state.collateral_amount.saturating_add(increase_by)
             } else {
@@ -553,7 +553,7 @@ where
         };
 
         log_info!(self.logger, "🔄 COLLATERAL: Increasing collateral to {} sats (adding {}) on ledger with {}",
-            new_amount, increase_by, partner_id);
+            new_amount, increase_by, reserves_id);
 
         // Get current block height
         let block_height = self.channel_manager.as_ref()
@@ -561,12 +561,12 @@ where
             .unwrap_or(0);
 
         // Acquire channel lock for this partner
-        let _channel_lock = self.acquire_channel_lock_async(self.our_node_id, partner_id).await;
+        let _channel_lock = self.acquire_channel_lock_async(self.our_node_id, reserves_id).await;
 
         // V2 format
         let update_msg = LedgerUpdateMsg::new_with_operation(
             self.our_node_id,    // operator
-            partner_id,          // partner
+            reserves_id,          // partner
             LedgerOperation::CollateralIncrease { new_amount, block_height },
         );
         let collateral_msg = DepositsMessage::LedgerUpdate(update_msg);
@@ -585,20 +585,20 @@ where
             pending_acks.insert(message_hash, deposits_core::PendingAck {
                 message_type,
                 timestamp,
-                peer: partner_id,
+                peer: reserves_id,
             });
         }
 
         // Send message and wait for ACK
-        if let Err(e) = self.send_message_with_ack_async(partner_id, collateral_msg, 30000).await {
-            log_error!(self.logger, "❌ COLLATERAL: Failed to increase collateral with {}: {}", partner_id, e);
+        if let Err(e) = self.send_message_with_ack_async(reserves_id, collateral_msg, 30000).await {
+            log_error!(self.logger, "❌ COLLATERAL: Failed to increase collateral with {}: {}", reserves_id, e);
             return Err(e);
         }
 
         // Apply the update locally after ACK
         let (prev_hash, new_hash, sequence_number, hash_verified) = {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, reserves_id)) {
                 let mut ledger = ledger_arc.write().unwrap();
 
                 ledger.state.last_updated = std::time::SystemTime::now()
@@ -622,7 +622,7 @@ where
                 // Verify our computed hash matches the attestation's ledger_hash
                 // This catches ledger divergence before we send UpdateReserves
                 let partner_hash = ledger.state.collateral_attestations
-                    .get(&partner_id)
+                    .get(&reserves_id)
                     .map(|att| att.ledger_hash);
 
                 let hash_verified = match partner_hash {
@@ -638,7 +638,7 @@ where
                     }
                     None => {
                         log_warn!(self.logger, "⚠️ COLLATERAL: No attestation found for partner {} - cannot verify hash",
-                            partner_id);
+                            reserves_id);
                         false
                     }
                 };
@@ -654,23 +654,23 @@ where
         // Update for broadcast
         {
             let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
-            sent_messages.insert(message_hash, (self.our_node_id, partner_id, collateral_msg_for_broadcast.clone(), prev_hash, new_hash, sequence_number));
+            sent_messages.insert(message_hash, (self.our_node_id, reserves_id, collateral_msg_for_broadcast.clone(), prev_hash, new_hash, sequence_number));
         }
 
         // Broadcast to other partners (auditors)
-        if let Err(e) = self.broadcast_message_to_other_partners(message_hash, partner_id, None) {
+        if let Err(e) = self.broadcast_message_to_other_partners(message_hash, reserves_id, None) {
             log_error!(self.logger, "Failed to broadcast collateral increase: {}", e);
         }
 
-        log_info!(self.logger, "✅ COLLATERAL: Increased collateral to {} sats on ledger with {}", new_amount, partner_id);
+        log_info!(self.logger, "✅ COLLATERAL: Increased collateral to {} sats on ledger with {}", new_amount, reserves_id);
 
         // Only refresh commitment if hash was verified
         // This prevents sending UpdateReserves with a hash the partner can't validate
         if hash_verified {
             // Refresh commitment transaction to include the new collateral
             // Cancel any pending lazy sync since we're syncing now
-            self.cancel_lazy_sync(partner_id);
-            if let Err(e) = self.refresh_reserves_commitment(partner_id) {
+            self.cancel_lazy_sync(reserves_id);
+            if let Err(e) = self.refresh_reserves_commitment(reserves_id) {
                 log_error!(self.logger, "❌ COLLATERAL: Failed to refresh commitment after increase: {}", e);
                 // Don't return error - the collateral increase was successful, commitment will sync later
             }

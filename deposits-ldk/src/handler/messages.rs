@@ -217,14 +217,14 @@ impl DepositsMessage {
         }
     }
 
-    pub fn partner_id(&self) -> Option<PublicKey> {
+    pub fn reserves_id(&self) -> Option<PublicKey> {
         match self {
-            Self::LedgerUpdate(m) => Some(m.partner_id),
+            Self::LedgerUpdate(m) => Some(m.reserves_id),
             Self::LedgerUpdateResponse(_) => None,
-            Self::Handshake(m) => Some(m.partner_id),
-            Self::HandshakeResponse(m) => Some(m.partner_id),
-            Self::Sync(m) => Some(m.partner_id),
-            Self::SyncResponse(m) => Some(m.partner_id),
+            Self::Handshake(m) => Some(m.reserves_id),
+            Self::HandshakeResponse(m) => Some(m.reserves_id),
+            Self::Sync(m) => Some(m.reserves_id),
+            Self::SyncResponse(m) => Some(m.reserves_id),
             Self::Recovery(_) => None,
             Self::RecoveryResponse(_) => None,
             Self::Coordination(_) => None,
@@ -694,7 +694,7 @@ impl LedgerUpdateMsgExt for LedgerUpdateMsg {
     fn new_with_operation(operator: PublicKey, partner: PublicKey, operation: LedgerOperation) -> LedgerUpdateMsg {
         LedgerUpdateMsg {
             operator_id: operator,
-            partner_id: partner,
+            reserves_id: partner,
             operation,
             sequence_number: 0,
             previous_hash: [0u8; 32],
@@ -971,7 +971,7 @@ mod tests {
 
         let msg = LedgerUpdateMsg {
             operator_id: test_pubkey(),
-            partner_id: test_pubkey(),
+            reserves_id: test_pubkey(),
             operation: op.clone(),
             sequence_number: 1,
             previous_hash: [0u8; 32],

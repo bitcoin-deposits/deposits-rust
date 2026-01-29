@@ -121,16 +121,16 @@ where
     pub fn create_proposal(
         &self,
         amount: u64,
-        partner_id: PublicKey,
+        reserves_id: PublicKey,
         ledger_id: u16,
         emergency_timeout: u32,
     ) -> DepositsResult<ReservesOutputProposal> {
         // Generate unique proposal ID
-        let proposal_id = self.generate_proposal_id(&partner_id, amount, ledger_id);
+        let proposal_id = self.generate_proposal_id(&reserves_id, amount, ledger_id);
 
         // Create deterministic address for the reserves
         let operator_id = self.operator_secret_key.public_key(&Secp256k1::new());
-        let reserves_address = self.create_reserves_address(operator_id, partner_id, ledger_id)?;
+        let reserves_address = self.create_reserves_address(operator_id, reserves_id, ledger_id)?;
 
         // Create default spending policy
         let spending_policy = SpendingPolicy {
@@ -147,7 +147,7 @@ where
         let mut proposal = ReservesOutputProposal {
             proposal_id,
             amount,
-            partner_id,
+            reserves_id,
             ledger_id,
             reserves_address: reserves_address.to_string(),
             spending_policy,
@@ -169,7 +169,7 @@ where
 
         log_info!(self.logger,
             "Created reserves output proposal {} for {} sats with partner {}",
-            hex::encode(&proposal_id[..8]), amount, partner_id);
+            hex::encode(&proposal_id[..8]), amount, reserves_id);
 
         Ok(proposal)
     }
@@ -184,7 +184,7 @@ where
 
         // Additional validation: verify the address is correctly derived
         let operator_id = self.operator_secret_key.public_key(&Secp256k1::new());
-        let expected_address = self.create_reserves_address(operator_id, proposal.partner_id, proposal.ledger_id)?;
+        let expected_address = self.create_reserves_address(operator_id, proposal.reserves_id, proposal.ledger_id)?;
 
         if proposal.reserves_address != expected_address.to_string() {
             return Err(DepositsError::InvalidAddress(
@@ -294,7 +294,7 @@ where
                 if !other_voters.is_empty() {
                     // Build Tapscript reserves output with quorum voting
                     let voter_set = VoterSet::new(
-                        proposal.partner_id, // Partner is tie-breaker
+                        proposal.reserves_id, // Partner is tie-breaker
                         other_voters.clone(),    // Other channel partners are voters
                     );
 
@@ -375,13 +375,13 @@ where
     /// Generate a unique proposal ID
     fn generate_proposal_id(
         &self,
-        partner_id: &PublicKey,
+        reserves_id: &PublicKey,
         amount: u64,
         ledger_id: u16,
     ) -> [u8; 32] {
         let mut hasher = sha256::Hash::engine();
         hasher.input(&self.operator_secret_key.public_key(&Secp256k1::new()).serialize());
-        hasher.input(&partner_id.serialize());
+        hasher.input(&reserves_id.serialize());
         hasher.input(&amount.to_be_bytes());
         hasher.input(&ledger_id.to_be_bytes());
         hasher.input(&now_unix_timestamp().to_be_bytes());
@@ -398,7 +398,7 @@ where
         let mut message_bytes = Vec::new();
         message_bytes.extend_from_slice(&proposal.proposal_id);
         message_bytes.extend_from_slice(&proposal.amount.to_be_bytes());
-        message_bytes.extend_from_slice(&proposal.partner_id.serialize());
+        message_bytes.extend_from_slice(&proposal.reserves_id.serialize());
         message_bytes.extend_from_slice(&proposal.ledger_id.to_be_bytes());
         message_bytes.extend_from_slice(&proposal.emergency_timeout.to_be_bytes());
 
@@ -418,15 +418,15 @@ where
     fn create_reserves_address(
         &self,
         operator_key: PublicKey,
-        partner_key: PublicKey,
+        reserves_key: PublicKey,
         ledger_id: u16,
     ) -> DepositsResult<Address> {
         let secp = Secp256k1::new();
 
-        // Deterministic key derivation: SHA256(operator_key || partner_key || ledger_id || "reserves")
+        // Deterministic key derivation: SHA256(operator_key || reserves_key || ledger_id || "reserves")
         let mut key_material = Vec::new();
         key_material.extend_from_slice(&operator_key.serialize());
-        key_material.extend_from_slice(&partner_key.serialize());
+        key_material.extend_from_slice(&reserves_key.serialize());
         key_material.extend_from_slice(&ledger_id.to_be_bytes());
         key_material.extend_from_slice(b"bitcoin-deposits-reserves-v1");
 
@@ -525,7 +525,7 @@ mod tests {
         ).unwrap();
 
         assert_eq!(proposal.amount, 50000);
-        assert_eq!(proposal.partner_id, partner_pk);
+        assert_eq!(proposal.reserves_id, partner_pk);
         assert!(proposal.operator_signature.is_some());
 
         // Validate the proposal

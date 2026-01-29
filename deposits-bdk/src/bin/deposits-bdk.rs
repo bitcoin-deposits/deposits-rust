@@ -71,11 +71,11 @@ COMMANDS:
     help            Show this help message
 
 LEDGER SUBCOMMANDS:
-    ledger open <partner_pubkey> [enforcement_block]
-                    Open a ledger with a partner. Set enforcement_block to a
+    ledger open <reserves_id> [enforcement_block]
+                    Open a ledger with reserves ID. Set enforcement_block to a
                     future block for bootstrap phase, or 0 for immediate enforcement.
     ledger list     List all ledgers
-    ledger history <partner_pubkey>
+    ledger history <reserves_id>
                     Show hash chain history for a ledger
 
 PARTNER SUBCOMMANDS:
@@ -83,16 +83,16 @@ PARTNER SUBCOMMANDS:
     partner list               List all collateral partners
 
 DEPOSIT SUBCOMMANDS:
-    deposit offer <partner_pubkey> <deposit_pubkey> <max_sats> <min_sats> <blocks_valid>
+    deposit offer <reserves_id> <deposit_pubkey> <max_sats> <min_sats> <blocks_valid>
                     Create a signed deposit offer for on-chain funding
     deposit list    List all deposit offers
-    deposit open <partner_pubkey> <deposit_pubkey>
+    deposit open <reserves_id> <deposit_pubkey>
                     Open a new deposit in a ledger
-    deposit ls <partner_pubkey>
+    deposit ls <reserves_id>
                     List all deposits in a ledger
-    deposit credit <partner_pubkey> <deposit_pubkey> <amount_msats> <invoice_id>
+    deposit credit <reserves_id> <deposit_pubkey> <amount_msats> <invoice_id>
                     Manually credit a deposit
-    deposit transfer <partner_pubkey> <from_deposit> <to_deposit> <amount_msats>
+    deposit transfer <reserves_id> <from_deposit> <to_deposit> <amount_msats>
                     Transfer funds between deposits in the same ledger
     deposit check <offer_id>
                     Check if a deposit offer has been funded
@@ -399,8 +399,8 @@ async fn ledger_command(args: &[String]) -> Result<(), Box<dyn std::error::Error
 
 /// Open a new ledger with a partner
 async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    // Parse positional arguments: <partner_pubkey> [enforcement_block]
-    let mut partner_pubkey_str: Option<String> = None;
+    // Parse positional arguments: <reserves_id> [enforcement_block]
+    let mut reserves_id_str: Option<String> = None;
     let mut enforcement_block: u64 = 0; // Default: immediate enforcement
     let mut config_args = Vec::new();
 
@@ -413,9 +413,9 @@ async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
                 config_args.push(args[i + 1].clone());
                 i += 1;
             }
-        } else if partner_pubkey_str.is_none() {
+        } else if reserves_id_str.is_none() {
             // First positional argument - partner pubkey
-            partner_pubkey_str = Some(args[i].clone());
+            reserves_id_str = Some(args[i].clone());
         } else {
             // Second positional argument - enforcement block
             enforcement_block = args[i]
@@ -425,9 +425,9 @@ async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         i += 1;
     }
 
-    let partner_pubkey_str = partner_pubkey_str.ok_or("Partner pubkey required")?;
-    let partner_pubkey = PublicKey::from_str(&partner_pubkey_str)
-        .map_err(|e| format!("Invalid partner pubkey: {}", e))?;
+    let reserves_id_str = reserves_id_str.ok_or("Reserves ID required")?;
+    let reserves_id = PublicKey::from_str(&reserves_id_str)
+        .map_err(|e| format!("Invalid reserves ID: {}", e))?;
 
     let config = parse_config(&config_args)?;
     let node = Node::new(config).await?;
@@ -441,17 +441,17 @@ async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         return Err("No reserves found. Create reserves first with 'reserves' command.".into());
     }
 
-    println!("Opening ledger with partner: {}", partner_pubkey);
+    println!("Opening ledger with reserves: {}", reserves_id);
     println!("  Our node ID: {}", node.node_id);
     println!("  Reserves: {} sats", reserves_balance);
     println!("  Collateral enforcement block: {}", enforcement_block);
 
     // Create the ledger
-    let ledger = node.open_ledger(partner_pubkey, enforcement_block)?;
+    let ledger = node.open_ledger(reserves_id, enforcement_block)?;
 
     println!("\nLedger opened successfully!");
     println!("  Operator: {}", ledger.state.operator_key);
-    println!("  Partner: {}", ledger.state.partner_key);
+    println!("  Partner: {}", ledger.state.reserves_key);
     println!("  Sequence: {}", ledger.state.sequence);
     println!("  Hash: {:02x?}", &ledger.state.hash[0..8]);
     if let Some(block) = ledger.state.collateral_enforcement_block {
@@ -490,7 +490,7 @@ async fn ledger_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
 
         println!("  {} ({})", partner, role);
         println!("    Operator: {}", operator);
-        println!("    Partner: {}", partner);
+        println!("    Reserves: {}", partner);
         println!("    Sequence: {}", ledger.state.sequence);
         println!("    Deposits: {} total, {} sats balance",
             ledger.state.deposits.len(),
@@ -507,8 +507,8 @@ async fn ledger_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
 
 /// Show ledger history (hash chain updates)
 async fn ledger_history(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    // Parse positional argument: <partner_pubkey>
-    let mut partner_pubkey_str: Option<String> = None;
+    // Parse positional argument: <reserves_id>
+    let mut reserves_id_str: Option<String> = None;
     let mut config_args = Vec::new();
 
     let mut i = 0;
@@ -519,25 +519,25 @@ async fn ledger_history(args: &[String]) -> Result<(), Box<dyn std::error::Error
                 config_args.push(args[i + 1].clone());
                 i += 1;
             }
-        } else if partner_pubkey_str.is_none() {
-            partner_pubkey_str = Some(args[i].clone());
+        } else if reserves_id_str.is_none() {
+            reserves_id_str = Some(args[i].clone());
         }
         i += 1;
     }
 
-    let partner_pubkey_str = partner_pubkey_str.ok_or("Partner pubkey required")?;
-    let partner_pubkey = PublicKey::from_str(&partner_pubkey_str)
-        .map_err(|e| format!("Invalid partner pubkey: {}", e))?;
+    let reserves_id_str = reserves_id_str.ok_or("Reserves ID required")?;
+    let reserves_id = PublicKey::from_str(&reserves_id_str)
+        .map_err(|e| format!("Invalid reserves ID: {}", e))?;
 
     let config = parse_config(&config_args)?;
     let node = Node::new(config).await?;
 
     // Get the ledger
-    let ledger = node.get_ledger(partner_pubkey)
+    let ledger = node.get_ledger(reserves_id)
         .ok_or("Ledger not found")?;
 
     // Print header
-    println!("Updates for ledger {}:", partner_pubkey);
+    println!("Updates for ledger {}:", reserves_id);
 
     if ledger.history.is_empty() {
         println!("  (no updates)");
@@ -781,7 +781,7 @@ async fn deposit_command(args: &[String]) -> Result<(), Box<dyn std::error::Erro
 /// Create a deposit offer for on-chain funding
 async fn deposit_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // Parse positional arguments:
-    // <partner_pubkey> <deposit_pubkey> <max_sats> <min_sats> <blocks_valid>
+    // <reserves_id> <deposit_pubkey> <max_sats> <min_sats> <blocks_valid>
     let mut positional: Vec<String> = Vec::new();
     let mut config_args = Vec::new();
 
@@ -800,7 +800,7 @@ async fn deposit_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     }
 
     if positional.len() < 5 {
-        eprintln!("Usage: deposits-bdk deposit offer <partner_pubkey> <deposit_pubkey> <max_sats> <min_sats> <blocks_valid> [options]");
+        eprintln!("Usage: deposits-bdk deposit offer <reserves_id> <deposit_pubkey> <max_sats> <min_sats> <blocks_valid> [options]");
         eprintln!("\nExample:");
         eprintln!("  deposits-bdk deposit offer 02abc...partner 02def...deposit 1000000 10000 144");
         eprintln!("\nThis creates a signed offer committing to credit the deposit");
@@ -809,8 +809,8 @@ async fn deposit_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         return Ok(());
     }
 
-    let partner_pubkey = PublicKey::from_str(&positional[0])
-        .map_err(|e| format!("Invalid partner pubkey: {}", e))?;
+    let reserves_id = PublicKey::from_str(&positional[0])
+        .map_err(|e| format!("Invalid reserves ID: {}", e))?;
     let deposit_pubkey = PublicKey::from_str(&positional[1])
         .map_err(|e| format!("Invalid deposit pubkey: {}", e))?;
     let max_sats: u64 = positional[2]
@@ -834,7 +834,7 @@ async fn deposit_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     node.sync_wallet()?;
 
     println!("Creating deposit offer...");
-    println!("  Partner: {}", partner_pubkey);
+    println!("  Partner: {}", reserves_id);
     println!("  Deposit: {}", deposit_pubkey);
     println!("  Max amount: {} sats", max_sats);
     println!("  Min amount: {} sats", min_sats);
@@ -842,7 +842,7 @@ async fn deposit_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>
 
     // Create the offer
     let offer = node.create_deposit_offer(
-        partner_pubkey,
+        reserves_id,
         deposit_pubkey,
         max_sats,
         min_sats,
@@ -906,7 +906,7 @@ async fn deposit_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         println!("    Address: {}", offer.funding_address);
         println!("    Amount: {} - {} sats", offer.min_amount_sats, offer.max_amount_sats);
         println!("    Deadline: block {}", offer.deadline_block);
-        println!("    Partner: {}", offer.partner_id);
+        println!("    Reserves: {}", offer.reserves_id);
         println!("    Deposit: {}", offer.deposit_pubkey);
         println!();
     }
@@ -916,7 +916,7 @@ async fn deposit_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 
 /// Open a new deposit in a ledger
 async fn deposit_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    // Parse positional arguments: <partner_pubkey> <deposit_pubkey>
+    // Parse positional arguments: <reserves_id> <deposit_pubkey>
     let mut positional: Vec<String> = Vec::new();
     let mut config_args = Vec::new();
 
@@ -935,15 +935,15 @@ async fn deposit_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     }
 
     if positional.len() < 2 {
-        eprintln!("Usage: deposits-bdk deposit open <partner_pubkey> <deposit_pubkey> [options]");
+        eprintln!("Usage: deposits-bdk deposit open <reserves_id> <deposit_pubkey> [options]");
         eprintln!("\nExample:");
         eprintln!("  deposits-bdk deposit open 02abc...partner 02def...deposit");
         eprintln!("\nThis opens a new deposit in the ledger with the given partner.");
         return Ok(());
     }
 
-    let partner_pubkey = PublicKey::from_str(&positional[0])
-        .map_err(|e| format!("Invalid partner pubkey: {}", e))?;
+    let reserves_id = PublicKey::from_str(&positional[0])
+        .map_err(|e| format!("Invalid reserves ID: {}", e))?;
     let deposit_pubkey = PublicKey::from_str(&positional[1])
         .map_err(|e| format!("Invalid deposit pubkey: {}", e))?;
 
@@ -951,10 +951,10 @@ async fn deposit_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     let node = Node::new(config).await?;
 
     println!("Opening deposit...");
-    println!("  Partner: {}", partner_pubkey);
+    println!("  Partner: {}", reserves_id);
     println!("  Deposit pubkey: {}", deposit_pubkey);
 
-    let deposit = node.open_deposit(partner_pubkey, deposit_pubkey, None)?;
+    let deposit = node.open_deposit(reserves_id, deposit_pubkey, None)?;
 
     println!("\nDeposit opened!");
     println!("  Pubkey: {}", deposit.pubkey);
@@ -965,8 +965,8 @@ async fn deposit_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 
 /// List deposits in a specific ledger
 async fn deposit_ls(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    // Parse positional arguments: <partner_pubkey>
-    let mut partner_pubkey_str: Option<String> = None;
+    // Parse positional arguments: <reserves_id>
+    let mut reserves_id_str: Option<String> = None;
     let mut config_args = Vec::new();
 
     let mut i = 0;
@@ -977,27 +977,27 @@ async fn deposit_ls(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 config_args.push(args[i + 1].clone());
                 i += 1;
             }
-        } else if partner_pubkey_str.is_none() {
-            partner_pubkey_str = Some(args[i].clone());
+        } else if reserves_id_str.is_none() {
+            reserves_id_str = Some(args[i].clone());
         }
         i += 1;
     }
 
-    let partner_pubkey_str = partner_pubkey_str.ok_or("Partner pubkey required")?;
-    let partner_pubkey = PublicKey::from_str(&partner_pubkey_str)
-        .map_err(|e| format!("Invalid partner pubkey: {}", e))?;
+    let reserves_id_str = reserves_id_str.ok_or("Reserves ID required")?;
+    let reserves_id = PublicKey::from_str(&reserves_id_str)
+        .map_err(|e| format!("Invalid reserves ID: {}", e))?;
 
     let config = parse_config(&config_args)?;
     let node = Node::new(config).await?;
 
-    let deposits = node.list_deposits(partner_pubkey);
+    let deposits = node.list_deposits(reserves_id);
 
     if deposits.is_empty() {
-        println!("No deposits found in ledger with partner {}", partner_pubkey);
+        println!("No deposits found in ledger with reserves {}", reserves_id);
         return Ok(());
     }
 
-    println!("Deposits in ledger with {} ({} total):", partner_pubkey, deposits.len());
+    println!("Deposits in ledger with {} ({} total):", reserves_id, deposits.len());
     println!();
 
     for (pubkey, deposit) in deposits {
@@ -1015,7 +1015,7 @@ async fn deposit_ls(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
 /// Credit a deposit manually
 async fn deposit_credit(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    // Parse positional arguments: <partner_pubkey> <deposit_pubkey> <amount_msats> <invoice_id>
+    // Parse positional arguments: <reserves_id> <deposit_pubkey> <amount_msats> <invoice_id>
     let mut positional: Vec<String> = Vec::new();
     let mut config_args = Vec::new();
 
@@ -1034,15 +1034,15 @@ async fn deposit_credit(args: &[String]) -> Result<(), Box<dyn std::error::Error
     }
 
     if positional.len() < 4 {
-        eprintln!("Usage: deposits-bdk deposit credit <partner_pubkey> <deposit_pubkey> <amount_msats> <invoice_id> [options]");
+        eprintln!("Usage: deposits-bdk deposit credit <reserves_id> <deposit_pubkey> <amount_msats> <invoice_id> [options]");
         eprintln!("\nExample:");
         eprintln!("  deposits-bdk deposit credit 02abc...partner 02def...deposit 1000000 inv123");
         eprintln!("\nThis credits the deposit with the specified amount.");
         return Ok(());
     }
 
-    let partner_pubkey = PublicKey::from_str(&positional[0])
-        .map_err(|e| format!("Invalid partner pubkey: {}", e))?;
+    let reserves_id = PublicKey::from_str(&positional[0])
+        .map_err(|e| format!("Invalid reserves ID: {}", e))?;
     let deposit_pubkey = PublicKey::from_str(&positional[1])
         .map_err(|e| format!("Invalid deposit pubkey: {}", e))?;
     let amount_msats: u64 = positional[2]
@@ -1058,13 +1058,13 @@ async fn deposit_credit(args: &[String]) -> Result<(), Box<dyn std::error::Error
     let node = Node::new(config).await?;
 
     println!("Crediting deposit...");
-    println!("  Partner: {}", partner_pubkey);
+    println!("  Partner: {}", reserves_id);
     println!("  Deposit: {}", deposit_pubkey);
     println!("  Amount: {} msats ({} sats)", amount_msats, amount_msats / 1000);
     println!("  Invoice ID: {}", invoice_id);
 
     let new_balance = node.credit_deposit(
-        partner_pubkey,
+        reserves_id,
         deposit_pubkey,
         amount_msats,
         payment_hash,
@@ -1079,7 +1079,7 @@ async fn deposit_credit(args: &[String]) -> Result<(), Box<dyn std::error::Error
 
 /// Transfer between deposits in the same ledger
 async fn deposit_transfer(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    // Parse positional arguments: <partner_pubkey> <from_deposit> <to_deposit> <amount_msats>
+    // Parse positional arguments: <reserves_id> <from_deposit> <to_deposit> <amount_msats>
     let mut positional: Vec<String> = Vec::new();
     let mut config_args = Vec::new();
 
@@ -1098,15 +1098,15 @@ async fn deposit_transfer(args: &[String]) -> Result<(), Box<dyn std::error::Err
     }
 
     if positional.len() < 4 {
-        eprintln!("Usage: deposits-bdk deposit transfer <partner_pubkey> <from_deposit> <to_deposit> <amount_msats> [options]");
+        eprintln!("Usage: deposits-bdk deposit transfer <reserves_id> <from_deposit> <to_deposit> <amount_msats> [options]");
         eprintln!("\nExample:");
         eprintln!("  deposits-bdk deposit transfer 02abc...partner 02def...from 02ghi...to 1000000");
         eprintln!("\nThis transfers funds from one deposit to another within the same ledger.");
         return Ok(());
     }
 
-    let partner_pubkey = PublicKey::from_str(&positional[0])
-        .map_err(|e| format!("Invalid partner pubkey: {}", e))?;
+    let reserves_id = PublicKey::from_str(&positional[0])
+        .map_err(|e| format!("Invalid reserves ID: {}", e))?;
     let from_deposit = PublicKey::from_str(&positional[1])
         .map_err(|e| format!("Invalid from_deposit pubkey: {}", e))?;
     let to_deposit = PublicKey::from_str(&positional[2])
@@ -1119,13 +1119,13 @@ async fn deposit_transfer(args: &[String]) -> Result<(), Box<dyn std::error::Err
     let node = Node::new(config).await?;
 
     println!("Transferring funds...");
-    println!("  Partner: {}", partner_pubkey);
+    println!("  Partner: {}", reserves_id);
     println!("  From: {}", from_deposit);
     println!("  To: {}", to_deposit);
     println!("  Amount: {} msats ({} sats)", amount_msats, amount_msats / 1000);
 
     let (transfer_id, from_balance, to_balance) = node.transfer_between_deposits(
-        partner_pubkey,
+        reserves_id,
         from_deposit,
         to_deposit,
         amount_msats,

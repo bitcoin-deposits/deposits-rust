@@ -136,12 +136,12 @@ where
         let active_partners = self.deposits_handler.list_active_partners();
         let mut partners_checked = 0;
         
-        for partner_id in active_partners {
-            if let Err(e) = self.ensure_adequate_reserves_for_partner(partner_id).await {
+        for reserves_id in active_partners {
+            if let Err(e) = self.ensure_adequate_reserves_for_partner(reserves_id).await {
                 log_warn!(
                     self.logger,
                     "Failed to ensure adequate reserves for partner {}: {:?}",
-                    partner_id, e
+                    reserves_id, e
                 );
             } else {
                 partners_checked += 1;
@@ -155,15 +155,15 @@ where
     /// Automatically adds or removes reserves to maintain 100% + max outstanding invoice
     async fn ensure_adequate_reserves_for_partner(
         &self,
-        partner_id: PublicKey,
+        reserves_id: PublicKey,
     ) -> Result<(), ServiceError> {
         // Get current reserves status
-        let reserves_status = self.calculate_reserves_status(partner_id)?;
+        let reserves_status = self.calculate_reserves_status(reserves_id)?;
         
         // Update cache
         {
             let mut cache = self.reserves_cache.write().unwrap();
-            cache.insert(partner_id, reserves_status.clone());
+            cache.insert(reserves_id, reserves_status.clone());
         }
         
         // Check if adjustment needed
@@ -174,11 +174,11 @@ where
             log_info!(
                 self.logger,
                 "Adding {} msat reserves for partner {} (shortage detected)",
-                shortage, partner_id
+                shortage, reserves_id
             );
             
             self.deposits_handler.add_reserves_to_channel(
-                partner_id,
+                reserves_id,
                 shortage,
             )?;
             
@@ -189,7 +189,7 @@ where
             log_info!(
                 self.logger,
                 "Removing {} msat excess reserves for partner {} (optimization)",
-                excess, partner_id
+                excess, reserves_id
             );
             
             // Note: We might need to add a remove_reserves_from_channel method to the handler
@@ -197,7 +197,7 @@ where
             log_debug!(
                 self.logger,
                 "Excess reserves detected but removal not implemented yet: {} msat for partner {}",
-                excess, partner_id
+                excess, reserves_id
             );
         }
         
@@ -205,20 +205,20 @@ where
     }
     
     /// Calculate current reserves status for a partner
-    fn calculate_reserves_status(&self, partner_id: PublicKey) -> Result<ReservesStatus, ServiceError> {
+    fn calculate_reserves_status(&self, reserves_id: PublicKey) -> Result<ReservesStatus, ServiceError> {
         // Get current reserves amount
         let current_amount = self.deposits_handler
-            .get_channel_reserves_amount(partner_id)
+            .get_channel_reserves_amount(reserves_id)
             .unwrap_or(0);
         
         // Get total deposit balances
         let total_deposit_balances = self.deposits_handler
-            .get_total_deposit_balances(partner_id)
+            .get_total_deposit_balances(reserves_id)
             .unwrap_or(0);
         
         // Get max outstanding invoice amount
         let max_outstanding_invoice = self.deposits_handler
-            .get_max_outstanding_invoice_amount(partner_id)
+            .get_max_outstanding_invoice_amount(reserves_id)
             .unwrap_or(0);
         
         // Calculate required reserves: 100% of deposits + max outstanding invoice
@@ -242,17 +242,17 @@ where
     /// This ensures reserves are immediately adjusted when deposits change
     pub fn handle_deposit_balance_change(
         &self,
-        partner_id: PublicKey,
+        reserves_id: PublicKey,
         balance_change_msat: i64, // Can be positive (deposit) or negative (payment)
     ) -> Result<(), ServiceError> {
         log_info!(
             self.logger,
             "Handling deposit balance change: {} msat for partner {}",
-            balance_change_msat, partner_id
+            balance_change_msat, reserves_id
         );
         
         // Recalculate required reserves with the balance change
-        let new_reserves_status = self.calculate_reserves_status(partner_id)?;
+        let new_reserves_status = self.calculate_reserves_status(reserves_id)?;
         
         // If balance increased (positive change), we need more reserves
         if balance_change_msat > 0 {
@@ -271,7 +271,7 @@ where
                 
                 // Automatically add reserves (replaces manual test operation)
                 self.deposits_handler.add_reserves_to_channel(
-                    partner_id,
+                    reserves_id,
                     additional_reserves_needed,
                 )?;
             }
@@ -283,7 +283,7 @@ where
                 log_info!(
                     self.logger,
                     "Deposit balance decreased, {} msat excess reserves available for partner {}",
-                    new_reserves_status.excess_amount, partner_id
+                    new_reserves_status.excess_amount, reserves_id
                 );
                 
                 // Note: Reserve removal would be implemented here
@@ -294,7 +294,7 @@ where
         // Update cache
         {
             let mut cache = self.reserves_cache.write().unwrap();
-            cache.insert(partner_id, new_reserves_status);
+            cache.insert(reserves_id, new_reserves_status);
         }
         
         Ok(())
@@ -305,13 +305,13 @@ where
     pub fn handle_real_deposit_balance_change(
         &self,
         real_handler: &DepositsHandler<L>,
-        partner_id: PublicKey,
+        reserves_id: PublicKey,
         balance_change_msat: i64, // Can be positive (deposit) or negative (payment)
     ) -> Result<(), ServiceError> {
         log_info!(
             self.logger,
             "Handling real deposit balance change: {} msat for partner {}",
-            balance_change_msat, partner_id
+            balance_change_msat, reserves_id
         );
         
         // If balance increased (positive change), we need more reserves
@@ -331,7 +331,7 @@ where
                 
                 // Use REAL Lightning handler for reserves operation (this is the key difference)
                 real_handler.add_reserves_to_channel(
-                    partner_id,
+                    reserves_id,
                     additional_reserves_needed,
                 ).map_err(ServiceError::Protocol)?;
             }
@@ -341,7 +341,7 @@ where
             log_info!(
                 self.logger,
                 "Deposit balance decreased, checking for excess reserves for partner {}",
-                partner_id
+                reserves_id
             );
             
             // Note: Reserve removal would use real_handler.remove_reserves_from_channel() when implemented
@@ -356,22 +356,22 @@ where
     }
     
     /// Get current reserves status for a partner (used by other services)
-    pub fn get_reserves_status(&self, partner_id: PublicKey) -> Result<ReservesStatus, ServiceError> {
+    pub fn get_reserves_status(&self, reserves_id: PublicKey) -> Result<ReservesStatus, ServiceError> {
         // Try cache first
         {
             let cache = self.reserves_cache.read().unwrap();
-            if let Some(status) = cache.get(&partner_id) {
+            if let Some(status) = cache.get(&reserves_id) {
                 return Ok(status.clone());
             }
         }
         
         // Calculate fresh status
-        let status = self.calculate_reserves_status(partner_id)?;
+        let status = self.calculate_reserves_status(reserves_id)?;
         
         // Update cache
         {
             let mut cache = self.reserves_cache.write().unwrap();
-            cache.insert(partner_id, status.clone());
+            cache.insert(reserves_id, status.clone());
         }
         
         Ok(status)
@@ -384,9 +384,9 @@ where
     }
     
     /// Force reserves check for a specific partner (useful for testing or manual intervention)
-    pub async fn force_reserves_check(&self, partner_id: PublicKey) -> Result<ReservesStatus, ServiceError> {
-        self.ensure_adequate_reserves_for_partner(partner_id).await?;
-        self.get_reserves_status(partner_id)
+    pub async fn force_reserves_check(&self, reserves_id: PublicKey) -> Result<ReservesStatus, ServiceError> {
+        self.ensure_adequate_reserves_for_partner(reserves_id).await?;
+        self.get_reserves_status(reserves_id)
     }
 }
 

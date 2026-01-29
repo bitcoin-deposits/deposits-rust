@@ -114,7 +114,7 @@ impl QuorumProcessor {
         info!(
             requester = %request.requester,
             operator = %request.ledger_id.operator_id,
-            partner = %request.ledger_id.partner_id,
+            partner = %request.ledger_id.reserves_id,
             "Processing quorum join request"
         );
 
@@ -190,7 +190,7 @@ impl QuorumProcessor {
     ) -> QuorumMessageResult {
         debug!(
             operator = %sync.ledger_id.operator_id,
-            partner = %sync.ledger_id.partner_id,
+            partner = %sync.ledger_id.reserves_id,
             from_seq = sync.from_sequence,
             to_seq = sync.to_sequence,
             "Processing state sync"
@@ -210,7 +210,7 @@ impl QuorumProcessor {
         debug!(
             sender = %sender,
             operator = %vote.ledger_id.operator_id,
-            partner = %vote.ledger_id.partner_id,
+            partner = %vote.ledger_id.reserves_id,
             vote = vote.vote,
             sequence = vote.sequence,
             "Processing vote"

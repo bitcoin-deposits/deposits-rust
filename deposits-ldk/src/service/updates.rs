@@ -26,20 +26,20 @@ where
     L: Deref + Clone + Send + Sync,
     L::Target: LdkLogger,
 {
-    let partner_id = PublicKey::from_str(&request.ledger_id)
+    let reserves_id = PublicKey::from_str(&request.ledger_id)
         .map_err(|_| DepositsError {
             code: "INVALID_LEDGER_ID".into(),
             message: "Invalid ledger_id (expected partner node pubkey)".into(),
         })?;
 
-    let all_updates = handler.get_ledger_updates(partner_id)
+    let all_updates = handler.get_ledger_updates(reserves_id)
         .map_err(|e| DepositsError {
             code: "GET_UPDATES_FAILED".into(),
             message: format!("{:?}", e),
         })?;
 
     // Get sync state to determine acknowledged/committed status
-    let (ack_hash, commit_hash) = handler.get_ledger_sync_state(partner_id)
+    let (ack_hash, commit_hash) = handler.get_ledger_sync_state(reserves_id)
         .unwrap_or(([0u8; 32], [0u8; 32]));
 
     // Build set of hashes that are acknowledged/committed

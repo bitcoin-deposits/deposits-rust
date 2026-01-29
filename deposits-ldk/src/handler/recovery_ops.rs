@@ -501,7 +501,7 @@ where
         let _ = self.event_queue.emit_deposits_event(
             super::events::DepositsEvent::RecoveryClaimCompleted {
                 old_operator: operator,
-                partner_id: partner,
+                reserves_id: partner,
                 new_operator: self.our_node_id,
                 claim_txid: result.txid.to_byte_array(),
                 confirmation_block: 0,

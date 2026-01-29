@@ -84,7 +84,7 @@ where
 
         // Extract values before mem::replace
         let operator_node_id = ledger_guard.operator_key();
-        let partner_node_id_inner = ledger_guard.partner_key();
+        let partner_node_id_inner = ledger_guard.reserves_key();
         let our_role = ledger_guard.role;
         let collateral_partners = ledger_guard.state.collateral_partners.clone();
         let ledger_address = ledger_guard.state.ledger_address.clone();

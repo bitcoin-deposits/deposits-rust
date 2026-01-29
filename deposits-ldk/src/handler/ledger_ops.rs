@@ -171,10 +171,10 @@ where
         let ledgers = self.ledgers.lock().unwrap();
         let mut hashes = HashMap::new();
 
-        for ((operator_id, partner_id), ledger) in ledgers.iter() {
+        for ((operator_id, reserves_id), ledger) in ledgers.iter() {
             if *operator_id == self.our_node_id {
                 let ledger = ledger.read().unwrap();
-                hashes.insert(*partner_id, ledger.tail_hash());
+                hashes.insert(*reserves_id, ledger.tail_hash());
             }
         }
 
@@ -260,16 +260,16 @@ where
 
         log_info!(self.logger, "DEBUG get_all_ledger_updates: total ledgers in memory = {}", ledgers.len());
 
-        for ((operator_id, partner_id), ledger_arc) in ledgers.iter() {
-            if *operator_id != self.our_node_id && *partner_id != self.our_node_id {
-                log_info!(self.logger, "DEBUG get_all_ledger_updates: skipping ledger {}→{} (not ours)", operator_id, partner_id);
+        for ((operator_id, reserves_id), ledger_arc) in ledgers.iter() {
+            if *operator_id != self.our_node_id && *reserves_id != self.our_node_id {
+                log_info!(self.logger, "DEBUG get_all_ledger_updates: skipping ledger {}→{} (not ours)", operator_id, reserves_id);
                 continue;
             }
 
             let ledger = ledger_arc.read().unwrap();
             log_info!(self.logger, "DEBUG get_all_ledger_updates: ledger {}→{} has {} history entries",
-                operator_id, partner_id, ledger.history.len());
-            all_updates.insert((*operator_id, *partner_id), ledger.history.to_vec());
+                operator_id, reserves_id, ledger.history.len());
+            all_updates.insert((*operator_id, *reserves_id), ledger.history.to_vec());
         }
 
         all_updates
@@ -279,9 +279,9 @@ where
         let ledgers = self.ledgers.lock().unwrap();
         let mut all_updates = HashMap::new();
 
-        for ((operator_id, partner_id), ledger_arc) in ledgers.iter() {
+        for ((operator_id, reserves_id), ledger_arc) in ledgers.iter() {
             let ledger = ledger_arc.read().unwrap();
-            all_updates.insert((*operator_id, *partner_id), ledger.history.to_vec());
+            all_updates.insert((*operator_id, *reserves_id), ledger.history.to_vec());
         }
 
         all_updates
@@ -291,8 +291,8 @@ where
         let signed_update_logs = self.signed_update_logs.lock().unwrap();
         let mut all_updates = HashMap::new();
 
-        for ((operator_id, partner_id), log) in signed_update_logs.iter() {
-            all_updates.insert((*operator_id, *partner_id), log.updates.clone());
+        for ((operator_id, reserves_id), log) in signed_update_logs.iter() {
+            all_updates.insert((*operator_id, *reserves_id), log.updates.clone());
         }
 
         all_updates
@@ -312,9 +312,9 @@ where
         let ledgers = self.ledgers.lock().unwrap();
         let mut all_updates = HashMap::new();
 
-        for ((operator_id, partner_id), ledger_arc) in ledgers.iter() {
+        for ((operator_id, reserves_id), ledger_arc) in ledgers.iter() {
             let ledger = ledger_arc.read().unwrap();
-            all_updates.insert((*operator_id, *partner_id), ledger.history.clone());
+            all_updates.insert((*operator_id, *reserves_id), ledger.history.clone());
         }
 
         all_updates

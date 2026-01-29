@@ -150,14 +150,14 @@ show_ledgers() {
         echo "  No ledgers"
     elif echo "$output" | grep -q "Ledgers"; then
         # Show ledger details
-        echo "$output" | grep -E "Ledger|Operator:|Partner:|Sequence:|Deposits:|Reserves:|Enforcement" | sed 's/^/  /'
+        echo "$output" | grep -E "Ledger|Operator:|Reserves:|Sequence:|Deposits:|Reserves:|Enforcement" | sed 's/^/  /'
 
-        # For each partner, show history
-        local partners=$(echo "$output" | grep "Partner:" | awk '{print $2}')
-        for partner in $partners; do
+        # For each reserves, show history
+        local reservess=$(echo "$output" | grep "Reserves:" | awk '{print $2}')
+        for reserves in $reservess; do
             echo ""
-            echo "  History for ledger $partner:"
-            local history=$(run_bdk_cmd "$node" ledger history "$partner" 2>&1)
+            echo "  History for ledger $reserves:"
+            local history=$(run_bdk_cmd "$node" ledger history "$reserves" 2>&1)
             if echo "$history" | grep -q "Updates for ledger"; then
                 echo "$history" | grep -v "^Updates for ledger" | sed 's/^/    /'
             else
@@ -178,7 +178,7 @@ show_deposits() {
     # Get list of ledgers first
     local ledger_output=$(run_bdk_cmd "$node" ledger list 2>&1)
 
-    # Extract partner pubkeys from ledgers where we are operator
+    # Extract reserves ids from ledgers where we are operator
     local has_deposits=false
 
     # Get node's own ID
@@ -187,20 +187,20 @@ show_deposits() {
 
     # For each ledger, try to list deposits
     # This is a simplification - in practice we'd parse the ledger list properly
-    for partner_node in "${NODES[@]}"; do
-        if [ "$partner_node" = "$node" ]; then
+    for reserves_node in "${NODES[@]}"; do
+        if [ "$reserves_node" = "$node" ]; then
             continue
         fi
 
-        local partner_info=$(run_bdk_cmd "$partner_node" info 2>&1)
-        local partner_id=$(echo "$partner_info" | grep "Node ID:" | awk '{print $3}')
+        local reserves_info=$(run_bdk_cmd "$reserves_node" info 2>&1)
+        local reserves_id=$(echo "$reserves_info" | grep "Node ID:" | awk '{print $3}')
 
-        if [ -n "$partner_id" ]; then
-            local deposits_output=$(run_bdk_cmd "$node" deposit ls "$partner_id" 2>&1)
+        if [ -n "$reserves_id" ]; then
+            local deposits_output=$(run_bdk_cmd "$node" deposit ls "$reserves_id" 2>&1)
 
             if echo "$deposits_output" | grep -q "Deposit:"; then
-                local partner_name=${partner_node#bdk-}
-                echo "  Ledger with $partner_name:"
+                local reserves_name=${reserves_node#bdk-}
+                echo "  Ledger with $reserves_name:"
                 echo "$deposits_output" | grep -E "Deposit:|Balance:|Locked:|Fees:" | sed 's/^/    /'
                 has_deposits=true
             fi
@@ -223,7 +223,7 @@ show_offers() {
     if echo "$output" | grep -q "No deposit offers"; then
         echo "  No deposit offers"
     elif echo "$output" | grep -q "Offer:"; then
-        echo "$output" | grep -E "Offer:|Status:|Address:|Amount:|Deadline:|Partner:|Deposit:" | sed 's/^/  /'
+        echo "$output" | grep -E "Offer:|Status:|Address:|Amount:|Deadline:|Reserves:|Deposit:" | sed 's/^/  /'
     else
         echo "  (none)"
     fi

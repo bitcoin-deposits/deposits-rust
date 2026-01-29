@@ -286,7 +286,7 @@ impl Node {
             min_protocol_version: deposits_core::messages::PROTOCOL_VERSION,
             features: 0,
             operator_id: self.node_id,
-            partner_id: partner,
+            reserves_id: partner,
             ledger_address,
             funding_txid,
             funding_vout,
@@ -326,7 +326,7 @@ impl Node {
                 min_protocol_version: deposits_core::messages::PROTOCOL_VERSION,
                 features: 0x01, // Flag indicating partnership request
                 operator_id: self.node_id,
-                partner_id: peer,
+                reserves_id: peer,
                 ledger_address: String::new(), // Will be filled when ledger is established
                 funding_txid: [0u8; 32],
                 funding_vout: 0,
@@ -426,7 +426,7 @@ impl Node {
         // Create the offer
         let offer = DepositOffer {
             operator_id: self.node_id,
-            partner_id: partner,
+            reserves_id: partner,
             deposit_pubkey,
             funding_address: funding_address_str,
             max_amount_sats,
@@ -1083,7 +1083,7 @@ impl Node {
         let invoice_id = format!("deposit_offer:{}", hex::encode(&offer_id[..8]));
 
         let new_balance = self.credit_deposit(
-            offer.partner_id,
+            offer.reserves_id,
             offer.deposit_pubkey,
             amount_msats,
             payment_hash,

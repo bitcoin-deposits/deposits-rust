@@ -25,7 +25,7 @@ where
     L: Deref + Clone + Send + Sync,
     L::Target: LdkLogger,
 {
-    let partner_id = PublicKey::from_str(&request.partner_node_id)
+    let reserves_id = PublicKey::from_str(&request.partner_node_id)
         .map_err(|_| DepositsError {
             code: "INVALID_PUBKEY".into(),
             message: "Invalid partner_node_id".into(),
@@ -37,7 +37,7 @@ where
             message: "Invalid deposit_pubkey".into(),
         })?;
 
-    handler.add_deposit_async(partner_id, deposit_pubkey, None).await
+    handler.add_deposit_async(reserves_id, deposit_pubkey, None).await
         .map_err(|e| DepositsError {
             code: "ADD_DEPOSIT_FAILED".into(),
             message: format!("{:?}", e),
@@ -59,18 +59,18 @@ where
 {
     let deposits: Vec<DepositInfo> = if let Some(ledger_id) = request.ledger_id {
         // Filter by ledger
-        let partner_id = PublicKey::from_str(&ledger_id)
+        let reserves_id = PublicKey::from_str(&ledger_id)
             .map_err(|_| DepositsError {
                 code: "INVALID_LEDGER_ID".into(),
                 message: "Invalid ledger_id (expected partner node pubkey)".into(),
             })?;
 
-        handler.get_deposits_for_partner(partner_id)
+        handler.get_deposits_for_partner(reserves_id)
             .map(|deps| {
                 deps.into_iter()
                     .map(|(pubkey, balance_msat, locked_msat)| DepositInfo {
                         deposit_pubkey: pubkey.to_string(),
-                        ledger_id: partner_id.to_string(),
+                        ledger_id: reserves_id.to_string(),
                         balance_msat,
                         locked_balance_msat: locked_msat,
                     })
@@ -83,12 +83,12 @@ where
         all_ledgers
             .into_iter()
             .filter(|((op, _), _)| *op == handler.our_node_id)
-            .flat_map(|((_, partner_id), ledger_arc)| {
+            .flat_map(|((_, reserves_id), ledger_arc)| {
                 let ledger = ledger_arc.read().unwrap();
                 ledger.state.deposits.iter()
                     .map(|(pubkey, deposit)| DepositInfo {
                         deposit_pubkey: pubkey.to_string(),
-                        ledger_id: partner_id.to_string(),
+                        ledger_id: reserves_id.to_string(),
                         balance_msat: deposit.balance,
                         locked_balance_msat: deposit.locked_balance,
                     })
@@ -110,7 +110,7 @@ where
     L: Deref + Clone + Send + Sync,
     L::Target: LdkLogger,
 {
-    let partner_id = PublicKey::from_str(&request.ledger_id)
+    let reserves_id = PublicKey::from_str(&request.ledger_id)
         .map_err(|_| DepositsError {
             code: "INVALID_LEDGER_ID".into(),
             message: "Invalid ledger_id (expected partner node pubkey)".into(),
@@ -123,7 +123,7 @@ where
         })?;
 
     // Use async method - properly sends DepositClose message and waits for ACK
-    handler.remove_deposit_async(partner_id, deposit_pubkey).await
+    handler.remove_deposit_async(reserves_id, deposit_pubkey).await
         .map_err(|e| DepositsError {
             code: "REMOVE_FAILED".into(),
             message: format!("{:?}", e),

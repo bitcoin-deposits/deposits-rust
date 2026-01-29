@@ -364,9 +364,9 @@ where
         let has_signed_update = {
             // First check ledgers (for SignedAuditUpdate broadcasts)
             let ledgers = self.ledgers.lock().unwrap();
-            let partner_key = (*counterparty_node_id, self.our_node_id);
+            let reserves_key = (*counterparty_node_id, self.our_node_id);
 
-            let signed_in_ledgers = if let Some(partner_ledger_arc) = ledgers.get(&partner_key) {
+            let signed_in_ledgers = if let Some(partner_ledger_arc) = ledgers.get(&reserves_key) {
                 let partner_ledger = partner_ledger_arc.read().unwrap();
 
                 let target_seq = partner_ledger.find_hash_sequence(ledger_hash);

@@ -67,7 +67,7 @@ where
                 // Build V2 LedgerUpdate message with PaymentFulfill operation
                 let update_msg = LedgerUpdateMsg::new_with_operation(
                     ledger.operator_key(),
-                    ledger.partner_key(),
+                    ledger.reserves_key(),
                     LedgerOperation::PaymentFulfill {
                         pubkey: msg.pubkey,
                         amount: msg.amount,
@@ -180,7 +180,7 @@ where
                 // Returns 0-based sequence number for broadcasting
                 let update_msg = LedgerUpdateMsg::new_with_operation(
                     ledger.operator_key(),
-                    ledger.partner_key(),
+                    ledger.reserves_key(),
                     LedgerOperation::PaymentFail {
                         pubkey: msg.pubkey,
                         amount: msg.amount,
@@ -280,7 +280,7 @@ where
             // Build V2 LedgerUpdate message with PaymentLock operation
             let update_msg = LedgerUpdateMsg::new_with_operation(
                 ledger.operator_key(),
-                ledger.partner_key(),
+                ledger.reserves_key(),
                 LedgerOperation::PaymentLock {
                     pubkey: msg.pubkey,
                     amount: msg.amount,
@@ -302,7 +302,7 @@ where
                      msg.amount, msg.pubkey, &msg.payment_id[0..8]);
 
             // Notify partner about the lock
-            let partner_node_id = ledger.partner_key();
+            let partner_node_id = ledger.reserves_key();
             let operator_id = ledger.operator_key();
             drop(ledger); // Release write lock before sending message
             drop(ledgers); // Release ledgers lock
@@ -375,7 +375,7 @@ where
                     // Create V2 LedgerUpdate message
                     let update_msg = LedgerUpdateMsg::new_with_operation(
                         ledger.operator_key(),
-                        ledger.partner_key(),
+                        ledger.reserves_key(),
                         LedgerOperation::PaymentFail {
                             pubkey: msg.pubkey,
                             amount: msg.amount,
@@ -396,7 +396,7 @@ where
                              locked_amount, msg.pubkey, &msg.payment_id[0..8]);
 
                     // Notify partner about the failure
-                    let partner_node_id = ledger.partner_key();
+                    let partner_node_id = ledger.reserves_key();
                     let operator_id = ledger.operator_key();
                     drop(ledger); // Release write lock before sending message
                     drop(ledgers); // Release ledgers lock

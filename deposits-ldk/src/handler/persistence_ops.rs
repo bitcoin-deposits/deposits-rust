@@ -50,17 +50,17 @@ where
                         Ok(ledger) => {
                             // Only recover ledgers where we are the operator OR partner
                             // (we might be the partner receiving deposits from others)
-                            if ledger.operator_key() == self.our_node_id || ledger.partner_key() == self.our_node_id {
+                            if ledger.operator_key() == self.our_node_id || ledger.reserves_key() == self.our_node_id {
                                 let operator_id = ledger.operator_key();
-                                let partner_id = ledger.partner_key();
+                                let reserves_id = ledger.reserves_key();
                                 let history_len = ledger.history.len();
 
                                 // Removed: clear_stale_uncommitted_changes (handler concern)
 
                                 // Store with (operator, partner) key
-                                ledgers.insert((operator_id, partner_id), Arc::new(RwLock::new(ledger)));
+                                ledgers.insert((operator_id, reserves_id), Arc::new(RwLock::new(ledger)));
                                 recovered_count += 1;
-                                log_info!(self.logger, "Recovered ledger (operator={}, partner={}) with {} history entries", operator_id, partner_id, history_len);
+                                log_info!(self.logger, "Recovered ledger (operator={}, partner={}) with {} history entries", operator_id, reserves_id, history_len);
                             } else {
                             }
                         }
@@ -92,7 +92,7 @@ where
         #[derive(serde::Serialize, serde::Deserialize)]
         struct AuditLedgerWrapper {
             operator_id: Vec<u8>,
-            partner_id: Vec<u8>,
+            reserves_id: Vec<u8>,
             ledger: Ledger,
         }
 
@@ -102,13 +102,13 @@ where
                 Ok(data) => {
                     match bincode::deserialize::<AuditLedgerWrapper>(&data) {
                         Ok(wrapper) => {
-                            if let (Ok(operator_id), Ok(partner_id)) = (
+                            if let (Ok(operator_id), Ok(reserves_id)) = (
                                 PublicKey::from_slice(&wrapper.operator_id),
-                                PublicKey::from_slice(&wrapper.partner_id)
+                                PublicKey::from_slice(&wrapper.reserves_id)
                             ) {
-                                ledgers.insert((operator_id, partner_id), Arc::new(RwLock::new(wrapper.ledger)));
+                                ledgers.insert((operator_id, reserves_id), Arc::new(RwLock::new(wrapper.ledger)));
                                 audit_recovered_count += 1;
-                                log_info!(self.logger, "Recovered audit ledger for (operator={}, partner={})", operator_id, partner_id);
+                                log_info!(self.logger, "Recovered audit ledger for (operator={}, partner={})", operator_id, reserves_id);
                             } else {
                             }
                         }
@@ -144,21 +144,21 @@ where
                 continue;
             }
 
-            // Load the signed update log directly (it contains operator_id and partner_id)
+            // Load the signed update log directly (it contains operator_id and reserves_id)
             match self.kv_store.read("deposits", "signed_ledger_updates", &key) {
                 Ok(data) => {
                     match bincode::deserialize::<deposits_core::SignedLedgerUpdateLog>(&data) {
                         Ok(log) => {
                             let operator_id = log.operator_id;
-                            let partner_id = log.partner_id;
+                            let reserves_id = log.reserves_id;
                             let update_count = log.updates.len();
-                            signed_update_logs.insert((operator_id, partner_id), log);
+                            signed_update_logs.insert((operator_id, reserves_id), log);
                             signed_update_recovered_count += 1;
                             log_info!(
                                 self.logger,
                                 "Recovered signed update log for (operator={}, partner={}) with {} updates",
                                 operator_id,
-                                partner_id,
+                                reserves_id,
                                 update_count
                             );
                         }
@@ -189,12 +189,12 @@ where
         let logs = self.signed_update_logs.lock().unwrap();
         let mut verification_failures = 0;
 
-        for ((operator_id, partner_id), log) in logs.iter() {
+        for ((operator_id, reserves_id), log) in logs.iter() {
             log_debug!(
                 self.logger,
                 "Verifying chain for operator {} -> partner {} ({} updates)",
                 operator_id,
-                partner_id,
+                reserves_id,
                 log.updates.len()
             );
 
@@ -204,7 +204,7 @@ where
                         self.logger,
                         "✓ Chain verification passed for operator {} -> partner {}",
                         operator_id,
-                        partner_id
+                        reserves_id
                     );
                 }
                 Err(e) => {
@@ -213,7 +213,7 @@ where
                         self.logger,
                         "✗ Chain verification FAILED for operator {} -> partner {}: {}",
                         operator_id,
-                        partner_id,
+                        reserves_id,
                         e
                     );
                 }
@@ -249,7 +249,7 @@ where
         #[derive(serde::Serialize, serde::Deserialize)]
         struct PartnerLedgerWrapper {
             operator_id: Vec<u8>,
-            partner_id: Vec<u8>,
+            reserves_id: Vec<u8>,
             ledger: Ledger,
         }
 
@@ -259,13 +259,13 @@ where
                 Ok(data) => {
                     match bincode::deserialize::<PartnerLedgerWrapper>(&data) {
                         Ok(wrapper) => {
-                            if let (Ok(operator_id), Ok(partner_id)) = (
+                            if let (Ok(operator_id), Ok(reserves_id)) = (
                                 PublicKey::from_slice(&wrapper.operator_id),
-                                PublicKey::from_slice(&wrapper.partner_id)
+                                PublicKey::from_slice(&wrapper.reserves_id)
                             ) {
                                 // Only recover if we are the partner
-                                if partner_id == self.our_node_id {
-                                    ledgers.insert((operator_id, partner_id), Arc::new(RwLock::new(wrapper.ledger)));
+                                if reserves_id == self.our_node_id {
+                                    ledgers.insert((operator_id, reserves_id), Arc::new(RwLock::new(wrapper.ledger)));
                                     partner_recovered_count += 1;
                                     log_info!(self.logger, "Recovered partner ledger for operator {}", operator_id);
                                 }
@@ -293,12 +293,12 @@ where
 
     /// Persist a channel ledger to storage
     pub(super) fn persist_ledger_state(&self, ledger: &Ledger) -> Result<(), DepositsError> {
-        // Key format: ledger_{hash} where hash = SHA256(operator_id || partner_id)
+        // Key format: ledger_{hash} where hash = SHA256(operator_id || reserves_id)
         // This keeps the key short while still distinguishing Alice->Eve from Eve->Alice
         use bitcoin::hashes::{Hash, sha256};
         let mut key_input = Vec::new();
         key_input.extend_from_slice(&ledger.operator_key().serialize());
-        key_input.extend_from_slice(&ledger.partner_key().serialize());
+        key_input.extend_from_slice(&ledger.reserves_key().serialize());
         let key_hash = sha256::Hash::hash(&key_input);
         let key = format!("ledger_{}", hex::encode(key_hash.as_byte_array()));
 
@@ -307,7 +307,7 @@ where
         let serialized = bincode::serialize(ledger)
             .map_err(|e| {
                 log_error!(self.logger, "Failed to serialize ledger for operator {} -> partner {}: {}",
-                    ledger.operator_key(), ledger.partner_key(), e);
+                    ledger.operator_key(), ledger.reserves_key(), e);
                 deposits_core::DepositsError::SerializationError
             })?;
 
@@ -318,17 +318,17 @@ where
             })?;
 
         log_debug!(self.logger, "Persisted ledger state (operator {} -> partner {})",
-            ledger.operator_key(), ledger.partner_key());
+            ledger.operator_key(), ledger.reserves_key());
         Ok(())
     }
 
     /// Persist an audit ledger to storage
-    pub(super) fn persist_audit_ledger_state(&self, operator_id: PublicKey, partner_id: PublicKey, ledger: &Ledger) -> Result<(), DepositsError> {
+    pub(super) fn persist_audit_ledger_state(&self, operator_id: PublicKey, reserves_id: PublicKey, ledger: &Ledger) -> Result<(), DepositsError> {
         // Use a hash of the two pubkeys to create a shorter key
         use bitcoin::hashes::{sha256, Hash};
         let mut hash_input = Vec::new();
         hash_input.extend_from_slice(&operator_id.serialize());
-        hash_input.extend_from_slice(&partner_id.serialize());
+        hash_input.extend_from_slice(&reserves_id.serialize());
         let hash = sha256::Hash::hash(&hash_input);
         let key = format!("audit_{}", hex::encode(&hash[..]));
 
@@ -337,13 +337,13 @@ where
         #[derive(serde::Serialize, serde::Deserialize)]
         struct AuditLedgerWrapper {
             operator_id: Vec<u8>,
-            partner_id: Vec<u8>,
+            reserves_id: Vec<u8>,
             ledger: Ledger,
         }
 
         let wrapper = AuditLedgerWrapper {
             operator_id: operator_id.serialize().to_vec(),
-            partner_id: partner_id.serialize().to_vec(),
+            reserves_id: reserves_id.serialize().to_vec(),
             ledger: ledger.clone(),
         };
 
@@ -359,7 +359,7 @@ where
                 deposits_core::DepositsError::PersistenceFailed { reason: e.to_string() }
             })?;
 
-        log_debug!(self.logger, "Persisted audit ledger state for (operator={}, partner={})", operator_id, partner_id);
+        log_debug!(self.logger, "Persisted audit ledger state for (operator={}, partner={})", operator_id, reserves_id);
         Ok(())
     }
 }

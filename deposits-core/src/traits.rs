@@ -625,7 +625,7 @@ impl<S: Storage> DepositsStorage for DefaultStorageProvider<S> {
     }
 
     fn put_ledger_state(&self, state: &LedgerState) -> Result<(), StorageError> {
-        let key = Self::ledger_key(&state.operator_key, &state.partner_key);
+        let key = Self::ledger_key(&state.operator_key, &state.reserves_key);
         let bytes = serde_json::to_vec(state)
             .map_err(|e| StorageError::SerializationError(e.to_string()))?;
         self.storage.put(&key, &bytes)

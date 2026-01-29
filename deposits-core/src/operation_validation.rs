@@ -573,7 +573,7 @@ pub fn validate_cosign_invoice(
 /// - Total deposit balance is zero
 /// - No locked balances (pending payments)
 ///
-/// Note: The caller must separately verify that the partner_id matches the expected value.
+/// Note: The caller must separately verify that the reserves_id matches the expected value.
 pub fn validate_ledger_close(ledger: &Ledger) -> ValidationResult {
     // Check for outstanding balances - deposits should be empty or zero-balance
     let total_balance: u64 = ledger.state.deposits.values().map(|d| d.balance).sum();

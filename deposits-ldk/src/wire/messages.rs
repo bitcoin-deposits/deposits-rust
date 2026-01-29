@@ -16,7 +16,7 @@
 //! Use the core types directly:
 //! ```ignore
 //! use deposits_ldk::wire::ReservesIncreaseMsg;
-//! let msg = ReservesIncreaseMsg { partner_id: pk, new_amount: 100_000 };
+//! let msg = ReservesIncreaseMsg { reserves_id: pk, new_amount: 100_000 };
 //! ```
 
 // ============================================================================
@@ -84,7 +84,7 @@ mod tests {
     fn test_core_types_reexported() {
         // Test that core types are accessible through re-exports
         let msg = ReservesIncreaseMsg {
-            partner_id: test_pubkey(),
+            reserves_id: test_pubkey(),
             new_amount: 100_000,
         };
         assert_eq!(msg.new_amount, 100_000);

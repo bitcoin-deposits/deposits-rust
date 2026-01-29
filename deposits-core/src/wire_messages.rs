@@ -230,7 +230,7 @@ impl WireEncode for QuorumJoinRequestMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
         write_pubkey(writer, &self.requester_pubkey)?;
         write_pubkey(writer, &self.operator_id)?;
-        write_pubkey(writer, &self.partner_id)?;
+        write_pubkey(writer, &self.reserves_id)?;
         write_u16(writer, self.protocol_version)?;
         write_u64(writer, self.timestamp)?;
         write_bytes64(writer, &self.signature)?;
@@ -243,7 +243,7 @@ impl WireDecode for QuorumJoinRequestMsg {
         Ok(Self {
             requester_pubkey: read_pubkey(reader)?,
             operator_id: read_pubkey(reader)?,
-            partner_id: read_pubkey(reader)?,
+            reserves_id: read_pubkey(reader)?,
             protocol_version: read_u16(reader)?,
             timestamp: read_u64(reader)?,
             signature: read_bytes64(reader)?,
@@ -342,13 +342,13 @@ impl WireDecode for QuorumVoteMsg {
 /// reserves increase message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReservesIncreaseMsg {
-    pub partner_id: PublicKey,
+    pub reserves_id: PublicKey,
     pub new_amount: u64,
 }
 
 impl WireEncode for ReservesIncreaseMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
-        write_pubkey(writer, &self.partner_id)?;
+        write_pubkey(writer, &self.reserves_id)?;
         write_u64(writer, self.new_amount)?;
         Ok(())
     }
@@ -357,7 +357,7 @@ impl WireEncode for ReservesIncreaseMsg {
 impl WireDecode for ReservesIncreaseMsg {
     fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
         Ok(Self {
-            partner_id: read_pubkey(reader)?,
+            reserves_id: read_pubkey(reader)?,
             new_amount: read_u64(reader)?,
         })
     }
@@ -366,13 +366,13 @@ impl WireDecode for ReservesIncreaseMsg {
 /// reserves decrease message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReservesDecreaseMsg {
-    pub partner_id: PublicKey,
+    pub reserves_id: PublicKey,
     pub new_amount: u64,
 }
 
 impl WireEncode for ReservesDecreaseMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
-        write_pubkey(writer, &self.partner_id)?;
+        write_pubkey(writer, &self.reserves_id)?;
         write_u64(writer, self.new_amount)?;
         Ok(())
     }
@@ -381,7 +381,7 @@ impl WireEncode for ReservesDecreaseMsg {
 impl WireDecode for ReservesDecreaseMsg {
     fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
         Ok(Self {
-            partner_id: read_pubkey(reader)?,
+            reserves_id: read_pubkey(reader)?,
             new_amount: read_u64(reader)?,
         })
     }
@@ -392,7 +392,7 @@ impl WireDecode for ReservesDecreaseMsg {
 pub struct ReservesAddOutputMsg {
     pub initial_amount: u64,
     pub spend_to: PublicKey,
-    pub partner_id: PublicKey,
+    pub reserves_id: PublicKey,
     pub collateral_partners: Vec<PublicKey>,
 }
 
@@ -400,7 +400,7 @@ impl WireEncode for ReservesAddOutputMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
         write_u64(writer, self.initial_amount)?;
         write_pubkey(writer, &self.spend_to)?;
-        write_pubkey(writer, &self.partner_id)?;
+        write_pubkey(writer, &self.reserves_id)?;
         write_u16(writer, self.collateral_partners.len() as u16)?;
         for pk in &self.collateral_partners {
             write_pubkey(writer, pk)?;
@@ -413,7 +413,7 @@ impl WireDecode for ReservesAddOutputMsg {
     fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
         let initial_amount = read_u64(reader)?;
         let spend_to = read_pubkey(reader)?;
-        let partner_id = read_pubkey(reader)?;
+        let reserves_id = read_pubkey(reader)?;
         let count = read_u16(reader)? as usize;
         let mut collateral_partners = Vec::with_capacity(count);
         for _ in 0..count {
@@ -422,7 +422,7 @@ impl WireDecode for ReservesAddOutputMsg {
         Ok(Self {
             initial_amount,
             spend_to,
-            partner_id,
+            reserves_id,
             collateral_partners,
         })
     }
@@ -431,13 +431,13 @@ impl WireDecode for ReservesAddOutputMsg {
 /// reserves remove output message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReservesRemoveOutputMsg {
-    pub partner_id: PublicKey,
+    pub reserves_id: PublicKey,
     pub remove_all: bool,
 }
 
 impl WireEncode for ReservesRemoveOutputMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
-        write_pubkey(writer, &self.partner_id)?;
+        write_pubkey(writer, &self.reserves_id)?;
         write_u8(writer, self.remove_all as u8)?;
         Ok(())
     }
@@ -446,7 +446,7 @@ impl WireEncode for ReservesRemoveOutputMsg {
 impl WireDecode for ReservesRemoveOutputMsg {
     fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
         Ok(Self {
-            partner_id: read_pubkey(reader)?,
+            reserves_id: read_pubkey(reader)?,
             remove_all: read_u8(reader)? != 0,
         })
     }
@@ -455,13 +455,13 @@ impl WireDecode for ReservesRemoveOutputMsg {
 /// reserves update output message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReservesUpdateOutputMsg {
-    pub partner_id: PublicKey,
+    pub reserves_id: PublicKey,
     pub spend_to: PublicKey,
 }
 
 impl WireEncode for ReservesUpdateOutputMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
-        write_pubkey(writer, &self.partner_id)?;
+        write_pubkey(writer, &self.reserves_id)?;
         write_pubkey(writer, &self.spend_to)?;
         Ok(())
     }
@@ -470,7 +470,7 @@ impl WireEncode for ReservesUpdateOutputMsg {
 impl WireDecode for ReservesUpdateOutputMsg {
     fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
         Ok(Self {
-            partner_id: read_pubkey(reader)?,
+            reserves_id: read_pubkey(reader)?,
             spend_to: read_pubkey(reader)?,
         })
     }
@@ -561,7 +561,7 @@ impl WireDecode for AcceptReservesMsg {
 /// deposit open message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DepositOpenMsg {
-    pub partner_id: PublicKey,
+    pub reserves_id: PublicKey,
     pub pubkey: PublicKey,
     pub fees: Option<FeeStructure>,
     pub payment_hash: Option<[u8; 32]>,
@@ -571,7 +571,7 @@ pub struct DepositOpenMsg {
 
 impl WireEncode for DepositOpenMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
-        write_pubkey(writer, &self.partner_id)?;
+        write_pubkey(writer, &self.reserves_id)?;
         write_pubkey(writer, &self.pubkey)?;
         write_optional(writer, &self.fees, |w, f| f.wire_encode(w))?;
         write_optional(writer, &self.payment_hash, |w, h| write_bytes32(w, h))?;
@@ -584,7 +584,7 @@ impl WireEncode for DepositOpenMsg {
 impl WireDecode for DepositOpenMsg {
     fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
         Ok(Self {
-            partner_id: read_pubkey(reader)?,
+            reserves_id: read_pubkey(reader)?,
             pubkey: read_pubkey(reader)?,
             fees: read_optional(reader, FeeStructure::wire_decode)?,
             payment_hash: read_optional(reader, read_bytes32)?,
@@ -597,13 +597,13 @@ impl WireDecode for DepositOpenMsg {
 /// deposit close message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DepositCloseMsg {
-    pub partner_id: PublicKey,
+    pub reserves_id: PublicKey,
     pub pubkey: PublicKey,
 }
 
 impl WireEncode for DepositCloseMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
-        write_pubkey(writer, &self.partner_id)?;
+        write_pubkey(writer, &self.reserves_id)?;
         write_pubkey(writer, &self.pubkey)?;
         Ok(())
     }
@@ -612,7 +612,7 @@ impl WireEncode for DepositCloseMsg {
 impl WireDecode for DepositCloseMsg {
     fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
         Ok(Self {
-            partner_id: read_pubkey(reader)?,
+            reserves_id: read_pubkey(reader)?,
             pubkey: read_pubkey(reader)?,
         })
     }
@@ -621,14 +621,14 @@ impl WireDecode for DepositCloseMsg {
 /// deposit update message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DepositUpdateMsg {
-    pub partner_id: PublicKey,
+    pub reserves_id: PublicKey,
     pub pubkey: PublicKey,
     pub new_fees: FeeStructure,
 }
 
 impl WireEncode for DepositUpdateMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
-        write_pubkey(writer, &self.partner_id)?;
+        write_pubkey(writer, &self.reserves_id)?;
         write_pubkey(writer, &self.pubkey)?;
         self.new_fees.wire_encode(writer)?;
         Ok(())
@@ -638,7 +638,7 @@ impl WireEncode for DepositUpdateMsg {
 impl WireDecode for DepositUpdateMsg {
     fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
         Ok(Self {
-            partner_id: read_pubkey(reader)?,
+            reserves_id: read_pubkey(reader)?,
             pubkey: read_pubkey(reader)?,
             new_fees: FeeStructure::wire_decode(reader)?,
         })
@@ -652,14 +652,14 @@ impl WireDecode for DepositUpdateMsg {
 /// collateral increase message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CollateralIncreaseMsg {
-    pub partner_id: PublicKey,
+    pub reserves_id: PublicKey,
     pub new_amount: u64,
     pub block_height: u32,
 }
 
 impl WireEncode for CollateralIncreaseMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
-        write_pubkey(writer, &self.partner_id)?;
+        write_pubkey(writer, &self.reserves_id)?;
         write_u64(writer, self.new_amount)?;
         write_u32(writer, self.block_height)?;
         Ok(())
@@ -669,7 +669,7 @@ impl WireEncode for CollateralIncreaseMsg {
 impl WireDecode for CollateralIncreaseMsg {
     fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
         Ok(Self {
-            partner_id: read_pubkey(reader)?,
+            reserves_id: read_pubkey(reader)?,
             new_amount: read_u64(reader)?,
             block_height: read_u32(reader)?,
         })
@@ -679,14 +679,14 @@ impl WireDecode for CollateralIncreaseMsg {
 /// collateral decrease message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CollateralDecreaseMsg {
-    pub partner_id: PublicKey,
+    pub reserves_id: PublicKey,
     pub new_amount: u64,
     pub block_height: u32,
 }
 
 impl WireEncode for CollateralDecreaseMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
-        write_pubkey(writer, &self.partner_id)?;
+        write_pubkey(writer, &self.reserves_id)?;
         write_u64(writer, self.new_amount)?;
         write_u32(writer, self.block_height)?;
         Ok(())
@@ -696,7 +696,7 @@ impl WireEncode for CollateralDecreaseMsg {
 impl WireDecode for CollateralDecreaseMsg {
     fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
         Ok(Self {
-            partner_id: read_pubkey(reader)?,
+            reserves_id: read_pubkey(reader)?,
             new_amount: read_u64(reader)?,
             block_height: read_u32(reader)?,
         })
@@ -737,12 +737,12 @@ impl WireDecode for FeeCollectMsg {
 /// ledger close message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LedgerCloseMsg {
-    pub partner_id: PublicKey,
+    pub reserves_id: PublicKey,
 }
 
 impl WireEncode for LedgerCloseMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
-        write_pubkey(writer, &self.partner_id)?;
+        write_pubkey(writer, &self.reserves_id)?;
         Ok(())
     }
 }
@@ -750,7 +750,7 @@ impl WireEncode for LedgerCloseMsg {
 impl WireDecode for LedgerCloseMsg {
     fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
         Ok(Self {
-            partner_id: read_pubkey(reader)?,
+            reserves_id: read_pubkey(reader)?,
         })
     }
 }
@@ -766,7 +766,7 @@ pub struct ReceivingCreditPaymentMsg {
     pub deposit_pubkey: PublicKey,
     pub amount: u64,
     pub invoice_id: String,
-    pub partner_id: PublicKey,
+    pub reserves_id: PublicKey,
     pub sequence_number: u64,
 }
 
@@ -776,7 +776,7 @@ impl WireEncode for ReceivingCreditPaymentMsg {
         write_pubkey(writer, &self.deposit_pubkey)?;
         write_u64(writer, self.amount)?;
         write_string(writer, &self.invoice_id)?;
-        write_pubkey(writer, &self.partner_id)?;
+        write_pubkey(writer, &self.reserves_id)?;
         write_u64(writer, self.sequence_number)?;
         Ok(())
     }
@@ -789,7 +789,7 @@ impl WireDecode for ReceivingCreditPaymentMsg {
             deposit_pubkey: read_pubkey(reader)?,
             amount: read_u64(reader)?,
             invoice_id: read_string(reader)?,
-            partner_id: read_pubkey(reader)?,
+            reserves_id: read_pubkey(reader)?,
             sequence_number: read_u64(reader)?,
         })
     }
@@ -938,7 +938,7 @@ impl WireDecode for ReceivingCosignInvoiceMsg {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CollateralAddPartnerMsg {
     pub operator_id: PublicKey,
-    pub partner_id: PublicKey,
+    pub reserves_id: PublicKey,
     pub collateral_partner: PublicKey,
     pub collateral_partner_signature: [u8; 64],
 }
@@ -946,7 +946,7 @@ pub struct CollateralAddPartnerMsg {
 impl WireEncode for CollateralAddPartnerMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
         write_pubkey(writer, &self.operator_id)?;
-        write_pubkey(writer, &self.partner_id)?;
+        write_pubkey(writer, &self.reserves_id)?;
         write_pubkey(writer, &self.collateral_partner)?;
         write_bytes64(writer, &self.collateral_partner_signature)?;
         Ok(())
@@ -957,7 +957,7 @@ impl WireDecode for CollateralAddPartnerMsg {
     fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
         Ok(Self {
             operator_id: read_pubkey(reader)?,
-            partner_id: read_pubkey(reader)?,
+            reserves_id: read_pubkey(reader)?,
             collateral_partner: read_pubkey(reader)?,
             collateral_partner_signature: read_bytes64(reader)?,
         })
@@ -967,14 +967,14 @@ impl WireDecode for CollateralAddPartnerMsg {
 /// collateral remove partner message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CollateralRemovePartnerMsg {
-    pub partner_id: PublicKey,
+    pub reserves_id: PublicKey,
     pub collateral_partner: PublicKey,
     pub operator_signature: [u8; 64],
 }
 
 impl WireEncode for CollateralRemovePartnerMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
-        write_pubkey(writer, &self.partner_id)?;
+        write_pubkey(writer, &self.reserves_id)?;
         write_pubkey(writer, &self.collateral_partner)?;
         write_bytes64(writer, &self.operator_signature)?;
         Ok(())
@@ -984,7 +984,7 @@ impl WireEncode for CollateralRemovePartnerMsg {
 impl WireDecode for CollateralRemovePartnerMsg {
     fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
         Ok(Self {
-            partner_id: read_pubkey(reader)?,
+            reserves_id: read_pubkey(reader)?,
             collateral_partner: read_pubkey(reader)?,
             operator_signature: read_bytes64(reader)?,
         })
@@ -1042,14 +1042,14 @@ impl WireDecode for CollateralAttestationMsg {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CollateralConsentRequestMsg {
     pub operator_id: PublicKey,
-    pub partner_id: PublicKey,
+    pub reserves_id: PublicKey,
     pub operator_signature: [u8; 64],
 }
 
 impl WireEncode for CollateralConsentRequestMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
         write_pubkey(writer, &self.operator_id)?;
-        write_pubkey(writer, &self.partner_id)?;
+        write_pubkey(writer, &self.reserves_id)?;
         write_bytes64(writer, &self.operator_signature)?;
         Ok(())
     }
@@ -1059,7 +1059,7 @@ impl WireDecode for CollateralConsentRequestMsg {
     fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
         Ok(Self {
             operator_id: read_pubkey(reader)?,
-            partner_id: read_pubkey(reader)?,
+            reserves_id: read_pubkey(reader)?,
             operator_signature: read_bytes64(reader)?,
         })
     }
@@ -1069,7 +1069,7 @@ impl WireDecode for CollateralConsentRequestMsg {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CollateralConsentResponseMsg {
     pub operator_id: PublicKey,
-    pub partner_id: PublicKey,
+    pub reserves_id: PublicKey,
     pub consent_granted: bool,
     pub collateral_partner_signature: [u8; 64],
 }
@@ -1077,7 +1077,7 @@ pub struct CollateralConsentResponseMsg {
 impl WireEncode for CollateralConsentResponseMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
         write_pubkey(writer, &self.operator_id)?;
-        write_pubkey(writer, &self.partner_id)?;
+        write_pubkey(writer, &self.reserves_id)?;
         write_u8(writer, self.consent_granted as u8)?;
         write_bytes64(writer, &self.collateral_partner_signature)?;
         Ok(())
@@ -1088,7 +1088,7 @@ impl WireDecode for CollateralConsentResponseMsg {
     fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
         Ok(Self {
             operator_id: read_pubkey(reader)?,
-            partner_id: read_pubkey(reader)?,
+            reserves_id: read_pubkey(reader)?,
             consent_granted: read_u8(reader)? != 0,
             collateral_partner_signature: read_bytes64(reader)?,
         })
@@ -1102,7 +1102,7 @@ impl WireDecode for CollateralConsentResponseMsg {
 /// deposit lock transfer message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DepositLockTransferMsg {
-    pub partner_id: PublicKey,
+    pub reserves_id: PublicKey,
     pub pubkey: PublicKey,
     pub amount: u64,
     pub transfer_id: [u8; 32],
@@ -1110,7 +1110,7 @@ pub struct DepositLockTransferMsg {
 
 impl WireEncode for DepositLockTransferMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
-        write_pubkey(writer, &self.partner_id)?;
+        write_pubkey(writer, &self.reserves_id)?;
         write_pubkey(writer, &self.pubkey)?;
         write_u64(writer, self.amount)?;
         write_bytes32(writer, &self.transfer_id)?;
@@ -1121,7 +1121,7 @@ impl WireEncode for DepositLockTransferMsg {
 impl WireDecode for DepositLockTransferMsg {
     fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
         Ok(Self {
-            partner_id: read_pubkey(reader)?,
+            reserves_id: read_pubkey(reader)?,
             pubkey: read_pubkey(reader)?,
             amount: read_u64(reader)?,
             transfer_id: read_bytes32(reader)?,
@@ -1132,14 +1132,14 @@ impl WireDecode for DepositLockTransferMsg {
 /// deposit fail transfer message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DepositFailTransferMsg {
-    pub partner_id: PublicKey,
+    pub reserves_id: PublicKey,
     pub pubkey: PublicKey,
     pub transfer_id: [u8; 32],
 }
 
 impl WireEncode for DepositFailTransferMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
-        write_pubkey(writer, &self.partner_id)?;
+        write_pubkey(writer, &self.reserves_id)?;
         write_pubkey(writer, &self.pubkey)?;
         write_bytes32(writer, &self.transfer_id)?;
         Ok(())
@@ -1149,7 +1149,7 @@ impl WireEncode for DepositFailTransferMsg {
 impl WireDecode for DepositFailTransferMsg {
     fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
         Ok(Self {
-            partner_id: read_pubkey(reader)?,
+            reserves_id: read_pubkey(reader)?,
             pubkey: read_pubkey(reader)?,
             transfer_id: read_bytes32(reader)?,
         })
@@ -1159,7 +1159,7 @@ impl WireDecode for DepositFailTransferMsg {
 /// deposit fulfill transfer message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DepositFulfillTransferMsg {
-    pub partner_id: PublicKey,
+    pub reserves_id: PublicKey,
     pub pubkey: PublicKey,
     pub amount: u64,
     pub transfer_id: [u8; 32],
@@ -1167,7 +1167,7 @@ pub struct DepositFulfillTransferMsg {
 
 impl WireEncode for DepositFulfillTransferMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
-        write_pubkey(writer, &self.partner_id)?;
+        write_pubkey(writer, &self.reserves_id)?;
         write_pubkey(writer, &self.pubkey)?;
         write_u64(writer, self.amount)?;
         write_bytes32(writer, &self.transfer_id)?;
@@ -1178,7 +1178,7 @@ impl WireEncode for DepositFulfillTransferMsg {
 impl WireDecode for DepositFulfillTransferMsg {
     fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
         Ok(Self {
-            partner_id: read_pubkey(reader)?,
+            reserves_id: read_pubkey(reader)?,
             pubkey: read_pubkey(reader)?,
             amount: read_u64(reader)?,
             transfer_id: read_bytes32(reader)?,
@@ -1193,14 +1193,14 @@ impl WireDecode for DepositFulfillTransferMsg {
 /// sync request message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SyncRequestMsg {
-    pub partner_id: PublicKey,
+    pub reserves_id: PublicKey,
     pub operator_id: PublicKey,
     pub last_known_sequence: u64,
 }
 
 impl WireEncode for SyncRequestMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
-        write_pubkey(writer, &self.partner_id)?;
+        write_pubkey(writer, &self.reserves_id)?;
         write_pubkey(writer, &self.operator_id)?;
         write_u64(writer, self.last_known_sequence)?;
         Ok(())
@@ -1210,7 +1210,7 @@ impl WireEncode for SyncRequestMsg {
 impl WireDecode for SyncRequestMsg {
     fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
         Ok(Self {
-            partner_id: read_pubkey(reader)?,
+            reserves_id: read_pubkey(reader)?,
             operator_id: read_pubkey(reader)?,
             last_known_sequence: read_u64(reader)?,
         })
@@ -1221,7 +1221,7 @@ impl WireDecode for SyncRequestMsg {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChannelCloseTombstoneMsg {
     pub operator_id: PublicKey,
-    pub partner_id: PublicKey,
+    pub reserves_id: PublicKey,
     pub timestamp: u64,
     pub channel_id: [u8; 32],
     pub close_reason: Option<String>,
@@ -1231,7 +1231,7 @@ pub struct ChannelCloseTombstoneMsg {
 impl WireEncode for ChannelCloseTombstoneMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
         write_pubkey(writer, &self.operator_id)?;
-        write_pubkey(writer, &self.partner_id)?;
+        write_pubkey(writer, &self.reserves_id)?;
         write_u64(writer, self.timestamp)?;
         write_bytes32(writer, &self.channel_id)?;
         write_optional(writer, &self.close_reason, |w, s| write_string(w, s))?;
@@ -1244,7 +1244,7 @@ impl WireDecode for ChannelCloseTombstoneMsg {
     fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
         Ok(Self {
             operator_id: read_pubkey(reader)?,
-            partner_id: read_pubkey(reader)?,
+            reserves_id: read_pubkey(reader)?,
             timestamp: read_u64(reader)?,
             channel_id: read_bytes32(reader)?,
             close_reason: read_optional(reader, read_string)?,
@@ -1262,7 +1262,7 @@ impl WireDecode for ChannelCloseTombstoneMsg {
 pub struct QuorumJoinRequestMsgWire {
     pub requester_pubkey: PublicKey,
     pub operator_id: PublicKey,
-    pub partner_id: PublicKey,
+    pub reserves_id: PublicKey,
     pub protocol_version: u16,
     pub timestamp: u64,
     pub signature: [u8; 64],
@@ -1272,7 +1272,7 @@ impl WireEncode for QuorumJoinRequestMsgWire {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
         write_pubkey(writer, &self.requester_pubkey)?;
         write_pubkey(writer, &self.operator_id)?;
-        write_pubkey(writer, &self.partner_id)?;
+        write_pubkey(writer, &self.reserves_id)?;
         write_u16(writer, self.protocol_version)?;
         write_u64(writer, self.timestamp)?;
         write_bytes64(writer, &self.signature)?;
@@ -1285,7 +1285,7 @@ impl WireDecode for QuorumJoinRequestMsgWire {
         Ok(Self {
             requester_pubkey: read_pubkey(reader)?,
             operator_id: read_pubkey(reader)?,
-            partner_id: read_pubkey(reader)?,
+            reserves_id: read_pubkey(reader)?,
             protocol_version: read_u16(reader)?,
             timestamp: read_u64(reader)?,
             signature: read_bytes64(reader)?,
@@ -1342,7 +1342,7 @@ impl WireDecode for QuorumJoinResponseMsgWire {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QuorumMembershipChangeMsg {
     pub operator_id: PublicKey,
-    pub partner_id: PublicKey,
+    pub reserves_id: PublicKey,
     pub change_type: String,
     pub member_pubkey: PublicKey,
     pub new_members: Vec<PublicKey>,
@@ -1351,7 +1351,7 @@ pub struct QuorumMembershipChangeMsg {
 impl WireEncode for QuorumMembershipChangeMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
         write_pubkey(writer, &self.operator_id)?;
-        write_pubkey(writer, &self.partner_id)?;
+        write_pubkey(writer, &self.reserves_id)?;
         write_string(writer, &self.change_type)?;
         write_pubkey(writer, &self.member_pubkey)?;
         write_u16(writer, self.new_members.len() as u16)?;
@@ -1365,7 +1365,7 @@ impl WireEncode for QuorumMembershipChangeMsg {
 impl WireDecode for QuorumMembershipChangeMsg {
     fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
         let operator_id = read_pubkey(reader)?;
-        let partner_id = read_pubkey(reader)?;
+        let reserves_id = read_pubkey(reader)?;
         let change_type = read_string(reader)?;
         let member_pubkey = read_pubkey(reader)?;
         let count = read_u16(reader)? as usize;
@@ -1375,7 +1375,7 @@ impl WireDecode for QuorumMembershipChangeMsg {
         }
         Ok(Self {
             operator_id,
-            partner_id,
+            reserves_id,
             change_type,
             member_pubkey,
             new_members,
@@ -1387,7 +1387,7 @@ impl WireDecode for QuorumMembershipChangeMsg {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QuorumStateSyncMsg {
     pub operator_id: PublicKey,
-    pub partner_id: PublicKey,
+    pub reserves_id: PublicKey,
     pub updates: Vec<Vec<u8>>,
     pub start_sequence: u64,
     pub is_final: bool,
@@ -1396,7 +1396,7 @@ pub struct QuorumStateSyncMsg {
 impl WireEncode for QuorumStateSyncMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
         write_pubkey(writer, &self.operator_id)?;
-        write_pubkey(writer, &self.partner_id)?;
+        write_pubkey(writer, &self.reserves_id)?;
         write_u16(writer, self.updates.len() as u16)?;
         for update in &self.updates {
             write_u32(writer, update.len() as u32)?;
@@ -1411,7 +1411,7 @@ impl WireEncode for QuorumStateSyncMsg {
 impl WireDecode for QuorumStateSyncMsg {
     fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
         let operator_id = read_pubkey(reader)?;
-        let partner_id = read_pubkey(reader)?;
+        let reserves_id = read_pubkey(reader)?;
         let count = read_u16(reader)? as usize;
         let mut updates = Vec::with_capacity(count);
         for _ in 0..count {
@@ -1422,7 +1422,7 @@ impl WireDecode for QuorumStateSyncMsg {
         }
         Ok(Self {
             operator_id,
-            partner_id,
+            reserves_id,
             updates,
             start_sequence: read_u64(reader)?,
             is_final: read_u8(reader)? != 0,
@@ -1434,7 +1434,7 @@ impl WireDecode for QuorumStateSyncMsg {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QuorumVoteRequestMsg {
     pub operator_id: PublicKey,
-    pub partner_id: PublicKey,
+    pub reserves_id: PublicKey,
     pub vote_round_id: [u8; 32],
     pub sequence_number: u64,
     pub state_hash: [u8; 32],
@@ -1448,7 +1448,7 @@ pub struct QuorumVoteRequestMsg {
 impl WireEncode for QuorumVoteRequestMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
         write_pubkey(writer, &self.operator_id)?;
-        write_pubkey(writer, &self.partner_id)?;
+        write_pubkey(writer, &self.reserves_id)?;
         write_bytes32(writer, &self.vote_round_id)?;
         write_u64(writer, self.sequence_number)?;
         write_bytes32(writer, &self.state_hash)?;
@@ -1469,7 +1469,7 @@ impl WireEncode for QuorumVoteRequestMsg {
 impl WireDecode for QuorumVoteRequestMsg {
     fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
         let operator_id = read_pubkey(reader)?;
-        let partner_id = read_pubkey(reader)?;
+        let reserves_id = read_pubkey(reader)?;
         let vote_round_id = read_bytes32(reader)?;
         let sequence_number = read_u64(reader)?;
         let state_hash = read_bytes32(reader)?;
@@ -1488,7 +1488,7 @@ impl WireDecode for QuorumVoteRequestMsg {
         let fee_rate_sat_vbyte = read_u64(reader)?;
         Ok(Self {
             operator_id,
-            partner_id,
+            reserves_id,
             vote_round_id,
             sequence_number,
             state_hash,
@@ -1891,7 +1891,7 @@ mod tests {
     #[test]
     fn test_reserves_increase_roundtrip() {
         let msg = ReservesIncreaseMsg {
-            partner_id: test_pubkey(1),
+            reserves_id: test_pubkey(1),
             new_amount: 100_000,
         };
         let bytes = msg.to_wire_bytes();
@@ -1902,7 +1902,7 @@ mod tests {
     #[test]
     fn test_deposit_open_roundtrip() {
         let msg = DepositOpenMsg {
-            partner_id: test_pubkey(1),
+            reserves_id: test_pubkey(1),
             pubkey: test_pubkey(2),
             fees: Some(FeeStructure {
                 annualized_fixed: 1000,
@@ -1925,7 +1925,7 @@ mod tests {
             deposit_pubkey: test_pubkey(2),
             amount: 50_000,
             invoice_id: "inv_123".to_string(),
-            partner_id: test_pubkey(1),
+            reserves_id: test_pubkey(1),
             sequence_number: 42,
         };
         let bytes = msg.to_wire_bytes();

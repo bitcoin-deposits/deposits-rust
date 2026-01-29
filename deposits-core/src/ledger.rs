@@ -115,11 +115,11 @@ impl Ledger {
     /// Create a new ledger as operator.
     pub fn new_as_operator(
         operator_key: PublicKey,
-        partner_key: PublicKey,
+        reserves_key: PublicKey,
         ledger_address: String,
     ) -> Self {
         Self {
-            state: LedgerState::new(operator_key, partner_key, ledger_address),
+            state: LedgerState::new(operator_key, reserves_key, ledger_address),
             role: LedgerRole::Operator,
             history: Vec::new(),
         }
@@ -128,11 +128,11 @@ impl Ledger {
     /// Create a new ledger as partner.
     pub fn new_as_partner(
         operator_key: PublicKey,
-        partner_key: PublicKey,
+        reserves_key: PublicKey,
         ledger_address: String,
     ) -> Self {
         Self {
-            state: LedgerState::new(operator_key, partner_key, ledger_address),
+            state: LedgerState::new(operator_key, reserves_key, ledger_address),
             role: LedgerRole::Partner,
             history: Vec::new(),
         }
@@ -142,14 +142,14 @@ impl Ledger {
     /// This constructor is provided for compatibility with existing code.
     pub fn new(
         operator_key: PublicKey,
-        partner_key: PublicKey,
+        reserves_key: PublicKey,
         role: LedgerRole,
         collateral_partners: Vec<PublicKey>,
         ledger_address: String,
     ) -> Self {
         Self::with_enforcement_block(
             operator_key,
-            partner_key,
+            reserves_key,
             role,
             collateral_partners,
             ledger_address,
@@ -167,7 +167,7 @@ impl Ledger {
     /// ledgers >= half the operator's ledger size.
     pub fn with_enforcement_block(
         operator_key: PublicKey,
-        partner_key: PublicKey,
+        reserves_key: PublicKey,
         role: LedgerRole,
         collateral_partners: Vec<PublicKey>,
         ledger_address: String,
@@ -175,7 +175,7 @@ impl Ledger {
     ) -> Self {
         let mut state = LedgerState::with_enforcement_block(
             operator_key,
-            partner_key,
+            reserves_key,
             ledger_address,
             collateral_enforcement_block,
         );
@@ -318,8 +318,8 @@ impl Ledger {
     }
 
     /// Get the partner's public key.
-    pub fn partner_key(&self) -> PublicKey {
-        self.state.partner_key
+    pub fn reserves_key(&self) -> PublicKey {
+        self.state.reserves_key
     }
 
     /// Get all quorum participants for this ledger.
@@ -327,7 +327,7 @@ impl Ledger {
     pub fn quorum_participants(&self) -> Vec<PublicKey> {
         let mut participants = Vec::with_capacity(2 + self.state.collateral_partners.len());
         participants.push(self.state.operator_key);
-        participants.push(self.state.partner_key);
+        participants.push(self.state.reserves_key);
         participants.extend(self.state.collateral_partners.iter().cloned());
         participants
     }
@@ -336,7 +336,7 @@ impl Ledger {
     /// This is the set of nodes the operator broadcasts updates to.
     pub fn all_partners(&self) -> Vec<PublicKey> {
         let mut partners = Vec::with_capacity(1 + self.state.collateral_partners.len());
-        partners.push(self.state.partner_key);
+        partners.push(self.state.reserves_key);
         partners.extend(self.state.collateral_partners.iter().cloned());
         partners
     }
@@ -348,7 +348,7 @@ impl Ledger {
                 "Operator cannot be a collateral partner".to_string()
             ));
         }
-        if partner == self.state.partner_key {
+        if partner == self.state.reserves_key {
             return Err(DepositsError::InvalidState(
                 "Channel partner is already part of the quorum".to_string()
             ));
@@ -598,7 +598,7 @@ impl Ledger {
             operator_signature: [0u8; 64],
             partner_signature: [0u8; 64],
             operator_id: self.state.operator_key,
-            partner_id: self.state.partner_key,
+            reserves_id: self.state.reserves_key,
             sequence_number: sequence,
             previous_hash: prev_hash,
             current_hash: new_hash,
@@ -839,14 +839,14 @@ impl Ledger {
                 use crate::types::CollateralAttestation;
                 let attestation = CollateralAttestation::new(
                     *collateral_operator,
-                    self.state.partner_key, // Attestation from our partner
+                    self.state.reserves_key, // Attestation from our partner
                     *amount,
                     *block_height,
                     *signature,
                     *ledger_hash,
                 );
                 // Insert even if not in collateral_partners - validation is done elsewhere
-                self.state.collateral_attestations.insert(self.state.partner_key, attestation);
+                self.state.collateral_attestations.insert(self.state.reserves_key, attestation);
             }
         }
         Ok(())
@@ -1175,19 +1175,19 @@ impl LedgerManager {
     /// Create a new ledger as operator.
     pub fn create_as_operator(
         operator_key: PublicKey,
-        partner_key: PublicKey,
+        reserves_key: PublicKey,
         ledger_address: String,
     ) -> Self {
-        Self::new(Ledger::new_as_operator(operator_key, partner_key, ledger_address))
+        Self::new(Ledger::new_as_operator(operator_key, reserves_key, ledger_address))
     }
 
     /// Create a new ledger as partner.
     pub fn create_as_partner(
         operator_key: PublicKey,
-        partner_key: PublicKey,
+        reserves_key: PublicKey,
         ledger_address: String,
     ) -> Self {
-        Self::new(Ledger::new_as_partner(operator_key, partner_key, ledger_address))
+        Self::new(Ledger::new_as_partner(operator_key, reserves_key, ledger_address))
     }
 
     /// Get a reference to the underlying ledger.
@@ -1337,14 +1337,14 @@ impl LedgerManager {
     /// where the handshake itself is not recorded as a ledger operation.
     pub fn create_empty_ledger(
         operator_key: PublicKey,
-        partner_key: PublicKey,
+        reserves_key: PublicKey,
         role: LedgerRole,
         collateral_partners: Vec<PublicKey>,
         ledger_address: String,
     ) -> (Self, [u8; 32]) {
         let ledger = Ledger::new(
             operator_key,
-            partner_key,
+            reserves_key,
             role,
             collateral_partners,
             ledger_address,
@@ -1359,7 +1359,7 @@ impl LedgerManager {
     /// and returns the manager along with the genesis hash.
     pub fn create_ledger(
         operator_key: PublicKey,
-        partner_key: PublicKey,
+        reserves_key: PublicKey,
         role: LedgerRole,
         collateral_partners: Vec<PublicKey>,
         ledger_address: String,
@@ -1368,7 +1368,7 @@ impl LedgerManager {
         // Create the base ledger
         let mut ledger = Ledger::new(
             operator_key,
-            partner_key,
+            reserves_key,
             role,
             collateral_partners,
             ledger_address,

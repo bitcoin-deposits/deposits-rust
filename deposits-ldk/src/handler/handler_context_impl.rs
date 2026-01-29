@@ -122,7 +122,7 @@ where
                 let _ = self.event_queue.emit_deposits_event(
                     DepositsEvent::RecoveryNonCompliant {
                         operator_id: operator,
-                        partner_id: partner,
+                        reserves_id: partner,
                         non_conforming_votes: 0, // Filled in by caller
                         total_votes: 0,
                     }
@@ -137,7 +137,7 @@ where
                 let _ = self.event_queue.emit_deposits_event(
                     DepositsEvent::RecoveryClaimCompleted {
                         old_operator: operator,
-                        partner_id: partner,
+                        reserves_id: partner,
                         new_operator,
                         claim_txid,
                         confirmation_block: 0, // Filled in by caller
@@ -213,7 +213,7 @@ where
                 let _ = self.event_queue.emit_deposits_event(
                     DepositsEvent::RecoveryClaimCompleted {
                         old_operator,
-                        partner_id: partner,
+                        reserves_id: partner,
                         new_operator,
                         claim_txid,
                         confirmation_block,
@@ -244,7 +244,7 @@ where
                     DepositsEvent::ReservesSpendReady {
                         vote_round_id,
                         operator_id: operator,
-                        partner_id: partner,
+                        reserves_id: partner,
                         signed_tx_bytes,
                         conforming_votes,
                         threshold,
@@ -343,7 +343,7 @@ where
 
         let ack = DepositsMessage::LedgerUpdateResponse(LedgerUpdateResponseMsg {
             operator_id: peer, // Responding to the operator who sent the update
-            partner_id: self.our_node_id,
+            reserves_id: self.our_node_id,
             request_hash: message_hash,
             accepted: success,
             error: error_message,
@@ -411,7 +411,7 @@ where
         let log = logs.entry((*operator, *partner)).or_insert_with(|| {
             deposits_core::SignedLedgerUpdateLog {
                 operator_id: *operator,
-                partner_id: *partner,
+                reserves_id: *partner,
                 updates: Vec::new(),
                 next_sequence: 0,
                 pending_updates: std::collections::HashMap::new(),
@@ -434,7 +434,7 @@ where
     fn verify_and_store_signed_update(&self, update: deposits_core::SignedLedgerUpdate) -> Result<(), String> {
         // Store in signed_update_logs
         let operator = update.operator_id;
-        let partner = update.partner_id;
+        let partner = update.reserves_id;
         self.store_signed_update(&operator, &partner, update)
     }
 
@@ -565,7 +565,7 @@ where
                     let _ = self.event_queue.emit_deposits_event(
                         super::events::DepositsEvent::RecoveryClaimReady {
                             operator_id: operator,
-                            partner_id: partner,
+                            reserves_id: partner,
                         },
                     );
                 }
@@ -622,7 +622,7 @@ where
 
             Some((
                 round.operator_id,
-                round.partner_id,
+                round.reserves_id,
                 data,
                 round.conforming_vote_count() as u32,
                 round.threshold as u32,
@@ -644,7 +644,7 @@ where
         // Calculate the hash for the original consent request
         let original = DepositsMessage::Coordination(CoordinationMsg::CollateralConsentRequest {
             operator_id: operator,
-            partner_id: partner,
+            reserves_id: partner,
             operator_signature: [0u8; 64],
         });
         let hash = self.calculate_message_hash(&original);
@@ -678,7 +678,7 @@ where
         let response = DepositsMessage::CoordinationResponse(CoordinationResponseMsg::CollateralConsentResponse {
             request_hash: [0u8; 32],
             operator_id: operator,
-            partner_id: partner,
+            reserves_id: partner,
             consent_granted: true,
             collateral_partner_signature: signature,
         });
@@ -786,7 +786,7 @@ where
         rounds.entry(vote_round_id).or_insert_with(|| {
             VoteRoundState {
                 operator_id: operator,
-                partner_id: partner,
+                reserves_id: partner,
                 sequence_number,
                 state_hash,
                 claimed_reserves,

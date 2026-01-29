@@ -30,7 +30,7 @@ where
     use bitcoin::secp256k1::{Secp256k1, SecretKey};
     use bitcoin::secp256k1::rand::rngs::OsRng;
 
-    let partner_id = PublicKey::from_str(&request.partner_node_id)
+    let reserves_id = PublicKey::from_str(&request.partner_node_id)
         .map_err(|_| DepositsError {
             code: "INVALID_PUBKEY".into(),
             message: "Invalid partner_node_id".into(),
@@ -52,7 +52,7 @@ where
             })?;
 
         // Store the private key for this ledger
-        handler.store_ledger_private_key(partner_id, secret_key)
+        handler.store_ledger_private_key(reserves_id, secret_key)
             .map_err(|e| DepositsError {
                 code: "KEY_STORAGE_FAILED".into(),
                 message: format!("Failed to store ledger private key: {}", e),
@@ -70,14 +70,14 @@ where
         address.assume_checked()
     };
 
-    handler.initiate_ledger_handshake_async(partner_id, address).await
+    handler.initiate_ledger_handshake_async(reserves_id, address).await
         .map_err(|e| DepositsError {
             code: "INIT_FAILED".into(),
             message: format!("{:?}", e),
         })?;
 
     Ok(InitLedgerResponse {
-        ledger_id: partner_id.to_string(),
+        ledger_id: reserves_id.to_string(),
     })
 }
 
@@ -95,19 +95,19 @@ where
 
     let ledgers: Vec<LedgerInfo> = operator_ledgers
         .into_iter()
-        .map(|partner_id| {
+        .map(|reserves_id| {
             // Get ledger details
             let ledger_arc = handler.get_all_ledgers()
                 .into_iter()
-                .find(|((op, part), _)| *op == handler.our_node_id && *part == partner_id)
+                .find(|((op, part), _)| *op == handler.our_node_id && *part == reserves_id)
                 .map(|(_, ledger)| ledger);
 
             if let Some(ledger_arc) = ledger_arc {
                 let ledger = ledger_arc.read().unwrap();
                 LedgerInfo {
-                    ledger_id: partner_id.to_string(),
+                    ledger_id: reserves_id.to_string(),
                     operator_node_id: our_node_id.clone(),
-                    partner_node_id: partner_id.to_string(),
+                    partner_node_id: reserves_id.to_string(),
                     operator_balance_sat: ledger.total_deposit_balance(),
                     partner_balance_sat: 0, // Partner balance tracked via reserves
                     reserves_sat: ledger.reserves_amount(),
@@ -121,9 +121,9 @@ where
                 }
             } else {
                 LedgerInfo {
-                    ledger_id: partner_id.to_string(),
+                    ledger_id: reserves_id.to_string(),
                     operator_node_id: our_node_id.clone(),
-                    partner_node_id: partner_id.to_string(),
+                    partner_node_id: reserves_id.to_string(),
                     ..Default::default()
                 }
             }
@@ -142,7 +142,7 @@ where
     L: Deref + Clone + Send + Sync,
     L::Target: LdkLogger,
 {
-    let partner_id = PublicKey::from_str(&request.ledger_id)
+    let reserves_id = PublicKey::from_str(&request.ledger_id)
         .map_err(|_| DepositsError {
             code: "INVALID_LEDGER_ID".into(),
             message: "Invalid ledger_id (expected partner node pubkey)".into(),
@@ -150,19 +150,19 @@ where
 
     let ledger_arc = handler.get_all_ledgers()
         .into_iter()
-        .find(|((op, part), _)| *op == handler.our_node_id && *part == partner_id)
+        .find(|((op, part), _)| *op == handler.our_node_id && *part == reserves_id)
         .map(|(_, ledger)| ledger);
 
     let ledger_arc = ledger_arc.ok_or_else(|| DepositsError {
         code: "LEDGER_NOT_FOUND".into(),
-        message: format!("No ledger found for partner {}", partner_id),
+        message: format!("No ledger found for partner {}", reserves_id),
     })?;
 
     let ledger = ledger_arc.read().unwrap();
     let ledger_info = LedgerInfo {
-        ledger_id: partner_id.to_string(),
+        ledger_id: reserves_id.to_string(),
         operator_node_id: handler.our_node_id.to_string(),
-        partner_node_id: partner_id.to_string(),
+        partner_node_id: reserves_id.to_string(),
         operator_balance_sat: ledger.total_deposit_balance(),
         partner_balance_sat: 0, // Partner balance tracked via reserves
         reserves_sat: ledger.reserves_amount(),
@@ -189,13 +189,13 @@ where
     L: Deref + Clone + Send + Sync,
     L::Target: LdkLogger,
 {
-    let partner_id = PublicKey::from_str(&request.ledger_id)
+    let reserves_id = PublicKey::from_str(&request.ledger_id)
         .map_err(|_| DepositsError {
             code: "INVALID_LEDGER_ID".into(),
             message: "Invalid ledger_id (expected partner node pubkey)".into(),
         })?;
 
-    handler.close_ledger_async(partner_id).await
+    handler.close_ledger_async(reserves_id).await
         .map_err(|e| DepositsError {
             code: "CLOSE_FAILED".into(),
             message: format!("{:?}", e),

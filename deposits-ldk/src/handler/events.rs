@@ -23,8 +23,8 @@ pub enum DepositsEvent {
         ledger_address: String,
         /// Operator's public key
         operator_key: PublicKey,
-        /// Partner's public key
-        partner_key: PublicKey,
+        /// Reserves identifier
+        reserves_key: PublicKey,
     },
 
     // Deposit events
@@ -194,7 +194,7 @@ pub enum DepositsEvent {
         /// Operator public key
         operator_id: PublicKey,
         /// Partner public key
-        partner_id: PublicKey,
+        reserves_id: PublicKey,
         /// Fully signed transaction bytes ready for broadcast
         signed_tx_bytes: Vec<u8>,
         /// Number of conforming votes received
@@ -209,7 +209,7 @@ pub enum DepositsEvent {
         /// Operator public key (the non-conforming operator being recovered from)
         operator_id: PublicKey,
         /// Partner public key
-        partner_id: PublicKey,
+        reserves_id: PublicKey,
     },
 
     /// Recovery claim transaction has been confirmed
@@ -217,7 +217,7 @@ pub enum DepositsEvent {
         /// Old operator public key (that was non-conforming)
         old_operator: PublicKey,
         /// Partner public key
-        partner_id: PublicKey,
+        reserves_id: PublicKey,
         /// New operator public key (that took over)
         new_operator: PublicKey,
         /// Claim transaction ID
@@ -231,7 +231,7 @@ pub enum DepositsEvent {
         /// Operator public key (determined to be non-compliant)
         operator_id: PublicKey,
         /// Partner public key
-        partner_id: PublicKey,
+        reserves_id: PublicKey,
         /// Number of non-conforming votes
         non_conforming_votes: u32,
         /// Total votes received
@@ -261,7 +261,7 @@ impl_writeable_tlv_based_enum!(DepositsEvent,
 	(0, LedgerCreated) => {
 		(0, ledger_address, required),
 		(2, operator_key, required),
-		(4, partner_key, required),
+		(4, reserves_key, required),
 	},
 	(1, DepositAdded) => {
 		(0, pubkey, required),
@@ -341,25 +341,25 @@ impl_writeable_tlv_based_enum!(DepositsEvent,
 	(18, ReservesSpendReady) => {
 		(0, vote_round_id, required),
 		(2, operator_id, required),
-		(4, partner_id, required),
+		(4, reserves_id, required),
 		(6, signed_tx_bytes, required),
 		(8, conforming_votes, required),
 		(10, threshold, required),
 	},
 	(19, RecoveryClaimReady) => {
 		(0, operator_id, required),
-		(2, partner_id, required),
+		(2, reserves_id, required),
 	},
 	(20, RecoveryClaimCompleted) => {
 		(0, old_operator, required),
-		(2, partner_id, required),
+		(2, reserves_id, required),
 		(4, new_operator, required),
 		(6, claim_txid, required),
 		(8, confirmation_block, required),
 	},
 	(21, RecoveryNonCompliant) => {
 		(0, operator_id, required),
-		(2, partner_id, required),
+		(2, reserves_id, required),
 		(4, non_conforming_votes, required),
 		(6, total_votes, required),
 	},

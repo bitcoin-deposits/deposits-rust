@@ -246,7 +246,7 @@ mod tests {
             payment_hash: None,
             invoice: None,
             cosigner_guarantee_signature: None,
-            partner_id: create_test_pubkey(3),
+            reserves_id: create_test_pubkey(3),
         };
 
         let result = handler.validate_add_deposit(&msg, sender);
@@ -260,7 +260,7 @@ mod tests {
         let sender = create_test_pubkey(3);
         let msg = crate::wire::messages::DepositCloseMsg {
             pubkey: create_test_pubkey(4),
-            partner_id: create_test_pubkey(5),
+            reserves_id: create_test_pubkey(5),
         };
 
         let result = handler.validate_remove_deposit(&msg, sender);
@@ -275,7 +275,7 @@ mod tests {
         let msg = crate::wire::messages::DepositUpdateMsg {
             pubkey: create_test_pubkey(6),
             new_fees: deposits_core::FeeStructure::default(),
-            partner_id: create_test_pubkey(7),
+            reserves_id: create_test_pubkey(7),
         };
 
         let result = handler.validate_update_deposit(&msg, sender);
@@ -343,7 +343,7 @@ mod tests {
             amount: 1000,
             payment_hash: [0xAB; 32],
             invoice_id: "test_invoice".to_string(),
-            partner_id: create_test_pubkey(15),
+            reserves_id: create_test_pubkey(15),
             sequence_number: 0,
         };
 
@@ -359,7 +359,7 @@ mod tests {
         let msg = crate::wire::messages::ReservesAddOutputMsg {
             initial_amount: 100, // Below minimum
             spend_to: create_test_pubkey(17),
-            partner_id: create_test_pubkey(18),
+            reserves_id: create_test_pubkey(18),
             collateral_partners: vec![],
         };
 
@@ -375,7 +375,7 @@ mod tests {
         let msg = crate::wire::messages::ReservesAddOutputMsg {
             initial_amount: 1_000_000_000_000, // Above maximum
             spend_to: create_test_pubkey(18),
-            partner_id: create_test_pubkey(19),
+            reserves_id: create_test_pubkey(19),
             collateral_partners: vec![],
         };
 
@@ -390,7 +390,7 @@ mod tests {
         let sender = create_test_pubkey(18);
         let msg = crate::wire::messages::ReservesRemoveOutputMsg {
             remove_all: false,
-            partner_id: create_test_pubkey(19),
+            reserves_id: create_test_pubkey(19),
         };
 
         let result = handler.validate_reserves_remove(&msg, sender);
@@ -419,7 +419,7 @@ mod tests {
         let sender = create_test_pubkey(21);
         let msg = crate::wire::messages::CollateralIncreaseMsg {
             new_amount: 1000,
-            partner_id: create_test_pubkey(22),
+            reserves_id: create_test_pubkey(22),
             block_height: 100,
         };
 
@@ -455,7 +455,7 @@ mod tests {
         // Try to "increase" to a lower amount - should fail
         let msg = crate::wire::messages::ReservesIncreaseMsg {
             new_amount: 4000, // Less than current 5000
-            partner_id: partner,
+            reserves_id: partner,
         };
 
         let result = handler.validate_reserves_increase(&msg, operator);
@@ -486,7 +486,7 @@ mod tests {
         // Try to "increase" to the same amount - should fail
         let msg = crate::wire::messages::ReservesIncreaseMsg {
             new_amount: 5000, // Same as current
-            partner_id: partner,
+            reserves_id: partner,
         };
 
         let result = handler.validate_reserves_increase(&msg, operator);
@@ -518,7 +518,7 @@ mod tests {
         // (without channel_manager, the channel balance check is skipped)
         let msg = crate::wire::messages::ReservesIncreaseMsg {
             new_amount: 10000, // More than current 5000
-            partner_id: partner,
+            reserves_id: partner,
         };
 
         let result = handler.validate_reserves_increase(&msg, operator);
@@ -534,7 +534,7 @@ mod tests {
 
         let msg = crate::wire::messages::ReservesIncreaseMsg {
             new_amount: 10000,
-            partner_id: create_test_pubkey(34),
+            reserves_id: create_test_pubkey(34),
         };
 
         // Without a ledger, the validation passes (channel balance check also skipped)
@@ -671,7 +671,7 @@ mod tests {
         // Try to decrease at block 150 (within 144-block period)
         let msg = crate::wire::messages::CollateralDecreaseMsg {
             new_amount: 3000,
-            partner_id: partner,
+            reserves_id: partner,
             block_height: 150,
         };
 
@@ -704,7 +704,7 @@ mod tests {
         // Decrease at block 250 (after 144-block period: 100 + 144 = 244)
         let msg = crate::wire::messages::CollateralDecreaseMsg {
             new_amount: 3000,
-            partner_id: partner,
+            reserves_id: partner,
             block_height: 250,
         };
 
@@ -736,7 +736,7 @@ mod tests {
         // Decrease should work since no prior increase to wait for
         let msg = crate::wire::messages::CollateralDecreaseMsg {
             new_amount: 3000,
-            partner_id: partner,
+            reserves_id: partner,
             block_height: 100,
         };
 
@@ -768,7 +768,7 @@ mod tests {
         // Try to "decrease" to a higher value
         let msg = crate::wire::messages::CollateralDecreaseMsg {
             new_amount: 6000,
-            partner_id: partner,
+            reserves_id: partner,
             block_height: 100,
         };
 
@@ -787,7 +787,7 @@ mod tests {
 
         let msg = crate::wire::messages::ReservesDecreaseMsg {
             new_amount: 50_000,
-            partner_id: partner,
+            reserves_id: partner,
         };
 
         let result = handler.validate_reserves_decrease(&msg, sender);
@@ -818,7 +818,7 @@ mod tests {
         // Try to "decrease" to same value
         let msg = crate::wire::messages::ReservesDecreaseMsg {
             new_amount: 100_000,
-            partner_id: partner,
+            reserves_id: partner,
         };
 
         let result = handler.validate_reserves_decrease(&msg, operator);
@@ -849,7 +849,7 @@ mod tests {
         // Try to "decrease" to higher value
         let msg = crate::wire::messages::ReservesDecreaseMsg {
             new_amount: 150_000,
-            partner_id: partner,
+            reserves_id: partner,
         };
 
         let result = handler.validate_reserves_decrease(&msg, operator);
@@ -887,7 +887,7 @@ mod tests {
         // Try to decrease reserves below what's required to back deposits
         let msg = crate::wire::messages::ReservesDecreaseMsg {
             new_amount: 50_000, // Less than the 80k deposit balance
-            partner_id: partner,
+            reserves_id: partner,
         };
 
         let result = handler.validate_reserves_decrease(&msg, operator);
@@ -925,7 +925,7 @@ mod tests {
         // Decrease reserves to 60k - still above the 50k deposit requirement
         let msg = crate::wire::messages::ReservesDecreaseMsg {
             new_amount: 60_000,
-            partner_id: partner,
+            reserves_id: partner,
         };
 
         let result = handler.validate_reserves_decrease(&msg, operator);
@@ -962,7 +962,7 @@ mod tests {
         // Decrease reserves to exactly the requirement (50k)
         let msg = crate::wire::messages::ReservesDecreaseMsg {
             new_amount: 50_000,
-            partner_id: partner,
+            reserves_id: partner,
         };
 
         let result = handler.validate_reserves_decrease(&msg, operator);
@@ -994,7 +994,7 @@ mod tests {
         // Decrease reserves to very low amount - should work since no deposits
         let msg = crate::wire::messages::ReservesDecreaseMsg {
             new_amount: 1_000,
-            partner_id: partner,
+            reserves_id: partner,
         };
 
         let result = handler.validate_reserves_decrease(&msg, operator);
@@ -1310,7 +1310,7 @@ mod tests {
         let sender = create_test_pubkey(186);
 
         let msg = crate::wire::messages::LedgerCloseMsg {
-            partner_id: handler.our_node_id,
+            reserves_id: handler.our_node_id,
         };
 
         let result = handler.validate_ledger_close(&msg, sender);
@@ -1337,9 +1337,9 @@ mod tests {
             ledgers.insert((operator, partner), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
         }
 
-        // Close message with wrong partner_id
+        // Close message with wrong reserves_id
         let msg = crate::wire::messages::LedgerCloseMsg {
-            partner_id: create_test_pubkey(188), // Wrong partner
+            reserves_id: create_test_pubkey(188), // Wrong partner
         };
 
         let result = handler.validate_ledger_close(&msg, operator);
@@ -1371,7 +1371,7 @@ mod tests {
         }
 
         let msg = crate::wire::messages::LedgerCloseMsg {
-            partner_id: partner,
+            reserves_id: partner,
         };
 
         let result = handler.validate_ledger_close(&msg, operator);
@@ -1403,7 +1403,7 @@ mod tests {
         }
 
         let msg = crate::wire::messages::LedgerCloseMsg {
-            partner_id: partner,
+            reserves_id: partner,
         };
 
         let result = handler.validate_ledger_close(&msg, operator);
@@ -1431,7 +1431,7 @@ mod tests {
         }
 
         let msg = crate::wire::messages::LedgerCloseMsg {
-            partner_id: partner,
+            reserves_id: partner,
         };
 
         let result = handler.validate_ledger_close(&msg, operator);
@@ -1461,7 +1461,7 @@ mod tests {
         }
 
         let msg = crate::wire::messages::LedgerCloseMsg {
-            partner_id: partner,
+            reserves_id: partner,
         };
 
         let result = handler.validate_ledger_close(&msg, operator);

@@ -251,7 +251,7 @@ where
         use deposits_core::messages::CoordinationMsg;
         let message = DepositsMessage::Coordination(CoordinationMsg::CosignInvoice {
             operator_id: self.our_node_id,
-            partner_id: partner_node_id,
+            reserves_id: partner_node_id,
             amount,
             payment_hash,
             expires,
@@ -368,7 +368,7 @@ where
             min_protocol_version: 1,
             features: 0,
             operator_id: self.our_node_id,
-            partner_id: partner_node_id,
+            reserves_id: partner_node_id,
             ledger_address: ledger_address.to_string(),
             funding_txid,
             funding_vout,
@@ -580,7 +580,7 @@ where
             min_protocol_version: 1,
             features: 0,
             operator_id: self.our_node_id,
-            partner_id: partner_node_id,
+            reserves_id: partner_node_id,
             ledger_address: ledger_addr_str,
             funding_txid,
             funding_vout,

@@ -19,7 +19,7 @@ pub trait ChannelLocks {
     /// This prevents commitment signature races when multiple operations
     /// happen in parallel on the same Lightning channel
     /// The lock is automatically released when the function returns
-    fn with_channel_lock<F, R>(&self, operator_id: PublicKey, partner_id: PublicKey, f: F) -> R
+    fn with_channel_lock<F, R>(&self, operator_id: PublicKey, reserves_id: PublicKey, f: F) -> R
     where
         F: FnOnce() -> R;
 
@@ -29,7 +29,7 @@ pub trait ChannelLocks {
     fn acquire_channel_lock_async(
         &self,
         operator_id: PublicKey,
-        partner_id: PublicKey,
+        reserves_id: PublicKey,
     ) -> impl std::future::Future<Output = tokio::sync::OwnedMutexGuard<()>> + Send;
 
     /// Acquire channel lock for a deposit (finds the partner and acquires the lock)
@@ -47,13 +47,13 @@ impl<L: Deref + Clone + Send + Sync> ChannelLocks for DepositsHandler<L>
 where
     L::Target: LdkLogger,
 {
-    fn with_channel_lock<F, R>(&self, operator_id: PublicKey, partner_id: PublicKey, f: F) -> R
+    fn with_channel_lock<F, R>(&self, operator_id: PublicKey, reserves_id: PublicKey, f: F) -> R
     where
         F: FnOnce() -> R,
     {
         let lock = {
             let mut locks = self.channel_operation_locks.lock().unwrap();
-            locks.entry((operator_id, partner_id))
+            locks.entry((operator_id, reserves_id))
                 .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
                 .clone()
         };
@@ -64,11 +64,11 @@ where
     async fn acquire_channel_lock_async(
         &self,
         operator_id: PublicKey,
-        partner_id: PublicKey,
+        reserves_id: PublicKey,
     ) -> tokio::sync::OwnedMutexGuard<()> {
         let lock = {
             let mut locks = self.channel_operation_locks_async.lock().await;
-            locks.entry((operator_id, partner_id))
+            locks.entry((operator_id, reserves_id))
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                 .clone()
         };
@@ -79,8 +79,8 @@ where
         &self,
         deposit_pubkey: PublicKey,
     ) -> Option<tokio::sync::OwnedMutexGuard<()>> {
-        let partner_id = self.find_partner_for_deposit(deposit_pubkey)?;
-        Some(self.acquire_channel_lock_async(self.our_node_id, partner_id).await)
+        let reserves_id = self.find_partner_for_deposit(deposit_pubkey)?;
+        Some(self.acquire_channel_lock_async(self.our_node_id, reserves_id).await)
     }
 
     fn our_node_id(&self) -> PublicKey {

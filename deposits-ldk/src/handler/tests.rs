@@ -79,22 +79,22 @@ fn test_handler_creation() {
 #[test]
 fn test_protocol_registration() {
     let handler = create_test_handler();
-    let partner_key = create_test_pubkey();
+    let reserves_key = create_test_pubkey();
     let protocol = create_test_protocol();
 
     // Register protocol
-    handler.add_protocol(partner_key, Arc::clone(&protocol));
+    handler.add_protocol(reserves_key, Arc::clone(&protocol));
 
     // Verify registration
-    let retrieved_protocol = handler.get_protocol(&partner_key);
+    let retrieved_protocol = handler.get_protocol(&reserves_key);
     assert!(retrieved_protocol.is_some());
 
     let stats = handler.get_protocol_stats();
     assert_eq!(stats.active_partners, 1);
 
     // Test removal
-    handler.remove_protocol(&partner_key);
-    assert!(handler.get_protocol(&partner_key).is_none());
+    handler.remove_protocol(&reserves_key);
+    assert!(handler.get_protocol(&reserves_key).is_none());
 
     let stats = handler.get_protocol_stats();
     assert_eq!(stats.active_partners, 0);
@@ -210,7 +210,7 @@ fn create_test_pubkey_from_seed(seed: u8) -> PublicKey {
 fn create_test_vote_round(threshold: usize) -> VoteRoundState {
     VoteRoundState {
         operator_id: create_test_pubkey_from_seed(1),
-        partner_id: create_test_pubkey_from_seed(2),
+        reserves_id: create_test_pubkey_from_seed(2),
         sequence_number: 42,
         state_hash: [0xAB; 32],
         claimed_reserves: 100_000,
@@ -1104,7 +1104,7 @@ fn test_credit_payment_within_reserves_succeeds() {
         deposit_pubkey,
         amount: 40_000,
         invoice_id: "valid_invoice".to_string(),
-        partner_id: our_node_id,
+        reserves_id: our_node_id,
         sequence_number: 0,
     };
 
@@ -1159,7 +1159,7 @@ fn test_credit_payment_exceeds_reserves_fails() {
         deposit_pubkey,
         amount: 25_000,
         invoice_id: "valid_invoice".to_string(),
-        partner_id: our_node_id,
+        reserves_id: our_node_id,
         sequence_number: 0,
     };
 
@@ -1215,7 +1215,7 @@ fn test_credit_payment_exceeds_collateral_fails() {
         deposit_pubkey,
         amount: 15_000,
         invoice_id: "valid_invoice".to_string(),
-        partner_id: our_node_id,
+        reserves_id: our_node_id,
         sequence_number: 0,
     };
 
@@ -1273,7 +1273,7 @@ fn test_credit_payment_within_collateral_succeeds() {
         deposit_pubkey,
         amount: 15_000,
         invoice_id: "valid_invoice".to_string(),
-        partner_id: our_node_id,
+        reserves_id: our_node_id,
         sequence_number: 0,
     };
 
@@ -1463,7 +1463,7 @@ fn test_collateral_increase_within_reserves_succeeds() {
     // Increase collateral to 50k (still within 100k reserves)
     let msg = CollateralIncreaseMsg {
         new_amount: 50_000,
-        partner_id: our_node_id,
+        reserves_id: our_node_id,
         block_height: 100,
     };
 
@@ -1504,7 +1504,7 @@ fn test_collateral_increase_exceeds_reserves_fails() {
     // Try to increase collateral to 60k (exceeds 50k reserves)
     let msg = CollateralIncreaseMsg {
         new_amount: 60_000,
-        partner_id: our_node_id,
+        reserves_id: our_node_id,
         block_height: 100,
     };
 
@@ -1546,7 +1546,7 @@ fn test_collateral_increase_must_actually_increase() {
     // Try to "increase" to 40k (less than current 50k)
     let msg = CollateralIncreaseMsg {
         new_amount: 40_000,
-        partner_id: our_node_id,
+        reserves_id: our_node_id,
         block_height: 100,
     };
 
@@ -1593,7 +1593,7 @@ fn test_calculate_collateral_with_headroom() {
 fn test_is_deposit_invoice_payment() {
     let handler = create_test_handler();
     let payment_hash = [0xAB; 32];
-    let (deposit_pubkey, partner_id) = {
+    let (deposit_pubkey, reserves_id) = {
         use bitcoin::secp256k1::{Secp256k1, SecretKey};
         let secp = Secp256k1::new();
         let secret = SecretKey::from_slice(&[2; 32]).unwrap();
@@ -1609,7 +1609,7 @@ fn test_is_deposit_invoice_payment() {
     // Register it
     handler.register_deposit_invoice(
         payment_hash,
-        partner_id,
+        reserves_id,
         deposit_pubkey,
         "inv-123".to_string(),
         "lnbc1test".to_string()
@@ -1623,7 +1623,7 @@ fn test_is_deposit_invoice_payment() {
 fn test_get_deposit_for_payment() {
     let handler = create_test_handler();
     let payment_hash = [0xCD; 32];
-    let (deposit_pubkey, partner_id) = {
+    let (deposit_pubkey, reserves_id) = {
         use bitcoin::secp256k1::{Secp256k1, SecretKey};
         let secp = Secp256k1::new();
         let secret = SecretKey::from_slice(&[4; 32]).unwrap();
@@ -1639,7 +1639,7 @@ fn test_get_deposit_for_payment() {
     // Register it
     handler.register_deposit_invoice(
         payment_hash,
-        partner_id,
+        reserves_id,
         deposit_pubkey,
         "inv-456".to_string(),
         "lnbc2test".to_string()
@@ -1649,7 +1649,7 @@ fn test_get_deposit_for_payment() {
     let result = handler.get_deposit_for_payment(&payment_hash);
     assert!(result.is_some());
     let (ret_partner, ret_deposit, ret_invoice_id, ret_bolt11) = result.unwrap();
-    assert_eq!(ret_partner, partner_id);
+    assert_eq!(ret_partner, reserves_id);
     assert_eq!(ret_deposit, deposit_pubkey);
     assert_eq!(ret_invoice_id, "inv-456");
     assert_eq!(ret_bolt11, "lnbc2test");
@@ -1659,7 +1659,7 @@ fn test_get_deposit_for_payment() {
 fn test_get_deposit_invoice_bolt11() {
     let handler = create_test_handler();
     let payment_hash = [0xEF; 32];
-    let (deposit_pubkey, partner_id) = {
+    let (deposit_pubkey, reserves_id) = {
         use bitcoin::secp256k1::{Secp256k1, SecretKey};
         let secp = Secp256k1::new();
         let secret = SecretKey::from_slice(&[6; 32]).unwrap();
@@ -1675,7 +1675,7 @@ fn test_get_deposit_invoice_bolt11() {
     // Register it
     handler.register_deposit_invoice(
         payment_hash,
-        partner_id,
+        reserves_id,
         deposit_pubkey,
         "inv-789".to_string(),
         "lnbc3mytestinvoice".to_string()
@@ -1690,7 +1690,7 @@ fn test_get_deposit_invoice_bolt11() {
 fn test_unregister_deposit_invoice() {
     let handler = create_test_handler();
     let payment_hash = [0x12; 32];
-    let (deposit_pubkey, partner_id) = {
+    let (deposit_pubkey, reserves_id) = {
         use bitcoin::secp256k1::{Secp256k1, SecretKey};
         let secp = Secp256k1::new();
         let secret = SecretKey::from_slice(&[8; 32]).unwrap();
@@ -1703,7 +1703,7 @@ fn test_unregister_deposit_invoice() {
     // Register it
     handler.register_deposit_invoice(
         payment_hash,
-        partner_id,
+        reserves_id,
         deposit_pubkey,
         "inv-abc".to_string(),
         "lnbc4test".to_string()

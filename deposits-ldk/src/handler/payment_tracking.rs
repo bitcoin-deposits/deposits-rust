@@ -25,14 +25,14 @@ where
     fn register_deposit_invoice(
         &self,
         payment_hash: [u8; 32],
-        partner_id: PublicKey,
+        reserves_id: PublicKey,
         deposit_pubkey: PublicKey,
         invoice_id: String,
         bolt11: String,
     ) {
         self.payment_index.register_deposit_invoice(
             payment_hash,
-            partner_id,
+            reserves_id,
             deposit_pubkey,
             invoice_id.clone(),
             bolt11,

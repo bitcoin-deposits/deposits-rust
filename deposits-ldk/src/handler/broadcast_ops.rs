@@ -28,17 +28,17 @@ where
         partner_signature: Option<[u8; 64]>,
     ) -> Result<(), DepositsError> {
         // Get stored message data
-        let (operator_id, partner_id, original_message, stored_prev_hash, stored_new_hash, chain_index) =
+        let (operator_id, reserves_id, original_message, stored_prev_hash, stored_new_hash, chain_index) =
             self.get_stored_broadcast_message(&message_hash)?;
 
-        if partner_id != original_partner {
+        if reserves_id != original_partner {
             return Err(DepositsError::InvalidState("Mismatched partner for message hash".to_string()));
         }
 
         // Get all recipients and create signed update
-        let recipients = self.get_broadcast_recipients_internal(operator_id, partner_id, original_partner);
+        let recipients = self.get_broadcast_recipients_internal(operator_id, reserves_id, original_partner);
         let signed_update = self.create_and_store_signed_update(
-            &original_message, operator_id, partner_id, chain_index,
+            &original_message, operator_id, reserves_id, chain_index,
             stored_prev_hash, stored_new_hash, partner_signature,
         );
 
@@ -137,7 +137,7 @@ where
 
             let msg = if let Some(ref update) = signed {
                 DepositsMessage::SyncResponse(super::messages::SyncResponseMsg {
-                    operator_id: update.operator_id, partner_id: update.partner_id,
+                    operator_id: update.operator_id, reserves_id: update.reserves_id,
                     request_hash: [0u8; 32], updates: vec![update.clone()],
                     current_sequence: update.sequence_number, current_hash: update.current_hash,
                 })

@@ -26,13 +26,13 @@ where
     L: Deref + Clone + Send + Sync,
     L::Target: LdkLogger,
 {
-    let partner_id = PublicKey::from_str(&request.partner_node_id)
+    let reserves_id = PublicKey::from_str(&request.partner_node_id)
         .map_err(|_| DepositsError {
             code: "INVALID_PUBKEY".into(),
             message: "Invalid partner_node_id".into(),
         })?;
 
-    let status = handler.get_channel_reserves_status(partner_id)
+    let status = handler.get_channel_reserves_status(reserves_id)
         .map_err(|e| DepositsError {
             code: "STATUS_FAILED".into(),
             message: format!("{:?}", e),
@@ -56,13 +56,13 @@ where
     L: Deref + Clone + Send + Sync,
     L::Target: LdkLogger,
 {
-    let partner_id = PublicKey::from_str(&request.partner_node_id)
+    let reserves_id = PublicKey::from_str(&request.partner_node_id)
         .map_err(|_| DepositsError {
             code: "INVALID_PUBKEY".into(),
             message: "Invalid partner_node_id".into(),
         })?;
 
-    handler.add_reserves_to_channel(partner_id, request.amount_sat)
+    handler.add_reserves_to_channel(reserves_id, request.amount_sat)
         .map_err(|e| DepositsError {
             code: "ADD_FAILED".into(),
             message: format!("{:?}", e),
@@ -81,14 +81,14 @@ where
     L: Deref + Clone + Send + Sync,
     L::Target: LdkLogger,
 {
-    let partner_id = PublicKey::from_str(&request.partner_node_id)
+    let reserves_id = PublicKey::from_str(&request.partner_node_id)
         .map_err(|_| DepositsError {
             code: "INVALID_PUBKEY".into(),
             message: "Invalid partner_node_id".into(),
         })?;
 
     // Use async method - it works when deposits are 0 (excess = full amount)
-    handler.reclaim_excess_reserves_async(partner_id, request.amount_sat).await
+    handler.reclaim_excess_reserves_async(reserves_id, request.amount_sat).await
         .map_err(|e| DepositsError {
             code: "REDUCE_FAILED".into(),
             message: format!("{:?}", e),
@@ -108,14 +108,14 @@ where
     L: Deref + Clone + Send + Sync,
     L::Target: LdkLogger,
 {
-    let partner_id = PublicKey::from_str(&request.partner_node_id)
+    let reserves_id = PublicKey::from_str(&request.partner_node_id)
         .map_err(|_| DepositsError {
             code: "INVALID_PUBKEY".into(),
             message: "Invalid partner_node_id".into(),
         })?;
 
     // Use async method - it works properly in the async server context
-    handler.remove_reserves_async(partner_id).await
+    handler.remove_reserves_async(reserves_id).await
         .map_err(|e| DepositsError {
             code: "REMOVE_FAILED".into(),
             message: format!("{:?}", e),

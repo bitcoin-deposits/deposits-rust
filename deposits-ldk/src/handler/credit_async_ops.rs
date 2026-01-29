@@ -173,7 +173,7 @@ where
                 // Build V2 LedgerUpdate message with PaymentCredit operation
                 let update_msg = LedgerUpdateMsg::new_with_operation(
                     ledger.operator_key(),
-                    ledger.partner_key(),
+                    ledger.reserves_key(),
                     LedgerOperation::PaymentCredit {
                         payment_hash,
                         deposit_pubkey,

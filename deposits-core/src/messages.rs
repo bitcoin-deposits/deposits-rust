@@ -388,19 +388,19 @@ impl DepositsMessage {
         }
     }
 
-    /// Get the partner_id if present in the message
-    pub fn partner_id(&self) -> Option<PublicKey> {
+    /// Get the reserves_id if present in the message
+    pub fn reserves_id(&self) -> Option<PublicKey> {
         match self {
-            Self::LedgerUpdate(m) => Some(m.partner_id),
-            Self::LedgerUpdateResponse(m) => Some(m.partner_id),
-            Self::Handshake(m) => Some(m.partner_id),
-            Self::HandshakeResponse(m) => Some(m.partner_id),
-            Self::Sync(m) => Some(m.partner_id),
-            Self::SyncResponse(m) => Some(m.partner_id),
-            Self::Recovery(m) => m.partner_id(),
-            Self::RecoveryResponse(m) => m.partner_id(),
-            Self::Coordination(m) => m.partner_id(),
-            Self::CoordinationResponse(m) => m.partner_id(),
+            Self::LedgerUpdate(m) => Some(m.reserves_id),
+            Self::LedgerUpdateResponse(m) => Some(m.reserves_id),
+            Self::Handshake(m) => Some(m.reserves_id),
+            Self::HandshakeResponse(m) => Some(m.reserves_id),
+            Self::Sync(m) => Some(m.reserves_id),
+            Self::SyncResponse(m) => Some(m.reserves_id),
+            Self::Recovery(m) => m.reserves_id(),
+            Self::RecoveryResponse(m) => m.reserves_id(),
+            Self::Coordination(m) => m.reserves_id(),
+            Self::CoordinationResponse(m) => m.reserves_id(),
             Self::Relay(_) => None,
             Self::RelayResponse(_) => None,
         }
@@ -443,8 +443,8 @@ impl DepositsMessage {
 pub struct LedgerUpdateMsg {
     /// Operator's public key
     pub operator_id: PublicKey,
-    /// Partner's public key
-    pub partner_id: PublicKey,
+    /// Reserves identifier
+    pub reserves_id: PublicKey,
     /// The operation to perform
     pub operation: LedgerOperation,
     /// Sequence number in the ledger chain
@@ -462,8 +462,8 @@ pub struct LedgerUpdateMsg {
 pub struct LedgerUpdateResponseMsg {
     /// Operator's public key
     pub operator_id: PublicKey,
-    /// Partner's public key
-    pub partner_id: PublicKey,
+    /// Reserves identifier
+    pub reserves_id: PublicKey,
     /// Hash of the request being responded to
     pub request_hash: [u8; 32],
     /// Whether the update was accepted
@@ -662,8 +662,8 @@ pub struct HandshakeMsg {
     pub features: u32,
     /// Operator's public key
     pub operator_id: PublicKey,
-    /// Partner's public key
-    pub partner_id: PublicKey,
+    /// Reserves identifier
+    pub reserves_id: PublicKey,
     /// Ledger address string
     pub ledger_address: String,
     /// Funding transaction ID (reserves UTXO)
@@ -694,8 +694,8 @@ pub struct HandshakeResponseMsg {
     pub accepted: bool,
     /// Error reason if rejected
     pub error: Option<String>,
-    /// Partner's public key
-    pub partner_id: PublicKey,
+    /// Reserves identifier
+    pub reserves_id: PublicKey,
 }
 
 // ============================================================================
@@ -706,7 +706,7 @@ pub struct HandshakeResponseMsg {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SyncMsg {
     pub operator_id: PublicKey,
-    pub partner_id: PublicKey,
+    pub reserves_id: PublicKey,
     pub last_known_sequence: u64,
     pub last_known_hash: [u8; 32],
 }
@@ -715,7 +715,7 @@ pub struct SyncMsg {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SyncResponseMsg {
     pub operator_id: PublicKey,
-    pub partner_id: PublicKey,
+    pub reserves_id: PublicKey,
     pub request_hash: [u8; 32],
     /// Signed updates since last_known_sequence (uses storage format - bytes are bytes)
     pub updates: Vec<StorageSignedLedgerUpdate>,
@@ -782,7 +782,7 @@ pub enum RecoveryMsg {
 }
 
 impl RecoveryMsg {
-    pub fn partner_id(&self) -> Option<PublicKey> {
+    pub fn reserves_id(&self) -> Option<PublicKey> {
         match self {
             Self::Vote { partner, .. } => Some(*partner),
             Self::ClaimRequest { partner, .. } => Some(*partner),
@@ -818,7 +818,7 @@ pub enum RecoveryResponseMsg {
 }
 
 impl RecoveryResponseMsg {
-    pub fn partner_id(&self) -> Option<PublicKey> {
+    pub fn reserves_id(&self) -> Option<PublicKey> {
         None // Recovery responses don't have a specific partner
     }
 }
@@ -833,7 +833,7 @@ pub enum CoordinationMsg {
     /// Request partner to cosign an invoice
     CosignInvoice {
         operator_id: PublicKey,
-        partner_id: PublicKey,
+        reserves_id: PublicKey,
         /// Invoice details for cosigning
         amount: u64,
         payment_hash: [u8; 32],
@@ -845,14 +845,14 @@ pub enum CoordinationMsg {
     /// Request consent for collateral registration
     CollateralConsentRequest {
         operator_id: PublicKey,
-        partner_id: PublicKey,
+        reserves_id: PublicKey,
         operator_signature: [u8; 64],
     },
     /// Quorum join request
     QuorumJoinRequest {
         requester_pubkey: PublicKey,
         operator_id: PublicKey,
-        partner_id: PublicKey,
+        reserves_id: PublicKey,
         protocol_version: u16,
         timestamp: u64,
         signature: [u8; 64],
@@ -861,7 +861,7 @@ pub enum CoordinationMsg {
     QuorumVoteRequest {
         vote_round_id: [u8; 32],
         operator_id: PublicKey,
-        partner_id: PublicKey,
+        reserves_id: PublicKey,
         sequence_number: u64,
         state_hash: [u8; 32],
         claimed_reserves: u64,
@@ -893,12 +893,12 @@ pub enum CoordinationMsg {
 }
 
 impl CoordinationMsg {
-    pub fn partner_id(&self) -> Option<PublicKey> {
+    pub fn reserves_id(&self) -> Option<PublicKey> {
         match self {
-            Self::CosignInvoice { partner_id, .. } => Some(*partner_id),
-            Self::CollateralConsentRequest { partner_id, .. } => Some(*partner_id),
-            Self::QuorumJoinRequest { partner_id, .. } => Some(*partner_id),
-            Self::QuorumVoteRequest { partner_id, .. } => Some(*partner_id),
+            Self::CosignInvoice { reserves_id, .. } => Some(*reserves_id),
+            Self::CollateralConsentRequest { reserves_id, .. } => Some(*reserves_id),
+            Self::QuorumJoinRequest { reserves_id, .. } => Some(*reserves_id),
+            Self::QuorumVoteRequest { reserves_id, .. } => Some(*reserves_id),
             Self::QuorumVote { .. } => None,
             Self::UpdateReserves { .. } => None, // Channel-level, not ledger-level
         }
@@ -917,7 +917,7 @@ pub enum CoordinationResponseMsg {
     CollateralConsentResponse {
         request_hash: [u8; 32],
         operator_id: PublicKey,
-        partner_id: PublicKey,
+        reserves_id: PublicKey,
         consent_granted: bool,
         collateral_partner_signature: [u8; 64],
     },
@@ -935,7 +935,7 @@ pub enum CoordinationResponseMsg {
     QuorumStateSync {
         request_hash: [u8; 32],
         operator_id: PublicKey,
-        partner_id: PublicKey,
+        reserves_id: PublicKey,
         updates: Vec<StorageSignedLedgerUpdate>,
         start_sequence: u64,
         is_final: bool,
@@ -944,7 +944,7 @@ pub enum CoordinationResponseMsg {
     QuorumMembershipChange {
         request_hash: [u8; 32],
         operator_id: PublicKey,
-        partner_id: PublicKey,
+        reserves_id: PublicKey,
         change_type: String,
         member_pubkey: PublicKey,
         new_members: Vec<PublicKey>,
@@ -959,13 +959,13 @@ pub enum CoordinationResponseMsg {
 }
 
 impl CoordinationResponseMsg {
-    pub fn partner_id(&self) -> Option<PublicKey> {
+    pub fn reserves_id(&self) -> Option<PublicKey> {
         match self {
             Self::InvoiceCosigned { .. } => None,
-            Self::CollateralConsentResponse { partner_id, .. } => Some(*partner_id),
+            Self::CollateralConsentResponse { reserves_id, .. } => Some(*reserves_id),
             Self::QuorumJoinResponse { .. } => None,
-            Self::QuorumStateSync { partner_id, .. } => Some(*partner_id),
-            Self::QuorumMembershipChange { partner_id, .. } => Some(*partner_id),
+            Self::QuorumStateSync { reserves_id, .. } => Some(*reserves_id),
+            Self::QuorumMembershipChange { reserves_id, .. } => Some(*reserves_id),
             Self::AcceptReserves { .. } => None, // Channel-level, not ledger-level
         }
     }
@@ -1465,7 +1465,7 @@ impl BinaryCodec for LedgerOperation {
 impl BinaryCodec for LedgerUpdateMsg {
     fn write_to<W: Write>(&self, w: &mut W) -> Result<(), CodecError> {
         write_pubkey(w, &self.operator_id)?;
-        write_pubkey(w, &self.partner_id)?;
+        write_pubkey(w, &self.reserves_id)?;
         self.operation.write_to(w)?;
         write_u64(w, self.sequence_number)?;
         write_32(w, &self.previous_hash)?;
@@ -1477,7 +1477,7 @@ impl BinaryCodec for LedgerUpdateMsg {
     fn read_from<R: Read>(r: &mut R) -> Result<Self, CodecError> {
         Ok(Self {
             operator_id: read_pubkey(r)?,
-            partner_id: read_pubkey(r)?,
+            reserves_id: read_pubkey(r)?,
             operation: LedgerOperation::read_from(r)?,
             sequence_number: read_u64(r)?,
             previous_hash: read_32(r)?,
@@ -1493,7 +1493,7 @@ impl BinaryCodec for StorageSignedLedgerUpdate {
         write_bytes(w, &self.message)?;
         write_u16(w, self.message_type)?;
         write_pubkey(w, &self.operator_id)?;
-        write_pubkey(w, &self.partner_id)?;
+        write_pubkey(w, &self.reserves_id)?;
         write_u64(w, self.sequence_number)?;
         write_32(w, &self.previous_hash)?;
         write_32(w, &self.current_hash)?;
@@ -1508,7 +1508,7 @@ impl BinaryCodec for StorageSignedLedgerUpdate {
             message: read_bytes(r)?,
             message_type: read_u16(r)?,
             operator_id: read_pubkey(r)?,
-            partner_id: read_pubkey(r)?,
+            reserves_id: read_pubkey(r)?,
             sequence_number: read_u64(r)?,
             previous_hash: read_32(r)?,
             current_hash: read_32(r)?,
@@ -1525,7 +1525,7 @@ impl DepositsMessage {
         match self {
             Self::LedgerUpdate(m) => {
                 write_pubkey(w, &m.operator_id)?;
-                write_pubkey(w, &m.partner_id)?;
+                write_pubkey(w, &m.reserves_id)?;
                 m.operation.write_to(w)?;
                 write_u64(w, m.sequence_number)?;
                 write_32(w, &m.previous_hash)?;
@@ -1534,7 +1534,7 @@ impl DepositsMessage {
             }
             Self::LedgerUpdateResponse(m) => {
                 write_pubkey(w, &m.operator_id)?;
-                write_pubkey(w, &m.partner_id)?;
+                write_pubkey(w, &m.reserves_id)?;
                 write_32(w, &m.request_hash)?;
                 write_bool(w, m.accepted)?;
                 write_option(w, &m.error, |w, s| write_string(w, s))?;
@@ -1547,7 +1547,7 @@ impl DepositsMessage {
                 write_u16(w, m.min_protocol_version)?;
                 write_u32(w, m.features)?;
                 write_pubkey(w, &m.operator_id)?;
-                write_pubkey(w, &m.partner_id)?;
+                write_pubkey(w, &m.reserves_id)?;
                 write_string(w, &m.ledger_address)?;
                 write_32(w, &m.funding_txid)?;
                 write_u16(w, m.funding_vout)?;
@@ -1559,17 +1559,17 @@ impl DepositsMessage {
                 write_u16(w, m.protocol_version)?;
                 write_bool(w, m.accepted)?;
                 write_option(w, &m.error, |w, s| write_string(w, s))?;
-                write_pubkey(w, &m.partner_id)?;
+                write_pubkey(w, &m.reserves_id)?;
             }
             Self::Sync(m) => {
                 write_pubkey(w, &m.operator_id)?;
-                write_pubkey(w, &m.partner_id)?;
+                write_pubkey(w, &m.reserves_id)?;
                 write_u64(w, m.last_known_sequence)?;
                 write_32(w, &m.last_known_hash)?;
             }
             Self::SyncResponse(m) => {
                 write_pubkey(w, &m.operator_id)?;
-                write_pubkey(w, &m.partner_id)?;
+                write_pubkey(w, &m.reserves_id)?;
                 write_32(w, &m.request_hash)?;
                 write_vec(w, &m.updates, |w, u| u.write_to(w))?;
                 write_u64(w, m.current_sequence)?;
@@ -1589,7 +1589,7 @@ impl DepositsMessage {
         match message_type {
             LEDGER_UPDATE => Ok(Self::LedgerUpdate(LedgerUpdateMsg {
                 operator_id: read_pubkey(r)?,
-                partner_id: read_pubkey(r)?,
+                reserves_id: read_pubkey(r)?,
                 operation: LedgerOperation::read_from(r)?,
                 sequence_number: read_u64(r)?,
                 previous_hash: read_32(r)?,
@@ -1598,7 +1598,7 @@ impl DepositsMessage {
             })),
             LEDGER_UPDATE_RESPONSE => Ok(Self::LedgerUpdateResponse(LedgerUpdateResponseMsg {
                 operator_id: read_pubkey(r)?,
-                partner_id: read_pubkey(r)?,
+                reserves_id: read_pubkey(r)?,
                 request_hash: read_32(r)?,
                 accepted: read_bool(r)?,
                 error: read_option(r, read_string)?,
@@ -1611,7 +1611,7 @@ impl DepositsMessage {
                 min_protocol_version: read_u16(r)?,
                 features: read_u32(r)?,
                 operator_id: read_pubkey(r)?,
-                partner_id: read_pubkey(r)?,
+                reserves_id: read_pubkey(r)?,
                 ledger_address: read_string(r)?,
                 funding_txid: read_32(r)?,
                 funding_vout: read_u16(r)?,
@@ -1623,17 +1623,17 @@ impl DepositsMessage {
                 protocol_version: read_u16(r)?,
                 accepted: read_bool(r)?,
                 error: read_option(r, read_string)?,
-                partner_id: read_pubkey(r)?,
+                reserves_id: read_pubkey(r)?,
             })),
             SYNC => Ok(Self::Sync(SyncMsg {
                 operator_id: read_pubkey(r)?,
-                partner_id: read_pubkey(r)?,
+                reserves_id: read_pubkey(r)?,
                 last_known_sequence: read_u64(r)?,
                 last_known_hash: read_32(r)?,
             })),
             SYNC_RESPONSE => Ok(Self::SyncResponse(SyncResponseMsg {
                 operator_id: read_pubkey(r)?,
-                partner_id: read_pubkey(r)?,
+                reserves_id: read_pubkey(r)?,
                 request_hash: read_32(r)?,
                 updates: read_vec(r, StorageSignedLedgerUpdate::read_from)?,
                 current_sequence: read_u64(r)?,
@@ -1804,10 +1804,10 @@ impl BinaryCodec for RecoveryResponseMsg {
 impl BinaryCodec for CoordinationMsg {
     fn write_to<W: Write>(&self, w: &mut W) -> Result<(), CodecError> {
         match self {
-            Self::CosignInvoice { operator_id, partner_id, amount, payment_hash, expires, assigned_deposit, invoice_id, bolt11_invoice } => {
+            Self::CosignInvoice { operator_id, reserves_id, amount, payment_hash, expires, assigned_deposit, invoice_id, bolt11_invoice } => {
                 write_u8(w, 0)?;
                 write_pubkey(w, operator_id)?;
-                write_pubkey(w, partner_id)?;
+                write_pubkey(w, reserves_id)?;
                 write_u64(w, *amount)?;
                 write_32(w, payment_hash)?;
                 write_u64(w, *expires)?;
@@ -1815,26 +1815,26 @@ impl BinaryCodec for CoordinationMsg {
                 write_string(w, invoice_id)?;
                 write_string(w, bolt11_invoice)?;
             }
-            Self::CollateralConsentRequest { operator_id, partner_id, operator_signature } => {
+            Self::CollateralConsentRequest { operator_id, reserves_id, operator_signature } => {
                 write_u8(w, 1)?;
                 write_pubkey(w, operator_id)?;
-                write_pubkey(w, partner_id)?;
+                write_pubkey(w, reserves_id)?;
                 write_64(w, operator_signature)?;
             }
-            Self::QuorumJoinRequest { requester_pubkey, operator_id, partner_id, protocol_version, timestamp, signature } => {
+            Self::QuorumJoinRequest { requester_pubkey, operator_id, reserves_id, protocol_version, timestamp, signature } => {
                 write_u8(w, 2)?;
                 write_pubkey(w, requester_pubkey)?;
                 write_pubkey(w, operator_id)?;
-                write_pubkey(w, partner_id)?;
+                write_pubkey(w, reserves_id)?;
                 write_u16(w, *protocol_version)?;
                 write_u64(w, *timestamp)?;
                 write_64(w, signature)?;
             }
-            Self::QuorumVoteRequest { vote_round_id, operator_id, partner_id, sequence_number, state_hash, claimed_reserves, collateral_amounts, reserves_outpoint, destination_script, fee_rate_sat_vbyte, timestamp } => {
+            Self::QuorumVoteRequest { vote_round_id, operator_id, reserves_id, sequence_number, state_hash, claimed_reserves, collateral_amounts, reserves_outpoint, destination_script, fee_rate_sat_vbyte, timestamp } => {
                 write_u8(w, 3)?;
                 write_32(w, vote_round_id)?;
                 write_pubkey(w, operator_id)?;
-                write_pubkey(w, partner_id)?;
+                write_pubkey(w, reserves_id)?;
                 write_u64(w, *sequence_number)?;
                 write_32(w, state_hash)?;
                 write_u64(w, *claimed_reserves)?;
@@ -1871,7 +1871,7 @@ impl BinaryCodec for CoordinationMsg {
         match read_u8(r)? {
             0 => Ok(Self::CosignInvoice {
                 operator_id: read_pubkey(r)?,
-                partner_id: read_pubkey(r)?,
+                reserves_id: read_pubkey(r)?,
                 amount: read_u64(r)?,
                 payment_hash: read_32(r)?,
                 expires: read_u64(r)?,
@@ -1881,13 +1881,13 @@ impl BinaryCodec for CoordinationMsg {
             }),
             1 => Ok(Self::CollateralConsentRequest {
                 operator_id: read_pubkey(r)?,
-                partner_id: read_pubkey(r)?,
+                reserves_id: read_pubkey(r)?,
                 operator_signature: read_64(r)?,
             }),
             2 => Ok(Self::QuorumJoinRequest {
                 requester_pubkey: read_pubkey(r)?,
                 operator_id: read_pubkey(r)?,
-                partner_id: read_pubkey(r)?,
+                reserves_id: read_pubkey(r)?,
                 protocol_version: read_u16(r)?,
                 timestamp: read_u64(r)?,
                 signature: read_64(r)?,
@@ -1895,7 +1895,7 @@ impl BinaryCodec for CoordinationMsg {
             3 => Ok(Self::QuorumVoteRequest {
                 vote_round_id: read_32(r)?,
                 operator_id: read_pubkey(r)?,
-                partner_id: read_pubkey(r)?,
+                reserves_id: read_pubkey(r)?,
                 sequence_number: read_u64(r)?,
                 state_hash: read_32(r)?,
                 claimed_reserves: read_u64(r)?,
@@ -1936,11 +1936,11 @@ impl BinaryCodec for CoordinationResponseMsg {
                 write_32(w, request_hash)?;
                 write_64(w, cosignature)?;
             }
-            Self::CollateralConsentResponse { request_hash, operator_id, partner_id, consent_granted, collateral_partner_signature } => {
+            Self::CollateralConsentResponse { request_hash, operator_id, reserves_id, consent_granted, collateral_partner_signature } => {
                 write_u8(w, 1)?;
                 write_32(w, request_hash)?;
                 write_pubkey(w, operator_id)?;
-                write_pubkey(w, partner_id)?;
+                write_pubkey(w, reserves_id)?;
                 write_bool(w, *consent_granted)?;
                 write_64(w, collateral_partner_signature)?;
             }
@@ -1954,20 +1954,20 @@ impl BinaryCodec for CoordinationResponseMsg {
                 write_32(w, current_hash)?;
                 write_option(w, rejection_reason, |w, s| write_string(w, s))?;
             }
-            Self::QuorumStateSync { request_hash, operator_id, partner_id, updates, start_sequence, is_final } => {
+            Self::QuorumStateSync { request_hash, operator_id, reserves_id, updates, start_sequence, is_final } => {
                 write_u8(w, 3)?;
                 write_32(w, request_hash)?;
                 write_pubkey(w, operator_id)?;
-                write_pubkey(w, partner_id)?;
+                write_pubkey(w, reserves_id)?;
                 write_vec(w, updates, |w, u| u.write_to(w))?;
                 write_u64(w, *start_sequence)?;
                 write_bool(w, *is_final)?;
             }
-            Self::QuorumMembershipChange { request_hash, operator_id, partner_id, change_type, member_pubkey, new_members, new_threshold, timestamp, operator_signature } => {
+            Self::QuorumMembershipChange { request_hash, operator_id, reserves_id, change_type, member_pubkey, new_members, new_threshold, timestamp, operator_signature } => {
                 write_u8(w, 4)?;
                 write_32(w, request_hash)?;
                 write_pubkey(w, operator_id)?;
-                write_pubkey(w, partner_id)?;
+                write_pubkey(w, reserves_id)?;
                 write_string(w, change_type)?;
                 write_pubkey(w, member_pubkey)?;
                 write_vec(w, new_members, |w, pk| write_pubkey(w, pk))?;
@@ -1992,7 +1992,7 @@ impl BinaryCodec for CoordinationResponseMsg {
             1 => Ok(Self::CollateralConsentResponse {
                 request_hash: read_32(r)?,
                 operator_id: read_pubkey(r)?,
-                partner_id: read_pubkey(r)?,
+                reserves_id: read_pubkey(r)?,
                 consent_granted: read_bool(r)?,
                 collateral_partner_signature: read_64(r)?,
             }),
@@ -2008,7 +2008,7 @@ impl BinaryCodec for CoordinationResponseMsg {
             3 => Ok(Self::QuorumStateSync {
                 request_hash: read_32(r)?,
                 operator_id: read_pubkey(r)?,
-                partner_id: read_pubkey(r)?,
+                reserves_id: read_pubkey(r)?,
                 updates: read_vec(r, StorageSignedLedgerUpdate::read_from)?,
                 start_sequence: read_u64(r)?,
                 is_final: read_bool(r)?,
@@ -2016,7 +2016,7 @@ impl BinaryCodec for CoordinationResponseMsg {
             4 => Ok(Self::QuorumMembershipChange {
                 request_hash: read_32(r)?,
                 operator_id: read_pubkey(r)?,
-                partner_id: read_pubkey(r)?,
+                reserves_id: read_pubkey(r)?,
                 change_type: read_string(r)?,
                 member_pubkey: read_pubkey(r)?,
                 new_members: read_vec(r, read_pubkey)?,
@@ -2431,7 +2431,7 @@ impl TlvDecode for LedgerOperation {
 /// TLV field type constants for LedgerUpdateMsg
 mod ledger_update_tlv {
     pub const OPERATOR_ID: u64 = 0;
-    pub const PARTNER_ID: u64 = 2;
+    pub const RESERVES_ID: u64 = 2;
     pub const OPERATION: u64 = 4;
     pub const SEQUENCE_NUMBER: u64 = 6;
     pub const PREVIOUS_HASH: u64 = 8;
@@ -2444,7 +2444,7 @@ impl TlvEncode for LedgerUpdateMsg {
         use ledger_update_tlv::*;
         TlvBuilder::new()
             .pubkey_field(OPERATOR_ID, &self.operator_id)
-            .pubkey_field(PARTNER_ID, &self.partner_id)
+            .pubkey_field(RESERVES_ID, &self.reserves_id)
             .nested(OPERATION, &self.operation)
             .u64_field(SEQUENCE_NUMBER, self.sequence_number)
             .bytes_field(PREVIOUS_HASH, &self.previous_hash)
@@ -2460,7 +2460,7 @@ impl TlvDecode for LedgerUpdateMsg {
         let reader = TlvReader::new(data)?;
         Ok(Self {
             operator_id: reader.read_pubkey(OPERATOR_ID)?,
-            partner_id: reader.read_pubkey(PARTNER_ID)?,
+            reserves_id: reader.read_pubkey(RESERVES_ID)?,
             operation: reader.read_nested(OPERATION)?,
             sequence_number: reader.read_u64(SEQUENCE_NUMBER)?,
             previous_hash: reader.read_bytes(PREVIOUS_HASH)?,
@@ -2473,7 +2473,7 @@ impl TlvDecode for LedgerUpdateMsg {
 /// TLV field type constants for LedgerUpdateResponseMsg
 mod ledger_response_tlv {
     pub const OPERATOR_ID: u64 = 0;
-    pub const PARTNER_ID: u64 = 2;
+    pub const RESERVES_ID: u64 = 2;
     pub const REQUEST_HASH: u64 = 4;
     pub const ACCEPTED: u64 = 6;
     pub const ERROR: u64 = 8;
@@ -2487,7 +2487,7 @@ impl TlvEncode for LedgerUpdateResponseMsg {
         use ledger_response_tlv::*;
         let mut builder = TlvBuilder::new()
             .pubkey_field(OPERATOR_ID, &self.operator_id)
-            .pubkey_field(PARTNER_ID, &self.partner_id)
+            .pubkey_field(RESERVES_ID, &self.reserves_id)
             .bytes_field(REQUEST_HASH, &self.request_hash)
             .u8_field(ACCEPTED, if self.accepted { 1 } else { 0 });
 
@@ -2511,7 +2511,7 @@ impl TlvDecode for LedgerUpdateResponseMsg {
         let reader = TlvReader::new(data)?;
         Ok(Self {
             operator_id: reader.read_pubkey(OPERATOR_ID)?,
-            partner_id: reader.read_pubkey(PARTNER_ID)?,
+            reserves_id: reader.read_pubkey(RESERVES_ID)?,
             request_hash: reader.read_bytes(REQUEST_HASH)?,
             accepted: reader.read_u8(ACCEPTED)? != 0,
             error: reader.read_string_opt(ERROR)?,
@@ -2544,7 +2544,7 @@ impl TlvEncode for HandshakeMsg {
             .u16_field(MIN_PROTOCOL_VERSION, self.min_protocol_version)
             .u32_field(FEATURES, self.features)
             .pubkey_field(OPERATOR_PUBKEY, &self.operator_id)
-            .pubkey_field(PARTNER_PUBKEY, &self.partner_id)
+            .pubkey_field(PARTNER_PUBKEY, &self.reserves_id)
             .string_field(LEDGER_ADDRESS, &self.ledger_address)
             .bytes_field(FUNDING_TXID, &self.funding_txid)
             .u16_field(FUNDING_VOUT, self.funding_vout)
@@ -2563,7 +2563,7 @@ impl TlvDecode for HandshakeMsg {
             min_protocol_version: reader.read_u16(MIN_PROTOCOL_VERSION)?,
             features: reader.read_u32(FEATURES)?,
             operator_id: reader.read_pubkey(OPERATOR_PUBKEY)?,
-            partner_id: reader.read_pubkey(PARTNER_PUBKEY)?,
+            reserves_id: reader.read_pubkey(PARTNER_PUBKEY)?,
             ledger_address: reader.read_string(LEDGER_ADDRESS)?,
             funding_txid: reader.read_bytes(FUNDING_TXID)?,
             funding_vout: reader.read_u16(FUNDING_VOUT)?,
@@ -2594,7 +2594,7 @@ impl TlvEncode for HandshakeResponseMsg {
             builder = builder.string_field(ERROR, err);
         }
 
-        builder.pubkey_field(PARTNER_PUBKEY, &self.partner_id).build()
+        builder.pubkey_field(PARTNER_PUBKEY, &self.reserves_id).build()
     }
 }
 
@@ -2607,7 +2607,7 @@ impl TlvDecode for HandshakeResponseMsg {
             protocol_version: reader.read_u16(PROTOCOL_VERSION)?,
             accepted: reader.read_u8(ACCEPTED)? != 0,
             error: reader.read_string_opt(ERROR)?,
-            partner_id: reader.read_pubkey(PARTNER_PUBKEY)?,
+            reserves_id: reader.read_pubkey(PARTNER_PUBKEY)?,
         })
     }
 }
@@ -2618,7 +2618,7 @@ impl TlvDecode for HandshakeResponseMsg {
 /// TLV for SyncMsg
 mod sync_msg_tlv {
     pub const OPERATOR_ID: u64 = 0;
-    pub const PARTNER_ID: u64 = 2;
+    pub const RESERVES_ID: u64 = 2;
     pub const LAST_KNOWN_SEQUENCE: u64 = 4;
     pub const LAST_KNOWN_HASH: u64 = 6;
 }
@@ -2628,7 +2628,7 @@ impl TlvEncode for SyncMsg {
         use sync_msg_tlv::*;
         TlvBuilder::new()
             .pubkey_field(OPERATOR_ID, &self.operator_id)
-            .pubkey_field(PARTNER_ID, &self.partner_id)
+            .pubkey_field(RESERVES_ID, &self.reserves_id)
             .u64_field(LAST_KNOWN_SEQUENCE, self.last_known_sequence)
             .bytes_field(LAST_KNOWN_HASH, &self.last_known_hash)
             .build()
@@ -2641,7 +2641,7 @@ impl TlvDecode for SyncMsg {
         let reader = TlvReader::new(data)?;
         Ok(Self {
             operator_id: reader.read_pubkey(OPERATOR_ID)?,
-            partner_id: reader.read_pubkey(PARTNER_ID)?,
+            reserves_id: reader.read_pubkey(RESERVES_ID)?,
             last_known_sequence: reader.read_u64(LAST_KNOWN_SEQUENCE)?,
             last_known_hash: reader.read_bytes(LAST_KNOWN_HASH)?,
         })
@@ -2651,7 +2651,7 @@ impl TlvDecode for SyncMsg {
 /// TLV for SyncResponseMsg
 mod sync_response_tlv {
     pub const OPERATOR_ID: u64 = 0;
-    pub const PARTNER_ID: u64 = 2;
+    pub const RESERVES_ID: u64 = 2;
     pub const REQUEST_HASH: u64 = 4;
     pub const UPDATES: u64 = 6;
     pub const CURRENT_SEQUENCE: u64 = 8;
@@ -2663,7 +2663,7 @@ impl TlvEncode for SyncResponseMsg {
         use sync_response_tlv::*;
         TlvBuilder::new()
             .pubkey_field(OPERATOR_ID, &self.operator_id)
-            .pubkey_field(PARTNER_ID, &self.partner_id)
+            .pubkey_field(RESERVES_ID, &self.reserves_id)
             .bytes_field(REQUEST_HASH, &self.request_hash)
             .vec_field(UPDATES, &self.updates)
             .u64_field(CURRENT_SEQUENCE, self.current_sequence)
@@ -2678,7 +2678,7 @@ impl TlvDecode for SyncResponseMsg {
         let reader = TlvReader::new(data)?;
         Ok(Self {
             operator_id: reader.read_pubkey(OPERATOR_ID)?,
-            partner_id: reader.read_pubkey(PARTNER_ID)?,
+            reserves_id: reader.read_pubkey(RESERVES_ID)?,
             request_hash: reader.read_bytes(REQUEST_HASH)?,
             updates: reader.read_vec(UPDATES)?,
             current_sequence: reader.read_u64(CURRENT_SEQUENCE)?,
@@ -2924,7 +2924,7 @@ impl TlvDecode for RecoveryResponseMsg {
 mod coordination_tlv {
     pub const DISCRIMINANT: u64 = 0;
     pub const OPERATOR_ID: u64 = 2;
-    pub const PARTNER_ID: u64 = 4;
+    pub const RESERVES_ID: u64 = 4;
     pub const AMOUNT: u64 = 6;
     pub const PAYMENT_HASH: u64 = 8;
     pub const EXPIRES: u64 = 10;
@@ -2963,13 +2963,13 @@ impl TlvEncode for CoordinationMsg {
         use coordination_tlv::*;
         match self {
             Self::CosignInvoice {
-                operator_id, partner_id, amount, payment_hash, expires,
+                operator_id, reserves_id, amount, payment_hash, expires,
                 assigned_deposit, invoice_id, bolt11_invoice,
             } => {
                 TlvBuilder::new()
                     .u8_field(DISCRIMINANT, 0)
                     .pubkey_field(OPERATOR_ID, operator_id)
-                    .pubkey_field(PARTNER_ID, partner_id)
+                    .pubkey_field(RESERVES_ID, reserves_id)
                     .u64_field(AMOUNT, *amount)
                     .bytes_field(PAYMENT_HASH, payment_hash)
                     .u64_field(EXPIRES, *expires)
@@ -2979,31 +2979,31 @@ impl TlvEncode for CoordinationMsg {
                     .build()
             }
             Self::CollateralConsentRequest {
-                operator_id, partner_id, operator_signature,
+                operator_id, reserves_id, operator_signature,
             } => {
                 TlvBuilder::new()
                     .u8_field(DISCRIMINANT, 1)
                     .pubkey_field(OPERATOR_ID, operator_id)
-                    .pubkey_field(PARTNER_ID, partner_id)
+                    .pubkey_field(RESERVES_ID, reserves_id)
                     .bytes_field(OPERATOR_SIGNATURE, operator_signature)
                     .build()
             }
             Self::QuorumJoinRequest {
-                requester_pubkey, operator_id, partner_id, protocol_version,
+                requester_pubkey, operator_id, reserves_id, protocol_version,
                 timestamp, signature,
             } => {
                 TlvBuilder::new()
                     .u8_field(DISCRIMINANT, 2)
                     .pubkey_field(REQUESTER_PUBKEY, requester_pubkey)
                     .pubkey_field(OPERATOR_ID, operator_id)
-                    .pubkey_field(PARTNER_ID, partner_id)
+                    .pubkey_field(RESERVES_ID, reserves_id)
                     .u16_field(PROTOCOL_VERSION, *protocol_version)
                     .u64_field(TIMESTAMP, *timestamp)
                     .bytes_field(SIGNATURE, signature)
                     .build()
             }
             Self::QuorumVoteRequest {
-                vote_round_id, operator_id, partner_id, sequence_number, state_hash,
+                vote_round_id, operator_id, reserves_id, sequence_number, state_hash,
                 claimed_reserves, collateral_amounts, reserves_outpoint,
                 destination_script, fee_rate_sat_vbyte, timestamp,
             } => {
@@ -3015,7 +3015,7 @@ impl TlvEncode for CoordinationMsg {
                     .u8_field(DISCRIMINANT, 3)
                     .bytes_field(VOTE_ROUND_ID, vote_round_id)
                     .pubkey_field(OPERATOR_ID, operator_id)
-                    .pubkey_field(PARTNER_ID, partner_id)
+                    .pubkey_field(RESERVES_ID, reserves_id)
                     .u64_field(SEQUENCE_NUMBER, *sequence_number)
                     .bytes_field(STATE_HASH, state_hash)
                     .u64_field(CLAIMED_RESERVES, *claimed_reserves)
@@ -3070,7 +3070,7 @@ impl TlvDecode for CoordinationMsg {
         match discriminant {
             0 => Ok(Self::CosignInvoice {
                 operator_id: reader.read_pubkey(OPERATOR_ID)?,
-                partner_id: reader.read_pubkey(PARTNER_ID)?,
+                reserves_id: reader.read_pubkey(RESERVES_ID)?,
                 amount: reader.read_u64(AMOUNT)?,
                 payment_hash: reader.read_bytes(PAYMENT_HASH)?,
                 expires: reader.read_u64(EXPIRES)?,
@@ -3080,13 +3080,13 @@ impl TlvDecode for CoordinationMsg {
             }),
             1 => Ok(Self::CollateralConsentRequest {
                 operator_id: reader.read_pubkey(OPERATOR_ID)?,
-                partner_id: reader.read_pubkey(PARTNER_ID)?,
+                reserves_id: reader.read_pubkey(RESERVES_ID)?,
                 operator_signature: reader.read_bytes(OPERATOR_SIGNATURE)?,
             }),
             2 => Ok(Self::QuorumJoinRequest {
                 requester_pubkey: reader.read_pubkey(REQUESTER_PUBKEY)?,
                 operator_id: reader.read_pubkey(OPERATOR_ID)?,
-                partner_id: reader.read_pubkey(PARTNER_ID)?,
+                reserves_id: reader.read_pubkey(RESERVES_ID)?,
                 protocol_version: reader.read_u16(PROTOCOL_VERSION)?,
                 timestamp: reader.read_u64(TIMESTAMP)?,
                 signature: reader.read_bytes(SIGNATURE)?,
@@ -3101,7 +3101,7 @@ impl TlvDecode for CoordinationMsg {
                 Ok(Self::QuorumVoteRequest {
                     vote_round_id: reader.read_bytes(VOTE_ROUND_ID)?,
                     operator_id: reader.read_pubkey(OPERATOR_ID)?,
-                    partner_id: reader.read_pubkey(PARTNER_ID)?,
+                    reserves_id: reader.read_pubkey(RESERVES_ID)?,
                     sequence_number: reader.read_u64(SEQUENCE_NUMBER)?,
                     state_hash: reader.read_bytes(STATE_HASH)?,
                     claimed_reserves: reader.read_u64(CLAIMED_RESERVES)?,
@@ -3142,7 +3142,7 @@ mod coordination_response_tlv {
     pub const REQUEST_HASH: u64 = 2;
     pub const COSIGNATURE: u64 = 4;
     pub const OPERATOR_ID: u64 = 6;
-    pub const PARTNER_ID: u64 = 8;
+    pub const RESERVES_ID: u64 = 8;
     pub const CONSENT_GRANTED: u64 = 10;
     pub const COLLATERAL_PARTNER_SIGNATURE: u64 = 12;
     pub const ACCEPTED: u64 = 14;
@@ -3176,14 +3176,14 @@ impl TlvEncode for CoordinationResponseMsg {
                     .build()
             }
             Self::CollateralConsentResponse {
-                request_hash, operator_id, partner_id, consent_granted,
+                request_hash, operator_id, reserves_id, consent_granted,
                 collateral_partner_signature,
             } => {
                 TlvBuilder::new()
                     .u8_field(DISCRIMINANT, 1)
                     .bytes_field(REQUEST_HASH, request_hash)
                     .pubkey_field(OPERATOR_ID, operator_id)
-                    .pubkey_field(PARTNER_ID, partner_id)
+                    .pubkey_field(RESERVES_ID, reserves_id)
                     .u8_field(CONSENT_GRANTED, if *consent_granted { 1 } else { 0 })
                     .bytes_field(COLLATERAL_PARTNER_SIGNATURE, collateral_partner_signature)
                     .build()
@@ -3210,20 +3210,20 @@ impl TlvEncode for CoordinationResponseMsg {
                 builder.build()
             }
             Self::QuorumStateSync {
-                request_hash, operator_id, partner_id, updates, start_sequence, is_final,
+                request_hash, operator_id, reserves_id, updates, start_sequence, is_final,
             } => {
                 TlvBuilder::new()
                     .u8_field(DISCRIMINANT, 3)
                     .bytes_field(REQUEST_HASH, request_hash)
                     .pubkey_field(OPERATOR_ID, operator_id)
-                    .pubkey_field(PARTNER_ID, partner_id)
+                    .pubkey_field(RESERVES_ID, reserves_id)
                     .vec_field(UPDATES, updates)
                     .u64_field(START_SEQUENCE, *start_sequence)
                     .u8_field(IS_FINAL, if *is_final { 1 } else { 0 })
                     .build()
             }
             Self::QuorumMembershipChange {
-                request_hash, operator_id, partner_id, change_type, member_pubkey,
+                request_hash, operator_id, reserves_id, change_type, member_pubkey,
                 new_members, new_threshold, timestamp, operator_signature,
             } => {
                 // Encode Vec<PublicKey> as concatenated compressed pubkey bytes (33 bytes each)
@@ -3234,7 +3234,7 @@ impl TlvEncode for CoordinationResponseMsg {
                     .u8_field(DISCRIMINANT, 4)
                     .bytes_field(REQUEST_HASH, request_hash)
                     .pubkey_field(OPERATOR_ID, operator_id)
-                    .pubkey_field(PARTNER_ID, partner_id)
+                    .pubkey_field(RESERVES_ID, reserves_id)
                     .string_field(CHANGE_TYPE, change_type)
                     .pubkey_field(MEMBER_PUBKEY, member_pubkey)
                     .bytes_field(NEW_MEMBERS, &new_members_bytes)
@@ -3266,7 +3266,7 @@ impl TlvDecode for CoordinationResponseMsg {
             1 => Ok(Self::CollateralConsentResponse {
                 request_hash: reader.read_bytes(REQUEST_HASH)?,
                 operator_id: reader.read_pubkey(OPERATOR_ID)?,
-                partner_id: reader.read_pubkey(PARTNER_ID)?,
+                reserves_id: reader.read_pubkey(RESERVES_ID)?,
                 consent_granted: reader.read_u8(CONSENT_GRANTED)? != 0,
                 collateral_partner_signature: reader.read_bytes(COLLATERAL_PARTNER_SIGNATURE)?,
             }),
@@ -3294,7 +3294,7 @@ impl TlvDecode for CoordinationResponseMsg {
             3 => Ok(Self::QuorumStateSync {
                 request_hash: reader.read_bytes(REQUEST_HASH)?,
                 operator_id: reader.read_pubkey(OPERATOR_ID)?,
-                partner_id: reader.read_pubkey(PARTNER_ID)?,
+                reserves_id: reader.read_pubkey(RESERVES_ID)?,
                 updates: reader.read_vec(UPDATES)?,
                 start_sequence: reader.read_u64(START_SEQUENCE)?,
                 is_final: reader.read_u8(IS_FINAL)? != 0,
@@ -3313,7 +3313,7 @@ impl TlvDecode for CoordinationResponseMsg {
                 Ok(Self::QuorumMembershipChange {
                     request_hash: reader.read_bytes(REQUEST_HASH)?,
                     operator_id: reader.read_pubkey(OPERATOR_ID)?,
-                    partner_id: reader.read_pubkey(PARTNER_ID)?,
+                    reserves_id: reader.read_pubkey(RESERVES_ID)?,
                     change_type: reader.read_string(CHANGE_TYPE)?,
                     member_pubkey: reader.read_pubkey(MEMBER_PUBKEY)?,
                     new_members,
@@ -3620,7 +3620,7 @@ mod tests {
     fn test_ledger_update_message_roundtrip() {
         let msg = DepositsMessage::LedgerUpdate(LedgerUpdateMsg {
             operator_id: test_pubkey(),
-            partner_id: test_pubkey(),
+            reserves_id: test_pubkey(),
             operation: LedgerOperation::ReservesAdd {
                 amount: 100000,
                 spend_to: test_pubkey(),
@@ -3645,7 +3645,7 @@ mod tests {
             min_protocol_version: MIN_PROTOCOL_VERSION,
             features: 0,
             operator_id: test_pubkey(),
-            partner_id: test_pubkey(),
+            reserves_id: test_pubkey(),
             ledger_address: "tb1q...".to_string(),
             funding_txid: [0x11; 32],
             funding_vout: 0,
@@ -3681,7 +3681,7 @@ mod tests {
     fn test_coordination_message_roundtrip() {
         let msg = DepositsMessage::Coordination(CoordinationMsg::CosignInvoice {
             operator_id: test_pubkey(),
-            partner_id: test_pubkey(),
+            reserves_id: test_pubkey(),
             amount: 50000,
             payment_hash: [0x11; 32],
             expires: 1234567890,
@@ -3768,7 +3768,7 @@ mod tests {
 
         let msg = LedgerUpdateMsg {
             operator_id: test_pubkey(),
-            partner_id: test_pubkey(),
+            reserves_id: test_pubkey(),
             operation: LedgerOperation::ReservesAdd {
                 amount: 100000,
                 spend_to: test_pubkey(),
@@ -3791,7 +3791,7 @@ mod tests {
 
         let msg = LedgerUpdateResponseMsg {
             operator_id: test_pubkey(),
-            partner_id: test_pubkey(),
+            reserves_id: test_pubkey(),
             request_hash: [0xAA; 32],
             accepted: true,
             error: None,
@@ -3814,7 +3814,7 @@ mod tests {
             min_protocol_version: MIN_PROTOCOL_VERSION,
             features: 0,
             operator_id: test_pubkey(),
-            partner_id: test_pubkey(),
+            reserves_id: test_pubkey(),
             ledger_address: "tb1q...".to_string(),
             funding_txid: [0x11; 32],
             funding_vout: 0,
@@ -3836,7 +3836,7 @@ mod tests {
             protocol_version: PROTOCOL_VERSION,
             accepted: true,
             error: None,
-            partner_id: test_pubkey(),
+            reserves_id: test_pubkey(),
         };
 
         let encoded = msg.tlv_encode();
@@ -3850,7 +3850,7 @@ mod tests {
 
         let msg = SyncMsg {
             operator_id: test_pubkey(),
-            partner_id: test_pubkey(),
+            reserves_id: test_pubkey(),
             last_known_sequence: 5,
             last_known_hash: [0xAA; 32],
         };
@@ -3869,7 +3869,7 @@ mod tests {
             message: vec![0x80, 0x01, 0xAA, 0xBB], // Sample message bytes
             message_type: 0x8001,
             operator_id: test_pubkey(),
-            partner_id: test_pubkey(),
+            reserves_id: test_pubkey(),
             sequence_number: 1,
             previous_hash: [0xCC; 32],
             current_hash: [0xDD; 32],
@@ -3880,7 +3880,7 @@ mod tests {
 
         let msg = SyncResponseMsg {
             operator_id: test_pubkey(),
-            partner_id: test_pubkey(),
+            reserves_id: test_pubkey(),
             request_hash: [0xAA; 32],
             updates: vec![update],
             current_sequence: 10,
@@ -3934,7 +3934,7 @@ mod tests {
         let msgs = vec![
             CoordinationMsg::CosignInvoice {
                 operator_id: test_pubkey(),
-                partner_id: test_pubkey(),
+                reserves_id: test_pubkey(),
                 amount: 100000,
                 payment_hash: [0xAA; 32],
                 expires: 1234567890,
@@ -3944,13 +3944,13 @@ mod tests {
             },
             CoordinationMsg::CollateralConsentRequest {
                 operator_id: test_pubkey(),
-                partner_id: test_pubkey(),
+                reserves_id: test_pubkey(),
                 operator_signature: [0xBB; 64],
             },
             CoordinationMsg::QuorumVoteRequest {
                 vote_round_id: [0xCC; 32],
                 operator_id: test_pubkey(),
-                partner_id: test_pubkey(),
+                reserves_id: test_pubkey(),
                 sequence_number: 50,
                 state_hash: [0xDD; 32],
                 claimed_reserves: 500000,
@@ -4055,7 +4055,7 @@ mod tests {
         let messages = vec![
             DepositsMessage::LedgerUpdate(LedgerUpdateMsg {
                 operator_id: test_pubkey(),
-                partner_id: test_pubkey(),
+                reserves_id: test_pubkey(),
                 operation: LedgerOperation::PaymentCredit {
                     payment_hash: [0xAA; 32],
                     deposit_pubkey: test_pubkey(),
@@ -4073,7 +4073,7 @@ mod tests {
                 min_protocol_version: 1,
                 features: 0,
                 operator_id: test_pubkey(),
-                partner_id: test_pubkey(),
+                reserves_id: test_pubkey(),
                 ledger_address: "test-ledger".to_string(),
                 funding_txid: [0xEE; 32],
                 funding_vout: 0,
@@ -4082,7 +4082,7 @@ mod tests {
             }),
             DepositsMessage::Sync(SyncMsg {
                 operator_id: test_pubkey(),
-                partner_id: test_pubkey(),
+                reserves_id: test_pubkey(),
                 last_known_sequence: 5,
                 last_known_hash: [0xFF; 32],
             }),

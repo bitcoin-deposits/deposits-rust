@@ -229,7 +229,7 @@ where
             let mut ledger_guard = ledger_arc.write().unwrap();
 
             let operator_node_id = ledger_guard.operator_key();
-            let partner_node_id = ledger_guard.partner_key();
+            let partner_node_id = ledger_guard.reserves_key();
             let our_role = ledger_guard.role;
             let collateral_partners = ledger_guard.state.collateral_partners.clone();
             let ledger_address = ledger_guard.state.ledger_address.clone();
@@ -283,7 +283,7 @@ where
             operator_signature: [0u8; 64],
             partner_signature: [0u8; 64],
             operator_id: tombstone_msg.operator_id,
-            partner_id: tombstone_msg.partner_id,
+            reserves_id: tombstone_msg.reserves_id,
             sequence_number: tombstone_msg.sequence_number,
             previous_hash: [0u8; 32],
             current_hash: [0u8; 32],
@@ -349,7 +349,7 @@ where
         log_error!(self.logger, "Handshake rejected: {}", error);
         let response = DepositsMessage::HandshakeResponse(HandshakeResponseMsg {
             request_hash: [0u8; 32], protocol_version: init_msg.protocol_version, accepted: false,
-            error: Some(error.to_string()), partner_id: self.our_node_id,
+            error: Some(error.to_string()), reserves_id: self.our_node_id,
         });
         let _ = self.send_message(peer, response);
     }
@@ -358,7 +358,7 @@ where
     fn send_handshake_acceptance(&self, init_msg: &HandshakeMsg, peer: PublicKey) {
         let response = DepositsMessage::HandshakeResponse(HandshakeResponseMsg {
             request_hash: [0u8; 32], protocol_version: init_msg.protocol_version, accepted: true,
-            error: None, partner_id: self.our_node_id,
+            error: None, reserves_id: self.our_node_id,
         });
         if let Err(e) = self.send_message(peer, response) {
             log_error!(self.logger, "Failed to send LedgerOpenRequestResponse: {}", e);
@@ -377,12 +377,12 @@ where
         // Check if this is a third-party audit message (we are neither operator nor partner)
         // A message is FOR US if:
         // 1. We have a ledger with the sender (existing relationship), OR
-        // 2. The message's partner_id field matches our own node ID (we are the intended partner)
-        let is_for_us = if let Some(partner_id) = message.partner_id() {
-            // If partner_id matches our node ID, this message is intended for us
-            partner_id == self.our_node_id
+        // 2. The message's reserves_id field matches our own node ID (we are the intended partner)
+        let is_for_us = if let Some(reserves_id) = message.reserves_id() {
+            // If reserves_id matches our node ID, this message is intended for us
+            reserves_id == self.our_node_id
         } else {
-            // No partner_id - check if we have existing ledger where sender is operator
+            // No reserves_id - check if we have existing ledger where sender is operator
             self.ledgers.lock().unwrap().contains_key(&(sender_node_id, self.our_node_id))
         };
 

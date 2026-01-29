@@ -77,7 +77,7 @@ where
 
         let consent_request = DepositsMessage::Coordination(CoordinationMsg::CollateralConsentRequest {
             operator_id: self.our_node_id,
-            partner_id: partner_node_id,
+            reserves_id: partner_node_id,
             operator_signature: [0u8; 64],
         });
 

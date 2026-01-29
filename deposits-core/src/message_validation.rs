@@ -499,7 +499,7 @@ pub fn validate_ledger_operation<C: ValidationContext>(
     match operation {
         LedgerOperation::DepositOpen { pubkey, fees, .. } => {
             let msg = DepositOpenMsg {
-                partner_id: partner_pubkey,
+                reserves_id: partner_pubkey,
                 pubkey: *pubkey,
                 fees: fees.clone(),
                 payment_hash: None, // Not used in validation
@@ -510,14 +510,14 @@ pub fn validate_ledger_operation<C: ValidationContext>(
         }
         LedgerOperation::DepositClose { pubkey } => {
             let msg = DepositCloseMsg {
-                partner_id: partner_pubkey,
+                reserves_id: partner_pubkey,
                 pubkey: *pubkey,
             };
             validate_remove_deposit_msg(ctx, &msg, sender)
         }
         LedgerOperation::DepositUpdate { pubkey, new_fees } => {
             let msg = DepositUpdateMsg {
-                partner_id: partner_pubkey,
+                reserves_id: partner_pubkey,
                 pubkey: *pubkey,
                 new_fees: new_fees.clone(),
             };
@@ -559,7 +559,7 @@ pub fn validate_ledger_operation<C: ValidationContext>(
                 deposit_pubkey: *deposit_pubkey,
                 amount: *amount,
                 invoice_id: invoice_id.clone(),
-                partner_id: partner_pubkey,
+                reserves_id: partner_pubkey,
                 sequence_number: 0,
             };
             validate_receiving_credit_payment_msg(ctx, &msg, sender)
@@ -568,14 +568,14 @@ pub fn validate_ledger_operation<C: ValidationContext>(
             let msg = ReservesAddOutputMsg {
                 initial_amount: *amount,
                 spend_to: *spend_to,
-                partner_id: partner_pubkey,
+                reserves_id: partner_pubkey,
                 collateral_partners: collateral_partners.clone(),
             };
             validate_reserves_add_output_msg(&msg)
         }
         LedgerOperation::ReservesRemove => {
             let msg = ReservesRemoveOutputMsg {
-                partner_id: partner_pubkey,
+                reserves_id: partner_pubkey,
                 remove_all: true,
             };
             validate_reserves_remove_msg(ctx, &msg, sender)
@@ -583,20 +583,20 @@ pub fn validate_ledger_operation<C: ValidationContext>(
         LedgerOperation::ReservesIncrease { new_amount } => {
             let msg = ReservesIncreaseMsg {
                 new_amount: *new_amount,
-                partner_id: partner_pubkey,
+                reserves_id: partner_pubkey,
             };
             validate_reserves_increase_msg(ctx, &msg, sender)
         }
         LedgerOperation::ReservesDecrease { new_amount } => {
             let msg = ReservesDecreaseMsg {
                 new_amount: *new_amount,
-                partner_id: partner_pubkey,
+                reserves_id: partner_pubkey,
             };
             validate_reserves_decrease_msg(ctx, &msg, sender)
         }
         LedgerOperation::CollateralIncrease { new_amount, block_height } => {
             let msg = CollateralIncreaseMsg {
-                partner_id: partner_pubkey,
+                reserves_id: partner_pubkey,
                 new_amount: *new_amount,
                 block_height: *block_height,
             };
@@ -604,7 +604,7 @@ pub fn validate_ledger_operation<C: ValidationContext>(
         }
         LedgerOperation::CollateralDecrease { new_amount, block_height } => {
             let msg = CollateralDecreaseMsg {
-                partner_id: partner_pubkey,
+                reserves_id: partner_pubkey,
                 new_amount: *new_amount,
                 block_height: *block_height,
             };
@@ -620,7 +620,7 @@ pub fn validate_ledger_operation<C: ValidationContext>(
         }
         LedgerOperation::LedgerClose => {
             let msg = LedgerCloseMsg {
-                partner_id: partner_pubkey,
+                reserves_id: partner_pubkey,
             };
             validate_ledger_close_msg(ctx, &msg, sender)
         }
@@ -905,11 +905,11 @@ pub fn validate_ledger_close_msg<C: ValidationContext>(
     if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id()) {
         let ledger = ledger_arc.read().unwrap();
 
-        // Check that the partner_id matches us (context-specific check)
-        if msg.partner_id != ctx.our_node_id() {
+        // Check that the reserves_id matches us (context-specific check)
+        if msg.reserves_id != ctx.our_node_id() {
             return Err(format!(
-                "LedgerClose partner_id {} does not match our node {}",
-                msg.partner_id, ctx.our_node_id()
+                "LedgerClose reserves_id {} does not match our node {}",
+                msg.reserves_id, ctx.our_node_id()
             ));
         }
 
@@ -981,7 +981,7 @@ mod tests {
             payment_hash: None,
             invoice: None,
             cosigner_guarantee_signature: None,
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
         };
 
         let result = validate_add_deposit_msg(&ctx, &msg, sender);
@@ -1011,7 +1011,7 @@ mod tests {
             payment_hash: None,
             invoice: None,
             cosigner_guarantee_signature: None,
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
         };
 
         let result = validate_add_deposit_msg(&ctx, &msg, operator);
@@ -1053,7 +1053,7 @@ mod tests {
         let msg = ReservesAddOutputMsg {
             initial_amount: 100, // Below minimum
             spend_to: create_test_pubkey(1),
-            partner_id: create_test_pubkey(2),
+            reserves_id: create_test_pubkey(2),
             collateral_partners: vec![],
         };
 
@@ -1067,7 +1067,7 @@ mod tests {
         let msg = ReservesAddOutputMsg {
             initial_amount: 1_000_000_000_000, // Above maximum
             spend_to: create_test_pubkey(1),
-            partner_id: create_test_pubkey(2),
+            reserves_id: create_test_pubkey(2),
             collateral_partners: vec![],
         };
 
@@ -1095,7 +1095,7 @@ mod tests {
         // Try to "increase" to a lower amount - should fail
         let msg = ReservesIncreaseMsg {
             new_amount: 4000, // Less than current 5000
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
         };
 
         let result = validate_reserves_increase_msg(&ctx, &msg, operator);
@@ -1123,7 +1123,7 @@ mod tests {
         // Try to decrease at block 150 (within 144-block period)
         let msg = CollateralDecreaseMsg {
             new_amount: 3000,
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             block_height: 150,
         };
 
@@ -1152,7 +1152,7 @@ mod tests {
         // Decrease at block 250 (after 144-block period: 100 + 144 = 244)
         let msg = CollateralDecreaseMsg {
             new_amount: 3000,
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             block_height: 250,
         };
 
@@ -1185,7 +1185,7 @@ mod tests {
         // Try to decrease reserves below what's required to back deposits
         let msg = ReservesDecreaseMsg {
             new_amount: 50_000, // Less than the 80k deposit balance
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
         };
 
         let result = validate_reserves_decrease_msg(&ctx, &msg, operator);
@@ -1213,7 +1213,7 @@ mod tests {
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = LedgerCloseMsg {
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
         };
 
         let result = validate_ledger_close_msg(&ctx, &msg, operator);
@@ -1237,7 +1237,7 @@ mod tests {
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = LedgerCloseMsg {
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
         };
 
         let result = validate_ledger_close_msg(&ctx, &msg, operator);

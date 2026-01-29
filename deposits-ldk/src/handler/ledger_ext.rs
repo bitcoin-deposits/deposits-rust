@@ -148,7 +148,7 @@ pub trait LedgerExt {
 impl LedgerExt for Ledger {
     fn construct_voter_set(&self) -> deposits_core::VoterSet {
         deposits_core::VoterSet::new(
-            self.state.partner_key,
+            self.state.reserves_key,
             self.state.collateral_partners.clone(),
         )
     }
@@ -191,8 +191,8 @@ impl LedgerExt for Ledger {
                 DepositsMessage::LedgerUpdate(ref update_msg) => {
                     // V2 CollateralAttestation is inside LedgerUpdate
                     if let deposits_core::messages::LedgerOperation::CollateralAttestation { collateral_operator, amount, block_height, signature, ledger_hash } = &update_msg.operation {
-                        let collateral_partner = update_msg.partner_id;
-                        if collateral_partner == self.state.partner_key || self.state.collateral_partners.contains(&collateral_partner) {
+                        let collateral_partner = update_msg.reserves_id;
+                        if collateral_partner == self.state.reserves_key || self.state.collateral_partners.contains(&collateral_partner) {
                             let attestation = deposits_core::CollateralAttestation {
                                 operator_id: *collateral_operator,
                                 collateral_partner,
@@ -253,7 +253,7 @@ impl LedgerExt for Ledger {
             operator_signature: [0u8; 64], // Placeholder during migration
             partner_signature: [0u8; 64],
             operator_id: self.state.operator_key,
-            partner_id: self.state.partner_key,
+            reserves_id: self.state.reserves_key,
             sequence_number: expected_sequence,
             previous_hash: prev_hash,
             current_hash: update_hash,

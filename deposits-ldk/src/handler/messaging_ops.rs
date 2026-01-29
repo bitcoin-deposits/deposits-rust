@@ -322,18 +322,18 @@ where
 
     /// Sign a collateral consent message.
     /// Returns the 64-byte signature or zeros if no secret key available.
-    pub fn sign_collateral_consent(&self, operator_id: &PublicKey, partner_id: &PublicKey) -> [u8; 64] {
+    pub fn sign_collateral_consent(&self, operator_id: &PublicKey, reserves_id: &PublicKey) -> [u8; 64] {
         use bitcoin::hashes::{Hash, sha256};
         use bitcoin::secp256k1::{Secp256k1, Message};
         use deposits_core::log_warn;
 
         match self.node_secret_key {
             Some(secret_key) => {
-                // Sign: SHA256("COLLATERAL_CONSENT" || operator_id || partner_id)
+                // Sign: SHA256("COLLATERAL_CONSENT" || operator_id || reserves_id)
                 let mut preimage = Vec::new();
                 preimage.extend_from_slice(b"COLLATERAL_CONSENT");
                 preimage.extend_from_slice(&operator_id.serialize());
-                preimage.extend_from_slice(&partner_id.serialize());
+                preimage.extend_from_slice(&reserves_id.serialize());
 
                 let message_hash = sha256::Hash::hash(&preimage);
                 let secp_message = Message::from_digest(message_hash.to_byte_array());
@@ -803,7 +803,7 @@ where
 
         let ack_msg = LedgerUpdateResponseMsg {
             operator_id: recipient, // Responding to the operator who sent the message
-            partner_id: self.our_node_id,
+            reserves_id: self.our_node_id,
             request_hash: message_hash,
             accepted: success,
             error: error_msg.clone(),

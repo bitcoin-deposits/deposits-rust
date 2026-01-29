@@ -136,7 +136,7 @@ pub trait PaymentTracking {
     fn register_deposit_invoice(
         &self,
         payment_hash: [u8; 32],
-        partner_id: PublicKey,
+        reserves_id: PublicKey,
         deposit_pubkey: PublicKey,
         invoice_id: String,
         bolt11: String,
@@ -146,7 +146,7 @@ pub trait PaymentTracking {
     fn get_deposit_invoice_bolt11(&self, payment_hash: &[u8; 32]) -> Option<String>;
 
     /// Get the full deposit info for a payment hash
-    /// Returns (partner_id, deposit_pubkey, invoice_id, bolt11) if found
+    /// Returns (reserves_id, deposit_pubkey, invoice_id, bolt11) if found
     fn get_deposit_for_payment(&self, payment_hash: &[u8; 32]) -> Option<(PublicKey, PublicKey, String, String)>;
 
     /// Unregister a deposit invoice (e.g., after payment or expiry)

@@ -39,12 +39,12 @@ use crate::types::{QuorumJoinRequestMsg, QuorumJoinResponseMsg, QuorumVoteMsg};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LedgerId {
     pub operator_id: PublicKey,
-    pub partner_id: PublicKey,
+    pub reserves_id: PublicKey,
 }
 
 impl LedgerId {
-    pub fn new(operator_id: PublicKey, partner_id: PublicKey) -> Self {
-        Self { operator_id, partner_id }
+    pub fn new(operator_id: PublicKey, reserves_id: PublicKey) -> Self {
+        Self { operator_id, reserves_id }
     }
 }
 
@@ -149,8 +149,8 @@ pub struct QuorumState {
 
 impl QuorumState {
     /// Create a new quorum for a ledger with operator and partner as initial members
-    pub fn new(operator_id: PublicKey, partner_id: PublicKey) -> Self {
-        let ledger_id = LedgerId::new(operator_id, partner_id);
+    pub fn new(operator_id: PublicKey, reserves_id: PublicKey) -> Self {
+        let ledger_id = LedgerId::new(operator_id, reserves_id);
         let mut members = HashMap::new();
 
         // Add operator as initial member
@@ -166,8 +166,8 @@ impl QuorumState {
         });
 
         // Add partner as initial member
-        members.insert(partner_id, QuorumMember {
-            pubkey: partner_id,
+        members.insert(reserves_id, QuorumMember {
+            pubkey: reserves_id,
             status: MemberStatus::Active,
             last_sequence: 0,
             last_state_hash: [0u8; 32],
@@ -230,10 +230,10 @@ impl QuorumManager {
     pub fn create_quorum(
         &self,
         operator_id: PublicKey,
-        partner_id: PublicKey,
+        reserves_id: PublicKey,
     ) -> Result<(), DepositsError> {
-        let ledger_id = LedgerId::new(operator_id, partner_id);
-        let quorum = QuorumState::new(operator_id, partner_id);
+        let ledger_id = LedgerId::new(operator_id, reserves_id);
+        let quorum = QuorumState::new(operator_id, reserves_id);
 
         let mut quorums = self.quorums.write().unwrap();
         if quorums.contains_key(&ledger_id) {
@@ -250,7 +250,7 @@ impl QuorumManager {
         &self,
         msg: &QuorumJoinRequestMsg,
     ) -> Result<QuorumJoinResponseMsg, DepositsError> {
-        let ledger_id = LedgerId::new(msg.operator_id, msg.partner_id);
+        let ledger_id = LedgerId::new(msg.operator_id, msg.reserves_id);
 
         let mut quorums = self.quorums.write().unwrap();
         let quorum = quorums.get_mut(&ledger_id).ok_or_else(|| {
@@ -412,7 +412,7 @@ impl QuorumManager {
         })?;
 
         // Don't allow removing operator or partner (they're always members)
-        if *member_pubkey == quorum.ledger_id.operator_id || *member_pubkey == quorum.ledger_id.partner_id {
+        if *member_pubkey == quorum.ledger_id.operator_id || *member_pubkey == quorum.ledger_id.reserves_id {
             return Err(DepositsError::InvalidState(
                 "Cannot remove operator or partner from quorum".to_string()
             ));
@@ -570,7 +570,7 @@ mod tests {
         let join_request = QuorumJoinRequestMsg {
             requester_pubkey: auditor,
             operator_id: operator,
-            partner_id: partner,
+            reserves_id: partner,
             protocol_version: 1,
             timestamp: 12345,
             signature: [0u8; 64],
@@ -594,7 +594,7 @@ mod tests {
         let join_request = QuorumJoinRequestMsg {
             requester_pubkey: operator,
             operator_id: operator,
-            partner_id: partner,
+            reserves_id: partner,
             protocol_version: 1,
             timestamp: 12345,
             signature: [0u8; 64],
@@ -620,7 +620,7 @@ mod tests {
         let join_request1 = QuorumJoinRequestMsg {
             requester_pubkey: auditor1,
             operator_id: operator,
-            partner_id: partner,
+            reserves_id: partner,
             protocol_version: 1,
             timestamp: 12345,
             signature: [0u8; 64],
@@ -633,7 +633,7 @@ mod tests {
         let join_request2 = QuorumJoinRequestMsg {
             requester_pubkey: auditor2,
             operator_id: operator,
-            partner_id: partner,
+            reserves_id: partner,
             protocol_version: 1,
             timestamp: 12346,
             signature: [0u8; 64],
@@ -646,7 +646,7 @@ mod tests {
         let join_request3 = QuorumJoinRequestMsg {
             requester_pubkey: auditor3,
             operator_id: operator,
-            partner_id: partner,
+            reserves_id: partner,
             protocol_version: 1,
             timestamp: 12347,
             signature: [0u8; 64],
@@ -678,7 +678,7 @@ mod tests {
         let join_request = QuorumJoinRequestMsg {
             requester_pubkey: auditor,
             operator_id: operator,
-            partner_id: partner,
+            reserves_id: partner,
             protocol_version: 1,
             timestamp: 12345,
             signature: [0u8; 64],
@@ -709,7 +709,7 @@ mod tests {
         let join_request = QuorumJoinRequestMsg {
             requester_pubkey: auditor,
             operator_id: operator,
-            partner_id: partner,
+            reserves_id: partner,
             protocol_version: 1,
             timestamp: 12345,
             signature: [0u8; 64],
@@ -815,7 +815,7 @@ mod tests {
             let join_request = QuorumJoinRequestMsg {
                 requester_pubkey: auditor,
                 operator_id: operator,
-                partner_id: partner,
+                reserves_id: partner,
                 protocol_version: 1,
                 timestamp: 12340 + i as u64,
                 signature: [0u8; 64],
@@ -829,7 +829,7 @@ mod tests {
         let join_request = QuorumJoinRequestMsg {
             requester_pubkey: extra_auditor,
             operator_id: operator,
-            partner_id: partner,
+            reserves_id: partner,
             protocol_version: 1,
             timestamp: 12351,
             signature: [0u8; 64],

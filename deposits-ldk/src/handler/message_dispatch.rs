@@ -77,7 +77,7 @@ where
         // V2 format: CollateralAttestation is inside LedgerUpdate as a LedgerOperation
         if let DepositsMessage::LedgerUpdate(ref update_msg) = &message {
             if let LedgerOperation::CollateralAttestation { collateral_operator: operator, amount, block_height, signature, ledger_hash, .. } = &update_msg.operation {
-                let collateral_partner = update_msg.partner_id;
+                let collateral_partner = update_msg.reserves_id;
                 // Check if we're the operator for a ledger with this sender as partner
                 // and have a pending CollateralIncrease/CollateralDecrease
                 let is_from_channel_partner = {
@@ -160,14 +160,14 @@ where
         // V2 format: Quorum messages are inside Coordination/CoordinationResponse
         match &message {
             DepositsMessage::Coordination(coord_msg) => match coord_msg {
-                CoordinationMsg::QuorumJoinRequest { requester_pubkey, operator_id, partner_id, protocol_version, timestamp, signature } => {
+                CoordinationMsg::QuorumJoinRequest { requester_pubkey, operator_id, reserves_id, protocol_version, timestamp, signature } => {
                     // Direct dispatch to core - core handles response, event, and state sync via providers
                     log_info!(self.logger, "📋 QUORUM: Join request from {} for ledger ({}, {})",
-                        requester_pubkey, operator_id, partner_id);
+                        requester_pubkey, operator_id, reserves_id);
                     let msg = deposits_core::wire_messages::QuorumJoinRequestMsgWire {
                         requester_pubkey: *requester_pubkey,
                         operator_id: *operator_id,
-                        partner_id: *partner_id,
+                        reserves_id: *reserves_id,
                         protocol_version: *protocol_version,
                         timestamp: *timestamp,
                         signature: *signature,
@@ -178,12 +178,12 @@ where
                     }
                     return Ok(());
                 }
-                CoordinationMsg::QuorumVoteRequest { vote_round_id, operator_id, partner_id, sequence_number, state_hash, claimed_reserves, ref collateral_amounts, ref reserves_outpoint, ref destination_script, fee_rate_sat_vbyte, .. } => {
+                CoordinationMsg::QuorumVoteRequest { vote_round_id, operator_id, reserves_id, sequence_number, state_hash, claimed_reserves, ref collateral_amounts, ref reserves_outpoint, ref destination_script, fee_rate_sat_vbyte, .. } => {
                     // Direct dispatch to core - core handles vote signing and message sending via providers
-                    log_info!(self.logger, "📋 QUORUM: Vote request for ({}, {}) seq={}", operator_id, partner_id, sequence_number);
+                    log_info!(self.logger, "📋 QUORUM: Vote request for ({}, {}) seq={}", operator_id, reserves_id, sequence_number);
                     let msg = QuorumVoteRequestMsg {
                         operator_id: *operator_id,
-                        partner_id: *partner_id,
+                        reserves_id: *reserves_id,
                         vote_round_id: *vote_round_id,
                         sequence_number: *sequence_number,
                         state_hash: *state_hash,
@@ -209,12 +209,12 @@ where
                     }
                     return Ok(());
                 }
-                CoordinationMsg::CollateralConsentRequest { operator_id, partner_id, operator_signature } => {
+                CoordinationMsg::CollateralConsentRequest { operator_id, reserves_id, operator_signature } => {
                     // Direct dispatch to core - core handles signing and message sending via providers
-                    log_info!(self.logger, "📋 CONSENT: Request from {} for ({}, {})", sender_node_id, operator_id, partner_id);
+                    log_info!(self.logger, "📋 CONSENT: Request from {} for ({}, {})", sender_node_id, operator_id, reserves_id);
                     let msg = CollateralConsentRequestMsg {
                         operator_id: *operator_id,
-                        partner_id: *partner_id,
+                        reserves_id: *reserves_id,
                         operator_signature: *operator_signature,
                     };
                     match deposits_core::handle_collateral_consent_request(self, &msg, sender_node_id) {
@@ -249,7 +249,7 @@ where
                     }
                     return Ok(());
                 }
-                CoordinationResponseMsg::QuorumStateSync { operator_id, partner_id, ref updates, start_sequence, is_final, .. } => {
+                CoordinationResponseMsg::QuorumStateSync { operator_id, reserves_id, ref updates, start_sequence, is_final, .. } => {
                     // Convert SignedLedgerUpdate to Vec<u8> for wire format
                     use deposits_core::messages::BinaryCodec;
                     let updates_bytes: Vec<Vec<u8>> = updates.iter().map(|u| {
@@ -259,8 +259,8 @@ where
                     }).collect();
                     // Direct dispatch to core - processes updates via verify_and_store_signed_update provider
                     // After final batch, updates quorum member state via update_quorum_member_state provider
-                    log_info!(self.logger, "📋 QUORUM: State sync for ({}, {}) - {} updates from seq {}", operator_id, partner_id, updates.len(), start_sequence);
-                    match deposits_core::handle_quorum_state_sync(self, *operator_id, *partner_id, &updates_bytes, *start_sequence, *is_final) {
+                    log_info!(self.logger, "📋 QUORUM: State sync for ({}, {}) - {} updates from seq {}", operator_id, reserves_id, updates.len(), start_sequence);
+                    match deposits_core::handle_quorum_state_sync(self, *operator_id, *reserves_id, &updates_bytes, *start_sequence, *is_final) {
                         Ok(deposits_core::message_handlers::HandlerResult::Response(
                             deposits_core::message_handlers::ResponseData::QuorumStateSyncProcessed { applied, errors, total }
                         )) => {
@@ -273,18 +273,18 @@ where
                     }
                     return Ok(());
                 }
-                CoordinationResponseMsg::QuorumMembershipChange { operator_id, partner_id, ref change_type, member_pubkey, ref new_members, .. } => {
+                CoordinationResponseMsg::QuorumMembershipChange { operator_id, reserves_id, ref change_type, member_pubkey, ref new_members, .. } => {
                     // Inline - just logging, no core logic needed
                     log_info!(self.logger, "📋 QUORUM: Membership change for ({}, {}): {} {} (now {} members)",
-                        operator_id, partner_id, change_type, member_pubkey, new_members.len());
+                        operator_id, reserves_id, change_type, member_pubkey, new_members.len());
                     return Ok(());
                 }
-                CoordinationResponseMsg::CollateralConsentResponse { operator_id, partner_id, consent_granted, collateral_partner_signature, .. } => {
+                CoordinationResponseMsg::CollateralConsentResponse { operator_id, reserves_id, consent_granted, collateral_partner_signature, .. } => {
                     // Direct dispatch to core - core handles signature verification, consent completion, and audit sending via providers
                     log_info!(self.logger, "📋 CONSENT: Response from {} - granted={}", sender_node_id, consent_granted);
                     let msg = CollateralConsentResponseMsg {
                         operator_id: *operator_id,
-                        partner_id: *partner_id,
+                        reserves_id: *reserves_id,
                         consent_granted: *consent_granted,
                         collateral_partner_signature: *collateral_partner_signature,
                     };
@@ -404,7 +404,7 @@ where
                 LedgerOperation::CollateralAttestation { collateral_operator, amount, block_height, signature, ledger_hash } => {
                     let msg = crate::wire::messages::CollateralAttestationMsg {
                         operator: *collateral_operator,
-                        collateral_partner: update_msg.partner_id,
+                        collateral_partner: update_msg.reserves_id,
                         amount: *amount,
                         block_height: *block_height,
                         signature: *signature,
@@ -425,7 +425,7 @@ where
                 LedgerOperation::Tombstone { channel_id, close_reason, timestamp } => {
                     let tombstone_msg = ChannelCloseTombstoneMsg {
                         operator_id: update_msg.operator_id,
-                        partner_id: update_msg.partner_id,
+                        reserves_id: update_msg.reserves_id,
                         timestamp: *timestamp,
                         channel_id: *channel_id,
                         close_reason: close_reason.clone(),
@@ -822,7 +822,7 @@ where
 
                     // Generate cosignature for CosignInvoice
                     // V2: ReceivingCosignInvoice is now Coordination(CosignInvoice)
-                    let cosignature = if let DepositsMessage::Coordination(CoordinationMsg::CosignInvoice { operator_id: _, partner_id: _, amount, payment_hash, expires, assigned_deposit, ref invoice_id, ref bolt11_invoice }) = message {
+                    let cosignature = if let DepositsMessage::Coordination(CoordinationMsg::CosignInvoice { operator_id: _, reserves_id: _, amount, payment_hash, expires, assigned_deposit, ref invoice_id, ref bolt11_invoice }) = message {
                         let bolt11 = bolt11_invoice;
                         // Generate proper 64-byte Schnorr signature over invoice data
                         let mut sig_input = Vec::new();
@@ -890,7 +890,7 @@ where
                     });
                     let ack = DepositsMessage::LedgerUpdateResponse(LedgerUpdateResponseMsg {
                         operator_id: sender_node_id,
-                        partner_id: self.our_node_id,
+                        reserves_id: self.our_node_id,
                         request_hash: message_hash,
                         accepted: true,
                         error: None,
@@ -960,7 +960,7 @@ where
 
                                 let ack = DepositsMessage::LedgerUpdateResponse(LedgerUpdateResponseMsg {
                                     operator_id: sender_node_id,
-                                    partner_id: self.our_node_id,
+                                    reserves_id: self.our_node_id,
                                     request_hash: message_hash,
                                     accepted: true,
                                     error: None,

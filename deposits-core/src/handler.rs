@@ -508,10 +508,10 @@ where
         );
 
         // Get the ledger
-        let ledger_arc = self.get_ledger(msg.operator_id, msg.partner_id)
+        let ledger_arc = self.get_ledger(msg.operator_id, msg.reserves_id)
             .ok_or(HandleError::UnknownLedger {
                 operator: msg.operator_id,
-                partner: msg.partner_id,
+                partner: msg.reserves_id,
             })?;
 
         // Validate and apply the update
@@ -564,7 +564,7 @@ where
         // Create response
         let response = crate::messages::LedgerUpdateResponseMsg {
             operator_id: msg.operator_id,
-            partner_id: msg.partner_id,
+            reserves_id: msg.reserves_id,
             request_hash: msg.current_hash,
             accepted: true,
             error: None,
@@ -602,7 +602,7 @@ where
         // Verify partner signature if accepted
         if msg.accepted {
             if let Some(sig) = &msg.partner_signature {
-                if !self.signer.verify_schnorr(&msg.partner_id, msg.confirmed_hash, sig) {
+                if !self.signer.verify_schnorr(&msg.reserves_id, msg.confirmed_hash, sig) {
                     return Err(HandleError::ValidationFailed(
                         "Invalid partner signature".to_string(),
                     ));
@@ -629,7 +629,7 @@ where
         // Create handshake response
         let response = crate::messages::HandshakeResponseMsg {
             request_hash: [0u8; 32], // TODO: Hash the request
-            partner_id: self.node_id,
+            reserves_id: self.node_id,
             accepted: true,
             protocol_version: crate::messages::PROTOCOL_VERSION,
             error: None,
@@ -664,10 +664,10 @@ where
         );
 
         // Get ledger and prepare sync response
-        let ledger_arc = self.get_ledger(msg.operator_id, msg.partner_id)
+        let ledger_arc = self.get_ledger(msg.operator_id, msg.reserves_id)
             .ok_or(HandleError::UnknownLedger {
                 operator: msg.operator_id,
-                partner: msg.partner_id,
+                partner: msg.reserves_id,
             })?;
 
         let (current_hash, current_sequence) = {
@@ -677,7 +677,7 @@ where
 
         let response = crate::messages::SyncResponseMsg {
             operator_id: msg.operator_id,
-            partner_id: msg.partner_id,
+            reserves_id: msg.reserves_id,
             request_hash: msg.last_known_hash, // Use the known hash as request reference
             updates: Vec::new(), // Would be populated from history
             current_hash,
@@ -866,13 +866,13 @@ where
 
     fn find_deposit_by_payment_hash(&self, payment_hash: &[u8; 32]) -> Option<(PublicKey, PublicKey, u64)> {
         let ledgers = self.ledgers.lock().unwrap();
-        for ((operator_id, partner_id), ledger_arc) in ledgers.iter() {
+        for ((operator_id, reserves_id), ledger_arc) in ledgers.iter() {
             if *operator_id == self.node_id {
                 let ledger = ledger_arc.read().unwrap();
                 for (deposit_pubkey, deposit) in ledger.state.deposits.iter() {
                     for invoice in &deposit.invoices {
                         if &invoice.payment_hash == payment_hash {
-                            return Some((*partner_id, *deposit_pubkey, invoice.amount));
+                            return Some((*reserves_id, *deposit_pubkey, invoice.amount));
                         }
                     }
                 }

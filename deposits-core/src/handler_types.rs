@@ -76,7 +76,7 @@ pub struct VoteRoundState {
     /// The operator's public key
     pub operator_id: PublicKey,
     /// The partner's public key
-    pub partner_id: PublicKey,
+    pub reserves_id: PublicKey,
     /// Sequence number for this vote round
     pub sequence_number: u64,
     /// Hash of the ledger state being voted on
@@ -202,7 +202,7 @@ mod tests {
     fn test_vote_round_state() {
         let mut state = VoteRoundState {
             operator_id: test_pubkey(),
-            partner_id: test_pubkey(),
+            reserves_id: test_pubkey(),
             sequence_number: 1,
             state_hash: [0u8; 32],
             claimed_reserves: 100000,

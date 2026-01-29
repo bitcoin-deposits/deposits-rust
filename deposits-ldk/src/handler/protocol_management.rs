@@ -74,12 +74,12 @@ where
     /// # Arguments
     /// * `target_node_id` - The node ID to send the join request to (operator or partner)
     /// * `operator_id` - The operator's public key for the ledger
-    /// * `partner_id` - The partner's public key for the ledger
+    /// * `reserves_id` - The partner's public key for the ledger
     pub fn request_join_quorum(
         &self,
         target_node_id: PublicKey,
         operator_id: PublicKey,
-        partner_id: PublicKey,
+        reserves_id: PublicKey,
     ) -> Result<(), DepositsError> {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -91,7 +91,7 @@ where
             "📋 QUORUM: Sending join request to {} for ledger ({}, {})",
             target_node_id,
             operator_id,
-            partner_id
+            reserves_id
         );
 
         // Queue the message for sending (V2 format)
@@ -103,7 +103,7 @@ where
             .push(DepositsMessage::Coordination(CoordinationMsg::QuorumJoinRequest {
                 requester_pubkey: self.our_node_id,
                 operator_id,
-                partner_id,
+                reserves_id,
                 protocol_version: deposits_core::constants::DEPOSITS_PROTOCOL_VERSION,
                 timestamp,
                 signature: [0u8; 64],
@@ -120,7 +120,7 @@ where
         &self,
         member_pubkey: PublicKey,
         operator_id: PublicKey,
-        partner_id: PublicKey,
+        reserves_id: PublicKey,
     ) {
         const BATCH_SIZE: usize = 100; // Send updates in batches to avoid huge messages
 
@@ -128,13 +128,13 @@ where
         let updates_to_send: Vec<deposits_core::SignedLedgerUpdate> = {
             // Try ledgers first (our own ledgers)
             let ledgers = self.ledgers.lock().unwrap();
-            if ledgers.contains_key(&(operator_id, partner_id)) {
+            if ledgers.contains_key(&(operator_id, reserves_id)) {
                 // We are the operator or partner - get updates from our ledger
                 drop(ledgers);
 
                 // For our own ledgers, we need to get updates from the ledger's signed update log
                 let logs = self.signed_update_logs.lock().unwrap();
-                if let Some(log) = logs.get(&(operator_id, partner_id)) {
+                if let Some(log) = logs.get(&(operator_id, reserves_id)) {
                     log.updates.clone()
                 } else {
                     Vec::new()
@@ -144,7 +144,7 @@ where
 
                 // Check if we have third-party audit copy
                 let logs = self.signed_update_logs.lock().unwrap();
-                if let Some(log) = logs.get(&(operator_id, partner_id)) {
+                if let Some(log) = logs.get(&(operator_id, reserves_id)) {
                     log.updates.clone()
                 } else {
                     Vec::new()
@@ -158,14 +158,14 @@ where
                 "📋 QUORUM: No updates to sync to {} for ledger ({}, {})",
                 member_pubkey,
                 operator_id,
-                partner_id
+                reserves_id
             );
 
             // Send empty final batch to indicate sync complete
             let sync_msg = DepositsMessage::CoordinationResponse(CoordinationResponseMsg::QuorumStateSync {
                 request_hash: [0u8; 32],
                 operator_id,
-                partner_id,
+                reserves_id,
                 updates: Vec::new(),
                 start_sequence: 0,
                 is_final: true,
@@ -187,7 +187,7 @@ where
             updates_to_send.len(),
             member_pubkey,
             operator_id,
-            partner_id
+            reserves_id
         );
 
         // Send updates in batches - updates_to_send is Vec<deposits_core::SignedLedgerUpdate> from types.rs
@@ -211,7 +211,7 @@ where
             let sync_msg = DepositsMessage::CoordinationResponse(CoordinationResponseMsg::QuorumStateSync {
                 request_hash: [0u8; 32],
                 operator_id,
-                partner_id,
+                reserves_id,
                 updates: chunk.to_vec(),
                 start_sequence,
                 is_final,

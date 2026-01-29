@@ -289,7 +289,7 @@ impl EventEmitter for LdkEventAdapter {
             ProtocolEvent::RecoveryClaimed { operator, partner, new_operator, claim_txid } => {
                 DepositsEvent::RecoveryClaimCompleted {
                     old_operator: operator,
-                    partner_id: partner,
+                    reserves_id: partner,
                     new_operator,
                     claim_txid,
                     confirmation_block: 0,

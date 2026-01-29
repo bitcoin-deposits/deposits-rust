@@ -265,7 +265,7 @@ test_open_ledgers() {
 
     log_info "Current block: $current_height, Enforcement block: $enforcement_block"
 
-    # Alice opens ledger with Bob (Alice = operator, Bob = partner)
+    # Alice opens ledger with Bob (Alice = operator, Bob = reserves)
     # First get Bob's node ID
     local bob_info=$(run_bdk_cmd "bdk-bob" info 2>&1)
     local bob_node_id=$(echo "$bob_info" | grep "Node ID:" | awk '{print $3}')
@@ -275,7 +275,7 @@ test_open_ledgers() {
         return
     fi
 
-    log_info "Opening ledger: Alice (operator) <-> Bob (partner)"
+    log_info "Opening ledger: Alice (operator) <-> Bob (reserves)"
     log_info "Bob's Node ID: ${bob_node_id:0:20}..."
 
     local ledger_output=$(run_bdk_cmd "bdk-alice" ledger open "$bob_node_id" "$enforcement_block" 2>&1)
@@ -284,7 +284,7 @@ test_open_ledgers() {
         test_pass "Alice opened ledger with Bob"
         if $VERBOSE; then
             echo "    Ledger output:"
-            echo "$ledger_output" | grep -E "Operator:|Partner:|Sequence:|Bootstrap" | sed 's/^/      /'
+            echo "$ledger_output" | grep -E "Operator:|Reserves:|Sequence:|Bootstrap" | sed 's/^/      /'
         fi
     else
         test_fail "Alice failed to open ledger with Bob"
@@ -293,7 +293,7 @@ test_open_ledgers() {
         fi
     fi
 
-    # Bob opens ledger with Charlie (Bob = operator, Charlie = partner)
+    # Bob opens ledger with Charlie (Bob = operator, Charlie = reserves)
     local charlie_info=$(run_bdk_cmd "bdk-charlie" info 2>&1)
     local charlie_node_id=$(echo "$charlie_info" | grep "Node ID:" | awk '{print $3}')
 
@@ -302,7 +302,7 @@ test_open_ledgers() {
         return
     fi
 
-    log_info "Opening ledger: Bob (operator) <-> Charlie (partner)"
+    log_info "Opening ledger: Bob (operator) <-> Charlie (reserves)"
     log_info "Charlie's Node ID: ${charlie_node_id:0:20}..."
 
     ledger_output=$(run_bdk_cmd "bdk-bob" ledger open "$charlie_node_id" "$enforcement_block" 2>&1)
@@ -316,7 +316,7 @@ test_open_ledgers() {
         fi
     fi
 
-    # Charlie opens ledger with Alice (Charlie = operator, Alice = partner)
+    # Charlie opens ledger with Alice (Charlie = operator, Alice = reserves)
     # This completes the triangle for cross-collateral
     local alice_info=$(run_bdk_cmd "bdk-alice" info 2>&1)
     local alice_node_id=$(echo "$alice_info" | grep "Node ID:" | awk '{print $3}')
@@ -326,7 +326,7 @@ test_open_ledgers() {
         return
     fi
 
-    log_info "Opening ledger: Charlie (operator) <-> Alice (partner)"
+    log_info "Opening ledger: Charlie (operator) <-> Alice (reserves)"
     log_info "Alice's Node ID: ${alice_node_id:0:20}..."
 
     ledger_output=$(run_bdk_cmd "bdk-charlie" ledger open "$alice_node_id" "$enforcement_block" 2>&1)
@@ -356,7 +356,7 @@ test_list_ledgers() {
             test_pass "$node has $ledger_count ledger relationship(s)"
             if $VERBOSE; then
                 echo "    Ledger list:"
-                echo "$list_output" | grep -E "Operator:|Partner:|Sequence:|Enforcement" | sed 's/^/      /'
+                echo "$list_output" | grep -E "Operator:|Reserves:|Sequence:|Enforcement" | sed 's/^/      /'
             fi
         else
             # No ledgers found for this node
@@ -369,9 +369,9 @@ test_list_ledgers() {
     done
 }
 
-# Test: Request collateral partners
-test_request_partners() {
-    log_info "Testing collateral partner requests..."
+# Test: Request collateral reservess
+test_request_reservess() {
+    log_info "Testing collateral reserves requests..."
 
     # Get node IDs
     local alice_info=$(run_bdk_cmd "bdk-alice" info 2>&1)
@@ -382,39 +382,39 @@ test_request_partners() {
     local bob_id=$(echo "$bob_info" | grep "Node ID:" | awk '{print $3}')
     local charlie_id=$(echo "$charlie_info" | grep "Node ID:" | awk '{print $3}')
 
-    # Alice requests Bob as partner
+    # Alice requests Bob as reserves
     if [ -n "$bob_id" ]; then
-        local request_output=$(run_bdk_cmd "bdk-alice" partner request "$bob_id" 2>&1)
+        local request_output=$(run_bdk_cmd "bdk-alice" reserves request "$bob_id" 2>&1)
 
         if echo "$request_output" | grep -q "Partnership request sent"; then
-            test_pass "Alice sent partner request to Bob"
+            test_pass "Alice sent reserves request to Bob"
         else
-            test_fail "Alice failed to send partner request to Bob"
+            test_fail "Alice failed to send reserves request to Bob"
             if $VERBOSE; then
                 echo "    Output: $request_output"
             fi
         fi
     fi
 
-    # Bob requests Charlie as partner
+    # Bob requests Charlie as reserves
     if [ -n "$charlie_id" ]; then
-        request_output=$(run_bdk_cmd "bdk-bob" partner request "$charlie_id" 2>&1)
+        request_output=$(run_bdk_cmd "bdk-bob" reserves request "$charlie_id" 2>&1)
 
         if echo "$request_output" | grep -q "Partnership request sent"; then
-            test_pass "Bob sent partner request to Charlie"
+            test_pass "Bob sent reserves request to Charlie"
         else
-            test_fail "Bob failed to send partner request to Charlie"
+            test_fail "Bob failed to send reserves request to Charlie"
         fi
     fi
 
-    # Charlie requests Alice as partner (completing the triangle)
+    # Charlie requests Alice as reserves (completing the triangle)
     if [ -n "$alice_id" ]; then
-        request_output=$(run_bdk_cmd "bdk-charlie" partner request "$alice_id" 2>&1)
+        request_output=$(run_bdk_cmd "bdk-charlie" reserves request "$alice_id" 2>&1)
 
         if echo "$request_output" | grep -q "Partnership request sent"; then
-            test_pass "Charlie sent partner request to Alice"
+            test_pass "Charlie sent reserves request to Alice"
         else
-            test_fail "Charlie failed to send partner request to Alice"
+            test_fail "Charlie failed to send reserves request to Alice"
         fi
     fi
 
@@ -422,22 +422,22 @@ test_request_partners() {
     sleep 2
 }
 
-# Test: List partners
-test_list_partners() {
-    log_info "Testing partner listing..."
+# Test: List reservess
+test_list_reservess() {
+    log_info "Testing reserves listing..."
 
     for node in "${NODES[@]}"; do
-        local list_output=$(run_bdk_cmd "$node" partner list 2>&1)
+        local list_output=$(run_bdk_cmd "$node" reserves list 2>&1)
 
         # Note: Partners may not be established yet (just requests sent)
         # So we just verify the command runs without error
-        if echo "$list_output" | grep -qE "No collateral partners|Partner|Collateral"; then
-            test_pass "$node partner list executed"
+        if echo "$list_output" | grep -qE "No collateral reservess|Partner|Collateral"; then
+            test_pass "$node reserves list executed"
             if $VERBOSE; then
                 echo "    Partners: $list_output"
             fi
         else
-            test_fail "$node partner list failed"
+            test_fail "$node reserves list failed"
         fi
     done
 }
@@ -459,7 +459,7 @@ FUNDING_AMOUNT_SATS=""
 test_open_deposits() {
     log_info "Testing deposit opening..."
 
-    # Get Bob's node ID (Bob is the partner in Alice's ledger)
+    # Get Bob's node ID (Bob is the reserves in Alice's ledger)
     local bob_info=$(run_bdk_cmd "bdk-bob" info 2>&1)
     BOB_NODE_ID=$(echo "$bob_info" | grep "Node ID:" | awk '{print $3}')
 
@@ -818,10 +818,10 @@ run_all_tests() {
     test_list_ledgers
 
     echo ""
-    test_request_partners
+    test_request_reservess
 
     echo ""
-    test_list_partners
+    test_list_reservess
 
     echo ""
     log_info "=== Deposit Lifecycle Tests ==="

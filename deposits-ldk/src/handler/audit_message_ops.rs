@@ -41,7 +41,7 @@ where
                 sync_response.updates.len(),
                 sender,
                 sync_response.operator_id,
-                sync_response.partner_id
+                sync_response.reserves_id
             );
 
             // Process each signed update
@@ -64,7 +64,7 @@ where
                 "📋 AUDIT: Received ledger update seq={} from operator {} -> partner {} (will be processed via normal flow)",
                 update_msg.sequence_number,
                 update_msg.operator_id,
-                update_msg.partner_id
+                update_msg.reserves_id
             );
             // In V2, individual LedgerUpdate messages are for new operations, not audit sync
             // Return Ok to indicate we've seen it, but don't try to store as signed update
@@ -72,13 +72,13 @@ where
         }
 
         // The sender is the operator of the ledger being audited
-        // Extract partner_id from the message
-        let partner_id = match message.partner_id() {
+        // Extract reserves_id from the message
+        let reserves_id = match message.reserves_id() {
             Some(id) => id,
             None => {
                 log_debug!(
                     self.logger,
-                    "📋 AUDIT: Message type {:#06x} doesn't contain partner_id, skipping audit storage",
+                    "📋 AUDIT: Message type {:#06x} doesn't contain reserves_id, skipping audit storage",
                     message.message_type()
                 );
                 return Ok(());
@@ -88,12 +88,12 @@ where
         let operator_id = sender;
 
         // Don't create audit ledgers for our own direct ledgers
-        if operator_id == self.our_node_id || partner_id == self.our_node_id {
+        if operator_id == self.our_node_id || reserves_id == self.our_node_id {
             log_debug!(
                 self.logger,
                 "📋 AUDIT: Skipping audit ledger creation - we are part of this ledger (operator={}, partner={})",
                 operator_id,
-                partner_id
+                reserves_id
             );
             return Ok(());
         }
@@ -103,7 +103,7 @@ where
             "📋 AUDIT: Received third-party message type {:#06x} for ledger (operator={}, partner={})",
             message.message_type(),
             operator_id,
-            partner_id
+            reserves_id
         );
 
 
@@ -111,7 +111,7 @@ where
         let ledger_arc = {
             let mut ledgers = self.ledgers.lock().unwrap();
             ledgers
-                .entry((operator_id, partner_id))
+                .entry((operator_id, reserves_id))
                 .or_insert_with(|| {
                     use bitcoin::secp256k1::{Secp256k1, SecretKey};
                     use bitcoin::hashes::{sha256, Hash};
@@ -121,7 +121,7 @@ where
                     let secp = Secp256k1::new();
                     let mut hash_data = Vec::new();
                     hash_data.extend_from_slice(&operator_id.serialize());
-                    hash_data.extend_from_slice(&partner_id.serialize());
+                    hash_data.extend_from_slice(&reserves_id.serialize());
                     let hash = sha256::Hash::hash(&hash_data);
                     let secret_key = SecretKey::from_slice(&hash[..]).expect("Valid hash");
                     let secp_pubkey = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
@@ -132,7 +132,7 @@ where
 
                     Arc::new(RwLock::new(Ledger::new(
                         operator_id,
-                        partner_id,
+                        reserves_id,
                         LedgerRole::Auditor,
                         Vec::new(), // No collateral partners for audit ledgers
                         placeholder_address.to_string(),
@@ -161,11 +161,11 @@ where
                             }
 
                             log_info!(self.logger, "📋 AUDIT: Handshake processed (operator={}, partner={})",
-                                     operator_id, partner_id);
+                                     operator_id, reserves_id);
 
                             drop(ledger);
                             let ledger_for_persist = ledger_arc.read().unwrap();
-                            if let Err(e) = self.persist_audit_ledger_state(operator_id, partner_id, &ledger_for_persist) {
+                            if let Err(e) = self.persist_audit_ledger_state(operator_id, reserves_id, &ledger_for_persist) {
                                 log_error!(self.logger, "📋 AUDIT: Failed to persist audit ledger: {}", e);
                             }
                         }
@@ -189,7 +189,7 @@ where
                 log_debug!(self.logger, "📋 AUDIT: Message type {:#06x} applied to audit ledger", message.message_type());
                 drop(ledger);
                 let ledger_for_persist = ledger_arc.read().unwrap();
-                if let Err(e) = self.persist_audit_ledger_state(operator_id, partner_id, &ledger_for_persist) {
+                if let Err(e) = self.persist_audit_ledger_state(operator_id, reserves_id, &ledger_for_persist) {
                     log_error!(self.logger, "📋 AUDIT: Failed to persist audit ledger: {}", e);
                 }
             }

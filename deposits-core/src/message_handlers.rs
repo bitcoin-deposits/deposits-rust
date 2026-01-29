@@ -74,7 +74,7 @@ pub enum ResponseData {
     /// Collateral consent response
     CollateralConsent {
         operator_id: PublicKey,
-        partner_id: PublicKey,
+        reserves_id: PublicKey,
         consent_granted: bool,
         // Signature is populated by the LDK layer which has access to keys
     },
@@ -93,7 +93,7 @@ pub enum ResponseData {
     /// Collateral partner added - response with signature data for ACK
     CollateralPartnerAdded {
         operator_id: PublicKey,
-        partner_id: PublicKey,
+        reserves_id: PublicKey,
         collateral_partner: PublicKey,
         /// Sequence number after append
         sequence: u64,
@@ -104,7 +104,7 @@ pub enum ResponseData {
     },
     /// Collateral partner removed - response with signature data for ACK
     CollateralPartnerRemoved {
-        partner_id: PublicKey,
+        reserves_id: PublicKey,
         collateral_partner: PublicKey,
         /// Sequence number after append
         sequence: u64,
@@ -360,7 +360,7 @@ pub fn handle_ledger_update<C: HandlerContext>(
     use bitcoin::hashes::{Hash, sha256};
 
     let operator = msg.operator_id;
-    let partner = msg.partner_id;
+    let partner = msg.reserves_id;
     let operation = msg.operation.clone();
 
     // Compute message hash from serialized message
@@ -581,7 +581,7 @@ pub fn handle_quorum_join_request<C: HandlerContext>(
     let core_msg = CoreQuorumMsg {
         requester_pubkey: msg.requester_pubkey,
         operator_id: msg.operator_id,
-        partner_id: msg.partner_id,
+        reserves_id: msg.reserves_id,
         protocol_version: msg.protocol_version,
         timestamp: msg.timestamp,
         signature: msg.signature,
@@ -605,11 +605,11 @@ pub fn handle_quorum_join_request<C: HandlerContext>(
             if response.accepted {
                 ctx.emit_event(ProtocolEvent::QuorumMemberJoined {
                     operator: msg.operator_id,
-                    partner: msg.partner_id,
+                    partner: msg.reserves_id,
                     member: msg.requester_pubkey,
                 });
                 // Send state sync to new member via provider
-                ctx.send_quorum_state_sync(msg.requester_pubkey, msg.operator_id, msg.partner_id);
+                ctx.send_quorum_state_sync(msg.requester_pubkey, msg.operator_id, msg.reserves_id);
             }
 
             Ok(HandlerResult::Ok)
@@ -632,7 +632,7 @@ pub fn handle_quorum_vote_request<C: HandlerContext>(
     let our_node_id = ctx.our_node_id();
 
     // Get local state from signed update log (more accurate than ledger state)
-    let (our_sequence, our_state_hash) = match ctx.get_signed_update_log_state(&msg.operator_id, &msg.partner_id) {
+    let (our_sequence, our_state_hash) = match ctx.get_signed_update_log_state(&msg.operator_id, &msg.reserves_id) {
         Some(state) => state,
         None => {
             // No local state, abstain from voting
@@ -644,7 +644,7 @@ pub fn handle_quorum_vote_request<C: HandlerContext>(
     ctx.init_vote_round(
         msg.vote_round_id,
         msg.operator_id,
-        msg.partner_id,
+        msg.reserves_id,
         msg.sequence_number,
         msg.state_hash,
         msg.claimed_reserves,
@@ -849,7 +849,7 @@ pub fn handle_collateral_consent_request<C: HandlerContext>(
         let mut sign_content = Vec::new();
         sign_content.extend_from_slice(b"COLLATERAL_CONSENT");
         sign_content.extend_from_slice(&msg.operator_id.serialize());
-        sign_content.extend_from_slice(&msg.partner_id.serialize());
+        sign_content.extend_from_slice(&msg.reserves_id.serialize());
         ctx.sign_message(&sign_content).unwrap_or([0u8; 64])
     } else {
         [0u8; 64]
@@ -860,7 +860,7 @@ pub fn handle_collateral_consent_request<C: HandlerContext>(
         CoordinationResponseMsg::CollateralConsentResponse {
             request_hash: [0u8; 32],
             operator_id: msg.operator_id,
-            partner_id: msg.partner_id,
+            reserves_id: msg.reserves_id,
             consent_granted,
             collateral_partner_signature: signature,
         }
@@ -871,7 +871,7 @@ pub fn handle_collateral_consent_request<C: HandlerContext>(
     if consent_granted {
         let sync_request = DepositsMessage::Sync(SyncMsg {
             operator_id: msg.operator_id,
-            partner_id: msg.partner_id,
+            reserves_id: msg.reserves_id,
             last_known_sequence: 0,
             last_known_hash: [0u8; 32],
         });
@@ -893,7 +893,7 @@ pub fn handle_collateral_consent_response<C: HandlerContext>(
     if msg.consent_granted {
         if !ctx.verify_consent_signature(
             msg.operator_id,
-            msg.partner_id,
+            msg.reserves_id,
             msg.collateral_partner_signature,
             sender,
         ) {
@@ -904,7 +904,7 @@ pub fn handle_collateral_consent_response<C: HandlerContext>(
     // Complete pending consent request via provider
     ctx.complete_consent_request(
         msg.operator_id,
-        msg.partner_id,
+        msg.reserves_id,
         msg.consent_granted,
         msg.collateral_partner_signature,
     );
@@ -913,7 +913,7 @@ pub fn handle_collateral_consent_response<C: HandlerContext>(
     if msg.consent_granted {
         ctx.send_audit_to_collateral_partner(
             msg.operator_id,
-            msg.partner_id,
+            msg.reserves_id,
             sender,
             msg.collateral_partner_signature,
         );
@@ -935,19 +935,19 @@ pub fn handle_collateral_add_partner<C: HandlerContext>(
 
     let our_node_id = ctx.our_node_id();
 
-    // We must be the partner_id to process this message
-    if msg.partner_id != our_node_id {
+    // We must be the reserves_id to process this message
+    if msg.reserves_id != our_node_id {
         return Ok(HandlerResult::Rejected(format!(
             "We ({}) are not the target partner ({})",
-            our_node_id, msg.partner_id
+            our_node_id, msg.reserves_id
         )));
     }
 
     // Get the ledger - sender (operator) and us (partner)
-    let ledger_arc = ctx.get_ledger(&sender, &msg.partner_id)
+    let ledger_arc = ctx.get_ledger(&sender, &msg.reserves_id)
         .ok_or(HandlerError::LedgerNotFound {
             operator: sender,
-            partner: msg.partner_id,
+            partner: msg.reserves_id,
         })?;
 
     let operation = LedgerOperation::CollateralAddPartner {
@@ -995,8 +995,8 @@ pub fn handle_collateral_add_partner<C: HandlerContext>(
             )?;
             ledger.sign_last_update(None, Some(sig));
         }
-        let _ = ctx.persist_ledger(&sender, &msg.partner_id);
-        ctx.sync_quorum_member(sender, msg.partner_id, msg.collateral_partner, true);
+        let _ = ctx.persist_ledger(&sender, &msg.reserves_id);
+        ctx.sync_quorum_member(sender, msg.reserves_id, msg.collateral_partner, true);
     }
 
     // NOTE: ACK is sent by LDK dispatch code which has access to the correct message hash
@@ -1016,19 +1016,19 @@ pub fn handle_collateral_remove_partner<C: HandlerContext>(
 
     let our_node_id = ctx.our_node_id();
 
-    // We must be the partner_id to process this message
-    if msg.partner_id != our_node_id {
+    // We must be the reserves_id to process this message
+    if msg.reserves_id != our_node_id {
         return Ok(HandlerResult::Rejected(format!(
             "We ({}) are not the target partner ({})",
-            our_node_id, msg.partner_id
+            our_node_id, msg.reserves_id
         )));
     }
 
     // Get the ledger - sender (operator) and us (partner)
-    let ledger_arc = ctx.get_ledger(&sender, &msg.partner_id)
+    let ledger_arc = ctx.get_ledger(&sender, &msg.reserves_id)
         .ok_or(HandlerError::LedgerNotFound {
             operator: sender,
-            partner: msg.partner_id,
+            partner: msg.reserves_id,
         })?;
 
     let operation = LedgerOperation::CollateralRemovePartner {
@@ -1076,8 +1076,8 @@ pub fn handle_collateral_remove_partner<C: HandlerContext>(
             )?;
             ledger.sign_last_update(None, Some(sig));
         }
-        let _ = ctx.persist_ledger(&sender, &msg.partner_id);
-        ctx.sync_quorum_member(sender, msg.partner_id, msg.collateral_partner, false);
+        let _ = ctx.persist_ledger(&sender, &msg.reserves_id);
+        ctx.sync_quorum_member(sender, msg.reserves_id, msg.collateral_partner, false);
     }
 
     // NOTE: ACK is sent by LDK dispatch code which has access to the correct message hash
@@ -1234,18 +1234,18 @@ pub fn handle_receiving_credit_payment<C: HandlerContext>(
     let our_node_id = ctx.our_node_id();
 
     // We must be the partner to process this message
-    if msg.partner_id != our_node_id {
+    if msg.reserves_id != our_node_id {
         return Ok(HandlerResult::Rejected(format!(
             "We ({}) are not the target partner ({})",
-            our_node_id, msg.partner_id
+            our_node_id, msg.reserves_id
         )));
     }
 
     // Get the ledger - sender (operator) and us (partner)
-    let ledger_arc = ctx.get_ledger(&sender, &msg.partner_id)
+    let ledger_arc = ctx.get_ledger(&sender, &msg.reserves_id)
         .ok_or(HandlerError::LedgerNotFound {
             operator: sender,
-            partner: msg.partner_id,
+            partner: msg.reserves_id,
         })?;
 
     // Validate the credit payment
@@ -1265,7 +1265,7 @@ pub fn handle_receiving_credit_payment<C: HandlerContext>(
     // Emit event for credit being received
     ctx.emit_event(ProtocolEvent::PaymentCredited {
         operator: sender,
-        partner: msg.partner_id,
+        partner: msg.reserves_id,
         deposit_pubkey: msg.deposit_pubkey,
         amount: msg.amount,
         payment_hash: msg.payment_hash,
@@ -1274,7 +1274,7 @@ pub fn handle_receiving_credit_payment<C: HandlerContext>(
     // Return validated data for LDK layer to record to ledger and sign
     Ok(HandlerResult::Response(ResponseData::CreditPaymentValidated {
         operator: sender,
-        partner: msg.partner_id,
+        partner: msg.reserves_id,
         deposit_pubkey: msg.deposit_pubkey,
         amount: msg.amount,
         payment_hash: msg.payment_hash,
@@ -1494,18 +1494,18 @@ pub fn handle_deposit_open<C: HandlerContext>(
     let our_node_id = ctx.our_node_id();
 
     // We must be the partner to process this message
-    if msg.partner_id != our_node_id {
+    if msg.reserves_id != our_node_id {
         return Ok(HandlerResult::Rejected(format!(
             "We ({}) are not the target partner ({})",
-            our_node_id, msg.partner_id
+            our_node_id, msg.reserves_id
         )));
     }
 
     // Get the ledger - sender (operator) and us (partner)
-    let ledger_arc = ctx.get_ledger(&sender, &msg.partner_id)
+    let ledger_arc = ctx.get_ledger(&sender, &msg.reserves_id)
         .ok_or(HandlerError::LedgerNotFound {
             operator: sender,
-            partner: msg.partner_id,
+            partner: msg.reserves_id,
         })?;
 
     let operation = LedgerOperation::DepositOpen {
@@ -1563,7 +1563,7 @@ pub fn handle_deposit_open<C: HandlerContext>(
             )?;
             ledger.sign_last_update(None, Some(sig));
         }
-        let _ = ctx.persist_ledger(&sender, &msg.partner_id);
+        let _ = ctx.persist_ledger(&sender, &msg.reserves_id);
     }
 
     // NOTE: ACK is sent by LDK dispatch code which has access to the correct message hash
@@ -1571,7 +1571,7 @@ pub fn handle_deposit_open<C: HandlerContext>(
     // Emit event
     ctx.emit_event(crate::traits::ProtocolEvent::DepositOpened {
         operator: sender,
-        partner: msg.partner_id,
+        partner: msg.reserves_id,
         deposit_pubkey: msg.pubkey,
     });
 
@@ -1592,18 +1592,18 @@ pub fn handle_deposit_close<C: HandlerContext>(
     let our_node_id = ctx.our_node_id();
 
     // We must be the partner to process this message
-    if msg.partner_id != our_node_id {
+    if msg.reserves_id != our_node_id {
         return Ok(HandlerResult::Rejected(format!(
             "We ({}) are not the target partner ({})",
-            our_node_id, msg.partner_id
+            our_node_id, msg.reserves_id
         )));
     }
 
     // Get the ledger - sender (operator) and us (partner)
-    let ledger_arc = ctx.get_ledger(&sender, &msg.partner_id)
+    let ledger_arc = ctx.get_ledger(&sender, &msg.reserves_id)
         .ok_or(HandlerError::LedgerNotFound {
             operator: sender,
-            partner: msg.partner_id,
+            partner: msg.reserves_id,
         })?;
 
     let operation = LedgerOperation::DepositClose {
@@ -1661,7 +1661,7 @@ pub fn handle_deposit_close<C: HandlerContext>(
             )?;
             ledger.sign_last_update(None, Some(sig));
         }
-        let _ = ctx.persist_ledger(&sender, &msg.partner_id);
+        let _ = ctx.persist_ledger(&sender, &msg.reserves_id);
     }
 
     // NOTE: ACK is sent by LDK dispatch code which has access to the correct message hash
@@ -1670,7 +1670,7 @@ pub fn handle_deposit_close<C: HandlerContext>(
     if !is_idempotent {
         ctx.emit_event(crate::traits::ProtocolEvent::DepositClosed {
             operator: sender,
-            partner: msg.partner_id,
+            partner: msg.reserves_id,
             deposit_pubkey: msg.pubkey,
             final_balance,
         });
@@ -1693,18 +1693,18 @@ pub fn handle_deposit_update<C: HandlerContext>(
     let our_node_id = ctx.our_node_id();
 
     // We must be the partner to process this message
-    if msg.partner_id != our_node_id {
+    if msg.reserves_id != our_node_id {
         return Ok(HandlerResult::Rejected(format!(
             "We ({}) are not the target partner ({})",
-            our_node_id, msg.partner_id
+            our_node_id, msg.reserves_id
         )));
     }
 
     // Get the ledger - sender (operator) and us (partner)
-    let ledger_arc = ctx.get_ledger(&sender, &msg.partner_id)
+    let ledger_arc = ctx.get_ledger(&sender, &msg.reserves_id)
         .ok_or(HandlerError::LedgerNotFound {
             operator: sender,
-            partner: msg.partner_id,
+            partner: msg.reserves_id,
         })?;
 
     let operation = LedgerOperation::DepositUpdate {
@@ -1751,7 +1751,7 @@ pub fn handle_deposit_update<C: HandlerContext>(
         )?;
         ledger.sign_last_update(None, Some(sig));
     }
-    let _ = ctx.persist_ledger(&sender, &msg.partner_id);
+    let _ = ctx.persist_ledger(&sender, &msg.reserves_id);
 
     // NOTE: ACK is sent by LDK dispatch code which has access to the correct message hash
 
@@ -1785,18 +1785,18 @@ pub fn handle_reserves_add_output<C: HandlerContext>(
     let our_node_id = ctx.our_node_id();
 
     // We must be the partner to process this message
-    if msg.partner_id != our_node_id {
+    if msg.reserves_id != our_node_id {
         return Ok(HandlerResult::Rejected(format!(
             "We ({}) are not the target partner ({})",
-            our_node_id, msg.partner_id
+            our_node_id, msg.reserves_id
         )));
     }
 
     // Get the ledger - sender (operator) and us (partner)
-    let ledger_arc = ctx.get_ledger(&sender, &msg.partner_id)
+    let ledger_arc = ctx.get_ledger(&sender, &msg.reserves_id)
         .ok_or(HandlerError::LedgerNotFound {
             operator: sender,
-            partner: msg.partner_id,
+            partner: msg.reserves_id,
         })?;
 
     // Validate and get current state
@@ -1809,7 +1809,7 @@ pub fn handle_reserves_add_output<C: HandlerContext>(
         if ledger.state.reserves.amount > 0 {
             return Ok(HandlerResult::Response(ResponseData::ReservesAddOutputValidated {
                 operator: sender,
-                partner: msg.partner_id,
+                partner: msg.reserves_id,
                 initial_amount: msg.initial_amount,
                 spend_to: msg.spend_to,
                 collateral_partners: msg.collateral_partners.clone(),
@@ -1830,7 +1830,7 @@ pub fn handle_reserves_add_output<C: HandlerContext>(
     // Return validated data for LDK layer to record to ledger and sign
     Ok(HandlerResult::Response(ResponseData::ReservesAddOutputValidated {
         operator: sender,
-        partner: msg.partner_id,
+        partner: msg.reserves_id,
         initial_amount: msg.initial_amount,
         spend_to: msg.spend_to,
         collateral_partners: msg.collateral_partners.clone(),
@@ -1863,18 +1863,18 @@ pub fn handle_reserves_remove_output<C: HandlerContext>(
     let our_node_id = ctx.our_node_id();
 
     // We must be the partner to process this message
-    if msg.partner_id != our_node_id {
+    if msg.reserves_id != our_node_id {
         return Ok(HandlerResult::Rejected(format!(
             "We ({}) are not the target partner ({})",
-            our_node_id, msg.partner_id
+            our_node_id, msg.reserves_id
         )));
     }
 
     // Get the ledger - sender (operator) and us (partner)
-    let ledger_arc = ctx.get_ledger(&sender, &msg.partner_id)
+    let ledger_arc = ctx.get_ledger(&sender, &msg.reserves_id)
         .ok_or(HandlerError::LedgerNotFound {
             operator: sender,
-            partner: msg.partner_id,
+            partner: msg.reserves_id,
         })?;
 
     // Validate and get current state
@@ -1887,7 +1887,7 @@ pub fn handle_reserves_remove_output<C: HandlerContext>(
         if ledger.state.reserves.amount == 0 {
             return Ok(HandlerResult::Response(ResponseData::ReservesRemoveOutputValidated {
                 operator: sender,
-                partner: msg.partner_id,
+                partner: msg.reserves_id,
                 sequence: ledger.sequence(),
                 prev_hash: ledger.hash(),
                 new_hash: ledger.hash(),
@@ -1910,7 +1910,7 @@ pub fn handle_reserves_remove_output<C: HandlerContext>(
     // Return validated data for LDK layer to record to ledger and sign
     Ok(HandlerResult::Response(ResponseData::ReservesRemoveOutputValidated {
         operator: sender,
-        partner: msg.partner_id,
+        partner: msg.reserves_id,
         sequence,
         prev_hash,
         new_hash,
@@ -1940,18 +1940,18 @@ pub fn handle_reserves_increase<C: HandlerContext>(
     let our_node_id = ctx.our_node_id();
 
     // We must be the partner to process this message
-    if msg.partner_id != our_node_id {
+    if msg.reserves_id != our_node_id {
         return Ok(HandlerResult::Rejected(format!(
             "We ({}) are not the target partner ({})",
-            our_node_id, msg.partner_id
+            our_node_id, msg.reserves_id
         )));
     }
 
     // Get the ledger - sender (operator) and us (partner)
-    let ledger_arc = ctx.get_ledger(&sender, &msg.partner_id)
+    let ledger_arc = ctx.get_ledger(&sender, &msg.reserves_id)
         .ok_or(HandlerError::LedgerNotFound {
             operator: sender,
-            partner: msg.partner_id,
+            partner: msg.reserves_id,
         })?;
 
     // Validate and get current state
@@ -1974,7 +1974,7 @@ pub fn handle_reserves_increase<C: HandlerContext>(
     // Return validated data for LDK layer to record to ledger and sign
     Ok(HandlerResult::Response(ResponseData::ReservesIncreaseValidated {
         operator: sender,
-        partner: msg.partner_id,
+        partner: msg.reserves_id,
         new_amount: msg.new_amount,
         sequence,
         prev_hash,
@@ -2005,18 +2005,18 @@ pub fn handle_reserves_decrease<C: HandlerContext>(
     let our_node_id = ctx.our_node_id();
 
     // We must be the partner to process this message
-    if msg.partner_id != our_node_id {
+    if msg.reserves_id != our_node_id {
         return Ok(HandlerResult::Rejected(format!(
             "We ({}) are not the target partner ({})",
-            our_node_id, msg.partner_id
+            our_node_id, msg.reserves_id
         )));
     }
 
     // Get the ledger - sender (operator) and us (partner)
-    let ledger_arc = ctx.get_ledger(&sender, &msg.partner_id)
+    let ledger_arc = ctx.get_ledger(&sender, &msg.reserves_id)
         .ok_or(HandlerError::LedgerNotFound {
             operator: sender,
-            partner: msg.partner_id,
+            partner: msg.reserves_id,
         })?;
 
     // Validate and get current state
@@ -2036,7 +2036,7 @@ pub fn handle_reserves_decrease<C: HandlerContext>(
     // Return validated data for LDK layer to record to ledger and sign
     Ok(HandlerResult::Response(ResponseData::ReservesDecreaseValidated {
         operator: sender,
-        partner: msg.partner_id,
+        partner: msg.reserves_id,
         new_amount: msg.new_amount,
         sequence,
         prev_hash,
@@ -2138,10 +2138,10 @@ pub fn handle_ledger_close<C: HandlerContext>(
     let our_node_id = ctx.our_node_id();
 
     // We must be the partner to process this message
-    if msg.partner_id != our_node_id {
+    if msg.reserves_id != our_node_id {
         return Ok(HandlerResult::Rejected(format!(
             "We ({}) are not the target partner ({})",
-            our_node_id, msg.partner_id
+            our_node_id, msg.reserves_id
         )));
     }
 
@@ -2448,19 +2448,19 @@ pub fn handle_channel_close_tombstone<C: HandlerContext>(
 
     // Determine our role: operator or partner
     let we_are_operator = msg.operator_id == our_node_id;
-    let we_are_partner = msg.partner_id == our_node_id;
+    let we_are_partner = msg.reserves_id == our_node_id;
 
     if !we_are_operator && !we_are_partner {
         return Ok(HandlerResult::Rejected(format!(
             "Received tombstone for ledger we're not part of: operator={}, partner={}",
-            msg.operator_id, msg.partner_id
+            msg.operator_id, msg.reserves_id
         )));
     }
 
     // Emit event for channel close
     ctx.emit_event(ProtocolEvent::ChannelClosed {
         operator: msg.operator_id,
-        partner: msg.partner_id,
+        partner: msg.reserves_id,
         channel_id: msg.channel_id,
         reason: msg.close_reason.clone(),
     });
@@ -2468,7 +2468,7 @@ pub fn handle_channel_close_tombstone<C: HandlerContext>(
     // Return validated data for LDK layer to append to ledger
     Ok(HandlerResult::Response(ResponseData::ChannelCloseTombstoneValidated {
         operator: msg.operator_id,
-        partner: msg.partner_id,
+        partner: msg.reserves_id,
         channel_id: msg.channel_id,
         sequence_number: msg.sequence_number,
         timestamp: msg.timestamp,
@@ -2569,7 +2569,7 @@ mod tests {
 
         let msg = CollateralConsentRequestMsg {
             operator_id: operator,
-            partner_id: partner,
+            reserves_id: partner,
             operator_signature: [0u8; 64],
         };
 
@@ -2588,7 +2588,7 @@ mod tests {
 
         let msg = CollateralConsentRequestMsg {
             operator_id: operator,
-            partner_id: partner,
+            reserves_id: partner,
             operator_signature: [0u8; 64],
         };
 
@@ -2616,7 +2616,7 @@ mod tests {
 
         let msg = CollateralConsentRequestMsg {
             operator_id: operator,
-            partner_id: partner,
+            reserves_id: partner,
             operator_signature: [0u8; 64],
         };
 
@@ -2645,7 +2645,7 @@ mod tests {
 
         let msg = CollateralAddPartnerMsg {
             operator_id: operator,
-            partner_id: other_partner, // Not us
+            reserves_id: other_partner, // Not us
             collateral_partner,
             collateral_partner_signature: [0u8; 64],
         };
@@ -2665,7 +2665,7 @@ mod tests {
 
         let msg = CollateralAddPartnerMsg {
             operator_id: operator,
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             collateral_partner,
             collateral_partner_signature: [0u8; 64],
         };
@@ -2689,7 +2689,7 @@ mod tests {
 
         let msg = CollateralAddPartnerMsg {
             operator_id: operator,
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             collateral_partner,
             collateral_partner_signature: [0u8; 64],
         };
@@ -2700,7 +2700,7 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_collateral_add_partner_idempotent() {
+    fn test_handle_collateral_add_reserves_idempotent() {
         let our_node_id = create_test_pubkey(1);
         let operator = create_test_pubkey(2);
         let collateral_partner = create_test_pubkey(3);
@@ -2714,7 +2714,7 @@ mod tests {
 
         let msg = CollateralAddPartnerMsg {
             operator_id: operator,
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             collateral_partner,
             collateral_partner_signature: [0u8; 64],
         };
@@ -2734,7 +2734,7 @@ mod tests {
         let ctx = TestContext::new(our_node_id);
 
         let msg = CollateralRemovePartnerMsg {
-            partner_id: other_partner, // Not us
+            reserves_id: other_partner, // Not us
             collateral_partner,
             operator_signature: [0u8; 64],
         };
@@ -2757,7 +2757,7 @@ mod tests {
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = CollateralRemovePartnerMsg {
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             collateral_partner,
             operator_signature: [0u8; 64],
         };
@@ -2781,7 +2781,7 @@ mod tests {
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = CollateralRemovePartnerMsg {
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             collateral_partner,
             operator_signature: [0u8; 64],
         };
@@ -3021,7 +3021,7 @@ mod tests {
             deposit_pubkey,
             amount: 100_000,
             invoice_id: "test_invoice".to_string(),
-            partner_id: other_partner, // Not us
+            reserves_id: other_partner, // Not us
             sequence_number: 0,
         };
 
@@ -3043,7 +3043,7 @@ mod tests {
             deposit_pubkey,
             amount: 100_000,
             invoice_id: "test_invoice".to_string(),
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             sequence_number: 0,
         };
 
@@ -3075,7 +3075,7 @@ mod tests {
             deposit_pubkey, // This deposit doesn't exist
             amount: 50_000,
             invoice_id: "test_invoice".to_string(),
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             sequence_number: 0,
         };
 
@@ -3111,7 +3111,7 @@ mod tests {
             deposit_pubkey,
             amount: 50_000,
             invoice_id: "test_invoice".to_string(),
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             sequence_number: 0,
         };
 
@@ -3495,7 +3495,7 @@ mod tests {
         let ctx = TestContext::new(our_node_id);
 
         let msg = DepositOpenMsg {
-            partner_id: other_partner, // Not us
+            reserves_id: other_partner, // Not us
             pubkey: deposit_pubkey,
             fees: None,
             payment_hash: None,
@@ -3517,7 +3517,7 @@ mod tests {
         let ctx = TestContext::new(our_node_id);
 
         let msg = DepositOpenMsg {
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             pubkey: deposit_pubkey,
             fees: None,
             payment_hash: None,
@@ -3543,7 +3543,7 @@ mod tests {
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = DepositOpenMsg {
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             pubkey: deposit_pubkey,
             fees: None,
             payment_hash: None,
@@ -3573,7 +3573,7 @@ mod tests {
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = DepositOpenMsg {
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             pubkey: deposit_pubkey,
             fees: None,
             payment_hash: None,
@@ -3607,7 +3607,7 @@ mod tests {
         };
 
         let msg = DepositOpenMsg {
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             pubkey: deposit_pubkey,
             fees: Some(fees),
             payment_hash: None,
@@ -3642,7 +3642,7 @@ mod tests {
         };
 
         let msg = DepositOpenMsg {
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             pubkey: deposit_pubkey,
             fees: Some(invalid_fees),
             payment_hash: None,
@@ -3669,7 +3669,7 @@ mod tests {
         let ctx = TestContext::new(our_node_id);
 
         let msg = DepositCloseMsg {
-            partner_id: other_partner, // Not us
+            reserves_id: other_partner, // Not us
             pubkey: deposit_pubkey,
         };
 
@@ -3687,7 +3687,7 @@ mod tests {
         let ctx = TestContext::new(our_node_id);
 
         let msg = DepositCloseMsg {
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             pubkey: deposit_pubkey,
         };
 
@@ -3713,7 +3713,7 @@ mod tests {
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = DepositCloseMsg {
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             pubkey: deposit_pubkey,
         };
 
@@ -3740,7 +3740,7 @@ mod tests {
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = DepositCloseMsg {
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             pubkey: deposit_pubkey,
         };
 
@@ -3767,7 +3767,7 @@ mod tests {
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = DepositCloseMsg {
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             pubkey: deposit_pubkey,
         };
 
@@ -3789,7 +3789,7 @@ mod tests {
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = DepositCloseMsg {
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             pubkey: deposit_pubkey,
         };
 
@@ -3814,7 +3814,7 @@ mod tests {
         let ctx = TestContext::new(our_node_id);
 
         let msg = DepositUpdateMsg {
-            partner_id: other_partner, // Not us
+            reserves_id: other_partner, // Not us
             pubkey: deposit_pubkey,
             new_fees: FeeStructure::default(),
         };
@@ -3835,7 +3835,7 @@ mod tests {
         let ctx = TestContext::new(our_node_id);
 
         let msg = DepositUpdateMsg {
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             pubkey: deposit_pubkey,
             new_fees: FeeStructure::default(),
         };
@@ -3860,7 +3860,7 @@ mod tests {
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = DepositUpdateMsg {
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             pubkey: deposit_pubkey,
             new_fees: FeeStructure::default(),
         };
@@ -3893,7 +3893,7 @@ mod tests {
         };
 
         let msg = DepositUpdateMsg {
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             pubkey: deposit_pubkey,
             new_fees,
         };
@@ -3927,7 +3927,7 @@ mod tests {
         };
 
         let msg = DepositUpdateMsg {
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             pubkey: deposit_pubkey,
             new_fees: invalid_fees,
         };
@@ -3961,7 +3961,7 @@ mod tests {
         };
 
         let msg = DepositUpdateMsg {
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             pubkey: deposit_pubkey,
             new_fees: invalid_fees,
         };
@@ -3987,7 +3987,7 @@ mod tests {
         let msg = ReservesAddOutputMsg {
             initial_amount: 100_000,
             spend_to,
-            partner_id: other_partner, // Not us
+            reserves_id: other_partner, // Not us
             collateral_partners: vec![],
         };
 
@@ -4007,7 +4007,7 @@ mod tests {
         let msg = ReservesAddOutputMsg {
             initial_amount: 100_000,
             spend_to,
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             collateral_partners: vec![],
         };
 
@@ -4031,7 +4031,7 @@ mod tests {
         let msg = ReservesAddOutputMsg {
             initial_amount: 100_000,
             spend_to,
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             collateral_partners: vec![],
         };
 
@@ -4060,7 +4060,7 @@ mod tests {
         let msg = ReservesAddOutputMsg {
             initial_amount: 100, // Too small
             spend_to,
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             collateral_partners: vec![],
         };
 
@@ -4086,7 +4086,7 @@ mod tests {
         let msg = ReservesAddOutputMsg {
             initial_amount: 100_000,
             spend_to,
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             collateral_partners: vec![],
         };
 
@@ -4111,7 +4111,7 @@ mod tests {
         let ctx = TestContext::new(our_node_id);
 
         let msg = ReservesRemoveOutputMsg {
-            partner_id: other_partner, // Not us
+            reserves_id: other_partner, // Not us
             remove_all: true,
         };
 
@@ -4128,7 +4128,7 @@ mod tests {
         let ctx = TestContext::new(our_node_id);
 
         let msg = ReservesRemoveOutputMsg {
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             remove_all: true,
         };
 
@@ -4152,7 +4152,7 @@ mod tests {
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = ReservesRemoveOutputMsg {
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             remove_all: true,
         };
 
@@ -4185,7 +4185,7 @@ mod tests {
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = ReservesRemoveOutputMsg {
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             remove_all: true,
         };
 
@@ -4206,7 +4206,7 @@ mod tests {
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = ReservesRemoveOutputMsg {
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             remove_all: true,
         };
 
@@ -4231,7 +4231,7 @@ mod tests {
         let ctx = TestContext::new(our_node_id);
 
         let msg = ReservesIncreaseMsg {
-            partner_id: other_partner, // Not us
+            reserves_id: other_partner, // Not us
             new_amount: 200_000,
         };
 
@@ -4248,7 +4248,7 @@ mod tests {
         let ctx = TestContext::new(our_node_id);
 
         let msg = ReservesIncreaseMsg {
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             new_amount: 200_000,
         };
 
@@ -4272,7 +4272,7 @@ mod tests {
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = ReservesIncreaseMsg {
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             new_amount: 200_000,
         };
 
@@ -4301,7 +4301,7 @@ mod tests {
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = ReservesIncreaseMsg {
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             new_amount: 150_000, // Less than current
         };
 
@@ -4323,7 +4323,7 @@ mod tests {
         let ctx = TestContext::new(our_node_id);
 
         let msg = ReservesDecreaseMsg {
-            partner_id: other_partner, // Not us
+            reserves_id: other_partner, // Not us
             new_amount: 50_000,
         };
 
@@ -4340,7 +4340,7 @@ mod tests {
         let ctx = TestContext::new(our_node_id);
 
         let msg = ReservesDecreaseMsg {
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             new_amount: 50_000,
         };
 
@@ -4364,7 +4364,7 @@ mod tests {
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = ReservesDecreaseMsg {
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             new_amount: 100_000,
         };
 
@@ -4393,7 +4393,7 @@ mod tests {
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = ReservesDecreaseMsg {
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             new_amount: 150_000, // More than current
         };
 
@@ -4423,7 +4423,7 @@ mod tests {
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = ReservesDecreaseMsg {
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
             new_amount: 50_000, // Below deposit balance
         };
 
@@ -4573,7 +4573,7 @@ mod tests {
         let ctx = TestContext::new(our_node_id);
 
         let msg = LedgerCloseMsg {
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
         };
 
         // No ledger exists - should error
@@ -4590,7 +4590,7 @@ mod tests {
         let ctx = TestContext::new(our_node_id);
 
         let msg = LedgerCloseMsg {
-            partner_id: wrong_partner, // Not us
+            reserves_id: wrong_partner, // Not us
         };
 
         // We're not the target partner - should be rejected
@@ -4616,7 +4616,7 @@ mod tests {
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = LedgerCloseMsg {
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
         };
 
         // Outstanding balance - should fail validation
@@ -4643,7 +4643,7 @@ mod tests {
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = LedgerCloseMsg {
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
         };
 
         // Locked balance - should fail validation
@@ -4663,7 +4663,7 @@ mod tests {
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = LedgerCloseMsg {
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
         };
 
         // Valid close of empty ledger
@@ -4705,7 +4705,7 @@ mod tests {
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = LedgerCloseMsg {
-            partner_id: our_node_id,
+            reserves_id: our_node_id,
         };
 
         // Valid close with zero-balance deposits
@@ -5128,7 +5128,7 @@ mod tests {
 
         let msg = ChannelCloseTombstoneMsg {
             operator_id: operator,
-            partner_id: partner, // We're neither
+            reserves_id: partner, // We're neither
             timestamp: 1234567890,
             channel_id: [0xAB; 32],
             close_reason: Some("test close".to_string()),
@@ -5151,7 +5151,7 @@ mod tests {
         let channel_id = [0xAB; 32];
         let msg = ChannelCloseTombstoneMsg {
             operator_id: our_node_id, // We are operator
-            partner_id: partner,
+            reserves_id: partner,
             timestamp: 1234567890,
             channel_id,
             close_reason: Some("test close".to_string()),
@@ -5196,7 +5196,7 @@ mod tests {
         let channel_id = [0xCD; 32];
         let msg = ChannelCloseTombstoneMsg {
             operator_id: operator,
-            partner_id: our_node_id, // We are partner
+            reserves_id: our_node_id, // We are partner
             timestamp: 1234567890,
             channel_id,
             close_reason: None,

@@ -35,10 +35,10 @@ where
             log_info!(self.logger, "Collecting partners to refresh commitments...");
             let ledgers = self.ledgers.lock().unwrap();
             let partners: Vec<PublicKey> = ledgers.iter()
-                .filter_map(|((operator_id, partner_id), _ledger_arc)| {
+                .filter_map(|((operator_id, reserves_id), _ledger_arc)| {
                     // Only refresh if we're the operator - partners don't send UpdateReserves
                     if *operator_id == self.our_node_id {
-                        Some(*partner_id)
+                        Some(*reserves_id)
                     } else {
                         None
                     }
@@ -50,17 +50,17 @@ where
 
         // Now refresh commitments with lock dropped
         log_info!(self.logger, "Refreshing channel commitments for {} partners...", partners_to_refresh.len());
-        for partner_id in &partners_to_refresh {
-            log_info!(self.logger, "Refreshing commitment with partner {}...", partner_id);
-            if let Err(e) = self.refresh_reserves_commitment(*partner_id) {
+        for reserves_id in &partners_to_refresh {
+            log_info!(self.logger, "Refreshing commitment with partner {}...", reserves_id);
+            if let Err(e) = self.refresh_reserves_commitment(*reserves_id) {
                 log_debug!(
                     self.logger,
                     "Could not refresh reserves commitment with {} on startup: {:?}",
-                    partner_id,
+                    reserves_id,
                     e
                 );
             } else {
-                log_info!(self.logger, "Successfully refreshed commitment with partner {}", partner_id);
+                log_info!(self.logger, "Successfully refreshed commitment with partner {}", reserves_id);
             }
         }
         log_info!(self.logger, "Finished refreshing channel commitments for {} ledgers", partners_to_refresh.len());

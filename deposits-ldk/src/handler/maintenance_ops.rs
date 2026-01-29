@@ -76,14 +76,14 @@ where
                 .collect()
         };
 
-        for (message_hash, partner_id) in stale_broadcasts {
+        for (message_hash, reserves_id) in stale_broadcasts {
             log_debug!(
                 self.logger,
                 "🔄 Retrying broadcast for hash {:02x?} to partner {}",
-                &message_hash[0..4], partner_id
+                &message_hash[0..4], reserves_id
             );
 
-            if let Err(e) = self.broadcast_message_to_other_partners(message_hash, partner_id, None) {
+            if let Err(e) = self.broadcast_message_to_other_partners(message_hash, reserves_id, None) {
                 log_debug!(
                     self.logger,
                     "⚠️ Retry broadcast failed for {:02x?}: {}",
@@ -106,10 +106,10 @@ where
         let partners_ready_for_lazy_sync: Vec<PublicKey> = {
             let pending_lazy_syncs = self.pending_lazy_syncs.lock().unwrap();
             pending_lazy_syncs.iter()
-                .filter_map(|(partner_id, requested_at)| {
+                .filter_map(|(reserves_id, requested_at)| {
                     // Only sync if enough quiet time has passed
                     if now >= requested_at + LAZY_SYNC_DELAY_SECS {
-                        Some(*partner_id)
+                        Some(*reserves_id)
                     } else {
                         None
                     }
@@ -117,11 +117,11 @@ where
                 .collect()
         };
 
-        for partner_id in partners_ready_for_lazy_sync {
+        for reserves_id in partners_ready_for_lazy_sync {
             // Check if there's actually uncommitted state
             let needs_commit = {
                 let ledgers = self.ledgers.lock().unwrap();
-                if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_id)) {
+                if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, reserves_id)) {
                     let ledger = ledger_arc.read().unwrap();
                     let acked_hash = ledger.state.partner_deepest_ack_hash;
                     let commit_hash = ledger.state.channel_deepest_commitment_hash;
@@ -132,7 +132,7 @@ where
             };
 
             if needs_commit {
-                if self.refresh_reserves_commitment(partner_id).is_ok() {
+                if self.refresh_reserves_commitment(reserves_id).is_ok() {
                     lazy_syncs_triggered += 1;
                 }
             }
@@ -140,7 +140,7 @@ where
             // Remove from pending regardless of outcome
             {
                 let mut pending_lazy_syncs = self.pending_lazy_syncs.lock().unwrap();
-                pending_lazy_syncs.remove(&partner_id);
+                pending_lazy_syncs.remove(&reserves_id);
             }
         }
 
@@ -157,7 +157,7 @@ where
 
     /// Mark a ledger for lazy sync after receiving an ACK
     /// This will trigger a commit after LAZY_SYNC_DELAY_SECS of quiet
-    pub(super) fn mark_for_lazy_sync(&self, partner_id: PublicKey) {
+    pub(super) fn mark_for_lazy_sync(&self, reserves_id: PublicKey) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -165,13 +165,13 @@ where
 
         let mut pending_lazy_syncs = self.pending_lazy_syncs.lock().unwrap();
         // Reset the timer - this coalesces rapid updates
-        pending_lazy_syncs.insert(partner_id, now);
+        pending_lazy_syncs.insert(reserves_id, now);
     }
 
     /// Cancel a pending lazy sync (called when immediate sync happens)
-    pub(super) fn cancel_lazy_sync(&self, partner_id: PublicKey) {
+    pub(super) fn cancel_lazy_sync(&self, reserves_id: PublicKey) {
         let mut pending_lazy_syncs = self.pending_lazy_syncs.lock().unwrap();
-        pending_lazy_syncs.remove(&partner_id);
+        pending_lazy_syncs.remove(&reserves_id);
     }
 
     /// Start a background task that periodically flushes stale updates

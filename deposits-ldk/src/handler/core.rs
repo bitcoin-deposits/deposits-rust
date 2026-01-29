@@ -111,7 +111,7 @@ pub struct DepositsHandler<L: Deref + Clone + Send + Sync>
 where
     L::Target: LdkLogger,
 {
-    /// Unified ledger storage keyed by (operator_id, partner_id) tuple
+    /// Unified ledger storage keyed by (operator_id, reserves_id) tuple
     /// Each ledger has an `our_role` field indicating if we're Operator, Partner, or Auditor
     /// Uses Arc to enable sharing with core Handler
     pub(crate) ledgers: Arc<Mutex<HashMap<(PublicKey, PublicKey), Arc<RwLock<Ledger>>>>>,
@@ -138,7 +138,7 @@ where
     /// Track individual payment locks (payment_id -> (deposit_pubkey, amount))
     pub(super) payment_locks: Mutex<HashMap<[u8; 32], (PublicKey, u64)>>,
 
-    /// Store ledger private keys (partner_id -> secret_key) for operator-created ledgers
+    /// Store ledger private keys (reserves_id -> secret_key) for operator-created ledgers
     /// Only the operator stores the private key for their ledgers
     pub(super) ledger_private_keys: Mutex<HashMap<PublicKey, bitcoin::secp256k1::SecretKey>>,
 
@@ -169,9 +169,9 @@ where
     /// Our Lightning node's public key
     pub(crate) our_node_id: PublicKey,
 
-    /// Track sent messages for broadcasting after ack (message_hash -> (operator_id, partner_id, message, prev_hash, new_hash, chain_index))
-    /// When we receive an ack from partner_id for this message, we broadcast to all other partners
-    /// operator_id is always `our_node_id`, partner_id is the direct partner
+    /// Track sent messages for broadcasting after ack (message_hash -> (operator_id, reserves_id, message, prev_hash, new_hash, chain_index))
+    /// When we receive an ack from reserves_id for this message, we broadcast to all other partners
+    /// operator_id is always `our_node_id`, reserves_id is the direct partner
     /// prev_hash is the ledger's hash BEFORE applying this update
     /// new_hash is the ledger's hash AFTER applying this update
     /// chain_index is the position of this update in the ledger's hash chain (like block height)
@@ -183,7 +183,7 @@ where
     pub(crate) pending_acks: Arc<Mutex<HashMap<[u8; 32], deposits_core::PendingAck>>>,
 
     /// Signed ledger update logs for third-party auditing
-    /// Key: (operator_id, partner_id) -> log of signed updates
+    /// Key: (operator_id, reserves_id) -> log of signed updates
     /// Only contains ledgers where we are neither operator nor partner (third-party audit only)
     pub(crate) signed_update_logs: Mutex<HashMap<(PublicKey, PublicKey), deposits_core::SignedLedgerUpdateLog>>,
 
@@ -214,7 +214,7 @@ where
 
     /// Per-channel operation locks to prevent commitment signature races
     /// Only one operation can be in-flight per channel at a time
-    /// Key: (operator_id, partner_id) -> lock
+    /// Key: (operator_id, reserves_id) -> lock
     /// CRITICAL: Acquired before any operation that may trigger commitment updates
     pub(crate) channel_operation_locks: Mutex<HashMap<(PublicKey, PublicKey), Arc<std::sync::Mutex<()>>>>,
 
@@ -223,7 +223,7 @@ where
     pub(crate) channel_operation_locks_async: tokio::sync::Mutex<HashMap<(PublicKey, PublicKey), Arc<tokio::sync::Mutex<()>>>>,
 
     /// Lazy sync tracking: ledgers with uncommitted ACKed updates
-    /// Key: partner_id -> timestamp when lazy sync was requested
+    /// Key: reserves_id -> timestamp when lazy sync was requested
     /// After LAZY_SYNC_DELAY_SECS of quiet, the flush timer will commit
     /// This coalesces rapid updates into a single commitment
     pub(super) pending_lazy_syncs: Mutex<HashMap<PublicKey, u64>>,
@@ -245,7 +245,7 @@ where
     pub(super) network: Network,
 
     /// Track pending reserves commitments awaiting confirmation
-    /// Key: partner_id -> (expected_script_pubkey, ledger_hash, reserves_sats, timestamp_sent)
+    /// Key: reserves_id -> (expected_script_pubkey, ledger_hash, reserves_sats, timestamp_sent)
     /// Set when propose_extra_outputs is called, cleared when outputs appear in channel
     pub(super) pending_reserves_commitments: Mutex<HashMap<PublicKey, (ScriptBuf, [u8; 32], u64, u64)>>,
 
@@ -263,13 +263,13 @@ where
 
     // Channel lock methods - inherent for simpler trait bounds
     /// Execute a function while holding the channel operation lock
-    pub fn with_channel_lock<F, R>(&self, operator_id: PublicKey, partner_id: PublicKey, f: F) -> R
+    pub fn with_channel_lock<F, R>(&self, operator_id: PublicKey, reserves_id: PublicKey, f: F) -> R
     where
         F: FnOnce() -> R,
     {
         let lock = {
             let mut locks = self.channel_operation_locks.lock().unwrap();
-            locks.entry((operator_id, partner_id))
+            locks.entry((operator_id, reserves_id))
                 .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
                 .clone()
         };
@@ -278,10 +278,10 @@ where
     }
 
     /// Async version of with_channel_lock for use in async contexts
-    pub async fn acquire_channel_lock_async(&self, operator_id: PublicKey, partner_id: PublicKey) -> tokio::sync::OwnedMutexGuard<()> {
+    pub async fn acquire_channel_lock_async(&self, operator_id: PublicKey, reserves_id: PublicKey) -> tokio::sync::OwnedMutexGuard<()> {
         let lock = {
             let mut locks = self.channel_operation_locks_async.lock().await;
-            locks.entry((operator_id, partner_id))
+            locks.entry((operator_id, reserves_id))
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                 .clone()
         };
@@ -295,8 +295,8 @@ where
 
     /// Acquire channel lock for a deposit (finds the partner and acquires the lock)
     pub async fn acquire_channel_lock_for_deposit(&self, deposit_pubkey: PublicKey) -> Option<tokio::sync::OwnedMutexGuard<()>> {
-        let partner_id = self.find_partner_for_deposit(deposit_pubkey)?;
-        Some(self.acquire_channel_lock_async(self.our_node_id, partner_id).await)
+        let reserves_id = self.find_partner_for_deposit(deposit_pubkey)?;
+        Some(self.acquire_channel_lock_async(self.our_node_id, reserves_id).await)
     }
 
     // NOTE: handle_channel_closed is in channel_close_handler.rs

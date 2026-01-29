@@ -29,7 +29,7 @@ use crate::handler_traits::PaymentTracking;
 /// CRITICAL: Must check this BEFORE calling claim_funds() to prevent uncredited payments.
 #[derive(Default)]
 pub struct DepositInvoiceIndex {
-    /// Maps payment_hash -> (partner_id, deposit_pubkey, invoice_id, bolt11)
+    /// Maps payment_hash -> (reserves_id, deposit_pubkey, invoice_id, bolt11)
     payments: Mutex<HashMap<[u8; 32], (PublicKey, PublicKey, String, String)>>,
 }
 
@@ -61,13 +61,13 @@ impl PaymentTracking for DepositInvoiceIndex {
     fn register_deposit_invoice(
         &self,
         payment_hash: [u8; 32],
-        partner_id: PublicKey,
+        reserves_id: PublicKey,
         deposit_pubkey: PublicKey,
         invoice_id: String,
         bolt11: String,
     ) {
         let mut payments = self.payments.lock().unwrap();
-        payments.insert(payment_hash, (partner_id, deposit_pubkey, invoice_id, bolt11));
+        payments.insert(payment_hash, (reserves_id, deposit_pubkey, invoice_id, bolt11));
     }
 
     fn get_deposit_invoice_bolt11(&self, payment_hash: &[u8; 32]) -> Option<String> {

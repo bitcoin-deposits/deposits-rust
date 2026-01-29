@@ -174,7 +174,7 @@ where
     ) -> Result<(), ServiceError> {
 
         // Find which deposit this payment should fund
-        let (partner_id, deposit_pubkey, invoice_id, _bolt11) = match self.find_deposit_for_payment(payment_hash) {
+        let (reserves_id, deposit_pubkey, invoice_id, _bolt11) = match self.find_deposit_for_payment(payment_hash) {
             Ok(result) => {
                 result
             },
@@ -186,11 +186,11 @@ where
         // If channel_id is provided (not all zeros), verify it matches expected partner
         if channel_id != [0; 32] {
             let channel_partner = self.get_partner_for_channel(channel_id)?;
-            if channel_partner != partner_id {
+            if channel_partner != reserves_id {
                 log_warn!(
                     self.logger,
                     "Payment received on wrong channel: expected partner {} but got {}",
-                    partner_id, channel_partner
+                    reserves_id, channel_partner
                 );
                 return Err(ServiceError::PartnerNotFound);
             }
@@ -199,12 +199,12 @@ where
         log_info!(
             self.logger,
             "Processing payment received: {} msat for deposit {} on channel with partner {}",
-            amount_msat, deposit_pubkey, partner_id
+            amount_msat, deposit_pubkey, reserves_id
         );
 
         // Credit deposit using async method that sends message and waits for ACK
         self.deposits_handler.credit_deposit_and_move_reserves_async(
-            partner_id,
+            reserves_id,
             deposit_pubkey,
             amount_msat,
             payment_hash,
@@ -214,7 +214,7 @@ where
         // Automatically trigger reserves management if available
         if let Some(ref reserves_manager) = self.reserves_manager {
             reserves_manager.handle_deposit_balance_change(
-                partner_id,
+                reserves_id,
                 amount_msat as i64, // Positive change
             )?;
         }
@@ -241,17 +241,17 @@ where
         channel_id: [u8; 32],
     ) -> Result<(), ServiceError> {
         // Find partner for this channel
-        let partner_id = self.get_partner_for_channel(channel_id)?;
+        let reserves_id = self.get_partner_for_channel(channel_id)?;
 
         // Find which deposit this payment should fund
         let (expected_partner, deposit_pubkey, _invoice_id, _bolt11) = self.find_deposit_for_payment(payment_hash)?;
         
         // Verify partner matches
-        if expected_partner != partner_id {
+        if expected_partner != reserves_id {
             log_warn!(
                 self.logger, 
                 "Payment received on wrong channel: expected partner {} but got {}", 
-                expected_partner, partner_id
+                expected_partner, reserves_id
             );
             return Err(ServiceError::PartnerNotFound);
         }
@@ -259,13 +259,13 @@ where
         log_info!(
             self.logger,
             "Processing real Lightning payment received: {} msat for deposit {} on channel with partner {}",
-            amount_msat, deposit_pubkey, partner_id
+            amount_msat, deposit_pubkey, reserves_id
         );
         
         // Use REAL Lightning handler to credit deposit and move 100% to reserves
         // (The other 100% collateral comes from other channels)
         real_handler.credit_deposit_and_move_reserves(
-            partner_id,
+            reserves_id,
             deposit_pubkey,
             amount_msat,
         ).map_err(ServiceError::Protocol)?;
@@ -290,24 +290,24 @@ where
         commitment_number: u64,
     ) -> Result<(), ServiceError> {
         // Find partner for this channel
-        let partner_id = self.get_partner_for_channel(channel_id)?;
+        let reserves_id = self.get_partner_for_channel(channel_id)?;
         
         log_info!(
             self.logger,
             "Processing commitment signed: commitment #{} with partner {}",
-            commitment_number, partner_id
+            commitment_number, reserves_id
         );
         
         // Automatically mark ledger committed (replaces manual test operation)
         self.deposits_handler.mark_ledger_committed(
-            partner_id,
+            reserves_id,
             commitment_number,
         )?;
         
         log_info!(
             self.logger,
             "Successfully marked ledger committed at commitment #{} with partner {}",
-            commitment_number, partner_id
+            commitment_number, reserves_id
         );
         
         Ok(())
@@ -322,24 +322,24 @@ where
         commitment_number: u64,
     ) -> Result<(), ServiceError> {
         // Find partner for this channel
-        let partner_id = self.get_partner_for_channel(channel_id)?;
+        let reserves_id = self.get_partner_for_channel(channel_id)?;
         
         log_info!(
             self.logger,
             "Processing real commitment signed: commitment #{} with partner {}",
-            commitment_number, partner_id
+            commitment_number, reserves_id
         );
         
         // Use REAL Lightning handler for commitment tracking (this is the key difference)
         real_handler.mark_ledger_committed(
-            partner_id,
+            reserves_id,
             commitment_number,
         ).map_err(ServiceError::Protocol)?;
         
         log_info!(
             self.logger,
             "Successfully marked ledger committed at commitment #{} with partner {} using real handler",
-            commitment_number, partner_id
+            commitment_number, reserves_id
         );
         
         Ok(())

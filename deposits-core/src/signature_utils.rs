@@ -153,7 +153,7 @@ pub fn create_payment_authorization_signature(
 pub fn create_deposit_offer_signature(
     operator_secret: &SecretKey,
     operator_id: &PublicKey,
-    partner_id: &PublicKey,
+    reserves_id: &PublicKey,
     deposit_pubkey: &PublicKey,
     funding_address: &str,
     max_amount_sats: u64,
@@ -165,7 +165,7 @@ pub fn create_deposit_offer_signature(
     // Create the canonical signing message
     let signing_message = DepositOffer::signing_message(
         operator_id,
-        partner_id,
+        reserves_id,
         deposit_pubkey,
         funding_address,
         max_amount_sats,
@@ -411,7 +411,7 @@ mod tests {
 
         let offer = DepositOffer {
             operator_id: operator_pubkey,
-            partner_id: partner_pubkey,
+            reserves_id: partner_pubkey,
             deposit_pubkey,
             funding_address: funding_address.to_string(),
             max_amount_sats,
@@ -469,7 +469,7 @@ mod tests {
 
         let offer = DepositOffer {
             operator_id: operator_pubkey,
-            partner_id: partner_pubkey,
+            reserves_id: partner_pubkey,
             deposit_pubkey,
             funding_address: funding_address.to_string(),
             max_amount_sats: max_amount_sats + 1000, // Different amount!

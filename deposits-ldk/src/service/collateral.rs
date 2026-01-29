@@ -25,7 +25,7 @@ where
     L: Deref + Clone + Send + Sync,
     L::Target: LdkLogger,
 {
-    let partner_id = PublicKey::from_str(&request.partner_node_id)
+    let reserves_id = PublicKey::from_str(&request.partner_node_id)
         .map_err(|_| DepositsError {
             code: "INVALID_PUBKEY".into(),
             message: "Invalid partner_node_id".into(),
@@ -37,7 +37,7 @@ where
             message: "Invalid collateral_partner_id".into(),
         })?;
 
-    handler.add_collateral_partner_async(partner_id, collateral_partner_id).await
+    handler.add_collateral_partner_async(reserves_id, collateral_partner_id).await
         .map_err(|e| DepositsError {
             code: "ADD_COLLATERAL_FAILED".into(),
             message: format!("{:?}", e),
@@ -55,7 +55,7 @@ where
     L: Deref + Clone + Send + Sync,
     L::Target: LdkLogger,
 {
-    let partner_id = PublicKey::from_str(&request.partner_node_id)
+    let reserves_id = PublicKey::from_str(&request.partner_node_id)
         .map_err(|_| DepositsError {
             code: "INVALID_PUBKEY".into(),
             message: "Invalid partner_node_id".into(),
@@ -67,7 +67,7 @@ where
             message: "Invalid collateral_partner_id".into(),
         })?;
 
-    handler.remove_collateral_partner(partner_id, collateral_partner_id)
+    handler.remove_collateral_partner(reserves_id, collateral_partner_id)
         .map_err(|e| DepositsError {
             code: "REMOVE_COLLATERAL_FAILED".into(),
             message: format!("{:?}", e),
@@ -85,16 +85,16 @@ where
     L: Deref + Clone + Send + Sync,
     L::Target: LdkLogger,
 {
-    let partner_id = PublicKey::from_str(&request.partner_node_id)
+    let reserves_id = PublicKey::from_str(&request.partner_node_id)
         .map_err(|_| DepositsError {
             code: "INVALID_PUBKEY".into(),
             message: "Invalid partner_node_id".into(),
         })?;
 
-    let info = handler.get_collateral_info(partner_id)
+    let info = handler.get_collateral_info(reserves_id)
         .ok_or_else(|| DepositsError {
             code: "LEDGER_NOT_FOUND".into(),
-            message: format!("No ledger found for partner {}", partner_id),
+            message: format!("No ledger found for partner {}", reserves_id),
         })?;
 
     let partners: Vec<CollateralPartnerInfo> = info.collateral_partners
