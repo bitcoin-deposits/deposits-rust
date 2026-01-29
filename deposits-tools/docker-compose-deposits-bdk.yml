@@ -1,0 +1,331 @@
+# Docker Compose for deposits-bdk network
+#
+# This mirrors docker-compose-deposits.yml but uses deposits-bdk nodes
+# instead of LDK nodes. The key difference:
+# - LDK nodes use Lightning channels for reserves and Lightning wire protocol for messaging
+# - BDK nodes use on-chain UTXOs for reserves and Nostr for messaging
+#
+# Usage:
+#   docker-compose -f docker-compose-deposits-bdk.yml up -d
+#   docker-compose -f docker-compose-deposits-bdk.yml logs -f
+#   docker-compose -f docker-compose-deposits-bdk.yml down -v
+
+services:
+  # Strfry Nostr relay for peer messaging
+  nostr-relay:
+    image: dockurr/strfry:latest
+    container_name: bdk-nostr-relay
+    ports:
+      - "7778:7777"
+    volumes:
+      - bdk_nostr_data:/app/strfry-db
+      - ./permissive-write-policy.py:/app/write-policy.py:ro
+    environment:
+      - STRFRY_BIND=0.0.0.0:7777
+    networks:
+      - bdk_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7777"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Bitcoin Core regtest node
+  bitcoin:
+    image: blockstream/bitcoind:27.2
+    platform: linux/amd64
+    container_name: bdk-bitcoind
+    command:
+      [
+        "bitcoind",
+        "-printtoconsole",
+        "-regtest=1",
+        "-rpcallowip=0.0.0.0/0",
+        "-rpcbind=0.0.0.0",
+        "-rpcuser=user",
+        "-rpcpassword=pass",
+        "-fallbackfee=0.00001",
+        "-rest",
+        "-txindex"
+      ]
+    ports:
+      - "18543:18443"  # Regtest RPC port (offset to avoid conflict with LDK compose)
+      - "18544:18444"  # Regtest P2P port
+    volumes:
+      - bdk_bitcoin_data:/home/bitcoin/.bitcoin
+    networks:
+      bdk_network:
+        ipv4_address: 172.21.0.10
+    healthcheck:
+      test: ["CMD", "bitcoin-cli", "-regtest", "-rpcuser=user", "-rpcpassword=pass", "getblockchaininfo"]
+      interval: 5s
+      timeout: 10s
+      retries: 5
+
+  # Electrs for blockchain indexing
+  electrs:
+    image: mempool/electrs:v3.2.0
+    platform: linux/amd64
+    container_name: bdk-electrs
+    depends_on:
+      bitcoin:
+        condition: service_healthy
+    command:
+      [
+        "-vvvv",
+        "--timestamp",
+        "--jsonrpc-import",
+        "--cookie=user:pass",
+        "--network=regtest",
+        "--daemon-rpc-addr=bitcoin:18443",
+        "--http-addr=0.0.0.0:3002"
+      ]
+    ports:
+      - "3102:3002"
+    volumes:
+      - bdk_electrs_data:/data
+    networks:
+      bdk_network:
+        ipv4_address: 172.21.0.11
+
+  # deposits-bdk Node 1 - Alice (Operator)
+  bdk-alice:
+    build:
+      context: ../../
+      dockerfile: deposits-rust/deposits-tools/Dockerfile.deposits-bdk
+    container_name: bdk-alice
+    command:
+      - "run"
+      - "--seed"
+      - "416c696365000000000000000000000000000000000000000000000000000001"
+      - "--network"
+      - "regtest"
+      - "--electrum"
+      - "tcp://electrs:3002"
+      - "--relay"
+      - "ws://nostr-relay:7777"
+      - "--data-dir"
+      - "/data"
+    environment:
+      - RUST_LOG=info,deposits_bdk=debug
+    volumes:
+      - bdk_alice_data:/data
+    depends_on:
+      bitcoin:
+        condition: service_healthy
+      electrs:
+        condition: service_started
+      nostr-relay:
+        condition: service_healthy
+    networks:
+      bdk_network:
+        ipv4_address: 172.21.0.20
+
+  # deposits-bdk Node 2 - Bob (Operator)
+  bdk-bob:
+    build:
+      context: ../../
+      dockerfile: deposits-rust/deposits-tools/Dockerfile.deposits-bdk
+    container_name: bdk-bob
+    command:
+      - "run"
+      - "--seed"
+      - "426f620000000000000000000000000000000000000000000000000000000002"
+      - "--network"
+      - "regtest"
+      - "--electrum"
+      - "tcp://electrs:3002"
+      - "--relay"
+      - "ws://nostr-relay:7777"
+      - "--data-dir"
+      - "/data"
+    environment:
+      - RUST_LOG=info,deposits_bdk=debug
+    volumes:
+      - bdk_bob_data:/data
+    depends_on:
+      bitcoin:
+        condition: service_healthy
+      electrs:
+        condition: service_started
+      nostr-relay:
+        condition: service_healthy
+    networks:
+      bdk_network:
+        ipv4_address: 172.21.0.21
+
+  # deposits-bdk Node 3 - Charlie (Partner)
+  bdk-charlie:
+    build:
+      context: ../../
+      dockerfile: deposits-rust/deposits-tools/Dockerfile.deposits-bdk
+    container_name: bdk-charlie
+    command:
+      - "run"
+      - "--seed"
+      - "436861726c696500000000000000000000000000000000000000000000000003"
+      - "--network"
+      - "regtest"
+      - "--electrum"
+      - "tcp://electrs:3002"
+      - "--relay"
+      - "ws://nostr-relay:7777"
+      - "--data-dir"
+      - "/data"
+    environment:
+      - RUST_LOG=info,deposits_bdk=debug
+    volumes:
+      - bdk_charlie_data:/data
+    depends_on:
+      bitcoin:
+        condition: service_healthy
+      electrs:
+        condition: service_started
+      nostr-relay:
+        condition: service_healthy
+    networks:
+      bdk_network:
+        ipv4_address: 172.21.0.22
+
+  # deposits-bdk Node 4 - Diana (Partner)
+  bdk-diana:
+    profiles:
+      - dev
+    build:
+      context: ../../
+      dockerfile: deposits-rust/deposits-tools/Dockerfile.deposits-bdk
+    container_name: bdk-diana
+    command:
+      - "run"
+      - "--seed"
+      - "4469616e61000000000000000000000000000000000000000000000000000004"
+      - "--network"
+      - "regtest"
+      - "--electrum"
+      - "tcp://electrs:3002"
+      - "--relay"
+      - "ws://nostr-relay:7777"
+      - "--data-dir"
+      - "/data"
+    environment:
+      - RUST_LOG=info,deposits_bdk=debug
+    volumes:
+      - bdk_diana_data:/data
+    depends_on:
+      bitcoin:
+        condition: service_healthy
+      electrs:
+        condition: service_started
+      nostr-relay:
+        condition: service_healthy
+    networks:
+      bdk_network:
+        ipv4_address: 172.21.0.23
+
+  # deposits-bdk Node 5 - Eve (Partner)
+  bdk-eve:
+    profiles:
+      - dev
+    build:
+      context: ../../
+      dockerfile: deposits-rust/deposits-tools/Dockerfile.deposits-bdk
+    container_name: bdk-eve
+    command:
+      - "run"
+      - "--seed"
+      - "4576650000000000000000000000000000000000000000000000000000000005"
+      - "--network"
+      - "regtest"
+      - "--electrum"
+      - "tcp://electrs:3002"
+      - "--relay"
+      - "ws://nostr-relay:7777"
+      - "--data-dir"
+      - "/data"
+    environment:
+      - RUST_LOG=info,deposits_bdk=debug
+    volumes:
+      - bdk_eve_data:/data
+    depends_on:
+      bitcoin:
+        condition: service_healthy
+      electrs:
+        condition: service_started
+      nostr-relay:
+        condition: service_healthy
+    networks:
+      bdk_network:
+        ipv4_address: 172.21.0.24
+
+  # Bitcoin faucet helper - mines blocks and sends to nodes
+  faucet:
+    image: blockstream/bitcoind:27.2
+    platform: linux/amd64
+    container_name: bdk-faucet
+    profiles:
+      - faucet
+    depends_on:
+      bitcoin:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        # Wait for electrs to be ready
+        sleep 10
+
+        # Create wallet if it doesn't exist
+        bitcoin-cli -regtest -rpcconnect=bitcoin -rpcuser=user -rpcpassword=pass createwallet "faucet" 2>/dev/null || true
+
+        # Generate initial blocks
+        echo "Mining 101 blocks..."
+        bitcoin-cli -regtest -rpcconnect=bitcoin -rpcuser=user -rpcpassword=pass -rpcwallet=faucet -generate 101
+
+        echo "Faucet ready. Mining a block every 30 seconds..."
+        while true; do
+          sleep 30
+          bitcoin-cli -regtest -rpcconnect=bitcoin -rpcuser=user -rpcpassword=pass -rpcwallet=faucet -generate 1
+        done
+    networks:
+      - bdk_network
+
+  # Development container for manual testing
+  dev:
+    image: mcr.microsoft.com/devcontainers/rust:latest
+    container_name: bdk-dev
+    command: ["sleep", "infinity"]
+    profiles:
+      - dev
+    environment:
+      - RUST_LOG=info,deposits_bdk=debug
+      - ELECTRUM_URL=tcp://electrs:3002
+      - NOSTR_RELAY=ws://nostr-relay:7777
+    volumes:
+      - ../..:/workspace
+    depends_on:
+      bitcoin:
+        condition: service_healthy
+      electrs:
+        condition: service_started
+      nostr-relay:
+        condition: service_healthy
+    networks:
+      bdk_network:
+        ipv4_address: 172.21.0.30
+    working_dir: /workspace/deposits-rust
+
+volumes:
+  bdk_nostr_data:
+  bdk_bitcoin_data:
+  bdk_electrs_data:
+  bdk_alice_data:
+  bdk_bob_data:
+  bdk_charlie_data:
+  bdk_diana_data:
+  bdk_eve_data:
+
+networks:
+  bdk_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.0.0/16
