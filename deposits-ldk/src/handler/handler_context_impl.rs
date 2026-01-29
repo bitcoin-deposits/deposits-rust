@@ -59,6 +59,8 @@ where
             CoreMsg::CoordinationResponse(m) => DepositsMessage::CoordinationResponse(m),
             CoreMsg::Relay(m) => DepositsMessage::Relay(m),
             CoreMsg::RelayResponse(m) => DepositsMessage::RelayResponse(m),
+            CoreMsg::ReservesAddOutput(m) => DepositsMessage::ReservesAddOutput(m),
+            CoreMsg::ReservesRemoveOutput(m) => DepositsMessage::ReservesRemoveOutput(m),
         };
 
         // Queue the message for sending

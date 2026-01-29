@@ -119,7 +119,6 @@ fn extract_from_ledger_operation(op: &LedgerOperation) -> (Option<u64>, Option<S
         LedgerOperation::TransferLock { pubkey, amount, .. } => (Some(*amount), Some(pubkey.to_string()), None),
         LedgerOperation::TransferFail { pubkey, .. } => (None, Some(pubkey.to_string()), None),
         LedgerOperation::TransferFulfill { pubkey, amount, .. } => (Some(*amount), Some(pubkey.to_string()), None),
-        LedgerOperation::ReservesAdd { amount, .. } => (Some(*amount), None, None),
         LedgerOperation::ReservesIncrease { new_amount } => (Some(*new_amount), None, None),
         LedgerOperation::ReservesDecrease { new_amount } => (Some(*new_amount), None, None),
         LedgerOperation::CollateralAddPartner { collateral_partner, .. } =>

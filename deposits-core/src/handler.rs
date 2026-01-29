@@ -487,6 +487,12 @@ where
             DepositsMessage::RelayResponse(msg) => {
                 self.handle_relay_response(sender, msg)
             }
+            DepositsMessage::ReservesAddOutput(msg) => {
+                self.handle_reserves_add_output(sender, msg)
+            }
+            DepositsMessage::ReservesRemoveOutput(msg) => {
+                self.handle_reserves_remove_output(sender, msg)
+            }
         }
     }
 
@@ -774,6 +780,34 @@ where
             LogLevel::Debug,
             &format!("Relay response from {}", sender),
         );
+        Ok(None)
+    }
+
+    fn handle_reserves_add_output(
+        &self,
+        sender: PublicKey,
+        msg: &crate::wire_messages::ReservesAddOutputMsg,
+    ) -> Result<Option<crate::messages::DepositsMessage>, HandleError> {
+        self.logger.log(
+            LogLevel::Debug,
+            &format!("Reserves add output from {}: reserves_id={}", sender, msg.reserves_id),
+        );
+        // This is a peer coordination message to add reserves output to commitment
+        // Handler implementation will coordinate with ChannelManager
+        Ok(None)
+    }
+
+    fn handle_reserves_remove_output(
+        &self,
+        sender: PublicKey,
+        msg: &crate::wire_messages::ReservesRemoveOutputMsg,
+    ) -> Result<Option<crate::messages::DepositsMessage>, HandleError> {
+        self.logger.log(
+            LogLevel::Debug,
+            &format!("Reserves remove output from {}: reserves_id={}", sender, msg.reserves_id),
+        );
+        // This is a peer coordination message to remove reserves output from commitment
+        // Handler implementation will coordinate with ChannelManager
         Ok(None)
     }
 

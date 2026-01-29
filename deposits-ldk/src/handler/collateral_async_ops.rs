@@ -703,11 +703,11 @@ where
             }
         }
 
-        // Send ReservesRemove message (V2 format)
+        // Send LedgerClose message to close the ledger (which removes reserves output)
         let update_msg = LedgerUpdateMsg::new_with_operation(
             self.our_node_id,    // operator
             partner_node_id,     // partner
-            LedgerOperation::ReservesRemove,
+            LedgerOperation::LedgerClose,
         );
         let message = DepositsMessage::LedgerUpdate(update_msg);
 
@@ -728,7 +728,7 @@ where
             });
         }
 
-        log_info!(self.logger, "Sending ReservesRemove message to partner {}", partner_node_id);
+        log_info!(self.logger, "Sending LedgerClose message to partner {}", partner_node_id);
 
         // Send message and wait for acknowledgment using async version
         self.send_message_with_ack_async(partner_node_id, message.clone(), 30000).await?;

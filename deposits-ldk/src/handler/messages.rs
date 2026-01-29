@@ -84,11 +84,9 @@ pub trait LedgerOperationExt {
 impl LedgerOperationExt for LedgerOperation {
     fn variant_name(&self) -> &'static str {
         match self {
-            LedgerOperation::ReservesAdd { .. } => "ReservesAdd",
-            LedgerOperation::ReservesRemove => "ReservesRemove",
+            LedgerOperation::LedgerOpen { .. } => "LedgerOpen",
             LedgerOperation::ReservesIncrease { .. } => "ReservesIncrease",
             LedgerOperation::ReservesDecrease { .. } => "ReservesDecrease",
-            LedgerOperation::ReservesUpdateSpendTo { .. } => "ReservesUpdateSpendTo",
             LedgerOperation::DepositOpen { .. } => "DepositOpen",
             LedgerOperation::DepositClose { .. } => "DepositClose",
             LedgerOperation::DepositUpdate { .. } => "DepositUpdate",
@@ -156,6 +154,10 @@ pub enum DepositsMessage {
     Relay(RelayMsg),
     /// Relay response
     RelayResponse(RelayResponseMsg),
+    /// Reserves add output (peer message, not a ledger operation)
+    ReservesAddOutput(deposits_core::ReservesAddOutputMsg),
+    /// Reserves remove output (peer message, not a ledger operation)
+    ReservesRemoveOutput(deposits_core::ReservesRemoveOutputMsg),
 
 }
 
@@ -175,6 +177,8 @@ impl DepositsMessage {
             Self::CoordinationResponse(_) => COORDINATION_RESPONSE,
             Self::Relay(_) => RELAY,
             Self::RelayResponse(_) => RELAY_RESPONSE,
+            Self::ReservesAddOutput(_) => RESERVES_ADD_OUTPUT,
+            Self::ReservesRemoveOutput(_) => RESERVES_REMOVE_OUTPUT,
         }
     }
 
@@ -198,6 +202,8 @@ impl DepositsMessage {
             Self::CoordinationResponse(_) => "CoordinationResponse",
             Self::Relay(_) => "Relay",
             Self::RelayResponse(_) => "RelayResponse",
+            Self::ReservesAddOutput(_) => "ReservesAddOutput",
+            Self::ReservesRemoveOutput(_) => "ReservesRemoveOutput",
         }
     }
 
@@ -231,6 +237,8 @@ impl DepositsMessage {
             Self::CoordinationResponse(_) => None,
             Self::Relay(_) => None,
             Self::RelayResponse(_) => None,
+            Self::ReservesAddOutput(m) => Some(m.reserves_id),
+            Self::ReservesRemoveOutput(m) => Some(m.reserves_id),
         }
     }
 
@@ -270,21 +278,6 @@ impl DepositsMessage {
         ))
     }
 
-    /// Create a ReservesAdd operation message
-    pub fn new_reserves_add(
-        operator: PublicKey,
-        partner: PublicKey,
-        amount: u64,
-        spend_to: PublicKey,
-        collateral_partners: Vec<PublicKey>,
-    ) -> Self {
-        Self::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
-            operator,
-            partner,
-            LedgerOperation::ReservesAdd { amount, spend_to, collateral_partners },
-        ))
-    }
-
     /// Create a ReservesIncrease operation message
     pub fn new_reserves_increase(operator: PublicKey, partner: PublicKey, new_amount: u64) -> Self {
         Self::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
@@ -300,24 +293,6 @@ impl DepositsMessage {
             operator,
             partner,
             LedgerOperation::ReservesDecrease { new_amount },
-        ))
-    }
-
-    /// Create a ReservesRemove operation message
-    pub fn new_reserves_remove(operator: PublicKey, partner: PublicKey) -> Self {
-        Self::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
-            operator,
-            partner,
-            LedgerOperation::ReservesRemove,
-        ))
-    }
-
-    /// Create a ReservesUpdateSpendTo operation message
-    pub fn new_reserves_update_spend_to(operator: PublicKey, partner: PublicKey, spend_to: PublicKey) -> Self {
-        Self::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
-            operator,
-            partner,
-            LedgerOperation::ReservesUpdateSpendTo { spend_to },
         ))
     }
 
@@ -633,6 +608,8 @@ impl DepositsMessage {
             DepositsMessageCore::CoordinationResponse(m) => Self::CoordinationResponse(m),
             DepositsMessageCore::Relay(m) => Self::Relay(m),
             DepositsMessageCore::RelayResponse(m) => Self::RelayResponse(m),
+            DepositsMessageCore::ReservesAddOutput(m) => Self::ReservesAddOutput(m),
+            DepositsMessageCore::ReservesRemoveOutput(m) => Self::ReservesRemoveOutput(m),
         }
     }
 
@@ -651,6 +628,8 @@ impl DepositsMessage {
             Self::CoordinationResponse(m) => DepositsMessageCore::CoordinationResponse(m),
             Self::Relay(m) => DepositsMessageCore::Relay(m),
             Self::RelayResponse(m) => DepositsMessageCore::RelayResponse(m),
+            Self::ReservesAddOutput(m) => DepositsMessageCore::ReservesAddOutput(m),
+            Self::ReservesRemoveOutput(m) => DepositsMessageCore::ReservesRemoveOutput(m),
         }
     }
 }
@@ -675,7 +654,6 @@ pub trait LedgerUpdateMsgExt {
     fn new_with_operation(operator: PublicKey, partner: PublicKey, operation: LedgerOperation) -> LedgerUpdateMsg;
     fn is_deposit_open(&self) -> bool;
     fn is_deposit_close(&self) -> bool;
-    fn is_reserves_add(&self) -> bool;
     fn is_reserves_increase(&self) -> bool;
     fn is_reserves_decrease(&self) -> bool;
     fn is_payment_credit(&self) -> bool;
@@ -709,10 +687,6 @@ impl LedgerUpdateMsgExt for LedgerUpdateMsg {
 
     fn is_deposit_close(&self) -> bool {
         matches!(self.operation, LedgerOperation::DepositClose { .. })
-    }
-
-    fn is_reserves_add(&self) -> bool {
-        matches!(self.operation, LedgerOperation::ReservesAdd { .. })
     }
 
     fn is_reserves_increase(&self) -> bool {
@@ -789,6 +763,7 @@ pub mod consts {
         RECOVERY, RECOVERY_RESPONSE,
         COORDINATION, COORDINATION_RESPONSE,
         RELAY, RELAY_RESPONSE,
+        RESERVES_ADD_OUTPUT, RESERVES_REMOVE_OUTPUT,
     };
 
     // Re-export utility functions from deposits-core
@@ -963,11 +938,7 @@ mod tests {
     #[test]
     #[ignore = "Requires deposits-core V2 codec fix for LedgerOperation roundtrip"]
     fn test_ledger_operation_roundtrip() {
-        let op = LedgerOperation::ReservesAdd {
-            amount: 100_000,
-            spend_to: test_pubkey(),
-            collateral_partners: vec![test_pubkey()],
-        };
+        let op = LedgerOperation::ReservesIncrease { new_amount: 100_000 };
 
         let msg = LedgerUpdateMsg {
             operator_id: test_pubkey(),

@@ -472,7 +472,6 @@ mod tests {
                     LedgerOperation::PaymentLock { amount, .. } => Some(*amount),
                     LedgerOperation::PaymentFail { amount, .. } => Some(*amount),
                     LedgerOperation::PaymentFulfill { amount, .. } => Some(*amount),
-                    LedgerOperation::ReservesAdd { amount, .. } => Some(*amount),
                     LedgerOperation::ReservesIncrease { new_amount, .. } => Some(*new_amount),
                     LedgerOperation::ReservesDecrease { new_amount, .. } => Some(*new_amount),
                     _ => None,

@@ -280,7 +280,28 @@ impl Node {
             tracing::error!("Failed to persist ledger: {}", e);
         }
 
-        // Create handshake message to send to partner
+        // Add LedgerOpen operation to history
+        {
+            let operation = LedgerOperation::LedgerOpen {
+                operator_id: self.node_id,
+                reserves_id: partner,
+                ledger_address: ledger_address.clone(),
+                reserves_amount: reserves_balance,
+                collateral_enforcement_block: enforcement_block,
+            };
+
+            let ledger_arc = self.handler.get_or_create_ledger(self.node_id, partner);
+            let mut ledger_guard = ledger_arc.write().unwrap();
+            ledger_guard.append_operation(operation, deposits_core::messages::consts::LEDGER_OPEN_REQUEST)
+                .map_err(|e| Error::Protocol(format!("Failed to append LedgerOpen: {:?}", e)))?;
+        }
+
+        // Persist the ledger after adding history
+        if let Err(e) = self.handler.persist_ledger(&self.node_id, &partner) {
+            tracing::error!("Failed to persist ledger: {}", e);
+        }
+
+        // Create handshake message to send to partner (wire protocol)
         let handshake_msg = deposits_core::messages::HandshakeMsg {
             protocol_version: deposits_core::messages::PROTOCOL_VERSION,
             min_protocol_version: deposits_core::messages::PROTOCOL_VERSION,
@@ -831,7 +852,7 @@ impl Node {
                 )));
             }
 
-            // Apply the DepositOpen operation
+            // Apply the DepositOpen operation with history tracking
             let operation = LedgerOperation::DepositOpen {
                 pubkey: deposit_pubkey,
                 fees: fees.clone(),
@@ -840,7 +861,7 @@ impl Node {
                 cosigner_guarantee_signature: None,
             };
 
-            ledger.apply_operation(&operation)
+            ledger.append_operation(operation, deposits_core::messages::consts::DEPOSIT_OPEN)
                 .map_err(|e| Error::Protocol(format!("Failed to open deposit: {:?}", e)))?;
 
             // Return the created deposit
@@ -891,7 +912,7 @@ impl Node {
             // Get the next sequence number for this deposit's operations
             let sequence_number = ledger.sequence() + 1;
 
-            // Apply the PaymentCredit operation
+            // Apply the PaymentCredit operation with history tracking
             let operation = LedgerOperation::PaymentCredit {
                 payment_hash,
                 deposit_pubkey,
@@ -900,7 +921,7 @@ impl Node {
                 sequence_number,
             };
 
-            ledger.apply_operation(&operation)
+            ledger.append_operation(operation, deposits_core::messages::consts::RECEIVING_CREDIT_PAYMENT)
                 .map_err(|e| Error::Protocol(format!("Failed to credit deposit: {:?}", e)))?;
 
             // Return the new balance
@@ -994,22 +1015,22 @@ impl Node {
                 )));
             }
 
-            // Lock funds from source
+            // Lock funds from source (with history tracking)
             let lock_op = LedgerOperation::TransferLock {
                 pubkey: source_pubkey,
                 amount: amount_msats,
                 transfer_id,
             };
-            ledger.apply_operation(&lock_op)
+            ledger.append_operation(lock_op, deposits_core::messages::consts::DEPOSIT_LOCK_TRANSFER)
                 .map_err(|e| Error::Protocol(format!("Failed to lock transfer: {:?}", e)))?;
 
-            // Fulfill transfer to destination
+            // Fulfill transfer to destination (with history tracking)
             let fulfill_op = LedgerOperation::TransferFulfill {
                 pubkey: dest_pubkey,
                 amount: amount_msats,
                 transfer_id,
             };
-            ledger.apply_operation(&fulfill_op)
+            ledger.append_operation(fulfill_op, deposits_core::messages::consts::DEPOSIT_FULFILL_TRANSFER)
                 .map_err(|e| Error::Protocol(format!("Failed to fulfill transfer: {:?}", e)))?;
 
             // Get updated balances
@@ -1162,6 +1183,18 @@ impl Node {
         if let Some(ledger_arc) = ledgers.get(&(self.node_id, partner)) {
             let ledger = ledger_arc.read().unwrap();
             return Some(ledger.clone());
+        }
+        None
+    }
+
+    /// Get the primary ledger (first ledger where we are operator)
+    pub fn get_primary_ledger(&self) -> Option<(PublicKey, Ledger)> {
+        let ledgers = self.handler.ledgers.lock().unwrap();
+        for ((operator, reserves_id), ledger_arc) in ledgers.iter() {
+            if *operator == self.node_id {
+                let ledger = ledger_arc.read().unwrap();
+                return Some((*reserves_id, ledger.clone()));
+            }
         }
         None
     }

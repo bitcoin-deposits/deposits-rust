@@ -403,9 +403,6 @@ pub fn handle_ledger_update<C: HandlerContext>(
             LedgerOperation::DepositClose { pubkey } => {
                 !ledger.state.deposits.contains_key(pubkey)
             }
-            LedgerOperation::ReservesRemove => {
-                ledger.reserves_amount() == 0
-            }
             _ => false,
         };
 
@@ -451,10 +448,6 @@ pub fn handle_ledger_update<C: HandlerContext>(
                 }
 
                 // Reserves operations
-                LedgerOperation::ReservesAdd { amount, .. } => {
-                    validate_reserves_add(*amount)
-                        .map_err(|e| HandlerError::ValidationFailed(e))?;
-                }
                 LedgerOperation::ReservesIncrease { new_amount } => {
                     validate_reserves_increase(ledger.reserves_amount(), *new_amount, None)
                         .map_err(|e| HandlerError::ValidationFailed(e))?;
@@ -480,15 +473,14 @@ pub fn handle_ledger_update<C: HandlerContext>(
                 // or have already been checked for idempotency above
                 LedgerOperation::CollateralAddPartner { .. } |
                 LedgerOperation::CollateralRemovePartner { .. } |
-                LedgerOperation::ReservesRemove |
-                LedgerOperation::ReservesUpdateSpendTo { .. } |
                 LedgerOperation::TransferLock { .. } |
                 LedgerOperation::TransferFail { .. } |
                 LedgerOperation::TransferFulfill { .. } |
                 LedgerOperation::CollateralIncrease { .. } |
                 LedgerOperation::CollateralDecrease { .. } |
                 LedgerOperation::CollateralAttestation { .. } |
-                LedgerOperation::Tombstone { .. } => {}
+                LedgerOperation::Tombstone { .. } |
+                LedgerOperation::LedgerOpen { .. } => {}
             }
 
             // Append operation to ledger

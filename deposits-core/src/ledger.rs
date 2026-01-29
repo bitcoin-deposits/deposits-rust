@@ -635,28 +635,6 @@ impl Ledger {
     /// Validate an operation before applying.
     fn validate_operation(&self, operation: &LedgerOperation) -> DepositsResult<()> {
         match operation {
-            LedgerOperation::ReservesAdd { amount, .. } => {
-                if *amount == 0 {
-                    return Err(DepositsError::InvalidReserveAmount);
-                }
-                if self.state.reserves.amount > 0 {
-                    return Err(DepositsError::InvalidState(
-                        "Reserves already exist".to_string(),
-                    ));
-                }
-            }
-            LedgerOperation::ReservesRemove => {
-                if self.state.reserves.amount == 0 {
-                    return Err(DepositsError::ReservesOutputNotFound(
-                        "No reserves to remove".to_string(),
-                    ));
-                }
-                if self.total_deposit_balance() > 0 {
-                    return Err(DepositsError::NonZeroBalance {
-                        balance: self.total_deposit_balance(),
-                    });
-                }
-            }
             LedgerOperation::ReservesIncrease { new_amount } => {
                 let current = self.reserves_amount();
                 if *new_amount <= current {
@@ -720,25 +698,25 @@ impl Ledger {
     /// Apply state changes for an operation.
     pub fn apply_state_changes(&mut self, operation: &LedgerOperation) -> DepositsResult<()> {
         match operation {
-            LedgerOperation::ReservesAdd {
-                amount,
-                spend_to,
-                collateral_partners,
+            LedgerOperation::LedgerOpen {
+                operator_id,
+                reserves_id,
+                ledger_address,
+                reserves_amount,
+                collateral_enforcement_block,
             } => {
-                self.state.reserves = ReservesOutput::new([0u8; 32], *amount, *spend_to);
-                self.state.collateral_partners = collateral_partners.clone();
-            }
-            LedgerOperation::ReservesRemove => {
-                self.state.reserves = ReservesOutput::default();
+                // LedgerOpen sets up the initial ledger identity
+                self.state.operator_key = *operator_id;
+                self.state.reserves_key = *reserves_id;
+                self.state.ledger_address = ledger_address.clone();
+                self.state.reserves.amount = *reserves_amount;
+                self.state.collateral_enforcement_block = Some(*collateral_enforcement_block);
             }
             LedgerOperation::ReservesIncrease { new_amount } => {
                 self.state.reserves.amount = *new_amount;
             }
             LedgerOperation::ReservesDecrease { new_amount } => {
                 self.state.reserves.amount = *new_amount;
-            }
-            LedgerOperation::ReservesUpdateSpendTo { spend_to } => {
-                self.state.reserves.spend_to = *spend_to;
             }
             LedgerOperation::DepositOpen { pubkey, fees, .. } => {
                 let deposit = Deposit::new(*pubkey, fees.clone());
@@ -1449,16 +1427,13 @@ mod tests {
     }
 
     #[test]
-    fn test_reserves_add() {
+    fn test_reserves_increase() {
         let op = test_pubkey();
         let partner = test_pubkey_2();
         let mut ledger = Ledger::new_as_operator(op, partner, "tb1q...".to_string());
 
-        let op = LedgerOperation::ReservesAdd {
-            amount: 100_000,
-            spend_to: op,
-            collateral_partners: vec![],
-        };
+        // Initial reserves are 0, use ReservesIncrease to add funds
+        let op = LedgerOperation::ReservesIncrease { new_amount: 100_000 };
 
         let update = ledger.apply_operation(&op).unwrap();
         assert_eq!(update.sequence_number, 1);
@@ -1471,13 +1446,9 @@ mod tests {
         let partner = test_pubkey_2();
         let mut ledger = Ledger::new_as_operator(op_key, partner, "tb1q...".to_string());
 
-        // Add reserves first
+        // Add reserves first via ReservesIncrease
         ledger
-            .apply_operation(&LedgerOperation::ReservesAdd {
-                amount: 100_000,
-                spend_to: op_key,
-                collateral_partners: vec![],
-            })
+            .apply_operation(&LedgerOperation::ReservesIncrease { new_amount: 100_000 })
             .unwrap();
 
         // Open deposit
@@ -1517,12 +1488,9 @@ mod tests {
         let initial_hash = ledger.hash();
         assert_eq!(initial_hash, [0u8; 32]);
 
+        // Initial reserves are 0, use ReservesIncrease to add funds
         ledger
-            .apply_operation(&LedgerOperation::ReservesAdd {
-                amount: 100_000,
-                spend_to: op,
-                collateral_partners: vec![],
-            })
+            .apply_operation(&LedgerOperation::ReservesIncrease { new_amount: 100_000 })
             .unwrap();
 
         let hash_after_1 = ledger.hash();

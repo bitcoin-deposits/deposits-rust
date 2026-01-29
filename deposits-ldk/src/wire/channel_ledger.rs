@@ -514,20 +514,14 @@ impl ChannelLedger {
         use crate::wire::messages::CollateralAttestationMsg;
 
         match operation {
-            LedgerOperation::ReservesAdd { amount, .. } => {
-                self.reserves.amount = self.reserves.amount.saturating_add(*amount);
-            }
-            LedgerOperation::ReservesRemove => {
-                self.reserves.amount = 0;
+            LedgerOperation::LedgerOpen { .. } => {
+                // LedgerOpen establishes initial state - handled during ledger creation
             }
             LedgerOperation::ReservesIncrease { new_amount } => {
                 self.reserves.amount = *new_amount;
             }
             LedgerOperation::ReservesDecrease { new_amount } => {
                 self.reserves.amount = *new_amount;
-            }
-            LedgerOperation::ReservesUpdateSpendTo { .. } => {
-                // No balance state change
             }
             LedgerOperation::DepositOpen { pubkey, fees, .. } => {
                 let deposit = Deposit::new(*pubkey, fees.clone());

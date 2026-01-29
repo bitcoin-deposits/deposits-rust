@@ -9,7 +9,7 @@
 //!
 //! A deposits protocol node using BDK for on-chain reserves and Nostr for messaging.
 
-use bitcoin::secp256k1::PublicKey;
+use bitcoin::secp256k1::{PublicKey, Secp256k1};
 use bitcoin::Network;
 use deposits_bdk::{Node, NodeConfig};
 use std::path::PathBuf;
@@ -42,6 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "partner" => partner_command(&args[2..]).await?,
         "deposit" => deposit_command(&args[2..]).await?,
         "withdraw" => withdraw_command(&args[2..]).await?,
+        "keygen" => keygen(),
         "help" | "--help" | "-h" => print_usage(&args[0]),
         cmd => {
             eprintln!("Unknown command: {}", cmd);
@@ -63,6 +64,7 @@ COMMANDS:
     run             Run the deposits node
     info            Show node info
     address         Generate a new receiving address
+    keygen          Generate a new secp256k1 keypair for deposits
     reserves        Create a reserves UTXO
     ledger          Manage ledgers (open, list)
     partner         Manage collateral partners (request, list)
@@ -75,8 +77,8 @@ LEDGER SUBCOMMANDS:
                     Open a ledger with reserves ID. Set enforcement_block to a
                     future block for bootstrap phase, or 0 for immediate enforcement.
     ledger list     List all ledgers
-    ledger history <reserves_id>
-                    Show hash chain history for a ledger
+    ledger history [reserves_id]
+                    Show hash chain history for a ledger (default: primary ledger)
 
 PARTNER SUBCOMMANDS:
     partner request <pubkey>   Send collateral partnership request
@@ -321,6 +323,17 @@ async fn show_address(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
+/// Generate a new secp256k1 keypair for deposits
+fn keygen() {
+    use bitcoin::secp256k1::rand::rngs::OsRng;
+
+    let secp = Secp256k1::new();
+    let (secret_key, public_key) = secp.generate_keypair(&mut OsRng);
+
+    // Output: secret_key_hex public_key_hex
+    println!("{} {}", hex::encode(secret_key.secret_bytes()), public_key);
+}
+
 async fn create_reserves(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // Parse amount from first positional argument
     let mut amount_sats: u64 = 100_000_000; // Default 1 BTC
@@ -507,7 +520,7 @@ async fn ledger_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
 
 /// Show ledger history (hash chain updates)
 async fn ledger_history(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    // Parse positional argument: <reserves_id>
+    // Parse positional argument: [reserves_id] (optional)
     let mut reserves_id_str: Option<String> = None;
     let mut config_args = Vec::new();
 
@@ -525,19 +538,26 @@ async fn ledger_history(args: &[String]) -> Result<(), Box<dyn std::error::Error
         i += 1;
     }
 
-    let reserves_id_str = reserves_id_str.ok_or("Reserves ID required")?;
-    let reserves_id = PublicKey::from_str(&reserves_id_str)
-        .map_err(|e| format!("Invalid reserves ID: {}", e))?;
-
     let config = parse_config(&config_args)?;
     let node = Node::new(config).await?;
 
-    // Get the ledger
-    let ledger = node.get_ledger(reserves_id)
-        .ok_or("Ledger not found")?;
+    // Get the ledger - either by reserves_id or primary ledger
+    let (reserves_id, ledger) = if let Some(id_str) = reserves_id_str {
+        let reserves_id = PublicKey::from_str(&id_str)
+            .map_err(|e| format!("Invalid reserves ID: {}", e))?;
+        let ledger = node.get_ledger(reserves_id)
+            .ok_or("Ledger not found")?;
+        (reserves_id, ledger)
+    } else {
+        // No argument - get primary ledger
+        node.get_primary_ledger()
+            .ok_or("No ledger found. Run 'ledger open' first.")?
+    };
 
-    // Print header
-    println!("Updates for ledger {}:", reserves_id);
+    // Print header with short ID
+    let id_str = reserves_id.to_string();
+    let short_id = &id_str[..8.min(id_str.len())];
+    println!("Updates for ledger {}...:", short_id);
 
     if ledger.history.is_empty() {
         println!("  (no updates)");
@@ -590,6 +610,7 @@ fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
     use deposits_core::messages::consts::*;
 
     let name = match msg_type {
+        LEDGER_OPEN_REQUEST => "LedgerOpen",
         HANDSHAKE => "Handshake",
         RESERVES_ADD_OUTPUT => "ReservesAdd",
         RESERVES_REMOVE_OUTPUT => "ReservesRemove",

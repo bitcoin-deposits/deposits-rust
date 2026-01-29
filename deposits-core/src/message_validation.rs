@@ -497,6 +497,8 @@ pub fn validate_ledger_operation<C: ValidationContext>(
     sender: PublicKey,
 ) -> ValidationResult {
     match operation {
+        // LedgerOpen is the first operation - always valid
+        LedgerOperation::LedgerOpen { .. } => Ok(()),
         LedgerOperation::DepositOpen { pubkey, fees, .. } => {
             let msg = DepositOpenMsg {
                 reserves_id: partner_pubkey,
@@ -564,22 +566,6 @@ pub fn validate_ledger_operation<C: ValidationContext>(
             };
             validate_receiving_credit_payment_msg(ctx, &msg, sender)
         }
-        LedgerOperation::ReservesAdd { amount, spend_to, collateral_partners } => {
-            let msg = ReservesAddOutputMsg {
-                initial_amount: *amount,
-                spend_to: *spend_to,
-                reserves_id: partner_pubkey,
-                collateral_partners: collateral_partners.clone(),
-            };
-            validate_reserves_add_output_msg(&msg)
-        }
-        LedgerOperation::ReservesRemove => {
-            let msg = ReservesRemoveOutputMsg {
-                reserves_id: partner_pubkey,
-                remove_all: true,
-            };
-            validate_reserves_remove_msg(ctx, &msg, sender)
-        }
         LedgerOperation::ReservesIncrease { new_amount } => {
             let msg = ReservesIncreaseMsg {
                 new_amount: *new_amount,
@@ -625,7 +611,6 @@ pub fn validate_ledger_operation<C: ValidationContext>(
             validate_ledger_close_msg(ctx, &msg, sender)
         }
         // Operations without specific validation
-        LedgerOperation::ReservesUpdateSpendTo { .. } |
         LedgerOperation::TransferLock { .. } |
         LedgerOperation::TransferFail { .. } |
         LedgerOperation::TransferFulfill { .. } |

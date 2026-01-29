@@ -369,9 +369,9 @@ test_list_ledgers() {
     done
 }
 
-# Test: Request collateral reservess
-test_request_reservess() {
-    log_info "Testing collateral reserves requests..."
+# Test: Request collateral partners
+test_request_partners() {
+    log_info "Testing collateral partner requests..."
 
     # Get node IDs
     local alice_info=$(run_bdk_cmd "bdk-alice" info 2>&1)
@@ -382,39 +382,39 @@ test_request_reservess() {
     local bob_id=$(echo "$bob_info" | grep "Node ID:" | awk '{print $3}')
     local charlie_id=$(echo "$charlie_info" | grep "Node ID:" | awk '{print $3}')
 
-    # Alice requests Bob as reserves
+    # Alice requests Bob as partner
     if [ -n "$bob_id" ]; then
-        local request_output=$(run_bdk_cmd "bdk-alice" reserves request "$bob_id" 2>&1)
+        local request_output=$(run_bdk_cmd "bdk-alice" partner request "$bob_id" 2>&1)
 
         if echo "$request_output" | grep -q "Partnership request sent"; then
-            test_pass "Alice sent reserves request to Bob"
+            test_pass "Alice sent partner request to Bob"
         else
-            test_fail "Alice failed to send reserves request to Bob"
+            test_fail "Alice failed to send partner request to Bob"
             if $VERBOSE; then
                 echo "    Output: $request_output"
             fi
         fi
     fi
 
-    # Bob requests Charlie as reserves
+    # Bob requests Charlie as partner
     if [ -n "$charlie_id" ]; then
-        request_output=$(run_bdk_cmd "bdk-bob" reserves request "$charlie_id" 2>&1)
+        request_output=$(run_bdk_cmd "bdk-bob" partner request "$charlie_id" 2>&1)
 
         if echo "$request_output" | grep -q "Partnership request sent"; then
-            test_pass "Bob sent reserves request to Charlie"
+            test_pass "Bob sent partner request to Charlie"
         else
-            test_fail "Bob failed to send reserves request to Charlie"
+            test_fail "Bob failed to send partner request to Charlie"
         fi
     fi
 
-    # Charlie requests Alice as reserves (completing the triangle)
+    # Charlie requests Alice as partner (completing the triangle)
     if [ -n "$alice_id" ]; then
-        request_output=$(run_bdk_cmd "bdk-charlie" reserves request "$alice_id" 2>&1)
+        request_output=$(run_bdk_cmd "bdk-charlie" partner request "$alice_id" 2>&1)
 
         if echo "$request_output" | grep -q "Partnership request sent"; then
-            test_pass "Charlie sent reserves request to Alice"
+            test_pass "Charlie sent partner request to Alice"
         else
-            test_fail "Charlie failed to send reserves request to Alice"
+            test_fail "Charlie failed to send partner request to Alice"
         fi
     fi
 
@@ -422,22 +422,22 @@ test_request_reservess() {
     sleep 2
 }
 
-# Test: List reservess
-test_list_reservess() {
-    log_info "Testing reserves listing..."
+# Test: List partners
+test_list_partners() {
+    log_info "Testing partner listing..."
 
     for node in "${NODES[@]}"; do
-        local list_output=$(run_bdk_cmd "$node" reserves list 2>&1)
+        local list_output=$(run_bdk_cmd "$node" partner list 2>&1)
 
         # Note: Partners may not be established yet (just requests sent)
         # So we just verify the command runs without error
-        if echo "$list_output" | grep -qE "No collateral reservess|Partner|Collateral"; then
-            test_pass "$node reserves list executed"
+        if echo "$list_output" | grep -qE "No collateral partners|Partner|Collateral"; then
+            test_pass "$node partner list executed"
             if $VERBOSE; then
                 echo "    Partners: $list_output"
             fi
         else
-            test_fail "$node reserves list failed"
+            test_fail "$node partner list failed"
         fi
     done
 }
@@ -448,7 +448,9 @@ test_list_reservess() {
 
 # Global variables to store deposit info across tests
 ALICE_DEPOSIT_A=""
+ALICE_DEPOSIT_A_SECRET=""
 ALICE_DEPOSIT_B=""
+ALICE_DEPOSIT_B_SECRET=""
 BOB_NODE_ID=""
 DEPOSIT_OFFER_ID=""
 DEPOSIT_FUNDING_ADDRESS=""
@@ -468,15 +470,29 @@ test_open_deposits() {
         return 1
     fi
 
-    # Generate two deposit pubkeys (using sha256 of identifiers for determinism in tests)
-    # In a real scenario, these would be user-controlled keys
-    ALICE_DEPOSIT_A=$(echo -n "alice_deposit_a_test_key" | sha256sum | awk '{print $1}')
-    ALICE_DEPOSIT_B=$(echo -n "alice_deposit_b_test_key" | sha256sum | awk '{print $1}')
+    # Create wallets directory
+    mkdir -p "$SCRIPT_DIR/../wallets"
 
-    # For the test, we'll use compressed pubkey format (02 prefix + 32 bytes)
-    # Generate proper test pubkeys
-    ALICE_DEPOSIT_A="02$(echo -n "deposit_a_$(date +%s)" | sha256sum | awk '{print $1}')"
-    ALICE_DEPOSIT_B="02$(echo -n "deposit_b_$(date +%s)" | sha256sum | awk '{print $1}')"
+    # Generate keypairs for deposits using the keygen command
+    # Each deposit needs its own keypair that the user controls
+    log_info "Generating deposit keypairs..."
+
+    local keypair_a=$(run_bdk_cmd "bdk-alice" keygen 2>&1)
+    ALICE_DEPOSIT_A_SECRET=$(echo "$keypair_a" | awk '{print $1}')
+    ALICE_DEPOSIT_A=$(echo "$keypair_a" | awk '{print $2}')
+
+    local keypair_b=$(run_bdk_cmd "bdk-alice" keygen 2>&1)
+    ALICE_DEPOSIT_B_SECRET=$(echo "$keypair_b" | awk '{print $1}')
+    ALICE_DEPOSIT_B=$(echo "$keypair_b" | awk '{print $2}')
+
+    if [ -z "$ALICE_DEPOSIT_A" ] || [ -z "$ALICE_DEPOSIT_B" ]; then
+        test_fail "Failed to generate deposit keypairs"
+        return 1
+    fi
+
+    # Save wallet files
+    echo "{\"deposit_pubkey\": \"$ALICE_DEPOSIT_A\", \"deposit_secret\": \"$ALICE_DEPOSIT_A_SECRET\"}" > "$SCRIPT_DIR/../wallets/deposit_a.json"
+    echo "{\"deposit_pubkey\": \"$ALICE_DEPOSIT_B\", \"deposit_secret\": \"$ALICE_DEPOSIT_B_SECRET\"}" > "$SCRIPT_DIR/../wallets/deposit_b.json"
 
     log_info "Opening Deposit A: ${ALICE_DEPOSIT_A:0:20}..."
     log_info "Opening Deposit B: ${ALICE_DEPOSIT_B:0:20}..."
@@ -818,10 +834,10 @@ run_all_tests() {
     test_list_ledgers
 
     echo ""
-    test_request_reservess
+    test_request_partners
 
     echo ""
-    test_list_reservess
+    test_list_partners
 
     echo ""
     log_info "=== Deposit Lifecycle Tests ==="

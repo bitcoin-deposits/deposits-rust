@@ -296,11 +296,11 @@ where
             }
         }
 
-        // Send ReservesRemove message (V2 format)
+        // Send ReservesDecrease to 0 message (reserves removal)
         let update_msg = LedgerUpdateMsg::new_with_operation(
             self.our_node_id,    // operator
             partner_node_id,     // partner
-            LedgerOperation::ReservesRemove,
+            LedgerOperation::ReservesDecrease { new_amount: 0 },
         );
         let message = DepositsMessage::LedgerUpdate(update_msg);
 
@@ -321,7 +321,7 @@ where
             });
         }
 
-        log_info!(self.logger, "Sending ReservesRemove message to partner {}", partner_node_id);
+        log_info!(self.logger, "Sending ReservesDecrease to 0 message to partner {}", partner_node_id);
 
         // Send message and wait for acknowledgment
         self.send_message_with_oneshot_ack(partner_node_id, message.clone(), 30000)?;
