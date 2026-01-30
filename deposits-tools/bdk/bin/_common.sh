@@ -46,6 +46,12 @@ get_node_seed() {
     esac
 }
 
+# Filter out Rust tracing log lines from output
+# Strips ANSI codes and removes timestamp-prefixed log lines
+filter_logs() {
+    sed 's/\x1b\[[0-9;]*m//g' | grep -v -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}'
+}
+
 # Print colored output
 log_info() {
     echo -e "${BLUE}[INFO]${NC} $1"
@@ -168,8 +174,9 @@ run_bdk_cmd() {
     fi
 
     # Run command with positional args first, then config args at the end
-    # This supports subcommands like: ledger open <pubkey> <block> --seed ...
-    docker exec "$container" deposits-bdk "$cmd" \
+    # This supports subcommands like: ledger open <block> --seed ...
+    # Use RUST_LOG=error to suppress INFO logs from CLI output
+    docker exec -e RUST_LOG=error "$container" deposits-bdk "$cmd" \
         "$@" \
         --seed "$seed" \
         --network regtest \
@@ -187,8 +194,8 @@ get_node_address() {
         return 1
     fi
 
-    # Run address command and extract just the address (filter out log lines)
-    docker exec "$container" deposits-bdk address \
+    # Run address command and extract just the address
+    docker exec -e RUST_LOG=error "$container" deposits-bdk address \
         --seed "$seed" \
         --network regtest \
         --esplora http://electrs:3002 \
@@ -269,6 +276,14 @@ follow_logs() {
     else
         $DC logs -f "$container"
     fi
+}
+
+# Generate a keypair using deposits-bdk keygen (no extra args needed)
+# Returns: secret_hex pubkey_hex
+run_keygen() {
+    local container=$1
+    # keygen doesn't need seed/network/etc - it just generates a random keypair
+    docker exec -e RUST_LOG=error "$container" deposits-bdk keygen 2>&1
 }
 
 # Check if all services are healthy

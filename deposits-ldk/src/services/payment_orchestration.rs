@@ -29,6 +29,6 @@ where
         _deposit_pubkey: PublicKey,
     ) -> Result<(), ServiceError> {
         // For now, just return an error indicating the feature is not implemented
-        Err(ServiceError::PaymentFailed)
+        Err(ServiceError::InvoiceFailed)
     }
 }

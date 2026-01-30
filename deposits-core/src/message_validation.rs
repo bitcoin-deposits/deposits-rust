@@ -81,10 +81,10 @@ use crate::wire_messages::{
 ///
 /// Implementations should be provided by the Lightning adapter (e.g., deposits-ldk).
 pub trait ValidationContext: Send + Sync {
-    /// Get a ledger for the given operator/partner pair.
+    /// Get a ledger for the given operator/reserves_id pair.
     ///
     /// Returns None if no ledger exists for this pair.
-    fn get_ledger(&self, operator: &PublicKey, partner: &PublicKey) -> Option<Arc<RwLock<Ledger>>>;
+    fn get_ledger(&self, operator: &PublicKey, reserves_id: &str) -> Option<Arc<RwLock<Ledger>>>;
 
     /// Get our node's public key.
     fn our_node_id(&self) -> PublicKey;
@@ -180,14 +180,14 @@ pub trait HandlerContext: ValidationContext {
 
     /// Persist ledger state to storage.
     /// Returns Ok(()) on success or error message on failure.
-    fn persist_ledger(&self, operator: &PublicKey, partner: &PublicKey) -> Result<(), String> {
-        let _ = (operator, partner);
+    fn persist_ledger(&self, operator: &PublicKey, reserves_id: &str) -> Result<(), String> {
+        let _ = (operator, reserves_id);
         Ok(()) // Default: no-op
     }
 
     /// Sync quorum membership after collateral partner change.
-    fn sync_quorum_member(&self, operator: PublicKey, partner: PublicKey, collateral_partner: PublicKey, add: bool) {
-        let _ = (operator, partner, collateral_partner, add);
+    fn sync_quorum_member(&self, operator: PublicKey, reserves_id: &str, collateral_partner: PublicKey, add: bool) {
+        let _ = (operator, reserves_id, collateral_partner, add);
         // Default: no-op
     }
 
@@ -345,8 +345,8 @@ pub trait HandlerContext: ValidationContext {
 
     /// Send quorum state sync to a new member.
     /// Called after accepting a quorum join request.
-    fn send_quorum_state_sync(&self, member: PublicKey, operator: PublicKey, partner: PublicKey) {
-        let _ = (member, operator, partner);
+    fn send_quorum_state_sync(&self, member: PublicKey, operator: PublicKey, reserves_id: &str) {
+        let _ = (member, operator, reserves_id);
         // Default: no-op
     }
 
@@ -356,14 +356,14 @@ pub trait HandlerContext: ValidationContext {
 
     /// Add a vote to a pending vote round.
     /// Returns Some(spend_ready_data) if threshold reached, None otherwise.
-    /// The spend_ready_data contains: (operator, partner, signed_tx_bytes, conforming_votes, threshold)
+    /// The spend_ready_data contains: (operator, reserves_id, signed_tx_bytes, conforming_votes, threshold)
     fn add_quorum_vote(
         &self,
         vote_round_id: [u8; 32],
         voter: PublicKey,
         vote: bool,
         spend_signature: Option<[u8; 64]>,
-    ) -> Option<(PublicKey, PublicKey, Vec<u8>, u32, u32)> {
+    ) -> Option<(PublicKey, String, Vec<u8>, u32, u32)> {
         let _ = (vote_round_id, voter, vote, spend_signature);
         None // Default: not implemented
     }
@@ -377,11 +377,11 @@ pub trait HandlerContext: ValidationContext {
     fn complete_consent_request(
         &self,
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: &str,
         granted: bool,
         signature: [u8; 64],
     ) -> bool {
-        let _ = (operator, partner, granted, signature);
+        let _ = (operator, reserves_id, granted, signature);
         false // Default: no pending request found
     }
 
@@ -389,11 +389,11 @@ pub trait HandlerContext: ValidationContext {
     fn send_audit_to_collateral_partner(
         &self,
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: &str,
         new_collateral_partner: PublicKey,
         signature: [u8; 64],
     ) {
-        let _ = (operator, partner, new_collateral_partner, signature);
+        let _ = (operator, reserves_id, new_collateral_partner, signature);
         // Default: no-op
     }
 
@@ -402,11 +402,11 @@ pub trait HandlerContext: ValidationContext {
     fn verify_consent_signature(
         &self,
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: &str,
         signature: [u8; 64],
         signer: PublicKey,
     ) -> bool {
-        let _ = (operator, partner, signature, signer);
+        let _ = (operator, reserves_id, signature, signer);
         false // Default: not implemented
     }
 
@@ -419,9 +419,9 @@ pub trait HandlerContext: ValidationContext {
     fn get_signed_update_log_state(
         &self,
         operator: &PublicKey,
-        partner: &PublicKey,
+        reserves_id: &str,
     ) -> Option<(u64, [u8; 32])> {
-        let _ = (operator, partner);
+        let _ = (operator, reserves_id);
         None // Default: not available
     }
 
@@ -430,11 +430,11 @@ pub trait HandlerContext: ValidationContext {
     fn update_quorum_member_state(
         &self,
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: &str,
         sequence: u64,
         state_hash: [u8; 32],
     ) -> Result<(), String> {
-        let _ = (operator, partner, sequence, state_hash);
+        let _ = (operator, reserves_id, sequence, state_hash);
         Ok(()) // Default: no-op
     }
 
@@ -448,7 +448,7 @@ pub trait HandlerContext: ValidationContext {
         &self,
         vote_round_id: [u8; 32],
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: &str,
         sequence_number: u64,
         state_hash: [u8; 32],
         claimed_reserves: u64,
@@ -457,7 +457,7 @@ pub trait HandlerContext: ValidationContext {
         fee_rate_sat_vbyte: u64,
         threshold: usize,
     ) -> bool {
-        let _ = (vote_round_id, operator, partner, sequence_number, state_hash,
+        let _ = (vote_round_id, operator, reserves_id, sequence_number, state_hash,
                  claimed_reserves, reserves_outpoint, destination_script, fee_rate_sat_vbyte, threshold);
         false // Default: not implemented
     }
@@ -501,7 +501,7 @@ pub fn validate_ledger_operation<C: ValidationContext>(
         LedgerOperation::LedgerOpen { .. } => Ok(()),
         LedgerOperation::DepositOpen { pubkey, fees, .. } => {
             let msg = DepositOpenMsg {
-                reserves_id: partner_pubkey,
+                reserves_id: partner_pubkey.to_string(),
                 pubkey: *pubkey,
                 fees: fees.clone(),
                 payment_hash: None, // Not used in validation
@@ -512,20 +512,20 @@ pub fn validate_ledger_operation<C: ValidationContext>(
         }
         LedgerOperation::DepositClose { pubkey } => {
             let msg = DepositCloseMsg {
-                reserves_id: partner_pubkey,
+                reserves_id: partner_pubkey.to_string(),
                 pubkey: *pubkey,
             };
             validate_remove_deposit_msg(ctx, &msg, sender)
         }
         LedgerOperation::DepositUpdate { pubkey, new_fees } => {
             let msg = DepositUpdateMsg {
-                reserves_id: partner_pubkey,
+                reserves_id: partner_pubkey.to_string(),
                 pubkey: *pubkey,
                 new_fees: new_fees.clone(),
             };
             validate_update_deposit_msg(ctx, &msg, sender)
         }
-        LedgerOperation::PaymentLock { pubkey, amount, payment_id, scriptpubkey_signature, .. } => {
+        LedgerOperation::InvoiceLock { pubkey, amount, payment_id, scriptpubkey_signature, .. } => {
             let msg = SendingLockPaymentMsg {
                 pubkey: *pubkey,
                 amount: *amount,
@@ -535,7 +535,7 @@ pub fn validate_ledger_operation<C: ValidationContext>(
             };
             validate_sending_lock_payment_msg(ctx, &msg, sender)
         }
-        LedgerOperation::PaymentFulfill { pubkey, amount, payment_id, scriptpubkey_signature, preimage, .. } => {
+        LedgerOperation::InvoiceFulfill { pubkey, amount, payment_id, scriptpubkey_signature, preimage, .. } => {
             let msg = SendingFulfillPaymentMsg {
                 pubkey: *pubkey,
                 amount: *amount,
@@ -546,7 +546,7 @@ pub fn validate_ledger_operation<C: ValidationContext>(
             };
             validate_sending_fulfill_payment_msg(&msg)
         }
-        LedgerOperation::PaymentFail { amount, .. } => {
+        LedgerOperation::InvoiceFail { amount, .. } => {
             let msg = SendingFailPaymentMsg {
                 pubkey: PublicKey::from_slice(&[2; 33]).unwrap(), // Placeholder
                 amount: *amount,
@@ -555,34 +555,42 @@ pub fn validate_ledger_operation<C: ValidationContext>(
             };
             validate_sending_fail_payment_msg(&msg)
         }
-        LedgerOperation::PaymentCredit { payment_hash, deposit_pubkey, amount, invoice_id, .. } => {
+        LedgerOperation::InvoiceCredit { payment_hash, deposit_pubkey, amount, invoice_id, .. } => {
             let msg = ReceivingCreditPaymentMsg {
                 payment_hash: *payment_hash,
                 deposit_pubkey: *deposit_pubkey,
                 amount: *amount,
                 invoice_id: invoice_id.clone(),
-                reserves_id: partner_pubkey,
+                reserves_id: partner_pubkey.to_string(),
                 sequence_number: 0,
             };
             validate_receiving_credit_payment_msg(ctx, &msg, sender)
         }
+        // Onchain operations
+        LedgerOperation::OnchainCredit { .. } |
+        LedgerOperation::OnchainLock { .. } |
+        LedgerOperation::OnchainFail { .. } |
+        LedgerOperation::OnchainFulfill { .. } => {
+            // Onchain operations are validated in message_handlers
+            Ok(())
+        }
         LedgerOperation::ReservesIncrease { new_amount } => {
             let msg = ReservesIncreaseMsg {
                 new_amount: *new_amount,
-                reserves_id: partner_pubkey,
+                reserves_id: partner_pubkey.to_string(),
             };
             validate_reserves_increase_msg(ctx, &msg, sender)
         }
         LedgerOperation::ReservesDecrease { new_amount } => {
             let msg = ReservesDecreaseMsg {
                 new_amount: *new_amount,
-                reserves_id: partner_pubkey,
+                reserves_id: partner_pubkey.to_string(),
             };
             validate_reserves_decrease_msg(ctx, &msg, sender)
         }
         LedgerOperation::CollateralIncrease { new_amount, block_height } => {
             let msg = CollateralIncreaseMsg {
-                reserves_id: partner_pubkey,
+                reserves_id: partner_pubkey.to_string(),
                 new_amount: *new_amount,
                 block_height: *block_height,
             };
@@ -590,7 +598,7 @@ pub fn validate_ledger_operation<C: ValidationContext>(
         }
         LedgerOperation::CollateralDecrease { new_amount, block_height } => {
             let msg = CollateralDecreaseMsg {
-                reserves_id: partner_pubkey,
+                reserves_id: partner_pubkey.to_string(),
                 new_amount: *new_amount,
                 block_height: *block_height,
             };
@@ -606,14 +614,11 @@ pub fn validate_ledger_operation<C: ValidationContext>(
         }
         LedgerOperation::LedgerClose => {
             let msg = LedgerCloseMsg {
-                reserves_id: partner_pubkey,
+                reserves_id: partner_pubkey.to_string(),
             };
             validate_ledger_close_msg(ctx, &msg, sender)
         }
         // Operations without specific validation
-        LedgerOperation::TransferLock { .. } |
-        LedgerOperation::TransferFail { .. } |
-        LedgerOperation::TransferFulfill { .. } |
         LedgerOperation::CollateralAttestation { .. } |
         LedgerOperation::CollateralAddPartner { .. } |
         LedgerOperation::CollateralRemovePartner { .. } |
@@ -631,7 +636,7 @@ pub fn validate_add_deposit_msg<C: ValidationContext>(
     msg: &DepositOpenMsg,
     sender: PublicKey,
 ) -> ValidationResult {
-    if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id()) {
+    if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
         let ledger = ledger_arc.read().unwrap();
         validate_deposit_add(&ledger, msg.pubkey, msg.fees.as_ref())
     } else {
@@ -645,7 +650,7 @@ pub fn validate_remove_deposit_msg<C: ValidationContext>(
     msg: &DepositCloseMsg,
     sender: PublicKey,
 ) -> ValidationResult {
-    if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id()) {
+    if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
         let ledger = ledger_arc.read().unwrap();
         validate_deposit_close(&ledger, msg.pubkey)
     } else {
@@ -659,7 +664,7 @@ pub fn validate_update_deposit_msg<C: ValidationContext>(
     msg: &DepositUpdateMsg,
     sender: PublicKey,
 ) -> ValidationResult {
-    if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id()) {
+    if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
         let ledger = ledger_arc.read().unwrap();
         validate_deposit_update(&ledger, msg.pubkey, &msg.new_fees)
     } else {
@@ -673,7 +678,7 @@ pub fn validate_sending_lock_payment_msg<C: ValidationContext>(
     msg: &SendingLockPaymentMsg,
     sender: PublicKey,
 ) -> ValidationResult {
-    if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id()) {
+    if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
         let ledger = ledger_arc.read().unwrap();
         validate_payment_lock(
             &ledger,
@@ -718,7 +723,7 @@ pub fn validate_receiving_credit_payment_msg<C: ValidationContext>(
         return Err(format!("Invalid invoice ID: {}", msg.invoice_id));
     }
 
-    if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id()) {
+    if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
         let ledger = ledger_arc.read().unwrap();
         validate_credit_payment(
             &ledger,
@@ -743,7 +748,7 @@ pub fn validate_reserves_remove_msg<C: ValidationContext>(
     sender: PublicKey,
 ) -> ValidationResult {
     // First check if we have a ledger for this sender
-    let has_ledger = ctx.get_ledger(&sender, &ctx.our_node_id()).is_some();
+    let has_ledger = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()).is_some();
 
     if has_ledger {
         // As the partner, use commitment tx reserves amount (not ledger's declared amount)
@@ -767,7 +772,7 @@ pub fn validate_fee_collect_msg<C: ValidationContext>(
     msg: &FeeCollectMsg,
     sender: PublicKey,
 ) -> ValidationResult {
-    if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id()) {
+    if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
         let ledger = ledger_arc.read().unwrap();
         validate_fee_collect(&ledger, msg.pubkey, msg.amount, msg.block_height)
     } else {
@@ -781,7 +786,7 @@ pub fn validate_collateral_increase_msg<C: ValidationContext>(
     msg: &CollateralIncreaseMsg,
     sender: PublicKey,
 ) -> ValidationResult {
-    if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id()) {
+    if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
         let ledger = ledger_arc.read().unwrap();
         validate_collateral_increase(
             ledger.state.collateral_amount,
@@ -801,7 +806,7 @@ pub fn validate_collateral_decrease_msg<C: ValidationContext>(
     msg: &CollateralDecreaseMsg,
     sender: PublicKey,
 ) -> ValidationResult {
-    if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id()) {
+    if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
         let ledger = ledger_arc.read().unwrap();
         validate_collateral_decrease(
             ledger.state.collateral_amount,
@@ -826,7 +831,7 @@ pub fn validate_reserves_increase_msg<C: ValidationContext>(
     let channel_balance = ctx.get_commitment_tx_reserves_amount(sender);
 
     // Get current reserves
-    if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id()) {
+    if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
         let ledger = ledger_arc.read().unwrap();
         validate_reserves_increase(
             ledger.reserves_amount(),
@@ -847,7 +852,7 @@ pub fn validate_reserves_decrease_msg<C: ValidationContext>(
     msg: &ReservesDecreaseMsg,
     sender: PublicKey,
 ) -> ValidationResult {
-    if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id()) {
+    if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
         let ledger = ledger_arc.read().unwrap();
         validate_reserves_decrease(&ledger, msg.new_amount)
     } else {
@@ -864,7 +869,7 @@ pub fn validate_receiving_cosign_invoice_msg<C: ValidationContext>(
     sender: PublicKey,
 ) -> ValidationResult {
     // Sender is the operator, we are the partner being asked to cosign
-    if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id()) {
+    if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
         let ledger = ledger_arc.read().unwrap();
         validate_cosign_invoice(
             &ledger,
@@ -887,11 +892,11 @@ pub fn validate_ledger_close_msg<C: ValidationContext>(
     sender: PublicKey,
 ) -> ValidationResult {
     // Sender is the operator, we are the partner
-    if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id()) {
+    if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
         let ledger = ledger_arc.read().unwrap();
 
         // Check that the reserves_id matches us (context-specific check)
-        if msg.reserves_id != ctx.our_node_id() {
+        if msg.reserves_id != ctx.our_node_id().to_string() {
             return Err(format!(
                 "LedgerClose reserves_id {} does not match our node {}",
                 msg.reserves_id, ctx.our_node_id()
@@ -919,7 +924,7 @@ mod tests {
 
     /// Test implementation of ValidationContext
     struct TestContext {
-        ledgers: HashMap<(PublicKey, PublicKey), Arc<RwLock<Ledger>>>,
+        ledgers: HashMap<(PublicKey, String), Arc<RwLock<Ledger>>>,
         our_node_id: PublicKey,
     }
 
@@ -931,14 +936,14 @@ mod tests {
             }
         }
 
-        fn add_ledger(&mut self, operator: PublicKey, partner: PublicKey, ledger: Ledger) {
-            self.ledgers.insert((operator, partner), Arc::new(RwLock::new(ledger)));
+        fn add_ledger(&mut self, operator: PublicKey, reserves_id: String, ledger: Ledger) {
+            self.ledgers.insert((operator, reserves_id), Arc::new(RwLock::new(ledger)));
         }
     }
 
     impl ValidationContext for TestContext {
-        fn get_ledger(&self, operator: &PublicKey, partner: &PublicKey) -> Option<Arc<RwLock<Ledger>>> {
-            self.ledgers.get(&(*operator, *partner)).cloned()
+        fn get_ledger(&self, operator: &PublicKey, reserves_id: &str) -> Option<Arc<RwLock<Ledger>>> {
+            self.ledgers.get(&(*operator, reserves_id.to_string())).cloned()
         }
 
         fn our_node_id(&self) -> PublicKey {
@@ -966,7 +971,7 @@ mod tests {
             payment_hash: None,
             invoice: None,
             cosigner_guarantee_signature: None,
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
         };
 
         let result = validate_add_deposit_msg(&ctx, &msg, sender);
@@ -983,12 +988,12 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
         let ledger = Ledger::new(
             operator,
-            our_node_id,
+            our_node_id.to_string(),
             LedgerRole::Partner,
             vec![],
             "tb1qtest".to_string(),
         );
-        ctx.add_ledger(operator, our_node_id, ledger);
+        ctx.add_ledger(operator, our_node_id.to_string(), ledger);
 
         let msg = DepositOpenMsg {
             pubkey: deposit_pubkey,
@@ -996,7 +1001,7 @@ mod tests {
             payment_hash: None,
             invoice: None,
             cosigner_guarantee_signature: None,
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
         };
 
         let result = validate_add_deposit_msg(&ctx, &msg, operator);
@@ -1038,7 +1043,7 @@ mod tests {
         let msg = ReservesAddOutputMsg {
             initial_amount: 100, // Below minimum
             spend_to: create_test_pubkey(1),
-            reserves_id: create_test_pubkey(2),
+            reserves_id: create_test_pubkey(2).to_string(),
             collateral_partners: vec![],
         };
 
@@ -1052,7 +1057,7 @@ mod tests {
         let msg = ReservesAddOutputMsg {
             initial_amount: 1_000_000_000_000, // Above maximum
             spend_to: create_test_pubkey(1),
-            reserves_id: create_test_pubkey(2),
+            reserves_id: create_test_pubkey(2).to_string(),
             collateral_partners: vec![],
         };
 
@@ -1069,18 +1074,18 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
         let mut ledger = Ledger::new(
             operator,
-            our_node_id,
+            our_node_id.to_string(),
             LedgerRole::Partner,
             vec![],
             "tb1qtest".to_string(),
         );
         ledger.state.reserves.amount = 5000;
-        ctx.add_ledger(operator, our_node_id, ledger);
+        ctx.add_ledger(operator, our_node_id.to_string(), ledger);
 
         // Try to "increase" to a lower amount - should fail
         let msg = ReservesIncreaseMsg {
             new_amount: 4000, // Less than current 5000
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
         };
 
         let result = validate_reserves_increase_msg(&ctx, &msg, operator);
@@ -1096,19 +1101,19 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
         let mut ledger = Ledger::new(
             operator,
-            our_node_id,
+            our_node_id.to_string(),
             LedgerRole::Partner,
             vec![],
             "tb1qtest".to_string(),
         );
         ledger.state.collateral_amount = 5000;
         ledger.state.last_collateral_increase_block = Some(100);
-        ctx.add_ledger(operator, our_node_id, ledger);
+        ctx.add_ledger(operator, our_node_id.to_string(), ledger);
 
         // Try to decrease at block 150 (within 144-block period)
         let msg = CollateralDecreaseMsg {
             new_amount: 3000,
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             block_height: 150,
         };
 
@@ -1125,19 +1130,19 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
         let mut ledger = Ledger::new(
             operator,
-            our_node_id,
+            our_node_id.to_string(),
             LedgerRole::Partner,
             vec![],
             "tb1qtest".to_string(),
         );
         ledger.state.collateral_amount = 5000;
         ledger.state.last_collateral_increase_block = Some(100);
-        ctx.add_ledger(operator, our_node_id, ledger);
+        ctx.add_ledger(operator, our_node_id.to_string(), ledger);
 
         // Decrease at block 250 (after 144-block period: 100 + 144 = 244)
         let msg = CollateralDecreaseMsg {
             new_amount: 3000,
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             block_height: 250,
         };
 
@@ -1154,7 +1159,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
         let mut ledger = Ledger::new(
             operator,
-            our_node_id,
+            our_node_id.to_string(),
             LedgerRole::Partner,
             vec![],
             "tb1qtest".to_string(),
@@ -1165,12 +1170,12 @@ mod tests {
         let mut deposit = Deposit::new(deposit_pubkey, None);
         deposit.balance = 80_000;
         ledger.state.deposits.insert(deposit_pubkey, deposit);
-        ctx.add_ledger(operator, our_node_id, ledger);
+        ctx.add_ledger(operator, our_node_id.to_string(), ledger);
 
         // Try to decrease reserves below what's required to back deposits
         let msg = ReservesDecreaseMsg {
             new_amount: 50_000, // Less than the 80k deposit balance
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
         };
 
         let result = validate_reserves_decrease_msg(&ctx, &msg, operator);
@@ -1187,7 +1192,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
         let mut ledger = Ledger::new(
             operator,
-            our_node_id,
+            our_node_id.to_string(),
             LedgerRole::Partner,
             vec![],
             "tb1qtest".to_string(),
@@ -1195,10 +1200,10 @@ mod tests {
         let mut deposit = Deposit::new(deposit_pubkey, None);
         deposit.balance = 50_000; // Has balance
         ledger.state.deposits.insert(deposit_pubkey, deposit);
-        ctx.add_ledger(operator, our_node_id, ledger);
+        ctx.add_ledger(operator, our_node_id.to_string(), ledger);
 
         let msg = LedgerCloseMsg {
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
         };
 
         let result = validate_ledger_close_msg(&ctx, &msg, operator);
@@ -1214,15 +1219,15 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
         let ledger = Ledger::new(
             operator,
-            our_node_id,
+            our_node_id.to_string(),
             LedgerRole::Partner,
             vec![],
             "tb1qtest".to_string(),
         );
-        ctx.add_ledger(operator, our_node_id, ledger);
+        ctx.add_ledger(operator, our_node_id.to_string(), ledger);
 
         let msg = LedgerCloseMsg {
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
         };
 
         let result = validate_ledger_close_msg(&ctx, &msg, operator);

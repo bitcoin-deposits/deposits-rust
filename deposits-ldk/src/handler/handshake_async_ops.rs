@@ -59,7 +59,7 @@ where
         // STEP 1: Calculate required reserves and send ReservesToReserves if needed
         let reserves_increase_amount = {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let ledger = ledger_arc.read().unwrap();
 
                 // Calculate current state
@@ -98,7 +98,7 @@ where
             // V2 format
             let update_msg = LedgerUpdateMsg::new_with_operation(
                 self.our_node_id,    // operator
-                partner_node_id,     // partner
+                partner_node_id.to_string(),     // partner
                 LedgerOperation::ReservesIncrease { new_amount: new_reserves_amount },
             );
             let reserves_msg = DepositsMessage::LedgerUpdate(update_msg);
@@ -110,7 +110,7 @@ where
             // Track pending ACK in ledger BEFORE sending
             {
                 let ledgers = self.ledgers.lock().unwrap();
-                if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+                if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                     let _ledger = ledger_arc.write().unwrap();
                     // Track pending ACK
                 {
@@ -135,7 +135,7 @@ where
             // consistent prev_hash, new_hash, and sequence_number atomically
             let (prev_hash, new_hash, sequence_number) = {
                 let ledgers = self.ledgers.lock().unwrap();
-                if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+                if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                     let mut ledger = ledger_arc.write().unwrap();
 
                     // Set timestamp
@@ -172,7 +172,7 @@ where
             // Update sent_messages_for_broadcast with correct new_hash and broadcast
             {
                 let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
-                sent_messages.insert(message_hash, (self.our_node_id, partner_node_id, reserves_msg_for_broadcast.clone(), prev_hash, new_hash, sequence_number));
+                sent_messages.insert(message_hash, (self.our_node_id, partner_node_id.to_string(), reserves_msg_for_broadcast.clone(), prev_hash, new_hash, sequence_number));
             }
 
             // Now broadcast with correct hashes
@@ -251,7 +251,7 @@ where
         use deposits_core::messages::CoordinationMsg;
         let message = DepositsMessage::Coordination(CoordinationMsg::CosignInvoice {
             operator_id: self.our_node_id,
-            reserves_id: partner_node_id,
+            reserves_id: partner_node_id.to_string(),
             amount,
             payment_hash,
             expires,
@@ -289,7 +289,7 @@ where
                 // Cosignature received successfully - add invoice to deposit in ledger
                 {
                     let ledgers = self.ledgers.lock().unwrap();
-                    if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+                    if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                         let mut ledger = ledger_arc.write().unwrap();
                         if let Some(deposit) = ledger.state.deposits.get_mut(&deposit_pubkey) {
                             // Convert wrapper to core type for storage
@@ -339,7 +339,7 @@ where
         // Check if ledger already exists
         {
             let ledgers = self.ledgers.lock().unwrap();
-            if ledgers.contains_key(&(self.our_node_id, partner_node_id)) {
+            if ledgers.contains_key(&(self.our_node_id, partner_node_id.to_string())) {
                 return Ok(());
             }
         }
@@ -368,11 +368,9 @@ where
             min_protocol_version: 1,
             features: 0,
             operator_id: self.our_node_id,
-            reserves_id: partner_node_id,
-            ledger_address: ledger_address.to_string(),
+            reserves_id: partner_node_id.to_string(),
             funding_txid,
             funding_vout,
-            reserves_amount: 0, // Will be set when reserves are established
             collateral_enforcement_block: 0, // Immediate enforcement
         });
 
@@ -415,7 +413,7 @@ where
             // Get the Handshake message from the ledger (first update)
             let (handshake_msg_opt, new_hash) = {
                 let ledgers = self.ledgers.lock().unwrap();
-                if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+                if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                     let ledger = ledger_arc.read().unwrap();
                     // Get the first update and deserialize its message using SignedLedgerUpdateExt
                     // which correctly uses the separate message_type field
@@ -434,7 +432,7 @@ where
                 // Store in sent_messages_for_broadcast for SignedAuditUpdate broadcast
                 {
                     let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
-                    sent_messages.insert(message_hash, (self.our_node_id, partner_node_id, handshake_msg, prev_hash, new_hash, chain_index));
+                    sent_messages.insert(message_hash, (self.our_node_id, partner_node_id.to_string(), handshake_msg, prev_hash, new_hash, chain_index));
                 }
 
                 if let Err(e) = self.broadcast_message_to_other_partners(message_hash, partner_node_id, None) {
@@ -458,7 +456,7 @@ where
                 // Get VoterSet from the newly created ledger
                 let voter_set = {
                     let ledgers = self.ledgers.lock().unwrap();
-                    let operator_key = (self.our_node_id, partner_node_id);
+                    let operator_key = (self.our_node_id, partner_node_id.to_string());
                     if let Some(ledger_arc) = ledgers.get(&operator_key) {
                         ledger_arc.read().unwrap().construct_voter_set()
                     } else {
@@ -518,7 +516,7 @@ where
                         // This ensures reserves_amount() returns the correct value for validation
                         {
                             let ledgers = self.ledgers.lock().unwrap();
-                            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+                            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                                 let mut ledger = ledger_arc.write().unwrap();
                                 ledger.state.reserves.amount = initial_reserves_sats;
                                 log_info!(
@@ -580,11 +578,9 @@ where
             min_protocol_version: 1,
             features: 0,
             operator_id: self.our_node_id,
-            reserves_id: partner_node_id,
-            ledger_address: ledger_addr_str,
+            reserves_id: partner_node_id.to_string(),
             funding_txid,
             funding_vout,
-            reserves_amount: 0, // Will be set when reserves are established
             collateral_enforcement_block: 0, // Immediate enforcement
         });
 
@@ -603,7 +599,7 @@ where
         // For Handshake, prev_hash is [0u8; 32] (genesis) and new_hash is the ledger's current hash
         let (prev_hash, new_hash, sequence_number) = {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let ledger = ledger_arc.read().unwrap();
                 // Handshake uses 0-based sequence for SignedAuditUpdate
                 let seq = ledger.history.len() as u64; // 0-based (index of entry being added)
@@ -614,7 +610,7 @@ where
         };
         {
             let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
-            sent_messages.insert(message_hash, (self.our_node_id, partner_node_id, init_msg_for_broadcast, prev_hash, new_hash, sequence_number));
+            sent_messages.insert(message_hash, (self.our_node_id, partner_node_id.to_string(), init_msg_for_broadcast, prev_hash, new_hash, sequence_number));
         }
 
         // Broadcast as signed update to all auditors

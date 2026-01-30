@@ -142,7 +142,7 @@ where
         // Custom message types in 0x8000-0x80FF range should be automatically handled
 
         // Check if we have an active channel ledger with this peer for future enhancements
-        let has_ledger = self.ledgers.lock().unwrap().contains_key(&(self.our_node_id, their_node_id));
+        let has_ledger = self.ledgers.lock().unwrap().contains_key(&(self.our_node_id, their_node_id.to_string()));
 
         log_debug!(
             self.logger,

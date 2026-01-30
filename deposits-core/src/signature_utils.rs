@@ -153,7 +153,7 @@ pub fn create_payment_authorization_signature(
 pub fn create_deposit_offer_signature(
     operator_secret: &SecretKey,
     operator_id: &PublicKey,
-    reserves_id: &PublicKey,
+    reserves_id: &str,
     deposit_pubkey: &PublicKey,
     funding_address: &str,
     max_amount_sats: u64,

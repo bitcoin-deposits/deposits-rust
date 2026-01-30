@@ -408,7 +408,7 @@ pub struct LedgerState(pub deposits_core::LedgerState);
 impl LedgerState {
     /// Create a new empty ledger state.
     pub fn new(operator_key: PublicKey, reserves_key: PublicKey, ledger_address: String) -> Self {
-        LedgerState(deposits_core::LedgerState::new(operator_key, reserves_key, ledger_address))
+        LedgerState(deposits_core::LedgerState::new(operator_key, reserves_key.to_string(), ledger_address))
     }
 }
 

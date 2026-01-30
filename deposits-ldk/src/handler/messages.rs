@@ -90,13 +90,14 @@ impl LedgerOperationExt for LedgerOperation {
             LedgerOperation::DepositOpen { .. } => "DepositOpen",
             LedgerOperation::DepositClose { .. } => "DepositClose",
             LedgerOperation::DepositUpdate { .. } => "DepositUpdate",
-            LedgerOperation::TransferLock { .. } => "TransferLock",
-            LedgerOperation::TransferFail { .. } => "TransferFail",
-            LedgerOperation::TransferFulfill { .. } => "TransferFulfill",
-            LedgerOperation::PaymentCredit { .. } => "PaymentCredit",
-            LedgerOperation::PaymentLock { .. } => "PaymentLock",
-            LedgerOperation::PaymentFail { .. } => "PaymentFail",
-            LedgerOperation::PaymentFulfill { .. } => "PaymentFulfill",
+            LedgerOperation::InvoiceCredit { .. } => "InvoiceCredit",
+            LedgerOperation::InvoiceLock { .. } => "InvoiceLock",
+            LedgerOperation::InvoiceFail { .. } => "InvoiceFail",
+            LedgerOperation::InvoiceFulfill { .. } => "InvoiceFulfill",
+            LedgerOperation::OnchainCredit { .. } => "OnchainCredit",
+            LedgerOperation::OnchainLock { .. } => "OnchainLock",
+            LedgerOperation::OnchainFail { .. } => "OnchainFail",
+            LedgerOperation::OnchainFulfill { .. } => "OnchainFulfill",
             LedgerOperation::CollateralIncrease { .. } => "CollateralIncrease",
             LedgerOperation::CollateralDecrease { .. } => "CollateralDecrease",
             LedgerOperation::CollateralAttestation { .. } => "CollateralAttestation",
@@ -110,10 +111,10 @@ impl LedgerOperationExt for LedgerOperation {
 
     fn get_sequence_number(&self) -> Option<u64> {
         match self {
-            LedgerOperation::PaymentCredit { sequence_number, .. } => Some(*sequence_number),
-            LedgerOperation::PaymentLock { sequence_number, .. } => Some(*sequence_number),
-            LedgerOperation::PaymentFail { sequence_number, .. } => Some(*sequence_number),
-            LedgerOperation::PaymentFulfill { sequence_number, .. } => Some(*sequence_number),
+            LedgerOperation::InvoiceCredit { sequence_number, .. } => Some(*sequence_number),
+            LedgerOperation::InvoiceLock { sequence_number, .. } => Some(*sequence_number),
+            LedgerOperation::InvoiceFail { sequence_number, .. } => Some(*sequence_number),
+            LedgerOperation::InvoiceFulfill { sequence_number, .. } => Some(*sequence_number),
             // Other operations don't have sequence numbers
             _ => None,
         }
@@ -223,22 +224,22 @@ impl DepositsMessage {
         }
     }
 
-    pub fn reserves_id(&self) -> Option<PublicKey> {
+    pub fn reserves_id(&self) -> Option<String> {
         match self {
-            Self::LedgerUpdate(m) => Some(m.reserves_id),
+            Self::LedgerUpdate(m) => Some(m.reserves_id.clone()),
             Self::LedgerUpdateResponse(_) => None,
-            Self::Handshake(m) => Some(m.reserves_id),
-            Self::HandshakeResponse(m) => Some(m.reserves_id),
-            Self::Sync(m) => Some(m.reserves_id),
-            Self::SyncResponse(m) => Some(m.reserves_id),
+            Self::Handshake(m) => Some(m.reserves_id.clone()),
+            Self::HandshakeResponse(m) => Some(m.reserves_id.clone()),
+            Self::Sync(m) => Some(m.reserves_id.clone()),
+            Self::SyncResponse(m) => Some(m.reserves_id.clone()),
             Self::Recovery(_) => None,
             Self::RecoveryResponse(_) => None,
             Self::Coordination(_) => None,
             Self::CoordinationResponse(_) => None,
             Self::Relay(_) => None,
             Self::RelayResponse(_) => None,
-            Self::ReservesAddOutput(m) => Some(m.reserves_id),
-            Self::ReservesRemoveOutput(m) => Some(m.reserves_id),
+            Self::ReservesAddOutput(m) => Some(m.reserves_id.clone()),
+            Self::ReservesRemoveOutput(m) => Some(m.reserves_id.clone()),
         }
     }
 
@@ -258,7 +259,7 @@ impl DepositsMessage {
     ) -> Self {
         Self::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             operator,
-            partner,
+            partner.to_string(),
             LedgerOperation::DepositOpen {
                 pubkey,
                 fees: fees.map(|f| f.into()),
@@ -273,7 +274,7 @@ impl DepositsMessage {
     pub fn new_deposit_close(operator: PublicKey, partner: PublicKey, pubkey: PublicKey) -> Self {
         Self::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             operator,
-            partner,
+            partner.to_string(),
             LedgerOperation::DepositClose { pubkey },
         ))
     }
@@ -282,7 +283,7 @@ impl DepositsMessage {
     pub fn new_reserves_increase(operator: PublicKey, partner: PublicKey, new_amount: u64) -> Self {
         Self::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             operator,
-            partner,
+            partner.to_string(),
             LedgerOperation::ReservesIncrease { new_amount },
         ))
     }
@@ -291,7 +292,7 @@ impl DepositsMessage {
     pub fn new_reserves_decrease(operator: PublicKey, partner: PublicKey, new_amount: u64) -> Self {
         Self::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             operator,
-            partner,
+            partner.to_string(),
             LedgerOperation::ReservesDecrease { new_amount },
         ))
     }
@@ -305,56 +306,12 @@ impl DepositsMessage {
     ) -> Self {
         Self::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             operator,
-            partner,
+            partner.to_string(),
             LedgerOperation::DepositUpdate { pubkey, new_fees: new_fees.into() },
         ))
     }
 
-    /// Create a TransferLock operation message
-    pub fn new_transfer_lock(
-        operator: PublicKey,
-        partner: PublicKey,
-        pubkey: PublicKey,
-        amount: u64,
-        transfer_id: [u8; 32],
-    ) -> Self {
-        Self::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
-            operator,
-            partner,
-            LedgerOperation::TransferLock { pubkey, amount, transfer_id },
-        ))
-    }
-
-    /// Create a TransferFail operation message
-    pub fn new_transfer_fail(
-        operator: PublicKey,
-        partner: PublicKey,
-        pubkey: PublicKey,
-        transfer_id: [u8; 32],
-    ) -> Self {
-        Self::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
-            operator,
-            partner,
-            LedgerOperation::TransferFail { pubkey, transfer_id },
-        ))
-    }
-
-    /// Create a TransferFulfill operation message
-    pub fn new_transfer_fulfill(
-        operator: PublicKey,
-        partner: PublicKey,
-        pubkey: PublicKey,
-        amount: u64,
-        transfer_id: [u8; 32],
-    ) -> Self {
-        Self::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
-            operator,
-            partner,
-            LedgerOperation::TransferFulfill { pubkey, amount, transfer_id },
-        ))
-    }
-
-    /// Create a PaymentCredit operation message
+    /// Create an InvoiceCredit operation message
     pub fn new_payment_credit(
         operator: PublicKey,
         partner: PublicKey,
@@ -366,12 +323,12 @@ impl DepositsMessage {
     ) -> Self {
         Self::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             operator,
-            partner,
-            LedgerOperation::PaymentCredit { payment_hash, deposit_pubkey, amount, invoice_id, sequence_number },
+            partner.to_string(),
+            LedgerOperation::InvoiceCredit { payment_hash, deposit_pubkey, amount, invoice_id, sequence_number },
         ))
     }
 
-    /// Create a PaymentLock operation message
+    /// Create a InvoiceLock operation message
     pub fn new_payment_lock(
         operator: PublicKey,
         partner: PublicKey,
@@ -383,12 +340,12 @@ impl DepositsMessage {
     ) -> Self {
         Self::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             operator,
-            partner,
-            LedgerOperation::PaymentLock { pubkey, amount, payment_id, sequence_number, scriptpubkey_signature },
+            partner.to_string(),
+            LedgerOperation::InvoiceLock { pubkey, amount, payment_id, sequence_number, scriptpubkey_signature },
         ))
     }
 
-    /// Create a PaymentFulfill operation message
+    /// Create a InvoiceFulfill operation message
     pub fn new_payment_fulfill(
         operator: PublicKey,
         partner: PublicKey,
@@ -401,12 +358,12 @@ impl DepositsMessage {
     ) -> Self {
         Self::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             operator,
-            partner,
-            LedgerOperation::PaymentFulfill { pubkey, amount, payment_id, sequence_number, scriptpubkey_signature, preimage },
+            partner.to_string(),
+            LedgerOperation::InvoiceFulfill { pubkey, amount, payment_id, sequence_number, scriptpubkey_signature, preimage },
         ))
     }
 
-    /// Create a PaymentFail operation message
+    /// Create a InvoiceFail operation message
     pub fn new_payment_fail(
         operator: PublicKey,
         partner: PublicKey,
@@ -417,8 +374,8 @@ impl DepositsMessage {
     ) -> Self {
         Self::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             operator,
-            partner,
-            LedgerOperation::PaymentFail { pubkey, amount, payment_id, sequence_number },
+            partner.to_string(),
+            LedgerOperation::InvoiceFail { pubkey, amount, payment_id, sequence_number },
         ))
     }
 
@@ -430,7 +387,7 @@ impl DepositsMessage {
     ) -> Self {
         Self::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             operator,
-            partner,
+            partner.to_string(),
             LedgerOperation::CollateralAddPartner {
                 collateral_partner,
                 collateral_partner_signature: [0u8; 64], // Filled in at signing time
@@ -446,7 +403,7 @@ impl DepositsMessage {
     ) -> Self {
         Self::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             operator,
-            partner,
+            partner.to_string(),
             LedgerOperation::CollateralRemovePartner {
                 collateral_partner,
                 operator_signature: [0u8; 64], // Filled in at signing time
@@ -463,7 +420,7 @@ impl DepositsMessage {
     ) -> Self {
         Self::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             operator,
-            partner,
+            partner.to_string(),
             LedgerOperation::CollateralIncrease { new_amount, block_height },
         ))
     }
@@ -477,7 +434,7 @@ impl DepositsMessage {
     ) -> Self {
         Self::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             operator,
-            partner,
+            partner.to_string(),
             LedgerOperation::CollateralDecrease { new_amount, block_height },
         ))
     }
@@ -487,6 +444,7 @@ impl DepositsMessage {
         operator: PublicKey,
         partner: PublicKey,
         collateral_operator: PublicKey,
+        collateral_partner: PublicKey,
         amount: u64,
         block_height: u32,
         signature: [u8; 64],
@@ -494,9 +452,9 @@ impl DepositsMessage {
     ) -> Self {
         Self::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             operator,
-            partner,
+            partner.to_string(),
             LedgerOperation::CollateralAttestation {
-                collateral_operator, amount, block_height, signature, ledger_hash
+                collateral_operator, collateral_partner, amount, block_height, signature, ledger_hash
             },
         ))
     }
@@ -511,7 +469,7 @@ impl DepositsMessage {
     ) -> Self {
         Self::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             operator,
-            partner,
+            partner.to_string(),
             LedgerOperation::FeeCollect { pubkey, amount, block_height },
         ))
     }
@@ -526,7 +484,7 @@ impl DepositsMessage {
     ) -> Self {
         Self::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             operator,
-            partner,
+            partner.to_string(),
             LedgerOperation::Tombstone { channel_id, close_reason, timestamp },
         ))
     }
@@ -535,7 +493,7 @@ impl DepositsMessage {
     pub fn new_ledger_close(operator: PublicKey, partner: PublicKey) -> Self {
         Self::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             operator,
-            partner,
+            partner.to_string(),
             LedgerOperation::LedgerClose,
         ))
     }
@@ -651,7 +609,7 @@ pub type LedgerUpdateMsg = LedgerUpdateMsgV2;
 
 /// Extension trait for LedgerUpdateMsg convenience methods
 pub trait LedgerUpdateMsgExt {
-    fn new_with_operation(operator: PublicKey, partner: PublicKey, operation: LedgerOperation) -> LedgerUpdateMsg;
+    fn new_with_operation(operator: PublicKey, reserves_id: String, operation: LedgerOperation) -> LedgerUpdateMsg;
     fn is_deposit_open(&self) -> bool;
     fn is_deposit_close(&self) -> bool;
     fn is_reserves_increase(&self) -> bool;
@@ -669,10 +627,10 @@ pub trait LedgerUpdateMsgExt {
 }
 
 impl LedgerUpdateMsgExt for LedgerUpdateMsg {
-    fn new_with_operation(operator: PublicKey, partner: PublicKey, operation: LedgerOperation) -> LedgerUpdateMsg {
+    fn new_with_operation(operator: PublicKey, reserves_id: String, operation: LedgerOperation) -> LedgerUpdateMsg {
         LedgerUpdateMsg {
             operator_id: operator,
-            reserves_id: partner,
+            reserves_id,
             operation,
             sequence_number: 0,
             previous_hash: [0u8; 32],
@@ -698,19 +656,19 @@ impl LedgerUpdateMsgExt for LedgerUpdateMsg {
     }
 
     fn is_payment_credit(&self) -> bool {
-        matches!(self.operation, LedgerOperation::PaymentCredit { .. })
+        matches!(self.operation, LedgerOperation::InvoiceCredit { .. })
     }
 
     fn is_payment_lock(&self) -> bool {
-        matches!(self.operation, LedgerOperation::PaymentLock { .. })
+        matches!(self.operation, LedgerOperation::InvoiceLock { .. })
     }
 
     fn is_payment_fulfill(&self) -> bool {
-        matches!(self.operation, LedgerOperation::PaymentFulfill { .. })
+        matches!(self.operation, LedgerOperation::InvoiceFulfill { .. })
     }
 
     fn is_payment_fail(&self) -> bool {
-        matches!(self.operation, LedgerOperation::PaymentFail { .. })
+        matches!(self.operation, LedgerOperation::InvoiceFail { .. })
     }
 
     fn is_collateral_add_partner(&self) -> bool {
@@ -942,7 +900,7 @@ mod tests {
 
         let msg = LedgerUpdateMsg {
             operator_id: test_pubkey(),
-            reserves_id: test_pubkey(),
+            reserves_id: test_pubkey().to_string(),
             operation: op.clone(),
             sequence_number: 1,
             previous_hash: [0u8; 32],

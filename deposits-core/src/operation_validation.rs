@@ -617,7 +617,7 @@ mod tests {
     fn create_test_ledger() -> Ledger {
         Ledger::new(
             test_pubkey(),
-            test_pubkey_2(),
+            test_pubkey_2().to_string(),
             LedgerRole::Operator,
             vec![],
             "test_ledger".to_string(),

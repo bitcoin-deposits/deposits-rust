@@ -63,8 +63,8 @@ pub trait DepositOperations {
     fn get_deposit_balance(&self, deposit_pubkey: PublicKey) -> Result<u64, DepositsError>;
 
     /// Find a deposit by payment_hash (from an invoice)
-    /// Returns (partner_node_id, deposit_pubkey, invoice_amount) if found
-    fn find_deposit_by_payment_hash(&self, payment_hash: &[u8; 32]) -> Option<(PublicKey, PublicKey, u64)>;
+    /// Returns (reserves_id, deposit_pubkey, invoice_amount) if found
+    fn find_deposit_by_payment_hash(&self, payment_hash: &[u8; 32]) -> Option<(String, PublicKey, u64)>;
 
     /// Get all depositors with positive balances
     fn get_active_depositors(&self) -> Vec<PublicKey>;
@@ -113,10 +113,10 @@ pub trait LedgerOperations {
     /// Check if we have a ledger with this partner (as operator)
     fn has_ledger_with(&self, partner_node_id: PublicKey) -> bool;
 
-    /// List all partners where we are the operator
-    fn list_operator_ledgers(&self) -> Vec<PublicKey>;
+    /// List all reserves_ids where we are the operator
+    fn list_operator_ledgers(&self) -> Vec<String>;
 
-    /// List all operators where we are the partner
+    /// List all operators where we are the partner (reserves)
     fn list_partner_ledgers(&self) -> Vec<PublicKey>;
 }
 

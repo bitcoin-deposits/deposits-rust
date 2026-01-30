@@ -215,15 +215,18 @@ impl Node {
     // Ledger Management
     // ========================================================================
 
-    /// Open a new ledger with a partner
+    /// Open a new ledger backed by our reserves UTXO
     ///
-    /// This creates a ledger where we are the operator. The `enforcement_block`
+    /// This creates a self-ledger where we are the operator. The `enforcement_block`
     /// parameter controls when collateral size requirements are enforced:
     /// - 0: Immediate enforcement (joining an established network)
     /// - Future block: Bootstrap phase (allows cross-establishing collateral)
+    ///
+    /// For BDK, the ledger is identified by the reserves UTXO address (stored in
+    /// ledger_address). The reserves_id field uses our own pubkey since there is
+    /// no separate partner node.
     pub fn open_ledger(
         &self,
-        partner: PublicKey,
         enforcement_block: u64,
     ) -> Result<Ledger, Error> {
         // Get our reserves info
@@ -241,7 +244,7 @@ impl Node {
             ([0u8; 32], 0u16)
         };
 
-        // Get the ledger address (reserves address)
+        // Get the ledger address (reserves address) - this identifies the ledger
         let ledger_address = self.wallet.get_reserves_address()
             .map(|a| a.to_string())
             .unwrap_or_default();
@@ -253,82 +256,109 @@ impl Node {
             None
         };
 
+        // For BDK, use the ledger_address as the reserves_id (identifies the reserves UTXO)
+        let reserves_id = ledger_address.clone();
+
         let _ledger = Ledger::with_enforcement_block(
             self.node_id,
-            partner,
+            reserves_id.clone(),
             deposits_core::ledger::LedgerRole::Operator,
             Vec::new(), // No collateral partners initially
             ledger_address.clone(),
             enforcement,
         );
 
-        // Store the ledger in the handler
-        let ledger_arc = self.handler.get_or_create_ledger(self.node_id, partner);
-        {
+        // Store the ledger in the handler (indexed by operator_id, reserves_id)
+        let ledger_arc = self.handler.get_or_create_ledger(self.node_id, reserves_id.clone());
+
+        // Check if this ledger already exists with history (from previous run)
+        let is_new_ledger = {
+            let ledger_guard = ledger_arc.read().unwrap();
+            ledger_guard.history.is_empty()
+        };
+
+        if is_new_ledger {
+            // New ledger - set up state and append operations
+            {
+                let mut ledger_guard = ledger_arc.write().unwrap();
+                // Update with our configuration
+                ledger_guard.state.reserves = deposits_core::types::ReservesOutput {
+                    channel_id: [0u8; 32], // Not using channels in BDK
+                    spend_to: self.node_id,
+                    amount: reserves_balance,
+                };
+                ledger_guard.state.collateral_enforcement_block = enforcement;
+                ledger_guard.state.ledger_address = ledger_address.clone();
+            }
+
+            // Persist the ledger after modification
+            if let Err(e) = self.handler.persist_ledger(&self.node_id, &reserves_id) {
+                tracing::error!("Failed to persist ledger: {}", e);
+            }
+
+            // Add LedgerOpen operation to history
+            {
+                let operation = LedgerOperation::LedgerOpen {
+                    operator_id: self.node_id,
+                    reserves_id: reserves_id.clone(),
+                    ledger_address: ledger_address.clone(),
+                    collateral_enforcement_block: enforcement_block,
+                };
+
+                let mut ledger_guard = ledger_arc.write().unwrap();
+                ledger_guard.append_operation(operation, deposits_core::messages::consts::LEDGER_OPEN_REQUEST)
+                    .map_err(|e| Error::Protocol(format!("Failed to append LedgerOpen: {:?}", e)))?;
+            }
+
+            // Add ReservesIncrease operation with the UTXO amount
+            {
+                let operation = LedgerOperation::ReservesIncrease {
+                    new_amount: reserves_balance,
+                };
+
+                let mut ledger_guard = ledger_arc.write().unwrap();
+                ledger_guard.append_operation(operation, deposits_core::messages::consts::RESERVES_INCREASE)
+                    .map_err(|e| Error::Protocol(format!("Failed to append ReservesIncrease: {:?}", e)))?;
+            }
+
+            // Persist the ledger after adding history
+            if let Err(e) = self.handler.persist_ledger(&self.node_id, &reserves_id) {
+                tracing::error!("Failed to persist ledger: {}", e);
+            }
+        } else {
+            // Ledger already exists - just update state if needed
             let mut ledger_guard = ledger_arc.write().unwrap();
-            // Update with our configuration
-            ledger_guard.state.reserves = deposits_core::types::ReservesOutput {
-                channel_id: [0u8; 32], // Not using channels in BDK
-                spend_to: self.node_id,
-                amount: reserves_balance,
-            };
             ledger_guard.state.collateral_enforcement_block = enforcement;
-        }
-
-        // Persist the ledger after modification
-        if let Err(e) = self.handler.persist_ledger(&self.node_id, &partner) {
-            tracing::error!("Failed to persist ledger: {}", e);
-        }
-
-        // Add LedgerOpen operation to history
-        {
-            let operation = LedgerOperation::LedgerOpen {
-                operator_id: self.node_id,
-                reserves_id: partner,
-                ledger_address: ledger_address.clone(),
-                reserves_amount: reserves_balance,
-                collateral_enforcement_block: enforcement_block,
-            };
-
-            let ledger_arc = self.handler.get_or_create_ledger(self.node_id, partner);
-            let mut ledger_guard = ledger_arc.write().unwrap();
-            ledger_guard.append_operation(operation, deposits_core::messages::consts::LEDGER_OPEN_REQUEST)
-                .map_err(|e| Error::Protocol(format!("Failed to append LedgerOpen: {:?}", e)))?;
-        }
-
-        // Persist the ledger after adding history
-        if let Err(e) = self.handler.persist_ledger(&self.node_id, &partner) {
-            tracing::error!("Failed to persist ledger: {}", e);
+            // Note: Don't update reserves.amount as that requires a proper operation
         }
 
         // Create handshake message to send to partner (wire protocol)
+        // Note: For BDK self-ledger, this handshake may be sent to self or skipped
         let handshake_msg = deposits_core::messages::HandshakeMsg {
             protocol_version: deposits_core::messages::PROTOCOL_VERSION,
             min_protocol_version: deposits_core::messages::PROTOCOL_VERSION,
             features: 0,
             operator_id: self.node_id,
-            reserves_id: partner,
-            ledger_address,
+            reserves_id: reserves_id.clone(),
             funding_txid,
             funding_vout,
-            reserves_amount: reserves_balance,
             collateral_enforcement_block: enforcement_block,
         };
 
-        // Queue the handshake message to be sent via Nostr
+        // Queue the handshake message (for BDK, sent to self as there's no remote partner)
         let _ = self.handler.queue_message(
-            partner,
+            self.node_id,
             deposits_core::messages::DepositsMessage::Handshake(handshake_msg),
         );
 
         // Return the ledger
-        let ledger_arc = self.handler.get_or_create_ledger(self.node_id, partner);
+        let ledger_arc = self.handler.get_or_create_ledger(self.node_id, reserves_id.clone());
         let ledger = ledger_arc.read().unwrap().clone();
         Ok(ledger)
     }
 
     /// List all ledgers
-    pub fn list_ledgers(&self) -> HashMap<(PublicKey, PublicKey), Arc<RwLock<Ledger>>> {
+    pub fn list_ledgers(&self) -> HashMap<(PublicKey, String), Arc<RwLock<Ledger>>> {
         let ledgers = self.handler.ledgers.lock().unwrap();
         ledgers.clone()
     }
@@ -347,11 +377,9 @@ impl Node {
                 min_protocol_version: deposits_core::messages::PROTOCOL_VERSION,
                 features: 0x01, // Flag indicating partnership request
                 operator_id: self.node_id,
-                reserves_id: peer,
-                ledger_address: String::new(), // Will be filled when ledger is established
+                reserves_id: peer.to_string(),
                 funding_txid: [0u8; 32],
                 funding_vout: 0,
-                reserves_amount: self.wallet.get_reserves_balance().unwrap_or(0),
                 collateral_enforcement_block: 0,
             },
         );
@@ -363,11 +391,12 @@ impl Node {
     }
 
     /// List all collateral partners across all ledgers
-    pub fn list_partners(&self) -> Vec<(PublicKey, String)> {
+    /// Returns (identifier, role) tuples where identifier is pubkey or reserves_id string
+    pub fn list_partners(&self) -> Vec<(String, String)> {
         let mut partners = Vec::new();
         let ledgers = self.handler.ledgers.lock().unwrap();
 
-        for ((operator, partner), ledger_arc) in ledgers.iter() {
+        for ((operator, reserves_id), ledger_arc) in ledgers.iter() {
             let ledger = ledger_arc.read().unwrap();
             let role = if *operator == self.node_id {
                 "Partner on our ledger"
@@ -377,19 +406,20 @@ impl Node {
 
             // Add the partner/operator
             if *operator == self.node_id {
-                partners.push((*partner, role.to_string()));
+                // reserves_id is now a String (could be pubkey string or address)
+                partners.push((reserves_id.clone(), role.to_string()));
             } else {
-                partners.push((*operator, role.to_string()));
+                partners.push((operator.to_string(), role.to_string()));
             }
 
             // Add collateral partners
             for cp in &ledger.state.collateral_partners {
-                partners.push((*cp, "Collateral partner".to_string()));
+                partners.push((cp.to_string(), "Collateral partner".to_string()));
             }
         }
 
         // Deduplicate
-        partners.sort_by(|a, b| a.0.to_string().cmp(&b.0.to_string()));
+        partners.sort_by(|a, b| a.0.cmp(&b.0));
         partners.dedup_by(|a, b| a.0 == b.0);
 
         partners
@@ -406,7 +436,7 @@ impl Node {
     /// a deadline block.
     pub fn create_deposit_offer(
         &self,
-        partner: PublicKey,
+        reserves_id: &str,
         deposit_pubkey: PublicKey,
         max_amount_sats: u64,
         min_amount_sats: u64,
@@ -423,7 +453,7 @@ impl Node {
         // Get the signing message and compute offer ID
         let signing_message = DepositOffer::signing_message(
             &self.node_id,
-            &partner,
+            reserves_id,
             &deposit_pubkey,
             &funding_address_str,
             max_amount_sats,
@@ -436,7 +466,7 @@ impl Node {
         let signature = deposits_core::create_deposit_offer_signature(
             &self.wallet.operator_secret(),
             &self.node_id,
-            &partner,
+            reserves_id,
             &deposit_pubkey,
             &funding_address_str,
             max_amount_sats,
@@ -447,7 +477,7 @@ impl Node {
         // Create the offer
         let offer = DepositOffer {
             operator_id: self.node_id,
-            reserves_id: partner,
+            reserves_id: reserves_id.to_string(),
             deposit_pubkey,
             funding_address: funding_address_str,
             max_amount_sats,
@@ -581,19 +611,19 @@ impl Node {
     ///
     /// This creates a withdrawal request and locks the funds in the deposit.
     /// The depositor must sign the withdrawal to authorize it.
+    /// The nonce must be provided by the depositor (who created the signature).
     pub fn lock_withdrawal(
         &self,
+        reserves_id: &str,
         deposit_pubkey: PublicKey,
         destination_address: String,
         amount_sats: u64,
         fee_sats: u64,
+        nonce: [u8; 32],
         depositor_signature: [u8; 64],
         memo: Option<String>,
     ) -> Result<WithdrawalLockResult, Error> {
         let current_block = self.wallet.get_block_height()?;
-
-        // Generate random nonce
-        let nonce = Self::generate_nonce();
 
         // Compute withdrawal ID
         let signing_message = OnChainWithdrawal::signing_message(
@@ -610,7 +640,7 @@ impl Node {
             withdrawal_id,
             nonce,
             deposit_pubkey,
-            destination_address,
+            destination_address: destination_address.clone(),
             amount_sats,
             fee_sats,
             requested_at_block: current_block,
@@ -624,6 +654,52 @@ impl Node {
 
         if !sig_valid {
             return Err(Error::Protocol("Invalid withdrawal signature".to_string()));
+        }
+
+        // Get the ledger and apply OnchainLock operation
+        let ledger_arc = self.handler.get_or_create_ledger(self.node_id, reserves_id.to_string());
+        let (previous_balance, new_balance) = {
+            let mut ledger = ledger_arc.write().unwrap();
+
+            // Check if deposit exists and has sufficient balance
+            let deposit = ledger.state.deposits.get(&deposit_pubkey)
+                .ok_or_else(|| Error::Protocol(format!(
+                    "Deposit not found for pubkey {}",
+                    deposit_pubkey
+                )))?;
+
+            let total_debit_msats = (amount_sats + fee_sats) * 1000;
+            if deposit.balance < total_debit_msats {
+                return Err(Error::Protocol(format!(
+                    "Insufficient balance: {} msats available, {} msats needed",
+                    deposit.balance, total_debit_msats
+                )));
+            }
+
+            let prev_balance = deposit.balance;
+
+            // Apply the OnchainLock operation
+            let operation = LedgerOperation::OnchainLock {
+                deposit_pubkey,
+                amount: total_debit_msats,
+                destination_address: destination_address.clone(),
+                withdrawal_id,
+            };
+
+            ledger.append_operation(operation, deposits_core::messages::consts::ONCHAIN_LOCK)
+                .map_err(|e| Error::Protocol(format!("Failed to lock withdrawal: {:?}", e)))?;
+
+            // Get new balance
+            let new_bal = ledger.state.deposits.get(&deposit_pubkey)
+                .map(|d| d.balance)
+                .unwrap_or(0);
+
+            (prev_balance, new_bal)
+        };
+
+        // Persist the ledger
+        if let Err(e) = self.handler.persist_ledger(&self.node_id, reserves_id) {
+            tracing::error!("Failed to persist ledger: {}", e);
         }
 
         // Store the withdrawal as locked
@@ -643,17 +719,19 @@ impl Node {
         let total_debit_msats = withdrawal.total_debit() * 1000;
 
         tracing::info!(
-            "Locked withdrawal {} for {} sats + {} fee to {}",
+            "Locked withdrawal {} for {} sats + {} fee to {}, balance {} -> {} msats",
             hex::encode(&withdrawal_id[..8]),
             amount_sats,
             fee_sats,
-            withdrawal.destination_address
+            withdrawal.destination_address,
+            previous_balance,
+            new_balance
         );
 
         Ok(WithdrawalLockResult {
             withdrawal: withdrawal.clone(),
-            previous_balance_msats: 0, // Would need ledger access to get actual balance
-            new_balance_msats: 0,
+            previous_balance_msats: previous_balance,
+            new_balance_msats: new_balance,
             locked_amount_msats: total_debit_msats,
         })
     }
@@ -664,6 +742,7 @@ impl Node {
     /// OP_RETURN commitment, then marks the withdrawal as complete.
     pub fn complete_withdrawal(
         &self,
+        reserves_id: &str,
         withdrawal_id: &[u8; 32],
     ) -> Result<WithdrawalCompleteResult, Error> {
         let current_block = self.wallet.get_block_height()?;
@@ -686,6 +765,47 @@ impl Node {
         // Build and broadcast the transaction
         let txid = self.wallet.send_withdrawal(&withdrawal)?;
 
+        // Convert txid string to bytes for the ledger operation
+        let txid_bytes: [u8; 32] = hex::decode(&txid)
+            .ok()
+            .and_then(|v| {
+                let mut arr = [0u8; 32];
+                if v.len() == 32 {
+                    arr.copy_from_slice(&v);
+                    Some(arr)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or([0u8; 32]);
+
+        // Apply OnchainFulfill operation to the ledger
+        let final_balance = {
+            let ledger_arc = self.handler.get_or_create_ledger(self.node_id, reserves_id.to_string());
+            let mut ledger = ledger_arc.write().unwrap();
+
+            let operation = LedgerOperation::OnchainFulfill {
+                deposit_pubkey: withdrawal.deposit_pubkey,
+                withdrawal_id: *withdrawal_id,
+                amount: withdrawal.amount_sats * 1000, // Convert to msats
+                txid: txid_bytes,
+                destination_address: withdrawal.destination_address.clone(),
+            };
+
+            ledger.append_operation(operation, deposits_core::messages::consts::ONCHAIN_FULFILL)
+                .map_err(|e| Error::Protocol(format!("Failed to fulfill withdrawal: {:?}", e)))?;
+
+            // Get final balance
+            ledger.state.deposits.get(&withdrawal.deposit_pubkey)
+                .map(|d| d.balance)
+                .unwrap_or(0)
+        };
+
+        // Persist the ledger
+        if let Err(e) = self.handler.persist_ledger(&self.node_id, reserves_id) {
+            tracing::error!("Failed to persist ledger: {}", e);
+        }
+
         // Update status
         let new_status = OnChainWithdrawalStatus::Broadcast {
             txid: txid.clone(),
@@ -703,9 +823,10 @@ impl Node {
         self.save_withdrawals()?;
 
         tracing::info!(
-            "Completed withdrawal {}: txid={}",
+            "Completed withdrawal {}: txid={}, final balance={} msats",
             hex::encode(&withdrawal_id[..8]),
-            txid
+            txid,
+            final_balance
         );
 
         Ok(WithdrawalCompleteResult {
@@ -713,7 +834,7 @@ impl Node {
             txid,
             amount_sats: withdrawal.amount_sats,
             fee_sats: withdrawal.fee_sats,
-            final_balance_msats: 0, // Would need ledger access
+            final_balance_msats: final_balance,
         })
     }
 
@@ -831,15 +952,15 @@ impl Node {
 
     /// Open a new deposit in a ledger
     ///
-    /// Creates a deposit for a given public key in the ledger with the partner.
+    /// Creates a deposit for a given public key in the ledger with the reserves_id.
     /// This applies a DepositOpen operation to the ledger.
     pub fn open_deposit(
         &self,
-        partner: PublicKey,
+        reserves_id: &str,
         deposit_pubkey: PublicKey,
         fees: Option<FeeStructure>,
     ) -> Result<Deposit, Error> {
-        let ledger_arc = self.handler.get_or_create_ledger(self.node_id, partner);
+        let ledger_arc = self.handler.get_or_create_ledger(self.node_id, reserves_id.to_string());
 
         let deposit = {
             let mut ledger = ledger_arc.write().unwrap();
@@ -871,32 +992,91 @@ impl Node {
         };
 
         // Persist the ledger
-        if let Err(e) = self.handler.persist_ledger(&self.node_id, &partner) {
+        if let Err(e) = self.handler.persist_ledger(&self.node_id, reserves_id) {
             tracing::error!("Failed to persist ledger: {}", e);
         }
 
         tracing::info!(
-            "Opened deposit {} in ledger with partner {}",
+            "Opened deposit {} in ledger with reserves {}",
             deposit_pubkey,
-            partner
+            reserves_id
         );
 
         Ok(deposit)
     }
 
-    /// Credit a deposit with received funds
+    /// Credit a deposit with on-chain funds
     ///
-    /// This applies a PaymentCredit operation to add funds to a deposit.
+    /// This applies an OnchainCredit operation to add funds to a deposit.
     /// Used when on-chain funding is received for a deposit offer.
+    pub fn credit_deposit_onchain(
+        &self,
+        reserves_id: &str,
+        deposit_pubkey: PublicKey,
+        amount_msats: u64,
+        txid: [u8; 32],
+        vout: u32,
+        funding_address: String,
+    ) -> Result<u64, Error> {
+        let ledger_arc = self.handler.get_or_create_ledger(self.node_id, reserves_id.to_string());
+
+        let new_balance = {
+            let mut ledger = ledger_arc.write().unwrap();
+
+            // Check if deposit exists
+            if !ledger.state.deposits.contains_key(&deposit_pubkey) {
+                return Err(Error::Protocol(format!(
+                    "Deposit not found for pubkey {}",
+                    deposit_pubkey
+                )));
+            }
+
+            // Apply the OnchainCredit operation with history tracking
+            let operation = LedgerOperation::OnchainCredit {
+                txid,
+                vout,
+                deposit_pubkey,
+                amount: amount_msats,
+                funding_address,
+            };
+
+            ledger.append_operation(operation, deposits_core::messages::consts::ONCHAIN_CREDIT)
+                .map_err(|e| Error::Protocol(format!("Failed to credit deposit: {:?}", e)))?;
+
+            // Return the new balance
+            ledger.state.deposits.get(&deposit_pubkey)
+                .map(|d| d.balance)
+                .unwrap_or(0)
+        };
+
+        // Persist the ledger
+        if let Err(e) = self.handler.persist_ledger(&self.node_id, reserves_id) {
+            tracing::error!("Failed to persist ledger: {}", e);
+        }
+
+        tracing::info!(
+            "Credited deposit {} with {} msats (on-chain), new balance: {} msats",
+            deposit_pubkey,
+            amount_msats,
+            new_balance
+        );
+
+        Ok(new_balance)
+    }
+
+    /// Credit a deposit with Lightning invoice payment
+    ///
+    /// This applies an InvoiceCredit operation to add funds to a deposit.
+    /// Used when a Lightning invoice payment is received.
     pub fn credit_deposit(
         &self,
-        partner: PublicKey,
+        reserves_id: &str,
         deposit_pubkey: PublicKey,
         amount_msats: u64,
         payment_hash: [u8; 32],
         invoice_id: String,
     ) -> Result<u64, Error> {
-        let ledger_arc = self.handler.get_or_create_ledger(self.node_id, partner);
+        let ledger_arc = self.handler.get_or_create_ledger(self.node_id, reserves_id.to_string());
 
         let new_balance = {
             let mut ledger = ledger_arc.write().unwrap();
@@ -912,8 +1092,8 @@ impl Node {
             // Get the next sequence number for this deposit's operations
             let sequence_number = ledger.sequence() + 1;
 
-            // Apply the PaymentCredit operation with history tracking
-            let operation = LedgerOperation::PaymentCredit {
+            // Apply the InvoiceCredit operation with history tracking
+            let operation = LedgerOperation::InvoiceCredit {
                 payment_hash,
                 deposit_pubkey,
                 amount: amount_msats,
@@ -931,12 +1111,12 @@ impl Node {
         };
 
         // Persist the ledger
-        if let Err(e) = self.handler.persist_ledger(&self.node_id, &partner) {
+        if let Err(e) = self.handler.persist_ledger(&self.node_id, reserves_id) {
             tracing::error!("Failed to persist ledger: {}", e);
         }
 
         tracing::info!(
-            "Credited deposit {} with {} msats, new balance: {} msats",
+            "Credited deposit {} with {} msats (invoice), new balance: {} msats",
             deposit_pubkey,
             amount_msats,
             new_balance
@@ -948,11 +1128,11 @@ impl Node {
     /// Get a deposit by pubkey from a ledger
     pub fn get_deposit(
         &self,
-        partner: PublicKey,
+        reserves_id: &str,
         deposit_pubkey: PublicKey,
     ) -> Option<Deposit> {
         let ledgers = self.handler.ledgers.lock().unwrap();
-        if let Some(ledger_arc) = ledgers.get(&(self.node_id, partner)) {
+        if let Some(ledger_arc) = ledgers.get(&(self.node_id, reserves_id.to_string())) {
             let ledger = ledger_arc.read().unwrap();
             return ledger.state.deposits.get(&deposit_pubkey).cloned();
         }
@@ -960,105 +1140,15 @@ impl Node {
     }
 
     /// List all deposits in a ledger
-    pub fn list_deposits(&self, partner: PublicKey) -> Vec<(PublicKey, Deposit)> {
+    pub fn list_deposits(&self, reserves_id: &str) -> Vec<(PublicKey, Deposit)> {
         let ledgers = self.handler.ledgers.lock().unwrap();
-        if let Some(ledger_arc) = ledgers.get(&(self.node_id, partner)) {
+        if let Some(ledger_arc) = ledgers.get(&(self.node_id, reserves_id.to_string())) {
             let ledger = ledger_arc.read().unwrap();
             return ledger.state.deposits.iter()
                 .map(|(k, v)| (*k, v.clone()))
                 .collect();
         }
         Vec::new()
-    }
-
-    /// Transfer funds between two deposits (internal transfer)
-    ///
-    /// Locks funds from source deposit and fulfills transfer to destination deposit.
-    /// Both deposits must be in the same ledger.
-    pub fn transfer_between_deposits(
-        &self,
-        partner: PublicKey,
-        source_pubkey: PublicKey,
-        dest_pubkey: PublicKey,
-        amount_msats: u64,
-    ) -> Result<([u8; 32], u64, u64), Error> {
-        let ledger_arc = self.handler.get_or_create_ledger(self.node_id, partner);
-
-        // Generate a unique transfer ID
-        let transfer_id = Self::generate_nonce();
-
-        let (source_balance, dest_balance) = {
-            let mut ledger = ledger_arc.write().unwrap();
-
-            // Check both deposits exist
-            if !ledger.state.deposits.contains_key(&source_pubkey) {
-                return Err(Error::Protocol(format!(
-                    "Source deposit not found: {}",
-                    source_pubkey
-                )));
-            }
-            if !ledger.state.deposits.contains_key(&dest_pubkey) {
-                return Err(Error::Protocol(format!(
-                    "Destination deposit not found: {}",
-                    dest_pubkey
-                )));
-            }
-
-            // Check source has sufficient balance
-            let source_balance = ledger.state.deposits.get(&source_pubkey)
-                .map(|d| d.balance)
-                .unwrap_or(0);
-            if source_balance < amount_msats {
-                return Err(Error::Protocol(format!(
-                    "Insufficient balance: {} msats available, {} msats requested",
-                    source_balance, amount_msats
-                )));
-            }
-
-            // Lock funds from source (with history tracking)
-            let lock_op = LedgerOperation::TransferLock {
-                pubkey: source_pubkey,
-                amount: amount_msats,
-                transfer_id,
-            };
-            ledger.append_operation(lock_op, deposits_core::messages::consts::DEPOSIT_LOCK_TRANSFER)
-                .map_err(|e| Error::Protocol(format!("Failed to lock transfer: {:?}", e)))?;
-
-            // Fulfill transfer to destination (with history tracking)
-            let fulfill_op = LedgerOperation::TransferFulfill {
-                pubkey: dest_pubkey,
-                amount: amount_msats,
-                transfer_id,
-            };
-            ledger.append_operation(fulfill_op, deposits_core::messages::consts::DEPOSIT_FULFILL_TRANSFER)
-                .map_err(|e| Error::Protocol(format!("Failed to fulfill transfer: {:?}", e)))?;
-
-            // Get updated balances
-            let new_source = ledger.state.deposits.get(&source_pubkey)
-                .map(|d| d.balance)
-                .unwrap_or(0);
-            let new_dest = ledger.state.deposits.get(&dest_pubkey)
-                .map(|d| d.balance)
-                .unwrap_or(0);
-
-            (new_source, new_dest)
-        };
-
-        // Persist the ledger
-        if let Err(e) = self.handler.persist_ledger(&self.node_id, &partner) {
-            tracing::error!("Failed to persist ledger: {}", e);
-        }
-
-        tracing::info!(
-            "Transferred {} msats from {} to {}: new balances {} / {}",
-            amount_msats,
-            source_pubkey,
-            dest_pubkey,
-            source_balance,
-            dest_balance
-        );
-
-        Ok((transfer_id, source_balance, dest_balance))
     }
 
     /// Complete a deposit offer by crediting the deposit
@@ -1100,15 +1190,20 @@ impl Node {
 
         // Credit the deposit (convert sats to msats)
         let amount_msats = credited_amount * 1000;
-        let payment_hash = *offer_id; // Use offer_id as payment hash
-        let invoice_id = format!("deposit_offer:{}", hex::encode(&offer_id[..8]));
 
-        let new_balance = self.credit_deposit(
-            offer.reserves_id,
+        // Parse txid from hex string to bytes (reversed for Bitcoin's internal byte order)
+        let txid_bytes: [u8; 32] = hex::decode(&funding_txid)
+            .map_err(|e| Error::Protocol(format!("Invalid txid hex: {}", e)))?
+            .try_into()
+            .map_err(|_| Error::Protocol("Invalid txid length".to_string()))?;
+
+        let new_balance = self.credit_deposit_onchain(
+            &offer.reserves_id,
             offer.deposit_pubkey,
             amount_msats,
-            payment_hash,
-            invoice_id,
+            txid_bytes,
+            0, // vout - typically 0 for deposit offers
+            offer.funding_address.clone(),
         )?;
 
         // Update offer status
@@ -1170,7 +1265,7 @@ impl Node {
         partner: PublicKey,
     ) -> Option<Vec<deposits_core::types::SignedLedgerUpdate>> {
         let ledgers = self.handler.ledgers.lock().unwrap();
-        if let Some(ledger_arc) = ledgers.get(&(self.node_id, partner)) {
+        if let Some(ledger_arc) = ledgers.get(&(self.node_id, partner.to_string())) {
             let ledger = ledger_arc.read().unwrap();
             return Some(ledger.history.clone());
         }
@@ -1180,7 +1275,7 @@ impl Node {
     /// Get a specific ledger
     pub fn get_ledger(&self, partner: PublicKey) -> Option<Ledger> {
         let ledgers = self.handler.ledgers.lock().unwrap();
-        if let Some(ledger_arc) = ledgers.get(&(self.node_id, partner)) {
+        if let Some(ledger_arc) = ledgers.get(&(self.node_id, partner.to_string())) {
             let ledger = ledger_arc.read().unwrap();
             return Some(ledger.clone());
         }
@@ -1188,12 +1283,13 @@ impl Node {
     }
 
     /// Get the primary ledger (first ledger where we are operator)
-    pub fn get_primary_ledger(&self) -> Option<(PublicKey, Ledger)> {
+    /// Returns (reserves_id, ledger) tuple
+    pub fn get_primary_ledger(&self) -> Option<(String, Ledger)> {
         let ledgers = self.handler.ledgers.lock().unwrap();
         for ((operator, reserves_id), ledger_arc) in ledgers.iter() {
             if *operator == self.node_id {
                 let ledger = ledger_arc.read().unwrap();
-                return Some((*reserves_id, ledger.clone()));
+                return Some((reserves_id.clone(), ledger.clone()));
             }
         }
         None

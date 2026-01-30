@@ -37,9 +37,9 @@ where
     }
 
     /// Get operator ledger state if we're the operator
-    fn get_operator_ledger_state(&self, partner: PublicKey) -> Option<([u8; 32], (PublicKey, PublicKey), u64, bool, [u8; 32], VoterSet)> {
+    fn get_operator_ledger_state(&self, partner: PublicKey) -> Option<([u8; 32], (PublicKey, String), u64, bool, [u8; 32], VoterSet)> {
         let ledgers = self.ledgers.lock().unwrap();
-        let key = (self.our_node_id, partner);
+        let key = (self.our_node_id, partner.to_string());
         let ledger_arc = ledgers.get(&key)?;
         let ledger = ledger_arc.read().unwrap();
 
@@ -49,7 +49,7 @@ where
         let reserves = ledger.reserves_amount();
         let voter_set = ledger.construct_voter_set();
 
-        let remote_hash = ledgers.get(&(partner, self.our_node_id))
+        let remote_hash = ledgers.get(&(partner, self.our_node_id.to_string()))
             .map(|arc| arc.read().unwrap().tail_hash())
             .unwrap_or([0u8; 32]);
 
@@ -64,7 +64,7 @@ where
         reserves: u64,
         voter_set: VoterSet,
         remote_hash: [u8; 32],
-        update_key: Option<(PublicKey, PublicKey)>,
+        update_key: Option<(PublicKey, String)>,
     ) -> Result<(), DepositsError> {
         let cm = self.channel_manager.as_ref().ok_or(DepositsError::InvalidChannelState)?;
         let channel = cm.list_channels_with_counterparty(&partner).first()
@@ -123,7 +123,7 @@ where
     ) -> Result<(), DepositsError> {
         let remote_hash = {
             let ledgers = self.ledgers.lock().unwrap();
-            ledgers.get(&(partner, self.our_node_id))
+            ledgers.get(&(partner, self.our_node_id.to_string()))
                 .map(|arc| arc.read().unwrap().tail_hash())
                 .unwrap_or([0u8; 32])
         };

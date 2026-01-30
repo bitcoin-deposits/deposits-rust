@@ -11,10 +11,13 @@
 //! instances in test environments.
 
 use super::core::DepositsHandler;
-use bitcoin::secp256k1::PublicKey;
 use lightning::util::logger::Logger as LdkLogger;
 
 use std::ops::Deref;
+
+#[cfg(any(test, feature = "testing"))]
+use bitcoin::secp256k1::PublicKey;
+#[cfg(any(test, feature = "testing"))]
 use std::sync::Arc;
 
 impl<L: Deref + Clone + Send + Sync + 'static> DepositsHandler<L>
@@ -74,7 +77,8 @@ where
         let event_queue = Arc::new(EventQueue::new(logger.clone()));
 
         // Generate a test node ID
-        use bitcoin::secp256k1::{Secp256k1, SecretKey};
+        use bitcoin::secp256k1::{Secp256k1, SecretKey, PublicKey};
+        use std::sync::Arc;
         let secp = Secp256k1::new();
         let secret = SecretKey::from_slice(&[1; 32]).unwrap();
         let test_node_id = PublicKey::from_secret_key(&secp, &secret);

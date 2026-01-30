@@ -110,7 +110,7 @@ fn test_message_queuing() {
 
     let message = DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
         peer_key, // operator
-        peer_key, // partner
+        peer_key.to_string(), // reserves_id
         LedgerOperation::ReservesIncrease { new_amount: 1000 },
     ));
 
@@ -522,7 +522,7 @@ fn test_broadcast_uncredited_payment_accusation_with_ledger() {
     // Create a ledger for this operator/partner pair
     let mut ledger = Ledger::new_as_operator(
         operator,
-        our_node_id,
+        our_node_id.to_string(),
         "test_address".to_string(),
     );
 
@@ -542,7 +542,7 @@ fn test_broadcast_uncredited_payment_accusation_with_ledger() {
     // Add ledger to handler
     {
         let mut ledgers = handler.ledgers.lock().unwrap();
-        ledgers.insert((operator, our_node_id), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
+        ledgers.insert((operator, our_node_id.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
     }
 
     // Add cosigned invoice (required for fraud proof validation)
@@ -622,7 +622,7 @@ fn test_broadcast_uncredited_payment_accusation_broadcasts_to_collateral_partner
     use deposits_core::LedgerRole;
     let mut ledger = Ledger::new(
         operator,
-        our_node_id,
+        our_node_id.to_string(),
         LedgerRole::Operator,
         vec![collateral1, collateral2],
         "test_address".to_string(),
@@ -644,7 +644,7 @@ fn test_broadcast_uncredited_payment_accusation_broadcasts_to_collateral_partner
     // Add ledger to handler
     {
         let mut ledgers = handler.ledgers.lock().unwrap();
-        ledgers.insert((operator, our_node_id), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
+        ledgers.insert((operator, our_node_id.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
     }
 
     // Add cosigned invoice (required for fraud proof validation)
@@ -709,7 +709,7 @@ fn test_fraud_proof_rejected_without_cosigned_invoice() {
     // Create a ledger with a deposit but NO cosigned invoices
     let mut ledger = Ledger::new_as_operator(
         operator,
-        our_node_id,
+        our_node_id.to_string(),
         "test_address".to_string(),
     );
 
@@ -722,7 +722,7 @@ fn test_fraud_proof_rejected_without_cosigned_invoice() {
     // Add ledger to handler
     {
         let mut ledgers = handler.ledgers.lock().unwrap();
-        ledgers.insert((operator, our_node_id), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
+        ledgers.insert((operator, our_node_id.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
     }
 
     // Create valid preimage and payment_hash
@@ -772,7 +772,7 @@ fn test_fraud_proof_rejected_when_already_credited() {
     // Create a ledger with a deposit that HAS a cosigned invoice
     let mut ledger = Ledger::new_as_operator(
         operator,
-        our_node_id,
+        our_node_id.to_string(),
         "test_address".to_string(),
     );
 
@@ -789,12 +789,12 @@ fn test_fraud_proof_rejected_when_already_credited() {
     }.into()];
     ledger.state.deposits.insert(deposit_pubkey, deposit);
 
-    // Add a PaymentCredit to the ledger updates (simulating payment was credited)
+    // Add a InvoiceCredit to the ledger updates (simulating payment was credited)
     // sequence_number must be 0 (first update in empty ledger)
     let credit_msg = DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
         operator,
-        our_node_id,
-        LedgerOperation::PaymentCredit {
+        our_node_id.to_string(),
+        LedgerOperation::InvoiceCredit {
             payment_hash,
             amount: 50_000,
             deposit_pubkey,
@@ -809,7 +809,7 @@ fn test_fraud_proof_rejected_when_already_credited() {
     // Add ledger to handler
     {
         let mut ledgers = handler.ledgers.lock().unwrap();
-        ledgers.insert((operator, our_node_id), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
+        ledgers.insert((operator, our_node_id.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
     }
 
     // Add cosigned invoice (required for fraud proof validation)
@@ -888,7 +888,7 @@ fn test_fraud_proof_accepted_with_valid_cosigned_invoice() {
     // Create a ledger with a deposit that HAS a cosigned invoice (but NO credit)
     let mut ledger = Ledger::new_as_operator(
         operator,
-        our_node_id,
+        our_node_id.to_string(),
         "test_address".to_string(),
     );
 
@@ -908,7 +908,7 @@ fn test_fraud_proof_accepted_with_valid_cosigned_invoice() {
     // Add ledger to handler (no credit payment added)
     {
         let mut ledgers = handler.ledgers.lock().unwrap();
-        ledgers.insert((operator, our_node_id), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
+        ledgers.insert((operator, our_node_id.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
     }
 
     // Add cosigned invoice (required for fraud proof validation)
@@ -993,7 +993,7 @@ fn test_received_fraud_proof_forwards_to_collateral_partners() {
     use deposits_core::LedgerRole;
     let ledger = Ledger::new(
         operator,
-        our_node_id,
+        our_node_id.to_string(),
         LedgerRole::Operator,
         vec![collateral1, collateral2], // Our collateral partners
         "test_address".to_string(),
@@ -1002,7 +1002,7 @@ fn test_received_fraud_proof_forwards_to_collateral_partners() {
     // Add our ledger to handler
     {
         let mut ledgers = handler.ledgers.lock().unwrap();
-        ledgers.insert((operator, our_node_id), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
+        ledgers.insert((operator, our_node_id.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
     }
 
     // Mark collateral partners as connected so forwarded messages can be drained
@@ -1073,7 +1073,7 @@ fn test_credit_payment_within_reserves_succeeds() {
     // Create ledger with reserves and collateral
     let mut ledger = Ledger::new_as_operator(
         operator,
-        our_node_id,
+        our_node_id.to_string(),
         "test_address".to_string(),
     );
     ledger.state.reserves.amount =100_000; // 100k sats reserves
@@ -1087,7 +1087,7 @@ fn test_credit_payment_within_reserves_succeeds() {
     // Add ledger to handler
     {
         let mut ledgers = handler.ledgers.lock().unwrap();
-        ledgers.insert((operator, our_node_id), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
+        ledgers.insert((operator, our_node_id.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
     }
 
     // Credit 40k (total 90k, still under 100k reserves)
@@ -1100,7 +1100,7 @@ fn test_credit_payment_within_reserves_succeeds() {
         deposit_pubkey,
         amount: 40_000,
         invoice_id: "valid_invoice".to_string(),
-        reserves_id: our_node_id,
+        reserves_id: our_node_id.to_string(),
         sequence_number: 0,
     };
 
@@ -1129,7 +1129,7 @@ fn test_credit_payment_exceeds_reserves_fails() {
     // Create ledger with limited reserves
     let mut ledger = Ledger::new_as_operator(
         operator,
-        our_node_id,
+        our_node_id.to_string(),
         "test_address".to_string(),
     );
     ledger.state.reserves.amount =50_000; // Only 50k sats reserves
@@ -1142,7 +1142,7 @@ fn test_credit_payment_exceeds_reserves_fails() {
     // Add ledger to handler
     {
         let mut ledgers = handler.ledgers.lock().unwrap();
-        ledgers.insert((operator, our_node_id), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
+        ledgers.insert((operator, our_node_id.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
     }
 
     // Try to credit 25k (total 55k, exceeds 50k reserves)
@@ -1155,7 +1155,7 @@ fn test_credit_payment_exceeds_reserves_fails() {
         deposit_pubkey,
         amount: 25_000,
         invoice_id: "valid_invoice".to_string(),
-        reserves_id: our_node_id,
+        reserves_id: our_node_id.to_string(),
         sequence_number: 0,
     };
 
@@ -1185,7 +1185,7 @@ fn test_credit_payment_exceeds_collateral_fails() {
     // Create ledger with high reserves but low collateral
     let mut ledger = Ledger::new_as_operator(
         operator,
-        our_node_id,
+        our_node_id.to_string(),
         "test_address".to_string(),
     );
     ledger.state.reserves.amount =100_000; // Plenty of reserves
@@ -1199,7 +1199,7 @@ fn test_credit_payment_exceeds_collateral_fails() {
     // Add ledger to handler
     {
         let mut ledgers = handler.ledgers.lock().unwrap();
-        ledgers.insert((operator, our_node_id), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
+        ledgers.insert((operator, our_node_id.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
     }
 
     // Try to credit 15k (total 25k deposits, exceeds 20k collateral)
@@ -1211,7 +1211,7 @@ fn test_credit_payment_exceeds_collateral_fails() {
         deposit_pubkey,
         amount: 15_000,
         invoice_id: "valid_invoice".to_string(),
-        reserves_id: our_node_id,
+        reserves_id: our_node_id.to_string(),
         sequence_number: 0,
     };
 
@@ -1243,7 +1243,7 @@ fn test_credit_payment_within_collateral_succeeds() {
     // Create ledger with sufficient reserves AND collateral
     let mut ledger = Ledger::new_as_operator(
         operator,
-        our_node_id,
+        our_node_id.to_string(),
         "test_address".to_string(),
     );
     ledger.state.reserves.amount =100_000;
@@ -1257,7 +1257,7 @@ fn test_credit_payment_within_collateral_succeeds() {
     // Add ledger to handler
     {
         let mut ledgers = handler.ledgers.lock().unwrap();
-        ledgers.insert((operator, our_node_id), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
+        ledgers.insert((operator, our_node_id.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
     }
 
     // Credit 15k (total 25k, within both 100k reserves and 100k collateral)
@@ -1269,7 +1269,7 @@ fn test_credit_payment_within_collateral_succeeds() {
         deposit_pubkey,
         amount: 15_000,
         invoice_id: "valid_invoice".to_string(),
-        reserves_id: our_node_id,
+        reserves_id: our_node_id.to_string(),
         sequence_number: 0,
     };
 
@@ -1300,7 +1300,7 @@ fn test_fee_collect_on_schedule_succeeds() {
     // Create ledger
     let mut ledger = Ledger::new_as_operator(
         operator,
-        our_node_id,
+        our_node_id.to_string(),
         "test_address".to_string(),
     );
 
@@ -1313,7 +1313,7 @@ fn test_fee_collect_on_schedule_succeeds() {
     // Add ledger to handler
     {
         let mut ledgers = handler.ledgers.lock().unwrap();
-        ledgers.insert((operator, our_node_id), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
+        ledgers.insert((operator, our_node_id.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
     }
 
     // Fee collection at block 1144 (exactly 144 blocks after last assessment)
@@ -1348,7 +1348,7 @@ fn test_fee_collect_too_early_fails() {
     // Create ledger
     let mut ledger = Ledger::new_as_operator(
         operator,
-        our_node_id,
+        our_node_id.to_string(),
         "test_address".to_string(),
     );
 
@@ -1361,7 +1361,7 @@ fn test_fee_collect_too_early_fails() {
     // Add ledger to handler
     {
         let mut ledgers = handler.ledgers.lock().unwrap();
-        ledgers.insert((operator, our_node_id), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
+        ledgers.insert((operator, our_node_id.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
     }
 
     // Try fee collection at block 1100 (too early - need to wait until 1144)
@@ -1397,7 +1397,7 @@ fn test_fee_collect_after_schedule_succeeds() {
     // Create ledger
     let mut ledger = Ledger::new_as_operator(
         operator,
-        our_node_id,
+        our_node_id.to_string(),
         "test_address".to_string(),
     );
 
@@ -1410,7 +1410,7 @@ fn test_fee_collect_after_schedule_succeeds() {
     // Add ledger to handler
     {
         let mut ledgers = handler.ledgers.lock().unwrap();
-        ledgers.insert((operator, our_node_id), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
+        ledgers.insert((operator, our_node_id.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
     }
 
     // Fee collection at block 2000 (well after the 1144 minimum)
@@ -1444,7 +1444,7 @@ fn test_collateral_increase_within_reserves_succeeds() {
     // Create ledger with reserves
     let mut ledger = Ledger::new_as_operator(
         operator,
-        our_node_id,
+        our_node_id.to_string(),
         "test_address".to_string(),
     );
     ledger.state.reserves.amount =100_000; // 100k sats reserves
@@ -1453,13 +1453,13 @@ fn test_collateral_increase_within_reserves_succeeds() {
     // Add ledger to handler
     {
         let mut ledgers = handler.ledgers.lock().unwrap();
-        ledgers.insert((operator, our_node_id), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
+        ledgers.insert((operator, our_node_id.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
     }
 
     // Increase collateral to 50k (still within 100k reserves)
     let msg = CollateralIncreaseMsg {
         new_amount: 50_000,
-        reserves_id: our_node_id,
+        reserves_id: our_node_id.to_string(),
         block_height: 100,
     };
 
@@ -1485,7 +1485,7 @@ fn test_collateral_increase_exceeds_reserves_fails() {
     // Create ledger with limited reserves
     let mut ledger = Ledger::new_as_operator(
         operator,
-        our_node_id,
+        our_node_id.to_string(),
         "test_address".to_string(),
     );
     ledger.state.reserves.amount =50_000; // Only 50k sats reserves
@@ -1494,13 +1494,13 @@ fn test_collateral_increase_exceeds_reserves_fails() {
     // Add ledger to handler
     {
         let mut ledgers = handler.ledgers.lock().unwrap();
-        ledgers.insert((operator, our_node_id), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
+        ledgers.insert((operator, our_node_id.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
     }
 
     // Try to increase collateral to 60k (exceeds 50k reserves)
     let msg = CollateralIncreaseMsg {
         new_amount: 60_000,
-        reserves_id: our_node_id,
+        reserves_id: our_node_id.to_string(),
         block_height: 100,
     };
 
@@ -1527,7 +1527,7 @@ fn test_collateral_increase_must_actually_increase() {
     // Create ledger with reserves
     let mut ledger = Ledger::new_as_operator(
         operator,
-        our_node_id,
+        our_node_id.to_string(),
         "test_address".to_string(),
     );
     ledger.state.reserves.amount =100_000;
@@ -1536,13 +1536,13 @@ fn test_collateral_increase_must_actually_increase() {
     // Add ledger to handler
     {
         let mut ledgers = handler.ledgers.lock().unwrap();
-        ledgers.insert((operator, our_node_id), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
+        ledgers.insert((operator, our_node_id.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
     }
 
     // Try to "increase" to 40k (less than current 50k)
     let msg = CollateralIncreaseMsg {
         new_amount: 40_000,
-        reserves_id: our_node_id,
+        reserves_id: our_node_id.to_string(),
         block_height: 100,
     };
 
@@ -1915,7 +1915,7 @@ fn test_has_pending_messages() {
     // Queue a message (V2 format)
     let message = DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
         peer_key, // operator
-        peer_key, // partner
+        peer_key.to_string(), // reserves_id
         LedgerOperation::ReservesIncrease { new_amount: 1000 },
     ));
     handler.send_message(peer_key, message).unwrap();
@@ -1958,12 +1958,12 @@ fn test_add_ledger_updates_stats() {
     // Add a ledger
     let ledger = Ledger::new_as_operator(
         operator,
-        our_node_id,
+        our_node_id.to_string(),
         "test_address".to_string(),
     );
     {
         let mut ledgers = handler.ledgers.lock().unwrap();
-        ledgers.insert((operator, our_node_id), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
+        ledgers.insert((operator, our_node_id.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
     }
 
     // Verify ledger exists
@@ -1974,12 +1974,12 @@ fn test_add_ledger_updates_stats() {
     let operator2 = PublicKey::from_secret_key(&secp, &operator2_secret);
     let ledger2 = Ledger::new_as_operator(
         operator2,
-        our_node_id,
+        our_node_id.to_string(),
         "test_address2".to_string(),
     );
     {
         let mut ledgers = handler.ledgers.lock().unwrap();
-        ledgers.insert((operator2, our_node_id), std::sync::Arc::new(std::sync::RwLock::new(ledger2)));
+        ledgers.insert((operator2, our_node_id.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger2)));
     }
 
     // Verify both ledgers exist
@@ -2007,12 +2007,12 @@ fn test_get_all_ledgers() {
     // Add a ledger
     let ledger = Ledger::new_as_operator(
         operator,
-        our_node_id,
+        our_node_id.to_string(),
         "test_address".to_string(),
     );
     {
         let mut ledgers = handler.ledgers.lock().unwrap();
-        ledgers.insert((operator, our_node_id), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
+        ledgers.insert((operator, our_node_id.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
     }
 
     // Should now have one ledger

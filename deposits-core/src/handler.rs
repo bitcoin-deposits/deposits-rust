@@ -57,7 +57,7 @@ where
 
     /// Ledgers indexed by (operator, partner)
     /// Uses Arc to enable sharing with external systems (e.g., DepositsHandler)
-    ledgers: Arc<Mutex<HashMap<(PublicKey, PublicKey), Arc<RwLock<Ledger>>>>>,
+    ledgers: Arc<Mutex<HashMap<(PublicKey, String), Arc<RwLock<Ledger>>>>>,
 
     /// Pending ACKs: message_hash -> (message_type, timestamp, peer)
     /// Tracks which messages are waiting for acknowledgment
@@ -137,7 +137,7 @@ where
     /// system (e.g., DepositsHandler in deposits-ldk). Operations on the handler
     /// will affect the shared ledgers.
     pub fn with_ledgers(
-        ledgers: Arc<Mutex<HashMap<(PublicKey, PublicKey), Arc<RwLock<Ledger>>>>>,
+        ledgers: Arc<Mutex<HashMap<(PublicKey, String), Arc<RwLock<Ledger>>>>>,
         storage: Arc<S>,
         transport: Arc<T>,
         payments: Arc<P>,
@@ -168,7 +168,7 @@ where
     /// This constructor allows sharing both ledgers and pending_acks with an
     /// external system (e.g., DepositsHandler in deposits-ldk).
     pub fn with_shared_state(
-        ledgers: Arc<Mutex<HashMap<(PublicKey, PublicKey), Arc<RwLock<Ledger>>>>>,
+        ledgers: Arc<Mutex<HashMap<(PublicKey, String), Arc<RwLock<Ledger>>>>>,
         pending_acks: Arc<Mutex<HashMap<[u8; 32], PendingAck>>>,
         storage: Arc<S>,
         transport: Arc<T>,
@@ -200,7 +200,7 @@ where
     /// Get a reference to the shared ledgers
     ///
     /// This allows external systems to access the ledger storage for sharing.
-    pub fn ledgers(&self) -> &Arc<Mutex<HashMap<(PublicKey, PublicKey), Arc<RwLock<Ledger>>>>> {
+    pub fn ledgers(&self) -> &Arc<Mutex<HashMap<(PublicKey, String), Arc<RwLock<Ledger>>>>> {
         &self.ledgers
     }
 
@@ -273,32 +273,33 @@ where
         self.chain.current_height()
     }
 
-    /// Get a ledger by (operator, partner)
-    pub fn get_ledger(&self, operator: PublicKey, partner: PublicKey) -> Option<Arc<RwLock<Ledger>>> {
+    /// Get a ledger by (operator, reserves_id)
+    pub fn get_ledger(&self, operator: PublicKey, reserves_id: &str) -> Option<Arc<RwLock<Ledger>>> {
         let ledgers = self.ledgers.lock().unwrap();
-        ledgers.get(&(operator, partner)).cloned()
+        ledgers.get(&(operator, reserves_id.to_string())).cloned()
     }
 
-    /// List all partners where we are the operator
-    pub fn list_operator_ledgers(&self) -> Vec<PublicKey> {
+    /// List all reserves_ids where we are the operator
+    pub fn list_operator_ledgers(&self) -> Vec<String> {
         let ledgers = self.ledgers.lock().unwrap();
         ledgers.keys()
             .filter(|(op, _)| *op == self.node_id)
-            .map(|(_, partner)| *partner)
+            .map(|(_, reserves_id)| reserves_id.clone())
             .collect()
     }
 
-    /// List all operators where we are the partner
+    /// List all operators where we are the reserves
     pub fn list_partner_ledgers(&self) -> Vec<PublicKey> {
         let ledgers = self.ledgers.lock().unwrap();
+        let node_id_str = self.node_id.to_string();
         ledgers.keys()
-            .filter(|(_, partner)| *partner == self.node_id)
+            .filter(|(_, reserves_id)| *reserves_id == node_id_str)
             .map(|(op, _)| *op)
             .collect()
     }
 
     /// List all ledgers (both operator and partner roles)
-    pub fn list_all_ledgers(&self) -> Vec<(PublicKey, PublicKey)> {
+    pub fn list_all_ledgers(&self) -> Vec<(PublicKey, String)> {
         let ledgers = self.ledgers.lock().unwrap();
         ledgers.keys().cloned().collect()
     }
@@ -307,13 +308,13 @@ where
     // Ledger Management
     // ========================================================================
 
-    /// Create a new ledger as operator with the given partner
+    /// Create a new ledger as operator with the given reserves_id
     pub fn create_operator_ledger(
         &self,
-        partner: PublicKey,
+        reserves_id: String,
         ledger_address: String,
     ) -> Result<(), HandleError> {
-        let key = (self.node_id, partner);
+        let key = (self.node_id, reserves_id.clone());
 
         let mut ledgers = self.ledgers.lock().unwrap();
         if ledgers.contains_key(&key) {
@@ -322,24 +323,26 @@ where
             ));
         }
 
-        let ledger = Ledger::new_as_operator(self.node_id, partner, ledger_address);
+        let ledger = Ledger::new_as_operator(self.node_id, reserves_id.clone(), ledger_address);
         ledgers.insert(key, Arc::new(RwLock::new(ledger)));
 
         self.logger.log(
             LogLevel::Info,
-            &format!("Created operator ledger with partner {}", partner),
+            &format!("Created operator ledger with reserves_id {}", reserves_id),
         );
 
         Ok(())
     }
 
     /// Create a new ledger as partner with the given operator
+    /// Note: For LDK compatibility, reserves_id is our node_id as string
     pub fn create_partner_ledger(
         &self,
         operator: PublicKey,
         ledger_address: String,
     ) -> Result<(), HandleError> {
-        let key = (operator, self.node_id);
+        let reserves_id = self.node_id.to_string();
+        let key = (operator, reserves_id.clone());
 
         let mut ledgers = self.ledgers.lock().unwrap();
         if ledgers.contains_key(&key) {
@@ -348,7 +351,7 @@ where
             ));
         }
 
-        let ledger = Ledger::new_as_partner(operator, self.node_id, ledger_address);
+        let ledger = Ledger::new_as_partner(operator, reserves_id, ledger_address);
         ledgers.insert(key, Arc::new(RwLock::new(ledger)));
 
         self.logger.log(
@@ -360,24 +363,22 @@ where
     }
 
     /// Remove a ledger (used for cleanup after close)
-    pub fn remove_ledger(&self, operator: PublicKey, partner: PublicKey) -> bool {
+    pub fn remove_ledger(&self, operator: PublicKey, reserves_id: &str) -> bool {
         let mut ledgers = self.ledgers.lock().unwrap();
-        ledgers.remove(&(operator, partner)).is_some()
+        ledgers.remove(&(operator, reserves_id.to_string())).is_some()
     }
 
-    /// Check if we have a ledger with this peer (as operator or partner)
-    pub fn has_ledger_with(&self, peer: PublicKey) -> bool {
+    /// Check if we have a ledger with this reserves_id (as operator)
+    pub fn has_ledger_with(&self, reserves_id: &str) -> bool {
         let ledgers = self.ledgers.lock().unwrap();
-        ledgers.contains_key(&(self.node_id, peer)) || ledgers.contains_key(&(peer, self.node_id))
+        ledgers.contains_key(&(self.node_id, reserves_id.to_string()))
     }
 
-    /// Get our role with a peer (Operator, Partner, or None)
-    pub fn role_with(&self, peer: PublicKey) -> Option<crate::ledger::LedgerRole> {
+    /// Get our role with a reserves_id (Operator or None for BDK)
+    pub fn role_with(&self, reserves_id: &str) -> Option<crate::ledger::LedgerRole> {
         let ledgers = self.ledgers.lock().unwrap();
-        if ledgers.contains_key(&(self.node_id, peer)) {
+        if ledgers.contains_key(&(self.node_id, reserves_id.to_string())) {
             Some(crate::ledger::LedgerRole::Operator)
-        } else if ledgers.contains_key(&(peer, self.node_id)) {
-            Some(crate::ledger::LedgerRole::Partner)
         } else {
             None
         }
@@ -388,40 +389,40 @@ where
     // ========================================================================
 
     /// Get ledger hash for a specific ledger
-    pub fn get_ledger_hash(&self, operator: PublicKey, partner: PublicKey) -> Option<[u8; 32]> {
-        self.get_ledger(operator, partner).map(|arc| {
+    pub fn get_ledger_hash(&self, operator: PublicKey, reserves_id: &str) -> Option<[u8; 32]> {
+        self.get_ledger(operator, reserves_id).map(|arc| {
             let ledger = arc.read().unwrap();
             ledger.hash()
         })
     }
 
     /// Get ledger sequence number
-    pub fn get_ledger_sequence(&self, operator: PublicKey, partner: PublicKey) -> Option<u64> {
-        self.get_ledger(operator, partner).map(|arc| {
+    pub fn get_ledger_sequence(&self, operator: PublicKey, reserves_id: &str) -> Option<u64> {
+        self.get_ledger(operator, reserves_id).map(|arc| {
             let ledger = arc.read().unwrap();
             ledger.sequence()
         })
     }
 
     /// Get total deposit balance (msat) for a ledger
-    pub fn get_ledger_deposit_balance(&self, operator: PublicKey, partner: PublicKey) -> Option<u64> {
-        self.get_ledger(operator, partner).map(|arc| {
+    pub fn get_ledger_deposit_balance(&self, operator: PublicKey, reserves_id: &str) -> Option<u64> {
+        self.get_ledger(operator, reserves_id).map(|arc| {
             let ledger = arc.read().unwrap();
             ledger.total_deposit_balance()
         })
     }
 
     /// Get reserves amount (sats) for a ledger
-    pub fn get_ledger_reserves(&self, operator: PublicKey, partner: PublicKey) -> Option<u64> {
-        self.get_ledger(operator, partner).map(|arc| {
+    pub fn get_ledger_reserves(&self, operator: PublicKey, reserves_id: &str) -> Option<u64> {
+        self.get_ledger(operator, reserves_id).map(|arc| {
             let ledger = arc.read().unwrap();
             ledger.reserves_amount()
         })
     }
 
     /// Check if a ledger has sufficient reserves
-    pub fn ledger_has_sufficient_reserves(&self, operator: PublicKey, partner: PublicKey) -> bool {
-        self.get_ledger(operator, partner)
+    pub fn ledger_has_sufficient_reserves(&self, operator: PublicKey, reserves_id: &str) -> bool {
+        self.get_ledger(operator, reserves_id)
             .map(|arc| {
                 let ledger = arc.read().unwrap();
                 ledger.has_sufficient_reserves()
@@ -514,10 +515,10 @@ where
         );
 
         // Get the ledger
-        let ledger_arc = self.get_ledger(msg.operator_id, msg.reserves_id)
+        let ledger_arc = self.get_ledger(msg.operator_id, &msg.reserves_id)
             .ok_or(HandleError::UnknownLedger {
                 operator: msg.operator_id,
-                partner: msg.reserves_id,
+                reserves_id: msg.reserves_id.clone(),
             })?;
 
         // Validate and apply the update
@@ -570,7 +571,7 @@ where
         // Create response
         let response = crate::messages::LedgerUpdateResponseMsg {
             operator_id: msg.operator_id,
-            reserves_id: msg.reserves_id,
+            reserves_id: msg.reserves_id.clone(),
             request_hash: msg.current_hash,
             accepted: true,
             error: None,
@@ -605,14 +606,18 @@ where
             );
         }
 
-        // Verify partner signature if accepted
+        // Verify partner signature if accepted (only for LDK where reserves_id is a pubkey)
         if msg.accepted {
             if let Some(sig) = &msg.partner_signature {
-                if !self.signer.verify_schnorr(&msg.reserves_id, msg.confirmed_hash, sig) {
-                    return Err(HandleError::ValidationFailed(
-                        "Invalid partner signature".to_string(),
-                    ));
+                // Try to parse reserves_id as pubkey for signature verification
+                if let Ok(partner_pubkey) = msg.reserves_id.parse::<PublicKey>() {
+                    if !self.signer.verify_schnorr(&partner_pubkey, msg.confirmed_hash, sig) {
+                        return Err(HandleError::ValidationFailed(
+                            "Invalid partner signature".to_string(),
+                        ));
+                    }
                 }
+                // For BDK, reserves_id is an address, not a pubkey - skip signature verification
             }
         }
 
@@ -635,7 +640,7 @@ where
         // Create handshake response
         let response = crate::messages::HandshakeResponseMsg {
             request_hash: [0u8; 32], // TODO: Hash the request
-            reserves_id: self.node_id,
+            reserves_id: self.node_id.to_string(),
             accepted: true,
             protocol_version: crate::messages::PROTOCOL_VERSION,
             error: None,
@@ -670,10 +675,10 @@ where
         );
 
         // Get ledger and prepare sync response
-        let ledger_arc = self.get_ledger(msg.operator_id, msg.reserves_id)
+        let ledger_arc = self.get_ledger(msg.operator_id, &msg.reserves_id)
             .ok_or(HandleError::UnknownLedger {
                 operator: msg.operator_id,
-                partner: msg.reserves_id,
+                reserves_id: msg.reserves_id.clone(),
             })?;
 
         let (current_hash, current_sequence) = {
@@ -683,7 +688,7 @@ where
 
         let response = crate::messages::SyncResponseMsg {
             operator_id: msg.operator_id,
-            reserves_id: msg.reserves_id,
+            reserves_id: msg.reserves_id.clone(),
             request_hash: msg.last_known_hash, // Use the known hash as request reference
             updates: Vec::new(), // Would be populated from history
             current_hash,
@@ -898,7 +903,7 @@ where
         Err(crate::DepositsError::DepositNotFound)
     }
 
-    fn find_deposit_by_payment_hash(&self, payment_hash: &[u8; 32]) -> Option<(PublicKey, PublicKey, u64)> {
+    fn find_deposit_by_payment_hash(&self, payment_hash: &[u8; 32]) -> Option<(String, PublicKey, u64)> {
         let ledgers = self.ledgers.lock().unwrap();
         for ((operator_id, reserves_id), ledger_arc) in ledgers.iter() {
             if *operator_id == self.node_id {
@@ -906,7 +911,7 @@ where
                 for (deposit_pubkey, deposit) in ledger.state.deposits.iter() {
                     for invoice in &deposit.invoices {
                         if &invoice.payment_hash == payment_hash {
-                            return Some((*reserves_id, *deposit_pubkey, invoice.amount));
+                            return Some((reserves_id.clone(), *deposit_pubkey, invoice.amount));
                         }
                     }
                 }
@@ -931,7 +936,7 @@ where
 
     fn get_total_deposit_balances(&self, partner_node_id: PublicKey) -> Option<u64> {
         let ledgers = self.ledgers.lock().unwrap();
-        if let Some(ledger_arc) = ledgers.get(&(self.node_id, partner_node_id)) {
+        if let Some(ledger_arc) = ledgers.get(&(self.node_id, partner_node_id.to_string())) {
             let ledger = ledger_arc.read().unwrap();
             let total = ledger.state.deposits.values()
                 .map(|deposit| deposit.balance)
@@ -944,7 +949,7 @@ where
 
     fn get_deposits_for_partner(&self, partner_node_id: PublicKey) -> Option<Vec<(PublicKey, u64, u64)>> {
         let ledgers = self.ledgers.lock().unwrap();
-        if let Some(ledger_arc) = ledgers.get(&(self.node_id, partner_node_id)) {
+        if let Some(ledger_arc) = ledgers.get(&(self.node_id, partner_node_id.to_string())) {
             let ledger = ledger_arc.read().unwrap();
             let deposits: Vec<(PublicKey, u64, u64)> = ledger.state.deposits.iter()
                 .map(|(depositor_pubkey, deposit)| (*depositor_pubkey, deposit.balance, deposit.locked_balance))
@@ -957,7 +962,7 @@ where
 
     fn get_max_outstanding_invoice_amount(&self, partner_node_id: PublicKey) -> Option<u64> {
         let ledgers = self.ledgers.lock().unwrap();
-        if let Some(ledger_arc) = ledgers.get(&(self.node_id, partner_node_id)) {
+        if let Some(ledger_arc) = ledgers.get(&(self.node_id, partner_node_id.to_string())) {
             let ledger = ledger_arc.read().unwrap();
             let max_invoice = ledger.state.deposits.values()
                 .flat_map(|d| d.invoices.iter())
@@ -985,7 +990,7 @@ where
 {
     fn get_ledger_hash(&self, partner_node_id: PublicKey) -> Result<[u8; 32], crate::DepositsError> {
         let ledgers = self.ledgers.lock().unwrap();
-        if let Some(ledger_arc) = ledgers.get(&(self.node_id, partner_node_id)) {
+        if let Some(ledger_arc) = ledgers.get(&(self.node_id, partner_node_id.to_string())) {
             let ledger = ledger_arc.read().unwrap();
             Ok(ledger.tail_hash())
         } else {
@@ -997,14 +1002,14 @@ where
         let ledgers = self.ledgers.lock().unwrap();
 
         // Local hash (where we are operator)
-        let local_hash = ledgers.get(&(self.node_id, partner_node_id))
+        let local_hash = ledgers.get(&(self.node_id, partner_node_id.to_string()))
             .map(|arc| {
                 let ledger = arc.read().unwrap();
                 ledger.state.channel_deepest_commitment_hash
             });
 
         // Remote hash (where they are operator)
-        let remote_hash = ledgers.get(&(partner_node_id, self.node_id))
+        let remote_hash = ledgers.get(&(partner_node_id, self.node_id.to_string()))
             .map(|arc| {
                 let ledger = arc.read().unwrap();
                 ledger.state.channel_deepest_commitment_hash
@@ -1033,7 +1038,7 @@ where
         }
 
         let ledgers = self.ledgers.lock().unwrap();
-        let ledger_key = (*counterparty_node_id, self.node_id);
+        let ledger_key = (*counterparty_node_id, self.node_id.to_string());
 
         if let Some(ledger_arc) = ledgers.get(&ledger_key) {
             let ledger = ledger_arc.read().unwrap();
@@ -1046,7 +1051,7 @@ where
 
     fn get_ledger_sequence(&self, partner_node_id: PublicKey) -> Result<u64, crate::DepositsError> {
         let ledgers = self.ledgers.lock().unwrap();
-        if let Some(ledger_arc) = ledgers.get(&(self.node_id, partner_node_id)) {
+        if let Some(ledger_arc) = ledgers.get(&(self.node_id, partner_node_id.to_string())) {
             let ledger = ledger_arc.read().unwrap();
             Ok(ledger.sequence())
         } else {
@@ -1056,21 +1061,22 @@ where
 
     fn has_ledger_with(&self, partner_node_id: PublicKey) -> bool {
         let ledgers = self.ledgers.lock().unwrap();
-        ledgers.contains_key(&(self.node_id, partner_node_id))
+        ledgers.contains_key(&(self.node_id, partner_node_id.to_string()))
     }
 
-    fn list_operator_ledgers(&self) -> Vec<PublicKey> {
+    fn list_operator_ledgers(&self) -> Vec<String> {
         let ledgers = self.ledgers.lock().unwrap();
         ledgers.keys()
             .filter(|(op, _)| *op == self.node_id)
-            .map(|(_, partner)| *partner)
+            .map(|(_, reserves_id)| reserves_id.clone())
             .collect()
     }
 
     fn list_partner_ledgers(&self) -> Vec<PublicKey> {
         let ledgers = self.ledgers.lock().unwrap();
+        let node_id_str = self.node_id.to_string();
         ledgers.keys()
-            .filter(|(_, partner)| *partner == self.node_id)
+            .filter(|(_, reserves_id)| *reserves_id == node_id_str)
             .map(|(op, _)| *op)
             .collect()
     }
@@ -1271,26 +1277,27 @@ mod tests {
         };
 
         // Initially no ledgers
-        assert!(!handler.has_ledger_with(partner));
+        let partner_str = partner.to_string();
+        assert!(!handler.has_ledger_with(&partner_str));
         assert!(handler.list_operator_ledgers().is_empty());
 
         // Create operator ledger
-        let result = handler.create_operator_ledger(partner, "tb1q...".to_string());
+        let result = handler.create_operator_ledger(partner_str.clone(), "tb1q...".to_string());
         assert!(result.is_ok());
-        assert!(handler.has_ledger_with(partner));
-        assert_eq!(handler.list_operator_ledgers(), vec![partner]);
+        assert!(handler.has_ledger_with(&partner_str));
+        assert_eq!(handler.list_operator_ledgers(), vec![partner_str.clone()]);
 
         // Verify ledger properties
-        assert_eq!(handler.get_ledger_sequence(test_pubkey(), partner), Some(0));
-        assert_eq!(handler.get_ledger_deposit_balance(test_pubkey(), partner), Some(0));
+        assert_eq!(handler.get_ledger_sequence(test_pubkey(), &partner_str), Some(0));
+        assert_eq!(handler.get_ledger_deposit_balance(test_pubkey(), &partner_str), Some(0));
 
         // Can't create duplicate
-        let result = handler.create_operator_ledger(partner, "tb1q...".to_string());
+        let result = handler.create_operator_ledger(partner_str.clone(), "tb1q...".to_string());
         assert!(result.is_err());
 
         // Remove ledger
-        assert!(handler.remove_ledger(test_pubkey(), partner));
-        assert!(!handler.has_ledger_with(partner));
+        assert!(handler.remove_ledger(test_pubkey(), &partner_str));
+        assert!(!handler.has_ledger_with(&partner_str));
     }
 
     #[test]
@@ -1316,7 +1323,8 @@ mod tests {
         };
 
         // Create a ledger
-        handler.create_operator_ledger(partner, "tb1q...".to_string()).unwrap();
+        let partner_str = partner.to_string();
+        handler.create_operator_ledger(partner_str.clone(), "tb1q...".to_string()).unwrap();
 
         // Initially no deposits
         assert!(handler.list_deposits().unwrap().is_empty());
@@ -1332,7 +1340,7 @@ mod tests {
         };
 
         {
-            let ledger_arc = handler.get_ledger(test_pubkey(), partner).unwrap();
+            let ledger_arc = handler.get_ledger(test_pubkey(), &partner_str).unwrap();
             let mut ledger = ledger_arc.write().unwrap();
             let mut deposit = crate::types::Deposit::new(deposit_pubkey, None);
             deposit.balance = 100_000;
@@ -1391,7 +1399,8 @@ mod tests {
         assert!(<_ as LedgerOperations>::get_ledger_sequence(&handler, partner).is_err());
 
         // Create ledger
-        handler.create_operator_ledger(partner, "tb1q...".to_string()).unwrap();
+        let partner_str = partner.to_string();
+        handler.create_operator_ledger(partner_str.clone(), "tb1q...".to_string()).unwrap();
 
         // Now we have a ledger - use trait methods
         assert!(<_ as LedgerOperations>::has_ledger_with(&handler, partner));
@@ -1413,7 +1422,7 @@ mod tests {
         assert!(<_ as LedgerOperations>::validate_ledger_hash_for_reserves(&handler, &partner, &[0u8; 32])); // zero is always valid
 
         // List ledgers - these are already trait methods
-        assert_eq!(<_ as LedgerOperations>::list_operator_ledgers(&handler), vec![partner]);
+        assert_eq!(<_ as LedgerOperations>::list_operator_ledgers(&handler), vec![partner_str]);
         assert!(<_ as LedgerOperations>::list_partner_ledgers(&handler).is_empty());
     }
 }

@@ -122,7 +122,7 @@ impl QuorumProcessor {
         if sender != request.requester {
             return QuorumMessageResult::Rejected {
                 response: QuorumResponse {
-                    ledger_id: request.ledger_id,
+                    ledger_id: request.ledger_id.clone(),
                     accepted: false,
                     members: vec![],
                     rejection_reason: Some("Sender doesn't match requester".to_string()),
@@ -135,7 +135,7 @@ impl QuorumProcessor {
         if request.ledger_id.operator_id != self.node_id {
             return QuorumMessageResult::Rejected {
                 response: QuorumResponse {
-                    ledger_id: request.ledger_id,
+                    ledger_id: request.ledger_id.clone(),
                     accepted: false,
                     members: vec![],
                     rejection_reason: Some("We are not the operator for this ledger".to_string()),
@@ -158,7 +158,7 @@ impl QuorumProcessor {
 
                 QuorumMessageResult::Accepted {
                     response: QuorumResponse {
-                        ledger_id: request.ledger_id,
+                        ledger_id: request.ledger_id.clone(),
                         accepted: true,
                         members,
                         rejection_reason: None,
@@ -171,7 +171,7 @@ impl QuorumProcessor {
 
                 QuorumMessageResult::Rejected {
                     response: QuorumResponse {
-                        ledger_id: request.ledger_id,
+                        ledger_id: request.ledger_id.clone(),
                         accepted: false,
                         members: vec![],
                         rejection_reason: Some(format!("{:?}", e)),

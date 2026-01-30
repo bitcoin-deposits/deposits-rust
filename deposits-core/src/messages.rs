@@ -82,9 +82,12 @@ pub mod consts {
     pub const DEPOSIT_OPEN: u16 = 0x80D1;
     pub const DEPOSIT_CLOSE: u16 = 0x80D3;
     pub const DEPOSIT_UPDATE: u16 = 0x80D5;
-    pub const DEPOSIT_LOCK_TRANSFER: u16 = 0x80D7;
-    pub const DEPOSIT_FAIL_TRANSFER: u16 = 0x80D9;
-    pub const DEPOSIT_FULFILL_TRANSFER: u16 = 0x80DB;
+
+    // Onchain operations (Bitcoin layer credits/withdrawals)
+    pub const ONCHAIN_CREDIT: u16 = 0x80E1;
+    pub const ONCHAIN_LOCK: u16 = 0x80E3;
+    pub const ONCHAIN_FAIL: u16 = 0x80E5;
+    pub const ONCHAIN_FULFILL: u16 = 0x80E7;
 
     // Ledger lifecycle
     pub const LEDGER_CLOSE: u16 = 0x801D;
@@ -158,7 +161,7 @@ pub const ALL_OPERATION_MESSAGE_TYPES: &[u16] = &[
     COLLATERAL_ATTESTATION, COLLATERAL_ADD_PARTNER, COLLATERAL_REMOVE_PARTNER,
     COLLATERAL_CONSENT_REQUEST, COLLATERAL_CONSENT_RESPONSE,
     DEPOSIT_OPEN, DEPOSIT_CLOSE, DEPOSIT_UPDATE,
-    DEPOSIT_LOCK_TRANSFER, DEPOSIT_FAIL_TRANSFER, DEPOSIT_FULFILL_TRANSFER,
+    ONCHAIN_CREDIT, ONCHAIN_LOCK, ONCHAIN_FAIL, ONCHAIN_FULFILL,
     LEDGER_CLOSE, CHANNEL_CLOSE_TOMBSTONE,
     MAINTENANCE_FEE_COLLECT,
     RECEIVING_COSIGN_INVOICE, RECEIVING_CREDIT_PAYMENT, UNCREDITED_PAYMENT,
@@ -177,7 +180,7 @@ pub const MESSAGES_REQUIRING_ACK: &[u16] = &[
     RESERVES_ADD_OUTPUT, RESERVES_REMOVE_OUTPUT, RESERVES_INCREASE,
     RESERVES_DECREASE, RESERVES_UPDATE_OUTPUT,
     DEPOSIT_OPEN, DEPOSIT_CLOSE, DEPOSIT_UPDATE,
-    DEPOSIT_LOCK_TRANSFER, DEPOSIT_FAIL_TRANSFER, DEPOSIT_FULFILL_TRANSFER,
+    ONCHAIN_CREDIT, ONCHAIN_LOCK, ONCHAIN_FAIL, ONCHAIN_FULFILL,
     RECEIVING_CREDIT_PAYMENT, RECEIVING_COSIGN_INVOICE,
     SENDING_LOCK_PAYMENT, SENDING_FAIL_PAYMENT, SENDING_FULFILL_PAYMENT,
     COLLATERAL_INCREASE, COLLATERAL_DECREASE,
@@ -214,8 +217,9 @@ pub fn get_message_category(message_type: u16) -> Option<&'static str> {
         COLLATERAL_ATTESTATION | COLLATERAL_ADD_PARTNER | COLLATERAL_REMOVE_PARTNER |
         COLLATERAL_CONSENT_REQUEST | COLLATERAL_CONSENT_RESPONSE => Some("collateral"),
 
-        DEPOSIT_OPEN | DEPOSIT_CLOSE | DEPOSIT_UPDATE |
-        DEPOSIT_LOCK_TRANSFER | DEPOSIT_FAIL_TRANSFER | DEPOSIT_FULFILL_TRANSFER => Some("deposit"),
+        DEPOSIT_OPEN | DEPOSIT_CLOSE | DEPOSIT_UPDATE => Some("deposit"),
+
+        ONCHAIN_CREDIT | ONCHAIN_LOCK | ONCHAIN_FAIL | ONCHAIN_FULFILL => Some("onchain"),
 
         LEDGER_CLOSE | CHANNEL_CLOSE_TOMBSTONE => Some("lifecycle"),
 
@@ -397,22 +401,22 @@ impl DepositsMessage {
     }
 
     /// Get the reserves_id if present in the message
-    pub fn reserves_id(&self) -> Option<PublicKey> {
+    pub fn reserves_id(&self) -> Option<String> {
         match self {
-            Self::LedgerUpdate(m) => Some(m.reserves_id),
-            Self::LedgerUpdateResponse(m) => Some(m.reserves_id),
-            Self::Handshake(m) => Some(m.reserves_id),
-            Self::HandshakeResponse(m) => Some(m.reserves_id),
-            Self::Sync(m) => Some(m.reserves_id),
-            Self::SyncResponse(m) => Some(m.reserves_id),
+            Self::LedgerUpdate(m) => Some(m.reserves_id.clone()),
+            Self::LedgerUpdateResponse(m) => Some(m.reserves_id.clone()),
+            Self::Handshake(m) => Some(m.reserves_id.clone()),
+            Self::HandshakeResponse(m) => Some(m.reserves_id.clone()),
+            Self::Sync(m) => Some(m.reserves_id.clone()),
+            Self::SyncResponse(m) => Some(m.reserves_id.clone()),
             Self::Recovery(m) => m.reserves_id(),
             Self::RecoveryResponse(m) => m.reserves_id(),
             Self::Coordination(m) => m.reserves_id(),
             Self::CoordinationResponse(m) => m.reserves_id(),
             Self::Relay(_) => None,
             Self::RelayResponse(_) => None,
-            Self::ReservesAddOutput(m) => Some(m.reserves_id),
-            Self::ReservesRemoveOutput(m) => Some(m.reserves_id),
+            Self::ReservesAddOutput(m) => Some(m.reserves_id.clone()),
+            Self::ReservesRemoveOutput(m) => Some(m.reserves_id.clone()),
         }
     }
 
@@ -453,8 +457,8 @@ impl DepositsMessage {
 pub struct LedgerUpdateMsg {
     /// Operator's public key
     pub operator_id: PublicKey,
-    /// Reserves identifier
-    pub reserves_id: PublicKey,
+    /// Reserves identifier (UTXO address for BDK, partner pubkey string for LDK)
+    pub reserves_id: String,
     /// The operation to perform
     pub operation: LedgerOperation,
     /// Sequence number in the ledger chain
@@ -472,8 +476,8 @@ pub struct LedgerUpdateMsg {
 pub struct LedgerUpdateResponseMsg {
     /// Operator's public key
     pub operator_id: PublicKey,
-    /// Reserves identifier
-    pub reserves_id: PublicKey,
+    /// Reserves identifier (UTXO address for BDK, partner pubkey string for LDK)
+    pub reserves_id: String,
     /// Hash of the request being responded to
     pub request_hash: [u8; 32],
     /// Whether the update was accepted
@@ -493,15 +497,14 @@ pub struct LedgerUpdateResponseMsg {
 pub enum LedgerOperation {
     // ========== Ledger Establishment (1) ==========
     /// Open/establish a new ledger (first operation, sequence 0)
+    /// Note: Initial reserves amount is set via ReservesIncrease after open
     LedgerOpen {
         /// Operator's node ID
         operator_id: PublicKey,
-        /// Reserves identifier (partner for LDK, UTXO reference for BDK)
-        reserves_id: PublicKey,
-        /// Address for the reserves/multisig
+        /// Reserves identifier (UTXO address for BDK, partner pubkey string for LDK)
+        reserves_id: String,
+        /// Stable ledger address for continuity across reassignments
         ledger_address: String,
-        /// Initial reserves amount in satoshis
-        reserves_amount: u64,
         /// Block height after which collateral requirements are enforced (0 = immediate)
         collateral_enforcement_block: u64,
     },
@@ -530,56 +533,68 @@ pub enum LedgerOperation {
         pubkey: PublicKey,
         new_fees: FeeStructure,
     },
-    /// Lock funds for an HTLC-like transfer
-    TransferLock {
-        pubkey: PublicKey,
-        amount: u64,
-        transfer_id: [u8; 32],
-    },
-    /// Fail a pending transfer
-    TransferFail {
-        pubkey: PublicKey,
-        transfer_id: [u8; 32],
-    },
-    /// Fulfill a pending transfer
-    TransferFulfill {
-        pubkey: PublicKey,
-        amount: u64,
-        transfer_id: [u8; 32],
-    },
-
-    // ========== Payment Operations (4) ==========
-    /// Credit a received payment to a deposit
-    PaymentCredit {
+    // ========== Invoice Operations (4) ==========
+    /// Credit a received invoice payment to a deposit
+    InvoiceCredit {
         payment_hash: [u8; 32],
         deposit_pubkey: PublicKey,
         amount: u64,
         invoice_id: String,
         sequence_number: u64,
     },
-    /// Lock funds for an outgoing payment
-    PaymentLock {
+    /// Lock funds for an outgoing invoice payment
+    InvoiceLock {
         pubkey: PublicKey,
         amount: u64,
         payment_id: [u8; 32],
         sequence_number: u64,
         scriptpubkey_signature: [u8; 64],
     },
-    /// Fail a pending payment
-    PaymentFail {
+    /// Fail a pending invoice payment
+    InvoiceFail {
         pubkey: PublicKey,
         amount: u64,
         payment_id: [u8; 32],
         sequence_number: u64,
     },
-    /// Fulfill a pending payment
-    PaymentFulfill {
+    /// Fulfill a pending invoice payment
+    InvoiceFulfill {
         pubkey: PublicKey,
         amount: u64,
         payment_id: [u8; 32],
         sequence_number: u64,
         scriptpubkey_signature: [u8; 64],
         preimage: [u8; 32],
+    },
+
+    // ========== Onchain Operations ==========
+    /// Credit received on-chain funds to a deposit (incoming, fast)
+    OnchainCredit {
+        txid: [u8; 32],
+        vout: u32,
+        deposit_pubkey: PublicKey,
+        amount: u64,
+        funding_address: String,
+    },
+    /// Lock funds for an on-chain withdrawal (outgoing, debits balance)
+    OnchainLock {
+        deposit_pubkey: PublicKey,
+        amount: u64,
+        destination_address: String,
+        withdrawal_id: [u8; 32],
+    },
+    /// Fail a pending on-chain withdrawal (returns funds to deposit)
+    OnchainFail {
+        deposit_pubkey: PublicKey,
+        withdrawal_id: [u8; 32],
+    },
+    /// Fulfill an on-chain withdrawal (confirmed on-chain)
+    OnchainFulfill {
+        deposit_pubkey: PublicKey,
+        withdrawal_id: [u8; 32],
+        amount: u64,
+        txid: [u8; 32],
+        destination_address: String,
     },
 
     // ========== Collateral Operations (3) ==========
@@ -596,6 +611,7 @@ pub enum LedgerOperation {
     /// Record a collateral attestation from another partner
     CollateralAttestation {
         collateral_operator: PublicKey,
+        collateral_partner: PublicKey,
         amount: u64,
         block_height: u32,
         signature: [u8; 64],
@@ -643,13 +659,14 @@ impl LedgerOperation {
             Self::DepositOpen { .. } => 20,
             Self::DepositClose { .. } => 21,
             Self::DepositUpdate { .. } => 22,
-            Self::TransferLock { .. } => 23,
-            Self::TransferFail { .. } => 24,
-            Self::TransferFulfill { .. } => 25,
-            Self::PaymentCredit { .. } => 30,
-            Self::PaymentLock { .. } => 31,
-            Self::PaymentFail { .. } => 32,
-            Self::PaymentFulfill { .. } => 33,
+            Self::InvoiceCredit { .. } => 30,
+            Self::InvoiceLock { .. } => 31,
+            Self::InvoiceFail { .. } => 32,
+            Self::InvoiceFulfill { .. } => 33,
+            Self::OnchainCredit { .. } => 35,
+            Self::OnchainLock { .. } => 36,
+            Self::OnchainFail { .. } => 37,
+            Self::OnchainFulfill { .. } => 38,
             Self::CollateralIncrease { .. } => 40,
             Self::CollateralDecrease { .. } => 41,
             Self::CollateralAttestation { .. } => 42,
@@ -677,16 +694,12 @@ pub struct HandshakeMsg {
     pub features: u32,
     /// Operator's public key
     pub operator_id: PublicKey,
-    /// Reserves identifier
-    pub reserves_id: PublicKey,
-    /// Ledger address string
-    pub ledger_address: String,
+    /// Reserves identifier (UTXO address for BDK, partner pubkey string for LDK)
+    pub reserves_id: String,
     /// Funding transaction ID (reserves UTXO)
     pub funding_txid: [u8; 32],
     /// Funding output index
     pub funding_vout: u16,
-    /// Reserves amount in satoshis
-    pub reserves_amount: u64,
     /// Block height at which collateral size requirements are enforced.
     ///
     /// Set to 0 for immediate enforcement (joining an established network).
@@ -710,7 +723,7 @@ pub struct HandshakeResponseMsg {
     /// Error reason if rejected
     pub error: Option<String>,
     /// Reserves identifier
-    pub reserves_id: PublicKey,
+    pub reserves_id: String,
 }
 
 // ============================================================================
@@ -721,7 +734,7 @@ pub struct HandshakeResponseMsg {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SyncMsg {
     pub operator_id: PublicKey,
-    pub reserves_id: PublicKey,
+    pub reserves_id: String,
     pub last_known_sequence: u64,
     pub last_known_hash: [u8; 32],
 }
@@ -730,7 +743,7 @@ pub struct SyncMsg {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SyncResponseMsg {
     pub operator_id: PublicKey,
-    pub reserves_id: PublicKey,
+    pub reserves_id: String,
     pub request_hash: [u8; 32],
     /// Signed updates since last_known_sequence (uses storage format - bytes are bytes)
     pub updates: Vec<StorageSignedLedgerUpdate>,
@@ -797,12 +810,12 @@ pub enum RecoveryMsg {
 }
 
 impl RecoveryMsg {
-    pub fn reserves_id(&self) -> Option<PublicKey> {
+    pub fn reserves_id(&self) -> Option<String> {
         match self {
-            Self::Vote { partner, .. } => Some(*partner),
-            Self::ClaimRequest { partner, .. } => Some(*partner),
-            Self::ClaimComplete { partner, .. } => Some(*partner),
-            Self::UncreditedPayment { partner, .. } => Some(*partner),
+            Self::Vote { partner, .. } => Some(partner.to_string()),
+            Self::ClaimRequest { partner, .. } => Some(partner.to_string()),
+            Self::ClaimComplete { partner, .. } => Some(partner.to_string()),
+            Self::UncreditedPayment { partner, .. } => Some(partner.to_string()),
         }
     }
 }
@@ -833,7 +846,7 @@ pub enum RecoveryResponseMsg {
 }
 
 impl RecoveryResponseMsg {
-    pub fn reserves_id(&self) -> Option<PublicKey> {
+    pub fn reserves_id(&self) -> Option<String> {
         None // Recovery responses don't have a specific partner
     }
 }
@@ -848,7 +861,7 @@ pub enum CoordinationMsg {
     /// Request partner to cosign an invoice
     CosignInvoice {
         operator_id: PublicKey,
-        reserves_id: PublicKey,
+        reserves_id: String,
         /// Invoice details for cosigning
         amount: u64,
         payment_hash: [u8; 32],
@@ -860,14 +873,14 @@ pub enum CoordinationMsg {
     /// Request consent for collateral registration
     CollateralConsentRequest {
         operator_id: PublicKey,
-        reserves_id: PublicKey,
+        reserves_id: String,
         operator_signature: [u8; 64],
     },
     /// Quorum join request
     QuorumJoinRequest {
         requester_pubkey: PublicKey,
         operator_id: PublicKey,
-        reserves_id: PublicKey,
+        reserves_id: String,
         protocol_version: u16,
         timestamp: u64,
         signature: [u8; 64],
@@ -876,7 +889,7 @@ pub enum CoordinationMsg {
     QuorumVoteRequest {
         vote_round_id: [u8; 32],
         operator_id: PublicKey,
-        reserves_id: PublicKey,
+        reserves_id: String,
         sequence_number: u64,
         state_hash: [u8; 32],
         claimed_reserves: u64,
@@ -908,12 +921,12 @@ pub enum CoordinationMsg {
 }
 
 impl CoordinationMsg {
-    pub fn reserves_id(&self) -> Option<PublicKey> {
+    pub fn reserves_id(&self) -> Option<String> {
         match self {
-            Self::CosignInvoice { reserves_id, .. } => Some(*reserves_id),
-            Self::CollateralConsentRequest { reserves_id, .. } => Some(*reserves_id),
-            Self::QuorumJoinRequest { reserves_id, .. } => Some(*reserves_id),
-            Self::QuorumVoteRequest { reserves_id, .. } => Some(*reserves_id),
+            Self::CosignInvoice { reserves_id, .. } => Some(reserves_id.clone()),
+            Self::CollateralConsentRequest { reserves_id, .. } => Some(reserves_id.clone()),
+            Self::QuorumJoinRequest { reserves_id, .. } => Some(reserves_id.clone()),
+            Self::QuorumVoteRequest { reserves_id, .. } => Some(reserves_id.clone()),
             Self::QuorumVote { .. } => None,
             Self::UpdateReserves { .. } => None, // Channel-level, not ledger-level
         }
@@ -932,7 +945,7 @@ pub enum CoordinationResponseMsg {
     CollateralConsentResponse {
         request_hash: [u8; 32],
         operator_id: PublicKey,
-        reserves_id: PublicKey,
+        reserves_id: String,
         consent_granted: bool,
         collateral_partner_signature: [u8; 64],
     },
@@ -950,7 +963,7 @@ pub enum CoordinationResponseMsg {
     QuorumStateSync {
         request_hash: [u8; 32],
         operator_id: PublicKey,
-        reserves_id: PublicKey,
+        reserves_id: String,
         updates: Vec<StorageSignedLedgerUpdate>,
         start_sequence: u64,
         is_final: bool,
@@ -959,7 +972,7 @@ pub enum CoordinationResponseMsg {
     QuorumMembershipChange {
         request_hash: [u8; 32],
         operator_id: PublicKey,
-        reserves_id: PublicKey,
+        reserves_id: String,
         change_type: String,
         member_pubkey: PublicKey,
         new_members: Vec<PublicKey>,
@@ -974,13 +987,13 @@ pub enum CoordinationResponseMsg {
 }
 
 impl CoordinationResponseMsg {
-    pub fn reserves_id(&self) -> Option<PublicKey> {
+    pub fn reserves_id(&self) -> Option<String> {
         match self {
             Self::InvoiceCosigned { .. } => None,
-            Self::CollateralConsentResponse { reserves_id, .. } => Some(*reserves_id),
+            Self::CollateralConsentResponse { reserves_id, .. } => Some(reserves_id.clone()),
             Self::QuorumJoinResponse { .. } => None,
-            Self::QuorumStateSync { reserves_id, .. } => Some(*reserves_id),
-            Self::QuorumMembershipChange { reserves_id, .. } => Some(*reserves_id),
+            Self::QuorumStateSync { reserves_id, .. } => Some(reserves_id.clone()),
+            Self::QuorumMembershipChange { reserves_id, .. } => Some(reserves_id.clone()),
             Self::AcceptReserves { .. } => None, // Channel-level, not ledger-level
         }
     }
@@ -1270,11 +1283,10 @@ impl BinaryCodec for LedgerOperation {
     fn write_to<W: Write>(&self, w: &mut W) -> Result<(), CodecError> {
         write_u8(w, self.discriminant())?;
         match self {
-            Self::LedgerOpen { operator_id, reserves_id, ledger_address, reserves_amount, collateral_enforcement_block } => {
+            Self::LedgerOpen { operator_id, reserves_id, ledger_address, collateral_enforcement_block } => {
                 write_pubkey(w, operator_id)?;
-                write_pubkey(w, reserves_id)?;
+                write_string(w, reserves_id)?;
                 write_string(w, ledger_address)?;
-                write_u64(w, *reserves_amount)?;
                 write_u64(w, *collateral_enforcement_block)?;
             }
             Self::ReservesIncrease { new_amount } => write_u64(w, *new_amount)?,
@@ -1291,47 +1303,57 @@ impl BinaryCodec for LedgerOperation {
                 write_pubkey(w, pubkey)?;
                 new_fees.write_to(w)?;
             }
-            Self::TransferLock { pubkey, amount, transfer_id } => {
-                write_pubkey(w, pubkey)?;
-                write_u64(w, *amount)?;
-                write_32(w, transfer_id)?;
-            }
-            Self::TransferFail { pubkey, transfer_id } => {
-                write_pubkey(w, pubkey)?;
-                write_32(w, transfer_id)?;
-            }
-            Self::TransferFulfill { pubkey, amount, transfer_id } => {
-                write_pubkey(w, pubkey)?;
-                write_u64(w, *amount)?;
-                write_32(w, transfer_id)?;
-            }
-            Self::PaymentCredit { payment_hash, deposit_pubkey, amount, invoice_id, sequence_number } => {
+            Self::InvoiceCredit { payment_hash, deposit_pubkey, amount, invoice_id, sequence_number } => {
                 write_32(w, payment_hash)?;
                 write_pubkey(w, deposit_pubkey)?;
                 write_u64(w, *amount)?;
                 write_string(w, invoice_id)?;
                 write_u64(w, *sequence_number)?;
             }
-            Self::PaymentLock { pubkey, amount, payment_id, sequence_number, scriptpubkey_signature } => {
+            Self::InvoiceLock { pubkey, amount, payment_id, sequence_number, scriptpubkey_signature } => {
                 write_pubkey(w, pubkey)?;
                 write_u64(w, *amount)?;
                 write_32(w, payment_id)?;
                 write_u64(w, *sequence_number)?;
                 write_64(w, scriptpubkey_signature)?;
             }
-            Self::PaymentFail { pubkey, amount, payment_id, sequence_number } => {
+            Self::InvoiceFail { pubkey, amount, payment_id, sequence_number } => {
                 write_pubkey(w, pubkey)?;
                 write_u64(w, *amount)?;
                 write_32(w, payment_id)?;
                 write_u64(w, *sequence_number)?;
             }
-            Self::PaymentFulfill { pubkey, amount, payment_id, sequence_number, scriptpubkey_signature, preimage } => {
+            Self::InvoiceFulfill { pubkey, amount, payment_id, sequence_number, scriptpubkey_signature, preimage } => {
                 write_pubkey(w, pubkey)?;
                 write_u64(w, *amount)?;
                 write_32(w, payment_id)?;
                 write_u64(w, *sequence_number)?;
                 write_64(w, scriptpubkey_signature)?;
                 write_32(w, preimage)?;
+            }
+            Self::OnchainCredit { txid, vout, deposit_pubkey, amount, funding_address } => {
+                write_32(w, txid)?;
+                write_u32(w, *vout)?;
+                write_pubkey(w, deposit_pubkey)?;
+                write_u64(w, *amount)?;
+                write_string(w, funding_address)?;
+            }
+            Self::OnchainLock { deposit_pubkey, amount, destination_address, withdrawal_id } => {
+                write_pubkey(w, deposit_pubkey)?;
+                write_u64(w, *amount)?;
+                write_string(w, destination_address)?;
+                write_32(w, withdrawal_id)?;
+            }
+            Self::OnchainFail { deposit_pubkey, withdrawal_id } => {
+                write_pubkey(w, deposit_pubkey)?;
+                write_32(w, withdrawal_id)?;
+            }
+            Self::OnchainFulfill { deposit_pubkey, withdrawal_id, amount, txid, destination_address } => {
+                write_pubkey(w, deposit_pubkey)?;
+                write_32(w, withdrawal_id)?;
+                write_u64(w, *amount)?;
+                write_32(w, txid)?;
+                write_string(w, destination_address)?;
             }
             Self::CollateralIncrease { new_amount, block_height } => {
                 write_u64(w, *new_amount)?;
@@ -1341,8 +1363,9 @@ impl BinaryCodec for LedgerOperation {
                 write_u64(w, *new_amount)?;
                 write_u32(w, *block_height)?;
             }
-            Self::CollateralAttestation { collateral_operator, amount, block_height, signature, ledger_hash } => {
+            Self::CollateralAttestation { collateral_operator, collateral_partner, amount, block_height, signature, ledger_hash } => {
                 write_pubkey(w, collateral_operator)?;
+                write_pubkey(w, collateral_partner)?;
                 write_u64(w, *amount)?;
                 write_u32(w, *block_height)?;
                 write_64(w, signature)?;
@@ -1377,9 +1400,8 @@ impl BinaryCodec for LedgerOperation {
             // LedgerOpen (1)
             1 => Ok(Self::LedgerOpen {
                 operator_id: read_pubkey(r)?,
-                reserves_id: read_pubkey(r)?,
+                reserves_id: read_string(r)?,
                 ledger_address: read_string(r)?,
-                reserves_amount: read_u64(r)?,
                 collateral_enforcement_block: read_u64(r)?,
             }),
             // Reserves operations (10-11)
@@ -1398,48 +1420,59 @@ impl BinaryCodec for LedgerOperation {
                 pubkey: read_pubkey(r)?,
                 new_fees: FeeStructure::read_from(r)?,
             }),
-            23 => Ok(Self::TransferLock {
-                pubkey: read_pubkey(r)?,
-                amount: read_u64(r)?,
-                transfer_id: read_32(r)?,
-            }),
-            24 => Ok(Self::TransferFail {
-                pubkey: read_pubkey(r)?,
-                transfer_id: read_32(r)?,
-            }),
-            25 => Ok(Self::TransferFulfill {
-                pubkey: read_pubkey(r)?,
-                amount: read_u64(r)?,
-                transfer_id: read_32(r)?,
-            }),
-            // Payment operations (30-33)
-            30 => Ok(Self::PaymentCredit {
+            // Invoice operations (30-33)
+            30 => Ok(Self::InvoiceCredit {
                 payment_hash: read_32(r)?,
                 deposit_pubkey: read_pubkey(r)?,
                 amount: read_u64(r)?,
                 invoice_id: read_string(r)?,
                 sequence_number: read_u64(r)?,
             }),
-            31 => Ok(Self::PaymentLock {
+            31 => Ok(Self::InvoiceLock {
                 pubkey: read_pubkey(r)?,
                 amount: read_u64(r)?,
                 payment_id: read_32(r)?,
                 sequence_number: read_u64(r)?,
                 scriptpubkey_signature: read_64(r)?,
             }),
-            32 => Ok(Self::PaymentFail {
+            32 => Ok(Self::InvoiceFail {
                 pubkey: read_pubkey(r)?,
                 amount: read_u64(r)?,
                 payment_id: read_32(r)?,
                 sequence_number: read_u64(r)?,
             }),
-            33 => Ok(Self::PaymentFulfill {
+            33 => Ok(Self::InvoiceFulfill {
                 pubkey: read_pubkey(r)?,
                 amount: read_u64(r)?,
                 payment_id: read_32(r)?,
                 sequence_number: read_u64(r)?,
                 scriptpubkey_signature: read_64(r)?,
                 preimage: read_32(r)?,
+            }),
+            // Onchain operations (35-38)
+            35 => Ok(Self::OnchainCredit {
+                txid: read_32(r)?,
+                vout: read_u32(r)?,
+                deposit_pubkey: read_pubkey(r)?,
+                amount: read_u64(r)?,
+                funding_address: read_string(r)?,
+            }),
+            36 => Ok(Self::OnchainLock {
+                deposit_pubkey: read_pubkey(r)?,
+                amount: read_u64(r)?,
+                destination_address: read_string(r)?,
+                withdrawal_id: read_32(r)?,
+            }),
+            37 => Ok(Self::OnchainFail {
+                deposit_pubkey: read_pubkey(r)?,
+                withdrawal_id: read_32(r)?,
+            }),
+            38 => Ok(Self::OnchainFulfill {
+                deposit_pubkey: read_pubkey(r)?,
+                withdrawal_id: read_32(r)?,
+                amount: read_u64(r)?,
+                txid: read_32(r)?,
+                destination_address: read_string(r)?,
             }),
             // Collateral operations (40-44)
             40 => Ok(Self::CollateralIncrease {
@@ -1452,6 +1485,7 @@ impl BinaryCodec for LedgerOperation {
             }),
             42 => Ok(Self::CollateralAttestation {
                 collateral_operator: read_pubkey(r)?,
+                collateral_partner: read_pubkey(r)?,
                 amount: read_u64(r)?,
                 block_height: read_u32(r)?,
                 signature: read_64(r)?,
@@ -1487,7 +1521,7 @@ impl BinaryCodec for LedgerOperation {
 impl BinaryCodec for LedgerUpdateMsg {
     fn write_to<W: Write>(&self, w: &mut W) -> Result<(), CodecError> {
         write_pubkey(w, &self.operator_id)?;
-        write_pubkey(w, &self.reserves_id)?;
+        write_string(w, &self.reserves_id)?;
         self.operation.write_to(w)?;
         write_u64(w, self.sequence_number)?;
         write_32(w, &self.previous_hash)?;
@@ -1499,7 +1533,7 @@ impl BinaryCodec for LedgerUpdateMsg {
     fn read_from<R: Read>(r: &mut R) -> Result<Self, CodecError> {
         Ok(Self {
             operator_id: read_pubkey(r)?,
-            reserves_id: read_pubkey(r)?,
+            reserves_id: read_string(r)?,
             operation: LedgerOperation::read_from(r)?,
             sequence_number: read_u64(r)?,
             previous_hash: read_32(r)?,
@@ -1515,7 +1549,7 @@ impl BinaryCodec for StorageSignedLedgerUpdate {
         write_bytes(w, &self.message)?;
         write_u16(w, self.message_type)?;
         write_pubkey(w, &self.operator_id)?;
-        write_pubkey(w, &self.reserves_id)?;
+        write_string(w, &self.reserves_id)?;
         write_u64(w, self.sequence_number)?;
         write_32(w, &self.previous_hash)?;
         write_32(w, &self.current_hash)?;
@@ -1530,7 +1564,7 @@ impl BinaryCodec for StorageSignedLedgerUpdate {
             message: read_bytes(r)?,
             message_type: read_u16(r)?,
             operator_id: read_pubkey(r)?,
-            reserves_id: read_pubkey(r)?,
+            reserves_id: read_string(r)?,
             sequence_number: read_u64(r)?,
             previous_hash: read_32(r)?,
             current_hash: read_32(r)?,
@@ -1547,7 +1581,7 @@ impl DepositsMessage {
         match self {
             Self::LedgerUpdate(m) => {
                 write_pubkey(w, &m.operator_id)?;
-                write_pubkey(w, &m.reserves_id)?;
+                write_string(w, &m.reserves_id)?;
                 m.operation.write_to(w)?;
                 write_u64(w, m.sequence_number)?;
                 write_32(w, &m.previous_hash)?;
@@ -1556,7 +1590,7 @@ impl DepositsMessage {
             }
             Self::LedgerUpdateResponse(m) => {
                 write_pubkey(w, &m.operator_id)?;
-                write_pubkey(w, &m.reserves_id)?;
+                write_string(w, &m.reserves_id)?;
                 write_32(w, &m.request_hash)?;
                 write_bool(w, m.accepted)?;
                 write_option(w, &m.error, |w, s| write_string(w, s))?;
@@ -1569,11 +1603,9 @@ impl DepositsMessage {
                 write_u16(w, m.min_protocol_version)?;
                 write_u32(w, m.features)?;
                 write_pubkey(w, &m.operator_id)?;
-                write_pubkey(w, &m.reserves_id)?;
-                write_string(w, &m.ledger_address)?;
+                write_string(w, &m.reserves_id)?;
                 write_32(w, &m.funding_txid)?;
                 write_u16(w, m.funding_vout)?;
-                write_u64(w, m.reserves_amount)?;
                 write_u64(w, m.collateral_enforcement_block)?;
             }
             Self::HandshakeResponse(m) => {
@@ -1581,17 +1613,17 @@ impl DepositsMessage {
                 write_u16(w, m.protocol_version)?;
                 write_bool(w, m.accepted)?;
                 write_option(w, &m.error, |w, s| write_string(w, s))?;
-                write_pubkey(w, &m.reserves_id)?;
+                write_string(w, &m.reserves_id)?;
             }
             Self::Sync(m) => {
                 write_pubkey(w, &m.operator_id)?;
-                write_pubkey(w, &m.reserves_id)?;
+                write_string(w, &m.reserves_id)?;
                 write_u64(w, m.last_known_sequence)?;
                 write_32(w, &m.last_known_hash)?;
             }
             Self::SyncResponse(m) => {
                 write_pubkey(w, &m.operator_id)?;
-                write_pubkey(w, &m.reserves_id)?;
+                write_string(w, &m.reserves_id)?;
                 write_32(w, &m.request_hash)?;
                 write_vec(w, &m.updates, |w, u| u.write_to(w))?;
                 write_u64(w, m.current_sequence)?;
@@ -1606,14 +1638,14 @@ impl DepositsMessage {
             Self::ReservesAddOutput(m) => {
                 write_u64(w, m.initial_amount)?;
                 write_pubkey(w, &m.spend_to)?;
-                write_pubkey(w, &m.reserves_id)?;
+                write_string(w, &m.reserves_id)?;
                 write_u16(w, m.collateral_partners.len() as u16)?;
                 for pk in &m.collateral_partners {
                     write_pubkey(w, pk)?;
                 }
             }
             Self::ReservesRemoveOutput(m) => {
-                write_pubkey(w, &m.reserves_id)?;
+                write_string(w, &m.reserves_id)?;
                 write_bool(w, m.remove_all)?;
             }
         }
@@ -1624,7 +1656,7 @@ impl DepositsMessage {
         match message_type {
             LEDGER_UPDATE => Ok(Self::LedgerUpdate(LedgerUpdateMsg {
                 operator_id: read_pubkey(r)?,
-                reserves_id: read_pubkey(r)?,
+                reserves_id: read_string(r)?,
                 operation: LedgerOperation::read_from(r)?,
                 sequence_number: read_u64(r)?,
                 previous_hash: read_32(r)?,
@@ -1633,7 +1665,7 @@ impl DepositsMessage {
             })),
             LEDGER_UPDATE_RESPONSE => Ok(Self::LedgerUpdateResponse(LedgerUpdateResponseMsg {
                 operator_id: read_pubkey(r)?,
-                reserves_id: read_pubkey(r)?,
+                reserves_id: read_string(r)?,
                 request_hash: read_32(r)?,
                 accepted: read_bool(r)?,
                 error: read_option(r, read_string)?,
@@ -1646,11 +1678,9 @@ impl DepositsMessage {
                 min_protocol_version: read_u16(r)?,
                 features: read_u32(r)?,
                 operator_id: read_pubkey(r)?,
-                reserves_id: read_pubkey(r)?,
-                ledger_address: read_string(r)?,
+                reserves_id: read_string(r)?,
                 funding_txid: read_32(r)?,
                 funding_vout: read_u16(r)?,
-                reserves_amount: read_u64(r)?,
                 collateral_enforcement_block: read_u64(r)?,
             })),
             HANDSHAKE_RESPONSE => Ok(Self::HandshakeResponse(HandshakeResponseMsg {
@@ -1658,17 +1688,17 @@ impl DepositsMessage {
                 protocol_version: read_u16(r)?,
                 accepted: read_bool(r)?,
                 error: read_option(r, read_string)?,
-                reserves_id: read_pubkey(r)?,
+                reserves_id: read_string(r)?,
             })),
             SYNC => Ok(Self::Sync(SyncMsg {
                 operator_id: read_pubkey(r)?,
-                reserves_id: read_pubkey(r)?,
+                reserves_id: read_string(r)?,
                 last_known_sequence: read_u64(r)?,
                 last_known_hash: read_32(r)?,
             })),
             SYNC_RESPONSE => Ok(Self::SyncResponse(SyncResponseMsg {
                 operator_id: read_pubkey(r)?,
-                reserves_id: read_pubkey(r)?,
+                reserves_id: read_string(r)?,
                 request_hash: read_32(r)?,
                 updates: read_vec(r, StorageSignedLedgerUpdate::read_from)?,
                 current_sequence: read_u64(r)?,
@@ -1683,7 +1713,7 @@ impl DepositsMessage {
             RESERVES_ADD_OUTPUT => {
                 let initial_amount = read_u64(r)?;
                 let spend_to = read_pubkey(r)?;
-                let reserves_id = read_pubkey(r)?;
+                let reserves_id = read_string(r)?;
                 let count = read_u16(r)? as usize;
                 let mut collateral_partners = Vec::with_capacity(count);
                 for _ in 0..count {
@@ -1697,7 +1727,7 @@ impl DepositsMessage {
                 }))
             }
             RESERVES_REMOVE_OUTPUT => {
-                let reserves_id = read_pubkey(r)?;
+                let reserves_id = read_string(r)?;
                 let remove_all = read_bool(r)?;
                 Ok(Self::ReservesRemoveOutput(crate::wire_messages::ReservesRemoveOutputMsg {
                     reserves_id,
@@ -1866,7 +1896,7 @@ impl BinaryCodec for CoordinationMsg {
             Self::CosignInvoice { operator_id, reserves_id, amount, payment_hash, expires, assigned_deposit, invoice_id, bolt11_invoice } => {
                 write_u8(w, 0)?;
                 write_pubkey(w, operator_id)?;
-                write_pubkey(w, reserves_id)?;
+                write_string(w, reserves_id)?;
                 write_u64(w, *amount)?;
                 write_32(w, payment_hash)?;
                 write_u64(w, *expires)?;
@@ -1877,14 +1907,14 @@ impl BinaryCodec for CoordinationMsg {
             Self::CollateralConsentRequest { operator_id, reserves_id, operator_signature } => {
                 write_u8(w, 1)?;
                 write_pubkey(w, operator_id)?;
-                write_pubkey(w, reserves_id)?;
+                write_string(w, reserves_id)?;
                 write_64(w, operator_signature)?;
             }
             Self::QuorumJoinRequest { requester_pubkey, operator_id, reserves_id, protocol_version, timestamp, signature } => {
                 write_u8(w, 2)?;
                 write_pubkey(w, requester_pubkey)?;
                 write_pubkey(w, operator_id)?;
-                write_pubkey(w, reserves_id)?;
+                write_string(w, reserves_id)?;
                 write_u16(w, *protocol_version)?;
                 write_u64(w, *timestamp)?;
                 write_64(w, signature)?;
@@ -1893,7 +1923,7 @@ impl BinaryCodec for CoordinationMsg {
                 write_u8(w, 3)?;
                 write_32(w, vote_round_id)?;
                 write_pubkey(w, operator_id)?;
-                write_pubkey(w, reserves_id)?;
+                write_string(w, reserves_id)?;
                 write_u64(w, *sequence_number)?;
                 write_32(w, state_hash)?;
                 write_u64(w, *claimed_reserves)?;
@@ -1930,7 +1960,7 @@ impl BinaryCodec for CoordinationMsg {
         match read_u8(r)? {
             0 => Ok(Self::CosignInvoice {
                 operator_id: read_pubkey(r)?,
-                reserves_id: read_pubkey(r)?,
+                reserves_id: read_string(r)?,
                 amount: read_u64(r)?,
                 payment_hash: read_32(r)?,
                 expires: read_u64(r)?,
@@ -1940,13 +1970,13 @@ impl BinaryCodec for CoordinationMsg {
             }),
             1 => Ok(Self::CollateralConsentRequest {
                 operator_id: read_pubkey(r)?,
-                reserves_id: read_pubkey(r)?,
+                reserves_id: read_string(r)?,
                 operator_signature: read_64(r)?,
             }),
             2 => Ok(Self::QuorumJoinRequest {
                 requester_pubkey: read_pubkey(r)?,
                 operator_id: read_pubkey(r)?,
-                reserves_id: read_pubkey(r)?,
+                reserves_id: read_string(r)?,
                 protocol_version: read_u16(r)?,
                 timestamp: read_u64(r)?,
                 signature: read_64(r)?,
@@ -1954,7 +1984,7 @@ impl BinaryCodec for CoordinationMsg {
             3 => Ok(Self::QuorumVoteRequest {
                 vote_round_id: read_32(r)?,
                 operator_id: read_pubkey(r)?,
-                reserves_id: read_pubkey(r)?,
+                reserves_id: read_string(r)?,
                 sequence_number: read_u64(r)?,
                 state_hash: read_32(r)?,
                 claimed_reserves: read_u64(r)?,
@@ -1999,7 +2029,7 @@ impl BinaryCodec for CoordinationResponseMsg {
                 write_u8(w, 1)?;
                 write_32(w, request_hash)?;
                 write_pubkey(w, operator_id)?;
-                write_pubkey(w, reserves_id)?;
+                write_string(w, reserves_id)?;
                 write_bool(w, *consent_granted)?;
                 write_64(w, collateral_partner_signature)?;
             }
@@ -2017,7 +2047,7 @@ impl BinaryCodec for CoordinationResponseMsg {
                 write_u8(w, 3)?;
                 write_32(w, request_hash)?;
                 write_pubkey(w, operator_id)?;
-                write_pubkey(w, reserves_id)?;
+                write_string(w, reserves_id)?;
                 write_vec(w, updates, |w, u| u.write_to(w))?;
                 write_u64(w, *start_sequence)?;
                 write_bool(w, *is_final)?;
@@ -2026,7 +2056,7 @@ impl BinaryCodec for CoordinationResponseMsg {
                 write_u8(w, 4)?;
                 write_32(w, request_hash)?;
                 write_pubkey(w, operator_id)?;
-                write_pubkey(w, reserves_id)?;
+                write_string(w, reserves_id)?;
                 write_string(w, change_type)?;
                 write_pubkey(w, member_pubkey)?;
                 write_vec(w, new_members, |w, pk| write_pubkey(w, pk))?;
@@ -2051,7 +2081,7 @@ impl BinaryCodec for CoordinationResponseMsg {
             1 => Ok(Self::CollateralConsentResponse {
                 request_hash: read_32(r)?,
                 operator_id: read_pubkey(r)?,
-                reserves_id: read_pubkey(r)?,
+                reserves_id: read_string(r)?,
                 consent_granted: read_bool(r)?,
                 collateral_partner_signature: read_64(r)?,
             }),
@@ -2067,7 +2097,7 @@ impl BinaryCodec for CoordinationResponseMsg {
             3 => Ok(Self::QuorumStateSync {
                 request_hash: read_32(r)?,
                 operator_id: read_pubkey(r)?,
-                reserves_id: read_pubkey(r)?,
+                reserves_id: read_string(r)?,
                 updates: read_vec(r, StorageSignedLedgerUpdate::read_from)?,
                 start_sequence: read_u64(r)?,
                 is_final: read_bool(r)?,
@@ -2075,7 +2105,7 @@ impl BinaryCodec for CoordinationResponseMsg {
             4 => Ok(Self::QuorumMembershipChange {
                 request_hash: read_32(r)?,
                 operator_id: read_pubkey(r)?,
-                reserves_id: read_pubkey(r)?,
+                reserves_id: read_string(r)?,
                 change_type: read_string(r)?,
                 member_pubkey: read_pubkey(r)?,
                 new_members: read_vec(r, read_pubkey)?,
@@ -2194,7 +2224,6 @@ mod ledger_op_tlv {
     pub const INVOICE: u64 = 16;
     pub const COSIGNER_SIG: u64 = 18;
     pub const NEW_FEES: u64 = 20;
-    pub const TRANSFER_ID: u64 = 22;
     pub const DEPOSIT_PUBKEY: u64 = 24;
     pub const INVOICE_ID: u64 = 26;
     pub const SEQUENCE_NUMBER: u64 = 28;
@@ -2217,6 +2246,12 @@ mod ledger_op_tlv {
     pub const LEDGER_ADDRESS: u64 = 60;
     pub const RESERVES_AMOUNT: u64 = 62;
     pub const ENFORCEMENT_BLOCK: u64 = 64;
+    // Onchain operation fields
+    pub const TXID: u64 = 66;
+    pub const VOUT: u64 = 68;
+    pub const DESTINATION_ADDRESS: u64 = 70;
+    pub const WITHDRAWAL_ID: u64 = 72;
+    pub const FUNDING_ADDRESS: u64 = 74;
 }
 
 impl TlvEncode for LedgerOperation {
@@ -2226,12 +2261,11 @@ impl TlvEncode for LedgerOperation {
         let mut builder = TlvBuilder::new().u8_field(DISCRIMINANT, self.discriminant());
 
         match self {
-            Self::LedgerOpen { operator_id, reserves_id, ledger_address, reserves_amount, collateral_enforcement_block } => {
+            Self::LedgerOpen { operator_id, reserves_id, ledger_address, collateral_enforcement_block } => {
                 builder = builder
                     .pubkey_field(OPERATOR_ID, operator_id)
-                    .pubkey_field(RESERVES_ID, reserves_id)
+                    .string_field(RESERVES_ID, reserves_id)
                     .string_field(LEDGER_ADDRESS, ledger_address)
-                    .u64_field(RESERVES_AMOUNT, *reserves_amount)
                     .u64_field(ENFORCEMENT_BLOCK, *collateral_enforcement_block);
             }
             Self::ReservesIncrease { new_amount } => {
@@ -2263,24 +2297,7 @@ impl TlvEncode for LedgerOperation {
                     .pubkey_field(PUBKEY, pubkey)
                     .nested(NEW_FEES, new_fees);
             }
-            Self::TransferLock { pubkey, amount, transfer_id } => {
-                builder = builder
-                    .pubkey_field(PUBKEY, pubkey)
-                    .u64_field(AMOUNT, *amount)
-                    .bytes_field(TRANSFER_ID, transfer_id);
-            }
-            Self::TransferFail { pubkey, transfer_id } => {
-                builder = builder
-                    .pubkey_field(PUBKEY, pubkey)
-                    .bytes_field(TRANSFER_ID, transfer_id);
-            }
-            Self::TransferFulfill { pubkey, amount, transfer_id } => {
-                builder = builder
-                    .pubkey_field(PUBKEY, pubkey)
-                    .u64_field(AMOUNT, *amount)
-                    .bytes_field(TRANSFER_ID, transfer_id);
-            }
-            Self::PaymentCredit { payment_hash, deposit_pubkey, amount, invoice_id, sequence_number } => {
+            Self::InvoiceCredit { payment_hash, deposit_pubkey, amount, invoice_id, sequence_number } => {
                 builder = builder
                     .bytes_field(PAYMENT_HASH, payment_hash)
                     .pubkey_field(DEPOSIT_PUBKEY, deposit_pubkey)
@@ -2288,7 +2305,7 @@ impl TlvEncode for LedgerOperation {
                     .string_field(INVOICE_ID, invoice_id)
                     .u64_field(SEQUENCE_NUMBER, *sequence_number);
             }
-            Self::PaymentLock { pubkey, amount, payment_id, sequence_number, scriptpubkey_signature } => {
+            Self::InvoiceLock { pubkey, amount, payment_id, sequence_number, scriptpubkey_signature } => {
                 builder = builder
                     .pubkey_field(PUBKEY, pubkey)
                     .u64_field(AMOUNT, *amount)
@@ -2296,14 +2313,14 @@ impl TlvEncode for LedgerOperation {
                     .u64_field(SEQUENCE_NUMBER, *sequence_number)
                     .bytes_field(SCRIPTPUBKEY_SIG, scriptpubkey_signature);
             }
-            Self::PaymentFail { pubkey, amount, payment_id, sequence_number } => {
+            Self::InvoiceFail { pubkey, amount, payment_id, sequence_number } => {
                 builder = builder
                     .pubkey_field(PUBKEY, pubkey)
                     .u64_field(AMOUNT, *amount)
                     .bytes_field(PAYMENT_ID, payment_id)
                     .u64_field(SEQUENCE_NUMBER, *sequence_number);
             }
-            Self::PaymentFulfill { pubkey, amount, payment_id, sequence_number, scriptpubkey_signature, preimage } => {
+            Self::InvoiceFulfill { pubkey, amount, payment_id, sequence_number, scriptpubkey_signature, preimage } => {
                 builder = builder
                     .pubkey_field(PUBKEY, pubkey)
                     .u64_field(AMOUNT, *amount)
@@ -2311,6 +2328,34 @@ impl TlvEncode for LedgerOperation {
                     .u64_field(SEQUENCE_NUMBER, *sequence_number)
                     .bytes_field(SCRIPTPUBKEY_SIG, scriptpubkey_signature)
                     .bytes_field(PREIMAGE, preimage);
+            }
+            Self::OnchainCredit { txid, vout, deposit_pubkey, amount, funding_address } => {
+                builder = builder
+                    .bytes_field(TXID, txid)
+                    .u32_field(VOUT, *vout)
+                    .pubkey_field(DEPOSIT_PUBKEY, deposit_pubkey)
+                    .u64_field(AMOUNT, *amount)
+                    .string_field(FUNDING_ADDRESS, funding_address);
+            }
+            Self::OnchainLock { deposit_pubkey, amount, destination_address, withdrawal_id } => {
+                builder = builder
+                    .pubkey_field(DEPOSIT_PUBKEY, deposit_pubkey)
+                    .u64_field(AMOUNT, *amount)
+                    .string_field(DESTINATION_ADDRESS, destination_address)
+                    .bytes_field(WITHDRAWAL_ID, withdrawal_id);
+            }
+            Self::OnchainFail { deposit_pubkey, withdrawal_id } => {
+                builder = builder
+                    .pubkey_field(DEPOSIT_PUBKEY, deposit_pubkey)
+                    .bytes_field(WITHDRAWAL_ID, withdrawal_id);
+            }
+            Self::OnchainFulfill { deposit_pubkey, withdrawal_id, amount, txid, destination_address } => {
+                builder = builder
+                    .pubkey_field(DEPOSIT_PUBKEY, deposit_pubkey)
+                    .bytes_field(WITHDRAWAL_ID, withdrawal_id)
+                    .u64_field(AMOUNT, *amount)
+                    .bytes_field(TXID, txid)
+                    .string_field(DESTINATION_ADDRESS, destination_address);
             }
             Self::CollateralIncrease { new_amount, block_height } => {
                 builder = builder
@@ -2322,9 +2367,10 @@ impl TlvEncode for LedgerOperation {
                     .u64_field(NEW_AMOUNT, *new_amount)
                     .u32_field(BLOCK_HEIGHT, *block_height);
             }
-            Self::CollateralAttestation { collateral_operator, amount, block_height, signature, ledger_hash } => {
+            Self::CollateralAttestation { collateral_operator, collateral_partner, amount, block_height, signature, ledger_hash } => {
                 builder = builder
                     .pubkey_field(COLLATERAL_OPERATOR, collateral_operator)
+                    .pubkey_field(COLLATERAL_PARTNER, collateral_partner)
                     .u64_field(AMOUNT, *amount)
                     .u32_field(BLOCK_HEIGHT, *block_height)
                     .bytes_field(SIGNATURE, signature)
@@ -2370,9 +2416,8 @@ impl TlvDecode for LedgerOperation {
         match discriminant {
             1 => Ok(Self::LedgerOpen {
                 operator_id: reader.read_pubkey(OPERATOR_ID)?,
-                reserves_id: reader.read_pubkey(RESERVES_ID)?,
+                reserves_id: reader.read_string(RESERVES_ID)?,
                 ledger_address: reader.read_string(LEDGER_ADDRESS)?,
-                reserves_amount: reader.read_u64(RESERVES_AMOUNT)?,
                 collateral_enforcement_block: reader.read_u64_opt(ENFORCEMENT_BLOCK)?.unwrap_or(0),
             }),
             10 => Ok(Self::ReservesIncrease { new_amount: reader.read_u64(NEW_AMOUNT)? }),
@@ -2389,47 +2434,57 @@ impl TlvDecode for LedgerOperation {
                 pubkey: reader.read_pubkey(PUBKEY)?,
                 new_fees: reader.read_nested(NEW_FEES)?,
             }),
-            23 => Ok(Self::TransferLock {
-                pubkey: reader.read_pubkey(PUBKEY)?,
-                amount: reader.read_u64(AMOUNT)?,
-                transfer_id: reader.read_bytes(TRANSFER_ID)?,
-            }),
-            24 => Ok(Self::TransferFail {
-                pubkey: reader.read_pubkey(PUBKEY)?,
-                transfer_id: reader.read_bytes(TRANSFER_ID)?,
-            }),
-            25 => Ok(Self::TransferFulfill {
-                pubkey: reader.read_pubkey(PUBKEY)?,
-                amount: reader.read_u64(AMOUNT)?,
-                transfer_id: reader.read_bytes(TRANSFER_ID)?,
-            }),
-            30 => Ok(Self::PaymentCredit {
+            30 => Ok(Self::InvoiceCredit {
                 payment_hash: reader.read_bytes(PAYMENT_HASH)?,
                 deposit_pubkey: reader.read_pubkey(DEPOSIT_PUBKEY)?,
                 amount: reader.read_u64(AMOUNT)?,
                 invoice_id: reader.read_string(INVOICE_ID)?,
                 sequence_number: reader.read_u64(SEQUENCE_NUMBER)?,
             }),
-            31 => Ok(Self::PaymentLock {
+            31 => Ok(Self::InvoiceLock {
                 pubkey: reader.read_pubkey(PUBKEY)?,
                 amount: reader.read_u64(AMOUNT)?,
                 payment_id: reader.read_bytes(PAYMENT_ID)?,
                 sequence_number: reader.read_u64(SEQUENCE_NUMBER)?,
                 scriptpubkey_signature: reader.read_bytes(SCRIPTPUBKEY_SIG)?,
             }),
-            32 => Ok(Self::PaymentFail {
+            32 => Ok(Self::InvoiceFail {
                 pubkey: reader.read_pubkey(PUBKEY)?,
                 amount: reader.read_u64(AMOUNT)?,
                 payment_id: reader.read_bytes(PAYMENT_ID)?,
                 sequence_number: reader.read_u64(SEQUENCE_NUMBER)?,
             }),
-            33 => Ok(Self::PaymentFulfill {
+            33 => Ok(Self::InvoiceFulfill {
                 pubkey: reader.read_pubkey(PUBKEY)?,
                 amount: reader.read_u64(AMOUNT)?,
                 payment_id: reader.read_bytes(PAYMENT_ID)?,
                 sequence_number: reader.read_u64(SEQUENCE_NUMBER)?,
                 scriptpubkey_signature: reader.read_bytes(SCRIPTPUBKEY_SIG)?,
                 preimage: reader.read_bytes(PREIMAGE)?,
+            }),
+            35 => Ok(Self::OnchainCredit {
+                txid: reader.read_bytes(TXID)?,
+                vout: reader.read_u32(VOUT)?,
+                deposit_pubkey: reader.read_pubkey(DEPOSIT_PUBKEY)?,
+                amount: reader.read_u64(AMOUNT)?,
+                funding_address: reader.read_string(FUNDING_ADDRESS)?,
+            }),
+            36 => Ok(Self::OnchainLock {
+                deposit_pubkey: reader.read_pubkey(DEPOSIT_PUBKEY)?,
+                amount: reader.read_u64(AMOUNT)?,
+                destination_address: reader.read_string(DESTINATION_ADDRESS)?,
+                withdrawal_id: reader.read_bytes(WITHDRAWAL_ID)?,
+            }),
+            37 => Ok(Self::OnchainFail {
+                deposit_pubkey: reader.read_pubkey(DEPOSIT_PUBKEY)?,
+                withdrawal_id: reader.read_bytes(WITHDRAWAL_ID)?,
+            }),
+            38 => Ok(Self::OnchainFulfill {
+                deposit_pubkey: reader.read_pubkey(DEPOSIT_PUBKEY)?,
+                withdrawal_id: reader.read_bytes(WITHDRAWAL_ID)?,
+                amount: reader.read_u64(AMOUNT)?,
+                txid: reader.read_bytes(TXID)?,
+                destination_address: reader.read_string(DESTINATION_ADDRESS)?,
             }),
             40 => Ok(Self::CollateralIncrease {
                 new_amount: reader.read_u64(NEW_AMOUNT)?,
@@ -2441,6 +2496,7 @@ impl TlvDecode for LedgerOperation {
             }),
             42 => Ok(Self::CollateralAttestation {
                 collateral_operator: reader.read_pubkey(COLLATERAL_OPERATOR)?,
+                collateral_partner: reader.read_pubkey(COLLATERAL_PARTNER)?,
                 amount: reader.read_u64(AMOUNT)?,
                 block_height: reader.read_u32(BLOCK_HEIGHT)?,
                 signature: reader.read_bytes(SIGNATURE)?,
@@ -2489,7 +2545,7 @@ impl TlvEncode for LedgerUpdateMsg {
         use ledger_update_tlv::*;
         TlvBuilder::new()
             .pubkey_field(OPERATOR_ID, &self.operator_id)
-            .pubkey_field(RESERVES_ID, &self.reserves_id)
+            .string_field(RESERVES_ID, &self.reserves_id)
             .nested(OPERATION, &self.operation)
             .u64_field(SEQUENCE_NUMBER, self.sequence_number)
             .bytes_field(PREVIOUS_HASH, &self.previous_hash)
@@ -2505,7 +2561,7 @@ impl TlvDecode for LedgerUpdateMsg {
         let reader = TlvReader::new(data)?;
         Ok(Self {
             operator_id: reader.read_pubkey(OPERATOR_ID)?,
-            reserves_id: reader.read_pubkey(RESERVES_ID)?,
+            reserves_id: reader.read_string(RESERVES_ID)?,
             operation: reader.read_nested(OPERATION)?,
             sequence_number: reader.read_u64(SEQUENCE_NUMBER)?,
             previous_hash: reader.read_bytes(PREVIOUS_HASH)?,
@@ -2532,7 +2588,7 @@ impl TlvEncode for LedgerUpdateResponseMsg {
         use ledger_response_tlv::*;
         let mut builder = TlvBuilder::new()
             .pubkey_field(OPERATOR_ID, &self.operator_id)
-            .pubkey_field(RESERVES_ID, &self.reserves_id)
+            .string_field(RESERVES_ID, &self.reserves_id)
             .bytes_field(REQUEST_HASH, &self.request_hash)
             .u8_field(ACCEPTED, if self.accepted { 1 } else { 0 });
 
@@ -2556,7 +2612,7 @@ impl TlvDecode for LedgerUpdateResponseMsg {
         let reader = TlvReader::new(data)?;
         Ok(Self {
             operator_id: reader.read_pubkey(OPERATOR_ID)?,
-            reserves_id: reader.read_pubkey(RESERVES_ID)?,
+            reserves_id: reader.read_string(RESERVES_ID)?,
             request_hash: reader.read_bytes(REQUEST_HASH)?,
             accepted: reader.read_u8(ACCEPTED)? != 0,
             error: reader.read_string_opt(ERROR)?,
@@ -2574,11 +2630,9 @@ mod handshake_tlv {
     pub const FEATURES: u64 = 4;
     pub const OPERATOR_PUBKEY: u64 = 6;
     pub const PARTNER_PUBKEY: u64 = 8;
-    pub const LEDGER_ADDRESS: u64 = 10;
-    pub const FUNDING_TXID: u64 = 12;
-    pub const FUNDING_VOUT: u64 = 14;
-    pub const RESERVES_AMOUNT: u64 = 16;
-    pub const COLLATERAL_ENFORCEMENT_BLOCK: u64 = 18;
+    pub const FUNDING_TXID: u64 = 10;
+    pub const FUNDING_VOUT: u64 = 12;
+    pub const COLLATERAL_ENFORCEMENT_BLOCK: u64 = 14;
 }
 
 impl TlvEncode for HandshakeMsg {
@@ -2589,11 +2643,9 @@ impl TlvEncode for HandshakeMsg {
             .u16_field(MIN_PROTOCOL_VERSION, self.min_protocol_version)
             .u32_field(FEATURES, self.features)
             .pubkey_field(OPERATOR_PUBKEY, &self.operator_id)
-            .pubkey_field(PARTNER_PUBKEY, &self.reserves_id)
-            .string_field(LEDGER_ADDRESS, &self.ledger_address)
+            .string_field(PARTNER_PUBKEY, &self.reserves_id)
             .bytes_field(FUNDING_TXID, &self.funding_txid)
             .u16_field(FUNDING_VOUT, self.funding_vout)
-            .u64_field(RESERVES_AMOUNT, self.reserves_amount)
             .u64_field(COLLATERAL_ENFORCEMENT_BLOCK, self.collateral_enforcement_block)
             .build()
     }
@@ -2608,11 +2660,9 @@ impl TlvDecode for HandshakeMsg {
             min_protocol_version: reader.read_u16(MIN_PROTOCOL_VERSION)?,
             features: reader.read_u32(FEATURES)?,
             operator_id: reader.read_pubkey(OPERATOR_PUBKEY)?,
-            reserves_id: reader.read_pubkey(PARTNER_PUBKEY)?,
-            ledger_address: reader.read_string(LEDGER_ADDRESS)?,
+            reserves_id: reader.read_string(PARTNER_PUBKEY)?,
             funding_txid: reader.read_bytes(FUNDING_TXID)?,
             funding_vout: reader.read_u16(FUNDING_VOUT)?,
-            reserves_amount: reader.read_u64_opt(RESERVES_AMOUNT)?.unwrap_or(0),
             collateral_enforcement_block: reader.read_u64_opt(COLLATERAL_ENFORCEMENT_BLOCK)?.unwrap_or(0),
         })
     }
@@ -2639,7 +2689,7 @@ impl TlvEncode for HandshakeResponseMsg {
             builder = builder.string_field(ERROR, err);
         }
 
-        builder.pubkey_field(PARTNER_PUBKEY, &self.reserves_id).build()
+        builder.string_field(PARTNER_PUBKEY, &self.reserves_id).build()
     }
 }
 
@@ -2652,7 +2702,7 @@ impl TlvDecode for HandshakeResponseMsg {
             protocol_version: reader.read_u16(PROTOCOL_VERSION)?,
             accepted: reader.read_u8(ACCEPTED)? != 0,
             error: reader.read_string_opt(ERROR)?,
-            reserves_id: reader.read_pubkey(PARTNER_PUBKEY)?,
+            reserves_id: reader.read_string(PARTNER_PUBKEY)?,
         })
     }
 }
@@ -2673,7 +2723,7 @@ impl TlvEncode for SyncMsg {
         use sync_msg_tlv::*;
         TlvBuilder::new()
             .pubkey_field(OPERATOR_ID, &self.operator_id)
-            .pubkey_field(RESERVES_ID, &self.reserves_id)
+            .string_field(RESERVES_ID, &self.reserves_id)
             .u64_field(LAST_KNOWN_SEQUENCE, self.last_known_sequence)
             .bytes_field(LAST_KNOWN_HASH, &self.last_known_hash)
             .build()
@@ -2686,7 +2736,7 @@ impl TlvDecode for SyncMsg {
         let reader = TlvReader::new(data)?;
         Ok(Self {
             operator_id: reader.read_pubkey(OPERATOR_ID)?,
-            reserves_id: reader.read_pubkey(RESERVES_ID)?,
+            reserves_id: reader.read_string(RESERVES_ID)?,
             last_known_sequence: reader.read_u64(LAST_KNOWN_SEQUENCE)?,
             last_known_hash: reader.read_bytes(LAST_KNOWN_HASH)?,
         })
@@ -2708,7 +2758,7 @@ impl TlvEncode for SyncResponseMsg {
         use sync_response_tlv::*;
         TlvBuilder::new()
             .pubkey_field(OPERATOR_ID, &self.operator_id)
-            .pubkey_field(RESERVES_ID, &self.reserves_id)
+            .string_field(RESERVES_ID, &self.reserves_id)
             .bytes_field(REQUEST_HASH, &self.request_hash)
             .vec_field(UPDATES, &self.updates)
             .u64_field(CURRENT_SEQUENCE, self.current_sequence)
@@ -2723,7 +2773,7 @@ impl TlvDecode for SyncResponseMsg {
         let reader = TlvReader::new(data)?;
         Ok(Self {
             operator_id: reader.read_pubkey(OPERATOR_ID)?,
-            reserves_id: reader.read_pubkey(RESERVES_ID)?,
+            reserves_id: reader.read_string(RESERVES_ID)?,
             request_hash: reader.read_bytes(REQUEST_HASH)?,
             updates: reader.read_vec(UPDATES)?,
             current_sequence: reader.read_u64(CURRENT_SEQUENCE)?,
@@ -3014,7 +3064,7 @@ impl TlvEncode for CoordinationMsg {
                 TlvBuilder::new()
                     .u8_field(DISCRIMINANT, 0)
                     .pubkey_field(OPERATOR_ID, operator_id)
-                    .pubkey_field(RESERVES_ID, reserves_id)
+                    .string_field(RESERVES_ID, reserves_id)
                     .u64_field(AMOUNT, *amount)
                     .bytes_field(PAYMENT_HASH, payment_hash)
                     .u64_field(EXPIRES, *expires)
@@ -3029,7 +3079,7 @@ impl TlvEncode for CoordinationMsg {
                 TlvBuilder::new()
                     .u8_field(DISCRIMINANT, 1)
                     .pubkey_field(OPERATOR_ID, operator_id)
-                    .pubkey_field(RESERVES_ID, reserves_id)
+                    .string_field(RESERVES_ID, reserves_id)
                     .bytes_field(OPERATOR_SIGNATURE, operator_signature)
                     .build()
             }
@@ -3041,7 +3091,7 @@ impl TlvEncode for CoordinationMsg {
                     .u8_field(DISCRIMINANT, 2)
                     .pubkey_field(REQUESTER_PUBKEY, requester_pubkey)
                     .pubkey_field(OPERATOR_ID, operator_id)
-                    .pubkey_field(RESERVES_ID, reserves_id)
+                    .string_field(RESERVES_ID, reserves_id)
                     .u16_field(PROTOCOL_VERSION, *protocol_version)
                     .u64_field(TIMESTAMP, *timestamp)
                     .bytes_field(SIGNATURE, signature)
@@ -3060,7 +3110,7 @@ impl TlvEncode for CoordinationMsg {
                     .u8_field(DISCRIMINANT, 3)
                     .bytes_field(VOTE_ROUND_ID, vote_round_id)
                     .pubkey_field(OPERATOR_ID, operator_id)
-                    .pubkey_field(RESERVES_ID, reserves_id)
+                    .string_field(RESERVES_ID, reserves_id)
                     .u64_field(SEQUENCE_NUMBER, *sequence_number)
                     .bytes_field(STATE_HASH, state_hash)
                     .u64_field(CLAIMED_RESERVES, *claimed_reserves)
@@ -3115,7 +3165,7 @@ impl TlvDecode for CoordinationMsg {
         match discriminant {
             0 => Ok(Self::CosignInvoice {
                 operator_id: reader.read_pubkey(OPERATOR_ID)?,
-                reserves_id: reader.read_pubkey(RESERVES_ID)?,
+                reserves_id: reader.read_string(RESERVES_ID)?,
                 amount: reader.read_u64(AMOUNT)?,
                 payment_hash: reader.read_bytes(PAYMENT_HASH)?,
                 expires: reader.read_u64(EXPIRES)?,
@@ -3125,13 +3175,13 @@ impl TlvDecode for CoordinationMsg {
             }),
             1 => Ok(Self::CollateralConsentRequest {
                 operator_id: reader.read_pubkey(OPERATOR_ID)?,
-                reserves_id: reader.read_pubkey(RESERVES_ID)?,
+                reserves_id: reader.read_string(RESERVES_ID)?,
                 operator_signature: reader.read_bytes(OPERATOR_SIGNATURE)?,
             }),
             2 => Ok(Self::QuorumJoinRequest {
                 requester_pubkey: reader.read_pubkey(REQUESTER_PUBKEY)?,
                 operator_id: reader.read_pubkey(OPERATOR_ID)?,
-                reserves_id: reader.read_pubkey(RESERVES_ID)?,
+                reserves_id: reader.read_string(RESERVES_ID)?,
                 protocol_version: reader.read_u16(PROTOCOL_VERSION)?,
                 timestamp: reader.read_u64(TIMESTAMP)?,
                 signature: reader.read_bytes(SIGNATURE)?,
@@ -3146,7 +3196,7 @@ impl TlvDecode for CoordinationMsg {
                 Ok(Self::QuorumVoteRequest {
                     vote_round_id: reader.read_bytes(VOTE_ROUND_ID)?,
                     operator_id: reader.read_pubkey(OPERATOR_ID)?,
-                    reserves_id: reader.read_pubkey(RESERVES_ID)?,
+                    reserves_id: reader.read_string(RESERVES_ID)?,
                     sequence_number: reader.read_u64(SEQUENCE_NUMBER)?,
                     state_hash: reader.read_bytes(STATE_HASH)?,
                     claimed_reserves: reader.read_u64(CLAIMED_RESERVES)?,
@@ -3228,7 +3278,7 @@ impl TlvEncode for CoordinationResponseMsg {
                     .u8_field(DISCRIMINANT, 1)
                     .bytes_field(REQUEST_HASH, request_hash)
                     .pubkey_field(OPERATOR_ID, operator_id)
-                    .pubkey_field(RESERVES_ID, reserves_id)
+                    .string_field(RESERVES_ID, reserves_id)
                     .u8_field(CONSENT_GRANTED, if *consent_granted { 1 } else { 0 })
                     .bytes_field(COLLATERAL_PARTNER_SIGNATURE, collateral_partner_signature)
                     .build()
@@ -3261,7 +3311,7 @@ impl TlvEncode for CoordinationResponseMsg {
                     .u8_field(DISCRIMINANT, 3)
                     .bytes_field(REQUEST_HASH, request_hash)
                     .pubkey_field(OPERATOR_ID, operator_id)
-                    .pubkey_field(RESERVES_ID, reserves_id)
+                    .string_field(RESERVES_ID, reserves_id)
                     .vec_field(UPDATES, updates)
                     .u64_field(START_SEQUENCE, *start_sequence)
                     .u8_field(IS_FINAL, if *is_final { 1 } else { 0 })
@@ -3279,7 +3329,7 @@ impl TlvEncode for CoordinationResponseMsg {
                     .u8_field(DISCRIMINANT, 4)
                     .bytes_field(REQUEST_HASH, request_hash)
                     .pubkey_field(OPERATOR_ID, operator_id)
-                    .pubkey_field(RESERVES_ID, reserves_id)
+                    .string_field(RESERVES_ID, reserves_id)
                     .string_field(CHANGE_TYPE, change_type)
                     .pubkey_field(MEMBER_PUBKEY, member_pubkey)
                     .bytes_field(NEW_MEMBERS, &new_members_bytes)
@@ -3311,7 +3361,7 @@ impl TlvDecode for CoordinationResponseMsg {
             1 => Ok(Self::CollateralConsentResponse {
                 request_hash: reader.read_bytes(REQUEST_HASH)?,
                 operator_id: reader.read_pubkey(OPERATOR_ID)?,
-                reserves_id: reader.read_pubkey(RESERVES_ID)?,
+                reserves_id: reader.read_string(RESERVES_ID)?,
                 consent_granted: reader.read_u8(CONSENT_GRANTED)? != 0,
                 collateral_partner_signature: reader.read_bytes(COLLATERAL_PARTNER_SIGNATURE)?,
             }),
@@ -3339,7 +3389,7 @@ impl TlvDecode for CoordinationResponseMsg {
             3 => Ok(Self::QuorumStateSync {
                 request_hash: reader.read_bytes(REQUEST_HASH)?,
                 operator_id: reader.read_pubkey(OPERATOR_ID)?,
-                reserves_id: reader.read_pubkey(RESERVES_ID)?,
+                reserves_id: reader.read_string(RESERVES_ID)?,
                 updates: reader.read_vec(UPDATES)?,
                 start_sequence: reader.read_u64(START_SEQUENCE)?,
                 is_final: reader.read_u8(IS_FINAL)? != 0,
@@ -3358,7 +3408,7 @@ impl TlvDecode for CoordinationResponseMsg {
                 Ok(Self::QuorumMembershipChange {
                     request_hash: reader.read_bytes(REQUEST_HASH)?,
                     operator_id: reader.read_pubkey(OPERATOR_ID)?,
-                    reserves_id: reader.read_pubkey(RESERVES_ID)?,
+                    reserves_id: reader.read_string(RESERVES_ID)?,
                     change_type: reader.read_string(CHANGE_TYPE)?,
                     member_pubkey: reader.read_pubkey(MEMBER_PUBKEY)?,
                     new_members,
@@ -3550,7 +3600,7 @@ impl TlvEncode for crate::wire_messages::ReservesAddOutputMsg {
         TlvBuilder::new()
             .u64_field(INITIAL_AMOUNT, self.initial_amount)
             .pubkey_field(SPEND_TO, &self.spend_to)
-            .pubkey_field(RESERVES_ID, &self.reserves_id)
+            .string_field(RESERVES_ID, &self.reserves_id)
             .bytes_field(COLLATERAL_PARTNERS, &partners_bytes)
             .build()
     }
@@ -3573,7 +3623,7 @@ impl TlvDecode for crate::wire_messages::ReservesAddOutputMsg {
         Ok(Self {
             initial_amount: reader.read_u64(INITIAL_AMOUNT)?,
             spend_to: reader.read_pubkey(SPEND_TO)?,
-            reserves_id: reader.read_pubkey(RESERVES_ID)?,
+            reserves_id: reader.read_string(RESERVES_ID)?,
             collateral_partners,
         })
     }
@@ -3592,7 +3642,7 @@ impl TlvEncode for crate::wire_messages::ReservesRemoveOutputMsg {
     fn tlv_encode(&self) -> Vec<u8> {
         use reserves_remove_output_tlv::*;
         TlvBuilder::new()
-            .pubkey_field(RESERVES_ID, &self.reserves_id)
+            .string_field(RESERVES_ID, &self.reserves_id)
             .u8_field(REMOVE_ALL, if self.remove_all { 1 } else { 0 })
             .build()
     }
@@ -3603,7 +3653,7 @@ impl TlvDecode for crate::wire_messages::ReservesRemoveOutputMsg {
         use reserves_remove_output_tlv::*;
         let reader = TlvReader::new(data)?;
         Ok(Self {
-            reserves_id: reader.read_pubkey(RESERVES_ID)?,
+            reserves_id: reader.read_string(RESERVES_ID)?,
             remove_all: reader.read_u8(REMOVE_ALL)? != 0,
         })
     }
@@ -3744,7 +3794,7 @@ mod tests {
     fn test_ledger_update_message_roundtrip() {
         let msg = DepositsMessage::LedgerUpdate(LedgerUpdateMsg {
             operator_id: test_pubkey(),
-            reserves_id: test_pubkey(),
+            reserves_id: test_pubkey().to_string(),
             operation: LedgerOperation::ReservesIncrease { new_amount: 100000 },
             sequence_number: 1,
             previous_hash: [0u8; 32],
@@ -3765,11 +3815,9 @@ mod tests {
             min_protocol_version: MIN_PROTOCOL_VERSION,
             features: 0,
             operator_id: test_pubkey(),
-            reserves_id: test_pubkey(),
-            ledger_address: "tb1q...".to_string(),
+            reserves_id: test_pubkey().to_string(),
             funding_txid: [0x11; 32],
             funding_vout: 0,
-            reserves_amount: 100_000_000, // 1 BTC
             collateral_enforcement_block: 1000, // Bootstrap until block 1000
         });
 
@@ -3801,7 +3849,7 @@ mod tests {
     fn test_coordination_message_roundtrip() {
         let msg = DepositsMessage::Coordination(CoordinationMsg::CosignInvoice {
             operator_id: test_pubkey(),
-            reserves_id: test_pubkey(),
+            reserves_id: test_pubkey().to_string(),
             amount: 50000,
             payment_hash: [0x11; 32],
             expires: 1234567890,
@@ -3850,7 +3898,7 @@ mod tests {
                 cosigner_guarantee_signature: None,
             },
             LedgerOperation::DepositClose { pubkey: test_pubkey() },
-            LedgerOperation::PaymentCredit {
+            LedgerOperation::InvoiceCredit {
                 payment_hash: [0xBB; 32],
                 deposit_pubkey: test_pubkey(),
                 amount: 50000,
@@ -3882,7 +3930,7 @@ mod tests {
 
         let msg = LedgerUpdateMsg {
             operator_id: test_pubkey(),
-            reserves_id: test_pubkey(),
+            reserves_id: test_pubkey().to_string(),
             operation: LedgerOperation::ReservesIncrease { new_amount: 100000 },
             sequence_number: 1,
             previous_hash: [0u8; 32],
@@ -3901,7 +3949,7 @@ mod tests {
 
         let msg = LedgerUpdateResponseMsg {
             operator_id: test_pubkey(),
-            reserves_id: test_pubkey(),
+            reserves_id: test_pubkey().to_string(),
             request_hash: [0xAA; 32],
             accepted: true,
             error: None,
@@ -3924,11 +3972,9 @@ mod tests {
             min_protocol_version: MIN_PROTOCOL_VERSION,
             features: 0,
             operator_id: test_pubkey(),
-            reserves_id: test_pubkey(),
-            ledger_address: "tb1q...".to_string(),
+            reserves_id: test_pubkey().to_string(),
             funding_txid: [0x11; 32],
             funding_vout: 0,
-            reserves_amount: 100_000_000,
             collateral_enforcement_block: 0, // Immediate enforcement
         };
 
@@ -3946,7 +3992,7 @@ mod tests {
             protocol_version: PROTOCOL_VERSION,
             accepted: true,
             error: None,
-            reserves_id: test_pubkey(),
+            reserves_id: test_pubkey().to_string(),
         };
 
         let encoded = msg.tlv_encode();
@@ -3960,7 +4006,7 @@ mod tests {
 
         let msg = SyncMsg {
             operator_id: test_pubkey(),
-            reserves_id: test_pubkey(),
+            reserves_id: test_pubkey().to_string(),
             last_known_sequence: 5,
             last_known_hash: [0xAA; 32],
         };
@@ -3979,7 +4025,7 @@ mod tests {
             message: vec![0x80, 0x01, 0xAA, 0xBB], // Sample message bytes
             message_type: 0x8001,
             operator_id: test_pubkey(),
-            reserves_id: test_pubkey(),
+            reserves_id: test_pubkey().to_string(),
             sequence_number: 1,
             previous_hash: [0xCC; 32],
             current_hash: [0xDD; 32],
@@ -3990,7 +4036,7 @@ mod tests {
 
         let msg = SyncResponseMsg {
             operator_id: test_pubkey(),
-            reserves_id: test_pubkey(),
+            reserves_id: test_pubkey().to_string(),
             request_hash: [0xAA; 32],
             updates: vec![update],
             current_sequence: 10,
@@ -4044,7 +4090,7 @@ mod tests {
         let msgs = vec![
             CoordinationMsg::CosignInvoice {
                 operator_id: test_pubkey(),
-                reserves_id: test_pubkey(),
+                reserves_id: test_pubkey().to_string(),
                 amount: 100000,
                 payment_hash: [0xAA; 32],
                 expires: 1234567890,
@@ -4054,13 +4100,13 @@ mod tests {
             },
             CoordinationMsg::CollateralConsentRequest {
                 operator_id: test_pubkey(),
-                reserves_id: test_pubkey(),
+                reserves_id: test_pubkey().to_string(),
                 operator_signature: [0xBB; 64],
             },
             CoordinationMsg::QuorumVoteRequest {
                 vote_round_id: [0xCC; 32],
                 operator_id: test_pubkey(),
-                reserves_id: test_pubkey(),
+                reserves_id: test_pubkey().to_string(),
                 sequence_number: 50,
                 state_hash: [0xDD; 32],
                 claimed_reserves: 500000,
@@ -4165,8 +4211,8 @@ mod tests {
         let messages = vec![
             DepositsMessage::LedgerUpdate(LedgerUpdateMsg {
                 operator_id: test_pubkey(),
-                reserves_id: test_pubkey(),
-                operation: LedgerOperation::PaymentCredit {
+                reserves_id: test_pubkey().to_string(),
+                operation: LedgerOperation::InvoiceCredit {
                     payment_hash: [0xAA; 32],
                     deposit_pubkey: test_pubkey(),
                     amount: 100000,
@@ -4183,16 +4229,14 @@ mod tests {
                 min_protocol_version: 1,
                 features: 0,
                 operator_id: test_pubkey(),
-                reserves_id: test_pubkey(),
-                ledger_address: "test-ledger".to_string(),
+                reserves_id: test_pubkey().to_string(),
                 funding_txid: [0xEE; 32],
                 funding_vout: 0,
-                reserves_amount: 50_000_000,
                 collateral_enforcement_block: 500,
             }),
             DepositsMessage::Sync(SyncMsg {
                 operator_id: test_pubkey(),
-                reserves_id: test_pubkey(),
+                reserves_id: test_pubkey().to_string(),
                 last_known_sequence: 5,
                 last_known_hash: [0xFF; 32],
             }),

@@ -77,7 +77,7 @@ pub enum HandleError {
     /// Message format is invalid
     InvalidMessage(String),
     /// Message references unknown ledger
-    UnknownLedger { operator: PublicKey, partner: PublicKey },
+    UnknownLedger { operator: PublicKey, reserves_id: String },
     /// Validation failed
     ValidationFailed(String),
     /// Internal error
@@ -88,8 +88,8 @@ impl fmt::Display for HandleError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidMessage(e) => write!(f, "invalid message: {}", e),
-            Self::UnknownLedger { operator, partner } => {
-                write!(f, "unknown ledger: {} -> {}", operator, partner)
+            Self::UnknownLedger { operator, reserves_id } => {
+                write!(f, "unknown ledger: {} -> {}", operator, reserves_id)
             }
             Self::ValidationFailed(e) => write!(f, "validation failed: {}", e),
             Self::Internal(e) => write!(f, "internal error: {}", e),
@@ -432,11 +432,11 @@ pub trait DepositsStorage: Send + Sync {
     // Ledger State
     // ========================================================================
 
-    /// Get ledger state for an operator-partner pair.
+    /// Get ledger state for an operator-reserves pair.
     fn get_ledger_state(
         &self,
         operator: &PublicKey,
-        partner: &PublicKey,
+        reserves_id: &str,
     ) -> Result<Option<LedgerState>, StorageError>;
 
     /// Store ledger state.
@@ -446,7 +446,7 @@ pub trait DepositsStorage: Send + Sync {
     fn delete_ledger_state(
         &self,
         operator: &PublicKey,
-        partner: &PublicKey,
+        reserves_id: &str,
     ) -> Result<(), StorageError>;
 
     /// List all ledger states.
@@ -460,7 +460,7 @@ pub trait DepositsStorage: Send + Sync {
     fn get_deposit(
         &self,
         operator: &PublicKey,
-        partner: &PublicKey,
+        reserves_id: &str,
         deposit_pubkey: &PublicKey,
     ) -> Result<Option<Deposit>, StorageError>;
 
@@ -468,7 +468,7 @@ pub trait DepositsStorage: Send + Sync {
     fn put_deposit(
         &self,
         operator: &PublicKey,
-        partner: &PublicKey,
+        reserves_id: &str,
         deposit: &Deposit,
     ) -> Result<(), StorageError>;
 
@@ -476,7 +476,7 @@ pub trait DepositsStorage: Send + Sync {
     fn delete_deposit(
         &self,
         operator: &PublicKey,
-        partner: &PublicKey,
+        reserves_id: &str,
         deposit_pubkey: &PublicKey,
     ) -> Result<(), StorageError>;
 
@@ -484,7 +484,7 @@ pub trait DepositsStorage: Send + Sync {
     fn list_deposits(
         &self,
         operator: &PublicKey,
-        partner: &PublicKey,
+        reserves_id: &str,
     ) -> Result<Vec<Deposit>, StorageError>;
 
     // ========================================================================
@@ -495,14 +495,14 @@ pub trait DepositsStorage: Send + Sync {
     fn get_reserves(
         &self,
         operator: &PublicKey,
-        partner: &PublicKey,
+        reserves_id: &str,
     ) -> Result<Option<ReservesOutput>, StorageError>;
 
     /// Store reserves output.
     fn put_reserves(
         &self,
         operator: &PublicKey,
-        partner: &PublicKey,
+        reserves_id: &str,
         reserves: &ReservesOutput,
     ) -> Result<(), StorageError>;
 
@@ -514,7 +514,7 @@ pub trait DepositsStorage: Send + Sync {
     fn append_signed_update(
         &self,
         operator: &PublicKey,
-        partner: &PublicKey,
+        reserves_id: &str,
         update: &SignedLedgerUpdate,
     ) -> Result<(), StorageError>;
 
@@ -522,7 +522,7 @@ pub trait DepositsStorage: Send + Sync {
     fn get_signed_updates(
         &self,
         operator: &PublicKey,
-        partner: &PublicKey,
+        reserves_id: &str,
         from_sequence: Option<u64>,
     ) -> Result<Vec<SignedLedgerUpdate>, StorageError>;
 }
@@ -542,61 +542,61 @@ impl<S: Storage> DefaultStorageProvider<S> {
     }
 
     /// Build a key for ledger state.
-    fn ledger_key(operator: &PublicKey, partner: &PublicKey) -> Vec<u8> {
+    fn ledger_key(operator: &PublicKey, reserves_id: &str) -> Vec<u8> {
         let mut key = b"deposits/ledger/".to_vec();
         key.extend_from_slice(&operator.serialize());
         key.push(b'/');
-        key.extend_from_slice(&partner.serialize());
+        key.extend_from_slice(reserves_id.as_bytes());
         key
     }
 
     /// Build a key for a deposit.
-    fn deposit_key(operator: &PublicKey, partner: &PublicKey, deposit_pubkey: &PublicKey) -> Vec<u8> {
+    fn deposit_key(operator: &PublicKey, reserves_id: &str, deposit_pubkey: &PublicKey) -> Vec<u8> {
         let mut key = b"deposits/deposit/".to_vec();
         key.extend_from_slice(&operator.serialize());
         key.push(b'/');
-        key.extend_from_slice(&partner.serialize());
+        key.extend_from_slice(reserves_id.as_bytes());
         key.push(b'/');
         key.extend_from_slice(&deposit_pubkey.serialize());
         key
     }
 
     /// Build a key prefix for deposits in a ledger.
-    fn deposits_prefix(operator: &PublicKey, partner: &PublicKey) -> Vec<u8> {
+    fn deposits_prefix(operator: &PublicKey, reserves_id: &str) -> Vec<u8> {
         let mut key = b"deposits/deposit/".to_vec();
         key.extend_from_slice(&operator.serialize());
         key.push(b'/');
-        key.extend_from_slice(&partner.serialize());
+        key.extend_from_slice(reserves_id.as_bytes());
         key.push(b'/');
         key
     }
 
     /// Build a key for reserves.
-    fn reserves_key(operator: &PublicKey, partner: &PublicKey) -> Vec<u8> {
+    fn reserves_key_storage(operator: &PublicKey, reserves_id: &str) -> Vec<u8> {
         let mut key = b"deposits/reserves/".to_vec();
         key.extend_from_slice(&operator.serialize());
         key.push(b'/');
-        key.extend_from_slice(&partner.serialize());
+        key.extend_from_slice(reserves_id.as_bytes());
         key
     }
 
     /// Build a key for a signed update.
-    fn update_key(operator: &PublicKey, partner: &PublicKey, sequence: u64) -> Vec<u8> {
+    fn update_key(operator: &PublicKey, reserves_id: &str, sequence: u64) -> Vec<u8> {
         let mut key = b"deposits/updates/".to_vec();
         key.extend_from_slice(&operator.serialize());
         key.push(b'/');
-        key.extend_from_slice(&partner.serialize());
+        key.extend_from_slice(reserves_id.as_bytes());
         key.push(b'/');
         key.extend_from_slice(&sequence.to_be_bytes());
         key
     }
 
     /// Build a key prefix for updates in a ledger.
-    fn updates_prefix(operator: &PublicKey, partner: &PublicKey) -> Vec<u8> {
+    fn updates_prefix(operator: &PublicKey, reserves_id: &str) -> Vec<u8> {
         let mut key = b"deposits/updates/".to_vec();
         key.extend_from_slice(&operator.serialize());
         key.push(b'/');
-        key.extend_from_slice(&partner.serialize());
+        key.extend_from_slice(reserves_id.as_bytes());
         key.push(b'/');
         key
     }
@@ -611,9 +611,9 @@ impl<S: Storage> DepositsStorage for DefaultStorageProvider<S> {
     fn get_ledger_state(
         &self,
         operator: &PublicKey,
-        partner: &PublicKey,
+        reserves_id: &str,
     ) -> Result<Option<LedgerState>, StorageError> {
-        let key = Self::ledger_key(operator, partner);
+        let key = Self::ledger_key(operator, reserves_id);
         match self.storage.get(&key)? {
             Some(bytes) => {
                 let state: LedgerState = serde_json::from_slice(&bytes)
@@ -634,9 +634,9 @@ impl<S: Storage> DepositsStorage for DefaultStorageProvider<S> {
     fn delete_ledger_state(
         &self,
         operator: &PublicKey,
-        partner: &PublicKey,
+        reserves_id: &str,
     ) -> Result<(), StorageError> {
-        let key = Self::ledger_key(operator, partner);
+        let key = Self::ledger_key(operator, reserves_id);
         self.storage.delete(&key)
     }
 
@@ -655,10 +655,10 @@ impl<S: Storage> DepositsStorage for DefaultStorageProvider<S> {
     fn get_deposit(
         &self,
         operator: &PublicKey,
-        partner: &PublicKey,
+        reserves_id: &str,
         deposit_pubkey: &PublicKey,
     ) -> Result<Option<Deposit>, StorageError> {
-        let key = Self::deposit_key(operator, partner, deposit_pubkey);
+        let key = Self::deposit_key(operator, reserves_id, deposit_pubkey);
         match self.storage.get(&key)? {
             Some(bytes) => {
                 let deposit = Deposit::tlv_decode(&bytes)
@@ -672,10 +672,10 @@ impl<S: Storage> DepositsStorage for DefaultStorageProvider<S> {
     fn put_deposit(
         &self,
         operator: &PublicKey,
-        partner: &PublicKey,
+        reserves_id: &str,
         deposit: &Deposit,
     ) -> Result<(), StorageError> {
-        let key = Self::deposit_key(operator, partner, &deposit.pubkey);
+        let key = Self::deposit_key(operator, reserves_id, &deposit.pubkey);
         let bytes = deposit.tlv_encode();
         self.storage.put(&key, &bytes)
     }
@@ -683,19 +683,19 @@ impl<S: Storage> DepositsStorage for DefaultStorageProvider<S> {
     fn delete_deposit(
         &self,
         operator: &PublicKey,
-        partner: &PublicKey,
+        reserves_id: &str,
         deposit_pubkey: &PublicKey,
     ) -> Result<(), StorageError> {
-        let key = Self::deposit_key(operator, partner, deposit_pubkey);
+        let key = Self::deposit_key(operator, reserves_id, deposit_pubkey);
         self.storage.delete(&key)
     }
 
     fn list_deposits(
         &self,
         operator: &PublicKey,
-        partner: &PublicKey,
+        reserves_id: &str,
     ) -> Result<Vec<Deposit>, StorageError> {
-        let prefix = Self::deposits_prefix(operator, partner);
+        let prefix = Self::deposits_prefix(operator, reserves_id);
         let items = self.storage.scan_prefix(&prefix)?;
         let mut deposits = Vec::new();
         for (_key, bytes) in items {
@@ -709,9 +709,9 @@ impl<S: Storage> DepositsStorage for DefaultStorageProvider<S> {
     fn get_reserves(
         &self,
         operator: &PublicKey,
-        partner: &PublicKey,
+        reserves_id: &str,
     ) -> Result<Option<ReservesOutput>, StorageError> {
-        let key = Self::reserves_key(operator, partner);
+        let key = Self::reserves_key_storage(operator, reserves_id);
         match self.storage.get(&key)? {
             Some(bytes) => {
                 let reserves = ReservesOutput::tlv_decode(&bytes)
@@ -725,10 +725,10 @@ impl<S: Storage> DepositsStorage for DefaultStorageProvider<S> {
     fn put_reserves(
         &self,
         operator: &PublicKey,
-        partner: &PublicKey,
+        reserves_id: &str,
         reserves: &ReservesOutput,
     ) -> Result<(), StorageError> {
-        let key = Self::reserves_key(operator, partner);
+        let key = Self::reserves_key_storage(operator, reserves_id);
         let bytes = reserves.tlv_encode();
         self.storage.put(&key, &bytes)
     }
@@ -736,10 +736,10 @@ impl<S: Storage> DepositsStorage for DefaultStorageProvider<S> {
     fn append_signed_update(
         &self,
         operator: &PublicKey,
-        partner: &PublicKey,
+        reserves_id: &str,
         update: &SignedLedgerUpdate,
     ) -> Result<(), StorageError> {
-        let key = Self::update_key(operator, partner, update.sequence_number);
+        let key = Self::update_key(operator, reserves_id, update.sequence_number);
         let bytes = update.tlv_encode();
         self.storage.put(&key, &bytes)
     }
@@ -747,10 +747,10 @@ impl<S: Storage> DepositsStorage for DefaultStorageProvider<S> {
     fn get_signed_updates(
         &self,
         operator: &PublicKey,
-        partner: &PublicKey,
+        reserves_id: &str,
         from_sequence: Option<u64>,
     ) -> Result<Vec<SignedLedgerUpdate>, StorageError> {
-        let prefix = Self::updates_prefix(operator, partner);
+        let prefix = Self::updates_prefix(operator, reserves_id);
         let items = self.storage.scan_prefix(&prefix)?;
         let mut updates = Vec::new();
         for (key, bytes) in items {
@@ -855,28 +855,28 @@ pub enum ProtocolEvent {
     /// A deposit was opened
     DepositOpened {
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: String,
         deposit_pubkey: PublicKey,
     },
     /// A deposit was closed
     DepositClosed {
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: String,
         deposit_pubkey: PublicKey,
         final_balance: u64,
     },
-    /// A payment was credited to a deposit
-    PaymentCredited {
+    /// An invoice payment was credited to a deposit
+    InvoiceCredited {
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: String,
         deposit_pubkey: PublicKey,
         amount: u64,
         payment_hash: [u8; 32],
     },
-    /// A payment was sent from a deposit
-    PaymentSent {
+    /// An invoice payment was sent from a deposit
+    InvoiceSent {
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: String,
         deposit_pubkey: PublicKey,
         amount: u64,
         payment_id: [u8; 32],
@@ -884,32 +884,32 @@ pub enum ProtocolEvent {
     /// Ledger synchronization completed
     LedgerSynced {
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: String,
         sequence: u64,
         hash: [u8; 32],
     },
     /// Recovery voting started
     RecoveryStarted {
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: String,
     },
     /// Recovery claim succeeded
     RecoveryClaimed {
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: String,
         new_operator: PublicKey,
         claim_txid: [u8; 32],
     },
     /// A protocol error occurred
     Error {
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: String,
         error: String,
     },
     /// An uncredited payment accusation was received
     UncreditedPaymentReceived {
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: String,
         payment_hash: [u8; 32],
         deposit_pubkey: PublicKey,
         amount_msat: u64,
@@ -918,7 +918,7 @@ pub enum ProtocolEvent {
     /// Fees were collected from a deposit
     FeeCollected {
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: String,
         deposit_pubkey: PublicKey,
         amount: u64,
         block_height: u32,
@@ -926,12 +926,12 @@ pub enum ProtocolEvent {
     /// A ledger was closed
     LedgerClosed {
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: String,
     },
     /// An invoice cosign was requested
     InvoiceCosignRequested {
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: String,
         deposit_pubkey: PublicKey,
         amount: u64,
         payment_hash: [u8; 32],
@@ -939,20 +939,20 @@ pub enum ProtocolEvent {
     /// A recovery claim was requested
     RecoveryClaimRequested {
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: String,
         claimant: PublicKey,
         tier_index: u8,
     },
     /// A recovery claim signature was received
     RecoveryClaimSignatureReceived {
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: String,
         signer: PublicKey,
     },
     /// A recovery claim was completed
     RecoveryClaimCompleted {
         old_operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: String,
         new_operator: PublicKey,
         claim_txid: [u8; 32],
         confirmation_block: u32,
@@ -960,21 +960,21 @@ pub enum ProtocolEvent {
     /// A channel was closed (tombstone received)
     ChannelClosed {
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: String,
         channel_id: [u8; 32],
         reason: Option<String>,
     },
     /// A quorum member joined
     QuorumMemberJoined {
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: String,
         member: PublicKey,
     },
     /// Reserves spend ready after vote threshold reached
     ReservesSpendReady {
         vote_round_id: [u8; 32],
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: String,
         signed_tx_bytes: Vec<u8>,
         conforming_votes: u32,
         threshold: u32,

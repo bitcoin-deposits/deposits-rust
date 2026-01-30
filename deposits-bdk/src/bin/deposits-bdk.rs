@@ -73,8 +73,8 @@ COMMANDS:
     help            Show this help message
 
 LEDGER SUBCOMMANDS:
-    ledger open <reserves_id> [enforcement_block]
-                    Open a ledger with reserves ID. Set enforcement_block to a
+    ledger open [enforcement_block]
+                    Open a ledger backed by your reserves UTXO. Set enforcement_block to a
                     future block for bootstrap phase, or 0 for immediate enforcement.
     ledger list     List all ledgers
     ledger history [reserves_id]
@@ -94,17 +94,17 @@ DEPOSIT SUBCOMMANDS:
                     List all deposits in a ledger
     deposit credit <reserves_id> <deposit_pubkey> <amount_msats> <invoice_id>
                     Manually credit a deposit
-    deposit transfer <reserves_id> <from_deposit> <to_deposit> <amount_msats>
-                    Transfer funds between deposits in the same ledger
     deposit check <offer_id>
                     Check if a deposit offer has been funded
     deposit complete <offer_id> <txid> <amount_sats>
                     Complete a funded deposit offer and credit the deposit
 
 WITHDRAW SUBCOMMANDS:
-    withdraw lock <deposit_pubkey> <address> <amount_sats> <fee_sats> <signature>
-                    Lock funds for an on-chain withdrawal (signature must be from depositor)
-    withdraw complete <withdrawal_id>
+    withdraw request <partner_id> <deposit_secret> <address> <amount_sats> <fee_sats>
+                    Request withdrawal (generates nonce, signs, and locks in one step)
+    withdraw lock <partner_id> <deposit_pubkey> <address> <amount_sats> <fee_sats> <nonce> <signature>
+                    Lock funds for withdrawal (operator-side, requires pre-signed request)
+    withdraw complete <partner_id> <withdrawal_id>
                     Complete a withdrawal by broadcasting the transaction
     withdraw cancel <withdrawal_id>
                     Cancel a pending withdrawal (only before broadcast)
@@ -132,7 +132,7 @@ EXAMPLES:
     {} reserves 100000000 --network regtest
 
     # Open a ledger with bootstrap phase (enforcement at block 1000)
-    {} ledger open 02abc...pubkey 1000 --network regtest
+    {} ledger open 1000 --network regtest
 
 "#,
         program, program, program, program, program, program
@@ -299,6 +299,9 @@ async fn show_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         println!("Wallet balance: {} sats", node.wallet_balance()?);
         println!("Reserves balance: {} sats", node.reserves_balance()?);
+        if let Some(addr) = node.wallet.get_reserves_address() {
+            println!("Reserves address: {}", addr);
+        }
     }
 
     if let Some(lightning) = &node.lightning {
@@ -410,10 +413,9 @@ async fn ledger_command(args: &[String]) -> Result<(), Box<dyn std::error::Error
     }
 }
 
-/// Open a new ledger with a partner
+/// Open a new ledger backed by our reserves UTXO
 async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    // Parse positional arguments: <reserves_id> [enforcement_block]
-    let mut reserves_id_str: Option<String> = None;
+    // Parse positional arguments: [enforcement_block]
     let mut enforcement_block: u64 = 0; // Default: immediate enforcement
     let mut config_args = Vec::new();
 
@@ -426,21 +428,14 @@ async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
                 config_args.push(args[i + 1].clone());
                 i += 1;
             }
-        } else if reserves_id_str.is_none() {
-            // First positional argument - partner pubkey
-            reserves_id_str = Some(args[i].clone());
         } else {
-            // Second positional argument - enforcement block
+            // First positional argument - enforcement block
             enforcement_block = args[i]
                 .parse()
                 .map_err(|_| format!("Invalid enforcement block: {}", args[i]))?;
         }
         i += 1;
     }
-
-    let reserves_id_str = reserves_id_str.ok_or("Reserves ID required")?;
-    let reserves_id = PublicKey::from_str(&reserves_id_str)
-        .map_err(|e| format!("Invalid reserves ID: {}", e))?;
 
     let config = parse_config(&config_args)?;
     let node = Node::new(config).await?;
@@ -454,13 +449,13 @@ async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         return Err("No reserves found. Create reserves first with 'reserves' command.".into());
     }
 
-    println!("Opening ledger with reserves: {}", reserves_id);
+    println!("Opening ledger backed by reserves UTXO");
     println!("  Our node ID: {}", node.node_id);
     println!("  Reserves: {} sats", reserves_balance);
     println!("  Collateral enforcement block: {}", enforcement_block);
 
     // Create the ledger
-    let ledger = node.open_ledger(reserves_id, enforcement_block)?;
+    let ledger = node.open_ledger(enforcement_block)?;
 
     println!("\nLedger opened successfully!");
     println!("  Operator: {}", ledger.state.operator_key);
@@ -543,11 +538,11 @@ async fn ledger_history(args: &[String]) -> Result<(), Box<dyn std::error::Error
 
     // Get the ledger - either by reserves_id or primary ledger
     let (reserves_id, ledger) = if let Some(id_str) = reserves_id_str {
-        let reserves_id = PublicKey::from_str(&id_str)
+        let partner_pubkey = PublicKey::from_str(&id_str)
             .map_err(|e| format!("Invalid reserves ID: {}", e))?;
-        let ledger = node.get_ledger(reserves_id)
+        let ledger = node.get_ledger(partner_pubkey)
             .ok_or("Ledger not found")?;
-        (reserves_id, ledger)
+        (id_str, ledger) // Return String, not PublicKey
     } else {
         // No argument - get primary ledger
         node.get_primary_ledger()
@@ -608,6 +603,8 @@ async fn ledger_history(args: &[String]) -> Result<(), Box<dyn std::error::Error
 /// Format an operation type and extract details from the message
 fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
     use deposits_core::messages::consts::*;
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::tlv::TlvDecode;
 
     let name = match msg_type {
         LEDGER_OPEN_REQUEST => "LedgerOpen",
@@ -626,67 +623,100 @@ fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
         DEPOSIT_OPEN => "DepositOpen",
         DEPOSIT_CLOSE => "DepositClose",
         DEPOSIT_UPDATE => "DepositUpdate",
-        DEPOSIT_LOCK_TRANSFER => "TransferLock",
-        DEPOSIT_FAIL_TRANSFER => "TransferFail",
-        DEPOSIT_FULFILL_TRANSFER => "TransferFulfill",
-        SENDING_LOCK_PAYMENT => "PaymentLock",
-        SENDING_FAIL_PAYMENT => "PaymentFail",
-        SENDING_FULFILL_PAYMENT => "PaymentFulfill",
-        RECEIVING_CREDIT_PAYMENT => "PaymentCredit",
+        SENDING_LOCK_PAYMENT => "InvoiceLock",
+        SENDING_FAIL_PAYMENT => "InvoiceFail",
+        SENDING_FULFILL_PAYMENT => "InvoiceFulfill",
+        RECEIVING_CREDIT_PAYMENT => "InvoiceCredit",
         RECEIVING_COSIGN_INVOICE => "CosignInvoice",
+        ONCHAIN_CREDIT => "OnchainCredit",
+        ONCHAIN_LOCK => "OnchainLock",
+        ONCHAIN_FAIL => "OnchainFail",
+        ONCHAIN_FULFILL => "OnchainFulfill",
         MAINTENANCE_FEE_COLLECT => "FeeCollect",
         LEDGER_CLOSE => "LedgerClose",
         _ => "Unknown",
     }.to_string();
 
-    // Try to extract details from the message
+    // Try to decode the operation using TLV and extract details
     let details = if !message.is_empty() {
-        match msg_type {
-            RESERVES_INCREASE | RESERVES_DECREASE => {
-                if message.len() >= 8 {
-                    let amt = u64::from_le_bytes([
-                        message[0], message[1], message[2], message[3],
-                        message[4], message[5], message[6], message[7],
-                    ]);
-                    if amt > 0 && amt < 1_000_000_000_000 {
-                        format!("{} sat", amt)
+        if let Ok(op) = LedgerOperation::tlv_decode(message) {
+            match op {
+                LedgerOperation::ReservesIncrease { new_amount } |
+                LedgerOperation::ReservesDecrease { new_amount } => {
+                    format!("{} sat", new_amount)
+                }
+                LedgerOperation::DepositOpen { pubkey, .. } |
+                LedgerOperation::DepositClose { pubkey, .. } => {
+                    let pk_bytes = pubkey.serialize();
+                    format!("pk:{:02x}{:02x}{:02x}{:02x}", pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3])
+                }
+                LedgerOperation::CollateralAddPartner { collateral_partner, .. } |
+                LedgerOperation::CollateralRemovePartner { collateral_partner, .. } => {
+                    let pk_bytes = collateral_partner.serialize();
+                    format!("partner:{:02x}{:02x}{:02x}{:02x}", pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3])
+                }
+                LedgerOperation::CollateralAttestation { amount, .. } => {
+                    format!("{} sat", amount)
+                }
+                LedgerOperation::LedgerOpen { ledger_address, .. } => {
+                    // Shorten address for display (first 8 and last 6 chars)
+                    let addr_short = if ledger_address.len() > 20 {
+                        format!("{}..{}", &ledger_address[..8], &ledger_address[ledger_address.len()-6..])
                     } else {
-                        String::new()
-                    }
-                } else {
-                    String::new()
+                        ledger_address.clone()
+                    };
+                    format!("addr:{}", addr_short)
                 }
-            }
-            DEPOSIT_OPEN | DEPOSIT_CLOSE => {
-                if message.len() >= 33 {
-                    format!("pk:{:02x}{:02x}{:02x}{:02x}", message[0], message[1], message[2], message[3])
-                } else {
-                    String::new()
-                }
-            }
-            COLLATERAL_ADD_PARTNER | COLLATERAL_REMOVE_PARTNER => {
-                if message.len() >= 33 {
-                    format!("partner:{:02x}{:02x}{:02x}{:02x}", message[0], message[1], message[2], message[3])
-                } else {
-                    String::new()
-                }
-            }
-            COLLATERAL_ATTESTATION => {
-                if message.len() >= 8 {
-                    let amt = u64::from_le_bytes([
-                        message[0], message[1], message[2], message[3],
-                        message[4], message[5], message[6], message[7],
-                    ]);
-                    if amt > 0 && amt < 1_000_000_000_000 {
-                        format!("{} sat", amt)
+                LedgerOperation::OnchainCredit { deposit_pubkey, amount, funding_address, .. } => {
+                    let pk_bytes = deposit_pubkey.serialize();
+                    // Shorten address for display (first 8 and last 6 chars)
+                    let addr_short = if funding_address.len() > 20 {
+                        format!("{}..{}", &funding_address[..8], &funding_address[funding_address.len()-6..])
                     } else {
-                        String::new()
-                    }
-                } else {
-                    String::new()
+                        funding_address.clone()
+                    };
+                    format!("pk:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  addr:{}",
+                        pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3], amount, addr_short)
                 }
+                LedgerOperation::OnchainLock { deposit_pubkey, amount, destination_address, withdrawal_id, .. } => {
+                    let pk_bytes = deposit_pubkey.serialize();
+                    let addr_short = if destination_address.len() > 20 {
+                        format!("{}..{}", &destination_address[..8], &destination_address[destination_address.len()-6..])
+                    } else {
+                        destination_address.clone()
+                    };
+                    format!("pk:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  wdrl:{}  addr:{}",
+                        pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3], amount,
+                        hex::encode(&withdrawal_id[..4]), addr_short)
+                }
+                LedgerOperation::OnchainFail { deposit_pubkey, withdrawal_id, .. } => {
+                    let pk_bytes = deposit_pubkey.serialize();
+                    format!("pk:{:02x}{:02x}{:02x}{:02x}  wdrl:{}",
+                        pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3],
+                        hex::encode(&withdrawal_id[..4]))
+                }
+                LedgerOperation::OnchainFulfill { deposit_pubkey, withdrawal_id, amount, txid, .. } => {
+                    let pk_bytes = deposit_pubkey.serialize();
+                    format!("pk:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  wdrl:{}  txn:{}",
+                        pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3],
+                        amount,
+                        hex::encode(&withdrawal_id[..4]),
+                        hex::encode(&txid[..4]))
+                }
+                LedgerOperation::InvoiceCredit { deposit_pubkey, amount, .. } => {
+                    let pk_bytes = deposit_pubkey.serialize();
+                    format!("pk:{:02x}{:02x}{:02x}{:02x}  amt:{} msat",
+                        pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3], amount)
+                }
+                LedgerOperation::InvoiceLock { pubkey, amount, .. } => {
+                    let pk_bytes = pubkey.serialize();
+                    format!("pk:{:02x}{:02x}{:02x}{:02x}  amt:{} msat",
+                        pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3], amount)
+                }
+                _ => String::new(),
             }
-            _ => String::new(),
+        } else {
+            String::new()
         }
     } else {
         String::new()
@@ -778,7 +808,7 @@ async fn partner_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 /// Handle deposit subcommands
 async fn deposit_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {
-        eprintln!("Usage: deposits-bdk deposit <offer|list|open|ls|credit|transfer|check|complete> [args...]");
+        eprintln!("Usage: deposits-bdk deposit <offer|list|open|ls|credit|check|complete> [args...]");
         return Ok(());
     }
 
@@ -788,12 +818,11 @@ async fn deposit_command(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         "open" => deposit_open(&args[1..]).await,
         "ls" => deposit_ls(&args[1..]).await,
         "credit" => deposit_credit(&args[1..]).await,
-        "transfer" => deposit_transfer(&args[1..]).await,
         "check" => deposit_check(&args[1..]).await,
         "complete" => deposit_complete(&args[1..]).await,
         cmd => {
             eprintln!("Unknown deposit subcommand: {}", cmd);
-            eprintln!("Usage: deposits-bdk deposit <offer|list|open|ls|credit|transfer|check|complete> [args...]");
+            eprintln!("Usage: deposits-bdk deposit <offer|list|open|ls|credit|check|complete> [args...]");
             Ok(())
         }
     }
@@ -830,8 +859,7 @@ async fn deposit_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         return Ok(());
     }
 
-    let reserves_id = PublicKey::from_str(&positional[0])
-        .map_err(|e| format!("Invalid reserves ID: {}", e))?;
+    let reserves_id = &positional[0];
     let deposit_pubkey = PublicKey::from_str(&positional[1])
         .map_err(|e| format!("Invalid deposit pubkey: {}", e))?;
     let max_sats: u64 = positional[2]
@@ -855,7 +883,7 @@ async fn deposit_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     node.sync_wallet()?;
 
     println!("Creating deposit offer...");
-    println!("  Partner: {}", reserves_id);
+    println!("  Reserves ID: {}", reserves_id);
     println!("  Deposit: {}", deposit_pubkey);
     println!("  Max amount: {} sats", max_sats);
     println!("  Min amount: {} sats", min_sats);
@@ -963,8 +991,7 @@ async fn deposit_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         return Ok(());
     }
 
-    let reserves_id = PublicKey::from_str(&positional[0])
-        .map_err(|e| format!("Invalid reserves ID: {}", e))?;
+    let reserves_id = &positional[0];
     let deposit_pubkey = PublicKey::from_str(&positional[1])
         .map_err(|e| format!("Invalid deposit pubkey: {}", e))?;
 
@@ -972,7 +999,7 @@ async fn deposit_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     let node = Node::new(config).await?;
 
     println!("Opening deposit...");
-    println!("  Partner: {}", reserves_id);
+    println!("  Reserves ID: {}", reserves_id);
     println!("  Deposit pubkey: {}", deposit_pubkey);
 
     let deposit = node.open_deposit(reserves_id, deposit_pubkey, None)?;
@@ -1004,14 +1031,12 @@ async fn deposit_ls(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         i += 1;
     }
 
-    let reserves_id_str = reserves_id_str.ok_or("Reserves ID required")?;
-    let reserves_id = PublicKey::from_str(&reserves_id_str)
-        .map_err(|e| format!("Invalid reserves ID: {}", e))?;
+    let reserves_id = reserves_id_str.ok_or("Reserves ID required")?;
 
     let config = parse_config(&config_args)?;
     let node = Node::new(config).await?;
 
-    let deposits = node.list_deposits(reserves_id);
+    let deposits = node.list_deposits(&reserves_id);
 
     if deposits.is_empty() {
         println!("No deposits found in ledger with reserves {}", reserves_id);
@@ -1062,8 +1087,7 @@ async fn deposit_credit(args: &[String]) -> Result<(), Box<dyn std::error::Error
         return Ok(());
     }
 
-    let reserves_id = PublicKey::from_str(&positional[0])
-        .map_err(|e| format!("Invalid reserves ID: {}", e))?;
+    let reserves_id = &positional[0];
     let deposit_pubkey = PublicKey::from_str(&positional[1])
         .map_err(|e| format!("Invalid deposit pubkey: {}", e))?;
     let amount_msats: u64 = positional[2]
@@ -1079,7 +1103,7 @@ async fn deposit_credit(args: &[String]) -> Result<(), Box<dyn std::error::Error
     let node = Node::new(config).await?;
 
     println!("Crediting deposit...");
-    println!("  Partner: {}", reserves_id);
+    println!("  Reserves ID: {}", reserves_id);
     println!("  Deposit: {}", deposit_pubkey);
     println!("  Amount: {} msats ({} sats)", amount_msats, amount_msats / 1000);
     println!("  Invoice ID: {}", invoice_id);
@@ -1094,68 +1118,6 @@ async fn deposit_credit(args: &[String]) -> Result<(), Box<dyn std::error::Error
 
     println!("\nDeposit credited!");
     println!("  New balance: {} msats ({} sats)", new_balance, new_balance / 1000);
-
-    Ok(())
-}
-
-/// Transfer between deposits in the same ledger
-async fn deposit_transfer(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    // Parse positional arguments: <reserves_id> <from_deposit> <to_deposit> <amount_msats>
-    let mut positional: Vec<String> = Vec::new();
-    let mut config_args = Vec::new();
-
-    let mut i = 0;
-    while i < args.len() {
-        if args[i].starts_with("--") {
-            config_args.push(args[i].clone());
-            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
-                config_args.push(args[i + 1].clone());
-                i += 1;
-            }
-        } else {
-            positional.push(args[i].clone());
-        }
-        i += 1;
-    }
-
-    if positional.len() < 4 {
-        eprintln!("Usage: deposits-bdk deposit transfer <reserves_id> <from_deposit> <to_deposit> <amount_msats> [options]");
-        eprintln!("\nExample:");
-        eprintln!("  deposits-bdk deposit transfer 02abc...partner 02def...from 02ghi...to 1000000");
-        eprintln!("\nThis transfers funds from one deposit to another within the same ledger.");
-        return Ok(());
-    }
-
-    let reserves_id = PublicKey::from_str(&positional[0])
-        .map_err(|e| format!("Invalid reserves ID: {}", e))?;
-    let from_deposit = PublicKey::from_str(&positional[1])
-        .map_err(|e| format!("Invalid from_deposit pubkey: {}", e))?;
-    let to_deposit = PublicKey::from_str(&positional[2])
-        .map_err(|e| format!("Invalid to_deposit pubkey: {}", e))?;
-    let amount_msats: u64 = positional[3]
-        .parse()
-        .map_err(|_| format!("Invalid amount_msats: {}", positional[3]))?;
-
-    let config = parse_config(&config_args)?;
-    let node = Node::new(config).await?;
-
-    println!("Transferring funds...");
-    println!("  Partner: {}", reserves_id);
-    println!("  From: {}", from_deposit);
-    println!("  To: {}", to_deposit);
-    println!("  Amount: {} msats ({} sats)", amount_msats, amount_msats / 1000);
-
-    let (transfer_id, from_balance, to_balance) = node.transfer_between_deposits(
-        reserves_id,
-        from_deposit,
-        to_deposit,
-        amount_msats,
-    )?;
-
-    println!("\nTransfer complete!");
-    println!("  Transfer ID: {}", hex::encode(&transfer_id[..8]));
-    println!("  From balance: {} msats ({} sats)", from_balance, from_balance / 1000);
-    println!("  To balance: {} msats ({} sats)", to_balance, to_balance / 1000);
 
     Ok(())
 }
@@ -1286,27 +1248,33 @@ async fn deposit_complete(args: &[String]) -> Result<(), Box<dyn std::error::Err
 /// Handle withdraw subcommands
 async fn withdraw_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {
-        eprintln!("Usage: deposits-bdk withdraw <lock|complete|cancel|list> [args...]");
+        eprintln!("Usage: deposits-bdk withdraw <request|lock|complete|cancel|list> [args...]");
         return Ok(());
     }
 
     match args[0].as_str() {
+        "request" => withdraw_request(&args[1..]).await,
         "lock" => withdraw_lock(&args[1..]).await,
         "complete" => withdraw_complete(&args[1..]).await,
         "cancel" => withdraw_cancel(&args[1..]).await,
         "list" => withdraw_list(&args[1..]).await,
         cmd => {
             eprintln!("Unknown withdraw subcommand: {}", cmd);
-            eprintln!("Usage: deposits-bdk withdraw <lock|complete|cancel|list> [args...]");
+            eprintln!("Usage: deposits-bdk withdraw <request|lock|complete|cancel|list> [args...]");
             Ok(())
         }
     }
 }
 
-/// Lock funds for an on-chain withdrawal
-async fn withdraw_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+/// Request a withdrawal (for depositors) - generates nonce and signature, then locks
+///
+/// This combines nonce generation, signing, and locking into one step for convenience.
+/// In production, the depositor would sign on their own device and send nonce+signature to operator.
+async fn withdraw_request(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use bitcoin::secp256k1::SecretKey;
+
     // Parse positional arguments:
-    // <deposit_pubkey> <address> <amount_sats> <fee_sats> <signature_hex>
+    // <partner_id> <deposit_secret> <address> <amount_sats> <fee_sats>
     let mut positional: Vec<String> = Vec::new();
     let mut config_args = Vec::new();
     let mut memo: Option<String> = None;
@@ -1331,22 +1299,144 @@ async fn withdraw_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     }
 
     if positional.len() < 5 {
-        eprintln!("Usage: deposits-bdk withdraw lock <deposit_pubkey> <address> <amount_sats> <fee_sats> <signature_hex> [--memo <text>] [options]");
-        eprintln!("\nThe signature must be created by the depositor authorizing the withdrawal.");
-        eprintln!("Format: ECDSA signature over 'WITHDRAWAL:<nonce>:<deposit>:<address>:<amount>:<fee>'");
+        eprintln!("Usage: deposits-bdk withdraw request <reserves_id> <deposit_secret_hex> <address> <amount_sats> <fee_sats> [--memo <text>] [options]");
+        eprintln!("\nThis command generates a nonce, signs the withdrawal request, and locks the funds.");
         return Ok(());
     }
 
-    let deposit_pubkey = PublicKey::from_str(&positional[0])
+    let reserves_id = &positional[0];
+    let secret_hex = &positional[1];
+    let destination_address = positional[2].clone();
+    let amount_sats: u64 = positional[3]
+        .parse()
+        .map_err(|_| format!("Invalid amount_sats: {}", positional[3]))?;
+    let fee_sats: u64 = positional[4]
+        .parse()
+        .map_err(|_| format!("Invalid fee_sats: {}", positional[4]))?;
+
+    // Parse secret key
+    let secret_bytes = hex::decode(secret_hex)
+        .map_err(|e| format!("Invalid secret hex: {}", e))?;
+    if secret_bytes.len() != 32 {
+        return Err("Secret key must be 32 bytes".into());
+    }
+    let secret_key = SecretKey::from_slice(&secret_bytes)
+        .map_err(|e| format!("Invalid secret key: {}", e))?;
+
+    // Derive public key
+    let secp = Secp256k1::new();
+    let deposit_pubkey = PublicKey::from_secret_key(&secp, &secret_key);
+
+    // Generate random nonce
+    use bitcoin::secp256k1::rand::rngs::OsRng;
+    use bitcoin::secp256k1::rand::RngCore;
+    let mut nonce = [0u8; 32];
+    OsRng.fill_bytes(&mut nonce);
+
+    // Create signature
+    let signature = deposits_core::create_withdrawal_signature(
+        &secret_key,
+        &nonce,
+        &deposit_pubkey,
+        &destination_address,
+        amount_sats,
+        fee_sats,
+    ).map_err(|e| format!("Failed to create signature: {:?}", e))?;
+
+    let config = parse_config(&config_args)?;
+    let node = Node::new(config).await?;
+
+    // Sync wallet
+    node.sync_wallet()?;
+
+    println!("Requesting withdrawal...");
+    println!("  Deposit: {}", deposit_pubkey);
+    println!("  Destination: {}", destination_address);
+    println!("  Amount: {} sats", amount_sats);
+    println!("  Fee: {} sats", fee_sats);
+    if let Some(ref m) = memo {
+        println!("  Memo: {}", m);
+    }
+
+    // Lock the withdrawal
+    let result = node.lock_withdrawal(
+        reserves_id,
+        deposit_pubkey,
+        destination_address,
+        amount_sats,
+        fee_sats,
+        nonce,
+        signature,
+        memo,
+    )?;
+
+    println!("\nWithdrawal locked!");
+    println!("  Withdrawal ID: {}", hex::encode(&result.withdrawal.withdrawal_id));
+    println!("  Nonce: {}", hex::encode(&result.withdrawal.nonce[..8]));
+    println!("  Total debit: {} sats", result.withdrawal.total_debit());
+    println!("  Previous balance: {} msats", result.previous_balance_msats);
+    println!("  New balance: {} msats", result.new_balance_msats);
+    println!("\nThe withdrawal can now be completed with:");
+    println!("  deposits-bdk withdraw complete {} {}", reserves_id, hex::encode(&result.withdrawal.withdrawal_id));
+
+    Ok(())
+}
+
+/// Lock funds for an on-chain withdrawal (operator-side, requires pre-signed request)
+async fn withdraw_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    // Parse positional arguments:
+    // <deposit_pubkey> <address> <amount_sats> <fee_sats> <nonce_hex> <signature_hex>
+    let mut positional: Vec<String> = Vec::new();
+    let mut config_args = Vec::new();
+    let mut memo: Option<String> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--memo" {
+            i += 1;
+            if i < args.len() {
+                memo = Some(args[i].clone());
+            }
+        } else if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else {
+            positional.push(args[i].clone());
+        }
+        i += 1;
+    }
+
+    if positional.len() < 7 {
+        eprintln!("Usage: deposits-bdk withdraw lock <reserves_id> <deposit_pubkey> <address> <amount_sats> <fee_sats> <nonce_hex> <signature_hex> [--memo <text>] [options]");
+        eprintln!("\nThe nonce and signature must be provided by the depositor.");
+        eprintln!("For testing, use 'withdraw request' which handles signing automatically.");
+        return Ok(());
+    }
+
+    let reserves_id = &positional[0];
+    let deposit_pubkey = PublicKey::from_str(&positional[1])
         .map_err(|e| format!("Invalid deposit pubkey: {}", e))?;
-    let destination_address = positional[1].clone();
-    let amount_sats: u64 = positional[2]
+    let destination_address = positional[2].clone();
+    let amount_sats: u64 = positional[3]
         .parse()
-        .map_err(|_| format!("Invalid amount_sats: {}", positional[2]))?;
-    let fee_sats: u64 = positional[3]
+        .map_err(|_| format!("Invalid amount_sats: {}", positional[3]))?;
+    let fee_sats: u64 = positional[4]
         .parse()
-        .map_err(|_| format!("Invalid fee_sats: {}", positional[3]))?;
-    let signature_hex = &positional[4];
+        .map_err(|_| format!("Invalid fee_sats: {}", positional[4]))?;
+    let nonce_hex = &positional[5];
+    let signature_hex = &positional[6];
+
+    // Parse nonce
+    let nonce_bytes = hex::decode(nonce_hex)
+        .map_err(|e| format!("Invalid nonce hex: {}", e))?;
+    if nonce_bytes.len() != 32 {
+        return Err("Nonce must be 32 bytes".into());
+    }
+    let mut nonce = [0u8; 32];
+    nonce.copy_from_slice(&nonce_bytes);
 
     // Parse signature
     let sig_bytes = hex::decode(signature_hex)
@@ -1364,6 +1454,7 @@ async fn withdraw_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     node.sync_wallet()?;
 
     println!("Locking withdrawal...");
+    println!("  Reserves ID: {}", reserves_id);
     println!("  Deposit: {}", deposit_pubkey);
     println!("  Destination: {}", destination_address);
     println!("  Amount: {} sats", amount_sats);
@@ -1374,10 +1465,12 @@ async fn withdraw_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
 
     // Lock the withdrawal
     let result = node.lock_withdrawal(
+        reserves_id,
         deposit_pubkey,
         destination_address,
         amount_sats,
         fee_sats,
+        nonce,
         signature,
         memo,
     )?;
@@ -1386,15 +1479,17 @@ async fn withdraw_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     println!("  Withdrawal ID: {}", hex::encode(&result.withdrawal.withdrawal_id));
     println!("  Nonce: {}", hex::encode(&result.withdrawal.nonce[..8]));
     println!("  Total debit: {} sats", result.withdrawal.total_debit());
+    println!("  Previous balance: {} msats", result.previous_balance_msats);
+    println!("  New balance: {} msats", result.new_balance_msats);
     println!("\nThe withdrawal can now be completed with:");
-    println!("  deposits-bdk withdraw complete {}", hex::encode(&result.withdrawal.withdrawal_id));
+    println!("  deposits-bdk withdraw complete {} {}", positional[0], hex::encode(&result.withdrawal.withdrawal_id));
 
     Ok(())
 }
 
 /// Complete a withdrawal by broadcasting the transaction
 async fn withdraw_complete(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let mut withdrawal_id_hex: Option<String> = None;
+    let mut positional: Vec<String> = Vec::new();
     let mut config_args = Vec::new();
 
     let mut i = 0;
@@ -1405,14 +1500,20 @@ async fn withdraw_complete(args: &[String]) -> Result<(), Box<dyn std::error::Er
                 config_args.push(args[i + 1].clone());
                 i += 1;
             }
-        } else if withdrawal_id_hex.is_none() {
-            withdrawal_id_hex = Some(args[i].clone());
+        } else {
+            positional.push(args[i].clone());
         }
         i += 1;
     }
 
-    let withdrawal_id_hex = withdrawal_id_hex.ok_or("Withdrawal ID required")?;
-    let id_bytes = hex::decode(&withdrawal_id_hex)
+    if positional.len() < 2 {
+        eprintln!("Usage: deposits-bdk withdraw complete <reserves_id> <withdrawal_id> [options]");
+        return Ok(());
+    }
+
+    let reserves_id = &positional[0];
+    let withdrawal_id_hex = &positional[1];
+    let id_bytes = hex::decode(withdrawal_id_hex)
         .map_err(|e| format!("Invalid withdrawal ID hex: {}", e))?;
     if id_bytes.len() != 32 {
         return Err("Withdrawal ID must be 32 bytes".into());
@@ -1428,12 +1529,13 @@ async fn withdraw_complete(args: &[String]) -> Result<(), Box<dyn std::error::Er
 
     println!("Completing withdrawal {}...", &withdrawal_id_hex[..16]);
 
-    let result = node.complete_withdrawal(&withdrawal_id)?;
+    let result = node.complete_withdrawal(reserves_id, &withdrawal_id)?;
 
     println!("\nWithdrawal completed!");
     println!("  Transaction ID: {}", result.txid);
     println!("  Amount: {} sats", result.amount_sats);
     println!("  Fee: {} sats", result.fee_sats);
+    println!("  Final balance: {} msats", result.final_balance_msats);
     println!("\nThe transaction includes an OP_RETURN commitment proving");
     println!("this withdrawal was executed for the specific request.");
 

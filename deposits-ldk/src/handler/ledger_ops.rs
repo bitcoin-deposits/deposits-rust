@@ -151,7 +151,7 @@ where
         <_ as LedgerOperations>::has_ledger_with(handler.as_ref(), partner_node_id)
     }
 
-    fn list_operator_ledgers(&self) -> Vec<PublicKey> {
+    fn list_operator_ledgers(&self) -> Vec<std::string::String> {
         let handler = self.core_handler.as_ref().expect("core_handler must be initialized");
         <_ as LedgerOperations>::list_operator_ledgers(handler.as_ref())
     }
@@ -168,13 +168,17 @@ where
     L::Target: LdkLogger,
 {
     fn get_all_ledger_hashes(&self) -> HashMap<PublicKey, [u8; 32]> {
+        use std::str::FromStr;
         let ledgers = self.ledgers.lock().unwrap();
         let mut hashes = HashMap::new();
 
         for ((operator_id, reserves_id), ledger) in ledgers.iter() {
             if *operator_id == self.our_node_id {
-                let ledger = ledger.read().unwrap();
-                hashes.insert(*reserves_id, ledger.tail_hash());
+                // In LDK, reserves_id is the partner's pubkey as string
+                if let Ok(partner_pubkey) = PublicKey::from_str(reserves_id) {
+                    let ledger = ledger.read().unwrap();
+                    hashes.insert(partner_pubkey, ledger.tail_hash());
+                }
             }
         }
 
@@ -182,6 +186,7 @@ where
     }
 
     fn get_next_sequence_number_for_deposit(&self, deposit_pubkey: PublicKey) -> Result<(u64, PublicKey), DepositsError> {
+        use std::str::FromStr;
         let ledgers = self.ledgers.lock().unwrap();
 
         for ((operator, partner), ledger_arc) in ledgers.iter() {
@@ -189,7 +194,10 @@ where
                 let ledger = ledger_arc.read().unwrap();
                 if ledger.state.deposits.contains_key(&deposit_pubkey) {
                     let next_sequence = ledger.history.len() as u64;
-                    return Ok((next_sequence, *partner));
+                    // In LDK, partner (reserves_id) is a string form of pubkey
+                    let partner_pubkey = PublicKey::from_str(partner)
+                        .map_err(|_| DepositsError::InvalidPublicKey)?;
+                    return Ok((next_sequence, partner_pubkey));
                 }
             }
         }
@@ -200,12 +208,12 @@ where
     fn get_ledger_address(&self, partner_node_id: PublicKey) -> Result<String, DepositsError> {
         let ledgers = self.ledgers.lock().unwrap();
 
-        if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+        if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
             let ledger = ledger_arc.read().unwrap();
             return Ok(ledger.state.ledger_address.clone());
         }
 
-        if let Some(ledger_arc) = ledgers.get(&(partner_node_id, self.our_node_id)) {
+        if let Some(ledger_arc) = ledgers.get(&(partner_node_id, self.our_node_id.to_string())) {
             let ledger = ledger_arc.read().unwrap();
             return Ok(ledger.state.ledger_address.clone());
         }
@@ -219,12 +227,12 @@ where
     fn get_ledger_updates(&self, partner_node_id: PublicKey) -> Result<Vec<SignedLedgerUpdate>, DepositsError> {
         let ledgers = self.ledgers.lock().unwrap();
 
-        if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+        if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
             let ledger = ledger_arc.read().unwrap();
             return Ok(ledger.history.to_vec());
         }
 
-        if let Some(ledger_arc) = ledgers.get(&(partner_node_id, self.our_node_id)) {
+        if let Some(ledger_arc) = ledgers.get(&(partner_node_id, self.our_node_id.to_string())) {
             let ledger = ledger_arc.read().unwrap();
             return Ok(ledger.history.to_vec());
         }
@@ -238,12 +246,12 @@ where
     fn get_ledger_sync_state(&self, partner_node_id: PublicKey) -> Result<([u8; 32], [u8; 32]), DepositsError> {
         let ledgers = self.ledgers.lock().unwrap();
 
-        if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+        if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
             let ledger = ledger_arc.read().unwrap();
             return Ok((ledger.state.partner_deepest_ack_hash, ledger.state.channel_deepest_commitment_hash));
         }
 
-        if let Some(ledger_arc) = ledgers.get(&(partner_node_id, self.our_node_id)) {
+        if let Some(ledger_arc) = ledgers.get(&(partner_node_id, self.our_node_id.to_string())) {
             let ledger = ledger_arc.read().unwrap();
             return Ok((ledger.state.partner_deepest_ack_hash, ledger.state.channel_deepest_commitment_hash));
         }
@@ -255,44 +263,54 @@ where
     }
 
     fn get_all_ledger_updates(&self) -> HashMap<(PublicKey, PublicKey), Vec<SignedLedgerUpdate>> {
+        use std::str::FromStr;
         let ledgers = self.ledgers.lock().unwrap();
         let mut all_updates = HashMap::new();
 
         log_info!(self.logger, "DEBUG get_all_ledger_updates: total ledgers in memory = {}", ledgers.len());
 
         for ((operator_id, reserves_id), ledger_arc) in ledgers.iter() {
-            if *operator_id != self.our_node_id && *reserves_id != self.our_node_id {
+            if *operator_id != self.our_node_id && *reserves_id != self.our_node_id.to_string() {
                 log_info!(self.logger, "DEBUG get_all_ledger_updates: skipping ledger {}→{} (not ours)", operator_id, reserves_id);
                 continue;
             }
 
-            let ledger = ledger_arc.read().unwrap();
-            log_info!(self.logger, "DEBUG get_all_ledger_updates: ledger {}→{} has {} history entries",
-                operator_id, reserves_id, ledger.history.len());
-            all_updates.insert((*operator_id, *reserves_id), ledger.history.to_vec());
+            // Parse reserves_id back to PublicKey for the map key
+            if let Ok(reserves_pubkey) = PublicKey::from_str(reserves_id) {
+                let ledger = ledger_arc.read().unwrap();
+                log_info!(self.logger, "DEBUG get_all_ledger_updates: ledger {}→{} has {} history entries",
+                    operator_id, reserves_id, ledger.history.len());
+                all_updates.insert((*operator_id, reserves_pubkey), ledger.history.to_vec());
+            }
         }
 
         all_updates
     }
 
     fn get_all_audit_ledger_updates(&self) -> HashMap<(PublicKey, PublicKey), Vec<SignedLedgerUpdate>> {
+        use std::str::FromStr;
         let ledgers = self.ledgers.lock().unwrap();
         let mut all_updates = HashMap::new();
 
         for ((operator_id, reserves_id), ledger_arc) in ledgers.iter() {
-            let ledger = ledger_arc.read().unwrap();
-            all_updates.insert((*operator_id, *reserves_id), ledger.history.to_vec());
+            if let Ok(reserves_pubkey) = PublicKey::from_str(reserves_id) {
+                let ledger = ledger_arc.read().unwrap();
+                all_updates.insert((*operator_id, reserves_pubkey), ledger.history.to_vec());
+            }
         }
 
         all_updates
     }
 
     fn get_all_signed_audit_updates(&self) -> HashMap<(PublicKey, PublicKey), Vec<SignedLedgerUpdate>> {
+        use std::str::FromStr;
         let signed_update_logs = self.signed_update_logs.lock().unwrap();
         let mut all_updates = HashMap::new();
 
         for ((operator_id, reserves_id), log) in signed_update_logs.iter() {
-            all_updates.insert((*operator_id, *reserves_id), log.updates.clone());
+            if let Ok(reserves_pubkey) = PublicKey::from_str(reserves_id) {
+                all_updates.insert((*operator_id, reserves_pubkey), log.updates.clone());
+            }
         }
 
         all_updates
@@ -300,34 +318,43 @@ where
 
     fn get_partner_ledger(&self, operator_id: &PublicKey) -> Option<Arc<RwLock<Ledger>>> {
         let ledgers = self.ledgers.lock().unwrap();
-        ledgers.get(&(*operator_id, self.our_node_id)).cloned()
+        ledgers.get(&(*operator_id, self.our_node_id.to_string())).cloned()
     }
 
     fn get_all_ledgers(&self) -> Vec<((PublicKey, PublicKey), Arc<RwLock<Ledger>>)> {
+        use std::str::FromStr;
         let ledgers = self.ledgers.lock().unwrap();
-        ledgers.iter().map(|(k, v)| (*k, v.clone())).collect()
+        ledgers.iter()
+            .filter_map(|((op, reserves_id), v)| {
+                PublicKey::from_str(reserves_id).ok().map(|pubkey| ((*op, pubkey), v.clone()))
+            })
+            .collect()
     }
 
     fn get_all_partner_ledger_updates(&self) -> HashMap<(PublicKey, PublicKey), Vec<SignedLedgerUpdate>> {
+        use std::str::FromStr;
         let ledgers = self.ledgers.lock().unwrap();
         let mut all_updates = HashMap::new();
 
         for ((operator_id, reserves_id), ledger_arc) in ledgers.iter() {
-            let ledger = ledger_arc.read().unwrap();
-            all_updates.insert((*operator_id, *reserves_id), ledger.history.clone());
+            if let Ok(reserves_pubkey) = PublicKey::from_str(reserves_id) {
+                let ledger = ledger_arc.read().unwrap();
+                all_updates.insert((*operator_id, reserves_pubkey), ledger.history.clone());
+            }
         }
 
         all_updates
     }
 
     fn find_partner_for_deposit(&self, deposit_pubkey: PublicKey) -> Option<PublicKey> {
+        use std::str::FromStr;
         let ledgers = self.ledgers.lock().unwrap();
 
         for ((operator, partner), ledger_arc) in ledgers.iter() {
             if *operator == self.our_node_id {
                 let ledger = ledger_arc.read().unwrap();
                 if ledger.state.deposits.contains_key(&deposit_pubkey) {
-                    return Some(*partner);
+                    return PublicKey::from_str(partner).ok();
                 }
             }
         }
@@ -346,12 +373,12 @@ where
         let mut ledgers = self.ledgers.lock().unwrap();
 
         // Remove ledger where we are operator
-        if ledgers.remove(&(self.our_node_id, partner_node_id)).is_some() {
+        if ledgers.remove(&(self.our_node_id, partner_node_id.to_string())).is_some() {
             return Ok(());
         }
 
         // Remove ledger where partner is operator
-        if ledgers.remove(&(partner_node_id, self.our_node_id)).is_some() {
+        if ledgers.remove(&(partner_node_id, self.our_node_id.to_string())).is_some() {
             return Ok(());
         }
 
@@ -364,7 +391,7 @@ where
     fn mark_ledger_committed(&self, partner_node_id: PublicKey, _commitment_number: u64) -> Result<(), DepositsError> {
         let ledgers = self.ledgers.lock().unwrap();
 
-        if ledgers.get(&(self.our_node_id, partner_node_id)).is_some() {
+        if ledgers.get(&(self.our_node_id, partner_node_id.to_string())).is_some() {
             // TODO: Track commitment state in handler
             return Ok(());
         }
@@ -375,7 +402,7 @@ where
     fn get_ledger_hash_for_commitment(&self, partner_node_id: PublicKey) -> Result<Option<[u8; 32]>, DepositsError> {
         let ledgers = self.ledgers.lock().unwrap();
 
-        if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+        if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
             let ledger = ledger_arc.read().unwrap();
             return Ok(Some(ledger.tail_hash()));
         }
@@ -506,12 +533,12 @@ mod tests {
     fn add_operator_ledger(handler: &DepositsHandler<Arc<TestLogger>>, partner: PublicKey) -> [u8; 32] {
         let ledger = Ledger::new_as_operator(
             handler.our_node_id,
-            partner,
+            partner.to_string(),
             "tb1qtest".to_string(),
         );
         let hash = ledger.tail_hash();
         handler.ledgers.lock().unwrap().insert(
-            (handler.our_node_id, partner),
+            (handler.our_node_id, partner.to_string()),
             Arc::new(RwLock::new(ledger))
         );
         hash
@@ -521,11 +548,11 @@ mod tests {
     fn add_partner_ledger_test(handler: &DepositsHandler<Arc<TestLogger>>, operator: PublicKey) {
         let ledger = Ledger::new_as_operator(
             operator,
-            handler.our_node_id,
+            handler.our_node_id.to_string(),
             "tb1qtest_partner".to_string(),
         );
         handler.ledgers.lock().unwrap().insert(
-            (operator, handler.our_node_id),
+            (operator, handler.our_node_id.to_string()),
             Arc::new(RwLock::new(ledger))
         );
     }
@@ -537,7 +564,7 @@ mod tests {
         deposit_pubkey: PublicKey,
     ) {
         let ledgers = handler.ledgers.lock().unwrap();
-        if let Some(ledger_arc) = ledgers.get(&(handler.our_node_id, partner)) {
+        if let Some(ledger_arc) = ledgers.get(&(handler.our_node_id, partner.to_string())) {
             let mut ledger = ledger_arc.write().unwrap();
             // Use deposits-core Deposit type
             let mut deposit = deposits_core::Deposit::new(deposit_pubkey, None);
@@ -568,8 +595,8 @@ mod tests {
 
         let ledgers = handler.list_operator_ledgers();
         assert_eq!(ledgers.len(), 2);
-        assert!(ledgers.contains(&partner1));
-        assert!(ledgers.contains(&partner2));
+        assert!(ledgers.contains(&partner1.to_string()));
+        assert!(ledgers.contains(&partner2.to_string()));
     }
 
     #[test]
@@ -671,7 +698,7 @@ mod tests {
 
         // Get the tail hash
         let ledgers = handler.ledgers.lock().unwrap();
-        let tail_hash = ledgers.get(&(partner, handler.our_node_id))
+        let tail_hash = ledgers.get(&(partner, handler.our_node_id.to_string()))
             .map(|l| l.read().unwrap().tail_hash())
             .unwrap();
         drop(ledgers);

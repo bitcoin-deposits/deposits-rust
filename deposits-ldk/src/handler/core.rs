@@ -114,7 +114,8 @@ where
     /// Unified ledger storage keyed by (operator_id, reserves_id) tuple
     /// Each ledger has an `our_role` field indicating if we're Operator, Partner, or Auditor
     /// Uses Arc to enable sharing with core Handler
-    pub(crate) ledgers: Arc<Mutex<HashMap<(PublicKey, PublicKey), Arc<RwLock<Ledger>>>>>,
+    /// Note: reserves_id is a String (partner pubkey string for LDK, address for BDK)
+    pub(crate) ledgers: Arc<Mutex<HashMap<(PublicKey, String), Arc<RwLock<Ledger>>>>>,
 
     /// Legacy protocol implementations (will be removed in future phases)
     /// TODO: Remove this once full migration is complete
@@ -175,7 +176,7 @@ where
     /// prev_hash is the ledger's hash BEFORE applying this update
     /// new_hash is the ledger's hash AFTER applying this update
     /// chain_index is the position of this update in the ledger's hash chain (like block height)
-    pub(crate) sent_messages_for_broadcast: Mutex<HashMap<[u8; 32], (PublicKey, PublicKey, DepositsMessage, [u8; 32], [u8; 32], u64)>>,
+    pub(crate) sent_messages_for_broadcast: Mutex<HashMap<[u8; 32], (PublicKey, String, DepositsMessage, [u8; 32], [u8; 32], u64)>>,
 
     /// Track pending ACKs (message_hash -> PendingAck)
     /// Used by operators to track which messages are waiting for ACKs from partners
@@ -185,7 +186,7 @@ where
     /// Signed ledger update logs for third-party auditing
     /// Key: (operator_id, reserves_id) -> log of signed updates
     /// Only contains ledgers where we are neither operator nor partner (third-party audit only)
-    pub(crate) signed_update_logs: Mutex<HashMap<(PublicKey, PublicKey), deposits_core::SignedLedgerUpdateLog>>,
+    pub(crate) signed_update_logs: Mutex<HashMap<(PublicKey, String), deposits_core::SignedLedgerUpdateLog>>,
 
     /// Node's secret key for signing ledger updates
     /// This is the Lightning node's identity key, used to sign audit messages

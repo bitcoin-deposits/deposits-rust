@@ -32,13 +32,14 @@ where
         // IMPORTANT: Only refresh ledgers where WE are the OPERATOR.
         // Partners do NOT send UpdateReserves - only operators do.
         let partners_to_refresh: Vec<PublicKey> = {
+            use std::str::FromStr;
             log_info!(self.logger, "Collecting partners to refresh commitments...");
             let ledgers = self.ledgers.lock().unwrap();
             let partners: Vec<PublicKey> = ledgers.iter()
                 .filter_map(|((operator_id, reserves_id), _ledger_arc)| {
                     // Only refresh if we're the operator - partners don't send UpdateReserves
                     if *operator_id == self.our_node_id {
-                        Some(*reserves_id)
+                        PublicKey::from_str(reserves_id).ok()
                     } else {
                         None
                     }

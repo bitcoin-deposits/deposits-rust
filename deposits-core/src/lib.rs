@@ -143,7 +143,7 @@ pub use message_processor::{
 };
 pub use handler_types::{
     // Pending operation tracking
-    PendingTransfer, PendingPayment,
+    PendingPayment,
     // Protocol state types
     CosignedInvoice, VoteRoundState, ProtocolStats,
     LedgerSummary, ReservesSummary, CollateralPartnerInfo, CollateralInfo,
@@ -209,8 +209,6 @@ pub use wire_messages::{
     ReceivingCreditPaymentMsg, SendingLockPaymentMsg,
     SendingFailPaymentMsg, SendingFulfillPaymentMsg,
     ReceivingCosignInvoiceMsg, UncreditedPaymentMsg,
-    // Transfer messages
-    DepositLockTransferMsg, DepositFailTransferMsg, DepositFulfillTransferMsg,
     // Sync messages
     SyncRequestMsg, ChannelCloseTombstoneMsg,
     // Quorum messages (wire-specific versions with Wire suffix)

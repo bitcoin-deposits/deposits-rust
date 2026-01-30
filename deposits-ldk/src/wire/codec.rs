@@ -151,11 +151,9 @@ mod tests {
             min_protocol_version: 1,
             features: 0,
             operator_id: test_pubkey,
-            reserves_id: test_pubkey,
-            ledger_address: "test_address".to_string(),
+            reserves_id: test_pubkey.to_string(),
             funding_txid: [0u8; 32],
             funding_vout: 0,
-            reserves_amount: 100_000_000,
             collateral_enforcement_block: 0,
         });
 
@@ -188,11 +186,9 @@ mod tests {
                 min_protocol_version: 1,
                 features: 0,
                 operator_id: test_pubkey,
-                reserves_id: test_pubkey,
-                ledger_address: "test".to_string(),
+                reserves_id: test_pubkey.to_string(),
                 funding_txid: [0u8; 32],
                 funding_vout: 0,
-                reserves_amount: 100_000_000,
                 collateral_enforcement_block: 0,
             }),
             // Handshake response
@@ -201,12 +197,12 @@ mod tests {
                 protocol_version: 2,
                 accepted: true,
                 error: None,
-                reserves_id: test_pubkey,
+                reserves_id: test_pubkey.to_string(),
             }),
             // Sync message
             DepositsMessage::Sync(SyncMsg {
                 operator_id: test_pubkey,
-                reserves_id: test_pubkey,
+                reserves_id: test_pubkey.to_string(),
                 last_known_sequence: 0,
                 last_known_hash: [0u8; 32],
             }),
@@ -269,11 +265,9 @@ mod tests {
             min_protocol_version: 1,
             features: 0,
             operator_id: test_pubkey,
-            reserves_id: test_pubkey,
-            ledger_address: "test".to_string(),
+            reserves_id: test_pubkey.to_string(),
             funding_txid: [0u8; 32],
             funding_vout: 0,
-            reserves_amount: 100_000_000,
             collateral_enforcement_block: 0,
         });
 

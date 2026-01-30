@@ -35,7 +35,7 @@ where
         // First validate that the deposit exists and has zero balance
         let ledgers = self.ledgers.lock().unwrap();
 
-        if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+        if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
             let ledger = ledger_arc.read().unwrap();
 
             // Ensure deposit balance is zero before removing
@@ -57,7 +57,7 @@ where
             // Capture prev_hash before creating message
             let prev_hash = {
                 let ledgers = self.ledgers.lock().unwrap();
-                if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+                if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                     let ledger = ledger_arc.read().unwrap();
                     ledger.tail_hash()
                 } else {
@@ -68,7 +68,7 @@ where
             // Send LedgerRemoveDeposit message to partner to create proper ledger update (V2 format)
             let update_msg = LedgerUpdateMsg::new_with_operation(
                 self.our_node_id,    // operator
-                partner_node_id,     // partner
+                partner_node_id.to_string(),     // partner
                 LedgerOperation::DepositClose { pubkey: deposit_pubkey },
             );
             let message = DepositsMessage::LedgerUpdate(update_msg);
@@ -84,7 +84,7 @@ where
             // After ACK received, apply the update to our (operator's) ledger and capture new_hash
             let (new_hash, chain_index) = {
                 let ledgers = self.ledgers.lock().unwrap();
-                if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+                if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                     let mut ledger = ledger_arc.write().unwrap();
                     let hash = ledger.append_mut(message_for_broadcast.clone())?;
                     let seq = (ledger.history.len() - 1) as u64; // 0-based (index of just-appended entry)
@@ -100,7 +100,7 @@ where
             // Update sent_messages_for_broadcast with correct new_hash and broadcast
             {
                 let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
-                sent_messages.insert(message_hash, (self.our_node_id, partner_node_id, message_for_broadcast.clone(), prev_hash, new_hash, chain_index));
+                sent_messages.insert(message_hash, (self.our_node_id, partner_node_id.to_string(), message_for_broadcast.clone(), prev_hash, new_hash, chain_index));
             }
 
             // Now broadcast with correct hashes
@@ -121,7 +121,7 @@ where
         // Validate ledger exists and has no deposits
         {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let ledger = ledger_arc.read().unwrap();
                 if !ledger.state.deposits.is_empty() {
                     return Err(DepositsError::ProtocolViolation {
@@ -137,7 +137,7 @@ where
         // Send LedgerClose message (V2 format)
         let update_msg = LedgerUpdateMsg::new_with_operation(
             self.our_node_id,    // operator
-            partner_node_id,     // partner
+            partner_node_id.to_string(),     // partner
             LedgerOperation::LedgerClose,
         );
         let message = DepositsMessage::LedgerUpdate(update_msg);
@@ -178,7 +178,7 @@ where
         // After ACK, apply update and remove ledger
         {
             let mut ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let mut ledger = ledger_arc.write().unwrap();
                 let new_hash = ledger.append_mut(message)?;
                 // Update partner_deepest_ack_hash since partner just ACKed this update
@@ -186,7 +186,7 @@ where
                 self.persist_ledger_state(&*ledger)?;
             }
             // Remove the ledger from our map
-            ledgers.remove(&(self.our_node_id, partner_node_id));
+            ledgers.remove(&(self.our_node_id, partner_node_id.to_string()));
         }
 
         // Also remove from protocols map
@@ -202,7 +202,7 @@ where
         // Validate ledger exists and has no deposits
         {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let ledger = ledger_arc.read().unwrap();
                 if !ledger.state.deposits.is_empty() {
                     return Err(DepositsError::ProtocolViolation {
@@ -218,7 +218,7 @@ where
         // Send LedgerClose message (V2 format)
         let update_msg = LedgerUpdateMsg::new_with_operation(
             self.our_node_id,    // operator
-            partner_node_id,     // partner
+            partner_node_id.to_string(),     // partner
             LedgerOperation::LedgerClose,
         );
         let message = DepositsMessage::LedgerUpdate(update_msg);
@@ -259,7 +259,7 @@ where
         // After ACK, apply update and remove ledger
         {
             let mut ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let mut ledger = ledger_arc.write().unwrap();
                 let new_hash = ledger.append_mut(message)?;
                 // Update partner_deepest_ack_hash since partner just ACKed this update
@@ -267,7 +267,7 @@ where
                 self.persist_ledger_state(&*ledger)?;
             }
             // Remove the ledger from our map
-            ledgers.remove(&(self.our_node_id, partner_node_id));
+            ledgers.remove(&(self.our_node_id, partner_node_id.to_string()));
         }
 
         // Also remove from protocols map
@@ -283,7 +283,7 @@ where
         // Validate reserves are 0
         {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let ledger = ledger_arc.read().unwrap();
                 if ledger.reserves_amount() > 0 {
                     return Err(DepositsError::ProtocolViolation {
@@ -299,7 +299,7 @@ where
         // Send ReservesDecrease to 0 message (reserves removal)
         let update_msg = LedgerUpdateMsg::new_with_operation(
             self.our_node_id,    // operator
-            partner_node_id,     // partner
+            partner_node_id.to_string(),     // partner
             LedgerOperation::ReservesDecrease { new_amount: 0 },
         );
         let message = DepositsMessage::LedgerUpdate(update_msg);
@@ -329,7 +329,7 @@ where
         // After ACK, apply update to ledger
         {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let mut ledger = ledger_arc.write().unwrap();
                 let new_hash = ledger.append_mut(message)?;
                 // Update partner_deepest_ack_hash since partner just ACKed this update
@@ -370,7 +370,7 @@ where
     pub fn credit_deposit_balance(&self, partner_node_id: PublicKey, deposit_pubkey: PublicKey, amount: u64) -> Result<(), DepositsError> {
         let ledgers = self.ledgers.lock().unwrap();
 
-        if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+        if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
             let mut ledger = ledger_arc.write().unwrap();
 
             // Direct balance update (for testing/internal use)

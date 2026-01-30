@@ -41,8 +41,6 @@ pub use deposits_core::{
     ReceivingCreditPaymentMsg, SendingLockPaymentMsg,
     SendingFailPaymentMsg, SendingFulfillPaymentMsg,
     ReceivingCosignInvoiceMsg, UncreditedPaymentMsg,
-    // Transfer messages
-    DepositLockTransferMsg, DepositFailTransferMsg, DepositFulfillTransferMsg,
     // Sync messages
     SyncRequestMsg, ChannelCloseTombstoneMsg,
     // Quorum messages (wire-specific versions with Wire suffix)
@@ -84,7 +82,7 @@ mod tests {
     fn test_core_types_reexported() {
         // Test that core types are accessible through re-exports
         let msg = ReservesIncreaseMsg {
-            reserves_id: test_pubkey(),
+            reserves_id: test_pubkey().to_string(),
             new_amount: 100_000,
         };
         assert_eq!(msg.new_amount, 100_000);

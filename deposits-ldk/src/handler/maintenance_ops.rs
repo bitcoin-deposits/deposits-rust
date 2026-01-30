@@ -12,6 +12,7 @@
 //! lazy sync for commitment updates.
 
 use bitcoin::secp256k1::PublicKey;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use super::core::{DepositsHandler, STALE_ACK_THRESHOLD_SECS, LAZY_SYNC_DELAY_SECS};
@@ -68,10 +69,11 @@ where
         let stale_broadcasts: Vec<([u8; 32], PublicKey)> = {
             let sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
             sent_messages.iter()
-                .filter_map(|(hash, (_op, partner, _msg, _prev, _new, _idx))| {
+                .filter_map(|(hash, (_op, reserves_id_str, _msg, _prev, _new, _idx))| {
                     // We don't have timestamps on these entries, so just retry all
                     // In practice, they should be processed quickly
-                    Some((*hash, *partner))
+                    // Parse reserves_id String back to PublicKey
+                    PublicKey::from_str(reserves_id_str).ok().map(|pk| (*hash, pk))
                 })
                 .collect()
         };
@@ -121,7 +123,7 @@ where
             // Check if there's actually uncommitted state
             let needs_commit = {
                 let ledgers = self.ledgers.lock().unwrap();
-                if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, reserves_id)) {
+                if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, reserves_id.to_string())) {
                     let ledger = ledger_arc.read().unwrap();
                     let acked_hash = ledger.state.partner_deepest_ack_hash;
                     let commit_hash = ledger.state.channel_deepest_commitment_hash;

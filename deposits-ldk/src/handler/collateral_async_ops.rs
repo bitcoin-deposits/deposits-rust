@@ -8,6 +8,7 @@
 //! Async collateral partner operations for the Bitcoin Deposits protocol.
 
 use bitcoin::secp256k1::PublicKey;
+use std::str::FromStr;
 
 use super::core::DepositsHandler;
 use deposits_core::DepositsError;
@@ -36,14 +37,14 @@ where
         // Verify ledger exists
         {
             let ledgers = self.ledgers.lock().unwrap();
-            if !ledgers.contains_key(&(self.our_node_id, partner_node_id)) {
+            if !ledgers.contains_key(&(self.our_node_id, partner_node_id.to_string())) {
                 return Err(DepositsError::ProtocolViolation {
                     violation_type: "No ledger found".to_string(),
                     details: format!("No ledger exists for partner {}", partner_node_id),
                 });
             }
             // Check the actual ledger state for duplicate collateral partner
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let ledger = ledger_arc.read().unwrap();
                 if ledger.state.collateral_partners.contains(&collateral_partner) {
                     log_info!(
@@ -58,7 +59,7 @@ where
 
         // Also check quorum_manager for redundancy
         {
-            let ledger_id = LedgerId::new(self.our_node_id, partner_node_id);
+            let ledger_id = LedgerId::new(self.our_node_id, partner_node_id.to_string());
             if let Some(members) = self.quorum_manager.get_quorum(&ledger_id) {
                 if members.contains(&collateral_partner) {
                     return Err(DepositsError::CollateralPartnerAlreadyExists);
@@ -72,7 +73,7 @@ where
 
         let consent_request = DepositsMessage::Coordination(CoordinationMsg::CollateralConsentRequest {
             operator_id: self.our_node_id,
-            reserves_id: partner_node_id,
+            reserves_id: partner_node_id.to_string(),
             operator_signature: [0u8; 64],
         });
 
@@ -87,7 +88,7 @@ where
         // Step 2: Create the AddCollateralPartner message with both signatures (V2 format)
         let update_msg = LedgerUpdateMsg::new_with_operation(
             self.our_node_id,    // operator
-            partner_node_id,     // partner
+            partner_node_id.to_string(),     // partner
             LedgerOperation::CollateralAddPartner {
                 collateral_partner,
                 collateral_partner_signature,
@@ -127,7 +128,7 @@ where
         // Apply the change locally
         {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let mut ledger = ledger_arc.write().unwrap();
 
                 let prev_hash = ledger.tail_hash();
@@ -147,12 +148,12 @@ where
 
                 {
                     let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
-                    sent_messages.insert(message_hash, (self.our_node_id, partner_node_id, message_for_broadcast.clone(), prev_hash, new_hash, chain_index));
+                    sent_messages.insert(message_hash, (self.our_node_id, partner_node_id.to_string(), message_for_broadcast.clone(), prev_hash, new_hash, chain_index));
                 }
 
                 // Add to quorum BEFORE broadcasting so the new collateral partner is included
                 // in the broadcast recipients list
-                let ledger_id = LedgerId::new(self.our_node_id, partner_node_id);
+                let ledger_id = LedgerId::new(self.our_node_id, partner_node_id.to_string());
                 if let Err(e) = self.quorum_manager.add_member(&ledger_id, collateral_partner) {
                     log_warn!(
                         self.logger,
@@ -203,7 +204,7 @@ where
         // STEP 1: Gather deposits and collateral for each ledger
         #[derive(Clone, Debug)]
         struct LedgerInfo {
-            partner: PublicKey,
+            partner: String,
             deposits: u64,
             collateral: u64, // Explicit collateral commitment
         }
@@ -219,7 +220,7 @@ where
                     let deposits = LedgerValidator::total_balance(&ledger);
                     let collateral = ledger.state.collateral_amount;
                     infos.push(LedgerInfo {
-                        partner: *partner,
+                        partner: partner.clone(),
                         deposits,
                         collateral,
                     });
@@ -228,7 +229,7 @@ where
 
             // For each ledger, check if OTHER ledgers have enough collateral to cover its deposits
             // We need: sum of other ledgers' collateral >= this ledger's deposits + headroom
-            let mut adjustments: Vec<(PublicKey, u64)> = Vec::new(); // (partner, amount_to_add)
+            let mut adjustments: Vec<(String, u64)> = Vec::new(); // (partner, amount_to_add)
 
             for ledger in &infos {
                 // Sum collateral from OTHER ledgers (what backs THIS ledger's deposits)
@@ -245,7 +246,7 @@ where
                 if other_collateral < ledger.deposits {
                     // We're actually undercollateralized - calculate how much we need
                     let shortfall = required_with_headroom.saturating_sub(other_collateral);
-                    adjustments.push((ledger.partner, shortfall));
+                    adjustments.push((ledger.partner.clone(), shortfall));
                 }
             }
 
@@ -270,9 +271,9 @@ where
 
         // Find ledgers we can add collateral to (any ledger that isn't the undercollateralized one)
         // These are ledgers where we'll INCREASE collateral commitment
-        let available_ledgers: Vec<PublicKey> = ledger_infos.iter()
+        let available_ledgers: Vec<String> = ledger_infos.iter()
             .filter(|l| !adjustments_needed.iter().any(|(p, _)| *p == l.partner))
-            .map(|l| l.partner)
+            .map(|l| l.partner.clone())
             .collect();
 
         if available_ledgers.is_empty() {
@@ -287,7 +288,9 @@ where
             for (i, info) in ledger_infos.iter().enumerate() {
                 let amount = if i == 0 { per_ledger + remainder } else { per_ledger };
                 if amount > 0 {
-                    self.increase_collateral_on_ledger(info.partner, amount).await?;
+                    let partner_pubkey = PublicKey::from_str(&info.partner)
+                        .map_err(|_e| DepositsError::InvalidPublicKey)?;
+                    self.increase_collateral_on_ledger(partner_pubkey, amount).await?;
                 }
             }
             return Ok(());
@@ -313,7 +316,9 @@ where
                 continue;
             }
 
-            self.increase_collateral_on_ledger(*reserves_id, increase_amount).await?;
+            let partner_pubkey = PublicKey::from_str(reserves_id)
+                .map_err(|_e| DepositsError::InvalidPublicKey)?;
+            self.increase_collateral_on_ledger(partner_pubkey, increase_amount).await?;
         }
 
         Ok(())
@@ -328,10 +333,12 @@ where
         // STEP 1: Gather deposits and collateral for each operator ledger
         #[derive(Clone, Debug)]
         struct LedgerInfo {
-            partner: PublicKey,
+            partner: String,
             deposits: u64,
             collateral: u64,
         }
+
+        let partner_for_invoice_str = partner_for_invoice.to_string();
 
         let (ledger_infos, shortfall) = {
             let ledgers = self.ledgers.lock().unwrap();
@@ -345,7 +352,7 @@ where
                     let mut deposits = current_balance;
 
                     // Add the invoice amount to expected deposits for this partner's ledger
-                    if *partner == partner_for_invoice {
+                    if *partner == partner_for_invoice_str {
                         deposits = deposits.saturating_add(invoice_amount);
                         log_info!(self.logger, "📊 COLLATERAL CHECK: partner={} current_balance={} + invoice={} = expected_deposits={}",
                             partner, current_balance, invoice_amount, deposits);
@@ -354,7 +361,7 @@ where
                     let collateral = ledger.state.collateral_amount;
                     log_debug!(self.logger, "📊 COLLATERAL CHECK: partner={} collateral_amount={}", partner, collateral);
                     infos.push(LedgerInfo {
-                        partner: *partner,
+                        partner: partner.clone(),
                         deposits,
                         collateral,
                     });
@@ -362,7 +369,7 @@ where
             }
 
             // Find the ledger that needs collateral backing (the invoice target)
-            let target_ledger = infos.iter().find(|l| l.partner == partner_for_invoice);
+            let target_ledger = infos.iter().find(|l| l.partner == partner_for_invoice_str);
             if target_ledger.is_none() {
                 return Err(DepositsError::LedgerNotFound);
             }
@@ -370,7 +377,7 @@ where
 
             // Sum collateral from OTHER ledgers (what backs the target ledger's deposits)
             let other_collateral: u64 = infos.iter()
-                .filter(|l| l.partner != partner_for_invoice)
+                .filter(|l| l.partner != partner_for_invoice_str)
                 .map(|l| l.collateral)
                 .sum();
 
@@ -396,9 +403,9 @@ where
             invoice_amount, shortfall);
 
         // Find ledgers we can add collateral to (any ledger except the invoice target)
-        let available_ledgers: Vec<PublicKey> = ledger_infos.iter()
-            .filter(|l| l.partner != partner_for_invoice)
-            .map(|l| l.partner)
+        let available_ledgers: Vec<String> = ledger_infos.iter()
+            .filter(|l| l.partner != partner_for_invoice_str)
+            .map(|l| l.partner.clone())
             .collect();
 
         if available_ledgers.is_empty() {
@@ -414,18 +421,20 @@ where
         let per_ledger_increase = shortfall.saturating_div(available_ledgers.len() as u64);
         let remainder = shortfall % (available_ledgers.len() as u64);
 
-        for (i, reserves_id) in available_ledgers.iter().enumerate() {
+        for (i, reserves_id_str) in available_ledgers.iter().enumerate() {
             let increase_amount = if i == 0 {
                 per_ledger_increase + remainder
             } else {
                 per_ledger_increase
             };
             if increase_amount > 0 {
+                let reserves_id = PublicKey::from_str(reserves_id_str)
+                    .map_err(|_e| DepositsError::InvalidPublicKey)?;
                 // First ensure reserves on the collateral-providing ledger are sufficient
                 // Collateral commitment cannot exceed reserves on that ledger
-                self.ensure_reserves_for_collateral(*reserves_id, increase_amount).await?;
+                self.ensure_reserves_for_collateral(reserves_id, increase_amount).await?;
                 // Then commit the collateral
-                self.increase_collateral_on_ledger(*reserves_id, increase_amount).await?;
+                self.increase_collateral_on_ledger(reserves_id, increase_amount).await?;
             }
         }
 
@@ -440,7 +449,7 @@ where
         // Check current reserves and collateral on this ledger
         let (current_reserves, current_collateral) = {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, reserves_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, reserves_id.to_string())) {
                 let ledger = ledger_arc.read().unwrap();
                 (ledger.reserves_amount(), ledger.state.collateral_amount)
             } else {
@@ -465,7 +474,7 @@ where
         // Send ReservesIncrease message (V2 format)
         let update_msg = LedgerUpdateMsg::new_with_operation(
             self.our_node_id,    // operator
-            reserves_id,          // partner
+            reserves_id.to_string(),          // partner
             LedgerOperation::ReservesIncrease { new_amount: headroom },
         );
         let reserves_msg = DepositsMessage::LedgerUpdate(update_msg);
@@ -494,7 +503,7 @@ where
         // Apply the update locally
         let (prev_hash, new_hash, sequence_number) = {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, reserves_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, reserves_id.to_string())) {
                 let mut ledger = ledger_arc.write().unwrap();
                 ledger.state.last_updated = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -523,7 +532,7 @@ where
         // Broadcast to other partners
         {
             let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
-            sent_messages.insert(message_hash, (self.our_node_id, reserves_id, reserves_msg_for_broadcast, prev_hash, new_hash, sequence_number));
+            sent_messages.insert(message_hash, (self.our_node_id, reserves_id.to_string(), reserves_msg_for_broadcast, prev_hash, new_hash, sequence_number));
         }
         if let Err(e) = self.broadcast_message_to_other_partners(message_hash, reserves_id, None) {
             log_error!(self.logger, "Failed to broadcast reserves increase: {}", e);
@@ -544,7 +553,7 @@ where
         // Calculate absolute new_amount = current + increase_by
         let new_amount = {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, reserves_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, reserves_id.to_string())) {
                 let ledger = ledger_arc.read().unwrap();
                 ledger.state.collateral_amount.saturating_add(increase_by)
             } else {
@@ -566,7 +575,7 @@ where
         // V2 format
         let update_msg = LedgerUpdateMsg::new_with_operation(
             self.our_node_id,    // operator
-            reserves_id,          // partner
+            reserves_id.to_string(),          // partner
             LedgerOperation::CollateralIncrease { new_amount, block_height },
         );
         let collateral_msg = DepositsMessage::LedgerUpdate(update_msg);
@@ -598,7 +607,7 @@ where
         // Apply the update locally after ACK
         let (prev_hash, new_hash, sequence_number, hash_verified) = {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, reserves_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, reserves_id.to_string())) {
                 let mut ledger = ledger_arc.write().unwrap();
 
                 ledger.state.last_updated = std::time::SystemTime::now()
@@ -654,7 +663,7 @@ where
         // Update for broadcast
         {
             let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
-            sent_messages.insert(message_hash, (self.our_node_id, reserves_id, collateral_msg_for_broadcast.clone(), prev_hash, new_hash, sequence_number));
+            sent_messages.insert(message_hash, (self.our_node_id, reserves_id.to_string(), collateral_msg_for_broadcast.clone(), prev_hash, new_hash, sequence_number));
         }
 
         // Broadcast to other partners (auditors)
@@ -690,7 +699,7 @@ where
         // Validate reserves are 0
         {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let ledger = ledger_arc.read().unwrap();
                 if ledger.reserves_amount() > 0 {
                     return Err(DepositsError::ProtocolViolation {
@@ -706,7 +715,7 @@ where
         // Send LedgerClose message to close the ledger (which removes reserves output)
         let update_msg = LedgerUpdateMsg::new_with_operation(
             self.our_node_id,    // operator
-            partner_node_id,     // partner
+            partner_node_id.to_string(),     // partner
             LedgerOperation::LedgerClose,
         );
         let message = DepositsMessage::LedgerUpdate(update_msg);
@@ -736,7 +745,7 @@ where
         // After ACK, apply update to ledger
         {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let mut ledger = ledger_arc.write().unwrap();
                 ledger.append_mut(message)?;
                 self.persist_ledger_state(&*ledger)?;
@@ -765,7 +774,7 @@ where
         // First validate that the deposit exists and has zero balance
         {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let ledger = ledger_arc.read().unwrap();
 
                 // Ensure deposit balance is zero before removing
@@ -787,7 +796,7 @@ where
         // Capture prev_hash before creating message
         let prev_hash = {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let ledger = ledger_arc.read().unwrap();
                 ledger.tail_hash()
             } else {
@@ -798,7 +807,7 @@ where
         // Send DepositClose message to partner (V2 format)
         let update_msg = LedgerUpdateMsg::new_with_operation(
             self.our_node_id,    // operator
-            partner_node_id,     // partner
+            partner_node_id.to_string(),     // partner
             LedgerOperation::DepositClose { pubkey: deposit_pubkey },
         );
         let message = DepositsMessage::LedgerUpdate(update_msg);
@@ -814,7 +823,7 @@ where
         // After ACK received, apply the update to our ledger and capture new_hash
         let (new_hash, chain_index) = {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let mut ledger = ledger_arc.write().unwrap();
                 let hash = ledger.append_mut(message_for_broadcast.clone())?;
                 let seq = (ledger.history.len() - 1) as u64;
@@ -828,7 +837,7 @@ where
         // Update sent_messages_for_broadcast with correct new_hash and broadcast
         {
             let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
-            sent_messages.insert(message_hash, (self.our_node_id, partner_node_id, message_for_broadcast.clone(), prev_hash, new_hash, chain_index));
+            sent_messages.insert(message_hash, (self.our_node_id, partner_node_id.to_string(), message_for_broadcast.clone(), prev_hash, new_hash, chain_index));
         }
 
         // Broadcast to other partners (auditors)

@@ -1741,7 +1741,7 @@ mod tests {
 
     #[test]
     fn test_full_non_compliant_recovery_flow() {
-        use deposits_core::recovery::{RecoveryPhase, RecoveryPool, RecoveryVote};
+        use deposits_core::recovery::{RecoveryPhase, RecoveryVote};
         use bitcoin::secp256k1::{Keypair, Message};
         use bitcoin::hashes::Hash;
 
@@ -2048,15 +2048,9 @@ mod tests {
             txdata: vec![tx],
         };
 
-        // Process block - this should mark reserves_confirmed = true
-        // Note: We need to link the reserves output to the channel
-        // For now, manually mark it confirmed
-        {
-            let mut channels = lighthouse.watched_channels.write().unwrap();
-            if let Some(entry) = channels.get_mut(&channel_id) {
-                entry.reserves_confirmed = true;
-            }
-        }
+        // Process block - this marks reserves_confirmed = true when the output is detected
+        let _ = lighthouse.process_block(&block, 100);
+        lighthouse.drain_events(); // Clear the event queue
 
         // Now channel closes - but reserves were confirmed
         let event = lighthouse.on_channel_closed(channel_id, true);

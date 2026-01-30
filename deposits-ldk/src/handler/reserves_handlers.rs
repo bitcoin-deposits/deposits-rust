@@ -30,7 +30,7 @@ where
         // Calculate absolute new_amount = current + additional_reserves
         let new_amount = {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let ledger = ledger_arc.read().unwrap();
                 ledger.reserves_amount().saturating_add(additional_reserves)
             } else {
@@ -48,7 +48,7 @@ where
         // Send ReservesIncrease message to partner (V2 format)
         let update_msg = LedgerUpdateMsg::new_with_operation(
             self.our_node_id,    // operator
-            partner_node_id,     // partner
+            partner_node_id.to_string(),     // partner
             LedgerOperation::ReservesIncrease { new_amount },
         );
         let message = DepositsMessage::LedgerUpdate(update_msg);
@@ -60,7 +60,7 @@ where
         // Track pending ACK in ledger BEFORE sending (so handle_ack can find it)
         {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let _ledger = ledger_arc.write().unwrap();
                 // Track pending ACK
                 {
@@ -85,7 +85,7 @@ where
         // consistent prev_hash, new_hash, and sequence_number atomically (avoids race condition)
         let (prev_hash, new_hash, chain_index) = {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let mut ledger = ledger_arc.write().unwrap();
                 let (prev, hash, seq) = ledger.append_mut_with_metadata(message_for_broadcast.clone())?;
 
@@ -116,7 +116,7 @@ where
         {
             let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
             // Always insert/update - insert will replace if key exists
-            sent_messages.insert(message_hash, (self.our_node_id, partner_node_id, message_for_broadcast.clone(), prev_hash, new_hash, chain_index));
+            sent_messages.insert(message_hash, (self.our_node_id, partner_node_id.to_string(), message_for_broadcast.clone(), prev_hash, new_hash, chain_index));
         }
 
         // Now broadcast with correct hashes
@@ -149,7 +149,7 @@ where
         // Calculate absolute new_amount = current - reduction_amount
         let new_amount = {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let ledger = ledger_arc.read().unwrap();
                 ledger.reserves_amount().saturating_sub(reduction_amount)
             } else {
@@ -167,7 +167,7 @@ where
         // Send ReservesDecrease message to partner (V2 format)
         let update_msg = LedgerUpdateMsg::new_with_operation(
             self.our_node_id,    // operator
-            partner_node_id,     // partner
+            partner_node_id.to_string(),     // partner
             LedgerOperation::ReservesDecrease { new_amount },
         );
         let message = DepositsMessage::LedgerUpdate(update_msg);
@@ -179,7 +179,7 @@ where
         // Track pending ACK in ledger BEFORE sending (so handle_ack can find it)
         {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let _ledger = ledger_arc.write().unwrap();
                 // Track pending ACK
                 {
@@ -204,7 +204,7 @@ where
         // consistent prev_hash, new_hash, and sequence_number atomically (avoids race condition)
         let (prev_hash, new_hash, chain_index) = {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let mut ledger = ledger_arc.write().unwrap();
                 let (prev, hash, seq) = ledger.append_mut_with_metadata(message_for_broadcast.clone())?;
 
@@ -233,7 +233,7 @@ where
         {
             let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
             // Always insert/update - insert will replace if key exists
-            sent_messages.insert(message_hash, (self.our_node_id, partner_node_id, message_for_broadcast.clone(), prev_hash, new_hash, chain_index));
+            sent_messages.insert(message_hash, (self.our_node_id, partner_node_id.to_string(), message_for_broadcast.clone(), prev_hash, new_hash, chain_index));
         }
 
         // Now broadcast with correct hashes

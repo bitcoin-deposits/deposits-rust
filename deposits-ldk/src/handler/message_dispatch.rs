@@ -77,12 +77,12 @@ where
         // V2 format: CollateralAttestation is inside LedgerUpdate as a LedgerOperation
         if let DepositsMessage::LedgerUpdate(ref update_msg) = &message {
             if let LedgerOperation::CollateralAttestation { collateral_operator: operator, amount, block_height, signature, ledger_hash, .. } = &update_msg.operation {
-                let collateral_partner = update_msg.reserves_id;
+                let _collateral_partner = update_msg.reserves_id.clone();
                 // Check if we're the operator for a ledger with this sender as partner
                 // and have a pending CollateralIncrease/CollateralDecrease
                 let is_from_channel_partner = {
                     let ledgers = self.ledgers.lock().unwrap();
-                    ledgers.contains_key(&(self.our_node_id, sender_node_id))
+                    ledgers.contains_key(&(self.our_node_id, sender_node_id.to_string()))
                 };
 
                 if is_from_channel_partner && *operator == self.our_node_id {
@@ -117,12 +117,13 @@ where
                         // increase_collateral_on_ledger resumes and needs to verify the hash
                         {
                             let ledgers = self.ledgers.lock().unwrap();
-                            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, sender_node_id)) {
+                            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, sender_node_id.to_string())) {
                                 let mut ledger = ledger_arc.write().unwrap();
                                 // Convert to core attestation type
+                                // Use sender_node_id as the collateral_partner since it's already a PublicKey
                                 let attestation = deposits_core::types::CollateralAttestation::new(
                                     *operator,
-                                    collateral_partner,
+                                    sender_node_id,
                                     *amount,
                                     *block_height,
                                     *signature,
@@ -167,7 +168,7 @@ where
                     let msg = deposits_core::wire_messages::QuorumJoinRequestMsgWire {
                         requester_pubkey: *requester_pubkey,
                         operator_id: *operator_id,
-                        reserves_id: *reserves_id,
+                        reserves_id: reserves_id.clone(),
                         protocol_version: *protocol_version,
                         timestamp: *timestamp,
                         signature: *signature,
@@ -183,7 +184,7 @@ where
                     log_info!(self.logger, "📋 QUORUM: Vote request for ({}, {}) seq={}", operator_id, reserves_id, sequence_number);
                     let msg = QuorumVoteRequestMsg {
                         operator_id: *operator_id,
-                        reserves_id: *reserves_id,
+                        reserves_id: reserves_id.clone(),
                         vote_round_id: *vote_round_id,
                         sequence_number: *sequence_number,
                         state_hash: *state_hash,
@@ -214,7 +215,7 @@ where
                     log_info!(self.logger, "📋 CONSENT: Request from {} for ({}, {})", sender_node_id, operator_id, reserves_id);
                     let msg = CollateralConsentRequestMsg {
                         operator_id: *operator_id,
-                        reserves_id: *reserves_id,
+                        reserves_id: reserves_id.clone(),
                         operator_signature: *operator_signature,
                     };
                     match deposits_core::handle_collateral_consent_request(self, &msg, sender_node_id) {
@@ -260,7 +261,7 @@ where
                     // Direct dispatch to core - processes updates via verify_and_store_signed_update provider
                     // After final batch, updates quorum member state via update_quorum_member_state provider
                     log_info!(self.logger, "📋 QUORUM: State sync for ({}, {}) - {} updates from seq {}", operator_id, reserves_id, updates.len(), start_sequence);
-                    match deposits_core::handle_quorum_state_sync(self, *operator_id, *reserves_id, &updates_bytes, *start_sequence, *is_final) {
+                    match deposits_core::handle_quorum_state_sync(self, *operator_id, &*reserves_id, &updates_bytes, *start_sequence, *is_final) {
                         Ok(deposits_core::message_handlers::HandlerResult::Response(
                             deposits_core::message_handlers::ResponseData::QuorumStateSyncProcessed { applied, errors, total }
                         )) => {
@@ -284,7 +285,7 @@ where
                     log_info!(self.logger, "📋 CONSENT: Response from {} - granted={}", sender_node_id, consent_granted);
                     let msg = CollateralConsentResponseMsg {
                         operator_id: *operator_id,
-                        reserves_id: *reserves_id,
+                        reserves_id: reserves_id.clone(),
                         consent_granted: *consent_granted,
                         collateral_partner_signature: *collateral_partner_signature,
                     };
@@ -401,10 +402,10 @@ where
             // NOTE: CollateralAddPartner and CollateralRemovePartner are now handled by the generic handler
             // which properly sends ACKs for both idempotent and non-idempotent cases
             DepositsMessage::LedgerUpdate(ref update_msg) => match &update_msg.operation {
-                LedgerOperation::CollateralAttestation { collateral_operator, amount, block_height, signature, ledger_hash } => {
+                LedgerOperation::CollateralAttestation { collateral_operator, collateral_partner, amount, block_height, signature, ledger_hash } => {
                     let msg = crate::wire::messages::CollateralAttestationMsg {
                         operator: *collateral_operator,
-                        collateral_partner: update_msg.reserves_id,
+                        collateral_partner: *collateral_partner,
                         amount: *amount,
                         block_height: *block_height,
                         signature: *signature,
@@ -425,7 +426,7 @@ where
                 LedgerOperation::Tombstone { channel_id, close_reason, timestamp } => {
                     let tombstone_msg = ChannelCloseTombstoneMsg {
                         operator_id: update_msg.operator_id,
-                        reserves_id: update_msg.reserves_id,
+                        reserves_id: update_msg.reserves_id.clone(),
                         timestamp: *timestamp,
                         channel_id: *channel_id,
                         close_reason: close_reason.clone(),
@@ -657,7 +658,7 @@ where
             let ledgers = self.ledgers.lock().unwrap();
             // For received messages, sender is typically the operator, we are the partner
             // So ledger key is (sender=operator, us=partner)
-            if let Some(ledger_arc) = ledgers.get(&(sender_node_id, self.our_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(sender_node_id, self.our_node_id.to_string())) {
                 let mut ledger = ledger_arc.write().unwrap();
 
                 // Partner uses declared reserves from ledger state (from most recent ReservesUpdated message)
@@ -765,9 +766,10 @@ where
                             // V2: CollateralAttestation is now inside LedgerUpdate
                             let attestation_msg = DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
                                 attestation.operator,
-                                attestation.collateral_partner,
+                                attestation.collateral_partner.to_string(),
                                 LedgerOperation::CollateralAttestation {
                                     collateral_operator: attestation.operator,
+                                    collateral_partner: attestation.collateral_partner,
                                     amount: attestation.amount,
                                     block_height: attestation.block_height,
                                     signature: attestation.signature,
@@ -890,7 +892,7 @@ where
                     });
                     let ack = DepositsMessage::LedgerUpdateResponse(LedgerUpdateResponseMsg {
                         operator_id: sender_node_id,
-                        reserves_id: self.our_node_id,
+                        reserves_id: self.our_node_id.to_string(),
                         request_hash: message_hash,
                         accepted: true,
                         error: None,
@@ -960,7 +962,7 @@ where
 
                                 let ack = DepositsMessage::LedgerUpdateResponse(LedgerUpdateResponseMsg {
                                     operator_id: sender_node_id,
-                                    reserves_id: self.our_node_id,
+                                    reserves_id: self.our_node_id.to_string(),
                                     request_hash: message_hash,
                                     accepted: true,
                                     error: None,
@@ -973,13 +975,20 @@ where
                                 pending_messages.push((sender_node_id, ack));
                             }
 
-                            // Special handling for CollateralAttestation: update received_collateral_amount
-                            // This allows partners to track collateral received from operators
+                            // Special handling for CollateralAttestation: recalculate received_collateral_amount
+                            // from the attestations HashMap to properly handle deduplication.
+                            // Note: apply_state_changes (called by append_mut) already inserted the attestation
+                            // into collateral_attestations HashMap with proper dedup (HashMap.insert replaces).
                             if let DepositsMessage::LedgerUpdate(ref msg) = message {
-                                if let super::messages::LedgerOperation::CollateralAttestation { collateral_operator, amount, .. } = &msg.operation {
-                                    ledger.state.received_collateral_amount = ledger.state.received_collateral_amount.saturating_add(*amount);
-                                    log_info!(self.logger, "💰 PARTNER: Updated received_collateral_amount to {} (added {} from {})",
-                                        ledger.state.received_collateral_amount, amount, collateral_operator);
+                                if let super::messages::LedgerOperation::CollateralAttestation { collateral_operator, .. } = &msg.operation {
+                                    // Recalculate from attestations HashMap - this properly handles duplicates
+                                    // since HashMap only stores one attestation per partner
+                                    let total: u64 = ledger.state.collateral_attestations.values()
+                                        .map(|a| a.available_collateral())
+                                        .sum();
+                                    ledger.state.received_collateral_amount = total;
+                                    log_info!(self.logger, "💰 PARTNER: Recalculated received_collateral_amount to {} (from {} attestations, operator={})",
+                                        ledger.state.received_collateral_amount, ledger.state.collateral_attestations.len(), collateral_operator);
                                 }
                             }
 
@@ -1034,7 +1043,7 @@ where
         if should_persist {
             let ledgers = self.ledgers.lock().unwrap();
             // Same ledger key as above: (sender=operator, us=partner)
-            if let Some(ledger_arc) = ledgers.get(&(sender_node_id, self.our_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(sender_node_id, self.our_node_id.to_string())) {
                 let ledger = ledger_arc.read().unwrap();
                 if let Err(e) = self.persist_ledger_state(&*ledger) {
                     log_error!(self.logger, "Failed to persist ledger state after processing message: {}", e);

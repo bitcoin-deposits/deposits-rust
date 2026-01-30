@@ -15,6 +15,7 @@
 
 use bitcoin::secp256k1::{PublicKey, SecretKey};
 use std::ops::Deref;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use lightning::util::logger::Logger as LdkLogger;
 
@@ -78,180 +79,191 @@ where
     fn emit_event(&self, event: ProtocolEvent) {
         // Convert core ProtocolEvent to LDK DepositsEvent
         match event {
-            ProtocolEvent::DepositOpened { operator, partner, deposit_pubkey } => {
+            ProtocolEvent::DepositOpened { operator, reserves_id, deposit_pubkey } => {
                 // The DepositsEvent doesn't have a direct mapping, log it
                 log_info!(
                     self.logger,
                     "Protocol event: DepositOpened - operator={}, partner={}, deposit={}",
-                    operator, partner, deposit_pubkey
+                    operator, reserves_id, deposit_pubkey
                 );
             }
-            ProtocolEvent::DepositClosed { operator, partner, deposit_pubkey, .. } => {
+            ProtocolEvent::DepositClosed { operator, reserves_id, deposit_pubkey, .. } => {
                 log_info!(
                     self.logger,
                     "Protocol event: DepositClosed - operator={}, partner={}, deposit={}",
-                    operator, partner, deposit_pubkey
+                    operator, reserves_id, deposit_pubkey
                 );
             }
-            ProtocolEvent::PaymentCredited { operator, partner, deposit_pubkey, amount, .. } => {
+            ProtocolEvent::InvoiceCredited { operator, reserves_id, deposit_pubkey, amount, .. } => {
                 log_info!(
                     self.logger,
-                    "Protocol event: PaymentCredited - operator={}, partner={}, deposit={}, amount={}",
-                    operator, partner, deposit_pubkey, amount
+                    "Protocol event: InvoiceCredited - operator={}, partner={}, deposit={}, amount={}",
+                    operator, reserves_id, deposit_pubkey, amount
                 );
             }
-            ProtocolEvent::PaymentSent { operator, partner, deposit_pubkey, amount, .. } => {
+            ProtocolEvent::InvoiceSent { operator, reserves_id, deposit_pubkey, amount, .. } => {
                 log_info!(
                     self.logger,
-                    "Protocol event: PaymentSent - operator={}, partner={}, deposit={}, amount={}",
-                    operator, partner, deposit_pubkey, amount
+                    "Protocol event: InvoiceSent - operator={}, partner={}, deposit={}, amount={}",
+                    operator, reserves_id, deposit_pubkey, amount
                 );
             }
-            ProtocolEvent::LedgerSynced { operator, partner, sequence, .. } => {
+            ProtocolEvent::LedgerSynced { operator, reserves_id, sequence, .. } => {
                 log_info!(
                     self.logger,
                     "Protocol event: LedgerSynced - operator={}, partner={}, seq={}",
-                    operator, partner, sequence
+                    operator, reserves_id, sequence
                 );
             }
-            ProtocolEvent::RecoveryStarted { operator, partner } => {
+            ProtocolEvent::RecoveryStarted { operator, reserves_id } => {
                 log_info!(
                     self.logger,
                     "Protocol event: RecoveryStarted - operator={}, partner={}",
-                    operator, partner
+                    operator, reserves_id
                 );
                 // Emit the LDK event
-                let _ = self.event_queue.emit_deposits_event(
-                    DepositsEvent::RecoveryNonCompliant {
-                        operator_id: operator,
-                        reserves_id: partner,
-                        non_conforming_votes: 0, // Filled in by caller
-                        total_votes: 0,
-                    }
-                );
+                // Parse reserves_id back to PublicKey (in LDK it's always a pubkey string)
+                if let Ok(reserves_pubkey) = PublicKey::from_str(&reserves_id) {
+                    let _ = self.event_queue.emit_deposits_event(
+                        DepositsEvent::RecoveryNonCompliant {
+                            operator_id: operator,
+                            reserves_id: reserves_pubkey,
+                            non_conforming_votes: 0, // Filled in by caller
+                            total_votes: 0,
+                        }
+                    );
+                }
             }
-            ProtocolEvent::RecoveryClaimed { operator, partner, new_operator, claim_txid } => {
+            ProtocolEvent::RecoveryClaimed { operator, reserves_id, new_operator, claim_txid } => {
                 log_info!(
                     self.logger,
                     "Protocol event: RecoveryClaimed - operator={}, partner={}, new_operator={}",
-                    operator, partner, new_operator
+                    operator, reserves_id, new_operator
                 );
-                let _ = self.event_queue.emit_deposits_event(
-                    DepositsEvent::RecoveryClaimCompleted {
-                        old_operator: operator,
-                        reserves_id: partner,
-                        new_operator,
-                        claim_txid,
-                        confirmation_block: 0, // Filled in by caller
-                    }
-                );
+                if let Ok(reserves_pubkey) = PublicKey::from_str(&reserves_id) {
+                    let _ = self.event_queue.emit_deposits_event(
+                        DepositsEvent::RecoveryClaimCompleted {
+                            old_operator: operator,
+                            reserves_id: reserves_pubkey,
+                            new_operator,
+                            claim_txid,
+                            confirmation_block: 0, // Filled in by caller
+                        }
+                    );
+                }
             }
-            ProtocolEvent::Error { operator, partner, error } => {
+            ProtocolEvent::Error { operator, reserves_id, error } => {
                 log_warn!(
                     self.logger,
                     "Protocol error: operator={}, partner={}: {}",
-                    operator, partner, error
+                    operator, reserves_id, error
                 );
             }
-            ProtocolEvent::UncreditedPaymentReceived { operator, partner, payment_hash, deposit_pubkey, amount_msat, settlement_sequence } => {
+            ProtocolEvent::UncreditedPaymentReceived { operator, reserves_id, payment_hash, deposit_pubkey, amount_msat, settlement_sequence } => {
                 log_warn!(
                     self.logger,
                     "Protocol event: UncreditedPaymentReceived (fraud proof) - operator={}, partner={}, amount={}",
-                    operator, partner, amount_msat
+                    operator, reserves_id, amount_msat
                 );
-                // Emit the LDK event
-                let _ = self.event_queue.emit_deposits_event(
-                    DepositsEvent::UncreditedPaymentAccusation {
-                        operator,
-                        partner,
-                        payment_hash,
-                        deposit_pubkey,
-                        amount_msat,
-                        settlement_sequence,
-                    }
-                );
+                // Emit the LDK event (field is named 'partner' in the event)
+                if let Ok(partner) = PublicKey::from_str(&reserves_id) {
+                    let _ = self.event_queue.emit_deposits_event(
+                        DepositsEvent::UncreditedPaymentAccusation {
+                            operator,
+                            partner,
+                            payment_hash,
+                            deposit_pubkey,
+                            amount_msat,
+                            settlement_sequence,
+                        }
+                    );
+                }
             }
-            ProtocolEvent::FeeCollected { operator, partner, deposit_pubkey, amount, block_height } => {
+            ProtocolEvent::FeeCollected { operator, reserves_id, deposit_pubkey, amount, block_height } => {
                 log_info!(
                     self.logger,
                     "Protocol event: FeeCollected - operator={}, partner={}, deposit={}, amount={}, block={}",
-                    operator, partner, deposit_pubkey, amount, block_height
+                    operator, reserves_id, deposit_pubkey, amount, block_height
                 );
             }
-            ProtocolEvent::LedgerClosed { operator, partner } => {
+            ProtocolEvent::LedgerClosed { operator, reserves_id } => {
                 log_info!(
                     self.logger,
                     "Protocol event: LedgerClosed - operator={}, partner={}",
-                    operator, partner
+                    operator, reserves_id
                 );
             }
-            ProtocolEvent::InvoiceCosignRequested { operator, partner, deposit_pubkey, amount, .. } => {
+            ProtocolEvent::InvoiceCosignRequested { operator, reserves_id, deposit_pubkey, amount, .. } => {
                 log_info!(
                     self.logger,
                     "Protocol event: InvoiceCosignRequested - operator={}, partner={}, deposit={}, amount={}",
-                    operator, partner, deposit_pubkey, amount
+                    operator, reserves_id, deposit_pubkey, amount
                 );
             }
-            ProtocolEvent::RecoveryClaimRequested { operator, partner, claimant, tier_index } => {
+            ProtocolEvent::RecoveryClaimRequested { operator, reserves_id, claimant, tier_index } => {
                 log_info!(
                     self.logger,
                     "Protocol event: RecoveryClaimRequested - operator={}, partner={}, claimant={}, tier={}",
-                    operator, partner, claimant, tier_index
+                    operator, reserves_id, claimant, tier_index
                 );
             }
-            ProtocolEvent::RecoveryClaimSignatureReceived { operator, partner, signer } => {
+            ProtocolEvent::RecoveryClaimSignatureReceived { operator, reserves_id, signer } => {
                 log_info!(
                     self.logger,
                     "Protocol event: RecoveryClaimSignatureReceived - operator={}, partner={}, signer={}",
-                    operator, partner, signer
+                    operator, reserves_id, signer
                 );
             }
-            ProtocolEvent::RecoveryClaimCompleted { old_operator, partner, new_operator, claim_txid, confirmation_block } => {
+            ProtocolEvent::RecoveryClaimCompleted { old_operator, reserves_id, new_operator, claim_txid, confirmation_block } => {
                 log_info!(
                     self.logger,
                     "Protocol event: RecoveryClaimCompleted - old_operator={}, partner={}, new_operator={}",
-                    old_operator, partner, new_operator
+                    old_operator, reserves_id, new_operator
                 );
-                let _ = self.event_queue.emit_deposits_event(
-                    DepositsEvent::RecoveryClaimCompleted {
-                        old_operator,
-                        reserves_id: partner,
-                        new_operator,
-                        claim_txid,
-                        confirmation_block,
-                    }
-                );
+                if let Ok(reserves_pubkey) = PublicKey::from_str(&reserves_id) {
+                    let _ = self.event_queue.emit_deposits_event(
+                        DepositsEvent::RecoveryClaimCompleted {
+                            old_operator,
+                            reserves_id: reserves_pubkey,
+                            new_operator,
+                            claim_txid,
+                            confirmation_block,
+                        }
+                    );
+                }
             }
-            ProtocolEvent::ChannelClosed { operator, partner, reason, .. } => {
+            ProtocolEvent::ChannelClosed { operator, reserves_id, reason, .. } => {
                 log_info!(
                     self.logger,
                     "Protocol event: ChannelClosed - operator={}, partner={}, reason={:?}",
-                    operator, partner, reason
+                    operator, reserves_id, reason
                 );
             }
-            ProtocolEvent::QuorumMemberJoined { operator, partner, member } => {
+            ProtocolEvent::QuorumMemberJoined { operator, reserves_id, member } => {
                 log_info!(
                     self.logger,
                     "Protocol event: QuorumMemberJoined - operator={}, partner={}, member={}",
-                    operator, partner, member
+                    operator, reserves_id, member
                 );
             }
-            ProtocolEvent::ReservesSpendReady { vote_round_id, operator, partner, signed_tx_bytes, conforming_votes, threshold } => {
+            ProtocolEvent::ReservesSpendReady { vote_round_id, operator, reserves_id, signed_tx_bytes, conforming_votes, threshold } => {
                 log_info!(
                     self.logger,
                     "Protocol event: ReservesSpendReady - operator={}, partner={}, votes={}/{}",
-                    operator, partner, conforming_votes, threshold
+                    operator, reserves_id, conforming_votes, threshold
                 );
-                let _ = self.event_queue.emit_deposits_event(
-                    DepositsEvent::ReservesSpendReady {
-                        vote_round_id,
-                        operator_id: operator,
-                        reserves_id: partner,
-                        signed_tx_bytes,
-                        conforming_votes,
-                        threshold,
-                    }
-                );
+                if let Ok(reserves_pubkey) = PublicKey::from_str(&reserves_id) {
+                    let _ = self.event_queue.emit_deposits_event(
+                        DepositsEvent::ReservesSpendReady {
+                            vote_round_id,
+                            operator_id: operator,
+                            reserves_id: reserves_pubkey,
+                            signed_tx_bytes,
+                            conforming_votes,
+                            threshold,
+                        }
+                    );
+                }
             }
         }
     }
@@ -302,9 +314,9 @@ where
         }
     }
 
-    fn persist_ledger(&self, operator: &PublicKey, partner: &PublicKey) -> Result<(), String> {
+    fn persist_ledger(&self, operator: &PublicKey, partner: &str) -> Result<(), String> {
         let ledgers = self.ledgers.lock().unwrap();
-        if let Some(ledger_arc) = ledgers.get(&(*operator, *partner)) {
+        if let Some(ledger_arc) = ledgers.get(&(*operator, partner.to_string())) {
             let ledger = ledger_arc.read().map_err(|e| format!("Lock error: {:?}", e))?;
             self.persist_ledger_state(&*ledger)
                 .map_err(|e| format!("Persist error: {:?}", e))
@@ -313,10 +325,10 @@ where
         }
     }
 
-    fn sync_quorum_member(&self, operator: PublicKey, partner: PublicKey, collateral_partner: PublicKey, add: bool) {
+    fn sync_quorum_member(&self, operator: PublicKey, partner: &str, collateral_partner: PublicKey, add: bool) {
         use deposits_core::quorum::LedgerId;
 
-        let ledger_id = LedgerId::new(operator, partner);
+        let ledger_id = LedgerId::new(operator, partner.to_string());
         if add {
             if let Err(e) = self.quorum_manager.add_member(&ledger_id, collateral_partner) {
                 log_info!(self.logger, "Quorum add_member (expected to fail for partners): {:?}", e);
@@ -345,7 +357,7 @@ where
 
         let ack = DepositsMessage::LedgerUpdateResponse(LedgerUpdateResponseMsg {
             operator_id: peer, // Responding to the operator who sent the update
-            reserves_id: self.our_node_id,
+            reserves_id: self.our_node_id.to_string(),
             request_hash: message_hash,
             accepted: success,
             error: error_message,
@@ -410,10 +422,10 @@ where
         update: deposits_core::SignedLedgerUpdate,
     ) -> Result<(), String> {
         let mut logs = self.signed_update_logs.lock().unwrap();
-        let log = logs.entry((*operator, *partner)).or_insert_with(|| {
+        let log = logs.entry((*operator, partner.to_string())).or_insert_with(|| {
             deposits_core::SignedLedgerUpdateLog {
                 operator_id: *operator,
-                reserves_id: *partner,
+                reserves_id: partner.to_string(),
                 updates: Vec::new(),
                 next_sequence: 0,
                 pending_updates: std::collections::HashMap::new(),
@@ -430,13 +442,15 @@ where
         partner: &PublicKey,
     ) -> Option<Vec<deposits_core::SignedLedgerUpdate>> {
         let logs = self.signed_update_logs.lock().unwrap();
-        logs.get(&(*operator, *partner)).map(|log| log.updates.clone())
+        logs.get(&(*operator, partner.to_string())).map(|log| log.updates.clone())
     }
 
     fn verify_and_store_signed_update(&self, update: deposits_core::SignedLedgerUpdate) -> Result<(), String> {
         // Store in signed_update_logs
         let operator = update.operator_id;
-        let partner = update.reserves_id;
+        let reserves_id = update.reserves_id.clone();
+        // Parse reserves_id back to PublicKey for the trait method signature
+        let partner = PublicKey::from_str(&reserves_id).map_err(|e| format!("Invalid partner: {}", e))?;
         self.store_signed_update(&operator, &partner, update)
     }
 
@@ -455,7 +469,7 @@ where
         let local_msg: LocalMessage = LocalMessage::from_v2(msg);
 
         let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
-        sent_messages.insert(msg_hash, (operator, partner, local_msg, prev_hash, new_hash, seq));
+        sent_messages.insert(msg_hash, (operator, partner.to_string(), local_msg, prev_hash, new_hash, seq));
     }
 
     fn complete_broadcast(&self, msg_hash: [u8; 32], partner_sig: Option<[u8; 64]>) -> Result<(), String> {
@@ -465,9 +479,11 @@ where
             sent_messages.get(&msg_hash).cloned()
         };
 
-        if let Some((_operator, partner, _msg, _prev_hash, _new_hash, _seq)) = info {
-            // Broadcast to other partners
-            if let Err(e) = self.broadcast_message_to_other_partners(msg_hash, partner, partner_sig) {
+        if let Some((_operator, reserves_id, _msg, _prev_hash, _new_hash, _seq)) = info {
+            // Broadcast to other partners - parse reserves_id to PublicKey
+            let partner_pubkey = PublicKey::from_str(&reserves_id)
+                .map_err(|e| format!("Invalid partner pubkey: {}", e))?;
+            if let Err(e) = self.broadcast_message_to_other_partners(msg_hash, partner_pubkey, partner_sig) {
                 return Err(format!("Broadcast failed: {:?}", e));
             }
             // Remove from tracking
@@ -480,7 +496,7 @@ where
 
     fn get_broadcast_recipients(&self, operator: &PublicKey, partner: &PublicKey) -> Vec<PublicKey> {
         use deposits_core::quorum::LedgerId;
-        let ledger_id = LedgerId::new(*operator, *partner);
+        let ledger_id = LedgerId::new(*operator, partner.to_string());
         self.quorum_manager
             .get_quorum(&ledger_id)
             .map(|members| members.into_iter().filter(|m| m != partner).collect())
@@ -498,7 +514,7 @@ where
         }
 
         // Check if we have a channel with the accused operator
-        let our_ledger_key = (accused_operator, self.our_node_id);
+        let our_ledger_key = (accused_operator, self.our_node_id.to_string());
         let have_channel = {
             let ledgers = self.ledgers.lock().unwrap();
             ledgers.contains_key(&our_ledger_key)
@@ -530,7 +546,7 @@ where
         // Rebroadcast to our collateral partners
         let partners = {
             let ledgers = self.ledgers.lock().unwrap();
-            ledgers.get(&our_ledger_key)
+            ledgers.get(&(accused_operator, self.our_node_id.to_string()))
                 .map(|l| l.read().unwrap().state.collateral_partners.clone())
                 .unwrap_or_default()
         };
@@ -563,11 +579,11 @@ where
             Ok(has_sufficient) => {
                 log_info!(self.logger, "🔄 RECOVERY: Signature stored (threshold_met={})", has_sufficient);
                 if has_sufficient {
-                    // Emit event when threshold is reached
+                    // Emit event when threshold is reached - reserves_id is PublicKey in LDK events
                     let _ = self.event_queue.emit_deposits_event(
                         super::events::DepositsEvent::RecoveryClaimReady {
                             operator_id: operator,
-                            reserves_id: partner,
+                            reserves_id: partner, // partner is PublicKey
                         },
                     );
                 }
@@ -587,8 +603,11 @@ where
         log_info!(self.logger, "🔄 RECOVERY: Removed claim for ({}, {})", operator, partner);
     }
 
-    fn send_quorum_state_sync(&self, member: PublicKey, operator: PublicKey, partner: PublicKey) {
-        self.send_state_sync_to_member(member, operator, partner);
+    fn send_quorum_state_sync(&self, member: PublicKey, operator: PublicKey, partner: &str) {
+        // Parse partner to PublicKey for send_state_sync_to_member
+        if let Ok(partner_pubkey) = PublicKey::from_str(partner) {
+            self.send_state_sync_to_member(member, operator, partner_pubkey);
+        }
     }
 
     fn add_quorum_vote(
@@ -597,7 +616,7 @@ where
         voter: PublicKey,
         vote: bool,
         spend_signature: Option<[u8; 64]>,
-    ) -> Option<(PublicKey, PublicKey, Vec<u8>, u32, u32)> {
+    ) -> std::option::Option<(bitcoin::secp256k1::PublicKey, std::string::String, Vec<u8>, u32, u32)> {
         let mut rounds = self.pending_vote_rounds.lock().unwrap();
         let round = rounds.get_mut(&vote_round_id)?;
 
@@ -624,7 +643,7 @@ where
 
             Some((
                 round.operator_id,
-                round.reserves_id,
+                round.reserves_id.to_string(),
                 data,
                 round.conforming_vote_count() as u32,
                 round.threshold as u32,
@@ -637,7 +656,7 @@ where
     fn complete_consent_request(
         &self,
         operator: PublicKey,
-        partner: PublicKey,
+        partner: &str,
         granted: bool,
         signature: [u8; 64],
     ) -> bool {
@@ -646,7 +665,7 @@ where
         // Calculate the hash for the original consent request
         let original = DepositsMessage::Coordination(CoordinationMsg::CollateralConsentRequest {
             operator_id: operator,
-            reserves_id: partner,
+            reserves_id: partner.to_string(),
             operator_signature: [0u8; 64],
         });
         let hash = self.calculate_message_hash(&original);
@@ -669,7 +688,7 @@ where
     fn send_audit_to_collateral_partner(
         &self,
         operator: PublicKey,
-        partner: PublicKey,
+        partner: &str,
         new_collateral_partner: PublicKey,
         signature: [u8; 64],
     ) {
@@ -680,12 +699,20 @@ where
         let response = DepositsMessage::CoordinationResponse(CoordinationResponseMsg::CollateralConsentResponse {
             request_hash: [0u8; 32],
             operator_id: operator,
-            reserves_id: partner,
+            reserves_id: partner.to_string(),
             consent_granted: true,
             collateral_partner_signature: signature,
         });
 
-        if let Err(e) = self.send_audit_update_to_new_collateral_partner(partner, new_collateral_partner, &response) {
+        // Parse partner to PublicKey for send_audit_update_to_new_collateral_partner
+        let partner_pubkey = match PublicKey::from_str(partner) {
+            Ok(pk) => pk,
+            Err(e) => {
+                log_warn!(self.logger, "📋 SYNC: Invalid partner pubkey: {:?}", e);
+                return;
+            }
+        };
+        if let Err(e) = self.send_audit_update_to_new_collateral_partner(partner_pubkey, new_collateral_partner, &response) {
             log_warn!(self.logger, "📋 SYNC: Failed to send audit history: {:?}", e);
         }
     }
@@ -693,7 +720,7 @@ where
     fn verify_consent_signature(
         &self,
         operator: PublicKey,
-        partner: PublicKey,
+        partner: &str,
         signature: [u8; 64],
         signer: PublicKey,
     ) -> bool {
@@ -703,7 +730,7 @@ where
         let mut preimage = Vec::new();
         preimage.extend_from_slice(b"COLLATERAL_CONSENT");
         preimage.extend_from_slice(&operator.serialize());
-        preimage.extend_from_slice(&partner.serialize());
+        preimage.extend_from_slice(partner.as_bytes());
 
         let hash = sha256::Hash::hash(&preimage);
         let secp_msg = Message::from_digest(hash.to_byte_array());
@@ -733,10 +760,10 @@ where
     fn get_signed_update_log_state(
         &self,
         operator: &PublicKey,
-        partner: &PublicKey,
+        partner: &str,
     ) -> Option<(u64, [u8; 32])> {
         let logs = self.signed_update_logs.lock().unwrap();
-        logs.get(&(*operator, *partner)).map(|log| {
+        logs.get(&(*operator, partner.to_string())).map(|log| {
             let sequence = log.next_sequence.saturating_sub(1);
             let state_hash = log.updates.last()
                 .map(|u| u.current_hash)
@@ -748,13 +775,13 @@ where
     fn update_quorum_member_state(
         &self,
         operator: PublicKey,
-        partner: PublicKey,
+        partner: &str,
         sequence: u64,
         state_hash: [u8; 32],
     ) -> Result<(), String> {
         use deposits_core::quorum::LedgerId;
 
-        let ledger_id = LedgerId::new(operator, partner);
+        let ledger_id = LedgerId::new(operator, partner.to_string());
         self.quorum_manager.update_member_state(
             &ledger_id,
             &self.our_node_id,
@@ -771,7 +798,7 @@ where
         &self,
         vote_round_id: [u8; 32],
         operator: PublicKey,
-        partner: PublicKey,
+        partner: &str,
         sequence_number: u64,
         state_hash: [u8; 32],
         claimed_reserves: u64,
@@ -784,11 +811,17 @@ where
         use std::collections::HashMap;
         use std::time::{SystemTime, UNIX_EPOCH};
 
+        // Parse partner string to PublicKey for VoteRoundState
+        let partner_pubkey = match PublicKey::from_str(partner) {
+            Ok(pk) => pk,
+            Err(_) => return false, // Invalid partner pubkey
+        };
+
         let mut rounds = self.pending_vote_rounds.lock().unwrap();
         rounds.entry(vote_round_id).or_insert_with(|| {
             VoteRoundState {
                 operator_id: operator,
-                reserves_id: partner,
+                reserves_id: partner_pubkey,
                 sequence_number,
                 state_hash,
                 claimed_reserves,

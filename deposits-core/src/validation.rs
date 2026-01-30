@@ -537,7 +537,7 @@ mod tests {
     }
 
     fn create_test_state(deposit_balance: u64, reserves: u64) -> LedgerState {
-        let mut state = LedgerState::new(test_pubkey(), test_pubkey_2(), "tb1q...".to_string());
+        let mut state = LedgerState::new(test_pubkey(), test_pubkey_2().to_string(), "tb1q...".to_string());
 
         let deposit = create_test_deposit(deposit_balance);
         let pubkey = deposit.pubkey;

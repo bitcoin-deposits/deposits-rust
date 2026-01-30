@@ -73,7 +73,7 @@ fn print_update(idx: usize, update: &SignedLedgerUpdate) {
         msg_type_name
     );
     println!("      operator: {}", format_pubkey(&update.operator_id));
-    println!("      partner:  {}", format_pubkey(&update.partner_id));
+    println!("      reserves: {}", &update.reserves_id);
     println!("      prev_hash: {}", format_hash(&update.previous_hash));
     println!("      curr_hash: {}", format_hash(&update.current_hash));
     println!("      timestamp: {} ({})", update.timestamp, format_timestamp(update.timestamp));
@@ -101,7 +101,7 @@ fn decode_and_print(data: &[u8], record_num: usize) {
         Ok(log) => {
             println!("=== SignedLedgerUpdateLog ===");
             println!("operator_id: {}", format_pubkey(&log.operator_id));
-            println!("partner_id:  {}", format_pubkey(&log.partner_id));
+            println!("reserves_id: {}", &log.reserves_id);
             println!("next_sequence: {}", log.next_sequence);
             println!("updates: {} entries", log.updates.len());
             println!("pending_updates: {} entries", log.pending_updates.len());

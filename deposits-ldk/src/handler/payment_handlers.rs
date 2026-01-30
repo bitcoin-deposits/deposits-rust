@@ -16,6 +16,8 @@ use super::messages::{DepositsMessage, LedgerUpdateMsg, LedgerUpdateMsgExt, Ledg
 use super::ledger_ext::LedgerExt;
 use deposits_core::{log_error, log_info};
 use lightning::util::logger::Logger as LdkLogger;
+use bitcoin::secp256k1::PublicKey;
+use std::str::FromStr;
 
 use std::ops::Deref;
 
@@ -33,7 +35,7 @@ where
                  &msg.payment_id[0..4], msg.pubkey, msg.amount);
 
         // STAGE 1: Validate and apply locally (optimistic - payment already succeeded)
-        let (partner_node_id, prev_hash, new_hash, fulfill_message, broadcast_seq) = {
+        let (partner_node_id, reserves_id_str, prev_hash, new_hash, fulfill_message, broadcast_seq) = {
             let mut payment_locks = self.payment_locks.lock().unwrap();
             let ledgers = self.ledgers.lock().unwrap();
 
@@ -47,7 +49,7 @@ where
 
             // Find ledger containing this deposit by searching all ledgers
             let mut found_result = None;
-            for ((op, partner), ledger_arc) in ledgers.iter() {
+            for ((op, reserves_id), ledger_arc) in ledgers.iter() {
                 if *op != self.our_node_id {
                     continue;
                 }
@@ -55,6 +57,10 @@ where
                 if !ledger.state.deposits.contains_key(&msg.pubkey) {
                     continue; // Deposit not in this ledger, check next one
                 }
+
+                // Parse reserves_id (partner pubkey string for LDK)
+                let partner_pubkey = PublicKey::from_str(reserves_id)
+                    .map_err(|_| DepositsError::InvalidPublicKey)?;
 
                 // Found the ledger with this deposit - process it
                 payment_locks.remove(&msg.payment_id);
@@ -64,11 +70,11 @@ where
                 // The message's sequence_number must match ledger.history.len() at append time
                 let expected_sequence = ledger.history.len() as u64;
 
-                // Build V2 LedgerUpdate message with PaymentFulfill operation
+                // Build V2 LedgerUpdate message with InvoiceFulfill operation
                 let update_msg = LedgerUpdateMsg::new_with_operation(
                     ledger.operator_key(),
-                    ledger.reserves_key(),
-                    LedgerOperation::PaymentFulfill {
+                    ledger.reserves_key().to_string(),
+                    LedgerOperation::InvoiceFulfill {
                         pubkey: msg.pubkey,
                         amount: msg.amount,
                         payment_id: msg.payment_id,
@@ -84,7 +90,7 @@ where
                 // Returns 0-based sequence number for broadcasting
                 let (prev_hash, new_hash, broadcast_seq) = ledger.append_mut_with_metadata(fulfill_message.clone())?;
 
-                found_result = Some((*partner, prev_hash, new_hash, fulfill_message, broadcast_seq));
+                found_result = Some((partner_pubkey, reserves_id.clone(), prev_hash, new_hash, fulfill_message, broadcast_seq));
                 break;
             }
             found_result.ok_or(DepositsError::DepositNotFound)?
@@ -99,7 +105,7 @@ where
         // send_message inserts with [0u8; 32] placeholder, but we need the real hash.
         {
             let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
-            sent_messages.insert(message_hash, (self.our_node_id, partner_node_id, message_for_broadcast.clone(), prev_hash, new_hash, broadcast_seq));
+            sent_messages.insert(message_hash, (self.our_node_id, partner_node_id.to_string(), message_for_broadcast.clone(), prev_hash, new_hash, broadcast_seq));
         }
 
         if let Err(e) = self.send_message(partner_node_id, fulfill_message) {
@@ -109,7 +115,7 @@ where
         // STAGE 3: Persist ledger
         {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, reserves_id_str)) {
                 let ledger = ledger_arc.read().unwrap();
                 self.persist_ledger_state(&*ledger)?;
             }
@@ -136,7 +142,7 @@ where
                  &msg.payment_id[0..4], msg.pubkey, msg.amount);
 
         // STAGE 1: Validate and apply locally (optimistic - unlock balance immediately)
-        let (partner_node_id, prev_hash, new_hash, msg, broadcast_seq) = {
+        let (partner_pubkey, reserves_id_str, prev_hash, new_hash, msg, broadcast_seq) = {
             let mut payment_locks = self.payment_locks.lock().unwrap();
             let ledgers = self.ledgers.lock().unwrap();
 
@@ -150,7 +156,7 @@ where
 
             // Find ledger containing this deposit by searching all ledgers
             let mut found_result = None;
-            for ((op, partner), ledger_arc) in ledgers.iter() {
+            for ((op, reserves_id), ledger_arc) in ledgers.iter() {
                 if *op != self.our_node_id {
                     continue;
                 }
@@ -158,6 +164,10 @@ where
                 if !ledger.state.deposits.contains_key(&msg.pubkey) {
                     continue; // Deposit not in this ledger, check next one
                 }
+
+                // Parse reserves_id (partner pubkey string for LDK)
+                let partner_pk = PublicKey::from_str(reserves_id)
+                    .map_err(|_| DepositsError::InvalidPublicKey)?;
 
                 // Found the ledger with this deposit - process it
                 payment_locks.remove(&msg.payment_id);
@@ -180,8 +190,8 @@ where
                 // Returns 0-based sequence number for broadcasting
                 let update_msg = LedgerUpdateMsg::new_with_operation(
                     ledger.operator_key(),
-                    ledger.reserves_key(),
-                    LedgerOperation::PaymentFail {
+                    ledger.reserves_key().to_string(),
+                    LedgerOperation::InvoiceFail {
                         pubkey: msg.pubkey,
                         amount: msg.amount,
                         payment_id: msg.payment_id,
@@ -190,7 +200,7 @@ where
                 );
                 let (prev_hash, new_hash, broadcast_seq) = ledger.append_mut_with_metadata(DepositsMessage::LedgerUpdate(update_msg))?;
 
-                found_result = Some((*partner, prev_hash, new_hash, msg, broadcast_seq));
+                found_result = Some((partner_pk, reserves_id.clone(), prev_hash, new_hash, msg, broadcast_seq));
                 break;
             }
             found_result.ok_or(DepositsError::DepositNotFound)?
@@ -199,8 +209,8 @@ where
         // STAGE 2: Send message fire-and-forget (no ACK wait needed)
         let fail_update_msg = LedgerUpdateMsg::new_with_operation(
             self.our_node_id,
-            partner_node_id,
-            LedgerOperation::PaymentFail {
+            reserves_id_str.clone(),
+            LedgerOperation::InvoiceFail {
                 pubkey: msg.pubkey,
                 amount: msg.amount,
                 payment_id: msg.payment_id,
@@ -216,17 +226,17 @@ where
         // send_message inserts with [0u8; 32] placeholder, but we need the real hash.
         {
             let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
-            sent_messages.insert(message_hash, (self.our_node_id, partner_node_id, message_for_broadcast.clone(), prev_hash, new_hash, broadcast_seq));
+            sent_messages.insert(message_hash, (self.our_node_id, partner_pubkey.to_string(), message_for_broadcast.clone(), prev_hash, new_hash, broadcast_seq));
         }
 
-        if let Err(e) = self.send_message(partner_node_id, message) {
+        if let Err(e) = self.send_message(partner_pubkey, message) {
             log_error!(self.logger, "Failed to send fail message: {}", e);
         }
 
         // STAGE 3: Persist ledger
         {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, reserves_id_str)) {
                 let ledger = ledger_arc.read().unwrap();
                 self.persist_ledger_state(&*ledger)?;
             }
@@ -277,11 +287,11 @@ where
             // Update timestamp to current time
             ledger.state.last_updated = deposits_core::time_utils::now_unix_timestamp();
 
-            // Build V2 LedgerUpdate message with PaymentLock operation
+            // Build V2 LedgerUpdate message with InvoiceLock operation
             let update_msg = LedgerUpdateMsg::new_with_operation(
                 ledger.operator_key(),
-                ledger.reserves_key(),
-                LedgerOperation::PaymentLock {
+                ledger.reserves_key().to_string(),
+                LedgerOperation::InvoiceLock {
                     pubkey: msg.pubkey,
                     amount: msg.amount,
                     payment_id: msg.payment_id,
@@ -294,7 +304,7 @@ where
             // Use append_mut_with_metadata to atomically get prev_hash, new_hash, and sequence_number
             // This prevents race conditions where another thread could append between operations
             let (prev_hash, new_hash, sequence_number) = ledger.append_mut_with_metadata(lock_message.clone()).map_err(|e| {
-                log_error!(self.logger, "Failed to append PaymentLock update: {}", e);
+                log_error!(self.logger, "Failed to append InvoiceLock update: {}", e);
                 e
             })?;
 
@@ -302,11 +312,15 @@ where
                      msg.amount, msg.pubkey, &msg.payment_id[0..8]);
 
             // Notify partner about the lock
-            let partner_node_id = ledger.reserves_key();
+            let partner_node_id_str = ledger.reserves_key().to_string();
             let operator_id = ledger.operator_key();
             drop(ledger); // Release write lock before sending message
             drop(ledgers); // Release ledgers lock
             drop(payment_locks); // Release payment_locks
+
+            // Parse partner pubkey for send_message
+            let partner_pubkey = PublicKey::from_str(&partner_node_id_str)
+                .map_err(|_| DepositsError::InvalidPublicKey)?;
 
             let message_hash = self.calculate_message_hash(&lock_message);
             let lock_message_for_broadcast = lock_message.clone();
@@ -316,13 +330,13 @@ where
             // send_message inserts with [0u8; 32] placeholder, but we need the real hash.
             {
                 let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
-                sent_messages.insert(message_hash, (operator_id, partner_node_id, lock_message_for_broadcast.clone(), prev_hash, new_hash, sequence_number));
+                sent_messages.insert(message_hash, ( operator_id, partner_node_id_str, lock_message_for_broadcast.clone(), prev_hash, new_hash, sequence_number));
             }
 
             // Fire-and-forget: Send message without waiting for ACK
             // Lock is enforced locally, partner will ACK asynchronously
             // This doesn't stall the pipeline - other operations can proceed
-            if let Err(e) = self.send_message(partner_node_id, lock_message) {
+            if let Err(e) = self.send_message(partner_pubkey, lock_message) {
                 log_error!(self.logger, "Failed to send payment lock message: {}", e);
             }
 
@@ -375,8 +389,8 @@ where
                     // Create V2 LedgerUpdate message
                     let update_msg = LedgerUpdateMsg::new_with_operation(
                         ledger.operator_key(),
-                        ledger.reserves_key(),
-                        LedgerOperation::PaymentFail {
+                        ledger.reserves_key().to_string(),
+                        LedgerOperation::InvoiceFail {
                             pubkey: msg.pubkey,
                             amount: msg.amount,
                             payment_id: msg.payment_id,
@@ -387,7 +401,7 @@ where
 
                     // Apply the update (this modifies state and records in history) and capture new_hash
                     let new_hash = ledger.append_mut(fail_message.clone()).map_err(|e| {
-                        log_error!(self.logger, "Failed to apply PaymentFail update: {}", e);
+                        log_error!(self.logger, "Failed to apply InvoiceFail update: {}", e);
                         e
                     })?;
                     let chain_index = (ledger.history.len() - 1) as u64; // 0-based (index of just-appended entry)
@@ -396,11 +410,15 @@ where
                              locked_amount, msg.pubkey, &msg.payment_id[0..8]);
 
                     // Notify partner about the failure
-                    let partner_node_id = ledger.reserves_key();
+                    let partner_node_id_str = ledger.reserves_key().to_string();
                     let operator_id = ledger.operator_key();
                     drop(ledger); // Release write lock before sending message
                     drop(ledgers); // Release ledgers lock
                     drop(payment_locks); // Release payment_locks
+
+                    // Parse partner pubkey for send_message
+                    let partner_pubkey = PublicKey::from_str(&partner_node_id_str)
+                        .map_err(|_| DepositsError::InvalidPublicKey)?;
 
                     let message_hash = self.calculate_message_hash(&fail_message);
                     let fail_message_for_broadcast = fail_message.clone();
@@ -408,16 +426,16 @@ where
                     // Insert into sent_messages_for_broadcast BEFORE send_message
                     {
                         let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
-                        sent_messages.insert(message_hash, (operator_id, partner_node_id, fail_message_for_broadcast, prev_hash, new_hash, chain_index));
+                        sent_messages.insert(message_hash, ( operator_id, partner_node_id_str, fail_message_for_broadcast, prev_hash, new_hash, chain_index));
                     }
 
-                    if let Err(e) = self.send_message(partner_node_id, fail_message) {
+                    if let Err(e) = self.send_message(partner_pubkey, fail_message) {
                         log_error!(self.logger, "Failed to notify partner about payment failure: {}", e);
                     }
 
                     // Broadcast SignedAuditUpdate to other partners/auditors
-                    if let Err(e) = self.broadcast_message_to_other_partners(message_hash, partner_node_id, None) {
-                        log_error!(self.logger, "Failed to broadcast PaymentFail: {:?}", e);
+                    if let Err(e) = self.broadcast_message_to_other_partners(message_hash, partner_pubkey, None) {
+                        log_error!(self.logger, "Failed to broadcast InvoiceFail: {:?}", e);
                     }
 
                     return Ok(());

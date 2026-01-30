@@ -48,7 +48,7 @@ where
                 if *operator == self.our_node_id {
                     operator_ledger_count += 1;
                 }
-                if *partner == self.our_node_id {
+                if *partner == self.our_node_id.to_string() {
                     partner_ledger_count += 1;
                 }
             }
@@ -71,7 +71,7 @@ where
                 operator_ledger_count, partner_ledger_count);
 
             // We are the operator, partner_node_id is the partner
-            if let Some(ledger_arc) = all_ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = all_ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let _ledger = ledger_arc.read().unwrap();
                 // Check if ledger can accept changes (no uncommitted changes)
 
@@ -87,7 +87,7 @@ where
         // NOTE: prev_hash will be captured atomically at append time to avoid race conditions
         let update_msg = LedgerUpdateMsg::new_with_operation(
             self.our_node_id,    // operator
-            partner_node_id,     // partner
+            partner_node_id.to_string(),     // partner
             LedgerOperation::DepositOpen {
                 pubkey: deposit_pubkey,
                 fees: fees.clone(),
@@ -105,7 +105,7 @@ where
         // Track pending ACK in ledger BEFORE sending (so handle_ack can find it)
         {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let _ledger = ledger_arc.write().unwrap();
                 // Track pending ACK
                 {
@@ -140,7 +140,7 @@ where
         // Use append_mut_with_metadata to get consistent prev_hash, new_hash, and sequence atomically
         let (prev_hash, new_hash, chain_index) = {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let mut ledger = ledger_arc.write().unwrap();
 
                 // Apply the deposit and capture prev_hash, new_hash, and sequence atomically
@@ -173,13 +173,13 @@ where
         // Note: Broadcast triggered automatically by handle_received_ack
         {
             let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
-            sent_messages.insert(message_hash, (self.our_node_id, partner_node_id, message_for_broadcast.clone(), prev_hash, new_hash, chain_index));
+            sent_messages.insert(message_hash, (self.our_node_id, partner_node_id.to_string(), message_for_broadcast.clone(), prev_hash, new_hash, chain_index));
         }
 
         // Continue with remaining operations
         {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let ledger = ledger_arc.write().unwrap();
 
                 // Track this message as acknowledged (for consensus tracking)
@@ -337,7 +337,7 @@ where
 
         // Get the partner's ledger (where they are operator, we are partner)
         // This is the ledger we're validating against
-        let ledger_key = (*counterparty_node_id, self.our_node_id);
+        let ledger_key = (*counterparty_node_id, self.our_node_id.to_string());
 
         let (is_valid_unsigned, committed_hash) = if let Some(ledger_arc) = ledgers.get(&ledger_key) {
             let ledger = ledger_arc.read().unwrap();
@@ -364,7 +364,7 @@ where
         let has_signed_update = {
             // First check ledgers (for SignedAuditUpdate broadcasts)
             let ledgers = self.ledgers.lock().unwrap();
-            let reserves_key = (*counterparty_node_id, self.our_node_id);
+            let reserves_key = (*counterparty_node_id, self.our_node_id.to_string());
 
             let signed_in_ledgers = if let Some(partner_ledger_arc) = ledgers.get(&reserves_key) {
                 let partner_ledger = partner_ledger_arc.read().unwrap();
@@ -392,7 +392,7 @@ where
             } else {
                 // Also check ledgers - partners store their signatures there when appending
                 let ledgers = self.ledgers.lock().unwrap();
-                let ledger_key = (*counterparty_node_id, self.our_node_id);
+                let ledger_key = (*counterparty_node_id, self.our_node_id.to_string());
 
                 let signed_in_ledgers = if let Some(ledger_arc) = ledgers.get(&ledger_key) {
                     let ledger = ledger_arc.read().unwrap();

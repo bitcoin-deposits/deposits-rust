@@ -37,7 +37,7 @@ pub enum ServiceError {
     LightningError(String),
 
     /// Payment processing error
-    PaymentFailed,
+    InvoiceFailed,
 
     /// Payment initiation failed
     PaymentInitiationFailed(String),
@@ -75,7 +75,7 @@ impl std::fmt::Display for ServiceError {
         match self {
             ServiceError::Protocol(e) => write!(f, "Protocol error: {}", e),
             ServiceError::LightningError(msg) => write!(f, "Lightning error: {}", msg),
-            ServiceError::PaymentFailed => write!(f, "Payment failed"),
+            ServiceError::InvoiceFailed => write!(f, "Payment failed"),
             ServiceError::PaymentInitiationFailed(msg) => write!(f, "Payment initiation failed: {}", msg),
             ServiceError::NostrWalletConnectError(msg) => write!(f, "NWC error: {}", msg),
             ServiceError::UnsupportedMethod(method) => write!(f, "Unsupported NWC method: {}", method),

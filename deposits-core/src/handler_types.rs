@@ -17,22 +17,6 @@ use std::collections::HashMap;
 // Pending Operation Tracking
 // ============================================================================
 
-/// Details of a pending transfer operation (deposit-to-deposit within ledger)
-///
-/// Tracks transfers that have been locked but not yet fulfilled or failed.
-/// This is used for the lock-fail-fulfill pattern in deposit transfers.
-#[derive(Clone, Debug)]
-pub struct PendingTransfer {
-    /// The deposit this transfer is from
-    pub deposit_pubkey: PublicKey,
-    /// Amount being transferred in satoshis
-    pub amount: u64,
-    /// Unix timestamp when the transfer was locked
-    pub locked_at: u64,
-    /// Unique identifier for this transfer
-    pub transfer_id: [u8; 32],
-}
-
 /// Details of a pending payment operation (outbound Lightning payment)
 ///
 /// Tracks payments that have been locked but not yet fulfilled or failed.

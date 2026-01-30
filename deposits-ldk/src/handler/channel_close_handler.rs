@@ -36,8 +36,8 @@ where
         // Check if we have a ledger with this partner
         let has_ledger = {
             let ledgers = self.ledgers.lock().unwrap();
-            let ledger_key_1 = (self.our_node_id, partner_node_id);
-            let ledger_key_2 = (partner_node_id, self.our_node_id);
+            let ledger_key_1 = (self.our_node_id, partner_node_id.to_string());
+            let ledger_key_2 = (partner_node_id, self.our_node_id.to_string());
             ledgers.contains_key(&ledger_key_1) || ledgers.contains_key(&ledger_key_2)
         };
 
@@ -53,7 +53,7 @@ where
         // Get sequence number and create/append tombstone while holding ledger lock
         // Then broadcast after releasing the lock
         let mut ledgers = self.ledgers.lock().unwrap();
-        let ledger_key = (self.our_node_id, partner_node_id);
+        let ledger_key = (self.our_node_id, partner_node_id.to_string());
 
         let Some(ledger_arc) = ledgers.get_mut(&ledger_key) else {
             log_error!(self.logger, "Ledger disappeared between check and append");
@@ -84,7 +84,7 @@ where
 
         // Extract values before mem::replace
         let operator_node_id = ledger_guard.operator_key();
-        let partner_node_id_inner = ledger_guard.reserves_key();
+        let partner_node_id_inner = ledger_guard.reserves_key().to_string(); // Clone immediately to release borrow
         let our_role = ledger_guard.role;
         let collateral_partners = ledger_guard.state.collateral_partners.clone();
         let ledger_address = ledger_guard.state.ledger_address.clone();
@@ -115,7 +115,7 @@ where
                 // so audit broadcasts can proceed
                 {
                     let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
-                    sent_messages.insert(message_hash, (self.our_node_id, partner_node_id, tombstone.clone(), prev_hash, new_hash, sequence_number));
+                    sent_messages.insert(message_hash, (self.our_node_id, partner_node_id.to_string(), tombstone.clone(), prev_hash, new_hash, sequence_number));
                 }
 
                 // Release locks before broadcast

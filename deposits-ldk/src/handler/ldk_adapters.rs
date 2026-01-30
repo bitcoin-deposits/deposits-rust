@@ -5,6 +5,7 @@
 //! protocol logic to work with LDK's concrete types.
 
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use bitcoin::secp256k1::PublicKey;
@@ -271,8 +272,8 @@ impl EventEmitter for LdkEventAdapter {
                     pubkey: deposit_pubkey,
                 }
             }
-            ProtocolEvent::PaymentCredited { deposit_pubkey, amount, .. } => {
-                DepositsEvent::PaymentCredited {
+            ProtocolEvent::InvoiceCredited { deposit_pubkey, amount, .. } => {
+                DepositsEvent::InvoiceCredited {
                     deposit_pubkey,
                     amount,
                 }
@@ -286,18 +287,26 @@ impl EventEmitter for LdkEventAdapter {
                 // Could emit RecoveryClaimReady but we don't have the right info
                 return;
             }
-            ProtocolEvent::RecoveryClaimed { operator, partner, new_operator, claim_txid } => {
+            ProtocolEvent::RecoveryClaimed { operator, reserves_id, new_operator, claim_txid } => {
+                let reserves_pubkey = match PublicKey::from_str(&reserves_id) {
+                    Ok(pk) => pk,
+                    Err(_) => return, // Skip if reserves_id is not a valid PublicKey
+                };
                 DepositsEvent::RecoveryClaimCompleted {
                     old_operator: operator,
-                    reserves_id: partner,
+                    reserves_id: reserves_pubkey,
                     new_operator,
                     claim_txid,
                     confirmation_block: 0,
                 }
             }
-            ProtocolEvent::Error { partner, error, .. } => {
+            ProtocolEvent::Error { reserves_id, error, .. } => {
+                let partner_pubkey = match PublicKey::from_str(&reserves_id) {
+                    Ok(pk) => pk,
+                    Err(_) => return, // Skip if reserves_id is not a valid PublicKey
+                };
                 DepositsEvent::ProtocolViolation {
-                    partner_node_id: partner,
+                    partner_node_id: partner_pubkey,
                     violation_type: "Error".to_string(),
                     evidence: error.into_bytes(),
                 }

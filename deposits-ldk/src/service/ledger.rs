@@ -99,7 +99,7 @@ where
             // Get ledger details
             let ledger_arc = handler.get_all_ledgers()
                 .into_iter()
-                .find(|((op, part), _)| *op == handler.our_node_id && *part == reserves_id)
+                .find(|((op, part), _)| *op == handler.our_node_id && part.to_string() == reserves_id)
                 .map(|(_, ledger)| ledger);
 
             if let Some(ledger_arc) = ledger_arc {

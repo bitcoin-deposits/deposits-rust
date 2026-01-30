@@ -147,8 +147,12 @@ pub trait LedgerExt {
 
 impl LedgerExt for Ledger {
     fn construct_voter_set(&self) -> deposits_core::VoterSet {
+        use std::str::FromStr;
+        // In LDK, reserves_key is the partner's pubkey stored as a string
+        let reserves_pubkey = bitcoin::secp256k1::PublicKey::from_str(&self.state.reserves_key)
+            .expect("reserves_key should be valid pubkey string");
         deposits_core::VoterSet::new(
-            self.state.reserves_key,
+            reserves_pubkey,
             self.state.collateral_partners.clone(),
         )
     }
@@ -190,18 +194,18 @@ impl LedgerExt for Ledger {
                 }
                 DepositsMessage::LedgerUpdate(ref update_msg) => {
                     // V2 CollateralAttestation is inside LedgerUpdate
-                    if let deposits_core::messages::LedgerOperation::CollateralAttestation { collateral_operator, amount, block_height, signature, ledger_hash } = &update_msg.operation {
-                        let collateral_partner = update_msg.reserves_id;
-                        if collateral_partner == self.state.reserves_key || self.state.collateral_partners.contains(&collateral_partner) {
+                    if let deposits_core::messages::LedgerOperation::CollateralAttestation { collateral_operator, collateral_partner, amount, block_height, signature, ledger_hash } = &update_msg.operation {
+                        // Check if this partner is relevant (is our direct partner or a collateral partner)
+                        if collateral_partner.to_string() == self.state.reserves_key || self.state.collateral_partners.contains(collateral_partner) {
                             let attestation = deposits_core::CollateralAttestation {
                                 operator_id: *collateral_operator,
-                                collateral_partner,
+                                collateral_partner: *collateral_partner,
                                 amount: *amount,
                                 block_height: *block_height,
                                 signature: *signature,
                                 ledger_hash: *ledger_hash,
                             };
-                            self.state.collateral_attestations.insert(collateral_partner, attestation);
+                            self.state.collateral_attestations.insert(*collateral_partner, attestation);
                         }
                     }
                 }
@@ -253,7 +257,7 @@ impl LedgerExt for Ledger {
             operator_signature: [0u8; 64], // Placeholder during migration
             partner_signature: [0u8; 64],
             operator_id: self.state.operator_key,
-            reserves_id: self.state.reserves_key,
+            reserves_id: self.state.reserves_key.clone(),
             sequence_number: expected_sequence,
             previous_hash: prev_hash,
             current_hash: update_hash,
@@ -466,7 +470,7 @@ mod tests {
 
         let ledger = Ledger::new_as_operator(
             operator,
-            partner,
+            partner.to_string(),
             "test_address".to_string(),
         );
 
@@ -488,7 +492,7 @@ mod tests {
 
         let mut ledger = Ledger::new_as_operator(
             operator,
-            partner,
+            partner.to_string(),
             "test_address".to_string(),
         );
         ledger.add_collateral_partner(collateral1).unwrap();
@@ -511,7 +515,7 @@ mod tests {
 
         let mut ledger = Ledger::new_as_operator(
             operator,
-            partner,
+            partner.to_string(),
             "test_address".to_string(),
         );
         ledger.add_collateral_partner(collateral).unwrap();
@@ -538,7 +542,7 @@ mod tests {
 
         let mut ledger = Ledger::new_as_operator(
             operator,
-            partner,
+            partner.to_string(),
             "test_address".to_string(),
         );
         ledger.add_collateral_partner(collateral1).unwrap();
@@ -560,7 +564,7 @@ mod tests {
 
         let mut ledger = Ledger::new_as_operator(
             operator,
-            partner,
+            partner.to_string(),
             "test_address".to_string(),
         );
         ledger.add_collateral_partner(collateral).unwrap();
@@ -579,7 +583,7 @@ mod tests {
 
         let mut ledger = Ledger::new_as_operator(
             operator,
-            partner,
+            partner.to_string(),
             "test_address".to_string(),
         );
 
@@ -599,7 +603,7 @@ mod tests {
 
         let mut ledger = Ledger::new_as_operator(
             operator,
-            partner,
+            partner.to_string(),
             "test_address".to_string(),
         );
 
@@ -615,7 +619,7 @@ mod tests {
 
         let mut ledger = Ledger::new_as_operator(
             operator,
-            partner,
+            partner.to_string(),
             "test_address".to_string(),
         );
 
@@ -632,7 +636,7 @@ mod tests {
 
         let mut ledger = Ledger::new_as_operator(
             operator,
-            partner,
+            partner.to_string(),
             "test_address".to_string(),
         );
 

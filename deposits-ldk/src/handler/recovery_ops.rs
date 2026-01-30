@@ -131,7 +131,7 @@ where
         // Evaluate our local ledger
         let (is_conforming, validated_hash, validated_sequence, discovered_violation) = {
             let ledgers = self.ledgers.lock().unwrap();
-            let ledger_key = (operator, partner);
+            let ledger_key = (operator, partner.to_string());
 
             match ledgers.get(&ledger_key) {
                 Some(ledger_arc) => {
@@ -523,7 +523,7 @@ where
         // Verify preimage matches payment hash using deposits-core's pure validation
         deposits_core::recovery::validate_preimage(&preimage, &payment_hash)?;
 
-        let ledger_key = (operator, self.our_node_id);
+        let ledger_key = (operator, self.our_node_id.to_string());
 
         // Verify invoice and check if already credited
         let (settlement_sequence, settlement_ledger_hash, collateral_partners, was_credited) = {
@@ -544,8 +544,8 @@ where
 
                         match crate::wire::MessageCodec::decode_message_with_type(msg_type, msg_data) {
                             Ok(msg) => {
-                                // Check for PaymentCredit via to_operation()
-                                if let Some(deposits_core::messages::LedgerOperation::PaymentCredit { payment_hash: hash, .. }) = msg.to_operation() {
+                                // Check for InvoiceCredit via to_operation()
+                                if let Some(deposits_core::messages::LedgerOperation::InvoiceCredit { payment_hash: hash, .. }) = msg.to_operation() {
                                     return hash == payment_hash;
                                 }
                                 false
@@ -773,11 +773,11 @@ mod tests {
     fn add_test_ledger(handler: &DepositsHandler<Arc<TestLogger>>, operator: PublicKey, partner: PublicKey) {
         let ledger = Ledger::new_as_operator(
             operator,
-            partner,
+            partner.to_string(),
             "tb1qtest".to_string(),
         );
         let mut ledgers = handler.ledgers.lock().unwrap();
-        ledgers.insert((operator, partner), Arc::new(RwLock::new(ledger)));
+        ledgers.insert((operator, partner.to_string()), Arc::new(RwLock::new(ledger)));
     }
 
     /// Helper to mark a peer as connected
@@ -1529,13 +1529,13 @@ mod tests {
         {
             let ledger = Ledger::new(
                 operator,
-                partner,
+                partner.to_string(),
                 LedgerRole::Operator,
                 vec![auditor], // Add auditor as collateral partner
                 "tb1qtest".to_string(),
             );
             let mut ledgers = handler.ledgers.lock().unwrap();
-            ledgers.insert((operator, partner), Arc::new(RwLock::new(ledger)));
+            ledgers.insert((operator, partner.to_string()), Arc::new(RwLock::new(ledger)));
         }
 
         // Mark both operator and auditor as connected

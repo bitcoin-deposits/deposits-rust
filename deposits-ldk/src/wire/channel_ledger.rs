@@ -180,7 +180,7 @@ impl ChannelLedger {
         use crate::handler::messages::{DepositsMessage, LedgerUpdateMsg, LedgerUpdateMsgExt, LedgerOperation};
         let update_msg = LedgerUpdateMsg::new_with_operation(
             self.operator_node_id,
-            self.partner_node_id,
+            self.partner_node_id.to_string(),
             LedgerOperation::DepositOpen {
                 pubkey: deposit_pubkey,
                 fees: fees.map(|f| f.into()),
@@ -225,7 +225,7 @@ impl ChannelLedger {
                         ));
                         self.add_deposit(*pubkey, *pubkey, local_fees)?;
                     }
-                    LedgerOperation::PaymentCredit { payment_hash, deposit_pubkey, amount, ref invoice_id, sequence_number: _ } => {
+                    LedgerOperation::InvoiceCredit { payment_hash, deposit_pubkey, amount, ref invoice_id, sequence_number: _ } => {
                         // Partner is crediting a deposit after receiving a Lightning payment
                         // Check if this payment has already been processed (idempotency)
                         if self.processed_payments.contains(payment_hash) {
@@ -243,8 +243,8 @@ impl ChannelLedger {
                         // Apply the balance credit (use the message being processed)
                         let credit_msg = LedgerUpdateMsg::new_with_operation(
                             self.operator_node_id,
-                            self.partner_node_id,
-                            LedgerOperation::PaymentCredit {
+                            self.partner_node_id.to_string(),
+                            LedgerOperation::InvoiceCredit {
                                 payment_hash: *payment_hash,
                                 deposit_pubkey: *deposit_pubkey,
                                 amount: *amount,
@@ -274,21 +274,21 @@ impl ChannelLedger {
                         if new_required_reserves > old_reserves {
                             let reserves_msg = LedgerUpdateMsg::new_with_operation(
                                 self.operator_node_id,
-                                self.partner_node_id,
+                                self.partner_node_id.to_string(),
                                 LedgerOperation::ReservesIncrease { new_amount: new_required_reserves },
                             );
                             self.apply_update(DepositsMessage::LedgerUpdate(reserves_msg))?;
                         } else if new_required_reserves < old_reserves {
                             let reserves_msg = LedgerUpdateMsg::new_with_operation(
                                 self.operator_node_id,
-                                self.partner_node_id,
+                                self.partner_node_id.to_string(),
                                 LedgerOperation::ReservesDecrease { new_amount: new_required_reserves },
                             );
                             self.apply_update(DepositsMessage::LedgerUpdate(reserves_msg))?;
                         }
                         // If equal, no update needed
                     }
-                    LedgerOperation::PaymentLock { pubkey, amount, payment_id, sequence_number: _, scriptpubkey_signature } => {
+                    LedgerOperation::InvoiceLock { pubkey, amount, payment_id, sequence_number: _, scriptpubkey_signature } => {
                         // Operator is locking balance for an outgoing payment
                         // Validate sufficient balance
                         if let Some(deposit) = self.deposits.get(pubkey) {
@@ -306,8 +306,8 @@ impl ChannelLedger {
                         // Apply the update
                         let lock_msg = LedgerUpdateMsg::new_with_operation(
                             self.operator_node_id,
-                            self.partner_node_id,
-                            LedgerOperation::PaymentLock {
+                            self.partner_node_id.to_string(),
+                            LedgerOperation::InvoiceLock {
                                 pubkey: *pubkey,
                                 amount: *amount,
                                 payment_id: *payment_id,
@@ -317,7 +317,7 @@ impl ChannelLedger {
                         );
                         self.apply_update(DepositsMessage::LedgerUpdate(lock_msg))?;
                     }
-                    LedgerOperation::PaymentFulfill { pubkey, amount, payment_id, scriptpubkey_signature, preimage, .. } => {
+                    LedgerOperation::InvoiceFulfill { pubkey, amount, payment_id, scriptpubkey_signature, preimage, .. } => {
                         // Operator is permanently deducting locked balance (payment succeeded)
 
                         // Update timestamp to current time
@@ -326,8 +326,8 @@ impl ChannelLedger {
                         // Apply the update
                         let fulfill_msg = LedgerUpdateMsg::new_with_operation(
                             self.operator_node_id,
-                            self.partner_node_id,
-                            LedgerOperation::PaymentFulfill {
+                            self.partner_node_id.to_string(),
+                            LedgerOperation::InvoiceFulfill {
                                 pubkey: *pubkey,
                                 amount: *amount,
                                 payment_id: *payment_id,
@@ -338,7 +338,7 @@ impl ChannelLedger {
                         );
                         self.apply_update(DepositsMessage::LedgerUpdate(fulfill_msg))?;
                     }
-                    LedgerOperation::PaymentFail { pubkey, amount, payment_id, .. } => {
+                    LedgerOperation::InvoiceFail { pubkey, amount, payment_id, .. } => {
                         // Operator is releasing locked balance (payment failed)
                         // Update timestamp to current time
                         self.last_updated = now_unix_timestamp();
@@ -346,8 +346,8 @@ impl ChannelLedger {
                         // Apply the update
                         let fail_msg = LedgerUpdateMsg::new_with_operation(
                             self.operator_node_id,
-                            self.partner_node_id,
-                            LedgerOperation::PaymentFail {
+                            self.partner_node_id.to_string(),
+                            LedgerOperation::InvoiceFail {
                                 pubkey: *pubkey,
                                 amount: *amount,
                                 payment_id: *payment_id,
@@ -364,7 +364,7 @@ impl ChannelLedger {
                         // Apply reserves increase
                         let reserves_msg = LedgerUpdateMsg::new_with_operation(
                             self.operator_node_id,
-                            self.partner_node_id,
+                            self.partner_node_id.to_string(),
                             LedgerOperation::ReservesIncrease { new_amount: *new_amount },
                         );
                         self.apply_update(DepositsMessage::LedgerUpdate(reserves_msg))?;
@@ -379,7 +379,7 @@ impl ChannelLedger {
                         // Apply reserves decrease with absolute target amount
                         let reserves_msg = LedgerUpdateMsg::new_with_operation(
                             self.operator_node_id,
-                            self.partner_node_id,
+                            self.partner_node_id.to_string(),
                             LedgerOperation::ReservesDecrease { new_amount: *new_amount },
                         );
                         self.apply_update(DepositsMessage::LedgerUpdate(reserves_msg))?;
@@ -405,7 +405,7 @@ impl ChannelLedger {
                             // Apply deposit removed update (this will remove the deposit via apply_update)
                             let close_msg = LedgerUpdateMsg::new_with_operation(
                                 self.operator_node_id,
-                                self.partner_node_id,
+                                self.partner_node_id.to_string(),
                                 LedgerOperation::DepositClose { pubkey: *pubkey },
                             );
                             self.apply_update(DepositsMessage::LedgerUpdate(close_msg))?;
@@ -429,7 +429,7 @@ impl ChannelLedger {
                         // Apply ledger closed update
                         let ledger_close_msg = LedgerUpdateMsg::new_with_operation(
                             self.operator_node_id,
-                            self.partner_node_id,
+                            self.partner_node_id.to_string(),
                             LedgerOperation::LedgerClose,
                         );
                         self.apply_update(DepositsMessage::LedgerUpdate(ledger_close_msg))?;
@@ -535,28 +535,28 @@ impl ChannelLedger {
                     deposit.fees = new_fees.clone();
                 }
             }
-            LedgerOperation::PaymentCredit { deposit_pubkey, amount, .. } => {
+            LedgerOperation::InvoiceCredit { deposit_pubkey, amount, .. } => {
                 if let Some(deposit) = self.deposits.get_mut(deposit_pubkey) {
                     deposit.balance += amount;
                 } else {
                     return Err(DepositsError::DepositNotFound);
                 }
             }
-            LedgerOperation::PaymentLock { pubkey, amount, .. } => {
+            LedgerOperation::InvoiceLock { pubkey, amount, .. } => {
                 if let Some(deposit) = self.deposits.get_mut(pubkey) {
                     deposit.locked_balance += amount;
                 } else {
                     return Err(DepositsError::DepositNotFound);
                 }
             }
-            LedgerOperation::PaymentFail { pubkey, amount, .. } => {
+            LedgerOperation::InvoiceFail { pubkey, amount, .. } => {
                 if let Some(deposit) = self.deposits.get_mut(pubkey) {
                     deposit.locked_balance = deposit.locked_balance.saturating_sub(*amount);
                 } else {
                     return Err(DepositsError::DepositNotFound);
                 }
             }
-            LedgerOperation::PaymentFulfill { pubkey, amount, .. } => {
+            LedgerOperation::InvoiceFulfill { pubkey, amount, .. } => {
                 if let Some(deposit) = self.deposits.get_mut(pubkey) {
                     deposit.locked_balance = deposit.locked_balance.saturating_sub(*amount);
                     deposit.balance = deposit.balance.saturating_sub(*amount);
@@ -564,22 +564,31 @@ impl ChannelLedger {
                     return Err(DepositsError::DepositNotFound);
                 }
             }
-            LedgerOperation::TransferLock { pubkey, amount, .. } => {
-                if let Some(deposit) = self.deposits.get_mut(pubkey) {
+            LedgerOperation::OnchainCredit { deposit_pubkey, amount, .. } => {
+                if let Some(deposit) = self.deposits.get_mut(deposit_pubkey) {
+                    deposit.balance += amount;
+                } else {
+                    return Err(DepositsError::DepositNotFound);
+                }
+            }
+            LedgerOperation::OnchainLock { deposit_pubkey, amount, .. } => {
+                if let Some(deposit) = self.deposits.get_mut(deposit_pubkey) {
                     deposit.locked_balance += amount;
                 } else {
                     return Err(DepositsError::DepositNotFound);
                 }
             }
-            LedgerOperation::TransferFail { .. } => {
-                // TransferFail doesn't carry amount
+            LedgerOperation::OnchainFail { deposit_pubkey, .. } => {
+                // OnchainFail unlocks - but we don't have amount here
+                // The withdrawal tracking should handle this
+                if self.deposits.contains_key(deposit_pubkey) {
+                    // TODO: Need to look up the withdrawal amount
+                }
             }
-            LedgerOperation::TransferFulfill { pubkey, amount, .. } => {
-                if let Some(deposit) = self.deposits.get_mut(pubkey) {
-                    deposit.locked_balance = deposit.locked_balance.saturating_sub(*amount);
-                    deposit.balance = deposit.balance.saturating_sub(*amount);
-                } else {
-                    return Err(DepositsError::DepositNotFound);
+            LedgerOperation::OnchainFulfill { deposit_pubkey, .. } => {
+                // On fulfillment, the locked funds are released (already deducted)
+                if let Some(_deposit) = self.deposits.get_mut(deposit_pubkey) {
+                    // The funds were already locked, fulfillment just confirms
                 }
             }
             LedgerOperation::FeeCollect { pubkey, amount, block_height } => {
@@ -605,17 +614,17 @@ impl ChannelLedger {
                 self.collateral_partners.retain(|p| p != collateral_partner);
                 self.collateral_attestations.remove(collateral_partner);
             }
-            LedgerOperation::CollateralAttestation { collateral_operator, amount, block_height, signature, ledger_hash } => {
-                // Store attestation by signing partner
+            LedgerOperation::CollateralAttestation { collateral_operator, collateral_partner, amount, block_height, signature, ledger_hash } => {
+                // Store attestation by the actual collateral partner
                 let attestation_msg = CollateralAttestationMsg {
                     operator: *collateral_operator,
-                    collateral_partner: self.partner_node_id,
+                    collateral_partner: *collateral_partner,
                     amount: *amount,
                     block_height: *block_height,
                     signature: *signature,
                     ledger_hash: *ledger_hash,
                 };
-                self.collateral_attestations.insert(self.partner_node_id, attestation_msg);
+                self.collateral_attestations.insert(*collateral_partner, attestation_msg);
             }
             LedgerOperation::LedgerClose => {
                 self.deposits.clear();
@@ -722,8 +731,8 @@ impl ChannelLedger {
         use crate::handler::messages::{LedgerUpdateMsg, LedgerUpdateMsgExt, LedgerOperation};
         let credit_msg = LedgerUpdateMsg::new_with_operation(
             self.operator_node_id,
-            self.partner_node_id,
-            LedgerOperation::PaymentCredit {
+            self.partner_node_id.to_string(),
+            LedgerOperation::InvoiceCredit {
                 payment_hash: [0u8; 32], // Placeholder for direct balance add
                 deposit_pubkey: depositor_pubkey,
                 amount,
@@ -772,8 +781,8 @@ impl ChannelLedger {
         use crate::handler::messages::{LedgerUpdateMsg, LedgerUpdateMsgExt, LedgerOperation};
         let credit_msg = LedgerUpdateMsg::new_with_operation(
             self.operator_node_id,
-            self.partner_node_id,
-            LedgerOperation::PaymentCredit {
+            self.partner_node_id.to_string(),
+            LedgerOperation::InvoiceCredit {
                 payment_hash: [0u8; 32], // Placeholder for direct balance add
                 deposit_pubkey: depositor_pubkey,
                 amount: credit_amount,
@@ -786,7 +795,7 @@ impl ChannelLedger {
         // Apply the reserves increase (using absolute target value)
         let reserves_msg = LedgerUpdateMsg::new_with_operation(
             self.operator_node_id,
-            self.partner_node_id,
+            self.partner_node_id.to_string(),
             LedgerOperation::ReservesIncrease { new_amount: new_reserves_amount },
         );
         self.apply_update(DepositsMessage::LedgerUpdate(reserves_msg))?;

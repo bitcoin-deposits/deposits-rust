@@ -41,14 +41,14 @@ where
         // Verify ledger exists
         {
             let ledgers = self.ledgers.lock().unwrap();
-            if !ledgers.contains_key(&(self.our_node_id, partner_node_id)) {
+            if !ledgers.contains_key(&(self.our_node_id, partner_node_id.to_string())) {
                 return Err(DepositsError::ProtocolViolation {
                     violation_type: "No ledger found".to_string(),
                     details: format!("No ledger exists for partner {}", partner_node_id),
                 });
             }
             // Check the actual ledger state for duplicate collateral partner
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let ledger = ledger_arc.read().unwrap();
                 if ledger.state.collateral_partners.contains(&collateral_partner) {
                     log_info!(
@@ -63,7 +63,7 @@ where
 
         // Also check quorum_manager for redundancy
         {
-            let ledger_id = LedgerId::new(self.our_node_id, partner_node_id);
+            let ledger_id = LedgerId::new(self.our_node_id, partner_node_id.to_string());
             if let Some(members) = self.quorum_manager.get_quorum(&ledger_id) {
                 if members.contains(&collateral_partner) {
                     return Err(DepositsError::CollateralPartnerAlreadyExists);
@@ -77,7 +77,7 @@ where
 
         let consent_request = DepositsMessage::Coordination(CoordinationMsg::CollateralConsentRequest {
             operator_id: self.our_node_id,
-            reserves_id: partner_node_id,
+            reserves_id: partner_node_id.to_string(),
             operator_signature: [0u8; 64],
         });
 
@@ -92,7 +92,7 @@ where
         // Step 2: Create the AddCollateralPartner message with both signatures (V2 format)
         let message = DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             self.our_node_id,
-            partner_node_id,
+            partner_node_id.to_string(),
             LedgerOperation::CollateralAddPartner {
                 collateral_partner,
                 collateral_partner_signature,
@@ -131,7 +131,7 @@ where
         // Apply the change locally
         {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let mut ledger = ledger_arc.write().unwrap();
 
                 // Capture prev_hash BEFORE appending
@@ -156,7 +156,7 @@ where
                 // Update sent_messages_for_broadcast with correct new_hash
                 {
                     let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
-                    sent_messages.insert(message_hash, (self.our_node_id, partner_node_id, message_for_broadcast.clone(), prev_hash, new_hash, chain_index));
+                    sent_messages.insert(message_hash, (self.our_node_id, partner_node_id.to_string(), message_for_broadcast.clone(), prev_hash, new_hash, chain_index));
                 }
 
                 // Now that new_hash is set, trigger the broadcast to other collateral partners
@@ -173,7 +173,7 @@ where
         }
 
         // Sync with QuorumManager - add collateral partner to quorum membership
-        let ledger_id = LedgerId::new(self.our_node_id, partner_node_id);
+        let ledger_id = LedgerId::new(self.our_node_id, partner_node_id.to_string());
         if let Err(e) = self.quorum_manager.add_member(&ledger_id, collateral_partner) {
             log_warn!(
                 self.logger,
@@ -214,7 +214,7 @@ where
         // Verify ledger exists
         {
             let ledgers = self.ledgers.lock().unwrap();
-            if !ledgers.contains_key(&(self.our_node_id, partner_node_id)) {
+            if !ledgers.contains_key(&(self.our_node_id, partner_node_id.to_string())) {
                 return Err(DepositsError::ProtocolViolation {
                     violation_type: "No ledger found".to_string(),
                     details: format!("No ledger exists for partner {}", partner_node_id),
@@ -225,7 +225,7 @@ where
         // Create the message (signature is placeholder for now) (V2 format)
         let message = DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             self.our_node_id,  // operator
-            partner_node_id,
+            partner_node_id.to_string(),
             LedgerOperation::CollateralRemovePartner {
                 collateral_partner,
                 operator_signature: [0u8; 64],
@@ -264,7 +264,7 @@ where
         // Apply the change locally
         {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let mut ledger = ledger_arc.write().unwrap();
 
                 // Capture prev_hash BEFORE appending
@@ -287,7 +287,7 @@ where
                 // Update sent_messages_for_broadcast with correct new_hash
                 {
                     let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
-                    sent_messages.insert(message_hash, (self.our_node_id, partner_node_id, message_for_broadcast.clone(), prev_hash, new_hash, chain_index));
+                    sent_messages.insert(message_hash, (self.our_node_id, partner_node_id.to_string(), message_for_broadcast.clone(), prev_hash, new_hash, chain_index));
                 }
 
                 // Now that new_hash is set, trigger the broadcast to other collateral partners
@@ -303,7 +303,7 @@ where
         }
 
         // Sync with QuorumManager - remove collateral partner from quorum membership
-        let ledger_id = LedgerId::new(self.our_node_id, partner_node_id);
+        let ledger_id = LedgerId::new(self.our_node_id, partner_node_id.to_string());
         if let Err(e) = self.quorum_manager.remove_member(&ledger_id, &collateral_partner) {
             log_warn!(
                 self.logger,

@@ -63,7 +63,7 @@ where
     /// Check if we have a ledger for this peer
     fn has_ledger_for_peer(&self, peer: PublicKey) -> bool {
         let ledgers = self.ledgers.lock().unwrap();
-        ledgers.contains_key(&(peer, self.our_node_id)) || ledgers.contains_key(&(self.our_node_id, peer))
+        ledgers.contains_key(&(peer, self.our_node_id.to_string())) || ledgers.contains_key(&(self.our_node_id, peer.to_string()))
     }
 
     /// Find pending ACK entry, trying both original and partner-specific hash
@@ -117,10 +117,10 @@ where
     /// Update partner_deepest_ack_hash on ledger
     fn update_partner_ack_hash(&self, sender: PublicKey, new_hash: [u8; 32]) {
         let ledgers = self.ledgers.lock().unwrap();
-        let key = if ledgers.contains_key(&(self.our_node_id, sender)) {
-            Some((self.our_node_id, sender))
-        } else if ledgers.contains_key(&(sender, self.our_node_id)) {
-            Some((sender, self.our_node_id))
+        let key = if ledgers.contains_key(&(self.our_node_id, sender.to_string())) {
+            Some((self.our_node_id, sender.to_string()))
+        } else if ledgers.contains_key(&(sender, self.our_node_id.to_string())) {
+            Some((sender, self.our_node_id.to_string()))
         } else { None };
 
         if let Some(k) = key {
@@ -129,7 +129,7 @@ where
                 if ledger.state.partner_deepest_ack_hash != new_hash {
                     ledger.state.partner_deepest_ack_hash = new_hash;
                     let _ = self.persist_ledger_state(&*ledger);
-                    if k.0 == self.our_node_id { self.mark_for_lazy_sync(k.1); }
+                    if k.0 == self.our_node_id { self.mark_for_lazy_sync(sender); }
                 }
             }
         }

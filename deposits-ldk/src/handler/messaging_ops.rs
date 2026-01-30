@@ -803,7 +803,7 @@ where
 
         let ack_msg = LedgerUpdateResponseMsg {
             operator_id: recipient, // Responding to the operator who sent the message
-            reserves_id: self.our_node_id,
+            reserves_id: self.our_node_id.to_string(),
             request_hash: message_hash,
             accepted: success,
             error: error_msg.clone(),

@@ -15,6 +15,7 @@ use deposits_core::quorum::LedgerId;
 use deposits_core::{log_debug, log_error, log_info};
 use lightning::util::logger::Logger as LdkLogger;
 use std::ops::Deref;
+use std::str::FromStr;
 
 impl<L: Deref + Clone + Send + Sync> DepositsHandler<L>
 where
@@ -31,12 +32,12 @@ where
         let (operator_id, reserves_id, original_message, stored_prev_hash, stored_new_hash, chain_index) =
             self.get_stored_broadcast_message(&message_hash)?;
 
-        if reserves_id != original_partner {
+        if reserves_id != original_partner.to_string() {
             return Err(DepositsError::InvalidState("Mismatched partner for message hash".to_string()));
         }
 
         // Get all recipients and create signed update
-        let recipients = self.get_broadcast_recipients_internal(operator_id, reserves_id, original_partner);
+        let recipients = self.get_broadcast_recipients_internal(operator_id, reserves_id.clone(), original_partner);
         let signed_update = self.create_and_store_signed_update(
             &original_message, operator_id, reserves_id, chain_index,
             stored_prev_hash, stored_new_hash, partner_signature,
@@ -54,10 +55,10 @@ where
     }
 
     /// Get stored message for broadcast
-    fn get_stored_broadcast_message(&self, hash: &[u8; 32]) -> Result<(PublicKey, PublicKey, DepositsMessage, [u8; 32], [u8; 32], u64), DepositsError> {
+    fn get_stored_broadcast_message(&self, hash: &[u8; 32]) -> Result<(PublicKey, String, DepositsMessage, [u8; 32], [u8; 32], u64), DepositsError> {
         let sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
         sent_messages.get(hash)
-            .map(|(op, partner, msg, prev, new, idx)| (*op, *partner, msg.clone(), *prev, *new, *idx))
+            .map(|(op, partner, msg, prev, new, idx)| (*op, partner.clone(), msg.clone(), *prev, *new, *idx))
             .ok_or_else(|| {
                 log_debug!(self.logger, "No message found for hash {:02x?}", &hash[0..8]);
                 DepositsError::InvalidState("No message found for broadcast".to_string())
@@ -65,7 +66,7 @@ where
     }
 
     /// Get all broadcast recipients including quorum members
-    fn get_broadcast_recipients_internal(&self, operator: PublicKey, partner: PublicKey, original_partner: PublicKey) -> Vec<PublicKey> {
+    fn get_broadcast_recipients_internal(&self, operator: PublicKey, partner: String, original_partner: PublicKey) -> Vec<PublicKey> {
         use std::collections::HashSet;
         let mut recipients: HashSet<PublicKey> = HashSet::new();
         recipients.insert(original_partner);
@@ -80,14 +81,18 @@ where
         } else {
             let ledgers = self.ledgers.lock().unwrap();
             for (op, p) in ledgers.keys() {
-                if *op == self.our_node_id { recipients.insert(*p); }
+                if *op == self.our_node_id {
+                    if let Ok(pk) = PublicKey::from_str(p) {
+                        recipients.insert(pk);
+                    }
+                }
             }
         }
 
         // Add quorum members
-        if let Some(members) = self.quorum_manager.get_quorum(&LedgerId::new(operator, partner)) {
+        if let Some(members) = self.quorum_manager.get_quorum(&LedgerId::new(operator, partner.clone())) {
             for member in members {
-                if member != self.our_node_id && member != operator && member != partner {
+                if member != self.our_node_id && member != operator && member.to_string() != partner {
                     recipients.insert(member);
                 }
             }
@@ -101,19 +106,20 @@ where
         &self,
         message: &DepositsMessage,
         operator: PublicKey,
-        partner: PublicKey,
+        partner: String,
         seq: u64,
         prev_hash: [u8; 32],
         new_hash: [u8; 32],
         partner_sig: Option<[u8; 64]>,
     ) -> Option<deposits_core::SignedLedgerUpdate> {
-        let update = self.create_signed_update(message, partner, seq, prev_hash, new_hash, partner_sig).ok()?;
+        let partner_pk = PublicKey::from_str(&partner).ok()?;
+        let update = self.create_signed_update(message, partner_pk, seq, prev_hash, new_hash, partner_sig).ok()?;
 
         // Store in memory
         {
             let mut logs = self.signed_update_logs.lock().unwrap();
-            let log = logs.entry((operator, partner))
-                .or_insert_with(|| deposits_core::SignedLedgerUpdateLog::new(operator, partner));
+            let log = logs.entry((operator, partner.clone()))
+                .or_insert_with(|| deposits_core::SignedLedgerUpdateLog::new(operator, partner.clone()));
             if log.updates.iter().all(|u| u.sequence_number != update.sequence_number) {
                 let _ = log.add_update(update.clone());
             }
@@ -137,7 +143,7 @@ where
 
             let msg = if let Some(ref update) = signed {
                 DepositsMessage::SyncResponse(super::messages::SyncResponseMsg {
-                    operator_id: update.operator_id, reserves_id: update.reserves_id,
+                    operator_id: update.operator_id, reserves_id: update.reserves_id.clone(),
                     request_hash: [0u8; 32], updates: vec![update.clone()],
                     current_sequence: update.sequence_number, current_hash: update.current_hash,
                 })

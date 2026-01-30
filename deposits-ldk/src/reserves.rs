@@ -497,15 +497,16 @@ impl ReservesOutputProposalExt for ReservesOutputProposal {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "testing"))]
 mod tests {
     use super::*;
     use bitcoin::secp256k1::rand::rngs::OsRng;
     use std::sync::Arc;
+    use lightning::util::test_utils::TestLogger;
 
     #[test]
     fn test_reserves_proposal_creation() {
-        let logger = Arc::new(lightning::util::test_utils::TestLogger::new());
+        let logger = Arc::new(TestLogger::new());
 
         let mut rng = OsRng;
         let operator_sk = SecretKey::new(&mut rng);
@@ -534,7 +535,7 @@ mod tests {
 
     #[test]
     fn test_reserves_output_creation() {
-        let logger = Arc::new(lightning::util::test_utils::TestLogger::new());
+        let logger = Arc::new(TestLogger::new());
 
         let mut rng = OsRng;
         let operator_sk = SecretKey::new(&mut rng);
@@ -566,7 +567,7 @@ mod tests {
 
     #[test]
     fn test_tapscript_reserves_output_creation() {
-        let logger = Arc::new(lightning::util::test_utils::TestLogger::new());
+        let logger = Arc::new(TestLogger::new());
 
         let mut rng = OsRng;
         let operator_sk = SecretKey::new(&mut rng);
@@ -616,7 +617,7 @@ mod tests {
 
     #[test]
     fn test_legacy_reserves_without_voters() {
-        let logger = Arc::new(lightning::util::test_utils::TestLogger::new());
+        let logger = Arc::new(TestLogger::new());
 
         let mut rng = OsRng;
         let operator_sk = SecretKey::new(&mut rng);

@@ -277,22 +277,22 @@ impl ReplayLedgerState {
                     self.deposits.remove(&pubkey);
                     self.locked_balances.remove(&pubkey);
                 }
-                LedgerOperation::PaymentCredit { deposit_pubkey, amount, .. } => {
+                LedgerOperation::InvoiceCredit { deposit_pubkey, amount, .. } => {
                     let balance = self.deposits.get_mut(&deposit_pubkey)
                         .ok_or("Deposit not found")?;
                     *balance += amount;
                 }
-                LedgerOperation::PaymentLock { pubkey, amount, .. } => {
+                LedgerOperation::InvoiceLock { pubkey, amount, .. } => {
                     let locked = self.locked_balances.get_mut(&pubkey)
                         .ok_or("Deposit not found")?;
                     *locked += amount;
                 }
-                LedgerOperation::PaymentFail { pubkey, amount, .. } => {
+                LedgerOperation::InvoiceFail { pubkey, amount, .. } => {
                     let locked = self.locked_balances.get_mut(&pubkey)
                         .ok_or("Deposit not found")?;
                     *locked = locked.saturating_sub(amount);
                 }
-                LedgerOperation::PaymentFulfill { pubkey, amount, .. } => {
+                LedgerOperation::InvoiceFulfill { pubkey, amount, .. } => {
                     let balance = self.deposits.get_mut(&pubkey)
                         .ok_or("Deposit not found")?;
                     *balance = balance.saturating_sub(amount);

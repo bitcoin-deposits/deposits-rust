@@ -33,7 +33,9 @@ pub use deposits_core::messages::{
 
     // Deposit operations
     DEPOSIT_OPEN, DEPOSIT_CLOSE, DEPOSIT_UPDATE,
-    DEPOSIT_LOCK_TRANSFER, DEPOSIT_FAIL_TRANSFER, DEPOSIT_FULFILL_TRANSFER,
+
+    // Onchain operations
+    ONCHAIN_CREDIT, ONCHAIN_LOCK, ONCHAIN_FAIL, ONCHAIN_FULFILL,
 
     // Ledger lifecycle
     LEDGER_CLOSE, CHANNEL_CLOSE_TOMBSTONE,

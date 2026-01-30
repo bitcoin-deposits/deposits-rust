@@ -532,9 +532,8 @@ pub struct LedgerState {
     /// Operator's public key.
     #[serde(with = "serde_pubkey")]
     pub operator_key: PublicKey,
-    /// Reserves identifier.
-    #[serde(with = "serde_pubkey")]
-    pub reserves_key: PublicKey,
+    /// Reserves identifier (UTXO address for BDK, partner pubkey string for LDK).
+    pub reserves_key: String,
     /// Ledger address (as string).
     pub ledger_address: String,
     /// All deposits in this ledger, keyed by depositor's public key.
@@ -611,7 +610,7 @@ pub struct LedgerState {
 
 impl LedgerState {
     /// Create a new empty ledger state.
-    pub fn new(operator_key: PublicKey, reserves_key: PublicKey, ledger_address: String) -> Self {
+    pub fn new(operator_key: PublicKey, reserves_key: String, ledger_address: String) -> Self {
         Self::with_enforcement_block(operator_key, reserves_key, ledger_address, None)
     }
 
@@ -621,7 +620,7 @@ impl LedgerState {
     /// - `enforcement_block = Some(future_block)`: Deferred enforcement (for bootstrap)
     pub fn with_enforcement_block(
         operator_key: PublicKey,
-        reserves_key: PublicKey,
+        reserves_key: String,
         ledger_address: String,
         collateral_enforcement_block: Option<u64>,
     ) -> Self {
@@ -863,9 +862,8 @@ pub struct SignedLedgerUpdate {
     /// Operator's public key (Lightning node ID).
     #[serde(with = "serde_pubkey")]
     pub operator_id: PublicKey,
-    /// Reserves identifier (for identifying which ledger this update applies to).
-    #[serde(with = "serde_pubkey")]
-    pub reserves_id: PublicKey,
+    /// Reserves identifier (UTXO address for BDK, partner pubkey string for LDK).
+    pub reserves_id: String,
     /// Deterministic sequence number (starts at 0 for LedgerOpened).
     pub sequence_number: u64,
     /// Hash of previous ledger state (creates cryptographic chain).
@@ -936,9 +934,16 @@ impl SignedLedgerUpdate {
     }
 
     /// Verify the partner's signature over the update content.
+    /// Note: For BDK ledgers where reserves_id is an address (not a pubkey),
+    /// this returns an error since there's no partner to verify against.
     pub fn verify_partner_signature(&self) -> Result<(), String> {
         use bitcoin::hashes::{Hash, sha256};
-        use bitcoin::secp256k1::{Secp256k1, Message, ecdsa::Signature};
+        use bitcoin::secp256k1::{Secp256k1, Message, ecdsa::Signature, PublicKey};
+        use std::str::FromStr;
+
+        // Parse reserves_id as a pubkey - fails for BDK ledgers with address-based IDs
+        let partner_pubkey = PublicKey::from_str(&self.reserves_id)
+            .map_err(|_| format!("Cannot verify partner signature: reserves_id '{}' is not a valid pubkey (BDK ledger?)", self.reserves_id))?;
 
         let secp = Secp256k1::new();
         let data = self.partner_signing_data();
@@ -948,7 +953,7 @@ impl SignedLedgerUpdate {
         let sig = Signature::from_compact(&self.partner_signature)
             .map_err(|e| format!("Invalid partner signature format: {}", e))?;
 
-        secp.verify_ecdsa(&msg, &sig, &self.reserves_id)
+        secp.verify_ecdsa(&msg, &sig, &partner_pubkey)
             .map_err(|e| format!("Partner signature verification failed: {}", e))
     }
 
@@ -1038,9 +1043,8 @@ pub struct QuorumJoinRequestMsg {
     /// Operator of the ledger.
     #[serde(with = "serde_pubkey")]
     pub operator_id: PublicKey,
-    /// Partner of the ledger.
-    #[serde(with = "serde_pubkey")]
-    pub reserves_id: PublicKey,
+    /// Reserves identifier (UTXO address for BDK, partner pubkey string for LDK).
+    pub reserves_id: String,
     /// Protocol version.
     pub protocol_version: u16,
     /// Timestamp.
@@ -1183,9 +1187,8 @@ pub struct SignedLedgerUpdateLog {
     /// Operator node ID.
     #[serde(with = "serde_pubkey")]
     pub operator_id: PublicKey,
-    /// Partner node ID.
-    #[serde(with = "serde_pubkey")]
-    pub reserves_id: PublicKey,
+    /// Reserves identifier (UTXO address for BDK, partner pubkey string for LDK).
+    pub reserves_id: String,
     /// Chain of signed updates (ordered by sequence number).
     pub updates: Vec<SignedLedgerUpdate>,
     /// Next expected sequence number.
@@ -1197,7 +1200,7 @@ pub struct SignedLedgerUpdateLog {
 
 impl SignedLedgerUpdateLog {
     /// Create a new empty log.
-    pub fn new(operator_id: PublicKey, reserves_id: PublicKey) -> Self {
+    pub fn new(operator_id: PublicKey, reserves_id: String) -> Self {
         Self {
             operator_id,
             reserves_id,
@@ -1590,7 +1593,7 @@ impl TlvEncode for SignedLedgerUpdate {
             .bytes_field(signed_update_fields::MESSAGE, &self.message)
             .u16_field(signed_update_fields::MESSAGE_TYPE, self.message_type)
             .pubkey_field(signed_update_fields::OPERATOR_ID, &self.operator_id)
-            .pubkey_field(signed_update_fields::RESERVES_ID, &self.reserves_id)
+            .string_field(signed_update_fields::RESERVES_ID, &self.reserves_id)
             .u64_field(signed_update_fields::SEQUENCE_NUMBER, self.sequence_number)
             .bytes_field(signed_update_fields::PREVIOUS_HASH, &self.previous_hash)
             .bytes_field(signed_update_fields::CURRENT_HASH, &self.current_hash)
@@ -1608,7 +1611,7 @@ impl TlvDecode for SignedLedgerUpdate {
             message: reader.read_raw(signed_update_fields::MESSAGE)?.to_vec(),
             message_type: reader.read_u16(signed_update_fields::MESSAGE_TYPE)?,
             operator_id: reader.read_pubkey(signed_update_fields::OPERATOR_ID)?,
-            reserves_id: reader.read_pubkey(signed_update_fields::RESERVES_ID)?,
+            reserves_id: reader.read_string(signed_update_fields::RESERVES_ID)?,
             sequence_number: reader.read_u64(signed_update_fields::SEQUENCE_NUMBER)?,
             previous_hash: reader.read_bytes(signed_update_fields::PREVIOUS_HASH)?,
             current_hash: reader.read_bytes(signed_update_fields::CURRENT_HASH)?,
@@ -1727,9 +1730,8 @@ pub struct DepositOffer {
     #[serde(with = "serde_pubkey")]
     pub operator_id: PublicKey,
 
-    /// The partner for whom this deposit is being opened.
-    #[serde(with = "serde_pubkey")]
-    pub reserves_id: PublicKey,
+    /// The reserves identifier (e.g., Bitcoin address for BDK, pubkey hex for LDK).
+    pub reserves_id: String,
 
     /// The deposit pubkey (identifier for the deposit).
     #[serde(with = "serde_pubkey")]
@@ -1766,7 +1768,7 @@ impl DepositOffer {
     /// Returns the canonical message format that should be signed by the operator.
     pub fn signing_message(
         operator_id: &PublicKey,
-        reserves_id: &PublicKey,
+        reserves_id: &str,
         deposit_pubkey: &PublicKey,
         funding_address: &str,
         max_amount_sats: u64,
@@ -1777,7 +1779,7 @@ impl DepositOffer {
         format!(
             "DEPOSIT_OFFER:{}:{}:{}:{}:{}:{}:{}",
             hex::encode(operator_id.serialize()),
-            hex::encode(reserves_id.serialize()),
+            reserves_id,
             hex::encode(deposit_pubkey.serialize()),
             funding_address,
             max_amount_sats,
@@ -2092,7 +2094,7 @@ mod tests {
     fn test_ledger_state() {
         let op = test_pubkey();
         let partner = test_pubkey();
-        let mut state = LedgerState::new(op, partner, "tb1q...".to_string());
+        let mut state = LedgerState::new(op, partner.to_string(), "tb1q...".to_string());
 
         assert_eq!(state.total_deposit_balance(), 0);
         assert_eq!(state.reserves_amount(), 0);
@@ -2110,7 +2112,7 @@ mod tests {
             message: vec![1, 2, 3],
             message_type: 1,
             operator_id: pk,
-            reserves_id: pk,
+            reserves_id: pk.to_string(),
             sequence_number: 1,
             previous_hash: [0u8; 32],
             current_hash: [0u8; 32],
@@ -2130,7 +2132,7 @@ mod tests {
             message: vec![1, 2, 3],
             message_type: 1,
             operator_id: pk,
-            reserves_id: pk,
+            reserves_id: pk.to_string(),
             sequence_number: 1,
             previous_hash: [0u8; 32],
             current_hash: [0u8; 32],
@@ -2296,7 +2298,7 @@ mod tests {
     fn test_ledger_state_collateral_tracking() {
         let op = test_pubkey();
         let partner = test_pubkey_2();
-        let mut state = LedgerState::new(op, partner, "tb1q...".to_string());
+        let mut state = LedgerState::new(op, partner.to_string(), "tb1q...".to_string());
 
         // Add collateral partners
         let collateral1 = test_pubkey_2();

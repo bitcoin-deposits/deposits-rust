@@ -49,7 +49,7 @@ where
         // STEP 1: Check if we need to send ReservesToReserves topup first
         let new_reserves_amount = {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let ledger = ledger_arc.read().unwrap();
                 let future_balance = ledger.state.deposits.values()
                     .map(|d| d.balance)
@@ -75,7 +75,7 @@ where
         let reserves_message_hash_opt = if let Some(new_amount) = new_reserves_amount {
             let update_msg = LedgerUpdateMsg::new_with_operation(
                 self.our_node_id,    // operator
-                partner_node_id,     // partner
+                partner_node_id.to_string(),     // partner
                 LedgerOperation::ReservesIncrease { new_amount },
             );
             let reserves_msg = DepositsMessage::LedgerUpdate(update_msg);
@@ -105,7 +105,7 @@ where
             // prev_hash, new_hash, and sequence_number atomically (avoids race condition)
             let (prev_hash, new_hash, sequence_number) = {
                 let ledgers = self.ledgers.lock().unwrap();
-                if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+                if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                     let mut ledger = ledger_arc.write().unwrap();
                     let (prev, hash, seq) = ledger.append_mut_with_metadata(reserves_msg_for_broadcast.clone())?;
 
@@ -134,7 +134,7 @@ where
             // Update sent_messages_for_broadcast with correct new_hash
             {
                 let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
-                sent_messages.insert(reserves_message_hash, (self.our_node_id, partner_node_id, reserves_msg_for_broadcast.clone(), prev_hash, new_hash, sequence_number));
+                sent_messages.insert(reserves_message_hash, (self.our_node_id, partner_node_id.to_string(), reserves_msg_for_broadcast.clone(), prev_hash, new_hash, sequence_number));
             }
 
             Some(reserves_message_hash)
@@ -166,15 +166,15 @@ where
 
         let (message, prev_hash, new_hash, chain_index, reserves_amount, voter_set) = {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let mut ledger = ledger_arc.write().unwrap();
                 let sequence_number = ledger.history.len() as u64;
 
-                // Build V2 LedgerUpdate message with PaymentCredit operation
+                // Build V2 LedgerUpdate message with InvoiceCredit operation
                 let update_msg = LedgerUpdateMsg::new_with_operation(
                     ledger.operator_key(),
-                    ledger.reserves_key(),
-                    LedgerOperation::PaymentCredit {
+                    ledger.reserves_key().to_string(),
+                    LedgerOperation::InvoiceCredit {
                         payment_hash,
                         deposit_pubkey,
                         amount: credit_amount,
@@ -246,7 +246,7 @@ where
         // Update ledger's channel_deepest_commitment_hash after commitment succeeds
         {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let mut ledger = ledger_arc.write().unwrap();
                 ledger.state.channel_deepest_commitment_hash = new_hash;
                 self.persist_ledger_state(&*ledger)?;
@@ -256,7 +256,7 @@ where
         // Step 3.7: Store partner signature (already received from ACK in step 3.3)
         {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let mut ledger = ledger_arc.write().unwrap();
 
                 // Retrieve partner signature from ACK and store it
@@ -279,7 +279,7 @@ where
         // Update sent_messages_for_broadcast with correct new_hash
         {
             let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
-            sent_messages.insert(credit_message_hash, (self.our_node_id, partner_node_id, message_for_broadcast, prev_hash, new_hash, chain_index));
+            sent_messages.insert(credit_message_hash, (self.our_node_id, partner_node_id.to_string(), message_for_broadcast, prev_hash, new_hash, chain_index));
         }
 
         log_info!(
@@ -320,7 +320,7 @@ where
         // Get next sequence number and clone ledger
         let (sequence_number, cloned_ledger) = {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let ledger = ledger_arc.read().unwrap();
                 (ledger.history.len() as u64, ledger.clone())
             } else {
@@ -332,7 +332,7 @@ where
         };
 
         // Credit deposit with automatic reserves topup using LedgerManager
-        let credit_operation = LedgerOperation::PaymentCredit {
+        let credit_operation = LedgerOperation::InvoiceCredit {
             payment_hash: [0u8; 32], // Dummy for testing
             deposit_pubkey,
             amount: credit_amount,
@@ -346,7 +346,7 @@ where
 
         // Store back
         let ledgers = self.ledgers.lock().unwrap();
-        if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+        if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
             *ledger_arc.write().unwrap() = updated_ledger;
         }
 
@@ -381,7 +381,7 @@ where
         // STEP 1: Calculate how much can be reclaimed
         let (_old_reserves, new_reserves, _reclaim_amount) = {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let ledger = ledger_arc.read().unwrap();
 
                 // Calculate current required reserves
@@ -426,7 +426,7 @@ where
         // Capture prev_hash before creating message
         let prev_hash = {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let ledger = ledger_arc.read().unwrap();
                 ledger.tail_hash()
             } else {
@@ -437,7 +437,7 @@ where
         // V2 format
         let update_msg = LedgerUpdateMsg::new_with_operation(
             self.our_node_id,    // operator
-            partner_node_id,     // partner
+            partner_node_id.to_string(),     // partner
             LedgerOperation::ReservesDecrease { new_amount: new_reserves },
         );
         let reserves_msg = DepositsMessage::LedgerUpdate(update_msg);
@@ -449,7 +449,7 @@ where
         // Track pending ACK in ledger BEFORE sending
         {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let _ledger = ledger_arc.write().unwrap();
                 // Track pending ACK
                 {
@@ -472,7 +472,7 @@ where
         // STEP 3: Apply the same update locally and capture new_hash
         let (new_hash, chain_index) = {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let mut ledger = ledger_arc.write().unwrap();
 
                 // Set timestamp
@@ -497,7 +497,7 @@ where
         // Update sent_messages_for_broadcast with correct new_hash and broadcast
         {
             let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
-            sent_messages.insert(message_hash, (self.our_node_id, partner_node_id, reserves_msg_for_broadcast.clone(), prev_hash, new_hash, chain_index));
+            sent_messages.insert(message_hash, (self.our_node_id, partner_node_id.to_string(), reserves_msg_for_broadcast.clone(), prev_hash, new_hash, chain_index));
         }
 
         // Now broadcast with correct hashes

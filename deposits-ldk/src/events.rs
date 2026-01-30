@@ -140,7 +140,7 @@ mod tests {
 
         emitter.emit(ProtocolEvent::DepositOpened {
             operator: test_pubkey(),
-            partner: test_pubkey_2(),
+            reserves_id: test_pubkey_2().to_string(),
             deposit_pubkey: test_pubkey(),
         });
 
@@ -167,7 +167,7 @@ mod tests {
 
         emitter.emit(ProtocolEvent::LedgerSynced {
             operator: test_pubkey(),
-            partner: test_pubkey_2(),
+            reserves_id: test_pubkey_2().to_string(),
             sequence: 1,
             hash: [0u8; 32],
         });
@@ -176,7 +176,7 @@ mod tests {
 
         emitter.emit(ProtocolEvent::LedgerSynced {
             operator: test_pubkey(),
-            partner: test_pubkey_2(),
+            reserves_id: test_pubkey_2().to_string(),
             sequence: 2,
             hash: [0u8; 32],
         });
@@ -190,7 +190,7 @@ mod tests {
 
         emitter.emit(ProtocolEvent::RecoveryStarted {
             operator: test_pubkey(),
-            partner: test_pubkey_2(),
+            reserves_id: test_pubkey_2().to_string(),
         });
 
         let event = receiver.recv().unwrap();
@@ -204,7 +204,7 @@ mod tests {
         // Should not panic
         emitter.emit(ProtocolEvent::Error {
             operator: test_pubkey(),
-            partner: test_pubkey_2(),
+            reserves_id: test_pubkey_2().to_string(),
             error: "test error".to_string(),
         });
     }

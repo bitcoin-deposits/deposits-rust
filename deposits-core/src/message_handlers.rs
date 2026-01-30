@@ -74,7 +74,7 @@ pub enum ResponseData {
     /// Collateral consent response
     CollateralConsent {
         operator_id: PublicKey,
-        reserves_id: PublicKey,
+        reserves_id: String,
         consent_granted: bool,
         // Signature is populated by the LDK layer which has access to keys
     },
@@ -93,7 +93,7 @@ pub enum ResponseData {
     /// Collateral partner added - response with signature data for ACK
     CollateralPartnerAdded {
         operator_id: PublicKey,
-        reserves_id: PublicKey,
+        reserves_id: String,
         collateral_partner: PublicKey,
         /// Sequence number after append
         sequence: u64,
@@ -104,7 +104,7 @@ pub enum ResponseData {
     },
     /// Collateral partner removed - response with signature data for ACK
     CollateralPartnerRemoved {
-        reserves_id: PublicKey,
+        reserves_id: String,
         collateral_partner: PublicKey,
         /// Sequence number after append
         sequence: u64,
@@ -122,7 +122,7 @@ pub enum ResponseData {
     /// Uncredited payment accusation - emit event for node layer
     UncreditedPaymentAccusation {
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: String,
         payment_hash: [u8; 32],
         deposit_pubkey: PublicKey,
         amount_msat: u64,
@@ -131,7 +131,7 @@ pub enum ResponseData {
     /// Credit payment validated - partner should sign and ACK
     CreditPaymentValidated {
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: String,
         deposit_pubkey: PublicKey,
         amount: u64,
         payment_hash: [u8; 32],
@@ -141,7 +141,7 @@ pub enum ResponseData {
     /// Lock payment validated - partner should sign and ACK
     LockPaymentValidated {
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: String,
         deposit_pubkey: PublicKey,
         amount: u64,
         payment_id: [u8; 32],
@@ -150,7 +150,7 @@ pub enum ResponseData {
     /// Fulfill payment validated - partner should sign and ACK
     FulfillPaymentValidated {
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: String,
         deposit_pubkey: PublicKey,
         amount: u64,
         payment_id: [u8; 32],
@@ -160,7 +160,7 @@ pub enum ResponseData {
     /// Fail payment validated - partner should sign and ACK
     FailPaymentValidated {
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: String,
         deposit_pubkey: PublicKey,
         amount: u64,
         payment_id: [u8; 32],
@@ -169,7 +169,7 @@ pub enum ResponseData {
     /// Deposit open validated - partner should sign and ACK
     DepositOpenValidated {
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: String,
         deposit_pubkey: PublicKey,
         /// Sequence number after append
         sequence: u64,
@@ -181,7 +181,7 @@ pub enum ResponseData {
     /// Deposit close validated - partner should sign and ACK
     DepositCloseValidated {
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: String,
         deposit_pubkey: PublicKey,
         /// Sequence number after append
         sequence: u64,
@@ -193,7 +193,7 @@ pub enum ResponseData {
     /// Deposit update validated - partner should sign and ACK
     DepositUpdateValidated {
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: String,
         deposit_pubkey: PublicKey,
         /// Sequence number after append
         sequence: u64,
@@ -205,7 +205,7 @@ pub enum ResponseData {
     /// Reserves add output validated - partner should sign and ACK
     ReservesAddOutputValidated {
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: String,
         initial_amount: u64,
         spend_to: PublicKey,
         collateral_partners: Vec<PublicKey>,
@@ -219,7 +219,7 @@ pub enum ResponseData {
     /// Reserves remove output validated - partner should sign and ACK
     ReservesRemoveOutputValidated {
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: String,
         /// Sequence number after append
         sequence: u64,
         /// Previous state hash
@@ -230,7 +230,7 @@ pub enum ResponseData {
     /// Reserves increase validated - partner should sign and ACK
     ReservesIncreaseValidated {
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: String,
         new_amount: u64,
         /// Sequence number after append
         sequence: u64,
@@ -242,7 +242,7 @@ pub enum ResponseData {
     /// Reserves decrease validated - partner should sign and ACK
     ReservesDecreaseValidated {
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: String,
         new_amount: u64,
         /// Sequence number after append
         sequence: u64,
@@ -254,7 +254,7 @@ pub enum ResponseData {
     /// Fee collection validated - partner should sign and ACK
     FeeCollectValidated {
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: String,
         deposit_pubkey: PublicKey,
         amount: u64,
         block_height: u32,
@@ -268,7 +268,7 @@ pub enum ResponseData {
     /// Ledger close validated - partner should sign and ACK
     LedgerCloseValidated {
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: String,
         /// Sequence number after append
         sequence: u64,
         /// Previous state hash
@@ -279,7 +279,7 @@ pub enum ResponseData {
     /// Invoice cosign validated - partner should sign the invoice
     CosignInvoiceValidated {
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: String,
         deposit_pubkey: PublicKey,
         amount: u64,
         payment_hash: [u8; 32],
@@ -313,7 +313,7 @@ pub enum ResponseData {
     /// Channel close tombstone validated - can be appended to ledger
     ChannelCloseTombstoneValidated {
         operator: PublicKey,
-        partner: PublicKey,
+        reserves_id: String,
         channel_id: [u8; 32],
         sequence_number: u64,
         timestamp: u64,
@@ -360,7 +360,7 @@ pub fn handle_ledger_update<C: HandlerContext>(
     use bitcoin::hashes::{Hash, sha256};
 
     let operator = msg.operator_id;
-    let partner = msg.reserves_id;
+    let partner = msg.reserves_id.clone();
     let operation = msg.operation.clone();
 
     // Compute message hash from serialized message
@@ -372,7 +372,7 @@ pub fn handle_ledger_update<C: HandlerContext>(
     let our_node_id = ctx.our_node_id();
 
     // We must be the partner to process this message
-    if partner != our_node_id {
+    if partner != our_node_id.to_string() {
         return Ok(HandlerResult::Rejected(format!(
             "We ({}) are not the target partner ({})",
             our_node_id, partner
@@ -381,7 +381,7 @@ pub fn handle_ledger_update<C: HandlerContext>(
 
     // Get the ledger
     let ledger_arc = ctx.get_ledger(&operator, &partner)
-        .ok_or(HandlerError::LedgerNotFound { operator, partner })?;
+        .ok_or(HandlerError::LedgerNotFound { operator, reserves_id: partner.clone() })?;
 
     // Validate and append based on operation type
     let (prev_hash, new_hash, sequence, message_bytes, is_idempotent) = {
@@ -429,22 +429,54 @@ pub fn handle_ledger_update<C: HandlerContext>(
                         .map_err(|e| HandlerError::ValidationFailed(e))?;
                 }
 
-                // Payment operations
-                LedgerOperation::PaymentCredit { payment_hash, deposit_pubkey, amount, .. } => {
+                // Invoice operations
+                LedgerOperation::InvoiceCredit { payment_hash, deposit_pubkey, amount, .. } => {
                     validate_credit_payment(&ledger, *deposit_pubkey, *amount, payment_hash)
                         .map_err(|e| HandlerError::ValidationFailed(e))?;
                 }
-                LedgerOperation::PaymentLock { pubkey, amount, payment_id, scriptpubkey_signature, .. } => {
+                LedgerOperation::InvoiceLock { pubkey, amount, payment_id, scriptpubkey_signature, .. } => {
                     validate_payment_lock(&ledger, *pubkey, *amount, payment_id, scriptpubkey_signature)
                         .map_err(|e| HandlerError::ValidationFailed(e))?;
                 }
-                LedgerOperation::PaymentFulfill { pubkey, amount, payment_id, scriptpubkey_signature, preimage, .. } => {
+                LedgerOperation::InvoiceFulfill { pubkey, amount, payment_id, scriptpubkey_signature, preimage, .. } => {
                     validate_payment_fulfill(pubkey, *amount, payment_id, scriptpubkey_signature, preimage)
                         .map_err(|e| HandlerError::ValidationFailed(e))?;
                 }
-                LedgerOperation::PaymentFail { amount, .. } => {
+                LedgerOperation::InvoiceFail { amount, .. } => {
                     validate_payment_fail(*amount)
                         .map_err(|e| HandlerError::ValidationFailed(e))?;
+                }
+
+                // Onchain operations - basic validation
+                LedgerOperation::OnchainCredit { deposit_pubkey, amount, .. } => {
+                    // Verify deposit exists
+                    if !ledger.state.deposits.contains_key(deposit_pubkey) {
+                        return Err(HandlerError::ValidationFailed(
+                            "Deposit not found for onchain credit".to_string()
+                        ));
+                    }
+                    if *amount == 0 {
+                        return Err(HandlerError::ValidationFailed(
+                            "Onchain credit amount must be positive".to_string()
+                        ));
+                    }
+                }
+                LedgerOperation::OnchainLock { deposit_pubkey, amount, .. } => {
+                    if let Some(deposit) = ledger.state.deposits.get(deposit_pubkey) {
+                        if deposit.available_balance() < *amount {
+                            return Err(HandlerError::ValidationFailed(
+                                "Insufficient balance for onchain withdrawal".to_string()
+                            ));
+                        }
+                    } else {
+                        return Err(HandlerError::ValidationFailed(
+                            "Deposit not found for onchain withdrawal".to_string()
+                        ));
+                    }
+                }
+                LedgerOperation::OnchainFail { .. } |
+                LedgerOperation::OnchainFulfill { .. } => {
+                    // These are validated during apply
                 }
 
                 // Reserves operations
@@ -473,9 +505,6 @@ pub fn handle_ledger_update<C: HandlerContext>(
                 // or have already been checked for idempotency above
                 LedgerOperation::CollateralAddPartner { .. } |
                 LedgerOperation::CollateralRemovePartner { .. } |
-                LedgerOperation::TransferLock { .. } |
-                LedgerOperation::TransferFail { .. } |
-                LedgerOperation::TransferFulfill { .. } |
                 LedgerOperation::CollateralIncrease { .. } |
                 LedgerOperation::CollateralDecrease { .. } |
                 LedgerOperation::CollateralAttestation { .. } |
@@ -516,10 +545,10 @@ pub fn handle_ledger_update<C: HandlerContext>(
         // Sync quorum for collateral partner changes
         match &operation {
             LedgerOperation::CollateralAddPartner { collateral_partner, .. } => {
-                ctx.sync_quorum_member(operator, partner, *collateral_partner, true);
+                ctx.sync_quorum_member(operator, &partner, *collateral_partner, true);
             }
             LedgerOperation::CollateralRemovePartner { collateral_partner, .. } => {
-                ctx.sync_quorum_member(operator, partner, *collateral_partner, false);
+                ctx.sync_quorum_member(operator, &partner, *collateral_partner, false);
             }
             _ => {}
         }
@@ -573,7 +602,7 @@ pub fn handle_quorum_join_request<C: HandlerContext>(
     let core_msg = CoreQuorumMsg {
         requester_pubkey: msg.requester_pubkey,
         operator_id: msg.operator_id,
-        reserves_id: msg.reserves_id,
+        reserves_id: msg.reserves_id.clone(),
         protocol_version: msg.protocol_version,
         timestamp: msg.timestamp,
         signature: msg.signature,
@@ -597,11 +626,11 @@ pub fn handle_quorum_join_request<C: HandlerContext>(
             if response.accepted {
                 ctx.emit_event(ProtocolEvent::QuorumMemberJoined {
                     operator: msg.operator_id,
-                    partner: msg.reserves_id,
+                    reserves_id: msg.reserves_id.clone(),
                     member: msg.requester_pubkey,
                 });
                 // Send state sync to new member via provider
-                ctx.send_quorum_state_sync(msg.requester_pubkey, msg.operator_id, msg.reserves_id);
+                ctx.send_quorum_state_sync(msg.requester_pubkey, msg.operator_id, &msg.reserves_id);
             }
 
             Ok(HandlerResult::Ok)
@@ -636,7 +665,7 @@ pub fn handle_quorum_vote_request<C: HandlerContext>(
     ctx.init_vote_round(
         msg.vote_round_id,
         msg.operator_id,
-        msg.reserves_id,
+        &msg.reserves_id,
         msg.sequence_number,
         msg.state_hash,
         msg.claimed_reserves,
@@ -690,14 +719,14 @@ pub fn handle_quorum_vote<C: HandlerContext>(
     spend_signature: Option<[u8; 64]>,
 ) -> Result<HandlerResult, HandlerError> {
     // Add vote via provider and check if threshold reached
-    if let Some((operator, partner, spend_data, conforming_votes, threshold)) =
+    if let Some((operator, reserves_id, spend_data, conforming_votes, threshold)) =
         ctx.add_quorum_vote(vote_round_id, voter, vote, spend_signature)
     {
         // Emit spend ready event
         ctx.emit_event(ProtocolEvent::ReservesSpendReady {
             vote_round_id,
             operator,
-            partner,
+            reserves_id,
             signed_tx_bytes: spend_data,
             conforming_votes,
             threshold,
@@ -714,7 +743,7 @@ pub fn handle_quorum_vote<C: HandlerContext>(
 pub fn handle_quorum_state_sync<C: HandlerContext>(
     ctx: &C,
     operator: PublicKey,
-    partner: PublicKey,
+    reserves_id: &str,
     updates: &[Vec<u8>],
     _start_sequence: u64,
     is_final: bool,
@@ -741,8 +770,8 @@ pub fn handle_quorum_state_sync<C: HandlerContext>(
 
     // Update quorum member state after final batch
     if is_final {
-        if let Some((sequence, state_hash)) = ctx.get_signed_update_log_state(&operator, &partner) {
-            let _ = ctx.update_quorum_member_state(operator, partner, sequence, state_hash);
+        if let Some((sequence, state_hash)) = ctx.get_signed_update_log_state(&operator, reserves_id) {
+            let _ = ctx.update_quorum_member_state(operator, reserves_id, sequence, state_hash);
         }
     }
 
@@ -802,7 +831,7 @@ pub fn handle_recovery_vote<C: HandlerContext>(
         // Emit recovery started event (non-compliance determined)
         ctx.emit_event(ProtocolEvent::RecoveryStarted {
             operator: msg.operator,
-            partner: msg.partner,
+            reserves_id: msg.partner.to_string(),
         });
     }
 
@@ -833,15 +862,15 @@ pub fn handle_collateral_consent_request<C: HandlerContext>(
 
     // Check if we have an operator channel with the requesting operator
     // This would be the channel where our reserves would serve as collateral
-    let has_channel_with_operator = ctx.get_ledger(&msg.operator_id, &our_node_id).is_some();
+    let has_channel_with_operator = ctx.get_ledger(&msg.operator_id, &our_node_id.to_string()).is_some();
     let consent_granted = has_channel_with_operator;
 
-    // Sign the consent (content: "COLLATERAL_CONSENT" + operator + partner)
+    // Sign the consent (content: "COLLATERAL_CONSENT" + operator + reserves_id)
     let signature = if consent_granted {
         let mut sign_content = Vec::new();
         sign_content.extend_from_slice(b"COLLATERAL_CONSENT");
         sign_content.extend_from_slice(&msg.operator_id.serialize());
-        sign_content.extend_from_slice(&msg.reserves_id.serialize());
+        sign_content.extend_from_slice(msg.reserves_id.as_bytes());
         ctx.sign_message(&sign_content).unwrap_or([0u8; 64])
     } else {
         [0u8; 64]
@@ -852,7 +881,7 @@ pub fn handle_collateral_consent_request<C: HandlerContext>(
         CoordinationResponseMsg::CollateralConsentResponse {
             request_hash: [0u8; 32],
             operator_id: msg.operator_id,
-            reserves_id: msg.reserves_id,
+            reserves_id: msg.reserves_id.clone(),
             consent_granted,
             collateral_partner_signature: signature,
         }
@@ -863,7 +892,7 @@ pub fn handle_collateral_consent_request<C: HandlerContext>(
     if consent_granted {
         let sync_request = DepositsMessage::Sync(SyncMsg {
             operator_id: msg.operator_id,
-            reserves_id: msg.reserves_id,
+            reserves_id: msg.reserves_id.clone(),
             last_known_sequence: 0,
             last_known_hash: [0u8; 32],
         });
@@ -885,7 +914,7 @@ pub fn handle_collateral_consent_response<C: HandlerContext>(
     if msg.consent_granted {
         if !ctx.verify_consent_signature(
             msg.operator_id,
-            msg.reserves_id,
+            &msg.reserves_id,
             msg.collateral_partner_signature,
             sender,
         ) {
@@ -896,7 +925,7 @@ pub fn handle_collateral_consent_response<C: HandlerContext>(
     // Complete pending consent request via provider
     ctx.complete_consent_request(
         msg.operator_id,
-        msg.reserves_id,
+        &msg.reserves_id,
         msg.consent_granted,
         msg.collateral_partner_signature,
     );
@@ -905,7 +934,7 @@ pub fn handle_collateral_consent_response<C: HandlerContext>(
     if msg.consent_granted {
         ctx.send_audit_to_collateral_partner(
             msg.operator_id,
-            msg.reserves_id,
+            &msg.reserves_id,
             sender,
             msg.collateral_partner_signature,
         );
@@ -928,7 +957,7 @@ pub fn handle_collateral_add_partner<C: HandlerContext>(
     let our_node_id = ctx.our_node_id();
 
     // We must be the reserves_id to process this message
-    if msg.reserves_id != our_node_id {
+    if msg.reserves_id != our_node_id.to_string().to_string() {
         return Ok(HandlerResult::Rejected(format!(
             "We ({}) are not the target partner ({})",
             our_node_id, msg.reserves_id
@@ -939,7 +968,7 @@ pub fn handle_collateral_add_partner<C: HandlerContext>(
     let ledger_arc = ctx.get_ledger(&sender, &msg.reserves_id)
         .ok_or(HandlerError::LedgerNotFound {
             operator: sender,
-            partner: msg.reserves_id,
+            reserves_id: msg.reserves_id.clone(),
         })?;
 
     let operation = LedgerOperation::CollateralAddPartner {
@@ -988,7 +1017,7 @@ pub fn handle_collateral_add_partner<C: HandlerContext>(
             ledger.sign_last_update(None, Some(sig));
         }
         let _ = ctx.persist_ledger(&sender, &msg.reserves_id);
-        ctx.sync_quorum_member(sender, msg.reserves_id, msg.collateral_partner, true);
+        ctx.sync_quorum_member(sender, &msg.reserves_id, msg.collateral_partner, true);
     }
 
     // NOTE: ACK is sent by LDK dispatch code which has access to the correct message hash
@@ -1009,7 +1038,7 @@ pub fn handle_collateral_remove_partner<C: HandlerContext>(
     let our_node_id = ctx.our_node_id();
 
     // We must be the reserves_id to process this message
-    if msg.reserves_id != our_node_id {
+    if msg.reserves_id != our_node_id.to_string().to_string() {
         return Ok(HandlerResult::Rejected(format!(
             "We ({}) are not the target partner ({})",
             our_node_id, msg.reserves_id
@@ -1020,7 +1049,7 @@ pub fn handle_collateral_remove_partner<C: HandlerContext>(
     let ledger_arc = ctx.get_ledger(&sender, &msg.reserves_id)
         .ok_or(HandlerError::LedgerNotFound {
             operator: sender,
-            partner: msg.reserves_id,
+            reserves_id: msg.reserves_id.clone(),
         })?;
 
     let operation = LedgerOperation::CollateralRemovePartner {
@@ -1069,7 +1098,7 @@ pub fn handle_collateral_remove_partner<C: HandlerContext>(
             ledger.sign_last_update(None, Some(sig));
         }
         let _ = ctx.persist_ledger(&sender, &msg.reserves_id);
-        ctx.sync_quorum_member(sender, msg.reserves_id, msg.collateral_partner, false);
+        ctx.sync_quorum_member(sender, &msg.reserves_id, msg.collateral_partner, false);
     }
 
     // NOTE: ACK is sent by LDK dispatch code which has access to the correct message hash
@@ -1154,7 +1183,7 @@ pub fn handle_uncredited_payment<C: HandlerContext>(
     }
 
     // 3. Check if we have the relevant ledger and if there's a credit
-    if let Some(ledger_arc) = ctx.get_ledger(&msg.operator, &msg.partner) {
+    if let Some(ledger_arc) = ctx.get_ledger(&msg.operator, &msg.partner.to_string()) {
         let ledger = ledger_arc.read().map_err(|_|
             HandlerError::Internal("Failed to acquire ledger lock".to_string())
         )?;
@@ -1172,7 +1201,7 @@ pub fn handle_uncredited_payment<C: HandlerContext>(
     // 4. Emit event for node layer to store the accusation
     ctx.emit_event(ProtocolEvent::UncreditedPaymentReceived {
         operator: msg.operator,
-        partner: msg.partner,
+        reserves_id: msg.partner.to_string(),
         payment_hash: msg.payment_hash,
         deposit_pubkey: msg.deposit_pubkey,
         amount_msat: msg.amount_msat,
@@ -1226,7 +1255,7 @@ pub fn handle_receiving_credit_payment<C: HandlerContext>(
     let our_node_id = ctx.our_node_id();
 
     // We must be the partner to process this message
-    if msg.reserves_id != our_node_id {
+    if msg.reserves_id != our_node_id.to_string() {
         return Ok(HandlerResult::Rejected(format!(
             "We ({}) are not the target partner ({})",
             our_node_id, msg.reserves_id
@@ -1237,7 +1266,7 @@ pub fn handle_receiving_credit_payment<C: HandlerContext>(
     let ledger_arc = ctx.get_ledger(&sender, &msg.reserves_id)
         .ok_or(HandlerError::LedgerNotFound {
             operator: sender,
-            partner: msg.reserves_id,
+            reserves_id: msg.reserves_id.clone(),
         })?;
 
     // Validate the credit payment
@@ -1255,9 +1284,9 @@ pub fn handle_receiving_credit_payment<C: HandlerContext>(
     }
 
     // Emit event for credit being received
-    ctx.emit_event(ProtocolEvent::PaymentCredited {
+    ctx.emit_event(ProtocolEvent::InvoiceCredited {
         operator: sender,
-        partner: msg.reserves_id,
+        reserves_id: msg.reserves_id.clone(),
         deposit_pubkey: msg.deposit_pubkey,
         amount: msg.amount,
         payment_hash: msg.payment_hash,
@@ -1266,7 +1295,7 @@ pub fn handle_receiving_credit_payment<C: HandlerContext>(
     // Return validated data for LDK layer to record to ledger and sign
     Ok(HandlerResult::Response(ResponseData::CreditPaymentValidated {
         operator: sender,
-        partner: msg.reserves_id,
+        reserves_id: msg.reserves_id.clone(),
         deposit_pubkey: msg.deposit_pubkey,
         amount: msg.amount,
         payment_hash: msg.payment_hash,
@@ -1297,10 +1326,10 @@ pub fn handle_sending_lock_payment<C: HandlerContext>(
     let our_node_id = ctx.our_node_id();
 
     // Get the ledger - sender (operator) and us (partner)
-    let ledger_arc = ctx.get_ledger(&sender, &our_node_id)
+    let ledger_arc = ctx.get_ledger(&sender, &our_node_id.to_string())
         .ok_or(HandlerError::LedgerNotFound {
             operator: sender,
-            partner: our_node_id,
+            reserves_id: our_node_id.to_string(),
         })?;
 
     // Validate the payment lock
@@ -1321,7 +1350,7 @@ pub fn handle_sending_lock_payment<C: HandlerContext>(
     // Return validated data for LDK layer to record to ledger and sign
     Ok(HandlerResult::Response(ResponseData::LockPaymentValidated {
         operator: sender,
-        partner: our_node_id,
+        reserves_id: our_node_id.to_string(),
         deposit_pubkey: msg.pubkey,
         amount: msg.amount,
         payment_id: msg.payment_id,
@@ -1351,10 +1380,10 @@ pub fn handle_sending_fulfill_payment<C: HandlerContext>(
     let our_node_id = ctx.our_node_id();
 
     // Get the ledger - sender (operator) and us (partner)
-    let ledger_arc = ctx.get_ledger(&sender, &our_node_id)
+    let ledger_arc = ctx.get_ledger(&sender, &our_node_id.to_string())
         .ok_or(HandlerError::LedgerNotFound {
             operator: sender,
-            partner: our_node_id,
+            reserves_id: our_node_id.to_string(),
         })?;
 
     // Validate the payment fulfill - verifies preimage matches payment_id
@@ -1381,9 +1410,9 @@ pub fn handle_sending_fulfill_payment<C: HandlerContext>(
     }
 
     // Emit event for payment being sent
-    ctx.emit_event(ProtocolEvent::PaymentSent {
+    ctx.emit_event(ProtocolEvent::InvoiceSent {
         operator: sender,
-        partner: our_node_id,
+        reserves_id: our_node_id.to_string(),
         deposit_pubkey: msg.pubkey,
         amount: msg.amount,
         payment_id: msg.payment_id,
@@ -1392,7 +1421,7 @@ pub fn handle_sending_fulfill_payment<C: HandlerContext>(
     // Return validated data for LDK layer to record to ledger and sign
     Ok(HandlerResult::Response(ResponseData::FulfillPaymentValidated {
         operator: sender,
-        partner: our_node_id,
+        reserves_id: our_node_id.to_string(),
         deposit_pubkey: msg.pubkey,
         amount: msg.amount,
         payment_id: msg.payment_id,
@@ -1423,10 +1452,10 @@ pub fn handle_sending_fail_payment<C: HandlerContext>(
     let our_node_id = ctx.our_node_id();
 
     // Get the ledger - sender (operator) and us (partner)
-    let ledger_arc = ctx.get_ledger(&sender, &our_node_id)
+    let ledger_arc = ctx.get_ledger(&sender, &our_node_id.to_string())
         .ok_or(HandlerError::LedgerNotFound {
             operator: sender,
-            partner: our_node_id,
+            reserves_id: our_node_id.to_string(),
         })?;
 
     // Validate the payment fail
@@ -1450,7 +1479,7 @@ pub fn handle_sending_fail_payment<C: HandlerContext>(
     // Return validated data for LDK layer to record to ledger and sign
     Ok(HandlerResult::Response(ResponseData::FailPaymentValidated {
         operator: sender,
-        partner: our_node_id,
+        reserves_id: our_node_id.to_string(),
         deposit_pubkey: msg.pubkey,
         amount: msg.amount,
         payment_id: msg.payment_id,
@@ -1486,7 +1515,7 @@ pub fn handle_deposit_open<C: HandlerContext>(
     let our_node_id = ctx.our_node_id();
 
     // We must be the partner to process this message
-    if msg.reserves_id != our_node_id {
+    if msg.reserves_id != our_node_id.to_string() {
         return Ok(HandlerResult::Rejected(format!(
             "We ({}) are not the target partner ({})",
             our_node_id, msg.reserves_id
@@ -1497,7 +1526,7 @@ pub fn handle_deposit_open<C: HandlerContext>(
     let ledger_arc = ctx.get_ledger(&sender, &msg.reserves_id)
         .ok_or(HandlerError::LedgerNotFound {
             operator: sender,
-            partner: msg.reserves_id,
+            reserves_id: msg.reserves_id.clone(),
         })?;
 
     let operation = LedgerOperation::DepositOpen {
@@ -1563,7 +1592,7 @@ pub fn handle_deposit_open<C: HandlerContext>(
     // Emit event
     ctx.emit_event(crate::traits::ProtocolEvent::DepositOpened {
         operator: sender,
-        partner: msg.reserves_id,
+        reserves_id: msg.reserves_id.clone(),
         deposit_pubkey: msg.pubkey,
     });
 
@@ -1584,7 +1613,7 @@ pub fn handle_deposit_close<C: HandlerContext>(
     let our_node_id = ctx.our_node_id();
 
     // We must be the partner to process this message
-    if msg.reserves_id != our_node_id {
+    if msg.reserves_id != our_node_id.to_string() {
         return Ok(HandlerResult::Rejected(format!(
             "We ({}) are not the target partner ({})",
             our_node_id, msg.reserves_id
@@ -1595,7 +1624,7 @@ pub fn handle_deposit_close<C: HandlerContext>(
     let ledger_arc = ctx.get_ledger(&sender, &msg.reserves_id)
         .ok_or(HandlerError::LedgerNotFound {
             operator: sender,
-            partner: msg.reserves_id,
+            reserves_id: msg.reserves_id.clone(),
         })?;
 
     let operation = LedgerOperation::DepositClose {
@@ -1662,7 +1691,7 @@ pub fn handle_deposit_close<C: HandlerContext>(
     if !is_idempotent {
         ctx.emit_event(crate::traits::ProtocolEvent::DepositClosed {
             operator: sender,
-            partner: msg.reserves_id,
+            reserves_id: msg.reserves_id.clone(),
             deposit_pubkey: msg.pubkey,
             final_balance,
         });
@@ -1685,7 +1714,7 @@ pub fn handle_deposit_update<C: HandlerContext>(
     let our_node_id = ctx.our_node_id();
 
     // We must be the partner to process this message
-    if msg.reserves_id != our_node_id {
+    if msg.reserves_id != our_node_id.to_string() {
         return Ok(HandlerResult::Rejected(format!(
             "We ({}) are not the target partner ({})",
             our_node_id, msg.reserves_id
@@ -1696,7 +1725,7 @@ pub fn handle_deposit_update<C: HandlerContext>(
     let ledger_arc = ctx.get_ledger(&sender, &msg.reserves_id)
         .ok_or(HandlerError::LedgerNotFound {
             operator: sender,
-            partner: msg.reserves_id,
+            reserves_id: msg.reserves_id.clone(),
         })?;
 
     let operation = LedgerOperation::DepositUpdate {
@@ -1777,7 +1806,7 @@ pub fn handle_reserves_add_output<C: HandlerContext>(
     let our_node_id = ctx.our_node_id();
 
     // We must be the partner to process this message
-    if msg.reserves_id != our_node_id {
+    if msg.reserves_id != our_node_id.to_string() {
         return Ok(HandlerResult::Rejected(format!(
             "We ({}) are not the target partner ({})",
             our_node_id, msg.reserves_id
@@ -1788,7 +1817,7 @@ pub fn handle_reserves_add_output<C: HandlerContext>(
     let ledger_arc = ctx.get_ledger(&sender, &msg.reserves_id)
         .ok_or(HandlerError::LedgerNotFound {
             operator: sender,
-            partner: msg.reserves_id,
+            reserves_id: msg.reserves_id.clone(),
         })?;
 
     // Validate and get current state
@@ -1801,7 +1830,7 @@ pub fn handle_reserves_add_output<C: HandlerContext>(
         if ledger.state.reserves.amount > 0 {
             return Ok(HandlerResult::Response(ResponseData::ReservesAddOutputValidated {
                 operator: sender,
-                partner: msg.reserves_id,
+                reserves_id: msg.reserves_id.clone(),
                 initial_amount: msg.initial_amount,
                 spend_to: msg.spend_to,
                 collateral_partners: msg.collateral_partners.clone(),
@@ -1822,7 +1851,7 @@ pub fn handle_reserves_add_output<C: HandlerContext>(
     // Return validated data for LDK layer to record to ledger and sign
     Ok(HandlerResult::Response(ResponseData::ReservesAddOutputValidated {
         operator: sender,
-        partner: msg.reserves_id,
+        reserves_id: msg.reserves_id.clone(),
         initial_amount: msg.initial_amount,
         spend_to: msg.spend_to,
         collateral_partners: msg.collateral_partners.clone(),
@@ -1855,7 +1884,7 @@ pub fn handle_reserves_remove_output<C: HandlerContext>(
     let our_node_id = ctx.our_node_id();
 
     // We must be the partner to process this message
-    if msg.reserves_id != our_node_id {
+    if msg.reserves_id != our_node_id.to_string() {
         return Ok(HandlerResult::Rejected(format!(
             "We ({}) are not the target partner ({})",
             our_node_id, msg.reserves_id
@@ -1866,7 +1895,7 @@ pub fn handle_reserves_remove_output<C: HandlerContext>(
     let ledger_arc = ctx.get_ledger(&sender, &msg.reserves_id)
         .ok_or(HandlerError::LedgerNotFound {
             operator: sender,
-            partner: msg.reserves_id,
+            reserves_id: msg.reserves_id.clone(),
         })?;
 
     // Validate and get current state
@@ -1879,7 +1908,7 @@ pub fn handle_reserves_remove_output<C: HandlerContext>(
         if ledger.state.reserves.amount == 0 {
             return Ok(HandlerResult::Response(ResponseData::ReservesRemoveOutputValidated {
                 operator: sender,
-                partner: msg.reserves_id,
+                reserves_id: msg.reserves_id.clone(),
                 sequence: ledger.sequence(),
                 prev_hash: ledger.hash(),
                 new_hash: ledger.hash(),
@@ -1902,7 +1931,7 @@ pub fn handle_reserves_remove_output<C: HandlerContext>(
     // Return validated data for LDK layer to record to ledger and sign
     Ok(HandlerResult::Response(ResponseData::ReservesRemoveOutputValidated {
         operator: sender,
-        partner: msg.reserves_id,
+        reserves_id: msg.reserves_id.clone(),
         sequence,
         prev_hash,
         new_hash,
@@ -1932,7 +1961,7 @@ pub fn handle_reserves_increase<C: HandlerContext>(
     let our_node_id = ctx.our_node_id();
 
     // We must be the partner to process this message
-    if msg.reserves_id != our_node_id {
+    if msg.reserves_id != our_node_id.to_string() {
         return Ok(HandlerResult::Rejected(format!(
             "We ({}) are not the target partner ({})",
             our_node_id, msg.reserves_id
@@ -1943,7 +1972,7 @@ pub fn handle_reserves_increase<C: HandlerContext>(
     let ledger_arc = ctx.get_ledger(&sender, &msg.reserves_id)
         .ok_or(HandlerError::LedgerNotFound {
             operator: sender,
-            partner: msg.reserves_id,
+            reserves_id: msg.reserves_id.clone(),
         })?;
 
     // Validate and get current state
@@ -1966,7 +1995,7 @@ pub fn handle_reserves_increase<C: HandlerContext>(
     // Return validated data for LDK layer to record to ledger and sign
     Ok(HandlerResult::Response(ResponseData::ReservesIncreaseValidated {
         operator: sender,
-        partner: msg.reserves_id,
+        reserves_id: msg.reserves_id.clone(),
         new_amount: msg.new_amount,
         sequence,
         prev_hash,
@@ -1997,7 +2026,7 @@ pub fn handle_reserves_decrease<C: HandlerContext>(
     let our_node_id = ctx.our_node_id();
 
     // We must be the partner to process this message
-    if msg.reserves_id != our_node_id {
+    if msg.reserves_id != our_node_id.to_string() {
         return Ok(HandlerResult::Rejected(format!(
             "We ({}) are not the target partner ({})",
             our_node_id, msg.reserves_id
@@ -2008,7 +2037,7 @@ pub fn handle_reserves_decrease<C: HandlerContext>(
     let ledger_arc = ctx.get_ledger(&sender, &msg.reserves_id)
         .ok_or(HandlerError::LedgerNotFound {
             operator: sender,
-            partner: msg.reserves_id,
+            reserves_id: msg.reserves_id.clone(),
         })?;
 
     // Validate and get current state
@@ -2028,7 +2057,7 @@ pub fn handle_reserves_decrease<C: HandlerContext>(
     // Return validated data for LDK layer to record to ledger and sign
     Ok(HandlerResult::Response(ResponseData::ReservesDecreaseValidated {
         operator: sender,
-        partner: msg.reserves_id,
+        reserves_id: msg.reserves_id.clone(),
         new_amount: msg.new_amount,
         sequence,
         prev_hash,
@@ -2062,10 +2091,10 @@ pub fn handle_fee_collect<C: HandlerContext>(
     let our_node_id = ctx.our_node_id();
 
     // Get the ledger - sender (operator) and us (partner)
-    let ledger_arc = ctx.get_ledger(&sender, &our_node_id)
+    let ledger_arc = ctx.get_ledger(&sender, &our_node_id.to_string())
         .ok_or(HandlerError::LedgerNotFound {
             operator: sender,
-            partner: our_node_id,
+            reserves_id: our_node_id.to_string(),
         })?;
 
     // Validate the fee collection
@@ -2089,7 +2118,7 @@ pub fn handle_fee_collect<C: HandlerContext>(
     // Emit event for fee collection
     ctx.emit_event(ProtocolEvent::FeeCollected {
         operator: sender,
-        partner: our_node_id,
+        reserves_id: our_node_id.to_string(),
         deposit_pubkey: msg.pubkey,
         amount: msg.amount,
         block_height: msg.block_height,
@@ -2098,7 +2127,7 @@ pub fn handle_fee_collect<C: HandlerContext>(
     // Return validated data for LDK layer to record to ledger and sign
     Ok(HandlerResult::Response(ResponseData::FeeCollectValidated {
         operator: sender,
-        partner: our_node_id,
+        reserves_id: our_node_id.to_string(),
         deposit_pubkey: msg.pubkey,
         amount: msg.amount,
         block_height: msg.block_height,
@@ -2130,7 +2159,7 @@ pub fn handle_ledger_close<C: HandlerContext>(
     let our_node_id = ctx.our_node_id();
 
     // We must be the partner to process this message
-    if msg.reserves_id != our_node_id {
+    if msg.reserves_id != our_node_id.to_string() {
         return Ok(HandlerResult::Rejected(format!(
             "We ({}) are not the target partner ({})",
             our_node_id, msg.reserves_id
@@ -2138,10 +2167,10 @@ pub fn handle_ledger_close<C: HandlerContext>(
     }
 
     // Get the ledger - sender (operator) and us (partner)
-    let ledger_arc = ctx.get_ledger(&sender, &our_node_id)
+    let ledger_arc = ctx.get_ledger(&sender, &our_node_id.to_string())
         .ok_or(HandlerError::LedgerNotFound {
             operator: sender,
-            partner: our_node_id,
+            reserves_id: our_node_id.to_string(),
         })?;
 
     // Validate the ledger close
@@ -2161,13 +2190,13 @@ pub fn handle_ledger_close<C: HandlerContext>(
     // Emit event for ledger close
     ctx.emit_event(ProtocolEvent::LedgerClosed {
         operator: sender,
-        partner: our_node_id,
+        reserves_id: our_node_id.to_string(),
     });
 
     // Return validated data for LDK layer to record to ledger and sign
     Ok(HandlerResult::Response(ResponseData::LedgerCloseValidated {
         operator: sender,
-        partner: our_node_id,
+        reserves_id: our_node_id.to_string(),
         sequence,
         prev_hash,
         new_hash,
@@ -2197,10 +2226,10 @@ pub fn handle_receiving_cosign_invoice<C: HandlerContext>(
     let our_node_id = ctx.our_node_id();
 
     // Get the ledger - sender (operator) and us (partner)
-    let ledger_arc = ctx.get_ledger(&sender, &our_node_id)
+    let ledger_arc = ctx.get_ledger(&sender, &our_node_id.to_string())
         .ok_or(HandlerError::LedgerNotFound {
             operator: sender,
-            partner: our_node_id,
+            reserves_id: our_node_id.to_string(),
         })?;
 
     // Validate the cosign invoice request
@@ -2222,7 +2251,7 @@ pub fn handle_receiving_cosign_invoice<C: HandlerContext>(
     // Emit event for invoice cosign request
     ctx.emit_event(ProtocolEvent::InvoiceCosignRequested {
         operator: sender,
-        partner: our_node_id,
+        reserves_id: our_node_id.to_string(),
         deposit_pubkey: msg.assigned_deposit,
         amount: msg.amount,
         payment_hash: msg.payment_hash,
@@ -2231,7 +2260,7 @@ pub fn handle_receiving_cosign_invoice<C: HandlerContext>(
     // Return validated data for LDK layer to sign the invoice
     Ok(HandlerResult::Response(ResponseData::CosignInvoiceValidated {
         operator: sender,
-        partner: our_node_id,
+        reserves_id: our_node_id.to_string(),
         deposit_pubkey: msg.assigned_deposit,
         amount: msg.amount,
         payment_hash: msg.payment_hash,
@@ -2308,7 +2337,7 @@ pub fn handle_recovery_claim_request<C: HandlerContext>(
     // Emit event for claim request received
     ctx.emit_event(ProtocolEvent::RecoveryClaimRequested {
         operator: msg.operator,
-        partner: msg.partner,
+        reserves_id: msg.partner.to_string(),
         claimant: msg.claimant,
         tier_index: msg.tier_index,
     });
@@ -2364,7 +2393,7 @@ pub fn handle_recovery_claim_signature<C: HandlerContext>(
     // Emit event for signature received
     ctx.emit_event(ProtocolEvent::RecoveryClaimSignatureReceived {
         operator: msg.operator,
-        partner: msg.partner,
+        reserves_id: msg.partner.to_string(),
         signer: msg.signer,
     });
 
@@ -2397,7 +2426,7 @@ pub fn handle_recovery_claim_complete<C: HandlerContext>(
     // Emit event for claim completion (this also emits DepositsEvent via provider)
     ctx.emit_event(ProtocolEvent::RecoveryClaimCompleted {
         old_operator: msg.operator,
-        partner: msg.partner,
+        reserves_id: msg.partner.to_string(),
         new_operator: msg.new_operator,
         claim_txid: msg.claim_txid,
         confirmation_block: msg.confirmation_block,
@@ -2440,7 +2469,7 @@ pub fn handle_channel_close_tombstone<C: HandlerContext>(
 
     // Determine our role: operator or partner
     let we_are_operator = msg.operator_id == our_node_id;
-    let we_are_partner = msg.reserves_id == our_node_id;
+    let we_are_partner = msg.reserves_id == our_node_id.to_string();
 
     if !we_are_operator && !we_are_partner {
         return Ok(HandlerResult::Rejected(format!(
@@ -2452,7 +2481,7 @@ pub fn handle_channel_close_tombstone<C: HandlerContext>(
     // Emit event for channel close
     ctx.emit_event(ProtocolEvent::ChannelClosed {
         operator: msg.operator_id,
-        partner: msg.reserves_id,
+        reserves_id: msg.reserves_id.clone(),
         channel_id: msg.channel_id,
         reason: msg.close_reason.clone(),
     });
@@ -2460,7 +2489,7 @@ pub fn handle_channel_close_tombstone<C: HandlerContext>(
     // Return validated data for LDK layer to append to ledger
     Ok(HandlerResult::Response(ResponseData::ChannelCloseTombstoneValidated {
         operator: msg.operator_id,
-        partner: msg.reserves_id,
+        reserves_id: msg.reserves_id.clone(),
         channel_id: msg.channel_id,
         sequence_number: msg.sequence_number,
         timestamp: msg.timestamp,
@@ -2472,9 +2501,9 @@ pub fn handle_channel_close_tombstone<C: HandlerContext>(
 // Helper Functions
 // ============================================================================
 
-/// Create a ledger ID from operator and partner pubkeys
-pub fn make_ledger_id(operator: PublicKey, partner: PublicKey) -> LedgerId {
-    LedgerId::new(operator, partner)
+/// Create a ledger ID from operator and reserves_id
+pub fn make_ledger_id(operator: PublicKey, reserves_id: String) -> LedgerId {
+    LedgerId::new(operator, reserves_id)
 }
 
 #[cfg(test)]
@@ -2488,7 +2517,7 @@ mod tests {
 
     /// Test implementation of HandlerContext
     struct TestContext {
-        ledgers: HashMap<(PublicKey, PublicKey), Arc<RwLock<Ledger>>>,
+        ledgers: HashMap<(PublicKey, String), Arc<RwLock<Ledger>>>,
         our_node_id: PublicKey,
         events: Mutex<Vec<ProtocolEvent>>,
         recovery_manager: Option<Arc<Mutex<RecoveryManager>>>,
@@ -2512,14 +2541,14 @@ mod tests {
             self
         }
 
-        fn add_ledger(&mut self, operator: PublicKey, partner: PublicKey, ledger: Ledger) {
-            self.ledgers.insert((operator, partner), Arc::new(RwLock::new(ledger)));
+        fn add_ledger(&mut self, operator: PublicKey, reserves_id: PublicKey, ledger: Ledger) {
+            self.ledgers.insert((operator, reserves_id.to_string()), Arc::new(RwLock::new(ledger)));
         }
     }
 
     impl crate::message_validation::ValidationContext for TestContext {
-        fn get_ledger(&self, operator: &PublicKey, partner: &PublicKey) -> Option<Arc<RwLock<Ledger>>> {
-            self.ledgers.get(&(*operator, *partner)).cloned()
+        fn get_ledger(&self, operator: &PublicKey, reserves_id: &str) -> Option<Arc<RwLock<Ledger>>> {
+            self.ledgers.get(&(*operator, reserves_id.to_string())).cloned()
         }
 
         fn our_node_id(&self) -> PublicKey {
@@ -2561,7 +2590,7 @@ mod tests {
 
         let msg = CollateralConsentRequestMsg {
             operator_id: operator,
-            reserves_id: partner,
+            reserves_id: partner.to_string(),
             operator_signature: [0u8; 64],
         };
 
@@ -2580,7 +2609,7 @@ mod tests {
 
         let msg = CollateralConsentRequestMsg {
             operator_id: operator,
-            reserves_id: partner,
+            reserves_id: partner.to_string(),
             operator_signature: [0u8; 64],
         };
 
@@ -2603,12 +2632,12 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger where operator is the operator and we are the partner
-        let ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = CollateralConsentRequestMsg {
             operator_id: operator,
-            reserves_id: partner,
+            reserves_id: partner.to_string(),
             operator_signature: [0u8; 64],
         };
 
@@ -2637,7 +2666,7 @@ mod tests {
 
         let msg = CollateralAddPartnerMsg {
             operator_id: operator,
-            reserves_id: other_partner, // Not us
+            reserves_id: other_partner.to_string(), // Not us
             collateral_partner,
             collateral_partner_signature: [0u8; 64],
         };
@@ -2657,7 +2686,7 @@ mod tests {
 
         let msg = CollateralAddPartnerMsg {
             operator_id: operator,
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             collateral_partner,
             collateral_partner_signature: [0u8; 64],
         };
@@ -2676,12 +2705,12 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger where operator is the operator and we are the partner
-        let ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = CollateralAddPartnerMsg {
             operator_id: operator,
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             collateral_partner,
             collateral_partner_signature: [0u8; 64],
         };
@@ -2700,13 +2729,13 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with the collateral partner already added
-        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         ledger.state.collateral_partners.push(collateral_partner);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = CollateralAddPartnerMsg {
             operator_id: operator,
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             collateral_partner,
             collateral_partner_signature: [0u8; 64],
         };
@@ -2726,7 +2755,7 @@ mod tests {
         let ctx = TestContext::new(our_node_id);
 
         let msg = CollateralRemovePartnerMsg {
-            reserves_id: other_partner, // Not us
+            reserves_id: other_partner.to_string(), // Not us
             collateral_partner,
             operator_signature: [0u8; 64],
         };
@@ -2745,11 +2774,11 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger without the collateral partner
-        let ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = CollateralRemovePartnerMsg {
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             collateral_partner,
             operator_signature: [0u8; 64],
         };
@@ -2768,12 +2797,12 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with the collateral partner
-        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         ledger.state.collateral_partners.push(collateral_partner);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = CollateralRemovePartnerMsg {
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             collateral_partner,
             operator_signature: [0u8; 64],
         };
@@ -2986,9 +3015,9 @@ mod tests {
         let events = ctx.events.lock().unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
-            ProtocolEvent::UncreditedPaymentReceived { operator: op, partner: p, amount_msat: amt, .. } => {
+            ProtocolEvent::UncreditedPaymentReceived { operator: op, reserves_id, amount_msat: amt, .. } => {
                 assert_eq!(*op, operator);
-                assert_eq!(*p, partner);
+                assert_eq!(*reserves_id, partner.to_string());
                 assert_eq!(*amt, 1_000_000);
             }
             other => panic!("Expected UncreditedPaymentReceived event, got {:?}", other),
@@ -3013,7 +3042,7 @@ mod tests {
             deposit_pubkey,
             amount: 100_000,
             invoice_id: "test_invoice".to_string(),
-            reserves_id: other_partner, // Not us
+            reserves_id: other_partner.to_string(), // Not us
             sequence_number: 0,
         };
 
@@ -3035,7 +3064,7 @@ mod tests {
             deposit_pubkey,
             amount: 100_000,
             invoice_id: "test_invoice".to_string(),
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             sequence_number: 0,
         };
 
@@ -3053,7 +3082,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger without the deposit
-        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         ledger.state.reserves.amount = 100_000;
         ledger.state.received_collateral_amount = 100_000;
         ctx.add_ledger(operator, our_node_id, ledger);
@@ -3067,7 +3096,7 @@ mod tests {
             deposit_pubkey, // This deposit doesn't exist
             amount: 50_000,
             invoice_id: "test_invoice".to_string(),
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             sequence_number: 0,
         };
 
@@ -3087,7 +3116,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with the deposit
-        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         ledger.state.reserves.amount = 100_000;
         ledger.state.received_collateral_amount = 100_000;
         let deposit = Deposit::new(deposit_pubkey, None);
@@ -3103,7 +3132,7 @@ mod tests {
             deposit_pubkey,
             amount: 50_000,
             invoice_id: "test_invoice".to_string(),
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             sequence_number: 0,
         };
 
@@ -3120,10 +3149,10 @@ mod tests {
         let events = ctx.events.lock().unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
-            ProtocolEvent::PaymentCredited { amount: amt, .. } => {
+            ProtocolEvent::InvoiceCredited { amount: amt, .. } => {
                 assert_eq!(*amt, 50_000);
             }
-            other => panic!("Expected PaymentCredited event, got {:?}", other),
+            other => panic!("Expected InvoiceCredited event, got {:?}", other),
         }
     }
 
@@ -3164,7 +3193,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with a different deposit
-        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         let deposit = Deposit::new(other_deposit, None);
         ledger.state.deposits.insert(other_deposit, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
@@ -3193,7 +3222,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with a deposit that has low balance
-        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         let mut deposit = Deposit::new(deposit_pubkey, None);
         deposit.balance = 10_000; // Low balance
         ledger.state.deposits.insert(deposit_pubkey, deposit);
@@ -3223,7 +3252,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with a deposit that has sufficient balance
-        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         let mut deposit = Deposit::new(deposit_pubkey, None);
         deposit.balance = 100_000;
         ledger.state.deposits.insert(deposit_pubkey, deposit);
@@ -3284,7 +3313,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with the deposit
-        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         let deposit = Deposit::new(deposit_pubkey, None);
         ledger.state.deposits.insert(deposit_pubkey, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
@@ -3319,7 +3348,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with the deposit
-        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         let mut deposit = Deposit::new(deposit_pubkey, None);
         deposit.balance = 100_000;
         ledger.state.deposits.insert(deposit_pubkey, deposit);
@@ -3352,10 +3381,10 @@ mod tests {
         let events = ctx.events.lock().unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
-            ProtocolEvent::PaymentSent { amount: amt, .. } => {
+            ProtocolEvent::InvoiceSent { amount: amt, .. } => {
                 assert_eq!(*amt, 50_000);
             }
-            other => panic!("Expected PaymentSent event, got {:?}", other),
+            other => panic!("Expected InvoiceSent event, got {:?}", other),
         }
     }
 
@@ -3394,7 +3423,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with the deposit
-        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         let deposit = Deposit::new(deposit_pubkey, None);
         ledger.state.deposits.insert(deposit_pubkey, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
@@ -3423,7 +3452,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with a different deposit
-        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         let deposit = Deposit::new(other_deposit, None);
         ledger.state.deposits.insert(other_deposit, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
@@ -3451,7 +3480,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with the deposit
-        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         let deposit = Deposit::new(deposit_pubkey, None);
         ledger.state.deposits.insert(deposit_pubkey, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
@@ -3487,7 +3516,7 @@ mod tests {
         let ctx = TestContext::new(our_node_id);
 
         let msg = DepositOpenMsg {
-            reserves_id: other_partner, // Not us
+            reserves_id: other_partner.to_string(), // Not us
             pubkey: deposit_pubkey,
             fees: None,
             payment_hash: None,
@@ -3509,7 +3538,7 @@ mod tests {
         let ctx = TestContext::new(our_node_id);
 
         let msg = DepositOpenMsg {
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             pubkey: deposit_pubkey,
             fees: None,
             payment_hash: None,
@@ -3531,11 +3560,11 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger
-        let ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = DepositOpenMsg {
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             pubkey: deposit_pubkey,
             fees: None,
             payment_hash: None,
@@ -3559,13 +3588,13 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with the deposit already added
-        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         let deposit = Deposit::new(deposit_pubkey, None);
         ledger.state.deposits.insert(deposit_pubkey, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = DepositOpenMsg {
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             pubkey: deposit_pubkey,
             fees: None,
             payment_hash: None,
@@ -3589,7 +3618,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger
-        let ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let fees = FeeStructure {
@@ -3599,7 +3628,7 @@ mod tests {
         };
 
         let msg = DepositOpenMsg {
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             pubkey: deposit_pubkey,
             fees: Some(fees),
             payment_hash: None,
@@ -3623,7 +3652,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger
-        let ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         ctx.add_ledger(operator, our_node_id, ledger);
 
         // Invalid fee structure with zero frequency
@@ -3634,7 +3663,7 @@ mod tests {
         };
 
         let msg = DepositOpenMsg {
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             pubkey: deposit_pubkey,
             fees: Some(invalid_fees),
             payment_hash: None,
@@ -3661,7 +3690,7 @@ mod tests {
         let ctx = TestContext::new(our_node_id);
 
         let msg = DepositCloseMsg {
-            reserves_id: other_partner, // Not us
+            reserves_id: other_partner.to_string(), // Not us
             pubkey: deposit_pubkey,
         };
 
@@ -3679,7 +3708,7 @@ mod tests {
         let ctx = TestContext::new(our_node_id);
 
         let msg = DepositCloseMsg {
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             pubkey: deposit_pubkey,
         };
 
@@ -3699,13 +3728,13 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with a deposit that has zero balance
-        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         let deposit = Deposit::new(deposit_pubkey, None); // balance=0 by default
         ledger.state.deposits.insert(deposit_pubkey, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = DepositCloseMsg {
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             pubkey: deposit_pubkey,
         };
 
@@ -3725,14 +3754,14 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with a deposit that has non-zero balance
-        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         let mut deposit = Deposit::new(deposit_pubkey, None);
         deposit.balance = 50_000; // Non-zero balance
         ledger.state.deposits.insert(deposit_pubkey, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = DepositCloseMsg {
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             pubkey: deposit_pubkey,
         };
 
@@ -3752,14 +3781,14 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with a deposit that has locked balance
-        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         let mut deposit = Deposit::new(deposit_pubkey, None);
         deposit.locked_balance = 10_000; // Has locked funds
         ledger.state.deposits.insert(deposit_pubkey, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = DepositCloseMsg {
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             pubkey: deposit_pubkey,
         };
 
@@ -3777,11 +3806,11 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger without the deposit (already closed)
-        let ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = DepositCloseMsg {
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             pubkey: deposit_pubkey,
         };
 
@@ -3806,7 +3835,7 @@ mod tests {
         let ctx = TestContext::new(our_node_id);
 
         let msg = DepositUpdateMsg {
-            reserves_id: other_partner, // Not us
+            reserves_id: other_partner.to_string(), // Not us
             pubkey: deposit_pubkey,
             new_fees: FeeStructure::default(),
         };
@@ -3827,7 +3856,7 @@ mod tests {
         let ctx = TestContext::new(our_node_id);
 
         let msg = DepositUpdateMsg {
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             pubkey: deposit_pubkey,
             new_fees: FeeStructure::default(),
         };
@@ -3848,11 +3877,11 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger without the deposit
-        let ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = DepositUpdateMsg {
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             pubkey: deposit_pubkey,
             new_fees: FeeStructure::default(),
         };
@@ -3873,7 +3902,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with the deposit
-        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         let deposit = Deposit::new(deposit_pubkey, None);
         ledger.state.deposits.insert(deposit_pubkey, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
@@ -3885,7 +3914,7 @@ mod tests {
         };
 
         let msg = DepositUpdateMsg {
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             pubkey: deposit_pubkey,
             new_fees,
         };
@@ -3906,7 +3935,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with the deposit
-        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         let deposit = Deposit::new(deposit_pubkey, None);
         ledger.state.deposits.insert(deposit_pubkey, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
@@ -3919,7 +3948,7 @@ mod tests {
         };
 
         let msg = DepositUpdateMsg {
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             pubkey: deposit_pubkey,
             new_fees: invalid_fees,
         };
@@ -3940,7 +3969,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with the deposit
-        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         let deposit = Deposit::new(deposit_pubkey, None);
         ledger.state.deposits.insert(deposit_pubkey, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
@@ -3953,7 +3982,7 @@ mod tests {
         };
 
         let msg = DepositUpdateMsg {
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             pubkey: deposit_pubkey,
             new_fees: invalid_fees,
         };
@@ -3979,7 +4008,7 @@ mod tests {
         let msg = ReservesAddOutputMsg {
             initial_amount: 100_000,
             spend_to,
-            reserves_id: other_partner, // Not us
+            reserves_id: other_partner.to_string(), // Not us
             collateral_partners: vec![],
         };
 
@@ -3999,7 +4028,7 @@ mod tests {
         let msg = ReservesAddOutputMsg {
             initial_amount: 100_000,
             spend_to,
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             collateral_partners: vec![],
         };
 
@@ -4017,13 +4046,13 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with no reserves
-        let ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = ReservesAddOutputMsg {
             initial_amount: 100_000,
             spend_to,
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             collateral_partners: vec![],
         };
 
@@ -4046,13 +4075,13 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with no reserves
-        let ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = ReservesAddOutputMsg {
             initial_amount: 100, // Too small
             spend_to,
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             collateral_partners: vec![],
         };
 
@@ -4070,7 +4099,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger that already has reserves
-        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         ledger.state.reserves.amount = 100_000;
         ledger.state.reserves.spend_to = spend_to;
         ctx.add_ledger(operator, our_node_id, ledger);
@@ -4078,7 +4107,7 @@ mod tests {
         let msg = ReservesAddOutputMsg {
             initial_amount: 100_000,
             spend_to,
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             collateral_partners: vec![],
         };
 
@@ -4103,7 +4132,7 @@ mod tests {
         let ctx = TestContext::new(our_node_id);
 
         let msg = ReservesRemoveOutputMsg {
-            reserves_id: other_partner, // Not us
+            reserves_id: other_partner.to_string(), // Not us
             remove_all: true,
         };
 
@@ -4120,7 +4149,7 @@ mod tests {
         let ctx = TestContext::new(our_node_id);
 
         let msg = ReservesRemoveOutputMsg {
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             remove_all: true,
         };
 
@@ -4138,13 +4167,13 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with reserves but no deposits
-        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         ledger.state.reserves.amount = 100_000;
         ledger.state.reserves.spend_to = spend_to;
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = ReservesRemoveOutputMsg {
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             remove_all: true,
         };
 
@@ -4168,7 +4197,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with reserves and active deposits
-        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         ledger.state.reserves.amount = 100_000;
         ledger.state.reserves.spend_to = spend_to;
         let mut deposit = Deposit::new(deposit_pubkey, None);
@@ -4177,7 +4206,7 @@ mod tests {
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = ReservesRemoveOutputMsg {
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             remove_all: true,
         };
 
@@ -4194,11 +4223,11 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with no reserves (already removed)
-        let ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = ReservesRemoveOutputMsg {
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             remove_all: true,
         };
 
@@ -4223,7 +4252,7 @@ mod tests {
         let ctx = TestContext::new(our_node_id);
 
         let msg = ReservesIncreaseMsg {
-            reserves_id: other_partner, // Not us
+            reserves_id: other_partner.to_string(), // Not us
             new_amount: 200_000,
         };
 
@@ -4240,7 +4269,7 @@ mod tests {
         let ctx = TestContext::new(our_node_id);
 
         let msg = ReservesIncreaseMsg {
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             new_amount: 200_000,
         };
 
@@ -4258,13 +4287,13 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with existing reserves
-        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         ledger.state.reserves.amount = 100_000;
         ledger.state.reserves.spend_to = spend_to;
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = ReservesIncreaseMsg {
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             new_amount: 200_000,
         };
 
@@ -4287,13 +4316,13 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with existing reserves
-        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         ledger.state.reserves.amount = 200_000;
         ledger.state.reserves.spend_to = spend_to;
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = ReservesIncreaseMsg {
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             new_amount: 150_000, // Less than current
         };
 
@@ -4315,7 +4344,7 @@ mod tests {
         let ctx = TestContext::new(our_node_id);
 
         let msg = ReservesDecreaseMsg {
-            reserves_id: other_partner, // Not us
+            reserves_id: other_partner.to_string(), // Not us
             new_amount: 50_000,
         };
 
@@ -4332,7 +4361,7 @@ mod tests {
         let ctx = TestContext::new(our_node_id);
 
         let msg = ReservesDecreaseMsg {
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             new_amount: 50_000,
         };
 
@@ -4350,13 +4379,13 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with reserves and no deposits
-        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         ledger.state.reserves.amount = 200_000;
         ledger.state.reserves.spend_to = spend_to;
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = ReservesDecreaseMsg {
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             new_amount: 100_000,
         };
 
@@ -4379,13 +4408,13 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with reserves
-        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         ledger.state.reserves.amount = 100_000;
         ledger.state.reserves.spend_to = spend_to;
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = ReservesDecreaseMsg {
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             new_amount: 150_000, // More than current
         };
 
@@ -4406,7 +4435,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with reserves and deposits
-        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         ledger.state.reserves.amount = 200_000;
         ledger.state.reserves.spend_to = spend_to;
         let mut deposit = Deposit::new(deposit_pubkey, None);
@@ -4415,7 +4444,7 @@ mod tests {
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = ReservesDecreaseMsg {
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
             new_amount: 50_000, // Below deposit balance
         };
 
@@ -4456,7 +4485,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger without the deposit
-        let ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = FeeCollectMsg {
@@ -4481,7 +4510,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with a deposit that has balance and is eligible for fee collection
-        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         let mut deposit = Deposit::new(deposit_pubkey, Some(FeeStructure {
             annualized_fixed: 0,
             annualized_bps: 100,
@@ -4531,7 +4560,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with a deposit where fees were recently collected
-        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         let mut deposit = Deposit::new(deposit_pubkey, Some(FeeStructure {
             annualized_fixed: 0,
             annualized_bps: 100,
@@ -4565,7 +4594,7 @@ mod tests {
         let ctx = TestContext::new(our_node_id);
 
         let msg = LedgerCloseMsg {
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
         };
 
         // No ledger exists - should error
@@ -4582,7 +4611,7 @@ mod tests {
         let ctx = TestContext::new(our_node_id);
 
         let msg = LedgerCloseMsg {
-            reserves_id: wrong_partner, // Not us
+            reserves_id: wrong_partner.to_string(), // Not us
         };
 
         // We're not the target partner - should be rejected
@@ -4601,14 +4630,14 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with a deposit that has balance
-        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         let mut deposit = Deposit::new(deposit_pubkey, None);
         deposit.balance = 100_000; // Has balance
         ledger.state.deposits.insert(deposit_pubkey, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = LedgerCloseMsg {
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
         };
 
         // Outstanding balance - should fail validation
@@ -4627,7 +4656,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with a deposit that has locked balance
-        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         let mut deposit = Deposit::new(deposit_pubkey, None);
         deposit.balance = 0;
         deposit.locked_balance = 50_000; // Has locked balance
@@ -4635,7 +4664,7 @@ mod tests {
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = LedgerCloseMsg {
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
         };
 
         // Locked balance - should fail validation
@@ -4651,19 +4680,19 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create an empty ledger
-        let ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = LedgerCloseMsg {
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
         };
 
         // Valid close of empty ledger
         let result = handle_ledger_close(&ctx, &msg, operator);
         match result {
-            Ok(HandlerResult::Response(ResponseData::LedgerCloseValidated { operator: op, partner, .. })) => {
+            Ok(HandlerResult::Response(ResponseData::LedgerCloseValidated { operator: op, reserves_id, .. })) => {
                 assert_eq!(op, operator);
-                assert_eq!(partner, our_node_id);
+                assert_eq!(reserves_id, our_node_id.to_string());
             }
             other => panic!("Expected Response(LedgerCloseValidated), got {:?}", other),
         }
@@ -4672,9 +4701,9 @@ mod tests {
         let events = ctx.events.lock().unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
-            ProtocolEvent::LedgerClosed { operator: op, partner } => {
+            ProtocolEvent::LedgerClosed { operator: op, reserves_id } => {
                 assert_eq!(*op, operator);
-                assert_eq!(*partner, our_node_id);
+                assert_eq!(*reserves_id, our_node_id.to_string());
             }
             other => panic!("Expected LedgerClosed event, got {:?}", other),
         }
@@ -4691,13 +4720,13 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with zero-balance deposits
-        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         let deposit = Deposit::new(deposit_pubkey, None); // Balance defaults to 0
         ledger.state.deposits.insert(deposit_pubkey, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = LedgerCloseMsg {
-            reserves_id: our_node_id,
+            reserves_id: our_node_id.to_string(),
         };
 
         // Valid close with zero-balance deposits
@@ -4740,7 +4769,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger without the deposit
-        let ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = ReceivingCosignInvoiceMsg {
@@ -4769,7 +4798,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with a deposit
-        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         let deposit = Deposit::new(deposit_pubkey, None);
         ledger.state.deposits.insert(deposit_pubkey, deposit);
         ledger.state.reserves.amount = 200_000;
@@ -4802,7 +4831,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with a deposit, sufficient reserves, and collateral
-        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         let deposit = Deposit::new(deposit_pubkey, None);
         ledger.state.deposits.insert(deposit_pubkey, deposit);
         ledger.state.reserves.amount = 200_000;
@@ -4859,7 +4888,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with a deposit but insufficient reserves
-        let mut ledger = Ledger::new(operator, our_node_id, LedgerRole::Partner, vec![], "tb1qtest".to_string());
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         let deposit = Deposit::new(deposit_pubkey, None);
         ledger.state.deposits.insert(deposit_pubkey, deposit);
         ledger.state.reserves.amount = 50_000; // Only 50k reserves
@@ -5120,7 +5149,7 @@ mod tests {
 
         let msg = ChannelCloseTombstoneMsg {
             operator_id: operator,
-            reserves_id: partner, // We're neither
+            reserves_id: partner.to_string(), // We're neither
             timestamp: 1234567890,
             channel_id: [0xAB; 32],
             close_reason: Some("test close".to_string()),
@@ -5143,7 +5172,7 @@ mod tests {
         let channel_id = [0xAB; 32];
         let msg = ChannelCloseTombstoneMsg {
             operator_id: our_node_id, // We are operator
-            reserves_id: partner,
+            reserves_id: partner.to_string(),
             timestamp: 1234567890,
             channel_id,
             close_reason: Some("test close".to_string()),
@@ -5154,10 +5183,10 @@ mod tests {
         let result = handle_channel_close_tombstone(&ctx, &msg, sender);
         match result {
             Ok(HandlerResult::Response(ResponseData::ChannelCloseTombstoneValidated {
-                operator, partner: p, channel_id: cid, sequence_number, ..
+                operator, reserves_id: p, channel_id: cid, sequence_number, ..
             })) => {
                 assert_eq!(operator, our_node_id);
-                assert_eq!(p, partner);
+                assert_eq!(p, partner.to_string());
                 assert_eq!(cid, channel_id);
                 assert_eq!(sequence_number, 42);
             }
@@ -5188,7 +5217,7 @@ mod tests {
         let channel_id = [0xCD; 32];
         let msg = ChannelCloseTombstoneMsg {
             operator_id: operator,
-            reserves_id: our_node_id, // We are partner
+            reserves_id: our_node_id.to_string(), // We are partner
             timestamp: 1234567890,
             channel_id,
             close_reason: None,
@@ -5199,10 +5228,10 @@ mod tests {
         let result = handle_channel_close_tombstone(&ctx, &msg, sender);
         match result {
             Ok(HandlerResult::Response(ResponseData::ChannelCloseTombstoneValidated {
-                operator: op, partner, channel_id: cid, close_reason, ..
+                operator: op, reserves_id, channel_id: cid, close_reason, ..
             })) => {
                 assert_eq!(op, operator);
-                assert_eq!(partner, our_node_id);
+                assert_eq!(reserves_id, our_node_id.to_string());
                 assert_eq!(cid, channel_id);
                 assert!(close_reason.is_none());
             }
@@ -5213,8 +5242,8 @@ mod tests {
         let events = ctx.events.lock().unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
-            ProtocolEvent::ChannelClosed { partner: p, channel_id: cid, reason, .. } => {
-                assert_eq!(*p, our_node_id);
+            ProtocolEvent::ChannelClosed { reserves_id: p, channel_id: cid, reason, .. } => {
+                assert_eq!(*p, our_node_id.to_string());
                 assert_eq!(*cid, channel_id);
                 assert!(reason.is_none());
             }

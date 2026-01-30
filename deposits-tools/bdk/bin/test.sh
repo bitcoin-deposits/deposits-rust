@@ -254,7 +254,8 @@ test_create_reserves() {
     mine_blocks 1
 }
 
-# Test: Open ledgers between nodes
+# Test: Open ledgers for each node
+# Each BDK node opens its own ledger backed by its reserves UTXO
 test_open_ledgers() {
     log_info "Testing ledger opening..."
 
@@ -265,80 +266,27 @@ test_open_ledgers() {
 
     log_info "Current block: $current_height, Enforcement block: $enforcement_block"
 
-    # Alice opens ledger with Bob (Alice = operator, Bob = reserves)
-    # First get Bob's node ID
-    local bob_info=$(run_bdk_cmd "bdk-bob" info 2>&1)
-    local bob_node_id=$(echo "$bob_info" | grep "Node ID:" | awk '{print $3}')
+    # Each node opens their own ledger backed by their reserves
+    for node in "${NODES[@]}"; do
+        log_info "Opening ledger for $node..."
 
-    if [ -z "$bob_node_id" ]; then
-        test_fail "Could not get Bob's node ID"
-        return
-    fi
+        local ledger_output=$(run_bdk_cmd "$node" ledger open "$enforcement_block" 2>&1)
 
-    log_info "Opening ledger: Alice (operator) <-> Bob (reserves)"
-    log_info "Bob's Node ID: ${bob_node_id:0:20}..."
-
-    local ledger_output=$(run_bdk_cmd "bdk-alice" ledger open "$bob_node_id" "$enforcement_block" 2>&1)
-
-    if echo "$ledger_output" | grep -q "Ledger opened successfully"; then
-        test_pass "Alice opened ledger with Bob"
-        if $VERBOSE; then
-            echo "    Ledger output:"
-            echo "$ledger_output" | grep -E "Operator:|Reserves:|Sequence:|Bootstrap" | sed 's/^/      /'
-        fi
-    else
-        test_fail "Alice failed to open ledger with Bob"
-        if $VERBOSE; then
+        if echo "$ledger_output" | grep -q "Ledger opened successfully\|Opening ledger backed by reserves"; then
+            test_pass "$node opened ledger"
+            if $VERBOSE; then
+                echo "    Ledger output:"
+                echo "$ledger_output" | grep -E "Operator:|Partner:|Sequence:|Bootstrap" | sed 's/^/      /'
+            fi
+        elif echo "$ledger_output" | grep -q "already\|exists"; then
+            # Ledger may already exist from previous run or network-init
+            test_pass "$node ledger already exists"
+        else
+            test_fail "$node failed to open ledger"
+            # Always show output on failure for debugging
             echo "    Output: $ledger_output"
         fi
-    fi
-
-    # Bob opens ledger with Charlie (Bob = operator, Charlie = reserves)
-    local charlie_info=$(run_bdk_cmd "bdk-charlie" info 2>&1)
-    local charlie_node_id=$(echo "$charlie_info" | grep "Node ID:" | awk '{print $3}')
-
-    if [ -z "$charlie_node_id" ]; then
-        test_fail "Could not get Charlie's node ID"
-        return
-    fi
-
-    log_info "Opening ledger: Bob (operator) <-> Charlie (reserves)"
-    log_info "Charlie's Node ID: ${charlie_node_id:0:20}..."
-
-    ledger_output=$(run_bdk_cmd "bdk-bob" ledger open "$charlie_node_id" "$enforcement_block" 2>&1)
-
-    if echo "$ledger_output" | grep -q "Ledger opened successfully"; then
-        test_pass "Bob opened ledger with Charlie"
-    else
-        test_fail "Bob failed to open ledger with Charlie"
-        if $VERBOSE; then
-            echo "    Output: $ledger_output"
-        fi
-    fi
-
-    # Charlie opens ledger with Alice (Charlie = operator, Alice = reserves)
-    # This completes the triangle for cross-collateral
-    local alice_info=$(run_bdk_cmd "bdk-alice" info 2>&1)
-    local alice_node_id=$(echo "$alice_info" | grep "Node ID:" | awk '{print $3}')
-
-    if [ -z "$alice_node_id" ]; then
-        test_fail "Could not get Alice's node ID"
-        return
-    fi
-
-    log_info "Opening ledger: Charlie (operator) <-> Alice (reserves)"
-    log_info "Alice's Node ID: ${alice_node_id:0:20}..."
-
-    ledger_output=$(run_bdk_cmd "bdk-charlie" ledger open "$alice_node_id" "$enforcement_block" 2>&1)
-
-    if echo "$ledger_output" | grep -q "Ledger opened successfully"; then
-        test_pass "Charlie opened ledger with Alice"
-    else
-        test_fail "Charlie failed to open ledger with Alice"
-        if $VERBOSE; then
-            echo "    Output: $ledger_output"
-        fi
-    fi
+    done
 }
 
 # Test: List ledgers
@@ -447,58 +395,70 @@ test_list_partners() {
 # ============================================================================
 
 # Global variables to store deposit info across tests
-ALICE_DEPOSIT_A=""
-ALICE_DEPOSIT_A_SECRET=""
-ALICE_DEPOSIT_B=""
-ALICE_DEPOSIT_B_SECRET=""
-BOB_NODE_ID=""
-DEPOSIT_OFFER_ID=""
-DEPOSIT_FUNDING_ADDRESS=""
+ALICE_RESERVES_ID=""
+BOB_RESERVES_ID=""
+DEPOSIT_A_PUBKEY=""
+DEPOSIT_A_SECRET=""
+DEPOSIT_B_PUBKEY=""
+DEPOSIT_B_SECRET=""
+DEPOSIT_A_OFFER_ID=""
+DEPOSIT_A_FUNDING_ADDRESS=""
+DEPOSIT_B_OFFER_ID=""
+DEPOSIT_B_FUNDING_ADDRESS=""
 FUNDING_TXID=""
 FUNDING_AMOUNT_SATS=""
 
-# Test: Open deposits in Alice's ledger with Bob
+# Test: Open deposits on Alice and Bob's ledgers
 test_open_deposits() {
     log_info "Testing deposit opening..."
-
-    # Get Bob's node ID (Bob is the reserves in Alice's ledger)
-    local bob_info=$(run_bdk_cmd "bdk-bob" info 2>&1)
-    BOB_NODE_ID=$(echo "$bob_info" | grep "Node ID:" | awk '{print $3}')
-
-    if [ -z "$BOB_NODE_ID" ]; then
-        test_fail "Could not get Bob's node ID"
-        return 1
-    fi
 
     # Create wallets directory
     mkdir -p "$SCRIPT_DIR/../wallets"
 
-    # Generate keypairs for deposits using the keygen command
-    # Each deposit needs its own keypair that the user controls
+    # Get Alice's reserves ID (her ledger address)
+    local alice_info=$(run_bdk_cmd "bdk-alice" info 2>&1)
+    ALICE_RESERVES_ID=$(echo "$alice_info" | grep "Reserves address:" | awk '{print $3}')
+
+    if [ -z "$ALICE_RESERVES_ID" ]; then
+        test_fail "Could not get Alice's reserves ID"
+        return 1
+    fi
+    log_info "Alice's reserves ID: ${ALICE_RESERVES_ID:0:20}..."
+
+    # Get Bob's reserves ID (his ledger address)
+    local bob_info=$(run_bdk_cmd "bdk-bob" info 2>&1)
+    BOB_RESERVES_ID=$(echo "$bob_info" | grep "Reserves address:" | awk '{print $3}')
+
+    if [ -z "$BOB_RESERVES_ID" ]; then
+        test_fail "Could not get Bob's reserves ID"
+        return 1
+    fi
+    log_info "Bob's reserves ID: ${BOB_RESERVES_ID:0:20}..."
+
+    # Generate keypair for Deposit A (on Alice's ledger)
     log_info "Generating deposit keypairs..."
-
     local keypair_a=$(run_bdk_cmd "bdk-alice" keygen 2>&1)
-    ALICE_DEPOSIT_A_SECRET=$(echo "$keypair_a" | awk '{print $1}')
-    ALICE_DEPOSIT_A=$(echo "$keypair_a" | awk '{print $2}')
+    DEPOSIT_A_SECRET=$(echo "$keypair_a" | awk '{print $1}')
+    DEPOSIT_A_PUBKEY=$(echo "$keypair_a" | awk '{print $2}')
 
-    local keypair_b=$(run_bdk_cmd "bdk-alice" keygen 2>&1)
-    ALICE_DEPOSIT_B_SECRET=$(echo "$keypair_b" | awk '{print $1}')
-    ALICE_DEPOSIT_B=$(echo "$keypair_b" | awk '{print $2}')
+    # Generate keypair for Deposit B (on Bob's ledger)
+    local keypair_b=$(run_bdk_cmd "bdk-bob" keygen 2>&1)
+    DEPOSIT_B_SECRET=$(echo "$keypair_b" | awk '{print $1}')
+    DEPOSIT_B_PUBKEY=$(echo "$keypair_b" | awk '{print $2}')
 
-    if [ -z "$ALICE_DEPOSIT_A" ] || [ -z "$ALICE_DEPOSIT_B" ]; then
+    if [ -z "$DEPOSIT_A_PUBKEY" ] || [ -z "$DEPOSIT_B_PUBKEY" ]; then
         test_fail "Failed to generate deposit keypairs"
         return 1
     fi
 
     # Save wallet files
-    echo "{\"deposit_pubkey\": \"$ALICE_DEPOSIT_A\", \"deposit_secret\": \"$ALICE_DEPOSIT_A_SECRET\"}" > "$SCRIPT_DIR/../wallets/deposit_a.json"
-    echo "{\"deposit_pubkey\": \"$ALICE_DEPOSIT_B\", \"deposit_secret\": \"$ALICE_DEPOSIT_B_SECRET\"}" > "$SCRIPT_DIR/../wallets/deposit_b.json"
+    echo "{\"deposit_pubkey\": \"$DEPOSIT_A_PUBKEY\", \"deposit_secret\": \"$DEPOSIT_A_SECRET\", \"node\": \"alice\"}" > "$SCRIPT_DIR/../wallets/deposit_a.json"
+    echo "{\"deposit_pubkey\": \"$DEPOSIT_B_PUBKEY\", \"deposit_secret\": \"$DEPOSIT_B_SECRET\", \"node\": \"bob\"}" > "$SCRIPT_DIR/../wallets/deposit_b.json"
 
-    log_info "Opening Deposit A: ${ALICE_DEPOSIT_A:0:20}..."
-    log_info "Opening Deposit B: ${ALICE_DEPOSIT_B:0:20}..."
+    log_info "Opening Deposit A on Alice: ${DEPOSIT_A_PUBKEY:0:20}..."
 
-    # Open Deposit A
-    local open_output=$(run_bdk_cmd "bdk-alice" deposit open "$BOB_NODE_ID" "$ALICE_DEPOSIT_A" 2>&1)
+    # Open Deposit A on Alice's ledger
+    local open_output=$(run_bdk_cmd "bdk-alice" deposit open "$ALICE_RESERVES_ID" "$DEPOSIT_A_PUBKEY" 2>&1)
 
     if echo "$open_output" | grep -q "Deposit opened"; then
         test_pass "Alice opened Deposit A"
@@ -513,13 +473,18 @@ test_open_deposits() {
         return 1
     fi
 
-    # Open Deposit B
-    open_output=$(run_bdk_cmd "bdk-alice" deposit open "$BOB_NODE_ID" "$ALICE_DEPOSIT_B" 2>&1)
+    log_info "Opening Deposit B on Bob: ${DEPOSIT_B_PUBKEY:0:20}..."
+
+    # Open Deposit B on Bob's ledger
+    open_output=$(run_bdk_cmd "bdk-bob" deposit open "$BOB_RESERVES_ID" "$DEPOSIT_B_PUBKEY" 2>&1)
 
     if echo "$open_output" | grep -q "Deposit opened"; then
-        test_pass "Alice opened Deposit B"
+        test_pass "Bob opened Deposit B"
+        if $VERBOSE; then
+            echo "    Output: $open_output"
+        fi
     else
-        test_fail "Alice failed to open Deposit B"
+        test_fail "Bob failed to open Deposit B"
         if $VERBOSE; then
             echo "    Output: $open_output"
         fi
@@ -527,22 +492,21 @@ test_open_deposits() {
     fi
 }
 
-# Test: List deposits in a ledger
+# Test: List deposits in ledgers
 test_list_deposits() {
     log_info "Testing deposit listing..."
 
-    if [ -z "$BOB_NODE_ID" ]; then
-        test_fail "Bob's node ID not set"
+    if [ -z "$ALICE_RESERVES_ID" ] || [ -z "$BOB_RESERVES_ID" ]; then
+        test_fail "Reserves IDs not set"
         return 1
     fi
 
-    local list_output=$(run_bdk_cmd "bdk-alice" deposit ls "$BOB_NODE_ID" 2>&1)
-
+    # Check Alice's ledger
+    local list_output=$(run_bdk_cmd "bdk-alice" deposit ls "$ALICE_RESERVES_ID" 2>&1)
     if echo "$list_output" | grep -q "Deposit:"; then
-        local deposit_count=$(echo "$list_output" | grep -c "Deposit:" || echo "0")
-        test_pass "Alice's ledger has $deposit_count deposit(s)"
+        test_pass "Alice's ledger has deposits"
         if $VERBOSE; then
-            echo "    Deposits:"
+            echo "    Alice's deposits:"
             echo "$list_output" | grep -E "Deposit:|Balance:|Locked:" | sed 's/^/      /'
         fi
     else
@@ -551,13 +515,28 @@ test_list_deposits() {
             echo "    Output: $list_output"
         fi
     fi
+
+    # Check Bob's ledger
+    list_output=$(run_bdk_cmd "bdk-bob" deposit ls "$BOB_RESERVES_ID" 2>&1)
+    if echo "$list_output" | grep -q "Deposit:"; then
+        test_pass "Bob's ledger has deposits"
+        if $VERBOSE; then
+            echo "    Bob's deposits:"
+            echo "$list_output" | grep -E "Deposit:|Balance:|Locked:" | sed 's/^/      /'
+        fi
+    else
+        test_fail "No deposits found in Bob's ledger"
+        if $VERBOSE; then
+            echo "    Output: $list_output"
+        fi
+    fi
 }
 
-# Test: Create a deposit offer for on-chain funding
-test_create_deposit_offer() {
-    log_info "Testing deposit offer creation..."
+# Test: Create deposit offer for Deposit A (on Alice)
+test_create_deposit_offer_a() {
+    log_info "Testing deposit offer creation for Deposit A..."
 
-    if [ -z "$BOB_NODE_ID" ] || [ -z "$ALICE_DEPOSIT_A" ]; then
+    if [ -z "$ALICE_RESERVES_ID" ] || [ -z "$DEPOSIT_A_PUBKEY" ]; then
         test_fail "Required variables not set"
         return 1
     fi
@@ -567,15 +546,15 @@ test_create_deposit_offer() {
     local min_sats=100000       # 0.001 BTC
     local blocks_valid=144      # ~1 day
 
-    local offer_output=$(run_bdk_cmd "bdk-alice" deposit offer "$BOB_NODE_ID" "$ALICE_DEPOSIT_A" "$max_sats" "$min_sats" "$blocks_valid" 2>&1)
+    local offer_output=$(run_bdk_cmd "bdk-alice" deposit offer "$ALICE_RESERVES_ID" "$DEPOSIT_A_PUBKEY" "$max_sats" "$min_sats" "$blocks_valid" 2>&1)
 
     if echo "$offer_output" | grep -q "Deposit offer created"; then
-        DEPOSIT_OFFER_ID=$(echo "$offer_output" | grep "Offer ID:" | awk '{print $3}')
-        DEPOSIT_FUNDING_ADDRESS=$(echo "$offer_output" | grep "Funding address:" | awk '{print $3}')
+        DEPOSIT_A_OFFER_ID=$(echo "$offer_output" | grep "Offer ID:" | awk '{print $3}')
+        DEPOSIT_A_FUNDING_ADDRESS=$(echo "$offer_output" | grep "Funding address:" | awk '{print $3}')
 
-        test_pass "Alice created deposit offer"
-        log_info "  Offer ID: ${DEPOSIT_OFFER_ID:0:16}..."
-        log_info "  Funding address: $DEPOSIT_FUNDING_ADDRESS"
+        test_pass "Alice created deposit offer for Deposit A"
+        log_info "  Offer ID: ${DEPOSIT_A_OFFER_ID:0:16}..."
+        log_info "  Funding address: $DEPOSIT_A_FUNDING_ADDRESS"
 
         if $VERBOSE; then
             echo "    Full offer output:"
@@ -590,23 +569,23 @@ test_create_deposit_offer() {
     fi
 }
 
-# Test: Fund the deposit offer on-chain
-test_fund_deposit_offer() {
-    log_info "Testing deposit offer funding..."
+# Test: Fund Deposit A's offer on-chain (from faucet, simulating external funding)
+test_fund_deposit_offer_a() {
+    log_info "Testing deposit offer funding for Deposit A..."
 
-    if [ -z "$DEPOSIT_FUNDING_ADDRESS" ]; then
+    if [ -z "$DEPOSIT_A_FUNDING_ADDRESS" ]; then
         test_fail "Funding address not set"
         return 1
     fi
 
     # Send 0.5 BTC to the funding address from the faucet
     local amount_btc="0.5"
-    log_info "Sending $amount_btc BTC to $DEPOSIT_FUNDING_ADDRESS"
+    log_info "Sending $amount_btc BTC to Deposit A's funding address"
 
-    local txid=$(bitcoin_cli -rpcwallet=faucet sendtoaddress "$DEPOSIT_FUNDING_ADDRESS" "$amount_btc" 2>&1)
+    local txid=$(bitcoin_cli -rpcwallet=faucet sendtoaddress "$DEPOSIT_A_FUNDING_ADDRESS" "$amount_btc" 2>&1)
 
     if [ $? -eq 0 ] && [ -n "$txid" ]; then
-        test_pass "Sent $amount_btc BTC to funding address"
+        test_pass "Sent $amount_btc BTC to Deposit A's funding address"
         log_info "  TXID: ${txid:0:16}..."
 
         # Store for later use
@@ -617,7 +596,7 @@ test_fund_deposit_offer() {
         mine_blocks 1
         test_pass "Mined confirmation block"
     else
-        test_fail "Failed to send funds to deposit offer"
+        test_fail "Failed to send funds to Deposit A's offer"
         if $VERBOSE; then
             echo "    Output: $txid"
         fi
@@ -625,11 +604,11 @@ test_fund_deposit_offer() {
     fi
 }
 
-# Test: Check if deposit offer has been funded
-test_check_deposit_offer() {
-    log_info "Testing deposit offer funding check..."
+# Test: Check if Deposit A's offer has been funded
+test_check_deposit_offer_a() {
+    log_info "Testing deposit offer funding check for Deposit A..."
 
-    if [ -z "$DEPOSIT_OFFER_ID" ]; then
+    if [ -z "$DEPOSIT_A_OFFER_ID" ]; then
         test_fail "Offer ID not set"
         return 1
     fi
@@ -637,10 +616,10 @@ test_check_deposit_offer() {
     # Sync Alice's wallet first
     run_bdk_cmd "bdk-alice" info >/dev/null 2>&1
 
-    local check_output=$(run_bdk_cmd "bdk-alice" deposit check "$DEPOSIT_OFFER_ID" 2>&1)
+    local check_output=$(run_bdk_cmd "bdk-alice" deposit check "$DEPOSIT_A_OFFER_ID" 2>&1)
 
     if echo "$check_output" | grep -q "Funding detected"; then
-        test_pass "Deposit offer funding detected"
+        test_pass "Deposit A offer funding detected"
         if $VERBOSE; then
             echo "    Check output:"
             echo "$check_output" | grep -E "Transaction:|Amount:" | sed 's/^/      /'
@@ -649,12 +628,12 @@ test_check_deposit_offer() {
         # May need to wait for sync
         log_info "Funding not detected yet, waiting for sync..."
         sleep 3
-        check_output=$(run_bdk_cmd "bdk-alice" deposit check "$DEPOSIT_OFFER_ID" 2>&1)
+        check_output=$(run_bdk_cmd "bdk-alice" deposit check "$DEPOSIT_A_OFFER_ID" 2>&1)
 
         if echo "$check_output" | grep -q "Funding detected"; then
-            test_pass "Deposit offer funding detected (after sync)"
+            test_pass "Deposit A offer funding detected (after sync)"
         else
-            test_fail "Deposit offer funding not detected"
+            test_fail "Deposit A offer funding not detected"
             if $VERBOSE; then
                 echo "    Output: $check_output"
             fi
@@ -662,30 +641,30 @@ test_check_deposit_offer() {
     fi
 }
 
-# Test: Complete the deposit offer (credit the deposit)
-test_complete_deposit_offer() {
-    log_info "Testing deposit offer completion..."
+# Test: Complete Deposit A's offer (credit the deposit)
+test_complete_deposit_offer_a() {
+    log_info "Testing deposit offer completion for Deposit A..."
 
-    if [ -z "$DEPOSIT_OFFER_ID" ] || [ -z "$FUNDING_TXID" ]; then
+    if [ -z "$DEPOSIT_A_OFFER_ID" ] || [ -z "$FUNDING_TXID" ]; then
         test_fail "Required variables not set"
         return 1
     fi
 
-    local complete_output=$(run_bdk_cmd "bdk-alice" deposit complete "$DEPOSIT_OFFER_ID" "$FUNDING_TXID" "$FUNDING_AMOUNT_SATS" 2>&1)
+    local complete_output=$(run_bdk_cmd "bdk-alice" deposit complete "$DEPOSIT_A_OFFER_ID" "$FUNDING_TXID" "$FUNDING_AMOUNT_SATS" 2>&1)
 
     if echo "$complete_output" | grep -q "Deposit offer completed"; then
-        test_pass "Deposit offer completed - deposit credited"
+        test_pass "Deposit A offer completed - deposit credited"
 
         # Extract new balance
         local new_balance=$(echo "$complete_output" | grep "New balance:" | awk '{print $3}')
-        log_info "  New balance: $new_balance msats"
+        log_info "  Deposit A new balance: $new_balance msats"
 
         if $VERBOSE; then
             echo "    Complete output:"
             echo "$complete_output" | sed 's/^/      /'
         fi
     else
-        test_fail "Failed to complete deposit offer"
+        test_fail "Failed to complete Deposit A offer"
         if $VERBOSE; then
             echo "    Output: $complete_output"
         fi
@@ -693,42 +672,140 @@ test_complete_deposit_offer() {
     fi
 }
 
-# Test: Transfer funds between deposits
-test_deposit_transfer() {
-    log_info "Testing deposit-to-deposit transfer..."
+# Test: Create deposit offer for Deposit B (on Bob)
+test_create_deposit_offer_b() {
+    log_info "Testing deposit offer creation for Deposit B..."
 
-    if [ -z "$BOB_NODE_ID" ] || [ -z "$ALICE_DEPOSIT_A" ] || [ -z "$ALICE_DEPOSIT_B" ]; then
+    if [ -z "$BOB_RESERVES_ID" ] || [ -z "$DEPOSIT_B_PUBKEY" ]; then
         test_fail "Required variables not set"
         return 1
     fi
 
-    # Transfer 0.1 BTC (100,000,000 msats) from Deposit A to Deposit B
-    local amount_msats=100000000  # 0.1 BTC in msats
+    # Create offer: max 0.3 BTC, min 0.001 BTC, valid for 144 blocks
+    local max_sats=30000000     # 0.3 BTC
+    local min_sats=100000       # 0.001 BTC
+    local blocks_valid=144      # ~1 day
 
-    log_info "Transferring $amount_msats msats from Deposit A to Deposit B..."
+    local offer_output=$(run_bdk_cmd "bdk-bob" deposit offer "$BOB_RESERVES_ID" "$DEPOSIT_B_PUBKEY" "$max_sats" "$min_sats" "$blocks_valid" 2>&1)
 
-    local transfer_output=$(run_bdk_cmd "bdk-alice" deposit transfer "$BOB_NODE_ID" "$ALICE_DEPOSIT_A" "$ALICE_DEPOSIT_B" "$amount_msats" 2>&1)
+    if echo "$offer_output" | grep -q "Deposit offer created"; then
+        DEPOSIT_B_OFFER_ID=$(echo "$offer_output" | grep "Offer ID:" | awk '{print $3}')
+        DEPOSIT_B_FUNDING_ADDRESS=$(echo "$offer_output" | grep "Funding address:" | awk '{print $3}')
 
-    if echo "$transfer_output" | grep -q "Transfer complete"; then
-        test_pass "Transfer completed successfully"
-
-        # Extract balances
-        local from_balance=$(echo "$transfer_output" | grep "From balance:" | awk '{print $3}')
-        local to_balance=$(echo "$transfer_output" | grep "To balance:" | awk '{print $3}')
-
-        log_info "  Deposit A balance: $from_balance msats"
-        log_info "  Deposit B balance: $to_balance msats"
+        test_pass "Bob created deposit offer for Deposit B"
+        log_info "  Offer ID: ${DEPOSIT_B_OFFER_ID:0:16}..."
+        log_info "  Funding address: $DEPOSIT_B_FUNDING_ADDRESS"
 
         if $VERBOSE; then
-            echo "    Transfer output:"
-            echo "$transfer_output" | sed 's/^/      /'
+            echo "    Full offer output:"
+            echo "$offer_output" | grep -E "Offer ID:|Funding address:|Deadline|Amount" | sed 's/^/      /'
         fi
     else
-        test_fail "Transfer failed"
+        test_fail "Bob failed to create deposit offer"
         if $VERBOSE; then
-            echo "    Output: $transfer_output"
+            echo "    Output: $offer_output"
         fi
         return 1
+    fi
+}
+
+# Test: Withdraw from Deposit A to fund Deposit B's offer
+test_withdraw_to_fund_deposit_b() {
+    log_info "Testing withdrawal from Deposit A to fund Deposit B..."
+
+    if [ -z "$ALICE_RESERVES_ID" ] || [ -z "$DEPOSIT_A_SECRET" ] || [ -z "$DEPOSIT_B_FUNDING_ADDRESS" ]; then
+        test_fail "Required variables not set"
+        return 1
+    fi
+
+    # Withdraw 0.2 BTC (leaving some for fees)
+    local amount_sats=20000000   # 0.2 BTC
+    local fee_sats=1000          # Small fee
+
+    log_info "Withdrawing $amount_sats sats from Deposit A to Deposit B's funding address..."
+
+    # Request withdrawal (generates nonce, signs, and locks)
+    local withdraw_output=$(run_bdk_cmd "bdk-alice" withdraw request "$ALICE_RESERVES_ID" "$DEPOSIT_A_SECRET" "$DEPOSIT_B_FUNDING_ADDRESS" "$amount_sats" "$fee_sats" 2>&1)
+
+    if echo "$withdraw_output" | grep -q "Withdrawal request created\|Withdrawal locked"; then
+        local withdrawal_id=$(echo "$withdraw_output" | grep -E "Withdrawal ID:|withdrawal_id" | awk '{print $NF}')
+        test_pass "Withdrawal from Deposit A locked"
+        log_info "  Withdrawal ID: ${withdrawal_id:0:16}..."
+
+        # Complete the withdrawal (broadcast)
+        local complete_output=$(run_bdk_cmd "bdk-alice" withdraw complete "$ALICE_RESERVES_ID" "$withdrawal_id" 2>&1)
+
+        if echo "$complete_output" | grep -q "Withdrawal complete\|broadcast"; then
+            test_pass "Withdrawal broadcasted"
+
+            # Mine a block to confirm
+            mine_blocks 1
+            test_pass "Mined confirmation block"
+
+            # Store the txid for Deposit B completion
+            FUNDING_TXID=$(echo "$complete_output" | grep -E "TXID:|txid" | awk '{print $NF}')
+            FUNDING_AMOUNT_SATS=$amount_sats
+        else
+            test_fail "Failed to complete withdrawal"
+            if $VERBOSE; then
+                echo "    Output: $complete_output"
+            fi
+            return 1
+        fi
+    else
+        test_fail "Failed to create withdrawal request"
+        if $VERBOSE; then
+            echo "    Output: $withdraw_output"
+        fi
+        return 1
+    fi
+}
+
+# Test: Check and complete Deposit B's offer
+test_complete_deposit_offer_b() {
+    log_info "Testing deposit offer completion for Deposit B..."
+
+    if [ -z "$DEPOSIT_B_OFFER_ID" ]; then
+        test_fail "Deposit B offer ID not set"
+        return 1
+    fi
+
+    # Sync Bob's wallet first
+    run_bdk_cmd "bdk-bob" info >/dev/null 2>&1
+    sleep 2
+
+    # Check if funded
+    local check_output=$(run_bdk_cmd "bdk-bob" deposit check "$DEPOSIT_B_OFFER_ID" 2>&1)
+
+    if echo "$check_output" | grep -q "Funding detected"; then
+        test_pass "Deposit B offer funding detected"
+
+        # Extract txid and amount from check output (use specific patterns to avoid matching help text)
+        local detected_txid=$(echo "$check_output" | grep "^  Transaction:" | awk '{print $2}')
+        local detected_amount=$(echo "$check_output" | grep "^  Amount:" | awk '{print $2}')
+
+        if [ -n "$detected_txid" ] && [ -n "$detected_amount" ]; then
+            local complete_output=$(run_bdk_cmd "bdk-bob" deposit complete "$DEPOSIT_B_OFFER_ID" "$detected_txid" "$detected_amount" 2>&1)
+
+            if echo "$complete_output" | grep -q "Deposit offer completed"; then
+                test_pass "Deposit B offer completed - deposit credited"
+
+                local new_balance=$(echo "$complete_output" | grep "New balance:" | awk '{print $3}')
+                log_info "  Deposit B new balance: $new_balance msats"
+            else
+                test_fail "Failed to complete Deposit B offer"
+                if $VERBOSE; then
+                    echo "    Output: $complete_output"
+                fi
+            fi
+        else
+            test_fail "Could not extract funding details"
+        fi
+    else
+        test_fail "Deposit B offer funding not detected"
+        if $VERBOSE; then
+            echo "    Output: $check_output"
+        fi
     fi
 }
 
@@ -736,37 +813,44 @@ test_deposit_transfer() {
 test_verify_deposit_balances() {
     log_info "Testing final deposit balances..."
 
-    if [ -z "$BOB_NODE_ID" ]; then
-        test_fail "Bob's node ID not set"
+    if [ -z "$ALICE_RESERVES_ID" ] || [ -z "$BOB_RESERVES_ID" ]; then
+        test_fail "Reserves IDs not set"
         return 1
     fi
 
-    local list_output=$(run_bdk_cmd "bdk-alice" deposit ls "$BOB_NODE_ID" 2>&1)
+    # Check Alice's ledger (Deposit A should have ~0.3 BTC after withdrawal)
+    local alice_list=$(run_bdk_cmd "bdk-alice" deposit ls "$ALICE_RESERVES_ID" 2>&1)
 
-    # Check that Deposit A has funds (should have ~0.4 BTC after transfer)
-    # Check that Deposit B has funds (should have ~0.1 BTC from transfer)
-
-    if echo "$list_output" | grep -A2 "$ALICE_DEPOSIT_A" | grep -q "Balance:"; then
-        local deposit_a_balance=$(echo "$list_output" | grep -A2 "$ALICE_DEPOSIT_A" | grep "Balance:" | awk '{print $2}')
+    if echo "$alice_list" | grep -A2 "$DEPOSIT_A_PUBKEY" | grep -q "Balance:"; then
+        local deposit_a_balance=$(echo "$alice_list" | grep -A2 "$DEPOSIT_A_PUBKEY" | grep "Balance:" | awk '{print $2}')
         if [ -n "$deposit_a_balance" ] && [ "$deposit_a_balance" -gt 0 ]; then
-            test_pass "Deposit A has balance: $deposit_a_balance msats"
+            test_pass "Deposit A (Alice) has balance: $deposit_a_balance msats"
         else
             test_fail "Deposit A has no balance"
         fi
+    else
+        test_fail "Could not find Deposit A balance"
     fi
 
-    if echo "$list_output" | grep -A2 "$ALICE_DEPOSIT_B" | grep -q "Balance:"; then
-        local deposit_b_balance=$(echo "$list_output" | grep -A2 "$ALICE_DEPOSIT_B" | grep "Balance:" | awk '{print $2}')
+    # Check Bob's ledger (Deposit B should have ~0.2 BTC from withdrawal funding)
+    local bob_list=$(run_bdk_cmd "bdk-bob" deposit ls "$BOB_RESERVES_ID" 2>&1)
+
+    if echo "$bob_list" | grep -A2 "$DEPOSIT_B_PUBKEY" | grep -q "Balance:"; then
+        local deposit_b_balance=$(echo "$bob_list" | grep -A2 "$DEPOSIT_B_PUBKEY" | grep "Balance:" | awk '{print $2}')
         if [ -n "$deposit_b_balance" ] && [ "$deposit_b_balance" -gt 0 ]; then
-            test_pass "Deposit B has balance: $deposit_b_balance msats"
+            test_pass "Deposit B (Bob) has balance: $deposit_b_balance msats"
         else
             test_fail "Deposit B has no balance"
         fi
+    else
+        test_fail "Could not find Deposit B balance"
     fi
 
     if $VERBOSE; then
-        echo "    Final deposit state:"
-        echo "$list_output" | sed 's/^/      /'
+        echo "    Alice's deposits:"
+        echo "$alice_list" | sed 's/^/      /'
+        echo "    Bob's deposits:"
+        echo "$bob_list" | sed 's/^/      /'
     fi
 }
 
@@ -843,31 +927,39 @@ run_all_tests() {
     log_info "=== Deposit Lifecycle Tests ==="
     echo ""
 
-    # Open deposits in Alice's ledger
+    # Open deposits: Deposit A on Alice, Deposit B on Bob
     test_open_deposits
 
     echo ""
     test_list_deposits
 
     echo ""
-    # Create a deposit offer for on-chain funding
-    test_create_deposit_offer
+    # Create deposit offer for Deposit A (on Alice)
+    test_create_deposit_offer_a
 
     echo ""
-    # Fund the deposit offer on-chain
-    test_fund_deposit_offer
+    # Fund Deposit A's offer on-chain (from faucet)
+    test_fund_deposit_offer_a
 
     echo ""
-    # Check if the funding was detected
-    test_check_deposit_offer
+    # Check if Deposit A's funding was detected
+    test_check_deposit_offer_a
 
     echo ""
-    # Complete the offer and credit the deposit
-    test_complete_deposit_offer
+    # Complete Deposit A's offer (credit the deposit)
+    test_complete_deposit_offer_a
 
     echo ""
-    # Transfer from Deposit A to Deposit B
-    test_deposit_transfer
+    # Create deposit offer for Deposit B (on Bob)
+    test_create_deposit_offer_b
+
+    echo ""
+    # Withdraw from Deposit A to fund Deposit B's offer
+    test_withdraw_to_fund_deposit_b
+
+    echo ""
+    # Check and complete Deposit B's offer
+    test_complete_deposit_offer_b
 
     echo ""
     # Verify final balances

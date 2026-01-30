@@ -96,7 +96,7 @@ pub enum DepositsEvent {
     },
 
     /// Payment was credited to a deposit
-    PaymentCredited {
+    InvoiceCredited {
         /// Deposit that received payment
         deposit_pubkey: PublicKey,
         /// Amount credited
@@ -144,35 +144,35 @@ pub enum DepositsEvent {
         timestamp: u64,
     },
 
-    // Transfer events
-    /// Balance was locked for a transfer
-    TransferLocked {
+    // Onchain withdrawal events
+    /// Balance was locked for an on-chain withdrawal
+    OnchainWithdrawalLocked {
         /// Deposit that had balance locked
         deposit_pubkey: PublicKey,
         /// Amount locked
         amount: u64,
-        /// Transfer identifier
-        transfer_id: [u8; 32],
+        /// Withdrawal identifier
+        withdrawal_id: [u8; 32],
     },
 
-    /// Transfer was completed successfully
-    TransferCompleted {
-        /// Deposit that sent the transfer
+    /// On-chain withdrawal was completed (confirmed on-chain)
+    OnchainWithdrawalCompleted {
+        /// Deposit that sent the withdrawal
         deposit_pubkey: PublicKey,
-        /// Amount transferred
+        /// Amount withdrawn
         amount: u64,
-        /// Transfer identifier
-        transfer_id: [u8; 32],
+        /// Withdrawal identifier
+        withdrawal_id: [u8; 32],
     },
 
-    /// Transfer failed and balance was unlocked
-    TransferFailed {
+    /// On-chain withdrawal failed and balance was unlocked
+    OnchainWithdrawalFailed {
         /// Deposit that had balance unlocked
         deposit_pubkey: PublicKey,
         /// Amount unlocked
         amount: u64,
-        /// Transfer identifier
-        transfer_id: [u8; 32],
+        /// Withdrawal identifier
+        withdrawal_id: [u8; 32],
     },
 
     // Cross-ledger audit events
@@ -289,7 +289,7 @@ impl_writeable_tlv_based_enum!(DepositsEvent,
 		(2, deposit_pubkey, required),
 		(4, amount, required),
 	},
-	(8, PaymentCredited) => {
+	(8, InvoiceCredited) => {
 		(0, deposit_pubkey, required),
 		(2, amount, required),
 	},
@@ -312,20 +312,20 @@ impl_writeable_tlv_based_enum!(DepositsEvent,
 		(2, amount, required),
 		(4, timestamp, required),
 	},
-	(13, TransferLocked) => {
+	(13, OnchainWithdrawalLocked) => {
 		(0, deposit_pubkey, required),
 		(2, amount, required),
-		(4, transfer_id, required),
+		(4, withdrawal_id, required),
 	},
-	(14, TransferCompleted) => {
+	(14, OnchainWithdrawalCompleted) => {
 		(0, deposit_pubkey, required),
 		(2, amount, required),
-		(4, transfer_id, required),
+		(4, withdrawal_id, required),
 	},
-	(15, TransferFailed) => {
+	(15, OnchainWithdrawalFailed) => {
 		(0, deposit_pubkey, required),
 		(2, amount, required),
-		(4, transfer_id, required),
+		(4, withdrawal_id, required),
 	},
 	(16, AuditCompleted) => {
 		(0, partner_node_id, required),

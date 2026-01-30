@@ -61,8 +61,8 @@ show_updates() {
 
     echo "=== Updates for $display_name ==="
 
-    # Get ledger history
-    local output=$(run_bdk_cmd "$node" ledger history 2>&1)
+    # Get ledger history and filter out log lines
+    local output=$(run_bdk_cmd "$node" ledger history 2>&1 | filter_logs)
 
     if echo "$output" | grep -q "Updates for ledger"; then
         echo "$output"

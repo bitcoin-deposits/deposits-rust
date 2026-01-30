@@ -115,7 +115,7 @@ impl Ledger {
     /// Create a new ledger as operator.
     pub fn new_as_operator(
         operator_key: PublicKey,
-        reserves_key: PublicKey,
+        reserves_key: String,
         ledger_address: String,
     ) -> Self {
         Self {
@@ -128,7 +128,7 @@ impl Ledger {
     /// Create a new ledger as partner.
     pub fn new_as_partner(
         operator_key: PublicKey,
-        reserves_key: PublicKey,
+        reserves_key: String,
         ledger_address: String,
     ) -> Self {
         Self {
@@ -142,7 +142,7 @@ impl Ledger {
     /// This constructor is provided for compatibility with existing code.
     pub fn new(
         operator_key: PublicKey,
-        reserves_key: PublicKey,
+        reserves_key: String,
         role: LedgerRole,
         collateral_partners: Vec<PublicKey>,
         ledger_address: String,
@@ -167,7 +167,7 @@ impl Ledger {
     /// ledgers >= half the operator's ledger size.
     pub fn with_enforcement_block(
         operator_key: PublicKey,
-        reserves_key: PublicKey,
+        reserves_key: String,
         role: LedgerRole,
         collateral_partners: Vec<PublicKey>,
         ledger_address: String,
@@ -317,17 +317,27 @@ impl Ledger {
         self.state.operator_key
     }
 
-    /// Get the partner's public key.
-    pub fn reserves_key(&self) -> PublicKey {
-        self.state.reserves_key
+    /// Get the reserves identifier (UTXO address for BDK, pubkey string for LDK).
+    pub fn reserves_key(&self) -> &str {
+        &self.state.reserves_key
+    }
+
+    /// Try to get reserves_key as a PublicKey (works for LDK where it's a pubkey string).
+    /// Returns None for BDK where reserves_key is an address.
+    pub fn reserves_key_as_pubkey(&self) -> Option<PublicKey> {
+        use std::str::FromStr;
+        PublicKey::from_str(&self.state.reserves_key).ok()
     }
 
     /// Get all quorum participants for this ledger.
-    /// Returns: operator + partner + all collateral partners.
+    /// Returns: operator + collateral partners. For LDK, also includes reserves partner.
     pub fn quorum_participants(&self) -> Vec<PublicKey> {
         let mut participants = Vec::with_capacity(2 + self.state.collateral_partners.len());
         participants.push(self.state.operator_key);
-        participants.push(self.state.reserves_key);
+        // Include reserves partner if it's a valid pubkey (LDK)
+        if let Some(reserves_pubkey) = self.reserves_key_as_pubkey() {
+            participants.push(reserves_pubkey);
+        }
         participants.extend(self.state.collateral_partners.iter().cloned());
         participants
     }
@@ -336,7 +346,10 @@ impl Ledger {
     /// This is the set of nodes the operator broadcasts updates to.
     pub fn all_partners(&self) -> Vec<PublicKey> {
         let mut partners = Vec::with_capacity(1 + self.state.collateral_partners.len());
-        partners.push(self.state.reserves_key);
+        // Include reserves partner if it's a valid pubkey (LDK)
+        if let Some(reserves_pubkey) = self.reserves_key_as_pubkey() {
+            partners.push(reserves_pubkey);
+        }
         partners.extend(self.state.collateral_partners.iter().cloned());
         partners
     }
@@ -348,7 +361,8 @@ impl Ledger {
                 "Operator cannot be a collateral partner".to_string()
             ));
         }
-        if partner == self.state.reserves_key {
+        // Compare with reserves_key (which is a String)
+        if partner.to_string() == self.state.reserves_key {
             return Err(DepositsError::InvalidState(
                 "Channel partner is already part of the quorum".to_string()
             ));
@@ -426,17 +440,17 @@ impl Ledger {
     }
 
     /// Check if a credit has been issued for a given payment hash.
-    /// This scans the history and deserializes PaymentCredit messages to check.
+    /// This scans the history and deserializes InvoiceCredit messages to check.
     pub fn has_credit_for_payment(&self, payment_hash: &[u8; 32]) -> bool {
         use crate::messages::DepositsMessage;
 
         for update in &self.history {
-            // Quick filter: only check PaymentCredit message types
-            // PaymentCredit is part of LedgerUpdate (0x8001) or standalone type (0x8005)
+            // Quick filter: only check InvoiceCredit message types
+            // InvoiceCredit is part of LedgerUpdate (0x8001) or standalone type (0x8005)
             if update.message_type == 0x8001 || update.message_type == 0x8005 {
                 if let Ok(msg) = DepositsMessage::decode(&update.message) {
                     if let DepositsMessage::LedgerUpdate(lu) = msg {
-                        if let LedgerOperation::PaymentCredit { payment_hash: hash, .. } = lu.operation {
+                        if let LedgerOperation::InvoiceCredit { payment_hash: hash, .. } = lu.operation {
                             if &hash == payment_hash {
                                 return true;
                             }
@@ -598,7 +612,7 @@ impl Ledger {
             operator_signature: [0u8; 64],
             partner_signature: [0u8; 64],
             operator_id: self.state.operator_key,
-            reserves_id: self.state.reserves_key,
+            reserves_id: self.state.reserves_key.clone(),
             sequence_number: sequence,
             previous_hash: prev_hash,
             current_hash: new_hash,
@@ -637,7 +651,8 @@ impl Ledger {
         match operation {
             LedgerOperation::ReservesIncrease { new_amount } => {
                 let current = self.reserves_amount();
-                if *new_amount <= current {
+                // Allow setting initial reserves (current == 0), otherwise must increase
+                if current > 0 && *new_amount <= current {
                     return Err(DepositsError::InvalidReservesDecrease(
                         "New amount must be greater than current".to_string(),
                     ));
@@ -675,7 +690,8 @@ impl Ledger {
                     });
                 }
             }
-            LedgerOperation::PaymentLock { pubkey, amount, .. } => {
+            LedgerOperation::InvoiceLock { pubkey, amount, .. } |
+            LedgerOperation::OnchainLock { deposit_pubkey: pubkey, amount, .. } => {
                 let deposit = self
                     .state
                     .deposits
@@ -702,14 +718,13 @@ impl Ledger {
                 operator_id,
                 reserves_id,
                 ledger_address,
-                reserves_amount,
                 collateral_enforcement_block,
             } => {
                 // LedgerOpen sets up the initial ledger identity
+                // Note: reserves amount is set via subsequent ReservesIncrease
                 self.state.operator_key = *operator_id;
-                self.state.reserves_key = *reserves_id;
+                self.state.reserves_key = reserves_id.clone();
                 self.state.ledger_address = ledger_address.clone();
-                self.state.reserves.amount = *reserves_amount;
                 self.state.collateral_enforcement_block = Some(*collateral_enforcement_block);
             }
             LedgerOperation::ReservesIncrease { new_amount } => {
@@ -730,7 +745,7 @@ impl Ledger {
                     deposit.fees = new_fees.clone();
                 }
             }
-            LedgerOperation::PaymentCredit {
+            LedgerOperation::InvoiceCredit {
                 deposit_pubkey,
                 amount,
                 ..
@@ -739,36 +754,46 @@ impl Ledger {
                     deposit.credit(*amount);
                 }
             }
-            LedgerOperation::PaymentLock { pubkey, amount, .. } => {
+            LedgerOperation::InvoiceLock { pubkey, amount, .. } => {
                 if let Some(deposit) = self.state.deposits.get_mut(pubkey) {
                     deposit.lock(*amount)?;
                 }
             }
-            LedgerOperation::PaymentFail { pubkey, amount, .. } => {
+            LedgerOperation::InvoiceFail { pubkey, amount, .. } => {
                 if let Some(deposit) = self.state.deposits.get_mut(pubkey) {
                     deposit.unlock(*amount);
                 }
             }
-            LedgerOperation::PaymentFulfill { pubkey, amount, .. } => {
+            LedgerOperation::InvoiceFulfill { pubkey, amount, .. } => {
                 if let Some(deposit) = self.state.deposits.get_mut(pubkey) {
                     deposit.fulfill(*amount);
                 }
             }
-            LedgerOperation::TransferLock { pubkey, amount, .. } => {
-                if let Some(deposit) = self.state.deposits.get_mut(pubkey) {
+            LedgerOperation::OnchainCredit {
+                deposit_pubkey,
+                amount,
+                ..
+            } => {
+                if let Some(deposit) = self.state.deposits.get_mut(deposit_pubkey) {
+                    deposit.credit(*amount);
+                }
+            }
+            LedgerOperation::OnchainLock { deposit_pubkey, amount, .. } => {
+                if let Some(deposit) = self.state.deposits.get_mut(deposit_pubkey) {
                     deposit.lock(*amount)?;
                 }
             }
-            LedgerOperation::TransferFail { pubkey, .. } => {
-                if let Some(deposit) = self.state.deposits.get_mut(pubkey) {
-                    // Transfer fail unlocks - but we don't have amount here
-                    // This is a simplified version
-                    deposit.unlock(0);
+            LedgerOperation::OnchainFail { deposit_pubkey, withdrawal_id: _ } => {
+                // Onchain fail needs to unlock the amount, but we don't track it here
+                // The withdrawal tracking should handle this
+                if let Some(_deposit) = self.state.deposits.get_mut(deposit_pubkey) {
+                    // TODO: Need to look up the withdrawal amount from withdrawal_id
                 }
             }
-            LedgerOperation::TransferFulfill { pubkey, amount, .. } => {
-                if let Some(deposit) = self.state.deposits.get_mut(pubkey) {
-                    deposit.credit(*amount);
+            LedgerOperation::OnchainFulfill { deposit_pubkey, .. } => {
+                // On fulfillment, the locked funds are released (already deducted)
+                if let Some(_deposit) = self.state.deposits.get_mut(deposit_pubkey) {
+                    // The funds were already locked, fulfillment just confirms
                 }
             }
             LedgerOperation::FeeCollect {
@@ -808,23 +833,27 @@ impl Ledger {
             }
             LedgerOperation::CollateralAttestation {
                 collateral_operator,
+                collateral_partner,
                 amount,
                 block_height,
                 signature,
                 ledger_hash,
             } => {
-                // Record the attestation if the partner is valid
+                // Record the attestation keyed by the actual collateral partner
                 use crate::types::CollateralAttestation;
                 let attestation = CollateralAttestation::new(
                     *collateral_operator,
-                    self.state.reserves_key, // Attestation from our partner
+                    *collateral_partner,
                     *amount,
                     *block_height,
                     *signature,
                     *ledger_hash,
                 );
-                // Insert even if not in collateral_partners - validation is done elsewhere
-                self.state.collateral_attestations.insert(self.state.reserves_key, attestation);
+                self.state.collateral_attestations.insert(*collateral_partner, attestation);
+                // Update received_collateral_amount - sum of all attestations
+                self.state.received_collateral_amount = self.state.collateral_attestations.values()
+                    .map(|a| a.available_collateral())
+                    .sum();
             }
         }
         Ok(())
@@ -1153,7 +1182,7 @@ impl LedgerManager {
     /// Create a new ledger as operator.
     pub fn create_as_operator(
         operator_key: PublicKey,
-        reserves_key: PublicKey,
+        reserves_key: String,
         ledger_address: String,
     ) -> Self {
         Self::new(Ledger::new_as_operator(operator_key, reserves_key, ledger_address))
@@ -1162,7 +1191,7 @@ impl LedgerManager {
     /// Create a new ledger as partner.
     pub fn create_as_partner(
         operator_key: PublicKey,
-        reserves_key: PublicKey,
+        reserves_key: String,
         ledger_address: String,
     ) -> Self {
         Self::new(Ledger::new_as_partner(operator_key, reserves_key, ledger_address))
@@ -1315,7 +1344,7 @@ impl LedgerManager {
     /// where the handshake itself is not recorded as a ledger operation.
     pub fn create_empty_ledger(
         operator_key: PublicKey,
-        reserves_key: PublicKey,
+        reserves_key: String,
         role: LedgerRole,
         collateral_partners: Vec<PublicKey>,
         ledger_address: String,
@@ -1337,7 +1366,7 @@ impl LedgerManager {
     /// and returns the manager along with the genesis hash.
     pub fn create_ledger(
         operator_key: PublicKey,
-        reserves_key: PublicKey,
+        reserves_key: String,
         role: LedgerRole,
         collateral_partners: Vec<PublicKey>,
         ledger_address: String,
@@ -1368,15 +1397,16 @@ impl LedgerManager {
     /// If the current reserves are insufficient, this will first apply a
     /// reserves increase, then apply the credit.
     ///
-    /// The credit_operation must be a `PaymentCredit` variant.
+    /// The credit_operation must be an `InvoiceCredit` or `OnchainCredit` variant.
     pub fn credit_payment_with_reserves_topup(
         &mut self,
         credit_operation: LedgerOperation,
     ) -> DepositsResult<Vec<[u8; 32]>> {
         // Extract the credit amount from the operation
         let credit_amount = match &credit_operation {
-            LedgerOperation::PaymentCredit { amount, .. } => *amount,
-            _ => return Err(DepositsError::InvalidReservesDecrease("Expected PaymentCredit operation".to_string())),
+            LedgerOperation::InvoiceCredit { amount, .. } => *amount,
+            LedgerOperation::OnchainCredit { amount, .. } => *amount,
+            _ => return Err(DepositsError::InvalidReservesDecrease("Expected InvoiceCredit or OnchainCredit operation".to_string())),
         };
 
         let mut hashes = Vec::new();
@@ -1419,7 +1449,7 @@ mod tests {
     fn test_ledger_creation() {
         let op = test_pubkey();
         let partner = test_pubkey_2();
-        let ledger = Ledger::new_as_operator(op, partner, "tb1q...".to_string());
+        let ledger = Ledger::new_as_operator(op, partner.to_string(), "tb1q...".to_string());
 
         assert_eq!(ledger.role, LedgerRole::Operator);
         assert_eq!(ledger.sequence(), 0);
@@ -1430,7 +1460,7 @@ mod tests {
     fn test_reserves_increase() {
         let op = test_pubkey();
         let partner = test_pubkey_2();
-        let mut ledger = Ledger::new_as_operator(op, partner, "tb1q...".to_string());
+        let mut ledger = Ledger::new_as_operator(op, partner.to_string(), "tb1q...".to_string());
 
         // Initial reserves are 0, use ReservesIncrease to add funds
         let op = LedgerOperation::ReservesIncrease { new_amount: 100_000 };
@@ -1444,7 +1474,7 @@ mod tests {
     fn test_deposit_lifecycle() {
         let op_key = test_pubkey();
         let partner = test_pubkey_2();
-        let mut ledger = Ledger::new_as_operator(op_key, partner, "tb1q...".to_string());
+        let mut ledger = Ledger::new_as_operator(op_key, partner.to_string(), "tb1q...".to_string());
 
         // Add reserves first via ReservesIncrease
         ledger
@@ -1467,7 +1497,7 @@ mod tests {
 
         // Credit deposit
         ledger
-            .apply_operation(&LedgerOperation::PaymentCredit {
+            .apply_operation(&LedgerOperation::InvoiceCredit {
                 payment_hash: [0u8; 32],
                 deposit_pubkey: user,
                 amount: 50_000,
@@ -1483,7 +1513,7 @@ mod tests {
     fn test_hash_chain() {
         let op = test_pubkey();
         let partner = test_pubkey_2();
-        let mut ledger = Ledger::new_as_operator(op, partner, "tb1q...".to_string());
+        let mut ledger = Ledger::new_as_operator(op, partner.to_string(), "tb1q...".to_string());
 
         let initial_hash = ledger.hash();
         assert_eq!(initial_hash, [0u8; 32]);

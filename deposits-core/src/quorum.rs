@@ -36,14 +36,14 @@ use crate::error::DepositsError;
 use crate::types::{QuorumJoinRequestMsg, QuorumJoinResponseMsg, QuorumVoteMsg};
 
 /// Identifies a specific ledger by its operator-partner pair
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct LedgerId {
     pub operator_id: PublicKey,
-    pub reserves_id: PublicKey,
+    pub reserves_id: String,
 }
 
 impl LedgerId {
-    pub fn new(operator_id: PublicKey, reserves_id: PublicKey) -> Self {
+    pub fn new(operator_id: PublicKey, reserves_id: String) -> Self {
         Self { operator_id, reserves_id }
     }
 }
@@ -148,9 +148,11 @@ pub struct QuorumState {
 }
 
 impl QuorumState {
-    /// Create a new quorum for a ledger with operator and partner as initial members
-    pub fn new(operator_id: PublicKey, reserves_id: PublicKey) -> Self {
-        let ledger_id = LedgerId::new(operator_id, reserves_id);
+    /// Create a new quorum for a ledger with operator and reserves identifier
+    pub fn new(operator_id: PublicKey, reserves_id: String) -> Self {
+        use std::str::FromStr;
+
+        let ledger_id = LedgerId::new(operator_id, reserves_id.clone());
         let mut members = HashMap::new();
 
         // Add operator as initial member
@@ -165,17 +167,20 @@ impl QuorumState {
                 .as_secs(),
         });
 
-        // Add partner as initial member
-        members.insert(reserves_id, QuorumMember {
-            pubkey: reserves_id,
-            status: MemberStatus::Active,
-            last_sequence: 0,
-            last_state_hash: [0u8; 32],
-            last_activity: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-        });
+        // Add partner as initial member only if reserves_id is a valid pubkey (LDK case)
+        // For BDK, reserves_id is an address, not a pubkey, so we skip adding it
+        if let Ok(partner_pubkey) = PublicKey::from_str(&reserves_id) {
+            members.insert(partner_pubkey, QuorumMember {
+                pubkey: partner_pubkey,
+                status: MemberStatus::Active,
+                last_sequence: 0,
+                last_state_hash: [0u8; 32],
+                last_activity: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            });
+        }
 
         Self {
             ledger_id,
@@ -226,13 +231,13 @@ impl QuorumManager {
         }
     }
 
-    /// Create a new quorum for a ledger (called by operator/partner)
+    /// Create a new quorum for a ledger (called by operator/reserves)
     pub fn create_quorum(
         &self,
         operator_id: PublicKey,
-        reserves_id: PublicKey,
+        reserves_id: String,
     ) -> Result<(), DepositsError> {
-        let ledger_id = LedgerId::new(operator_id, reserves_id);
+        let ledger_id = LedgerId::new(operator_id, reserves_id.clone());
         let quorum = QuorumState::new(operator_id, reserves_id);
 
         let mut quorums = self.quorums.write().unwrap();
@@ -250,7 +255,7 @@ impl QuorumManager {
         &self,
         msg: &QuorumJoinRequestMsg,
     ) -> Result<QuorumJoinResponseMsg, DepositsError> {
-        let ledger_id = LedgerId::new(msg.operator_id, msg.reserves_id);
+        let ledger_id = LedgerId::new(msg.operator_id, msg.reserves_id.clone());
 
         let mut quorums = self.quorums.write().unwrap();
         let quorum = quorums.get_mut(&ledger_id).ok_or_else(|| {
@@ -411,10 +416,10 @@ impl QuorumManager {
             DepositsError::InvalidState("No quorum exists for this ledger".to_string())
         })?;
 
-        // Don't allow removing operator or partner (they're always members)
-        if *member_pubkey == quorum.ledger_id.operator_id || *member_pubkey == quorum.ledger_id.reserves_id {
+        // Don't allow removing operator or reserves (they're always members)
+        if *member_pubkey == quorum.ledger_id.operator_id || member_pubkey.to_string() == quorum.ledger_id.reserves_id {
             return Err(DepositsError::InvalidState(
-                "Cannot remove operator or partner from quorum".to_string()
+                "Cannot remove operator or reserves from quorum".to_string()
             ));
         }
 
@@ -548,9 +553,9 @@ mod tests {
         let partner = generate_test_pubkey(2);
 
         let manager = QuorumManager::new(operator);
-        manager.create_quorum(operator, partner).unwrap();
+        manager.create_quorum(operator, partner.to_string()).unwrap();
 
-        let ledger_id = LedgerId::new(operator, partner);
+        let ledger_id = LedgerId::new(operator, partner.to_string());
         let members = manager.get_quorum(&ledger_id).unwrap();
 
         assert_eq!(members.len(), 2);
@@ -565,12 +570,12 @@ mod tests {
         let auditor = generate_test_pubkey(3);
 
         let manager = QuorumManager::new(operator);
-        manager.create_quorum(operator, partner).unwrap();
+        manager.create_quorum(operator, partner.to_string()).unwrap();
 
         let join_request = QuorumJoinRequestMsg {
             requester_pubkey: auditor,
             operator_id: operator,
-            reserves_id: partner,
+            reserves_id: partner.to_string(),
             protocol_version: 1,
             timestamp: 12345,
             signature: [0u8; 64],
@@ -588,13 +593,13 @@ mod tests {
         let partner = generate_test_pubkey(2);
 
         let manager = QuorumManager::new(operator);
-        manager.create_quorum(operator, partner).unwrap();
+        manager.create_quorum(operator, partner.to_string()).unwrap();
 
         // Try to join as operator (already a member)
         let join_request = QuorumJoinRequestMsg {
             requester_pubkey: operator,
             operator_id: operator,
-            reserves_id: partner,
+            reserves_id: partner.to_string(),
             protocol_version: 1,
             timestamp: 12345,
             signature: [0u8; 64],
@@ -614,13 +619,13 @@ mod tests {
         let auditor3 = generate_test_pubkey(5);
 
         let manager = QuorumManager::new(operator);
-        manager.create_quorum(operator, partner).unwrap();
+        manager.create_quorum(operator, partner.to_string()).unwrap();
 
         // First auditor joins
         let join_request1 = QuorumJoinRequestMsg {
             requester_pubkey: auditor1,
             operator_id: operator,
-            reserves_id: partner,
+            reserves_id: partner.to_string(),
             protocol_version: 1,
             timestamp: 12345,
             signature: [0u8; 64],
@@ -633,7 +638,7 @@ mod tests {
         let join_request2 = QuorumJoinRequestMsg {
             requester_pubkey: auditor2,
             operator_id: operator,
-            reserves_id: partner,
+            reserves_id: partner.to_string(),
             protocol_version: 1,
             timestamp: 12346,
             signature: [0u8; 64],
@@ -646,7 +651,7 @@ mod tests {
         let join_request3 = QuorumJoinRequestMsg {
             requester_pubkey: auditor3,
             operator_id: operator,
-            reserves_id: partner,
+            reserves_id: partner.to_string(),
             protocol_version: 1,
             timestamp: 12347,
             signature: [0u8; 64],
@@ -656,7 +661,7 @@ mod tests {
         assert_eq!(response3.members.len(), 5);
 
         // Verify all members are present
-        let ledger_id = LedgerId::new(operator, partner);
+        let ledger_id = LedgerId::new(operator, partner.to_string());
         let members = manager.get_quorum(&ledger_id).unwrap();
         assert!(members.contains(&operator));
         assert!(members.contains(&partner));
@@ -672,13 +677,13 @@ mod tests {
         let auditor = generate_test_pubkey(3);
 
         let manager = QuorumManager::new(operator);
-        manager.create_quorum(operator, partner).unwrap();
+        manager.create_quorum(operator, partner.to_string()).unwrap();
 
         // Auditor joins
         let join_request = QuorumJoinRequestMsg {
             requester_pubkey: auditor,
             operator_id: operator,
-            reserves_id: partner,
+            reserves_id: partner.to_string(),
             protocol_version: 1,
             timestamp: 12345,
             signature: [0u8; 64],
@@ -686,7 +691,7 @@ mod tests {
         manager.handle_join_request(&join_request).unwrap();
 
         // Update auditor's state after syncing
-        let ledger_id = LedgerId::new(operator, partner);
+        let ledger_id = LedgerId::new(operator, partner.to_string());
         let state_hash = [42u8; 32];
         let result = manager.update_member_state(&ledger_id, &auditor, 100, state_hash);
         assert!(result.is_ok());
@@ -703,13 +708,13 @@ mod tests {
         let auditor = generate_test_pubkey(3);
 
         let manager = QuorumManager::new(operator);
-        manager.create_quorum(operator, partner).unwrap();
+        manager.create_quorum(operator, partner.to_string()).unwrap();
 
         // Auditor joins
         let join_request = QuorumJoinRequestMsg {
             requester_pubkey: auditor,
             operator_id: operator,
-            reserves_id: partner,
+            reserves_id: partner.to_string(),
             protocol_version: 1,
             timestamp: 12345,
             signature: [0u8; 64],
@@ -717,7 +722,7 @@ mod tests {
         manager.handle_join_request(&join_request).unwrap();
 
         // Cast votes
-        let ledger_id = LedgerId::new(operator, partner);
+        let ledger_id = LedgerId::new(operator, partner.to_string());
         let vote_round_id = [1u8; 32];
 
         // Operator votes conforming
@@ -767,9 +772,9 @@ mod tests {
         let non_member = generate_test_pubkey(99);
 
         let manager = QuorumManager::new(operator);
-        manager.create_quorum(operator, partner).unwrap();
+        manager.create_quorum(operator, partner.to_string()).unwrap();
 
-        let ledger_id = LedgerId::new(operator, partner);
+        let ledger_id = LedgerId::new(operator, partner.to_string());
         let vote = QuorumVoteMsg {
             vote_round_id: [1u8; 32],
             voter_pubkey: non_member,
@@ -791,9 +796,9 @@ mod tests {
         let partner1 = generate_test_pubkey(2);
         let partner2 = generate_test_pubkey(3);
 
-        let ledger_id1 = LedgerId::new(operator, partner1);
-        let ledger_id2 = LedgerId::new(operator, partner2);
-        let ledger_id1_again = LedgerId::new(operator, partner1);
+        let ledger_id1 = LedgerId::new(operator, partner1.to_string());
+        let ledger_id2 = LedgerId::new(operator, partner2.to_string());
+        let ledger_id1_again = LedgerId::new(operator, partner1.to_string());
 
         // Different partners = different ledger IDs
         assert_ne!(ledger_id1, ledger_id2);
@@ -807,7 +812,7 @@ mod tests {
         let partner = generate_test_pubkey(2);
 
         let manager = QuorumManager::new(operator);
-        manager.create_quorum(operator, partner).unwrap();
+        manager.create_quorum(operator, partner.to_string()).unwrap();
 
         // Fill up the quorum (default max is 10, we have 2 already)
         for i in 3..=10 {
@@ -815,7 +820,7 @@ mod tests {
             let join_request = QuorumJoinRequestMsg {
                 requester_pubkey: auditor,
                 operator_id: operator,
-                reserves_id: partner,
+                reserves_id: partner.to_string(),
                 protocol_version: 1,
                 timestamp: 12340 + i as u64,
                 signature: [0u8; 64],
@@ -829,7 +834,7 @@ mod tests {
         let join_request = QuorumJoinRequestMsg {
             requester_pubkey: extra_auditor,
             operator_id: operator,
-            reserves_id: partner,
+            reserves_id: partner.to_string(),
             protocol_version: 1,
             timestamp: 12351,
             signature: [0u8; 64],
@@ -846,9 +851,9 @@ mod tests {
         let non_member = generate_test_pubkey(99);
 
         let manager = QuorumManager::new(operator);
-        manager.create_quorum(operator, partner).unwrap();
+        manager.create_quorum(operator, partner.to_string()).unwrap();
 
-        let ledger_id = LedgerId::new(operator, partner);
+        let ledger_id = LedgerId::new(operator, partner.to_string());
         let result = manager.update_member_state(&ledger_id, &non_member, 100, [42u8; 32]);
         assert!(result.is_err());
     }
@@ -861,7 +866,7 @@ mod tests {
         let manager = QuorumManager::new(operator);
         // Don't create the quorum
 
-        let ledger_id = LedgerId::new(operator, partner);
+        let ledger_id = LedgerId::new(operator, partner.to_string());
         let result = manager.get_quorum(&ledger_id);
         assert!(result.is_none());
     }
@@ -877,9 +882,9 @@ mod tests {
         let collateral_partner = generate_test_pubkey(3);
 
         let manager = QuorumManager::new(operator);
-        manager.create_quorum(operator, partner).unwrap();
+        manager.create_quorum(operator, partner.to_string()).unwrap();
 
-        let ledger_id = LedgerId::new(operator, partner);
+        let ledger_id = LedgerId::new(operator, partner.to_string());
 
         // Initially only operator and partner
         let members = manager.get_quorum(&ledger_id).unwrap();
@@ -903,9 +908,9 @@ mod tests {
         let collateral_partner = generate_test_pubkey(3);
 
         let manager = QuorumManager::new(operator);
-        manager.create_quorum(operator, partner).unwrap();
+        manager.create_quorum(operator, partner.to_string()).unwrap();
 
-        let ledger_id = LedgerId::new(operator, partner);
+        let ledger_id = LedgerId::new(operator, partner.to_string());
 
         // Add same member twice - should be idempotent
         manager.add_member(&ledger_id, collateral_partner).unwrap();
@@ -925,7 +930,7 @@ mod tests {
         let manager = QuorumManager::new(operator);
         // Don't create the quorum
 
-        let ledger_id = LedgerId::new(operator, partner);
+        let ledger_id = LedgerId::new(operator, partner.to_string());
         let result = manager.add_member(&ledger_id, collateral_partner);
         assert!(result.is_err());
     }
@@ -937,9 +942,9 @@ mod tests {
         let collateral_partner = generate_test_pubkey(3);
 
         let manager = QuorumManager::new(operator);
-        manager.create_quorum(operator, partner).unwrap();
+        manager.create_quorum(operator, partner.to_string()).unwrap();
 
-        let ledger_id = LedgerId::new(operator, partner);
+        let ledger_id = LedgerId::new(operator, partner.to_string());
 
         // Add collateral partner
         manager.add_member(&ledger_id, collateral_partner).unwrap();
@@ -962,9 +967,9 @@ mod tests {
         let collateral_partner = generate_test_pubkey(3);
 
         let manager = QuorumManager::new(operator);
-        manager.create_quorum(operator, partner).unwrap();
+        manager.create_quorum(operator, partner.to_string()).unwrap();
 
-        let ledger_id = LedgerId::new(operator, partner);
+        let ledger_id = LedgerId::new(operator, partner.to_string());
 
         // Add then remove twice - second remove should be no-op
         manager.add_member(&ledger_id, collateral_partner).unwrap();
@@ -981,9 +986,9 @@ mod tests {
         let partner = generate_test_pubkey(2);
 
         let manager = QuorumManager::new(operator);
-        manager.create_quorum(operator, partner).unwrap();
+        manager.create_quorum(operator, partner.to_string()).unwrap();
 
-        let ledger_id = LedgerId::new(operator, partner);
+        let ledger_id = LedgerId::new(operator, partner.to_string());
 
         // Try to remove operator - should fail
         let result = manager.remove_member(&ledger_id, &operator);
@@ -1000,9 +1005,9 @@ mod tests {
         let partner = generate_test_pubkey(2);
 
         let manager = QuorumManager::new(operator);
-        manager.create_quorum(operator, partner).unwrap();
+        manager.create_quorum(operator, partner.to_string()).unwrap();
 
-        let ledger_id = LedgerId::new(operator, partner);
+        let ledger_id = LedgerId::new(operator, partner.to_string());
 
         // Try to remove partner - should fail
         let result = manager.remove_member(&ledger_id, &partner);
@@ -1022,9 +1027,9 @@ mod tests {
         let collateral3 = generate_test_pubkey(5);
 
         let manager = QuorumManager::new(operator);
-        manager.create_quorum(operator, partner).unwrap();
+        manager.create_quorum(operator, partner.to_string()).unwrap();
 
-        let ledger_id = LedgerId::new(operator, partner);
+        let ledger_id = LedgerId::new(operator, partner.to_string());
 
         // Add multiple collateral partners
         manager.add_member(&ledger_id, collateral1).unwrap();
@@ -1044,9 +1049,9 @@ mod tests {
         let partner = generate_test_pubkey(2);
 
         let manager = QuorumManager::new(operator);
-        manager.create_quorum(operator, partner).unwrap();
+        manager.create_quorum(operator, partner.to_string()).unwrap();
 
-        let ledger_id = LedgerId::new(operator, partner);
+        let ledger_id = LedgerId::new(operator, partner.to_string());
 
         // Fill up the quorum (default max is 10, we have 2)
         for i in 3..=10 {
@@ -1072,9 +1077,9 @@ mod tests {
         let collateral = generate_test_pubkey(3);
 
         let manager = QuorumManager::new(operator);
-        manager.create_quorum(operator, partner).unwrap();
+        manager.create_quorum(operator, partner.to_string()).unwrap();
 
-        let ledger_id = LedgerId::new(operator, partner);
+        let ledger_id = LedgerId::new(operator, partner.to_string());
         manager.add_member(&ledger_id, collateral).unwrap();
 
         // Verify member is active by checking we can update their state

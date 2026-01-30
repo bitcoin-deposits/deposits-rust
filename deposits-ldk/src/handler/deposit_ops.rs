@@ -53,7 +53,7 @@ where
             .get_deposit_balance(deposit_pubkey)
     }
 
-    fn find_deposit_by_payment_hash(&self, payment_hash: &[u8; 32]) -> Option<(PublicKey, PublicKey, u64)> {
+    fn find_deposit_by_payment_hash(&self, payment_hash: &[u8; 32]) -> std::option::Option<(std::string::String, bitcoin::secp256k1::PublicKey, u64)> {
         self.core_handler
             .as_ref()
             .expect("core_handler must be initialized")
@@ -183,14 +183,14 @@ mod tests {
     use std::sync::RwLock;
 
     /// Helper to add an operator ledger (where handler's node is operator)
-    fn add_operator_ledger(handler: &DepositsHandler<Arc<TestLogger>>, partner: PublicKey) {
+    fn add_operator_ledger(handler: &DepositsHandler<Arc<TestLogger>>, reserves_id: &str) {
         let ledger = Ledger::new_as_operator(
             handler.our_node_id,
-            partner,
+            reserves_id.to_string(),
             "tb1qtest".to_string(),
         );
         handler.ledgers.lock().unwrap().insert(
-            (handler.our_node_id, partner),
+            (handler.our_node_id, reserves_id.to_string()),
             Arc::new(RwLock::new(ledger))
         );
     }
@@ -198,13 +198,13 @@ mod tests {
     /// Helper to add a deposit to a ledger
     fn add_deposit_to_ledger(
         handler: &DepositsHandler<Arc<TestLogger>>,
-        partner: PublicKey,
+        reserves_id: &str,
         deposit_pubkey: PublicKey,
         balance: u64,
         locked_balance: u64,
     ) {
         let ledgers = handler.ledgers.lock().unwrap();
-        if let Some(ledger_arc) = ledgers.get(&(handler.our_node_id, partner)) {
+        if let Some(ledger_arc) = ledgers.get(&(handler.our_node_id, reserves_id.to_string())) {
             let mut ledger = ledger_arc.write().unwrap();
             let mut deposit = deposits_core::Deposit::new(deposit_pubkey, None);
             deposit.balance = balance;
@@ -216,14 +216,14 @@ mod tests {
     /// Helper to add an invoice to a deposit
     fn add_invoice_to_deposit(
         handler: &DepositsHandler<Arc<TestLogger>>,
-        partner: PublicKey,
+        reserves_id: &str,
         deposit_pubkey: PublicKey,
         payment_hash: [u8; 32],
         amount: u64,
         expires: u64,
     ) {
         let ledgers = handler.ledgers.lock().unwrap();
-        if let Some(ledger_arc) = ledgers.get(&(handler.our_node_id, partner)) {
+        if let Some(ledger_arc) = ledgers.get(&(handler.our_node_id, reserves_id.to_string())) {
             let mut ledger = ledger_arc.write().unwrap();
             if let Some(deposit) = ledger.state.deposits.get_mut(&deposit_pubkey) {
                 let invoice = deposits_core::Invoice {
@@ -242,13 +242,13 @@ mod tests {
     #[test]
     fn test_list_deposits_with_deposits() {
         let handler = create_test_handler();
-        let partner = create_test_pubkey(10);
+        let reserves_id = "reserves-10";
         let deposit1 = create_test_pubkey(11);
         let deposit2 = create_test_pubkey(12);
 
-        add_operator_ledger(&handler, partner);
-        add_deposit_to_ledger(&handler, partner, deposit1, 100_000, 0);
-        add_deposit_to_ledger(&handler, partner, deposit2, 200_000, 0);
+        add_operator_ledger(&handler, reserves_id);
+        add_deposit_to_ledger(&handler, reserves_id, deposit1, 100_000, 0);
+        add_deposit_to_ledger(&handler, reserves_id, deposit2, 200_000, 0);
 
         let deposits = handler.list_deposits().unwrap();
         assert_eq!(deposits.len(), 2);
@@ -259,11 +259,11 @@ mod tests {
     #[test]
     fn test_list_deposits_for_depositor_found() {
         let handler = create_test_handler();
-        let partner = create_test_pubkey(20);
+        let reserves_id = "reserves-20";
         let depositor = create_test_pubkey(21);
 
-        add_operator_ledger(&handler, partner);
-        add_deposit_to_ledger(&handler, partner, depositor, 100_000, 0);
+        add_operator_ledger(&handler, reserves_id);
+        add_deposit_to_ledger(&handler, reserves_id, depositor, 100_000, 0);
 
         let deposits = handler.list_deposits_for_depositor(depositor).unwrap();
         assert_eq!(deposits.len(), 1);
@@ -273,11 +273,11 @@ mod tests {
     #[test]
     fn test_list_deposits_for_pubkey_found() {
         let handler = create_test_handler();
-        let partner = create_test_pubkey(30);
+        let reserves_id = "reserves-30";
         let deposit = create_test_pubkey(31);
 
-        add_operator_ledger(&handler, partner);
-        add_deposit_to_ledger(&handler, partner, deposit, 100_000, 0);
+        add_operator_ledger(&handler, reserves_id);
+        add_deposit_to_ledger(&handler, reserves_id, deposit, 100_000, 0);
 
         let deposits = handler.list_deposits_for_pubkey(deposit).unwrap();
         assert_eq!(deposits.len(), 1);
@@ -287,11 +287,11 @@ mod tests {
     #[test]
     fn test_get_deposit_balance_found() {
         let handler = create_test_handler();
-        let partner = create_test_pubkey(40);
+        let reserves_id = "reserves-40";
         let deposit = create_test_pubkey(41);
 
-        add_operator_ledger(&handler, partner);
-        add_deposit_to_ledger(&handler, partner, deposit, 100_000, 0);
+        add_operator_ledger(&handler, reserves_id);
+        add_deposit_to_ledger(&handler, reserves_id, deposit, 100_000, 0);
 
         let balance = handler.get_deposit_balance(deposit).unwrap();
         assert_eq!(balance, 100_000);
@@ -300,11 +300,11 @@ mod tests {
     #[test]
     fn test_get_deposit_balance_with_locked() {
         let handler = create_test_handler();
-        let partner = create_test_pubkey(50);
+        let reserves_id = "reserves-50";
         let deposit = create_test_pubkey(51);
 
-        add_operator_ledger(&handler, partner);
-        add_deposit_to_ledger(&handler, partner, deposit, 100_000, 30_000);
+        add_operator_ledger(&handler, reserves_id);
+        add_deposit_to_ledger(&handler, reserves_id, deposit, 100_000, 30_000);
 
         let balance = handler.get_deposit_balance(deposit).unwrap();
         assert_eq!(balance, 70_000); // 100_000 - 30_000
@@ -313,18 +313,18 @@ mod tests {
     #[test]
     fn test_find_deposit_by_payment_hash_found() {
         let handler = create_test_handler();
-        let partner = create_test_pubkey(60);
+        let reserves_id = "reserves-60";
         let deposit = create_test_pubkey(61);
         let payment_hash = [0xAB; 32];
 
-        add_operator_ledger(&handler, partner);
-        add_deposit_to_ledger(&handler, partner, deposit, 100_000, 0);
-        add_invoice_to_deposit(&handler, partner, deposit, payment_hash, 50_000, u64::MAX);
+        add_operator_ledger(&handler, reserves_id);
+        add_deposit_to_ledger(&handler, reserves_id, deposit, 100_000, 0);
+        add_invoice_to_deposit(&handler, reserves_id, deposit, payment_hash, 50_000, u64::MAX);
 
         let result = handler.find_deposit_by_payment_hash(&payment_hash);
         assert!(result.is_some());
-        let (found_partner, found_deposit, amount) = result.unwrap();
-        assert_eq!(found_partner, partner);
+        let (found_reserves_id, found_deposit, amount) = result.unwrap();
+        assert_eq!(found_reserves_id, reserves_id);
         assert_eq!(found_deposit, deposit);
         assert_eq!(amount, 50_000);
     }
@@ -332,15 +332,15 @@ mod tests {
     #[test]
     fn test_get_active_depositors_with_deposits() {
         let handler = create_test_handler();
-        let partner = create_test_pubkey(70);
+        let reserves_id = "reserves-70";
         let deposit1 = create_test_pubkey(71);
         let deposit2 = create_test_pubkey(72);
         let deposit3 = create_test_pubkey(73);
 
-        add_operator_ledger(&handler, partner);
-        add_deposit_to_ledger(&handler, partner, deposit1, 100_000, 0); // active
-        add_deposit_to_ledger(&handler, partner, deposit2, 0, 0);       // zero balance
-        add_deposit_to_ledger(&handler, partner, deposit3, 50_000, 0);  // active
+        add_operator_ledger(&handler, reserves_id);
+        add_deposit_to_ledger(&handler, reserves_id, deposit1, 100_000, 0); // active
+        add_deposit_to_ledger(&handler, reserves_id, deposit2, 0, 0);       // zero balance
+        add_deposit_to_ledger(&handler, reserves_id, deposit3, 50_000, 0);  // active
 
         let depositors = handler.get_active_depositors();
         assert_eq!(depositors.len(), 2);
@@ -353,12 +353,13 @@ mod tests {
     fn test_get_total_deposit_balances_with_ledger() {
         let handler = create_test_handler();
         let partner = create_test_pubkey(80);
+        let reserves_id = partner.to_string();
         let deposit1 = create_test_pubkey(81);
         let deposit2 = create_test_pubkey(82);
 
-        add_operator_ledger(&handler, partner);
-        add_deposit_to_ledger(&handler, partner, deposit1, 100_000, 0);
-        add_deposit_to_ledger(&handler, partner, deposit2, 200_000, 0);
+        add_operator_ledger(&handler, &reserves_id);
+        add_deposit_to_ledger(&handler, &reserves_id, deposit1, 100_000, 0);
+        add_deposit_to_ledger(&handler, &reserves_id, deposit2, 200_000, 0);
 
         let total = handler.get_total_deposit_balances(partner);
         assert!(total.is_some());
@@ -369,12 +370,13 @@ mod tests {
     fn test_get_deposits_for_partner_with_ledger() {
         let handler = create_test_handler();
         let partner = create_test_pubkey(90);
+        let reserves_id = partner.to_string();
         let deposit1 = create_test_pubkey(91);
         let deposit2 = create_test_pubkey(92);
 
-        add_operator_ledger(&handler, partner);
-        add_deposit_to_ledger(&handler, partner, deposit1, 100_000, 10_000);
-        add_deposit_to_ledger(&handler, partner, deposit2, 200_000, 50_000);
+        add_operator_ledger(&handler, &reserves_id);
+        add_deposit_to_ledger(&handler, &reserves_id, deposit1, 100_000, 10_000);
+        add_deposit_to_ledger(&handler, &reserves_id, deposit2, 200_000, 50_000);
 
         let deposits = handler.get_deposits_for_partner(partner);
         assert!(deposits.is_some());
@@ -396,15 +398,16 @@ mod tests {
     fn test_get_max_outstanding_invoice_with_invoices() {
         let handler = create_test_handler();
         let partner = create_test_pubkey(100);
+        let reserves_id = partner.to_string();
         let deposit = create_test_pubkey(101);
 
-        add_operator_ledger(&handler, partner);
-        add_deposit_to_ledger(&handler, partner, deposit, 100_000, 0);
-        add_invoice_to_deposit(&handler, partner, deposit, [0x01; 32], 50_000, u64::MAX);
+        add_operator_ledger(&handler, &reserves_id);
+        add_deposit_to_ledger(&handler, &reserves_id, deposit, 100_000, 0);
+        add_invoice_to_deposit(&handler, &reserves_id, deposit, [0x01; 32], 50_000, u64::MAX);
 
         {
             let ledgers = handler.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(handler.our_node_id, partner)) {
+            if let Some(ledger_arc) = ledgers.get(&(handler.our_node_id, reserves_id.clone())) {
                 let mut ledger = ledger_arc.write().unwrap();
                 if let Some(dep) = ledger.state.deposits.get_mut(&deposit) {
                     let invoice2 = deposits_core::Invoice {
@@ -438,10 +441,11 @@ mod tests {
     fn test_get_max_outstanding_invoice_empty() {
         let handler = create_test_handler();
         let partner = create_test_pubkey(110);
+        let reserves_id = partner.to_string();
         let deposit = create_test_pubkey(111);
 
-        add_operator_ledger(&handler, partner);
-        add_deposit_to_ledger(&handler, partner, deposit, 100_000, 0);
+        add_operator_ledger(&handler, &reserves_id);
+        add_deposit_to_ledger(&handler, &reserves_id, deposit, 100_000, 0);
         // No invoices added
 
         let max = handler.get_max_outstanding_invoice_amount(partner);
@@ -452,15 +456,15 @@ mod tests {
     #[test]
     fn test_list_deposits_multiple_ledgers() {
         let handler = create_test_handler();
-        let partner1 = create_test_pubkey(120);
-        let partner2 = create_test_pubkey(121);
+        let reserves_id1 = "reserves-120";
+        let reserves_id2 = "reserves-121";
         let deposit1 = create_test_pubkey(122);
         let deposit2 = create_test_pubkey(123);
 
-        add_operator_ledger(&handler, partner1);
-        add_operator_ledger(&handler, partner2);
-        add_deposit_to_ledger(&handler, partner1, deposit1, 100_000, 0);
-        add_deposit_to_ledger(&handler, partner2, deposit2, 200_000, 0);
+        add_operator_ledger(&handler, reserves_id1);
+        add_operator_ledger(&handler, reserves_id2);
+        add_deposit_to_ledger(&handler, reserves_id1, deposit1, 100_000, 0);
+        add_deposit_to_ledger(&handler, reserves_id2, deposit2, 200_000, 0);
 
         let deposits = handler.list_deposits().unwrap();
         assert_eq!(deposits.len(), 2);

@@ -88,7 +88,7 @@ where
         let operator_id = sender;
 
         // Don't create audit ledgers for our own direct ledgers
-        if operator_id == self.our_node_id || reserves_id == self.our_node_id {
+        if operator_id == self.our_node_id || reserves_id == self.our_node_id.to_string() {
             log_debug!(
                 self.logger,
                 "📋 AUDIT: Skipping audit ledger creation - we are part of this ledger (operator={}, partner={})",
@@ -108,10 +108,11 @@ where
 
 
         // Get or create audit ledger for this (operator, partner) pair
+        let reserves_id_for_closure = reserves_id.clone();
         let ledger_arc = {
             let mut ledgers = self.ledgers.lock().unwrap();
             ledgers
-                .entry((operator_id, reserves_id))
+                .entry((operator_id, reserves_id.clone()))
                 .or_insert_with(|| {
                     use bitcoin::secp256k1::{Secp256k1, SecretKey};
                     use bitcoin::hashes::{sha256, Hash};
@@ -121,7 +122,7 @@ where
                     let secp = Secp256k1::new();
                     let mut hash_data = Vec::new();
                     hash_data.extend_from_slice(&operator_id.serialize());
-                    hash_data.extend_from_slice(&reserves_id.serialize());
+                    hash_data.extend_from_slice(reserves_id_for_closure.as_bytes());
                     let hash = sha256::Hash::hash(&hash_data);
                     let secret_key = SecretKey::from_slice(&hash[..]).expect("Valid hash");
                     let secp_pubkey = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
@@ -132,7 +133,7 @@ where
 
                     Arc::new(RwLock::new(Ledger::new(
                         operator_id,
-                        reserves_id,
+                        reserves_id_for_closure.clone(),
                         LedgerRole::Auditor,
                         Vec::new(), // No collateral partners for audit ledgers
                         placeholder_address.to_string(),
@@ -146,37 +147,25 @@ where
         if let DepositsMessage::Handshake(ref handshake_msg) = message {
             let mut ledger = ledger_arc.write().unwrap();
 
-            // Parse and validate the ledger address
-            match handshake_msg.ledger_address.parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>() {
-                Ok(unchecked_addr) => {
-                    match unchecked_addr.require_network(bitcoin::Network::Regtest) {
-                        Ok(validated_addr) => {
-                            ledger.state.ledger_address = validated_addr.to_string();
+            // For LDK, ledger address is derived from funding UTXO (placeholder for audit ledgers)
+            // In a full implementation, this would compute the taproot address
+            let ledger_address = format!("bcrt1q{}audit", hex::encode(&handshake_msg.funding_txid[..4]));
+            ledger.state.ledger_address = ledger_address;
 
-                            // Apply Handshake if this is the first update
-                            if ledger.history.is_empty() {
-                                if let Err(e) = ledger.append_mut(DepositsMessage::Handshake(handshake_msg.clone())) {
-                                    log_error!(self.logger, "📋 AUDIT: Failed to apply Handshake: {}", e);
-                                }
-                            }
-
-                            log_info!(self.logger, "📋 AUDIT: Handshake processed (operator={}, partner={})",
-                                     operator_id, reserves_id);
-
-                            drop(ledger);
-                            let ledger_for_persist = ledger_arc.read().unwrap();
-                            if let Err(e) = self.persist_audit_ledger_state(operator_id, reserves_id, &ledger_for_persist) {
-                                log_error!(self.logger, "📋 AUDIT: Failed to persist audit ledger: {}", e);
-                            }
-                        }
-                        Err(e) => {
-                            log_error!(self.logger, "📋 AUDIT: Invalid network for ledger address: {}", e);
-                        }
-                    }
+            // Apply Handshake if this is the first update
+            if ledger.history.is_empty() {
+                if let Err(e) = ledger.append_mut(DepositsMessage::Handshake(handshake_msg.clone())) {
+                    log_error!(self.logger, "📋 AUDIT: Failed to apply Handshake: {}", e);
                 }
-                Err(e) => {
-                    log_error!(self.logger, "📋 AUDIT: Failed to parse ledger address: {}", e);
-                }
+            }
+
+            log_info!(self.logger, "📋 AUDIT: Handshake processed (operator={}, partner={})",
+                     operator_id, reserves_id);
+
+            drop(ledger);
+            let ledger_for_persist = ledger_arc.read().unwrap();
+            if let Err(e) = self.persist_audit_ledger_state(operator_id, &reserves_id, &ledger_for_persist) {
+                log_error!(self.logger, "📋 AUDIT: Failed to persist audit ledger: {}", e);
             }
         } else if message.is_ledger_operation() {
             // Unified handling for all ledger operations (V2 LedgerUpdate)
@@ -189,7 +178,7 @@ where
                 log_debug!(self.logger, "📋 AUDIT: Message type {:#06x} applied to audit ledger", message.message_type());
                 drop(ledger);
                 let ledger_for_persist = ledger_arc.read().unwrap();
-                if let Err(e) = self.persist_audit_ledger_state(operator_id, reserves_id, &ledger_for_persist) {
+                if let Err(e) = self.persist_audit_ledger_state(operator_id, &reserves_id, &ledger_for_persist) {
                     log_error!(self.logger, "📋 AUDIT: Failed to persist audit ledger: {}", e);
                 }
             }

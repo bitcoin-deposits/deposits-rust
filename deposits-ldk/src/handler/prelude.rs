@@ -35,7 +35,7 @@ pub use deposits_core::{
     handler_types::{
         CosignedInvoice, VoteRoundState, ProtocolStats,
         LedgerSummary, ReservesSummary, CollateralPartnerInfo, CollateralInfo,
-        PendingTransfer, PendingPayment,
+        PendingPayment,
     },
 
     // Tapscript reserves

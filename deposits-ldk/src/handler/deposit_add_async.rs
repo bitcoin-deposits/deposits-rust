@@ -40,7 +40,7 @@ where
         // Check for duplicate deposit before proceeding
         {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let ledger = ledger_arc.read().unwrap();
                 if ledger.state.deposits.contains_key(&deposit_pubkey) {
                     log_info!(
@@ -74,7 +74,7 @@ where
                 if *operator == self.our_node_id {
                     operator_ledger_count += 1;
                 }
-                if *partner == self.our_node_id {
+                if *partner == self.our_node_id.to_string() {
                     partner_ledger_count += 1;
                 }
             }
@@ -96,7 +96,7 @@ where
             log_info!(self.logger, "✅ COLLATERAL CHECK PASSED: {} operator ledgers (partner={} for reference)",
                 operator_ledger_count, partner_ledger_count);
 
-            if let Some(ledger_arc) = all_ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = all_ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let ledger = ledger_arc.read().unwrap();
 
                 // Check if ledger can accept changes (no uncommitted changes)
@@ -120,7 +120,7 @@ where
         // First, capture prev_hash before creating the message
         let prev_hash = {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let ledger = ledger_arc.read().unwrap();
                 ledger.tail_hash()
             } else {
@@ -145,7 +145,7 @@ where
         // Track pending ACK in ledger BEFORE sending (so handle_ack can find it)
         {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let _ledger = ledger_arc.write().unwrap();
                 // Track pending ACK
                 {
@@ -180,7 +180,7 @@ where
         // STAGE 3: Apply the change now that ACK is confirmed
         let (new_hash, sequence_number) = {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let mut ledger = ledger_arc.write().unwrap();
                 let hash = ledger.append_mut(message_for_broadcast.clone())?;
                 let seq = (ledger.history.len() - 1) as u64; // 0-based (index of just-appended entry)
@@ -196,13 +196,13 @@ where
         // Update sent_messages_for_broadcast with correct new_hash and sequence
         {
             let mut sent_messages = self.sent_messages_for_broadcast.lock().unwrap();
-            sent_messages.insert(message_hash, (self.our_node_id, partner_node_id, message_for_broadcast.clone(), prev_hash, new_hash, sequence_number));
+            sent_messages.insert(message_hash, (self.our_node_id, partner_node_id.to_string(), message_for_broadcast.clone(), prev_hash, new_hash, sequence_number));
         }
 
         // Reacquire ledger lock for remaining operations
         {
             let ledgers = self.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let mut ledger = ledger_arc.write().unwrap();
 
                 // Update partner_deepest_ack_hash since partner just ACKed this update

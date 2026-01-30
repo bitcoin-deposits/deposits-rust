@@ -72,7 +72,7 @@ $DC down -v --remove-orphans 2>/dev/null || true
 docker image prune -f 2>/dev/null || true
 
 if ! $QUICK; then
-    # Rebuild deposits-bdk
+    # Rebuild deposits-bdk image (shared by all nodes)
     log_info "Building deposits-bdk image..."
     $DC build --no-cache bdk-alice
 fi

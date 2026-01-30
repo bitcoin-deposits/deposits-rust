@@ -43,13 +43,13 @@ fn event_from_operation(operation: &LedgerOperation) -> Option<DepositsEvent> {
                 amount: *new_amount,
             })
         }
-        LedgerOperation::PaymentCredit { deposit_pubkey, amount, .. } => {
-            Some(DepositsEvent::PaymentCredited {
+        LedgerOperation::InvoiceCredit { deposit_pubkey, amount, .. } => {
+            Some(DepositsEvent::InvoiceCredited {
                 deposit_pubkey: *deposit_pubkey,
                 amount: *amount,
             })
         }
-        LedgerOperation::PaymentFulfill { pubkey, amount, .. } => {
+        LedgerOperation::InvoiceFulfill { pubkey, amount, .. } => {
             Some(DepositsEvent::PaymentDebited {
                 deposit_pubkey: *pubkey,
                 amount: *amount,
@@ -102,12 +102,13 @@ where
     ///
     /// This prevents using ledgers from force-closed channels
     pub fn list_active_partners(&self) -> Vec<PublicKey> {
+        use std::str::FromStr;
         // Get all ledger partners where we are the operator
         let ledger_partners: Vec<PublicKey> = {
             let ledgers = self.ledgers.lock().unwrap();
             ledgers.keys()
                 .filter(|(operator, _partner)| *operator == self.our_node_id)
-                .map(|(_operator, partner)| *partner)
+                .filter_map(|(_operator, partner)| PublicKey::from_str(partner).ok())
                 .collect()
         };
 

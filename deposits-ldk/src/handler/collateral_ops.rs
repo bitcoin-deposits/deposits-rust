@@ -22,7 +22,7 @@ where
     fn get_collateral_info(&self, partner_node_id: PublicKey) -> Option<CollateralInfo> {
         let ledgers = self.ledgers.lock().unwrap();
 
-        if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+        if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
             let ledger = ledger_arc.read().unwrap();
 
             let collateral_partners: Vec<CollateralPartnerInfo> = ledger.state.collateral_partners.iter()
@@ -60,7 +60,7 @@ where
     fn get_collateral_partners(&self, partner_node_id: PublicKey) -> Vec<PublicKey> {
         let ledgers = self.ledgers.lock().unwrap();
 
-        if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+        if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
             let ledger = ledger_arc.read().unwrap();
             ledger.state.collateral_partners.iter().cloned().collect()
         } else {
@@ -71,7 +71,7 @@ where
     fn is_collateral_partner(&self, partner_node_id: PublicKey, potential_collateral: PublicKey) -> bool {
         let ledgers = self.ledgers.lock().unwrap();
 
-        if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+        if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
             let ledger = ledger_arc.read().unwrap();
             ledger.state.collateral_partners.contains(&potential_collateral)
         } else {
@@ -82,7 +82,7 @@ where
     fn get_total_available_collateral(&self, partner_node_id: PublicKey) -> u64 {
         let ledgers = self.ledgers.lock().unwrap();
 
-        if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+        if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
             let ledger = ledger_arc.read().unwrap();
             ledger.state.collateral_attestations.values()
                 .map(|a| a.available_collateral())

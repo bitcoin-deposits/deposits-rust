@@ -44,7 +44,7 @@ where
         // Idempotency check: if ledger already exists, return error
         {
             let ledgers = self.ledgers.lock().unwrap();
-            if ledgers.contains_key(&(self.our_node_id, partner_node_id)) {
+            if ledgers.contains_key(&(self.our_node_id, partner_node_id.to_string())) {
                 return Err(DepositsError::LedgerAlreadyExists);
             }
         }
@@ -75,11 +75,9 @@ where
             min_protocol_version: deposits_core::constants::DEPOSITS_PROTOCOL_VERSION,
             features: 0,
             operator_id: self.our_node_id,
-            reserves_id: partner_node_id,
-            ledger_address: multisig_address.to_string(),
+            reserves_id: partner_node_id.to_string(),
             funding_txid,
             funding_vout,
-            reserves_amount: 0, // Will be set when reserves are established
             collateral_enforcement_block: 0, // Immediate enforcement (joining established network)
         });
 
@@ -87,7 +85,7 @@ where
         // The handshake_msg is a protocol message, not a ledger operation, so we use create_empty_ledger
         let (_manager, _genesis_hash) = LedgerManager::create_empty_ledger(
             self.our_node_id,
-            partner_node_id,
+            partner_node_id.to_string(),
             LedgerRole::Operator,
             Vec::new(), // No collateral partners yet
             multisig_address.to_string(),
@@ -106,11 +104,11 @@ where
 
         // Store the ledger in memory - we are the operator
         let mut ledgers = self.ledgers.lock().unwrap();
-        ledgers.insert((self.our_node_id, partner_node_id), Arc::new(RwLock::new(ledger)));
+        ledgers.insert((self.our_node_id, partner_node_id.to_string()), Arc::new(RwLock::new(ledger)));
         drop(ledgers);
 
         // Create the quorum for this ledger so collateral partners can be added later
-        if let Err(e) = self.quorum_manager.create_quorum(self.our_node_id, partner_node_id) {
+        if let Err(e) = self.quorum_manager.create_quorum(self.our_node_id, partner_node_id.to_string()) {
             log_warn!(self.logger, "Failed to create quorum for ledger ({}, {}): {:?}",
                 self.our_node_id, partner_node_id, e);
         } else {
@@ -134,7 +132,7 @@ where
         // The handshake_msg is a protocol message, not a ledger operation, so we use create_empty_ledger
         let (_manager, _genesis_hash) = LedgerManager::create_empty_ledger(
             operator_node_id,
-            self.our_node_id,
+            self.our_node_id.to_string(),
             LedgerRole::Partner,
             Vec::new(), // No collateral partners yet
             multisig_address.to_string(),
@@ -149,11 +147,11 @@ where
 
         // Store the ledger in memory - operator_node_id is the operator, we are partner
         let mut ledgers = self.ledgers.lock().unwrap();
-        ledgers.insert((operator_node_id, self.our_node_id), Arc::new(RwLock::new(ledger)));
+        ledgers.insert((operator_node_id, self.our_node_id.to_string()), Arc::new(RwLock::new(ledger)));
         drop(ledgers);
 
         // Create the quorum for this ledger so collateral partners can be tracked
-        if let Err(e) = self.quorum_manager.create_quorum(operator_node_id, self.our_node_id) {
+        if let Err(e) = self.quorum_manager.create_quorum(operator_node_id, self.our_node_id.to_string()) {
             log_warn!(self.logger, "Failed to create quorum for ledger ({}, {}): {:?}",
                 operator_node_id, self.our_node_id, e);
         } else {
@@ -198,11 +196,9 @@ where
             min_protocol_version: deposits_core::constants::DEPOSITS_PROTOCOL_VERSION,
             features: 0,
             operator_id: operator_node_id,
-            reserves_id: self.our_node_id,
-            ledger_address: multisig_address.to_string(),
+            reserves_id: self.our_node_id.to_string(),
             funding_txid,
             funding_vout,
-            reserves_amount: 0, // Partner doesn't set reserves directly
             collateral_enforcement_block: 0, // Immediate enforcement
         });
 
@@ -210,7 +206,7 @@ where
         // The handshake_msg is a protocol message, not a ledger operation, so we use create_empty_ledger
         let (_manager, _genesis_hash) = LedgerManager::create_empty_ledger(
             operator_node_id,
-            self.our_node_id,
+            self.our_node_id.to_string(),
             LedgerRole::Partner,
             Vec::new(), // No collateral partners yet
             multisig_address.to_string(),
@@ -225,11 +221,11 @@ where
 
         // Store the ledger in memory - operator_node_id is the operator, we are partner
         let mut ledgers = self.ledgers.lock().unwrap();
-        ledgers.insert((operator_node_id, self.our_node_id), Arc::new(RwLock::new(ledger)));
+        ledgers.insert((operator_node_id, self.our_node_id.to_string()), Arc::new(RwLock::new(ledger)));
         drop(ledgers);
 
         // Create the quorum for this ledger so collateral partners can be tracked
-        if let Err(e) = self.quorum_manager.create_quorum(operator_node_id, self.our_node_id) {
+        if let Err(e) = self.quorum_manager.create_quorum(operator_node_id, self.our_node_id.to_string()) {
             log_warn!(self.logger, "Failed to create quorum for ledger ({}, {}): {:?}",
                 operator_node_id, self.our_node_id, e);
         } else {

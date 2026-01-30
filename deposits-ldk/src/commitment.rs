@@ -468,9 +468,17 @@ mod tests {
     use bitcoin::secp256k1::{Secp256k1, SecretKey};
     use std::sync::Arc;
 
+    // Local TestLogger to avoid dependency on lightning's test_utils feature
+    struct TestLogger;
+    impl lightning::util::logger::Logger for TestLogger {
+        fn log(&self, record: lightning::util::logger::Record) {
+            println!("[{}] {}", record.level, record.args);
+        }
+    }
+
     #[test]
     fn test_commitment_enhancer_creation() {
-        let logger = Arc::new(lightning::util::test_utils::TestLogger::new());
+        let logger = Arc::new(TestLogger);
 
         let mut rng = OsRng;
         let operator_sk = SecretKey::new(&mut rng);
@@ -496,7 +504,7 @@ mod tests {
 
     #[test]
     fn test_reserves_proposal_flow() {
-        let logger = Arc::new(lightning::util::test_utils::TestLogger::new());
+        let logger = Arc::new(TestLogger);
 
         let mut rng = OsRng;
         let operator_sk = SecretKey::new(&mut rng);
@@ -530,7 +538,7 @@ mod tests {
 
     #[test]
     fn test_reserves_balance_validation() {
-        let logger = Arc::new(lightning::util::test_utils::TestLogger::new());
+        let logger = Arc::new(TestLogger);
 
         let mut rng = OsRng;
         let operator_sk = SecretKey::new(&mut rng);
@@ -558,7 +566,7 @@ mod tests {
 
     #[test]
     fn test_commitment_ledger_hash() {
-        let logger = Arc::new(lightning::util::test_utils::TestLogger::new());
+        let logger = Arc::new(TestLogger);
 
         let mut rng = OsRng;
         let operator_sk = SecretKey::new(&mut rng);

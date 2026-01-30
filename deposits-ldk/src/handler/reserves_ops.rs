@@ -24,7 +24,7 @@ where
     fn get_channel_reserves_status(&self, partner_node_id: PublicKey) -> Result<ReservesStatus, DepositsError> {
         let ledgers = self.ledgers.lock().unwrap();
 
-        if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+        if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
             let ledger = ledger_arc.read().unwrap();
 
             let total_deposit_balances = LedgerValidator::total_balance(&ledger);
@@ -59,7 +59,7 @@ where
     fn get_channel_reserves_amount(&self, partner_node_id: PublicKey) -> Option<u64> {
         let ledgers = self.ledgers.lock().unwrap();
 
-        if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id)) {
+        if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
             let ledger = ledger_arc.read().unwrap();
             Some(ledger.reserves_amount())
         } else {
@@ -148,7 +148,6 @@ mod tests {
     }
 
     use deposits_core::Ledger;
-    use deposits_core::{Deposit, FeeStructure};
     use std::sync::RwLock;
 
     /// Helper to add an operator ledger with optional reserves
@@ -159,7 +158,7 @@ mod tests {
     ) {
         let mut ledger = Ledger::new_as_operator(
             handler.our_node_id,
-            partner,
+            partner.to_string(),
             "tb1qtest".to_string(),
         );
         // Set reserves via ReservesOutput
@@ -169,7 +168,7 @@ mod tests {
             handler.our_node_id,
         );
         handler.ledgers.lock().unwrap().insert(
-            (handler.our_node_id, partner),
+            (handler.our_node_id, partner.to_string()),
             Arc::new(RwLock::new(ledger))
         );
     }
@@ -183,7 +182,7 @@ mod tests {
         locked_balance: u64,
     ) {
         let ledgers = handler.ledgers.lock().unwrap();
-        if let Some(ledger_arc) = ledgers.get(&(handler.our_node_id, partner)) {
+        if let Some(ledger_arc) = ledgers.get(&(handler.our_node_id, partner.to_string())) {
             let mut ledger = ledger_arc.write().unwrap();
             // Use deposits-core Deposit type
             let mut deposit = deposits_core::Deposit::new(deposit_pubkey, None);
