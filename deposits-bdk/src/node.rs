@@ -259,77 +259,20 @@ impl Node {
         // For BDK, use the ledger_address as the reserves_id (identifies the reserves UTXO)
         let reserves_id = ledger_address.clone();
 
-        let _ledger = Ledger::with_enforcement_block(
-            self.node_id,
-            reserves_id.clone(),
-            deposits_core::ledger::LedgerRole::Operator,
-            Vec::new(), // No collateral partners initially
-            ledger_address.clone(),
-            enforcement,
-        );
-
-        // Store the ledger in the handler (indexed by operator_id, reserves_id)
+        // Get or create the ledger - this automatically adds LedgerOpen and ReservesIncrease
+        // if it's a new ledger for our own operator
         let ledger_arc = self.handler.get_or_create_ledger(self.node_id, reserves_id.clone());
 
-        // Check if this ledger already exists with history (from previous run)
-        let is_new_ledger = {
-            let ledger_guard = ledger_arc.read().unwrap();
-            ledger_guard.history.is_empty()
-        };
-
-        if is_new_ledger {
-            // New ledger - set up state and append operations
-            {
-                let mut ledger_guard = ledger_arc.write().unwrap();
-                // Update with our configuration
-                ledger_guard.state.reserves = deposits_core::types::ReservesOutput {
-                    channel_id: [0u8; 32], // Not using channels in BDK
-                    spend_to: self.node_id,
-                    amount: reserves_balance,
-                };
-                ledger_guard.state.collateral_enforcement_block = enforcement;
-                ledger_guard.state.ledger_address = ledger_address.clone();
-            }
-
-            // Persist the ledger after modification
-            if let Err(e) = self.handler.persist_ledger(&self.node_id, &reserves_id) {
-                tracing::error!("Failed to persist ledger: {}", e);
-            }
-
-            // Add LedgerOpen operation to history
-            {
-                let operation = LedgerOperation::LedgerOpen {
-                    operator_id: self.node_id,
-                    reserves_id: reserves_id.clone(),
-                    ledger_address: ledger_address.clone(),
-                    collateral_enforcement_block: enforcement_block,
-                };
-
-                let mut ledger_guard = ledger_arc.write().unwrap();
-                ledger_guard.append_operation(operation, deposits_core::messages::consts::LEDGER_OPEN_REQUEST)
-                    .map_err(|e| Error::Protocol(format!("Failed to append LedgerOpen: {:?}", e)))?;
-            }
-
-            // Add ReservesIncrease operation with the UTXO amount
-            {
-                let operation = LedgerOperation::ReservesIncrease {
-                    new_amount: reserves_balance,
-                };
-
-                let mut ledger_guard = ledger_arc.write().unwrap();
-                ledger_guard.append_operation(operation, deposits_core::messages::consts::RESERVES_INCREASE)
-                    .map_err(|e| Error::Protocol(format!("Failed to append ReservesIncrease: {:?}", e)))?;
-            }
-
-            // Persist the ledger after adding history
-            if let Err(e) = self.handler.persist_ledger(&self.node_id, &reserves_id) {
-                tracing::error!("Failed to persist ledger: {}", e);
-            }
-        } else {
-            // Ledger already exists - just update state if needed
+        // Update enforcement block and other state
+        {
             let mut ledger_guard = ledger_arc.write().unwrap();
             ledger_guard.state.collateral_enforcement_block = enforcement;
-            // Note: Don't update reserves.amount as that requires a proper operation
+            ledger_guard.state.reserves.spend_to = self.node_id;
+        }
+
+        // Persist the ledger
+        if let Err(e) = self.handler.persist_ledger(&self.node_id, &reserves_id) {
+            tracing::error!("Failed to persist ledger: {}", e);
         }
 
         // Create handshake message to send to partner (wire protocol)

@@ -385,11 +385,13 @@ mod tests {
         let min_amount_sats = 10_000u64;
         let deadline_block = 800_000u32;
 
+        let partner_reserves_id = partner_pubkey.to_string();
+
         // Create signature
         let sig = create_deposit_offer_signature(
             &operator_secret,
             &operator_pubkey,
-            &partner_pubkey,
+            &partner_reserves_id,
             &deposit_pubkey,
             funding_address,
             max_amount_sats,
@@ -400,7 +402,7 @@ mod tests {
         // Create the offer struct
         let signing_message = DepositOffer::signing_message(
             &operator_pubkey,
-            &partner_pubkey,
+            &partner_reserves_id,
             &deposit_pubkey,
             funding_address,
             max_amount_sats,
@@ -411,7 +413,7 @@ mod tests {
 
         let offer = DepositOffer {
             operator_id: operator_pubkey,
-            reserves_id: partner_pubkey,
+            reserves_id: partner_reserves_id.clone(),
             deposit_pubkey,
             funding_address: funding_address.to_string(),
             max_amount_sats,
@@ -442,12 +444,13 @@ mod tests {
         let max_amount_sats = 1_000_000u64;
         let min_amount_sats = 10_000u64;
         let deadline_block = 800_000u32;
+        let partner_reserves_id = partner_pubkey.to_string();
 
         // Create signature with original amount
         let sig = create_deposit_offer_signature(
             &operator_secret,
             &operator_pubkey,
-            &partner_pubkey,
+            &partner_reserves_id,
             &deposit_pubkey,
             funding_address,
             max_amount_sats,
@@ -458,7 +461,7 @@ mod tests {
         // Create offer with different amount
         let signing_message = DepositOffer::signing_message(
             &operator_pubkey,
-            &partner_pubkey,
+            &partner_reserves_id,
             &deposit_pubkey,
             funding_address,
             max_amount_sats + 1000, // Different amount!
@@ -469,7 +472,7 @@ mod tests {
 
         let offer = DepositOffer {
             operator_id: operator_pubkey,
-            reserves_id: partner_pubkey,
+            reserves_id: partner_reserves_id.clone(),
             deposit_pubkey,
             funding_address: funding_address.to_string(),
             max_amount_sats: max_amount_sats + 1000, // Different amount!
