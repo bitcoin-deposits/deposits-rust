@@ -622,7 +622,7 @@ pub fn validate_ledger_operation<C: ValidationContext>(
         LedgerOperation::CollateralAttestation { .. } |
         LedgerOperation::CollateralAddPartner { .. } |
         LedgerOperation::CollateralRemovePartner { .. } |
-        LedgerOperation::CollateralPledge { .. } |
+        LedgerOperation::CollateralLock { .. } |
         LedgerOperation::Tombstone { .. } => Ok(()),
     }
 }

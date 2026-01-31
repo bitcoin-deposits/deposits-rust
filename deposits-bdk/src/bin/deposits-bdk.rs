@@ -545,11 +545,9 @@ async fn ledger_history(args: &[String]) -> Result<(), Box<dyn std::error::Error
 
     // Get the ledger - either by reserves_id or primary ledger
     let (reserves_id, ledger) = if let Some(id_str) = reserves_id_str {
-        let partner_pubkey = PublicKey::from_str(&id_str)
-            .map_err(|e| format!("Invalid reserves ID: {}", e))?;
-        let ledger = node.get_ledger(partner_pubkey)
-            .ok_or("Ledger not found")?;
-        (id_str, ledger) // Return String, not PublicKey
+        // Look up ledger by reserves_id (Bitcoin address string)
+        node.get_ledger_by_reserves_id(&id_str)
+            .ok_or_else(|| format!("Ledger not found for reserves_id: {}", id_str))?
     } else {
         // No argument - get primary ledger
         node.get_primary_ledger()
@@ -629,7 +627,7 @@ fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
         COLLATERAL_ATTESTATION => "CollateralAttestation",
         COLLATERAL_ADD_PARTNER => "CollateralAddPartner",
         COLLATERAL_REMOVE_PARTNER => "CollateralRemovePartner",
-        COLLATERAL_PLEDGE => "CollateralPledge",
+        COLLATERAL_LOCK => "CollateralLock",
         DEPOSIT_OPEN => "DepositOpen",
         DEPOSIT_CLOSE => "DepositClose",
         DEPOSIT_UPDATE => "DepositUpdate",
@@ -665,10 +663,12 @@ fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                     let pk_bytes = collateral_partner.serialize();
                     format!("partner:{:02x}{:02x}{:02x}{:02x}", pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3])
                 }
-                LedgerOperation::CollateralAttestation { amount, .. } => {
-                    format!("{} sat", amount)
+                LedgerOperation::CollateralAttestation { collateral_operator, amount, lock_until_block, .. } => {
+                    let pk_bytes = collateral_operator.serialize();
+                    format!("from:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  until_block:{}",
+                        pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3], amount, lock_until_block)
                 }
-                LedgerOperation::CollateralPledge { deposit_pubkey, amount, lock_until_block, .. } => {
+                LedgerOperation::CollateralLock { deposit_pubkey, amount, lock_until_block, .. } => {
                     let pk_bytes = deposit_pubkey.serialize();
                     format!("pk:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  until_block:{}",
                         pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3], amount, lock_until_block)
@@ -823,27 +823,30 @@ async fn partner_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 /// Handle collateral subcommands
 async fn collateral_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {
-        eprintln!("Usage: deposits-bdk collateral <pledge> [args...]");
+        eprintln!("Usage: deposits-bdk collateral <lock> [args...]");
         return Ok(());
     }
 
     match args[0].as_str() {
-        "pledge" => collateral_pledge(&args[1..]).await,
+        "lock" | "pledge" => collateral_lock(&args[1..]).await,
+        "record" => collateral_record(&args[1..]).await,
         cmd => {
             eprintln!("Unknown collateral subcommand: {}", cmd);
-            eprintln!("Usage: deposits-bdk collateral <pledge> [args...]");
+            eprintln!("Usage: deposits-bdk collateral <lock|record> [args...]");
             Ok(())
         }
     }
 }
 
-/// Pledge deposit balance as collateral backing for the operator
-async fn collateral_pledge(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    // Parse positional arguments: <reserves_id> <deposit_secret> <amount_msats> <lock_blocks>
+/// Lock deposit balance as collateral backing for the operator
+/// Returns a signed attestation that the requesting operator can record on their ledger
+async fn collateral_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    // Parse positional arguments: <reserves_id> <deposit_secret> <amount_msats> <lock_blocks> [requesting_operator]
     let mut reserves_id: Option<String> = None;
     let mut deposit_secret_hex: Option<String> = None;
     let mut amount_msats: Option<u64> = None;
     let mut lock_blocks: Option<u32> = None;
+    let mut requesting_operator_hex: Option<String> = None;
     let mut config_args = Vec::new();
 
     let mut i = 0;
@@ -862,6 +865,8 @@ async fn collateral_pledge(args: &[String]) -> Result<(), Box<dyn std::error::Er
             amount_msats = Some(args[i].parse().map_err(|_| "Invalid amount_msats")?);
         } else if lock_blocks.is_none() {
             lock_blocks = Some(args[i].parse().map_err(|_| "Invalid lock_blocks")?);
+        } else if requesting_operator_hex.is_none() {
+            requesting_operator_hex = Some(args[i].clone());
         }
         i += 1;
     }
@@ -888,23 +893,87 @@ async fn collateral_pledge(args: &[String]) -> Result<(), Box<dyn std::error::Er
     let current_block = node.wallet.get_block_height()?;
     let lock_until_block = current_block + lock_blocks;
 
-    println!("Creating collateral pledge...");
+    // Parse requesting operator (defaults to self if not specified)
+    let requesting_operator = if let Some(hex) = requesting_operator_hex {
+        PublicKey::from_str(&hex).map_err(|e| format!("Invalid requesting_operator: {}", e))?
+    } else {
+        node.node_id
+    };
+
+    println!("Creating collateral lock...");
     println!("  Reserves ID: {}", reserves_id);
     println!("  Deposit: {}", deposit_pubkey);
     println!("  Amount: {} msats", amount_msats);
     println!("  Lock until block: {} (current: {}, +{} blocks)", lock_until_block, current_block, lock_blocks);
+    println!("  Requesting operator: {}", requesting_operator);
 
-    let (pledge_amount, pledge_expires) = node.pledge_collateral(
+    let attestation = node.lock_collateral(
         &reserves_id,
         deposit_pubkey,
         &deposit_secret,
         amount_msats,
         lock_until_block,
+        requesting_operator,
     )?;
 
-    println!("\nCollateral pledge created!");
-    println!("  Pledged amount: {} msats", pledge_amount);
-    println!("  Lock expires: block {}", pledge_expires);
+    println!("\nCollateral lock created!");
+    println!("  Total locked: {} msats", attestation.amount);
+    println!("  Lock expires: block {}", attestation.lock_until_block);
+    println!("  Attestation for: {}", attestation.collateral_partner);
+
+    // Output the attestation as JSON for the requesting operator to use
+    let attestation_json = serde_json::to_string(&attestation)?;
+    println!("\nAttestation (record on requesting operator's ledger):");
+    println!("ATTESTATION_JSON:{}", attestation_json);
+
+    Ok(())
+}
+
+/// Record a received CollateralAttestation on our own ledger
+async fn collateral_record(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    // Parse positional arguments: <reserves_id> <attestation_json>
+    let mut reserves_id: Option<String> = None;
+    let mut attestation_json: Option<String> = None;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else if reserves_id.is_none() {
+            reserves_id = Some(args[i].clone());
+        } else if attestation_json.is_none() {
+            // Take just this arg as the JSON (should be a single quoted string from shell)
+            attestation_json = Some(args[i].clone());
+        }
+        i += 1;
+    }
+
+    let reserves_id = reserves_id.ok_or("reserves_id required")?;
+    let attestation_json = attestation_json.ok_or("attestation_json required")?;
+
+    // Parse the attestation
+    let attestation: deposits_core::CollateralAttestationMsg = serde_json::from_str(&attestation_json)
+        .map_err(|e| format!("Invalid attestation JSON: {}", e))?;
+
+    let config = parse_config(&config_args)?;
+    let node = Node::new(config).await?;
+
+    println!("Recording collateral attestation...");
+    println!("  Reserves ID: {}", reserves_id);
+    println!("  From operator: {}", attestation.operator);
+    println!("  Amount: {} msats", attestation.amount);
+    println!("  Lock until: block {}", attestation.lock_until_block);
+
+    node.record_collateral_attestation(&reserves_id, attestation.clone())?;
+
+    println!("\nCollateral attestation recorded!");
+    println!("  Operator: {}", attestation.operator);
+    println!("  Amount: {} msats", attestation.amount);
 
     Ok(())
 }

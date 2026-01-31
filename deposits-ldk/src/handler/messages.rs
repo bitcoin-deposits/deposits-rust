@@ -103,7 +103,7 @@ impl LedgerOperationExt for LedgerOperation {
             LedgerOperation::CollateralAttestation { .. } => "CollateralAttestation",
             LedgerOperation::CollateralAddPartner { .. } => "CollateralAddPartner",
             LedgerOperation::CollateralRemovePartner { .. } => "CollateralRemovePartner",
-            LedgerOperation::CollateralPledge { .. } => "CollateralPledge",
+            LedgerOperation::CollateralLock { .. } => "CollateralLock",
             LedgerOperation::FeeCollect { .. } => "FeeCollect",
             LedgerOperation::LedgerClose => "LedgerClose",
             LedgerOperation::Tombstone { .. } => "Tombstone",
@@ -448,6 +448,7 @@ impl DepositsMessage {
         collateral_partner: PublicKey,
         amount: u64,
         block_height: u32,
+        lock_until_block: u32,
         signature: [u8; 64],
         ledger_hash: [u8; 32],
     ) -> Self {
@@ -455,7 +456,7 @@ impl DepositsMessage {
             operator,
             partner.to_string(),
             LedgerOperation::CollateralAttestation {
-                collateral_operator, collateral_partner, amount, block_height, signature, ledger_hash
+                collateral_operator, collateral_partner, amount, block_height, lock_until_block, signature, ledger_hash
             },
         ))
     }

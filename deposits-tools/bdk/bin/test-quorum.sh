@@ -1,0 +1,470 @@
+#!/bin/bash
+# Three-operator quorum test script
+#
+# This script tests a full cross-collateral scenario with 3 operators:
+# 1. Each creates reserves UTXOs of the same amount
+# 2. Each opens ledgers with 200 block enforcement delay
+# 3. Each operator opens deposits FOR the other two ON their own ledger
+#    (Alice generates key, Bob opens deposit with Alice's key on Bob's ledger)
+# 4. Depositors fund their deposits (20% of reserves)
+# 5. Depositors lock collateral for 500 blocks
+# 6. Mines past enforcement block
+# 7. All nodes validate ledgers they hold collateral for
+#
+# Usage:
+#   ./bin/test-quorum.sh
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/_common.sh"
+
+# Configuration
+RESERVES_AMOUNT=100000000  # 1 BTC in sats
+DEPOSIT_PERCENT=20         # 20% of reserves
+ENFORCEMENT_DELAY=200      # Blocks until enforcement
+COLLATERAL_LOCK_BLOCKS=500 # Lock duration
+
+# Use temp directory for state
+STATE_DIR=$(mktemp -d)
+trap "rm -rf $STATE_DIR" EXIT
+
+# Store/retrieve functions (bash 3.2 compatible)
+store_value() {
+    local key="$1"
+    local value="$2"
+    echo "$value" > "$STATE_DIR/$key"
+}
+
+get_value() {
+    local key="$1"
+    if [ -f "$STATE_DIR/$key" ]; then
+        cat "$STATE_DIR/$key"
+    fi
+}
+
+# Operators as simple array
+OPERATORS="bdk-alice bdk-bob bdk-charlie"
+
+TESTS_PASSED=0
+TESTS_FAILED=0
+
+test_pass() {
+    log_success "PASS: $1"
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+}
+
+test_fail() {
+    log_error "FAIL: $1"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+}
+
+# ============================================================================
+# Phase 1: Setup - Fund operators and get their info
+# ============================================================================
+
+setup_operators() {
+    log_info "=== Phase 1: Setup Operators ==="
+    echo ""
+
+    for op in $OPERATORS; do
+        log_info "Setting up $op..."
+
+        # Fund if needed
+        local info_output=$(run_bdk_cmd "$op" info 2>&1)
+        local balance=$(echo "$info_output" | grep "Wallet balance:" | awk '{print $3}')
+
+        if [ -z "$balance" ] || [ "$balance" -lt 200000000 ]; then
+            local address=$(get_node_address "$op")
+            bitcoin_cli -rpcwallet=faucet sendtoaddress "$address" 10 >/dev/null 2>&1
+            mine_blocks 1
+            log_info "  Funded $op with 10 BTC"
+        fi
+
+        # Get node info
+        info_output=$(run_bdk_cmd "$op" info 2>&1)
+        local node_id=$(echo "$info_output" | grep "Node ID:" | awk '{print $3}')
+        store_value "node_id_$op" "$node_id"
+
+        if [ -n "$node_id" ]; then
+            test_pass "$op ready: ${node_id:0:16}..."
+        else
+            test_fail "Could not get node ID for $op"
+            return 1
+        fi
+    done
+}
+
+# ============================================================================
+# Phase 2: Create reserves UTXOs (same amount for all)
+# ============================================================================
+
+create_reserves() {
+    log_info ""
+    log_info "=== Phase 2: Create Reserves ($RESERVES_AMOUNT sats each) ==="
+    echo ""
+
+    for op in $OPERATORS; do
+        log_info "Creating reserves for $op..."
+
+        local reserves_output=$(run_bdk_cmd "$op" reserves "$RESERVES_AMOUNT" 2>&1)
+
+        if echo "$reserves_output" | grep -q "Reserves created"; then
+            test_pass "$op created reserves"
+        elif echo "$reserves_output" | grep -q "already have reserves"; then
+            test_pass "$op already has reserves"
+        else
+            test_fail "$op reserves creation failed"
+            echo "    Output: $reserves_output"
+        fi
+    done
+
+    # Mine to confirm
+    mine_blocks 1
+}
+
+# ============================================================================
+# Phase 3: Open ledgers with enforcement delay
+# ============================================================================
+
+open_ledgers() {
+    log_info ""
+    log_info "=== Phase 3: Open Ledgers (enforcement +$ENFORCEMENT_DELAY blocks) ==="
+    echo ""
+
+    local current_height=$(get_block_height)
+    local enforcement_block=$((current_height + ENFORCEMENT_DELAY))
+
+    log_info "Current block: $current_height, Enforcement: $enforcement_block"
+    echo ""
+
+    for op in $OPERATORS; do
+        log_info "Opening ledger for $op..."
+
+        local ledger_output=$(run_bdk_cmd "$op" ledger open "$enforcement_block" 2>&1)
+
+        if echo "$ledger_output" | grep -q "Ledger opened\|Opening ledger"; then
+            test_pass "$op opened ledger"
+        elif echo "$ledger_output" | grep -q "already"; then
+            test_pass "$op ledger already exists"
+        else
+            test_fail "$op failed to open ledger"
+            echo "    Output: $ledger_output"
+        fi
+
+        # Get reserves_id
+        local info_output=$(run_bdk_cmd "$op" info 2>&1)
+        local reserves_id=$(echo "$info_output" | grep "Reserves address:" | awk '{print $3}')
+        store_value "reserves_id_$op" "$reserves_id"
+        log_info "  Reserves ID: ${reserves_id:0:20}..."
+    done
+}
+
+# ============================================================================
+# Phase 4: Generate deposit keys and open cross-deposits
+# Each depositor generates ONE key, then each OTHER operator opens a deposit
+# with that key on their ledger.
+# ============================================================================
+
+generate_deposit_keys() {
+    log_info ""
+    log_info "=== Phase 4a: Generate Deposit Keys ==="
+    log_info "(Format: deposit_{depositor}_{operator}.json)"
+    echo ""
+
+    # Generate one keypair for each (depositor, operator) pair
+    for depositor in $OPERATORS; do
+        for operator in $OPERATORS; do
+            if [ "$depositor" != "$operator" ]; then
+                # Extract short names (e.g., bdk-alice -> alice)
+                local dep_short=$(echo "$depositor" | sed 's/bdk-//')
+                local op_short=$(echo "$operator" | sed 's/bdk-//')
+                local keyfile="deposit_${dep_short}_${op_short}"
+
+                # Generate keypair
+                local keypair=$(run_bdk_cmd "$depositor" keygen 2>&1)
+                local secret=$(echo "$keypair" | awk '{print $1}')
+                local pubkey=$(echo "$keypair" | awk '{print $2}')
+
+                store_value "pubkey_${depositor}_${operator}" "$pubkey"
+                store_value "secret_${depositor}_${operator}" "$secret"
+                log_info "$keyfile: ${pubkey:0:16}..."
+            fi
+        done
+    done
+}
+
+open_cross_deposits() {
+    log_info ""
+    log_info "=== Phase 4b: Open Cross-Deposits ==="
+    log_info "(Each operator opens deposits FOR other operators ON their own ledger)"
+    echo ""
+
+    # For each operator, open deposits for the OTHER operators on THIS operator's ledger
+    for operator in $OPERATORS; do
+        local reserves_id=$(get_value "reserves_id_$operator")
+
+        for depositor in $OPERATORS; do
+            if [ "$depositor" != "$operator" ]; then
+                # Get depositor's pubkey for this specific (depositor, operator) pair
+                local pubkey=$(get_value "pubkey_${depositor}_${operator}")
+                local dep_short=$(echo "$depositor" | sed 's/bdk-//')
+                local op_short=$(echo "$operator" | sed 's/bdk-//')
+
+                log_info "$operator opening deposit_${dep_short}_${op_short} (${pubkey:0:12}...)"
+
+                # OPERATOR runs deposit open with DEPOSITOR's pubkey
+                local open_output=$(run_bdk_cmd "$operator" deposit open "$reserves_id" "$pubkey" 2>&1)
+
+                if echo "$open_output" | grep -q "Deposit opened"; then
+                    test_pass "$operator opened deposit for $depositor"
+                    store_value "deposit_${depositor}_on_${operator}" "1"
+                else
+                    test_fail "$operator failed to open deposit for $depositor"
+                    echo "    Output: $open_output"
+                fi
+            fi
+        done
+    done
+}
+
+# ============================================================================
+# Phase 5: Fund deposits
+# Each depositor funds their deposits on each operator's ledger
+# ============================================================================
+
+fund_deposits() {
+    log_info ""
+    log_info "=== Phase 5: Fund Deposits ==="
+    echo ""
+
+    local deposit_amount=$((RESERVES_AMOUNT * DEPOSIT_PERCENT / 100))
+
+    for depositor in $OPERATORS; do
+        for operator in $OPERATORS; do
+            local has_deposit=$(get_value "deposit_${depositor}_on_${operator}")
+            if [ "$depositor" != "$operator" ] && [ "$has_deposit" = "1" ]; then
+                # Get the specific pubkey for this (depositor, operator) pair
+                local pubkey=$(get_value "pubkey_${depositor}_${operator}")
+                local reserves_id=$(get_value "reserves_id_$operator")
+
+                log_info "$depositor funding deposit on $operator's ledger..."
+
+                # Create deposit offer (operator creates it for the deposit)
+                local offer_output=$(run_bdk_cmd "$operator" deposit offer "$reserves_id" "$pubkey" "$deposit_amount" "10000" "144" 2>&1)
+
+                if echo "$offer_output" | grep -q "Deposit offer created"; then
+                    local offer_id=$(echo "$offer_output" | grep "Offer ID:" | awk '{print $3}')
+                    local funding_address=$(echo "$offer_output" | grep "Funding address:" | awk '{print $3}')
+
+                    # Fund from faucet (simulating depositor funding)
+                    # Use awk instead of bc for proper decimal formatting
+                    local btc_amount=$(awk "BEGIN {printf \"%.8f\", $deposit_amount / 100000000}")
+                    bitcoin_cli -rpcwallet=faucet sendtoaddress "$funding_address" "$btc_amount" >/dev/null 2>&1
+
+                    if [ $? -eq 0 ]; then
+                        mine_blocks 1
+
+                        # Use deposit check to detect funding and get txid
+                        local check_output=$(run_bdk_cmd "$operator" deposit check "$offer_id" 2>&1)
+
+                        if echo "$check_output" | grep -q "Funding detected"; then
+                            local txid=$(echo "$check_output" | grep "Transaction:" | awk '{print $2}')
+                            local detected_amount=$(echo "$check_output" | grep "Amount:" | awk '{print $2}')
+
+                            # Operator completes the deposit
+                            local complete_output=$(run_bdk_cmd "$operator" deposit complete "$offer_id" "$txid" "$detected_amount" 2>&1)
+
+                            if echo "$complete_output" | grep -q "completed\|credited"; then
+                                test_pass "$depositor's deposit on $operator funded ($detected_amount sats)"
+                            else
+                                test_fail "Failed to complete $depositor's deposit on $operator"
+                                echo "    Output: $complete_output"
+                            fi
+                        else
+                            test_fail "Funding not detected for $depositor's deposit on $operator"
+                            echo "    Output: $check_output"
+                        fi
+                    else
+                        test_fail "Failed to fund $depositor's deposit on $operator"
+                    fi
+                else
+                    test_fail "Failed to create offer for $depositor's deposit on $operator"
+                    echo "    Output: $offer_output"
+                fi
+            fi
+        done
+    done
+}
+
+# ============================================================================
+# Phase 6: Lock collateral and record attestations
+# Each depositor locks their deposits as collateral, and the depositor
+# records the attestation on their own ledger
+# ============================================================================
+
+lock_collateral() {
+    log_info ""
+    log_info "=== Phase 6: Lock Collateral (lock for $COLLATERAL_LOCK_BLOCKS blocks) ==="
+    echo ""
+
+    local deposit_amount=$((RESERVES_AMOUNT * DEPOSIT_PERCENT / 100))
+    local deposit_amount_msats=$((deposit_amount * 1000))
+
+    for depositor in $OPERATORS; do
+        for operator in $OPERATORS; do
+            local has_deposit=$(get_value "deposit_${depositor}_on_${operator}")
+            if [ "$depositor" != "$operator" ] && [ "$has_deposit" = "1" ]; then
+                # Get the specific secret for this (depositor, operator) pair
+                local secret=$(get_value "secret_${depositor}_${operator}")
+                local operator_reserves_id=$(get_value "reserves_id_$operator")
+                local depositor_reserves_id=$(get_value "reserves_id_$depositor")
+                local depositor_node_id=$(get_value "node_id_$depositor")
+
+                log_info "$depositor locking collateral on $operator's ledger..."
+
+                # Depositor locks their deposit on operator's ledger
+                # The 5th argument is the requesting_operator (depositor) who will receive the attestation
+                local lock_output=$(run_bdk_cmd "$operator" collateral lock "$operator_reserves_id" "$secret" "$deposit_amount_msats" "$COLLATERAL_LOCK_BLOCKS" "$depositor_node_id" 2>&1)
+
+                if echo "$lock_output" | grep -q "Collateral lock created\|lock"; then
+                    # Extract the attestation JSON from the output (prefixed with ATTESTATION_JSON:)
+                    local attestation_json=$(echo "$lock_output" | grep 'ATTESTATION_JSON:' | sed 's/ATTESTATION_JSON://')
+
+                    if [ -n "$attestation_json" ]; then
+                        # Depositor records the attestation on their own ledger
+                        log_info "  $depositor recording attestation from $operator..."
+                        local record_output=$(run_bdk_cmd "$depositor" collateral record "$depositor_reserves_id" "$attestation_json" 2>&1)
+
+                        if echo "$record_output" | grep -q "recorded\|Collateral attestation"; then
+                            test_pass "$depositor: locked on $operator, attestation recorded"
+                        else
+                            test_fail "$depositor: locked but attestation not recorded"
+                            log_warn "    Record output: $record_output"
+                        fi
+                    else
+                        test_fail "$depositor: locked but no attestation JSON found"
+                        echo "    Lock output: $lock_output"
+                    fi
+                else
+                    test_fail "$depositor failed to lock on $operator"
+                    echo "    Output: $lock_output"
+                fi
+            fi
+        done
+    done
+}
+
+# ============================================================================
+# Phase 7: Mine past enforcement block
+# ============================================================================
+
+mine_to_enforcement() {
+    log_info ""
+    log_info "=== Phase 7: Mine Past Enforcement Block ==="
+    echo ""
+
+    local blocks_to_mine=$((ENFORCEMENT_DELAY + 10))
+
+    log_info "Mining $blocks_to_mine blocks to reach enforcement..."
+    mine_blocks "$blocks_to_mine"
+
+    local new_height=$(get_block_height)
+    test_pass "Mined to block $new_height"
+}
+
+# ============================================================================
+# Phase 8: Validate ledgers
+# ============================================================================
+
+validate_ledgers() {
+    log_info ""
+    log_info "=== Phase 8: Validate Ledgers ==="
+    echo ""
+
+    for op in $OPERATORS; do
+        # Use reserves_id (Bitcoin address) as the ledger identifier
+        local reserves_id=$(get_value "reserves_id_$op")
+        log_info "Checking $op's ledger (${reserves_id:0:16}...)..."
+
+        local history_output=$(run_bdk_cmd "$op" ledger history "$reserves_id" 2>&1)
+
+        # Count operations (use grep with || true to avoid errors)
+        local op_count=$(echo "$history_output" | grep -c "↑" 2>/dev/null || echo "0")
+
+        # Check for CollateralLock operations (collateral locked TO this operator)
+        local lock_count=$(echo "$history_output" | grep -c "CollateralLock" 2>/dev/null || echo "0")
+
+        # Check for CollateralAttestation operations (collateral received FROM other operators)
+        local attestation_count=$(echo "$history_output" | grep -c "CollateralAttestation" 2>/dev/null || echo "0")
+
+        # Check for deposits
+        local deposit_count=$(echo "$history_output" | grep -c "DepositOpen" 2>/dev/null || echo "0")
+
+        if [ "$op_count" -gt 0 ]; then
+            test_pass "$op: $op_count ops, $deposit_count deposits, $lock_count locks, $attestation_count attestations"
+        else
+            test_fail "$op has no operations"
+        fi
+    done
+}
+
+# ============================================================================
+# Show final state
+# ============================================================================
+
+show_final_state() {
+    log_info ""
+    log_info "=== Final State ==="
+    echo ""
+
+    for op in $OPERATORS; do
+        local reserves_id=$(get_value "reserves_id_$op")
+        echo "=== $op (${reserves_id:0:16}...) ==="
+        run_bdk_cmd "$op" ledger history "$reserves_id" 2>&1 | grep -v "^$"
+        echo ""
+    done
+}
+
+# ============================================================================
+# Main
+# ============================================================================
+
+main() {
+    log_info "=========================================="
+    log_info "  Three-Operator Cross-Collateral Test"
+    log_info "=========================================="
+    log_info "Operators: $OPERATORS"
+    log_info "Reserves: $RESERVES_AMOUNT sats each"
+    log_info "Deposit: ${DEPOSIT_PERCENT}% of reserves"
+    log_info "Enforcement delay: $ENFORCEMENT_DELAY blocks"
+    log_info "Collateral lock: $COLLATERAL_LOCK_BLOCKS blocks"
+    echo ""
+
+    setup_operators
+    create_reserves
+    open_ledgers
+    generate_deposit_keys
+    open_cross_deposits
+    fund_deposits
+    lock_collateral
+    mine_to_enforcement
+    validate_ledgers
+    show_final_state
+
+    echo ""
+    log_info "=== Test Summary ==="
+    echo -e "  ${GREEN}Passed: $TESTS_PASSED${NC}"
+    echo -e "  ${RED}Failed: $TESTS_FAILED${NC}"
+    echo ""
+
+    if [ $TESTS_FAILED -gt 0 ]; then
+        log_error "Some tests failed"
+        exit 1
+    else
+        log_success "All tests passed!"
+        exit 0
+    fi
+}
+
+main

@@ -90,15 +90,15 @@ where
                 .map(|a| a.available_collateral())
                 .sum();
 
-            // Sum of deposit pledged collateral (with active locks)
+            // Sum of deposit locked collateral (with active locks)
             // Use block 0 as a simple check - in production this should be current block height
-            // For now, count all pledges with non-zero expiry
-            let pledged_collateral: u64 = ledger.state.deposits.values()
-                .filter(|d| d.collateral_pledge_expires > 0)
-                .map(|d| d.collateral_pledge_amount)
+            // For now, count all locks with non-zero expiry
+            let locked_collateral: u64 = ledger.state.deposits.values()
+                .filter(|d| d.collateral_lock_expires > 0)
+                .map(|d| d.collateral_lock_amount)
                 .sum();
 
-            attestation_collateral + pledged_collateral
+            attestation_collateral + locked_collateral
         } else {
             0
         }

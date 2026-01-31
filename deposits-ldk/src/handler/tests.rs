@@ -366,6 +366,7 @@ fn test_collateral_attestation_signature_roundtrip() {
         collateral_partner,
         amount,
         block_height,
+        lock_until_block: 0,
         signature,
         ledger_hash: [0u8; 32],
     };
@@ -405,6 +406,7 @@ fn test_collateral_attestation_available_collateral() {
         collateral_partner,
         amount: 100_000,
         block_height: 850_000,
+        lock_until_block: 0,
         signature: [0u8; 64],
         ledger_hash: [0u8; 32],
     };
@@ -416,6 +418,7 @@ fn test_collateral_attestation_available_collateral() {
         collateral_partner,
         amount: 0,
         block_height: 850_000,
+        lock_until_block: 0,
         signature: [0u8; 64],
         ledger_hash: [0u8; 32],
     };
@@ -427,6 +430,7 @@ fn test_collateral_attestation_available_collateral() {
         collateral_partner,
         amount: 30_000,
         block_height: 850_000,
+        lock_until_block: 0,
         signature: [0u8; 64],
         ledger_hash: [0u8; 32],
     };

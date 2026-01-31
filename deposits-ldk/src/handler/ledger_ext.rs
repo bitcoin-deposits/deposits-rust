@@ -194,7 +194,7 @@ impl LedgerExt for Ledger {
                 }
                 DepositsMessage::LedgerUpdate(ref update_msg) => {
                     // V2 CollateralAttestation is inside LedgerUpdate
-                    if let deposits_core::messages::LedgerOperation::CollateralAttestation { collateral_operator, collateral_partner, amount, block_height, signature, ledger_hash } = &update_msg.operation {
+                    if let deposits_core::messages::LedgerOperation::CollateralAttestation { collateral_operator, collateral_partner, amount, block_height, lock_until_block, signature, ledger_hash } = &update_msg.operation {
                         // Check if this partner is relevant (is our direct partner or a collateral partner)
                         if collateral_partner.to_string() == self.state.reserves_key || self.state.collateral_partners.contains(collateral_partner) {
                             let attestation = deposits_core::CollateralAttestation {
@@ -202,6 +202,7 @@ impl LedgerExt for Ledger {
                                 collateral_partner: *collateral_partner,
                                 amount: *amount,
                                 block_height: *block_height,
+                                lock_until_block: *lock_until_block,
                                 signature: *signature,
                                 ledger_hash: *ledger_hash,
                             };
@@ -376,6 +377,7 @@ impl LedgerExt for Ledger {
             collateral_partner: attestation.collateral_partner,
             amount: attestation.amount,
             block_height: attestation.block_height,
+            lock_until_block: attestation.lock_until_block,
             signature: attestation.signature,
             ledger_hash: attestation.ledger_hash,
         };

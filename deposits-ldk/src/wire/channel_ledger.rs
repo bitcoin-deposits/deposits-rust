@@ -614,23 +614,24 @@ impl ChannelLedger {
                 self.collateral_partners.retain(|p| p != collateral_partner);
                 self.collateral_attestations.remove(collateral_partner);
             }
-            LedgerOperation::CollateralAttestation { collateral_operator, collateral_partner, amount, block_height, signature, ledger_hash } => {
+            LedgerOperation::CollateralAttestation { collateral_operator, collateral_partner, amount, block_height, lock_until_block, signature, ledger_hash } => {
                 // Store attestation by the actual collateral partner
                 let attestation_msg = CollateralAttestationMsg {
                     operator: *collateral_operator,
                     collateral_partner: *collateral_partner,
                     amount: *amount,
                     block_height: *block_height,
+                    lock_until_block: *lock_until_block,
                     signature: *signature,
                     ledger_hash: *ledger_hash,
                 };
                 self.collateral_attestations.insert(*collateral_partner, attestation_msg);
             }
-            LedgerOperation::CollateralPledge { deposit_pubkey, amount, lock_until_block, .. } => {
-                // Update the deposit's collateral pledge fields
+            LedgerOperation::CollateralLock { deposit_pubkey, amount, lock_until_block, .. } => {
+                // Update the deposit's collateral lock fields
                 if let Some(deposit) = self.deposits.get_mut(deposit_pubkey) {
-                    deposit.collateral_pledge_amount = *amount;
-                    deposit.collateral_pledge_expires = *lock_until_block;
+                    deposit.collateral_lock_amount = *amount;
+                    deposit.collateral_lock_expires = *lock_until_block;
                 }
             }
             LedgerOperation::LedgerClose => {

@@ -512,8 +512,8 @@ impl Ledger {
     /// Only counts pledges that haven't expired (lock_until_block > current_block).
     pub fn total_deposit_pledged_collateral(&self, current_block: u32) -> u64 {
         self.state.deposits.values()
-            .filter(|d| d.collateral_pledge_expires > current_block)
-            .map(|d| d.collateral_pledge_amount)
+            .filter(|d| d.collateral_lock_expires > current_block)
+            .map(|d| d.collateral_lock_amount)
             .sum()
     }
 
@@ -729,7 +729,7 @@ impl Ledger {
                     });
                 }
             }
-            LedgerOperation::CollateralPledge {
+            LedgerOperation::CollateralLock {
                 deposit_pubkey,
                 amount,
                 lock_until_block,
@@ -744,7 +744,7 @@ impl Ledger {
                     .ok_or(DepositsError::DepositNotFound)?;
 
                 // 2. Verify deposit_holder_signature
-                let sig_valid = crate::signature_utils::verify_collateral_pledge_signature(
+                let sig_valid = crate::signature_utils::verify_collateral_lock_signature(
                     deposit_holder_signature,
                     deposit_pubkey,
                     *amount,
@@ -753,7 +753,7 @@ impl Ledger {
                 )?;
                 if !sig_valid {
                     return Err(DepositsError::ProtocolViolation {
-                        violation_type: "invalid_collateral_pledge_signature".to_string(),
+                        violation_type: "invalid_collateral_lock_signature".to_string(),
                         details: "Deposit holder signature verification failed".to_string(),
                     });
                 }
@@ -766,23 +766,23 @@ impl Ledger {
                     });
                 }
 
-                // 4. Ratchet check: if existing pledge, new must have (amount >= existing) AND (lock > existing)
-                if deposit.collateral_pledge_amount > 0 {
-                    if *amount < deposit.collateral_pledge_amount {
+                // 4. Ratchet check: if existing lock, new must have (amount >= existing) AND (lock > existing)
+                if deposit.collateral_lock_amount > 0 {
+                    if *amount < deposit.collateral_lock_amount {
                         return Err(DepositsError::ProtocolViolation {
-                            violation_type: "collateral_pledge_ratchet_violation".to_string(),
+                            violation_type: "collateral_lock_ratchet_violation".to_string(),
                             details: format!(
-                                "New pledge amount {} must be >= existing amount {}",
-                                amount, deposit.collateral_pledge_amount
+                                "New lock amount {} must be >= existing amount {}",
+                                amount, deposit.collateral_lock_amount
                             ),
                         });
                     }
-                    if *lock_until_block <= deposit.collateral_pledge_expires {
+                    if *lock_until_block <= deposit.collateral_lock_expires {
                         return Err(DepositsError::ProtocolViolation {
-                            violation_type: "collateral_pledge_ratchet_violation".to_string(),
+                            violation_type: "collateral_lock_ratchet_violation".to_string(),
                             details: format!(
                                 "New lock expiry {} must be > existing expiry {}",
-                                lock_until_block, deposit.collateral_pledge_expires
+                                lock_until_block, deposit.collateral_lock_expires
                             ),
                         });
                     }
@@ -791,7 +791,7 @@ impl Ledger {
                 // 5. operator_id must match ledger operator
                 if *operator_id != self.state.operator_key {
                     return Err(DepositsError::ProtocolViolation {
-                        violation_type: "invalid_collateral_pledge_operator".to_string(),
+                        violation_type: "invalid_collateral_lock_operator".to_string(),
                         details: format!(
                             "Operator ID {} does not match ledger operator {}",
                             operator_id, self.state.operator_key
@@ -922,15 +922,15 @@ impl Ledger {
                 // Also remove any attestations from this partner
                 self.state.collateral_attestations.remove(collateral_partner);
             }
-            LedgerOperation::CollateralPledge {
+            LedgerOperation::CollateralLock {
                 deposit_pubkey,
                 amount,
                 lock_until_block,
                 ..
             } => {
                 if let Some(deposit) = self.state.deposits.get_mut(deposit_pubkey) {
-                    deposit.collateral_pledge_amount = *amount;
-                    deposit.collateral_pledge_expires = *lock_until_block;
+                    deposit.collateral_lock_amount = *amount;
+                    deposit.collateral_lock_expires = *lock_until_block;
                 }
             }
             LedgerOperation::LedgerClose | LedgerOperation::Tombstone { .. } => {
@@ -942,6 +942,7 @@ impl Ledger {
                 collateral_partner,
                 amount,
                 block_height,
+                lock_until_block,
                 signature,
                 ledger_hash,
             } => {
@@ -952,6 +953,7 @@ impl Ledger {
                     *collateral_partner,
                     *amount,
                     *block_height,
+                    *lock_until_block,
                     *signature,
                     *ledger_hash,
                 );

@@ -290,17 +290,17 @@ pub fn verify_withdrawal_signature(
     }
 }
 
-/// Create the signing message for a collateral pledge.
+/// Create the signing message for a collateral lock.
 ///
-/// Format: "COLLATERAL_PLEDGE:{deposit_pubkey}:{amount}:{lock_until_block}:{operator_id}"
-pub fn collateral_pledge_signing_message(
+/// Format: "COLLATERAL_LOCK:{deposit_pubkey}:{amount}:{lock_until_block}:{operator_id}"
+pub fn collateral_lock_signing_message(
     deposit_pubkey: &PublicKey,
     amount: u64,
     lock_until_block: u32,
     operator_id: &PublicKey,
 ) -> String {
     format!(
-        "COLLATERAL_PLEDGE:{}:{}:{}:{}",
+        "COLLATERAL_LOCK:{}:{}:{}:{}",
         deposit_pubkey,
         amount,
         lock_until_block,
@@ -308,11 +308,11 @@ pub fn collateral_pledge_signing_message(
     )
 }
 
-/// Create a collateral pledge signature (deposit holder's authorization).
+/// Create a collateral lock signature (deposit holder's authorization).
 ///
 /// The deposit holder's private key signs the pledge parameters to authorize
 /// locking their balance as collateral backing for the operator.
-pub fn create_collateral_pledge_signature(
+pub fn create_collateral_lock_signature(
     deposit_holder_secret: &SecretKey,
     deposit_pubkey: &PublicKey,
     amount: u64,
@@ -320,7 +320,7 @@ pub fn create_collateral_pledge_signature(
     operator_id: &PublicKey,
 ) -> Result<[u8; 64], DepositsError> {
     // Create the signing message
-    let signing_message = collateral_pledge_signing_message(
+    let signing_message = collateral_lock_signing_message(
         deposit_pubkey,
         amount,
         lock_until_block,
@@ -342,11 +342,11 @@ pub fn create_collateral_pledge_signature(
     Ok(signature.serialize_compact())
 }
 
-/// Verify a collateral pledge signature.
+/// Verify a collateral lock signature.
 ///
 /// Verifies that the deposit holder authorized the pledge of their balance
 /// as collateral backing for the specified operator.
-pub fn verify_collateral_pledge_signature(
+pub fn verify_collateral_lock_signature(
     signature: &[u8; 64],
     deposit_pubkey: &PublicKey,
     amount: u64,
@@ -354,7 +354,7 @@ pub fn verify_collateral_pledge_signature(
     operator_id: &PublicKey,
 ) -> Result<bool, DepositsError> {
     // Recreate the same signing message
-    let signing_message = collateral_pledge_signing_message(
+    let signing_message = collateral_lock_signing_message(
         deposit_pubkey,
         amount,
         lock_until_block,
@@ -373,7 +373,7 @@ pub fn verify_collateral_pledge_signature(
     let signature = Signature::from_compact(signature)
         .map_err(|_| DepositsError::ProtocolViolation {
             violation_type: "invalid_signature".to_string(),
-            details: "Failed to parse collateral pledge signature".to_string(),
+            details: "Failed to parse collateral lock signature".to_string(),
         })?;
 
     // Verify signature against deposit holder's public key
@@ -685,7 +685,7 @@ mod tests {
     }
 
     #[test]
-    fn test_collateral_pledge_signature_roundtrip() {
+    fn test_collateral_lock_signature_roundtrip() {
         let (deposit_holder_secret, deposit_pubkey) = create_test_keypair();
 
         // Create another keypair for operator
@@ -697,7 +697,7 @@ mod tests {
         let lock_until_block = 850_000u32;
 
         // Create signature
-        let sig = create_collateral_pledge_signature(
+        let sig = create_collateral_lock_signature(
             &deposit_holder_secret,
             &deposit_pubkey,
             amount,
@@ -706,18 +706,18 @@ mod tests {
         ).unwrap();
 
         // Verify signature
-        let valid = verify_collateral_pledge_signature(
+        let valid = verify_collateral_lock_signature(
             &sig,
             &deposit_pubkey,
             amount,
             lock_until_block,
             &operator_pubkey,
         ).unwrap();
-        assert!(valid, "Collateral pledge signature should be valid");
+        assert!(valid, "Collateral lock signature should be valid");
     }
 
     #[test]
-    fn test_collateral_pledge_signature_wrong_amount() {
+    fn test_collateral_lock_signature_wrong_amount() {
         let (deposit_holder_secret, deposit_pubkey) = create_test_keypair();
         let secp = Secp256k1::new();
         let operator_secret = SecretKey::from_slice(&[2u8; 32]).unwrap();
@@ -727,7 +727,7 @@ mod tests {
         let lock_until_block = 850_000u32;
 
         // Create signature with original amount
-        let sig = create_collateral_pledge_signature(
+        let sig = create_collateral_lock_signature(
             &deposit_holder_secret,
             &deposit_pubkey,
             amount,
@@ -736,7 +736,7 @@ mod tests {
         ).unwrap();
 
         // Verify with different amount should fail
-        let valid = verify_collateral_pledge_signature(
+        let valid = verify_collateral_lock_signature(
             &sig,
             &deposit_pubkey,
             amount + 1000, // Different amount

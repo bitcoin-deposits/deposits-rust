@@ -368,31 +368,32 @@ impl Node {
         partners
     }
 
-    /// Pledge a deposit's balance as collateral backing for the operator.
+    /// Lock a deposit's balance as collateral backing for the operator.
     ///
-    /// The pledged amount cannot be withdrawn until the lock expires.
+    /// The locked amount cannot be withdrawn until the lock expires.
     /// Uses ratchet semantics: can only increase amount AND extend duration.
     ///
     /// # Arguments
     /// * `reserves_id` - The reserves ID (ledger address) where the deposit exists
     /// * `deposit_pubkey` - The deposit's public key
     /// * `deposit_secret` - The deposit holder's secret key for signing
-    /// * `amount_msats` - Amount to pledge as collateral (millisatoshis)
+    /// * `amount_msats` - Amount to lock as collateral (millisatoshis)
     /// * `lock_until_block` - Block height when the lock expires
     ///
     /// # Returns
-    /// The new pledge amount and expiry block on success
-    pub fn pledge_collateral(
+    /// A signed CollateralAttestationMsg that the requesting operator can record on their own ledger
+    pub fn lock_collateral(
         &self,
         reserves_id: &str,
         deposit_pubkey: PublicKey,
         deposit_secret: &bitcoin::secp256k1::SecretKey,
         amount_msats: u64,
         lock_until_block: u32,
-    ) -> Result<(u64, u32), Error> {
+        requesting_operator: PublicKey,
+    ) -> Result<deposits_core::CollateralAttestationMsg, Error> {
         let ledger_arc = self.handler.get_or_create_ledger(self.node_id, reserves_id.to_string());
 
-        let result = {
+        let attestation = {
             let mut ledger = ledger_arc.write().unwrap();
 
             // Check if deposit exists
@@ -403,8 +404,8 @@ impl Node {
                 )));
             }
 
-            // Create the signature
-            let signature = deposits_core::signature_utils::create_collateral_pledge_signature(
+            // Create the deposit holder's signature for the lock
+            let lock_signature = deposits_core::signature_utils::create_collateral_lock_signature(
                 deposit_secret,
                 &deposit_pubkey,
                 amount_msats,
@@ -412,25 +413,55 @@ impl Node {
                 &self.node_id,
             ).map_err(|e| Error::Protocol(format!("Failed to create signature: {:?}", e)))?;
 
-            // Apply the CollateralPledge operation
-            let operation = LedgerOperation::CollateralPledge {
+            // Apply the CollateralLock operation
+            let operation = LedgerOperation::CollateralLock {
                 deposit_pubkey,
                 amount: amount_msats,
                 lock_until_block,
                 operator_id: self.node_id,
-                deposit_holder_signature: signature,
+                deposit_holder_signature: lock_signature,
             };
 
             let block_height = self.wallet.get_block_height().unwrap_or(0);
             let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
-            ledger.append_operation_with_block(operation, deposits_core::messages::consts::COLLATERAL_PLEDGE, block_height, block_hash)
-                .map_err(|e| Error::Protocol(format!("Failed to pledge collateral: {:?}", e)))?;
+            ledger.append_operation_with_block(operation, deposits_core::messages::consts::COLLATERAL_LOCK, block_height, block_hash)
+                .map_err(|e| Error::Protocol(format!("Failed to lock collateral: {:?}", e)))?;
 
-            // Return the pledge details from the deposit
-            let deposit = ledger.state.deposits.get(&deposit_pubkey)
-                .ok_or_else(|| Error::Protocol("Deposit not found after pledge".to_string()))?;
+            // Calculate total locked collateral from all deposits
+            let total_locked: u64 = ledger.state.deposits.values()
+                .filter(|d| d.collateral_lock_expires > block_height)
+                .map(|d| d.collateral_lock_amount)
+                .sum();
 
-            (deposit.collateral_pledge_amount, deposit.collateral_pledge_expires)
+            // Find minimum lock expiry among active locks
+            let min_lock_until: u32 = ledger.state.deposits.values()
+                .filter(|d| d.collateral_lock_expires > block_height && d.collateral_lock_amount > 0)
+                .map(|d| d.collateral_lock_expires)
+                .min()
+                .unwrap_or(lock_until_block);
+
+            // Get current ledger hash for the attestation
+            let ledger_hash = ledger.hash();
+
+            // Create operator's attestation signature
+            // Sign: operator || collateral_partner || amount || block_height || lock_until_block || ledger_hash
+            let attestation_signature = self.sign_collateral_attestation(
+                requesting_operator,
+                total_locked,
+                block_height,
+                min_lock_until,
+                ledger_hash,
+            )?;
+
+            deposits_core::CollateralAttestationMsg {
+                operator: self.node_id,
+                collateral_partner: requesting_operator,
+                amount: total_locked,
+                block_height,
+                lock_until_block: min_lock_until,
+                signature: attestation_signature,
+                ledger_hash,
+            }
         };
 
         // Persist the ledger
@@ -439,13 +470,103 @@ impl Node {
         }
 
         tracing::info!(
-            "Created collateral pledge for deposit {}: {} msats until block {}",
+            "Created collateral lock for deposit {}: {} msats until block {}, attestation for {}",
             deposit_pubkey,
-            result.0,
-            result.1
+            attestation.amount,
+            attestation.lock_until_block,
+            requesting_operator
         );
 
-        Ok(result)
+        Ok(attestation)
+    }
+
+    /// Sign a collateral attestation message
+    fn sign_collateral_attestation(
+        &self,
+        collateral_partner: PublicKey,
+        amount: u64,
+        block_height: u32,
+        lock_until_block: u32,
+        ledger_hash: [u8; 32],
+    ) -> Result<[u8; 64], Error> {
+        use bitcoin::hashes::{sha256, Hash};
+        use bitcoin::secp256k1::{Secp256k1, Message};
+
+        let mut sign_content = Vec::new();
+        sign_content.extend_from_slice(b"COLLATERAL_ATTESTATION:");
+        sign_content.extend_from_slice(&self.node_id.serialize());
+        sign_content.extend_from_slice(&collateral_partner.serialize());
+        sign_content.extend_from_slice(&amount.to_le_bytes());
+        sign_content.extend_from_slice(&block_height.to_le_bytes());
+        sign_content.extend_from_slice(&lock_until_block.to_le_bytes());
+        sign_content.extend_from_slice(&ledger_hash);
+
+        let hash = sha256::Hash::hash(&sign_content);
+        let msg = Message::from_digest(hash.to_byte_array());
+
+        let secp = Secp256k1::new();
+        let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
+        let sig = secp.sign_schnorr(&msg, &keypair);
+
+        Ok(*sig.as_ref())
+    }
+
+    /// Record a received CollateralAttestation on our own ledger
+    ///
+    /// This is called by an operator who received an attestation from another operator
+    /// after pledging collateral on their ledger. The attestation is recorded on the
+    /// caller's own ledger so quorum members can see it.
+    pub fn record_collateral_attestation(
+        &self,
+        reserves_id: &str,
+        attestation: deposits_core::CollateralAttestationMsg,
+    ) -> Result<(), Error> {
+        // Verify we are the collateral_partner in the attestation
+        if attestation.collateral_partner != self.node_id {
+            return Err(Error::Protocol(format!(
+                "Attestation is for {}, not us ({})",
+                attestation.collateral_partner, self.node_id
+            )));
+        }
+
+        let ledger_arc = self.handler.get_or_create_ledger(self.node_id, reserves_id.to_string());
+
+        {
+            let mut ledger = ledger_arc.write().unwrap();
+
+            // Create the CollateralAttestation operation
+            let operation = LedgerOperation::CollateralAttestation {
+                collateral_operator: attestation.operator,
+                collateral_partner: attestation.collateral_partner,
+                amount: attestation.amount,
+                block_height: attestation.block_height,
+                lock_until_block: attestation.lock_until_block,
+                signature: attestation.signature,
+                ledger_hash: attestation.ledger_hash,
+            };
+
+            let block_height = self.wallet.get_block_height().unwrap_or(0);
+            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
+            ledger.append_operation_with_block(
+                operation,
+                deposits_core::messages::consts::COLLATERAL_ATTESTATION,
+                block_height,
+                block_hash,
+            ).map_err(|e| Error::Protocol(format!("Failed to record attestation: {:?}", e)))?;
+        }
+
+        // Persist the ledger
+        if let Err(e) = self.handler.persist_ledger(&self.node_id, reserves_id) {
+            tracing::error!("Failed to persist ledger: {}", e);
+        }
+
+        tracing::info!(
+            "Recorded collateral attestation from {} for {} msats",
+            attestation.operator,
+            attestation.amount
+        );
+
+        Ok(())
     }
 
     // ========================================================================
@@ -1323,6 +1444,19 @@ impl Node {
             if *operator == self.node_id {
                 let ledger = ledger_arc.read().unwrap();
                 return Some((reserves_id.clone(), ledger.clone()));
+            }
+        }
+        None
+    }
+
+    /// Get a ledger by reserves_id (Bitcoin address string)
+    /// Returns (reserves_id, ledger) tuple
+    pub fn get_ledger_by_reserves_id(&self, reserves_id: &str) -> Option<(String, Ledger)> {
+        let ledgers = self.handler.ledgers.lock().unwrap();
+        for ((operator, rid), ledger_arc) in ledgers.iter() {
+            if rid == reserves_id && *operator == self.node_id {
+                let ledger = ledger_arc.read().unwrap();
+                return Some((rid.clone(), ledger.clone()));
             }
         }
         None

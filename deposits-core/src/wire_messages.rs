@@ -1000,6 +1000,8 @@ pub struct CollateralAttestationMsg {
     pub collateral_partner: PublicKey,
     pub amount: u64,
     pub block_height: u32,
+    #[serde(default)]
+    pub lock_until_block: u32,
     #[serde(with = "crate::types::serde_64")]
     pub signature: [u8; 64],
     #[serde(with = "crate::types::serde_32")]
@@ -1019,6 +1021,7 @@ impl WireEncode for CollateralAttestationMsg {
         write_pubkey(writer, &self.collateral_partner)?;
         write_u64(writer, self.amount)?;
         write_u32(writer, self.block_height)?;
+        write_u32(writer, self.lock_until_block)?;
         write_bytes64(writer, &self.signature)?;
         write_bytes32(writer, &self.ledger_hash)?;
         Ok(())
@@ -1032,6 +1035,7 @@ impl WireDecode for CollateralAttestationMsg {
             collateral_partner: read_pubkey(reader)?,
             amount: read_u64(reader)?,
             block_height: read_u32(reader)?,
+            lock_until_block: read_u32(reader)?,
             signature: read_bytes64(reader)?,
             ledger_hash: read_bytes32(reader)?,
         })
