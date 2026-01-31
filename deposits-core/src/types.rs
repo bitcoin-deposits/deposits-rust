@@ -335,6 +335,14 @@ pub struct Deposit {
     pub fees: FeeStructure,
     /// Block height of last fee assessment.
     pub last_fee_assessment: u32,
+    /// Amount pledged as collateral backing for the operator (millisatoshis).
+    /// This amount cannot be withdrawn until the lock expires.
+    #[serde(default)]
+    pub collateral_pledge_amount: u64,
+    /// Block height when the collateral pledge lock expires.
+    /// After this block, the pledged funds can be withdrawn.
+    #[serde(default)]
+    pub collateral_pledge_expires: u32,
 }
 
 impl Deposit {
@@ -347,6 +355,8 @@ impl Deposit {
             invoices: Vec::new(),
             fees: fees.unwrap_or_default(),
             last_fee_assessment: 0,
+            collateral_pledge_amount: 0,
+            collateral_pledge_expires: 0,
         }
     }
 
@@ -874,6 +884,12 @@ pub struct SignedLedgerUpdate {
     pub current_hash: [u8; 32],
     /// Timestamp when operator created this update.
     pub timestamp: u64,
+    /// Block height when this update was created.
+    #[serde(default)]
+    pub block_height: u32,
+    /// Block hash at the time this update was created.
+    #[serde(default, with = "serde_32")]
+    pub block_hash: [u8; 32],
     /// Partner's signature over update content.
     #[serde(with = "serde_64")]
     pub partner_signature: [u8; 64],
@@ -1513,6 +1529,8 @@ mod deposit_fields {
     pub const PUBKEY: u64 = 0;
     pub const BALANCE: u64 = 2;
     pub const LOCKED_BALANCE: u64 = 4;
+    pub const COLLATERAL_PLEDGE_AMOUNT: u64 = 12;
+    pub const COLLATERAL_PLEDGE_EXPIRES: u64 = 14;
     pub const INVOICES: u64 = 6;
     pub const FEES: u64 = 8;
     pub const LAST_FEE_ASSESSMENT: u64 = 10;
@@ -1527,6 +1545,8 @@ impl TlvEncode for Deposit {
             .vec_field(deposit_fields::INVOICES, &self.invoices)
             .nested(deposit_fields::FEES, &self.fees)
             .u32_field(deposit_fields::LAST_FEE_ASSESSMENT, self.last_fee_assessment)
+            .u64_field(deposit_fields::COLLATERAL_PLEDGE_AMOUNT, self.collateral_pledge_amount)
+            .u32_field(deposit_fields::COLLATERAL_PLEDGE_EXPIRES, self.collateral_pledge_expires)
             .build()
     }
 }
@@ -1541,6 +1561,8 @@ impl TlvDecode for Deposit {
             invoices: reader.read_vec(deposit_fields::INVOICES)?,
             fees: reader.read_nested(deposit_fields::FEES)?,
             last_fee_assessment: reader.read_u32(deposit_fields::LAST_FEE_ASSESSMENT)?,
+            collateral_pledge_amount: reader.read_u64_opt(deposit_fields::COLLATERAL_PLEDGE_AMOUNT)?.unwrap_or(0),
+            collateral_pledge_expires: reader.read_u32_opt(deposit_fields::COLLATERAL_PLEDGE_EXPIRES)?.unwrap_or(0),
         })
     }
 }
@@ -1585,6 +1607,8 @@ mod signed_update_fields {
     pub const TIMESTAMP: u64 = 14;
     pub const PARTNER_SIGNATURE: u64 = 16;
     pub const OPERATOR_SIGNATURE: u64 = 18;
+    pub const BLOCK_HEIGHT: u64 = 20;
+    pub const BLOCK_HASH: u64 = 22;
 }
 
 impl TlvEncode for SignedLedgerUpdate {
@@ -1598,6 +1622,8 @@ impl TlvEncode for SignedLedgerUpdate {
             .bytes_field(signed_update_fields::PREVIOUS_HASH, &self.previous_hash)
             .bytes_field(signed_update_fields::CURRENT_HASH, &self.current_hash)
             .u64_field(signed_update_fields::TIMESTAMP, self.timestamp)
+            .u32_field(signed_update_fields::BLOCK_HEIGHT, self.block_height)
+            .bytes_field(signed_update_fields::BLOCK_HASH, &self.block_hash)
             .bytes_field(signed_update_fields::PARTNER_SIGNATURE, &self.partner_signature)
             .bytes_field(signed_update_fields::OPERATOR_SIGNATURE, &self.operator_signature)
             .build()
@@ -1616,6 +1642,8 @@ impl TlvDecode for SignedLedgerUpdate {
             previous_hash: reader.read_bytes(signed_update_fields::PREVIOUS_HASH)?,
             current_hash: reader.read_bytes(signed_update_fields::CURRENT_HASH)?,
             timestamp: reader.read_u64(signed_update_fields::TIMESTAMP)?,
+            block_height: reader.read_u32_opt(signed_update_fields::BLOCK_HEIGHT)?.unwrap_or(0),
+            block_hash: reader.read_bytes_opt(signed_update_fields::BLOCK_HASH)?.unwrap_or([0u8; 32]),
             partner_signature: reader.read_bytes(signed_update_fields::PARTNER_SIGNATURE)?,
             operator_signature: reader.read_bytes(signed_update_fields::OPERATOR_SIGNATURE)?,
         })
@@ -2117,6 +2145,8 @@ mod tests {
             previous_hash: [0u8; 32],
             current_hash: [0u8; 32],
             timestamp: 0,
+            block_height: 0,
+            block_hash: [0u8; 32],
             partner_signature: [0u8; 64],
             operator_signature: [0u8; 64],
         };
@@ -2137,6 +2167,8 @@ mod tests {
             previous_hash: [0u8; 32],
             current_hash: [0u8; 32],
             timestamp: 1000,
+            block_height: 0,
+            block_hash: [0u8; 32],
             partner_signature: [0u8; 64],
             operator_signature: [0u8; 64],
         };
@@ -2231,6 +2263,8 @@ mod tests {
             ],
             fees: FeeStructure::new(100, 25, 2016),
             last_fee_assessment: 800_000,
+            collateral_pledge_amount: 500_000,
+            collateral_pledge_expires: 850_000,
         };
         let encoded = original.tlv_encode();
         let decoded = Deposit::tlv_decode(&encoded).unwrap();

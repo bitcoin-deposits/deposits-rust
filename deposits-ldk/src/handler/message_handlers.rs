@@ -327,6 +327,8 @@ where
             previous_hash: [0u8; 32],
             current_hash: [0u8; 32],
             timestamp: tombstone_msg.timestamp,
+            block_height: 0,
+            block_hash: [0u8; 32],
         };
 
         let count = ledger_guard.insert_signed_unchecked(signed_update);

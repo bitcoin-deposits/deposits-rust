@@ -262,6 +262,8 @@ impl LedgerExt for Ledger {
             previous_hash: prev_hash,
             current_hash: update_hash,
             timestamp: deposits_core::now_unix_timestamp(),
+            block_height: 0,
+            block_hash: [0u8; 32],
         };
 
         // Apply state transition

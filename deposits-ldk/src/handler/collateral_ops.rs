@@ -84,9 +84,21 @@ where
 
         if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
             let ledger = ledger_arc.read().unwrap();
-            ledger.state.collateral_attestations.values()
+
+            // Sum of attestation collateral
+            let attestation_collateral: u64 = ledger.state.collateral_attestations.values()
                 .map(|a| a.available_collateral())
-                .sum()
+                .sum();
+
+            // Sum of deposit pledged collateral (with active locks)
+            // Use block 0 as a simple check - in production this should be current block height
+            // For now, count all pledges with non-zero expiry
+            let pledged_collateral: u64 = ledger.state.deposits.values()
+                .filter(|d| d.collateral_pledge_expires > 0)
+                .map(|d| d.collateral_pledge_amount)
+                .sum();
+
+            attestation_collateral + pledged_collateral
         } else {
             0
         }

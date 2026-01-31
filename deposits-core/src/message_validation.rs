@@ -618,10 +618,11 @@ pub fn validate_ledger_operation<C: ValidationContext>(
             };
             validate_ledger_close_msg(ctx, &msg, sender)
         }
-        // Operations without specific validation
+        // Operations without specific validation (validated in ledger.rs)
         LedgerOperation::CollateralAttestation { .. } |
         LedgerOperation::CollateralAddPartner { .. } |
         LedgerOperation::CollateralRemovePartner { .. } |
+        LedgerOperation::CollateralPledge { .. } |
         LedgerOperation::Tombstone { .. } => Ok(()),
     }
 }

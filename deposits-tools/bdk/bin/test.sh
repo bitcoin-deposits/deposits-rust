@@ -735,15 +735,15 @@ test_withdraw_to_fund_deposit_b() {
         # Complete the withdrawal (broadcast)
         local complete_output=$(run_bdk_cmd "bdk-alice" withdraw complete "$ALICE_RESERVES_ID" "$withdrawal_id" 2>&1)
 
-        if echo "$complete_output" | grep -q "Withdrawal complete\|broadcast"; then
+        if echo "$complete_output" | grep -q "Withdrawal completed\|Transaction ID"; then
             test_pass "Withdrawal broadcasted"
 
             # Mine a block to confirm
             mine_blocks 1
             test_pass "Mined confirmation block"
 
-            # Store the txid for Deposit B completion
-            FUNDING_TXID=$(echo "$complete_output" | grep -E "TXID:|txid" | awk '{print $NF}')
+            # Store the txid for Deposit B completion - CLI outputs "Transaction ID: <txid>"
+            FUNDING_TXID=$(echo "$complete_output" | grep "Transaction ID:" | awk '{print $3}')
             FUNDING_AMOUNT_SATS=$amount_sats
         else
             test_fail "Failed to complete withdrawal"

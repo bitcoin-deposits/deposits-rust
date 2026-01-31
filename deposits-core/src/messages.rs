@@ -77,6 +77,7 @@ pub mod consts {
     pub const COLLATERAL_REMOVE_PARTNER: u16 = 0x8099;
     pub const COLLATERAL_CONSENT_REQUEST: u16 = 0x809B;
     pub const COLLATERAL_CONSENT_RESPONSE: u16 = 0x809D;
+    pub const COLLATERAL_PLEDGE: u16 = 0x809F;
 
     // Deposit operations
     pub const DEPOSIT_OPEN: u16 = 0x80D1;
@@ -629,6 +630,21 @@ pub enum LedgerOperation {
         collateral_partner: PublicKey,
         operator_signature: [u8; 64],
     },
+    /// Pledge deposit balance as collateral backing for the operator.
+    /// The pledged amount cannot be withdrawn until lock expires.
+    /// Uses ratchet semantics: can only increase amount AND extend duration.
+    CollateralPledge {
+        /// Which deposit is pledging collateral
+        deposit_pubkey: PublicKey,
+        /// Amount pledged as collateral (millisatoshis)
+        amount: u64,
+        /// Block height when the lock expires
+        lock_until_block: u32,
+        /// Operator being backed
+        operator_id: PublicKey,
+        /// Deposit holder's signature authorizing the pledge
+        deposit_holder_signature: [u8; 64],
+    },
 
     // ========== Maintenance (1) ==========
     /// Collect maintenance fees from a deposit
@@ -672,6 +688,7 @@ impl LedgerOperation {
             Self::CollateralAttestation { .. } => 42,
             Self::CollateralAddPartner { .. } => 43,
             Self::CollateralRemovePartner { .. } => 44,
+            Self::CollateralPledge { .. } => 45,
             Self::FeeCollect { .. } => 50,
             Self::LedgerClose => 60,
             Self::Tombstone { .. } => 61,
@@ -1379,6 +1396,13 @@ impl BinaryCodec for LedgerOperation {
                 write_pubkey(w, collateral_partner)?;
                 write_64(w, operator_signature)?;
             }
+            Self::CollateralPledge { deposit_pubkey, amount, lock_until_block, operator_id, deposit_holder_signature } => {
+                write_pubkey(w, deposit_pubkey)?;
+                write_u64(w, *amount)?;
+                write_u32(w, *lock_until_block)?;
+                write_pubkey(w, operator_id)?;
+                write_64(w, deposit_holder_signature)?;
+            }
             Self::FeeCollect { pubkey, amount, block_height } => {
                 write_pubkey(w, pubkey)?;
                 write_u64(w, *amount)?;
@@ -1499,6 +1523,13 @@ impl BinaryCodec for LedgerOperation {
                 collateral_partner: read_pubkey(r)?,
                 operator_signature: read_64(r)?,
             }),
+            45 => Ok(Self::CollateralPledge {
+                deposit_pubkey: read_pubkey(r)?,
+                amount: read_u64(r)?,
+                lock_until_block: read_u32(r)?,
+                operator_id: read_pubkey(r)?,
+                deposit_holder_signature: read_64(r)?,
+            }),
             // Fee operations (50)
             50 => Ok(Self::FeeCollect {
                 pubkey: read_pubkey(r)?,
@@ -1554,6 +1585,8 @@ impl BinaryCodec for StorageSignedLedgerUpdate {
         write_32(w, &self.previous_hash)?;
         write_32(w, &self.current_hash)?;
         write_u64(w, self.timestamp)?;
+        write_u32(w, self.block_height)?;
+        write_32(w, &self.block_hash)?;
         write_64(w, &self.partner_signature)?;
         write_64(w, &self.operator_signature)?;
         Ok(())
@@ -1569,6 +1602,8 @@ impl BinaryCodec for StorageSignedLedgerUpdate {
             previous_hash: read_32(r)?,
             current_hash: read_32(r)?,
             timestamp: read_u64(r)?,
+            block_height: read_u32(r)?,
+            block_hash: read_32(r)?,
             partner_signature: read_64(r)?,
             operator_signature: read_64(r)?,
         })
@@ -2252,6 +2287,9 @@ mod ledger_op_tlv {
     pub const DESTINATION_ADDRESS: u64 = 70;
     pub const WITHDRAWAL_ID: u64 = 72;
     pub const FUNDING_ADDRESS: u64 = 74;
+    // CollateralPledge fields
+    pub const LOCK_UNTIL_BLOCK: u64 = 76;
+    pub const DEPOSIT_HOLDER_SIG: u64 = 78;
 }
 
 impl TlvEncode for LedgerOperation {
@@ -2386,6 +2424,14 @@ impl TlvEncode for LedgerOperation {
                     .pubkey_field(COLLATERAL_PARTNER, collateral_partner)
                     .bytes_field(OPERATOR_SIG, operator_signature);
             }
+            Self::CollateralPledge { deposit_pubkey, amount, lock_until_block, operator_id, deposit_holder_signature } => {
+                builder = builder
+                    .pubkey_field(DEPOSIT_PUBKEY, deposit_pubkey)
+                    .u64_field(AMOUNT, *amount)
+                    .u32_field(LOCK_UNTIL_BLOCK, *lock_until_block)
+                    .pubkey_field(OPERATOR_ID, operator_id)
+                    .bytes_field(DEPOSIT_HOLDER_SIG, deposit_holder_signature);
+            }
             Self::FeeCollect { pubkey, amount, block_height } => {
                 builder = builder
                     .pubkey_field(PUBKEY, pubkey)
@@ -2509,6 +2555,13 @@ impl TlvDecode for LedgerOperation {
             44 => Ok(Self::CollateralRemovePartner {
                 collateral_partner: reader.read_pubkey(COLLATERAL_PARTNER)?,
                 operator_signature: reader.read_bytes(OPERATOR_SIG)?,
+            }),
+            45 => Ok(Self::CollateralPledge {
+                deposit_pubkey: reader.read_pubkey(DEPOSIT_PUBKEY)?,
+                amount: reader.read_u64(AMOUNT)?,
+                lock_until_block: reader.read_u32(LOCK_UNTIL_BLOCK)?,
+                operator_id: reader.read_pubkey(OPERATOR_ID)?,
+                deposit_holder_signature: reader.read_bytes(DEPOSIT_HOLDER_SIG)?,
             }),
             50 => Ok(Self::FeeCollect {
                 pubkey: reader.read_pubkey(PUBKEY)?,
@@ -4030,6 +4083,8 @@ mod tests {
             previous_hash: [0xCC; 32],
             current_hash: [0xDD; 32],
             timestamp: 1234567890,
+            block_height: 12345,
+            block_hash: [0x11; 32],
             partner_signature: [0xFF; 64],
             operator_signature: [0xEE; 64],
         };

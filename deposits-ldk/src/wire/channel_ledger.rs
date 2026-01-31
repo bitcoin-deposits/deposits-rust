@@ -626,6 +626,13 @@ impl ChannelLedger {
                 };
                 self.collateral_attestations.insert(*collateral_partner, attestation_msg);
             }
+            LedgerOperation::CollateralPledge { deposit_pubkey, amount, lock_until_block, .. } => {
+                // Update the deposit's collateral pledge fields
+                if let Some(deposit) = self.deposits.get_mut(deposit_pubkey) {
+                    deposit.collateral_pledge_amount = *amount;
+                    deposit.collateral_pledge_expires = *lock_until_block;
+                }
+            }
             LedgerOperation::LedgerClose => {
                 self.deposits.clear();
                 self.reserves.amount = 0;

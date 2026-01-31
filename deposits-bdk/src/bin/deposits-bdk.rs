@@ -40,6 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "reserves" => create_reserves(&args[2..]).await?,
         "ledger" => ledger_command(&args[2..]).await?,
         "partner" => partner_command(&args[2..]).await?,
+        "collateral" => collateral_command(&args[2..]).await?,
         "deposit" => deposit_command(&args[2..]).await?,
         "withdraw" => withdraw_command(&args[2..]).await?,
         "keygen" => keygen(),
@@ -68,6 +69,7 @@ COMMANDS:
     reserves        Create a reserves UTXO
     ledger          Manage ledgers (open, list)
     partner         Manage collateral partners (request, list)
+    collateral      Manage collateral pledges
     deposit         Manage deposit offers for on-chain funding
     withdraw        Manage on-chain withdrawals
     help            Show this help message
@@ -83,6 +85,11 @@ LEDGER SUBCOMMANDS:
 PARTNER SUBCOMMANDS:
     partner request <pubkey>   Send collateral partnership request
     partner list               List all collateral partners
+
+COLLATERAL SUBCOMMANDS:
+    collateral pledge <reserves_id> <deposit_secret> <amount_msats> <lock_blocks>
+                    Pledge deposit balance as collateral backing for the operator.
+                    lock_blocks is how many blocks from now until the lock expires.
 
 DEPOSIT SUBCOMMANDS:
     deposit offer <reserves_id> <deposit_pubkey> <max_sats> <min_sats> <blocks_valid>
@@ -552,6 +559,7 @@ async fn ledger_history(args: &[String]) -> Result<(), Box<dyn std::error::Error
     // Print header with short ID
     let id_str = reserves_id.to_string();
     let short_id = &id_str[..8.min(id_str.len())];
+
     println!("Updates for ledger {}...:", short_id);
 
     if ledger.history.is_empty() {
@@ -586,8 +594,9 @@ async fn ledger_history(args: &[String]) -> Result<(), Box<dyn std::error::Error
         // Get operation name and details
         let (op_name, op_details) = format_operation(update.message_type, &update.message);
 
-        println!("{:>4} [{:08x}~{:08x}] {}{} {}{}",
+        println!("{:>4} ↑{:<6} [{:08x}~{:08x}] {}{} {}{}",
             seq,
+            update.block_height,
             u32::from_be_bytes([prev[0], prev[1], prev[2], prev[3]]),
             u32::from_be_bytes([curr[0], curr[1], curr[2], curr[3]]),
             sig_status,
@@ -620,6 +629,7 @@ fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
         COLLATERAL_ATTESTATION => "CollateralAttestation",
         COLLATERAL_ADD_PARTNER => "CollateralAddPartner",
         COLLATERAL_REMOVE_PARTNER => "CollateralRemovePartner",
+        COLLATERAL_PLEDGE => "CollateralPledge",
         DEPOSIT_OPEN => "DepositOpen",
         DEPOSIT_CLOSE => "DepositClose",
         DEPOSIT_UPDATE => "DepositUpdate",
@@ -657,6 +667,11 @@ fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                 }
                 LedgerOperation::CollateralAttestation { amount, .. } => {
                     format!("{} sat", amount)
+                }
+                LedgerOperation::CollateralPledge { deposit_pubkey, amount, lock_until_block, .. } => {
+                    let pk_bytes = deposit_pubkey.serialize();
+                    format!("pk:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  until_block:{}",
+                        pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3], amount, lock_until_block)
                 }
                 LedgerOperation::LedgerOpen { ledger_address, .. } => {
                     // Shorten address for display (first 8 and last 6 chars)
@@ -797,6 +812,99 @@ async fn partner_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     for (pubkey, role) in partners {
         println!("  {} - {}", pubkey, role);
     }
+
+    Ok(())
+}
+
+// ============================================================================
+// Collateral Commands
+// ============================================================================
+
+/// Handle collateral subcommands
+async fn collateral_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    if args.is_empty() {
+        eprintln!("Usage: deposits-bdk collateral <pledge> [args...]");
+        return Ok(());
+    }
+
+    match args[0].as_str() {
+        "pledge" => collateral_pledge(&args[1..]).await,
+        cmd => {
+            eprintln!("Unknown collateral subcommand: {}", cmd);
+            eprintln!("Usage: deposits-bdk collateral <pledge> [args...]");
+            Ok(())
+        }
+    }
+}
+
+/// Pledge deposit balance as collateral backing for the operator
+async fn collateral_pledge(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    // Parse positional arguments: <reserves_id> <deposit_secret> <amount_msats> <lock_blocks>
+    let mut reserves_id: Option<String> = None;
+    let mut deposit_secret_hex: Option<String> = None;
+    let mut amount_msats: Option<u64> = None;
+    let mut lock_blocks: Option<u32> = None;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else if reserves_id.is_none() {
+            reserves_id = Some(args[i].clone());
+        } else if deposit_secret_hex.is_none() {
+            deposit_secret_hex = Some(args[i].clone());
+        } else if amount_msats.is_none() {
+            amount_msats = Some(args[i].parse().map_err(|_| "Invalid amount_msats")?);
+        } else if lock_blocks.is_none() {
+            lock_blocks = Some(args[i].parse().map_err(|_| "Invalid lock_blocks")?);
+        }
+        i += 1;
+    }
+
+    let reserves_id = reserves_id.ok_or("reserves_id required")?;
+    let deposit_secret_hex = deposit_secret_hex.ok_or("deposit_secret required")?;
+    let amount_msats = amount_msats.ok_or("amount_msats required")?;
+    let lock_blocks = lock_blocks.ok_or("lock_blocks required")?;
+
+    // Parse the deposit secret
+    let secret_bytes = hex::decode(&deposit_secret_hex)
+        .map_err(|e| format!("Invalid deposit secret hex: {}", e))?;
+    let deposit_secret = bitcoin::secp256k1::SecretKey::from_slice(&secret_bytes)
+        .map_err(|e| format!("Invalid deposit secret: {}", e))?;
+
+    // Derive the deposit pubkey from the secret
+    let secp = Secp256k1::new();
+    let deposit_pubkey = PublicKey::from_secret_key(&secp, &deposit_secret);
+
+    let config = parse_config(&config_args)?;
+    let node = Node::new(config).await?;
+
+    // Get current block height and compute lock_until_block
+    let current_block = node.wallet.get_block_height()?;
+    let lock_until_block = current_block + lock_blocks;
+
+    println!("Creating collateral pledge...");
+    println!("  Reserves ID: {}", reserves_id);
+    println!("  Deposit: {}", deposit_pubkey);
+    println!("  Amount: {} msats", amount_msats);
+    println!("  Lock until block: {} (current: {}, +{} blocks)", lock_until_block, current_block, lock_blocks);
+
+    let (pledge_amount, pledge_expires) = node.pledge_collateral(
+        &reserves_id,
+        deposit_pubkey,
+        &deposit_secret,
+        amount_msats,
+        lock_until_block,
+    )?;
+
+    println!("\nCollateral pledge created!");
+    println!("  Pledged amount: {} msats", pledge_amount);
+    println!("  Lock expires: block {}", pledge_expires);
 
     Ok(())
 }

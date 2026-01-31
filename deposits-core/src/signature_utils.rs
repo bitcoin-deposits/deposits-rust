@@ -290,6 +290,100 @@ pub fn verify_withdrawal_signature(
     }
 }
 
+/// Create the signing message for a collateral pledge.
+///
+/// Format: "COLLATERAL_PLEDGE:{deposit_pubkey}:{amount}:{lock_until_block}:{operator_id}"
+pub fn collateral_pledge_signing_message(
+    deposit_pubkey: &PublicKey,
+    amount: u64,
+    lock_until_block: u32,
+    operator_id: &PublicKey,
+) -> String {
+    format!(
+        "COLLATERAL_PLEDGE:{}:{}:{}:{}",
+        deposit_pubkey,
+        amount,
+        lock_until_block,
+        operator_id
+    )
+}
+
+/// Create a collateral pledge signature (deposit holder's authorization).
+///
+/// The deposit holder's private key signs the pledge parameters to authorize
+/// locking their balance as collateral backing for the operator.
+pub fn create_collateral_pledge_signature(
+    deposit_holder_secret: &SecretKey,
+    deposit_pubkey: &PublicKey,
+    amount: u64,
+    lock_until_block: u32,
+    operator_id: &PublicKey,
+) -> Result<[u8; 64], DepositsError> {
+    // Create the signing message
+    let signing_message = collateral_pledge_signing_message(
+        deposit_pubkey,
+        amount,
+        lock_until_block,
+        operator_id,
+    );
+
+    // Hash the message
+    let message_hash = sha256::Hash::hash(signing_message.as_bytes());
+    let secp_message = Message::from_digest_slice(message_hash.as_ref())
+        .map_err(|_| DepositsError::ProtocolViolation {
+            violation_type: "invalid_message_hash".to_string(),
+            details: "Failed to create secp256k1 message from hash".to_string(),
+        })?;
+
+    // Sign the message
+    let secp = Secp256k1::signing_only();
+    let signature = secp.sign_ecdsa(&secp_message, deposit_holder_secret);
+
+    Ok(signature.serialize_compact())
+}
+
+/// Verify a collateral pledge signature.
+///
+/// Verifies that the deposit holder authorized the pledge of their balance
+/// as collateral backing for the specified operator.
+pub fn verify_collateral_pledge_signature(
+    signature: &[u8; 64],
+    deposit_pubkey: &PublicKey,
+    amount: u64,
+    lock_until_block: u32,
+    operator_id: &PublicKey,
+) -> Result<bool, DepositsError> {
+    // Recreate the same signing message
+    let signing_message = collateral_pledge_signing_message(
+        deposit_pubkey,
+        amount,
+        lock_until_block,
+        operator_id,
+    );
+
+    // Hash the message
+    let message_hash = sha256::Hash::hash(signing_message.as_bytes());
+    let secp_message = Message::from_digest_slice(message_hash.as_ref())
+        .map_err(|_| DepositsError::ProtocolViolation {
+            violation_type: "invalid_message_hash".to_string(),
+            details: "Failed to create secp256k1 message from hash".to_string(),
+        })?;
+
+    // Parse signature
+    let signature = Signature::from_compact(signature)
+        .map_err(|_| DepositsError::ProtocolViolation {
+            violation_type: "invalid_signature".to_string(),
+            details: "Failed to parse collateral pledge signature".to_string(),
+        })?;
+
+    // Verify signature against deposit holder's public key
+    let secp = Secp256k1::verification_only();
+    match secp.verify_ecdsa(&secp_message, &signature, deposit_pubkey) {
+        Ok(_) => Ok(true),
+        Err(_) => Ok(false),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -587,6 +681,68 @@ mod tests {
 
         // Verify should fail - signature doesn't match modified amount
         let valid = verify_withdrawal_signature(&withdrawal).unwrap();
+        assert!(!valid, "Signature should be invalid for modified amount");
+    }
+
+    #[test]
+    fn test_collateral_pledge_signature_roundtrip() {
+        let (deposit_holder_secret, deposit_pubkey) = create_test_keypair();
+
+        // Create another keypair for operator
+        let secp = Secp256k1::new();
+        let operator_secret = SecretKey::from_slice(&[2u8; 32]).unwrap();
+        let operator_pubkey = PublicKey::from_secret_key(&secp, &operator_secret);
+
+        let amount = 1_000_000u64;
+        let lock_until_block = 850_000u32;
+
+        // Create signature
+        let sig = create_collateral_pledge_signature(
+            &deposit_holder_secret,
+            &deposit_pubkey,
+            amount,
+            lock_until_block,
+            &operator_pubkey,
+        ).unwrap();
+
+        // Verify signature
+        let valid = verify_collateral_pledge_signature(
+            &sig,
+            &deposit_pubkey,
+            amount,
+            lock_until_block,
+            &operator_pubkey,
+        ).unwrap();
+        assert!(valid, "Collateral pledge signature should be valid");
+    }
+
+    #[test]
+    fn test_collateral_pledge_signature_wrong_amount() {
+        let (deposit_holder_secret, deposit_pubkey) = create_test_keypair();
+        let secp = Secp256k1::new();
+        let operator_secret = SecretKey::from_slice(&[2u8; 32]).unwrap();
+        let operator_pubkey = PublicKey::from_secret_key(&secp, &operator_secret);
+
+        let amount = 1_000_000u64;
+        let lock_until_block = 850_000u32;
+
+        // Create signature with original amount
+        let sig = create_collateral_pledge_signature(
+            &deposit_holder_secret,
+            &deposit_pubkey,
+            amount,
+            lock_until_block,
+            &operator_pubkey,
+        ).unwrap();
+
+        // Verify with different amount should fail
+        let valid = verify_collateral_pledge_signature(
+            &sig,
+            &deposit_pubkey,
+            amount + 1000, // Different amount
+            lock_until_block,
+            &operator_pubkey,
+        ).unwrap();
         assert!(!valid, "Signature should be invalid for modified amount");
     }
 }

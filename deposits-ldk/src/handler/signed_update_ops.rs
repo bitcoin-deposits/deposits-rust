@@ -124,6 +124,8 @@ where
             previous_hash,
             current_hash,
             timestamp,
+            block_height: 0, // LDK block info populated separately
+            block_hash: [0u8; 32],
         })
     }
 

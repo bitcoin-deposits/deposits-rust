@@ -505,6 +505,7 @@ pub fn handle_ledger_update<C: HandlerContext>(
                 // or have already been checked for idempotency above
                 LedgerOperation::CollateralAddPartner { .. } |
                 LedgerOperation::CollateralRemovePartner { .. } |
+                LedgerOperation::CollateralPledge { .. } |
                 LedgerOperation::CollateralIncrease { .. } |
                 LedgerOperation::CollateralDecrease { .. } |
                 LedgerOperation::CollateralAttestation { .. } |

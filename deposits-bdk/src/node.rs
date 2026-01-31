@@ -368,6 +368,86 @@ impl Node {
         partners
     }
 
+    /// Pledge a deposit's balance as collateral backing for the operator.
+    ///
+    /// The pledged amount cannot be withdrawn until the lock expires.
+    /// Uses ratchet semantics: can only increase amount AND extend duration.
+    ///
+    /// # Arguments
+    /// * `reserves_id` - The reserves ID (ledger address) where the deposit exists
+    /// * `deposit_pubkey` - The deposit's public key
+    /// * `deposit_secret` - The deposit holder's secret key for signing
+    /// * `amount_msats` - Amount to pledge as collateral (millisatoshis)
+    /// * `lock_until_block` - Block height when the lock expires
+    ///
+    /// # Returns
+    /// The new pledge amount and expiry block on success
+    pub fn pledge_collateral(
+        &self,
+        reserves_id: &str,
+        deposit_pubkey: PublicKey,
+        deposit_secret: &bitcoin::secp256k1::SecretKey,
+        amount_msats: u64,
+        lock_until_block: u32,
+    ) -> Result<(u64, u32), Error> {
+        let ledger_arc = self.handler.get_or_create_ledger(self.node_id, reserves_id.to_string());
+
+        let result = {
+            let mut ledger = ledger_arc.write().unwrap();
+
+            // Check if deposit exists
+            if !ledger.state.deposits.contains_key(&deposit_pubkey) {
+                return Err(Error::Protocol(format!(
+                    "Deposit not found for pubkey {}",
+                    deposit_pubkey
+                )));
+            }
+
+            // Create the signature
+            let signature = deposits_core::signature_utils::create_collateral_pledge_signature(
+                deposit_secret,
+                &deposit_pubkey,
+                amount_msats,
+                lock_until_block,
+                &self.node_id,
+            ).map_err(|e| Error::Protocol(format!("Failed to create signature: {:?}", e)))?;
+
+            // Apply the CollateralPledge operation
+            let operation = LedgerOperation::CollateralPledge {
+                deposit_pubkey,
+                amount: amount_msats,
+                lock_until_block,
+                operator_id: self.node_id,
+                deposit_holder_signature: signature,
+            };
+
+            let block_height = self.wallet.get_block_height().unwrap_or(0);
+            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
+            ledger.append_operation_with_block(operation, deposits_core::messages::consts::COLLATERAL_PLEDGE, block_height, block_hash)
+                .map_err(|e| Error::Protocol(format!("Failed to pledge collateral: {:?}", e)))?;
+
+            // Return the pledge details from the deposit
+            let deposit = ledger.state.deposits.get(&deposit_pubkey)
+                .ok_or_else(|| Error::Protocol("Deposit not found after pledge".to_string()))?;
+
+            (deposit.collateral_pledge_amount, deposit.collateral_pledge_expires)
+        };
+
+        // Persist the ledger
+        if let Err(e) = self.handler.persist_ledger(&self.node_id, reserves_id) {
+            tracing::error!("Failed to persist ledger: {}", e);
+        }
+
+        tracing::info!(
+            "Created collateral pledge for deposit {}: {} msats until block {}",
+            deposit_pubkey,
+            result.0,
+            result.1
+        );
+
+        Ok(result)
+    }
+
     // ========================================================================
     // Deposit Offer Management (On-Chain Funding)
     // ========================================================================
@@ -629,7 +709,9 @@ impl Node {
                 withdrawal_id,
             };
 
-            ledger.append_operation(operation, deposits_core::messages::consts::ONCHAIN_LOCK)
+            let block_height = self.wallet.get_block_height().unwrap_or(0);
+            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
+            ledger.append_operation_with_block(operation, deposits_core::messages::consts::ONCHAIN_LOCK, block_height, block_hash)
                 .map_err(|e| Error::Protocol(format!("Failed to lock withdrawal: {:?}", e)))?;
 
             // Get new balance
@@ -735,7 +817,9 @@ impl Node {
                 destination_address: withdrawal.destination_address.clone(),
             };
 
-            ledger.append_operation(operation, deposits_core::messages::consts::ONCHAIN_FULFILL)
+            let block_height = self.wallet.get_block_height().unwrap_or(0);
+            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
+            ledger.append_operation_with_block(operation, deposits_core::messages::consts::ONCHAIN_FULFILL, block_height, block_hash)
                 .map_err(|e| Error::Protocol(format!("Failed to fulfill withdrawal: {:?}", e)))?;
 
             // Get final balance
@@ -925,7 +1009,9 @@ impl Node {
                 cosigner_guarantee_signature: None,
             };
 
-            ledger.append_operation(operation, deposits_core::messages::consts::DEPOSIT_OPEN)
+            let block_height = self.wallet.get_block_height().unwrap_or(0);
+            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
+            ledger.append_operation_with_block(operation, deposits_core::messages::consts::DEPOSIT_OPEN, block_height, block_hash)
                 .map_err(|e| Error::Protocol(format!("Failed to open deposit: {:?}", e)))?;
 
             // Return the created deposit
@@ -983,7 +1069,9 @@ impl Node {
                 funding_address,
             };
 
-            ledger.append_operation(operation, deposits_core::messages::consts::ONCHAIN_CREDIT)
+            let block_height = self.wallet.get_block_height().unwrap_or(0);
+            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
+            ledger.append_operation_with_block(operation, deposits_core::messages::consts::ONCHAIN_CREDIT, block_height, block_hash)
                 .map_err(|e| Error::Protocol(format!("Failed to credit deposit: {:?}", e)))?;
 
             // Return the new balance
@@ -1044,7 +1132,9 @@ impl Node {
                 sequence_number,
             };
 
-            ledger.append_operation(operation, deposits_core::messages::consts::RECEIVING_CREDIT_PAYMENT)
+            let block_height = self.wallet.get_block_height().unwrap_or(0);
+            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
+            ledger.append_operation_with_block(operation, deposits_core::messages::consts::RECEIVING_CREDIT_PAYMENT, block_height, block_hash)
                 .map_err(|e| Error::Protocol(format!("Failed to credit deposit: {:?}", e)))?;
 
             // Return the new balance

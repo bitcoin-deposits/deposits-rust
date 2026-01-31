@@ -55,6 +55,9 @@ pub struct Wallet {
     /// Current block height (updated on sync)
     block_height: Mutex<u32>,
 
+    /// Current block hash (updated on sync)
+    block_hash: Mutex<[u8; 32]>,
+
     /// Data directory for persistence
     data_dir: PathBuf,
 }
@@ -205,6 +208,7 @@ impl Wallet {
             operator_pubkey,
             reserves: RwLock::new(reserves),
             block_height: Mutex::new(0),
+            block_hash: Mutex::new([0u8; 32]),
             data_dir,
         })
     }
@@ -261,9 +265,49 @@ impl Wallet {
         self.operator_secret
     }
 
-    /// Get the current block height
+    /// Fetch current block info from esplora and update cache
+    pub fn fetch_block_info(&self) -> Result<(u32, [u8; 32]), Error> {
+        let client = EsploraBuilder::new(&self.electrum_url)
+            .build_blocking();
+
+        let height = client
+            .get_height()
+            .map_err(|e| Error::Wallet(format!("Failed to get block height: {}", e)))?;
+
+        let hash = client
+            .get_block_hash(height)
+            .map_err(|e| Error::Wallet(format!("Failed to get block hash: {}", e)))?;
+
+        let hash_bytes: [u8; 32] = *hash.as_ref();
+
+        *self.block_height.lock().unwrap() = height;
+        *self.block_hash.lock().unwrap() = hash_bytes;
+
+        Ok((height, hash_bytes))
+    }
+
+    /// Get the current block height (fetches from chain if not yet known)
     pub fn get_block_height(&self) -> Result<u32, Error> {
-        Ok(*self.block_height.lock().unwrap())
+        let cached = *self.block_height.lock().unwrap();
+        if cached == 0 {
+            // Fetch fresh block info
+            let (height, _) = self.fetch_block_info()?;
+            Ok(height)
+        } else {
+            Ok(cached)
+        }
+    }
+
+    /// Get the current block hash (fetches from chain if not yet known)
+    pub fn get_block_hash(&self) -> Result<[u8; 32], Error> {
+        let cached = *self.block_hash.lock().unwrap();
+        if cached == [0u8; 32] {
+            // Fetch fresh block info
+            let (_, hash) = self.fetch_block_info()?;
+            Ok(hash)
+        } else {
+            Ok(cached)
+        }
     }
 
     /// Get the total reserves balance (sum of all tracked reserves outputs)
@@ -306,6 +350,11 @@ impl Wallet {
             .map_err(|e| Error::Wallet(format!("Failed to get block height: {}", e)))?;
 
         *self.block_height.lock().unwrap() = height;
+
+        // Get block hash at current height
+        if let Ok(hash) = client.get_block_hash(height) {
+            *self.block_hash.lock().unwrap() = *hash.as_ref();
+        }
 
         // Sync the wallet
         let mut wallet = self.inner.lock().unwrap();

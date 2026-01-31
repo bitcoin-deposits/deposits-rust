@@ -103,6 +103,7 @@ impl LedgerOperationExt for LedgerOperation {
             LedgerOperation::CollateralAttestation { .. } => "CollateralAttestation",
             LedgerOperation::CollateralAddPartner { .. } => "CollateralAddPartner",
             LedgerOperation::CollateralRemovePartner { .. } => "CollateralRemovePartner",
+            LedgerOperation::CollateralPledge { .. } => "CollateralPledge",
             LedgerOperation::FeeCollect { .. } => "FeeCollect",
             LedgerOperation::LedgerClose => "LedgerClose",
             LedgerOperation::Tombstone { .. } => "Tombstone",
