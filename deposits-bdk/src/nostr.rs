@@ -43,14 +43,17 @@ use tokio::sync::mpsc;
 use crate::Error;
 
 /// Custom Kind for ledger updates.
+/// Uses range 1000-9999 (regular custom events) to ensure relay storage.
 /// Each update is a separate event that relays should retain.
-pub const KIND_LEDGER_UPDATE: u16 = 21100;
+pub const KIND_LEDGER_UPDATE: u16 = 9100;
 
 /// Custom Kind for ledger requests (deposit_open, etc.)
-pub const KIND_LEDGER_REQUEST: u16 = 21101;
+/// Uses range 1000-9999 (regular custom events) for relay storage.
+pub const KIND_LEDGER_REQUEST: u16 = 9101;
 
 /// Custom Kind for ledger responses (replies to requests)
-pub const KIND_LEDGER_RESPONSE: u16 = 21102;
+/// Uses range 1000-9999 (regular custom events) for relay storage.
+pub const KIND_LEDGER_RESPONSE: u16 = 9102;
 
 /// Default relay URLs for the network
 /// Empty by default - relays should be explicitly configured
@@ -475,20 +478,43 @@ impl NostrTransport {
 
     /// Subscribe to ledger requests for a specific ledger (for operators)
     pub async fn subscribe_to_requests(&self, ledger_id: &str) -> Result<(), Error> {
+        // Subscribe to ALL requests of this kind (filter by ledger_id in handler)
+        // This avoids potential issues with custom tag filters on some relays
         let filter = Filter::new()
-            .kind(Kind::Custom(KIND_LEDGER_REQUEST))
-            .custom_tag(
-                SingleLetterTag::lowercase(Alphabet::L),
-                [ledger_id],
-            );
+            .kind(Kind::Custom(KIND_LEDGER_REQUEST));
 
         self.client
             .subscribe(vec![filter], None)
             .await
             .map_err(|e| Error::Nostr(format!("Failed to subscribe to requests: {}", e)))?;
 
-        tracing::info!("Subscribed to ledger requests: {}", ledger_id);
+        tracing::info!("Subscribed to ledger requests (kind {}), filtering for: {}", KIND_LEDGER_REQUEST, ledger_id);
         Ok(())
+    }
+
+    /// Fetch recent ledger requests (polling fallback)
+    pub async fn fetch_recent_requests(&self, since_secs: u64) -> Result<Vec<LedgerRequest>, Error> {
+        use nostr_sdk::Timestamp;
+
+        let since = Timestamp::now() - since_secs;
+        let filter = Filter::new()
+            .kind(Kind::Custom(KIND_LEDGER_REQUEST))
+            .since(since);
+
+        let events = self.client
+            .fetch_events(vec![filter], Some(tokio::time::Duration::from_secs(5)))
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to fetch events: {}", e)))?;
+
+        let mut requests = Vec::new();
+        for event in events.into_iter() {
+            if let Ok(req) = self.process_ledger_request(&event) {
+                requests.push(req);
+            }
+        }
+
+        tracing::debug!("Fetched {} recent requests", requests.len());
+        Ok(requests)
     }
 
     /// Subscribe to responses for a specific request (for requesters)
@@ -509,6 +535,37 @@ impl NostrTransport {
         Ok(())
     }
 
+    /// Fetch response for a specific request (polling fallback)
+    pub async fn fetch_response(&self, request_id: &str) -> Result<Option<LedgerResponse>, Error> {
+        use nostr_sdk::Timestamp;
+
+        // Look for responses from the last 60 seconds
+        let since = Timestamp::now() - 60;
+        let filter = Filter::new()
+            .kind(Kind::Custom(KIND_LEDGER_RESPONSE))
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::E),
+                [request_id],
+            )
+            .since(since);
+
+        let events = self.client
+            .fetch_events(vec![filter], Some(tokio::time::Duration::from_secs(5)))
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to fetch events: {}", e)))?;
+
+        for event in events.into_iter() {
+            if let Ok(response) = self.process_ledger_response(&event) {
+                if response.request_id == request_id {
+                    tracing::debug!("Fetched response for request: {}", &request_id[..16]);
+                    return Ok(Some(response));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
     /// Start listening for inbound messages
     pub async fn start_listening(&self) -> Result<(), Error> {
         // Subscribe to DMs addressed to us
@@ -525,20 +582,25 @@ impl NostrTransport {
     }
 
     /// Process incoming events (call this in a loop)
-    /// This awaits on the notification channel, blocking until a message arrives
+    /// This awaits on the notification channel with a timeout
     pub async fn process_events(&mut self) -> Result<(), Error> {
-        // Wait for a notification (this blocks until one arrives)
-        match self.client.notifications().recv().await {
-            Ok(notification) => {
+        // Wait for a notification with timeout
+        let timeout = tokio::time::Duration::from_millis(500);
+        match tokio::time::timeout(timeout, self.client.notifications().recv()).await {
+            Ok(Ok(notification)) => {
+                tracing::debug!("Received notification: {:?}", notification);
                 self.handle_notification(notification);
                 // Drain any additional pending notifications without blocking
                 while let Ok(notification) = self.client.notifications().try_recv() {
                     self.handle_notification(notification);
                 }
             }
+            Ok(Err(_)) => {
+                // Channel closed or lagged
+                tracing::debug!("Notification channel error");
+            }
             Err(_) => {
-                // Channel closed or lagged, wait a bit before retrying
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                // Timeout - no notification received, that's ok
             }
         }
         Ok(())
@@ -547,28 +609,26 @@ impl NostrTransport {
     /// Handle a single notification
     fn handle_notification(&self, notification: RelayPoolNotification) {
         if let RelayPoolNotification::Event { event, .. } = notification {
-            match event.kind {
-                Kind::EncryptedDirectMessage => {
-                    if let Ok(msg) = self.process_dm(&event) {
-                        let _ = self.inbound_tx.send(msg);
-                    }
+            // Use numeric kind value for comparison since Kind::Custom(n) and Kind::Regular(n)
+            // are different enum variants but represent the same kind number
+            let kind_num = event.kind.as_u16();
+
+            if event.kind == Kind::EncryptedDirectMessage {
+                if let Ok(msg) = self.process_dm(&event) {
+                    let _ = self.inbound_tx.send(msg);
                 }
-                Kind::Custom(KIND_LEDGER_UPDATE) => {
-                    if let Ok(update) = self.process_ledger_update(&event) {
-                        let _ = self.ledger_tx.send(update);
-                    }
+            } else if kind_num == KIND_LEDGER_UPDATE {
+                if let Ok(update) = self.process_ledger_update(&event) {
+                    let _ = self.ledger_tx.send(update);
                 }
-                Kind::Custom(KIND_LEDGER_REQUEST) => {
-                    if let Ok(request) = self.process_ledger_request(&event) {
-                        let _ = self.request_tx.send(request);
-                    }
+            } else if kind_num == KIND_LEDGER_REQUEST {
+                if let Ok(request) = self.process_ledger_request(&event) {
+                    let _ = self.request_tx.send(request);
                 }
-                Kind::Custom(KIND_LEDGER_RESPONSE) => {
-                    if let Ok(response) = self.process_ledger_response(&event) {
-                        let _ = self.response_tx.send(response);
-                    }
+            } else if kind_num == KIND_LEDGER_RESPONSE {
+                if let Ok(response) = self.process_ledger_response(&event) {
+                    let _ = self.response_tx.send(response);
                 }
-                _ => {}
             }
         }
     }
@@ -783,6 +843,11 @@ impl NostrTransport {
     /// Receive the next ledger request (non-blocking)
     pub fn try_recv_request(&mut self) -> Option<LedgerRequest> {
         self.request_rx.try_recv().ok()
+    }
+
+    /// Queue a request for processing (used by polling fallback)
+    pub fn queue_request(&self, request: LedgerRequest) {
+        let _ = self.request_tx.send(request);
     }
 
     /// Receive the next ledger request (blocking)

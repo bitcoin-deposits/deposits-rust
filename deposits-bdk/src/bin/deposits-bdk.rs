@@ -2940,10 +2940,12 @@ async fn nostr_request(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     // Subscribe to the response
     transport.subscribe_to_response(&event_id).await?;
 
-    // Wait for response with timeout
+    // Wait for response with timeout, using both subscription and polling
     let mut transport = transport;
     let timeout = tokio::time::Duration::from_secs(30);
     let start = std::time::Instant::now();
+    let mut last_poll = std::time::Instant::now();
+    let mut poll_count = 0;
 
     loop {
         if start.elapsed() > timeout {
@@ -2951,13 +2953,13 @@ async fn nostr_request(args: &[String]) -> Result<(), Box<dyn std::error::Error>
             break;
         }
 
-        // Process events
+        // Process events from subscription
         tokio::select! {
             _ = transport.process_events() => {}
             _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {}
         }
 
-        // Check for response
+        // Check for response from subscription
         if let Some(response) = transport.try_recv_response() {
             if response.request_id == event_id {
                 println!();
@@ -2974,6 +2976,33 @@ async fn nostr_request(args: &[String]) -> Result<(), Box<dyn std::error::Error>
                 }
                 break;
             }
+        }
+
+        // Poll more frequently - every 500ms for first 5 polls, then every 2 seconds
+        let poll_interval = if poll_count < 5 {
+            std::time::Duration::from_millis(500)
+        } else {
+            std::time::Duration::from_secs(2)
+        };
+
+        if last_poll.elapsed() > poll_interval {
+            if let Ok(Some(response)) = transport.fetch_response(&event_id).await {
+                println!();
+                if response.success {
+                    println!("Response: SUCCESS");
+                    if let Some(result) = &response.result {
+                        println!("Result: {}", serde_json::to_string_pretty(result)?);
+                    }
+                } else {
+                    println!("Response: ERROR");
+                    if let Some(error) = &response.error {
+                        println!("Error: {}", error);
+                    }
+                }
+                break;
+            }
+            poll_count += 1;
+            last_poll = std::time::Instant::now();
         }
     }
 
@@ -3012,6 +3041,9 @@ async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     let secret_key = SecretKey::from_slice(&config.seed)
         .map_err(|e| format!("Invalid seed: {}", e))?;
 
+    // Clone config for later use (collateral_lock needs to reload node)
+    let config_for_reload = config.clone();
+
     // Get the node to process requests
     let node = Node::new(config).await?;
 
@@ -3044,31 +3076,72 @@ async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     transport.subscribe_to_requests(&ledger_id).await?;
 
     let mut transport = transport;
+    let mut last_poll = std::time::Instant::now();
+    let mut seen_events: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     loop {
-        // Process events
+        // Process events from subscription
         if let Err(e) = transport.process_events().await {
             tracing::warn!("Error processing events: {}", e);
         }
 
+        // Poll frequently for events (subscription may not work reliably)
+        if last_poll.elapsed() > std::time::Duration::from_millis(500) {
+            if let Ok(requests) = transport.fetch_recent_requests(60).await {
+                for request in requests {
+                    // Only queue requests for our ledger
+                    if request.ledger_id == ledger_id && !seen_events.contains(&request.event_id) {
+                        seen_events.insert(request.event_id.clone());
+                        transport.queue_request(request);
+                    }
+                }
+            }
+            last_poll = std::time::Instant::now();
+        }
+
         // Check for requests
         while let Some(request) = transport.try_recv_request() {
+            // Skip requests not for our ledger
+            if request.ledger_id != ledger_id {
+                tracing::debug!("Skipping request for different ledger: {} (ours: {})",
+                    request.ledger_id, ledger_id);
+                continue;
+            }
+
             println!("[{}] Request: action={}",
                 chrono::Utc::now().format("%H:%M:%S"),
                 request.action);
             println!("  Event: {}", &request.event_id[..16]);
             println!("  Params: {}", request.params);
 
+            // Reload the node to get fresh ledger state from disk
+            // (the CLI may have updated the ledger concurrently)
+            let fresh_node = match Node::new(config_for_reload.clone()).await {
+                Ok(n) => n,
+                Err(e) => {
+                    let error_msg = format!("Failed to reload node: {}", e);
+                    let _ = transport.send_ledger_response(
+                        &request.event_id,
+                        &ledger_id,
+                        false,
+                        None,
+                        Some(error_msg.clone()),
+                    ).await;
+                    println!("  Response: ERROR - {}", error_msg);
+                    continue;
+                }
+            };
+
             // Process the request
             let (success, result, error) = match request.action.as_str() {
                 "deposit_open" => {
-                    process_deposit_open_request(&node, &ledger_id, &request).await
+                    process_deposit_open_request(&fresh_node, &ledger_id, &request).await
                 }
                 "deposit_offer" => {
-                    process_deposit_offer_request(&node, &ledger_id, &request).await
+                    process_deposit_offer_request(&fresh_node, &ledger_id, &request).await
                 }
                 "collateral_lock" => {
-                    process_collateral_lock_request(&node, &ledger_id, &request).await
+                    process_collateral_lock_request(&fresh_node, &ledger_id, &request).await
                 }
                 _ => {
                     (false, None, Some(format!("Unknown action: {}", request.action)))

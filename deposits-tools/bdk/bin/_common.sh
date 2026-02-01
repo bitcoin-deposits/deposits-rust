@@ -286,6 +286,64 @@ run_keygen() {
     docker exec -e RUST_LOG=error "$container" deposits-bdk keygen 2>&1
 }
 
+# Run a nostr request from one node to a ledger
+# Usage: run_nostr_request <from_container> <ledger_id> <action> [params...]
+# Returns the response JSON
+run_nostr_request() {
+    local container=$1
+    shift
+    local ledger_id=$1
+    shift
+    local action=$1
+    shift
+
+    local seed=$(get_node_seed "$container")
+    if [ -z "$seed" ]; then
+        log_error "Unknown node: $container"
+        return 1
+    fi
+
+    # Run nostr request command
+    docker exec -e RUST_LOG=error "$container" deposits-bdk nostr request \
+        "$ledger_id" "$action" "$@" \
+        --seed "$seed" \
+        --network regtest \
+        --esplora http://electrs:3002 \
+        --relay ws://nostr-relay:7777 \
+        --data-dir /data 2>&1
+}
+
+# Start nostr watch on a node in the background
+# Usage: start_nostr_watch <container> <ledger_id>
+# Returns the background process name for later cleanup
+start_nostr_watch() {
+    local container=$1
+    local ledger_id=$2
+
+    local seed=$(get_node_seed "$container")
+    if [ -z "$seed" ]; then
+        log_error "Unknown node: $container"
+        return 1
+    fi
+
+    # Start watch in background inside the container
+    docker exec -d -e RUST_LOG=error "$container" deposits-bdk nostr watch \
+        "$ledger_id" \
+        --seed "$seed" \
+        --network regtest \
+        --esplora http://electrs:3002 \
+        --relay ws://nostr-relay:7777 \
+        --data-dir /data
+
+    log_info "Started nostr watch on $container for $ledger_id"
+}
+
+# Stop all nostr watch processes on a node
+stop_nostr_watch() {
+    local container=$1
+    docker exec "$container" pkill -f "nostr watch" 2>/dev/null || true
+}
+
 # Check if all services are healthy
 check_health() {
     local unhealthy=0

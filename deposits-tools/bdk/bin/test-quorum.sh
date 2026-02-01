@@ -152,12 +152,40 @@ open_ledgers() {
             echo "    Output: $ledger_output"
         fi
 
-        # Get reserves_id
+        # Get reserves_id for ledger
         local info_output=$(run_bdk_cmd "$op" info 2>&1)
         local reserves_id=$(echo "$info_output" | grep "Reserves address:" | awk '{print $3}')
         store_value "reserves_id_$op" "$reserves_id"
+        # Compute ledger_id using node_id from setup phase
+        local node_id=$(get_value "node_id_$op")
+        store_value "ledger_id_$op" "${node_id}:${reserves_id}"
         log_info "  Reserves ID: ${reserves_id:0:20}..."
     done
+}
+
+# ============================================================================
+# Phase 3a: Start Nostr watchers on each operator
+# This allows operators to receive and process requests via Nostr
+# ============================================================================
+
+start_nostr_watchers() {
+    log_info ""
+    log_info "=== Phase 3a: Start Nostr Watchers ==="
+    log_info "(Each operator listens for incoming requests)"
+    echo ""
+
+    for op in $OPERATORS; do
+        local ledger_id=$(get_value "ledger_id_$op")
+        if [ -n "$ledger_id" ]; then
+            start_nostr_watch "$op" "$ledger_id"
+            test_pass "$op nostr watcher started"
+        else
+            test_fail "$op has no ledger_id"
+        fi
+    done
+
+    # Give watchers time to connect
+    sleep 2
 }
 
 # ============================================================================
@@ -285,31 +313,30 @@ generate_deposit_keys() {
 
 open_cross_deposits() {
     log_info ""
-    log_info "=== Phase 4b: Open Cross-Deposits ==="
-    log_info "(Each operator opens deposits FOR other operators ON their own ledger)"
+    log_info "=== Phase 4b: Open Cross-Deposits via Nostr ==="
+    log_info "(Each depositor requests a deposit on each operator's ledger)"
     echo ""
 
-    # For each operator, open deposits for the OTHER operators on THIS operator's ledger
-    for operator in $OPERATORS; do
-        local reserves_id=$(get_value "reserves_id_$operator")
-
-        for depositor in $OPERATORS; do
+    # For each depositor, request deposits on OTHER operators' ledgers
+    for depositor in $OPERATORS; do
+        for operator in $OPERATORS; do
             if [ "$depositor" != "$operator" ]; then
                 # Get depositor's pubkey for this specific (depositor, operator) pair
                 local pubkey=$(get_value "pubkey_${depositor}_${operator}")
+                local ledger_id=$(get_value "ledger_id_$operator")
                 local dep_short=$(echo "$depositor" | sed 's/bdk-//')
                 local op_short=$(echo "$operator" | sed 's/bdk-//')
 
-                log_info "$operator opening deposit_${dep_short}_${op_short} (${pubkey:0:12}...)"
+                log_info "$dep_short requesting deposit on $op_short's ledger (${pubkey:0:12}...)"
 
-                # OPERATOR runs deposit open with DEPOSITOR's pubkey
-                local open_output=$(run_bdk_cmd "$operator" deposit open "$reserves_id" "$pubkey" 2>&1)
+                # DEPOSITOR sends request to OPERATOR's ledger via Nostr
+                local open_output=$(run_nostr_request "$depositor" "$ledger_id" deposit_open "$pubkey" 2>&1)
 
-                if echo "$open_output" | grep -q "Deposit opened"; then
-                    test_pass "$operator opened deposit for $depositor"
+                if echo "$open_output" | grep -q "SUCCESS\|deposit_pubkey"; then
+                    test_pass "$depositor opened deposit on $operator via Nostr"
                     store_value "deposit_${depositor}_on_${operator}" "1"
                 else
-                    test_fail "$operator failed to open deposit for $depositor"
+                    test_fail "$depositor failed to open deposit on $operator"
                     echo "    Output: $open_output"
                 fi
             fi
@@ -324,7 +351,7 @@ open_cross_deposits() {
 
 fund_deposits() {
     log_info ""
-    log_info "=== Phase 5: Fund Deposits ==="
+    log_info "=== Phase 5: Fund Deposits via Nostr ==="
     echo ""
 
     local deposit_amount=$((RESERVES_AMOUNT * DEPOSIT_PERCENT / 100))
@@ -335,50 +362,60 @@ fund_deposits() {
             if [ "$depositor" != "$operator" ] && [ "$has_deposit" = "1" ]; then
                 # Get the specific pubkey for this (depositor, operator) pair
                 local pubkey=$(get_value "pubkey_${depositor}_${operator}")
-                local reserves_id=$(get_value "reserves_id_$operator")
+                local ledger_id=$(get_value "ledger_id_$operator")
+                local dep_short=$(echo "$depositor" | sed 's/bdk-//')
+                local op_short=$(echo "$operator" | sed 's/bdk-//')
 
-                log_info "$depositor funding deposit on $operator's ledger..."
+                log_info "$dep_short requesting deposit offer from $op_short..."
 
-                # Create deposit offer (operator creates it for the deposit)
-                local offer_output=$(run_bdk_cmd "$operator" deposit offer "$reserves_id" "$pubkey" "$deposit_amount" "10000" "144" 2>&1)
+                # Request deposit offer via Nostr
+                # deposit_offer params: <pubkey> <max_sats> <min_sats> <blocks_valid>
+                local offer_output=$(run_nostr_request "$depositor" "$ledger_id" deposit_offer "$pubkey" "$deposit_amount" "10000" "144" 2>&1)
 
-                if echo "$offer_output" | grep -q "Deposit offer created"; then
-                    local offer_id=$(echo "$offer_output" | grep "Offer ID:" | awk '{print $3}')
-                    local funding_address=$(echo "$offer_output" | grep "Funding address:" | awk '{print $3}')
+                if echo "$offer_output" | grep -q "SUCCESS\|offer_id"; then
+                    # Parse JSON response for offer_id and funding_address
+                    local offer_id=$(echo "$offer_output" | grep -o '"offer_id"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*: *"//' | sed 's/"$//')
+                    local funding_address=$(echo "$offer_output" | grep -o '"funding_address"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*: *"//' | sed 's/"$//')
 
-                    # Fund from faucet (simulating depositor funding)
-                    # Use awk instead of bc for proper decimal formatting
-                    local btc_amount=$(awk "BEGIN {printf \"%.8f\", $deposit_amount / 100000000}")
-                    bitcoin_cli -rpcwallet=faucet sendtoaddress "$funding_address" "$btc_amount" >/dev/null 2>&1
+                    if [ -n "$funding_address" ]; then
+                        log_info "  Got offer, funding address: ${funding_address:0:20}..."
 
-                    if [ $? -eq 0 ]; then
-                        mine_blocks 1
+                        # Fund from faucet (simulating depositor funding)
+                        local btc_amount=$(awk "BEGIN {printf \"%.8f\", $deposit_amount / 100000000}")
+                        bitcoin_cli -rpcwallet=faucet sendtoaddress "$funding_address" "$btc_amount" >/dev/null 2>&1
 
-                        # Use deposit check to detect funding and get txid
-                        local check_output=$(run_bdk_cmd "$operator" deposit check "$offer_id" 2>&1)
+                        if [ $? -eq 0 ]; then
+                            mine_blocks 1
 
-                        if echo "$check_output" | grep -q "Funding detected"; then
-                            local txid=$(echo "$check_output" | grep "Transaction:" | awk '{print $2}')
-                            local detected_amount=$(echo "$check_output" | grep "Amount:" | awk '{print $2}')
+                            # Use deposit check to detect funding and get txid (local CLI)
+                            local check_output=$(run_bdk_cmd "$operator" deposit check "$offer_id" 2>&1)
 
-                            # Operator completes the deposit
-                            local complete_output=$(run_bdk_cmd "$operator" deposit complete "$offer_id" "$txid" "$detected_amount" 2>&1)
+                            if echo "$check_output" | grep -q "Funding detected"; then
+                                local txid=$(echo "$check_output" | grep "Transaction:" | awk '{print $2}')
+                                local detected_amount=$(echo "$check_output" | grep "Amount:" | awk '{print $2}')
 
-                            if echo "$complete_output" | grep -q "completed\|credited"; then
-                                test_pass "$depositor's deposit on $operator funded ($detected_amount sats)"
+                                # Operator completes the deposit (local CLI)
+                                local complete_output=$(run_bdk_cmd "$operator" deposit complete "$offer_id" "$txid" "$detected_amount" 2>&1)
+
+                                if echo "$complete_output" | grep -q "completed\|credited"; then
+                                    test_pass "$dep_short's deposit on $op_short funded via Nostr ($detected_amount sats)"
+                                else
+                                    test_fail "Failed to complete $dep_short's deposit on $op_short"
+                                    echo "    Output: $complete_output"
+                                fi
                             else
-                                test_fail "Failed to complete $depositor's deposit on $operator"
-                                echo "    Output: $complete_output"
+                                test_fail "Funding not detected for $dep_short's deposit on $op_short"
+                                echo "    Output: $check_output"
                             fi
                         else
-                            test_fail "Funding not detected for $depositor's deposit on $operator"
-                            echo "    Output: $check_output"
+                            test_fail "Failed to fund $dep_short's deposit on $op_short"
                         fi
                     else
-                        test_fail "Failed to fund $depositor's deposit on $operator"
+                        test_fail "No funding_address in offer response"
+                        echo "    Output: $offer_output"
                     fi
                 else
-                    test_fail "Failed to create offer for $depositor's deposit on $operator"
+                    test_fail "Failed to get deposit offer from $op_short via Nostr"
                     echo "    Output: $offer_output"
                 fi
             fi
@@ -394,7 +431,7 @@ fund_deposits() {
 
 lock_collateral() {
     log_info ""
-    log_info "=== Phase 6: Lock Collateral (lock for $COLLATERAL_LOCK_BLOCKS blocks) ==="
+    log_info "=== Phase 6: Lock Collateral via Nostr (lock for $COLLATERAL_LOCK_BLOCKS blocks) ==="
     echo ""
 
     local deposit_amount=$((RESERVES_AMOUNT * DEPOSIT_PERCENT / 100))
@@ -406,37 +443,40 @@ lock_collateral() {
             if [ "$depositor" != "$operator" ] && [ "$has_deposit" = "1" ]; then
                 # Get the specific secret for this (depositor, operator) pair
                 local secret=$(get_value "secret_${depositor}_${operator}")
-                local operator_reserves_id=$(get_value "reserves_id_$operator")
+                local ledger_id=$(get_value "ledger_id_$operator")
                 local depositor_reserves_id=$(get_value "reserves_id_$depositor")
                 local depositor_node_id=$(get_value "node_id_$depositor")
+                local dep_short=$(echo "$depositor" | sed 's/bdk-//')
+                local op_short=$(echo "$operator" | sed 's/bdk-//')
 
-                log_info "$depositor locking collateral on $operator's ledger..."
+                log_info "$dep_short requesting collateral lock on $op_short's ledger..."
 
-                # Depositor locks their deposit on operator's ledger
-                # The 5th argument is the requesting_operator (depositor) who will receive the attestation
-                local lock_output=$(run_bdk_cmd "$operator" collateral lock "$operator_reserves_id" "$secret" "$deposit_amount_msats" "$COLLATERAL_LOCK_BLOCKS" "$depositor_node_id" 2>&1)
+                # Depositor requests collateral lock via Nostr
+                # collateral_lock params: <secret> <amount_msats> <lock_blocks> [requesting_operator]
+                local lock_output=$(run_nostr_request "$depositor" "$ledger_id" collateral_lock "$secret" "$deposit_amount_msats" "$COLLATERAL_LOCK_BLOCKS" "$depositor_node_id" 2>&1)
 
-                if echo "$lock_output" | grep -q "Collateral lock created\|lock"; then
-                    # Extract the attestation JSON from the output (prefixed with ATTESTATION_JSON:)
-                    local attestation_json=$(echo "$lock_output" | grep 'ATTESTATION_JSON:' | sed 's/ATTESTATION_JSON://')
+                if echo "$lock_output" | grep -q "SUCCESS\|attestation"; then
+                    # Extract attestation JSON from response
+                    # The response contains "attestation": {...}
+                    local attestation_json=$(echo "$lock_output" | grep -o '"attestation"[[:space:]]*:[[:space:]]*{[^}]*}' | sed 's/"attestation"[[:space:]]*:[[:space:]]*//')
 
                     if [ -n "$attestation_json" ]; then
-                        # Depositor records the attestation on their own ledger
-                        log_info "  $depositor recording attestation from $operator..."
+                        # Depositor records the attestation on their own ledger (local CLI)
+                        log_info "  $dep_short recording attestation from $op_short..."
                         local record_output=$(run_bdk_cmd "$depositor" collateral record "$depositor_reserves_id" "$attestation_json" 2>&1)
 
                         if echo "$record_output" | grep -q "recorded\|Collateral attestation"; then
-                            test_pass "$depositor: locked on $operator, attestation recorded"
+                            test_pass "$dep_short: locked on $op_short via Nostr, attestation recorded"
                         else
-                            test_fail "$depositor: locked but attestation not recorded"
+                            test_fail "$dep_short: locked but attestation not recorded"
                             log_warn "    Record output: $record_output"
                         fi
                     else
-                        test_fail "$depositor: locked but no attestation JSON found"
+                        test_fail "$dep_short: locked but no attestation in response"
                         echo "    Lock output: $lock_output"
                     fi
                 else
-                    test_fail "$depositor failed to lock on $operator"
+                    test_fail "$dep_short failed to lock on $op_short via Nostr"
                     echo "    Output: $lock_output"
                 fi
             fi
@@ -526,9 +566,18 @@ show_final_state() {
 # Main
 # ============================================================================
 
+cleanup_nostr_watchers() {
+    log_info ""
+    log_info "=== Cleanup: Stopping Nostr Watchers ==="
+    for op in $OPERATORS; do
+        stop_nostr_watch "$op"
+    done
+}
+
 main() {
     log_info "=========================================="
     log_info "  Three-Operator Cross-Collateral Test"
+    log_info "  (Using Nostr for peer communication)"
     log_info "=========================================="
     log_info "Operators: $OPERATORS"
     log_info "Reserves: $RESERVES_AMOUNT sats each"
@@ -537,9 +586,13 @@ main() {
     log_info "Collateral lock: $COLLATERAL_LOCK_BLOCKS blocks"
     echo ""
 
+    # Ensure watchers are stopped on exit
+    trap cleanup_nostr_watchers EXIT
+
     setup_operators
     create_reserves
     open_ledgers
+    start_nostr_watchers
     add_quorum_members
     rotate_reserves_to_quorum
     generate_deposit_keys

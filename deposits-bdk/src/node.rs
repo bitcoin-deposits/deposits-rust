@@ -30,6 +30,7 @@ use crate::wallet::Wallet;
 use crate::Error;
 
 /// Configuration for the deposits-bdk node
+#[derive(Clone)]
 pub struct NodeConfig {
     /// Seed for wallet/identity (32 bytes)
     pub seed: [u8; 32],
