@@ -11,9 +11,9 @@
 #   docker-compose logs -f
 #   docker-compose down -v
 #
-# With mempool.space block explorer:
-#   docker-compose --profile mempool up -d
-#   Open http://localhost:8080 in browser
+# Block explorer (electrs REST API):
+#   curl http://localhost:3102/blocks
+#   curl http://localhost:3102/tx/<txid>
 
 services:
   # Strfry Nostr relay for peer messaging
@@ -286,89 +286,6 @@ services:
     networks:
       - bdk_network
 
-  # Mempool.space block explorer
-  mempool-db:
-    image: mariadb:10.11
-    container_name: bdk-mempool-db
-    profiles:
-      - mempool
-    environment:
-      MYSQL_DATABASE: mempool
-      MYSQL_USER: mempool
-      MYSQL_PASSWORD: mempool
-      MYSQL_ROOT_PASSWORD: admin
-    volumes:
-      - bdk_mempool_db:/var/lib/mysql
-    networks:
-      bdk_network:
-        ipv4_address: 172.21.0.40
-    healthcheck:
-      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  mempool-api:
-    image: mempool/backend:latest
-    container_name: bdk-mempool-api
-    profiles:
-      - mempool
-    depends_on:
-      bitcoin:
-        condition: service_healthy
-      mempool-db:
-        condition: service_healthy
-    environment:
-      # Use esplora backend instead of electrum TCP
-      MEMPOOL_BACKEND: esplora
-      ESPLORA_REST_API_URL: http://electrs:3002
-      CORE_RPC_HOST: bitcoin
-      CORE_RPC_PORT: 18443
-      CORE_RPC_USERNAME: user
-      CORE_RPC_PASSWORD: pass
-      DATABASE_ENABLED: "true"
-      DATABASE_HOST: mempool-db
-      DATABASE_DATABASE: mempool
-      DATABASE_USERNAME: mempool
-      DATABASE_PASSWORD: mempool
-      STATISTICS_ENABLED: "false"
-      MEMPOOL_NETWORK: regtest
-      # Disable external API calls (exchanges, mining pools, etc)
-      MEMPOOL_PRICE_FEED_UPDATE_INTERVAL: 0
-      PRICE_DATA_SERVER_CLEARNET_URL: ""
-      EXTERNAL_DATA_SERVER_URL: ""
-      LIGHTNING_ENABLED: "false"
-      MINING_DASHBOARD: "false"
-      AUDIT: "false"
-    networks:
-      bdk_network:
-        ipv4_address: 172.21.0.41
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8999/api/v1/backend-info"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-
-  mempool-web:
-    image: mempool/frontend:latest
-    container_name: bdk-mempool-web
-    profiles:
-      - mempool
-    depends_on:
-      mempool-api:
-        condition: service_healthy
-    environment:
-      FRONTEND_HTTP_PORT: 8080
-      BACKEND_MAINNET_HTTP_HOST: mempool-api
-      # For regtest network routing
-      NGINX_UPSTREAM_HOST: mempool-api
-      NGINX_UPSTREAM_PORT: 8999
-    ports:
-      - "8080:8080"
-    networks:
-      bdk_network:
-        ipv4_address: 172.21.0.42
-
   # Development container for manual testing
   dev:
     image: mcr.microsoft.com/devcontainers/rust:latest
@@ -403,7 +320,6 @@ volumes:
   bdk_charlie_data:
   bdk_diana_data:
   bdk_eve_data:
-  bdk_mempool_db:
 
 networks:
   bdk_network:

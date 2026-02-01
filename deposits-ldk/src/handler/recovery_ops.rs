@@ -526,14 +526,14 @@ where
         let ledger_key = (operator, self.our_node_id.to_string());
 
         // Verify invoice and check if already credited
-        let (settlement_sequence, settlement_ledger_hash, collateral_partners, was_credited) = {
+        let (settlement_sequence, settlement_ledger_hash, quorum_members, was_credited) = {
             let ledgers = self.ledgers.lock().unwrap();
             match ledgers.get(&ledger_key) {
                 Some(ledger_arc) => {
                     let ledger = ledger_arc.read().unwrap();
                     let seq = ledger.history.len() as u64;
                     let hash = ledger.tail_hash();
-                    let partners = ledger.state.collateral_partners.clone();
+                    let partners = ledger.state.quorum_members.clone();
 
                     let credited = ledger.history.iter().any(|update| {
                         if update.message.len() < 2 {
@@ -681,8 +681,8 @@ where
             accuser_signature: accusation_msg.accuser_signature,
         });
 
-        // Broadcast to all collateral partners
-        let mut broadcast_targets = collateral_partners;
+        // Broadcast to all quorum members
+        let mut broadcast_targets = quorum_members;
         if !broadcast_targets.contains(&operator) {
             broadcast_targets.push(operator);
         }
@@ -1525,13 +1525,13 @@ mod tests {
         let auditor = create_test_pubkey(191);
         let partner = our_node_id;
 
-        // Add ledger and set up collateral partners
+        // Add ledger and set up quorum members
         {
             let ledger = Ledger::new(
                 operator,
                 partner.to_string(),
                 LedgerRole::Operator,
-                vec![auditor], // Add auditor as collateral partner
+                vec![auditor], // Add auditor as quorum member
                 "tb1qtest".to_string(),
             );
             let mut ledgers = handler.ledgers.lock().unwrap();

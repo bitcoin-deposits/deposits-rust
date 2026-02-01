@@ -121,7 +121,7 @@ pub use handler_types::{
     ProtocolStats,
     LedgerSummary,
     ReservesSummary,
-    CollateralPartnerInfo,
+    QuorumMemberInfo,
     CollateralInfo,
 };
 

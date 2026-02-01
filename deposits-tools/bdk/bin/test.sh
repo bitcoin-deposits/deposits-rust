@@ -317,9 +317,9 @@ test_list_ledgers() {
     done
 }
 
-# Test: Request collateral partners
+# Test: Request quorum members
 test_request_partners() {
-    log_info "Testing collateral partner requests..."
+    log_info "Testing quorum member requests..."
 
     # Get node IDs
     local alice_info=$(run_bdk_cmd "bdk-alice" info 2>&1)
@@ -379,7 +379,7 @@ test_list_partners() {
 
         # Note: Partners may not be established yet (just requests sent)
         # So we just verify the command runs without error
-        if echo "$list_output" | grep -qE "No collateral partners|Partner|Collateral"; then
+        if echo "$list_output" | grep -qE "No quorum members|Partner|Quorum"; then
             test_pass "$node partner list executed"
             if $VERBOSE; then
                 echo "    Partners: $list_output"

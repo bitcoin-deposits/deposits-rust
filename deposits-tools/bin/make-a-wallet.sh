@@ -76,21 +76,21 @@ echo "Waiting for ledger handshakes to complete..."
 sleep 3
 
 echo ""
-echo "Step 3: Add ${PARTNER2_NAME} as collateral partner for ledger ${NODE_NAME}->${PARTNER1_NAME}..."
+echo "Step 3: Add ${PARTNER2_NAME} as quorum member for ledger ${NODE_NAME}->${PARTNER1_NAME}..."
 echo "   ${PARTNER2_NAME}'s reserves in ${NODE_NAME}->${PARTNER2_NAME} back deposits in ${NODE_NAME}->${PARTNER1_NAME}."
-$ADMIN -p "$NODE_NAME" add-collateral-partner "$PARTNER1_NAME" "$PARTNER2_NAME" || {
-    echo "   (Collateral partner may already exist - continuing)"
+$ADMIN -p "$NODE_NAME" add-quorum-member "$PARTNER1_NAME" "$PARTNER2_NAME" || {
+    echo "   (Quorum member may already exist - continuing)"
 }
 
 echo ""
-echo "Step 4: Add ${PARTNER1_NAME} as collateral partner for ledger ${NODE_NAME}->${PARTNER2_NAME}..."
+echo "Step 4: Add ${PARTNER1_NAME} as quorum member for ledger ${NODE_NAME}->${PARTNER2_NAME}..."
 echo "   ${PARTNER1_NAME}'s reserves in ${NODE_NAME}->${PARTNER1_NAME} back deposits in ${NODE_NAME}->${PARTNER2_NAME}."
-$ADMIN -p "$NODE_NAME" add-collateral-partner "$PARTNER2_NAME" "$PARTNER1_NAME" || {
-    echo "   (Collateral partner may already exist - continuing)"
+$ADMIN -p "$NODE_NAME" add-quorum-member "$PARTNER2_NAME" "$PARTNER1_NAME" || {
+    echo "   (Quorum member may already exist - continuing)"
 }
 
 echo ""
-echo "Two OPERATOR ledgers initialized for $NODE_NAME with symmetric collateral partners."
+echo "Two OPERATOR ledgers initialized for $NODE_NAME with symmetric quorum members."
 sleep 1
 mkdir -p wallet
 

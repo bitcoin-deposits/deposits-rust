@@ -360,7 +360,7 @@ mod tests {
             initial_amount: 100, // Below minimum
             spend_to: create_test_pubkey(17),
             reserves_id: create_test_pubkey(18).to_string(),
-            collateral_partners: vec![],
+            quorum_members: vec![],
         };
 
         let result = handler.validate_reserves_add(&msg, sender);
@@ -376,7 +376,7 @@ mod tests {
             initial_amount: 1_000_000_000_000, // Above maximum
             spend_to: create_test_pubkey(18),
             reserves_id: create_test_pubkey(19).to_string(),
-            collateral_partners: vec![],
+            quorum_members: vec![],
         };
 
         let result = handler.validate_reserves_add(&msg, sender);

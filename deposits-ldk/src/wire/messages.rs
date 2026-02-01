@@ -32,7 +32,7 @@ pub use deposits_core::{
     DepositOpenMsg, DepositCloseMsg, DepositUpdateMsg,
     // Collateral messages
     CollateralIncreaseMsg, CollateralDecreaseMsg,
-    CollateralAddPartnerMsg, CollateralRemovePartnerMsg,
+    QuorumAddMemberMsg, QuorumRemoveMemberMsg,
     CollateralAttestationMsg,
     CollateralConsentRequestMsg, CollateralConsentResponseMsg,
     // Fee and lifecycle messages

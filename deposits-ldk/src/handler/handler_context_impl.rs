@@ -325,16 +325,16 @@ where
         }
     }
 
-    fn sync_quorum_member(&self, operator: PublicKey, partner: &str, collateral_partner: PublicKey, add: bool) {
+    fn sync_quorum_member(&self, operator: PublicKey, partner: &str, quorum_member: PublicKey, add: bool) {
         use deposits_core::quorum::LedgerId;
 
         let ledger_id = LedgerId::new(operator, partner.to_string());
         if add {
-            if let Err(e) = self.quorum_manager.add_member(&ledger_id, collateral_partner) {
+            if let Err(e) = self.quorum_manager.add_member(&ledger_id, quorum_member) {
                 log_info!(self.logger, "Quorum add_member (expected to fail for partners): {:?}", e);
             }
         } else {
-            if let Err(e) = self.quorum_manager.remove_member(&ledger_id, &collateral_partner) {
+            if let Err(e) = self.quorum_manager.remove_member(&ledger_id, &quorum_member) {
                 log_info!(self.logger, "Quorum remove_member (expected to fail for partners): {:?}", e);
             }
         }
@@ -543,11 +543,11 @@ where
             }
         }
 
-        // Rebroadcast to our collateral partners
+        // Rebroadcast to our quorum members
         let partners = {
             let ledgers = self.ledgers.lock().unwrap();
             ledgers.get(&(accused_operator, self.our_node_id.to_string()))
-                .map(|l| l.read().unwrap().state.collateral_partners.clone())
+                .map(|l| l.read().unwrap().state.quorum_members.clone())
                 .unwrap_or_default()
         };
 
@@ -675,7 +675,7 @@ where
             if granted {
                 let _ = tx.send(Ok(signature));
             } else {
-                let _ = tx.send(Err("Collateral partner denied consent".to_string()));
+                let _ = tx.send(Err("Quorum member denied consent".to_string()));
             }
             log_info!(self.logger, "📋 CONSENT: Completed pending request (granted={})", granted);
             true
@@ -685,26 +685,26 @@ where
         }
     }
 
-    fn send_audit_to_collateral_partner(
+    fn send_audit_to_quorum_member(
         &self,
         operator: PublicKey,
         partner: &str,
-        new_collateral_partner: PublicKey,
+        new_quorum_member: PublicKey,
         signature: [u8; 64],
     ) {
         use super::messages::{DepositsMessage, CoordinationResponseMsg};
 
-        log_info!(self.logger, "📋 SYNC: Sending audit history to new collateral partner {}", new_collateral_partner);
+        log_info!(self.logger, "📋 SYNC: Sending audit history to new quorum member {}", new_quorum_member);
 
         let response = DepositsMessage::CoordinationResponse(CoordinationResponseMsg::CollateralConsentResponse {
             request_hash: [0u8; 32],
             operator_id: operator,
             reserves_id: partner.to_string(),
             consent_granted: true,
-            collateral_partner_signature: signature,
+            quorum_member_signature: signature,
         });
 
-        // Parse partner to PublicKey for send_audit_update_to_new_collateral_partner
+        // Parse partner to PublicKey for send_audit_update_to_new_quorum_member
         let partner_pubkey = match PublicKey::from_str(partner) {
             Ok(pk) => pk,
             Err(e) => {
@@ -712,7 +712,7 @@ where
                 return;
             }
         };
-        if let Err(e) = self.send_audit_update_to_new_collateral_partner(partner_pubkey, new_collateral_partner, &response) {
+        if let Err(e) = self.send_audit_update_to_new_quorum_member(partner_pubkey, new_quorum_member, &response) {
             log_warn!(self.logger, "📋 SYNC: Failed to send audit history: {:?}", e);
         }
     }

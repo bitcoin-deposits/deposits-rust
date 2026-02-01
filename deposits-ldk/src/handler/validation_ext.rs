@@ -41,7 +41,7 @@ pub trait LedgerConformanceValidatorExt {
     /// * `updates` - Chain of signed ledger updates to validate
     /// * `expected_operator` - Expected operator pubkey for all updates
     /// * `claimed_reserves` - Reserves amount (from commitment tx in this channel)
-    /// * `collateral_amounts` - Collateral from each other partner channel
+    /// * `collateral_amounts` - Collateral from each quorum member channel
     /// * `claimed_state_hash` - Optional claimed final state hash to verify
     fn validate_update_chain(
         &self,

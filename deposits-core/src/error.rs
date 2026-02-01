@@ -155,9 +155,9 @@ pub enum DepositsError {
     #[error("Invalid partner")]
     InvalidPartner,
 
-    /// Collateral partner already exists
-    #[error("Collateral partner already exists")]
-    CollateralPartnerAlreadyExists,
+    /// Quorum member already exists
+    #[error("Quorum member already exists")]
+    QuorumMemberAlreadyExists,
 
     /// Insufficient collateral
     #[error("Insufficient collateral: required {required}, available {available}")]
@@ -170,9 +170,9 @@ pub enum DepositsError {
         missing_attestations: Vec<PublicKey>,
     },
 
-    /// Insufficient collateral partners
-    #[error("Insufficient collateral partners: operator ledgers {operator_ledgers}, partner ledgers {partner_ledgers}")]
-    InsufficientCollateralPartners {
+    /// Insufficient quorum members
+    #[error("Insufficient quorum members: operator ledgers {operator_ledgers}, partner ledgers {partner_ledgers}")]
+    InsufficientQuorumMembers {
         /// Number of operator ledgers
         operator_ledgers: usize,
         /// Number of partner ledgers

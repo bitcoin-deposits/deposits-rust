@@ -77,7 +77,7 @@ where
         // V2 format: CollateralAttestation is inside LedgerUpdate as a LedgerOperation
         if let DepositsMessage::LedgerUpdate(ref update_msg) = &message {
             if let LedgerOperation::CollateralAttestation { collateral_operator: operator, amount, block_height, lock_until_block, signature, ledger_hash, .. } = &update_msg.operation {
-                let _collateral_partner = update_msg.reserves_id.clone();
+                let _quorum_member = update_msg.reserves_id.clone();
                 // Check if we're the operator for a ledger with this sender as partner
                 // and have a pending CollateralIncrease/CollateralDecrease
                 let is_from_channel_partner = {
@@ -120,7 +120,7 @@ where
                             if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, sender_node_id.to_string())) {
                                 let mut ledger = ledger_arc.write().unwrap();
                                 // Convert to core attestation type
-                                // Use sender_node_id as the collateral_partner since it's already a PublicKey
+                                // Use sender_node_id as the quorum_member since it's already a PublicKey
                                 let attestation = deposits_core::types::CollateralAttestation::new(
                                     *operator,
                                     sender_node_id,
@@ -281,14 +281,14 @@ where
                         operator_id, reserves_id, change_type, member_pubkey, new_members.len());
                     return Ok(());
                 }
-                CoordinationResponseMsg::CollateralConsentResponse { operator_id, reserves_id, consent_granted, collateral_partner_signature, .. } => {
+                CoordinationResponseMsg::CollateralConsentResponse { operator_id, reserves_id, consent_granted, quorum_member_signature, .. } => {
                     // Direct dispatch to core - core handles signature verification, consent completion, and audit sending via providers
                     log_info!(self.logger, "📋 CONSENT: Response from {} - granted={}", sender_node_id, consent_granted);
                     let msg = CollateralConsentResponseMsg {
                         operator_id: *operator_id,
                         reserves_id: reserves_id.clone(),
                         consent_granted: *consent_granted,
-                        collateral_partner_signature: *collateral_partner_signature,
+                        quorum_member_signature: *quorum_member_signature,
                     };
                     match deposits_core::handle_collateral_consent_response(self, &msg, sender_node_id) {
                         Ok(_) => log_info!(self.logger, "📋 CONSENT: Response processed"),
@@ -403,10 +403,10 @@ where
             // NOTE: CollateralAddPartner and CollateralRemovePartner are now handled by the generic handler
             // which properly sends ACKs for both idempotent and non-idempotent cases
             DepositsMessage::LedgerUpdate(ref update_msg) => match &update_msg.operation {
-                LedgerOperation::CollateralAttestation { collateral_operator, collateral_partner, amount, block_height, lock_until_block, signature, ledger_hash } => {
+                LedgerOperation::CollateralAttestation { collateral_operator, quorum_member, amount, block_height, lock_until_block, signature, ledger_hash } => {
                     let msg = crate::wire::messages::CollateralAttestationMsg {
                         operator: *collateral_operator,
-                        collateral_partner: *collateral_partner,
+                        quorum_member: *quorum_member,
                         amount: *amount,
                         block_height: *block_height,
                         lock_until_block: *lock_until_block,
@@ -748,7 +748,7 @@ where
 
                             let attestation = CollateralAttestationMsg {
                                 operator: sender_node_id,
-                                collateral_partner: self.our_node_id,
+                                quorum_member: self.our_node_id,
                                 amount: new_collateral_amount,
                                 block_height,
                                 lock_until_block: 0, // Partner doesn't set lock expiry on attestation response
@@ -769,10 +769,10 @@ where
                             // V2: CollateralAttestation is now inside LedgerUpdate
                             let attestation_msg = DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
                                 attestation.operator,
-                                attestation.collateral_partner.to_string(),
+                                attestation.quorum_member.to_string(),
                                 LedgerOperation::CollateralAttestation {
                                     collateral_operator: attestation.operator,
-                                    collateral_partner: attestation.collateral_partner,
+                                    quorum_member: attestation.quorum_member,
                                     amount: attestation.amount,
                                     block_height: attestation.block_height,
                                     lock_until_block: attestation.lock_until_block,
@@ -785,7 +785,7 @@ where
                             // CRITICAL: Update received_collateral_amount for the partner
                             // When the partner processes CollateralIncrease, THEY are the collateral
                             // that backs this ledger. In the simple 2-node case where the channel partner
-                            // IS the collateral partner, received_collateral_amount should equal
+                            // IS the quorum member, received_collateral_amount should equal
                             // collateral_amount. Use SET (not ADD) because new_collateral_amount is absolute.
                             ledger.state.received_collateral_amount = new_collateral_amount;
                             log_info!(
@@ -803,7 +803,7 @@ where
                             //
                             // Previously there was a broadcast loop here that sent attestations to
                             // all other partners, but this caused an infinite forwarding loop when
-                            // the collateral partner graph had cycles (e.g., A->B, B->C, C->A).
+                            // the quorum member graph had cycles (e.g., A->B, B->C, C->A).
 
                             // Mark that we should persist
                             should_persist = true;

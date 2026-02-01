@@ -50,8 +50,8 @@ pub mod endpoints {
     pub const DEPOSITS_REMOVE_RESERVES_PATH: &str = "/deposits/remove_reserves";
 
     // Collateral operations
-    pub const DEPOSITS_ADD_COLLATERAL_PARTNER_PATH: &str = "/deposits/add_collateral_partner";
-    pub const DEPOSITS_REMOVE_COLLATERAL_PARTNER_PATH: &str = "/deposits/remove_collateral_partner";
+    pub const DEPOSITS_ADD_QUORUM_MEMBER_PATH: &str = "/deposits/add_quorum_member";
+    pub const DEPOSITS_REMOVE_QUORUM_MEMBER_PATH: &str = "/deposits/remove_quorum_member";
     pub const DEPOSITS_GET_COLLATERAL_INFO_PATH: &str = "/deposits/get_collateral_info";
 
     // Ledger updates

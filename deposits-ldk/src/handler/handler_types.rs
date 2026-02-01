@@ -17,7 +17,7 @@ pub use deposits_core::handler_types::{
     CosignedInvoice,
     VoteRoundState,
     ProtocolStats,
-    CollateralPartnerInfo,
+    QuorumMemberInfo,
     CollateralInfo,
 };
 

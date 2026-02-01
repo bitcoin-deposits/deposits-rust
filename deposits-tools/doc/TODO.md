@@ -28,17 +28,17 @@
 - [x] 8 new unit tests for collateral validation
 
 **Game Theory:**
-- Each ledger needs reserves ≥ deposits (direct backing)
-- Each ledger also needs attestations ≥ deposits (collateral backing)
-- Attestations = excess reserves in OTHER channels that partners can slash
+- Each ledger needs reserves >= deposits (direct backing)
+- Each ledger also needs attestations >= deposits (collateral backing)
+- Attestations = excess reserves in OTHER channels that quorum members can slash
 - Same attestation backs multiple ledgers (capital efficiency)
-- Theft requires colluding with enough partners that remaining attestations can't cover
+- Theft requires colluding with enough quorum members that remaining attestations can't cover
 
 ### System 4: Peer Multisig + VoterSet ✅
 - [x] Wire VoterSet into tapscript building for reserves output
-- [x] Store voter set in ledger state (via collateral_partners field)
+- [x] Store voter set in ledger state (via quorum_members field)
 - [x] Ledger.construct_voter_set() derives VoterSet from ledger state
-- [x] Implement voter registration via AddCollateralPartner message (0x8097)
+- [x] Implement voter registration via AddQuorumMember message (0x8097)
 
 ### System 6: Enhanced Watchtower ✅
 - [x] Detect force-close via process_block() and on_channel_closed()
@@ -119,7 +119,7 @@
 - [x] Pre-computed script_pubkey architecture in ReservesOutputInfo
 - [x] VoterSet wiring: construct_voter_set() derives VoterSet from ledger state
 - [x] build_taproot_reserves_script() uses VoterSet from ledger instead of hardcoded pubkeys
-- [x] AddCollateralPartner message (0x8097) for voter registration during multi-party quorum setup
+- [x] AddQuorumMember message (0x8097) for voter registration during multi-party quorum setup
 - [x] VoterSet fix: operator excluded from voters (they're being judged)
 - [x] Recovery claim codec support (0x8091, 0x8093, 0x8095) for signature collection flow
 - [x] CollateralAttestation (0x808D) codec and message handler

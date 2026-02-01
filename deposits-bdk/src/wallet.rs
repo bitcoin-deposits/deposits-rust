@@ -21,6 +21,7 @@ use bdk_wallet::bitcoin::{
 };
 use bdk_wallet::chain::spk_client::SyncRequest;
 use bdk_wallet::{KeychainKind, SignOptions, Wallet as BdkWallet};
+use deposits_core::{TapscriptReservesBuilder, TaprootReservesOutput, VoterSet, ThresholdConfig, ThresholdTier};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -49,8 +50,11 @@ pub struct Wallet {
     /// Our operator public key
     operator_pubkey: PublicKey,
 
-    /// Tracked reserves outputs
+    /// Tracked reserves outputs (legacy P2WSH)
     reserves: RwLock<HashMap<OutPoint, ReservesInfo>>,
+
+    /// Tracked Taproot reserves outputs (quorum-based)
+    taproot_reserves: RwLock<HashMap<OutPoint, TaprootReservesInfo>>,
 
     /// Current block height (updated on sync)
     block_height: Mutex<u32>,
@@ -90,6 +94,34 @@ pub struct ReservesInfo {
     pub confirmed: bool,
 }
 
+/// Information about a Taproot reserves output (quorum-based spending)
+#[derive(Debug, Clone)]
+pub struct TaprootReservesInfo {
+    /// The outpoint
+    pub outpoint: OutPoint,
+
+    /// Amount in satoshis
+    pub amount: u64,
+
+    /// The operator pubkey (tie-breaker)
+    pub operator: PublicKey,
+
+    /// Quorum member pubkeys (primary voters)
+    pub quorum_members: Vec<PublicKey>,
+
+    /// Minimum quorum member expiration block (first timeout)
+    pub first_expiry_block: u32,
+
+    /// The ledger hash committed to in the Taproot tree
+    pub ledger_hash: [u8; 32],
+
+    /// The Taproot reserves output (contains spend info)
+    pub taproot_output: TaprootReservesOutput,
+
+    /// Whether this output is confirmed
+    pub confirmed: bool,
+}
+
 /// Serializable version of ReservesInfo for persistence
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ReservesInfoSerde {
@@ -102,6 +134,36 @@ struct ReservesInfoSerde {
     timeout_height: u32,
     redeem_script_hex: String,
     confirmed: bool,
+}
+
+/// Serializable version of TaprootReservesInfo for persistence
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TaprootReservesInfoSerde {
+    outpoint_txid: String,
+    outpoint_vout: u32,
+    amount: u64,
+    operator: String,
+    quorum_members: Vec<String>,
+    first_expiry_block: u32,
+    ledger_hash: String,  // hex encoded
+    address: String,      // Taproot address
+    confirmed: bool,
+}
+
+impl From<&TaprootReservesInfo> for TaprootReservesInfoSerde {
+    fn from(info: &TaprootReservesInfo) -> Self {
+        Self {
+            outpoint_txid: info.outpoint.txid.to_string(),
+            outpoint_vout: info.outpoint.vout,
+            amount: info.amount,
+            operator: info.operator.to_string(),
+            quorum_members: info.quorum_members.iter().map(|p| p.to_string()).collect(),
+            first_expiry_block: info.first_expiry_block,
+            ledger_hash: hex::encode(info.ledger_hash),
+            address: info.taproot_output.address.to_string(),
+            confirmed: info.confirmed,
+        }
+    }
 }
 
 impl From<&ReservesInfo> for ReservesInfoSerde {
@@ -199,6 +261,7 @@ impl Wallet {
 
         // Load existing reserves from disk
         let reserves = Self::load_reserves_from_disk(&data_dir)?;
+        let taproot_reserves = Self::load_taproot_reserves_from_disk(&data_dir, operator_pubkey, network)?;
 
         Ok(Self {
             inner: Mutex::new(wallet),
@@ -207,6 +270,7 @@ impl Wallet {
             operator_secret,
             operator_pubkey,
             reserves: RwLock::new(reserves),
+            taproot_reserves: RwLock::new(taproot_reserves),
             block_height: Mutex::new(0),
             block_hash: Mutex::new([0u8; 32]),
             data_dir,
@@ -238,6 +302,7 @@ impl Wallet {
 
     /// Save reserves to disk
     fn save_reserves_to_disk(&self) -> Result<(), Error> {
+        // Save legacy P2WSH reserves
         let reserves = self.reserves.read().unwrap();
         let serde_list: Vec<ReservesInfoSerde> = reserves
             .values()
@@ -251,7 +316,110 @@ impl Wallet {
         fs::write(&reserves_file, contents)
             .map_err(|e| Error::Wallet(format!("Failed to write reserves file: {}", e)))?;
 
-        tracing::info!("Saved {} reserves to disk", reserves.len());
+        tracing::info!("Saved {} legacy reserves to disk", reserves.len());
+        drop(reserves);
+
+        // Save Taproot reserves
+        self.save_taproot_reserves_to_disk()?;
+
+        Ok(())
+    }
+
+    /// Load Taproot reserves from disk
+    fn load_taproot_reserves_from_disk(
+        data_dir: &PathBuf,
+        operator_pubkey: PublicKey,
+        network: Network,
+    ) -> Result<HashMap<OutPoint, TaprootReservesInfo>, Error> {
+        let reserves_file = data_dir.join("taproot_reserves.json");
+        if !reserves_file.exists() {
+            return Ok(HashMap::new());
+        }
+
+        let contents = fs::read_to_string(&reserves_file)
+            .map_err(|e| Error::Wallet(format!("Failed to read taproot reserves file: {}", e)))?;
+
+        let serde_list: Vec<TaprootReservesInfoSerde> = serde_json::from_str(&contents)
+            .map_err(|e| Error::Wallet(format!("Failed to parse taproot reserves file: {}", e)))?;
+
+        let mut reserves = HashMap::new();
+        for serde_info in serde_list {
+            // Parse the basic info
+            let txid = Txid::from_str(&serde_info.outpoint_txid)
+                .map_err(|e| Error::Wallet(format!("Invalid txid: {}", e)))?;
+            let outpoint = OutPoint {
+                txid,
+                vout: serde_info.outpoint_vout,
+            };
+            let operator = PublicKey::from_str(&serde_info.operator)
+                .map_err(|e| Error::Wallet(format!("Invalid operator pubkey: {}", e)))?;
+            let quorum_members: Result<Vec<PublicKey>, _> = serde_info
+                .quorum_members
+                .iter()
+                .map(|p| PublicKey::from_str(p))
+                .collect();
+            let quorum_members =
+                quorum_members.map_err(|e| Error::Wallet(format!("Invalid quorum member pubkey: {}", e)))?;
+            let ledger_hash_bytes = hex::decode(&serde_info.ledger_hash)
+                .map_err(|e| Error::Wallet(format!("Invalid ledger hash hex: {}", e)))?;
+            let mut ledger_hash = [0u8; 32];
+            ledger_hash.copy_from_slice(&ledger_hash_bytes);
+
+            // Rebuild the TaprootReservesOutput
+            let voter_set = VoterSet::new(operator_pubkey, quorum_members.clone());
+            let blocks_until_expiry = serde_info.first_expiry_block.saturating_sub(0); // Use stored expiry
+            let total_voters = quorum_members.len() + 1;
+            let majority = (total_voters / 2) + 1;
+            let config = ThresholdConfig::custom(
+                if quorum_members.is_empty() {
+                    vec![ThresholdTier::new(1, true, 0, "Operator only")]
+                } else {
+                    vec![
+                        ThresholdTier::new(majority, true, 0, "Majority + operator"),
+                        ThresholdTier::new(1, true, blocks_until_expiry, "Operator after expiry"),
+                        ThresholdTier::emergency_recovery(blocks_until_expiry.saturating_mul(2)),
+                    ]
+                }
+            );
+
+            let builder = TapscriptReservesBuilder::new(voter_set, config, network, ledger_hash);
+            let taproot_output = builder.build()
+                .map_err(|e| Error::Wallet(format!("Failed to rebuild Taproot output: {:?}", e)))?;
+
+            let info = TaprootReservesInfo {
+                outpoint,
+                amount: serde_info.amount,
+                operator,
+                quorum_members,
+                first_expiry_block: serde_info.first_expiry_block,
+                ledger_hash,
+                taproot_output,
+                confirmed: serde_info.confirmed,
+            };
+
+            reserves.insert(outpoint, info);
+        }
+
+        tracing::info!("Loaded {} Taproot reserves from disk", reserves.len());
+        Ok(reserves)
+    }
+
+    /// Save Taproot reserves to disk
+    fn save_taproot_reserves_to_disk(&self) -> Result<(), Error> {
+        let reserves = self.taproot_reserves.read().unwrap();
+        let serde_list: Vec<TaprootReservesInfoSerde> = reserves
+            .values()
+            .map(TaprootReservesInfoSerde::from)
+            .collect();
+
+        let contents = serde_json::to_string_pretty(&serde_list)
+            .map_err(|e| Error::Wallet(format!("Failed to serialize Taproot reserves: {}", e)))?;
+
+        let reserves_file = self.data_dir.join("taproot_reserves.json");
+        fs::write(&reserves_file, contents)
+            .map_err(|e| Error::Wallet(format!("Failed to write Taproot reserves file: {}", e)))?;
+
+        tracing::info!("Saved {} Taproot reserves to disk", reserves.len());
         Ok(())
     }
 
@@ -522,6 +690,351 @@ impl Wallet {
         })
     }
 
+    /// Create a Taproot reserves output with quorum-based spending
+    ///
+    /// This creates a P2TR output with tiered spending policies:
+    /// - Tier 0: Majority of quorum + operator (immediate)
+    /// - Tier 1: Operator only after first quorum member expires
+    /// - Tier 2+: Degraded tiers with longer timelocks
+    ///
+    /// # Arguments
+    /// * `amount_sats` - Amount in satoshis for the reserves
+    /// * `quorum_members` - The quorum member pubkeys (will be voters)
+    /// * `member_expiries` - Block heights when each quorum member expires (parallel to quorum_members)
+    /// * `ledger_hash` - The current ledger hash to commit to in the Taproot tree
+    ///
+    /// # Returns
+    /// A `TaprootReservesCreateResult` with the transaction and reserves info
+    pub fn create_taproot_reserves_output(
+        &self,
+        amount_sats: u64,
+        quorum_members: Vec<PublicKey>,
+        member_expiries: Vec<u32>,
+        ledger_hash: [u8; 32],
+    ) -> Result<TaprootReservesCreateResult, Error> {
+        if quorum_members.len() != member_expiries.len() {
+            return Err(Error::Wallet(
+                "Quorum members and expiries must have same length".to_string()
+            ));
+        }
+
+        // Find the minimum expiry (first quorum member timeout)
+        let first_expiry = *member_expiries.iter().min().unwrap_or(&0);
+        let current_height = self.get_block_height()?;
+
+        if first_expiry > 0 && first_expiry <= current_height {
+            return Err(Error::Wallet(format!(
+                "First quorum member expiry {} is already past current block {}",
+                first_expiry, current_height
+            )));
+        }
+
+        // Create VoterSet: operator is tie-breaker, quorum members are primary voters
+        let voter_set = VoterSet::new(self.operator_pubkey, quorum_members.clone());
+
+        // Create custom threshold configuration
+        // If we have quorum members, use tiered spending; otherwise simple 1-of-1
+        let config = ThresholdConfig::custom(
+            if quorum_members.is_empty() {
+                vec![ThresholdTier::new(1, true, 0, "Operator only (no quorum)")]
+            } else {
+                let blocks_until_expiry = if first_expiry > current_height {
+                    first_expiry - current_height
+                } else {
+                    144 // Default to 1 day if expiry is in the past/zero
+                };
+                let total_voters = quorum_members.len() + 1;
+                let majority = (total_voters / 2) + 1;
+                vec![
+                    ThresholdTier::new(majority, true, 0, "Majority + operator (immediate)"),
+                    ThresholdTier::new(1, true, blocks_until_expiry, "Operator after first expiry"),
+                    ThresholdTier::emergency_recovery(blocks_until_expiry.saturating_mul(2)),
+                ]
+            }
+        );
+
+        // Build the Taproot reserves output
+        let builder = TapscriptReservesBuilder::new(
+            voter_set,
+            config,
+            self.network,
+            ledger_hash,
+        );
+
+        let taproot_output = builder.build()
+            .map_err(|e| Error::Wallet(format!("Failed to build Taproot reserves: {:?}", e)))?;
+
+        // Get the P2TR script pubkey
+        let script_pubkey = taproot_output.script_pubkey();
+
+        // Build the transaction
+        let mut wallet = self.inner.lock().unwrap();
+
+        let mut psbt = {
+            let mut builder = wallet.build_tx();
+            builder
+                .add_recipient(script_pubkey.clone(), Amount::from_sat(amount_sats))
+                .fee_rate(FeeRate::from_sat_per_vb(2).unwrap());
+            builder
+                .finish()
+                .map_err(|e| Error::Wallet(format!("Failed to build tx: {}", e)))?
+        };
+
+        // Sign the transaction
+        wallet
+            .sign(&mut psbt, SignOptions::default())
+            .map_err(|e| Error::Wallet(format!("Failed to sign tx: {}", e)))?;
+
+        let tx = psbt
+            .extract_tx()
+            .map_err(|e| Error::Wallet(format!("Failed to extract tx: {}", e)))?;
+
+        // Find the Taproot output index
+        let vout = tx
+            .output
+            .iter()
+            .position(|o| o.script_pubkey == script_pubkey)
+            .ok_or_else(|| Error::Wallet("Taproot output not found in tx".to_string()))?;
+
+        let outpoint = OutPoint {
+            txid: tx.compute_txid(),
+            vout: vout as u32,
+        };
+
+        // Track this Taproot reserves output
+        let info = TaprootReservesInfo {
+            outpoint,
+            amount: amount_sats,
+            operator: self.operator_pubkey,
+            quorum_members: quorum_members.clone(),
+            first_expiry_block: first_expiry,
+            ledger_hash,
+            taproot_output: taproot_output.clone(),
+            confirmed: false,
+        };
+
+        drop(wallet); // Release lock before acquiring write lock
+        self.taproot_reserves.write().unwrap().insert(outpoint, info);
+
+        tracing::info!(
+            "Created Taproot reserves at {} with {} quorum members, first expiry at block {}",
+            outpoint,
+            quorum_members.len(),
+            first_expiry
+        );
+
+        Ok(TaprootReservesCreateResult {
+            outpoint,
+            address: taproot_output.address.clone(),
+            amount: amount_sats,
+            tx,
+            taproot_output,
+            first_expiry_block: first_expiry,
+            ledger_hash,
+        })
+    }
+
+    /// Get all tracked Taproot reserves
+    pub fn get_taproot_reserves(&self) -> Vec<TaprootReservesInfo> {
+        self.taproot_reserves.read().unwrap().values().cloned().collect()
+    }
+
+    /// Get the first/primary Taproot reserves outpoint
+    pub fn get_taproot_reserves_outpoint(&self) -> Option<OutPoint> {
+        self.taproot_reserves
+            .read()
+            .unwrap()
+            .keys()
+            .next()
+            .copied()
+    }
+
+    /// Mark a Taproot reserves output as confirmed
+    pub fn confirm_taproot_reserves(&self, outpoint: &OutPoint) -> Result<(), Error> {
+        let mut taproot_reserves = self.taproot_reserves.write().unwrap();
+        if let Some(info) = taproot_reserves.get_mut(outpoint) {
+            info.confirmed = true;
+            Ok(())
+        } else {
+            Err(Error::Wallet(format!(
+                "Taproot reserves output not found: {}",
+                outpoint
+            )))
+        }
+    }
+
+    /// Rotate existing P2WSH reserves to a new Taproot output with quorum-based spending
+    ///
+    /// This spends the existing P2WSH reserves output and creates a new P2TR output.
+    /// The operator signs the P2WSH input using the single-sig path (OP_ELSE branch).
+    ///
+    /// # Arguments
+    /// * `quorum_members` - The quorum member pubkeys (will be voters)
+    /// * `member_expiries` - Block heights when each quorum member expires
+    /// * `ledger_hash` - The current ledger hash to commit to in the Taproot tree
+    ///
+    /// # Returns
+    /// A `TaprootReservesCreateResult` with the rotation transaction
+    pub fn rotate_reserves_to_taproot(
+        &self,
+        quorum_members: Vec<PublicKey>,
+        member_expiries: Vec<u32>,
+        ledger_hash: [u8; 32],
+    ) -> Result<TaprootReservesCreateResult, Error> {
+        use bitcoin::sighash::{SighashCache, EcdsaSighashType};
+        use bitcoin::ecdsa::Signature as EcdsaSignature;
+        use bitcoin::Witness;
+
+        if quorum_members.len() != member_expiries.len() {
+            return Err(Error::Wallet(
+                "Quorum members and expiries must have same length".to_string()
+            ));
+        }
+
+        // Get existing reserves info
+        let reserves_info = {
+            let reserves = self.reserves.read().unwrap();
+            reserves.values().next().cloned()
+                .ok_or_else(|| Error::Wallet("No existing reserves to rotate".to_string()))?
+        };
+
+        let amount_sats = reserves_info.amount;
+        let fee_sats = 200; // Simple fee estimate for 1-in-1-out
+        let output_amount = amount_sats.saturating_sub(fee_sats);
+
+        // Find the minimum expiry (first quorum member timeout)
+        let first_expiry = *member_expiries.iter().min().unwrap_or(&0);
+        let current_height = self.get_block_height()?;
+
+        // Create VoterSet: operator is tie-breaker, quorum members are primary voters
+        let voter_set = VoterSet::new(self.operator_pubkey, quorum_members.clone());
+
+        // Create threshold configuration
+        let config = ThresholdConfig::custom(
+            if quorum_members.is_empty() {
+                vec![ThresholdTier::new(1, true, 0, "Operator only (no quorum)")]
+            } else {
+                let blocks_until_expiry = if first_expiry > current_height {
+                    first_expiry - current_height
+                } else {
+                    144
+                };
+                let total_voters = quorum_members.len() + 1;
+                let majority = (total_voters / 2) + 1;
+                vec![
+                    ThresholdTier::new(majority, true, 0, "Majority + operator (immediate)"),
+                    ThresholdTier::new(1, true, blocks_until_expiry, "Operator after first expiry"),
+                    ThresholdTier::emergency_recovery(blocks_until_expiry.saturating_mul(2)),
+                ]
+            }
+        );
+
+        // Build the Taproot reserves output
+        let builder = TapscriptReservesBuilder::new(
+            voter_set,
+            config,
+            self.network,
+            ledger_hash,
+        );
+
+        let taproot_output = builder.build()
+            .map_err(|e| Error::Wallet(format!("Failed to build Taproot reserves: {:?}", e)))?;
+
+        let new_script_pubkey = taproot_output.script_pubkey();
+
+        // Build the rotation transaction
+        let mut tx = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                previous_output: reserves_info.outpoint,
+                script_sig: ScriptBuf::new(), // Empty for SegWit
+                sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(output_amount),
+                script_pubkey: new_script_pubkey.clone(),
+            }],
+        };
+
+        // Compute sighash for the P2WSH input
+
+        let mut sighash_cache = SighashCache::new(&tx);
+        let sighash = sighash_cache
+            .p2wsh_signature_hash(
+                0,
+                &reserves_info.redeem_script,
+                Amount::from_sat(amount_sats),
+                EcdsaSighashType::All,
+            )
+            .map_err(|e| Error::Wallet(format!("Failed to compute sighash: {:?}", e)))?;
+
+        // Sign with operator's key
+        let secp = Secp256k1::new();
+        let msg = bitcoin::secp256k1::Message::from_digest(sighash.to_byte_array());
+        let sig = secp.sign_ecdsa(&msg, &self.operator_secret);
+        let ecdsa_sig = EcdsaSignature::sighash_all(sig);
+
+        // Build the witness for P2WSH single-sig (OP_ELSE branch)
+        // Witness stack: <signature> <FALSE> <redeem_script>
+        // FALSE selects the OP_ELSE branch
+        let mut witness = Witness::new();
+        witness.push(ecdsa_sig.to_vec());
+        witness.push([]); // OP_FALSE to select ELSE branch
+        witness.push(reserves_info.redeem_script.as_bytes());
+
+        tx.input[0].witness = witness;
+
+        // Calculate new outpoint
+        let new_outpoint = OutPoint {
+            txid: tx.compute_txid(),
+            vout: 0,
+        };
+
+        // Track the new Taproot reserves
+        let new_info = TaprootReservesInfo {
+            outpoint: new_outpoint,
+            amount: output_amount,
+            operator: self.operator_pubkey,
+            quorum_members: quorum_members.clone(),
+            first_expiry_block: first_expiry,
+            ledger_hash,
+            taproot_output: taproot_output.clone(),
+            confirmed: false,
+        };
+
+        // Update tracking: remove old reserves, add new
+        {
+            let mut old_reserves = self.reserves.write().unwrap();
+            old_reserves.remove(&reserves_info.outpoint);
+        }
+        {
+            let mut new_reserves = self.taproot_reserves.write().unwrap();
+            new_reserves.insert(new_outpoint, new_info);
+        }
+
+        // Persist
+        self.save_reserves_to_disk()?;
+
+        tracing::info!(
+            "Rotating reserves from {} to Taproot {} with {} quorum members",
+            reserves_info.outpoint,
+            new_outpoint,
+            quorum_members.len()
+        );
+
+        Ok(TaprootReservesCreateResult {
+            outpoint: new_outpoint,
+            address: taproot_output.address.clone(),
+            amount: output_amount,
+            tx,
+            taproot_output,
+            first_expiry_block: first_expiry,
+            ledger_hash,
+        })
+    }
+
     /// Broadcast a transaction
     pub fn broadcast(&self, tx: &Transaction) -> Result<Txid, Error> {
         let client = EsploraBuilder::new(&self.electrum_url)
@@ -764,4 +1277,29 @@ pub struct RecoveryTx {
 
     /// Operator's signature (if signed)
     pub operator_sig: Option<Vec<u8>>,
+}
+
+/// Result of creating a Taproot reserves output
+#[derive(Debug, Clone)]
+pub struct TaprootReservesCreateResult {
+    /// The outpoint (valid after broadcast)
+    pub outpoint: OutPoint,
+
+    /// The P2TR address
+    pub address: Address,
+
+    /// Amount in satoshis
+    pub amount: u64,
+
+    /// The signed transaction
+    pub tx: Transaction,
+
+    /// The Taproot reserves output (contains spend info)
+    pub taproot_output: TaprootReservesOutput,
+
+    /// Block height when first quorum member expires (operator-only spend unlocks)
+    pub first_expiry_block: u32,
+
+    /// The ledger hash committed to in the Taproot tree
+    pub ledger_hash: [u8; 32],
 }

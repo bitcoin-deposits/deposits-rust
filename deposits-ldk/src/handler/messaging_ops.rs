@@ -349,11 +349,11 @@ where
         }
     }
 
-    /// Request consent from a collateral partner to back a ledger
+    /// Request consent from a quorum member to back a ledger
     /// Sends a CollateralConsentRequest and waits for CollateralConsentResponse with signature
     pub(super) fn request_collateral_consent(
         &self,
-        collateral_partner: PublicKey,
+        quorum_member: PublicKey,
         consent_request: DepositsMessage,
     ) -> Result<[u8; 64], DepositsError> {
         use std::time::Duration;
@@ -374,15 +374,15 @@ where
         // If the peer disconnects before responding, we'll resend when they reconnect
         {
             let mut undelivered = self.undelivered_consent_requests.lock().unwrap();
-            undelivered.insert(collateral_partner, (message_hash, consent_request.clone()));
+            undelivered.insert(quorum_member, (message_hash, consent_request.clone()));
         }
 
         // Send the consent request
-        match self.send_message(collateral_partner, consent_request) {
+        match self.send_message(quorum_member, consent_request) {
             Ok(()) => {}
             Err(e) => {
                 self.pending_consent_requests.lock().unwrap().remove(&message_hash);
-                self.undelivered_consent_requests.lock().unwrap().remove(&collateral_partner);
+                self.undelivered_consent_requests.lock().unwrap().remove(&quorum_member);
                 return Err(e);
             }
         }
@@ -399,7 +399,7 @@ where
         loop {
             if start_time.elapsed() > timeout_duration {
                 self.pending_consent_requests.lock().unwrap().remove(&message_hash);
-                self.undelivered_consent_requests.lock().unwrap().remove(&collateral_partner);
+                self.undelivered_consent_requests.lock().unwrap().remove(&quorum_member);
                 return Err(DepositsError::ProtocolViolation {
                     violation_type: "Consent timeout".to_string(),
                     details: "No consent response received within 60 seconds".to_string(),
@@ -412,16 +412,16 @@ where
                 log_info!(
                     self.logger,
                     "🔄 Retrying consent request to {} after {:?}",
-                    collateral_partner,
+                    quorum_member,
                     start_time.elapsed()
                 );
                 // Get the stored consent request and resend it
-                if let Some((_, consent_msg)) = self.undelivered_consent_requests.lock().unwrap().get(&collateral_partner).cloned() {
-                    if let Err(e) = self.send_message(collateral_partner, consent_msg) {
+                if let Some((_, consent_msg)) = self.undelivered_consent_requests.lock().unwrap().get(&quorum_member).cloned() {
+                    if let Err(e) = self.send_message(quorum_member, consent_msg) {
                         log_debug!(
                             self.logger,
                             "Failed to retry consent request to {}: {:?}",
-                            collateral_partner,
+                            quorum_member,
                             e
                         );
                     }
@@ -432,12 +432,12 @@ where
             match rx.try_recv() {
                 Ok(Ok(signature)) => {
                     // Clear the undelivered request - we got a response
-                    self.undelivered_consent_requests.lock().unwrap().remove(&collateral_partner);
+                    self.undelivered_consent_requests.lock().unwrap().remove(&quorum_member);
                     return Ok(signature);
                 }
                 Ok(Err(error_msg)) => {
                     self.pending_consent_requests.lock().unwrap().remove(&message_hash);
-                    self.undelivered_consent_requests.lock().unwrap().remove(&collateral_partner);
+                    self.undelivered_consent_requests.lock().unwrap().remove(&quorum_member);
                     return Err(DepositsError::ProtocolViolation {
                         violation_type: "Consent denied".to_string(),
                         details: error_msg,
@@ -449,7 +449,7 @@ where
                 }
                 Err(oneshot::error::TryRecvError::Closed) => {
                     self.pending_consent_requests.lock().unwrap().remove(&message_hash);
-                    self.undelivered_consent_requests.lock().unwrap().remove(&collateral_partner);
+                    self.undelivered_consent_requests.lock().unwrap().remove(&quorum_member);
                     return Err(DepositsError::ProtocolViolation {
                         violation_type: "Consent channel closed".to_string(),
                         details: "Consent channel was closed before receiving response".to_string(),
@@ -459,11 +459,11 @@ where
         }
     }
 
-    /// Request consent from a collateral partner - async version
+    /// Request consent from a quorum member - async version
     /// Uses tokio::time::sleep instead of std::thread::sleep to not block the executor
     pub(super) async fn request_collateral_consent_async(
         &self,
-        collateral_partner: PublicKey,
+        quorum_member: PublicKey,
         consent_request: DepositsMessage,
     ) -> Result<[u8; 64], DepositsError> {
         use tokio::time::{sleep, Duration, Instant};
@@ -483,15 +483,15 @@ where
         // Store the consent request for retry on reconnect
         {
             let mut undelivered = self.undelivered_consent_requests.lock().unwrap();
-            undelivered.insert(collateral_partner, (message_hash, consent_request.clone()));
+            undelivered.insert(quorum_member, (message_hash, consent_request.clone()));
         }
 
         // Send the consent request
-        match self.send_message(collateral_partner, consent_request) {
+        match self.send_message(quorum_member, consent_request) {
             Ok(()) => {}
             Err(e) => {
                 self.pending_consent_requests.lock().unwrap().remove(&message_hash);
-                self.undelivered_consent_requests.lock().unwrap().remove(&collateral_partner);
+                self.undelivered_consent_requests.lock().unwrap().remove(&quorum_member);
                 return Err(e);
             }
         }
@@ -508,7 +508,7 @@ where
         loop {
             if start_time.elapsed() > timeout_duration {
                 self.pending_consent_requests.lock().unwrap().remove(&message_hash);
-                self.undelivered_consent_requests.lock().unwrap().remove(&collateral_partner);
+                self.undelivered_consent_requests.lock().unwrap().remove(&quorum_member);
                 return Err(DepositsError::ProtocolViolation {
                     violation_type: "Consent timeout".to_string(),
                     details: "No consent response received within 60 seconds".to_string(),
@@ -520,15 +520,15 @@ where
                 log_info!(
                     self.logger,
                     "🔄 Retrying consent request to {} after {:?}",
-                    collateral_partner,
+                    quorum_member,
                     start_time.elapsed()
                 );
-                if let Some((_, consent_msg)) = self.undelivered_consent_requests.lock().unwrap().get(&collateral_partner).cloned() {
-                    if let Err(e) = self.send_message(collateral_partner, consent_msg) {
+                if let Some((_, consent_msg)) = self.undelivered_consent_requests.lock().unwrap().get(&quorum_member).cloned() {
+                    if let Err(e) = self.send_message(quorum_member, consent_msg) {
                         log_debug!(
                             self.logger,
                             "Failed to retry consent request to {}: {:?}",
-                            collateral_partner,
+                            quorum_member,
                             e
                         );
                     }
@@ -538,12 +538,12 @@ where
 
             match rx.try_recv() {
                 Ok(Ok(signature)) => {
-                    self.undelivered_consent_requests.lock().unwrap().remove(&collateral_partner);
+                    self.undelivered_consent_requests.lock().unwrap().remove(&quorum_member);
                     return Ok(signature);
                 }
                 Ok(Err(error_msg)) => {
                     self.pending_consent_requests.lock().unwrap().remove(&message_hash);
-                    self.undelivered_consent_requests.lock().unwrap().remove(&collateral_partner);
+                    self.undelivered_consent_requests.lock().unwrap().remove(&quorum_member);
                     return Err(DepositsError::ProtocolViolation {
                         violation_type: "Consent denied".to_string(),
                         details: error_msg,
@@ -556,7 +556,7 @@ where
                 }
                 Err(oneshot::error::TryRecvError::Closed) => {
                     self.pending_consent_requests.lock().unwrap().remove(&message_hash);
-                    self.undelivered_consent_requests.lock().unwrap().remove(&collateral_partner);
+                    self.undelivered_consent_requests.lock().unwrap().remove(&quorum_member);
                     return Err(DepositsError::ProtocolViolation {
                         violation_type: "Consent channel closed".to_string(),
                         details: "Consent channel was closed before receiving response".to_string(),

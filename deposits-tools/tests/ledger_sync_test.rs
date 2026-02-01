@@ -28,7 +28,7 @@ mod tests {
         todo!("Update for V2 Ledger API - Ledger::new_as_operator, append_mut, updates field changed");
     }
 
-    /// Test that multiple attestations from different collateral partners
+    /// Test that multiple attestations from different quorum members
     /// produce consistent hashes when applied in the same order.
     #[test]
     #[ignore = "TODO: Update for V2 Ledger API"]
@@ -47,8 +47,8 @@ mod tests {
 
     /// Test full synchronization flow:
     /// 1. LedgerOpenRequest
-    /// 2. AddCollateralPartner
-    /// 3. CollateralAttestation from collateral partner
+    /// 2. AddQuorumMember
+    /// 3. CollateralAttestation from quorum member
     /// 4. CollateralAttestation from channel partner
     /// Both sides should have identical final state.
     #[test]
@@ -66,27 +66,27 @@ mod tests {
     }
 
     // =========================================================================
-    // Audit Ledger Synchronization Tests - Ensure collateral partners receive all updates
+    // Audit Ledger Synchronization Tests - Ensure quorum members receive all updates
     // =========================================================================
 
-    /// Test that a new collateral partner should receive AddCollateralPartner
+    /// Test that a new quorum member should receive AddQuorumMember
     /// as the first update in their audit ledger.
     ///
-    /// This test documents the expected behavior: when a collateral partner is added,
-    /// they should receive a SignedAuditUpdate for the AddCollateralPartner message
+    /// This test documents the expected behavior: when a quorum member is added,
+    /// they should receive a SignedAuditUpdate for the AddQuorumMember message
     /// that added them. Without this, auditors would have a sparse audit log that
     /// starts from a later sequence number.
     #[test]
     #[ignore = "TODO: Update for V2 Ledger API"]
-    fn test_collateral_partner_receives_add_message() {
+    fn test_quorum_member_receives_add_message() {
         todo!("Update for V2 Ledger API - Ledger::new_as_operator, append_mut, updates field changed");
     }
 
     /// Test that auditors must receive updates starting from sequence 0.
     /// If an auditor's first update has sequence > 0, they have a broken audit chain.
     ///
-    /// This test documents the bug where collateral partners only received updates
-    /// AFTER being added to the quorum, missing the AddCollateralPartner itself.
+    /// This test documents the bug where quorum members only received updates
+    /// AFTER being added to the quorum, missing the AddQuorumMember itself.
     #[test]
     #[ignore = "TODO: Update for V2 Ledger API"]
     fn test_auditor_chain_must_start_from_zero() {

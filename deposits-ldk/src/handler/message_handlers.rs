@@ -63,7 +63,7 @@ where
     /// Handle CollateralAttestation message
     /// Handle CollateralAttestation message.
     ///
-    /// Received from collateral partner after CollateralIncrease. Stores attestation
+    /// Received from quorum member after CollateralIncrease. Stores attestation
     /// and forwards to channel partners.
     pub(super) fn handle_collateral_attestation(
         &self,
@@ -72,7 +72,7 @@ where
     ) -> Result<(), LightningError> {
         log_info!(self.logger, "💰 COLLATERAL: Received attestation from {} - amount={}", sender_node_id, msg.amount);
 
-        let is_direct = sender_node_id == msg.collateral_partner;
+        let is_direct = sender_node_id == msg.quorum_member;
         let mut partners_to_forward: Vec<PublicKey> = Vec::new();
 
         // Process attestation based on our role
@@ -113,7 +113,7 @@ where
 
     fn store_attestation(&self, ledger: &mut deposits_core::Ledger, msg: &crate::wire::messages::CollateralAttestationMsg, sender: PublicKey) {
         let attestation = deposits_core::types::CollateralAttestation::new(
-            msg.operator, msg.collateral_partner, msg.amount, msg.block_height, msg.lock_until_block, msg.signature, msg.ledger_hash,
+            msg.operator, msg.quorum_member, msg.amount, msg.block_height, msg.lock_until_block, msg.signature, msg.ledger_hash,
         );
         ledger.state.collateral_attestations.insert(sender, attestation);
         log_info!(self.logger, "💰 COLLATERAL: Stored attestation from {}", sender);
@@ -121,9 +121,9 @@ where
 
     fn store_attestation_as_partner(&self, ledger: &mut deposits_core::Ledger, msg: &crate::wire::messages::CollateralAttestationMsg) {
         let attestation = deposits_core::types::CollateralAttestation::new(
-            msg.operator, msg.collateral_partner, msg.amount, msg.block_height, msg.lock_until_block, msg.signature, msg.ledger_hash,
+            msg.operator, msg.quorum_member, msg.amount, msg.block_height, msg.lock_until_block, msg.signature, msg.ledger_hash,
         );
-        ledger.state.collateral_attestations.insert(msg.collateral_partner, attestation);
+        ledger.state.collateral_attestations.insert(msg.quorum_member, attestation);
         // Recalculate from attestations HashMap - this properly handles duplicates
         let total: u64 = ledger.state.collateral_attestations.values()
             .map(|a| a.available_collateral())
@@ -138,10 +138,10 @@ where
 
     fn create_attestation_message(&self, msg: &crate::wire::messages::CollateralAttestationMsg) -> DepositsMessage {
         DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
-            msg.operator, msg.collateral_partner.to_string(),
+            msg.operator, msg.quorum_member.to_string(),
             LedgerOperation::CollateralAttestation {
                 collateral_operator: msg.operator,
-                collateral_partner: msg.collateral_partner,
+                quorum_member: msg.quorum_member,
                 amount: msg.amount,
                 block_height: msg.block_height,
                 lock_until_block: msg.lock_until_block,
@@ -160,21 +160,21 @@ where
                 let mut ledger = ledger_arc.write().unwrap();
 
                 // Check for idempotency - only append to history if the collateral amount has changed.
-                // collateral_attestations is keyed by the actual collateral_partner who provided the attestation.
-                if let Some(existing) = ledger.state.collateral_attestations.get(&msg.collateral_partner) {
+                // collateral_attestations is keyed by the actual quorum_member who provided the attestation.
+                if let Some(existing) = ledger.state.collateral_attestations.get(&msg.quorum_member) {
                     if existing.available_collateral() == msg.amount {
                         // Same amount - update HashMap with fresh attestation but skip history entry
                         let attestation = deposits_core::types::CollateralAttestation::new(
-                            msg.operator, msg.collateral_partner, msg.amount, msg.block_height, msg.lock_until_block, msg.signature, msg.ledger_hash,
+                            msg.operator, msg.quorum_member, msg.amount, msg.block_height, msg.lock_until_block, msg.signature, msg.ledger_hash,
                         );
-                        ledger.state.collateral_attestations.insert(msg.collateral_partner, attestation);
+                        ledger.state.collateral_attestations.insert(msg.quorum_member, attestation);
                         log_info!(self.logger, "💰 COLLATERAL: Updated attestation from {} (same amount {}, fresh block {}), no history entry",
-                            msg.collateral_partner, msg.amount, msg.block_height);
+                            msg.quorum_member, msg.amount, msg.block_height);
                         continue;
                     }
                     if existing.block_height >= msg.block_height {
                         log_info!(self.logger, "💰 COLLATERAL: Skipping stale attestation from {} (existing block {} >= new block {})",
-                            msg.collateral_partner, existing.block_height, msg.block_height);
+                            msg.quorum_member, existing.block_height, msg.block_height);
                         continue;
                     }
                 }
@@ -271,12 +271,12 @@ where
             let operator_node_id = ledger_guard.operator_key();
             let partner_node_id = ledger_guard.reserves_key().to_string(); // Clone immediately to release borrow
             let our_role = ledger_guard.role;
-            let collateral_partners = ledger_guard.state.collateral_partners.clone();
+            let quorum_members = ledger_guard.state.quorum_members.clone();
             let ledger_address = ledger_guard.state.ledger_address.clone();
 
             let ledger_owned = std::mem::replace(
                 &mut *ledger_guard,
-                deposits_core::Ledger::new(operator_node_id, partner_node_id, our_role, collateral_partners, ledger_address)
+                deposits_core::Ledger::new(operator_node_id, partner_node_id, our_role, quorum_members, ledger_address)
             );
 
             match ledger_owned.append(message.clone()) {

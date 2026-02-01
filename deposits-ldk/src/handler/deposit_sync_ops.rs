@@ -61,7 +61,7 @@ where
                     100%+100% model requires at least 2 operator ledgers (your reserves in one back your deposits in another). \
                     Partner ledgers don't count - you have no funds at stake there.",
                     operator_ledger_count);
-                return Err(DepositsError::InsufficientCollateralPartners {
+                return Err(DepositsError::InsufficientQuorumMembers {
                     operator_ledgers: operator_ledger_count,
                     partner_ledgers: partner_ledger_count,
                 });

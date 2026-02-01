@@ -86,7 +86,7 @@ where
         let operator_node_id = ledger_guard.operator_key();
         let partner_node_id_inner = ledger_guard.reserves_key().to_string(); // Clone immediately to release borrow
         let our_role = ledger_guard.role;
-        let collateral_partners = ledger_guard.state.collateral_partners.clone();
+        let quorum_members = ledger_guard.state.quorum_members.clone();
         let ledger_address = ledger_guard.state.ledger_address.clone();
 
         // Take ownership of the ledger
@@ -96,7 +96,7 @@ where
                 operator_node_id,
                 partner_node_id_inner,
                 our_role,
-                collateral_partners,
+                quorum_members,
                 ledger_address.clone(),
             )
         );

@@ -78,23 +78,23 @@ message RemoveReservesRequest {
 message RemoveReservesResponse {}
 
 // Collateral operations
-message AddCollateralPartnerRequest {
+message QuorumAddMemberRequest {
   string partner_node_id = 1;
-  string collateral_partner_id = 2;
+  string quorum_member_id = 2;
 }
-message AddCollateralPartnerResponse {}
+message QuorumAddMemberResponse {}
 
-message RemoveCollateralPartnerRequest {
+message QuorumRemoveMemberRequest {
   string partner_node_id = 1;
-  string collateral_partner_id = 2;
+  string quorum_member_id = 2;
 }
-message RemoveCollateralPartnerResponse {}
+message QuorumRemoveMemberResponse {}
 
 message GetCollateralInfoRequest {
   string partner_node_id = 1;
 }
 message GetCollateralInfoResponse {
-  repeated CollateralPartnerInfo partners = 1;
+  repeated QuorumMemberInfo partners = 1;
   uint64 total_available_collateral = 2;
 }
 
@@ -132,7 +132,7 @@ message DepositInfo {
   uint64 locked_balance_msat = 4;
 }
 
-message CollateralPartnerInfo {
+message QuorumMemberInfo {
   string pubkey = 1;
   uint64 collateral_amount = 2;
   uint32 block_height = 3;
@@ -151,7 +151,7 @@ message LedgerUpdate {
   // Key parameters extracted from operation
   optional uint64 amount_sat = 9;
   optional string deposit_pubkey = 10;
-  optional string description = 11;  // Additional context (e.g., collateral partner name)
+  optional string description = 11;  // Additional context (e.g., quorum member name)
 }
 
 message DepositsError {

@@ -13,8 +13,8 @@ use deposits_ldk::service::{
     ReduceReservesRequest, ReduceReservesResponse,
     RemoveReservesRequest, RemoveReservesResponse,
     GetLedgerUpdatesRequest, GetLedgerUpdatesResponse,
-    AddCollateralPartnerRequest, AddCollateralPartnerResponse,
-    RemoveCollateralPartnerRequest, RemoveCollateralPartnerResponse,
+    QuorumAddMemberRequest, QuorumAddMemberResponse,
+    QuorumRemoveMemberRequest, QuorumRemoveMemberResponse,
     GetDepositNwcRequest, GetDepositNwcResponse,
     DepositsError,
 };
@@ -396,8 +396,8 @@ fn build_cli() -> Command {
                 ),
         )
         .subcommand(
-            Command::new("add-collateral-partner")
-                .about("Add a collateral partner to a ledger")
+            Command::new("add-quorum-member")
+                .about("Add a quorum member to a ledger")
                 .arg(
                     Arg::new("partner")
                         .help("Partner node for the ledger")
@@ -406,16 +406,16 @@ fn build_cli() -> Command {
                         .index(1),
                 )
                 .arg(
-                    Arg::new("collateral-partner")
-                        .help("Node to add as collateral partner")
+                    Arg::new("quorum-member")
+                        .help("Node to add as quorum member")
                         .value_hint(ValueHint::Other)
                         .required(true)
                         .index(2),
                 ),
         )
         .subcommand(
-            Command::new("remove-collateral-partner")
-                .about("Remove a collateral partner from a ledger")
+            Command::new("remove-quorum-member")
+                .about("Remove a quorum member from a ledger")
                 .arg(
                     Arg::new("partner")
                         .help("Partner node for the ledger")
@@ -424,8 +424,8 @@ fn build_cli() -> Command {
                         .index(1),
                 )
                 .arg(
-                    Arg::new("collateral-partner")
-                        .help("Node to remove as collateral partner")
+                    Arg::new("quorum-member")
+                        .help("Node to remove as quorum member")
                         .value_hint(ValueHint::Other)
                         .required(true)
                         .index(2),
@@ -566,11 +566,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Some(("remove-reserves", sub_m)) => {
             remove_reserves(&client, &base_url, sub_m).await?;
         }
-        Some(("add-collateral-partner", sub_m)) => {
-            add_collateral_partner(&client, &base_url, sub_m).await?;
+        Some(("add-quorum-member", sub_m)) => {
+            add_quorum_member(&client, &base_url, sub_m).await?;
         }
-        Some(("remove-collateral-partner", sub_m)) => {
-            remove_collateral_partner(&client, &base_url, sub_m).await?;
+        Some(("remove-quorum-member", sub_m)) => {
+            remove_quorum_member(&client, &base_url, sub_m).await?;
         }
         Some(("status", sub_m)) => {
             // Use node arg if provided, otherwise use original alias (before resolution)
@@ -1009,56 +1009,56 @@ async fn remove_reserves(client: &Client, base_url: &str, matches: &ArgMatches) 
     Ok(())
 }
 
-async fn add_collateral_partner(client: &Client, base_url: &str, matches: &ArgMatches) -> Result<(), Box<dyn Error>> {
+async fn add_quorum_member(client: &Client, base_url: &str, matches: &ArgMatches) -> Result<(), Box<dyn Error>> {
     let partner_input = matches.get_one::<String>("partner").unwrap();
-    let collateral_input = matches.get_one::<String>("collateral-partner").unwrap();
+    let quorum_input = matches.get_one::<String>("quorum-member").unwrap();
 
     // Resolve aliases to node IDs if needed
     let partner_id = resolve_node_id(client, partner_input).await?;
-    let collateral_partner_id = resolve_node_id(client, collateral_input).await?;
+    let quorum_member_id = resolve_node_id(client, quorum_input).await?;
 
-    println!("🔗 Adding collateral partner {} to ledger with {}...", collateral_partner_id, partner_id);
+    println!("🔗 Adding quorum member {} to ledger with {}...", quorum_member_id, partner_id);
 
-    let request = AddCollateralPartnerRequest {
+    let request = QuorumAddMemberRequest {
         partner_node_id: partner_id.clone(),
-        collateral_partner_id: collateral_partner_id.clone(),
+        quorum_member_id: quorum_member_id.clone(),
     };
 
-    let _response: AddCollateralPartnerResponse = proto_request(
+    let _response: QuorumAddMemberResponse = proto_request(
         client,
         base_url,
-        endpoints::DEPOSITS_ADD_COLLATERAL_PARTNER_PATH,
+        endpoints::DEPOSITS_ADD_QUORUM_MEMBER_PATH,
         request,
     ).await?;
 
-    println!("✅ Collateral partner added successfully!");
+    println!("✅ Quorum member added successfully!");
 
     Ok(())
 }
 
-async fn remove_collateral_partner(client: &Client, base_url: &str, matches: &ArgMatches) -> Result<(), Box<dyn Error>> {
+async fn remove_quorum_member(client: &Client, base_url: &str, matches: &ArgMatches) -> Result<(), Box<dyn Error>> {
     let partner_input = matches.get_one::<String>("partner").unwrap();
-    let collateral_input = matches.get_one::<String>("collateral-partner").unwrap();
+    let quorum_input = matches.get_one::<String>("quorum-member").unwrap();
 
     // Resolve aliases to node IDs if needed
     let partner_id = resolve_node_id(client, partner_input).await?;
-    let collateral_partner_id = resolve_node_id(client, collateral_input).await?;
+    let quorum_member_id = resolve_node_id(client, quorum_input).await?;
 
-    println!("🔗 Removing collateral partner {} from ledger with {}...", collateral_partner_id, partner_id);
+    println!("🔗 Removing quorum member {} from ledger with {}...", quorum_member_id, partner_id);
 
-    let request = RemoveCollateralPartnerRequest {
+    let request = QuorumRemoveMemberRequest {
         partner_node_id: partner_id.clone(),
-        collateral_partner_id: collateral_partner_id.clone(),
+        quorum_member_id: quorum_member_id.clone(),
     };
 
-    let _response: RemoveCollateralPartnerResponse = proto_request(
+    let _response: QuorumRemoveMemberResponse = proto_request(
         client,
         base_url,
-        endpoints::DEPOSITS_REMOVE_COLLATERAL_PARTNER_PATH,
+        endpoints::DEPOSITS_REMOVE_QUORUM_MEMBER_PATH,
         request,
     ).await?;
 
-    println!("✅ Collateral partner removed successfully!");
+    println!("✅ Quorum member removed successfully!");
 
     Ok(())
 }

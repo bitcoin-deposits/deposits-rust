@@ -58,7 +58,7 @@ This is how deposits messages flow through LDK's peer handler.
 | **Audit/Sync** | 3 | SignedUpdate, SyncRequest, SyncResponse |
 | **Recovery** | 4 | Vote, ClaimRequest, ClaimSignature, ClaimComplete |
 | **Quorum** | 6 | Join*, Vote*, StateSync, MembershipChange |
-| **Collateral Mgmt** | 5 | Attestation, Add/Remove Partner, Consent Request/Response |
+| **Quorum Mgmt** | 5 | Attestation, Add/Remove Member, Consent Request/Response |
 | **External** | 4 | NWC Relay (3), UncreditedPayment (1) |
 
 ### BOLT Message Type Rules
@@ -105,7 +105,7 @@ pub struct LedgerUpdateMsg {
 
 pub enum LedgerOperation {
     // Reserves
-    ReservesAdd { amount: u64, spend_to: PublicKey, collateral_partners: Vec<PublicKey> },
+    ReservesAdd { amount: u64, spend_to: PublicKey, quorum_members: Vec<PublicKey> },
     ReservesRemove,
     ReservesIncrease { new_amount: u64 },
     ReservesDecrease { new_amount: u64 },
@@ -130,8 +130,8 @@ pub enum LedgerOperation {
     CollateralIncrease { new_amount: u64, block_height: u32 },
     CollateralDecrease { new_amount: u64, block_height: u32 },
     CollateralAttestation { operator: PublicKey, amount: u64, block_height: u32, sig: [u8; 64] },
-    CollateralAddPartner { partner: PublicKey, sig: [u8; 64] },
-    CollateralRemovePartner { partner: PublicKey, sig: [u8; 64] },
+    QuorumAddMember { member: PublicKey, sig: [u8; 64] },
+    QuorumRemoveMember { member: PublicKey, sig: [u8; 64] },
 
     // Lifecycle
     FeeCollect { pubkey: PublicKey, amount: u64, block_height: u32 },

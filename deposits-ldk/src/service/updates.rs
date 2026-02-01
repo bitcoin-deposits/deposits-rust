@@ -122,10 +122,10 @@ fn extract_from_ledger_operation(op: &LedgerOperation) -> (Option<u64>, Option<S
         LedgerOperation::OnchainFulfill { deposit_pubkey, .. } => (None, Some(deposit_pubkey.to_string()), None),
         LedgerOperation::ReservesIncrease { new_amount } => (Some(*new_amount), None, None),
         LedgerOperation::ReservesDecrease { new_amount } => (Some(*new_amount), None, None),
-        LedgerOperation::CollateralAddPartner { collateral_partner, .. } =>
-            (None, None, Some(format!("partner:{}", &collateral_partner.to_string()[..8]))),
-        LedgerOperation::CollateralRemovePartner { collateral_partner, .. } =>
-            (None, None, Some(format!("partner:{}", &collateral_partner.to_string()[..8]))),
+        LedgerOperation::QuorumAddMember { quorum_member, .. } =>
+            (None, None, Some(format!("partner:{}", &quorum_member.to_string()[..8]))),
+        LedgerOperation::QuorumRemoveMember { quorum_member, .. } =>
+            (None, None, Some(format!("partner:{}", &quorum_member.to_string()[..8]))),
         LedgerOperation::CollateralIncrease { new_amount, .. } => (Some(*new_amount), None, None),
         LedgerOperation::CollateralDecrease { new_amount, .. } => (Some(*new_amount), None, None),
         LedgerOperation::CollateralAttestation { amount, .. } => (Some(*amount), None, None),

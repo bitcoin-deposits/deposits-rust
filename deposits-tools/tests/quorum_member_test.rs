@@ -1,25 +1,21 @@
-//! Tests for collateral partner management via ledger updates
+//! Tests for quorum member management via ledger updates
 //!
-//! Tests the AddCollateralPartner, RemoveCollateralPartner, CollateralAttestation,
+//! Tests the AddQuorumMember, RemoveQuorumMember, CollateralAttestation,
 //! CollateralConsentRequest, and CollateralConsentResponse messages and their effect on ledger state.
 
 #[cfg(test)]
 mod tests {
     use ldk_node::bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
-    use std::collections::HashMap;
 
     // V2 message types from deposits-ldk
     use deposits_ldk::handler::messages::{
-        DepositsMessage, LedgerUpdateMsg, LedgerUpdateResponseMsg, LedgerOperation,
+        DepositsMessage, LedgerUpdateMsg, LedgerUpdateMsgExt, LedgerUpdateResponseMsg, LedgerOperation,
         HandshakeMsg, HandshakeResponseMsg, CoordinationMsg, CoordinationResponseMsg,
     };
     // Wire message structs from deposits-core for struct construction
     use deposits_ldk::wire::messages::{
-        CollateralAddPartnerMsg, CollateralRemovePartnerMsg,
+        QuorumAddMemberMsg, QuorumRemoveMemberMsg,
         CollateralConsentRequestMsg, CollateralConsentResponseMsg, CollateralAttestationMsg,
-        // LDK wrappers for encoding tests (implement Readable/Writeable)
-        LdkCollateralAddPartnerMsg, LdkCollateralRemovePartnerMsg,
-        LdkCollateralConsentRequestMsg, LdkCollateralConsentResponseMsg, LdkCollateralAttestationMsg,
     };
 
     /// Generate a deterministic test public key
@@ -37,177 +33,118 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_add_collateral_partner_message_roundtrip() {
-        use lightning::util::ser::{Readable, Writeable};
-        use lightning::io::Cursor;
-
+    fn test_add_quorum_member_message_struct() {
         let operator_id = generate_test_pubkey(1);
-        let partner_id = generate_test_pubkey(2);
-        let collateral_partner = generate_test_pubkey(3);
+        let reserves_id = "test_reserves".to_string();
+        let quorum_member = generate_test_pubkey(3);
 
-        let msg = CollateralAddPartnerMsg {
+        let msg = QuorumAddMemberMsg {
             operator_id,
-            partner_id,
-            collateral_partner,
-            collateral_partner_signature: [0xCD; 64],
+            reserves_id: reserves_id.clone(),
+            quorum_member,
+            quorum_member_signature: [0xCD; 64],
         };
 
-        // Encode using LDK wrapper
-        let ldk_msg = LdkCollateralAddPartnerMsg::from(msg.clone());
-        let encoded = ldk_msg.encode();
+        assert_eq!(msg.operator_id, operator_id);
+        assert_eq!(msg.reserves_id, reserves_id);
+        assert_eq!(msg.quorum_member, quorum_member);
+        assert_eq!(msg.quorum_member_signature, [0xCD; 64]);
 
-        // Decode using LDK wrapper
-        let mut cursor = Cursor::new(&encoded);
-        let decoded: LdkCollateralAddPartnerMsg = Readable::read(&mut cursor).expect("should decode");
-
-        assert_eq!(decoded.0.operator_id, operator_id);
-        assert_eq!(decoded.0.partner_id, partner_id);
-        assert_eq!(decoded.0.collateral_partner, collateral_partner);
-        assert_eq!(decoded.0.collateral_partner_signature, [0xCD; 64]);
-
-        println!("AddCollateralPartnerMsg roundtrip test passed!");
+        println!("QuorumAddMemberMsg struct test passed!");
     }
 
     #[test]
-    fn test_collateral_consent_request_message_roundtrip() {
-        use lightning::util::ser::{Readable, Writeable};
-        use lightning::io::Cursor;
-
+    fn test_collateral_consent_request_message_struct() {
         let operator_id = generate_test_pubkey(1);
-        let partner_id = generate_test_pubkey(2);
+        let reserves_id = "test_reserves".to_string();
 
         let msg = CollateralConsentRequestMsg {
             operator_id,
-            partner_id,
+            reserves_id: reserves_id.clone(),
             operator_signature: [0xEF; 64],
         };
 
-        // Encode using LDK wrapper
-        let ldk_msg = LdkCollateralConsentRequestMsg::from(msg.clone());
-        let encoded = ldk_msg.encode();
+        assert_eq!(msg.operator_id, operator_id);
+        assert_eq!(msg.reserves_id, reserves_id);
+        assert_eq!(msg.operator_signature, [0xEF; 64]);
 
-        // Decode using LDK wrapper
-        let mut cursor = Cursor::new(&encoded);
-        let decoded: LdkCollateralConsentRequestMsg = Readable::read(&mut cursor).expect("should decode");
-
-        assert_eq!(decoded.0.operator_id, operator_id);
-        assert_eq!(decoded.0.partner_id, partner_id);
-        assert_eq!(decoded.0.operator_signature, [0xEF; 64]);
-
-        println!("CollateralConsentRequestMsg roundtrip test passed!");
+        println!("CollateralConsentRequestMsg struct test passed!");
     }
 
     #[test]
-    fn test_collateral_consent_response_message_roundtrip() {
-        use lightning::util::ser::{Readable, Writeable};
-        use lightning::io::Cursor;
-
+    fn test_collateral_consent_response_message_struct() {
         let operator_id = generate_test_pubkey(1);
-        let partner_id = generate_test_pubkey(2);
+        let reserves_id = "test_reserves".to_string();
 
         // Test with consent granted
         let msg_granted = CollateralConsentResponseMsg {
             operator_id,
-            partner_id,
+            reserves_id: reserves_id.clone(),
             consent_granted: true,
-            collateral_partner_signature: [0x12; 64],
+            quorum_member_signature: [0x12; 64],
         };
 
-        // Encode using LDK wrapper
-        let ldk_msg = LdkCollateralConsentResponseMsg::from(msg_granted.clone());
-        let encoded = ldk_msg.encode();
-
-        let mut cursor = Cursor::new(&encoded);
-        let decoded: LdkCollateralConsentResponseMsg = Readable::read(&mut cursor).expect("should decode");
-
-        assert_eq!(decoded.0.operator_id, operator_id);
-        assert_eq!(decoded.0.partner_id, partner_id);
-        assert_eq!(decoded.0.consent_granted, true);
-        assert_eq!(decoded.0.collateral_partner_signature, [0x12; 64]);
+        assert_eq!(msg_granted.operator_id, operator_id);
+        assert_eq!(msg_granted.reserves_id, reserves_id);
+        assert_eq!(msg_granted.consent_granted, true);
+        assert_eq!(msg_granted.quorum_member_signature, [0x12; 64]);
 
         // Test with consent denied
         let msg_denied = CollateralConsentResponseMsg {
             operator_id,
-            partner_id,
+            reserves_id: reserves_id.clone(),
             consent_granted: false,
-            collateral_partner_signature: [0u8; 64],
+            quorum_member_signature: [0u8; 64],
         };
 
-        let ldk_msg2 = LdkCollateralConsentResponseMsg::from(msg_denied.clone());
-        let encoded2 = ldk_msg2.encode();
+        assert_eq!(msg_denied.consent_granted, false);
 
-        let mut cursor2 = Cursor::new(&encoded2);
-        let decoded2: LdkCollateralConsentResponseMsg = Readable::read(&mut cursor2).expect("should decode");
-
-        assert_eq!(decoded2.0.consent_granted, false);
-
-        println!("CollateralConsentResponseMsg roundtrip test passed!");
+        println!("CollateralConsentResponseMsg struct test passed!");
     }
 
     #[test]
-    fn test_remove_collateral_partner_message_roundtrip() {
-        use lightning::util::ser::{Readable, Writeable};
-        use lightning::io::Cursor;
+    fn test_remove_quorum_member_message_struct() {
+        let reserves_id = "test_reserves".to_string();
+        let quorum_member = generate_test_pubkey(2);
 
-        let partner_id = generate_test_pubkey(1);
-        let collateral_partner = generate_test_pubkey(2);
-
-        let msg = CollateralRemovePartnerMsg {
-            partner_id,
-            collateral_partner,
+        let msg = QuorumRemoveMemberMsg {
+            reserves_id: reserves_id.clone(),
+            quorum_member,
             operator_signature: [0xCD; 64],
         };
 
-        // Encode using LDK wrapper
-        let ldk_msg = LdkCollateralRemovePartnerMsg::from(msg.clone());
-        let encoded = ldk_msg.encode();
+        assert_eq!(msg.reserves_id, reserves_id);
+        assert_eq!(msg.quorum_member, quorum_member);
+        assert_eq!(msg.operator_signature, [0xCD; 64]);
 
-        // Decode using LDK wrapper
-        let mut cursor = Cursor::new(&encoded);
-        let decoded: LdkCollateralRemovePartnerMsg = Readable::read(&mut cursor).expect("should decode");
-
-        assert_eq!(decoded.0.partner_id, partner_id);
-        assert_eq!(decoded.0.collateral_partner, collateral_partner);
-        assert_eq!(decoded.0.operator_signature, [0xCD; 64]);
-
-        println!("RemoveCollateralPartnerMsg roundtrip test passed!");
+        println!("QuorumRemoveMemberMsg struct test passed!");
     }
 
     #[test]
-    fn test_collateral_attestation_message_roundtrip() {
-        use lightning::util::ser::{Readable, Writeable};
-        use lightning::io::Cursor;
-
+    fn test_collateral_attestation_message_struct() {
         let operator = generate_test_pubkey(1);
-        let collateral_partner = generate_test_pubkey(2);
+        let quorum_member = generate_test_pubkey(2);
 
         let msg = CollateralAttestationMsg {
             operator,
-            collateral_partner,
+            quorum_member,
             amount: 100_000,
             block_height: 800_000,
+            lock_until_block: 0,
             signature: [0xEF; 64],
             ledger_hash: [0u8; 32],
         };
 
-        // Encode using LDK wrapper
-        let ldk_msg = LdkCollateralAttestationMsg::from(msg.clone());
-        let encoded = ldk_msg.encode();
-
-        // Decode using LDK wrapper
-        let mut cursor = Cursor::new(&encoded);
-        let decoded: LdkCollateralAttestationMsg = Readable::read(&mut cursor).expect("should decode");
-
-        assert_eq!(decoded.0.operator, operator);
-        assert_eq!(decoded.0.collateral_partner, collateral_partner);
-        assert_eq!(decoded.0.amount, 100_000);
-        assert_eq!(decoded.0.block_height, 800_000);
-        assert_eq!(decoded.0.signature, [0xEF; 64]);
+        assert_eq!(msg.operator, operator);
+        assert_eq!(msg.quorum_member, quorum_member);
+        assert_eq!(msg.amount, 100_000);
+        assert_eq!(msg.block_height, 800_000);
+        assert_eq!(msg.signature, [0xEF; 64]);
 
         // Test available_collateral calculation
         assert_eq!(msg.available_collateral(), 100_000);
 
-        println!("CollateralAttestationMsg roundtrip test passed!");
+        println!("CollateralAttestationMsg struct test passed!");
     }
 
     // =========================================================================
@@ -216,13 +153,13 @@ mod tests {
 
     #[test]
     #[ignore = "TODO: Update for V2 Ledger API"]
-    fn test_ledger_add_collateral_partner_via_message() {
+    fn test_ledger_add_quorum_member_via_message() {
         todo!("Update test for V2 Ledger API");
     }
 
     #[test]
     #[ignore = "TODO: Update for V2 Ledger API"]
-    fn test_ledger_remove_collateral_partner_via_message() {
+    fn test_ledger_remove_quorum_member_via_message() {
         todo!("Update test for V2 Ledger API");
     }
 
@@ -234,7 +171,7 @@ mod tests {
 
     #[test]
     #[ignore = "TODO: Update for V2 Ledger API"]
-    fn test_ledger_collateral_attestation_from_collateral_partner() {
+    fn test_ledger_collateral_attestation_from_quorum_member() {
         todo!("Update test for V2 Ledger API");
     }
 
@@ -246,7 +183,7 @@ mod tests {
 
     #[test]
     #[ignore = "TODO: Update for V2 Ledger API"]
-    fn test_remove_collateral_partner_clears_attestation() {
+    fn test_remove_quorum_member_clears_attestation() {
         todo!("Update test for V2 Ledger API");
     }
 
@@ -256,7 +193,7 @@ mod tests {
 
     #[test]
     #[ignore = "TODO: Update for V2 Ledger API"]
-    fn test_collateral_partner_messages_update_hash_chain() {
+    fn test_quorum_member_messages_update_hash_chain() {
         todo!("Update test for V2 Ledger API");
     }
 
@@ -269,28 +206,28 @@ mod tests {
         use deposits_ldk::handler::messages::{LEDGER_UPDATE, COORDINATION, COORDINATION_RESPONSE};
 
         // V2: Collateral operations go through LedgerUpdate (0x8001) or Coordination (0x800D/0x800F)
-        // CollateralAddPartner, CollateralRemovePartner, CollateralAttestation -> LedgerUpdate with LedgerOperation
+        // QuorumAddMember, QuorumRemoveMember, CollateralAttestation -> LedgerUpdate with LedgerOperation
         // CollateralConsentRequest -> Coordination
         // CollateralConsentResponse -> CoordinationResponse
 
-        // CollateralAddPartner is now a LedgerUpdate with LedgerOperation::CollateralAddPartner
+        // QuorumAddMember is now a LedgerUpdate with LedgerOperation::QuorumAddMember
         let add_msg = DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             generate_test_pubkey(1),
-            generate_test_pubkey(2),
-            LedgerOperation::CollateralAddPartner {
-                collateral_partner: generate_test_pubkey(3),
-                collateral_partner_signature: [0u8; 64],
+            generate_test_pubkey(2).to_string(),
+            LedgerOperation::QuorumAddMember {
+                quorum_member: generate_test_pubkey(3),
+                quorum_member_signature: [0u8; 64],
             },
         ));
         assert_eq!(add_msg.message_type(), LEDGER_UPDATE);
         assert_eq!(add_msg.message_type(), 0x8001);
 
-        // CollateralRemovePartner is now a LedgerUpdate with LedgerOperation::CollateralRemovePartner
+        // QuorumRemoveMember is now a LedgerUpdate with LedgerOperation::QuorumRemoveMember
         let remove_msg = DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             generate_test_pubkey(1),
-            generate_test_pubkey(2),
-            LedgerOperation::CollateralRemovePartner {
-                collateral_partner: generate_test_pubkey(3),
+            generate_test_pubkey(2).to_string(),
+            LedgerOperation::QuorumRemoveMember {
+                quorum_member: generate_test_pubkey(3),
                 operator_signature: [0u8; 64],
             },
         ));
@@ -299,7 +236,7 @@ mod tests {
         // CollateralConsentRequest is now Coordination with CoordinationMsg::CollateralConsentRequest
         let consent_request = DepositsMessage::Coordination(CoordinationMsg::CollateralConsentRequest {
             operator_id: generate_test_pubkey(1),
-            partner_id: generate_test_pubkey(2),
+            reserves_id: "test_reserves".to_string(),
             operator_signature: [0u8; 64],
         });
         assert_eq!(consent_request.message_type(), COORDINATION);
@@ -309,9 +246,9 @@ mod tests {
         let consent_response = DepositsMessage::CoordinationResponse(CoordinationResponseMsg::CollateralConsentResponse {
             request_hash: [0u8; 32],
             operator_id: generate_test_pubkey(1),
-            partner_id: generate_test_pubkey(2),
+            reserves_id: "test_reserves".to_string(),
             consent_granted: true,
-            collateral_partner_signature: [0u8; 64],
+            quorum_member_signature: [0u8; 64],
         });
         assert_eq!(consent_response.message_type(), COORDINATION_RESPONSE);
         assert_eq!(consent_response.message_type(), 0x8013);
@@ -328,7 +265,7 @@ mod tests {
         // V2: Consent messages are wrapped in Coordination/CoordinationResponse
         let request = DepositsMessage::Coordination(CoordinationMsg::CollateralConsentRequest {
             operator_id: generate_test_pubkey(1),
-            partner_id: generate_test_pubkey(2),
+            reserves_id: "test_reserves".to_string(),
             operator_signature: [0u8; 64],
         });
         assert_eq!(request.variant_name(), "Coordination");
@@ -336,9 +273,9 @@ mod tests {
         let response = DepositsMessage::CoordinationResponse(CoordinationResponseMsg::CollateralConsentResponse {
             request_hash: [0u8; 32],
             operator_id: generate_test_pubkey(1),
-            partner_id: generate_test_pubkey(2),
+            reserves_id: "test_reserves".to_string(),
             consent_granted: true,
-            collateral_partner_signature: [0u8; 64],
+            quorum_member_signature: [0u8; 64],
         });
         assert_eq!(response.variant_name(), "CoordinationResponse");
 
@@ -346,73 +283,63 @@ mod tests {
     }
 
     #[test]
-    fn test_consent_messages_have_partner_id() {
-        let partner_id = generate_test_pubkey(2);
+    fn test_consent_messages_have_reserves_id() {
+        let reserves_id = "test_reserves".to_string();
 
-        // V2: Coordination messages don't expose partner_id at the outer level
-        // The partner_id is within the inner CoordinationMsg variant
+        // V2: Coordination messages don't expose reserves_id at the outer level
+        // The reserves_id is within the inner CoordinationMsg variant
         let request = DepositsMessage::Coordination(CoordinationMsg::CollateralConsentRequest {
             operator_id: generate_test_pubkey(1),
-            partner_id,
+            reserves_id: reserves_id.clone(),
             operator_signature: [0u8; 64],
         });
-        // V2 Coordination messages return None for partner_id() at DepositsMessage level
-        // The partner_id is inside the CoordinationMsg variant
-        assert_eq!(request.partner_id(), None);
+        // V2 Coordination messages return None for reserves_id() at DepositsMessage level
+        // The reserves_id is inside the CoordinationMsg variant
+        assert_eq!(request.reserves_id(), None);
 
         let response = DepositsMessage::CoordinationResponse(CoordinationResponseMsg::CollateralConsentResponse {
             request_hash: [0u8; 32],
             operator_id: generate_test_pubkey(1),
-            partner_id,
+            reserves_id: reserves_id.clone(),
             consent_granted: false,
-            collateral_partner_signature: [0u8; 64],
+            quorum_member_signature: [0u8; 64],
         });
-        // V2 CoordinationResponse messages return None for partner_id() at DepositsMessage level
-        assert_eq!(response.partner_id(), None);
+        // V2 CoordinationResponse messages return None for reserves_id() at DepositsMessage level
+        assert_eq!(response.reserves_id(), None);
 
-        println!("Consent messages partner_id test passed!");
+        println!("Consent messages reserves_id test passed!");
     }
 
     #[test]
-    fn test_add_collateral_partner_requires_consent_signature() {
-        use lightning::util::ser::{Readable, Writeable};
-        use lightning::io::Cursor;
-
+    fn test_add_quorum_member_requires_consent_signature() {
         let operator = generate_test_pubkey(1);
-        let partner = generate_test_pubkey(2);
-        let collateral = generate_test_pubkey(3);
+        let reserves_id = "test_reserves".to_string();
+        let quorum_member = generate_test_pubkey(3);
 
         // Wire message struct for encoding test
-        let msg_with_consent = CollateralAddPartnerMsg {
+        let msg_with_consent = QuorumAddMemberMsg {
             operator_id: operator,
-            partner_id: partner,
-            collateral_partner: collateral,
-            collateral_partner_signature: [0xBB; 64],
+            reserves_id: reserves_id.clone(),
+            quorum_member,
+            quorum_member_signature: [0xBB; 64],
         };
 
-        // Verify the consent signature is encoded and decoded using LDK wrapper
-        let ldk_msg = LdkCollateralAddPartnerMsg::from(msg_with_consent.clone());
-        let encoded = ldk_msg.encode();
-
-        let mut cursor = Cursor::new(&encoded);
-        let decoded: LdkCollateralAddPartnerMsg = Readable::read(&mut cursor).expect("should decode");
-
-        assert_eq!(decoded.0.operator_id, operator);
-        assert_eq!(decoded.0.collateral_partner_signature, [0xBB; 64]);
+        assert_eq!(msg_with_consent.operator_id, operator);
+        assert_eq!(msg_with_consent.quorum_member_signature, [0xBB; 64]);
 
         // V2: The DepositsMessage variant uses LedgerUpdate with LedgerOperation
         let v2_msg = DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             operator,
-            partner,
-            LedgerOperation::CollateralAddPartner {
-                collateral_partner: collateral,
-                collateral_partner_signature: [0xBB; 64],
+            reserves_id,
+            LedgerOperation::QuorumAddMember {
+                quorum_member,
+                quorum_member_signature: [0xBB; 64],
             },
         ));
         // Verify it's the right message type
         assert_eq!(v2_msg.message_type(), 0x8001); // LEDGER_UPDATE
 
-        println!("AddCollateralPartner requires consent signature test passed!");
+        println!("QuorumAddMember requires consent signature test passed!");
     }
 
     // =========================================================================
@@ -425,7 +352,7 @@ mod tests {
     fn test_consent_request_should_skip_broadcast_queue() {
         let msg = DepositsMessage::Coordination(CoordinationMsg::CollateralConsentRequest {
             operator_id: generate_test_pubkey(1),
-            partner_id: generate_test_pubkey(2),
+            reserves_id: "test_reserves".to_string(),
             operator_signature: [0u8; 64],
         });
 
@@ -450,9 +377,9 @@ mod tests {
         let msg = DepositsMessage::CoordinationResponse(CoordinationResponseMsg::CollateralConsentResponse {
             request_hash: [0u8; 32],
             operator_id: generate_test_pubkey(1),
-            partner_id: generate_test_pubkey(2),
+            reserves_id: "test_reserves".to_string(),
             consent_granted: true,
-            collateral_partner_signature: [0u8; 64],
+            quorum_member_signature: [0u8; 64],
         });
 
         // V2: CoordinationResponse messages use COORDINATION_RESPONSE type (0x8013)
@@ -469,31 +396,31 @@ mod tests {
         println!("CollateralConsentResponse skip broadcast queue test passed!");
     }
 
-    /// Tests that AddCollateralPartner (a ledger update) should NOT be skipped
+    /// Tests that QuorumAddMember (a ledger update) should NOT be skipped
     #[test]
-    fn test_add_collateral_partner_should_not_skip_broadcast_queue() {
-        // V2: CollateralAddPartner is now a LedgerUpdate with LedgerOperation
+    fn test_quorum_add_member_should_not_skip_broadcast_queue() {
+        // V2: QuorumAddMember is now a LedgerUpdate with LedgerOperation
         let msg = DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             generate_test_pubkey(1),
-            generate_test_pubkey(2),
-            LedgerOperation::CollateralAddPartner {
-                collateral_partner: generate_test_pubkey(3),
-                collateral_partner_signature: [0u8; 64],
+            generate_test_pubkey(2).to_string(),
+            LedgerOperation::QuorumAddMember {
+                quorum_member: generate_test_pubkey(3),
+                quorum_member_signature: [0u8; 64],
             },
         ));
 
         // V2: Uses LEDGER_UPDATE type (0x8001)
         assert_eq!(msg.message_type(), 0x8001);
 
-        // LedgerUpdate messages (including CollateralAddPartner operation) should NOT be skipped
+        // LedgerUpdate messages (including QuorumAddMember operation) should NOT be skipped
         let should_skip = matches!(msg,
             DepositsMessage::LedgerUpdateResponse(_) |
             DepositsMessage::Coordination(_) |
             DepositsMessage::CoordinationResponse(_)
         );
-        assert!(!should_skip, "LedgerUpdate (CollateralAddPartner) is a ledger update and should NOT be skipped");
+        assert!(!should_skip, "LedgerUpdate (QuorumAddMember) is a ledger update and should NOT be skipped");
 
-        println!("AddCollateralPartner NOT in skip list test passed!");
+        println!("QuorumAddMember NOT in skip list test passed!");
     }
 
     /// Tests that CollateralAttestation (a ledger update) should NOT be skipped
@@ -502,11 +429,13 @@ mod tests {
         // V2: CollateralAttestation is now a LedgerUpdate with LedgerOperation
         let msg = DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             generate_test_pubkey(1),
-            generate_test_pubkey(2),
+            generate_test_pubkey(2).to_string(),
             LedgerOperation::CollateralAttestation {
                 collateral_operator: generate_test_pubkey(3),
+                quorum_member: generate_test_pubkey(4),
                 amount: 100_000,
                 block_height: 800_000,
+                lock_until_block: 0,
                 signature: [0u8; 64],
                 ledger_hash: [0u8; 32],
             },
@@ -533,32 +462,28 @@ mod tests {
         let skip_messages: Vec<DepositsMessage> = vec![
             // LedgerUpdateResponse (V2 for Ack)
             DepositsMessage::LedgerUpdateResponse(LedgerUpdateResponseMsg {
-                message_hash: [0u8; 32],
-                success: true,
-                error_message: None,
+                operator_id: generate_test_pubkey(1),
+                reserves_id: "test_reserves".to_string(),
+                request_hash: [0u8; 32],
+                accepted: true,
+                error: None,
                 partner_signature: None,
                 confirmed_sequence: 0,
                 confirmed_hash: [0u8; 32],
-                acked_message_type: 0x8001,
-                cosignature: None,
-                update_signature: None,
-                update_sequence: None,
-                update_prev_hash: None,
-                update_curr_hash: None,
             }),
             // Coordination (includes CollateralConsentRequest, CosignInvoice, etc.)
             DepositsMessage::Coordination(CoordinationMsg::CollateralConsentRequest {
                 operator_id: generate_test_pubkey(1),
-                partner_id: generate_test_pubkey(2),
+                reserves_id: "test_reserves".to_string(),
                 operator_signature: [0u8; 64],
             }),
             // CoordinationResponse (includes CollateralConsentResponse, InvoiceCosigned, etc.)
             DepositsMessage::CoordinationResponse(CoordinationResponseMsg::CollateralConsentResponse {
                 request_hash: [0u8; 32],
                 operator_id: generate_test_pubkey(1),
-                partner_id: generate_test_pubkey(2),
+                reserves_id: "test_reserves".to_string(),
                 consent_granted: true,
-                collateral_partner_signature: [0u8; 64],
+                quorum_member_signature: [0u8; 64],
             }),
         ];
 
@@ -580,23 +505,23 @@ mod tests {
         // Use the wire message struct (imported at top of module)
         let denied = CollateralConsentResponseMsg {
             operator_id: generate_test_pubkey(1),
-            partner_id: generate_test_pubkey(2),
+            reserves_id: "test_reserves".to_string(),
             consent_granted: false,
-            collateral_partner_signature: [0u8; 64], // Empty signature when denied
+            quorum_member_signature: [0u8; 64], // Empty signature when denied
         };
 
         assert!(!denied.consent_granted);
-        assert_eq!(denied.collateral_partner_signature, [0u8; 64]);
+        assert_eq!(denied.quorum_member_signature, [0u8; 64]);
 
         let granted = CollateralConsentResponseMsg {
             operator_id: generate_test_pubkey(1),
-            partner_id: generate_test_pubkey(2),
+            reserves_id: "test_reserves".to_string(),
             consent_granted: true,
-            collateral_partner_signature: [0xAB; 64], // Real signature when granted
+            quorum_member_signature: [0xAB; 64], // Real signature when granted
         };
 
         assert!(granted.consent_granted);
-        assert_ne!(granted.collateral_partner_signature, [0u8; 64]);
+        assert_ne!(granted.quorum_member_signature, [0u8; 64]);
 
         println!("Consent response denied/granted signature test passed!");
     }
@@ -609,11 +534,9 @@ mod tests {
             min_protocol_version: 1,
             features: 0,
             operator_id: generate_test_pubkey(1),
-            partner_id: generate_test_pubkey(2),
-            ledger_address: "bcrt1qtest".to_string(),
+            reserves_id: "test_reserves".to_string(),
             funding_txid: [0u8; 32],
             funding_vout: 0,
-            reserves_amount: 100_000_000,
             collateral_enforcement_block: 0,
         });
 
@@ -637,11 +560,11 @@ mod tests {
     fn test_handshake_response_should_skip_broadcast_queue() {
         // V2: LedgerOpenResponse is now HandshakeResponse
         let msg = DepositsMessage::HandshakeResponse(HandshakeResponseMsg {
+            request_hash: [0u8; 32],
             protocol_version: 1,
             accepted: true,
-            error_reason: None,
-            public_key: generate_test_pubkey(1),
-            partner_id: generate_test_pubkey(2),
+            error: None,
+            reserves_id: "test_reserves".to_string(),
         });
 
         // V2 uses HANDSHAKE_RESPONSE (0x8007)

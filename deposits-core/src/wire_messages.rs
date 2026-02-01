@@ -393,7 +393,7 @@ pub struct ReservesAddOutputMsg {
     pub initial_amount: u64,
     pub spend_to: PublicKey,
     pub reserves_id: String,
-    pub collateral_partners: Vec<PublicKey>,
+    pub quorum_members: Vec<PublicKey>,
 }
 
 impl WireEncode for ReservesAddOutputMsg {
@@ -401,8 +401,8 @@ impl WireEncode for ReservesAddOutputMsg {
         write_u64(writer, self.initial_amount)?;
         write_pubkey(writer, &self.spend_to)?;
         write_string(writer, &self.reserves_id)?;
-        write_u16(writer, self.collateral_partners.len() as u16)?;
-        for pk in &self.collateral_partners {
+        write_u16(writer, self.quorum_members.len() as u16)?;
+        for pk in &self.quorum_members {
             write_pubkey(writer, pk)?;
         }
         Ok(())
@@ -415,15 +415,15 @@ impl WireDecode for ReservesAddOutputMsg {
         let spend_to = read_pubkey(reader)?;
         let reserves_id = read_string(reader)?;
         let count = read_u16(reader)? as usize;
-        let mut collateral_partners = Vec::with_capacity(count);
+        let mut quorum_members = Vec::with_capacity(count);
         for _ in 0..count {
-            collateral_partners.push(read_pubkey(reader)?);
+            quorum_members.push(read_pubkey(reader)?);
         }
         Ok(Self {
             initial_amount,
             spend_to,
             reserves_id,
-            collateral_partners,
+            quorum_members,
         })
     }
 }
@@ -934,58 +934,58 @@ impl WireDecode for ReceivingCosignInvoiceMsg {
 // Collateral Messages
 // ============================================================================
 
-/// collateral add partner message
+/// quorum add member message
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CollateralAddPartnerMsg {
+pub struct QuorumAddMemberMsg {
     pub operator_id: PublicKey,
     pub reserves_id: String,
-    pub collateral_partner: PublicKey,
-    pub collateral_partner_signature: [u8; 64],
+    pub quorum_member: PublicKey,
+    pub quorum_member_signature: [u8; 64],
 }
 
-impl WireEncode for CollateralAddPartnerMsg {
+impl WireEncode for QuorumAddMemberMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
         write_pubkey(writer, &self.operator_id)?;
         write_string(writer, &self.reserves_id)?;
-        write_pubkey(writer, &self.collateral_partner)?;
-        write_bytes64(writer, &self.collateral_partner_signature)?;
+        write_pubkey(writer, &self.quorum_member)?;
+        write_bytes64(writer, &self.quorum_member_signature)?;
         Ok(())
     }
 }
 
-impl WireDecode for CollateralAddPartnerMsg {
+impl WireDecode for QuorumAddMemberMsg {
     fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
         Ok(Self {
             operator_id: read_pubkey(reader)?,
             reserves_id: read_string(reader)?,
-            collateral_partner: read_pubkey(reader)?,
-            collateral_partner_signature: read_bytes64(reader)?,
+            quorum_member: read_pubkey(reader)?,
+            quorum_member_signature: read_bytes64(reader)?,
         })
     }
 }
 
-/// collateral remove partner message
+/// quorum remove member message
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CollateralRemovePartnerMsg {
+pub struct QuorumRemoveMemberMsg {
     pub reserves_id: String,
-    pub collateral_partner: PublicKey,
+    pub quorum_member: PublicKey,
     pub operator_signature: [u8; 64],
 }
 
-impl WireEncode for CollateralRemovePartnerMsg {
+impl WireEncode for QuorumRemoveMemberMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
         write_string(writer, &self.reserves_id)?;
-        write_pubkey(writer, &self.collateral_partner)?;
+        write_pubkey(writer, &self.quorum_member)?;
         write_bytes64(writer, &self.operator_signature)?;
         Ok(())
     }
 }
 
-impl WireDecode for CollateralRemovePartnerMsg {
+impl WireDecode for QuorumRemoveMemberMsg {
     fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
         Ok(Self {
             reserves_id: read_string(reader)?,
-            collateral_partner: read_pubkey(reader)?,
+            quorum_member: read_pubkey(reader)?,
             operator_signature: read_bytes64(reader)?,
         })
     }
@@ -997,7 +997,7 @@ pub struct CollateralAttestationMsg {
     #[serde(with = "crate::types::serde_pubkey")]
     pub operator: PublicKey,
     #[serde(with = "crate::types::serde_pubkey")]
-    pub collateral_partner: PublicKey,
+    pub quorum_member: PublicKey,
     pub amount: u64,
     pub block_height: u32,
     #[serde(default)]
@@ -1018,7 +1018,7 @@ impl CollateralAttestationMsg {
 impl WireEncode for CollateralAttestationMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
         write_pubkey(writer, &self.operator)?;
-        write_pubkey(writer, &self.collateral_partner)?;
+        write_pubkey(writer, &self.quorum_member)?;
         write_u64(writer, self.amount)?;
         write_u32(writer, self.block_height)?;
         write_u32(writer, self.lock_until_block)?;
@@ -1032,7 +1032,7 @@ impl WireDecode for CollateralAttestationMsg {
     fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
         Ok(Self {
             operator: read_pubkey(reader)?,
-            collateral_partner: read_pubkey(reader)?,
+            quorum_member: read_pubkey(reader)?,
             amount: read_u64(reader)?,
             block_height: read_u32(reader)?,
             lock_until_block: read_u32(reader)?,
@@ -1075,7 +1075,7 @@ pub struct CollateralConsentResponseMsg {
     pub operator_id: PublicKey,
     pub reserves_id: String,
     pub consent_granted: bool,
-    pub collateral_partner_signature: [u8; 64],
+    pub quorum_member_signature: [u8; 64],
 }
 
 impl WireEncode for CollateralConsentResponseMsg {
@@ -1083,7 +1083,7 @@ impl WireEncode for CollateralConsentResponseMsg {
         write_pubkey(writer, &self.operator_id)?;
         write_string(writer, &self.reserves_id)?;
         write_u8(writer, self.consent_granted as u8)?;
-        write_bytes64(writer, &self.collateral_partner_signature)?;
+        write_bytes64(writer, &self.quorum_member_signature)?;
         Ok(())
     }
 }
@@ -1094,7 +1094,7 @@ impl WireDecode for CollateralConsentResponseMsg {
             operator_id: read_pubkey(reader)?,
             reserves_id: read_string(reader)?,
             consent_granted: read_u8(reader)? != 0,
-            collateral_partner_signature: read_bytes64(reader)?,
+            quorum_member_signature: read_bytes64(reader)?,
         })
     }
 }

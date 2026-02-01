@@ -808,7 +808,7 @@ where
     /// * `partner` - The partner pubkey
     /// * `signed_updates` - The signed update chain to validate
     /// * `claimed_reserves` - Reserves amount from the on-chain commitment tx
-    /// * `collateral_amounts` - Collateral from other partner channels
+    /// * `collateral_amounts` - Collateral from quorum member channels
     /// * `on_chain_ledger_hash` - The ledger hash from on-chain data
     /// * `keypair` - Our keypair for signing the vote
     ///

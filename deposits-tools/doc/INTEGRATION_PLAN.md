@@ -95,24 +95,24 @@ message ReduceReservesRequest {
 }
 message ReduceReservesResponse {}
 
-// Collateral operations
-message AddCollateralPartnerRequest {
+// Quorum member operations
+message AddQuorumMemberRequest {
   string partner_node_id = 1;
-  string collateral_partner_id = 2;
+  string quorum_member_id = 2;
 }
-message AddCollateralPartnerResponse {}
+message AddQuorumMemberResponse {}
 
-message RemoveCollateralPartnerRequest {
+message RemoveQuorumMemberRequest {
   string partner_node_id = 1;
-  string collateral_partner_id = 2;
+  string quorum_member_id = 2;
 }
-message RemoveCollateralPartnerResponse {}
+message RemoveQuorumMemberResponse {}
 
 message GetCollateralInfoRequest {
   string partner_node_id = 1;
 }
 message GetCollateralInfoResponse {
-  repeated CollateralPartnerInfo partners = 1;
+  repeated QuorumMemberInfo members = 1;
   uint64 total_available_collateral = 2;
 }
 
@@ -145,7 +145,7 @@ message DepositInfo {
   uint64 locked_balance_sat = 4;
 }
 
-message CollateralPartnerInfo {
+message QuorumMemberInfo {
   string pubkey = 1;
   uint64 collateral_amount = 2;
   uint32 block_height = 3;

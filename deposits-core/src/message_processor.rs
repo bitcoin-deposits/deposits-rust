@@ -280,7 +280,7 @@ pub enum CollateralMessageResult {
 
 /// Process collateral-related messages
 ///
-/// This processor handles collateral partner management, consent flow,
+/// This processor handles quorum member management, consent flow,
 /// and attestations.
 pub struct CollateralProcessor {
     /// Our node's public key
@@ -321,7 +321,7 @@ impl CollateralProcessor {
         }
     }
 
-    /// Check if we should grant consent to be a collateral partner
+    /// Check if we should grant consent to be a quorum member
     pub fn should_grant_consent(&self, operator: &PublicKey) -> bool {
         // Default policy: grant consent if we have a relationship with the operator
         // The actual implementation should check if we have a ledger with this operator

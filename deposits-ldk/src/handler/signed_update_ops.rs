@@ -549,22 +549,22 @@ where
         Ok(*signature.as_ref())
     }
 
-    /// Send the full audit history to a newly added collateral partner
+    /// Send the full audit history to a newly added quorum member
     ///
-    /// This is called after add_collateral_partner adds the collateral partner to the quorum.
-    /// The ACK handler's broadcast_message_to_other_partners ran BEFORE the collateral partner
+    /// This is called after add_quorum_member adds the quorum member to the quorum.
+    /// The ACK handler's broadcast_message_to_other_partners ran BEFORE the quorum member
     /// was in the quorum, so they didn't receive ANY updates.
     /// We need to send them the ENTIRE hash chain from sequence 0 so they can verify it.
-    pub(super) fn send_audit_update_to_new_collateral_partner(
+    pub(super) fn send_audit_update_to_new_quorum_member(
         &self,
         partner_node_id: PublicKey,
-        collateral_partner: PublicKey,
+        quorum_member: PublicKey,
         _message: &DepositsMessage,  // Not used anymore - we send all updates
     ) -> Result<(), DepositsError> {
         log_info!(
             self.logger,
-            "📋 Sending full audit history to new collateral partner {} for ledger ({}, {})",
-            collateral_partner,
+            "📋 Sending full audit history to new quorum member {} for ledger ({}, {})",
+            quorum_member,
             self.our_node_id,
             partner_node_id
         );
@@ -578,7 +578,7 @@ where
                 if ledger.history.is_empty() {
                     log_warn!(
                         self.logger,
-                        "No updates in ledger to send to collateral partner"
+                        "No updates in ledger to send to quorum member"
                     );
                     return Ok(());
                 }
@@ -610,7 +610,7 @@ where
             } else {
                 log_warn!(
                     self.logger,
-                    "Ledger not found when sending audit history to collateral partner"
+                    "Ledger not found when sending audit history to quorum member"
                 );
                 return Ok(());
             }
@@ -618,9 +618,9 @@ where
 
         log_info!(
             self.logger,
-            "📋 Sending {} updates to new collateral partner {}",
+            "📋 Sending {} updates to new quorum member {}",
             updates_to_send.len(),
-            collateral_partner
+            quorum_member
         );
 
         // Create signed updates and send as a SyncResponse bundle
@@ -661,18 +661,18 @@ where
             current_hash,
         });
 
-        if let Err(e) = self.send_message(collateral_partner, sync_response) {
+        if let Err(e) = self.send_message(quorum_member, sync_response) {
             log_warn!(
                 self.logger,
-                "Failed to send audit history to collateral partner: {:?}",
+                "Failed to send audit history to quorum member: {:?}",
                 e
             );
         }
 
         log_info!(
             self.logger,
-            "✅ Sent full audit history to new collateral partner {}",
-            collateral_partner
+            "✅ Sent full audit history to new quorum member {}",
+            quorum_member
         );
 
         Ok(())

@@ -135,7 +135,7 @@ where
                         operator_id,
                         reserves_id_for_closure.clone(),
                         LedgerRole::Auditor,
-                        Vec::new(), // No collateral partners for audit ledgers
+                        Vec::new(), // No quorum members for audit ledgers
                         placeholder_address.to_string(),
                     )))
                 })

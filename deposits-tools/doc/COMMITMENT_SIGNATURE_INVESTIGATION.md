@@ -145,7 +145,7 @@ From Alice's perspective (channel with Charlie):
 ```
 Alice → Charlie (4 updates)
     0 [00000000~5f07e5a3] ✓3🔒 LedgerOpenRequest
-    1 [5f07e5a3~f838b7d0] ✓3🔒 AddCollateralPartner     cp:Bob
+    1 [5f07e5a3~f838b7d0] ✓3🔒 AddQuorumMember     qm:Bob
     2 [f838b7d0~22356f4e] ✓3🔒 ReservesToReserves       10000 sat
     3 [22356f4e~47ab1fda] ✓3   ChannelCloseTombstone    <-- FAILURE
 ```

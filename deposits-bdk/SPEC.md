@@ -7,7 +7,7 @@
 
 ## Overview
 
-Bitcoin Deposits is a Layer 3 protocol for trustless custody. Operators maintain transparent account ledgers backed by on-chain reserves. Collateral partners hold pre-signed recovery transactions and monitor for dishonesty. Users get Lightning-speed payments without channel management, UTXOs, or liquidity concerns.
+Bitcoin Deposits is a Layer 3 protocol for trustless custody. Operators maintain transparent account ledgers backed by on-chain reserves. Quorum members hold pre-signed recovery transactions and monitor for dishonesty. Users get Lightning-speed payments without channel management, UTXOs, or liquidity concerns.
 
 **Security model**: Successful theft requires collusion of 51% of network capital—the same threshold as Bitcoin itself, enforced by capital at risk rather than hashpower.
 
@@ -44,7 +44,7 @@ Operator {
     ledger: ordered list of transactions
     state_root: hash of current ledger state
     reserves: on-chain UTXOs backing the ledger
-    collateral_partners: set of operators holding recovery capability
+    quorum_members: set of operators holding recovery capability
     collateral_enforcement_block: u64 (collateral requirements enforced from this block)
 }
 ```
@@ -58,10 +58,10 @@ The `collateral_enforcement_block` is set at ledger creation and immutable.
 - Partner validation of updates
 
 **What is deferred until `collateral_enforcement_block`:**
-- Collateral size requirements (partners must have ledgers >= half size)
+- Collateral size requirements (quorum members must have ledgers >= half size)
 - The 51% security threshold guarantee
 
-Before `collateral_enforcement_block`, ledger operations are validated but the economic backstop is not guaranteed. Non-conforming ledgers are still invalid—there's just no assurance that partners have sufficient capital at risk to make recovery reliable.
+Before `collateral_enforcement_block`, ledger operations are validated but the economic backstop is not guaranteed. Non-conforming ledgers are still invalid—there's just no assurance that quorum members have sufficient capital at risk to make recovery reliable.
 
 **Operator obligations**:
 - Only sign conforming ledger updates
@@ -69,12 +69,12 @@ Before `collateral_enforcement_block`, ledger operations are validated but the e
 - Credit wallet invoices when paid
 - Publish state updates to nostr relay
 
-### Collateral Partner
+### Quorum Member
 
-A collateral partner monitors an operator and holds recovery capability.
+A quorum member monitors an operator and holds recovery capability.
 
 ```
-CollateralPartner {
+QuorumMember {
     pubkey: secp256k1 public key
     operator: pubkey of operator being monitored
     recovery_tx: pre-signed transaction to recover reserves
@@ -228,7 +228,7 @@ When partners join or leave:
 3. Old txs remain valid but current partners can always act first
 4. Periodically, operator refreshes to new UTXO (resets locktime space)
 
-**Expiry enforcement**: If old partners broadcast an outdated recovery tx, their signatures prove collusion. Their own collateral partners confiscate their funds.
+**Expiry enforcement**: If old partners broadcast an outdated recovery tx, their signatures prove collusion. Their own quorum members confiscate their funds.
 
 ### Recovery Process
 
@@ -337,7 +337,7 @@ The ledger is transparent, but query patterns can be private.
 
 ### Size Requirement
 
-To be a collateral partner for operator O, partner P must have:
+To be a quorum member for operator O, member P must have:
 
 ```
 P.ledger_total >= O.ledger_total / 2
@@ -348,8 +348,8 @@ This ensures partners have proportional skin in the game.
 ### Security Threshold
 
 To steal from ledger L:
-1. Corrupt majority of L's collateral partners
-2. Each partner has their own collateral partners
+1. Corrupt majority of L's quorum members
+2. Each member has their own quorum members
 3. Recursion continues until you need 51% of total network capital
 
 The market determines acceptable:
@@ -367,8 +367,8 @@ No protocol-level governance. Participants vote with capital.
 ### The Bootstrap Problem
 
 Collateral size requirements create a circular dependency:
-- To operate, you need collateral partners
-- To be a partner, your ledger must be half the size
+- To operate, you need quorum members
+- To be a member, your ledger must be half the size
 - To have a ledger, you need to operate
 
 ### Solution: Deferred Collateral Requirements
@@ -461,11 +461,11 @@ This is explicit in the protocol. Users make informed decisions based on the gua
 - Basic wallet operations
 - Nostr communication
 
-### Phase 2: Collateral Partners
+### Phase 2: Quorum Members
 
 - Multi-party reserve output
 - Pre-signed recovery transactions
-- Partner monitoring
+- Member monitoring
 - Recovery process
 
 ### Phase 3: Cross-Operator

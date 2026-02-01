@@ -281,47 +281,47 @@ fn test_multiple_ledgers_same_channel() {
 }
 
 // =============================================================================
-// Collateral Partner Tests
+// Quorum Member Tests
 // =============================================================================
 
 #[test]
-fn test_ledger_with_collateral_partners() {
+fn test_ledger_with_quorum_members() {
     let operator = generate_test_pubkey(1);
     let partner = generate_test_pubkey(2);
-    let collateral_partner = generate_test_pubkey(3);
+    let quorum_member = generate_test_pubkey(3);
 
     let ledger = Ledger::new(
         operator,
         partner,
         LedgerRole::Operator,
-        vec![collateral_partner],
+        vec![quorum_member],
         "addr".to_string(),
     );
 
-    assert_eq!(ledger.state.collateral_partners.len(), 1);
-    assert!(ledger.state.collateral_partners.contains(&collateral_partner));
+    assert_eq!(ledger.state.quorum_members.len(), 1);
+    assert!(ledger.state.quorum_members.contains(&quorum_member));
 }
 
 #[test]
-fn test_ledger_multiple_collateral_partners() {
+fn test_ledger_multiple_quorum_members() {
     let operator = generate_test_pubkey(1);
     let partner = generate_test_pubkey(2);
-    let cp1 = generate_test_pubkey(3);
-    let cp2 = generate_test_pubkey(4);
-    let cp3 = generate_test_pubkey(5);
+    let qm1 = generate_test_pubkey(3);
+    let qm2 = generate_test_pubkey(4);
+    let qm3 = generate_test_pubkey(5);
 
     let ledger = Ledger::new(
         operator,
         partner,
         LedgerRole::Operator,
-        vec![cp1, cp2, cp3],
+        vec![qm1, qm2, qm3],
         "addr".to_string(),
     );
 
-    assert_eq!(ledger.state.collateral_partners.len(), 3);
-    assert!(ledger.state.collateral_partners.contains(&cp1));
-    assert!(ledger.state.collateral_partners.contains(&cp2));
-    assert!(ledger.state.collateral_partners.contains(&cp3));
+    assert_eq!(ledger.state.quorum_members.len(), 3);
+    assert!(ledger.state.quorum_members.contains(&qm1));
+    assert!(ledger.state.quorum_members.contains(&qm2));
+    assert!(ledger.state.quorum_members.contains(&qm3));
 }
 
 // =============================================================================

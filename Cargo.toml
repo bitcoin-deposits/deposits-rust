@@ -5,6 +5,7 @@ members = [
     "deposits-bdk",
     "deposits-nwc",
     "deposits-tools",
+    "deposits-explorer",
 ]
 resolver = "2"
 

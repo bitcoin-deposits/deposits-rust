@@ -366,7 +366,7 @@ impl QuorumManager {
         quorums.get(ledger_id).map(|q| q.member_pubkeys())
     }
 
-    /// Add a member directly to the quorum (used when collateral partners are added)
+    /// Add a member directly to the quorum (used when quorum members are added)
     /// Unlike handle_join_request, this adds the member as Active immediately
     pub fn add_member(
         &self,
@@ -390,7 +390,7 @@ impl QuorumManager {
             ));
         }
 
-        // Add as active member (collateral partners are trusted, no syncing needed)
+        // Add as active member (quorum members are trusted, no syncing needed)
         quorum.members.insert(member_pubkey, QuorumMember {
             pubkey: member_pubkey,
             status: MemberStatus::Active,
@@ -405,7 +405,7 @@ impl QuorumManager {
         Ok(())
     }
 
-    /// Remove a member from the quorum (used when collateral partners are removed)
+    /// Remove a member from the quorum (used when quorum members are removed)
     pub fn remove_member(
         &self,
         ledger_id: &LedgerId,
@@ -872,14 +872,14 @@ mod tests {
     }
 
     // =========================================================================
-    // Tests for add_member and remove_member (collateral partner sync)
+    // Tests for add_member and remove_member (quorum member sync)
     // =========================================================================
 
     #[test]
     fn test_add_member_directly() {
         let operator = generate_test_pubkey(1);
         let partner = generate_test_pubkey(2);
-        let collateral_partner = generate_test_pubkey(3);
+        let quorum_member = generate_test_pubkey(3);
 
         let manager = QuorumManager::new(operator);
         manager.create_quorum(operator, partner.to_string()).unwrap();
@@ -889,23 +889,23 @@ mod tests {
         // Initially only operator and partner
         let members = manager.get_quorum(&ledger_id).unwrap();
         assert_eq!(members.len(), 2);
-        assert!(!members.contains(&collateral_partner));
+        assert!(!members.contains(&quorum_member));
 
-        // Add collateral partner directly
-        let result = manager.add_member(&ledger_id, collateral_partner);
+        // Add quorum member directly
+        let result = manager.add_member(&ledger_id, quorum_member);
         assert!(result.is_ok());
 
         // Now should have 3 members
         let members = manager.get_quorum(&ledger_id).unwrap();
         assert_eq!(members.len(), 3);
-        assert!(members.contains(&collateral_partner));
+        assert!(members.contains(&quorum_member));
     }
 
     #[test]
     fn test_add_member_idempotent() {
         let operator = generate_test_pubkey(1);
         let partner = generate_test_pubkey(2);
-        let collateral_partner = generate_test_pubkey(3);
+        let quorum_member = generate_test_pubkey(3);
 
         let manager = QuorumManager::new(operator);
         manager.create_quorum(operator, partner.to_string()).unwrap();
@@ -913,8 +913,8 @@ mod tests {
         let ledger_id = LedgerId::new(operator, partner.to_string());
 
         // Add same member twice - should be idempotent
-        manager.add_member(&ledger_id, collateral_partner).unwrap();
-        manager.add_member(&ledger_id, collateral_partner).unwrap();
+        manager.add_member(&ledger_id, quorum_member).unwrap();
+        manager.add_member(&ledger_id, quorum_member).unwrap();
 
         // Should still only have 3 members
         let members = manager.get_quorum(&ledger_id).unwrap();
@@ -925,13 +925,13 @@ mod tests {
     fn test_add_member_to_nonexistent_quorum_fails() {
         let operator = generate_test_pubkey(1);
         let partner = generate_test_pubkey(2);
-        let collateral_partner = generate_test_pubkey(3);
+        let quorum_member = generate_test_pubkey(3);
 
         let manager = QuorumManager::new(operator);
         // Don't create the quorum
 
         let ledger_id = LedgerId::new(operator, partner.to_string());
-        let result = manager.add_member(&ledger_id, collateral_partner);
+        let result = manager.add_member(&ledger_id, quorum_member);
         assert!(result.is_err());
     }
 
@@ -939,32 +939,32 @@ mod tests {
     fn test_remove_member_directly() {
         let operator = generate_test_pubkey(1);
         let partner = generate_test_pubkey(2);
-        let collateral_partner = generate_test_pubkey(3);
+        let quorum_member = generate_test_pubkey(3);
 
         let manager = QuorumManager::new(operator);
         manager.create_quorum(operator, partner.to_string()).unwrap();
 
         let ledger_id = LedgerId::new(operator, partner.to_string());
 
-        // Add collateral partner
-        manager.add_member(&ledger_id, collateral_partner).unwrap();
+        // Add quorum member
+        manager.add_member(&ledger_id, quorum_member).unwrap();
         assert_eq!(manager.get_quorum(&ledger_id).unwrap().len(), 3);
 
-        // Remove collateral partner
-        let result = manager.remove_member(&ledger_id, &collateral_partner);
+        // Remove quorum member
+        let result = manager.remove_member(&ledger_id, &quorum_member);
         assert!(result.is_ok());
 
         // Should be back to 2 members
         let members = manager.get_quorum(&ledger_id).unwrap();
         assert_eq!(members.len(), 2);
-        assert!(!members.contains(&collateral_partner));
+        assert!(!members.contains(&quorum_member));
     }
 
     #[test]
     fn test_remove_member_idempotent() {
         let operator = generate_test_pubkey(1);
         let partner = generate_test_pubkey(2);
-        let collateral_partner = generate_test_pubkey(3);
+        let quorum_member = generate_test_pubkey(3);
 
         let manager = QuorumManager::new(operator);
         manager.create_quorum(operator, partner.to_string()).unwrap();
@@ -972,9 +972,9 @@ mod tests {
         let ledger_id = LedgerId::new(operator, partner.to_string());
 
         // Add then remove twice - second remove should be no-op
-        manager.add_member(&ledger_id, collateral_partner).unwrap();
-        manager.remove_member(&ledger_id, &collateral_partner).unwrap();
-        manager.remove_member(&ledger_id, &collateral_partner).unwrap(); // Should succeed (no-op)
+        manager.add_member(&ledger_id, quorum_member).unwrap();
+        manager.remove_member(&ledger_id, &quorum_member).unwrap();
+        manager.remove_member(&ledger_id, &quorum_member).unwrap(); // Should succeed (no-op)
 
         let members = manager.get_quorum(&ledger_id).unwrap();
         assert_eq!(members.len(), 2);
@@ -1019,7 +1019,7 @@ mod tests {
     }
 
     #[test]
-    fn test_add_multiple_collateral_partners() {
+    fn test_add_multiple_quorum_members() {
         let operator = generate_test_pubkey(1);
         let partner = generate_test_pubkey(2);
         let collateral1 = generate_test_pubkey(3);
@@ -1031,7 +1031,7 @@ mod tests {
 
         let ledger_id = LedgerId::new(operator, partner.to_string());
 
-        // Add multiple collateral partners
+        // Add multiple quorum members
         manager.add_member(&ledger_id, collateral1).unwrap();
         manager.add_member(&ledger_id, collateral2).unwrap();
         manager.add_member(&ledger_id, collateral3).unwrap();

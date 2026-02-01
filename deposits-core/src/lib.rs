@@ -146,7 +146,7 @@ pub use handler_types::{
     PendingPayment,
     // Protocol state types
     CosignedInvoice, VoteRoundState, ProtocolStats,
-    LedgerSummary, ReservesSummary, CollateralPartnerInfo, CollateralInfo,
+    LedgerSummary, ReservesSummary, QuorumMemberInfo, CollateralInfo,
 };
 pub use handler_traits::{
     // Pure protocol traits (no LDK dependencies)
@@ -200,7 +200,7 @@ pub use wire_messages::{
     DepositOpenMsg, DepositCloseMsg, DepositUpdateMsg,
     // Collateral messages
     CollateralIncreaseMsg, CollateralDecreaseMsg,
-    CollateralAddPartnerMsg, CollateralRemovePartnerMsg,
+    QuorumAddMemberMsg, QuorumRemoveMemberMsg,
     CollateralAttestationMsg,
     CollateralConsentRequestMsg, CollateralConsentResponseMsg,
     // Fee and lifecycle messages

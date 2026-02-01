@@ -10,7 +10,7 @@ For every sat of user deposits, the operator locks two sats of their own: 100% i
 
 Every operation—deposits, payments, fees—produces a signed, hash-chained record. The operator signs each update, and each update includes the hash of its predecessor. Modify any historical entry and the chain breaks.
 
-These signed updates don't stay between operator and partner. The operator broadcasts them to collateral partners in other channels, who validate independently. When a channel force-closes, voters evaluate the ledger against protocol rules. Conforming operators get their funds back. Non-conforming operators lose them to a time-locked recovery process that makes depositors whole.
+These signed updates don't stay between operator and partner. The operator broadcasts them to quorum members in other channels, who validate independently. When a channel force-closes, voters evaluate the ledger against protocol rules. Conforming operators get their funds back. Non-conforming operators lose them to a time-locked recovery process that makes depositors whole.
 
 ## The Ledger
 

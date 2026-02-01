@@ -473,7 +473,7 @@ pub fn verify_taproot_reserves(
 /// This creates a P2TR output with tiered spending thresholds for reserves.
 /// The VoterSet defines the voters for reserve spending:
 /// - Tie-breaker: The channel partner (required for immediate spend)
-/// - Other voters: Collateral partners from other channels (if any)
+/// - Other voters: Quorum members from other channels (if any)
 ///
 /// # Arguments
 /// * `voter_set` - The set of voters who can authorize reserve spends

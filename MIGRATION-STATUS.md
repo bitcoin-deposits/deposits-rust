@@ -147,9 +147,9 @@ which aren't valid secp256k1 curve points. This caused "INVALID_PUBKEY" errors w
 
 **Fixed**: Script now uses `openssl ecparam -name secp256k1` to generate real EC keypairs.
 
-### 5. ~~Collateral Partner State Sync~~ ✅ FIXED
+### 5. ~~Quorum Member State Sync~~ ✅ FIXED
 
-Collateral partners weren't syncing ledger state when granting consent.
+Quorum members weren't syncing ledger state when granting consent.
 
 **Fixed**: `handle_collateral_consent_request()` now sends a `SyncRequest` after granting consent
 to fetch all ledger updates for the ledger being backed.
@@ -209,6 +209,6 @@ cd deposits-tools
 2. ✅ ~~Verify deposit credit flow with `updates.sh` after test run~~ (VERIFIED - working)
 3. ✅ ~~Fix deposits-admin JSON vs protobuf issue~~ (FIXED - uses GetNodeInfo protobuf)
 4. ✅ ~~Fix make-a-wallet.sh invalid pubkey generation~~ (FIXED - uses openssl secp256k1)
-5. ✅ ~~Fix collateral partner state sync~~ (FIXED - sends SyncRequest on consent)
+5. ✅ ~~Fix quorum member state sync~~ (FIXED - sends SyncRequest on consent)
 6. Decide on NWC relay integration approach
 7. Consider full migration from bash scripts to CLI tools

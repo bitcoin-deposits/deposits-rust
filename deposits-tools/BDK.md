@@ -7,7 +7,7 @@
 
 ## Overview
 
-Bitcoin Deposits is a Layer 3 protocol for trustless custody. Operators maintain transparent account ledgers backed by on-chain reserves. Collateral partners hold pre-signed recovery transactions and monitor for dishonesty. Users get Lightning-speed payments without channel management, UTXOs, or liquidity concerns.
+Bitcoin Deposits is a Layer 3 protocol for trustless custody. Operators maintain transparent account ledgers backed by on-chain reserves. Quorum members hold pre-signed recovery transactions and monitor for dishonesty. Users get Lightning-speed payments without channel management, UTXOs, or liquidity concerns.
 
 **Security model**: Successful theft requires collusion of 51% of network capital—the same threshold as Bitcoin itself, enforced by capital at risk rather than hashpower.
 
@@ -44,7 +44,7 @@ Operator {
     ledger: ordered list of transactions
     state_root: hash of current ledger state
     reserves: on-chain UTXOs backing the ledger
-    collateral_partners: set of operators holding recovery capability
+    quorum_members: set of operators holding recovery capability
 }
 ```
 
@@ -54,12 +54,12 @@ Operator {
 - Credit wallet invoices when paid
 - Publish state updates to nostr relay
 
-### Collateral Partner
+### Quorum Member
 
-A collateral partner monitors an operator and holds recovery capability.
+A quorum member monitors an operator and holds recovery capability.
 
 ```
-CollateralPartner {
+QuorumMember {
     pubkey: secp256k1 public key
     operator: pubkey of operator being monitored
     recovery_tx: pre-signed transaction to recover reserves
@@ -67,7 +67,7 @@ CollateralPartner {
 }
 ```
 
-**Partner obligations**:
+**Quorum member obligations**:
 - Only co-sign conforming attestations
 - Broadcast recovery tx on evidence of dishonesty
 - Provide conforming vote for recovery proceedings
@@ -213,7 +213,7 @@ When partners join or leave:
 3. Old txs remain valid but current partners can always act first
 4. Periodically, operator refreshes to new UTXO (resets locktime space)
 
-**Expiry enforcement**: If old partners broadcast an outdated recovery tx, their signatures prove collusion. Their own collateral partners confiscate their funds.
+**Expiry enforcement**: If old partners broadcast an outdated recovery tx, their signatures prove collusion. Their own quorum members confiscate their funds.
 
 ### Recovery Process
 
@@ -322,7 +322,7 @@ The ledger is transparent, but query patterns can be private.
 
 ### Size Requirement
 
-To be a collateral partner for operator O, partner P must have:
+To be a quorum member for operator O, partner P must have:
 
 ```
 P.ledger_total >= O.ledger_total / 2
@@ -333,8 +333,8 @@ This ensures partners have proportional skin in the game.
 ### Security Threshold
 
 To steal from ledger L:
-1. Corrupt majority of L's collateral partners
-2. Each partner has their own collateral partners
+1. Corrupt majority of L's quorum members
+2. Each partner has their own quorum members
 3. Recursion continues until you need 51% of total network capital
 
 The market determines acceptable:
@@ -356,7 +356,7 @@ No protocol-level governance. Participants vote with capital.
 - Basic wallet operations
 - Nostr communication
 
-### Phase 2: Collateral Partners
+### Phase 2: Quorum Members
 
 - Multi-party reserve output
 - Pre-signed recovery transactions

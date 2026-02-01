@@ -1253,7 +1253,7 @@ impl NetworkStatus {
         let update_type = update.get("update_type").and_then(|v| v.as_str()).unwrap_or("Unknown");
         print!("{:<24}", update_type);
 
-        // Key parameters (amount, deposit_pubkey, collateral_partner)
+        // Key parameters (amount, deposit_pubkey, quorum_member)
         let mut params = Vec::new();
 
         if let Some(amount) = update.get("amount").and_then(|v| v.as_u64()) {
@@ -1265,12 +1265,12 @@ impl NetworkStatus {
             params.push(format!("pk:{}", abbr));
         }
 
-        if let Some(cp) = update.get("collateral_partner").and_then(|v| v.as_str()) {
-            let display = self.find_node_name_by_pubkey(cp)
+        if let Some(qm) = update.get("quorum_member").and_then(|v| v.as_str()) {
+            let display = self.find_node_name_by_pubkey(qm)
                 .unwrap_or_else(|| {
-                    if cp.len() >= 8 { cp[..8].to_string() } else { cp.to_string() }
+                    if qm.len() >= 8 { qm[..8].to_string() } else { qm.to_string() }
                 });
-            params.push(format!("cp:{}", display));
+            params.push(format!("qm:{}", display));
         }
 
         if !params.is_empty() {
@@ -1332,7 +1332,7 @@ impl NetworkStatus {
         let update_type = update.get("update_type").and_then(|v| v.as_str()).unwrap_or("Unknown");
         print!("{:<24}", update_type);
 
-        // Key parameters (amount, deposit_pubkey, collateral_partner, status markers)
+        // Key parameters (amount, deposit_pubkey, quorum_member, status markers)
         let mut params = Vec::new();
 
         if let Some(amount) = update.get("amount").and_then(|v| v.as_u64()) {
@@ -1345,14 +1345,14 @@ impl NetworkStatus {
             params.push(format!("pk:{}", abbr));
         }
 
-        // Collateral partner (for AddCollateralPartner, CollateralAttestation)
-        if let Some(cp) = update.get("collateral_partner").and_then(|v| v.as_str()) {
+        // Quorum member (for AddQuorumMember, CollateralAttestation)
+        if let Some(qm) = update.get("quorum_member").and_then(|v| v.as_str()) {
             // Try to resolve to a node name
-            let display = self.find_node_name_by_pubkey(cp)
+            let display = self.find_node_name_by_pubkey(qm)
                 .unwrap_or_else(|| {
-                    if cp.len() >= 8 { cp[..8].to_string() } else { cp.to_string() }
+                    if qm.len() >= 8 { qm[..8].to_string() } else { qm.to_string() }
                 });
-            params.push(format!("cp:{}", display));
+            params.push(format!("qm:{}", display));
         }
 
         // Status markers
@@ -1574,23 +1574,23 @@ impl NetworkStatus {
 
                                 println!();
 
-                                // Collateral partners
-                                if let Some(collateral_partners) = data.get("collateral_partners").and_then(|v| v.as_array()) {
-                                    if !collateral_partners.is_empty() {
-                                        println!("🔗 Collateral Partners ({}):", collateral_partners.len());
-                                        for (i, cp) in collateral_partners.iter().enumerate() {
-                                            let pubkey = cp.get("pubkey").and_then(|v| v.as_str()).unwrap_or("unknown");
-                                            let cp_name = self.find_node_name_by_pubkey(pubkey)
+                                // Quorum members
+                                if let Some(quorum_members) = data.get("quorum_members").and_then(|v| v.as_array()) {
+                                    if !quorum_members.is_empty() {
+                                        println!("🔗 Quorum Members ({}):", quorum_members.len());
+                                        for (i, qm) in quorum_members.iter().enumerate() {
+                                            let pubkey = qm.get("pubkey").and_then(|v| v.as_str()).unwrap_or("unknown");
+                                            let qm_name = self.find_node_name_by_pubkey(pubkey)
                                                 .unwrap_or_else(|| "Unknown".to_string());
-                                            let has_attestation = cp.get("has_attestation").and_then(|v| v.as_bool()).unwrap_or(false);
+                                            let has_attestation = qm.get("has_attestation").and_then(|v| v.as_bool()).unwrap_or(false);
 
-                                            println!("   {}. {} ({})", i + 1, cp_name, &pubkey[..16.min(pubkey.len())]);
+                                            println!("   {}. {} ({})", i + 1, qm_name, &pubkey[..16.min(pubkey.len())]);
 
                                             if has_attestation {
-                                                let reserves_output = cp.get("reserves_output_amount").and_then(|v| v.as_u64()).unwrap_or(0);
-                                                let reserves_required = cp.get("reserves_required").and_then(|v| v.as_u64()).unwrap_or(0);
-                                                let available = cp.get("available_collateral").and_then(|v| v.as_u64()).unwrap_or(0);
-                                                let block_height = cp.get("block_height").and_then(|v| v.as_u64()).unwrap_or(0);
+                                                let reserves_output = qm.get("reserves_output_amount").and_then(|v| v.as_u64()).unwrap_or(0);
+                                                let reserves_required = qm.get("reserves_required").and_then(|v| v.as_u64()).unwrap_or(0);
+                                                let available = qm.get("available_collateral").and_then(|v| v.as_u64()).unwrap_or(0);
+                                                let block_height = qm.get("block_height").and_then(|v| v.as_u64()).unwrap_or(0);
                                                 println!("      ✅ Attestation: {} sat available ({} sat output - {} sat required) @ block {}",
                                                     available, reserves_output, reserves_required, block_height);
                                             } else {
@@ -1598,7 +1598,7 @@ impl NetworkStatus {
                                             }
                                         }
                                     } else {
-                                        println!("🔗 Collateral Partners: None");
+                                        println!("🔗 Quorum Members: None");
                                     }
                                 }
 
@@ -1694,7 +1694,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )
         .subcommand(
             Command::new("ledger")
-                .about("Show detailed ledger info including collateral partners")
+                .about("Show detailed ledger info including quorum members")
                 .arg(Arg::new("node")
                     .help(&format!("Node name ({})", NetworkConfig::all_node_names_string()))
                     .required(true)
@@ -1756,7 +1756,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             println!("  status ledgers [node]       - Show Bitcoin Deposits ledgers (all or specific node)");
             println!("  status ledger-updates               - Show cross-node ledger sync view (all nodes)");
             println!("  status ledger-updates <node> [-v]   - Show ledger updates for a specific node");
-            println!("  status ledger <node> <partner_pubkey> - Show detailed ledger info with collateral partners");
+            println!("  status ledger <node> <partner_pubkey> - Show detailed ledger info with quorum members");
             println!();
             println!("Available nodes: {}", NetworkConfig::all_node_names_string());
         }

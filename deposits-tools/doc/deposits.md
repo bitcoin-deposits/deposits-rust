@@ -12,7 +12,7 @@ Traditional custodial wallets require users to fully trust the operator. Bitcoin
 
 1. **Economic Constraints**: Operators must lock up 200% of deposits (100% reserves + 100% collateral), making theft economically irrational
 2. **Cryptographic Accountability**: Every operation is signed and hash-chained, creating unforgeable audit trails
-3. **Multi-Party Watching**: Channel partners and collateral partners independently validate operations
+3. **Multi-Party Watching**: Channel partners and quorum members independently validate operations
 4. **Automatic Recovery**: Time-locked mechanisms ensure funds are never permanently stuck
 
 The result: a wallet service where operators **can't** steal, not just **won't** steal.
@@ -28,7 +28,7 @@ The protocol consists of 10 interconnected systems:
 | 1 | **Cryptographic Ledger** | Hash-chained state updates signed by operator |
 | 2 | **Multichannel Collateral** | Reserves backed by channel balance + attestations from other channels |
 | 3 | **Dedicated Commitment Output** | Tapscript reserves output embedded in Lightning commitment tx |
-| 4 | **Peer Multisig + VoterSet** | Reserves output spends to multisig of channel peers + collateral partners |
+| 4 | **Peer Multisig + VoterSet** | Reserves output spends to multisig of channel peers + quorum members |
 | 5 | **Invoice Cosigning** | Partner must cosign invoices before they're valid |
 | 6 | **Enhanced Watchtower** | Watching for force-closes on channels where we're in the multisig |
 | 7 | **Ledger Validation** | Conformance evaluation against protocol rules |
@@ -259,7 +259,7 @@ pub fn validate_collateral_for_liability(
     }
 
     // Requirement 2: attestations >= deposit_liability
-    if !self.collateral_partners.is_empty() {
+    if !self.quorum_members.is_empty() {
         let total_collateral = self.total_available_collateral(current_block, max_attestation_age_blocks);
         if total_collateral < deposit_liability {
             return Err(DepositsError::InsufficientCollateral { ... });
@@ -294,7 +294,7 @@ When the channel force-closes, this output goes on-chain with the final ledger h
 
 ## 4. Peer Multisig + VoterSet
 
-The reserves output spends to a multisig controlled by the channel peers and optional collateral partners. This ensures neither party can unilaterally claim funds.
+The reserves output spends to a multisig controlled by the channel peers and optional quorum members. This ensures neither party can unilaterally claim funds.
 
 ### VoterSet
 
@@ -315,25 +315,25 @@ In a dangerous 2-party setup:
 - Tie-breaker: channel partner
 - Other voters: none (partner is sole voter)
 
-In a multi-party setup with collateral partners:
+In a multi-party setup with quorum members:
 - Tie-breaker: channel partner
-- Other voters: collateral partners from other channels
+- Other voters: quorum members from other channels
 
 Note: Cooperative spending (operator + partner collude) is handled separately from recovery voting.
 
 ### Dynamic Voter Registration
 
-Collateral partners can be added after ledger creation via `ADD_COLLATERAL_PARTNER` (0x8097):
+Quorum members can be added after ledger creation via `QUORUM_ADD_MEMBER` (0x8097):
 
 ```rust
-pub struct AddCollateralPartnerMsg {
+pub struct AddQuorumMemberMsg {
     pub partner_id: PublicKey,           // Channel partner receiving this
-    pub collateral_partner: PublicKey,   // New voter to add
+    pub quorum_member: PublicKey,        // New voter to add
     pub operator_signature: [u8; 64],    // Operator authorization
 }
 ```
 
-The partner validates and ACKs, then the new collateral partner is included in future VoterSet constructions and receives ledger update broadcasts.
+The partner validates and ACKs, then the new quorum member is included in future VoterSet constructions and receives ledger update broadcasts.
 
 ### Tapscript Structure
 
@@ -415,7 +415,7 @@ When a payment is settled (preimage revealed) but the operator has not already i
 4. Partner calls `broadcast_uncredited_payment_accusation()`:
    - **Force-closes the channel** with operator to protect funds
    - Constructs accusation with cryptographic proof
-   - Broadcasts to operator + all collateral partners
+   - Broadcasts to operator + all quorum members
    - Emits `UncreditedPaymentAccusation` event
 
 **API:**
@@ -462,7 +462,7 @@ pub struct UncreditedPaymentMsg {
 **Consequences:**
 
 - Channel is force-closed immediately (funds protected)
-- Accusation broadcast to all collateral partners (auditors)
+- Accusation broadcast to all quorum members (auditors)
 - Recorded as `ConformanceViolation::UncreditedPayment`
 - Counts toward non-conformance determination in recovery voting
 - Partner can initiate recovery claim if sufficient violations exist
@@ -765,8 +765,8 @@ src/bitcoin_deposits/
 - `RECOVERY_VOTE` (0x808F), `RECOVERY_CLAIM_REQUEST` (0x8091)
 - `RECOVERY_CLAIM_SIGNATURE` (0x8093), `RECOVERY_CLAIM_COMPLETE` (0x8095)
 
-**Collateral Partners (0x8097-0x809D)**
-- `COLLATERAL_ADD_PARTNER` (0x8097), `COLLATERAL_REMOVE_PARTNER` (0x8099) // duplicate of quorum?
+**Quorum Members (0x8097-0x809D)**
+- `QUORUM_ADD_MEMBER` (0x8097), `QUORUM_REMOVE_MEMBER` (0x8099)
 - `COLLATERAL_ATTESTATION_REQUEST` (0x809B), `COLLATERAL_ATTESTATION_RESPONSE` (0x809D)
 - `COLLATERAL_ATTESTATION` (0x808D)
 
@@ -784,7 +784,7 @@ src/bitcoin_deposits/
 pub struct Ledger {
     pub operator_node_id: PublicKey,
     pub partner_node_id: PublicKey,
-    pub collateral_partners: Vec<PublicKey>,
+    pub quorum_members: Vec<PublicKey>,
     pub ledger_address: String,
     pub updates: Vec<LedgerUpdate>,
     pub deposits: HashMap<PublicKey, Deposit>,

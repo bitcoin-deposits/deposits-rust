@@ -87,7 +87,7 @@ where
             self.our_node_id,
             partner_node_id.to_string(),
             LedgerRole::Operator,
-            Vec::new(), // No collateral partners yet
+            Vec::new(), // No quorum members yet
             multisig_address.to_string(),
         );
 
@@ -107,7 +107,7 @@ where
         ledgers.insert((self.our_node_id, partner_node_id.to_string()), Arc::new(RwLock::new(ledger)));
         drop(ledgers);
 
-        // Create the quorum for this ledger so collateral partners can be added later
+        // Create the quorum for this ledger so quorum members can be added later
         if let Err(e) = self.quorum_manager.create_quorum(self.our_node_id, partner_node_id.to_string()) {
             log_warn!(self.logger, "Failed to create quorum for ledger ({}, {}): {:?}",
                 self.our_node_id, partner_node_id, e);
@@ -134,7 +134,7 @@ where
             operator_node_id,
             self.our_node_id.to_string(),
             LedgerRole::Partner,
-            Vec::new(), // No collateral partners yet
+            Vec::new(), // No quorum members yet
             multisig_address.to_string(),
         );
 
@@ -150,7 +150,7 @@ where
         ledgers.insert((operator_node_id, self.our_node_id.to_string()), Arc::new(RwLock::new(ledger)));
         drop(ledgers);
 
-        // Create the quorum for this ledger so collateral partners can be tracked
+        // Create the quorum for this ledger so quorum members can be tracked
         if let Err(e) = self.quorum_manager.create_quorum(operator_node_id, self.our_node_id.to_string()) {
             log_warn!(self.logger, "Failed to create quorum for ledger ({}, {}): {:?}",
                 operator_node_id, self.our_node_id, e);
@@ -208,7 +208,7 @@ where
             operator_node_id,
             self.our_node_id.to_string(),
             LedgerRole::Partner,
-            Vec::new(), // No collateral partners yet
+            Vec::new(), // No quorum members yet
             multisig_address.to_string(),
         );
 
@@ -224,7 +224,7 @@ where
         ledgers.insert((operator_node_id, self.our_node_id.to_string()), Arc::new(RwLock::new(ledger)));
         drop(ledgers);
 
-        // Create the quorum for this ledger so collateral partners can be tracked
+        // Create the quorum for this ledger so quorum members can be tracked
         if let Err(e) = self.quorum_manager.create_quorum(operator_node_id, self.our_node_id.to_string()) {
             log_warn!(self.logger, "Failed to create quorum for ledger ({}, {}): {:?}",
                 operator_node_id, self.our_node_id, e);

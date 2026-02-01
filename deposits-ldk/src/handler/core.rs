@@ -79,7 +79,7 @@ pub use super::handler_types::{
     ProtocolStats,
     LedgerSummary,
     ReservesSummary,
-    CollateralPartnerInfo,
+    QuorumMemberInfo,
     CollateralInfo,
 };
 
@@ -147,14 +147,14 @@ where
     pub(super) pending_oneshot_acks: Mutex<HashMap<[u8; 32], oneshot::Sender<Result<(), String>>>>,
 
     /// Store partner signatures from ACKs (message_hash -> partner_signature)
-    /// Used when operator broadcasts after receiving ACK (e.g., AddCollateralPartner)
+    /// Used when operator broadcasts after receiving ACK (e.g., QuorumAddMember)
     pub(super) received_partner_signatures: Mutex<HashMap<[u8; 32], [u8; 64]>>,
 
     /// Track pending cosignature requests (message_hash -> oneshot_sender for signature)
     pub(super) pending_cosignature_requests: Mutex<HashMap<[u8; 32], oneshot::Sender<Result<Vec<u8>, String>>>>,
 
     /// Track pending collateral consent requests (message_hash -> oneshot_sender for signature)
-    /// Used when operator requests consent from a collateral partner to back a ledger
+    /// Used when operator requests consent from a quorum member to back a ledger
     pub(crate) pending_consent_requests: Mutex<HashMap<[u8; 32], oneshot::Sender<Result<[u8; 64], String>>>>,
 
     /// Track undelivered consent requests for retry on reconnect (peer_id -> (message_hash, consent_message))
@@ -390,7 +390,7 @@ where
     // NOTE: broadcast_message_to_other_partners is in broadcast_ops.rs
 
     // NOTE: create_signed_update, sign_ledger_update, sign_as_partner, sign_attestation_content,
-    // send_audit_update_to_new_collateral_partner, persist_signed_update, load_signed_update_log,
+    // send_audit_update_to_new_quorum_member, persist_signed_update, load_signed_update_log,
     // verify_signed_update, verify_and_store_signed_update, handle_audit_sync_request, and
     // handle_audit_sync_response are in signed_update_ops.rs
 
@@ -405,7 +405,7 @@ where
     // and start_background_flush_arc are in maintenance_ops.rs
 }
 
-// NOTE: ProtocolStats, LedgerSummary, ReservesSummary, CollateralPartnerInfo, CollateralInfo
+// NOTE: ProtocolStats, LedgerSummary, ReservesSummary, QuorumMemberInfo, CollateralInfo
 // are in handler_types.rs (re-exported above for backward compatibility)
 
 // NOTE: DepositsHandlerBuilder is in builder.rs

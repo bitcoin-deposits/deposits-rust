@@ -13,6 +13,6 @@ channel partner MUST verify that:
   reservesdecrease doesn't fall below ledger requirement
   maintenancefeecollect does not occur ahead of schedule
   
-collateral partner MUST verify that:
+quorum member MUST verify that:
   collateralincrease doesn't exceed commited reserves
   collateraldecrease doesn't happen in the same reporting period as collateralincrease

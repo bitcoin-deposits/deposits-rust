@@ -73,7 +73,7 @@ Move ldk-node's richer ledger features to deposits-core:
   - LedgerState.collateral_attestations HashMap
   - LedgerState.last_collateral_increase_block, received_collateral_amount
   - update_collateral_attestation(), total_available_collateral()
-  - partner_available_collateral(), missing_attestations()
+  - quorum_member_available_collateral(), missing_attestations()
   - LedgerValidator.validate_collateral_for_liability()
   - LedgerValidator.can_decrease_collateral()
 - [x] Add ACK/commitment hash tracking ✅
@@ -435,7 +435,7 @@ Tests have been updated for V2 message format changes. Some tests that depend on
 | Test File | Passed | Ignored | Notes |
 |-----------|--------|---------|-------|
 | bitcoin_deposits_message_logging | 2 | 0 | Fully passing |
-| collateral_partner_test | 17 | 7 | V2 struct variants fixed; Ledger API tests ignored |
+| quorum_member_test | 17 | 7 | V2 struct variants fixed; Ledger API tests ignored |
 | invoice_tracking_test | 15 | 0 | Fixed Invoice/PendingInvoice to use core types |
 | ledger_sync_test | 0 | 8 | All tests use deprecated Ledger::new_as_operator, append_mut |
 | peer_message_replay_test | 0 | 7 | All tests use deprecated handler API |
@@ -451,7 +451,7 @@ Tests have been updated for V2 message format changes. Some tests that depend on
 - `ldk_node::deposits::types::Invoice` → `ldk_node::deposits::core::Invoice` (use core types for Deposit.invoices)
 
 **Deprecated APIs in Ignored Tests:**
-- `Ledger::new_as_operator(operator, partner, collateral_partners, address)` - now takes 3 args
+- `Ledger::new_as_operator(operator, partner, quorum_members, address)` - now takes 3 args
 - `ledger.append_mut(message)` - removed in V2
 - `ledger.updates` field - structure changed
 - `ledger.has_credit_for_payment(&hash)` - API changed
@@ -487,12 +487,12 @@ Tests have been updated for V2 message format changes. Some tests that depend on
 - Added V2 event generation to event_info_ops.rs (~70 lines)
 - Added V2 audit support to audit_message_ops.rs (~100 lines)
 - Added V2 payment detection to recovery_ops.rs (~15 lines)
-- **Fixed partner/collateral partner ledger sync** (critical bug fixes):
+- **Fixed partner/quorum member ledger sync** (critical bug fixes):
   - Fixed `create_signed_update()` to use `write()` instead of `encode()` (type prefix issue)
-  - Fixed `send_audit_update_to_new_collateral_partner()` to use `get_message()`
+  - Fixed `send_audit_update_to_new_quorum_member()` to use `get_message()`
   - Fixed ledger deserialization in `ledger.rs` and `handshake_async_ops.rs`
   - Added `quorum_manager.create_quorum()` calls during ledger initialization
-  - All ledger entries now show ✓3 (operator + partner + collateral partner synced)
+  - All ledger entries now show ✓3 (operator + partner + quorum member synced)
 - **ledger.rs consolidation** (-31 lines):
   - Removed redundant SignedLedgerUpdate type conversions (same type was being copied field-by-field)
   - Simplified `append_signed()` to use `SignedLedgerUpdateExt::get_message()`
@@ -523,7 +523,7 @@ Tests have been updated for V2 message format changes. Some tests that depend on
   - ldk-node now re-exports from deposits-core
 - **Handler types migration** (+156 lines in deposits-core, -77 lines in ldk-node):
   - Moved CosignedInvoice, VoteRoundState, ProtocolStats to deposits-core
-  - Moved CollateralPartnerInfo, CollateralInfo to deposits-core
+  - Moved QuorumMemberInfo, CollateralInfo to deposits-core
   - LedgerSummary, ReservesSummary remain local (use SystemTime for API compat)
 - **Protocol types migration** (-17 lines in ldk-node):
   - Moved PendingTransfer, PendingPayment types to deposits-core/handler_types.rs

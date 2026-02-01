@@ -15,7 +15,7 @@ Same previous hash (aeb8d883) but different resulting hashes - the messages appl
 ## Root Cause Analysis
 
 ### Current Broken Flow (CollateralAttestation)
-1. Charlie (collateral partner) sends attestation to Bob (operator)
+1. Charlie (quorum member) sends attestation to Bob (operator)
 2. Bob calls `append_mut` on his ledger
 3. Bob forwards attestation to Alice (partner)
 4. Alice calls `append_mut` on her ledger
@@ -39,7 +39,7 @@ Same previous hash (aeb8d883) but different resulting hashes - the messages appl
 
 Change CollateralAttestation to follow the bilateral update pattern:
 
-1. Collateral partner sends attestation to **operator only**
+1. Quorum member sends attestation to **operator only**
 2. Operator receives attestation and creates a "ledger update" version
 3. Operator sends to partner, WAITS for ACK
 4. Partner validates, applies via `append_mut`, sends ACK
@@ -67,7 +67,7 @@ Keep attestations as separate state, not part of the hash chain:
 
 1. `src/bitcoin_deposits/handler.rs`:
    - `DepositsMessage::CollateralAttestation` handler (~line 4619)
-   - Possibly `add_collateral_partner` function
+   - Possibly `add_quorum_member` function
 
 2. Tests:
    - `tests/ledger_sync_test.rs` - add test for CollateralAttestation sync

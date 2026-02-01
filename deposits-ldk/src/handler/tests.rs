@@ -336,25 +336,25 @@ fn test_collateral_attestation_signature_roundtrip() {
 
     let secp = Secp256k1::new();
 
-    // Create operator and collateral partner keys
+    // Create operator and quorum member keys
     let operator_secret = SecretKey::from_slice(&[41u8; 32]).unwrap();
     let operator = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &operator_secret);
 
     let partner_secret = SecretKey::from_slice(&[42u8; 32]).unwrap();
-    let collateral_partner = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &partner_secret);
+    let quorum_member = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &partner_secret);
 
     // Test values
     let amount: u64 = 100_000;
     let block_height: u32 = 850_000;
 
-    // Create signing data - collateral partner signs: operator + amount + block_height
+    // Create signing data - quorum member signs: operator + amount + block_height
     let mut msg_bytes = Vec::new();
     msg_bytes.extend_from_slice(&operator.serialize());
     msg_bytes.extend_from_slice(&amount.to_le_bytes());
     msg_bytes.extend_from_slice(&block_height.to_le_bytes());
     let hash = sha256::Hash::hash(&msg_bytes);
 
-    // Sign with collateral partner's key
+    // Sign with quorum member's key
     let msg = Message::from_digest(hash.to_byte_array());
     let keypair = partner_secret.keypair(&secp);
     let sig = secp.sign_schnorr(&msg, &keypair);
@@ -363,7 +363,7 @@ fn test_collateral_attestation_signature_roundtrip() {
     // Create attestation
     let attestation = CollateralAttestationMsg {
         operator,
-        collateral_partner,
+        quorum_member,
         amount,
         block_height,
         lock_until_block: 0,
@@ -398,12 +398,12 @@ fn test_collateral_attestation_available_collateral() {
     let operator_secret = SecretKey::from_slice(&[41u8; 32]).unwrap();
     let operator = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &operator_secret);
     let partner_secret = SecretKey::from_slice(&[42u8; 32]).unwrap();
-    let collateral_partner = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &partner_secret);
+    let quorum_member = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &partner_secret);
 
     // Attestation with 100k collateral
     let attestation1 = CollateralAttestationMsg {
         operator,
-        collateral_partner,
+        quorum_member,
         amount: 100_000,
         block_height: 850_000,
         lock_until_block: 0,
@@ -415,7 +415,7 @@ fn test_collateral_attestation_available_collateral() {
     // Attestation with zero collateral
     let attestation2 = CollateralAttestationMsg {
         operator,
-        collateral_partner,
+        quorum_member,
         amount: 0,
         block_height: 850_000,
         lock_until_block: 0,
@@ -427,7 +427,7 @@ fn test_collateral_attestation_available_collateral() {
     // Attestation with smaller collateral
     let attestation3 = CollateralAttestationMsg {
         operator,
-        collateral_partner,
+        quorum_member,
         amount: 30_000,
         block_height: 850_000,
         lock_until_block: 0,
@@ -597,7 +597,7 @@ fn test_broadcast_uncredited_payment_accusation_with_ledger() {
 }
 
 #[test]
-fn test_broadcast_uncredited_payment_accusation_broadcasts_to_collateral_partners() {
+fn test_broadcast_uncredited_payment_accusation_broadcasts_to_quorum_members() {
     use bitcoin::hashes::{sha256, Hash};
     use deposits_core::Ledger;
     use deposits_core::{Deposit, Invoice};
@@ -622,7 +622,7 @@ fn test_broadcast_uncredited_payment_accusation_broadcasts_to_collateral_partner
     let preimage = [0x42; 32];
     let payment_hash = *sha256::Hash::hash(&preimage).as_byte_array();
 
-    // Create a ledger with collateral partners
+    // Create a ledger with quorum members
     use deposits_core::LedgerRole;
     let mut ledger = Ledger::new(
         operator,
@@ -679,9 +679,9 @@ fn test_broadcast_uncredited_payment_accusation_broadcasts_to_collateral_partner
 
     assert!(result.is_ok());
 
-    // Check that messages were queued to all targets (operator + 2 collateral partners)
+    // Check that messages were queued to all targets (operator + 2 quorum members)
     let pending = handler.get_and_clear_pending_msg();
-    assert_eq!(pending.len(), 3, "Expected 3 pending messages (operator + 2 collateral partners)");
+    assert_eq!(pending.len(), 3, "Expected 3 pending messages (operator + 2 quorum members)");
 
     // Verify all targets received UncreditedPayment
     let targets: std::collections::HashSet<_> = pending.iter().map(|(t, _)| *t).collect();
@@ -959,7 +959,7 @@ fn test_fraud_proof_accepted_with_valid_cosigned_invoice() {
 }
 
 #[test]
-fn test_received_fraud_proof_forwards_to_collateral_partners() {
+fn test_received_fraud_proof_forwards_to_quorum_members() {
     use bitcoin::hashes::{sha256, Hash};
     use deposits_core::Ledger;
 
@@ -979,7 +979,7 @@ fn test_received_fraud_proof_forwards_to_collateral_partners() {
     let accuser_secret = SecretKey::from_slice(&[3; 32]).unwrap();
     let accuser = PublicKey::from_secret_key(&secp, &accuser_secret);
 
-    // Our collateral partners (who should receive the forwarded accusation)
+    // Our quorum members (who should receive the forwarded accusation)
     let collateral1_secret = SecretKey::from_slice(&[4; 32]).unwrap();
     let collateral1 = PublicKey::from_secret_key(&secp, &collateral1_secret);
     let collateral2_secret = SecretKey::from_slice(&[5; 32]).unwrap();
@@ -999,7 +999,7 @@ fn test_received_fraud_proof_forwards_to_collateral_partners() {
         operator,
         our_node_id.to_string(),
         LedgerRole::Operator,
-        vec![collateral1, collateral2], // Our collateral partners
+        vec![collateral1, collateral2], // Our quorum members
         "test_address".to_string(),
     );
 
@@ -1009,7 +1009,7 @@ fn test_received_fraud_proof_forwards_to_collateral_partners() {
         ledgers.insert((operator, our_node_id.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
     }
 
-    // Mark collateral partners as connected so forwarded messages can be drained
+    // Mark quorum members as connected so forwarded messages can be drained
     mark_peer_connected(&handler, collateral1);
     mark_peer_connected(&handler, collateral2);
 
@@ -1032,10 +1032,10 @@ fn test_received_fraud_proof_forwards_to_collateral_partners() {
     let result = handler.handle_custom_message(accusation, accuser);
     assert!(result.is_ok());
 
-    // Check that accusation was forwarded to our collateral partners
+    // Check that accusation was forwarded to our quorum members
     let pending = handler.get_and_clear_pending_msg();
 
-    // Should have forwarded to both collateral partners (but not back to sender)
+    // Should have forwarded to both quorum members (but not back to sender)
     let targets: std::collections::HashSet<_> = pending.iter().map(|(t, _)| *t).collect();
     assert!(targets.contains(&collateral1), "Should forward to collateral1");
     assert!(targets.contains(&collateral2), "Should forward to collateral2");

@@ -147,10 +147,10 @@ pub struct ReservesSummary {
     pub last_update: u64,
 }
 
-/// Information about a single collateral partner and their attestation
+/// Information about a single quorum member and their attestation
 #[derive(Clone, Debug)]
-pub struct CollateralPartnerInfo {
-    /// The collateral partner's public key
+pub struct QuorumMemberInfo {
+    /// The quorum member's public key
     pub pubkey: PublicKey,
     /// Amount of collateral provided in satoshis
     pub collateral_amount: u64,
@@ -163,11 +163,11 @@ pub struct CollateralPartnerInfo {
 /// Collateral information for a ledger
 #[derive(Clone, Debug, Default)]
 pub struct CollateralInfo {
-    /// List of collateral partners and their info
-    pub collateral_partners: Vec<CollateralPartnerInfo>,
-    /// Our attestation as a partner (if we are a collateral partner)
-    pub partner_attestation: Option<CollateralPartnerInfo>,
-    /// Total available collateral across all partners
+    /// List of quorum members and their info
+    pub quorum_members: Vec<QuorumMemberInfo>,
+    /// Our attestation as a partner (if we are a quorum member)
+    pub member_attestation: Option<QuorumMemberInfo>,
+    /// Total available collateral across all quorum members
     pub total_available_collateral: u64,
 }
 

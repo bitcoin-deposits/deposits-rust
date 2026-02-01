@@ -5,7 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-//! Async collateral partner operations for the Bitcoin Deposits protocol.
+//! Async quorum member operations for the Bitcoin Deposits protocol.
 
 use bitcoin::secp256k1::PublicKey;
 use std::str::FromStr;
@@ -25,12 +25,12 @@ impl<L: Deref + Clone + Send + Sync> DepositsHandler<L>
 where
     L::Target: LdkLogger,
 {
-    /// Add a collateral partner to a ledger - async version
+    /// Add a quorum member to a ledger - async version
     /// Uses async sleep to not block the tokio executor when called from HTTP handlers
-    pub async fn add_collateral_partner_async(
+    pub async fn add_quorum_member_async(
         &self,
         partner_node_id: PublicKey,
-        collateral_partner: PublicKey,
+        quorum_member: PublicKey,
     ) -> Result<(), DepositsError> {
         use super::messages::DepositsMessage;
 
@@ -43,16 +43,16 @@ where
                     details: format!("No ledger exists for partner {}", partner_node_id),
                 });
             }
-            // Check the actual ledger state for duplicate collateral partner
+            // Check the actual ledger state for duplicate quorum member
             if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let ledger = ledger_arc.read().unwrap();
-                if ledger.state.collateral_partners.contains(&collateral_partner) {
+                if ledger.state.quorum_members.contains(&quorum_member) {
                     log_info!(
                         self.logger,
-                        "📋 OPERATOR: Collateral partner {} already exists in ledger, skipping",
-                        collateral_partner
+                        "📋 OPERATOR: Quorum member {} already exists in ledger, skipping",
+                        quorum_member
                     );
-                    return Err(DepositsError::CollateralPartnerAlreadyExists);
+                    return Err(DepositsError::QuorumMemberAlreadyExists);
                 }
             }
         }
@@ -61,15 +61,15 @@ where
         {
             let ledger_id = LedgerId::new(self.our_node_id, partner_node_id.to_string());
             if let Some(members) = self.quorum_manager.get_quorum(&ledger_id) {
-                if members.contains(&collateral_partner) {
-                    return Err(DepositsError::CollateralPartnerAlreadyExists);
+                if members.contains(&quorum_member) {
+                    return Err(DepositsError::QuorumMemberAlreadyExists);
                 }
             }
         }
 
-        // Step 1: Request consent from the collateral partner (async!)
-        log_info!(self.logger, "📨 Requesting consent from collateral partner {} to back ledger with partner {}",
-            collateral_partner, partner_node_id);
+        // Step 1: Request consent from the quorum member (async!)
+        log_info!(self.logger, "📨 Requesting consent from quorum member {} to back ledger with partner {}",
+            quorum_member, partner_node_id);
 
         let consent_request = DepositsMessage::Coordination(CoordinationMsg::CollateralConsentRequest {
             operator_id: self.our_node_id,
@@ -78,20 +78,20 @@ where
         });
 
         // Use async version - doesn't block the executor!
-        let collateral_partner_signature = self.request_collateral_consent_async(
-            collateral_partner,
+        let quorum_member_signature = self.request_collateral_consent_async(
+            quorum_member,
             consent_request,
         ).await?;
 
-        log_info!(self.logger, "✅ Received consent signature from collateral partner {}", collateral_partner);
+        log_info!(self.logger, "✅ Received consent signature from quorum member {}", quorum_member);
 
-        // Step 2: Create the AddCollateralPartner message with both signatures (V2 format)
+        // Step 2: Create the QuorumAddMember message with both signatures (V2 format)
         let update_msg = LedgerUpdateMsg::new_with_operation(
             self.our_node_id,    // operator
             partner_node_id.to_string(),     // partner
-            LedgerOperation::CollateralAddPartner {
-                collateral_partner,
-                collateral_partner_signature,
+            LedgerOperation::QuorumAddMember {
+                quorum_member,
+                quorum_member_signature,
             },
         );
         let message = DepositsMessage::LedgerUpdate(update_msg);
@@ -117,10 +117,10 @@ where
         // Send and wait for ACK (async!)
         match self.send_message_with_ack_async(partner_node_id, message, 30000).await {
             Ok(()) => {
-                log_info!(self.logger, "✅ AddCollateralPartner ACK received from {}", partner_node_id);
+                log_info!(self.logger, "✅ QuorumAddMember ACK received from {}", partner_node_id);
             }
             Err(e) => {
-                log_info!(self.logger, "❌ Failed to get AddCollateralPartner ACK from {}: {}", partner_node_id, e);
+                log_info!(self.logger, "❌ Failed to get QuorumAddMember ACK from {}: {}", partner_node_id, e);
                 return Err(e);
             }
         }
@@ -140,7 +140,7 @@ where
                 ledger.state.partner_deepest_ack_hash = new_hash;
 
                 if let Err(e) = self.persist_ledger_state(&*ledger) {
-                    log_warn!(self.logger, "Failed to persist ledger after adding collateral partner: {:?}", e);
+                    log_warn!(self.logger, "Failed to persist ledger after adding quorum member: {:?}", e);
                 }
 
                 drop(ledger);
@@ -151,21 +151,21 @@ where
                     sent_messages.insert(message_hash, (self.our_node_id, partner_node_id.to_string(), message_for_broadcast.clone(), prev_hash, new_hash, chain_index));
                 }
 
-                // Add to quorum BEFORE broadcasting so the new collateral partner is included
+                // Add to quorum BEFORE broadcasting so the new quorum member is included
                 // in the broadcast recipients list
                 let ledger_id = LedgerId::new(self.our_node_id, partner_node_id.to_string());
-                if let Err(e) = self.quorum_manager.add_member(&ledger_id, collateral_partner) {
+                if let Err(e) = self.quorum_manager.add_member(&ledger_id, quorum_member) {
                     log_warn!(
                         self.logger,
-                        "Failed to add collateral partner {} to quorum: {:?}",
-                        collateral_partner,
+                        "Failed to add quorum member {} to quorum: {:?}",
+                        quorum_member,
                         e
                     );
                 } else {
                     log_info!(
                         self.logger,
-                        "✅ Added collateral partner {} to quorum for ledger ({}, {})",
-                        collateral_partner,
+                        "✅ Added quorum member {} to quorum for ledger ({}, {})",
+                        quorum_member,
                         self.our_node_id,
                         partner_node_id
                     );
@@ -177,17 +177,17 @@ where
                     sigs.remove(&message_hash)
                 };
                 if let Err(e) = self.broadcast_message_to_other_partners(message_hash, partner_node_id, partner_sig) {
-                    log_warn!(self.logger, "Failed to broadcast AddCollateralPartner to other partners: {:?}", e);
+                    log_warn!(self.logger, "Failed to broadcast QuorumAddMember to other partners: {:?}", e);
                 }
             }
         }
 
-        // NOTE: We no longer call send_audit_update_to_new_collateral_partner here
+        // NOTE: We no longer call send_audit_update_to_new_quorum_member here
         // because broadcast_message_to_other_partners already sends to all partners including
-        // the new collateral partner. Sending both causes duplicate SignedAuditUpdates which
+        // the new quorum member. Sending both causes duplicate SignedAuditUpdates which
         // triggers sequence mismatch errors at the receiver.
         // The broadcast sends all partners the single new update - for history sync,
-        // the new collateral partner should request it separately if needed.
+        // the new quorum member should request it separately if needed.
 
         Ok(())
     }

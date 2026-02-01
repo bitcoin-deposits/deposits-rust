@@ -12,7 +12,7 @@
 //! `DepositsHandler` but can be implemented by any handler implementation.
 //!
 //! The traits are organized by operation category:
-//! - [`CollateralOperations`] - Query collateral partners and attestations
+//! - [`CollateralOperations`] - Query quorum members and attestations
 //! - [`DepositOperations`] - CRUD operations on deposits
 //! - [`LedgerOperations`] - Query ledger state and hashes
 //! - [`PaymentTracking`] - Track deposit invoice payments
@@ -31,14 +31,14 @@ use crate::types::ReservesStatus;
 
 /// Extension trait for collateral query operations
 pub trait CollateralOperations {
-    /// Get collateral info for a channel partner
+    /// Get collateral info for a ledger partner
     fn get_collateral_info(&self, partner_node_id: PublicKey) -> Option<CollateralInfo>;
 
-    /// Get the list of collateral partners for a channel
-    fn get_collateral_partners(&self, partner_node_id: PublicKey) -> Vec<PublicKey>;
+    /// Get the list of quorum members for a channel
+    fn get_quorum_members(&self, partner_node_id: PublicKey) -> Vec<PublicKey>;
 
-    /// Check if a node is a collateral partner for a channel
-    fn is_collateral_partner(&self, partner_node_id: PublicKey, potential_collateral: PublicKey) -> bool;
+    /// Check if a node is a quorum member for a channel
+    fn is_quorum_member(&self, partner_node_id: PublicKey, potential_collateral: PublicKey) -> bool;
 
     /// Get the total available collateral for a channel
     fn get_total_available_collateral(&self, partner_node_id: PublicKey) -> u64;

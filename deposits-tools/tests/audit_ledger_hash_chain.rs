@@ -90,7 +90,7 @@ fn test_real_world_broken_audit_chain() {
     //
     // Expected direct ledger:
     //   LedgerOpenRequest:    [00000000 → cdfdf7d0]
-    //   AddCollateralPartner: [cdfdf7d0 → 786e8e7e]
+    //   AddQuorumMember: [cdfdf7d0 → 786e8e7e]
     //   CollateralAttestation:[786e8e7e → 6feadabe]
     //   CollateralAttestation:[6feadabe → b296c726]
     //   ReservesToReserves:   [b296c726 → c5eaa702]

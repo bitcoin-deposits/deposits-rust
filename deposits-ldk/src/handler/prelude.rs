@@ -34,7 +34,7 @@ pub use deposits_core::{
     // Handler types
     handler_types::{
         CosignedInvoice, VoteRoundState, ProtocolStats,
-        LedgerSummary, ReservesSummary, CollateralPartnerInfo, CollateralInfo,
+        LedgerSummary, ReservesSummary, QuorumMemberInfo, CollateralInfo,
         PendingPayment,
     },
 
