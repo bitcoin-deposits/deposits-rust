@@ -18,6 +18,17 @@
 //!   - Tag `prev`: previous hash (hex)
 //!   - Tag `hash`: current hash (hex)
 //!   - Content: base64-encoded TLV wire format of SignedLedgerUpdate
+//!
+//! - **Kind 21101**: Ledger requests (deposit_open, etc.)
+//!   - Tag `l`: `<operator_pubkey>:<reserves_id>` (ledger identifier)
+//!   - Tag `action`: action name (e.g., "deposit_open")
+//!   - Content: JSON with action parameters
+//!
+//! - **Kind 21102**: Ledger responses (replies to requests)
+//!   - Tag `e`: reference to request event ID
+//!   - Tag `l`: ledger identifier
+//!   - Tag `status`: "ok" or "error"
+//!   - Content: JSON with result or error message
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use bitcoin::secp256k1::{PublicKey, SecretKey};
@@ -32,9 +43,14 @@ use tokio::sync::mpsc;
 use crate::Error;
 
 /// Custom Kind for ledger updates.
-/// Uses range 1000-9999 for regular (non-replaceable) custom events.
 /// Each update is a separate event that relays should retain.
 pub const KIND_LEDGER_UPDATE: u16 = 21100;
+
+/// Custom Kind for ledger requests (deposit_open, etc.)
+pub const KIND_LEDGER_REQUEST: u16 = 21101;
+
+/// Custom Kind for ledger responses (replies to requests)
+pub const KIND_LEDGER_RESPONSE: u16 = 21102;
 
 /// Default relay URLs for the network
 /// Empty by default - relays should be explicitly configured
@@ -62,6 +78,18 @@ pub struct NostrTransport {
 
     /// Sender for ledger updates
     ledger_tx: mpsc::UnboundedSender<InboundLedgerUpdate>,
+
+    /// Pending inbound ledger requests
+    request_rx: mpsc::UnboundedReceiver<LedgerRequest>,
+
+    /// Sender for ledger requests
+    request_tx: mpsc::UnboundedSender<LedgerRequest>,
+
+    /// Pending inbound ledger responses
+    response_rx: mpsc::UnboundedReceiver<LedgerResponse>,
+
+    /// Sender for ledger responses
+    response_tx: mpsc::UnboundedSender<LedgerResponse>,
 
     /// Peer pubkey mapping (secp256k1 -> nostr)
     peer_keys: RwLock<HashMap<PublicKey, nostr_sdk::PublicKey>>,
@@ -94,6 +122,62 @@ pub struct InboundLedgerUpdate {
 
     /// Nostr event ID for reference
     pub event_id: String,
+}
+
+/// A ledger request (e.g., deposit_open)
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LedgerRequest {
+    /// Action to perform
+    pub action: String,
+
+    /// Ledger identifier (operator:reserves_id)
+    pub ledger_id: String,
+
+    /// Action-specific parameters as JSON
+    pub params: serde_json::Value,
+
+    /// Nostr event ID of this request
+    #[serde(skip)]
+    pub event_id: String,
+
+    /// Sender's nostr pubkey (for responses)
+    #[serde(skip)]
+    pub sender: String,
+
+    /// Timestamp
+    #[serde(skip)]
+    pub timestamp: u64,
+}
+
+/// A ledger response (reply to a request)
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LedgerResponse {
+    /// Was the request successful?
+    pub success: bool,
+
+    /// Result data (if successful)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
+
+    /// Error message (if failed)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+
+    /// Reference to the request event ID
+    #[serde(skip)]
+    pub request_id: String,
+
+    /// Ledger identifier
+    #[serde(skip)]
+    pub ledger_id: String,
+
+    /// Nostr event ID of this response
+    #[serde(skip)]
+    pub event_id: String,
+
+    /// Timestamp
+    #[serde(skip)]
+    pub timestamp: u64,
 }
 
 impl NostrTransport {
@@ -129,9 +213,11 @@ impl NostrTransport {
         // Connect to relays
         client.connect().await;
 
-        // Create channels for inbound messages and ledger updates
+        // Create channels for inbound messages, ledger updates, requests, and responses
         let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
         let (ledger_tx, ledger_rx) = mpsc::unbounded_channel();
+        let (request_tx, request_rx) = mpsc::unbounded_channel();
+        let (response_tx, response_rx) = mpsc::unbounded_channel();
 
         Ok(Self {
             client,
@@ -141,6 +227,10 @@ impl NostrTransport {
             inbound_tx,
             ledger_rx,
             ledger_tx,
+            request_rx,
+            request_tx,
+            response_rx,
+            response_tx,
             peer_keys: RwLock::new(HashMap::new()),
         })
     }
@@ -285,6 +375,140 @@ impl NostrTransport {
         Ok(())
     }
 
+    /// Send a ledger request (e.g., deposit_open)
+    ///
+    /// Returns the event ID for tracking the response.
+    pub async fn send_ledger_request(
+        &self,
+        ledger_id: &str,
+        action: &str,
+        params: serde_json::Value,
+    ) -> Result<String, Error> {
+        let content = serde_json::to_string(&params)
+            .map_err(|e| Error::Serialization(format!("Failed to serialize params: {}", e)))?;
+
+        let event = EventBuilder::new(Kind::Custom(KIND_LEDGER_REQUEST), &content)
+            .tag(Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)),
+                [ledger_id],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("action"),
+                [action],
+            ))
+            .sign_with_keys(&self.keys)
+            .map_err(|e| Error::Nostr(format!("Failed to sign event: {}", e)))?;
+
+        let event_id = event.id.to_hex();
+
+        self.client
+            .send_event(event)
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to send request: {}", e)))?;
+
+        tracing::info!(
+            "Sent ledger request: ledger={}, action={}, event={}",
+            ledger_id,
+            action,
+            &event_id[..16]
+        );
+
+        Ok(event_id)
+    }
+
+    /// Send a ledger response (reply to a request)
+    pub async fn send_ledger_response(
+        &self,
+        request_id: &str,
+        ledger_id: &str,
+        success: bool,
+        result: Option<serde_json::Value>,
+        error: Option<String>,
+    ) -> Result<String, Error> {
+        let response = LedgerResponse {
+            success,
+            result,
+            error,
+            request_id: String::new(),
+            ledger_id: String::new(),
+            event_id: String::new(),
+            timestamp: 0,
+        };
+
+        let content = serde_json::to_string(&response)
+            .map_err(|e| Error::Serialization(format!("Failed to serialize response: {}", e)))?;
+
+        let status = if success { "ok" } else { "error" };
+
+        let event = EventBuilder::new(Kind::Custom(KIND_LEDGER_RESPONSE), &content)
+            .tag(Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::E)),
+                [request_id],
+            ))
+            .tag(Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)),
+                [ledger_id],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("status"),
+                [status],
+            ))
+            .sign_with_keys(&self.keys)
+            .map_err(|e| Error::Nostr(format!("Failed to sign event: {}", e)))?;
+
+        let event_id = event.id.to_hex();
+
+        self.client
+            .send_event(event)
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to send response: {}", e)))?;
+
+        tracing::info!(
+            "Sent ledger response: request={}, status={}, event={}",
+            &request_id[..16],
+            status,
+            &event_id[..16]
+        );
+
+        Ok(event_id)
+    }
+
+    /// Subscribe to ledger requests for a specific ledger (for operators)
+    pub async fn subscribe_to_requests(&self, ledger_id: &str) -> Result<(), Error> {
+        let filter = Filter::new()
+            .kind(Kind::Custom(KIND_LEDGER_REQUEST))
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::L),
+                [ledger_id],
+            );
+
+        self.client
+            .subscribe(vec![filter], None)
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to subscribe to requests: {}", e)))?;
+
+        tracing::info!("Subscribed to ledger requests: {}", ledger_id);
+        Ok(())
+    }
+
+    /// Subscribe to responses for a specific request (for requesters)
+    pub async fn subscribe_to_response(&self, request_id: &str) -> Result<(), Error> {
+        let filter = Filter::new()
+            .kind(Kind::Custom(KIND_LEDGER_RESPONSE))
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::E),
+                [request_id],
+            );
+
+        self.client
+            .subscribe(vec![filter], None)
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to subscribe to response: {}", e)))?;
+
+        tracing::debug!("Subscribed to response for request: {}", &request_id[..16]);
+        Ok(())
+    }
+
     /// Start listening for inbound messages
     pub async fn start_listening(&self) -> Result<(), Error> {
         // Subscribe to DMs addressed to us
@@ -332,6 +556,16 @@ impl NostrTransport {
                 Kind::Custom(KIND_LEDGER_UPDATE) => {
                     if let Ok(update) = self.process_ledger_update(&event) {
                         let _ = self.ledger_tx.send(update);
+                    }
+                }
+                Kind::Custom(KIND_LEDGER_REQUEST) => {
+                    if let Ok(request) = self.process_ledger_request(&event) {
+                        let _ = self.request_tx.send(request);
+                    }
+                }
+                Kind::Custom(KIND_LEDGER_RESPONSE) => {
+                    if let Ok(response) = self.process_ledger_response(&event) {
+                        let _ = self.response_tx.send(response);
                     }
                 }
                 _ => {}
@@ -409,6 +643,123 @@ impl NostrTransport {
         })
     }
 
+    /// Process a ledger request event
+    fn process_ledger_request(&self, event: &Event) -> Result<LedgerRequest, Error> {
+        // Extract ledger_id from the l tag
+        let ledger_id = event
+            .tags
+            .iter()
+            .find_map(|tag| {
+                if tag.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)) {
+                    tag.content().map(|s| s.to_string())
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| Error::Nostr("Missing l tag in ledger request".to_string()))?;
+
+        // Extract action from the action tag
+        let action = event
+            .tags
+            .iter()
+            .find_map(|tag| {
+                if tag.kind() == TagKind::custom("action") {
+                    tag.content().map(|s| s.to_string())
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| Error::Nostr("Missing action tag in ledger request".to_string()))?;
+
+        // Parse params from content
+        let params: serde_json::Value = serde_json::from_str(&event.content)
+            .unwrap_or(serde_json::Value::Null);
+
+        tracing::debug!(
+            "Received ledger request: ledger={}, action={}, event={}",
+            ledger_id,
+            action,
+            &event.id.to_hex()[..16]
+        );
+
+        Ok(LedgerRequest {
+            action,
+            ledger_id,
+            params,
+            event_id: event.id.to_hex(),
+            sender: event.pubkey.to_hex(),
+            timestamp: event.created_at.as_u64(),
+        })
+    }
+
+    /// Process a ledger response event
+    fn process_ledger_response(&self, event: &Event) -> Result<LedgerResponse, Error> {
+        // Extract request_id from the e tag
+        let request_id = event
+            .tags
+            .iter()
+            .find_map(|tag| {
+                if tag.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::E)) {
+                    tag.content().map(|s| s.to_string())
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| Error::Nostr("Missing e tag in ledger response".to_string()))?;
+
+        // Extract ledger_id from the l tag
+        let ledger_id = event
+            .tags
+            .iter()
+            .find_map(|tag| {
+                if tag.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)) {
+                    tag.content().map(|s| s.to_string())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
+
+        // Extract status from the status tag
+        let status = event
+            .tags
+            .iter()
+            .find_map(|tag| {
+                if tag.kind() == TagKind::custom("status") {
+                    tag.content().map(|s| s.to_string())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+
+        // Parse response from content
+        let mut response: LedgerResponse = serde_json::from_str(&event.content)
+            .unwrap_or(LedgerResponse {
+                success: status == "ok",
+                result: None,
+                error: Some("Failed to parse response".to_string()),
+                request_id: String::new(),
+                ledger_id: String::new(),
+                event_id: String::new(),
+                timestamp: 0,
+            });
+
+        response.request_id = request_id.clone();
+        response.ledger_id = ledger_id;
+        response.event_id = event.id.to_hex();
+        response.timestamp = event.created_at.as_u64();
+
+        tracing::debug!(
+            "Received ledger response: request={}, status={}, event={}",
+            &request_id[..16.min(request_id.len())],
+            status,
+            &event.id.to_hex()[..16]
+        );
+
+        Ok(response)
+    }
+
     /// Receive the next inbound message (non-blocking)
     pub fn try_recv(&mut self) -> Option<InboundMessage> {
         self.inbound_rx.try_recv().ok()
@@ -427,6 +778,26 @@ impl NostrTransport {
     /// Receive the next ledger update (blocking)
     pub async fn recv_ledger_update(&mut self) -> Option<InboundLedgerUpdate> {
         self.ledger_rx.recv().await
+    }
+
+    /// Receive the next ledger request (non-blocking)
+    pub fn try_recv_request(&mut self) -> Option<LedgerRequest> {
+        self.request_rx.try_recv().ok()
+    }
+
+    /// Receive the next ledger request (blocking)
+    pub async fn recv_request(&mut self) -> Option<LedgerRequest> {
+        self.request_rx.recv().await
+    }
+
+    /// Receive the next ledger response (non-blocking)
+    pub fn try_recv_response(&mut self) -> Option<LedgerResponse> {
+        self.response_rx.try_recv().ok()
+    }
+
+    /// Receive the next ledger response (blocking)
+    pub async fn recv_response(&mut self) -> Option<LedgerResponse> {
+        self.response_rx.recv().await
     }
 
     /// Disconnect from all relays

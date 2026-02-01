@@ -141,6 +141,10 @@ NOSTR SUBCOMMANDS:
                     Broadcast ledger updates to Nostr relay (all local ledgers if no ID given)
     nostr import [operator:reserves_id]
                     Fetch ledger updates from Nostr relay (all ledgers if no ID given)
+    nostr request <ledger_id> <action> [params...]
+                    Send a request to a ledger (e.g., deposit_open)
+    nostr watch <ledger_id>
+                    Watch for requests to a ledger and process them
 
 OPTIONS:
     --seed <hex>       Seed for wallet/identity (64 hex chars)
@@ -2414,7 +2418,7 @@ async fn withdraw_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>
 /// Handle nostr subcommands
 async fn nostr_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {
-        eprintln!("Usage: deposits-bdk nostr <list|export|import> [args...]");
+        eprintln!("Usage: deposits-bdk nostr <list|export|import|request|watch> [args...]");
         return Ok(());
     }
 
@@ -2422,9 +2426,11 @@ async fn nostr_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         "list" | "ls" => nostr_list(&args[1..]).await,
         "export" => nostr_export(&args[1..]).await,
         "import" => nostr_import(&args[1..]).await,
+        "request" | "req" => nostr_request(&args[1..]).await,
+        "watch" => nostr_watch(&args[1..]).await,
         cmd => {
             eprintln!("Unknown nostr subcommand: {}", cmd);
-            eprintln!("Usage: deposits-bdk nostr <list|export|import> [args...]");
+            eprintln!("Usage: deposits-bdk nostr <list|export|import|request|watch> [args...]");
             Ok(())
         }
     }
@@ -2807,4 +2813,313 @@ async fn nostr_export(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         total_exported, ledgers_to_export.len());
 
     Ok(())
+}
+
+/// Send a request to a ledger via Nostr
+async fn nostr_request(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use bitcoin::secp256k1::SecretKey;
+    use deposits_bdk::nostr::NostrTransportBuilder;
+
+    let mut ledger_id: Option<String> = None;
+    let mut action: Option<String> = None;
+    let mut params: Vec<String> = Vec::new();
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else if ledger_id.is_none() {
+            ledger_id = Some(args[i].clone());
+        } else if action.is_none() {
+            action = Some(args[i].clone());
+        } else {
+            params.push(args[i].clone());
+        }
+        i += 1;
+    }
+
+    let ledger_id = ledger_id.ok_or("Ledger ID required")?;
+    let action = action.ok_or("Action required (e.g., deposit_open)")?;
+
+    let config = parse_config(&config_args)?;
+
+    let relay_url = config.relays.first()
+        .ok_or("No relay configured. Use --relay <url>")?
+        .clone();
+
+    let secret_key = SecretKey::from_slice(&config.seed)
+        .map_err(|e| format!("Invalid seed: {}", e))?;
+
+    // Build params JSON based on action
+    let params_json = match action.as_str() {
+        "deposit_open" => {
+            // params: deposit_pubkey [fee_fixed] [fee_bps] [fee_frequency]
+            if params.is_empty() {
+                return Err("deposit_open requires: <deposit_pubkey>".into());
+            }
+            let mut obj = serde_json::Map::new();
+            obj.insert("deposit_pubkey".to_string(), serde_json::Value::String(params[0].clone()));
+            if params.len() > 1 {
+                obj.insert("fee_fixed".to_string(), serde_json::json!(params[1].parse::<u64>().unwrap_or(0)));
+            }
+            if params.len() > 2 {
+                obj.insert("fee_bps".to_string(), serde_json::json!(params[2].parse::<u64>().unwrap_or(0)));
+            }
+            if params.len() > 3 {
+                obj.insert("fee_frequency".to_string(), serde_json::json!(params[3].parse::<u32>().unwrap_or(144)));
+            }
+            serde_json::Value::Object(obj)
+        }
+        _ => {
+            // Generic: treat params as key=value pairs or just values
+            let mut obj = serde_json::Map::new();
+            for (i, p) in params.iter().enumerate() {
+                if let Some((k, v)) = p.split_once('=') {
+                    obj.insert(k.to_string(), serde_json::Value::String(v.to_string()));
+                } else {
+                    obj.insert(format!("arg{}", i), serde_json::Value::String(p.clone()));
+                }
+            }
+            serde_json::Value::Object(obj)
+        }
+    };
+
+    println!("Sending ledger request via Nostr...");
+    println!("  Relay: {}", relay_url);
+    println!("  Ledger: {}", ledger_id);
+    println!("  Action: {}", action);
+    println!("  Params: {}", serde_json::to_string(&params_json)?);
+    println!();
+
+    let transport = NostrTransportBuilder::new(secret_key)
+        .relay(&relay_url)
+        .build()
+        .await?;
+
+    // Subscribe to responses for this request
+    let event_id = transport.send_ledger_request(&ledger_id, &action, params_json).await?;
+
+    println!("Request sent! Event ID: {}", event_id);
+    println!();
+    println!("Waiting for response...");
+
+    // Subscribe to the response
+    transport.subscribe_to_response(&event_id).await?;
+
+    // Wait for response with timeout
+    let mut transport = transport;
+    let timeout = tokio::time::Duration::from_secs(30);
+    let start = std::time::Instant::now();
+
+    loop {
+        if start.elapsed() > timeout {
+            println!("Timeout waiting for response.");
+            break;
+        }
+
+        // Process events
+        tokio::select! {
+            _ = transport.process_events() => {}
+            _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {}
+        }
+
+        // Check for response
+        if let Some(response) = transport.try_recv_response() {
+            if response.request_id == event_id {
+                println!();
+                if response.success {
+                    println!("Response: SUCCESS");
+                    if let Some(result) = &response.result {
+                        println!("Result: {}", serde_json::to_string_pretty(result)?);
+                    }
+                } else {
+                    println!("Response: ERROR");
+                    if let Some(error) = &response.error {
+                        println!("Error: {}", error);
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    transport.disconnect().await;
+    Ok(())
+}
+
+/// Watch for requests to a ledger and process them
+async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use bitcoin::secp256k1::SecretKey;
+    use deposits_bdk::nostr::NostrTransportBuilder;
+
+    let mut ledger_id: Option<String> = None;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else if ledger_id.is_none() {
+            ledger_id = Some(args[i].clone());
+        }
+        i += 1;
+    }
+
+    let config = parse_config(&config_args)?;
+
+    let relay_url = config.relays.first()
+        .ok_or("No relay configured. Use --relay <url>")?
+        .clone();
+
+    let secret_key = SecretKey::from_slice(&config.seed)
+        .map_err(|e| format!("Invalid seed: {}", e))?;
+
+    // Get the node to process requests
+    let node = Node::new(config).await?;
+
+    // Determine ledger_id - use from args or find our primary ledger
+    let ledger_id = if let Some(lid) = ledger_id {
+        lid
+    } else {
+        // Find our primary ledger
+        let ledgers = node.list_ledgers();
+        if ledgers.is_empty() {
+            return Err("No ledgers found. Specify a ledger ID or open a ledger first.".into());
+        }
+        let ((op, rid), _) = ledgers.into_iter().next().unwrap();
+        format!("{}:{}", op, rid)
+    };
+
+    println!("Watching for requests on ledger...");
+    println!("  Relay: {}", relay_url);
+    println!("  Ledger: {}", ledger_id);
+    println!();
+    println!("Press Ctrl+C to stop.");
+    println!();
+
+    let transport = NostrTransportBuilder::new(secret_key)
+        .relay(&relay_url)
+        .build()
+        .await?;
+
+    // Subscribe to requests for this ledger
+    transport.subscribe_to_requests(&ledger_id).await?;
+
+    let mut transport = transport;
+
+    loop {
+        // Process events
+        if let Err(e) = transport.process_events().await {
+            tracing::warn!("Error processing events: {}", e);
+        }
+
+        // Check for requests
+        while let Some(request) = transport.try_recv_request() {
+            println!("[{}] Request: action={}",
+                chrono::Utc::now().format("%H:%M:%S"),
+                request.action);
+            println!("  Event: {}", &request.event_id[..16]);
+            println!("  Params: {}", request.params);
+
+            // Process the request
+            let (success, result, error) = match request.action.as_str() {
+                "deposit_open" => {
+                    process_deposit_open_request(&node, &ledger_id, &request).await
+                }
+                _ => {
+                    (false, None, Some(format!("Unknown action: {}", request.action)))
+                }
+            };
+
+            // Send response
+            match transport.send_ledger_response(
+                &request.event_id,
+                &ledger_id,
+                success,
+                result.clone(),
+                error.clone(),
+            ).await {
+                Ok(resp_id) => {
+                    if success {
+                        println!("  Response: SUCCESS ({})", &resp_id[..16]);
+                    } else {
+                        println!("  Response: ERROR - {} ({})", error.unwrap_or_default(), &resp_id[..16]);
+                    }
+                }
+                Err(e) => {
+                    println!("  Failed to send response: {}", e);
+                }
+            }
+            println!();
+        }
+    }
+}
+
+/// Process a deposit_open request
+async fn process_deposit_open_request(
+    node: &Node,
+    ledger_id: &str,
+    request: &deposits_bdk::nostr::LedgerRequest,
+) -> (bool, Option<serde_json::Value>, Option<String>) {
+    // Parse ledger_id to get reserves_id
+    let parts: Vec<&str> = ledger_id.splitn(2, ':').collect();
+    let reserves_id = if parts.len() == 2 { parts[1] } else { ledger_id };
+
+    // Extract deposit_pubkey from params
+    let deposit_pubkey_str = match request.params.get("deposit_pubkey") {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        _ => return (false, None, Some("Missing deposit_pubkey parameter".to_string())),
+    };
+
+    let deposit_pubkey = match PublicKey::from_str(&deposit_pubkey_str) {
+        Ok(pk) => pk,
+        Err(e) => return (false, None, Some(format!("Invalid deposit_pubkey: {}", e))),
+    };
+
+    // Extract optional fee parameters
+    let fees = if request.params.get("fee_fixed").is_some()
+        || request.params.get("fee_bps").is_some()
+    {
+        Some(deposits_core::FeeStructure {
+            annualized_fixed: request.params.get("fee_fixed")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            annualized_bps: request.params.get("fee_bps")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u16,
+            frequency_blocks: request.params.get("fee_frequency")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(144) as u32,
+        })
+    } else {
+        None
+    };
+
+    // Open the deposit
+    match node.open_deposit(reserves_id, deposit_pubkey, fees) {
+        Ok(deposit) => {
+            let result = serde_json::json!({
+                "deposit_pubkey": deposit_pubkey_str,
+                "balance": deposit.balance,
+                "fees": {
+                    "fixed": deposit.fees.annualized_fixed,
+                    "bps": deposit.fees.annualized_bps,
+                    "frequency": deposit.fees.frequency_blocks,
+                }
+            });
+            (true, Some(result), None)
+        }
+        Err(e) => {
+            (false, None, Some(e.to_string()))
+        }
+    }
 }
