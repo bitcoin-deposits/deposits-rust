@@ -8,16 +8,33 @@
 //! Nostr transport for peer-to-peer messaging
 //!
 //! Uses Nostr encrypted direct messages (NIP-04) to send deposits protocol
-//! messages between peers.
+//! messages between peers, and public events for ledger updates.
+//!
+//! # Custom Kinds
+//!
+//! - **Kind 21100**: Ledger updates (regular event, not replaceable)
+//!   - Tag `d`: `<operator_pubkey>:<reserves_id>` (ledger identifier)
+//!   - Tag `seq`: sequence number
+//!   - Tag `prev`: previous hash (hex)
+//!   - Tag `hash`: current hash (hex)
+//!   - Content: base64-encoded TLV wire format of SignedLedgerUpdate
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use bitcoin::secp256k1::{PublicKey, SecretKey};
 use deposits_core::messages::DepositsMessage;
+use deposits_core::types::SignedLedgerUpdate;
+use deposits_core::{TlvDecode, TlvEncode};
 use nostr_sdk::prelude::*;
 use std::collections::HashMap;
 use std::sync::RwLock;
 use tokio::sync::mpsc;
 
 use crate::Error;
+
+/// Custom Kind for ledger updates.
+/// Uses range 1000-9999 for regular (non-replaceable) custom events.
+/// Each update is a separate event that relays should retain.
+pub const KIND_LEDGER_UPDATE: u16 = 21100;
 
 /// Default relay URLs for the network
 /// Empty by default - relays should be explicitly configured
@@ -34,11 +51,17 @@ pub struct NostrTransport {
     /// Our secp256k1 pubkey (same as deposits node ID)
     our_pubkey: PublicKey,
 
-    /// Pending inbound messages
+    /// Pending inbound messages (encrypted DMs)
     inbound_rx: mpsc::UnboundedReceiver<InboundMessage>,
 
     /// Sender for inbound messages (used by subscription task)
     inbound_tx: mpsc::UnboundedSender<InboundMessage>,
+
+    /// Pending inbound ledger updates (broadcasts)
+    ledger_rx: mpsc::UnboundedReceiver<InboundLedgerUpdate>,
+
+    /// Sender for ledger updates
+    ledger_tx: mpsc::UnboundedSender<InboundLedgerUpdate>,
 
     /// Peer pubkey mapping (secp256k1 -> nostr)
     peer_keys: RwLock<HashMap<PublicKey, nostr_sdk::PublicKey>>,
@@ -55,6 +78,22 @@ pub struct InboundMessage {
 
     /// Timestamp
     pub timestamp: u64,
+}
+
+/// An inbound ledger update from a broadcast
+#[derive(Debug, Clone)]
+pub struct InboundLedgerUpdate {
+    /// The signed ledger update
+    pub update: SignedLedgerUpdate,
+
+    /// Ledger identifier (operator_pubkey:reserves_id)
+    pub ledger_id: String,
+
+    /// Nostr event timestamp
+    pub timestamp: u64,
+
+    /// Nostr event ID for reference
+    pub event_id: String,
 }
 
 impl NostrTransport {
@@ -90,8 +129,9 @@ impl NostrTransport {
         // Connect to relays
         client.connect().await;
 
-        // Create channel for inbound messages
+        // Create channels for inbound messages and ledger updates
         let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
+        let (ledger_tx, ledger_rx) = mpsc::unbounded_channel();
 
         Ok(Self {
             client,
@@ -99,6 +139,8 @@ impl NostrTransport {
             our_pubkey,
             inbound_rx,
             inbound_tx,
+            ledger_rx,
+            ledger_tx,
             peer_keys: RwLock::new(HashMap::new()),
         })
     }
@@ -154,6 +196,95 @@ impl NostrTransport {
         Ok(())
     }
 
+    /// Broadcast a ledger update to the network.
+    ///
+    /// Creates a parameterized replaceable event (Kind 30100) that can be
+    /// subscribed to by anyone interested in this ledger.
+    pub async fn broadcast_ledger_update(&self, update: &SignedLedgerUpdate) -> Result<String, Error> {
+        // Create ledger identifier from operator pubkey and reserves_id
+        let ledger_id = format!("{}:{}", update.operator_id, update.reserves_id);
+
+        // Encode update as TLV, then base64
+        let tlv_bytes = update.tlv_encode();
+        let content = BASE64.encode(&tlv_bytes);
+
+        // Build the event with appropriate tags
+        let event = EventBuilder::new(Kind::Custom(KIND_LEDGER_UPDATE), &content)
+            .tag(Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::D)),
+                [&ledger_id],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("seq"),
+                [update.sequence_number.to_string()],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("prev"),
+                [hex::encode(update.previous_hash)],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("hash"),
+                [hex::encode(update.current_hash)],
+            ))
+            .sign_with_keys(&self.keys)
+            .map_err(|e| Error::Nostr(format!("Failed to sign event: {}", e)))?;
+
+        let event_id = event.id.to_hex();
+
+        // Broadcast
+        self.client
+            .send_event(event)
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to broadcast ledger update: {}", e)))?;
+
+        tracing::info!(
+            "Broadcast ledger update: ledger={}, seq={}, hash={}",
+            ledger_id,
+            update.sequence_number,
+            &hex::encode(update.current_hash)[..16]
+        );
+
+        Ok(event_id)
+    }
+
+    /// Subscribe to ledger updates for a specific ledger.
+    ///
+    /// The ledger_id format is `<operator_pubkey>:<reserves_id>`.
+    pub async fn subscribe_to_ledger(&self, ledger_id: &str) -> Result<(), Error> {
+        let filter = Filter::new()
+            .kind(Kind::Custom(KIND_LEDGER_UPDATE))
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::D),
+                [ledger_id],
+            );
+
+        self.client
+            .subscribe(vec![filter], None)
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to subscribe to ledger: {}", e)))?;
+
+        tracing::info!("Subscribed to ledger updates: {}", ledger_id);
+        Ok(())
+    }
+
+    /// Subscribe to all ledger updates from a specific operator.
+    ///
+    /// Uses prefix matching on the `d` tag to find all ledgers from this operator.
+    pub async fn subscribe_to_operator(&self, operator_pubkey: &PublicKey) -> Result<(), Error> {
+        // We can't do prefix matching in Nostr filters, so we subscribe to all
+        // ledger update events and filter locally. For now, subscribe to all.
+        let filter = Filter::new()
+            .kind(Kind::Custom(KIND_LEDGER_UPDATE));
+
+        self.client
+            .subscribe(vec![filter], None)
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to subscribe to operator: {}", e)))?;
+
+        tracing::info!("Subscribed to ledger updates from operator: {}", operator_pubkey);
+        Ok(())
+    }
+
     /// Start listening for inbound messages
     pub async fn start_listening(&self) -> Result<(), Error> {
         // Subscribe to DMs addressed to us
@@ -175,22 +306,10 @@ impl NostrTransport {
         // Wait for a notification (this blocks until one arrives)
         match self.client.notifications().recv().await {
             Ok(notification) => {
-                if let RelayPoolNotification::Event { event, .. } = notification {
-                    if event.kind == Kind::EncryptedDirectMessage {
-                        if let Ok(msg) = self.process_dm(&event) {
-                            let _ = self.inbound_tx.send(msg);
-                        }
-                    }
-                }
+                self.handle_notification(notification);
                 // Drain any additional pending notifications without blocking
                 while let Ok(notification) = self.client.notifications().try_recv() {
-                    if let RelayPoolNotification::Event { event, .. } = notification {
-                        if event.kind == Kind::EncryptedDirectMessage {
-                            if let Ok(msg) = self.process_dm(&event) {
-                                let _ = self.inbound_tx.send(msg);
-                            }
-                        }
-                    }
+                    self.handle_notification(notification);
                 }
             }
             Err(_) => {
@@ -199,6 +318,25 @@ impl NostrTransport {
             }
         }
         Ok(())
+    }
+
+    /// Handle a single notification
+    fn handle_notification(&self, notification: RelayPoolNotification) {
+        if let RelayPoolNotification::Event { event, .. } = notification {
+            match event.kind {
+                Kind::EncryptedDirectMessage => {
+                    if let Ok(msg) = self.process_dm(&event) {
+                        let _ = self.inbound_tx.send(msg);
+                    }
+                }
+                Kind::Custom(KIND_LEDGER_UPDATE) => {
+                    if let Ok(update) = self.process_ledger_update(&event) {
+                        let _ = self.ledger_tx.send(update);
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Process an encrypted DM event
@@ -232,6 +370,45 @@ impl NostrTransport {
         })
     }
 
+    /// Process a ledger update event
+    fn process_ledger_update(&self, event: &Event) -> Result<InboundLedgerUpdate, Error> {
+        // Extract ledger_id from the d tag
+        let ledger_id = event
+            .tags
+            .iter()
+            .find_map(|tag| {
+                if tag.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::D)) {
+                    tag.content().map(|s| s.to_string())
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| Error::Nostr("Missing d tag in ledger update".to_string()))?;
+
+        // Decode content from base64
+        let tlv_bytes = BASE64
+            .decode(&event.content)
+            .map_err(|e| Error::Serialization(format!("Invalid base64 in ledger update: {}", e)))?;
+
+        // Decode TLV to SignedLedgerUpdate
+        let update = SignedLedgerUpdate::tlv_decode(&tlv_bytes)
+            .map_err(|e| Error::Serialization(format!("Failed to decode ledger update: {:?}", e)))?;
+
+        tracing::debug!(
+            "Received ledger update: ledger={}, seq={}, hash={}",
+            ledger_id,
+            update.sequence_number,
+            &hex::encode(update.current_hash)[..16]
+        );
+
+        Ok(InboundLedgerUpdate {
+            update,
+            ledger_id,
+            timestamp: event.created_at.as_u64(),
+            event_id: event.id.to_hex(),
+        })
+    }
+
     /// Receive the next inbound message (non-blocking)
     pub fn try_recv(&mut self) -> Option<InboundMessage> {
         self.inbound_rx.try_recv().ok()
@@ -240,6 +417,16 @@ impl NostrTransport {
     /// Receive the next inbound message (blocking)
     pub async fn recv(&mut self) -> Option<InboundMessage> {
         self.inbound_rx.recv().await
+    }
+
+    /// Receive the next ledger update (non-blocking)
+    pub fn try_recv_ledger_update(&mut self) -> Option<InboundLedgerUpdate> {
+        self.ledger_rx.try_recv().ok()
+    }
+
+    /// Receive the next ledger update (blocking)
+    pub async fn recv_ledger_update(&mut self) -> Option<InboundLedgerUpdate> {
+        self.ledger_rx.recv().await
     }
 
     /// Disconnect from all relays

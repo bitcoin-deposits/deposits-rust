@@ -43,6 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "collateral" => collateral_command(&args[2..]).await?,
         "deposit" => deposit_command(&args[2..]).await?,
         "withdraw" => withdraw_command(&args[2..]).await?,
+        "nostr" => nostr_command(&args[2..]).await?,
         "keygen" => keygen(),
         "help" | "--help" | "-h" => print_usage(&args[0]),
         cmd => {
@@ -72,6 +73,7 @@ COMMANDS:
     collateral      Manage collateral pledges
     deposit         Manage deposit offers for on-chain funding
     withdraw        Manage on-chain withdrawals
+    nostr           Nostr relay operations (updates, broadcast)
     help            Show this help message
 
 RESERVES SUBCOMMANDS:
@@ -132,6 +134,13 @@ WITHDRAW SUBCOMMANDS:
     withdraw cancel <withdrawal_id>
                     Cancel a pending withdrawal (only before broadcast)
     withdraw list   List all withdrawals
+
+NOSTR SUBCOMMANDS:
+    nostr list      List all ledgers available on the Nostr relay
+    nostr export [operator:reserves_id]
+                    Broadcast ledger updates to Nostr relay (all local ledgers if no ID given)
+    nostr import [operator:reserves_id]
+                    Fetch ledger updates from Nostr relay (all ledgers if no ID given)
 
 OPTIONS:
     --seed <hex>       Seed for wallet/identity (64 hex chars)
@@ -2394,6 +2403,408 @@ async fn withdraw_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         }
         println!();
     }
+
+    Ok(())
+}
+
+// ============================================================================
+// Nostr Commands
+// ============================================================================
+
+/// Handle nostr subcommands
+async fn nostr_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    if args.is_empty() {
+        eprintln!("Usage: deposits-bdk nostr <list|export|import> [args...]");
+        return Ok(());
+    }
+
+    match args[0].as_str() {
+        "list" | "ls" => nostr_list(&args[1..]).await,
+        "export" => nostr_export(&args[1..]).await,
+        "import" => nostr_import(&args[1..]).await,
+        cmd => {
+            eprintln!("Unknown nostr subcommand: {}", cmd);
+            eprintln!("Usage: deposits-bdk nostr <list|export|import> [args...]");
+            Ok(())
+        }
+    }
+}
+
+/// List all ledgers available on Nostr relay
+async fn nostr_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use deposits_bdk::nostr::KIND_LEDGER_UPDATE;
+    use nostr_sdk::prelude::*;
+    use std::collections::HashMap;
+
+    let config = parse_config(args)?;
+
+    // Get relay URL from config
+    let relay_url = config.relays.first()
+        .ok_or("No relay configured. Use --relay <url>")?;
+
+    println!("Listing ledgers from Nostr relay...");
+    println!("  Relay: {}", relay_url);
+    println!();
+
+    // Create a temporary nostr client to fetch events
+    let keys = Keys::generate();
+    let client = Client::new(keys);
+    client.add_relay(relay_url).await
+        .map_err(|e| format!("Failed to add relay: {}", e))?;
+    client.connect().await;
+
+    // Fetch all ledger update events
+    let filter = Filter::new()
+        .kind(Kind::Custom(KIND_LEDGER_UPDATE));
+
+    let events = client
+        .fetch_events(vec![filter], None)
+        .await
+        .map_err(|e| format!("Failed to fetch events: {}", e))?;
+
+    client.disconnect().await.ok();
+
+    if events.is_empty() {
+        println!("No ledgers found.");
+        return Ok(());
+    }
+
+    // Group by ledger_id and track max sequence
+    let mut ledgers: HashMap<String, (u64, u64)> = HashMap::new(); // ledger_id -> (max_seq, count)
+
+    for event in events {
+        // Extract ledger_id from d tag
+        let ledger_id = event
+            .tags
+            .iter()
+            .find_map(|tag| {
+                if tag.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::D)) {
+                    tag.content().map(|s| s.to_string())
+                } else {
+                    None
+                }
+            });
+
+        // Extract sequence from seq tag
+        let sequence = event
+            .tags
+            .iter()
+            .find_map(|tag| {
+                if tag.kind() == TagKind::custom("seq") {
+                    tag.content().and_then(|s| s.parse::<u64>().ok())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+
+        if let Some(lid) = ledger_id {
+            let entry = ledgers.entry(lid).or_insert((0, 0));
+            entry.0 = entry.0.max(sequence);
+            entry.1 += 1;
+        }
+    }
+
+    println!("Found {} ledger(s):", ledgers.len());
+    println!();
+
+    // Sort by ledger_id for consistent output
+    let mut sorted: Vec<_> = ledgers.into_iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+
+    for (ledger_id, (max_seq, count)) in sorted {
+        println!("  {}", ledger_id);
+        println!("    Updates: {} (seq 0..{})", count, max_seq);
+        println!();
+    }
+
+    Ok(())
+}
+
+/// Fetch ledger updates from Nostr relay (import)
+async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use deposits_bdk::nostr::KIND_LEDGER_UPDATE;
+    use deposits_core::{TlvDecode, SignedLedgerUpdate};
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    use nostr_sdk::prelude::*;
+
+    let mut ledger_id: Option<String> = None;
+    let mut config_args = Vec::new();
+    let mut limit: usize = 50;
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--limit" {
+            i += 1;
+            if i < args.len() {
+                limit = args[i].parse().unwrap_or(50);
+            }
+        } else if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else if ledger_id.is_none() {
+            ledger_id = Some(args[i].clone());
+        }
+        i += 1;
+    }
+
+    let config = parse_config(&config_args)?;
+
+    // Get relay URL from config
+    let relay_url = config.relays.first()
+        .ok_or("No relay configured. Use --relay <url>")?;
+
+    println!("Fetching ledger updates from Nostr relay...");
+    println!("  Relay: {}", relay_url);
+    if let Some(ref lid) = ledger_id {
+        println!("  Ledger: {}", lid);
+    } else {
+        println!("  Ledger: (all)");
+    }
+    println!();
+
+    // Create a temporary nostr client to fetch events
+    let keys = Keys::generate();
+    let client = Client::new(keys);
+    client.add_relay(relay_url).await
+        .map_err(|e| format!("Failed to add relay: {}", e))?;
+    client.connect().await;
+
+    // Build filter
+    let mut filter = Filter::new()
+        .kind(Kind::Custom(KIND_LEDGER_UPDATE))
+        .limit(limit);
+
+    if let Some(ref lid) = ledger_id {
+        filter = filter.custom_tag(
+            SingleLetterTag::lowercase(Alphabet::D),
+            [lid.as_str()],
+        );
+    }
+
+    // Fetch events
+    let events = client
+        .fetch_events(vec![filter], None)
+        .await
+        .map_err(|e| format!("Failed to fetch events: {}", e))?;
+
+    client.disconnect().await.ok();
+
+    if events.is_empty() {
+        println!("No ledger updates found.");
+        return Ok(());
+    }
+
+    // Sort by timestamp
+    let mut events: Vec<_> = events.into_iter().collect();
+    events.sort_by_key(|e| e.created_at);
+
+    println!("Found {} ledger update(s):", events.len());
+    println!();
+
+    for event in events {
+        // Extract ledger_id from d tag
+        let event_ledger_id = event
+            .tags
+            .iter()
+            .find_map(|tag| {
+                if tag.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::D)) {
+                    tag.content().map(|s| s.to_string())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "(unknown)".to_string());
+
+        // Extract sequence from seq tag
+        let sequence = event
+            .tags
+            .iter()
+            .find_map(|tag| {
+                if tag.kind() == TagKind::custom("seq") {
+                    tag.content().and_then(|s| s.parse::<u64>().ok())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+
+        // Extract hash from hash tag
+        let hash = event
+            .tags
+            .iter()
+            .find_map(|tag| {
+                if tag.kind() == TagKind::custom("hash") {
+                    tag.content().map(|s| s.to_string())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "(unknown)".to_string());
+
+        // Try to decode the update content
+        let update_info = if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
+            if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
+                // Get operation type from message_type
+                let op_type = match update.message_type {
+                    1 => "LedgerOpen",
+                    2 => "ReservesAdd",
+                    3 => "ReservesRemove",
+                    4 => "ReservesIncrease",
+                    5 => "ReservesDecrease",
+                    10 => "DepositOpen",
+                    11 => "DepositClose",
+                    12 => "DepositUpdate",
+                    20 => "CreditPayment",
+                    21 => "LockPayment",
+                    22 => "FailPayment",
+                    23 => "FulfillPayment",
+                    30 => "FeeCollect",
+                    40 => "CollateralIncrease",
+                    41 => "CollateralDecrease",
+                    50 => "QuorumAddMember",
+                    51 => "QuorumRemoveMember",
+                    52 => "QuorumJoin",
+                    60 => "ReservesRotate",
+                    90 => "LedgerClose",
+                    _ => "Unknown",
+                };
+                format!("{}", op_type)
+            } else {
+                "(decode failed)".to_string()
+            }
+        } else {
+            "(invalid base64)".to_string()
+        };
+
+        // Format timestamp
+        let timestamp = event.created_at.as_u64();
+        let dt = chrono::DateTime::from_timestamp(timestamp as i64, 0)
+            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+            .unwrap_or_else(|| timestamp.to_string());
+
+        println!("  [{}] seq={} op={}", dt, sequence, update_info);
+        println!("       ledger: {}", event_ledger_id);
+        println!("       hash: {}...", &hash[..16.min(hash.len())]);
+        println!();
+    }
+
+    Ok(())
+}
+
+/// Broadcast ledger updates to Nostr relay (export)
+async fn nostr_export(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use bitcoin::secp256k1::SecretKey;
+    use deposits_bdk::nostr::NostrTransportBuilder;
+
+    let mut ledger_id: Option<String> = None;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else if ledger_id.is_none() && !args[i].is_empty() {
+            ledger_id = Some(args[i].clone());
+        }
+        i += 1;
+    }
+
+    let config = parse_config(&config_args)?;
+
+    // Get relay URL before moving config
+    let relay_url = config.relays.first()
+        .ok_or("No relay configured. Use --relay <url>")?
+        .clone();
+
+    // Derive secret key from seed
+    let secret_key = SecretKey::from_slice(&config.seed)
+        .map_err(|e| format!("Invalid seed: {}", e))?;
+
+    // Get the node to access the ledger
+    let node = Node::new(config).await?;
+
+    // Collect ledgers to export
+    let ledgers_to_export: Vec<(String, deposits_core::Ledger)> = match &ledger_id {
+        Some(lid) if lid.contains(':') => {
+            // Parse ledger_id as operator:reserves_id
+            let parts: Vec<&str> = lid.splitn(2, ':').collect();
+            let reserves_id = parts[1];
+
+            let (_, ledger) = node.get_ledger_by_reserves_id(reserves_id)
+                .ok_or_else(|| format!("Ledger not found: {}", reserves_id))?;
+            vec![(lid.clone(), ledger)]
+        }
+        Some(lid) => {
+            // Might be just a reserves_id - try to look it up
+            if let Some((_, ledger)) = node.get_ledger_by_reserves_id(lid) {
+                let full_lid = format!("{}:{}", ledger.state.operator_key, lid);
+                vec![(full_lid, ledger)]
+            } else {
+                return Err(format!(
+                    "Ledger not found: {}. Use format operator:reserves_id or just reserves_id", lid
+                ).into());
+            }
+        }
+        None => {
+            // Export all ledgers
+            node.list_ledgers()
+                .into_iter()
+                .map(|((op, rid), ledger_arc)| {
+                    let lid = format!("{}:{}", op, rid);
+                    let ledger = ledger_arc.read().unwrap().clone();
+                    (lid, ledger)
+                })
+                .collect()
+        }
+    };
+
+    if ledgers_to_export.is_empty() {
+        println!("No ledgers to export.");
+        return Ok(());
+    }
+
+    println!("Exporting ledger updates to Nostr relay...");
+    println!("  Relay: {}", relay_url);
+    println!("  Ledgers to export: {}", ledgers_to_export.len());
+    println!();
+
+    // Create nostr transport
+    let transport = NostrTransportBuilder::new(secret_key)
+        .relay(&relay_url)
+        .build()
+        .await?;
+
+    let mut total_exported = 0;
+
+    for (lid, ledger) in &ledgers_to_export {
+        println!("Ledger: {}", lid);
+        println!("  Updates: {}", ledger.history.len());
+
+        // Broadcast each update
+        for update in &ledger.history {
+            let event_id = transport.broadcast_ledger_update(update).await?;
+            println!("    seq={} hash={}... event={}",
+                update.sequence_number,
+                &hex::encode(update.current_hash)[..16],
+                &event_id[..16],
+            );
+            total_exported += 1;
+        }
+        println!();
+    }
+
+    transport.disconnect().await;
+
+    println!("Export complete! {} update(s) from {} ledger(s) published.",
+        total_exported, ledgers_to_export.len());
 
     Ok(())
 }
