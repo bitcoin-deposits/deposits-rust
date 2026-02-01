@@ -18,10 +18,20 @@ impl ElectrsClient {
         }
     }
 
-    /// Get recent blocks
+    /// Get recent blocks (from tip)
     pub async fn get_blocks(&self) -> Result<Vec<BlockSummary>> {
         let url = format!("{}/blocks", self.base_url);
-        let response: Vec<BlockApiResponse> = self.client.get(&url).send().await?.json().await?;
+        self.fetch_blocks_from_url(&url).await
+    }
+
+    /// Get blocks starting from a specific height (for pagination)
+    pub async fn get_blocks_from_height(&self, start_height: u64) -> Result<Vec<BlockSummary>> {
+        let url = format!("{}/blocks/{}", self.base_url, start_height);
+        self.fetch_blocks_from_url(&url).await
+    }
+
+    async fn fetch_blocks_from_url(&self, url: &str) -> Result<Vec<BlockSummary>> {
+        let response: Vec<BlockApiResponse> = self.client.get(url).send().await?.json().await?;
 
         let mut blocks = Vec::with_capacity(response.len());
         for b in response {

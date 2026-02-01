@@ -127,3 +127,47 @@ fn message_type_name(msg_type: u16) -> String {
         _ => format!("Type({})", msg_type),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_message_type_names() {
+        assert_eq!(message_type_name(1), "LedgerOpen");
+        assert_eq!(message_type_name(3), "ReservesInc");
+        assert_eq!(message_type_name(10), "DepositOpen");
+        assert_eq!(message_type_name(20), "InvoiceCredit");
+        assert_eq!(message_type_name(50), "FeeCollect");
+        assert_eq!(message_type_name(999), "Type(999)");
+    }
+
+    #[test]
+    fn test_operation_info_from_signed_update() {
+        // Use a valid secp256k1 public key (this is the generator point G)
+        let valid_pubkey: PublicKey = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798".parse().unwrap();
+
+        let update = SignedLedgerUpdate {
+            message: vec![],
+            message_type: 10, // DepositOpen
+            operator_id: valid_pubkey,
+            reserves_id: "partner123".to_string(),
+            sequence_number: 42,
+            previous_hash: [0u8; 32],
+            current_hash: [1u8; 32],
+            timestamp: 1700000000,
+            block_height: 800000,
+            block_hash: [0u8; 32],
+            partner_signature: [0u8; 64],
+            operator_signature: [0u8; 64],
+        };
+
+        let op_info = OperationInfo::from_signed_update(&update);
+        assert_eq!(op_info.sequence, 42);
+        assert_eq!(op_info.op_type, "DepositOpen");
+        assert_eq!(op_info.timestamp, 1700000000);
+        assert_eq!(op_info.block_height, 800000);
+        assert_eq!(op_info.prev_hash, "00000000");
+        assert_eq!(op_info.curr_hash, "01010101");
+    }
+}

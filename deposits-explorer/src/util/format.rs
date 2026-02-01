@@ -64,12 +64,67 @@ pub fn short_hash(s: &str, len: usize) -> String {
 }
 
 /// Format bytes as hex
+#[allow(dead_code)]
 pub fn to_hex(bytes: &[u8]) -> String {
     hex::encode(bytes)
 }
 
 /// Format bytes as hex, truncated
+#[allow(dead_code)]
 pub fn short_hex(bytes: &[u8], len: usize) -> String {
     let hex = hex::encode(bytes);
     short_hash(&hex, len)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_btc() {
+        assert_eq!(format_btc(100_000_000), "1.00000000 BTC");
+        assert_eq!(format_btc(50_000_000), "0.50000000 BTC");
+        assert_eq!(format_btc(1_000_000), "0.01000000 BTC");
+        assert_eq!(format_btc(10_000), "10000 sats");
+        assert_eq!(format_btc(1_000), "1000 sats");
+        assert_eq!(format_btc(100), "100 sats");
+        assert_eq!(format_btc(1), "1 sats");
+        assert_eq!(format_btc(0), "0 sats");
+    }
+
+    #[test]
+    fn test_format_amount() {
+        let (text, color) = format_amount(100_000_000);
+        assert_eq!(text, "+1.00000000 BTC");
+        assert_eq!(color, Color::Green);
+
+        let (text, color) = format_amount(-50_000);
+        assert_eq!(text, "-50000 sats");
+        assert_eq!(color, Color::Red);
+
+        let (text, color) = format_amount(0);
+        assert_eq!(text, "0 sats");
+        assert_eq!(color, Color::White);
+    }
+
+    #[test]
+    fn test_short_hash() {
+        let hash = "7f41c1c04e23ba7cde206aa7d4b55c8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d";
+        assert_eq!(short_hash(hash, 8), "7f41c1c0...");
+        assert_eq!(short_hash(hash, 64), hash); // No truncation needed
+        assert_eq!(short_hash("short", 10), "short"); // Already short enough
+    }
+
+    #[test]
+    fn test_short_hex() {
+        let bytes = [0x7f, 0x41, 0xc1, 0xc0, 0x4e, 0x23, 0xba, 0x7c];
+        assert_eq!(short_hex(&bytes, 8), "7f41c1c0...");
+        assert_eq!(short_hex(&bytes, 16), "7f41c1c04e23ba7c");
+    }
+
+    #[test]
+    fn test_to_hex() {
+        assert_eq!(to_hex(&[0xde, 0xad, 0xbe, 0xef]), "deadbeef");
+        assert_eq!(to_hex(&[]), "");
+    }
 }

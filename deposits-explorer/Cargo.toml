@@ -45,3 +45,6 @@ chrono = "0.4"
 
 # Hex encoding
 hex = "0.4"
+
+[dev-dependencies]
+tempfile = "3"

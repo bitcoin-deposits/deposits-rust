@@ -55,12 +55,14 @@ pub struct App {
     /// Block list scroll offset
     pub block_scroll: usize,
 
-    /// Current transaction (when in Transaction view)
+    /// Current transaction (shown in detail panel)
     pub current_tx: Option<TransactionInfo>,
     /// Selected input/output index in transaction view
     pub tx_io_index: usize,
     /// Whether viewing inputs (true) or outputs (false)
     pub tx_viewing_inputs: bool,
+    /// Whether the detail panel is focused (vs the list)
+    pub detail_focused: bool,
 
     /// Current address (when in Address view)
     pub current_address: Option<AddressInfo>,
@@ -94,6 +96,9 @@ pub struct App {
 
     /// Whether to quit
     pub should_quit: bool,
+
+    /// Whether we've loaded all available blocks
+    pub blocks_exhausted: bool,
 }
 
 impl App {
@@ -112,6 +117,7 @@ impl App {
             current_tx: None,
             tx_io_index: 0,
             tx_viewing_inputs: true,
+            detail_focused: false,
 
             current_address: None,
 
@@ -132,6 +138,7 @@ impl App {
             refresh_interval: Duration::from_secs(refresh_secs),
 
             should_quit: false,
+            blocks_exhausted: false,
         }
     }
 
@@ -179,8 +186,26 @@ impl App {
     pub async fn refresh(&mut self) {
         match self.view {
             View::Blocks => {
-                if let Ok(blocks) = self.electrs.get_blocks().await {
-                    self.blocks = blocks;
+                // Only fetch new blocks at the tip, don't replace everything
+                if let Ok(new_blocks) = self.electrs.get_blocks().await {
+                    if self.blocks.is_empty() {
+                        self.blocks = new_blocks;
+                    } else {
+                        // Prepend any new blocks we don't have yet
+                        let our_tip = self.blocks.first().map(|b| b.height).unwrap_or(0);
+                        let fresh: Vec<_> = new_blocks
+                            .into_iter()
+                            .filter(|b| b.height > our_tip)
+                            .collect();
+                        if !fresh.is_empty() {
+                            let count = fresh.len();
+                            // Prepend new blocks
+                            self.blocks.splice(0..0, fresh);
+                            // Adjust block_index to keep same block selected
+                            self.block_index += count;
+                            self.status = format!("{} new blocks", count);
+                        }
+                    }
                 }
             }
             View::Ledgers => {
@@ -190,7 +215,23 @@ impl App {
             }
             _ => {}
         }
+        // Ensure indices are valid
+        self.clamp_indices();
         self.last_refresh = Instant::now();
+    }
+
+    /// Ensure all indices are within valid bounds
+    fn clamp_indices(&mut self) {
+        if !self.blocks.is_empty() {
+            self.block_index = self.block_index.min(self.blocks.len() - 1);
+        } else {
+            self.block_index = 0;
+        }
+        if !self.ledgers.is_empty() {
+            self.ledger_index = self.ledger_index.min(self.ledgers.len() - 1);
+        } else {
+            self.ledger_index = 0;
+        }
     }
 
     /// Navigate to a transaction by txid
@@ -346,20 +387,203 @@ impl App {
         // Pure numeric = block height
         if query.chars().all(|c| c.is_ascii_digit()) {
             if let Ok(height) = query.parse::<u64>() {
-                self.loading = true;
-                if let Ok(hash) = self.electrs.get_block_hash(height).await {
-                    // Find block in our list or fetch it
-                    if let Some(idx) = self.blocks.iter().position(|b| b.hash == hash) {
-                        self.block_index = idx;
-                        self.view = View::Blocks;
-                    }
-                }
-                self.loading = false;
+                self.goto_block_height(height).await;
             }
             return;
         }
 
         self.status = format!("Unknown search query: {}", query);
+    }
+
+    /// Enter a block - fetch txids and load first transaction into detail panel
+    pub async fn enter_block(&mut self) {
+        let block_hash = match self.blocks.get(self.block_index) {
+            Some(b) => b.hash.clone(),
+            None => return,
+        };
+
+        // Fetch txids if not already loaded
+        if self.blocks.get(self.block_index).map(|b| b.txids.is_empty()).unwrap_or(true) {
+            self.loading = true;
+            self.status = "Loading transactions...".to_string();
+
+            match self.electrs.get_block_txids(&block_hash).await {
+                Ok(txids) => {
+                    if let Some(block) = self.blocks.get_mut(self.block_index) {
+                        block.txids = txids;
+                    }
+                }
+                Err(e) => {
+                    self.status = format!("Failed to load txids: {}", e);
+                    self.loading = false;
+                    return;
+                }
+            }
+            self.loading = false;
+        }
+
+        // Load first transaction into detail panel (don't change view)
+        let txid = self.blocks.get(self.block_index)
+            .and_then(|b| b.txids.first().cloned());
+
+        if let Some(txid) = txid {
+            self.loading = true;
+            match self.electrs.get_transaction(&txid).await {
+                Ok(tx) => {
+                    self.current_tx = Some(tx);
+                    self.tx_io_index = 0;
+                    self.tx_viewing_inputs = true;
+                    self.detail_focused = true;
+                    self.status = String::new();
+                }
+                Err(e) => {
+                    self.status = format!("Failed to load tx: {}", e);
+                }
+            }
+            self.loading = false;
+        } else {
+            self.status = "No transactions in block".to_string();
+        }
+    }
+
+    /// Load more blocks when cursor is near the bottom
+    pub async fn maybe_load_more_blocks(&mut self) {
+        // Don't load if already exhausted or loading
+        if self.blocks_exhausted || self.loading || self.blocks.is_empty() {
+            return;
+        }
+
+        // Load more when within 5 blocks of the end
+        let threshold = 5;
+        let remaining = self.blocks.len().saturating_sub(self.block_index + 1);
+        if remaining > threshold {
+            return;
+        }
+
+        // Get the height of the last block to paginate from
+        let last_height = match self.blocks.last() {
+            Some(b) => b.height,
+            None => return,
+        };
+
+        // Check we're not at genesis (height 0)
+        if last_height == 0 {
+            self.blocks_exhausted = true;
+            return;
+        }
+
+        // Request blocks starting from one before our last
+        let start_height = last_height.saturating_sub(1);
+
+        self.loading = true;
+        self.status = "Loading more blocks...".to_string();
+
+        match self.electrs.get_blocks_from_height(start_height).await {
+            Ok(new_blocks) => {
+                // Skip blocks we already have (by height)
+                let fresh_blocks: Vec<_> = new_blocks
+                    .into_iter()
+                    .filter(|b| b.height < last_height)
+                    .collect();
+
+                if fresh_blocks.is_empty() {
+                    self.blocks_exhausted = true;
+                    self.status = "Reached genesis".to_string();
+                } else {
+                    self.status = format!("Loaded {} more blocks", fresh_blocks.len());
+                    self.blocks.extend(fresh_blocks);
+                }
+            }
+            Err(e) => {
+                self.status = format!("Failed to load more blocks: {}", e);
+            }
+        }
+
+        self.clamp_indices();
+        self.loading = false;
+    }
+
+    /// Jump to a specific block height
+    pub async fn goto_block_height(&mut self, target_height: u64) {
+        // First check if we already have this block loaded
+        if let Some(idx) = self.blocks.iter().position(|b| b.height == target_height) {
+            self.block_index = idx;
+            self.view = View::Blocks;
+            self.status = format!("Jumped to block {}", target_height);
+            return;
+        }
+
+        // Not loaded - need to fetch blocks around this height
+        self.loading = true;
+        self.status = format!("Loading block {}...", target_height);
+
+        match self.electrs.get_blocks_from_height(target_height).await {
+            Ok(new_blocks) => {
+                if new_blocks.is_empty() {
+                    self.status = format!("Block {} not found", target_height);
+                    self.loading = false;
+                    return;
+                }
+
+                // Find if target height is in the fetched blocks
+                let target_in_new = new_blocks.iter().position(|b| b.height == target_height);
+
+                if self.blocks.is_empty() {
+                    // No existing blocks, just use the new ones
+                    self.blocks = new_blocks;
+                    self.block_index = target_in_new.unwrap_or(0);
+                } else {
+                    // We have existing blocks - need to merge or replace
+                    let our_tip = self.blocks.first().map(|b| b.height).unwrap_or(0);
+                    let our_bottom = self.blocks.last().map(|b| b.height).unwrap_or(0);
+
+                    if target_height > our_tip {
+                        // Target is above our tip - prepend new blocks
+                        let fresh: Vec<_> = new_blocks
+                            .into_iter()
+                            .filter(|b| b.height > our_tip)
+                            .collect();
+                        let count = fresh.len();
+                        self.blocks.splice(0..0, fresh);
+                        // Find the target in our updated list
+                        if let Some(idx) = self.blocks.iter().position(|b| b.height == target_height) {
+                            self.block_index = idx;
+                        } else {
+                            self.block_index = 0;
+                        }
+                    } else if target_height < our_bottom {
+                        // Target is below our bottom - append new blocks
+                        let fresh: Vec<_> = new_blocks
+                            .into_iter()
+                            .filter(|b| b.height < our_bottom)
+                            .collect();
+                        let old_len = self.blocks.len();
+                        self.blocks.extend(fresh);
+                        // Find the target in our updated list
+                        if let Some(idx) = self.blocks.iter().position(|b| b.height == target_height) {
+                            self.block_index = idx;
+                        } else {
+                            self.block_index = old_len;
+                        }
+                    } else {
+                        // Target should be in our range but wasn't found - scroll to closest
+                        if let Some(idx) = self.blocks.iter().position(|b| b.height <= target_height) {
+                            self.block_index = idx;
+                        }
+                    }
+                }
+
+                self.view = View::Blocks;
+                self.status = format!("Jumped to block {}", target_height);
+                self.blocks_exhausted = false; // Reset since we may have jumped
+            }
+            Err(e) => {
+                self.status = format!("Failed to load block {}: {}", target_height, e);
+            }
+        }
+
+        self.clamp_indices();
+        self.loading = false;
     }
 }
 
@@ -454,7 +678,19 @@ async fn run_loop(
                         app.refresh().await;
                     }
                     KeyCode::Esc => {
-                        app.go_back().await;
+                        // If viewing transaction detail, close it first
+                        if app.view == View::Blocks && app.current_tx.is_some() {
+                            app.current_tx = None;
+                            app.detail_focused = false;
+                        } else {
+                            app.go_back().await;
+                        }
+                    }
+                    KeyCode::Tab => {
+                        // Toggle focus between list and detail
+                        if app.current_tx.is_some() {
+                            app.detail_focused = !app.detail_focused;
+                        }
                     }
                     _ => {
                         // View-specific keys
@@ -482,32 +718,97 @@ async fn run_loop(
 async fn handle_view_keys(app: &mut App, key: KeyCode) {
     match app.view {
         View::Blocks => {
-            match key {
-                KeyCode::Up | KeyCode::Char('k') => {
-                    if app.block_index > 0 {
-                        app.block_index -= 1;
+            // If detail is focused, handle navigation within transaction
+            if app.detail_focused && app.current_tx.is_some() {
+                match key {
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        if app.tx_io_index > 0 {
+                            app.tx_io_index -= 1;
+                        }
                     }
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    if app.block_index < app.blocks.len().saturating_sub(1) {
-                        app.block_index += 1;
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if let Some(ref tx) = app.current_tx {
+                            let max = if app.tx_viewing_inputs {
+                                tx.inputs.len()
+                            } else {
+                                tx.outputs.len()
+                            };
+                            if app.tx_io_index < max.saturating_sub(1) {
+                                app.tx_io_index += 1;
+                            }
+                        }
                     }
-                }
-                KeyCode::Char('g') => {
-                    app.block_index = 0;
-                }
-                KeyCode::Char('G') => {
-                    app.block_index = app.blocks.len().saturating_sub(1);
-                }
-                KeyCode::Enter => {
-                    // Enter block: show first transaction
-                    let txid = app.blocks.get(app.block_index)
-                        .and_then(|b| b.txids.first().cloned());
-                    if let Some(txid) = txid {
-                        app.goto_transaction(&txid).await;
+                    KeyCode::Left | KeyCode::Char('h') => {
+                        if !app.tx_viewing_inputs {
+                            app.tx_viewing_inputs = true;
+                            app.tx_io_index = 0;
+                        }
                     }
+                    KeyCode::Right | KeyCode::Char('l') => {
+                        if app.tx_viewing_inputs {
+                            app.tx_viewing_inputs = false;
+                            app.tx_io_index = 0;
+                        }
+                    }
+                    KeyCode::Enter => {
+                        // Navigate to selected input's prev tx or output's spending tx
+                        if let Some(ref tx) = app.current_tx {
+                            if app.tx_viewing_inputs {
+                                if let Some(input) = tx.inputs.get(app.tx_io_index) {
+                                    if !input.is_coinbase {
+                                        let txid = input.txid.clone();
+                                        app.loading = true;
+                                        if let Ok(new_tx) = app.electrs.get_transaction(&txid).await {
+                                            app.current_tx = Some(new_tx);
+                                            app.tx_io_index = 0;
+                                        }
+                                        app.loading = false;
+                                    }
+                                }
+                            } else if let Some(output) = tx.outputs.get(app.tx_io_index) {
+                                if let Some(ref spending_txid) = output.spending_txid {
+                                    let txid = spending_txid.clone();
+                                    app.loading = true;
+                                    if let Ok(new_tx) = app.electrs.get_transaction(&txid).await {
+                                        app.current_tx = Some(new_tx);
+                                        app.tx_io_index = 0;
+                                    }
+                                    app.loading = false;
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
+            } else {
+                // Block list is focused
+                match key {
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        if app.block_index > 0 {
+                            app.block_index -= 1;
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if app.block_index < app.blocks.len().saturating_sub(1) {
+                            app.block_index += 1;
+                            // Lazy load more blocks when near the bottom
+                            app.maybe_load_more_blocks().await;
+                        }
+                    }
+                    KeyCode::Char('g') => {
+                        app.block_index = 0;
+                    }
+                    KeyCode::Char('G') => {
+                        app.block_index = app.blocks.len().saturating_sub(1);
+                        // Load more blocks when jumping to bottom
+                        app.maybe_load_more_blocks().await;
+                    }
+                    KeyCode::Enter => {
+                        // Enter block: fetch txids and show first transaction
+                        app.enter_block().await;
+                    }
+                    _ => {}
+                }
             }
         }
         View::Transaction => {

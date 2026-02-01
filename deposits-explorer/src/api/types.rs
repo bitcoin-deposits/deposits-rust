@@ -186,3 +186,130 @@ impl AddressInfo {
         self.utxos.len()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_block_summary() {
+        let json = r#"{
+            "hash": "0000000000000000000123456789abcdef",
+            "height": 800000,
+            "timestamp": 1700000000,
+            "tx_count": 3500,
+            "txids": [],
+            "size": 1500000,
+            "weight": 4000000
+        }"#;
+
+        let block: BlockSummary = serde_json::from_str(json).unwrap();
+        assert_eq!(block.height, 800000);
+        assert_eq!(block.tx_count, 3500);
+        assert_eq!(block.timestamp, 1700000000);
+    }
+
+    #[test]
+    fn test_parse_transaction() {
+        let json = r#"{
+            "txid": "abc123def456",
+            "version": 2,
+            "locktime": 0,
+            "vin": [{
+                "txid": "prev123",
+                "vout": 0,
+                "scriptsig": "",
+                "witness": [],
+                "sequence": 4294967295
+            }],
+            "vout": [{
+                "scriptpubkey": "0014abc123",
+                "scriptpubkey_asm": "OP_0 OP_PUSHBYTES_20 abc123",
+                "scriptpubkey_type": "v0_p2wpkh",
+                "scriptpubkey_address": "bc1qtest",
+                "value": 50000
+            }],
+            "size": 250,
+            "weight": 750,
+            "fee": 500,
+            "status": {
+                "confirmed": true,
+                "block_height": 800000
+            }
+        }"#;
+
+        let tx: TransactionInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(tx.txid, "abc123def456");
+        assert_eq!(tx.inputs.len(), 1);
+        assert_eq!(tx.outputs.len(), 1);
+        assert_eq!(tx.outputs[0].value, 50000);
+        assert!(tx.status.confirmed);
+        assert_eq!(tx.vsize(), 188); // (750 + 3) / 4
+    }
+
+    #[test]
+    fn test_transaction_fee_rate() {
+        let tx = TransactionInfo {
+            txid: "test".to_string(),
+            version: 2,
+            locktime: 0,
+            inputs: vec![],
+            outputs: vec![],
+            size: 250,
+            weight: 1000,
+            fee: 500,
+            status: TxStatus::default(),
+        };
+
+        // vsize = 1000/4 = 250, fee_rate = 500/250 = 2.0 sat/vB
+        assert!((tx.fee_rate() - 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_parse_utxo() {
+        let json = r#"{
+            "txid": "abc123",
+            "vout": 0,
+            "value": 100000,
+            "status": {
+                "confirmed": true,
+                "block_height": 800000
+            }
+        }"#;
+
+        let utxo: Utxo = serde_json::from_str(json).unwrap();
+        assert_eq!(utxo.txid, "abc123");
+        assert_eq!(utxo.value, 100000);
+        assert!(utxo.status.confirmed);
+    }
+
+    #[test]
+    fn test_parse_outspend() {
+        let json = r#"{
+            "spent": true,
+            "txid": "spending123",
+            "vin": 0
+        }"#;
+
+        let outspend: OutSpend = serde_json::from_str(json).unwrap();
+        assert!(outspend.spent);
+        assert_eq!(outspend.txid, Some("spending123".to_string()));
+    }
+
+    #[test]
+    fn test_address_balance() {
+        let addr = AddressInfo {
+            address: "bc1qtest".to_string(),
+            script_type: "v0_p2wpkh".to_string(),
+            funded_txo_count: 5,
+            funded_txo_sum: 1_000_000,
+            spent_txo_count: 3,
+            spent_txo_sum: 400_000,
+            utxos: vec![],
+            txs: vec![],
+        };
+
+        assert_eq!(addr.balance(), 600_000);
+        assert_eq!(addr.utxo_count(), 0);
+    }
+}
