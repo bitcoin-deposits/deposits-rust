@@ -142,7 +142,10 @@ NOSTR SUBCOMMANDS:
     nostr import [operator:reserves_id]
                     Fetch ledger updates from Nostr relay (all ledgers if no ID given)
     nostr request <ledger_id> <action> [params...]
-                    Send a request to a ledger (e.g., deposit_open)
+                    Send a request to a ledger. Actions:
+                      deposit_open <pubkey> [fee_fixed] [fee_bps] [fee_frequency]
+                      deposit_offer <pubkey> <max_sats> <min_sats> <blocks_valid>
+                      collateral_lock <secret> <amount_msats> <lock_blocks> [requesting_op]
     nostr watch <ledger_id>
                     Watch for requests to a ledger and process them
 
@@ -2875,6 +2878,32 @@ async fn nostr_request(args: &[String]) -> Result<(), Box<dyn std::error::Error>
             }
             serde_json::Value::Object(obj)
         }
+        "deposit_offer" => {
+            // params: deposit_pubkey max_sats min_sats blocks_valid
+            if params.len() < 4 {
+                return Err("deposit_offer requires: <deposit_pubkey> <max_sats> <min_sats> <blocks_valid>".into());
+            }
+            let mut obj = serde_json::Map::new();
+            obj.insert("deposit_pubkey".to_string(), serde_json::Value::String(params[0].clone()));
+            obj.insert("max_sats".to_string(), serde_json::json!(params[1].parse::<u64>().unwrap_or(0)));
+            obj.insert("min_sats".to_string(), serde_json::json!(params[2].parse::<u64>().unwrap_or(0)));
+            obj.insert("blocks_valid".to_string(), serde_json::json!(params[3].parse::<u32>().unwrap_or(144)));
+            serde_json::Value::Object(obj)
+        }
+        "collateral_lock" => {
+            // params: deposit_secret amount_msats lock_blocks [requesting_operator]
+            if params.len() < 3 {
+                return Err("collateral_lock requires: <deposit_secret> <amount_msats> <lock_blocks> [requesting_operator]".into());
+            }
+            let mut obj = serde_json::Map::new();
+            obj.insert("deposit_secret".to_string(), serde_json::Value::String(params[0].clone()));
+            obj.insert("amount_msats".to_string(), serde_json::json!(params[1].parse::<u64>().unwrap_or(0)));
+            obj.insert("lock_blocks".to_string(), serde_json::json!(params[2].parse::<u32>().unwrap_or(0)));
+            if params.len() > 3 {
+                obj.insert("requesting_operator".to_string(), serde_json::Value::String(params[3].clone()));
+            }
+            serde_json::Value::Object(obj)
+        }
         _ => {
             // Generic: treat params as key=value pairs or just values
             let mut obj = serde_json::Map::new();
@@ -3035,6 +3064,12 @@ async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
                 "deposit_open" => {
                     process_deposit_open_request(&node, &ledger_id, &request).await
                 }
+                "deposit_offer" => {
+                    process_deposit_offer_request(&node, &ledger_id, &request).await
+                }
+                "collateral_lock" => {
+                    process_collateral_lock_request(&node, &ledger_id, &request).await
+                }
                 _ => {
                     (false, None, Some(format!("Unknown action: {}", request.action)))
                 }
@@ -3115,6 +3150,156 @@ async fn process_deposit_open_request(
                     "bps": deposit.fees.annualized_bps,
                     "frequency": deposit.fees.frequency_blocks,
                 }
+            });
+            (true, Some(result), None)
+        }
+        Err(e) => {
+            (false, None, Some(e.to_string()))
+        }
+    }
+}
+
+/// Process a deposit_offer request
+async fn process_deposit_offer_request(
+    node: &Node,
+    ledger_id: &str,
+    request: &deposits_bdk::nostr::LedgerRequest,
+) -> (bool, Option<serde_json::Value>, Option<String>) {
+    // Parse ledger_id to get reserves_id
+    let parts: Vec<&str> = ledger_id.splitn(2, ':').collect();
+    let reserves_id = if parts.len() == 2 { parts[1] } else { ledger_id };
+
+    // Extract deposit_pubkey from params
+    let deposit_pubkey_str = match request.params.get("deposit_pubkey") {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        _ => return (false, None, Some("Missing deposit_pubkey parameter".to_string())),
+    };
+
+    let deposit_pubkey = match PublicKey::from_str(&deposit_pubkey_str) {
+        Ok(pk) => pk,
+        Err(e) => return (false, None, Some(format!("Invalid deposit_pubkey: {}", e))),
+    };
+
+    // Extract required parameters
+    let max_sats = match request.params.get("max_sats").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => return (false, None, Some("Missing max_sats parameter".to_string())),
+    };
+
+    let min_sats = match request.params.get("min_sats").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => return (false, None, Some("Missing min_sats parameter".to_string())),
+    };
+
+    let blocks_valid = match request.params.get("blocks_valid").and_then(|v| v.as_u64()) {
+        Some(v) => v as u32,
+        None => return (false, None, Some("Missing blocks_valid parameter".to_string())),
+    };
+
+    if min_sats >= max_sats {
+        return (false, None, Some("min_sats must be less than max_sats".to_string()));
+    }
+
+    // Sync wallet to get current block height
+    if let Err(e) = node.sync_wallet() {
+        return (false, None, Some(format!("Failed to sync wallet: {}", e)));
+    }
+
+    // Create the offer
+    match node.create_deposit_offer(reserves_id, deposit_pubkey, max_sats, min_sats, blocks_valid) {
+        Ok(offer) => {
+            let result = serde_json::json!({
+                "offer_id": hex::encode(&offer.offer_id),
+                "funding_address": offer.funding_address,
+                "deadline_block": offer.deadline_block,
+                "created_at_block": offer.created_at_block,
+                "max_sats": max_sats,
+                "min_sats": min_sats,
+            });
+            (true, Some(result), None)
+        }
+        Err(e) => {
+            (false, None, Some(e.to_string()))
+        }
+    }
+}
+
+/// Process a collateral_lock request
+async fn process_collateral_lock_request(
+    node: &Node,
+    ledger_id: &str,
+    request: &deposits_bdk::nostr::LedgerRequest,
+) -> (bool, Option<serde_json::Value>, Option<String>) {
+    use bitcoin::secp256k1::Secp256k1;
+
+    // Parse ledger_id to get reserves_id
+    let parts: Vec<&str> = ledger_id.splitn(2, ':').collect();
+    let reserves_id = if parts.len() == 2 { parts[1] } else { ledger_id };
+
+    // Extract deposit_secret from params
+    let deposit_secret_hex = match request.params.get("deposit_secret") {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        _ => return (false, None, Some("Missing deposit_secret parameter".to_string())),
+    };
+
+    let secret_bytes = match hex::decode(&deposit_secret_hex) {
+        Ok(b) => b,
+        Err(e) => return (false, None, Some(format!("Invalid deposit_secret hex: {}", e))),
+    };
+
+    let deposit_secret = match bitcoin::secp256k1::SecretKey::from_slice(&secret_bytes) {
+        Ok(s) => s,
+        Err(e) => return (false, None, Some(format!("Invalid deposit_secret: {}", e))),
+    };
+
+    // Derive the deposit pubkey from the secret
+    let secp = Secp256k1::new();
+    let deposit_pubkey = PublicKey::from_secret_key(&secp, &deposit_secret);
+
+    // Extract required parameters
+    let amount_msats = match request.params.get("amount_msats").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => return (false, None, Some("Missing amount_msats parameter".to_string())),
+    };
+
+    let lock_blocks = match request.params.get("lock_blocks").and_then(|v| v.as_u64()) {
+        Some(v) => v as u32,
+        None => return (false, None, Some("Missing lock_blocks parameter".to_string())),
+    };
+
+    // Get current block height and compute lock_until_block
+    let current_block = match node.wallet.get_block_height() {
+        Ok(h) => h,
+        Err(e) => return (false, None, Some(format!("Failed to get block height: {}", e))),
+    };
+    let lock_until_block = current_block + lock_blocks;
+
+    // Parse requesting operator (defaults to sender's node_id derived from event)
+    let requesting_operator = if let Some(serde_json::Value::String(hex)) = request.params.get("requesting_operator") {
+        match PublicKey::from_str(hex) {
+            Ok(pk) => pk,
+            Err(e) => return (false, None, Some(format!("Invalid requesting_operator: {}", e))),
+        }
+    } else {
+        // Default to the operator's own node_id (self-request)
+        node.node_id
+    };
+
+    // Lock the collateral
+    match node.lock_collateral(
+        reserves_id,
+        deposit_pubkey,
+        &deposit_secret,
+        amount_msats,
+        lock_until_block,
+        requesting_operator,
+    ) {
+        Ok(attestation) => {
+            let result = serde_json::json!({
+                "amount": attestation.amount,
+                "lock_until_block": attestation.lock_until_block,
+                "quorum_member": attestation.quorum_member.to_string(),
+                "attestation": serde_json::to_value(&attestation).unwrap_or(serde_json::Value::Null),
             });
             (true, Some(result), None)
         }
