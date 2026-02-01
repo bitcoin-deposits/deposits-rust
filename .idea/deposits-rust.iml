@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<module type="EMPTY_MODULE" version="4">
+  <component name="NewModuleRootManager">
+    <content url="file://$MODULE_DIR$">
+      <sourceFolder url="file://$MODULE_DIR$/deposits-bdk/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/deposits-core/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/deposits-explorer/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/deposits-explorer/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/deposits-ldk/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/deposits-nwc/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/deposits-tools/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/deposits-tools/tests" isTestSource="true" />
+      <excludeFolder url="file://$MODULE_DIR$/deposits-core/target" />
+      <excludeFolder url="file://$MODULE_DIR$/deposits-ldk/target" />
+      <excludeFolder url="file://$MODULE_DIR$/target" />
+    </content>
+    <orderEntry type="inheritedJdk" />
+    <orderEntry type="sourceFolder" forTests="false" />
+  </component>
+</module>
