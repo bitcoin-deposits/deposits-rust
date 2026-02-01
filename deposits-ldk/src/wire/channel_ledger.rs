@@ -127,10 +127,10 @@ pub struct ChannelLedger {
     #[serde(skip)]
     pub processed_payments: std::collections::HashSet<[u8; 32]>,
 
-    /// Collateral partners who provide additional backing from other channels
-    pub collateral_partners: Vec<PublicKey>,
+    /// Quorum members who provide additional backing from other channels
+    pub quorum_members: Vec<PublicKey>,
 
-    /// Collateral attestations from collateral partners
+    /// Collateral attestations from quorum members
     /// Each attestation proves how much the partner can slash if operator misbehaves
     pub collateral_attestations: HashMap<PublicKey, crate::wire::messages::CollateralAttestationMsg>,
 }
@@ -164,7 +164,7 @@ impl ChannelLedger {
             channel_deepest_commitment_hash: [0u8; 32], // No commitments yet
             update_history: Vec::new(),
             processed_payments: std::collections::HashSet::new(),
-            collateral_partners: Vec::new(),
+            quorum_members: Vec::new(),
             collateral_attestations: HashMap::new(),
         }
     }
@@ -523,6 +523,10 @@ impl ChannelLedger {
             LedgerOperation::ReservesDecrease { new_amount } => {
                 self.reserves.amount = *new_amount;
             }
+            LedgerOperation::ReservesRotate { amount, .. } => {
+                // ReservesRotate records rotation to Taproot - amount should match
+                self.reserves.amount = *amount;
+            }
             LedgerOperation::DepositOpen { pubkey, fees, .. } => {
                 let deposit = Deposit::new(*pubkey, fees.clone());
                 self.deposits.insert(*pubkey, deposit);
@@ -605,27 +609,27 @@ impl ChannelLedger {
             LedgerOperation::CollateralDecrease { .. } => {
                 // ChannelLedger doesn't track collateral amount directly
             }
-            LedgerOperation::CollateralAddPartner { collateral_partner, .. } => {
-                if !self.collateral_partners.contains(collateral_partner) {
-                    self.collateral_partners.push(*collateral_partner);
+            LedgerOperation::QuorumAddMember { quorum_member, .. } => {
+                if !self.quorum_members.contains(quorum_member) {
+                    self.quorum_members.push(*quorum_member);
                 }
             }
-            LedgerOperation::CollateralRemovePartner { collateral_partner, .. } => {
-                self.collateral_partners.retain(|p| p != collateral_partner);
-                self.collateral_attestations.remove(collateral_partner);
+            LedgerOperation::QuorumRemoveMember { quorum_member, .. } => {
+                self.quorum_members.retain(|p| p != quorum_member);
+                self.collateral_attestations.remove(quorum_member);
             }
-            LedgerOperation::CollateralAttestation { collateral_operator, collateral_partner, amount, block_height, lock_until_block, signature, ledger_hash } => {
-                // Store attestation by the actual collateral partner
+            LedgerOperation::CollateralAttestation { collateral_operator, quorum_member, amount, block_height, lock_until_block, signature, ledger_hash } => {
+                // Store attestation by the actual quorum member
                 let attestation_msg = CollateralAttestationMsg {
                     operator: *collateral_operator,
-                    collateral_partner: *collateral_partner,
+                    quorum_member: *quorum_member,
                     amount: *amount,
                     block_height: *block_height,
                     lock_until_block: *lock_until_block,
                     signature: *signature,
                     ledger_hash: *ledger_hash,
                 };
-                self.collateral_attestations.insert(*collateral_partner, attestation_msg);
+                self.collateral_attestations.insert(*quorum_member, attestation_msg);
             }
             LedgerOperation::CollateralLock { deposit_pubkey, amount, lock_until_block, .. } => {
                 // Update the deposit's collateral lock fields
@@ -633,6 +637,10 @@ impl ChannelLedger {
                     deposit.collateral_lock_amount = *amount;
                     deposit.collateral_lock_expires = *lock_until_block;
                 }
+            }
+            LedgerOperation::QuorumJoin { .. } => {
+                // QuorumJoin is recorded on the consenting party's own ledger
+                // ChannelLedger doesn't need to track this (it's in LedgerState.joined_quorums)
             }
             LedgerOperation::LedgerClose => {
                 self.deposits.clear();

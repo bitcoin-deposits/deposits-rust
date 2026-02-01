@@ -170,15 +170,32 @@ impl NostrTransport {
     }
 
     /// Process incoming events (call this in a loop)
+    /// This awaits on the notification channel, blocking until a message arrives
     pub async fn process_events(&mut self) -> Result<(), Error> {
-        // Handle notifications
-        while let Ok(notification) = self.client.notifications().try_recv() {
-            if let RelayPoolNotification::Event { event, .. } = notification {
-                if event.kind == Kind::EncryptedDirectMessage {
-                    if let Ok(msg) = self.process_dm(&event) {
-                        let _ = self.inbound_tx.send(msg);
+        // Wait for a notification (this blocks until one arrives)
+        match self.client.notifications().recv().await {
+            Ok(notification) => {
+                if let RelayPoolNotification::Event { event, .. } = notification {
+                    if event.kind == Kind::EncryptedDirectMessage {
+                        if let Ok(msg) = self.process_dm(&event) {
+                            let _ = self.inbound_tx.send(msg);
+                        }
                     }
                 }
+                // Drain any additional pending notifications without blocking
+                while let Ok(notification) = self.client.notifications().try_recv() {
+                    if let RelayPoolNotification::Event { event, .. } = notification {
+                        if event.kind == Kind::EncryptedDirectMessage {
+                            if let Ok(msg) = self.process_dm(&event) {
+                                let _ = self.inbound_tx.send(msg);
+                            }
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                // Channel closed or lagged, wait a bit before retrying
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }
         }
         Ok(())

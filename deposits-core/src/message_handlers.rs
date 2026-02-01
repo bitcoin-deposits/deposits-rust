@@ -32,7 +32,7 @@ use crate::traits::ProtocolEvent;
 use crate::wire_messages::{
     QuorumJoinRequestMsgWire, QuorumVoteRequestMsg, RecoveryVoteMsg,
     CollateralConsentRequestMsg, CollateralConsentResponseMsg,
-    CollateralAddPartnerMsg, CollateralRemovePartnerMsg,
+    QuorumAddMemberMsg, QuorumRemoveMemberMsg,
     CollateralAttestationMsg, UncreditedPaymentMsg,
     ReceivingCreditPaymentMsg, SendingLockPaymentMsg,
     SendingFulfillPaymentMsg, SendingFailPaymentMsg,
@@ -90,11 +90,11 @@ pub enum ResponseData {
         threshold: u16,
         rejection_reason: Option<String>,
     },
-    /// Collateral partner added - response with signature data for ACK
-    CollateralPartnerAdded {
+    /// Quorum member added - response with signature data for ACK
+    QuorumMemberAdded {
         operator_id: PublicKey,
         reserves_id: String,
-        collateral_partner: PublicKey,
+        quorum_member: PublicKey,
         /// Sequence number after append
         sequence: u64,
         /// Previous state hash
@@ -102,10 +102,10 @@ pub enum ResponseData {
         /// New state hash after append
         new_hash: [u8; 32],
     },
-    /// Collateral partner removed - response with signature data for ACK
-    CollateralPartnerRemoved {
+    /// Quorum member removed - response with signature data for ACK
+    QuorumMemberRemoved {
         reserves_id: String,
-        collateral_partner: PublicKey,
+        quorum_member: PublicKey,
         /// Sequence number after append
         sequence: u64,
         /// Previous state hash
@@ -116,7 +116,7 @@ pub enum ResponseData {
     /// Collateral attestation processed
     CollateralAttestationProcessed {
         operator: PublicKey,
-        collateral_partner: PublicKey,
+        quorum_member: PublicKey,
         amount: u64,
     },
     /// Uncredited payment accusation - emit event for node layer
@@ -208,7 +208,7 @@ pub enum ResponseData {
         reserves_id: String,
         initial_amount: u64,
         spend_to: PublicKey,
-        collateral_partners: Vec<PublicKey>,
+        quorum_members: Vec<PublicKey>,
         /// Sequence number after append
         sequence: u64,
         /// Previous state hash
@@ -391,11 +391,11 @@ pub fn handle_ledger_update<C: HandlerContext>(
 
         // Check for idempotent operations first - these still need ACKs but don't modify state
         let is_idempotent = match &operation {
-            LedgerOperation::CollateralAddPartner { collateral_partner, .. } => {
-                ledger.state.collateral_partners.contains(collateral_partner)
+            LedgerOperation::QuorumAddMember { quorum_member, .. } => {
+                ledger.state.quorum_members.contains(quorum_member)
             }
-            LedgerOperation::CollateralRemovePartner { collateral_partner, .. } => {
-                !ledger.state.collateral_partners.contains(collateral_partner)
+            LedgerOperation::QuorumRemoveMember { quorum_member, .. } => {
+                !ledger.state.quorum_members.contains(quorum_member)
             }
             LedgerOperation::DepositOpen { pubkey, .. } => {
                 ledger.state.deposits.contains_key(pubkey)
@@ -503,12 +503,14 @@ pub fn handle_ledger_update<C: HandlerContext>(
 
                 // Operations that don't need pre-validation (validated during append)
                 // or have already been checked for idempotency above
-                LedgerOperation::CollateralAddPartner { .. } |
-                LedgerOperation::CollateralRemovePartner { .. } |
+                LedgerOperation::QuorumAddMember { .. } |
+                LedgerOperation::QuorumRemoveMember { .. } |
                 LedgerOperation::CollateralLock { .. } |
+                LedgerOperation::QuorumJoin { .. } |
                 LedgerOperation::CollateralIncrease { .. } |
                 LedgerOperation::CollateralDecrease { .. } |
                 LedgerOperation::CollateralAttestation { .. } |
+                LedgerOperation::ReservesRotate { .. } |
                 LedgerOperation::Tombstone { .. } |
                 LedgerOperation::LedgerOpen { .. } => {}
             }
@@ -543,13 +545,13 @@ pub fn handle_ledger_update<C: HandlerContext>(
         }
         let _ = ctx.persist_ledger(&operator, &partner);
 
-        // Sync quorum for collateral partner changes
+        // Sync quorum for quorum member changes
         match &operation {
-            LedgerOperation::CollateralAddPartner { collateral_partner, .. } => {
-                ctx.sync_quorum_member(operator, &partner, *collateral_partner, true);
+            LedgerOperation::QuorumAddMember { quorum_member, .. } => {
+                ctx.sync_quorum_member(operator, &partner, *quorum_member, true);
             }
-            LedgerOperation::CollateralRemovePartner { collateral_partner, .. } => {
-                ctx.sync_quorum_member(operator, &partner, *collateral_partner, false);
+            LedgerOperation::QuorumRemoveMember { quorum_member, .. } => {
+                ctx.sync_quorum_member(operator, &partner, *quorum_member, false);
             }
             _ => {}
         }
@@ -845,7 +847,7 @@ pub fn handle_recovery_vote<C: HandlerContext>(
 
 /// Handle a CollateralConsentRequest message.
 ///
-/// Sent by operators requesting consent from potential collateral partners.
+/// Sent by operators requesting consent from potential quorum members.
 /// Uses providers to sign and send responses directly.
 pub fn handle_collateral_consent_request<C: HandlerContext>(
     ctx: &C,
@@ -877,6 +879,23 @@ pub fn handle_collateral_consent_request<C: HandlerContext>(
         [0u8; 64]
     };
 
+    // If consent granted, append QuorumJoin to our own ledger
+    // This creates a two-sided auditable trail
+    if consent_granted {
+        // Calculate membership expiration (~1 week at 10 min/block)
+        let current_block = ctx.current_block_height();
+        let membership_duration = 1000; // ~1 week
+        let membership_expires = current_block + membership_duration;
+
+        // Append QuorumJoin to our operator ledger
+        ctx.append_quorum_join_to_own_ledger(
+            msg.operator_id,
+            &msg.reserves_id,
+            membership_expires,
+            signature,
+        )?;
+    }
+
     // Queue the response message
     let response = DepositsMessage::CoordinationResponse(
         CoordinationResponseMsg::CollateralConsentResponse {
@@ -884,7 +903,7 @@ pub fn handle_collateral_consent_request<C: HandlerContext>(
             operator_id: msg.operator_id,
             reserves_id: msg.reserves_id.clone(),
             consent_granted,
-            collateral_partner_signature: signature,
+            quorum_member_signature: signature,
         }
     );
     ctx.queue_message(sender, response)?;
@@ -905,7 +924,7 @@ pub fn handle_collateral_consent_request<C: HandlerContext>(
 
 /// Handle a CollateralConsentResponse message.
 ///
-/// Received by operators after requesting consent from collateral partners.
+/// Received by operators after requesting consent from quorum members.
 pub fn handle_collateral_consent_response<C: HandlerContext>(
     ctx: &C,
     msg: &CollateralConsentResponseMsg,
@@ -916,7 +935,7 @@ pub fn handle_collateral_consent_response<C: HandlerContext>(
         if !ctx.verify_consent_signature(
             msg.operator_id,
             &msg.reserves_id,
-            msg.collateral_partner_signature,
+            msg.quorum_member_signature,
             sender,
         ) {
             return Ok(HandlerResult::Rejected("Invalid consent signature".to_string()));
@@ -928,29 +947,29 @@ pub fn handle_collateral_consent_response<C: HandlerContext>(
         msg.operator_id,
         &msg.reserves_id,
         msg.consent_granted,
-        msg.collateral_partner_signature,
+        msg.quorum_member_signature,
     );
 
-    // Send audit to new collateral partner if granted
+    // Send audit to new quorum member if granted
     if msg.consent_granted {
-        ctx.send_audit_to_collateral_partner(
+        ctx.send_audit_to_quorum_member(
             msg.operator_id,
             &msg.reserves_id,
             sender,
-            msg.collateral_partner_signature,
+            msg.quorum_member_signature,
         );
     }
 
     Ok(HandlerResult::Ok)
 }
 
-/// Handle a CollateralAddPartner message.
+/// Handle a QuorumAddMember message.
 ///
-/// Received by partners when an operator adds a collateral partner to a ledger.
+/// Received by partners when an operator adds a quorum member to a ledger.
 /// This handler does the complete flow: validate, mutate, sign, persist, sync, send ACK.
 pub fn handle_collateral_add_partner<C: HandlerContext>(
     ctx: &C,
-    msg: &CollateralAddPartnerMsg,
+    msg: &QuorumAddMemberMsg,
     sender: PublicKey,
 ) -> Result<HandlerResult, HandlerError> {
     use crate::messages::{LedgerOperation, LEDGER_UPDATE};
@@ -972,9 +991,9 @@ pub fn handle_collateral_add_partner<C: HandlerContext>(
             reserves_id: msg.reserves_id.clone(),
         })?;
 
-    let operation = LedgerOperation::CollateralAddPartner {
-        collateral_partner: msg.collateral_partner,
-        collateral_partner_signature: msg.collateral_partner_signature,
+    let operation = LedgerOperation::QuorumAddMember {
+        quorum_member: msg.quorum_member,
+        quorum_member_signature: msg.quorum_member_signature,
     };
 
     // Check for idempotency and append (single write lock scope)
@@ -984,7 +1003,7 @@ pub fn handle_collateral_add_partner<C: HandlerContext>(
         )?;
 
         // Idempotency check
-        if ledger.state.collateral_partners.contains(&msg.collateral_partner) {
+        if ledger.state.quorum_members.contains(&msg.quorum_member) {
             let seq = ledger.sequence();
             let hash = ledger.hash();
             (hash, hash, seq, Vec::new(), true)
@@ -1018,20 +1037,20 @@ pub fn handle_collateral_add_partner<C: HandlerContext>(
             ledger.sign_last_update(None, Some(sig));
         }
         let _ = ctx.persist_ledger(&sender, &msg.reserves_id);
-        ctx.sync_quorum_member(sender, &msg.reserves_id, msg.collateral_partner, true);
+        ctx.sync_quorum_member(sender, &msg.reserves_id, msg.quorum_member, true);
     }
 
     // NOTE: ACK is sent by LDK dispatch code which has access to the correct message hash
     Ok(HandlerResult::Ok)
 }
 
-/// Handle a CollateralRemovePartner message.
+/// Handle a QuorumRemoveMember message.
 ///
-/// Received by partners when an operator removes a collateral partner from a ledger.
+/// Received by partners when an operator removes a quorum member from a ledger.
 /// This handler does the complete flow: validate, mutate, sign, persist, sync, send ACK.
 pub fn handle_collateral_remove_partner<C: HandlerContext>(
     ctx: &C,
-    msg: &CollateralRemovePartnerMsg,
+    msg: &QuorumRemoveMemberMsg,
     sender: PublicKey,
 ) -> Result<HandlerResult, HandlerError> {
     use crate::messages::{LedgerOperation, LEDGER_UPDATE};
@@ -1053,8 +1072,8 @@ pub fn handle_collateral_remove_partner<C: HandlerContext>(
             reserves_id: msg.reserves_id.clone(),
         })?;
 
-    let operation = LedgerOperation::CollateralRemovePartner {
-        collateral_partner: msg.collateral_partner,
+    let operation = LedgerOperation::QuorumRemoveMember {
+        quorum_member: msg.quorum_member,
         operator_signature: msg.operator_signature,
     };
 
@@ -1065,7 +1084,7 @@ pub fn handle_collateral_remove_partner<C: HandlerContext>(
         )?;
 
         // Idempotency check - if already removed, return success
-        if !ledger.state.collateral_partners.contains(&msg.collateral_partner) {
+        if !ledger.state.quorum_members.contains(&msg.quorum_member) {
             let seq = ledger.sequence();
             let hash = ledger.hash();
             (hash, hash, seq, Vec::new(), true)
@@ -1099,7 +1118,7 @@ pub fn handle_collateral_remove_partner<C: HandlerContext>(
             ledger.sign_last_update(None, Some(sig));
         }
         let _ = ctx.persist_ledger(&sender, &msg.reserves_id);
-        ctx.sync_quorum_member(sender, &msg.reserves_id, msg.collateral_partner, false);
+        ctx.sync_quorum_member(sender, &msg.reserves_id, msg.quorum_member, false);
     }
 
     // NOTE: ACK is sent by LDK dispatch code which has access to the correct message hash
@@ -1108,7 +1127,7 @@ pub fn handle_collateral_remove_partner<C: HandlerContext>(
 
 /// Handle a CollateralAttestation message.
 ///
-/// Received by operators from collateral partners after they process a CollateralIncrease.
+/// Received by operators from quorum members after they process a CollateralIncrease.
 /// The operator stores the attestation as proof and forwards it to channel partners.
 pub fn handle_collateral_attestation<C: HandlerContext>(
     ctx: &C,
@@ -1117,11 +1136,11 @@ pub fn handle_collateral_attestation<C: HandlerContext>(
 ) -> Result<HandlerResult, HandlerError> {
     let our_node_id = ctx.our_node_id();
 
-    // The sender should be the collateral partner
-    if sender != msg.collateral_partner {
+    // The sender should be the quorum member
+    if sender != msg.quorum_member {
         return Ok(HandlerResult::Rejected(format!(
-            "Sender {} doesn't match collateral_partner {}",
-            sender, msg.collateral_partner
+            "Sender {} doesn't match quorum_member {}",
+            sender, msg.quorum_member
         )));
     }
 
@@ -1147,7 +1166,7 @@ pub fn handle_collateral_attestation<C: HandlerContext>(
     // 3. Send to channel partners for bilateral signing
     Ok(HandlerResult::Response(ResponseData::CollateralAttestationProcessed {
         operator: msg.operator,
-        collateral_partner: msg.collateral_partner,
+        quorum_member: msg.quorum_member,
         amount: msg.amount,
     }))
 }
@@ -1155,7 +1174,7 @@ pub fn handle_collateral_attestation<C: HandlerContext>(
 /// Handle an UncreditedPayment accusation message.
 ///
 /// This is a fraud proof broadcast by a partner claiming the operator
-/// failed to credit a payment they received. Collateral partners must:
+/// failed to credit a payment they received. Quorum members must:
 /// 1. Verify the preimage matches the payment hash
 /// 2. Check if the ledger has a credit for this payment
 /// 3. Store the accusation for dispute resolution
@@ -1834,7 +1853,7 @@ pub fn handle_reserves_add_output<C: HandlerContext>(
                 reserves_id: msg.reserves_id.clone(),
                 initial_amount: msg.initial_amount,
                 spend_to: msg.spend_to,
-                collateral_partners: msg.collateral_partners.clone(),
+                quorum_members: msg.quorum_members.clone(),
                 sequence: ledger.sequence(),
                 prev_hash: ledger.hash(),
                 new_hash: ledger.hash(),
@@ -1855,7 +1874,7 @@ pub fn handle_reserves_add_output<C: HandlerContext>(
         reserves_id: msg.reserves_id.clone(),
         initial_amount: msg.initial_amount,
         spend_to: msg.spend_to,
-        collateral_partners: msg.collateral_partners.clone(),
+        quorum_members: msg.quorum_members.clone(),
         sequence,
         prev_hash,
         new_hash,
@@ -2653,15 +2672,15 @@ mod tests {
         let our_node_id = create_test_pubkey(1);
         let operator = create_test_pubkey(2);
         let other_partner = create_test_pubkey(3);
-        let collateral_partner = create_test_pubkey(4);
+        let quorum_member = create_test_pubkey(4);
 
         let ctx = TestContext::new(our_node_id);
 
-        let msg = CollateralAddPartnerMsg {
+        let msg = QuorumAddMemberMsg {
             operator_id: operator,
             reserves_id: other_partner.to_string(), // Not us
-            collateral_partner,
-            collateral_partner_signature: [0u8; 64],
+            quorum_member,
+            quorum_member_signature: [0u8; 64],
         };
 
         // We're not the target partner - should be rejected
@@ -2673,15 +2692,15 @@ mod tests {
     fn test_handle_collateral_add_partner_no_ledger() {
         let our_node_id = create_test_pubkey(1);
         let operator = create_test_pubkey(2);
-        let collateral_partner = create_test_pubkey(3);
+        let quorum_member = create_test_pubkey(3);
 
         let ctx = TestContext::new(our_node_id);
 
-        let msg = CollateralAddPartnerMsg {
+        let msg = QuorumAddMemberMsg {
             operator_id: operator,
             reserves_id: our_node_id.to_string(),
-            collateral_partner,
-            collateral_partner_signature: [0u8; 64],
+            quorum_member,
+            quorum_member_signature: [0u8; 64],
         };
 
         // No ledger exists - should error
@@ -2693,7 +2712,7 @@ mod tests {
     fn test_handle_collateral_add_partner_valid() {
         let our_node_id = create_test_pubkey(1);
         let operator = create_test_pubkey(2);
-        let collateral_partner = create_test_pubkey(3);
+        let quorum_member = create_test_pubkey(3);
 
         let mut ctx = TestContext::new(our_node_id);
 
@@ -2701,11 +2720,11 @@ mod tests {
         let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         ctx.add_ledger(operator, our_node_id, ledger);
 
-        let msg = CollateralAddPartnerMsg {
+        let msg = QuorumAddMemberMsg {
             operator_id: operator,
             reserves_id: our_node_id.to_string(),
-            collateral_partner,
-            collateral_partner_signature: [0u8; 64],
+            quorum_member,
+            quorum_member_signature: [0u8; 64],
         };
 
         // Valid request - should return Ok (actual mutation happens in LDK layer)
@@ -2717,20 +2736,20 @@ mod tests {
     fn test_handle_collateral_add_reserves_idempotent() {
         let our_node_id = create_test_pubkey(1);
         let operator = create_test_pubkey(2);
-        let collateral_partner = create_test_pubkey(3);
+        let quorum_member = create_test_pubkey(3);
 
         let mut ctx = TestContext::new(our_node_id);
 
-        // Create a ledger with the collateral partner already added
+        // Create a ledger with the quorum member already added
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
-        ledger.state.collateral_partners.push(collateral_partner);
+        ledger.state.quorum_members.push(quorum_member);
         ctx.add_ledger(operator, our_node_id, ledger);
 
-        let msg = CollateralAddPartnerMsg {
+        let msg = QuorumAddMemberMsg {
             operator_id: operator,
             reserves_id: our_node_id.to_string(),
-            collateral_partner,
-            collateral_partner_signature: [0u8; 64],
+            quorum_member,
+            quorum_member_signature: [0u8; 64],
         };
 
         // Already exists - should return Ok (idempotent success)
@@ -2743,13 +2762,13 @@ mod tests {
         let our_node_id = create_test_pubkey(1);
         let operator = create_test_pubkey(2);
         let other_partner = create_test_pubkey(3);
-        let collateral_partner = create_test_pubkey(4);
+        let quorum_member = create_test_pubkey(4);
 
         let ctx = TestContext::new(our_node_id);
 
-        let msg = CollateralRemovePartnerMsg {
+        let msg = QuorumRemoveMemberMsg {
             reserves_id: other_partner.to_string(), // Not us
-            collateral_partner,
+            quorum_member,
             operator_signature: [0u8; 64],
         };
 
@@ -2762,21 +2781,21 @@ mod tests {
     fn test_handle_collateral_remove_partner_not_found() {
         let our_node_id = create_test_pubkey(1);
         let operator = create_test_pubkey(2);
-        let collateral_partner = create_test_pubkey(3);
+        let quorum_member = create_test_pubkey(3);
 
         let mut ctx = TestContext::new(our_node_id);
 
-        // Create a ledger without the collateral partner
+        // Create a ledger without the quorum member
         let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
         ctx.add_ledger(operator, our_node_id, ledger);
 
-        let msg = CollateralRemovePartnerMsg {
+        let msg = QuorumRemoveMemberMsg {
             reserves_id: our_node_id.to_string(),
-            collateral_partner,
+            quorum_member,
             operator_signature: [0u8; 64],
         };
 
-        // Collateral partner doesn't exist - should return Ok (idempotent, already removed)
+        // Quorum member doesn't exist - should return Ok (idempotent, already removed)
         let result = handle_collateral_remove_partner(&ctx, &msg, operator);
         assert!(matches!(result, Ok(HandlerResult::Ok)));
     }
@@ -2785,18 +2804,18 @@ mod tests {
     fn test_handle_collateral_remove_partner_valid() {
         let our_node_id = create_test_pubkey(1);
         let operator = create_test_pubkey(2);
-        let collateral_partner = create_test_pubkey(3);
+        let quorum_member = create_test_pubkey(3);
 
         let mut ctx = TestContext::new(our_node_id);
 
-        // Create a ledger with the collateral partner
+        // Create a ledger with the quorum member
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string());
-        ledger.state.collateral_partners.push(collateral_partner);
+        ledger.state.quorum_members.push(quorum_member);
         ctx.add_ledger(operator, our_node_id, ledger);
 
-        let msg = CollateralRemovePartnerMsg {
+        let msg = QuorumRemoveMemberMsg {
             reserves_id: our_node_id.to_string(),
-            collateral_partner,
+            quorum_member,
             operator_signature: [0u8; 64],
         };
 
@@ -2812,14 +2831,14 @@ mod tests {
     #[test]
     fn test_handle_collateral_attestation_wrong_sender() {
         let our_node_id = create_test_pubkey(1);
-        let collateral_partner = create_test_pubkey(2);
+        let quorum_member = create_test_pubkey(2);
         let wrong_sender = create_test_pubkey(3);
 
         let ctx = TestContext::new(our_node_id);
 
         let msg = CollateralAttestationMsg {
             operator: our_node_id,
-            collateral_partner,
+            quorum_member,
             amount: 100_000,
             block_height: 100,
             lock_until_block: 0,
@@ -2836,13 +2855,13 @@ mod tests {
     fn test_handle_collateral_attestation_not_operator() {
         let our_node_id = create_test_pubkey(1);
         let other_operator = create_test_pubkey(2);
-        let collateral_partner = create_test_pubkey(3);
+        let quorum_member = create_test_pubkey(3);
 
         let ctx = TestContext::new(our_node_id);
 
         let msg = CollateralAttestationMsg {
             operator: other_operator, // Not us
-            collateral_partner,
+            quorum_member,
             amount: 100_000,
             block_height: 100,
             lock_until_block: 0,
@@ -2851,20 +2870,20 @@ mod tests {
         };
 
         // We're not the operator - should be rejected
-        let result = handle_collateral_attestation(&ctx, &msg, collateral_partner);
+        let result = handle_collateral_attestation(&ctx, &msg, quorum_member);
         assert!(matches!(result, Ok(HandlerResult::Rejected(_))));
     }
 
     #[test]
     fn test_handle_collateral_attestation_zero_amount() {
         let our_node_id = create_test_pubkey(1);
-        let collateral_partner = create_test_pubkey(2);
+        let quorum_member = create_test_pubkey(2);
 
         let ctx = TestContext::new(our_node_id);
 
         let msg = CollateralAttestationMsg {
             operator: our_node_id,
-            collateral_partner,
+            quorum_member,
             amount: 0, // Zero
             block_height: 100,
             lock_until_block: 0,
@@ -2873,20 +2892,20 @@ mod tests {
         };
 
         // Zero amount - should be rejected
-        let result = handle_collateral_attestation(&ctx, &msg, collateral_partner);
+        let result = handle_collateral_attestation(&ctx, &msg, quorum_member);
         assert!(matches!(result, Ok(HandlerResult::Rejected(_))));
     }
 
     #[test]
     fn test_handle_collateral_attestation_valid() {
         let our_node_id = create_test_pubkey(1);
-        let collateral_partner = create_test_pubkey(2);
+        let quorum_member = create_test_pubkey(2);
 
         let ctx = TestContext::new(our_node_id);
 
         let msg = CollateralAttestationMsg {
             operator: our_node_id,
-            collateral_partner,
+            quorum_member,
             amount: 100_000,
             block_height: 100,
             lock_until_block: 0,
@@ -2895,7 +2914,7 @@ mod tests {
         };
 
         // Valid attestation
-        let result = handle_collateral_attestation(&ctx, &msg, collateral_partner);
+        let result = handle_collateral_attestation(&ctx, &msg, quorum_member);
         match result {
             Ok(HandlerResult::Response(ResponseData::CollateralAttestationProcessed { amount, .. })) => {
                 assert_eq!(amount, 100_000);
@@ -4006,7 +4025,7 @@ mod tests {
             initial_amount: 100_000,
             spend_to,
             reserves_id: other_partner.to_string(), // Not us
-            collateral_partners: vec![],
+            quorum_members: vec![],
         };
 
         // We're not the target partner - should be rejected
@@ -4026,7 +4045,7 @@ mod tests {
             initial_amount: 100_000,
             spend_to,
             reserves_id: our_node_id.to_string(),
-            collateral_partners: vec![],
+            quorum_members: vec![],
         };
 
         // No ledger - should error
@@ -4050,7 +4069,7 @@ mod tests {
             initial_amount: 100_000,
             spend_to,
             reserves_id: our_node_id.to_string(),
-            collateral_partners: vec![],
+            quorum_members: vec![],
         };
 
         // Valid request - should return response
@@ -4079,7 +4098,7 @@ mod tests {
             initial_amount: 100, // Too small
             spend_to,
             reserves_id: our_node_id.to_string(),
-            collateral_partners: vec![],
+            quorum_members: vec![],
         };
 
         // Amount too small - should fail validation
@@ -4105,7 +4124,7 @@ mod tests {
             initial_amount: 100_000,
             spend_to,
             reserves_id: our_node_id.to_string(),
-            collateral_partners: vec![],
+            quorum_members: vec![],
         };
 
         // Already exists - should return success (idempotent)

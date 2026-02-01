@@ -138,20 +138,20 @@ impl Ledger {
         }
     }
 
-    /// Create a new ledger with explicit role and optional collateral partners.
+    /// Create a new ledger with explicit role and optional quorum members.
     /// This constructor is provided for compatibility with existing code.
     pub fn new(
         operator_key: PublicKey,
         reserves_key: String,
         role: LedgerRole,
-        collateral_partners: Vec<PublicKey>,
+        quorum_members: Vec<PublicKey>,
         ledger_address: String,
     ) -> Self {
         Self::with_enforcement_block(
             operator_key,
             reserves_key,
             role,
-            collateral_partners,
+            quorum_members,
             ledger_address,
             None,
         )
@@ -162,14 +162,14 @@ impl Ledger {
     /// - `enforcement_block = None`: Immediate enforcement (for joining established networks)
     /// - `enforcement_block = Some(future_block)`: Deferred enforcement (for bootstrap phase)
     ///
-    /// During bootstrap, operators can cross-establish collateral partnerships before
+    /// During bootstrap, operators can cross-establish quorum memberships before
     /// the size requirements kick in. After the enforcement block, partners must have
     /// ledgers >= half the operator's ledger size.
     pub fn with_enforcement_block(
         operator_key: PublicKey,
         reserves_key: String,
         role: LedgerRole,
-        collateral_partners: Vec<PublicKey>,
+        quorum_members: Vec<PublicKey>,
         ledger_address: String,
         collateral_enforcement_block: Option<u64>,
     ) -> Self {
@@ -179,7 +179,7 @@ impl Ledger {
             ledger_address,
             collateral_enforcement_block,
         );
-        state.collateral_partners = collateral_partners;
+        state.quorum_members = quorum_members;
         Self {
             state,
             role,
@@ -330,35 +330,35 @@ impl Ledger {
     }
 
     /// Get all quorum participants for this ledger.
-    /// Returns: operator + collateral partners. For LDK, also includes reserves partner.
+    /// Returns: operator + quorum members. For LDK, also includes reserves partner.
     pub fn quorum_participants(&self) -> Vec<PublicKey> {
-        let mut participants = Vec::with_capacity(2 + self.state.collateral_partners.len());
+        let mut participants = Vec::with_capacity(2 + self.state.quorum_members.len());
         participants.push(self.state.operator_key);
         // Include reserves partner if it's a valid pubkey (LDK)
         if let Some(reserves_pubkey) = self.reserves_key_as_pubkey() {
             participants.push(reserves_pubkey);
         }
-        participants.extend(self.state.collateral_partners.iter().cloned());
+        participants.extend(self.state.quorum_members.iter().cloned());
         participants
     }
 
-    /// Get all partners (channel partner + collateral partners).
+    /// Get all partners (channel partner + quorum members).
     /// This is the set of nodes the operator broadcasts updates to.
     pub fn all_partners(&self) -> Vec<PublicKey> {
-        let mut partners = Vec::with_capacity(1 + self.state.collateral_partners.len());
+        let mut partners = Vec::with_capacity(1 + self.state.quorum_members.len());
         // Include reserves partner if it's a valid pubkey (LDK)
         if let Some(reserves_pubkey) = self.reserves_key_as_pubkey() {
             partners.push(reserves_pubkey);
         }
-        partners.extend(self.state.collateral_partners.iter().cloned());
+        partners.extend(self.state.quorum_members.iter().cloned());
         partners
     }
 
-    /// Add a collateral partner to this ledger.
-    pub fn add_collateral_partner(&mut self, partner: PublicKey) -> DepositsResult<()> {
+    /// Add a quorum member to this ledger.
+    pub fn add_quorum_member(&mut self, partner: PublicKey) -> DepositsResult<()> {
         if partner == self.state.operator_key {
             return Err(DepositsError::InvalidState(
-                "Operator cannot be a collateral partner".to_string()
+                "Operator cannot be a quorum member".to_string()
             ));
         }
         // Compare with reserves_key (which is a String)
@@ -367,12 +367,12 @@ impl Ledger {
                 "Channel partner is already part of the quorum".to_string()
             ));
         }
-        if self.state.collateral_partners.contains(&partner) {
+        if self.state.quorum_members.contains(&partner) {
             return Err(DepositsError::InvalidState(
-                format!("Collateral partner {} already exists", partner)
+                format!("Quorum member {} already exists", partner)
             ));
         }
-        self.state.collateral_partners.push(partner);
+        self.state.quorum_members.push(partner);
         Ok(())
     }
 
@@ -532,8 +532,8 @@ impl Ledger {
             });
         }
 
-        // Requirement 2: attestations >= deposit_liability (if we have collateral partners)
-        if !self.state.collateral_partners.is_empty() {
+        // Requirement 2: attestations >= deposit_liability (if we have quorum members)
+        if !self.state.quorum_members.is_empty() {
             let total_collateral = self.total_available_collateral(current_block, max_attestation_age_blocks);
             if total_collateral < deposit_liability {
                 return Err(DepositsError::InsufficientCollateral {
@@ -799,6 +799,31 @@ impl Ledger {
                     });
                 }
             }
+            LedgerOperation::QuorumJoin { operator_id, reserves_id, membership_expires, our_signature: _ } => {
+                // 1. Must be on operator's own ledger (we are the operator)
+                if !self.is_operator() {
+                    return Err(DepositsError::ProtocolViolation {
+                        violation_type: "quorum_join_wrong_role".to_string(),
+                        details: "QuorumJoin can only be added to operator's own ledger".to_string(),
+                    });
+                }
+                // Note: Signature verification should be done at the message handler level
+                // where the signing key is available. Here we just validate the operation structure.
+                // 2. Ratchet check: if renewing, new expiration must be >= existing
+                if let Some(existing) = self.state.joined_quorums.iter().find(|m|
+                    &m.operator_id == operator_id && &m.reserves_id == reserves_id
+                ) {
+                    if *membership_expires < existing.membership_expires {
+                        return Err(DepositsError::ProtocolViolation {
+                            violation_type: "quorum_join_ratchet".to_string(),
+                            details: format!(
+                                "Cannot reduce membership duration: new {} < existing {}",
+                                membership_expires, existing.membership_expires
+                            ),
+                        });
+                    }
+                }
+            }
             _ => {
                 // Other operations have simpler or no validation
             }
@@ -827,6 +852,12 @@ impl Ledger {
             }
             LedgerOperation::ReservesDecrease { new_amount } => {
                 self.state.reserves.amount = *new_amount;
+            }
+            LedgerOperation::ReservesRotate { amount, .. } => {
+                // ReservesRotate records the rotation to Taproot but doesn't change
+                // the reserves amount (it should match the previous reserves)
+                // The new UTXO info is recorded in the operation for audit purposes
+                self.state.reserves.amount = *amount;
             }
             LedgerOperation::DepositOpen { pubkey, fees, .. } => {
                 let deposit = Deposit::new(*pubkey, fees.clone());
@@ -908,19 +939,19 @@ impl Ledger {
             LedgerOperation::CollateralDecrease { new_amount, .. } => {
                 self.state.collateral_amount = *new_amount;
             }
-            LedgerOperation::CollateralAddPartner {
-                collateral_partner, ..
+            LedgerOperation::QuorumAddMember {
+                quorum_member, ..
             } => {
-                if !self.state.collateral_partners.contains(collateral_partner) {
-                    self.state.collateral_partners.push(*collateral_partner);
+                if !self.state.quorum_members.contains(quorum_member) {
+                    self.state.quorum_members.push(*quorum_member);
                 }
             }
-            LedgerOperation::CollateralRemovePartner {
-                collateral_partner, ..
+            LedgerOperation::QuorumRemoveMember {
+                quorum_member, ..
             } => {
-                self.state.collateral_partners.retain(|k| k != collateral_partner);
+                self.state.quorum_members.retain(|k| k != quorum_member);
                 // Also remove any attestations from this partner
-                self.state.collateral_attestations.remove(collateral_partner);
+                self.state.collateral_attestations.remove(quorum_member);
             }
             LedgerOperation::CollateralLock {
                 deposit_pubkey,
@@ -939,29 +970,50 @@ impl Ledger {
             }
             LedgerOperation::CollateralAttestation {
                 collateral_operator,
-                collateral_partner,
+                quorum_member,
                 amount,
                 block_height,
                 lock_until_block,
                 signature,
                 ledger_hash,
             } => {
-                // Record the attestation keyed by the actual collateral partner
+                // Record the attestation keyed by the actual quorum member
                 use crate::types::CollateralAttestation;
                 let attestation = CollateralAttestation::new(
                     *collateral_operator,
-                    *collateral_partner,
+                    *quorum_member,
                     *amount,
                     *block_height,
                     *lock_until_block,
                     *signature,
                     *ledger_hash,
                 );
-                self.state.collateral_attestations.insert(*collateral_partner, attestation);
+                self.state.collateral_attestations.insert(*quorum_member, attestation);
                 // Update received_collateral_amount - sum of all attestations
                 self.state.received_collateral_amount = self.state.collateral_attestations.values()
                     .map(|a| a.available_collateral())
                     .sum();
+            }
+            LedgerOperation::QuorumJoin { operator_id, reserves_id, membership_expires, our_signature } => {
+                use crate::types::QuorumMembership;
+                // Find and update existing membership, or add new one
+                if let Some(existing) = self.state.joined_quorums.iter_mut().find(|m|
+                    m.operator_id == *operator_id && m.reserves_id == *reserves_id
+                ) {
+                    // Renew/extend membership
+                    existing.membership_expires = *membership_expires;
+                    existing.our_signature = *our_signature;
+                } else {
+                    // New membership
+                    let membership = QuorumMembership {
+                        operator_id: *operator_id,
+                        reserves_id: reserves_id.clone(),
+                        membership_expires: *membership_expires,
+                        our_signature: *our_signature,
+                        joined_at_sequence: self.state.sequence + 1,
+                    };
+                    self.state.joined_quorums.push(membership);
+                }
             }
         }
         Ok(())
@@ -1125,7 +1177,7 @@ impl LedgerValidator {
     ///
     /// In the 100%+100% model:
     /// - Requirement 1: reserves >= deposit_liability (checked elsewhere)
-    /// - Requirement 2: attestations >= deposit_liability (if we have collateral partners)
+    /// - Requirement 2: attestations >= deposit_liability (if we have quorum members)
     ///
     /// Returns Ok if collateral is sufficient, Err with details if not.
     pub fn validate_collateral_for_liability(
@@ -1142,8 +1194,8 @@ impl LedgerValidator {
             });
         }
 
-        // Requirement 2: attestations >= deposit_liability (if we have collateral partners)
-        if !ledger.state.collateral_partners.is_empty() {
+        // Requirement 2: attestations >= deposit_liability (if we have quorum members)
+        if !ledger.state.quorum_members.is_empty() {
             let total_collateral =
                 Self::total_available_collateral(ledger, current_block, max_attestation_age_blocks);
             if total_collateral < deposit_liability {
@@ -1454,14 +1506,14 @@ impl LedgerManager {
         operator_key: PublicKey,
         reserves_key: String,
         role: LedgerRole,
-        collateral_partners: Vec<PublicKey>,
+        quorum_members: Vec<PublicKey>,
         ledger_address: String,
     ) -> (Self, [u8; 32]) {
         let ledger = Ledger::new(
             operator_key,
             reserves_key,
             role,
-            collateral_partners,
+            quorum_members,
             ledger_address,
         );
         let genesis_hash = ledger.state.hash; // Initial hash from LedgerState::new()
@@ -1476,7 +1528,7 @@ impl LedgerManager {
         operator_key: PublicKey,
         reserves_key: String,
         role: LedgerRole,
-        collateral_partners: Vec<PublicKey>,
+        quorum_members: Vec<PublicKey>,
         ledger_address: String,
         genesis_operation: LedgerOperation,
     ) -> DepositsResult<(Self, [u8; 32])> {
@@ -1485,7 +1537,7 @@ impl LedgerManager {
             operator_key,
             reserves_key,
             role,
-            collateral_partners,
+            quorum_members,
             ledger_address,
         );
 

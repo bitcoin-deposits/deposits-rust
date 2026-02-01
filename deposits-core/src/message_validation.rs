@@ -185,9 +185,9 @@ pub trait HandlerContext: ValidationContext {
         Ok(()) // Default: no-op
     }
 
-    /// Sync quorum membership after collateral partner change.
-    fn sync_quorum_member(&self, operator: PublicKey, reserves_id: &str, collateral_partner: PublicKey, add: bool) {
-        let _ = (operator, reserves_id, collateral_partner, add);
+    /// Sync quorum membership after quorum member change.
+    fn sync_quorum_member(&self, operator: PublicKey, reserves_id: &str, quorum_member: PublicKey, add: bool) {
+        let _ = (operator, reserves_id, quorum_member, add);
         // Default: no-op
     }
 
@@ -293,7 +293,7 @@ pub trait HandlerContext: ValidationContext {
         Ok(()) // Default: no-op
     }
 
-    /// Get collateral partners for broadcast (excluding the direct partner).
+    /// Get quorum members for broadcast (excluding the direct partner).
     fn get_broadcast_recipients(&self, operator: &PublicKey, partner: &PublicKey) -> Vec<PublicKey> {
         let _ = (operator, partner);
         vec![] // Default: none
@@ -305,7 +305,7 @@ pub trait HandlerContext: ValidationContext {
 
     /// Handle followup actions after receiving a valid fraud proof (uncredited payment).
     /// - Force-close any channel with the accused operator
-    /// - Rebroadcast the accusation to our collateral partners
+    /// - Rebroadcast the accusation to our quorum members
     fn handle_fraud_proof_followup(
         &self,
         accused_operator: PublicKey,
@@ -385,15 +385,15 @@ pub trait HandlerContext: ValidationContext {
         false // Default: no pending request found
     }
 
-    /// Send audit history to a new collateral partner.
-    fn send_audit_to_collateral_partner(
+    /// Send audit history to a new quorum member.
+    fn send_audit_to_quorum_member(
         &self,
         operator: PublicKey,
         reserves_id: &str,
-        new_collateral_partner: PublicKey,
+        new_quorum_member: PublicKey,
         signature: [u8; 64],
     ) {
-        let _ = (operator, reserves_id, new_collateral_partner, signature);
+        let _ = (operator, reserves_id, new_quorum_member, signature);
         // Default: no-op
     }
 
@@ -408,6 +408,22 @@ pub trait HandlerContext: ValidationContext {
     ) -> bool {
         let _ = (operator, reserves_id, signature, signer);
         false // Default: not implemented
+    }
+
+    /// Append a QuorumJoin operation to our own operator ledger.
+    /// This records that we have agreed to join another operator's quorum.
+    /// Called when granting consent to be a quorum member.
+    ///
+    /// Returns Ok(()) on success, or error if ledger not found or append fails.
+    fn append_quorum_join_to_own_ledger(
+        &self,
+        target_operator: PublicKey,
+        target_reserves_id: &str,
+        membership_expires: u32,
+        our_signature: [u8; 64],
+    ) -> Result<(), HandlerError> {
+        let _ = (target_operator, target_reserves_id, membership_expires, our_signature);
+        Ok(()) // Default: no-op
     }
 
     // ========================================================================
@@ -618,11 +634,13 @@ pub fn validate_ledger_operation<C: ValidationContext>(
             };
             validate_ledger_close_msg(ctx, &msg, sender)
         }
-        // Operations without specific validation (validated in ledger.rs)
+        // Operations without specific validation (validated in ledger.rs or by construction)
         LedgerOperation::CollateralAttestation { .. } |
-        LedgerOperation::CollateralAddPartner { .. } |
-        LedgerOperation::CollateralRemovePartner { .. } |
+        LedgerOperation::QuorumAddMember { .. } |
+        LedgerOperation::QuorumRemoveMember { .. } |
         LedgerOperation::CollateralLock { .. } |
+        LedgerOperation::QuorumJoin { .. } |
+        LedgerOperation::ReservesRotate { .. } |
         LedgerOperation::Tombstone { .. } => Ok(()),
     }
 }
@@ -1045,7 +1063,7 @@ mod tests {
             initial_amount: 100, // Below minimum
             spend_to: create_test_pubkey(1),
             reserves_id: create_test_pubkey(2).to_string(),
-            collateral_partners: vec![],
+            quorum_members: vec![],
         };
 
         let result = validate_reserves_add_output_msg(&msg);
@@ -1059,7 +1077,7 @@ mod tests {
             initial_amount: 1_000_000_000_000, // Above maximum
             spend_to: create_test_pubkey(1),
             reserves_id: create_test_pubkey(2).to_string(),
-            collateral_partners: vec![],
+            quorum_members: vec![],
         };
 
         let result = validate_reserves_add_output_msg(&msg);

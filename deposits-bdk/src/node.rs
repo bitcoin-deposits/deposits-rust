@@ -50,6 +50,28 @@ pub struct NodeConfig {
     pub data_dir: PathBuf,
 }
 
+/// Result of rotating reserves to quorum-based Taproot spending
+#[derive(Debug, Clone)]
+pub struct RotateReservesResult {
+    /// The transaction ID of the rotation transaction
+    pub txid: String,
+
+    /// The new Taproot reserves address
+    pub new_address: String,
+
+    /// Amount in satoshis
+    pub amount_sats: u64,
+
+    /// Number of quorum members in the new output
+    pub quorum_member_count: usize,
+
+    /// Block height when first quorum member expires (operator-only unlock)
+    pub first_expiry_block: u32,
+
+    /// The ledger hash committed to in the new Taproot tree
+    pub ledger_hash: [u8; 32],
+}
+
 /// A deposits-bdk node
 pub struct Node {
     /// Our node ID (secp256k1 pubkey)
@@ -307,10 +329,10 @@ impl Node {
     }
 
     // ========================================================================
-    // Collateral Partner Management
+    // Quorum Member Management
     // ========================================================================
 
-    /// Request a peer to be a collateral partner
+    /// Request a peer to be a quorum member
     pub async fn request_partner(&self, peer: PublicKey) -> Result<(), Error> {
         // Create a coordination message for partnership request
         // For now, this is a simple handshake-like message
@@ -333,7 +355,119 @@ impl Node {
         Ok(())
     }
 
-    /// List all collateral partners across all ledgers
+    /// Add a quorum member to our ledger.
+    ///
+    /// This appends a QuorumAddMember operation to our ledger with the member's signature.
+    /// For testing, we can generate a placeholder signature.
+    ///
+    /// # Arguments
+    /// * `reserves_id` - Our ledger's reserves ID
+    /// * `quorum_member` - The public key of the new quorum member
+    /// * `signature` - The member's consent signature (or placeholder for testing)
+    pub fn add_quorum_member(
+        &self,
+        reserves_id: &str,
+        quorum_member: PublicKey,
+        signature: [u8; 64],
+    ) -> Result<(), Error> {
+        {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+
+            // Find our ledger (where we are the operator)
+            let ledger_arc = ledgers
+                .get(&(self.node_id, reserves_id.to_string()))
+                .ok_or_else(|| Error::Protocol("Ledger not found".to_string()))?;
+
+            let mut ledger = ledger_arc.write().unwrap();
+
+            // Check if already a member
+            if ledger.state.quorum_members.contains(&quorum_member) {
+                return Err(Error::Protocol("Already a quorum member".to_string()));
+            }
+
+            // Get current block info
+            let block_height = self.wallet.get_block_height().unwrap_or(0);
+            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
+
+            // Create and append QuorumAddMember operation
+            let operation = deposits_core::messages::LedgerOperation::QuorumAddMember {
+                quorum_member,
+                quorum_member_signature: signature,
+            };
+
+            ledger.append_operation_with_block(
+                operation,
+                deposits_core::messages::consts::QUORUM_ADD_MEMBER,
+                block_height,
+                block_hash,
+            ).map_err(|e| Error::Protocol(format!("Failed to add quorum member: {:?}", e)))?;
+        }
+
+        // Persist the ledger
+        if let Err(e) = self.handler.persist_ledger(&self.node_id, reserves_id) {
+            tracing::error!("Failed to persist ledger: {}", e);
+        }
+
+        Ok(())
+    }
+
+    /// Record that we have joined another operator's quorum.
+    ///
+    /// This appends a QuorumJoin operation to our own ledger, creating a two-sided audit trail.
+    ///
+    /// # Arguments
+    /// * `our_reserves_id` - Our own ledger's reserves ID
+    /// * `target_operator` - The operator whose quorum we're joining
+    /// * `target_reserves_id` - The reserves ID of the ledger we're monitoring
+    /// * `membership_expires` - Block height when our membership commitment expires
+    /// * `signature` - Our consent signature
+    pub fn record_quorum_join(
+        &self,
+        our_reserves_id: &str,
+        target_operator: PublicKey,
+        target_reserves_id: &str,
+        membership_expires: u32,
+        signature: [u8; 64],
+    ) -> Result<(), Error> {
+        {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+
+            // Find our ledger (where we are the operator)
+            let ledger_arc = ledgers
+                .get(&(self.node_id, our_reserves_id.to_string()))
+                .ok_or_else(|| Error::Protocol("Our ledger not found".to_string()))?;
+
+            let mut ledger = ledger_arc.write().unwrap();
+
+            // Get current block info
+            let block_height = self.wallet.get_block_height().unwrap_or(0);
+            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
+
+            // Create and append QuorumJoin operation
+            let operation = deposits_core::messages::LedgerOperation::QuorumJoin {
+                operator_id: target_operator,
+                reserves_id: target_reserves_id.to_string(),
+                membership_expires,
+                our_signature: signature,
+            };
+
+            ledger.append_operation_with_block(
+                operation,
+                deposits_core::messages::consts::QUORUM_JOIN,
+                block_height,
+                block_hash,
+            ).map_err(|e| Error::Protocol(format!("Failed to record quorum join: {:?}", e)))?;
+        }
+
+        // Persist the ledger
+        if let Err(e) = self.handler.persist_ledger(&self.node_id, our_reserves_id) {
+            tracing::error!("Failed to persist ledger: {}", e);
+        }
+
+        Ok(())
+    }
+
+    /// List all quorum members across all ledgers
     /// Returns (identifier, role) tuples where identifier is pubkey or reserves_id string
     pub fn list_partners(&self) -> Vec<(String, String)> {
         let mut partners = Vec::new();
@@ -355,9 +489,9 @@ impl Node {
                 partners.push((operator.to_string(), role.to_string()));
             }
 
-            // Add collateral partners
-            for cp in &ledger.state.collateral_partners {
-                partners.push((cp.to_string(), "Collateral partner".to_string()));
+            // Add quorum members
+            for cp in &ledger.state.quorum_members {
+                partners.push((cp.to_string(), "Quorum member".to_string()));
             }
         }
 
@@ -366,6 +500,135 @@ impl Node {
         partners.dedup_by(|a, b| a.0 == b.0);
 
         partners
+    }
+
+    /// Rotate reserves to use quorum-based Taproot spending
+    ///
+    /// This creates a new reserves output with tiered spending:
+    /// - Tier 0: Majority of quorum + operator (immediate)
+    /// - Tier 1: Operator only after first quorum member expires
+    /// - Tier 2: Emergency recovery after extended timeout
+    ///
+    /// The rotation should be scheduled before the first quorum member expires
+    /// to maintain quorum-based security.
+    ///
+    /// # Arguments
+    /// * `reserves_id` - The reserves ID (ledger address) of the ledger to rotate for
+    ///
+    /// # Returns
+    /// The new Taproot reserves address and txid, or error if rotation fails
+    pub fn rotate_reserves_to_quorum(
+        &self,
+        reserves_id: &str,
+    ) -> Result<RotateReservesResult, Error> {
+        // Get the ledger
+        let ledgers = self.handler.ledgers.lock().unwrap();
+        let ledger_arc = ledgers
+            .get(&(self.node_id, reserves_id.to_string()))
+            .ok_or_else(|| Error::Protocol("Ledger not found".to_string()))?
+            .clone();
+        drop(ledgers);
+
+        let (quorum_members, quorum_expiries, ledger_hash, _current_reserves) = {
+            let ledger = ledger_arc.read().unwrap();
+
+            // Get quorum members and their expiration times
+            let members = ledger.state.quorum_members.clone();
+
+            // For now, use a fixed expiration window per member
+            // In a real implementation, these would come from QuorumAddMember operations
+            let current_block = self.wallet.get_block_height().unwrap_or(0);
+            let default_expiry = current_block + 1000; // ~1 week
+
+            // TODO: Get actual expiries from quorum member info in ledger
+            let expiries: Vec<u32> = members.iter().map(|_| default_expiry).collect();
+
+            let hash = ledger.hash();
+            let reserves = ledger.state.reserves.amount;
+
+            (members, expiries, hash, reserves)
+        };
+
+        if quorum_members.is_empty() {
+            return Err(Error::Protocol(
+                "No quorum members to rotate to. Add quorum members first.".to_string()
+            ));
+        }
+
+        // Rotate the existing P2WSH reserves to new Taproot output
+        let result = self.wallet.rotate_reserves_to_taproot(
+            quorum_members.clone(),
+            quorum_expiries.clone(),
+            ledger_hash,
+        )?;
+
+        // Broadcast the rotation transaction
+        let txid = self.wallet.broadcast(&result.tx)?;
+
+        tracing::info!(
+            "Rotated reserves to Taproot quorum-based output: txid={}, address={}, {} members, first expiry at block {}",
+            txid,
+            result.address,
+            quorum_members.len(),
+            result.first_expiry_block
+        );
+
+        // Append ReservesRotate operation to the ledger for audit trail
+        {
+            let block_height = self.wallet.get_block_height().unwrap_or(0);
+            let block_hash = [0u8; 32]; // We don't have the block hash yet since tx is just broadcast
+
+            // Convert txid to bytes
+            let txid_bytes: [u8; 32] = {
+                let mut bytes = txid.to_byte_array();
+                bytes.reverse(); // Bitcoin txids are displayed in reverse byte order
+                bytes
+            };
+
+            // Calculate quorum parameters
+            let quorum_size = (quorum_members.len() + 1) as u8; // +1 for operator
+            let quorum_threshold = (quorum_size / 2) + 1; // Majority
+
+            let operation = LedgerOperation::ReservesRotate {
+                spending_txid: txid_bytes,
+                new_outpoint_txid: txid_bytes, // Same tx creates the new output
+                new_outpoint_vout: result.outpoint.vout,
+                amount: result.amount,
+                quorum_threshold,
+                quorum_size,
+                first_expiry_block: result.first_expiry_block,
+                ledger_hash,
+            };
+
+            let mut ledger = ledger_arc.write().unwrap();
+            ledger.append_operation_with_block(
+                operation,
+                deposits_core::messages::consts::RESERVES_ROTATE,
+                block_height,
+                block_hash,
+            ).map_err(|e| Error::Protocol(format!("Failed to record reserves rotation: {:?}", e)))?;
+
+            tracing::info!(
+                "Appended ReservesRotate operation to ledger: txid={}, quorum={}/{}",
+                txid,
+                quorum_threshold,
+                quorum_size
+            );
+        }
+
+        // Persist the ledger with the new operation
+        if let Err(e) = self.handler.persist_ledger(&self.node_id, &reserves_id) {
+            tracing::error!("Failed to persist ledger after rotation: {}", e);
+        }
+
+        Ok(RotateReservesResult {
+            txid: txid.to_string(),
+            new_address: result.address.to_string(),
+            amount_sats: result.amount,
+            quorum_member_count: quorum_members.len(),
+            first_expiry_block: result.first_expiry_block,
+            ledger_hash,
+        })
     }
 
     /// Lock a deposit's balance as collateral backing for the operator.
@@ -444,7 +707,7 @@ impl Node {
             let ledger_hash = ledger.hash();
 
             // Create operator's attestation signature
-            // Sign: operator || collateral_partner || amount || block_height || lock_until_block || ledger_hash
+            // Sign: operator || quorum_member || amount || block_height || lock_until_block || ledger_hash
             let attestation_signature = self.sign_collateral_attestation(
                 requesting_operator,
                 total_locked,
@@ -455,7 +718,7 @@ impl Node {
 
             deposits_core::CollateralAttestationMsg {
                 operator: self.node_id,
-                collateral_partner: requesting_operator,
+                quorum_member: requesting_operator,
                 amount: total_locked,
                 block_height,
                 lock_until_block: min_lock_until,
@@ -483,7 +746,7 @@ impl Node {
     /// Sign a collateral attestation message
     fn sign_collateral_attestation(
         &self,
-        collateral_partner: PublicKey,
+        quorum_member: PublicKey,
         amount: u64,
         block_height: u32,
         lock_until_block: u32,
@@ -495,7 +758,7 @@ impl Node {
         let mut sign_content = Vec::new();
         sign_content.extend_from_slice(b"COLLATERAL_ATTESTATION:");
         sign_content.extend_from_slice(&self.node_id.serialize());
-        sign_content.extend_from_slice(&collateral_partner.serialize());
+        sign_content.extend_from_slice(&quorum_member.serialize());
         sign_content.extend_from_slice(&amount.to_le_bytes());
         sign_content.extend_from_slice(&block_height.to_le_bytes());
         sign_content.extend_from_slice(&lock_until_block.to_le_bytes());
@@ -521,11 +784,11 @@ impl Node {
         reserves_id: &str,
         attestation: deposits_core::CollateralAttestationMsg,
     ) -> Result<(), Error> {
-        // Verify we are the collateral_partner in the attestation
-        if attestation.collateral_partner != self.node_id {
+        // Verify we are the quorum_member in the attestation
+        if attestation.quorum_member != self.node_id {
             return Err(Error::Protocol(format!(
                 "Attestation is for {}, not us ({})",
-                attestation.collateral_partner, self.node_id
+                attestation.quorum_member, self.node_id
             )));
         }
 
@@ -537,7 +800,7 @@ impl Node {
             // Create the CollateralAttestation operation
             let operation = LedgerOperation::CollateralAttestation {
                 collateral_operator: attestation.operator,
-                collateral_partner: attestation.collateral_partner,
+                quorum_member: attestation.quorum_member,
                 amount: attestation.amount,
                 block_height: attestation.block_height,
                 lock_until_block: attestation.lock_until_block,

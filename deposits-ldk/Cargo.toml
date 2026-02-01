@@ -56,3 +56,5 @@ bitcoin-deposits-non-conforming = []  # Testing feature for non-conforming proto
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 rand = "0.8"
+# Enable _test_utils feature for lightning in tests
+lightning = { path = "../../rust-lightning/lightning", default-features = false, features = ["std", "_test_utils"] }

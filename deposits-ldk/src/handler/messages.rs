@@ -87,6 +87,7 @@ impl LedgerOperationExt for LedgerOperation {
             LedgerOperation::LedgerOpen { .. } => "LedgerOpen",
             LedgerOperation::ReservesIncrease { .. } => "ReservesIncrease",
             LedgerOperation::ReservesDecrease { .. } => "ReservesDecrease",
+            LedgerOperation::ReservesRotate { .. } => "ReservesRotate",
             LedgerOperation::DepositOpen { .. } => "DepositOpen",
             LedgerOperation::DepositClose { .. } => "DepositClose",
             LedgerOperation::DepositUpdate { .. } => "DepositUpdate",
@@ -101,9 +102,10 @@ impl LedgerOperationExt for LedgerOperation {
             LedgerOperation::CollateralIncrease { .. } => "CollateralIncrease",
             LedgerOperation::CollateralDecrease { .. } => "CollateralDecrease",
             LedgerOperation::CollateralAttestation { .. } => "CollateralAttestation",
-            LedgerOperation::CollateralAddPartner { .. } => "CollateralAddPartner",
-            LedgerOperation::CollateralRemovePartner { .. } => "CollateralRemovePartner",
+            LedgerOperation::QuorumAddMember { .. } => "QuorumAddMember",
+            LedgerOperation::QuorumRemoveMember { .. } => "QuorumRemoveMember",
             LedgerOperation::CollateralLock { .. } => "CollateralLock",
+            LedgerOperation::QuorumJoin { .. } => "QuorumJoin",
             LedgerOperation::FeeCollect { .. } => "FeeCollect",
             LedgerOperation::LedgerClose => "LedgerClose",
             LedgerOperation::Tombstone { .. } => "Tombstone",
@@ -380,33 +382,33 @@ impl DepositsMessage {
         ))
     }
 
-    /// Create a CollateralAddPartner operation message
-    pub fn new_collateral_add_partner(
+    /// Create a QuorumAddMember operation message
+    pub fn new_quorum_add_member(
         operator: PublicKey,
         partner: PublicKey,
-        collateral_partner: PublicKey,
+        quorum_member: PublicKey,
     ) -> Self {
         Self::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             operator,
             partner.to_string(),
-            LedgerOperation::CollateralAddPartner {
-                collateral_partner,
-                collateral_partner_signature: [0u8; 64], // Filled in at signing time
+            LedgerOperation::QuorumAddMember {
+                quorum_member,
+                quorum_member_signature: [0u8; 64], // Filled in at signing time
             },
         ))
     }
 
-    /// Create a CollateralRemovePartner operation message
-    pub fn new_collateral_remove_partner(
+    /// Create a QuorumRemoveMember operation message
+    pub fn new_quorum_remove_member(
         operator: PublicKey,
         partner: PublicKey,
-        collateral_partner: PublicKey,
+        quorum_member: PublicKey,
     ) -> Self {
         Self::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             operator,
             partner.to_string(),
-            LedgerOperation::CollateralRemovePartner {
-                collateral_partner,
+            LedgerOperation::QuorumRemoveMember {
+                quorum_member,
                 operator_signature: [0u8; 64], // Filled in at signing time
             },
         ))
@@ -445,7 +447,7 @@ impl DepositsMessage {
         operator: PublicKey,
         partner: PublicKey,
         collateral_operator: PublicKey,
-        collateral_partner: PublicKey,
+        quorum_member: PublicKey,
         amount: u64,
         block_height: u32,
         lock_until_block: u32,
@@ -456,7 +458,7 @@ impl DepositsMessage {
             operator,
             partner.to_string(),
             LedgerOperation::CollateralAttestation {
-                collateral_operator, collateral_partner, amount, block_height, lock_until_block, signature, ledger_hash
+                collateral_operator, quorum_member, amount, block_height, lock_until_block, signature, ledger_hash
             },
         ))
     }
@@ -674,7 +676,7 @@ impl LedgerUpdateMsgExt for LedgerUpdateMsg {
     }
 
     fn is_collateral_add_partner(&self) -> bool {
-        matches!(self.operation, LedgerOperation::CollateralAddPartner { .. })
+        matches!(self.operation, LedgerOperation::QuorumAddMember { .. })
     }
 
     fn is_collateral_increase(&self) -> bool {

@@ -62,6 +62,7 @@ pub mod consts {
     pub const RESERVES_REMOVE_OUTPUT: u16 = 0x80C3;
     pub const RESERVES_INCREASE: u16 = 0x80B1;
     pub const RESERVES_DECREASE: u16 = 0x80B3;
+    pub const RESERVES_ROTATE: u16 = 0x80B5;
     pub const RESERVES_UPDATE_OUTPUT: u16 = 0x80C9;
 
     // Reserves commitment protocol
@@ -73,11 +74,12 @@ pub mod consts {
     pub const COLLATERAL_DECREASE: u16 = 0x80CD;
     pub const COLLATERAL_STATUS: u16 = 0x80CF;
     pub const COLLATERAL_ATTESTATION: u16 = 0x808D;
-    pub const COLLATERAL_ADD_PARTNER: u16 = 0x8097;
-    pub const COLLATERAL_REMOVE_PARTNER: u16 = 0x8099;
+    pub const QUORUM_ADD_MEMBER: u16 = 0x8097;
+    pub const QUORUM_REMOVE_MEMBER: u16 = 0x8099;
     pub const COLLATERAL_CONSENT_REQUEST: u16 = 0x809B;
     pub const COLLATERAL_CONSENT_RESPONSE: u16 = 0x809D;
     pub const COLLATERAL_LOCK: u16 = 0x809F;
+    pub const QUORUM_JOIN: u16 = 0x80AB;
 
     // Deposit operations
     pub const DEPOSIT_OPEN: u16 = 0x80D1;
@@ -159,7 +161,7 @@ pub const ALL_OPERATION_MESSAGE_TYPES: &[u16] = &[
     RESERVES_ADD_OUTPUT, RESERVES_REMOVE_OUTPUT, RESERVES_INCREASE,
     RESERVES_DECREASE, RESERVES_UPDATE_OUTPUT, UPDATE_RESERVES, ACCEPT_RESERVES,
     COLLATERAL_INCREASE, COLLATERAL_DECREASE, COLLATERAL_STATUS,
-    COLLATERAL_ATTESTATION, COLLATERAL_ADD_PARTNER, COLLATERAL_REMOVE_PARTNER,
+    COLLATERAL_ATTESTATION, QUORUM_ADD_MEMBER, QUORUM_REMOVE_MEMBER,
     COLLATERAL_CONSENT_REQUEST, COLLATERAL_CONSENT_RESPONSE,
     DEPOSIT_OPEN, DEPOSIT_CLOSE, DEPOSIT_UPDATE,
     ONCHAIN_CREDIT, ONCHAIN_LOCK, ONCHAIN_FAIL, ONCHAIN_FULFILL,
@@ -185,7 +187,7 @@ pub const MESSAGES_REQUIRING_ACK: &[u16] = &[
     RECEIVING_CREDIT_PAYMENT, RECEIVING_COSIGN_INVOICE,
     SENDING_LOCK_PAYMENT, SENDING_FAIL_PAYMENT, SENDING_FULFILL_PAYMENT,
     COLLATERAL_INCREASE, COLLATERAL_DECREASE,
-    COLLATERAL_ADD_PARTNER, COLLATERAL_REMOVE_PARTNER,
+    QUORUM_ADD_MEMBER, QUORUM_REMOVE_MEMBER,
     COLLATERAL_CONSENT_REQUEST, COLLATERAL_CONSENT_RESPONSE,
     MAINTENANCE_FEE_COLLECT,
     LEDGER_CLOSE, CHANNEL_CLOSE_TOMBSTONE,
@@ -215,7 +217,7 @@ pub fn get_message_category(message_type: u16) -> Option<&'static str> {
         RESERVES_DECREASE | RESERVES_UPDATE_OUTPUT => Some("reserves"),
 
         COLLATERAL_INCREASE | COLLATERAL_DECREASE | COLLATERAL_STATUS |
-        COLLATERAL_ATTESTATION | COLLATERAL_ADD_PARTNER | COLLATERAL_REMOVE_PARTNER |
+        COLLATERAL_ATTESTATION | QUORUM_ADD_MEMBER | QUORUM_REMOVE_MEMBER |
         COLLATERAL_CONSENT_REQUEST | COLLATERAL_CONSENT_RESPONSE => Some("collateral"),
 
         DEPOSIT_OPEN | DEPOSIT_CLOSE | DEPOSIT_UPDATE => Some("deposit"),
@@ -510,13 +512,38 @@ pub enum LedgerOperation {
         collateral_enforcement_block: u64,
     },
 
-    // ========== Reserves Operations (2) ==========
+    // ========== Reserves Operations (3) ==========
     // Note: ReservesAdd/Remove/UpdateSpendTo are peer messages, not ledger operations.
     // The initial reserves state is set via LedgerOpen.
     /// Increase reserves amount
     ReservesIncrease { new_amount: u64 },
     /// Decrease reserves amount
     ReservesDecrease { new_amount: u64 },
+    /// Rotate reserves to a new Taproot output with quorum-based spending
+    ///
+    /// Records the rotation of reserves from P2WSH to P2TR with tiered spending:
+    /// - Immediate: quorum_threshold-of-quorum_size multisig
+    /// - After first_expiry_block: operator can spend alone
+    ///
+    /// The quorum member pubkeys are derived from QuorumAddMember operations on this ledger.
+    ReservesRotate {
+        /// Transaction that spent the old reserves UTXO
+        spending_txid: [u8; 32],
+        /// New reserves UTXO txid
+        new_outpoint_txid: [u8; 32],
+        /// New reserves UTXO vout
+        new_outpoint_vout: u32,
+        /// Amount in satoshis (should match previous reserves)
+        amount: u64,
+        /// Number of signatures required for immediate spend
+        quorum_threshold: u8,
+        /// Total number of quorum members (including operator)
+        quorum_size: u8,
+        /// Block height when operator can spend alone (earliest member expiry)
+        first_expiry_block: u32,
+        /// Ledger hash committed in the Taproot script
+        ledger_hash: [u8; 32],
+    },
 
     // ========== Deposit Operations (6) ==========
     /// Open a new deposit
@@ -609,10 +636,10 @@ pub enum LedgerOperation {
         new_amount: u64,
         block_height: u32,
     },
-    /// Record a collateral attestation from another partner
+    /// Record a collateral attestation from another quorum member
     CollateralAttestation {
         collateral_operator: PublicKey,
-        collateral_partner: PublicKey,
+        quorum_member: PublicKey,
         amount: u64,
         block_height: u32,
         /// Block height when the collateral lock expires
@@ -621,15 +648,15 @@ pub enum LedgerOperation {
         ledger_hash: [u8; 32],
     },
 
-    // ========== Voter Registration (2) ==========
-    /// Add a collateral partner to the VoterSet
-    CollateralAddPartner {
-        collateral_partner: PublicKey,
-        collateral_partner_signature: [u8; 64],
+    // ========== Quorum Membership (2) ==========
+    /// Add a quorum member to the VoterSet
+    QuorumAddMember {
+        quorum_member: PublicKey,
+        quorum_member_signature: [u8; 64],
     },
-    /// Remove a collateral partner from the VoterSet
-    CollateralRemovePartner {
-        collateral_partner: PublicKey,
+    /// Remove a quorum member from the VoterSet
+    QuorumRemoveMember {
+        quorum_member: PublicKey,
         operator_signature: [u8; 64],
     },
     /// Lock deposit balance as collateral backing for the operator.
@@ -646,6 +673,20 @@ pub enum LedgerOperation {
         operator_id: PublicKey,
         /// Deposit holder's signature authorizing the lock
         deposit_holder_signature: [u8; 64],
+    },
+    /// Record that we have joined another operator's quorum as a monitoring member.
+    /// This is appended to the consenting party's own ledger when they grant consent.
+    /// Creates a two-sided auditable trail alongside QuorumAddMember on the operator's ledger.
+    /// Uses ratchet semantics: can only extend membership duration.
+    QuorumJoin {
+        /// The operator whose quorum we're joining
+        operator_id: PublicKey,
+        /// The ledger identifier we're monitoring
+        reserves_id: String,
+        /// Block height when our membership commitment expires
+        membership_expires: u32,
+        /// Our consent signature (matches quorum_member_signature in QuorumAddMember)
+        our_signature: [u8; 64],
     },
 
     // ========== Maintenance (1) ==========
@@ -674,6 +715,7 @@ impl LedgerOperation {
             Self::LedgerOpen { .. } => 1,  // First operation
             Self::ReservesIncrease { .. } => 10,
             Self::ReservesDecrease { .. } => 11,
+            Self::ReservesRotate { .. } => 12,
             Self::DepositOpen { .. } => 20,
             Self::DepositClose { .. } => 21,
             Self::DepositUpdate { .. } => 22,
@@ -688,9 +730,10 @@ impl LedgerOperation {
             Self::CollateralIncrease { .. } => 40,
             Self::CollateralDecrease { .. } => 41,
             Self::CollateralAttestation { .. } => 42,
-            Self::CollateralAddPartner { .. } => 43,
-            Self::CollateralRemovePartner { .. } => 44,
+            Self::QuorumAddMember { .. } => 43,
+            Self::QuorumRemoveMember { .. } => 44,
             Self::CollateralLock { .. } => 45,
+            Self::QuorumJoin { .. } => 46,
             Self::FeeCollect { .. } => 50,
             Self::LedgerClose => 60,
             Self::Tombstone { .. } => 61,
@@ -966,7 +1009,7 @@ pub enum CoordinationResponseMsg {
         operator_id: PublicKey,
         reserves_id: String,
         consent_granted: bool,
-        collateral_partner_signature: [u8; 64],
+        quorum_member_signature: [u8; 64],
     },
     /// Quorum join accepted/rejected
     QuorumJoinResponse {
@@ -1310,6 +1353,16 @@ impl BinaryCodec for LedgerOperation {
             }
             Self::ReservesIncrease { new_amount } => write_u64(w, *new_amount)?,
             Self::ReservesDecrease { new_amount } => write_u64(w, *new_amount)?,
+            Self::ReservesRotate { spending_txid, new_outpoint_txid, new_outpoint_vout, amount, quorum_threshold, quorum_size, first_expiry_block, ledger_hash } => {
+                write_32(w, spending_txid)?;
+                write_32(w, new_outpoint_txid)?;
+                write_u32(w, *new_outpoint_vout)?;
+                write_u64(w, *amount)?;
+                write_u8(w, *quorum_threshold)?;
+                write_u8(w, *quorum_size)?;
+                write_u32(w, *first_expiry_block)?;
+                write_32(w, ledger_hash)?;
+            }
             Self::DepositOpen { pubkey, fees, payment_hash, invoice, cosigner_guarantee_signature } => {
                 write_pubkey(w, pubkey)?;
                 write_option(w, fees, |w, f| f.write_to(w))?;
@@ -1382,21 +1435,21 @@ impl BinaryCodec for LedgerOperation {
                 write_u64(w, *new_amount)?;
                 write_u32(w, *block_height)?;
             }
-            Self::CollateralAttestation { collateral_operator, collateral_partner, amount, block_height, lock_until_block, signature, ledger_hash } => {
+            Self::CollateralAttestation { collateral_operator, quorum_member, amount, block_height, lock_until_block, signature, ledger_hash } => {
                 write_pubkey(w, collateral_operator)?;
-                write_pubkey(w, collateral_partner)?;
+                write_pubkey(w, quorum_member)?;
                 write_u64(w, *amount)?;
                 write_u32(w, *block_height)?;
                 write_u32(w, *lock_until_block)?;
                 write_64(w, signature)?;
                 write_32(w, ledger_hash)?;
             }
-            Self::CollateralAddPartner { collateral_partner, collateral_partner_signature } => {
-                write_pubkey(w, collateral_partner)?;
-                write_64(w, collateral_partner_signature)?;
+            Self::QuorumAddMember { quorum_member, quorum_member_signature } => {
+                write_pubkey(w, quorum_member)?;
+                write_64(w, quorum_member_signature)?;
             }
-            Self::CollateralRemovePartner { collateral_partner, operator_signature } => {
-                write_pubkey(w, collateral_partner)?;
+            Self::QuorumRemoveMember { quorum_member, operator_signature } => {
+                write_pubkey(w, quorum_member)?;
                 write_64(w, operator_signature)?;
             }
             Self::CollateralLock { deposit_pubkey, amount, lock_until_block, operator_id, deposit_holder_signature } => {
@@ -1405,6 +1458,12 @@ impl BinaryCodec for LedgerOperation {
                 write_u32(w, *lock_until_block)?;
                 write_pubkey(w, operator_id)?;
                 write_64(w, deposit_holder_signature)?;
+            }
+            Self::QuorumJoin { operator_id, reserves_id, membership_expires, our_signature } => {
+                write_pubkey(w, operator_id)?;
+                write_string(w, reserves_id)?;
+                write_u32(w, *membership_expires)?;
+                write_64(w, our_signature)?;
             }
             Self::FeeCollect { pubkey, amount, block_height } => {
                 write_pubkey(w, pubkey)?;
@@ -1431,9 +1490,19 @@ impl BinaryCodec for LedgerOperation {
                 ledger_address: read_string(r)?,
                 collateral_enforcement_block: read_u64(r)?,
             }),
-            // Reserves operations (10-11)
+            // Reserves operations (10-12)
             10 => Ok(Self::ReservesIncrease { new_amount: read_u64(r)? }),
             11 => Ok(Self::ReservesDecrease { new_amount: read_u64(r)? }),
+            12 => Ok(Self::ReservesRotate {
+                spending_txid: read_32(r)?,
+                new_outpoint_txid: read_32(r)?,
+                new_outpoint_vout: read_u32(r)?,
+                amount: read_u64(r)?,
+                quorum_threshold: read_u8(r)?,
+                quorum_size: read_u8(r)?,
+                first_expiry_block: read_u32(r)?,
+                ledger_hash: read_32(r)?,
+            }),
             // Deposit operations (20-25)
             20 => Ok(Self::DepositOpen {
                 pubkey: read_pubkey(r)?,
@@ -1512,19 +1581,19 @@ impl BinaryCodec for LedgerOperation {
             }),
             42 => Ok(Self::CollateralAttestation {
                 collateral_operator: read_pubkey(r)?,
-                collateral_partner: read_pubkey(r)?,
+                quorum_member: read_pubkey(r)?,
                 amount: read_u64(r)?,
                 block_height: read_u32(r)?,
                 lock_until_block: read_u32(r)?,
                 signature: read_64(r)?,
                 ledger_hash: read_32(r)?,
             }),
-            43 => Ok(Self::CollateralAddPartner {
-                collateral_partner: read_pubkey(r)?,
-                collateral_partner_signature: read_64(r)?,
+            43 => Ok(Self::QuorumAddMember {
+                quorum_member: read_pubkey(r)?,
+                quorum_member_signature: read_64(r)?,
             }),
-            44 => Ok(Self::CollateralRemovePartner {
-                collateral_partner: read_pubkey(r)?,
+            44 => Ok(Self::QuorumRemoveMember {
+                quorum_member: read_pubkey(r)?,
                 operator_signature: read_64(r)?,
             }),
             45 => Ok(Self::CollateralLock {
@@ -1533,6 +1602,12 @@ impl BinaryCodec for LedgerOperation {
                 lock_until_block: read_u32(r)?,
                 operator_id: read_pubkey(r)?,
                 deposit_holder_signature: read_64(r)?,
+            }),
+            46 => Ok(Self::QuorumJoin {
+                operator_id: read_pubkey(r)?,
+                reserves_id: read_string(r)?,
+                membership_expires: read_u32(r)?,
+                our_signature: read_64(r)?,
             }),
             // Fee operations (50)
             50 => Ok(Self::FeeCollect {
@@ -1678,8 +1753,8 @@ impl DepositsMessage {
                 write_u64(w, m.initial_amount)?;
                 write_pubkey(w, &m.spend_to)?;
                 write_string(w, &m.reserves_id)?;
-                write_u16(w, m.collateral_partners.len() as u16)?;
-                for pk in &m.collateral_partners {
+                write_u16(w, m.quorum_members.len() as u16)?;
+                for pk in &m.quorum_members {
                     write_pubkey(w, pk)?;
                 }
             }
@@ -1754,15 +1829,15 @@ impl DepositsMessage {
                 let spend_to = read_pubkey(r)?;
                 let reserves_id = read_string(r)?;
                 let count = read_u16(r)? as usize;
-                let mut collateral_partners = Vec::with_capacity(count);
+                let mut quorum_members = Vec::with_capacity(count);
                 for _ in 0..count {
-                    collateral_partners.push(read_pubkey(r)?);
+                    quorum_members.push(read_pubkey(r)?);
                 }
                 Ok(Self::ReservesAddOutput(crate::wire_messages::ReservesAddOutputMsg {
                     initial_amount,
                     spend_to,
                     reserves_id,
-                    collateral_partners,
+                    quorum_members,
                 }))
             }
             RESERVES_REMOVE_OUTPUT => {
@@ -2064,13 +2139,13 @@ impl BinaryCodec for CoordinationResponseMsg {
                 write_32(w, request_hash)?;
                 write_64(w, cosignature)?;
             }
-            Self::CollateralConsentResponse { request_hash, operator_id, reserves_id, consent_granted, collateral_partner_signature } => {
+            Self::CollateralConsentResponse { request_hash, operator_id, reserves_id, consent_granted, quorum_member_signature } => {
                 write_u8(w, 1)?;
                 write_32(w, request_hash)?;
                 write_pubkey(w, operator_id)?;
                 write_string(w, reserves_id)?;
                 write_bool(w, *consent_granted)?;
-                write_64(w, collateral_partner_signature)?;
+                write_64(w, quorum_member_signature)?;
             }
             Self::QuorumJoinResponse { request_hash, accepted, members, threshold, last_sequence, current_hash, rejection_reason } => {
                 write_u8(w, 2)?;
@@ -2122,7 +2197,7 @@ impl BinaryCodec for CoordinationResponseMsg {
                 operator_id: read_pubkey(r)?,
                 reserves_id: read_string(r)?,
                 consent_granted: read_bool(r)?,
-                collateral_partner_signature: read_64(r)?,
+                quorum_member_signature: read_64(r)?,
             }),
             2 => Ok(Self::QuorumJoinResponse {
                 request_hash: read_32(r)?,
@@ -2255,7 +2330,7 @@ mod ledger_op_tlv {
     pub const DISCRIMINANT: u64 = 0;
     pub const AMOUNT: u64 = 2;
     pub const SPEND_TO: u64 = 4;
-    pub const COLLATERAL_PARTNERS: u64 = 6;
+    pub const QUORUM_MEMBERS: u64 = 6;
     pub const NEW_AMOUNT: u64 = 8;
     pub const PUBKEY: u64 = 10;
     pub const FEES: u64 = 12;
@@ -2273,8 +2348,8 @@ mod ledger_op_tlv {
     pub const COLLATERAL_OPERATOR: u64 = 38;
     pub const SIGNATURE: u64 = 40;
     pub const LEDGER_HASH: u64 = 42;
-    pub const COLLATERAL_PARTNER: u64 = 44;
-    pub const COLLATERAL_PARTNER_SIG: u64 = 46;
+    pub const QUORUM_MEMBER: u64 = 44;
+    pub const QUORUM_MEMBER_SIG: u64 = 46;
     pub const OPERATOR_SIG: u64 = 48;
     pub const CHANNEL_ID: u64 = 50;
     pub const CLOSE_REASON: u64 = 52;
@@ -2294,6 +2369,16 @@ mod ledger_op_tlv {
     // CollateralLock fields
     pub const LOCK_UNTIL_BLOCK: u64 = 76;
     pub const DEPOSIT_HOLDER_SIG: u64 = 78;
+    // QuorumJoin fields
+    pub const OUR_SIGNATURE: u64 = 80;
+    pub const MEMBERSHIP_EXPIRES: u64 = 82;
+    // ReservesRotate fields
+    pub const SPENDING_TXID: u64 = 90;
+    pub const NEW_OUTPOINT_TXID: u64 = 91;
+    pub const NEW_OUTPOINT_VOUT: u64 = 92;
+    pub const QUORUM_THRESHOLD: u64 = 93;
+    pub const QUORUM_SIZE: u64 = 94;
+    pub const FIRST_EXPIRY_BLOCK: u64 = 95;
 }
 
 impl TlvEncode for LedgerOperation {
@@ -2315,6 +2400,17 @@ impl TlvEncode for LedgerOperation {
             }
             Self::ReservesDecrease { new_amount } => {
                 builder = builder.u64_field(NEW_AMOUNT, *new_amount);
+            }
+            Self::ReservesRotate { spending_txid, new_outpoint_txid, new_outpoint_vout, amount, quorum_threshold, quorum_size, first_expiry_block, ledger_hash } => {
+                builder = builder
+                    .bytes_field(SPENDING_TXID, spending_txid)
+                    .bytes_field(NEW_OUTPOINT_TXID, new_outpoint_txid)
+                    .u32_field(NEW_OUTPOINT_VOUT, *new_outpoint_vout)
+                    .u64_field(AMOUNT, *amount)
+                    .u8_field(QUORUM_THRESHOLD, *quorum_threshold)
+                    .u8_field(QUORUM_SIZE, *quorum_size)
+                    .u32_field(FIRST_EXPIRY_BLOCK, *first_expiry_block)
+                    .bytes_field(LEDGER_HASH, ledger_hash);
             }
             Self::DepositOpen { pubkey, fees, payment_hash, invoice, cosigner_guarantee_signature } => {
                 builder = builder.pubkey_field(PUBKEY, pubkey);
@@ -2409,24 +2505,24 @@ impl TlvEncode for LedgerOperation {
                     .u64_field(NEW_AMOUNT, *new_amount)
                     .u32_field(BLOCK_HEIGHT, *block_height);
             }
-            Self::CollateralAttestation { collateral_operator, collateral_partner, amount, block_height, lock_until_block, signature, ledger_hash } => {
+            Self::CollateralAttestation { collateral_operator, quorum_member, amount, block_height, lock_until_block, signature, ledger_hash } => {
                 builder = builder
                     .pubkey_field(COLLATERAL_OPERATOR, collateral_operator)
-                    .pubkey_field(COLLATERAL_PARTNER, collateral_partner)
+                    .pubkey_field(QUORUM_MEMBER, quorum_member)
                     .u64_field(AMOUNT, *amount)
                     .u32_field(BLOCK_HEIGHT, *block_height)
                     .u32_field(LOCK_UNTIL_BLOCK, *lock_until_block)
                     .bytes_field(SIGNATURE, signature)
                     .bytes_field(LEDGER_HASH, ledger_hash);
             }
-            Self::CollateralAddPartner { collateral_partner, collateral_partner_signature } => {
+            Self::QuorumAddMember { quorum_member, quorum_member_signature } => {
                 builder = builder
-                    .pubkey_field(COLLATERAL_PARTNER, collateral_partner)
-                    .bytes_field(COLLATERAL_PARTNER_SIG, collateral_partner_signature);
+                    .pubkey_field(QUORUM_MEMBER, quorum_member)
+                    .bytes_field(QUORUM_MEMBER_SIG, quorum_member_signature);
             }
-            Self::CollateralRemovePartner { collateral_partner, operator_signature } => {
+            Self::QuorumRemoveMember { quorum_member, operator_signature } => {
                 builder = builder
-                    .pubkey_field(COLLATERAL_PARTNER, collateral_partner)
+                    .pubkey_field(QUORUM_MEMBER, quorum_member)
                     .bytes_field(OPERATOR_SIG, operator_signature);
             }
             Self::CollateralLock { deposit_pubkey, amount, lock_until_block, operator_id, deposit_holder_signature } => {
@@ -2436,6 +2532,13 @@ impl TlvEncode for LedgerOperation {
                     .u32_field(LOCK_UNTIL_BLOCK, *lock_until_block)
                     .pubkey_field(OPERATOR_ID, operator_id)
                     .bytes_field(DEPOSIT_HOLDER_SIG, deposit_holder_signature);
+            }
+            Self::QuorumJoin { operator_id, reserves_id, membership_expires, our_signature } => {
+                builder = builder
+                    .pubkey_field(OPERATOR_ID, operator_id)
+                    .string_field(RESERVES_ID, reserves_id)
+                    .u32_field(MEMBERSHIP_EXPIRES, *membership_expires)
+                    .bytes_field(OUR_SIGNATURE, our_signature);
             }
             Self::FeeCollect { pubkey, amount, block_height } => {
                 builder = builder
@@ -2473,6 +2576,16 @@ impl TlvDecode for LedgerOperation {
             }),
             10 => Ok(Self::ReservesIncrease { new_amount: reader.read_u64(NEW_AMOUNT)? }),
             11 => Ok(Self::ReservesDecrease { new_amount: reader.read_u64(NEW_AMOUNT)? }),
+            12 => Ok(Self::ReservesRotate {
+                spending_txid: reader.read_bytes(SPENDING_TXID)?,
+                new_outpoint_txid: reader.read_bytes(NEW_OUTPOINT_TXID)?,
+                new_outpoint_vout: reader.read_u32(NEW_OUTPOINT_VOUT)?,
+                amount: reader.read_u64(AMOUNT)?,
+                quorum_threshold: reader.read_u8(QUORUM_THRESHOLD)?,
+                quorum_size: reader.read_u8(QUORUM_SIZE)?,
+                first_expiry_block: reader.read_u32(FIRST_EXPIRY_BLOCK)?,
+                ledger_hash: reader.read_bytes(LEDGER_HASH)?,
+            }),
             20 => Ok(Self::DepositOpen {
                 pubkey: reader.read_pubkey(PUBKEY)?,
                 fees: reader.read_nested_opt(FEES)?,
@@ -2547,19 +2660,19 @@ impl TlvDecode for LedgerOperation {
             }),
             42 => Ok(Self::CollateralAttestation {
                 collateral_operator: reader.read_pubkey(COLLATERAL_OPERATOR)?,
-                collateral_partner: reader.read_pubkey(COLLATERAL_PARTNER)?,
+                quorum_member: reader.read_pubkey(QUORUM_MEMBER)?,
                 amount: reader.read_u64(AMOUNT)?,
                 block_height: reader.read_u32(BLOCK_HEIGHT)?,
                 lock_until_block: reader.read_u32(LOCK_UNTIL_BLOCK)?,
                 signature: reader.read_bytes(SIGNATURE)?,
                 ledger_hash: reader.read_bytes(LEDGER_HASH)?,
             }),
-            43 => Ok(Self::CollateralAddPartner {
-                collateral_partner: reader.read_pubkey(COLLATERAL_PARTNER)?,
-                collateral_partner_signature: reader.read_bytes(COLLATERAL_PARTNER_SIG)?,
+            43 => Ok(Self::QuorumAddMember {
+                quorum_member: reader.read_pubkey(QUORUM_MEMBER)?,
+                quorum_member_signature: reader.read_bytes(QUORUM_MEMBER_SIG)?,
             }),
-            44 => Ok(Self::CollateralRemovePartner {
-                collateral_partner: reader.read_pubkey(COLLATERAL_PARTNER)?,
+            44 => Ok(Self::QuorumRemoveMember {
+                quorum_member: reader.read_pubkey(QUORUM_MEMBER)?,
                 operator_signature: reader.read_bytes(OPERATOR_SIG)?,
             }),
             45 => Ok(Self::CollateralLock {
@@ -2568,6 +2681,12 @@ impl TlvDecode for LedgerOperation {
                 lock_until_block: reader.read_u32(LOCK_UNTIL_BLOCK)?,
                 operator_id: reader.read_pubkey(OPERATOR_ID)?,
                 deposit_holder_signature: reader.read_bytes(DEPOSIT_HOLDER_SIG)?,
+            }),
+            46 => Ok(Self::QuorumJoin {
+                operator_id: reader.read_pubkey(OPERATOR_ID)?,
+                reserves_id: reader.read_string(RESERVES_ID)?,
+                membership_expires: reader.read_u32(MEMBERSHIP_EXPIRES)?,
+                our_signature: reader.read_bytes(OUR_SIGNATURE)?,
             }),
             50 => Ok(Self::FeeCollect {
                 pubkey: reader.read_pubkey(PUBKEY)?,
@@ -3298,7 +3417,7 @@ mod coordination_response_tlv {
     pub const OPERATOR_ID: u64 = 6;
     pub const RESERVES_ID: u64 = 8;
     pub const CONSENT_GRANTED: u64 = 10;
-    pub const COLLATERAL_PARTNER_SIGNATURE: u64 = 12;
+    pub const QUORUM_MEMBER_SIGNATURE: u64 = 12;
     pub const ACCEPTED: u64 = 14;
     pub const MEMBERS: u64 = 16;
     pub const THRESHOLD: u64 = 18;
@@ -3331,7 +3450,7 @@ impl TlvEncode for CoordinationResponseMsg {
             }
             Self::CollateralConsentResponse {
                 request_hash, operator_id, reserves_id, consent_granted,
-                collateral_partner_signature,
+                quorum_member_signature,
             } => {
                 TlvBuilder::new()
                     .u8_field(DISCRIMINANT, 1)
@@ -3339,7 +3458,7 @@ impl TlvEncode for CoordinationResponseMsg {
                     .pubkey_field(OPERATOR_ID, operator_id)
                     .string_field(RESERVES_ID, reserves_id)
                     .u8_field(CONSENT_GRANTED, if *consent_granted { 1 } else { 0 })
-                    .bytes_field(COLLATERAL_PARTNER_SIGNATURE, collateral_partner_signature)
+                    .bytes_field(QUORUM_MEMBER_SIGNATURE, quorum_member_signature)
                     .build()
             }
             Self::QuorumJoinResponse {
@@ -3422,7 +3541,7 @@ impl TlvDecode for CoordinationResponseMsg {
                 operator_id: reader.read_pubkey(OPERATOR_ID)?,
                 reserves_id: reader.read_string(RESERVES_ID)?,
                 consent_granted: reader.read_u8(CONSENT_GRANTED)? != 0,
-                collateral_partner_signature: reader.read_bytes(COLLATERAL_PARTNER_SIGNATURE)?,
+                quorum_member_signature: reader.read_bytes(QUORUM_MEMBER_SIGNATURE)?,
             }),
             2 => {
                 // Decode Vec<PublicKey> from concatenated 33-byte compressed pubkeys
@@ -3646,21 +3765,21 @@ mod reserves_add_output_tlv {
     pub const INITIAL_AMOUNT: u64 = 0;
     pub const SPEND_TO: u64 = 2;
     pub const RESERVES_ID: u64 = 4;
-    pub const COLLATERAL_PARTNERS: u64 = 6;
+    pub const QUORUM_MEMBERS: u64 = 6;
 }
 
 impl TlvEncode for crate::wire_messages::ReservesAddOutputMsg {
     fn tlv_encode(&self) -> Vec<u8> {
         use reserves_add_output_tlv::*;
         // Encode Vec<PublicKey> as concatenated compressed pubkey bytes (33 bytes each)
-        let partners_bytes: Vec<u8> = self.collateral_partners.iter()
+        let partners_bytes: Vec<u8> = self.quorum_members.iter()
             .flat_map(|pk| pk.serialize())
             .collect();
         TlvBuilder::new()
             .u64_field(INITIAL_AMOUNT, self.initial_amount)
             .pubkey_field(SPEND_TO, &self.spend_to)
             .string_field(RESERVES_ID, &self.reserves_id)
-            .bytes_field(COLLATERAL_PARTNERS, &partners_bytes)
+            .bytes_field(QUORUM_MEMBERS, &partners_bytes)
             .build()
     }
 }
@@ -3670,20 +3789,20 @@ impl TlvDecode for crate::wire_messages::ReservesAddOutputMsg {
         use reserves_add_output_tlv::*;
         let reader = TlvReader::new(data)?;
         // Decode Vec<PublicKey> from concatenated 33-byte compressed pubkeys
-        let partners_raw = reader.read_raw(COLLATERAL_PARTNERS)?;
-        let collateral_partners: Result<Vec<bitcoin::secp256k1::PublicKey>, _> = partners_raw
+        let partners_raw = reader.read_raw(QUORUM_MEMBERS)?;
+        let quorum_members: Result<Vec<bitcoin::secp256k1::PublicKey>, _> = partners_raw
             .chunks(33)
             .map(|chunk| bitcoin::secp256k1::PublicKey::from_slice(chunk))
             .collect();
-        let collateral_partners = collateral_partners.map_err(|e| TlvError::InvalidFieldValue {
-            field_type: COLLATERAL_PARTNERS,
+        let quorum_members = quorum_members.map_err(|e| TlvError::InvalidFieldValue {
+            field_type: QUORUM_MEMBERS,
             reason: format!("invalid pubkey: {}", e),
         })?;
         Ok(Self {
             initial_amount: reader.read_u64(INITIAL_AMOUNT)?,
             spend_to: reader.read_pubkey(SPEND_TO)?,
             reserves_id: reader.read_string(RESERVES_ID)?,
-            collateral_partners,
+            quorum_members,
         })
     }
 }

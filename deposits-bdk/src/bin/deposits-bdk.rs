@@ -37,7 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "run" => run_node(&args[2..]).await?,
         "info" => show_info(&args[2..]).await?,
         "address" => show_address(&args[2..]).await?,
-        "reserves" => create_reserves(&args[2..]).await?,
+        "reserves" => reserves_command(&args[2..]).await?,
         "ledger" => ledger_command(&args[2..]).await?,
         "partner" => partner_command(&args[2..]).await?,
         "collateral" => collateral_command(&args[2..]).await?,
@@ -66,13 +66,20 @@ COMMANDS:
     info            Show node info
     address         Generate a new receiving address
     keygen          Generate a new secp256k1 keypair for deposits
-    reserves        Create a reserves UTXO
+    reserves        Manage reserves UTXOs (create, rotate, list)
     ledger          Manage ledgers (open, list)
-    partner         Manage collateral partners (request, list)
+    partner         Manage quorum members (request, add, join, list)
     collateral      Manage collateral pledges
     deposit         Manage deposit offers for on-chain funding
     withdraw        Manage on-chain withdrawals
     help            Show this help message
+
+RESERVES SUBCOMMANDS:
+    reserves create [amount_sats]
+                    Create a new reserves UTXO (default: 100M sats / 1 BTC)
+    reserves rotate <reserves_id>
+                    Rotate reserves to quorum-based Taproot spending
+    reserves list   List all reserves outputs
 
 LEDGER SUBCOMMANDS:
     ledger open [enforcement_block]
@@ -83,8 +90,12 @@ LEDGER SUBCOMMANDS:
                     Show hash chain history for a ledger (default: primary ledger)
 
 PARTNER SUBCOMMANDS:
-    partner request <pubkey>   Send collateral partnership request
-    partner list               List all collateral partners
+    partner request <pubkey>   Send quorum membership request
+    partner add <reserves_id> <quorum_member_pubkey>
+                    Add a quorum member to your ledger (records QuorumAddMember)
+    partner join <our_reserves_id> <target_operator> <target_reserves_id> <expires_block>
+                    Record that you joined another operator's quorum (records QuorumJoin)
+    partner list               List all quorum members
 
 COLLATERAL SUBCOMMANDS:
     collateral pledge <reserves_id> <deposit_secret> <amount_msats> <lock_blocks>
@@ -344,7 +355,30 @@ fn keygen() {
     println!("{} {}", hex::encode(secret_key.secret_bytes()), public_key);
 }
 
-async fn create_reserves(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+/// Handle reserves subcommands
+async fn reserves_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    if args.is_empty() {
+        // Default behavior: create reserves (backwards compatible)
+        return reserves_create(&[]).await;
+    }
+
+    match args[0].as_str() {
+        "create" => reserves_create(&args[1..]).await,
+        "rotate" => reserves_rotate(&args[1..]).await,
+        "list" => reserves_list(&args[1..]).await,
+        arg if !arg.starts_with("--") && arg.parse::<u64>().is_ok() => {
+            // Legacy: direct amount argument (backwards compatible)
+            reserves_create(args).await
+        }
+        _ => {
+            // Could be config args for create (backwards compatible)
+            reserves_create(args).await
+        }
+    }
+}
+
+/// Create a new reserves UTXO
+async fn reserves_create(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // Parse amount from first positional argument
     let mut amount_sats: u64 = 100_000_000; // Default 1 BTC
     let mut config_args = Vec::new();
@@ -397,6 +431,146 @@ async fn create_reserves(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     println!("  Amount: {} sats", reserves.amount);
     println!("  Address: {}", reserves.address);
     println!("  Timeout height: {}", reserves.timeout_height);
+
+    Ok(())
+}
+
+/// Rotate reserves to quorum-based Taproot spending
+async fn reserves_rotate(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut reserves_id: Option<String> = None;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            // Config argument - pass through
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else if reserves_id.is_none() {
+            reserves_id = Some(args[i].clone());
+        }
+        i += 1;
+    }
+
+    let config = parse_config(&config_args)?;
+    let node = Node::new(config).await?;
+
+    // Sync wallet first
+    node.sync_wallet()?;
+
+    // If no reserves_id provided, use the primary ledger
+    let reserves_id = match reserves_id {
+        Some(id) => id,
+        None => {
+            // Get the primary ledger's reserves_id
+            match node.get_primary_ledger() {
+                Some((rid, _)) => rid,
+                None => return Err("No ledger found. Open a ledger first with 'ledger open'.".into()),
+            }
+        }
+    };
+
+    println!("Rotating reserves to quorum-based Taproot spending...");
+    println!("  Ledger: {}", reserves_id);
+
+    let result = node.rotate_reserves_to_quorum(&reserves_id)?;
+
+    println!("\nReserves rotated successfully!");
+    println!("  TXID: {}", result.txid);
+    println!("  New Address: {}", result.new_address);
+    println!("  Amount: {} sats", result.amount_sats);
+    println!("  Quorum Members: {}", result.quorum_member_count);
+    println!("  First Expiry Block: {}", result.first_expiry_block);
+    println!("  Ledger Hash: {}", hex::encode(&result.ledger_hash[..8]));
+    println!("\nSpending tiers:");
+    println!("  Tier 0: Majority of quorum + operator (immediate)");
+    println!("  Tier 1: Operator only (after block {})", result.first_expiry_block);
+    println!("  Tier 2: Emergency recovery (extended timeout)");
+
+    Ok(())
+}
+
+/// List all reserves outputs
+async fn reserves_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let config = parse_config(args)?;
+    let node = Node::new(config).await?;
+
+    // Sync wallet first
+    node.sync_wallet()?;
+
+    let reserves = node.wallet.get_reserves();
+    let taproot_reserves = node.wallet.get_taproot_reserves();
+
+    if reserves.is_empty() && taproot_reserves.is_empty() {
+        println!("No reserves outputs found.");
+        return Ok(());
+    }
+
+    println!("=== Legacy Reserves (P2WSH) ===");
+    for info in &reserves {
+        println!("  Outpoint: {}", info.outpoint);
+        println!("    Amount: {} sats", info.amount);
+        println!("    Operator: {}", info.operator);
+        println!("    Partners: {}", info.partners.len());
+        println!("    Timeout: block {}", info.timeout_height);
+        println!("    Confirmed: {}", info.confirmed);
+        println!();
+    }
+
+    println!("=== Taproot Reserves (Quorum-based) ===");
+    for info in &taproot_reserves {
+        println!("  Outpoint: {}", info.outpoint);
+        println!("    Amount: {} sats", info.amount);
+        println!("    Operator: {}", info.operator);
+        println!("    Quorum Members: {}", info.quorum_members.len());
+        for (i, member) in info.quorum_members.iter().enumerate() {
+            println!("      {}: {}", i + 1, member);
+        }
+        println!("    First Expiry: block {}", info.first_expiry_block);
+        println!("    Ledger Hash: {}", hex::encode(&info.ledger_hash[..8]));
+        println!("    Confirmed: {}", info.confirmed);
+
+        // Dump Taproot details
+        println!();
+        println!("    === Taproot Script Details ===");
+        println!("    Internal Key: {}", info.taproot_output.internal_key());
+        if let Some(merkle_root) = info.taproot_output.merkle_root() {
+            println!("    Merkle Root: {}", merkle_root);
+        }
+        println!("    ScriptPubKey: {}", hex::encode(info.taproot_output.script_pubkey().as_bytes()));
+        println!();
+        println!("    === Spending Tiers (Script Leaves) ===");
+        for (i, tier) in info.taproot_output.config.tiers.iter().enumerate() {
+            println!("    Tier {}: {} (threshold={}, tie_breaker={}, timelock={})",
+                i, tier.description, tier.threshold, tier.requires_tie_breaker, tier.timelock_blocks);
+
+            // Get the control block for this tier
+            if let Some(cb) = info.taproot_output.control_block_for_tier(i) {
+                println!("      Control Block: {}", hex::encode(cb.serialize()));
+            }
+        }
+        println!();
+
+        // Dump the full script tree
+        println!("    === Full Script Tree (for decoding) ===");
+        // Rebuild and show each leaf script
+        let voter_set = deposits_core::VoterSet::new(info.operator, info.quorum_members.clone());
+        for (i, tier) in info.taproot_output.config.tiers.iter().enumerate() {
+            let builder = deposits_core::TapscriptReservesBuilder::new(
+                voter_set.clone(),
+                info.taproot_output.config.clone(),
+                node.wallet.network(),
+                info.ledger_hash,
+            );
+            if let Ok(script) = builder.build_threshold_leaf(tier) {
+                println!("    Leaf {}: {}", i, hex::encode(script.as_bytes()));
+            }
+        }
+        println!();
+    }
 
     Ok(())
 }
@@ -620,14 +794,16 @@ fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
         RESERVES_REMOVE_OUTPUT => "ReservesRemove",
         RESERVES_INCREASE => "ReservesIncrease",
         RESERVES_DECREASE => "ReservesDecrease",
+        RESERVES_ROTATE => "ReservesRotate",
         RESERVES_UPDATE_OUTPUT => "ReservesUpdate",
         COLLATERAL_INCREASE => "CollateralIncrease",
         COLLATERAL_DECREASE => "CollateralDecrease",
         COLLATERAL_STATUS => "CollateralStatus",
         COLLATERAL_ATTESTATION => "CollateralAttestation",
-        COLLATERAL_ADD_PARTNER => "CollateralAddPartner",
-        COLLATERAL_REMOVE_PARTNER => "CollateralRemovePartner",
+        QUORUM_ADD_MEMBER => "QuorumAddMember",
+        QUORUM_REMOVE_MEMBER => "QuorumRemoveMember",
         COLLATERAL_LOCK => "CollateralLock",
+        QUORUM_JOIN => "QuorumJoin",
         DEPOSIT_OPEN => "DepositOpen",
         DEPOSIT_CLOSE => "DepositClose",
         DEPOSIT_UPDATE => "DepositUpdate",
@@ -658,10 +834,10 @@ fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                     let pk_bytes = pubkey.serialize();
                     format!("pk:{:02x}{:02x}{:02x}{:02x}", pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3])
                 }
-                LedgerOperation::CollateralAddPartner { collateral_partner, .. } |
-                LedgerOperation::CollateralRemovePartner { collateral_partner, .. } => {
-                    let pk_bytes = collateral_partner.serialize();
-                    format!("partner:{:02x}{:02x}{:02x}{:02x}", pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3])
+                LedgerOperation::QuorumAddMember { quorum_member, .. } |
+                LedgerOperation::QuorumRemoveMember { quorum_member, .. } => {
+                    let pk_bytes = quorum_member.serialize();
+                    format!("member:{:02x}{:02x}{:02x}{:02x}", pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3])
                 }
                 LedgerOperation::CollateralAttestation { collateral_operator, amount, lock_until_block, .. } => {
                     let pk_bytes = collateral_operator.serialize();
@@ -743,22 +919,24 @@ fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
 /// Handle partner subcommands
 async fn partner_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {
-        eprintln!("Usage: deposits-bdk partner <request|list> [args...]");
+        eprintln!("Usage: deposits-bdk partner <request|add|join|list> [args...]");
         return Ok(());
     }
 
     match args[0].as_str() {
         "request" => partner_request(&args[1..]).await,
+        "add" => partner_add(&args[1..]).await,
+        "join" => partner_join(&args[1..]).await,
         "list" => partner_list(&args[1..]).await,
         cmd => {
             eprintln!("Unknown partner subcommand: {}", cmd);
-            eprintln!("Usage: deposits-bdk partner <request|list> [args...]");
+            eprintln!("Usage: deposits-bdk partner <request|add|join|list> [args...]");
             Ok(())
         }
     }
 }
 
-/// Request a peer to be a collateral partner
+/// Request a peer to be a quorum member
 async fn partner_request(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // Parse positional argument: <peer_pubkey>
     let mut peer_pubkey_str: Option<String> = None;
@@ -785,18 +963,125 @@ async fn partner_request(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     let config = parse_config(&config_args)?;
     let node = Node::new(config).await?;
 
-    println!("Requesting collateral partnership with: {}", peer_pubkey);
+    println!("Requesting quorum membership with: {}", peer_pubkey);
 
-    // Send partnership request via Nostr
+    // Send membership request via Nostr
     node.request_partner(peer_pubkey).await?;
 
-    println!("Partnership request sent!");
-    println!("  The peer will need to accept the request to establish the partnership.");
+    println!("Membership request sent!");
+    println!("  The peer will need to accept the request to establish the membership.");
 
     Ok(())
 }
 
-/// List collateral partners
+/// Add a quorum member to our ledger
+/// Usage: partner add <reserves_id> <quorum_member_pubkey>
+async fn partner_add(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut reserves_id: Option<String> = None;
+    let mut quorum_member_str: Option<String> = None;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else if reserves_id.is_none() {
+            reserves_id = Some(args[i].clone());
+        } else if quorum_member_str.is_none() {
+            quorum_member_str = Some(args[i].clone());
+        }
+        i += 1;
+    }
+
+    let reserves_id = reserves_id.ok_or("Reserves ID required")?;
+    let quorum_member_str = quorum_member_str.ok_or("Quorum member pubkey required")?;
+    let quorum_member = PublicKey::from_str(&quorum_member_str)
+        .map_err(|e| format!("Invalid quorum member pubkey: {}", e))?;
+
+    let config = parse_config(&config_args)?;
+    let node = Node::new(config).await?;
+
+    println!("Adding quorum member {} to ledger {}...", quorum_member, reserves_id);
+
+    // For testing, use a placeholder signature (in production this would come from the member)
+    let placeholder_sig = [0u8; 64];
+
+    node.add_quorum_member(&reserves_id, quorum_member, placeholder_sig)?;
+
+    println!("Quorum member added!");
+    println!("  Member: {}", quorum_member);
+    println!("  Ledger: {}", reserves_id);
+
+    Ok(())
+}
+
+/// Record that we have joined another operator's quorum
+/// Usage: partner join <our_reserves_id> <target_operator> <target_reserves_id> <expires_block>
+async fn partner_join(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut our_reserves_id: Option<String> = None;
+    let mut target_operator_str: Option<String> = None;
+    let mut target_reserves_id: Option<String> = None;
+    let mut expires_block: Option<u32> = None;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else if our_reserves_id.is_none() {
+            our_reserves_id = Some(args[i].clone());
+        } else if target_operator_str.is_none() {
+            target_operator_str = Some(args[i].clone());
+        } else if target_reserves_id.is_none() {
+            target_reserves_id = Some(args[i].clone());
+        } else if expires_block.is_none() {
+            expires_block = Some(args[i].parse()
+                .map_err(|_| "Invalid expires_block")?);
+        }
+        i += 1;
+    }
+
+    let our_reserves_id = our_reserves_id.ok_or("Our reserves ID required")?;
+    let target_operator_str = target_operator_str.ok_or("Target operator pubkey required")?;
+    let target_reserves_id = target_reserves_id.ok_or("Target reserves ID required")?;
+    let expires_block = expires_block.ok_or("Expires block required")?;
+
+    let target_operator = PublicKey::from_str(&target_operator_str)
+        .map_err(|e| format!("Invalid target operator pubkey: {}", e))?;
+
+    let config = parse_config(&config_args)?;
+    let node = Node::new(config).await?;
+
+    println!("Recording quorum join for operator {}...", target_operator);
+
+    // For testing, use a placeholder signature
+    let placeholder_sig = [0u8; 64];
+
+    node.record_quorum_join(
+        &our_reserves_id,
+        target_operator,
+        &target_reserves_id,
+        expires_block,
+        placeholder_sig,
+    )?;
+
+    println!("Quorum join recorded!");
+    println!("  Target operator: {}", target_operator);
+    println!("  Target ledger: {}", target_reserves_id);
+    println!("  Expires at block: {}", expires_block);
+
+    Ok(())
+}
+
+/// List quorum members
 async fn partner_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let config = parse_config(args)?;
     let node = Node::new(config).await?;
@@ -804,11 +1089,11 @@ async fn partner_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     let partners = node.list_partners();
 
     if partners.is_empty() {
-        println!("No collateral partners found.");
+        println!("No quorum members found.");
         return Ok(());
     }
 
-    println!("Collateral Partners ({} total):", partners.len());
+    println!("Quorum Members ({} total):", partners.len());
     for (pubkey, role) in partners {
         println!("  {} - {}", pubkey, role);
     }
@@ -919,7 +1204,7 @@ async fn collateral_lock(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     println!("\nCollateral lock created!");
     println!("  Total locked: {} msats", attestation.amount);
     println!("  Lock expires: block {}", attestation.lock_until_block);
-    println!("  Attestation for: {}", attestation.collateral_partner);
+    println!("  Attestation for: {}", attestation.quorum_member);
 
     // Output the attestation as JSON for the requesting operator to use
     let attestation_json = serde_json::to_string(&attestation)?;
