@@ -88,6 +88,11 @@ LEDGER SUBCOMMANDS:
     ledger list     List all ledgers
     ledger history [reserves_id]
                     Show hash chain history for a ledger (default: primary ledger)
+    ledger validate [reserves_id]
+                    Validate a ledger's conformance to the Bitcoin Deposits Protocol.
+                    Checks hash chain integrity, sequence continuity, and business rules.
+    ledger export [reserves_id] [--json|--binary]
+                    Export a ledger for external validation or backup
 
 PARTNER SUBCOMMANDS:
     partner request <pubkey>   Send quorum membership request
@@ -578,7 +583,7 @@ async fn reserves_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>
 /// Handle ledger subcommands
 async fn ledger_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {
-        eprintln!("Usage: deposits-bdk ledger <open|list|history> [args...]");
+        eprintln!("Usage: deposits-bdk ledger <open|list|history|validate|export|import> [args...]");
         return Ok(());
     }
 
@@ -586,9 +591,12 @@ async fn ledger_command(args: &[String]) -> Result<(), Box<dyn std::error::Error
         "open" => ledger_open(&args[1..]).await,
         "list" => ledger_list(&args[1..]).await,
         "history" => ledger_history(&args[1..]).await,
+        "validate" => ledger_validate(&args[1..]).await,
+        "export" => ledger_export(&args[1..]).await,
+        "import" => ledger_import(&args[1..]).await,
         cmd => {
             eprintln!("Unknown ledger subcommand: {}", cmd);
-            eprintln!("Usage: deposits-bdk ledger <open|list|history> [args...]");
+            eprintln!("Usage: deposits-bdk ledger <open|list|history|validate|export|import> [args...]");
             Ok(())
         }
     }
@@ -776,6 +784,300 @@ async fn ledger_history(args: &[String]) -> Result<(), Box<dyn std::error::Error
             op_name,
             if op_details.is_empty() { String::new() } else { format!("  {}", op_details) }
         );
+    }
+
+    Ok(())
+}
+
+/// Validate a ledger's conformance to the Bitcoin Deposits Protocol
+async fn ledger_validate(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use deposits_core::validation::LedgerConformanceValidator;
+
+    // Parse positional arguments: [reserves_id]
+    let mut reserves_id_str: Option<String> = None;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else if reserves_id_str.is_none() {
+            reserves_id_str = Some(args[i].clone());
+        }
+        i += 1;
+    }
+
+    let config = parse_config(&config_args)?;
+    let node = Node::new(config).await?;
+
+    // Get the ledger
+    let (reserves_id, ledger) = if let Some(id_str) = reserves_id_str {
+        node.get_ledger_by_reserves_id(&id_str)
+            .ok_or_else(|| format!("Ledger not found for reserves_id: {}", id_str))?
+    } else {
+        node.get_primary_ledger()
+            .ok_or("No ledger found. Run 'ledger open' first.")?
+    };
+
+    let id_str = reserves_id.to_string();
+    let short_id = &id_str[..8.min(id_str.len())];
+
+    println!("Validating ledger {}...", short_id);
+    println!();
+
+    // Check if ledger has any history
+    if ledger.history.is_empty() {
+        println!("Ledger has no updates to validate.");
+        return Ok(());
+    }
+
+    // Create export and validate
+    let export = ledger.export(0); // block_height 0 for local validation
+
+    match LedgerConformanceValidator::validate(&export) {
+        Ok(report) => {
+            // Print validation results
+            println!("Validation Results:");
+            println!("  Valid: {}", if report.is_valid { "YES" } else { "NO" });
+            println!();
+
+            // Hash chain status
+            println!("Hash Chain:");
+            println!("  Valid length: {}/{}", report.hash_chain.valid_length, report.hash_chain.total_length);
+            println!("  Genesis hash: {:02x?}", &report.hash_chain.genesis_hash[..8]);
+            println!("  Tail hash: {:02x?}", &report.hash_chain.tail_hash[..8]);
+            println!();
+
+            // Signature status
+            println!("Signatures:");
+            println!("  Total updates: {}", report.signatures.total_updates);
+            println!("  Fully signed: {}", report.signatures.fully_signed);
+            println!("  Operator only: {}", report.signatures.operator_only);
+            println!("  Unsigned: {}", report.signatures.unsigned);
+            if !report.signatures.invalid_signatures.is_empty() {
+                println!("  Invalid signatures:");
+                for (seq, err) in &report.signatures.invalid_signatures {
+                    println!("    Seq {}: {}", seq, err);
+                }
+            }
+            println!();
+
+            // Business rules
+            println!("Business Rules:");
+            for rule in &report.business_rules {
+                let status = if rule.passed { "PASS" } else { "FAIL" };
+                let details = rule.details.as_ref().map(|d| format!(" ({})", d)).unwrap_or_default();
+                println!("  [{}] {}{}", status, rule.rule, details);
+            }
+            println!();
+
+            // Final state
+            println!("Final State:");
+            println!("  Sequence: {}", report.final_state.sequence);
+            println!("  Hash: {:02x?}", &report.final_state.hash[..8]);
+            println!("  Total deposits: {} msat", report.final_state.total_deposits);
+            println!("  Reserves: {} sats", report.final_state.reserves_amount);
+            println!("  Deposit count: {}", report.final_state.deposit_count);
+            println!();
+
+            // Warnings
+            if !report.warnings.is_empty() {
+                println!("Warnings:");
+                for warning in &report.warnings {
+                    println!("  - {}", warning);
+                }
+                println!();
+            }
+
+            if report.is_valid {
+                println!("Ledger is CONFORMING to the Bitcoin Deposits Protocol.");
+            } else {
+                println!("Ledger is NOT CONFORMING to the Bitcoin Deposits Protocol.");
+            }
+        }
+        Err(e) => {
+            println!("Validation FAILED: {}", e);
+            return Err(Box::new(e));
+        }
+    }
+
+    Ok(())
+}
+
+/// Export a ledger for external validation or backup
+async fn ledger_export(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    // Parse arguments
+    let mut reserves_id_str: Option<String> = None;
+    let mut format = "json"; // Default format
+    let mut output_path: Option<String> = None;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--json" {
+            format = "json";
+        } else if args[i] == "--binary" {
+            format = "binary";
+        } else if args[i] == "--output" || args[i] == "-o" {
+            if i + 1 < args.len() {
+                output_path = Some(args[i + 1].clone());
+                i += 1;
+            }
+        } else if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else if reserves_id_str.is_none() {
+            reserves_id_str = Some(args[i].clone());
+        }
+        i += 1;
+    }
+
+    let config = parse_config(&config_args)?;
+    let node = Node::new(config).await?;
+
+    // Get the ledger
+    let (reserves_id, ledger) = if let Some(id_str) = reserves_id_str {
+        node.get_ledger_by_reserves_id(&id_str)
+            .ok_or_else(|| format!("Ledger not found for reserves_id: {}", id_str))?
+    } else {
+        node.get_primary_ledger()
+            .ok_or("No ledger found. Run 'ledger open' first.")?
+    };
+
+    let id_str = reserves_id.to_string();
+    let short_id = &id_str[..8.min(id_str.len())];
+
+    // Get current block height from node if available
+    let block_height = 0; // TODO: Get from blockchain
+
+    // Create export
+    let export = ledger.export(block_height);
+
+    match format {
+        "json" => {
+            let json = export.to_json()?;
+            let filename = output_path.unwrap_or_else(|| format!("ledger_export_{}.json", short_id));
+            std::fs::write(&filename, &json)?;
+            println!("Exported ledger to {}", filename);
+            println!("  Updates: {}", export.updates.len());
+            println!("  Size: {} bytes", json.len());
+        }
+        "binary" => {
+            let binary = export.to_binary();
+            let filename = output_path.unwrap_or_else(|| format!("ledger_export_{}.bin", short_id));
+            std::fs::write(&filename, &binary)?;
+            println!("Exported ledger to {}", filename);
+            println!("  Updates: {}", export.updates.len());
+            println!("  Size: {} bytes", binary.len());
+        }
+        _ => unreachable!(),
+    }
+
+    Ok(())
+}
+
+/// Import a ledger from an export file (JSON or binary)
+async fn ledger_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use deposits_core::validation::LedgerExport;
+
+    // Parse arguments: <file_path>
+    let mut file_path: Option<String> = None;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else if file_path.is_none() {
+            file_path = Some(args[i].clone());
+        }
+        i += 1;
+    }
+
+    let file_path = file_path.ok_or("Usage: deposits-bdk ledger import <file_path> [--data-dir <dir>]")?;
+
+    // Read the file
+    let data = std::fs::read(&file_path)?;
+
+    // Try to parse as JSON first, then binary
+    let export: LedgerExport = if file_path.ends_with(".json") {
+        let json = String::from_utf8(data)?;
+        serde_json::from_str(&json)?
+    } else if file_path.ends_with(".bin") {
+        bincode::deserialize(&data)?
+    } else {
+        // Try JSON first, then binary
+        String::from_utf8(data.clone())
+            .ok()
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .or_else(|| bincode::deserialize(&data).ok())
+            .ok_or("Failed to parse file as JSON or binary format")?
+    };
+
+    println!("Importing ledger from: {}", file_path);
+    println!("  Operator: {}", export.operator_id);
+    println!("  Reserves ID: {}", export.reserves_id);
+    println!("  Updates: {}", export.updates.len());
+    println!();
+
+    let config = parse_config(&config_args)?;
+    let node = Node::new(config).await?;
+
+    // Import the ledger
+    match node.import_ledger(export) {
+        Ok((report, ledger)) => {
+            println!("Import successful!");
+            println!();
+
+            // Print validation report
+            println!("Validation Report:");
+            println!("  Hash chain: {} of {} updates valid",
+                report.hash_chain.valid_length, report.hash_chain.total_length);
+            println!("  Signatures: {} fully signed, {} operator-only, {} unsigned",
+                report.signatures.fully_signed,
+                report.signatures.operator_only,
+                report.signatures.unsigned);
+            println!();
+
+            // Business rules
+            println!("Business Rules:");
+            for rule in &report.business_rules {
+                let status = if rule.passed { "PASS" } else { "FAIL" };
+                let details = rule.details.as_ref().map(|d| format!(" ({})", d)).unwrap_or_default();
+                println!("  [{}] {}{}", status, rule.rule, details);
+            }
+            println!();
+
+            // Final state
+            println!("Imported Ledger State:");
+            println!("  Sequence: {}", ledger.state.sequence);
+            println!("  Total deposits: {} msat", ledger.total_deposit_balance());
+            println!("  Reserves: {} sats", ledger.reserves_amount());
+            println!("  Deposit count: {}", ledger.state.deposits.len());
+
+            if !report.warnings.is_empty() {
+                println!();
+                println!("Warnings:");
+                for warning in &report.warnings {
+                    println!("  - {}", warning);
+                }
+            }
+        }
+        Err(e) => {
+            println!("Import FAILED: {}", e);
+            return Err(e.into());
+        }
     }
 
     Ok(())

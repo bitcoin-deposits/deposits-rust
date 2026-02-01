@@ -620,7 +620,7 @@ impl Ledger {
 
         // Compute hashes
         let prev_hash = self.state.hash;
-        let sequence = self.state.sequence + 1;
+        let sequence = self.history.len() as u64;
 
         let mut hash_input = Vec::new();
         hash_input.extend_from_slice(&sequence.to_le_bytes());
@@ -1017,6 +1017,61 @@ impl Ledger {
             }
         }
         Ok(())
+    }
+
+    // ========================================================================
+    // Export Methods
+    // ========================================================================
+
+    /// Export the complete ledger for validation and audit.
+    ///
+    /// Creates a `LedgerExport` containing all signed updates and metadata.
+    pub fn export(&self, block_height: u32) -> crate::validation::LedgerExport {
+        crate::validation::LedgerExport::new(
+            self.state.operator_key,
+            self.state.reserves_key.clone(),
+            self.state.ledger_address.clone(),
+            self.history.clone(),
+            block_height,
+        )
+    }
+
+    /// Export the ledger to a JSON string.
+    ///
+    /// Returns a human-readable JSON representation suitable for debugging and inspection.
+    pub fn export_json(&self, block_height: u32) -> Result<String, serde_json::Error> {
+        self.export(block_height).to_json()
+    }
+
+    /// Export the ledger to binary (bincode).
+    ///
+    /// Returns a compact binary representation suitable for storage and transmission.
+    pub fn export_binary(&self, block_height: u32) -> Vec<u8> {
+        self.export(block_height).to_binary()
+    }
+
+    /// Import and validate a ledger from an export.
+    ///
+    /// Validates the export and reconstructs the ledger state by replaying all updates.
+    pub fn from_export(export: crate::validation::LedgerExport) -> Result<Self, crate::validation::ValidationError> {
+        crate::validation::LedgerConformanceValidator::from_export(export)
+    }
+
+    /// Import from JSON and validate.
+    ///
+    /// Parses JSON and validates the ledger export.
+    pub fn from_export_json(json: &str) -> Result<Self, crate::validation::ValidationError> {
+        let export = crate::validation::LedgerExport::from_json(json)
+            .map_err(|e| crate::validation::ValidationError::DecodeError(format!("JSON decode failed: {}", e)))?;
+        Self::from_export(export)
+    }
+
+    /// Import from binary and validate.
+    ///
+    /// Parses bincode and validates the ledger export.
+    pub fn from_export_binary(data: &[u8]) -> Result<Self, crate::validation::ValidationError> {
+        let export = crate::validation::LedgerExport::from_binary(data)?;
+        Self::from_export(export)
     }
 }
 
@@ -1692,5 +1747,47 @@ mod tests {
 
         let hash_after_2 = ledger.hash();
         assert_ne!(hash_after_2, hash_after_1);
+    }
+
+    #[test]
+    fn test_ledger_export() {
+        let op_key = test_pubkey();
+        let partner = test_pubkey_2();
+        let ledger = Ledger::new_as_operator(op_key, partner.to_string(), "tb1q...".to_string());
+
+        // Export the ledger
+        let export = ledger.export(1000);
+
+        assert_eq!(export.version, 1);
+        assert_eq!(export.operator_id, op_key);
+        assert_eq!(export.reserves_id, partner.to_string());
+        assert_eq!(export.ledger_address, "tb1q...");
+        assert!(export.updates.is_empty());
+        assert_eq!(export.block_height, 1000);
+    }
+
+    #[test]
+    fn test_ledger_export_json() {
+        let op_key = test_pubkey();
+        let partner = test_pubkey_2();
+        let ledger = Ledger::new_as_operator(op_key, partner.to_string(), "tb1q...".to_string());
+
+        // Export to JSON
+        let json = ledger.export_json(1000).expect("JSON export should succeed");
+
+        assert!(json.contains("\"version\": 1"));
+        assert!(json.contains("tb1q..."));
+    }
+
+    #[test]
+    fn test_ledger_export_binary() {
+        let op_key = test_pubkey();
+        let partner = test_pubkey_2();
+        let ledger = Ledger::new_as_operator(op_key, partner.to_string(), "tb1q...".to_string());
+
+        // Export to binary
+        let binary = ledger.export_binary(1000);
+
+        assert!(!binary.is_empty());
     }
 }

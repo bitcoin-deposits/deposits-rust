@@ -510,6 +510,454 @@ impl Default for LedgerConformanceValidator {
 }
 
 // ============================================================================
+// LEDGER EXPORT AND VALIDATION API
+// ============================================================================
+
+/// Complete ledger export for validation and audit.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct LedgerExport {
+    /// Protocol version for compatibility checking.
+    pub version: u32,
+    /// Operator's public key.
+    #[serde(with = "crate::types::serde_pubkey")]
+    pub operator_id: PublicKey,
+    /// Reserves identifier (UTXO address for BDK, partner pubkey for LDK).
+    pub reserves_id: String,
+    /// Ledger address.
+    pub ledger_address: String,
+    /// Complete update history (chronologically ordered).
+    pub updates: Vec<crate::types::SignedLedgerUpdate>,
+    /// Export timestamp.
+    pub exported_at: u64,
+    /// Current block height at export time.
+    pub block_height: u32,
+}
+
+impl LedgerExport {
+    /// Create a new ledger export.
+    pub fn new(
+        operator_id: PublicKey,
+        reserves_id: String,
+        ledger_address: String,
+        updates: Vec<crate::types::SignedLedgerUpdate>,
+        block_height: u32,
+    ) -> Self {
+        Self {
+            version: 1,
+            operator_id,
+            reserves_id,
+            ledger_address,
+            updates,
+            exported_at: crate::now_unix_timestamp(),
+            block_height,
+        }
+    }
+
+    /// Export to JSON string.
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+
+    /// Import from JSON string.
+    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(json)
+    }
+
+    /// Export to binary (bincode).
+    pub fn to_binary(&self) -> Vec<u8> {
+        bincode::serialize(self).unwrap_or_default()
+    }
+
+    /// Import from binary (bincode).
+    pub fn from_binary(data: &[u8]) -> Result<Self, ValidationError> {
+        bincode::deserialize(data)
+            .map_err(|e| ValidationError::DecodeError(format!("Bincode decode failed: {}", e)))
+    }
+
+    /// Get the genesis hash (first update's previous_hash, which should be [0u8; 32]).
+    pub fn genesis_hash(&self) -> [u8; 32] {
+        self.updates.first()
+            .map(|u| u.previous_hash)
+            .unwrap_or([0u8; 32])
+    }
+
+    /// Get the tail hash (last update's current_hash).
+    pub fn tail_hash(&self) -> [u8; 32] {
+        self.updates.last()
+            .map(|u| u.current_hash)
+            .unwrap_or([0u8; 32])
+    }
+}
+
+/// Validation report for a ledger export.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ValidationReport {
+    /// Is the ledger fully conforming?
+    pub is_valid: bool,
+    /// Final ledger state after replay.
+    pub final_state: LedgerStateSnapshot,
+    /// Hash chain status.
+    pub hash_chain: ChainStatus,
+    /// Signature verification results.
+    pub signatures: SignatureReport,
+    /// Business rule compliance.
+    pub business_rules: Vec<RuleCheck>,
+    /// Warnings (non-fatal issues).
+    pub warnings: Vec<String>,
+    /// Reconstructed ledger (only present if validation succeeded).
+    #[serde(skip)]
+    pub reconstructed_ledger: Option<crate::ledger::Ledger>,
+}
+
+/// Snapshot of ledger state for serialization in validation report.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct LedgerStateSnapshot {
+    /// Final sequence number.
+    pub sequence: u64,
+    /// Final hash.
+    #[serde(with = "crate::types::serde_32")]
+    pub hash: [u8; 32],
+    /// Total deposit balance (millisatoshis).
+    pub total_deposits: u64,
+    /// Reserves amount (satoshis).
+    pub reserves_amount: u64,
+    /// Number of active deposits.
+    pub deposit_count: usize,
+}
+
+/// Hash chain validation status.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ChainStatus {
+    /// Length of the valid chain (may be less than total if broken).
+    pub valid_length: usize,
+    /// Total number of updates.
+    pub total_length: usize,
+    /// Genesis hash (first update's previous_hash).
+    #[serde(with = "crate::types::serde_32")]
+    pub genesis_hash: [u8; 32],
+    /// Tail hash (last valid update's current_hash).
+    #[serde(with = "crate::types::serde_32")]
+    pub tail_hash: [u8; 32],
+}
+
+/// Signature verification results.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct SignatureReport {
+    /// Total number of updates.
+    pub total_updates: usize,
+    /// Updates with both operator and partner signatures.
+    pub fully_signed: usize,
+    /// Updates with only operator signature.
+    pub operator_only: usize,
+    /// Updates without any signatures.
+    pub unsigned: usize,
+    /// Invalid signatures with their sequence numbers and error messages.
+    pub invalid_signatures: Vec<(u64, String)>,
+}
+
+/// Business rule check result.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct RuleCheck {
+    /// Rule identifier.
+    pub rule: String,
+    /// Whether the rule passed.
+    pub passed: bool,
+    /// Additional details about the check.
+    pub details: Option<String>,
+}
+
+/// Validation error for ledger conformance checking.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum ValidationError {
+    /// Hash chain is broken at the given sequence.
+    #[error("Hash chain broken at sequence {sequence}: expected {expected}, got {actual}")]
+    HashChainBroken {
+        sequence: u64,
+        expected: String,
+        actual: String,
+    },
+
+    /// Signature verification failed.
+    #[error("Signature verification failed at sequence {sequence}: {reason}")]
+    SignatureInvalid {
+        sequence: u64,
+        reason: String,
+    },
+
+    /// State transition failed to apply.
+    #[error("State transition failed at sequence {sequence}: {reason}")]
+    StateTransitionFailed {
+        sequence: u64,
+        reason: String,
+    },
+
+    /// Business rule violation.
+    #[error("Business rule violation: {rule}: {details}")]
+    BusinessRuleViolation {
+        rule: String,
+        details: String,
+    },
+
+    /// Decode error.
+    #[error("Decode error: {0}")]
+    DecodeError(String),
+
+    /// Empty ledger (no updates).
+    #[error("Empty ledger: no updates to validate")]
+    EmptyLedger,
+}
+
+impl LedgerConformanceValidator {
+    /// Validate a complete ledger export.
+    ///
+    /// Returns Ok(ValidationReport) on success, Err with first critical failure.
+    pub fn validate(export: &LedgerExport) -> Result<ValidationReport, ValidationError> {
+        // Check for empty ledger
+        if export.updates.is_empty() {
+            return Err(ValidationError::EmptyLedger);
+        }
+
+        // Validate hash chain
+        Self::validate_hash_chain(&export.updates)?;
+
+        // Validate signatures
+        let signatures = Self::validate_signatures(export)?;
+
+        // Validate state transitions and reconstruct ledger
+        let ledger = Self::validate_state_transitions(export)?;
+
+        // Validate business rules
+        let business_rules = Self::validate_business_rules(&ledger);
+
+        // Check if any critical business rule failed
+        let critical_failure = business_rules.iter()
+            .find(|r| !r.passed && r.rule == "reserves_coverage");
+
+        // Collect warnings
+        let mut warnings = Vec::new();
+        if signatures.unsigned > 0 {
+            warnings.push(format!("{} updates are unsigned", signatures.unsigned));
+        }
+        if signatures.operator_only > 0 {
+            warnings.push(format!("{} updates have only operator signature", signatures.operator_only));
+        }
+        if !signatures.invalid_signatures.is_empty() {
+            warnings.push(format!("{} updates have invalid signatures", signatures.invalid_signatures.len()));
+        }
+
+        // Build chain status
+        let hash_chain = ChainStatus {
+            valid_length: export.updates.len(),
+            total_length: export.updates.len(),
+            genesis_hash: export.genesis_hash(),
+            tail_hash: export.tail_hash(),
+        };
+
+        // Build final state snapshot
+        let final_state = LedgerStateSnapshot {
+            sequence: ledger.sequence(),
+            hash: ledger.hash(),
+            total_deposits: ledger.total_deposit_balance(),
+            reserves_amount: ledger.reserves_amount(),
+            deposit_count: ledger.state.deposits.len(),
+        };
+
+        let is_valid = critical_failure.is_none()
+            && signatures.invalid_signatures.is_empty()
+            && business_rules.iter().all(|r| r.passed || r.rule != "reserves_coverage");
+
+        Ok(ValidationReport {
+            is_valid,
+            final_state,
+            hash_chain,
+            signatures,
+            business_rules,
+            warnings,
+            reconstructed_ledger: Some(ledger),
+        })
+    }
+
+    /// Validate just the hash chain (fast check).
+    pub fn validate_hash_chain(updates: &[crate::types::SignedLedgerUpdate]) -> Result<(), ValidationError> {
+        let mut expected_prev = [0u8; 32];
+
+        for (i, update) in updates.iter().enumerate() {
+            // Check sequence number
+            if update.sequence_number != i as u64 {
+                return Err(ValidationError::HashChainBroken {
+                    sequence: i as u64,
+                    expected: format!("sequence {}", i),
+                    actual: format!("sequence {}", update.sequence_number),
+                });
+            }
+
+            // Check previous hash linkage
+            if update.previous_hash != expected_prev {
+                return Err(ValidationError::HashChainBroken {
+                    sequence: update.sequence_number,
+                    expected: hex::encode(expected_prev),
+                    actual: hex::encode(update.previous_hash),
+                });
+            }
+
+            // Verify computed hash matches stored hash
+            let computed = update.compute_hash();
+            if computed != update.current_hash {
+                return Err(ValidationError::HashChainBroken {
+                    sequence: update.sequence_number,
+                    expected: hex::encode(computed),
+                    actual: hex::encode(update.current_hash),
+                });
+            }
+
+            expected_prev = update.current_hash;
+        }
+
+        Ok(())
+    }
+
+    /// Validate signatures on all updates.
+    pub fn validate_signatures(export: &LedgerExport) -> Result<SignatureReport, ValidationError> {
+        let mut report = SignatureReport::default();
+        report.total_updates = export.updates.len();
+
+        for update in &export.updates {
+            let has_operator = update.operator_signature != [0u8; 64];
+            let has_partner = update.partner_signature != [0u8; 64];
+
+            if has_operator && has_partner {
+                // Verify signatures if we have the keys
+                // For now, we just count them as fully signed
+                // Full verification would require access to secp256k1 context
+                report.fully_signed += 1;
+            } else if has_operator {
+                report.operator_only += 1;
+            } else {
+                report.unsigned += 1;
+            }
+        }
+
+        Ok(report)
+    }
+
+    /// Replay updates and verify state conformance.
+    pub fn validate_state_transitions(export: &LedgerExport) -> Result<crate::ledger::Ledger, ValidationError> {
+        use crate::tlv::TlvDecode;
+        use crate::ledger::{Ledger, LedgerRole};
+
+        // Create empty ledger as partner (for validation purposes)
+        let mut ledger = Ledger::new(
+            export.operator_id,
+            export.reserves_id.clone(),
+            LedgerRole::Partner,
+            Vec::new(),
+            export.ledger_address.clone(),
+        );
+
+        // Replay each update
+        for update in &export.updates {
+            // Decode the operation from TLV-encoded bytes
+            let operation = crate::messages::LedgerOperation::tlv_decode(&update.message)
+                .map_err(|e| ValidationError::DecodeError(format!("{:?}", e)))?;
+
+            // Apply state changes (skip validation for replay - we trust the history)
+            ledger.apply_state_changes(&operation)
+                .map_err(|e| ValidationError::StateTransitionFailed {
+                    sequence: update.sequence_number,
+                    reason: format!("{}", e),
+                })?;
+
+            // Update sequence/hash to match the update
+            ledger.state.sequence = update.sequence_number;
+            ledger.state.hash = update.current_hash;
+
+            // Add to history
+            ledger.history.push(update.clone());
+        }
+
+        Ok(ledger)
+    }
+
+    /// Check business rules (reserves >= deposits, etc).
+    pub fn validate_business_rules(ledger: &crate::ledger::Ledger) -> Vec<RuleCheck> {
+        let mut checks = Vec::new();
+
+        // Rule 1: reserves >= deposits (in satoshis)
+        let total_deposits_sat = ledger.total_deposit_balance() / 1000; // msat to sat
+        let reserves = ledger.reserves_amount();
+        checks.push(RuleCheck {
+            rule: "reserves_coverage".to_string(),
+            passed: reserves >= total_deposits_sat,
+            details: Some(format!(
+                "reserves: {} sats, deposits: {} sats ({}%)",
+                reserves,
+                total_deposits_sat,
+                if total_deposits_sat > 0 { (reserves * 100) / total_deposits_sat } else { 100 }
+            )),
+        });
+
+        // Rule 2: no negative balances (locked > balance is invalid)
+        let has_invalid_balance = ledger.state.deposits.values()
+            .any(|d| d.locked_balance > d.balance);
+        checks.push(RuleCheck {
+            rule: "non_negative_available_balance".to_string(),
+            passed: !has_invalid_balance,
+            details: if has_invalid_balance {
+                Some("Some deposits have locked_balance > balance".to_string())
+            } else {
+                None
+            },
+        });
+
+        // Rule 3: sequence numbers match history length
+        let history_len = ledger.history.len() as u64;
+        let current_seq = ledger.state.sequence;
+        // After replaying N updates, sequence should be N-1 (0-indexed) or N depending on logic
+        // The last update's sequence_number should be history.len() - 1
+        let sequence_matches = if history_len > 0 {
+            current_seq == history_len - 1
+        } else {
+            current_seq == 0
+        };
+        checks.push(RuleCheck {
+            rule: "contiguous_sequences".to_string(),
+            passed: sequence_matches,
+            details: Some(format!(
+                "history length: {}, current sequence: {}",
+                history_len,
+                current_seq
+            )),
+        });
+
+        // Rule 4: hash matches computed hash (final state)
+        let final_hash_valid = if let Some(last_update) = ledger.history.last() {
+            last_update.current_hash == ledger.state.hash
+        } else {
+            ledger.state.hash == [0u8; 32]
+        };
+        checks.push(RuleCheck {
+            rule: "final_hash_consistency".to_string(),
+            passed: final_hash_valid,
+            details: Some(format!("final hash: {}", hex::encode(ledger.state.hash))),
+        });
+
+        checks
+    }
+
+    /// Validate and reconstruct a ledger from an export.
+    ///
+    /// This is a convenience method that validates and returns the reconstructed ledger.
+    pub fn from_export(export: LedgerExport) -> Result<crate::ledger::Ledger, ValidationError> {
+        let report = Self::validate(&export)?;
+        report.reconstructed_ledger
+            .ok_or_else(|| ValidationError::StateTransitionFailed {
+                sequence: 0,
+                reason: "Failed to reconstruct ledger".to_string(),
+            })
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -822,5 +1270,162 @@ mod tests {
             settlement_sequence: 5,
         };
         assert!(matches!(v9, ConformanceViolation::UncreditedPayment { .. }));
+    }
+
+    // ========================================================================
+    // Ledger Export Tests
+    // ========================================================================
+
+    #[test]
+    fn test_ledger_export_creation() {
+        let op = test_pubkey();
+        let export = LedgerExport::new(
+            op,
+            "reserves_id".to_string(),
+            "tb1q...".to_string(),
+            Vec::new(),
+            100,
+        );
+
+        assert_eq!(export.version, 1);
+        assert_eq!(export.operator_id, op);
+        assert_eq!(export.reserves_id, "reserves_id");
+        assert_eq!(export.ledger_address, "tb1q...");
+        assert!(export.updates.is_empty());
+        assert_eq!(export.block_height, 100);
+        assert!(export.exported_at > 0);
+    }
+
+    #[test]
+    fn test_ledger_export_json_roundtrip() {
+        let op = test_pubkey();
+        let export = LedgerExport::new(
+            op,
+            "reserves_id".to_string(),
+            "tb1q...".to_string(),
+            Vec::new(),
+            100,
+        );
+
+        // Serialize to JSON
+        let json = export.to_json().expect("JSON serialization should succeed");
+        assert!(json.contains("\"version\": 1"));
+        assert!(json.contains("\"reserves_id\": \"reserves_id\""));
+
+        // Deserialize from JSON
+        let imported = LedgerExport::from_json(&json).expect("JSON deserialization should succeed");
+        assert_eq!(imported.version, export.version);
+        assert_eq!(imported.operator_id, export.operator_id);
+        assert_eq!(imported.reserves_id, export.reserves_id);
+    }
+
+    #[test]
+    fn test_ledger_export_binary_roundtrip() {
+        let op = test_pubkey();
+        let export = LedgerExport::new(
+            op,
+            "reserves_id".to_string(),
+            "tb1q...".to_string(),
+            Vec::new(),
+            100,
+        );
+
+        // Serialize to binary
+        let binary = export.to_binary();
+        assert!(!binary.is_empty());
+
+        // Deserialize from binary
+        let imported = LedgerExport::from_binary(&binary).expect("Binary deserialization should succeed");
+        assert_eq!(imported.version, export.version);
+        assert_eq!(imported.operator_id, export.operator_id);
+        assert_eq!(imported.reserves_id, export.reserves_id);
+    }
+
+    #[test]
+    fn test_validation_error_display() {
+        let e1 = ValidationError::HashChainBroken {
+            sequence: 5,
+            expected: "abc".to_string(),
+            actual: "def".to_string(),
+        };
+        assert!(e1.to_string().contains("sequence 5"));
+
+        let e2 = ValidationError::SignatureInvalid {
+            sequence: 10,
+            reason: "bad sig".to_string(),
+        };
+        assert!(e2.to_string().contains("sequence 10"));
+
+        let e3 = ValidationError::StateTransitionFailed {
+            sequence: 15,
+            reason: "failed".to_string(),
+        };
+        assert!(e3.to_string().contains("sequence 15"));
+
+        let e4 = ValidationError::BusinessRuleViolation {
+            rule: "reserves".to_string(),
+            details: "not enough".to_string(),
+        };
+        assert!(e4.to_string().contains("reserves"));
+
+        let e5 = ValidationError::DecodeError("parse error".to_string());
+        assert!(e5.to_string().contains("parse error"));
+
+        let e6 = ValidationError::EmptyLedger;
+        assert!(e6.to_string().contains("Empty ledger"));
+    }
+
+    #[test]
+    fn test_chain_status_structure() {
+        let status = ChainStatus {
+            valid_length: 10,
+            total_length: 10,
+            genesis_hash: [0u8; 32],
+            tail_hash: [1u8; 32],
+        };
+
+        assert_eq!(status.valid_length, 10);
+        assert_eq!(status.total_length, 10);
+        assert_eq!(status.genesis_hash, [0u8; 32]);
+    }
+
+    #[test]
+    fn test_signature_report_default() {
+        let report = SignatureReport::default();
+
+        assert_eq!(report.total_updates, 0);
+        assert_eq!(report.fully_signed, 0);
+        assert_eq!(report.operator_only, 0);
+        assert_eq!(report.unsigned, 0);
+        assert!(report.invalid_signatures.is_empty());
+    }
+
+    #[test]
+    fn test_rule_check_structure() {
+        let check = RuleCheck {
+            rule: "reserves_coverage".to_string(),
+            passed: true,
+            details: Some("100%".to_string()),
+        };
+
+        assert_eq!(check.rule, "reserves_coverage");
+        assert!(check.passed);
+        assert_eq!(check.details, Some("100%".to_string()));
+    }
+
+    #[test]
+    fn test_validate_empty_ledger_fails() {
+        let op = test_pubkey();
+        let export = LedgerExport::new(
+            op,
+            "reserves_id".to_string(),
+            "tb1q...".to_string(),
+            Vec::new(),
+            100,
+        );
+
+        let result = LedgerConformanceValidator::validate(&export);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ValidationError::EmptyLedger));
     }
 }

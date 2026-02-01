@@ -13,6 +13,7 @@ use bitcoin::secp256k1::{PublicKey, SecretKey};
 use deposits_core::error::HandlerError;
 use deposits_core::ledger::Ledger;
 use deposits_core::message_validation::{HandlerContext, ValidationContext};
+use deposits_core::validation::{LedgerConformanceValidator, LedgerExport, ValidationReport};
 use deposits_core::messages::DepositsMessage;
 use deposits_core::traits::ProtocolEvent;
 use serde::{Deserialize, Serialize};
@@ -283,6 +284,57 @@ impl DepositsHandler {
     pub fn persist_ledger(&self, _operator: &PublicKey, _reserves_id: &str) -> Result<(), String> {
         // Save all ledgers to disk (could optimize to save just the specific one)
         self.save_ledgers_to_disk()
+    }
+
+    /// Import a ledger from an export file (JSON or binary)
+    ///
+    /// This validates the ledger using LedgerConformanceValidator before storing it.
+    /// The ledger will be stored with the Partner role since it's from another operator.
+    pub fn import_ledger(&self, export: LedgerExport) -> Result<(ValidationReport, Arc<RwLock<Ledger>>), String> {
+        // Check if this is our own ledger (not allowed to import our own)
+        if export.operator_id == self.our_node_id {
+            return Err("Cannot import your own ledger. Use 'ledger open' instead.".to_string());
+        }
+
+        // Check if ledger already exists
+        let key = (export.operator_id, export.reserves_id.clone());
+        {
+            let ledgers = self.ledgers.lock().unwrap();
+            if ledgers.contains_key(&key) {
+                return Err(format!(
+                    "Ledger already exists for operator {} with reserves {}",
+                    export.operator_id, export.reserves_id
+                ));
+            }
+        }
+
+        // Validate the export
+        let report = LedgerConformanceValidator::validate(&export)
+            .map_err(|e| format!("Validation failed: {}", e))?;
+
+        if !report.is_valid {
+            return Err(format!(
+                "Ledger is not conforming: {} warnings, {} invalid signatures",
+                report.warnings.len(),
+                report.signatures.invalid_signatures.len()
+            ));
+        }
+
+        // Create the ledger from the validated export
+        let ledger = Ledger::from_export(export)
+            .map_err(|e| format!("Failed to reconstruct ledger: {}", e))?;
+
+        // Store the ledger
+        let ledger_arc = Arc::new(RwLock::new(ledger));
+        {
+            let mut ledgers = self.ledgers.lock().unwrap();
+            ledgers.insert(key, ledger_arc.clone());
+        }
+
+        // Persist to disk
+        self.save_ledgers_to_disk()?;
+
+        Ok((report, ledger_arc))
     }
 }
 

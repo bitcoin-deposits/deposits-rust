@@ -1788,6 +1788,123 @@ impl WireDecode for UncreditedPaymentMsg {
     }
 }
 
+// ============================================================================
+// Ledger Export Messages
+// ============================================================================
+
+/// Request to export a ledger for validation.
+///
+/// Sent by a partner or quorum member to request the complete ledger
+/// history from the operator for conformance validation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LedgerExportRequestMsg {
+    /// Operator's public key.
+    pub operator_id: PublicKey,
+    /// Reserves identifier for the ledger.
+    pub reserves_id: String,
+    /// Optional: only return updates after this sequence number.
+    pub from_sequence: Option<u64>,
+    /// Current block height (for export timestamp).
+    pub block_height: u32,
+}
+
+impl WireEncode for LedgerExportRequestMsg {
+    fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
+        write_pubkey(writer, &self.operator_id)?;
+        write_string(writer, &self.reserves_id)?;
+        write_optional(writer, &self.from_sequence, |w, seq| write_u64(w, *seq))?;
+        write_u32(writer, self.block_height)?;
+        Ok(())
+    }
+}
+
+impl WireDecode for LedgerExportRequestMsg {
+    fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
+        Ok(Self {
+            operator_id: read_pubkey(reader)?,
+            reserves_id: read_string(reader)?,
+            from_sequence: read_optional(reader, read_u64)?,
+            block_height: read_u32(reader)?,
+        })
+    }
+}
+
+/// Response containing the ledger export data.
+///
+/// Contains the complete ledger history for validation, including
+/// all signed updates and current state information.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LedgerExportResponseMsg {
+    /// Operator's public key.
+    pub operator_id: PublicKey,
+    /// Reserves identifier for the ledger.
+    pub reserves_id: String,
+    /// Ledger address.
+    pub ledger_address: String,
+    /// Protocol version.
+    pub version: u32,
+    /// Export timestamp.
+    pub exported_at: u64,
+    /// Block height at export time.
+    pub block_height: u32,
+    /// Number of updates included.
+    pub update_count: u32,
+    /// Serialized updates (each update is length-prefixed).
+    pub updates_data: Vec<u8>,
+    /// Whether export was successful.
+    pub success: bool,
+    /// Error message if export failed.
+    pub error_message: Option<String>,
+}
+
+impl WireEncode for LedgerExportResponseMsg {
+    fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
+        write_pubkey(writer, &self.operator_id)?;
+        write_string(writer, &self.reserves_id)?;
+        write_string(writer, &self.ledger_address)?;
+        write_u32(writer, self.version)?;
+        write_u64(writer, self.exported_at)?;
+        write_u32(writer, self.block_height)?;
+        write_u32(writer, self.update_count)?;
+        // Write updates data with length prefix
+        write_u32(writer, self.updates_data.len() as u32)?;
+        writer.write_all(&self.updates_data)?;
+        write_u8(writer, if self.success { 1 } else { 0 })?;
+        write_optional(writer, &self.error_message, |w, s| write_string(w, s))?;
+        Ok(())
+    }
+}
+
+impl WireDecode for LedgerExportResponseMsg {
+    fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
+        let operator_id = read_pubkey(reader)?;
+        let reserves_id = read_string(reader)?;
+        let ledger_address = read_string(reader)?;
+        let version = read_u32(reader)?;
+        let exported_at = read_u64(reader)?;
+        let block_height = read_u32(reader)?;
+        let update_count = read_u32(reader)?;
+        // Read updates data
+        let updates_len = read_u32(reader)? as usize;
+        let mut updates_data = vec![0u8; updates_len];
+        reader.read_exact(&mut updates_data)?;
+        let success = read_u8(reader)? != 0;
+        let error_message = read_optional(reader, read_string)?;
+        Ok(Self {
+            operator_id,
+            reserves_id,
+            ledger_address,
+            version,
+            exported_at,
+            block_height,
+            update_count,
+            updates_data,
+            success,
+            error_message,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1856,5 +1973,69 @@ mod tests {
         let bytes = fees.to_wire_bytes();
         let decoded = FeeStructure::from_wire_bytes(&bytes).unwrap();
         assert_eq!(fees, decoded);
+    }
+
+    #[test]
+    fn test_ledger_export_request_roundtrip() {
+        let msg = LedgerExportRequestMsg {
+            operator_id: test_pubkey(1),
+            reserves_id: test_pubkey(2).to_string(),
+            from_sequence: Some(42),
+            block_height: 100_000,
+        };
+        let bytes = msg.to_wire_bytes();
+        let decoded = LedgerExportRequestMsg::from_wire_bytes(&bytes).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn test_ledger_export_request_no_sequence() {
+        let msg = LedgerExportRequestMsg {
+            operator_id: test_pubkey(1),
+            reserves_id: test_pubkey(2).to_string(),
+            from_sequence: None,
+            block_height: 100_000,
+        };
+        let bytes = msg.to_wire_bytes();
+        let decoded = LedgerExportRequestMsg::from_wire_bytes(&bytes).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn test_ledger_export_response_success_roundtrip() {
+        let msg = LedgerExportResponseMsg {
+            operator_id: test_pubkey(1),
+            reserves_id: test_pubkey(2).to_string(),
+            ledger_address: "tb1q...".to_string(),
+            version: 1,
+            exported_at: 1700000000,
+            block_height: 100_000,
+            update_count: 5,
+            updates_data: vec![1, 2, 3, 4, 5, 6, 7, 8],
+            success: true,
+            error_message: None,
+        };
+        let bytes = msg.to_wire_bytes();
+        let decoded = LedgerExportResponseMsg::from_wire_bytes(&bytes).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn test_ledger_export_response_error_roundtrip() {
+        let msg = LedgerExportResponseMsg {
+            operator_id: test_pubkey(1),
+            reserves_id: test_pubkey(2).to_string(),
+            ledger_address: "".to_string(),
+            version: 1,
+            exported_at: 1700000000,
+            block_height: 100_000,
+            update_count: 0,
+            updates_data: vec![],
+            success: false,
+            error_message: Some("Ledger not found".to_string()),
+        };
+        let bytes = msg.to_wire_bytes();
+        let decoded = LedgerExportResponseMsg::from_wire_bytes(&bytes).unwrap();
+        assert_eq!(msg, decoded);
     }
 }

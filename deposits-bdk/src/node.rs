@@ -328,6 +328,16 @@ impl Node {
         ledgers.clone()
     }
 
+    /// Import a ledger from an export (validates before storing)
+    pub fn import_ledger(
+        &self,
+        export: deposits_core::validation::LedgerExport,
+    ) -> Result<(deposits_core::validation::ValidationReport, Ledger), String> {
+        let (report, ledger_arc) = self.handler.import_ledger(export)?;
+        let ledger = ledger_arc.read().unwrap().clone();
+        Ok((report, ledger))
+    }
+
     // ========================================================================
     // Quorum Member Management
     // ========================================================================
@@ -1714,10 +1724,11 @@ impl Node {
 
     /// Get a ledger by reserves_id (Bitcoin address string)
     /// Returns (reserves_id, ledger) tuple
+    /// Searches all ledgers (both operator and partner roles)
     pub fn get_ledger_by_reserves_id(&self, reserves_id: &str) -> Option<(String, Ledger)> {
         let ledgers = self.handler.ledgers.lock().unwrap();
-        for ((operator, rid), ledger_arc) in ledgers.iter() {
-            if rid == reserves_id && *operator == self.node_id {
+        for ((_operator, rid), ledger_arc) in ledgers.iter() {
+            if rid == reserves_id {
                 let ledger = ledger_arc.read().unwrap();
                 return Some((rid.clone(), ledger.clone()));
             }

@@ -129,6 +129,9 @@ pub use channel_manager_ops::{
 pub use validation::{
     ValidationRules, OperationValidator, LedgerConformanceValidator,
     ConformanceResult, ConformanceViolation,
+    // Export and validation API types
+    LedgerExport, ValidationReport, ValidationError,
+    LedgerStateSnapshot, ChainStatus, SignatureReport, RuleCheck,
 };
 pub use ledger::{
     Ledger, LedgerRole, LedgerValidator, LedgerManager,
@@ -218,6 +221,8 @@ pub use wire_messages::{
     RecoveryVoteMsg, RecoveryClaimRequestMsg, RecoveryClaimSignatureMsg, RecoveryClaimCompleteMsg,
     // Relay messages
     RelayNwcRequestMsg, RelayNwcResponseMsg, RelayNwcDeliveryProofMsg,
+    // Ledger export messages
+    LedgerExportRequestMsg, LedgerExportResponseMsg,
 };
 pub use message_validation::{
     // ValidationContext trait for implementing message validation
@@ -250,6 +255,8 @@ pub use message_handlers::{
     handle_fee_collect, handle_ledger_close, handle_receiving_cosign_invoice,
     // Generic ledger update handler
     handle_ledger_update,
+    // Ledger export handlers
+    handle_ledger_export_request, validate_ledger_export_response,
     // Helper functions
     make_ledger_id,
 };

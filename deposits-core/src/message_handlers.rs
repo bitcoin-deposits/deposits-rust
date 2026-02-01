@@ -325,6 +325,19 @@ pub enum ResponseData {
         errors: u32,
         total: u32,
     },
+    /// Ledger export response - contains the full export for validation
+    LedgerExportResponse {
+        operator_id: PublicKey,
+        reserves_id: String,
+        ledger_address: String,
+        version: u32,
+        exported_at: u64,
+        block_height: u32,
+        update_count: u32,
+        updates_data: Vec<u8>,
+        success: bool,
+        error_message: Option<String>,
+    },
 }
 
 // ============================================================================
@@ -2515,6 +2528,213 @@ pub fn handle_channel_close_tombstone<C: HandlerContext>(
         timestamp: msg.timestamp,
         close_reason: msg.close_reason.clone(),
     }))
+}
+
+// ============================================================================
+// Ledger Export Handler
+// ============================================================================
+
+/// Handle a ledger export request from a partner or quorum member.
+///
+/// This handler allows peers to request a complete ledger export for
+/// validation purposes. The requester can then validate the ledger
+/// using `LedgerConformanceValidator`.
+///
+/// # Arguments
+/// * `ctx` - Handler context providing access to ledgers
+/// * `msg` - The export request containing operator_id and reserves_id
+/// * `sender` - Public key of the sender
+///
+/// # Returns
+/// * `Ok(HandlerResult::Response(LedgerExportResponse))` - Export data
+/// * `Ok(HandlerResult::Rejected(reason))` - Request rejected
+/// * `Err(HandlerError)` - Internal error
+pub fn handle_ledger_export_request<C: HandlerContext>(
+    ctx: &C,
+    msg: &crate::wire_messages::LedgerExportRequestMsg,
+    sender: PublicKey,
+) -> Result<HandlerResult, HandlerError> {
+    let our_node_id = ctx.our_node_id();
+
+    // Validate: request should be for us as operator
+    if msg.operator_id != our_node_id {
+        return Ok(HandlerResult::Response(ResponseData::LedgerExportResponse {
+            operator_id: msg.operator_id,
+            reserves_id: msg.reserves_id.clone(),
+            ledger_address: String::new(),
+            version: 1,
+            exported_at: crate::now_unix_timestamp(),
+            block_height: msg.block_height,
+            update_count: 0,
+            updates_data: Vec::new(),
+            success: false,
+            error_message: Some("We are not the operator of this ledger".to_string()),
+        }));
+    }
+
+    // Get the ledger
+    let ledger = ctx.get_ledger(&msg.operator_id, &msg.reserves_id);
+    let ledger = match ledger {
+        Some(l) => l,
+        None => {
+            return Ok(HandlerResult::Response(ResponseData::LedgerExportResponse {
+                operator_id: msg.operator_id,
+                reserves_id: msg.reserves_id.clone(),
+                ledger_address: String::new(),
+                version: 1,
+                exported_at: crate::now_unix_timestamp(),
+                block_height: msg.block_height,
+                update_count: 0,
+                updates_data: Vec::new(),
+                success: false,
+                error_message: Some("Ledger not found".to_string()),
+            }));
+        }
+    };
+
+    // Read the ledger and export
+    let ledger_guard = ledger.read().map_err(|_| HandlerError::Internal("Lock poisoned".to_string()))?;
+
+    // Validate: sender should be a partner or quorum member
+    let is_partner = ledger_guard.reserves_key() == sender.to_string()
+        || sender.to_string() == msg.reserves_id;
+    let is_quorum_member = ledger_guard.state.quorum_members.contains(&sender);
+
+    if !is_partner && !is_quorum_member {
+        return Ok(HandlerResult::Response(ResponseData::LedgerExportResponse {
+            operator_id: msg.operator_id,
+            reserves_id: msg.reserves_id.clone(),
+            ledger_address: ledger_guard.state.ledger_address.clone(),
+            version: 1,
+            exported_at: crate::now_unix_timestamp(),
+            block_height: msg.block_height,
+            update_count: 0,
+            updates_data: Vec::new(),
+            success: false,
+            error_message: Some("Sender is not authorized to access this ledger".to_string()),
+        }));
+    }
+
+    // Create the export
+    let export = ledger_guard.export(msg.block_height);
+
+    // Serialize updates with length prefixes
+    let mut updates_data = Vec::new();
+    for update in &export.updates {
+        let update_bytes = bincode::serialize(update).unwrap_or_default();
+        // Write length as u32, then data
+        updates_data.extend_from_slice(&(update_bytes.len() as u32).to_be_bytes());
+        updates_data.extend_from_slice(&update_bytes);
+    }
+
+    Ok(HandlerResult::Response(ResponseData::LedgerExportResponse {
+        operator_id: export.operator_id,
+        reserves_id: export.reserves_id,
+        ledger_address: export.ledger_address,
+        version: export.version,
+        exported_at: export.exported_at,
+        block_height: export.block_height,
+        update_count: export.updates.len() as u32,
+        updates_data,
+        success: true,
+        error_message: None,
+    }))
+}
+
+/// Validate a ledger export received from a peer.
+///
+/// This is a standalone function that validates a received export
+/// without needing a HandlerContext. It can be used by clients
+/// to verify a peer's ledger conformance.
+///
+/// # Arguments
+/// * `response` - The ledger export response from the peer
+///
+/// # Returns
+/// * `Ok(ValidationReport)` - Validation succeeded (check is_valid field)
+/// * `Err(ValidationError)` - Critical validation failure
+pub fn validate_ledger_export_response(
+    response: &ResponseData,
+) -> Result<crate::validation::ValidationReport, crate::validation::ValidationError> {
+    // Extract data from ResponseData
+    let (operator_id, reserves_id, ledger_address, version, exported_at, block_height, update_count, updates_data, success, error_message) =
+        match response {
+            ResponseData::LedgerExportResponse {
+                operator_id,
+                reserves_id,
+                ledger_address,
+                version,
+                exported_at,
+                block_height,
+                update_count,
+                updates_data,
+                success,
+                error_message,
+            } => (
+                *operator_id,
+                reserves_id.clone(),
+                ledger_address.clone(),
+                *version,
+                *exported_at,
+                *block_height,
+                *update_count,
+                updates_data.clone(),
+                *success,
+                error_message.clone(),
+            ),
+            _ => {
+                return Err(crate::validation::ValidationError::DecodeError(
+                    "Expected LedgerExportResponse".to_string(),
+                ));
+            }
+        };
+
+    // Check for error response
+    if !success {
+        return Err(crate::validation::ValidationError::DecodeError(
+            error_message.unwrap_or_else(|| "Export failed".to_string()),
+        ));
+    }
+
+    // Deserialize updates
+    let mut updates = Vec::new();
+    let mut cursor = std::io::Cursor::new(&updates_data);
+    use std::io::Read;
+
+    for _ in 0..update_count {
+        // Read length
+        let mut len_bytes = [0u8; 4];
+        cursor.read_exact(&mut len_bytes).map_err(|e| {
+            crate::validation::ValidationError::DecodeError(format!("Failed to read length: {}", e))
+        })?;
+        let len = u32::from_be_bytes(len_bytes) as usize;
+
+        // Read update data
+        let mut update_bytes = vec![0u8; len];
+        cursor.read_exact(&mut update_bytes).map_err(|e| {
+            crate::validation::ValidationError::DecodeError(format!("Failed to read update: {}", e))
+        })?;
+
+        // Deserialize update
+        let update: crate::types::SignedLedgerUpdate = bincode::deserialize(&update_bytes)
+            .map_err(|e| {
+                crate::validation::ValidationError::DecodeError(format!("Failed to deserialize update: {}", e))
+            })?;
+        updates.push(update);
+    }
+
+    // Create LedgerExport and validate
+    let export = crate::validation::LedgerExport {
+        version,
+        operator_id,
+        reserves_id,
+        ledger_address,
+        updates,
+        exported_at,
+        block_height,
+    };
+
+    crate::validation::LedgerConformanceValidator::validate(&export)
 }
 
 // ============================================================================
