@@ -252,6 +252,8 @@ impl DepositsHandler {
                     deposits_core::messages::consts::LEDGER_OPEN_REQUEST,
                 ) {
                     tracing::error!("Failed to append LedgerOpen: {:?}", e);
+                } else {
+                    self.sign_ledger_update(&mut ledger_guard);
                 }
             }
 
@@ -259,6 +261,7 @@ impl DepositsHandler {
             if reserves_balance > 0 {
                 let mut ledger_guard = ledger.write().unwrap();
                 let operation = deposits_core::messages::LedgerOperation::ReservesIncrease {
+                    reserves_id: reserves_id.clone(),
                     new_amount: reserves_balance,
                 };
                 if let Err(e) = ledger_guard.append_operation(
@@ -266,6 +269,8 @@ impl DepositsHandler {
                     deposits_core::messages::consts::RESERVES_INCREASE,
                 ) {
                     tracing::error!("Failed to append ReservesIncrease: {:?}", e);
+                } else {
+                    self.sign_ledger_update(&mut ledger_guard);
                 }
             }
 
@@ -289,6 +294,30 @@ impl DepositsHandler {
     pub fn persist_ledger(&self, _operator: &PublicKey, _reserves_id: &str) -> Result<(), String> {
         // Save all ledgers to disk (could optimize to save just the specific one)
         self.save_ledgers_to_disk()
+    }
+
+    /// Sign the last update in a ledger with our operator key
+    fn sign_ledger_update(&self, ledger: &mut Ledger) {
+        use bitcoin::secp256k1::{Secp256k1, Message};
+        use bitcoin::hashes::{Hash, sha256};
+
+        if let Some(update) = ledger.history.last_mut() {
+            // Compute signature over update content
+            let mut sig_input = Vec::new();
+            sig_input.extend_from_slice(&update.sequence_number.to_le_bytes());
+            sig_input.extend_from_slice(&update.previous_hash);
+            sig_input.extend_from_slice(&update.current_hash);
+            sig_input.extend_from_slice(&update.message);
+
+            let hash = sha256::Hash::hash(&sig_input);
+            let secp = Secp256k1::new();
+            let msg = Message::from_digest(*hash.as_byte_array());
+            let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &self.secret_key);
+            let sig = secp.sign_schnorr(&msg, &keypair);
+
+            update.operator_signature = sig.serialize();
+            tracing::debug!("Signed update seq={}", update.sequence_number);
+        }
     }
 
     /// Import a ledger from an export file (JSON or binary)

@@ -159,6 +159,90 @@ impl Node {
         self.wallet.sync()
     }
 
+    /// Sign the last update in a ledger with our operator key
+    ///
+    /// Call this after appending an operation to sign the update before broadcasting.
+    pub fn sign_last_update(&self, reserves_id: &str) -> Result<(), Error> {
+        use bitcoin::secp256k1::{Secp256k1, Message};
+        use bitcoin::hashes::{Hash, sha256};
+
+        // Get the ledger
+        let ledger_arc = self.handler.ledgers.lock().unwrap()
+            .iter()
+            .find(|((_, rid), _)| rid == reserves_id)
+            .map(|(_, arc)| arc.clone());
+
+        let ledger_arc = ledger_arc
+            .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", reserves_id)))?;
+
+        let mut ledger = ledger_arc.write().unwrap();
+
+        if let Some(update) = ledger.history.last_mut() {
+            // Compute signature over update content
+            let mut sig_input = Vec::new();
+            sig_input.extend_from_slice(&update.sequence_number.to_le_bytes());
+            sig_input.extend_from_slice(&update.previous_hash);
+            sig_input.extend_from_slice(&update.current_hash);
+            sig_input.extend_from_slice(&update.message);
+
+            let hash = sha256::Hash::hash(&sig_input);
+            let secp = Secp256k1::new();
+            let msg = Message::from_digest(*hash.as_byte_array());
+            let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
+            let sig = secp.sign_schnorr(&msg, &keypair);
+
+            update.operator_signature = sig.serialize();
+            tracing::debug!("Signed update seq={} for ledger {}", update.sequence_number, reserves_id);
+        }
+
+        Ok(())
+    }
+
+    /// Broadcast the most recent ledger update to Nostr
+    ///
+    /// Call this after appending an operation to a ledger to ensure the update
+    /// is published to the Nostr relay for other participants to see.
+    pub async fn broadcast_last_update(&self, reserves_id: &str) -> Result<String, Error> {
+        // Get the ledger
+        let (_, ledger) = self.get_ledger_by_reserves_id(reserves_id)
+            .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", reserves_id)))?;
+
+        // Get the last update
+        let update = ledger.history.last()
+            .ok_or_else(|| Error::Protocol("Ledger has no updates".to_string()))?;
+
+        // Broadcast to Nostr
+        let event_id = self.nostr.broadcast_ledger_update(update).await?;
+        tracing::info!("Broadcast update seq={} to Nostr: {}", update.sequence_number, &event_id[..16]);
+
+        Ok(event_id)
+    }
+
+    /// Broadcast all ledger updates to Nostr
+    ///
+    /// Use this when initializing a ledger (e.g., after ledger_open) to broadcast
+    /// all initial operations (LedgerOpen, ReservesIncrease, etc.)
+    pub async fn broadcast_all_updates(&self, reserves_id: &str) -> Result<usize, Error> {
+        // Get the ledger
+        let (_, ledger) = self.get_ledger_by_reserves_id(reserves_id)
+            .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", reserves_id)))?;
+
+        let mut count = 0;
+        for update in &ledger.history {
+            match self.nostr.broadcast_ledger_update(update).await {
+                Ok(event_id) => {
+                    tracing::info!("Broadcast update seq={} to Nostr: {}", update.sequence_number, &event_id[..16]);
+                    count += 1;
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to broadcast update seq={}: {}", update.sequence_number, e);
+                }
+            }
+        }
+
+        Ok(count)
+    }
+
     /// Start listening for messages
     pub async fn start(&mut self) -> Result<(), Error> {
         self.nostr.start_listening().await?;
@@ -414,6 +498,9 @@ impl Node {
             ).map_err(|e| Error::Protocol(format!("Failed to add quorum member: {:?}", e)))?;
         }
 
+        // Sign the update
+        self.sign_last_update(reserves_id)?;
+
         // Persist the ledger
         if let Err(e) = self.handler.persist_ledger(&self.node_id, reserves_id) {
             tracing::error!("Failed to persist ledger: {}", e);
@@ -469,6 +556,9 @@ impl Node {
                 block_hash,
             ).map_err(|e| Error::Protocol(format!("Failed to record quorum join: {:?}", e)))?;
         }
+
+        // Sign the update
+        self.sign_last_update(our_reserves_id)?;
 
         // Persist the ledger
         if let Err(e) = self.handler.persist_ledger(&self.node_id, our_reserves_id) {
@@ -601,6 +691,7 @@ impl Node {
             let quorum_threshold = (quorum_size / 2) + 1; // Majority
 
             let operation = LedgerOperation::ReservesRotate {
+                reserves_id: result.address.to_string(),
                 spending_txid: txid_bytes,
                 new_outpoint_txid: txid_bytes, // Same tx creates the new output
                 new_outpoint_vout: result.outpoint.vout,
@@ -626,6 +717,9 @@ impl Node {
                 quorum_size
             );
         }
+
+        // Sign the update
+        self.sign_last_update(&reserves_id)?;
 
         // Persist the ledger with the new operation
         if let Err(e) = self.handler.persist_ledger(&self.node_id, &reserves_id) {
@@ -738,6 +832,9 @@ impl Node {
             }
         };
 
+        // Sign the update
+        self.sign_last_update(reserves_id)?;
+
         // Persist the ledger
         if let Err(e) = self.handler.persist_ledger(&self.node_id, reserves_id) {
             tracing::error!("Failed to persist ledger: {}", e);
@@ -828,6 +925,9 @@ impl Node {
                 block_hash,
             ).map_err(|e| Error::Protocol(format!("Failed to record attestation: {:?}", e)))?;
         }
+
+        // Sign the update
+        self.sign_last_update(reserves_id)?;
 
         // Persist the ledger
         if let Err(e) = self.handler.persist_ledger(&self.node_id, reserves_id) {
@@ -1117,6 +1217,9 @@ impl Node {
             (prev_balance, new_bal)
         };
 
+        // Sign the update
+        self.sign_last_update(reserves_id)?;
+
         // Persist the ledger
         if let Err(e) = self.handler.persist_ledger(&self.node_id, reserves_id) {
             tracing::error!("Failed to persist ledger: {}", e);
@@ -1222,6 +1325,9 @@ impl Node {
                 .map(|d| d.balance)
                 .unwrap_or(0)
         };
+
+        // Sign the update
+        self.sign_last_update(reserves_id)?;
 
         // Persist the ledger
         if let Err(e) = self.handler.persist_ledger(&self.node_id, reserves_id) {
@@ -1415,6 +1521,9 @@ impl Node {
                 .ok_or_else(|| Error::Protocol("Deposit not found after creation".to_string()))?
         };
 
+        // Sign the update
+        self.sign_last_update(reserves_id)?;
+
         // Persist the ledger
         if let Err(e) = self.handler.persist_ledger(&self.node_id, reserves_id) {
             tracing::error!("Failed to persist ledger: {}", e);
@@ -1474,6 +1583,9 @@ impl Node {
                 .map(|d| d.balance)
                 .unwrap_or(0)
         };
+
+        // Sign the update
+        self.sign_last_update(reserves_id)?;
 
         // Persist the ledger
         if let Err(e) = self.handler.persist_ledger(&self.node_id, reserves_id) {
@@ -1537,6 +1649,9 @@ impl Node {
                 .map(|d| d.balance)
                 .unwrap_or(0)
         };
+
+        // Sign the update
+        self.sign_last_update(reserves_id)?;
 
         // Persist the ledger
         if let Err(e) = self.handler.persist_ledger(&self.node_id, reserves_id) {
@@ -1710,14 +1825,18 @@ impl Node {
         None
     }
 
-    /// Get the primary ledger (first ledger where we are operator)
+    /// Get the primary ledger (operator ledger backed by reserves)
     /// Returns (reserves_id, ledger) tuple
+    /// Only returns ledgers with non-zero reserves (the actual reserves ledger)
     pub fn get_primary_ledger(&self) -> Option<(String, Ledger)> {
         let ledgers = self.handler.ledgers.lock().unwrap();
         for ((operator, reserves_id), ledger_arc) in ledgers.iter() {
             if *operator == self.node_id {
                 let ledger = ledger_arc.read().unwrap();
-                return Some((reserves_id.clone(), ledger.clone()));
+                // Only return ledgers backed by reserves
+                if ledger.reserves_amount() > 0 {
+                    return Some((reserves_id.clone(), ledger.clone()));
+                }
             }
         }
         None

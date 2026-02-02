@@ -300,6 +300,11 @@ impl NostrTransport {
         self.our_pubkey
     }
 
+    /// Get a reference to the underlying Nostr client
+    pub fn client(&self) -> &Client {
+        &self.client
+    }
+
     /// Get our nostr public key
     pub fn nostr_pubkey(&self) -> nostr_sdk::PublicKey {
         self.keys.public_key()
