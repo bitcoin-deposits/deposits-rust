@@ -621,6 +621,7 @@ mod tests {
             LedgerRole::Operator,
             vec![],
             "test_ledger".to_string(),
+            0,
         )
     }
 

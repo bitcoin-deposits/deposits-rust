@@ -313,6 +313,7 @@ where
         &self,
         reserves_id: String,
         ledger_address: String,
+        genesis_block: u32,
     ) -> Result<(), HandleError> {
         let key = (self.node_id, reserves_id.clone());
 
@@ -323,7 +324,7 @@ where
             ));
         }
 
-        let ledger = Ledger::new_as_operator(self.node_id, reserves_id.clone(), ledger_address);
+        let ledger = Ledger::new_as_operator(self.node_id, reserves_id.clone(), ledger_address, genesis_block);
         ledgers.insert(key, Arc::new(RwLock::new(ledger)));
 
         self.logger.log(
@@ -340,6 +341,7 @@ where
         &self,
         operator: PublicKey,
         ledger_address: String,
+        genesis_block: u32,
     ) -> Result<(), HandleError> {
         let reserves_id = self.node_id.to_string();
         let key = (operator, reserves_id.clone());
@@ -351,7 +353,7 @@ where
             ));
         }
 
-        let ledger = Ledger::new_as_partner(operator, reserves_id, ledger_address);
+        let ledger = Ledger::new_as_partner(operator, reserves_id, ledger_address, genesis_block);
         ledgers.insert(key, Arc::new(RwLock::new(ledger)));
 
         self.logger.log(
@@ -1282,7 +1284,7 @@ mod tests {
         assert!(handler.list_operator_ledgers().is_empty());
 
         // Create operator ledger
-        let result = handler.create_operator_ledger(partner_str.clone(), "tb1q...".to_string());
+        let result = handler.create_operator_ledger(partner_str.clone(), "tb1q...".to_string(), 0);
         assert!(result.is_ok());
         assert!(handler.has_ledger_with(&partner_str));
         assert_eq!(handler.list_operator_ledgers(), vec![partner_str.clone()]);
@@ -1292,7 +1294,7 @@ mod tests {
         assert_eq!(handler.get_ledger_deposit_balance(test_pubkey(), &partner_str), Some(0));
 
         // Can't create duplicate
-        let result = handler.create_operator_ledger(partner_str.clone(), "tb1q...".to_string());
+        let result = handler.create_operator_ledger(partner_str.clone(), "tb1q...".to_string(), 0);
         assert!(result.is_err());
 
         // Remove ledger
@@ -1324,7 +1326,7 @@ mod tests {
 
         // Create a ledger
         let partner_str = partner.to_string();
-        handler.create_operator_ledger(partner_str.clone(), "tb1q...".to_string()).unwrap();
+        handler.create_operator_ledger(partner_str.clone(), "tb1q...".to_string(), 0).unwrap();
 
         // Initially no deposits
         assert!(handler.list_deposits().unwrap().is_empty());
@@ -1400,7 +1402,7 @@ mod tests {
 
         // Create ledger
         let partner_str = partner.to_string();
-        handler.create_operator_ledger(partner_str.clone(), "tb1q...".to_string()).unwrap();
+        handler.create_operator_ledger(partner_str.clone(), "tb1q...".to_string(), 0).unwrap();
 
         // Now we have a ledger - use trait methods
         assert!(<_ as LedgerOperations>::has_ledger_with(&handler, partner));

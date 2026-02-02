@@ -117,9 +117,10 @@ impl Ledger {
         operator_key: PublicKey,
         reserves_key: String,
         ledger_address: String,
+        genesis_block: u32,
     ) -> Self {
         Self {
-            state: LedgerState::new(operator_key, reserves_key, ledger_address),
+            state: LedgerState::new(operator_key, reserves_key, ledger_address, genesis_block),
             role: LedgerRole::Operator,
             history: Vec::new(),
         }
@@ -130,9 +131,10 @@ impl Ledger {
         operator_key: PublicKey,
         reserves_key: String,
         ledger_address: String,
+        genesis_block: u32,
     ) -> Self {
         Self {
-            state: LedgerState::new(operator_key, reserves_key, ledger_address),
+            state: LedgerState::new(operator_key, reserves_key, ledger_address, genesis_block),
             role: LedgerRole::Partner,
             history: Vec::new(),
         }
@@ -146,6 +148,7 @@ impl Ledger {
         role: LedgerRole,
         quorum_members: Vec<PublicKey>,
         ledger_address: String,
+        genesis_block: u32,
     ) -> Self {
         Self::with_enforcement_block(
             operator_key,
@@ -153,6 +156,7 @@ impl Ledger {
             role,
             quorum_members,
             ledger_address,
+            genesis_block,
             None,
         )
     }
@@ -171,12 +175,14 @@ impl Ledger {
         role: LedgerRole,
         quorum_members: Vec<PublicKey>,
         ledger_address: String,
+        genesis_block: u32,
         collateral_enforcement_block: Option<u64>,
     ) -> Self {
         let mut state = LedgerState::with_enforcement_block(
             operator_key,
             reserves_key,
             ledger_address,
+            genesis_block,
             collateral_enforcement_block,
         );
         state.quorum_members = quorum_members;
@@ -315,6 +321,21 @@ impl Ledger {
     /// Get the operator's public key.
     pub fn operator_key(&self) -> PublicKey {
         self.state.operator_key
+    }
+
+    /// Get the unique ledger identifier (hash of operator + reserves + genesis_block).
+    pub fn ledger_id(&self) -> [u8; 32] {
+        self.state.ledger_id
+    }
+
+    /// Get the ledger_id as a hex string.
+    pub fn ledger_id_hex(&self) -> String {
+        self.state.ledger_id_hex()
+    }
+
+    /// Get the genesis block height.
+    pub fn genesis_block(&self) -> u32 {
+        self.state.genesis_block
     }
 
     /// Get the reserves identifier (UTXO address for BDK, pubkey string for LDK).
@@ -838,6 +859,7 @@ impl Ledger {
                 operator_id,
                 reserves_id,
                 ledger_address,
+                genesis_block,
                 collateral_enforcement_block,
             } => {
                 // LedgerOpen sets up the initial ledger identity
@@ -845,6 +867,8 @@ impl Ledger {
                 self.state.operator_key = *operator_id;
                 self.state.reserves_key = reserves_id.clone();
                 self.state.ledger_address = ledger_address.clone();
+                self.state.genesis_block = *genesis_block;
+                self.state.ledger_id = LedgerState::compute_ledger_id(operator_id, reserves_id, *genesis_block);
                 self.state.collateral_enforcement_block = Some(*collateral_enforcement_block);
             }
             LedgerOperation::ReservesIncrease { new_amount } => {
@@ -1028,6 +1052,8 @@ impl Ledger {
     /// Creates a `LedgerExport` containing all signed updates and metadata.
     pub fn export(&self, block_height: u32) -> crate::validation::LedgerExport {
         crate::validation::LedgerExport::new(
+            self.state.ledger_id,
+            self.state.genesis_block,
             self.state.operator_key,
             self.state.reserves_key.clone(),
             self.state.ledger_address.clone(),
@@ -1399,8 +1425,9 @@ impl LedgerManager {
         operator_key: PublicKey,
         reserves_key: String,
         ledger_address: String,
+        genesis_block: u32,
     ) -> Self {
-        Self::new(Ledger::new_as_operator(operator_key, reserves_key, ledger_address))
+        Self::new(Ledger::new_as_operator(operator_key, reserves_key, ledger_address, genesis_block))
     }
 
     /// Create a new ledger as partner.
@@ -1408,8 +1435,9 @@ impl LedgerManager {
         operator_key: PublicKey,
         reserves_key: String,
         ledger_address: String,
+        genesis_block: u32,
     ) -> Self {
-        Self::new(Ledger::new_as_partner(operator_key, reserves_key, ledger_address))
+        Self::new(Ledger::new_as_partner(operator_key, reserves_key, ledger_address, genesis_block))
     }
 
     /// Get a reference to the underlying ledger.
@@ -1563,6 +1591,7 @@ impl LedgerManager {
         role: LedgerRole,
         quorum_members: Vec<PublicKey>,
         ledger_address: String,
+        genesis_block: u32,
     ) -> (Self, [u8; 32]) {
         let ledger = Ledger::new(
             operator_key,
@@ -1570,6 +1599,7 @@ impl LedgerManager {
             role,
             quorum_members,
             ledger_address,
+            genesis_block,
         );
         let genesis_hash = ledger.state.hash; // Initial hash from LedgerState::new()
         (Self::new(ledger), genesis_hash)
@@ -1585,6 +1615,7 @@ impl LedgerManager {
         role: LedgerRole,
         quorum_members: Vec<PublicKey>,
         ledger_address: String,
+        genesis_block: u32,
         genesis_operation: LedgerOperation,
     ) -> DepositsResult<(Self, [u8; 32])> {
         // Create the base ledger
@@ -1594,6 +1625,7 @@ impl LedgerManager {
             role,
             quorum_members,
             ledger_address,
+            genesis_block,
         );
 
         // Apply the genesis operation
@@ -1664,7 +1696,7 @@ mod tests {
     fn test_ledger_creation() {
         let op = test_pubkey();
         let partner = test_pubkey_2();
-        let ledger = Ledger::new_as_operator(op, partner.to_string(), "tb1q...".to_string());
+        let ledger = Ledger::new_as_operator(op, partner.to_string(), "tb1q...".to_string(), 0);
 
         assert_eq!(ledger.role, LedgerRole::Operator);
         assert_eq!(ledger.sequence(), 0);
@@ -1675,7 +1707,7 @@ mod tests {
     fn test_reserves_increase() {
         let op = test_pubkey();
         let partner = test_pubkey_2();
-        let mut ledger = Ledger::new_as_operator(op, partner.to_string(), "tb1q...".to_string());
+        let mut ledger = Ledger::new_as_operator(op, partner.to_string(), "tb1q...".to_string(), 0);
 
         // Initial reserves are 0, use ReservesIncrease to add funds
         let op = LedgerOperation::ReservesIncrease { new_amount: 100_000 };
@@ -1689,7 +1721,7 @@ mod tests {
     fn test_deposit_lifecycle() {
         let op_key = test_pubkey();
         let partner = test_pubkey_2();
-        let mut ledger = Ledger::new_as_operator(op_key, partner.to_string(), "tb1q...".to_string());
+        let mut ledger = Ledger::new_as_operator(op_key, partner.to_string(), "tb1q...".to_string(), 0);
 
         // Add reserves first via ReservesIncrease
         ledger
@@ -1728,7 +1760,7 @@ mod tests {
     fn test_hash_chain() {
         let op = test_pubkey();
         let partner = test_pubkey_2();
-        let mut ledger = Ledger::new_as_operator(op, partner.to_string(), "tb1q...".to_string());
+        let mut ledger = Ledger::new_as_operator(op, partner.to_string(), "tb1q...".to_string(), 0);
 
         let initial_hash = ledger.hash();
         assert_eq!(initial_hash, [0u8; 32]);
@@ -1753,7 +1785,7 @@ mod tests {
     fn test_ledger_export() {
         let op_key = test_pubkey();
         let partner = test_pubkey_2();
-        let ledger = Ledger::new_as_operator(op_key, partner.to_string(), "tb1q...".to_string());
+        let ledger = Ledger::new_as_operator(op_key, partner.to_string(), "tb1q...".to_string(), 0);
 
         // Export the ledger
         let export = ledger.export(1000);
@@ -1770,7 +1802,7 @@ mod tests {
     fn test_ledger_export_json() {
         let op_key = test_pubkey();
         let partner = test_pubkey_2();
-        let ledger = Ledger::new_as_operator(op_key, partner.to_string(), "tb1q...".to_string());
+        let ledger = Ledger::new_as_operator(op_key, partner.to_string(), "tb1q...".to_string(), 0);
 
         // Export to JSON
         let json = ledger.export_json(1000).expect("JSON export should succeed");
@@ -1783,7 +1815,7 @@ mod tests {
     fn test_ledger_export_binary() {
         let op_key = test_pubkey();
         let partner = test_pubkey_2();
-        let ledger = Ledger::new_as_operator(op_key, partner.to_string(), "tb1q...".to_string());
+        let ledger = Ledger::new_as_operator(op_key, partner.to_string(), "tb1q...".to_string(), 0);
 
         // Export to binary
         let binary = ledger.export_binary(1000);

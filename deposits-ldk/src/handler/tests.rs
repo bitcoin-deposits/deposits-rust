@@ -528,6 +528,7 @@ fn test_broadcast_uncredited_payment_accusation_with_ledger() {
         operator,
         our_node_id.to_string(),
         "test_address".to_string(),
+        0,
     );
 
     // Add deposit with cosigned invoice (required for fraud proof validation)
@@ -630,6 +631,7 @@ fn test_broadcast_uncredited_payment_accusation_broadcasts_to_quorum_members() {
         LedgerRole::Operator,
         vec![collateral1, collateral2],
         "test_address".to_string(),
+        0, // genesis_block: test value
     );
 
     // Add deposit with cosigned invoice (required for fraud proof validation)
@@ -715,6 +717,7 @@ fn test_fraud_proof_rejected_without_cosigned_invoice() {
         operator,
         our_node_id.to_string(),
         "test_address".to_string(),
+        0,
     );
 
     // Add deposit without any invoices
@@ -778,6 +781,7 @@ fn test_fraud_proof_rejected_when_already_credited() {
         operator,
         our_node_id.to_string(),
         "test_address".to_string(),
+        0,
     );
 
     // Add deposit with a cosigned invoice
@@ -894,6 +898,7 @@ fn test_fraud_proof_accepted_with_valid_cosigned_invoice() {
         operator,
         our_node_id.to_string(),
         "test_address".to_string(),
+        0,
     );
 
     // Add deposit with a cosigned invoice
@@ -1001,6 +1006,7 @@ fn test_received_fraud_proof_forwards_to_quorum_members() {
         LedgerRole::Operator,
         vec![collateral1, collateral2], // Our quorum members
         "test_address".to_string(),
+        0, // genesis_block: test value
     );
 
     // Add our ledger to handler
@@ -1079,6 +1085,7 @@ fn test_credit_payment_within_reserves_succeeds() {
         operator,
         our_node_id.to_string(),
         "test_address".to_string(),
+        0,
     );
     ledger.state.reserves.amount =100_000; // 100k sats reserves
     ledger.state.received_collateral_amount = 100_000; // 100k sats collateral
@@ -1135,6 +1142,7 @@ fn test_credit_payment_exceeds_reserves_fails() {
         operator,
         our_node_id.to_string(),
         "test_address".to_string(),
+        0,
     );
     ledger.state.reserves.amount =50_000; // Only 50k sats reserves
 
@@ -1191,6 +1199,7 @@ fn test_credit_payment_exceeds_collateral_fails() {
         operator,
         our_node_id.to_string(),
         "test_address".to_string(),
+        0,
     );
     ledger.state.reserves.amount =100_000; // Plenty of reserves
     ledger.state.received_collateral_amount = 20_000; // But only 20k collateral
@@ -1249,6 +1258,7 @@ fn test_credit_payment_within_collateral_succeeds() {
         operator,
         our_node_id.to_string(),
         "test_address".to_string(),
+        0,
     );
     ledger.state.reserves.amount =100_000;
     ledger.state.received_collateral_amount = 100_000; // Full collateral backing
@@ -1306,6 +1316,7 @@ fn test_fee_collect_on_schedule_succeeds() {
         operator,
         our_node_id.to_string(),
         "test_address".to_string(),
+        0,
     );
 
     // Add deposit with fee schedule
@@ -1354,6 +1365,7 @@ fn test_fee_collect_too_early_fails() {
         operator,
         our_node_id.to_string(),
         "test_address".to_string(),
+        0,
     );
 
     // Add deposit with fee schedule
@@ -1403,6 +1415,7 @@ fn test_fee_collect_after_schedule_succeeds() {
         operator,
         our_node_id.to_string(),
         "test_address".to_string(),
+        0,
     );
 
     // Add deposit with fee schedule
@@ -1450,6 +1463,7 @@ fn test_collateral_increase_within_reserves_succeeds() {
         operator,
         our_node_id.to_string(),
         "test_address".to_string(),
+        0,
     );
     ledger.state.reserves.amount =100_000; // 100k sats reserves
     ledger.state.collateral_amount = 30_000; // Current collateral is 30k
@@ -1491,6 +1505,7 @@ fn test_collateral_increase_exceeds_reserves_fails() {
         operator,
         our_node_id.to_string(),
         "test_address".to_string(),
+        0,
     );
     ledger.state.reserves.amount =50_000; // Only 50k sats reserves
     ledger.state.collateral_amount = 30_000; // Current collateral is 30k
@@ -1533,6 +1548,7 @@ fn test_collateral_increase_must_actually_increase() {
         operator,
         our_node_id.to_string(),
         "test_address".to_string(),
+        0,
     );
     ledger.state.reserves.amount =100_000;
     ledger.state.collateral_amount = 50_000; // Current collateral is 50k
@@ -1964,6 +1980,7 @@ fn test_add_ledger_updates_stats() {
         operator,
         our_node_id.to_string(),
         "test_address".to_string(),
+        0,
     );
     {
         let mut ledgers = handler.ledgers.lock().unwrap();
@@ -1980,6 +1997,7 @@ fn test_add_ledger_updates_stats() {
         operator2,
         our_node_id.to_string(),
         "test_address2".to_string(),
+        0,
     );
     {
         let mut ledgers = handler.ledgers.lock().unwrap();
@@ -2013,6 +2031,7 @@ fn test_get_all_ledgers() {
         operator,
         our_node_id.to_string(),
         "test_address".to_string(),
+        0,
     );
     {
         let mut ledgers = handler.ledgers.lock().unwrap();

@@ -775,6 +775,7 @@ mod tests {
             operator,
             partner.to_string(),
             "tb1qtest".to_string(),
+            0,
         );
         let mut ledgers = handler.ledgers.lock().unwrap();
         ledgers.insert((operator, partner.to_string()), Arc::new(RwLock::new(ledger)));
@@ -1533,6 +1534,7 @@ mod tests {
                 LedgerRole::Operator,
                 vec![auditor], // Add auditor as quorum member
                 "tb1qtest".to_string(),
+                0, // genesis_block: test value
             );
             let mut ledgers = handler.ledgers.lock().unwrap();
             ledgers.insert((operator, partner.to_string()), Arc::new(RwLock::new(ledger)));

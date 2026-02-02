@@ -89,6 +89,7 @@ where
             LedgerRole::Operator,
             Vec::new(), // No quorum members yet
             multisig_address.to_string(),
+            0, // genesis_block: LDK doesn't have direct block height access
         );
 
         // Extract the ledger from manager and append the handshake message to history
@@ -136,6 +137,7 @@ where
             LedgerRole::Partner,
             Vec::new(), // No quorum members yet
             multisig_address.to_string(),
+            0, // genesis_block: LDK doesn't have direct block height access
         );
 
         // Extract the ledger from validator and append the handshake message to history
@@ -210,6 +212,7 @@ where
             LedgerRole::Partner,
             Vec::new(), // No quorum members yet
             multisig_address.to_string(),
+            0, // genesis_block: LDK doesn't have direct block height access
         );
 
         // Extract the ledger from validator and append the handshake message to history

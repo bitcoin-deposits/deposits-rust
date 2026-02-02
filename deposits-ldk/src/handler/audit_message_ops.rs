@@ -137,6 +137,7 @@ where
                         LedgerRole::Auditor,
                         Vec::new(), // No quorum members for audit ledgers
                         placeholder_address.to_string(),
+                        0, // genesis_block: LDK doesn't have direct block height access
                     )))
                 })
                 .clone()

@@ -276,7 +276,7 @@ where
 
             let ledger_owned = std::mem::replace(
                 &mut *ledger_guard,
-                deposits_core::Ledger::new(operator_node_id, partner_node_id, our_role, quorum_members, ledger_address)
+                deposits_core::Ledger::new(operator_node_id, partner_node_id, our_role, quorum_members, ledger_address, 0)
             );
 
             match ledger_owned.append(message.clone()) {
@@ -307,7 +307,7 @@ where
         let ledger = ledgers.entry(ledger_key.clone()).or_insert_with(|| {
             log_info!(self.logger, "📋 PARTNER: Creating partner ledger for tombstone");
             Arc::new(RwLock::new(Ledger::new(
-                tombstone_msg.operator_id, self.our_node_id.to_string(), LedgerRole::Partner, vec![], String::new()
+                tombstone_msg.operator_id, self.our_node_id.to_string(), LedgerRole::Partner, vec![], String::new(), 0
             )))
         });
 

@@ -98,6 +98,7 @@ where
                 our_role,
                 quorum_members,
                 ledger_address.clone(),
+                0, // genesis_block: LDK doesn't have direct block height access
             )
         );
 

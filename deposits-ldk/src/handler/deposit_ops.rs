@@ -188,6 +188,7 @@ mod tests {
             handler.our_node_id,
             reserves_id.to_string(),
             "tb1qtest".to_string(),
+            0,
         );
         handler.ledgers.lock().unwrap().insert(
             (handler.our_node_id, reserves_id.to_string()),

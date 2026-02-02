@@ -207,6 +207,9 @@ impl DepositsHandler {
         operator: PublicKey,
         reserves_id: String,
     ) -> Arc<RwLock<Ledger>> {
+        // Get current block height for genesis_block
+        let genesis_block = self.wallet.get_block_height().unwrap_or(0);
+
         let mut ledgers = self.ledgers.lock().unwrap();
         let key = (operator, reserves_id.clone());
         let is_new = !ledgers.contains_key(&key);
@@ -224,6 +227,7 @@ impl DepositsHandler {
                     role,
                     vec![],
                     reserves_id.clone(), // Use reserves_id as ledger_address for BDK
+                    genesis_block,
                 )))
             })
             .clone();
@@ -240,6 +244,7 @@ impl DepositsHandler {
                     operator_id: operator,
                     reserves_id: reserves_id.clone(),
                     ledger_address: reserves_id.clone(),
+                    genesis_block,
                     collateral_enforcement_block: 0, // Default to immediate enforcement
                 };
                 if let Err(e) = ledger_guard.append_operation(

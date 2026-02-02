@@ -535,6 +535,7 @@ mod tests {
             handler.our_node_id,
             partner.to_string(),
             "tb1qtest".to_string(),
+            0,
         );
         let hash = ledger.tail_hash();
         handler.ledgers.lock().unwrap().insert(
@@ -550,6 +551,7 @@ mod tests {
             operator,
             handler.our_node_id.to_string(),
             "tb1qtest_partner".to_string(),
+            0,
         );
         handler.ledgers.lock().unwrap().insert(
             (operator, handler.our_node_id.to_string()),

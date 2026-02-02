@@ -160,6 +160,7 @@ mod tests {
             handler.our_node_id,
             partner.to_string(),
             "tb1qtest".to_string(),
+            0,
         );
         // Set reserves via ReservesOutput
         ledger.state.reserves = deposits_core::types::ReservesOutput::new(

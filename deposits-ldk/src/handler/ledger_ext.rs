@@ -476,6 +476,7 @@ mod tests {
             operator,
             partner.to_string(),
             "test_address".to_string(),
+            0,
         );
 
         let voter_set = ledger.construct_voter_set();
@@ -498,6 +499,7 @@ mod tests {
             operator,
             partner.to_string(),
             "test_address".to_string(),
+            0,
         );
         ledger.add_quorum_member(collateral1).unwrap();
         ledger.add_quorum_member(collateral2).unwrap();
@@ -521,6 +523,7 @@ mod tests {
             operator,
             partner.to_string(),
             "test_address".to_string(),
+            0,
         );
         ledger.add_quorum_member(collateral).unwrap();
 
@@ -548,6 +551,7 @@ mod tests {
             operator,
             partner.to_string(),
             "test_address".to_string(),
+            0,
         );
         ledger.add_quorum_member(collateral1).unwrap();
         ledger.add_quorum_member(collateral2).unwrap();
@@ -570,6 +574,7 @@ mod tests {
             operator,
             partner.to_string(),
             "test_address".to_string(),
+            0,
         );
         ledger.add_quorum_member(collateral).unwrap();
 
@@ -589,6 +594,7 @@ mod tests {
             operator,
             partner.to_string(),
             "test_address".to_string(),
+            0,
         );
 
         assert!(ledger.state.quorum_members.is_empty());
@@ -609,6 +615,7 @@ mod tests {
             operator,
             partner.to_string(),
             "test_address".to_string(),
+            0,
         );
 
         let result = ledger.add_quorum_member(operator);
@@ -625,6 +632,7 @@ mod tests {
             operator,
             partner.to_string(),
             "test_address".to_string(),
+            0,
         );
 
         let result = ledger.add_quorum_member(partner);
@@ -642,6 +650,7 @@ mod tests {
             operator,
             partner.to_string(),
             "test_address".to_string(),
+            0,
         );
 
         assert!(ledger.add_quorum_member(collateral).is_ok());

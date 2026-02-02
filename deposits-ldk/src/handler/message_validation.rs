@@ -447,6 +447,7 @@ mod tests {
                 deposits_core::LedgerRole::Partner,
                 vec![],
                 "tb1qtest".to_string(),
+                0,
             );
             ledger.state.reserves.amount =5000;
             ledgers.insert((operator, partner.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
@@ -478,6 +479,7 @@ mod tests {
                 deposits_core::LedgerRole::Partner,
                 vec![],
                 "tb1qtest".to_string(),
+                0,
             );
             ledger.state.reserves.amount =5000;
             ledgers.insert((operator, partner.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
@@ -509,6 +511,7 @@ mod tests {
                 deposits_core::LedgerRole::Partner,
                 vec![],
                 "tb1qtest".to_string(),
+                0,
             );
             ledger.state.reserves.amount =5000;
             ledgers.insert((operator, partner.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
@@ -662,6 +665,7 @@ mod tests {
                 deposits_core::LedgerRole::Partner,
                 vec![],
                 "tb1qtest".to_string(),
+                0,
             );
             ledger.state.collateral_amount = 5000;
             ledger.state.last_collateral_increase_block = Some(100);
@@ -695,6 +699,7 @@ mod tests {
                 deposits_core::LedgerRole::Partner,
                 vec![],
                 "tb1qtest".to_string(),
+                0,
             );
             ledger.state.collateral_amount = 5000;
             ledger.state.last_collateral_increase_block = Some(100);
@@ -727,6 +732,7 @@ mod tests {
                 deposits_core::LedgerRole::Partner,
                 vec![],
                 "tb1qtest".to_string(),
+                0,
             );
             ledger.state.collateral_amount = 5000;
             ledger.state.last_collateral_increase_block = None; // No prior increase
@@ -759,6 +765,7 @@ mod tests {
                 deposits_core::LedgerRole::Partner,
                 vec![],
                 "tb1qtest".to_string(),
+                0,
             );
             ledger.state.collateral_amount = 5000;
             ledger.state.last_collateral_increase_block = None;
@@ -810,6 +817,7 @@ mod tests {
                 deposits_core::LedgerRole::Partner,
                 vec![],
                 "tb1qtest".to_string(),
+                0,
             );
             ledger.state.reserves.amount =100_000;
             ledgers.insert((operator, partner.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
@@ -841,6 +849,7 @@ mod tests {
                 deposits_core::LedgerRole::Partner,
                 vec![],
                 "tb1qtest".to_string(),
+                0,
             );
             ledger.state.reserves.amount =100_000;
             ledgers.insert((operator, partner.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
@@ -873,6 +882,7 @@ mod tests {
                 deposits_core::LedgerRole::Partner,
                 vec![],
                 "tb1qtest".to_string(),
+                0,
             );
             ledger.state.reserves.amount =100_000;
 
@@ -911,6 +921,7 @@ mod tests {
                 deposits_core::LedgerRole::Partner,
                 vec![],
                 "tb1qtest".to_string(),
+                0,
             );
             ledger.state.reserves.amount =100_000;
 
@@ -948,6 +959,7 @@ mod tests {
                 deposits_core::LedgerRole::Partner,
                 vec![],
                 "tb1qtest".to_string(),
+                0,
             );
             ledger.state.reserves.amount =100_000;
 
@@ -984,6 +996,7 @@ mod tests {
                 deposits_core::LedgerRole::Partner,
                 vec![],
                 "tb1qtest".to_string(),
+                0,
             );
             ledger.state.reserves.amount =100_000;
             // No deposits added
@@ -1037,6 +1050,7 @@ mod tests {
                 deposits_core::LedgerRole::Partner,
                 vec![],
                 "tb1qtest".to_string(),
+                0,
             );
             ledgers.insert((operator, partner.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
         }
@@ -1071,6 +1085,7 @@ mod tests {
                 deposits_core::LedgerRole::Partner,
                 vec![],
                 "tb1qtest".to_string(),
+                0,
             );
             ledger.state.reserves.amount =100_000;
             ledger.state.received_collateral_amount = 100_000;
@@ -1109,6 +1124,7 @@ mod tests {
                 deposits_core::LedgerRole::Partner,
                 vec![],
                 "tb1qtest".to_string(),
+                0,
             );
             ledger.state.reserves.amount =50_000; // Only 50k reserves
             ledger.state.received_collateral_amount = 100_000; // Plenty of collateral
@@ -1154,6 +1170,7 @@ mod tests {
                 deposits_core::LedgerRole::Partner,
                 vec![],
                 "tb1qtest".to_string(),
+                0,
             );
             ledger.state.reserves.amount =100_000; // Plenty of reserves
             ledger.state.received_collateral_amount = 50_000; // Only 50k collateral
@@ -1199,6 +1216,7 @@ mod tests {
                 deposits_core::LedgerRole::Partner,
                 vec![],
                 "tb1qtest".to_string(),
+                0,
             );
             ledger.state.reserves.amount =100_000;
             ledger.state.received_collateral_amount = 100_000;
@@ -1237,6 +1255,7 @@ mod tests {
                 deposits_core::LedgerRole::Partner,
                 vec![],
                 "tb1qtest".to_string(),
+                0,
             );
             ledger.state.reserves.amount =100_000;
             ledger.state.received_collateral_amount = 100_000;
@@ -1275,6 +1294,7 @@ mod tests {
                 deposits_core::LedgerRole::Partner,
                 vec![],
                 "tb1qtest".to_string(),
+                0,
             );
             ledger.state.reserves.amount =100_000;
             ledger.state.received_collateral_amount = 100_000;
@@ -1333,6 +1353,7 @@ mod tests {
                 deposits_core::LedgerRole::Partner,
                 vec![],
                 "tb1qtest".to_string(),
+                0,
             );
             ledgers.insert((operator, partner.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
         }
@@ -1363,6 +1384,7 @@ mod tests {
                 deposits_core::LedgerRole::Partner,
                 vec![],
                 "tb1qtest".to_string(),
+                0,
             );
             let mut deposit = deposits_core::Deposit::new(deposit_pubkey, None);
             deposit.balance = 50_000; // Has balance
@@ -1395,6 +1417,7 @@ mod tests {
                 deposits_core::LedgerRole::Partner,
                 vec![],
                 "tb1qtest".to_string(),
+                0,
             );
             let mut deposit = deposits_core::Deposit::new(deposit_pubkey, None);
             deposit.locked_balance = 10_000; // Has locked payments
@@ -1426,6 +1449,7 @@ mod tests {
                 deposits_core::LedgerRole::Partner,
                 vec![],
                 "tb1qtest".to_string(),
+                0,
             );
             ledgers.insert((operator, partner.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
         }
@@ -1454,6 +1478,7 @@ mod tests {
                 deposits_core::LedgerRole::Partner,
                 vec![],
                 "tb1qtest".to_string(),
+                0,
             );
             let deposit = deposits_core::Deposit::new(deposit_pubkey, None);
             ledger.state.deposits.insert(deposit_pubkey, deposit);

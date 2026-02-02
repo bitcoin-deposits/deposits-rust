@@ -518,6 +518,11 @@ impl Default for LedgerConformanceValidator {
 pub struct LedgerExport {
     /// Protocol version for compatibility checking.
     pub version: u32,
+    /// Unique ledger identifier (hash of operator + reserves + genesis_block).
+    #[serde(with = "crate::types::serde_32")]
+    pub ledger_id: [u8; 32],
+    /// Block height when this ledger was opened.
+    pub genesis_block: u32,
     /// Operator's public key.
     #[serde(with = "crate::types::serde_pubkey")]
     pub operator_id: PublicKey,
@@ -536,6 +541,8 @@ pub struct LedgerExport {
 impl LedgerExport {
     /// Create a new ledger export.
     pub fn new(
+        ledger_id: [u8; 32],
+        genesis_block: u32,
         operator_id: PublicKey,
         reserves_id: String,
         ledger_address: String,
@@ -544,6 +551,8 @@ impl LedgerExport {
     ) -> Self {
         Self {
             version: 1,
+            ledger_id,
+            genesis_block,
             operator_id,
             reserves_id,
             ledger_address,
@@ -551,6 +560,11 @@ impl LedgerExport {
             exported_at: crate::now_unix_timestamp(),
             block_height,
         }
+    }
+
+    /// Get the ledger_id as a hex string.
+    pub fn ledger_id_hex(&self) -> String {
+        hex::encode(self.ledger_id)
     }
 
     /// Export to JSON string.
@@ -852,6 +866,7 @@ impl LedgerConformanceValidator {
             LedgerRole::Partner,
             Vec::new(),
             export.ledger_address.clone(),
+            export.genesis_block,
         );
 
         // Replay each update
@@ -985,7 +1000,7 @@ mod tests {
     }
 
     fn create_test_state(deposit_balance: u64, reserves: u64) -> LedgerState {
-        let mut state = LedgerState::new(test_pubkey(), test_pubkey_2().to_string(), "tb1q...".to_string());
+        let mut state = LedgerState::new(test_pubkey(), test_pubkey_2().to_string(), "tb1q...".to_string(), 0);
 
         let deposit = create_test_deposit(deposit_balance);
         let pubkey = deposit.pubkey;
@@ -1279,7 +1294,11 @@ mod tests {
     #[test]
     fn test_ledger_export_creation() {
         let op = test_pubkey();
+        let genesis_block = 1000u32;
+        let ledger_id = crate::types::LedgerState::compute_ledger_id(&op, "reserves_id", genesis_block);
         let export = LedgerExport::new(
+            ledger_id,
+            genesis_block,
             op,
             "reserves_id".to_string(),
             "tb1q...".to_string(),
@@ -1288,6 +1307,8 @@ mod tests {
         );
 
         assert_eq!(export.version, 1);
+        assert_eq!(export.ledger_id, ledger_id);
+        assert_eq!(export.genesis_block, genesis_block);
         assert_eq!(export.operator_id, op);
         assert_eq!(export.reserves_id, "reserves_id");
         assert_eq!(export.ledger_address, "tb1q...");
@@ -1299,7 +1320,11 @@ mod tests {
     #[test]
     fn test_ledger_export_json_roundtrip() {
         let op = test_pubkey();
+        let genesis_block = 1000u32;
+        let ledger_id = crate::types::LedgerState::compute_ledger_id(&op, "reserves_id", genesis_block);
         let export = LedgerExport::new(
+            ledger_id,
+            genesis_block,
             op,
             "reserves_id".to_string(),
             "tb1q...".to_string(),
@@ -1315,6 +1340,8 @@ mod tests {
         // Deserialize from JSON
         let imported = LedgerExport::from_json(&json).expect("JSON deserialization should succeed");
         assert_eq!(imported.version, export.version);
+        assert_eq!(imported.ledger_id, export.ledger_id);
+        assert_eq!(imported.genesis_block, export.genesis_block);
         assert_eq!(imported.operator_id, export.operator_id);
         assert_eq!(imported.reserves_id, export.reserves_id);
     }
@@ -1322,7 +1349,11 @@ mod tests {
     #[test]
     fn test_ledger_export_binary_roundtrip() {
         let op = test_pubkey();
+        let genesis_block = 1000u32;
+        let ledger_id = crate::types::LedgerState::compute_ledger_id(&op, "reserves_id", genesis_block);
         let export = LedgerExport::new(
+            ledger_id,
+            genesis_block,
             op,
             "reserves_id".to_string(),
             "tb1q...".to_string(),
@@ -1337,6 +1368,8 @@ mod tests {
         // Deserialize from binary
         let imported = LedgerExport::from_binary(&binary).expect("Binary deserialization should succeed");
         assert_eq!(imported.version, export.version);
+        assert_eq!(imported.ledger_id, export.ledger_id);
+        assert_eq!(imported.genesis_block, export.genesis_block);
         assert_eq!(imported.operator_id, export.operator_id);
         assert_eq!(imported.reserves_id, export.reserves_id);
     }
@@ -1416,7 +1449,11 @@ mod tests {
     #[test]
     fn test_validate_empty_ledger_fails() {
         let op = test_pubkey();
+        let genesis_block = 1000u32;
+        let ledger_id = crate::types::LedgerState::compute_ledger_id(&op, "reserves_id", genesis_block);
         let export = LedgerExport::new(
+            ledger_id,
+            genesis_block,
             op,
             "reserves_id".to_string(),
             "tb1q...".to_string(),

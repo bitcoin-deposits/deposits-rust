@@ -1011,6 +1011,7 @@ mod tests {
             LedgerRole::Partner,
             vec![],
             "tb1qtest".to_string(),
+            0,
         );
         ctx.add_ledger(operator, our_node_id.to_string(), ledger);
 
@@ -1097,6 +1098,7 @@ mod tests {
             LedgerRole::Partner,
             vec![],
             "tb1qtest".to_string(),
+            0,
         );
         ledger.state.reserves.amount = 5000;
         ctx.add_ledger(operator, our_node_id.to_string(), ledger);
@@ -1124,6 +1126,7 @@ mod tests {
             LedgerRole::Partner,
             vec![],
             "tb1qtest".to_string(),
+            0,
         );
         ledger.state.collateral_amount = 5000;
         ledger.state.last_collateral_increase_block = Some(100);
@@ -1153,6 +1156,7 @@ mod tests {
             LedgerRole::Partner,
             vec![],
             "tb1qtest".to_string(),
+            0,
         );
         ledger.state.collateral_amount = 5000;
         ledger.state.last_collateral_increase_block = Some(100);
@@ -1182,6 +1186,7 @@ mod tests {
             LedgerRole::Partner,
             vec![],
             "tb1qtest".to_string(),
+            0,
         );
         ledger.state.reserves.amount = 100_000;
 
@@ -1215,6 +1220,7 @@ mod tests {
             LedgerRole::Partner,
             vec![],
             "tb1qtest".to_string(),
+            0,
         );
         let mut deposit = Deposit::new(deposit_pubkey, None);
         deposit.balance = 50_000; // Has balance
@@ -1242,6 +1248,7 @@ mod tests {
             LedgerRole::Partner,
             vec![],
             "tb1qtest".to_string(),
+            0,
         );
         ctx.add_ledger(operator, our_node_id.to_string(), ledger);
 
