@@ -151,9 +151,12 @@ pub struct ThresholdConfig {
 
 impl ThresholdConfig {
     /// Default configuration for n voters:
-    /// - Tier 0: Majority + tie-breaker (immediate)
-    /// - Tier 1: 2-of-n after 1 week (1008 blocks)
-    /// - Tier 2: 1-of-n after 2 weeks (2016 blocks)
+    /// - Tier 0: Majority + tie-breaker (immediate) - normal operations
+    /// - Tier 1: 2-of-n quorum override (1008 blocks) - custody transfer when quorum agrees
+    /// - Tier 2: 1-of-n emergency (4032 blocks) - last resort recovery
+    ///
+    /// Note: Tier 1 allows quorum members to override the operator after ~1 week.
+    /// This is used for custody transfers when the quorum detects non-conformance.
     pub fn default_for_voter_count(n: usize) -> Self {
         let tiers = if n <= 2 {
             // Simple 2-party case
@@ -162,11 +165,12 @@ impl ThresholdConfig {
                 ThresholdTier::emergency_recovery(2016),
             ]
         } else {
-            // Multi-party case
+            // Multi-party case with quorum override
             vec![
                 ThresholdTier::majority_immediate(n),
-                ThresholdTier::degraded(2, true, 1008),  // 2-of-n + tie-breaker after 1 week
-                ThresholdTier::degraded(2, false, 2016), // 2-of-n after 2 weeks
+                // Quorum override: 2-of-n without operator (immediate)
+                // Used for custody transfer when quorum agrees on non-conformance
+                ThresholdTier::degraded(2, false, 0),
                 ThresholdTier::emergency_recovery(4032), // 1-of-n after 4 weeks
             ]
         };
@@ -680,10 +684,16 @@ mod tests {
         assert_eq!(config_2.tiers.len(), 2);
 
         let config_5 = ThresholdConfig::default_for_voter_count(5);
-        assert_eq!(config_5.tiers.len(), 4);
-        // First tier should be majority (3-of-5) + tie-breaker
+        assert_eq!(config_5.tiers.len(), 3);
+        // Tier 0: majority (3-of-5) + tie-breaker
         assert_eq!(config_5.tiers[0].threshold, 3);
         assert!(config_5.tiers[0].requires_tie_breaker);
+        // Tier 1: quorum override (2-of-n without tie-breaker, immediate)
+        assert_eq!(config_5.tiers[1].threshold, 2);
+        assert!(!config_5.tiers[1].requires_tie_breaker);
+        assert_eq!(config_5.tiers[1].timelock_blocks, 0);
+        // Tier 2: emergency recovery (1-of-n)
+        assert_eq!(config_5.tiers[2].threshold, 1);
     }
 
     fn test_ledger_hash() -> [u8; 32] {

@@ -493,11 +493,11 @@ pub fn handle_ledger_update<C: HandlerContext>(
                 }
 
                 // Reserves operations
-                LedgerOperation::ReservesIncrease { new_amount } => {
+                LedgerOperation::ReservesIncrease { reserves_id: _, new_amount } => {
                     validate_reserves_increase(ledger.reserves_amount(), *new_amount, None)
                         .map_err(|e| HandlerError::ValidationFailed(e))?;
                 }
-                LedgerOperation::ReservesDecrease { new_amount } => {
+                LedgerOperation::ReservesDecrease { reserves_id: _, new_amount } => {
                     validate_reserves_decrease(&ledger, *new_amount)
                         .map_err(|e| HandlerError::ValidationFailed(e))?;
                 }
@@ -524,6 +524,7 @@ pub fn handle_ledger_update<C: HandlerContext>(
                 LedgerOperation::CollateralDecrease { .. } |
                 LedgerOperation::CollateralAttestation { .. } |
                 LedgerOperation::ReservesRotate { .. } |
+                LedgerOperation::CustodyTransfer { .. } |
                 LedgerOperation::Tombstone { .. } |
                 LedgerOperation::LedgerOpen { .. } => {}
             }

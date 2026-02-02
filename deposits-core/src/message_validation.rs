@@ -590,17 +590,17 @@ pub fn validate_ledger_operation<C: ValidationContext>(
             // Onchain operations are validated in message_handlers
             Ok(())
         }
-        LedgerOperation::ReservesIncrease { new_amount } => {
+        LedgerOperation::ReservesIncrease { reserves_id, new_amount } => {
             let msg = ReservesIncreaseMsg {
                 new_amount: *new_amount,
-                reserves_id: partner_pubkey.to_string(),
+                reserves_id: reserves_id.clone(),
             };
             validate_reserves_increase_msg(ctx, &msg, sender)
         }
-        LedgerOperation::ReservesDecrease { new_amount } => {
+        LedgerOperation::ReservesDecrease { reserves_id, new_amount } => {
             let msg = ReservesDecreaseMsg {
                 new_amount: *new_amount,
-                reserves_id: partner_pubkey.to_string(),
+                reserves_id: reserves_id.clone(),
             };
             validate_reserves_decrease_msg(ctx, &msg, sender)
         }
@@ -641,6 +641,7 @@ pub fn validate_ledger_operation<C: ValidationContext>(
         LedgerOperation::CollateralLock { .. } |
         LedgerOperation::QuorumJoin { .. } |
         LedgerOperation::ReservesRotate { .. } |
+        LedgerOperation::CustodyTransfer { .. } |
         LedgerOperation::Tombstone { .. } => Ok(()),
     }
 }

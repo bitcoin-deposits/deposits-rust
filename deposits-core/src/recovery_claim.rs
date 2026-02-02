@@ -739,7 +739,10 @@ mod tests {
         let pk3 = generate_test_pubkey(3);
         let pk4 = generate_test_pubkey(4);
 
-        // Multi-party setup (4 voters -> 4 tiers)
+        // Multi-party setup (4 voters -> 3 tiers with new tier structure)
+        // Tier 0: Majority + operator
+        // Tier 1: Quorum override (2-of-n without operator)
+        // Tier 2: Emergency (1-of-n)
         let voter_set = VoterSet::new(pk1, vec![pk2, pk3, pk4]);
         let reserves = create_test_reserves(voter_set);
 
@@ -750,7 +753,7 @@ mod tests {
             (ClaimEligibility::SelectedPartnerOnly { partner: pk1 }, 0),
             (ClaimEligibility::AnyThreePartners, 1),
             (ClaimEligibility::AnySinglePartner, 2),
-            (ClaimEligibility::CommunityFallback, 3),
+            (ClaimEligibility::CommunityFallback, 2),  // Maps to last tier (emergency)
         ];
 
         for (eligibility, expected_tier) in test_cases {

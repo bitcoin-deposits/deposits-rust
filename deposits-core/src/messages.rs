@@ -524,9 +524,19 @@ pub enum LedgerOperation {
     // Note: ReservesAdd/Remove/UpdateSpendTo are peer messages, not ledger operations.
     // The initial reserves state is set via LedgerOpen.
     /// Increase reserves amount
-    ReservesIncrease { new_amount: u64 },
+    ReservesIncrease {
+        /// Current reserves identifier (UTXO address for BDK, partner pubkey for LDK)
+        reserves_id: String,
+        /// New total reserves amount in satoshis
+        new_amount: u64,
+    },
     /// Decrease reserves amount
-    ReservesDecrease { new_amount: u64 },
+    ReservesDecrease {
+        /// Current reserves identifier (UTXO address for BDK, partner pubkey for LDK)
+        reserves_id: String,
+        /// New total reserves amount in satoshis
+        new_amount: u64,
+    },
     /// Rotate reserves to a new Taproot output with quorum-based spending
     ///
     /// Records the rotation of reserves from P2WSH to P2TR with tiered spending:
@@ -535,6 +545,8 @@ pub enum LedgerOperation {
     ///
     /// The quorum member pubkeys are derived from QuorumAddMember operations on this ledger.
     ReservesRotate {
+        /// New reserves identifier (the new Taproot address)
+        reserves_id: String,
         /// Transaction that spent the old reserves UTXO
         spending_txid: [u8; 32],
         /// New reserves UTXO txid
@@ -705,6 +717,42 @@ pub enum LedgerOperation {
         block_height: u32,
     },
 
+    // ========== Custody Transfer (1) ==========
+    /// Transfer custody of the ledger to a new operator.
+    ///
+    /// This operation is signed by quorum members (not the current operator) when
+    /// they detect non-conformance. Once applied:
+    /// - The ledger's operator changes to new_custodian
+    /// - All future updates must be signed by the new custodian
+    /// - Reserves will need to be reassigned on-chain separately
+    ///
+    /// Validation requires signatures from a threshold of quorum members.
+    CustodyTransfer {
+        /// Reason for transfer (e.g., "hash_chain_broken", "double_spend")
+        reason: String,
+        /// Hash of the last valid update before non-conformance
+        last_valid_hash: [u8; 32],
+        /// Sequence number of the last valid update
+        last_valid_sequence: u64,
+        /// Hash of the first invalid/non-conforming update (evidence)
+        evidence_hash: [u8; 32],
+        /// Block height when transfer was initiated
+        initiation_block: u32,
+        /// Block height used for entropy (initiation_block + 6)
+        entropy_block_height: u32,
+        /// Hash of the entropy block (populated after block is mined)
+        /// Used to deterministically select the new custodian
+        entropy_block_hash: [u8; 32],
+        /// Pool of eligible custodians (quorum members who signed)
+        candidate_pool: Vec<PublicKey>,
+        /// The new custodian selected by entropy (computed from entropy_block_hash + candidate_pool)
+        /// Validation must verify this matches select_recovery_partner(entropy_block_hash, candidate_pool)
+        new_custodian: PublicKey,
+        /// Quorum member signatures authorizing this transfer
+        /// Each entry is (quorum_member_pubkey, signature over transfer details)
+        quorum_signatures: Vec<(PublicKey, [u8; 64])>,
+    },
+
     // ========== Lifecycle (2) ==========
     /// Close the ledger
     LedgerClose,
@@ -743,6 +791,7 @@ impl LedgerOperation {
             Self::CollateralLock { .. } => 45,
             Self::QuorumJoin { .. } => 46,
             Self::FeeCollect { .. } => 50,
+            Self::CustodyTransfer { .. } => 55,
             Self::LedgerClose => 60,
             Self::Tombstone { .. } => 61,
         }
@@ -1358,9 +1407,16 @@ impl BinaryCodec for LedgerOperation {
                 write_u32(w, *genesis_block)?;
                 write_u64(w, *collateral_enforcement_block)?;
             }
-            Self::ReservesIncrease { new_amount } => write_u64(w, *new_amount)?,
-            Self::ReservesDecrease { new_amount } => write_u64(w, *new_amount)?,
-            Self::ReservesRotate { spending_txid, new_outpoint_txid, new_outpoint_vout, amount, quorum_threshold, quorum_size, first_expiry_block, ledger_hash } => {
+            Self::ReservesIncrease { reserves_id, new_amount } => {
+                write_string(w, reserves_id)?;
+                write_u64(w, *new_amount)?;
+            }
+            Self::ReservesDecrease { reserves_id, new_amount } => {
+                write_string(w, reserves_id)?;
+                write_u64(w, *new_amount)?;
+            }
+            Self::ReservesRotate { reserves_id, spending_txid, new_outpoint_txid, new_outpoint_vout, amount, quorum_threshold, quorum_size, first_expiry_block, ledger_hash } => {
+                write_string(w, reserves_id)?;
                 write_32(w, spending_txid)?;
                 write_32(w, new_outpoint_txid)?;
                 write_u32(w, *new_outpoint_vout)?;
@@ -1477,6 +1533,27 @@ impl BinaryCodec for LedgerOperation {
                 write_u64(w, *amount)?;
                 write_u32(w, *block_height)?;
             }
+            Self::CustodyTransfer { reason, last_valid_hash, last_valid_sequence, evidence_hash, initiation_block, entropy_block_height, entropy_block_hash, candidate_pool, new_custodian, quorum_signatures } => {
+                write_string(w, reason)?;
+                write_32(w, last_valid_hash)?;
+                write_u64(w, *last_valid_sequence)?;
+                write_32(w, evidence_hash)?;
+                write_u32(w, *initiation_block)?;
+                write_u32(w, *entropy_block_height)?;
+                write_32(w, entropy_block_hash)?;
+                // Write candidate pool as length-prefixed array
+                write_u16(w, candidate_pool.len() as u16)?;
+                for pubkey in candidate_pool {
+                    write_pubkey(w, pubkey)?;
+                }
+                write_pubkey(w, new_custodian)?;
+                // Write quorum signatures as length-prefixed array
+                write_u16(w, quorum_signatures.len() as u16)?;
+                for (pubkey, sig) in quorum_signatures {
+                    write_pubkey(w, pubkey)?;
+                    write_64(w, sig)?;
+                }
+            }
             Self::LedgerClose => {}
             Self::Tombstone { channel_id, close_reason, timestamp } => {
                 write_32(w, channel_id)?;
@@ -1499,9 +1576,16 @@ impl BinaryCodec for LedgerOperation {
                 collateral_enforcement_block: read_u64(r)?,
             }),
             // Reserves operations (10-12)
-            10 => Ok(Self::ReservesIncrease { new_amount: read_u64(r)? }),
-            11 => Ok(Self::ReservesDecrease { new_amount: read_u64(r)? }),
+            10 => Ok(Self::ReservesIncrease {
+                reserves_id: read_string(r)?,
+                new_amount: read_u64(r)?,
+            }),
+            11 => Ok(Self::ReservesDecrease {
+                reserves_id: read_string(r)?,
+                new_amount: read_u64(r)?,
+            }),
             12 => Ok(Self::ReservesRotate {
+                reserves_id: read_string(r)?,
                 spending_txid: read_32(r)?,
                 new_outpoint_txid: read_32(r)?,
                 new_outpoint_vout: read_u32(r)?,
@@ -1623,6 +1707,43 @@ impl BinaryCodec for LedgerOperation {
                 amount: read_u64(r)?,
                 block_height: read_u32(r)?,
             }),
+            // CustodyTransfer (55)
+            55 => {
+                let reason = read_string(r)?;
+                let last_valid_hash = read_32(r)?;
+                let last_valid_sequence = read_u64(r)?;
+                let evidence_hash = read_32(r)?;
+                let initiation_block = read_u32(r)?;
+                let entropy_block_height = read_u32(r)?;
+                let entropy_block_hash = read_32(r)?;
+                // Read candidate pool
+                let pool_count = read_u16(r)? as usize;
+                let mut candidate_pool = Vec::with_capacity(pool_count);
+                for _ in 0..pool_count {
+                    candidate_pool.push(read_pubkey(r)?);
+                }
+                let new_custodian = read_pubkey(r)?;
+                // Read quorum signatures
+                let sig_count = read_u16(r)? as usize;
+                let mut quorum_signatures = Vec::with_capacity(sig_count);
+                for _ in 0..sig_count {
+                    let pubkey = read_pubkey(r)?;
+                    let sig = read_64(r)?;
+                    quorum_signatures.push((pubkey, sig));
+                }
+                Ok(Self::CustodyTransfer {
+                    reason,
+                    last_valid_hash,
+                    last_valid_sequence,
+                    evidence_hash,
+                    initiation_block,
+                    entropy_block_height,
+                    entropy_block_hash,
+                    candidate_pool,
+                    new_custodian,
+                    quorum_signatures,
+                })
+            }
             // Close operations (60-61)
             60 => Ok(Self::LedgerClose),
             61 => Ok(Self::Tombstone {
@@ -2384,6 +2505,17 @@ mod ledger_op_tlv {
     pub const QUORUM_THRESHOLD: u64 = 93;
     pub const QUORUM_SIZE: u64 = 94;
     pub const FIRST_EXPIRY_BLOCK: u64 = 95;
+    // CustodyTransfer fields
+    pub const REASON: u64 = 100;
+    pub const LAST_VALID_HASH: u64 = 101;
+    pub const LAST_VALID_SEQUENCE: u64 = 102;
+    pub const EVIDENCE_HASH: u64 = 103;
+    pub const INITIATION_BLOCK: u64 = 104;
+    pub const ENTROPY_BLOCK_HEIGHT: u64 = 105;
+    pub const ENTROPY_BLOCK_HASH: u64 = 106;
+    pub const CANDIDATE_POOL: u64 = 107;
+    pub const NEW_CUSTODIAN: u64 = 108;
+    pub const QUORUM_SIGNATURES: u64 = 109;
 }
 
 impl TlvEncode for LedgerOperation {
@@ -2401,14 +2533,19 @@ impl TlvEncode for LedgerOperation {
                     .u32_field(GENESIS_BLOCK, *genesis_block)
                     .u64_field(ENFORCEMENT_BLOCK, *collateral_enforcement_block);
             }
-            Self::ReservesIncrease { new_amount } => {
-                builder = builder.u64_field(NEW_AMOUNT, *new_amount);
-            }
-            Self::ReservesDecrease { new_amount } => {
-                builder = builder.u64_field(NEW_AMOUNT, *new_amount);
-            }
-            Self::ReservesRotate { spending_txid, new_outpoint_txid, new_outpoint_vout, amount, quorum_threshold, quorum_size, first_expiry_block, ledger_hash } => {
+            Self::ReservesIncrease { reserves_id, new_amount } => {
                 builder = builder
+                    .string_field(RESERVES_ID, reserves_id)
+                    .u64_field(NEW_AMOUNT, *new_amount);
+            }
+            Self::ReservesDecrease { reserves_id, new_amount } => {
+                builder = builder
+                    .string_field(RESERVES_ID, reserves_id)
+                    .u64_field(NEW_AMOUNT, *new_amount);
+            }
+            Self::ReservesRotate { reserves_id, spending_txid, new_outpoint_txid, new_outpoint_vout, amount, quorum_threshold, quorum_size, first_expiry_block, ledger_hash } => {
+                builder = builder
+                    .string_field(RESERVES_ID, reserves_id)
                     .bytes_field(SPENDING_TXID, spending_txid)
                     .bytes_field(NEW_OUTPOINT_TXID, new_outpoint_txid)
                     .u32_field(NEW_OUTPOINT_VOUT, *new_outpoint_vout)
@@ -2552,6 +2689,33 @@ impl TlvEncode for LedgerOperation {
                     .u64_field(AMOUNT, *amount)
                     .u32_field(BLOCK_HEIGHT, *block_height);
             }
+            Self::CustodyTransfer { reason, last_valid_hash, last_valid_sequence, evidence_hash, initiation_block, entropy_block_height, entropy_block_hash, candidate_pool, new_custodian, quorum_signatures } => {
+                builder = builder
+                    .string_field(REASON, reason)
+                    .bytes_field(LAST_VALID_HASH, last_valid_hash)
+                    .u64_field(LAST_VALID_SEQUENCE, *last_valid_sequence)
+                    .bytes_field(EVIDENCE_HASH, evidence_hash)
+                    .u32_field(INITIATION_BLOCK, *initiation_block)
+                    .u32_field(ENTROPY_BLOCK_HEIGHT, *entropy_block_height)
+                    .bytes_field(ENTROPY_BLOCK_HASH, entropy_block_hash);
+                // Encode candidate pool as a blob: count(u16) + [pubkey(33)]*
+                let mut pool_data = Vec::new();
+                pool_data.extend_from_slice(&(candidate_pool.len() as u16).to_be_bytes());
+                for pk in candidate_pool {
+                    pool_data.extend_from_slice(&pk.serialize());
+                }
+                builder = builder
+                    .bytes_field(CANDIDATE_POOL, &pool_data)
+                    .pubkey_field(NEW_CUSTODIAN, new_custodian);
+                // Encode quorum signatures as a blob: count(u16) + [pubkey(33) + sig(64)]*
+                let mut sigs_data = Vec::new();
+                sigs_data.extend_from_slice(&(quorum_signatures.len() as u16).to_be_bytes());
+                for (pk, sig) in quorum_signatures {
+                    sigs_data.extend_from_slice(&pk.serialize());
+                    sigs_data.extend_from_slice(sig);
+                }
+                builder = builder.bytes_field(QUORUM_SIGNATURES, &sigs_data);
+            }
             Self::LedgerClose => {}
             Self::Tombstone { channel_id, close_reason, timestamp } => {
                 builder = builder.bytes_field(CHANNEL_ID, channel_id);
@@ -2581,9 +2745,16 @@ impl TlvDecode for LedgerOperation {
                 genesis_block: reader.read_u32_opt(GENESIS_BLOCK)?.unwrap_or(0),
                 collateral_enforcement_block: reader.read_u64_opt(ENFORCEMENT_BLOCK)?.unwrap_or(0),
             }),
-            10 => Ok(Self::ReservesIncrease { new_amount: reader.read_u64(NEW_AMOUNT)? }),
-            11 => Ok(Self::ReservesDecrease { new_amount: reader.read_u64(NEW_AMOUNT)? }),
+            10 => Ok(Self::ReservesIncrease {
+                reserves_id: reader.read_string(RESERVES_ID)?,
+                new_amount: reader.read_u64(NEW_AMOUNT)?,
+            }),
+            11 => Ok(Self::ReservesDecrease {
+                reserves_id: reader.read_string(RESERVES_ID)?,
+                new_amount: reader.read_u64(NEW_AMOUNT)?,
+            }),
             12 => Ok(Self::ReservesRotate {
+                reserves_id: reader.read_string(RESERVES_ID)?,
                 spending_txid: reader.read_bytes(SPENDING_TXID)?,
                 new_outpoint_txid: reader.read_bytes(NEW_OUTPOINT_TXID)?,
                 new_outpoint_vout: reader.read_u32(NEW_OUTPOINT_VOUT)?,
@@ -2700,6 +2871,64 @@ impl TlvDecode for LedgerOperation {
                 amount: reader.read_u64(AMOUNT)?,
                 block_height: reader.read_u32(BLOCK_HEIGHT)?,
             }),
+            55 => {
+                let reason = reader.read_string(REASON)?;
+                let last_valid_hash = reader.read_bytes(LAST_VALID_HASH)?;
+                let last_valid_sequence = reader.read_u64(LAST_VALID_SEQUENCE)?;
+                let evidence_hash = reader.read_bytes(EVIDENCE_HASH)?;
+                let initiation_block = reader.read_u32(INITIATION_BLOCK)?;
+                let entropy_block_height = reader.read_u32(ENTROPY_BLOCK_HEIGHT)?;
+                let entropy_block_hash = reader.read_bytes(ENTROPY_BLOCK_HASH)?;
+                // Decode candidate pool blob
+                let pool_data = reader.read_raw(CANDIDATE_POOL)?;
+                let mut candidate_pool = Vec::new();
+                if pool_data.len() >= 2 {
+                    let pool_count = u16::from_be_bytes([pool_data[0], pool_data[1]]) as usize;
+                    let mut offset = 2;
+                    for _ in 0..pool_count {
+                        if offset + 33 > pool_data.len() { break; }
+                        let pk = bitcoin::secp256k1::PublicKey::from_slice(&pool_data[offset..offset+33])
+                            .map_err(|_| TlvError::InvalidFieldValue {
+                                field_type: CANDIDATE_POOL,
+                                reason: "invalid pubkey".to_string(),
+                            })?;
+                        candidate_pool.push(pk);
+                        offset += 33;
+                    }
+                }
+                let new_custodian = reader.read_pubkey(NEW_CUSTODIAN)?;
+                // Decode quorum signatures blob
+                let sigs_data = reader.read_raw(QUORUM_SIGNATURES)?;
+                let mut quorum_signatures = Vec::new();
+                if sigs_data.len() >= 2 {
+                    let sig_count = u16::from_be_bytes([sigs_data[0], sigs_data[1]]) as usize;
+                    let mut offset = 2;
+                    for _ in 0..sig_count {
+                        if offset + 33 + 64 > sigs_data.len() { break; }
+                        let pk = bitcoin::secp256k1::PublicKey::from_slice(&sigs_data[offset..offset+33])
+                            .map_err(|_| TlvError::InvalidFieldValue {
+                                field_type: QUORUM_SIGNATURES,
+                                reason: "invalid pubkey".to_string(),
+                            })?;
+                        let mut sig = [0u8; 64];
+                        sig.copy_from_slice(&sigs_data[offset+33..offset+33+64]);
+                        quorum_signatures.push((pk, sig));
+                        offset += 33 + 64;
+                    }
+                }
+                Ok(Self::CustodyTransfer {
+                    reason,
+                    last_valid_hash,
+                    last_valid_sequence,
+                    evidence_hash,
+                    initiation_block,
+                    entropy_block_height,
+                    entropy_block_hash,
+                    candidate_pool,
+                    new_custodian,
+                    quorum_signatures,
+                })
+            }
             60 => Ok(Self::LedgerClose),
             61 => Ok(Self::Tombstone {
                 channel_id: reader.read_bytes(CHANNEL_ID)?,
@@ -3936,8 +4165,8 @@ mod tests {
     #[test]
     fn test_ledger_operation_roundtrip() {
         let ops = vec![
-            LedgerOperation::ReservesIncrease { new_amount: 200000 },
-            LedgerOperation::ReservesDecrease { new_amount: 100000 },
+            LedgerOperation::ReservesIncrease { reserves_id: "bcrt1q...".to_string(), new_amount: 200000 },
+            LedgerOperation::ReservesDecrease { reserves_id: "bcrt1q...".to_string(), new_amount: 100000 },
             LedgerOperation::DepositOpen {
                 pubkey: test_pubkey(),
                 fees: Some(FeeStructure {
@@ -3974,7 +4203,7 @@ mod tests {
         let msg = DepositsMessage::LedgerUpdate(LedgerUpdateMsg {
             operator_id: test_pubkey(),
             reserves_id: test_pubkey().to_string(),
-            operation: LedgerOperation::ReservesIncrease { new_amount: 100000 },
+            operation: LedgerOperation::ReservesIncrease { reserves_id: "bcrt1q...".to_string(), new_amount: 100000 },
             sequence_number: 1,
             previous_hash: [0u8; 32],
             current_hash: [0xAB; 32],
@@ -4067,8 +4296,8 @@ mod tests {
         use crate::tlv::{TlvEncode, TlvDecode};
 
         let ops = vec![
-            LedgerOperation::ReservesIncrease { new_amount: 200000 },
-            LedgerOperation::ReservesDecrease { new_amount: 50000 },
+            LedgerOperation::ReservesIncrease { reserves_id: "bcrt1q...".to_string(), new_amount: 200000 },
+            LedgerOperation::ReservesDecrease { reserves_id: "bcrt1q...".to_string(), new_amount: 50000 },
             LedgerOperation::DepositOpen {
                 pubkey: test_pubkey(),
                 fees: Some(FeeStructure::new(100, 10, 144)),
@@ -4110,7 +4339,7 @@ mod tests {
         let msg = LedgerUpdateMsg {
             operator_id: test_pubkey(),
             reserves_id: test_pubkey().to_string(),
-            operation: LedgerOperation::ReservesIncrease { new_amount: 100000 },
+            operation: LedgerOperation::ReservesIncrease { reserves_id: "bcrt1q...".to_string(), new_amount: 100000 },
             sequence_number: 1,
             previous_hash: [0u8; 32],
             current_hash: [0xAB; 32],
