@@ -416,8 +416,8 @@ impl DepositsMessage {
             Self::LedgerUpdateResponse(m) => Some(m.reserves_id.clone()),
             Self::Handshake(m) => Some(m.reserves_id.clone()),
             Self::HandshakeResponse(m) => Some(m.reserves_id.clone()),
-            Self::Sync(m) => Some(m.reserves_id.clone()),
-            Self::SyncResponse(m) => Some(m.reserves_id.clone()),
+            Self::Sync(_) => None, // Uses ledger_id now
+            Self::SyncResponse(_) => None, // Uses ledger_id now
             Self::Recovery(m) => m.reserves_id(),
             Self::RecoveryResponse(m) => m.reserves_id(),
             Self::Coordination(m) => m.reserves_id(),
@@ -803,8 +803,7 @@ pub struct HandshakeResponseMsg {
 /// Request to synchronize ledger state
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SyncMsg {
-    pub operator_id: PublicKey,
-    pub reserves_id: String,
+    pub ledger_id: [u8; 32],
     pub last_known_sequence: u64,
     pub last_known_hash: [u8; 32],
 }
@@ -812,8 +811,7 @@ pub struct SyncMsg {
 /// Response with missing updates
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SyncResponseMsg {
-    pub operator_id: PublicKey,
-    pub reserves_id: String,
+    pub ledger_id: [u8; 32],
     pub request_hash: [u8; 32],
     /// Signed updates since last_known_sequence (uses storage format - bytes are bytes)
     pub updates: Vec<StorageSignedLedgerUpdate>,
@@ -1669,7 +1667,7 @@ impl BinaryCodec for StorageSignedLedgerUpdate {
         write_bytes(w, &self.message)?;
         write_u16(w, self.message_type)?;
         write_pubkey(w, &self.operator_id)?;
-        write_string(w, &self.reserves_id)?;
+        write_32(w, &self.ledger_id)?;
         write_u64(w, self.sequence_number)?;
         write_32(w, &self.previous_hash)?;
         write_32(w, &self.current_hash)?;
@@ -1686,7 +1684,7 @@ impl BinaryCodec for StorageSignedLedgerUpdate {
             message: read_bytes(r)?,
             message_type: read_u16(r)?,
             operator_id: read_pubkey(r)?,
-            reserves_id: read_string(r)?,
+            ledger_id: read_32(r)?,
             sequence_number: read_u64(r)?,
             previous_hash: read_32(r)?,
             current_hash: read_32(r)?,
@@ -1740,14 +1738,12 @@ impl DepositsMessage {
                 write_string(w, &m.reserves_id)?;
             }
             Self::Sync(m) => {
-                write_pubkey(w, &m.operator_id)?;
-                write_string(w, &m.reserves_id)?;
+                write_32(w, &m.ledger_id)?;
                 write_u64(w, m.last_known_sequence)?;
                 write_32(w, &m.last_known_hash)?;
             }
             Self::SyncResponse(m) => {
-                write_pubkey(w, &m.operator_id)?;
-                write_string(w, &m.reserves_id)?;
+                write_32(w, &m.ledger_id)?;
                 write_32(w, &m.request_hash)?;
                 write_vec(w, &m.updates, |w, u| u.write_to(w))?;
                 write_u64(w, m.current_sequence)?;
@@ -1815,14 +1811,12 @@ impl DepositsMessage {
                 reserves_id: read_string(r)?,
             })),
             SYNC => Ok(Self::Sync(SyncMsg {
-                operator_id: read_pubkey(r)?,
-                reserves_id: read_string(r)?,
+                ledger_id: read_32(r)?,
                 last_known_sequence: read_u64(r)?,
                 last_known_hash: read_32(r)?,
             })),
             SYNC_RESPONSE => Ok(Self::SyncResponse(SyncResponseMsg {
-                operator_id: read_pubkey(r)?,
-                reserves_id: read_string(r)?,
+                ledger_id: read_32(r)?,
                 request_hash: read_32(r)?,
                 updates: read_vec(r, StorageSignedLedgerUpdate::read_from)?,
                 current_sequence: read_u64(r)?,
@@ -2903,18 +2897,16 @@ impl TlvDecode for HandshakeResponseMsg {
 
 /// TLV for SyncMsg
 mod sync_msg_tlv {
-    pub const OPERATOR_ID: u64 = 0;
-    pub const RESERVES_ID: u64 = 2;
-    pub const LAST_KNOWN_SEQUENCE: u64 = 4;
-    pub const LAST_KNOWN_HASH: u64 = 6;
+    pub const LEDGER_ID: u64 = 0;
+    pub const LAST_KNOWN_SEQUENCE: u64 = 2;
+    pub const LAST_KNOWN_HASH: u64 = 4;
 }
 
 impl TlvEncode for SyncMsg {
     fn tlv_encode(&self) -> Vec<u8> {
         use sync_msg_tlv::*;
         TlvBuilder::new()
-            .pubkey_field(OPERATOR_ID, &self.operator_id)
-            .string_field(RESERVES_ID, &self.reserves_id)
+            .bytes_field(LEDGER_ID, &self.ledger_id)
             .u64_field(LAST_KNOWN_SEQUENCE, self.last_known_sequence)
             .bytes_field(LAST_KNOWN_HASH, &self.last_known_hash)
             .build()
@@ -2926,8 +2918,7 @@ impl TlvDecode for SyncMsg {
         use sync_msg_tlv::*;
         let reader = TlvReader::new(data)?;
         Ok(Self {
-            operator_id: reader.read_pubkey(OPERATOR_ID)?,
-            reserves_id: reader.read_string(RESERVES_ID)?,
+            ledger_id: reader.read_bytes(LEDGER_ID)?,
             last_known_sequence: reader.read_u64(LAST_KNOWN_SEQUENCE)?,
             last_known_hash: reader.read_bytes(LAST_KNOWN_HASH)?,
         })
@@ -2936,20 +2927,18 @@ impl TlvDecode for SyncMsg {
 
 /// TLV for SyncResponseMsg
 mod sync_response_tlv {
-    pub const OPERATOR_ID: u64 = 0;
-    pub const RESERVES_ID: u64 = 2;
-    pub const REQUEST_HASH: u64 = 4;
-    pub const UPDATES: u64 = 6;
-    pub const CURRENT_SEQUENCE: u64 = 8;
-    pub const CURRENT_HASH: u64 = 10;
+    pub const LEDGER_ID: u64 = 0;
+    pub const REQUEST_HASH: u64 = 2;
+    pub const UPDATES: u64 = 4;
+    pub const CURRENT_SEQUENCE: u64 = 6;
+    pub const CURRENT_HASH: u64 = 8;
 }
 
 impl TlvEncode for SyncResponseMsg {
     fn tlv_encode(&self) -> Vec<u8> {
         use sync_response_tlv::*;
         TlvBuilder::new()
-            .pubkey_field(OPERATOR_ID, &self.operator_id)
-            .string_field(RESERVES_ID, &self.reserves_id)
+            .bytes_field(LEDGER_ID, &self.ledger_id)
             .bytes_field(REQUEST_HASH, &self.request_hash)
             .vec_field(UPDATES, &self.updates)
             .u64_field(CURRENT_SEQUENCE, self.current_sequence)
@@ -2963,8 +2952,7 @@ impl TlvDecode for SyncResponseMsg {
         use sync_response_tlv::*;
         let reader = TlvReader::new(data)?;
         Ok(Self {
-            operator_id: reader.read_pubkey(OPERATOR_ID)?,
-            reserves_id: reader.read_string(RESERVES_ID)?,
+            ledger_id: reader.read_bytes(LEDGER_ID)?,
             request_hash: reader.read_bytes(REQUEST_HASH)?,
             updates: reader.read_vec(UPDATES)?,
             current_sequence: reader.read_u64(CURRENT_SEQUENCE)?,
@@ -4196,8 +4184,7 @@ mod tests {
         use crate::tlv::{TlvEncode, TlvDecode};
 
         let msg = SyncMsg {
-            operator_id: test_pubkey(),
-            reserves_id: test_pubkey().to_string(),
+            ledger_id: [0x12; 32],
             last_known_sequence: 5,
             last_known_hash: [0xAA; 32],
         };
@@ -4216,7 +4203,7 @@ mod tests {
             message: vec![0x80, 0x01, 0xAA, 0xBB], // Sample message bytes
             message_type: 0x8001,
             operator_id: test_pubkey(),
-            reserves_id: test_pubkey().to_string(),
+            ledger_id: [0x12; 32],
             sequence_number: 1,
             previous_hash: [0xCC; 32],
             current_hash: [0xDD; 32],
@@ -4228,8 +4215,7 @@ mod tests {
         };
 
         let msg = SyncResponseMsg {
-            operator_id: test_pubkey(),
-            reserves_id: test_pubkey().to_string(),
+            ledger_id: [0x12; 32],
             request_hash: [0xAA; 32],
             updates: vec![update],
             current_sequence: 10,
@@ -4428,8 +4414,7 @@ mod tests {
                 collateral_enforcement_block: 500,
             }),
             DepositsMessage::Sync(SyncMsg {
-                operator_id: test_pubkey(),
-                reserves_id: test_pubkey().to_string(),
+                ledger_id: [0x12; 32],
                 last_known_sequence: 5,
                 last_known_hash: [0xFF; 32],
             }),

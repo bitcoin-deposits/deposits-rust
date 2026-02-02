@@ -33,7 +33,7 @@ where
     ///
     /// # Arguments
     /// * `message` - The ledger operation message
-    /// * `reserves_id` - The channel partner's node ID
+    /// * `ledger_id` - The unique ledger identifier (hash of genesis params)
     /// * `sequence_number` - The update's sequence in the ledger
     /// * `previous_hash` - Hash of the previous ledger state
     /// * `current_hash` - Hash after applying this update
@@ -45,7 +45,7 @@ where
     pub(super) fn create_signed_update(
         &self,
         message: &DepositsMessage,
-        reserves_id: PublicKey,
+        ledger_id: [u8; 32],
         sequence_number: u64,
         previous_hash: [u8; 32],
         current_hash: [u8; 32],
@@ -119,7 +119,7 @@ where
             operator_signature,
             partner_signature: partner_sig,
             operator_id: self.our_node_id,
-            reserves_id: reserves_id.to_string(),
+            ledger_id,
             sequence_number,
             previous_hash,
             current_hash,
@@ -237,39 +237,23 @@ where
             return Ok(());
         }
 
-        // If we're the partner, we SHOULD receive and store this update.
-        // Partners no longer maintain their own hash chain - they receive authoritative
-        // SignedAuditUpdate from operator. This prevents hash divergence.
-        let we_are_partner = signed_update.reserves_id == self.our_node_id.to_string();
-        if we_are_partner {
-            log_info!(
-                self.logger,
-                "📋 PARTNER: Receiving authoritative SignedAuditUpdate seq={} from operator {} for our partner ledger",
-                signed_update.sequence_number,
-                signed_update.operator_id
-            );
-        }
-
         // 1. Verify the ECDSA signature
         Self::verify_signed_update(&signed_update)?;
 
         log_debug!(
             self.logger,
-            "✅ Verified signature for update seq={} from operator {} -> partner {}",
+            "✅ Verified signature for update seq={} from operator {} for ledger {}",
             signed_update.sequence_number,
             signed_update.operator_id,
-            signed_update.reserves_id
+            signed_update.ledger_id_hex()
         );
 
         // 2. Add to local log (verifies sequence/hash chain)
         let mut logs = self.signed_update_logs.lock().unwrap();
 
-        let log = logs.entry((signed_update.operator_id, signed_update.reserves_id.clone()))
+        let log = logs.entry(signed_update.ledger_id)
             .or_insert_with(|| {
-                deposits_core::SignedLedgerUpdateLog::new(
-                    signed_update.operator_id,
-                    signed_update.reserves_id.clone()
-                )
+                deposits_core::SignedLedgerUpdateLog::new(signed_update.ledger_id)
             });
 
         log.add_update(signed_update.clone())
@@ -286,11 +270,7 @@ where
         drop(logs); // Release lock before persisting
 
         // 3. Persist to disk
-        self.persist_signed_update(
-            signed_update.operator_id,
-            signed_update.reserves_id.clone(),
-            signed_update.clone()
-        )?;
+        self.persist_signed_update(signed_update.ledger_id, signed_update.clone())?;
 
         Ok(())
     }
@@ -301,25 +281,18 @@ where
     /// It just persists the current state of the log to disk.
     pub(super) fn persist_signed_update(
         &self,
-        operator_id: PublicKey,
-        reserves_id: String,
+        ledger_id: [u8; 32],
         _signed_update: deposits_core::SignedLedgerUpdate,
     ) -> Result<(), DepositsError> {
         // Get the existing log (should already contain the update from verify_and_store)
         let logs = self.signed_update_logs.lock().unwrap();
-        let log = logs.get(&(operator_id, reserves_id.clone()))
+        let log = logs.get(&ledger_id)
             .ok_or_else(|| DepositsError::InvalidState(
                 "Attempted to persist update for non-existent log".to_string()
             ))?;
 
-        // Persist to disk using hashed key (same as ledger persistence)
-        // Key format: signed_updates_{hash} where hash = SHA256(operator_id || reserves_id)
-        use bitcoin::hashes::{Hash, sha256};
-        let mut key_input = Vec::new();
-        key_input.extend_from_slice(&operator_id.serialize());
-        key_input.extend_from_slice(reserves_id.as_bytes());
-        let key_hash = sha256::Hash::hash(&key_input);
-        let key = format!("signed_updates_{}", hex::encode(key_hash.as_byte_array()));
+        // Persist to disk using ledger_id as the key
+        let key = format!("signed_updates_{}", hex::encode(ledger_id));
 
         let serialized = bincode::serialize(log)
             .map_err(|_| DepositsError::SerializationError)?;
@@ -328,9 +301,8 @@ where
             .map_err(|e| {
                 log_error!(
                     self.logger,
-                    "Failed to persist signed update for ledger (op={}, partner={}): {}",
-                    operator_id,
-                    reserves_id,
+                    "Failed to persist signed update for ledger {}: {}",
+                    hex::encode(ledger_id),
                     e
                 );
                 DepositsError::PersistenceFailed { reason: e.to_string() }
@@ -338,10 +310,9 @@ where
 
         log_debug!(
             self.logger,
-            "🔏 Persisted signed update seq={} for ledger (op={}, partner={})",
+            "🔏 Persisted signed update seq={} for ledger {}",
             log.next_sequence.saturating_sub(1),
-            operator_id,
-            reserves_id
+            hex::encode(ledger_id)
         );
 
         Ok(())
@@ -357,16 +328,15 @@ where
     ) -> Result<(), DepositsError> {
         log_info!(
             self.logger,
-            "📋 SYNC: Received audit sync request from {} for operator {} -> partner {} (after seq={})",
+            "📋 SYNC: Received audit sync request from {} for ledger {} (after seq={})",
             requester,
-            request.operator_id,
-            request.reserves_id,
+            hex::encode(request.ledger_id),
             request.last_known_sequence
         );
 
         // Load our stored signed updates for this ledger
         let logs = self.signed_update_logs.lock().unwrap();
-        let updates_to_send = if let Some(log) = logs.get(&(request.operator_id, request.reserves_id.clone())) {
+        let updates_to_send = if let Some(log) = logs.get(&request.ledger_id) {
             // Get updates since the requested sequence
             let updates = log.get_updates_since(request.last_known_sequence);
 
@@ -381,9 +351,8 @@ where
         } else {
             log_debug!(
                 self.logger,
-                "📋 SYNC: No signed updates found for operator {} -> partner {}",
-                request.operator_id,
-                request.reserves_id
+                "📋 SYNC: No signed updates found for ledger {}",
+                hex::encode(request.ledger_id)
             );
             Vec::new()
         };
@@ -395,8 +364,7 @@ where
         let current_sequence = updates_to_send.last().map(|u| u.sequence_number).unwrap_or(0);
         let current_hash = updates_to_send.last().map(|u| u.current_hash).unwrap_or([0u8; 32]);
         let response = DepositsMessage::SyncResponse(SyncResponseMsg {
-            operator_id: request.operator_id,
-            reserves_id: request.reserves_id.clone(),
+            ledger_id: request.ledger_id,
             request_hash: [0u8; 32], // Not tracking request hashes for audit sync
             updates: updates_to_send.clone(),
             current_sequence,
@@ -425,11 +393,10 @@ where
     ) -> Result<(), DepositsError> {
         log_info!(
             self.logger,
-            "📋 SYNC: Received {} updates from {} for operator {} -> partner {}",
+            "📋 SYNC: Received {} updates from {} for ledger {}",
             response.updates.len(),
             sender,
-            response.operator_id,
-            response.reserves_id
+            hex::encode(response.ledger_id)
         );
 
         let mut stored_count = 0;
@@ -569,11 +536,12 @@ where
             partner_node_id
         );
 
-        // Get all updates from the ledger
-        let updates_to_send: Vec<_> = {
+        // Get all updates and ledger_id from the ledger
+        let (updates_to_send, ledger_id): (Vec<_>, [u8; 32]) = {
             let ledgers = self.ledgers.lock().unwrap();
             if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let ledger = ledger_arc.read().unwrap();
+                let ledger_id = ledger.ledger_id();
 
                 if ledger.history.is_empty() {
                     log_warn!(
@@ -606,7 +574,7 @@ where
 
                     result.push((msg, update.sequence_number, update.previous_hash, current_hash));
                 }
-                result
+                (result, ledger_id)
             } else {
                 log_warn!(
                     self.logger,
@@ -629,7 +597,7 @@ where
             // Create the signed update (resync path - no fresh partner signature)
             let signed_update = match self.create_signed_update(
                 &msg,
-                partner_node_id,
+                ledger_id,
                 sequence_number,
                 prev_hash,
                 current_hash,
@@ -653,8 +621,7 @@ where
         let current_sequence = signed_updates.last().map(|u| u.sequence_number).unwrap_or(0);
         let current_hash = signed_updates.last().map(|u| u.current_hash).unwrap_or([0u8; 32]);
         let sync_response = DepositsMessage::SyncResponse(SyncResponseMsg {
-            operator_id: self.our_node_id,
-            reserves_id: partner_node_id.to_string(),
+            ledger_id,
             request_hash: [0u8; 32], // Not a request-response, this is a push
             updates: signed_updates,
             current_sequence,

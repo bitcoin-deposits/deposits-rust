@@ -923,13 +923,19 @@ pub fn handle_collateral_consent_request<C: HandlerContext>(
 
     // If consent granted, request state sync from the operator
     if consent_granted {
-        let sync_request = DepositsMessage::Sync(SyncMsg {
-            operator_id: msg.operator_id,
-            reserves_id: msg.reserves_id.clone(),
-            last_known_sequence: 0,
-            last_known_hash: [0u8; 32],
-        });
-        ctx.queue_message(msg.operator_id, sync_request)?;
+        // Get the ledger_id from our ledger with the operator
+        if let Some(ledger_arc) = ctx.get_ledger(&msg.operator_id, &our_node_id.to_string()) {
+            let ledger_id = {
+                let ledger = ledger_arc.read().unwrap();
+                ledger.ledger_id()
+            };
+            let sync_request = DepositsMessage::Sync(SyncMsg {
+                ledger_id,
+                last_known_sequence: 0,
+                last_known_hash: [0u8; 32],
+            });
+            ctx.queue_message(msg.operator_id, sync_request)?;
+        }
     }
 
     Ok(HandlerResult::Ok)

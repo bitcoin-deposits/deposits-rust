@@ -421,11 +421,22 @@ where
         partner: &PublicKey,
         update: deposits_core::SignedLedgerUpdate,
     ) -> Result<(), String> {
+        // Get ledger_id from the ledger
+        let ledger_id = {
+            let ledgers = self.ledgers.lock().unwrap();
+            if let Some(ledger_arc) = ledgers.get(&(*operator, partner.to_string())) {
+                let ledger = ledger_arc.read().map_err(|e| format!("Lock error: {:?}", e))?;
+                ledger.ledger_id()
+            } else {
+                // Fall back to the update's ledger_id
+                update.ledger_id
+            }
+        };
+
         let mut logs = self.signed_update_logs.lock().unwrap();
-        let log = logs.entry((*operator, partner.to_string())).or_insert_with(|| {
+        let log = logs.entry(ledger_id).or_insert_with(|| {
             deposits_core::SignedLedgerUpdateLog {
-                operator_id: *operator,
-                reserves_id: partner.to_string(),
+                ledger_id,
                 updates: Vec::new(),
                 next_sequence: 0,
                 pending_updates: std::collections::HashMap::new(),
@@ -441,17 +452,34 @@ where
         operator: &PublicKey,
         partner: &PublicKey,
     ) -> Option<Vec<deposits_core::SignedLedgerUpdate>> {
+        // Get ledger_id from the ledger
+        let ledger_id = {
+            let ledgers = self.ledgers.lock().unwrap();
+            let ledger_arc = ledgers.get(&(*operator, partner.to_string()))?;
+            let ledger = ledger_arc.read().ok()?;
+            ledger.ledger_id()
+        };
+
         let logs = self.signed_update_logs.lock().unwrap();
-        logs.get(&(*operator, partner.to_string())).map(|log| log.updates.clone())
+        logs.get(&ledger_id).map(|log| log.updates.clone())
     }
 
     fn verify_and_store_signed_update(&self, update: deposits_core::SignedLedgerUpdate) -> Result<(), String> {
-        // Store in signed_update_logs
-        let operator = update.operator_id;
-        let reserves_id = update.reserves_id.clone();
-        // Parse reserves_id back to PublicKey for the trait method signature
-        let partner = PublicKey::from_str(&reserves_id).map_err(|e| format!("Invalid partner: {}", e))?;
-        self.store_signed_update(&operator, &partner, update)
+        // Store directly by ledger_id
+        let ledger_id = update.ledger_id;
+
+        let mut logs = self.signed_update_logs.lock().unwrap();
+        let log = logs.entry(ledger_id).or_insert_with(|| {
+            deposits_core::SignedLedgerUpdateLog {
+                ledger_id,
+                updates: Vec::new(),
+                next_sequence: 0,
+                pending_updates: std::collections::HashMap::new(),
+            }
+        });
+        log.updates.push(update);
+        log.next_sequence = log.updates.len() as u64;
+        Ok(())
     }
 
     fn track_for_broadcast(
@@ -762,8 +790,16 @@ where
         operator: &PublicKey,
         partner: &str,
     ) -> Option<(u64, [u8; 32])> {
+        // Get ledger_id from the ledger
+        let ledger_id = {
+            let ledgers = self.ledgers.lock().unwrap();
+            let ledger_arc = ledgers.get(&(*operator, partner.to_string()))?;
+            let ledger = ledger_arc.read().ok()?;
+            ledger.ledger_id()
+        };
+
         let logs = self.signed_update_logs.lock().unwrap();
-        logs.get(&(*operator, partner.to_string())).map(|log| {
+        logs.get(&ledger_id).map(|log| {
             let sequence = log.next_sequence.saturating_sub(1);
             let state_hash = log.updates.last()
                 .map(|u| u.current_hash)

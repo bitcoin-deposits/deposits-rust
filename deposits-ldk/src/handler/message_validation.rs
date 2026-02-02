@@ -1160,19 +1160,21 @@ mod tests {
         let operator = create_test_pubkey(178);
         let partner = handler.our_node_id;
         let deposit_pubkey = create_test_pubkey(179);
+        let quorum_member = create_test_pubkey(180);
 
         // Set up ledger with plenty of reserves but limited collateral
+        // Note: Must have quorum members for collateral check to apply
         {
             let mut ledgers = handler.ledgers.lock().unwrap();
             let mut ledger = deposits_core::Ledger::new(
                 operator,
                 partner.to_string(),
                 deposits_core::LedgerRole::Partner,
-                vec![],
+                vec![quorum_member], // Need a quorum member for collateral check
                 "tb1qtest".to_string(),
                 0,
             );
-            ledger.state.reserves.amount =100_000; // Plenty of reserves
+            ledger.state.reserves.amount = 100_000; // Plenty of reserves
             ledger.state.received_collateral_amount = 50_000; // Only 50k collateral
             let mut deposit = deposits_core::Deposit::new(deposit_pubkey, None);
             deposit.balance = 30_000;

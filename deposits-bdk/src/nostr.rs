@@ -351,8 +351,8 @@ impl NostrTransport {
     /// Creates a parameterized replaceable event (Kind 30100) that can be
     /// subscribed to by anyone interested in this ledger.
     pub async fn broadcast_ledger_update(&self, update: &SignedLedgerUpdate) -> Result<String, Error> {
-        // Create ledger identifier from operator pubkey and reserves_id
-        let ledger_id = format!("{}:{}", update.operator_id, update.reserves_id);
+        // Use the hashed ledger_id as the identifier
+        let ledger_id = update.ledger_id_hex();
 
         // Encode update as TLV, then base64
         let tlv_bytes = update.tlv_encode();

@@ -447,9 +447,10 @@ impl Ledger {
     /// Check if this ledger is closed (has a Tombstone or LedgerClose as the last operation).
     /// Note: This checks the message_type field for quick detection without deserialization.
     pub fn is_closed(&self) -> bool {
+        use crate::messages::consts::{LEDGER_CLOSE, CHANNEL_CLOSE_TOMBSTONE};
         if let Some(last_update) = self.history.last() {
-            // Check message type for Tombstone (0x8016) or LedgerClose (0x8009)
-            last_update.message_type == 0x8016 || last_update.message_type == 0x8009
+            // Check message type for LedgerClose (0x801D) or Tombstone (0x8051)
+            last_update.message_type == LEDGER_CLOSE || last_update.message_type == CHANNEL_CLOSE_TOMBSTONE
         } else {
             false
         }
@@ -656,7 +657,7 @@ impl Ledger {
             operator_signature: [0u8; 64],
             partner_signature: [0u8; 64],
             operator_id: self.state.operator_key,
-            reserves_id: self.state.reserves_key.clone(),
+            ledger_id: self.state.ledger_id,
             sequence_number: sequence,
             previous_hash: prev_hash,
             current_hash: new_hash,

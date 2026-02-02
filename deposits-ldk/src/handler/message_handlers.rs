@@ -323,7 +323,7 @@ where
             operator_signature: [0u8; 64],
             partner_signature: [0u8; 64],
             operator_id: tombstone_msg.operator_id,
-            reserves_id: tombstone_msg.reserves_id.clone(),
+            ledger_id: ledger_guard.ledger_id(),
             sequence_number: tombstone_msg.sequence_number,
             previous_hash: [0u8; 32],
             current_hash: [0u8; 32],

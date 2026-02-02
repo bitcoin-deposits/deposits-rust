@@ -76,8 +76,10 @@ impl std::error::Error for TransportError {}
 pub enum HandleError {
     /// Message format is invalid
     InvalidMessage(String),
-    /// Message references unknown ledger
-    UnknownLedger { operator: PublicKey, reserves_id: String },
+    /// Message references unknown ledger (by ledger_id)
+    UnknownLedger { ledger_id: [u8; 32] },
+    /// Message references unknown ledger (by operator/reserves)
+    UnknownLedgerByKey { operator: PublicKey, reserves_id: String },
     /// Validation failed
     ValidationFailed(String),
     /// Internal error
@@ -88,7 +90,10 @@ impl fmt::Display for HandleError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidMessage(e) => write!(f, "invalid message: {}", e),
-            Self::UnknownLedger { operator, reserves_id } => {
+            Self::UnknownLedger { ledger_id } => {
+                write!(f, "unknown ledger: {}", hex::encode(ledger_id))
+            }
+            Self::UnknownLedgerByKey { operator, reserves_id } => {
                 write!(f, "unknown ledger: {} -> {}", operator, reserves_id)
             }
             Self::ValidationFailed(e) => write!(f, "validation failed: {}", e),

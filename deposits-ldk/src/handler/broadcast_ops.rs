@@ -112,21 +112,28 @@ where
         new_hash: [u8; 32],
         partner_sig: Option<[u8; 64]>,
     ) -> Option<deposits_core::SignedLedgerUpdate> {
-        let partner_pk = PublicKey::from_str(&partner).ok()?;
-        let update = self.create_signed_update(message, partner_pk, seq, prev_hash, new_hash, partner_sig).ok()?;
+        // Get ledger_id from the ledger
+        let ledger_id = {
+            let ledgers = self.ledgers.lock().unwrap();
+            let ledger_arc = ledgers.get(&(operator, partner.clone()))?;
+            let ledger = ledger_arc.read().ok()?;
+            ledger.ledger_id()
+        };
+
+        let update = self.create_signed_update(message, ledger_id, seq, prev_hash, new_hash, partner_sig).ok()?;
 
         // Store in memory
         {
             let mut logs = self.signed_update_logs.lock().unwrap();
-            let log = logs.entry((operator, partner.clone()))
-                .or_insert_with(|| deposits_core::SignedLedgerUpdateLog::new(operator, partner.clone()));
+            let log = logs.entry(ledger_id)
+                .or_insert_with(|| deposits_core::SignedLedgerUpdateLog::new(ledger_id));
             if log.updates.iter().all(|u| u.sequence_number != update.sequence_number) {
                 let _ = log.add_update(update.clone());
             }
         }
 
         // Persist to disk
-        let _ = self.persist_signed_update(operator, partner, update.clone());
+        let _ = self.persist_signed_update(ledger_id, update.clone());
         Some(update)
     }
 
@@ -143,7 +150,7 @@ where
 
             let msg = if let Some(ref update) = signed {
                 DepositsMessage::SyncResponse(super::messages::SyncResponseMsg {
-                    operator_id: update.operator_id, reserves_id: update.reserves_id.clone(),
+                    ledger_id: update.ledger_id,
                     request_hash: [0u8; 32], updates: vec![update.clone()],
                     current_sequence: update.sequence_number, current_hash: update.current_hash,
                 })

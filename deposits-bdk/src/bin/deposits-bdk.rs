@@ -3995,7 +3995,7 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
                 message: dummy_message,
                 message_type,
                 operator_id: node.node_id,
-                reserves_id: reserves_id.to_string(),
+                ledger_id: ledger.ledger_id(),
                 sequence_number: new_seq,
                 previous_hash: wrong_prev_hash, // INVALID!
                 current_hash: computed_hash,
@@ -4051,7 +4051,7 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
                 message: dummy_message,
                 message_type,
                 operator_id: node.node_id,
-                reserves_id: reserves_id.to_string(),
+                ledger_id: ledger.ledger_id(),
                 sequence_number: skipped_seq, // INVALID! Skips seq numbers
                 previous_hash: current_hash,
                 current_hash: computed_hash,

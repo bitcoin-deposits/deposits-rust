@@ -258,7 +258,7 @@ impl LedgerExt for Ledger {
             operator_signature: [0u8; 64], // Placeholder during migration
             partner_signature: [0u8; 64],
             operator_id: self.state.operator_key,
-            reserves_id: self.state.reserves_key.clone(),
+            ledger_id: self.state.ledger_id,
             sequence_number: expected_sequence,
             previous_hash: prev_hash,
             current_hash: update_hash,

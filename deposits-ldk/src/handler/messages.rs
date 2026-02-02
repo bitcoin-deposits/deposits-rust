@@ -233,8 +233,8 @@ impl DepositsMessage {
             Self::LedgerUpdateResponse(_) => None,
             Self::Handshake(m) => Some(m.reserves_id.clone()),
             Self::HandshakeResponse(m) => Some(m.reserves_id.clone()),
-            Self::Sync(m) => Some(m.reserves_id.clone()),
-            Self::SyncResponse(m) => Some(m.reserves_id.clone()),
+            Self::Sync(_) => None, // Uses ledger_id now
+            Self::SyncResponse(_) => None, // Uses ledger_id now
             Self::Recovery(_) => None,
             Self::RecoveryResponse(_) => None,
             Self::Coordination(_) => None,

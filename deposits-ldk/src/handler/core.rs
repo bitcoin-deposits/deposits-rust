@@ -184,9 +184,9 @@ where
     pub(crate) pending_acks: Arc<Mutex<HashMap<[u8; 32], deposits_core::PendingAck>>>,
 
     /// Signed ledger update logs for third-party auditing
-    /// Key: (operator_id, reserves_id) -> log of signed updates
+    /// Key: ledger_id (32-byte hash) -> log of signed updates
     /// Only contains ledgers where we are neither operator nor partner (third-party audit only)
-    pub(crate) signed_update_logs: Mutex<HashMap<(PublicKey, String), deposits_core::SignedLedgerUpdateLog>>,
+    pub(crate) signed_update_logs: Mutex<HashMap<[u8; 32], deposits_core::SignedLedgerUpdateLog>>,
 
     /// Node's secret key for signing ledger updates
     /// This is the Lightning node's identity key, used to sign audit messages

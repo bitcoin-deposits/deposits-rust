@@ -37,11 +37,10 @@ where
         if let DepositsMessage::SyncResponse(ref sync_response) = message {
             log_info!(
                 self.logger,
-                "📋 AUDIT: Received sync response with {} updates from {} for operator {} -> partner {}",
+                "📋 AUDIT: Received sync response with {} updates from {} for ledger {}",
                 sync_response.updates.len(),
                 sender,
-                sync_response.operator_id,
-                sync_response.reserves_id
+                hex::encode(sync_response.ledger_id)
             );
 
             // Process each signed update

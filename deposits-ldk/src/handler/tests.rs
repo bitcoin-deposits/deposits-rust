@@ -1193,15 +1193,20 @@ fn test_credit_payment_exceeds_collateral_fails() {
     let operator = PublicKey::from_secret_key(&secp, &operator_secret);
     let deposit_secret = SecretKey::from_slice(&[3; 32]).unwrap();
     let deposit_pubkey = PublicKey::from_secret_key(&secp, &deposit_secret);
+    let quorum_secret = SecretKey::from_slice(&[4; 32]).unwrap();
+    let quorum_member = PublicKey::from_secret_key(&secp, &quorum_secret);
 
     // Create ledger with high reserves but low collateral
-    let mut ledger = Ledger::new_as_operator(
+    // Note: Must have quorum members for collateral check to apply
+    let mut ledger = Ledger::new(
         operator,
         our_node_id.to_string(),
+        deposits_core::LedgerRole::Operator,
+        vec![quorum_member], // Need a quorum member for collateral check
         "test_address".to_string(),
         0,
     );
-    ledger.state.reserves.amount =100_000; // Plenty of reserves
+    ledger.state.reserves.amount = 100_000; // Plenty of reserves
     ledger.state.received_collateral_amount = 20_000; // But only 20k collateral
 
     // Add deposit with 10k balance
@@ -1252,15 +1257,20 @@ fn test_credit_payment_within_collateral_succeeds() {
     let operator = PublicKey::from_secret_key(&secp, &operator_secret);
     let deposit_secret = SecretKey::from_slice(&[3; 32]).unwrap();
     let deposit_pubkey = PublicKey::from_secret_key(&secp, &deposit_secret);
+    let quorum_secret = SecretKey::from_slice(&[4; 32]).unwrap();
+    let quorum_member = PublicKey::from_secret_key(&secp, &quorum_secret);
 
     // Create ledger with sufficient reserves AND collateral
-    let mut ledger = Ledger::new_as_operator(
+    // Note: Include quorum member to ensure collateral check is performed
+    let mut ledger = Ledger::new(
         operator,
         our_node_id.to_string(),
+        deposits_core::LedgerRole::Operator,
+        vec![quorum_member], // Include quorum member for collateral check
         "test_address".to_string(),
         0,
     );
-    ledger.state.reserves.amount =100_000;
+    ledger.state.reserves.amount = 100_000;
     ledger.state.received_collateral_amount = 100_000; // Full collateral backing
 
     // Add deposit with 10k balance

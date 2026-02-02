@@ -139,6 +139,17 @@ fn read_u64<R: Read>(reader: &mut R) -> Result<u64, WireError> {
     Ok(u64::from_be_bytes(buf))
 }
 
+fn write_32<W: Write>(writer: &mut W, val: &[u8; 32]) -> Result<(), WireError> {
+    writer.write_all(val)?;
+    Ok(())
+}
+
+fn read_32<R: Read>(reader: &mut R) -> Result<[u8; 32], WireError> {
+    let mut buf = [0u8; 32];
+    reader.read_exact(&mut buf)?;
+    Ok(buf)
+}
+
 fn write_bytes32<W: Write>(writer: &mut W, bytes: &[u8; 32]) -> Result<(), WireError> {
     writer.write_all(bytes)?;
     Ok(())
@@ -1106,15 +1117,13 @@ impl WireDecode for CollateralConsentResponseMsg {
 /// sync request message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SyncRequestMsg {
-    pub reserves_id: String,
-    pub operator_id: PublicKey,
+    pub ledger_id: [u8; 32],
     pub last_known_sequence: u64,
 }
 
 impl WireEncode for SyncRequestMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
-        write_string(writer, &self.reserves_id)?;
-        write_pubkey(writer, &self.operator_id)?;
+        write_32(writer, &self.ledger_id)?;
         write_u64(writer, self.last_known_sequence)?;
         Ok(())
     }
@@ -1123,8 +1132,7 @@ impl WireEncode for SyncRequestMsg {
 impl WireDecode for SyncRequestMsg {
     fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
         Ok(Self {
-            reserves_id: read_string(reader)?,
-            operator_id: read_pubkey(reader)?,
+            ledger_id: read_32(reader)?,
             last_known_sequence: read_u64(reader)?,
         })
     }

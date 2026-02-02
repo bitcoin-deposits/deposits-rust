@@ -37,10 +37,11 @@ fn test_ledger_role_operator() {
 
     let ledger = Ledger::new(
         operator,
-        partner,
+        partner.to_string(),
         LedgerRole::Operator,
         vec![],
         "test_address".to_string(),
+        0,
     );
 
     assert!(ledger.is_operator());
@@ -55,10 +56,11 @@ fn test_ledger_role_partner() {
 
     let ledger = Ledger::new(
         operator,
-        partner,
+        partner.to_string(),
         LedgerRole::Partner,
         vec![],
         "test_address".to_string(),
+        0,
     );
 
     assert!(!ledger.is_operator());
@@ -73,10 +75,11 @@ fn test_ledger_role_auditor() {
 
     let ledger = Ledger::new(
         operator,
-        partner,
+        partner.to_string(),
         LedgerRole::Auditor,
         vec![],
         "test_address".to_string(),
+        0,
     );
 
     assert!(!ledger.is_operator());
@@ -91,14 +94,15 @@ fn test_new_as_operator_helper() {
 
     let ledger = Ledger::new_as_operator(
         operator,
-        partner,
+        partner.to_string(),
         "test_address".to_string(),
+        0,
     );
 
     assert!(ledger.is_operator());
     assert_eq!(ledger.role, LedgerRole::Operator);
     assert_eq!(ledger.state.operator_key, operator);
-    assert_eq!(ledger.state.partner_key, partner);
+    assert_eq!(ledger.state.reserves_key, partner.to_string());
 }
 
 // =============================================================================
@@ -113,35 +117,38 @@ fn test_unified_ledger_storage() {
 
     let alice = generate_test_pubkey(1);
     let bob = generate_test_pubkey(2);
-    let charlie = generate_test_pubkey(3);
+    let _charlie = generate_test_pubkey(3);
 
     // Alice as operator with Bob
     let alice_bob_ledger = Ledger::new(
         alice,
-        bob,
+        bob.to_string(),
         LedgerRole::Operator,
         vec![],
         "alice_bob_addr".to_string(),
+        0,
     );
     ledgers.insert((alice, bob), Arc::new(RwLock::new(alice_bob_ledger)));
 
     // Bob as operator with Alice (bidirectional - separate ledger)
     let bob_alice_ledger = Ledger::new(
         bob,
-        alice,
+        alice.to_string(),
         LedgerRole::Operator,
         vec![],
         "bob_alice_addr".to_string(),
+        0,
     );
     ledgers.insert((bob, alice), Arc::new(RwLock::new(bob_alice_ledger)));
 
-    // Charlie as partner on Alice→Bob ledger
-    let charlie_audit_ledger = Ledger::new(
+    // Charlie as partner on Alice→Bob ledger (not used - just to show auditor role)
+    let _charlie_audit_ledger = Ledger::new(
         alice,
-        bob,
+        bob.to_string(),
         LedgerRole::Auditor,  // Charlie is auditing this ledger
         vec![],
         "alice_bob_addr".to_string(),
+        0,
     );
     // Note: In real system, auditor wouldn't store in same HashMap
     // This is just to demonstrate role differentiation
@@ -173,10 +180,11 @@ fn test_ledger_lookup_patterns() {
     // Store ledger where Alice is operator
     let ledger = Ledger::new(
         alice,
-        bob,
+        bob.to_string(),
         LedgerRole::Operator,
         vec![],
         "addr".to_string(),
+        0,
     );
     ledgers.insert((alice, bob), Arc::new(RwLock::new(ledger)));
 
@@ -211,24 +219,26 @@ fn test_role_based_state_access() {
     // Create operator ledger
     let op_ledger = Ledger::new(
         operator,
-        partner,
+        partner.to_string(),
         LedgerRole::Operator,
         vec![],
         "addr".to_string(),
+        0,
     );
 
     // Create partner ledger (same channel, different perspective)
     let partner_ledger = Ledger::new(
         operator,
-        partner,
+        partner.to_string(),
         LedgerRole::Partner,
         vec![],
         "addr".to_string(),
+        0,
     );
 
-    // Both should have same operator/partner IDs
+    // Both should have same operator/reserves IDs
     assert_eq!(op_ledger.state.operator_key, partner_ledger.state.operator_key);
-    assert_eq!(op_ledger.state.partner_key, partner_ledger.state.partner_key);
+    assert_eq!(op_ledger.state.reserves_key, partner_ledger.state.reserves_key);
 
     // But different roles
     assert_ne!(op_ledger.role, partner_ledger.role);
@@ -247,20 +257,22 @@ fn test_multiple_ledgers_same_channel() {
     // Ledger 1: Alice → Bob (Alice is operator)
     let alice_to_bob = Ledger::new(
         alice,
-        bob,
+        bob.to_string(),
         LedgerRole::Operator,
         vec![],
         "alice_addr".to_string(),
+        0,
     );
     ledgers.insert((alice, bob), Arc::new(RwLock::new(alice_to_bob)));
 
     // Ledger 2: Bob → Alice (Bob is operator)
     let bob_to_alice = Ledger::new(
         bob,
-        alice,
+        alice.to_string(),
         LedgerRole::Operator,
         vec![],
         "bob_addr".to_string(),
+        0,
     );
     ledgers.insert((bob, alice), Arc::new(RwLock::new(bob_to_alice)));
 
@@ -292,10 +304,11 @@ fn test_ledger_with_quorum_members() {
 
     let ledger = Ledger::new(
         operator,
-        partner,
+        partner.to_string(),
         LedgerRole::Operator,
         vec![quorum_member],
         "addr".to_string(),
+        0,
     );
 
     assert_eq!(ledger.state.quorum_members.len(), 1);
@@ -312,10 +325,11 @@ fn test_ledger_multiple_quorum_members() {
 
     let ledger = Ledger::new(
         operator,
-        partner,
+        partner.to_string(),
         LedgerRole::Operator,
         vec![qm1, qm2, qm3],
         "addr".to_string(),
+        0,
     );
 
     assert_eq!(ledger.state.quorum_members.len(), 3);
@@ -335,10 +349,11 @@ fn test_ledger_empty_address() {
 
     let ledger = Ledger::new(
         operator,
-        partner,
+        partner.to_string(),
         LedgerRole::Operator,
         vec![],
         String::new(),
+        0,
     );
 
     assert!(ledger.state.ledger_address.is_empty());
@@ -346,19 +361,20 @@ fn test_ledger_empty_address() {
 
 #[test]
 fn test_ledger_same_operator_partner_key() {
-    // Edge case: What if operator == partner? (shouldn't happen in practice)
+    // Edge case: What if operator == reserves? (shouldn't happen in practice)
     let same_key = generate_test_pubkey(1);
 
     let ledger = Ledger::new(
         same_key,
-        same_key,
+        same_key.to_string(),
         LedgerRole::Operator,
         vec![],
         "addr".to_string(),
+        0,
     );
 
     // Should still work structurally
-    assert_eq!(ledger.state.operator_key, ledger.state.partner_key);
+    assert_eq!(ledger.state.operator_key.to_string(), ledger.state.reserves_key);
     assert!(ledger.is_operator());
 }
 
@@ -375,10 +391,11 @@ fn test_concurrent_ledger_reads() {
 
     let ledger = Arc::new(RwLock::new(Ledger::new(
         operator,
-        partner,
+        partner.to_string(),
         LedgerRole::Operator,
         vec![],
         "addr".to_string(),
+        0,
     )));
 
     let mut handles = vec![];
@@ -415,10 +432,11 @@ fn test_concurrent_ledger_writes() {
 
     let ledger = Arc::new(RwLock::new(Ledger::new(
         operator,
-        partner,
+        partner.to_string(),
         LedgerRole::Operator,
         vec![],
         "addr".to_string(),
+        0,
     )));
 
     let write_count = Arc::new(AtomicU64::new(0));

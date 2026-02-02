@@ -179,7 +179,9 @@ pub fn validate_credit_payment(
     }
 
     // Check that credit doesn't exceed declared collateral
-    if new_total_deposits > ledger.state.received_collateral_amount {
+    // Skip this check if there are no quorum members - collateral only applies when
+    // there are external parties providing attestations
+    if !ledger.state.quorum_members.is_empty() && new_total_deposits > ledger.state.received_collateral_amount {
         return Err(format!(
             "Credit would exceed declared collateral: new deposits {} sats > received collateral {} sats",
             new_total_deposits, ledger.state.received_collateral_amount
@@ -553,7 +555,9 @@ pub fn validate_cosign_invoice(
     }
 
     // CRITICAL: Check that cosigning wouldn't exceed declared collateral
-    if new_total_deposits > ledger.state.received_collateral_amount {
+    // Skip this check if there are no quorum members - collateral only applies when
+    // there are external parties providing attestations
+    if !ledger.state.quorum_members.is_empty() && new_total_deposits > ledger.state.received_collateral_amount {
         return Err(format!(
             "Cosigning would exceed collateral: potential deposits {} msat > collateral {} msat",
             new_total_deposits, ledger.state.received_collateral_amount

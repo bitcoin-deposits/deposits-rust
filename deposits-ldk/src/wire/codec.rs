@@ -201,8 +201,7 @@ mod tests {
             }),
             // Sync message
             DepositsMessage::Sync(SyncMsg {
-                operator_id: test_pubkey,
-                reserves_id: test_pubkey.to_string(),
+                ledger_id: [0x12; 32],
                 last_known_sequence: 0,
                 last_known_hash: [0u8; 32],
             }),

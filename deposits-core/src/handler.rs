@@ -279,6 +279,18 @@ where
         ledgers.get(&(operator, reserves_id.to_string())).cloned()
     }
 
+    /// Get a ledger by its ledger_id (hash of genesis parameters)
+    pub fn get_ledger_by_id(&self, ledger_id: [u8; 32]) -> Option<Arc<RwLock<Ledger>>> {
+        let ledgers = self.ledgers.lock().unwrap();
+        for ledger_arc in ledgers.values() {
+            let ledger = ledger_arc.read().unwrap();
+            if ledger.ledger_id() == ledger_id {
+                return Some(ledger_arc.clone());
+            }
+        }
+        None
+    }
+
     /// List all reserves_ids where we are the operator
     pub fn list_operator_ledgers(&self) -> Vec<String> {
         let ledgers = self.ledgers.lock().unwrap();
@@ -518,7 +530,7 @@ where
 
         // Get the ledger
         let ledger_arc = self.get_ledger(msg.operator_id, &msg.reserves_id)
-            .ok_or(HandleError::UnknownLedger {
+            .ok_or(HandleError::UnknownLedgerByKey {
                 operator: msg.operator_id,
                 reserves_id: msg.reserves_id.clone(),
             })?;
@@ -676,11 +688,10 @@ where
             &format!("Sync request from {} - from_seq={}", sender, msg.last_known_sequence),
         );
 
-        // Get ledger and prepare sync response
-        let ledger_arc = self.get_ledger(msg.operator_id, &msg.reserves_id)
+        // Get ledger by ledger_id and prepare sync response
+        let ledger_arc = self.get_ledger_by_id(msg.ledger_id)
             .ok_or(HandleError::UnknownLedger {
-                operator: msg.operator_id,
-                reserves_id: msg.reserves_id.clone(),
+                ledger_id: msg.ledger_id,
             })?;
 
         let (current_hash, current_sequence) = {
@@ -689,8 +700,7 @@ where
         };
 
         let response = crate::messages::SyncResponseMsg {
-            operator_id: msg.operator_id,
-            reserves_id: msg.reserves_id.clone(),
+            ledger_id: msg.ledger_id,
             request_hash: msg.last_known_hash, // Use the known hash as request reference
             updates: Vec::new(), // Would be populated from history
             current_hash,

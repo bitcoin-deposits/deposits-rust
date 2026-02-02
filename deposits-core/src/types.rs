@@ -941,11 +941,12 @@ pub struct SignedLedgerUpdate {
     pub message: Vec<u8>,
     /// Type of the message (for quick filtering without deserializing).
     pub message_type: u16,
-    /// Operator's public key (Lightning node ID).
+    /// Operator's public key (for signature verification).
     #[serde(with = "serde_pubkey")]
     pub operator_id: PublicKey,
-    /// Reserves identifier (UTXO address for BDK, partner pubkey string for LDK).
-    pub reserves_id: String,
+    /// Unique ledger identifier: SHA256(genesis_operator || reserves_id || genesis_block).
+    #[serde(with = "serde_32")]
+    pub ledger_id: [u8; 32],
     /// Deterministic sequence number (starts at 0 for LedgerOpened).
     pub sequence_number: u64,
     /// Hash of previous ledger state (creates cryptographic chain).
@@ -991,6 +992,11 @@ impl SignedLedgerUpdate {
         self.compute_hash() == self.current_hash
     }
 
+    /// Get the ledger ID as a hex string.
+    pub fn ledger_id_hex(&self) -> String {
+        hex::encode(self.ledger_id)
+    }
+
     // ========================================================================
     // Signature Methods
     // ========================================================================
@@ -1022,16 +1028,18 @@ impl SignedLedgerUpdate {
     }
 
     /// Verify the partner's signature over the update content.
-    /// Note: For BDK ledgers where reserves_id is an address (not a pubkey),
-    /// this returns an error since there's no partner to verify against.
-    pub fn verify_partner_signature(&self) -> Result<(), String> {
+    ///
+    /// The partner pubkey must be provided by the caller (from the Ledger).
+    /// For BDK ledgers without a partner, pass None and this returns Ok.
+    pub fn verify_partner_signature(&self, partner_pubkey: Option<&PublicKey>) -> Result<(), String> {
         use bitcoin::hashes::{Hash, sha256};
-        use bitcoin::secp256k1::{Secp256k1, Message, ecdsa::Signature, PublicKey};
-        use std::str::FromStr;
+        use bitcoin::secp256k1::{Secp256k1, Message, ecdsa::Signature};
 
-        // Parse reserves_id as a pubkey - fails for BDK ledgers with address-based IDs
-        let partner_pubkey = PublicKey::from_str(&self.reserves_id)
-            .map_err(|_| format!("Cannot verify partner signature: reserves_id '{}' is not a valid pubkey (BDK ledger?)", self.reserves_id))?;
+        // If no partner pubkey provided (BDK ledger), skip verification
+        let partner_pubkey = match partner_pubkey {
+            Some(pk) => pk,
+            None => return Ok(()),
+        };
 
         let secp = Secp256k1::new();
         let data = self.partner_signing_data();
@@ -1041,7 +1049,7 @@ impl SignedLedgerUpdate {
         let sig = Signature::from_compact(&self.partner_signature)
             .map_err(|e| format!("Invalid partner signature format: {}", e))?;
 
-        secp.verify_ecdsa(&msg, &sig, &partner_pubkey)
+        secp.verify_ecdsa(&msg, &sig, partner_pubkey)
             .map_err(|e| format!("Partner signature verification failed: {}", e))
     }
 
@@ -1063,8 +1071,11 @@ impl SignedLedgerUpdate {
     }
 
     /// Verify both signatures on this update.
-    pub fn verify_signatures(&self) -> Result<(), String> {
-        self.verify_partner_signature()?;
+    ///
+    /// The partner pubkey must be provided by the caller (from the Ledger).
+    /// For BDK ledgers without a partner, pass None.
+    pub fn verify_signatures(&self, partner_pubkey: Option<&PublicKey>) -> Result<(), String> {
+        self.verify_partner_signature(partner_pubkey)?;
         self.verify_operator_signature()
     }
 
@@ -1272,11 +1283,9 @@ pub struct ReservesStatus {
 /// Cryptographically signed ledger update log for audit trail.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignedLedgerUpdateLog {
-    /// Operator node ID.
-    #[serde(with = "serde_pubkey")]
-    pub operator_id: PublicKey,
-    /// Reserves identifier (UTXO address for BDK, partner pubkey string for LDK).
-    pub reserves_id: String,
+    /// Unique ledger identifier: SHA256(genesis_operator || reserves_id || genesis_block).
+    #[serde(with = "serde_32")]
+    pub ledger_id: [u8; 32],
     /// Chain of signed updates (ordered by sequence number).
     pub updates: Vec<SignedLedgerUpdate>,
     /// Next expected sequence number.
@@ -1288,14 +1297,18 @@ pub struct SignedLedgerUpdateLog {
 
 impl SignedLedgerUpdateLog {
     /// Create a new empty log.
-    pub fn new(operator_id: PublicKey, reserves_id: String) -> Self {
+    pub fn new(ledger_id: [u8; 32]) -> Self {
         Self {
-            operator_id,
-            reserves_id,
+            ledger_id,
             updates: Vec::new(),
             next_sequence: 0,
             pending_updates: HashMap::new(),
         }
+    }
+
+    /// Get the ledger ID as a hex string.
+    pub fn ledger_id_hex(&self) -> String {
+        hex::encode(self.ledger_id)
     }
 
     /// Add an update to the log with sequence and hash chain validation.
@@ -1672,7 +1685,7 @@ mod signed_update_fields {
     pub const MESSAGE: u64 = 0;
     pub const MESSAGE_TYPE: u64 = 2;
     pub const OPERATOR_ID: u64 = 4;
-    pub const RESERVES_ID: u64 = 6;
+    pub const LEDGER_ID: u64 = 6;
     pub const SEQUENCE_NUMBER: u64 = 8;
     pub const PREVIOUS_HASH: u64 = 10;
     pub const CURRENT_HASH: u64 = 12;
@@ -1689,7 +1702,7 @@ impl TlvEncode for SignedLedgerUpdate {
             .bytes_field(signed_update_fields::MESSAGE, &self.message)
             .u16_field(signed_update_fields::MESSAGE_TYPE, self.message_type)
             .pubkey_field(signed_update_fields::OPERATOR_ID, &self.operator_id)
-            .string_field(signed_update_fields::RESERVES_ID, &self.reserves_id)
+            .bytes_field(signed_update_fields::LEDGER_ID, &self.ledger_id)
             .u64_field(signed_update_fields::SEQUENCE_NUMBER, self.sequence_number)
             .bytes_field(signed_update_fields::PREVIOUS_HASH, &self.previous_hash)
             .bytes_field(signed_update_fields::CURRENT_HASH, &self.current_hash)
@@ -1709,7 +1722,7 @@ impl TlvDecode for SignedLedgerUpdate {
             message: reader.read_raw(signed_update_fields::MESSAGE)?.to_vec(),
             message_type: reader.read_u16(signed_update_fields::MESSAGE_TYPE)?,
             operator_id: reader.read_pubkey(signed_update_fields::OPERATOR_ID)?,
-            reserves_id: reader.read_string(signed_update_fields::RESERVES_ID)?,
+            ledger_id: reader.read_bytes(signed_update_fields::LEDGER_ID)?,
             sequence_number: reader.read_u64(signed_update_fields::SEQUENCE_NUMBER)?,
             previous_hash: reader.read_bytes(signed_update_fields::PREVIOUS_HASH)?,
             current_hash: reader.read_bytes(signed_update_fields::CURRENT_HASH)?,
@@ -2215,7 +2228,7 @@ mod tests {
             message: vec![1, 2, 3],
             message_type: 1,
             operator_id: pk,
-            reserves_id: pk.to_string(),
+            ledger_id: [0x12; 32],
             sequence_number: 1,
             previous_hash: [0u8; 32],
             current_hash: [0u8; 32],
@@ -2237,7 +2250,7 @@ mod tests {
             message: vec![1, 2, 3],
             message_type: 1,
             operator_id: pk,
-            reserves_id: pk.to_string(),
+            ledger_id: [0x12; 32],
             sequence_number: 1,
             previous_hash: [0u8; 32],
             current_hash: [0u8; 32],

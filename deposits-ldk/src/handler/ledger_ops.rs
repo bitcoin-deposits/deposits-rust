@@ -50,7 +50,8 @@ pub trait LedgerOperationsExt {
     fn get_all_audit_ledger_updates(&self) -> HashMap<(PublicKey, PublicKey), Vec<SignedLedgerUpdate>>;
 
     /// Get all signed audit updates (cryptographically signed third-party ledgers)
-    fn get_all_signed_audit_updates(&self) -> HashMap<(PublicKey, PublicKey), Vec<SignedLedgerUpdate>>;
+    /// Keyed by ledger_id.
+    fn get_all_signed_audit_updates(&self) -> HashMap<[u8; 32], Vec<SignedLedgerUpdate>>;
 
     /// Get a partner ledger (for when we are the partner)
     fn get_partner_ledger(&self, operator_id: &PublicKey) -> Option<Arc<RwLock<Ledger>>>;
@@ -302,15 +303,12 @@ where
         all_updates
     }
 
-    fn get_all_signed_audit_updates(&self) -> HashMap<(PublicKey, PublicKey), Vec<SignedLedgerUpdate>> {
-        use std::str::FromStr;
+    fn get_all_signed_audit_updates(&self) -> HashMap<[u8; 32], Vec<SignedLedgerUpdate>> {
         let signed_update_logs = self.signed_update_logs.lock().unwrap();
         let mut all_updates = HashMap::new();
 
-        for ((operator_id, reserves_id), log) in signed_update_logs.iter() {
-            if let Ok(reserves_pubkey) = PublicKey::from_str(reserves_id) {
-                all_updates.insert((*operator_id, reserves_pubkey), log.updates.clone());
-            }
+        for (ledger_id, log) in signed_update_logs.iter() {
+            all_updates.insert(*ledger_id, log.updates.clone());
         }
 
         all_updates

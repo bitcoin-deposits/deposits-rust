@@ -143,21 +143,19 @@ where
                 continue;
             }
 
-            // Load the signed update log directly (it contains operator_id and reserves_id)
+            // Load the signed update log directly (it contains ledger_id)
             match self.kv_store.read("deposits", "signed_ledger_updates", &key) {
                 Ok(data) => {
                     match bincode::deserialize::<deposits_core::SignedLedgerUpdateLog>(&data) {
                         Ok(log) => {
-                            let operator_id = log.operator_id;
-                            let reserves_id = log.reserves_id.clone();
+                            let ledger_id = log.ledger_id;
                             let update_count = log.updates.len();
-                            signed_update_logs.insert((operator_id, reserves_id.clone()), log);
+                            signed_update_logs.insert(ledger_id, log);
                             signed_update_recovered_count += 1;
                             log_info!(
                                 self.logger,
-                                "Recovered signed update log for (operator={}, partner={}) with {} updates",
-                                operator_id,
-                                reserves_id,
+                                "Recovered signed update log for ledger {} with {} updates",
+                                hex::encode(ledger_id),
                                 update_count
                             );
                         }
@@ -188,12 +186,11 @@ where
         let logs = self.signed_update_logs.lock().unwrap();
         let mut verification_failures = 0;
 
-        for ((operator_id, reserves_id), log) in logs.iter() {
+        for (ledger_id, log) in logs.iter() {
             log_debug!(
                 self.logger,
-                "Verifying chain for operator {} -> partner {} ({} updates)",
-                operator_id,
-                reserves_id,
+                "Verifying chain for ledger {} ({} updates)",
+                hex::encode(ledger_id),
                 log.updates.len()
             );
 
@@ -201,18 +198,16 @@ where
                 Ok(()) => {
                     log_debug!(
                         self.logger,
-                        "✓ Chain verification passed for operator {} -> partner {}",
-                        operator_id,
-                        reserves_id
+                        "✓ Chain verification passed for ledger {}",
+                        hex::encode(ledger_id)
                     );
                 }
                 Err(e) => {
                     verification_failures += 1;
                     log_error!(
                         self.logger,
-                        "✗ Chain verification FAILED for operator {} -> partner {}: {}",
-                        operator_id,
-                        reserves_id,
+                        "✗ Chain verification FAILED for ledger {}: {}",
+                        hex::encode(ledger_id),
                         e
                     );
                 }

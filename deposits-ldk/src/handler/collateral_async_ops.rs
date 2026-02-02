@@ -189,6 +189,28 @@ where
         // The broadcast sends all partners the single new update - for history sync,
         // the new quorum member should request it separately if needed.
 
+        // IMPORTANT: After adding a quorum member, we need to establish collateral
+        // attestations from the quorum member's channel. This ensures that when
+        // CosignInvoice is validated on the target ledger, received_collateral_amount
+        // is properly populated.
+        //
+        // In the 100%+100% model:
+        // - partner_node_id is the target ledger's partner (e.g., charlie for alice→charlie)
+        // - quorum_member is the channel partner providing collateral (e.g., bob for alice→bob)
+        // - We need to send CollateralIncrease on the quorum_member's channel to get attestations
+        //
+        // The attestation flow is:
+        // 1. Send CollateralIncrease to quorum_member (on alice→bob ledger)
+        // 2. quorum_member responds with CollateralAttestation
+        // 3. Operator forwards attestation to partner_node_id (on alice→charlie ledger)
+        // 4. partner_node_id updates received_collateral_amount
+        //
+        // This needs to happen proactively so attestations are in place before invoice creation.
+        if let Err(e) = self.initialize_collateral_from_quorum_member(quorum_member, partner_node_id).await {
+            log_warn!(self.logger, "⚠️ Failed to initialize collateral from quorum member {}: {:?} - attestations may need to be triggered during invoice creation", quorum_member, e);
+            // Don't fail - attestations can still be established during invoice creation
+        }
+
         Ok(())
     }
 
@@ -686,6 +708,126 @@ where
         } else {
             log_warn!(self.logger, "⚠️ COLLATERAL: Skipping commitment refresh due to hash mismatch - will sync lazily");
         }
+
+        Ok(())
+    }
+
+    /// Initialize collateral attestations from a quorum member.
+    ///
+    /// When a quorum member is added, we need to establish attestations proactively
+    /// so they're in place before any invoice is created. This sends a minimal
+    /// CollateralIncrease on the quorum member's channel to trigger attestation flow.
+    ///
+    /// # Arguments
+    /// * `quorum_member` - The pubkey of the quorum member (channel partner providing collateral)
+    /// * `target_partner` - The pubkey of the target ledger's partner (the one who will receive attestations)
+    async fn initialize_collateral_from_quorum_member(
+        &self,
+        quorum_member: PublicKey,
+        target_partner: PublicKey,
+    ) -> Result<(), DepositsError> {
+        // Check if we have a ledger with this quorum member as partner
+        let (has_ledger, current_reserves, current_collateral) = {
+            let ledgers = self.ledgers.lock().unwrap();
+            if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, quorum_member.to_string())) {
+                let ledger = ledger_arc.read().unwrap();
+                (true, ledger.reserves_amount(), ledger.state.collateral_amount)
+            } else {
+                (false, 0, 0)
+            }
+        };
+
+        if !has_ledger {
+            log_warn!(
+                self.logger,
+                "⚠️ No ledger found with quorum member {} as partner - cannot initialize collateral",
+                quorum_member
+            );
+            return Err(DepositsError::LedgerNotFound);
+        }
+
+        // Only initialize if we haven't already established collateral on this channel
+        if current_collateral > 0 {
+            log_info!(
+                self.logger,
+                "✅ Collateral already established on channel with {} ({}), attestations should flow",
+                quorum_member,
+                current_collateral
+            );
+            return Ok(());
+        }
+
+        // Use current reserves as the collateral amount (if any), or a minimal amount
+        // This triggers the attestation flow without requiring actual deposits yet
+        let collateral_to_commit = if current_reserves > 0 {
+            current_reserves
+        } else {
+            // No reserves yet - we'll trigger collateral when reserves are added
+            log_info!(
+                self.logger,
+                "ℹ️ No reserves on channel with {} yet - collateral will be established when reserves are added",
+                quorum_member
+            );
+            return Ok(());
+        };
+
+        log_info!(
+            self.logger,
+            "🔄 Initializing collateral ({}) from quorum member {} for target partner {}",
+            collateral_to_commit,
+            quorum_member,
+            target_partner
+        );
+
+        // Send CollateralIncrease to the quorum member's channel
+        // This triggers:
+        // 1. Quorum member responds with CollateralAttestation
+        // 2. We forward attestation to target_partner (and any other partners)
+        // 3. Target partner updates their received_collateral_amount
+        self.increase_collateral_on_ledger(quorum_member, collateral_to_commit).await?;
+
+        // Wait for attestation forwarding ACKs to complete
+        // This ensures target_partner has received and processed the attestation
+        // before we return, avoiding race conditions during invoice creation
+        {
+            use super::messages::consts::LEDGER_UPDATE;
+            use tokio::time::{sleep, Duration};
+
+            let start = std::time::Instant::now();
+            let timeout = Duration::from_millis(5000);
+
+            loop {
+                let pending_ledger_updates = {
+                    let pending_acks = self.pending_acks.lock().unwrap();
+                    pending_acks.iter()
+                        .filter(|(_, ack)| ack.message_type == LEDGER_UPDATE)
+                        .count()
+                };
+
+                if pending_ledger_updates == 0 {
+                    log_debug!(self.logger, "✅ All attestation forwarding ACKs received");
+                    break;
+                }
+
+                if start.elapsed() > timeout {
+                    log_warn!(
+                        self.logger,
+                        "⚠️ Timeout waiting for {} attestation forwarding ACK(s) - continuing anyway",
+                        pending_ledger_updates
+                    );
+                    break;
+                }
+
+                sleep(Duration::from_millis(50)).await;
+            }
+        }
+
+        log_info!(
+            self.logger,
+            "✅ Collateral initialized from quorum member {} - attestations should now flow to {}",
+            quorum_member,
+            target_partner
+        );
 
         Ok(())
     }
