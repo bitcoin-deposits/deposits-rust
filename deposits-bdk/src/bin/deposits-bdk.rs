@@ -2986,20 +2986,29 @@ async fn nostr_request(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         };
 
         if last_poll.elapsed() > poll_interval {
-            if let Ok(Some(response)) = transport.fetch_response(&event_id).await {
-                println!();
-                if response.success {
-                    println!("Response: SUCCESS");
-                    if let Some(result) = &response.result {
-                        println!("Result: {}", serde_json::to_string_pretty(result)?);
+            tracing::debug!("Polling for response to request: {}", &event_id[..16]);
+            match transport.fetch_response(&event_id).await {
+                Ok(Some(response)) => {
+                    println!();
+                    if response.success {
+                        println!("Response: SUCCESS");
+                        if let Some(result) = &response.result {
+                            println!("Result: {}", serde_json::to_string_pretty(result)?);
+                        }
+                    } else {
+                        println!("Response: ERROR");
+                        if let Some(error) = &response.error {
+                            println!("Error: {}", error);
+                        }
                     }
-                } else {
-                    println!("Response: ERROR");
-                    if let Some(error) = &response.error {
-                        println!("Error: {}", error);
-                    }
+                    break;
                 }
-                break;
+                Ok(None) => {
+                    tracing::debug!("No response found for request: {} (poll #{})", &event_id[..16], poll_count);
+                }
+                Err(e) => {
+                    tracing::warn!("Error fetching response: {}", e);
+                }
             }
             poll_count += 1;
             last_poll = std::time::Instant::now();
@@ -3149,6 +3158,7 @@ async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
             };
 
             // Send response
+            println!("  Sending response for request: {}", &request.event_id[..16]);
             match transport.send_ledger_response(
                 &request.event_id,
                 &ledger_id,
@@ -3158,9 +3168,11 @@ async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
             ).await {
                 Ok(resp_id) => {
                     if success {
-                        println!("  Response: SUCCESS ({})", &resp_id[..16]);
+                        println!("  Response: SUCCESS (resp_id={}, req_id={})",
+                            &resp_id[..16], &request.event_id[..16]);
                     } else {
-                        println!("  Response: ERROR - {} ({})", error.unwrap_or_default(), &resp_id[..16]);
+                        println!("  Response: ERROR - {} (resp_id={}, req_id={})",
+                            error.unwrap_or_default(), &resp_id[..16], &request.event_id[..16]);
                     }
                 }
                 Err(e) => {
@@ -3368,11 +3380,16 @@ async fn process_collateral_lock_request(
         requesting_operator,
     ) {
         Ok(attestation) => {
+            // Serialize attestation as JSON then base64 encode for easy shell parsing
+            // (base64 avoids escaping issues with nested JSON)
+            use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+            let attestation_json = serde_json::to_string(&attestation).unwrap_or_default();
+            let attestation_b64 = BASE64.encode(attestation_json.as_bytes());
             let result = serde_json::json!({
                 "amount": attestation.amount,
                 "lock_until_block": attestation.lock_until_block,
                 "quorum_member": attestation.quorum_member.to_string(),
-                "attestation": serde_json::to_value(&attestation).unwrap_or(serde_json::Value::Null),
+                "attestation_b64": attestation_b64,
             });
             (true, Some(result), None)
         }

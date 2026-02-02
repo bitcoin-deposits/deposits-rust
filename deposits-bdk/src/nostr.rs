@@ -539,14 +539,12 @@ impl NostrTransport {
     pub async fn fetch_response(&self, request_id: &str) -> Result<Option<LedgerResponse>, Error> {
         use nostr_sdk::Timestamp;
 
-        // Look for responses from the last 60 seconds
-        let since = Timestamp::now() - 60;
+        // Look for responses from the last 120 seconds (wider window for clock drift)
+        let since = Timestamp::now() - 120;
+
+        // Fetch ALL responses and filter locally (custom_tag filters unreliable on some relays)
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_RESPONSE))
-            .custom_tag(
-                SingleLetterTag::lowercase(Alphabet::E),
-                [request_id],
-            )
             .since(since);
 
         let events = self.client
@@ -554,10 +552,16 @@ impl NostrTransport {
             .await
             .map_err(|e| Error::Nostr(format!("Failed to fetch events: {}", e)))?;
 
+        tracing::debug!("Fetched {} response events, looking for request {}",
+            events.len(), &request_id[..16]);
+
         for event in events.into_iter() {
             if let Ok(response) = self.process_ledger_response(&event) {
+                tracing::debug!("Found response for request {}, comparing with {}",
+                    &response.request_id[..16.min(response.request_id.len())],
+                    &request_id[..16]);
                 if response.request_id == request_id {
-                    tracing::debug!("Fetched response for request: {}", &request_id[..16]);
+                    tracing::info!("Matched response for request: {}", &request_id[..16]);
                     return Ok(Some(response));
                 }
             }

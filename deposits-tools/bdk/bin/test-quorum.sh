@@ -456,11 +456,14 @@ lock_collateral() {
                 local lock_output=$(run_nostr_request "$depositor" "$ledger_id" collateral_lock "$secret" "$deposit_amount_msats" "$COLLATERAL_LOCK_BLOCKS" "$depositor_node_id" 2>&1)
 
                 if echo "$lock_output" | grep -q "SUCCESS\|attestation"; then
-                    # Extract attestation JSON from response
-                    # The response contains "attestation": {...}
-                    local attestation_json=$(echo "$lock_output" | grep -o '"attestation"[[:space:]]*:[[:space:]]*{[^}]*}' | sed 's/"attestation"[[:space:]]*:[[:space:]]*//')
+                    # Extract base64-encoded attestation from response
+                    # The response contains "attestation_b64": "base64string"
+                    local attestation_b64=$(echo "$lock_output" | grep -o '"attestation_b64"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/"attestation_b64"[[:space:]]*:[[:space:]]*"//' | sed 's/"$//')
 
-                    if [ -n "$attestation_json" ]; then
+                    if [ -n "$attestation_b64" ]; then
+                        # Decode base64 to get the JSON
+                        local attestation_json=$(echo "$attestation_b64" | base64 -d 2>/dev/null)
+
                         # Depositor records the attestation on their own ledger (local CLI)
                         log_info "  $dep_short recording attestation from $op_short..."
                         local record_output=$(run_bdk_cmd "$depositor" collateral record "$depositor_reserves_id" "$attestation_json" 2>&1)
@@ -546,6 +549,47 @@ validate_ledgers() {
 }
 
 # ============================================================================
+# Phase 8b: Full ledger validation (conformance check)
+# ============================================================================
+
+full_validate_ledgers() {
+    log_info ""
+    log_info "=== Phase 8b: Full Ledger Validation (Conformance Check) ==="
+    echo ""
+
+    # Each operator validates their own ledger
+    for op in $OPERATORS; do
+        local reserves_id=$(get_value "reserves_id_$op")
+        local op_short=$(echo "$op" | sed 's/bdk-//')
+        log_info "$op_short validating own ledger..."
+
+        local validate_output=$(run_bdk_cmd "$op" ledger validate "$reserves_id" 2>&1)
+
+        # Check if validation passed
+        if echo "$validate_output" | grep -q "Valid: YES"; then
+            # Extract key metrics (remove newlines/whitespace)
+            local hash_valid=$(echo "$validate_output" | grep "Valid length" | sed 's/.*: //' | tr -d '\n\r')
+            local reserves_coverage=$(echo "$validate_output" | grep "reserves_coverage" | grep -o "([^)]*)" | tail -1 | tr -d '\n\r')
+
+            # Check all business rules passed (use tr to ensure clean number)
+            local rules_failed=$(echo "$validate_output" | grep -c "\[FAIL\]" 2>/dev/null | tr -d '\n\r' || echo "0")
+            # Default to 0 if empty
+            rules_failed=${rules_failed:-0}
+
+            if [ "$rules_failed" -eq 0 ]; then
+                test_pass "$op_short: ledger CONFORMING (hash chain: $hash_valid, coverage: $reserves_coverage)"
+            else
+                test_fail "$op_short: ledger valid but $rules_failed business rule(s) failed"
+                echo "$validate_output" | grep "\[FAIL\]"
+            fi
+        else
+            test_fail "$op_short: ledger validation failed"
+            echo "$validate_output" | grep -E "Error|FAIL|Invalid" | head -5
+        fi
+    done
+}
+
+# ============================================================================
 # Show final state
 # ============================================================================
 
@@ -601,6 +645,7 @@ main() {
     lock_collateral
     mine_to_enforcement
     validate_ledgers
+    full_validate_ledgers
     show_final_state
 
     echo ""
