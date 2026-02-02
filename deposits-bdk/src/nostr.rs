@@ -12,23 +12,29 @@
 //!
 //! # Custom Kinds
 //!
-//! - **Kind 21100**: Ledger updates (regular event, not replaceable)
+//! - **Kind 9100**: Ledger updates (regular event, not replaceable)
 //!   - Tag `d`: `<operator_pubkey>:<reserves_id>` (ledger identifier)
 //!   - Tag `seq`: sequence number
 //!   - Tag `prev`: previous hash (hex)
 //!   - Tag `hash`: current hash (hex)
 //!   - Content: base64-encoded TLV wire format of SignedLedgerUpdate
 //!
-//! - **Kind 21101**: Ledger requests (deposit_open, etc.)
+//! - **Kind 9101**: Ledger requests (deposit_open, etc.)
 //!   - Tag `l`: `<operator_pubkey>:<reserves_id>` (ledger identifier)
 //!   - Tag `action`: action name (e.g., "deposit_open")
 //!   - Content: JSON with action parameters
 //!
-//! - **Kind 21102**: Ledger responses (replies to requests)
+//! - **Kind 9102**: Ledger responses (replies to requests)
 //!   - Tag `e`: reference to request event ID
 //!   - Tag `l`: ledger identifier
 //!   - Tag `status`: "ok" or "error"
 //!   - Content: JSON with result or error message
+//!
+//! - **Kind 9103**: Ledger disputes (invalid ledger detected)
+//!   - Tag `l`: ledger identifier
+//!   - Tag `reason`: dispute reason (e.g., "hash_chain_broken")
+//!   - Tag `disputer`: disputer's pubkey (hex)
+//!   - Content: JSON with LedgerDispute details
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use bitcoin::secp256k1::{PublicKey, SecretKey};
@@ -54,6 +60,11 @@ pub const KIND_LEDGER_REQUEST: u16 = 9101;
 /// Custom Kind for ledger responses (replies to requests)
 /// Uses range 1000-9999 (regular custom events) for relay storage.
 pub const KIND_LEDGER_RESPONSE: u16 = 9102;
+
+/// Custom Kind for ledger disputes (invalid ledger detected)
+/// Uses range 1000-9999 (regular custom events) for relay storage.
+/// Published when a quorum member detects a non-conforming ledger.
+pub const KIND_LEDGER_DISPUTE: u16 = 9103;
 
 /// Default relay URLs for the network
 /// Empty by default - relays should be explicitly configured
@@ -93,6 +104,12 @@ pub struct NostrTransport {
 
     /// Sender for ledger responses
     response_tx: mpsc::UnboundedSender<LedgerResponse>,
+
+    /// Pending inbound ledger disputes
+    dispute_rx: mpsc::UnboundedReceiver<LedgerDispute>,
+
+    /// Sender for ledger disputes
+    dispute_tx: mpsc::UnboundedSender<LedgerDispute>,
 
     /// Peer pubkey mapping (secp256k1 -> nostr)
     peer_keys: RwLock<HashMap<PublicKey, nostr_sdk::PublicKey>>,
@@ -183,6 +200,43 @@ pub struct LedgerResponse {
     pub timestamp: u64,
 }
 
+/// A ledger dispute (invalid ledger detected)
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LedgerDispute {
+    /// The disputer's secp256k1 pubkey (who detected the violation)
+    pub disputer_pubkey: String,
+
+    /// Ledger identifier (operator:reserves_id)
+    pub ledger_id: String,
+
+    /// Reason for dispute (e.g., "hash_chain_broken", "invalid_signature", "business_rule_violation")
+    pub reason: String,
+
+    /// Detailed error message
+    pub details: String,
+
+    /// The last valid hash before the violation (hex)
+    pub last_valid_hash: String,
+
+    /// The last valid sequence number before the violation
+    pub last_valid_sequence: u64,
+
+    /// The sequence number where the violation was detected (if applicable)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub violation_sequence: Option<u64>,
+
+    /// Schnorr signature over the dispute (hex) for verification
+    pub signature: String,
+
+    /// Nostr event ID of this dispute
+    #[serde(skip)]
+    pub event_id: String,
+
+    /// Timestamp
+    #[serde(skip)]
+    pub timestamp: u64,
+}
+
 impl NostrTransport {
     /// Create a new Nostr transport
     pub async fn new(secret_key: SecretKey, relays: Vec<String>) -> Result<Self, Error> {
@@ -216,11 +270,12 @@ impl NostrTransport {
         // Connect to relays
         client.connect().await;
 
-        // Create channels for inbound messages, ledger updates, requests, and responses
+        // Create channels for inbound messages, ledger updates, requests, responses, and disputes
         let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
         let (ledger_tx, ledger_rx) = mpsc::unbounded_channel();
         let (request_tx, request_rx) = mpsc::unbounded_channel();
         let (response_tx, response_rx) = mpsc::unbounded_channel();
+        let (dispute_tx, dispute_rx) = mpsc::unbounded_channel();
 
         Ok(Self {
             client,
@@ -234,6 +289,8 @@ impl NostrTransport {
             request_tx,
             response_rx,
             response_tx,
+            dispute_rx,
+            dispute_tx,
             peer_keys: RwLock::new(HashMap::new()),
         })
     }
@@ -476,6 +533,121 @@ impl NostrTransport {
         Ok(event_id)
     }
 
+    /// Publish a ledger dispute (invalid ledger detected)
+    ///
+    /// This is broadcast when a quorum member detects a non-conforming ledger.
+    /// Other quorum members listening will receive this and can initiate recovery.
+    pub async fn publish_dispute(
+        &self,
+        ledger_id: &str,
+        reason: &str,
+        details: &str,
+        last_valid_hash: [u8; 32],
+        last_valid_sequence: u64,
+        violation_sequence: Option<u64>,
+        keypair: &bitcoin::secp256k1::Keypair,
+    ) -> Result<String, Error> {
+        use bitcoin::hashes::{Hash, sha256};
+        use bitcoin::secp256k1::{Secp256k1, Message};
+
+        // Build the message to sign
+        let mut preimage = Vec::new();
+        preimage.extend_from_slice(ledger_id.as_bytes());
+        preimage.extend_from_slice(reason.as_bytes());
+        preimage.extend_from_slice(&last_valid_hash);
+        preimage.extend_from_slice(&last_valid_sequence.to_le_bytes());
+        if let Some(vs) = violation_sequence {
+            preimage.extend_from_slice(&vs.to_le_bytes());
+        }
+
+        let sighash = sha256::Hash::hash(&preimage);
+        let secp = Secp256k1::new();
+        let msg = Message::from_digest(sighash.to_byte_array());
+        let signature = secp.sign_schnorr(&msg, keypair);
+
+        let disputer_pubkey = hex::encode(keypair.public_key().serialize());
+
+        let dispute = LedgerDispute {
+            disputer_pubkey: disputer_pubkey.clone(),
+            ledger_id: ledger_id.to_string(),
+            reason: reason.to_string(),
+            details: details.to_string(),
+            last_valid_hash: hex::encode(last_valid_hash),
+            last_valid_sequence,
+            violation_sequence,
+            signature: hex::encode(signature.serialize()),
+            event_id: String::new(),
+            timestamp: 0,
+        };
+
+        let content = serde_json::to_string(&dispute)
+            .map_err(|e| Error::Serialization(format!("Failed to serialize dispute: {}", e)))?;
+
+        let event = EventBuilder::new(Kind::Custom(KIND_LEDGER_DISPUTE), &content)
+            .tag(Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)),
+                [ledger_id],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("reason"),
+                [reason],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("disputer"),
+                [&disputer_pubkey],
+            ))
+            .sign_with_keys(&self.keys)
+            .map_err(|e| Error::Nostr(format!("Failed to sign event: {}", e)))?;
+
+        let event_id = event.id.to_hex();
+
+        self.client
+            .send_event(event)
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to send dispute: {}", e)))?;
+
+        tracing::warn!(
+            "Published ledger dispute: ledger={}, reason={}, event={}",
+            ledger_id,
+            reason,
+            &event_id[..16]
+        );
+
+        Ok(event_id)
+    }
+
+    /// Subscribe to disputes for a specific ledger (for quorum members)
+    pub async fn subscribe_to_disputes(&self, ledger_id: &str) -> Result<(), Error> {
+        let filter = Filter::new()
+            .kind(Kind::Custom(KIND_LEDGER_DISPUTE))
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::L),
+                [ledger_id],
+            );
+
+        self.client
+            .subscribe(vec![filter], None)
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to subscribe to disputes: {}", e)))?;
+
+        tracing::info!("Subscribed to disputes for ledger: {}", ledger_id);
+        Ok(())
+    }
+
+    /// Subscribe to all disputes (for monitoring)
+    pub async fn subscribe_to_all_disputes(&self) -> Result<(), Error> {
+        let filter = Filter::new()
+            .kind(Kind::Custom(KIND_LEDGER_DISPUTE));
+
+        self.client
+            .subscribe(vec![filter], None)
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to subscribe to all disputes: {}", e)))?;
+
+        tracing::info!("Subscribed to all ledger disputes (kind {})", KIND_LEDGER_DISPUTE);
+        Ok(())
+    }
+
     /// Subscribe to ledger requests for a specific ledger (for operators)
     pub async fn subscribe_to_requests(&self, ledger_id: &str) -> Result<(), Error> {
         // Subscribe to ALL requests of this kind (filter by ledger_id in handler)
@@ -632,6 +804,10 @@ impl NostrTransport {
             } else if kind_num == KIND_LEDGER_RESPONSE {
                 if let Ok(response) = self.process_ledger_response(&event) {
                     let _ = self.response_tx.send(response);
+                }
+            } else if kind_num == KIND_LEDGER_DISPUTE {
+                if let Ok(dispute) = self.process_ledger_dispute(&event) {
+                    let _ = self.dispute_tx.send(dispute);
                 }
             }
         }
@@ -824,6 +1000,26 @@ impl NostrTransport {
         Ok(response)
     }
 
+    /// Process a ledger dispute event
+    fn process_ledger_dispute(&self, event: &Event) -> Result<LedgerDispute, Error> {
+        // Parse dispute from content
+        let mut dispute: LedgerDispute = serde_json::from_str(&event.content)
+            .map_err(|e| Error::Serialization(format!("Failed to parse dispute: {}", e)))?;
+
+        dispute.event_id = event.id.to_hex();
+        dispute.timestamp = event.created_at.as_u64();
+
+        tracing::warn!(
+            "Received ledger dispute: ledger={}, reason={}, from={}, event={}",
+            dispute.ledger_id,
+            dispute.reason,
+            &dispute.disputer_pubkey[..16],
+            &event.id.to_hex()[..16]
+        );
+
+        Ok(dispute)
+    }
+
     /// Receive the next inbound message (non-blocking)
     pub fn try_recv(&mut self) -> Option<InboundMessage> {
         self.inbound_rx.try_recv().ok()
@@ -867,6 +1063,16 @@ impl NostrTransport {
     /// Receive the next ledger response (blocking)
     pub async fn recv_response(&mut self) -> Option<LedgerResponse> {
         self.response_rx.recv().await
+    }
+
+    /// Receive the next ledger dispute (non-blocking)
+    pub fn try_recv_dispute(&mut self) -> Option<LedgerDispute> {
+        self.dispute_rx.try_recv().ok()
+    }
+
+    /// Receive the next ledger dispute (blocking)
+    pub async fn recv_dispute(&mut self) -> Option<LedgerDispute> {
+        self.dispute_rx.recv().await
     }
 
     /// Disconnect from all relays

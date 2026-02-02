@@ -151,7 +151,11 @@ NOSTR SUBCOMMANDS:
                       deposit_offer <pubkey> <max_sats> <min_sats> <blocks_valid>
                       collateral_lock <secret> <amount_msats> <lock_blocks> [requesting_op]
     nostr watch <ledger_id>
-                    Watch for requests to a ledger and process them
+                    Watch for requests and disputes for a ledger
+    nostr dispute publish <ledger_id> <reason> <details>
+                    Publish a dispute for a non-conforming ledger
+    nostr dispute listen [ledger_id]
+                    Listen for disputes (all ledgers or specific)
 "#,
         program
     );
@@ -2443,7 +2447,7 @@ async fn withdraw_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>
 /// Handle nostr subcommands
 async fn nostr_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {
-        eprintln!("Usage: deposits-bdk nostr <list|export|import|request|watch> [args...]");
+        eprintln!("Usage: deposits-bdk nostr <list|export|import|validate|request|watch|dispute> [args...]");
         return Ok(());
     }
 
@@ -2454,9 +2458,10 @@ async fn nostr_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         "validate" => nostr_validate(&args[1..]).await,
         "request" | "req" => nostr_request(&args[1..]).await,
         "watch" => nostr_watch(&args[1..]).await,
+        "dispute" => nostr_dispute(&args[1..]).await,
         cmd => {
             eprintln!("Unknown nostr subcommand: {}", cmd);
-            eprintln!("Usage: deposits-bdk nostr <list|export|import|validate|request|watch> [args...]");
+            eprintln!("Usage: deposits-bdk nostr <list|export|import|validate|request|watch|dispute> [args...]");
             Ok(())
         }
     }
@@ -2882,6 +2887,255 @@ async fn nostr_validate(args: &[String]) -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
+/// Publish or listen for ledger disputes on Nostr
+async fn nostr_dispute(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use bitcoin::secp256k1::{SecretKey, Keypair, Secp256k1};
+    use deposits_bdk::nostr::{NostrTransportBuilder, KIND_LEDGER_DISPUTE};
+
+    if args.is_empty() {
+        eprintln!("Usage: deposits-bdk nostr dispute <publish|listen> [args...]");
+        eprintln!();
+        eprintln!("  publish <ledger_id> <reason> <details> [--last-hash <hex>] [--last-seq <n>] [--violation-seq <n>]");
+        eprintln!("          Publish a dispute for a non-conforming ledger");
+        eprintln!();
+        eprintln!("  listen [--ledger <ledger_id>]");
+        eprintln!("          Listen for disputes (all or specific ledger)");
+        return Ok(());
+    }
+
+    match args[0].as_str() {
+        "publish" | "pub" => {
+            // Parse arguments
+            let mut ledger_id: Option<String> = None;
+            let mut reason: Option<String> = None;
+            let mut details: Option<String> = None;
+            let mut last_hash: [u8; 32] = [0u8; 32];
+            let mut last_seq: u64 = 0;
+            let mut violation_seq: Option<u64> = None;
+            let mut config_args = Vec::new();
+
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--last-hash" => {
+                        i += 1;
+                        if i < args.len() {
+                            let bytes = hex::decode(&args[i])
+                                .map_err(|_| "Invalid hex for --last-hash")?;
+                            if bytes.len() == 32 {
+                                last_hash.copy_from_slice(&bytes);
+                            }
+                        }
+                    }
+                    "--last-seq" => {
+                        i += 1;
+                        if i < args.len() {
+                            last_seq = args[i].parse().unwrap_or(0);
+                        }
+                    }
+                    "--violation-seq" => {
+                        i += 1;
+                        if i < args.len() {
+                            violation_seq = Some(args[i].parse().unwrap_or(0));
+                        }
+                    }
+                    s if s.starts_with("--") => {
+                        config_args.push(args[i].clone());
+                        if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                            config_args.push(args[i + 1].clone());
+                            i += 1;
+                        }
+                    }
+                    _ => {
+                        if ledger_id.is_none() {
+                            ledger_id = Some(args[i].clone());
+                        } else if reason.is_none() {
+                            reason = Some(args[i].clone());
+                        } else if details.is_none() {
+                            details = Some(args[i].clone());
+                        }
+                    }
+                }
+                i += 1;
+            }
+
+            let ledger_id = ledger_id.ok_or("Ledger ID required")?;
+            let reason = reason.ok_or("Reason required (e.g., hash_chain_broken)")?;
+            let details = details.unwrap_or_else(|| "Validation failed".to_string());
+            let config = parse_config(&config_args)?;
+
+            let relay_url = config.relays.first()
+                .ok_or("No relay configured. Use --relay <url>")?
+                .clone();
+
+            // Build keypair from seed
+            let secp = Secp256k1::new();
+            let secret_key = SecretKey::from_slice(&config.seed)
+                .map_err(|e| format!("Invalid seed: {}", e))?;
+            let keypair = Keypair::from_secret_key(&secp, &secret_key);
+
+            println!("Publishing dispute...");
+            println!("  Relay: {}", relay_url);
+            println!("  Ledger: {}", ledger_id);
+            println!("  Reason: {}", reason);
+            println!("  Details: {}", details);
+            println!();
+
+            // Create transport and publish
+            let transport = NostrTransportBuilder::new(secret_key)
+                .relay(&relay_url)
+                .build()
+                .await?;
+
+            let event_id = transport.publish_dispute(
+                &ledger_id,
+                &reason,
+                &details,
+                last_hash,
+                last_seq,
+                violation_seq,
+                &keypair,
+            ).await?;
+
+            println!("Dispute published: {}", event_id);
+            transport.disconnect().await;
+        }
+        "listen" => {
+            use nostr_sdk::prelude::*;
+
+            let mut ledger_id: Option<String> = None;
+            let mut config_args = Vec::new();
+
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--ledger" | "-l" => {
+                        i += 1;
+                        if i < args.len() {
+                            ledger_id = Some(args[i].clone());
+                        }
+                    }
+                    s if s.starts_with("--") => {
+                        config_args.push(args[i].clone());
+                        if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                            config_args.push(args[i + 1].clone());
+                            i += 1;
+                        }
+                    }
+                    _ => {
+                        if ledger_id.is_none() {
+                            ledger_id = Some(args[i].clone());
+                        }
+                    }
+                }
+                i += 1;
+            }
+
+            let config = parse_config(&config_args)?;
+            let relay_url = config.relays.first()
+                .ok_or("No relay configured. Use --relay <url>")?
+                .clone();
+
+            println!("Listening for disputes...");
+            println!("  Relay: {}", relay_url);
+            if let Some(ref lid) = ledger_id {
+                println!("  Ledger: {}", lid);
+            } else {
+                println!("  Ledger: (all)");
+            }
+            println!();
+
+            // Connect to relay
+            let keys = Keys::generate();
+            let client = Client::new(keys);
+            client.add_relay(&relay_url).await
+                .map_err(|e| format!("Failed to add relay: {}", e))?;
+            client.connect().await;
+
+            // Build filter
+            let mut filter = Filter::new()
+                .kind(Kind::Custom(KIND_LEDGER_DISPUTE));
+            if let Some(ref lid) = ledger_id {
+                filter = filter.custom_tag(SingleLetterTag::lowercase(Alphabet::L), [lid.as_str()]);
+            }
+
+            // Subscribe
+            client.subscribe(vec![filter], None).await
+                .map_err(|e| format!("Failed to subscribe: {}", e))?;
+
+            println!("Subscribed to dispute events. Press Ctrl+C to stop.\n");
+
+            // Listen for events
+            loop {
+                let timeout = std::time::Duration::from_secs(30);
+                match tokio::time::timeout(timeout, client.notifications().recv()).await {
+                    Ok(Ok(RelayPoolNotification::Event { event, .. })) => {
+                        if event.kind.as_u16() == KIND_LEDGER_DISPUTE {
+                            println!("=== DISPUTE RECEIVED ===");
+                            println!("  Event: {}", event.id.to_hex());
+                            println!("  Time: {}", event.created_at);
+
+                            // Extract tags
+                            for tag in event.tags.iter() {
+                                if tag.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)) {
+                                    if let Some(v) = tag.content() {
+                                        println!("  Ledger: {}", v);
+                                    }
+                                }
+                                if tag.kind() == TagKind::custom("reason") {
+                                    if let Some(v) = tag.content() {
+                                        println!("  Reason: {}", v);
+                                    }
+                                }
+                                if tag.kind() == TagKind::custom("disputer") {
+                                    if let Some(v) = tag.content() {
+                                        println!("  Disputer: {}...", &v[..32.min(v.len())]);
+                                    }
+                                }
+                            }
+
+                            // Parse content for details
+                            if let Ok(dispute) = serde_json::from_str::<serde_json::Value>(&event.content) {
+                                if let Some(details) = dispute.get("details").and_then(|v| v.as_str()) {
+                                    println!("  Details: {}", details);
+                                }
+                                if let Some(last_seq) = dispute.get("last_valid_sequence").and_then(|v| v.as_u64()) {
+                                    println!("  Last valid seq: {}", last_seq);
+                                }
+                                if let Some(viol_seq) = dispute.get("violation_sequence").and_then(|v| v.as_u64()) {
+                                    println!("  Violation seq: {}", viol_seq);
+                                }
+                            }
+                            println!();
+                        }
+                    }
+                    Ok(Ok(_)) => {
+                        // Other notification types, ignore
+                    }
+                    Ok(Err(_)) => {
+                        // Channel error
+                        break;
+                    }
+                    Err(_) => {
+                        // Timeout - keep waiting
+                        print!(".");
+                        use std::io::Write;
+                        std::io::stdout().flush().ok();
+                    }
+                }
+            }
+
+            client.disconnect().await.ok();
+        }
+        cmd => {
+            eprintln!("Unknown dispute subcommand: {}", cmd);
+            eprintln!("Usage: deposits-bdk nostr dispute <publish|listen> [args...]");
+        }
+    }
+
+    Ok(())
+}
+
 /// Broadcast ledger updates to Nostr relay (export)
 async fn nostr_export(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     use bitcoin::secp256k1::SecretKey;
@@ -3262,6 +3516,9 @@ async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     // Subscribe to requests for this ledger
     transport.subscribe_to_requests(&ledger_id).await?;
 
+    // Also subscribe to disputes for this ledger
+    transport.subscribe_to_disputes(&ledger_id).await?;
+
     let mut transport = transport;
     let mut last_poll = std::time::Instant::now();
     let mut seen_events: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -3357,6 +3614,24 @@ async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
                     println!("  Failed to send response: {}", e);
                 }
             }
+            println!();
+        }
+
+        // Check for disputes
+        while let Some(dispute) = transport.try_recv_dispute() {
+            println!("!!! DISPUTE RECEIVED !!!");
+            println!("  Time: {}", chrono::Utc::now().format("%H:%M:%S"));
+            println!("  Event: {}", &dispute.event_id[..16.min(dispute.event_id.len())]);
+            println!("  Ledger: {}", dispute.ledger_id);
+            println!("  Reason: {}", dispute.reason);
+            println!("  Details: {}", dispute.details);
+            println!("  Disputer: {}...", &dispute.disputer_pubkey[..32.min(dispute.disputer_pubkey.len())]);
+            println!("  Last valid seq: {}", dispute.last_valid_sequence);
+            if let Some(vs) = dispute.violation_sequence {
+                println!("  Violation seq: {}", vs);
+            }
+            println!();
+            println!("  ACTION REQUIRED: Validate ledger and participate in recovery voting.");
             println!();
         }
     }
