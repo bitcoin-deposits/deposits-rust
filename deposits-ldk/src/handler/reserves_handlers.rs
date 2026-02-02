@@ -49,7 +49,7 @@ where
         let update_msg = LedgerUpdateMsg::new_with_operation(
             self.our_node_id,    // operator
             partner_node_id.to_string(),     // partner
-            LedgerOperation::ReservesIncrease { new_amount },
+            LedgerOperation::ReservesIncrease { reserves_id: partner_node_id.to_string(), new_amount },
         );
         let message = DepositsMessage::LedgerUpdate(update_msg);
 
@@ -168,7 +168,7 @@ where
         let update_msg = LedgerUpdateMsg::new_with_operation(
             self.our_node_id,    // operator
             partner_node_id.to_string(),     // partner
-            LedgerOperation::ReservesDecrease { new_amount },
+            LedgerOperation::ReservesDecrease { reserves_id: partner_node_id.to_string(), new_amount },
         );
         let message = DepositsMessage::LedgerUpdate(update_msg);
 

@@ -38,7 +38,7 @@ fn event_from_operation(operation: &LedgerOperation) -> Option<DepositsEvent> {
                 pubkey: *pubkey,
             })
         }
-        LedgerOperation::ReservesIncrease { new_amount } => {
+        LedgerOperation::ReservesIncrease { new_amount, .. } => {
             Some(DepositsEvent::ReservesIncreased {
                 amount: *new_amount,
             })

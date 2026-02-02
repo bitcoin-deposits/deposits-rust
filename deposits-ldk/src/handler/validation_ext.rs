@@ -301,10 +301,10 @@ impl ReplayLedgerState {
                         .ok_or("Deposit not found")?;
                     *locked = locked.saturating_sub(amount);
                 }
-                LedgerOperation::ReservesIncrease { new_amount } => {
+                LedgerOperation::ReservesIncrease { new_amount, .. } => {
                     self.reserves = new_amount;
                 }
-                LedgerOperation::ReservesDecrease { new_amount } => {
+                LedgerOperation::ReservesDecrease { new_amount, .. } => {
                     self.reserves = new_amount;
                 }
                 LedgerOperation::LedgerClose => {

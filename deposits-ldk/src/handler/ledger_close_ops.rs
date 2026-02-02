@@ -300,7 +300,7 @@ where
         let update_msg = LedgerUpdateMsg::new_with_operation(
             self.our_node_id,    // operator
             partner_node_id.to_string(),     // partner
-            LedgerOperation::ReservesDecrease { new_amount: 0 },
+            LedgerOperation::ReservesDecrease { reserves_id: partner_node_id.to_string(), new_amount: 0 },
         );
         let message = DepositsMessage::LedgerUpdate(update_msg);
 

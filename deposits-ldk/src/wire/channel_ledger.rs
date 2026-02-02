@@ -275,14 +275,14 @@ impl ChannelLedger {
                             let reserves_msg = LedgerUpdateMsg::new_with_operation(
                                 self.operator_node_id,
                                 self.partner_node_id.to_string(),
-                                LedgerOperation::ReservesIncrease { new_amount: new_required_reserves },
+                                LedgerOperation::ReservesIncrease { reserves_id: self.partner_node_id.to_string(), new_amount: new_required_reserves },
                             );
                             self.apply_update(DepositsMessage::LedgerUpdate(reserves_msg))?;
                         } else if new_required_reserves < old_reserves {
                             let reserves_msg = LedgerUpdateMsg::new_with_operation(
                                 self.operator_node_id,
                                 self.partner_node_id.to_string(),
-                                LedgerOperation::ReservesDecrease { new_amount: new_required_reserves },
+                                LedgerOperation::ReservesDecrease { reserves_id: self.partner_node_id.to_string(), new_amount: new_required_reserves },
                             );
                             self.apply_update(DepositsMessage::LedgerUpdate(reserves_msg))?;
                         }
@@ -356,7 +356,7 @@ impl ChannelLedger {
                         );
                         self.apply_update(DepositsMessage::LedgerUpdate(fail_msg))?;
                     }
-                    LedgerOperation::ReservesIncrease { new_amount } => {
+                    LedgerOperation::ReservesIncrease { new_amount, .. } => {
                         // Operator is declaring new reserves level (moving from channel to reserves)
                         // Update timestamp for deterministic state
                         self.last_updated = now_unix_timestamp();
@@ -365,11 +365,11 @@ impl ChannelLedger {
                         let reserves_msg = LedgerUpdateMsg::new_with_operation(
                             self.operator_node_id,
                             self.partner_node_id.to_string(),
-                            LedgerOperation::ReservesIncrease { new_amount: *new_amount },
+                            LedgerOperation::ReservesIncrease { reserves_id: self.partner_node_id.to_string(), new_amount: *new_amount },
                         );
                         self.apply_update(DepositsMessage::LedgerUpdate(reserves_msg))?;
                     }
-                    LedgerOperation::ReservesDecrease { new_amount } => {
+                    LedgerOperation::ReservesDecrease { new_amount, .. } => {
                         // Operator is moving reserves back to local channel balance
                         // Message contains absolute new_amount target
 
@@ -380,7 +380,7 @@ impl ChannelLedger {
                         let reserves_msg = LedgerUpdateMsg::new_with_operation(
                             self.operator_node_id,
                             self.partner_node_id.to_string(),
-                            LedgerOperation::ReservesDecrease { new_amount: *new_amount },
+                            LedgerOperation::ReservesDecrease { reserves_id: self.partner_node_id.to_string(), new_amount: *new_amount },
                         );
                         self.apply_update(DepositsMessage::LedgerUpdate(reserves_msg))?;
                     }
@@ -517,10 +517,10 @@ impl ChannelLedger {
             LedgerOperation::LedgerOpen { .. } => {
                 // LedgerOpen establishes initial state - handled during ledger creation
             }
-            LedgerOperation::ReservesIncrease { new_amount } => {
+            LedgerOperation::ReservesIncrease { new_amount, .. } => {
                 self.reserves.amount = *new_amount;
             }
-            LedgerOperation::ReservesDecrease { new_amount } => {
+            LedgerOperation::ReservesDecrease { new_amount, .. } => {
                 self.reserves.amount = *new_amount;
             }
             LedgerOperation::ReservesRotate { amount, .. } => {
@@ -641,6 +641,11 @@ impl ChannelLedger {
             LedgerOperation::QuorumJoin { .. } => {
                 // QuorumJoin is recorded on the consenting party's own ledger
                 // ChannelLedger doesn't need to track this (it's in LedgerState.joined_quorums)
+            }
+            LedgerOperation::CustodyTransfer { new_custodian, .. } => {
+                // Transfer custody to new operator
+                // After this, all future updates must be signed by new_custodian
+                self.operator_node_id = *new_custodian;
             }
             LedgerOperation::LedgerClose => {
                 self.deposits.clear();
@@ -812,7 +817,7 @@ impl ChannelLedger {
         let reserves_msg = LedgerUpdateMsg::new_with_operation(
             self.operator_node_id,
             self.partner_node_id.to_string(),
-            LedgerOperation::ReservesIncrease { new_amount: new_reserves_amount },
+            LedgerOperation::ReservesIncrease { reserves_id: self.partner_node_id.to_string(), new_amount: new_reserves_amount },
         );
         self.apply_update(DepositsMessage::LedgerUpdate(reserves_msg))?;
 

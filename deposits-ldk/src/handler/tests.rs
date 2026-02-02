@@ -111,7 +111,7 @@ fn test_message_queuing() {
     let message = DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
         peer_key, // operator
         peer_key.to_string(), // reserves_id
-        LedgerOperation::ReservesIncrease { new_amount: 1000 },
+        LedgerOperation::ReservesIncrease { reserves_id: peer_key.to_string(), new_amount: 1000 },
     ));
 
     // Queue message
@@ -1946,7 +1946,7 @@ fn test_has_pending_messages() {
     let message = DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
         peer_key, // operator
         peer_key.to_string(), // reserves_id
-        LedgerOperation::ReservesIncrease { new_amount: 1000 },
+        LedgerOperation::ReservesIncrease { reserves_id: peer_key.to_string(), new_amount: 1000 },
     ));
     handler.send_message(peer_key, message).unwrap();
 

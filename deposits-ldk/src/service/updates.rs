@@ -120,8 +120,8 @@ fn extract_from_ledger_operation(op: &LedgerOperation) -> (Option<u64>, Option<S
         LedgerOperation::OnchainLock { deposit_pubkey, amount, .. } => (Some(*amount), Some(deposit_pubkey.to_string()), None),
         LedgerOperation::OnchainFail { deposit_pubkey, .. } => (None, Some(deposit_pubkey.to_string()), None),
         LedgerOperation::OnchainFulfill { deposit_pubkey, .. } => (None, Some(deposit_pubkey.to_string()), None),
-        LedgerOperation::ReservesIncrease { new_amount } => (Some(*new_amount), None, None),
-        LedgerOperation::ReservesDecrease { new_amount } => (Some(*new_amount), None, None),
+        LedgerOperation::ReservesIncrease { new_amount, .. } => (Some(*new_amount), None, None),
+        LedgerOperation::ReservesDecrease { new_amount, .. } => (Some(*new_amount), None, None),
         LedgerOperation::QuorumAddMember { quorum_member, .. } =>
             (None, None, Some(format!("partner:{}", &quorum_member.to_string()[..8]))),
         LedgerOperation::QuorumRemoveMember { quorum_member, .. } =>

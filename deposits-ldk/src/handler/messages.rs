@@ -107,6 +107,7 @@ impl LedgerOperationExt for LedgerOperation {
             LedgerOperation::CollateralLock { .. } => "CollateralLock",
             LedgerOperation::QuorumJoin { .. } => "QuorumJoin",
             LedgerOperation::FeeCollect { .. } => "FeeCollect",
+            LedgerOperation::CustodyTransfer { .. } => "CustodyTransfer",
             LedgerOperation::LedgerClose => "LedgerClose",
             LedgerOperation::Tombstone { .. } => "Tombstone",
         }
@@ -287,7 +288,7 @@ impl DepositsMessage {
         Self::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             operator,
             partner.to_string(),
-            LedgerOperation::ReservesIncrease { new_amount },
+            LedgerOperation::ReservesIncrease { reserves_id: partner.to_string(), new_amount },
         ))
     }
 
@@ -296,7 +297,7 @@ impl DepositsMessage {
         Self::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             operator,
             partner.to_string(),
-            LedgerOperation::ReservesDecrease { new_amount },
+            LedgerOperation::ReservesDecrease { reserves_id: partner.to_string(), new_amount },
         ))
     }
 
@@ -900,7 +901,7 @@ mod tests {
     #[test]
     #[ignore = "Requires deposits-core V2 codec fix for LedgerOperation roundtrip"]
     fn test_ledger_operation_roundtrip() {
-        let op = LedgerOperation::ReservesIncrease { new_amount: 100_000 };
+        let op = LedgerOperation::ReservesIncrease { reserves_id: test_pubkey().to_string(), new_amount: 100_000 };
 
         let msg = LedgerUpdateMsg {
             operator_id: test_pubkey(),
