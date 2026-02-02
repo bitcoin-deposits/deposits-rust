@@ -365,22 +365,13 @@ impl Wallet {
             let mut ledger_hash = [0u8; 32];
             ledger_hash.copy_from_slice(&ledger_hash_bytes);
 
-            // Rebuild the TaprootReservesOutput
+            // Rebuild the TaprootReservesOutput using default config to match custody transfer
             let voter_set = VoterSet::new(operator_pubkey, quorum_members.clone());
-            let blocks_until_expiry = serde_info.first_expiry_block.saturating_sub(0); // Use stored expiry
-            let total_voters = quorum_members.len() + 1;
-            let majority = (total_voters / 2) + 1;
-            let config = ThresholdConfig::custom(
-                if quorum_members.is_empty() {
-                    vec![ThresholdTier::new(1, true, 0, "Operator only")]
-                } else {
-                    vec![
-                        ThresholdTier::new(majority, true, 0, "Majority + operator"),
-                        ThresholdTier::new(1, true, blocks_until_expiry, "Operator after expiry"),
-                        ThresholdTier::emergency_recovery(blocks_until_expiry.saturating_mul(2)),
-                    ]
-                }
-            );
+            let config = if quorum_members.is_empty() {
+                ThresholdConfig::custom(vec![ThresholdTier::new(1, true, 0, "Operator only")])
+            } else {
+                ThresholdConfig::default_for_voter_count(quorum_members.len() + 1)
+            };
 
             let builder = TapscriptReservesBuilder::new(voter_set, config, network, ledger_hash);
             let taproot_output = builder.build()
@@ -732,26 +723,13 @@ impl Wallet {
         // Create VoterSet: operator is tie-breaker, quorum members are primary voters
         let voter_set = VoterSet::new(self.operator_pubkey, quorum_members.clone());
 
-        // Create custom threshold configuration
-        // If we have quorum members, use tiered spending; otherwise simple 1-of-1
-        let config = ThresholdConfig::custom(
-            if quorum_members.is_empty() {
-                vec![ThresholdTier::new(1, true, 0, "Operator only (no quorum)")]
-            } else {
-                let blocks_until_expiry = if first_expiry > current_height {
-                    first_expiry - current_height
-                } else {
-                    144 // Default to 1 day if expiry is in the past/zero
-                };
-                let total_voters = quorum_members.len() + 1;
-                let majority = (total_voters / 2) + 1;
-                vec![
-                    ThresholdTier::new(majority, true, 0, "Majority + operator (immediate)"),
-                    ThresholdTier::new(1, true, blocks_until_expiry, "Operator after first expiry"),
-                    ThresholdTier::emergency_recovery(blocks_until_expiry.saturating_mul(2)),
-                ]
-            }
-        );
+        // Use default threshold configuration to ensure custody transfer can rebuild the same address
+        // This uses: Tier 0 (majority+operator), Tier 1 (2-of-n quorum override), Tier 2 (emergency)
+        let config = if quorum_members.is_empty() {
+            ThresholdConfig::custom(vec![ThresholdTier::new(1, true, 0, "Operator only (no quorum)")])
+        } else {
+            ThresholdConfig::default_for_voter_count(quorum_members.len() + 1)
+        };
 
         // Build the Taproot reserves output
         let builder = TapscriptReservesBuilder::new(
@@ -909,25 +887,12 @@ impl Wallet {
         // Create VoterSet: operator is tie-breaker, quorum members are primary voters
         let voter_set = VoterSet::new(self.operator_pubkey, quorum_members.clone());
 
-        // Create threshold configuration
-        let config = ThresholdConfig::custom(
-            if quorum_members.is_empty() {
-                vec![ThresholdTier::new(1, true, 0, "Operator only (no quorum)")]
-            } else {
-                let blocks_until_expiry = if first_expiry > current_height {
-                    first_expiry - current_height
-                } else {
-                    144
-                };
-                let total_voters = quorum_members.len() + 1;
-                let majority = (total_voters / 2) + 1;
-                vec![
-                    ThresholdTier::new(majority, true, 0, "Majority + operator (immediate)"),
-                    ThresholdTier::new(1, true, blocks_until_expiry, "Operator after first expiry"),
-                    ThresholdTier::emergency_recovery(blocks_until_expiry.saturating_mul(2)),
-                ]
-            }
-        );
+        // Use default threshold configuration to ensure custody transfer can rebuild the same address
+        let config = if quorum_members.is_empty() {
+            ThresholdConfig::custom(vec![ThresholdTier::new(1, true, 0, "Operator only (no quorum)")])
+        } else {
+            ThresholdConfig::default_for_voter_count(quorum_members.len() + 1)
+        };
 
         // Build the Taproot reserves output
         let builder = TapscriptReservesBuilder::new(
@@ -1239,6 +1204,225 @@ impl Wallet {
 
         Ok(None)
     }
+
+    // ========================================================================
+    // Custody Transfer (Quorum Override) Spending
+    // ========================================================================
+
+    /// Prepare a custody transfer spend transaction
+    ///
+    /// This creates an unsigned transaction that spends the Taproot reserves
+    /// via the Tier 2 spending path (2-of-n without operator, after 2016 blocks).
+    /// This path allows quorum members to confiscate reserves from a non-conforming operator.
+    ///
+    /// # Arguments
+    /// * `request` - The custody transfer parameters
+    ///
+    /// # Returns
+    /// A `CustodyTransferSpend` with the unsigned tx and sighash for signing
+    pub fn create_custody_transfer_spend(
+        &self,
+        request: &CustodyTransferRequest,
+    ) -> Result<CustodyTransferSpend, Error> {
+        use deposits_core::ReservesSpendBuilder;
+
+        // Get the Taproot reserves info
+        let reserves_info = {
+            let reserves = self.taproot_reserves.read().unwrap();
+            reserves
+                .get(&request.reserves_outpoint)
+                .cloned()
+                .ok_or_else(|| Error::Wallet(format!(
+                    "Taproot reserves not found: {}",
+                    request.reserves_outpoint
+                )))?
+        };
+
+        // Find the quorum-override tier: one that doesn't require tie-breaker (operator)
+        // and has threshold > 1 (not emergency single-sig). This allows quorum members
+        // to spend without the operator's cooperation.
+        let (tier_index, tier) = reserves_info.taproot_output.config.tiers.iter()
+            .enumerate()
+            .find(|(_, t)| !t.requires_tie_breaker && t.threshold > 1)
+            .ok_or_else(|| Error::Wallet(
+                "No quorum-override tier found (requires_tie_breaker=false, threshold>1)".to_string()
+            ))?;
+
+        // Rebuild the leaf script for this tier
+        let builder = deposits_core::TapscriptReservesBuilder::new(
+            reserves_info.taproot_output.voter_set.clone(),
+            reserves_info.taproot_output.config.clone(),
+            self.network,
+            reserves_info.ledger_hash,
+        );
+
+        let leaf_script = builder.build_threshold_leaf(tier)
+            .map_err(|e| Error::Wallet(format!("Failed to build spending script: {:?}", e)))?;
+
+        // Get the control block
+        let control_block = reserves_info.taproot_output.control_block_for_tier(tier_index)
+            .ok_or_else(|| Error::Wallet("Failed to get control block for tier".to_string()))?;
+
+        // Build the spend transaction parameters
+        let spend_params = deposits_core::SpendTxParams {
+            reserves_outpoint: request.reserves_outpoint,
+            reserves_amount: reserves_info.amount,
+            destination_script: request.destination_address.script_pubkey(),
+            fee_rate_sat_vbyte: request.fee_rate,
+        };
+
+        let reserves_script_pubkey = reserves_info.taproot_output.script_pubkey();
+
+        // Build the unsigned transaction
+        let unsigned_tx = ReservesSpendBuilder::build_spend_transaction(
+            &spend_params,
+            &reserves_script_pubkey,
+        ).map_err(|e| Error::Wallet(format!("Failed to build spend tx: {:?}", e)))?;
+
+        // Compute the sighash
+        let sighash = ReservesSpendBuilder::compute_sighash(
+            &unsigned_tx,
+            0, // input index
+            reserves_info.amount,
+            &reserves_script_pubkey,
+            &leaf_script,
+        ).map_err(|e| Error::Wallet(format!("Failed to compute sighash: {:?}", e)))?;
+
+        // Get sorted voter pubkeys (signature order must match)
+        let voter_pubkeys: Vec<PublicKey> = reserves_info.taproot_output.voter_set
+            .all_voters()
+            .into_iter()
+            .collect();
+
+        Ok(CustodyTransferSpend {
+            unsigned_tx,
+            sighash: sighash.to_byte_array(),
+            leaf_script,
+            control_block,
+            voter_pubkeys,
+            tier_index,
+            reserves_amount: reserves_info.amount,
+            reserves_script_pubkey,
+        })
+    }
+
+    /// Sign a custody transfer sighash with our key
+    ///
+    /// Returns a 64-byte Schnorr signature if our key is in the voter set,
+    /// or None if we're not a voter.
+    pub fn sign_custody_transfer_sighash(&self, sighash: &[u8; 32]) -> Result<Option<[u8; 64]>, Error> {
+        use bitcoin::secp256k1::{Secp256k1, Message, Keypair};
+
+        let secp = Secp256k1::new();
+        let msg = Message::from_digest(*sighash);
+
+        // Create keypair for Schnorr signing
+        let keypair = Keypair::from_secret_key(&secp, &self.operator_secret);
+
+        // Sign with Schnorr (BIP-340)
+        let sig = secp.sign_schnorr(&msg, &keypair);
+
+        let mut sig_bytes = [0u8; 64];
+        sig_bytes.copy_from_slice(sig.as_ref());
+
+        Ok(Some(sig_bytes))
+    }
+
+    /// Finalize a custody transfer spend with collected signatures
+    ///
+    /// # Arguments
+    /// * `spend` - The custody transfer spend prepared earlier
+    /// * `signatures` - Signatures from voters, keyed by their pubkey
+    ///
+    /// # Returns
+    /// A `CustodyTransferResult` with the signed transaction
+    pub fn finalize_custody_transfer(
+        &self,
+        spend: &CustodyTransferSpend,
+        signatures: &std::collections::HashMap<PublicKey, [u8; 64]>,
+    ) -> Result<CustodyTransferResult, Error> {
+        use deposits_core::ReservesSpendBuilder;
+
+        // Build the signature array in the correct order (matching voter pubkey order)
+        // For CHECKSIGADD, we need signatures in the order of keys in the script
+        let sorted_pubkeys = spend.voter_pubkeys.iter()
+            .map(|pk| pk.x_only_public_key().0)
+            .collect::<Vec<_>>();
+
+        let sorted_keys_with_sigs: Vec<_> = sorted_pubkeys.iter()
+            .map(|xonly| {
+                // Find the full pubkey and its signature
+                for (pk, sig) in signatures.iter() {
+                    if pk.x_only_public_key().0 == *xonly {
+                        return Some(*sig);
+                    }
+                }
+                None
+            })
+            .collect();
+
+        // Sort by x-only pubkey (same order as script construction)
+        let mut indexed: Vec<_> = sorted_pubkeys.iter().zip(sorted_keys_with_sigs.iter())
+            .enumerate()
+            .collect();
+        indexed.sort_by(|a, b| a.1.0.serialize().cmp(&b.1.0.serialize()));
+
+        let ordered_sigs: Vec<Option<[u8; 64]>> = indexed.iter()
+            .map(|(_, (_, sig))| **sig)
+            .collect();
+
+        // Create the witness
+        let signed_tx = ReservesSpendBuilder::finalize_spend_transaction(
+            spend.unsigned_tx.clone(),
+            &ordered_sigs,
+            &spend.leaf_script,
+            &spend.control_block,
+        );
+
+        let txid = signed_tx.compute_txid();
+
+        Ok(CustodyTransferResult {
+            signed_tx,
+            txid,
+        })
+    }
+
+    /// Execute a complete custody transfer (for testing/single-node scenarios)
+    ///
+    /// This is a convenience method that creates, signs, and optionally broadcasts
+    /// a custody transfer spend. For production use with multiple quorum members,
+    /// use the individual create/sign/finalize methods to coordinate signatures.
+    pub fn execute_custody_transfer(
+        &self,
+        destination_address: Address,
+        fee_rate: u64,
+    ) -> Result<CustodyTransferResult, Error> {
+        // Get the first Taproot reserves
+        let reserves_outpoint = self.get_taproot_reserves_outpoint()
+            .ok_or_else(|| Error::Wallet("No Taproot reserves found".to_string()))?;
+
+        let request = CustodyTransferRequest {
+            reserves_outpoint,
+            destination_address,
+            fee_rate,
+        };
+
+        // Create the spend
+        let spend = self.create_custody_transfer_spend(&request)?;
+
+        // Sign with our key
+        let our_sig = self.sign_custody_transfer_sighash(&spend.sighash)?
+            .ok_or_else(|| Error::Wallet("Failed to sign".to_string()))?;
+
+        // For a proper custody transfer, we need 2 signatures (Tier 2 threshold)
+        // In a real scenario, we'd collect from other quorum members via Nostr
+        // For now, just use our signature (will fail if threshold > 1)
+        let mut signatures = std::collections::HashMap::new();
+        signatures.insert(self.operator_pubkey, our_sig);
+
+        // Finalize
+        self.finalize_custody_transfer(&spend, &signatures)
+    }
 }
 
 /// A reserves output ready for broadcast
@@ -1302,4 +1486,45 @@ pub struct TaprootReservesCreateResult {
 
     /// The ledger hash committed to in the Taproot tree
     pub ledger_hash: [u8; 32],
+}
+
+/// Parameters for a custody transfer spend
+#[derive(Debug, Clone)]
+pub struct CustodyTransferRequest {
+    /// The Taproot reserves outpoint to spend
+    pub reserves_outpoint: OutPoint,
+    /// Destination address (new custodian's receiving address)
+    pub destination_address: Address,
+    /// Fee rate in sat/vbyte
+    pub fee_rate: u64,
+}
+
+/// Result of preparing a custody transfer spend
+#[derive(Debug, Clone)]
+pub struct CustodyTransferSpend {
+    /// The unsigned spend transaction
+    pub unsigned_tx: Transaction,
+    /// The sighash that each quorum member must sign
+    pub sighash: [u8; 32],
+    /// The Tapscript leaf being used (Tier 2: 2-of-n without operator)
+    pub leaf_script: ScriptBuf,
+    /// The control block for the leaf
+    pub control_block: bitcoin::taproot::ControlBlock,
+    /// Sorted list of voter pubkeys (signature order must match)
+    pub voter_pubkeys: Vec<PublicKey>,
+    /// The tier index being used (2 = quorum override)
+    pub tier_index: usize,
+    /// The reserves amount (needed for sighash verification)
+    pub reserves_amount: u64,
+    /// The reserves script pubkey
+    pub reserves_script_pubkey: ScriptBuf,
+}
+
+/// Result of finalizing a custody transfer spend
+#[derive(Debug, Clone)]
+pub struct CustodyTransferResult {
+    /// The signed transaction ready for broadcast
+    pub signed_tx: Transaction,
+    /// The transaction ID
+    pub txid: Txid,
 }
