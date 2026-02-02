@@ -20,8 +20,9 @@ COPY deposits-rust/deposits-bdk ./deposits-bdk
 # Create a minimal workspace Cargo.toml for Docker build
 RUN echo '[workspace]\nmembers = ["deposits-core", "deposits-bdk"]\nresolver = "2"' > Cargo.toml
 
-# Build deposits-bdk
-RUN cargo build --release -p deposits-bdk --bin deposits-bdk
+# Build deposits-bdk with dangerous-testing for test environments
+# WARNING: Do not use this image in production
+RUN cargo build --release -p deposits-bdk --bin deposits-bdk --features dangerous-testing
 
 # Runtime image
 FROM debian:bookworm-slim

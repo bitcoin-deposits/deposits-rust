@@ -45,6 +45,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "withdraw" => withdraw_command(&args[2..]).await?,
         "nostr" => nostr_command(&args[2..]).await?,
         "keygen" => keygen(),
+        #[cfg(feature = "dangerous-testing")]
+        "danger" => danger_command(&args[2..]).await?,
         "help" | "--help" | "-h" => print_usage(&args[0]),
         cmd => {
             eprintln!("Unknown command: {}", cmd);
@@ -141,6 +143,8 @@ NOSTR SUBCOMMANDS:
                     Broadcast ledger updates to Nostr relay (all local ledgers if no ID given)
     nostr import [operator:reserves_id]
                     Fetch ledger updates from Nostr relay (all ledgers if no ID given)
+    nostr validate <operator:reserves_id>
+                    Fetch and validate a ledger's hash chain directly from Nostr
     nostr request <ledger_id> <action> [params...]
                     Send a request to a ledger. Actions:
                       deposit_open <pubkey> [fee_fixed] [fee_bps] [fee_frequency]
@@ -148,8 +152,26 @@ NOSTR SUBCOMMANDS:
                       collateral_lock <secret> <amount_msats> <lock_blocks> [requesting_op]
     nostr watch <ledger_id>
                     Watch for requests to a ledger and process them
+"#,
+        program
+    );
 
-OPTIONS:
+    #[cfg(feature = "dangerous-testing")]
+    println!(
+        r#"
+DANGER SUBCOMMANDS (testing only - DO NOT USE IN PRODUCTION):
+    danger publish-invalid <reserves_id> <violation_type>
+                    Publish an invalid ledger update to test recovery.
+                    Violation types:
+                      invalid-hash     - Wrong previous_hash linkage
+                      skip-sequence    - Skip ahead in sequence numbers
+                      double-spend     - Spend more than available balance
+                      replay           - Replay an old sequence number
+"#
+    );
+
+    println!(
+        r#"OPTIONS:
     --seed <hex>       Seed for wallet/identity (64 hex chars)
     --network <net>    Bitcoin network: mainnet, testnet, signet, regtest (default: signet)
     --esplora <url>    Esplora server URL (default: https://mempool.space/signet/api)
@@ -174,7 +196,7 @@ EXAMPLES:
     {} ledger open 1000 --network regtest
 
 "#,
-        program, program, program, program, program, program
+        program, program, program, program, program
     );
 }
 
@@ -2429,11 +2451,12 @@ async fn nostr_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         "list" | "ls" => nostr_list(&args[1..]).await,
         "export" => nostr_export(&args[1..]).await,
         "import" => nostr_import(&args[1..]).await,
+        "validate" => nostr_validate(&args[1..]).await,
         "request" | "req" => nostr_request(&args[1..]).await,
         "watch" => nostr_watch(&args[1..]).await,
         cmd => {
             eprintln!("Unknown nostr subcommand: {}", cmd);
-            eprintln!("Usage: deposits-bdk nostr <list|export|import|request|watch> [args...]");
+            eprintln!("Usage: deposits-bdk nostr <list|export|import|validate|request|watch> [args...]");
             Ok(())
         }
     }
@@ -2699,6 +2722,161 @@ async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         println!("       ledger: {}", event_ledger_id);
         println!("       hash: {}...", &hash[..16.min(hash.len())]);
         println!();
+    }
+
+    Ok(())
+}
+
+/// Validate a ledger directly from Nostr (fetch and validate hash chain)
+async fn nostr_validate(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use deposits_bdk::nostr::KIND_LEDGER_UPDATE;
+    use deposits_core::{TlvDecode, SignedLedgerUpdate};
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    use nostr_sdk::prelude::*;
+
+    let mut ledger_id: Option<String> = None;
+    let mut config_args = Vec::new();
+    let mut limit: usize = 200;
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--limit" {
+            i += 1;
+            if i < args.len() {
+                limit = args[i].parse().unwrap_or(200);
+            }
+        } else if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else if ledger_id.is_none() {
+            ledger_id = Some(args[i].clone());
+        }
+        i += 1;
+    }
+
+    let ledger_id = ledger_id.ok_or("Ledger ID required (operator:reserves_id)")?;
+    let config = parse_config(&config_args)?;
+
+    let relay_url = config.relays.first()
+        .ok_or("No relay configured. Use --relay <url>")?;
+
+    println!("Validating ledger from Nostr...");
+    println!("  Relay: {}", relay_url);
+    println!("  Ledger: {}", ledger_id);
+    println!();
+
+    // Fetch events from Nostr
+    let keys = Keys::generate();
+    let client = Client::new(keys);
+    client.add_relay(relay_url).await
+        .map_err(|e| format!("Failed to add relay: {}", e))?;
+    client.connect().await;
+
+    let filter = Filter::new()
+        .kind(Kind::Custom(KIND_LEDGER_UPDATE))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()])
+        .limit(limit);
+
+    let events = client
+        .fetch_events(vec![filter], None)
+        .await
+        .map_err(|e| format!("Failed to fetch events: {}", e))?;
+
+    client.disconnect().await.ok();
+
+    if events.is_empty() {
+        println!("No ledger updates found on Nostr.");
+        return Ok(());
+    }
+
+    // Decode all updates
+    let mut updates: Vec<SignedLedgerUpdate> = Vec::new();
+    for event in events.iter() {
+        if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
+            if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
+                updates.push(update);
+            }
+        }
+    }
+
+    if updates.is_empty() {
+        println!("No valid updates could be decoded.");
+        return Ok(());
+    }
+
+    // Sort by sequence number
+    updates.sort_by_key(|u| u.sequence_number);
+
+    println!("Found {} update(s), validating hash chain...", updates.len());
+    println!();
+
+    // Validate hash chain
+    let mut valid = true;
+    let mut expected_prev_hash = [0u8; 32];
+    let mut last_valid_seq: i64 = -1;
+    let mut errors: Vec<String> = Vec::new();
+
+    for update in &updates {
+        // Check sequence continuity
+        if update.sequence_number != (last_valid_seq + 1) as u64 {
+            if last_valid_seq >= 0 {
+                let err = format!(
+                    "Sequence gap: expected {}, got {}",
+                    last_valid_seq + 1,
+                    update.sequence_number
+                );
+                errors.push(err.clone());
+                println!("  [FAIL] seq={}: {}", update.sequence_number, err);
+                valid = false;
+            }
+        }
+
+        // Check previous hash linkage
+        if update.previous_hash != expected_prev_hash {
+            let err = format!(
+                "Hash chain broken: prev_hash {}... != expected {}...",
+                &hex::encode(update.previous_hash)[..8],
+                &hex::encode(expected_prev_hash)[..8]
+            );
+            errors.push(err.clone());
+            println!("  [FAIL] seq={}: {}", update.sequence_number, err);
+            valid = false;
+        }
+
+        // Verify the update's own hash
+        let computed_hash = update.compute_hash();
+        if computed_hash != update.current_hash {
+            let err = format!(
+                "Hash mismatch: computed {}... != stored {}...",
+                &hex::encode(computed_hash)[..8],
+                &hex::encode(update.current_hash)[..8]
+            );
+            errors.push(err.clone());
+            println!("  [FAIL] seq={}: {}", update.sequence_number, err);
+            valid = false;
+        }
+
+        // Update for next iteration
+        expected_prev_hash = update.current_hash;
+        last_valid_seq = update.sequence_number as i64;
+    }
+
+    println!();
+    if valid {
+        println!("Valid: YES");
+        println!("  Updates: {}", updates.len());
+        println!("  Sequence: 0..{}", last_valid_seq);
+        println!("  Tail hash: {}...", &hex::encode(expected_prev_hash)[..16]);
+    } else {
+        println!("Valid: NO");
+        println!("  Updates: {}", updates.len());
+        println!("  Errors: {}", errors.len());
+        for err in &errors {
+            println!("    - {}", err);
+        }
     }
 
     Ok(())
@@ -3397,4 +3575,297 @@ async fn process_collateral_lock_request(
             (false, None, Some(e.to_string()))
         }
     }
+}
+
+// =============================================================================
+// DANGEROUS TESTING COMMANDS
+// =============================================================================
+// WARNING: These commands create invalid/malicious ledger updates.
+// Only use for testing recovery mechanisms. Never enable in production builds.
+
+#[cfg(feature = "dangerous-testing")]
+async fn danger_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    if args.is_empty() {
+        eprintln!("Usage: deposits-bdk danger <subcommand> [args...]");
+        eprintln!("Subcommands:");
+        eprintln!("  publish-invalid <reserves_id> <violation_type>");
+        return Ok(());
+    }
+
+    match args[0].as_str() {
+        "publish-invalid" => danger_publish_invalid(&args[1..]).await,
+        cmd => {
+            eprintln!("Unknown danger subcommand: {}", cmd);
+            eprintln!("Available: publish-invalid");
+            Ok(())
+        }
+    }
+}
+
+/// Publish an invalid ledger update to test recovery mechanisms.
+/// WARNING: This creates non-conforming updates that break protocol rules.
+#[cfg(feature = "dangerous-testing")]
+async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use bitcoin::secp256k1::{Secp256k1, SecretKey, Message};
+    use deposits_bdk::nostr::NostrTransportBuilder;
+    use deposits_core::SignedLedgerUpdate;
+    use sha2::{Digest, Sha256};
+
+    if args.len() < 2 {
+        eprintln!("Usage: deposits-bdk danger publish-invalid <reserves_id> <violation_type> [options...]");
+        eprintln!();
+        eprintln!("Violation types:");
+        eprintln!("  invalid-hash   - Wrong previous_hash linkage");
+        eprintln!("  skip-sequence  - Skip ahead in sequence numbers");
+        eprintln!("  replay         - Replay an old update");
+        eprintln!();
+        eprintln!("Examples:");
+        eprintln!("  danger publish-invalid bcrt1q... invalid-hash");
+        eprintln!("  danger publish-invalid bcrt1q... skip-sequence");
+        return Ok(());
+    }
+
+    let reserves_id = &args[0];
+    let violation_type = &args[1];
+    let config_args: Vec<String> = args.iter().skip(2).cloned().collect();
+
+    let config = parse_config(&config_args)?;
+
+    let relay_url = config.relays.first()
+        .ok_or("No relay configured. Use --relay <url>")?
+        .clone();
+
+    let secret_key = SecretKey::from_slice(&config.seed)
+        .map_err(|e| format!("Invalid seed: {}", e))?;
+    let secp = Secp256k1::new();
+
+    // Get the node to access the ledger
+    let node = Node::new(config).await?;
+
+    let (_, ledger) = node.get_ledger_by_reserves_id(reserves_id)
+        .ok_or_else(|| format!("Ledger not found: {}", reserves_id))?;
+
+    if ledger.history.is_empty() {
+        return Err("Ledger has no history - cannot create invalid update".into());
+    }
+
+    let last_update = ledger.history.last().unwrap();
+    let current_seq = last_update.sequence_number;
+    let current_hash = last_update.current_hash;
+
+    println!("=== DANGER: Publishing Invalid Ledger Update ===");
+    println!();
+    println!("WARNING: This creates a non-conforming update!");
+    println!("Only use for testing recovery mechanisms.");
+    println!();
+    println!("Ledger: {}", reserves_id);
+    println!("Current sequence: {}", current_seq);
+    println!("Current hash: {}...", &hex::encode(current_hash)[..16]);
+    println!("Violation type: {}", violation_type);
+    println!();
+
+    // Create the invalid update based on violation type
+    let invalid_update: SignedLedgerUpdate = match violation_type.as_str() {
+        "invalid-hash" => {
+            // Create update with wrong previous_hash
+            let wrong_prev_hash = {
+                let mut h = current_hash;
+                h[0] ^= 0xFF; // Flip some bits
+                h[1] ^= 0xAA;
+                h
+            };
+
+            // Create a dummy message (empty marker)
+            let dummy_message = vec![0u8; 8]; // Just some bytes
+            let message_type: u16 = 0x0001; // Arbitrary
+
+            let new_seq = current_seq + 1;
+
+            // Compute hash (will be valid for this malformed update)
+            let computed_hash = {
+                let mut hasher = Sha256::new();
+                hasher.update(&new_seq.to_le_bytes());
+                hasher.update(&wrong_prev_hash);
+                hasher.update(&dummy_message);
+                let result = hasher.finalize();
+                let mut hash = [0u8; 32];
+                hash.copy_from_slice(&result);
+                hash
+            };
+
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+
+            // Sign with operator key only (partner sig will be empty)
+            let signing_data = {
+                let mut data = Vec::new();
+                data.extend_from_slice(&dummy_message);
+                data.extend_from_slice(&message_type.to_le_bytes());
+                data.extend_from_slice(&new_seq.to_le_bytes());
+                data.extend_from_slice(&wrong_prev_hash);
+                data.extend_from_slice(&computed_hash);
+                data.extend_from_slice(&timestamp.to_le_bytes());
+                data
+            };
+
+            // Sign
+            let msg_hash = sha256_hash(&signing_data);
+            let message = Message::from_digest(msg_hash);
+            let sig = secp.sign_schnorr(&message, &secret_key.keypair(&secp));
+            let operator_signature = sig.serialize();
+
+            SignedLedgerUpdate {
+                message: dummy_message,
+                message_type,
+                operator_id: node.node_id,
+                reserves_id: reserves_id.to_string(),
+                sequence_number: new_seq,
+                previous_hash: wrong_prev_hash, // INVALID!
+                current_hash: computed_hash,
+                timestamp,
+                block_height: 0,
+                block_hash: [0u8; 32],
+                partner_signature: [0u8; 64],
+                operator_signature,
+            }
+        }
+
+        "skip-sequence" => {
+            // Create update that skips sequence numbers
+            let skipped_seq = current_seq + 5; // Skip 4 sequence numbers
+
+            let dummy_message = vec![0u8; 8];
+            let message_type: u16 = 0x0001;
+
+            // Still link to correct previous hash
+            let computed_hash = {
+                let mut hasher = Sha256::new();
+                hasher.update(&skipped_seq.to_le_bytes());
+                hasher.update(&current_hash);
+                hasher.update(&dummy_message);
+                let result = hasher.finalize();
+                let mut hash = [0u8; 32];
+                hash.copy_from_slice(&result);
+                hash
+            };
+
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+
+            let signing_data = {
+                let mut data = Vec::new();
+                data.extend_from_slice(&dummy_message);
+                data.extend_from_slice(&message_type.to_le_bytes());
+                data.extend_from_slice(&skipped_seq.to_le_bytes());
+                data.extend_from_slice(&current_hash);
+                data.extend_from_slice(&computed_hash);
+                data.extend_from_slice(&timestamp.to_le_bytes());
+                data
+            };
+
+            let msg_hash = sha256_hash(&signing_data);
+            let message = Message::from_digest(msg_hash);
+            let sig = secp.sign_schnorr(&message, &secret_key.keypair(&secp));
+            let operator_signature = sig.serialize();
+
+            SignedLedgerUpdate {
+                message: dummy_message,
+                message_type,
+                operator_id: node.node_id,
+                reserves_id: reserves_id.to_string(),
+                sequence_number: skipped_seq, // INVALID! Skips seq numbers
+                previous_hash: current_hash,
+                current_hash: computed_hash,
+                timestamp,
+                block_height: 0,
+                block_hash: [0u8; 32],
+                partner_signature: [0u8; 64],
+                operator_signature,
+            }
+        }
+
+        "replay" => {
+            // Re-publish an old update (but modify it slightly so it's detectable)
+            if ledger.history.len() < 2 {
+                return Err("Need at least 2 updates to create replay attack".into());
+            }
+
+            // Get an old update and modify its message slightly
+            let old_update = &ledger.history[ledger.history.len() / 2];
+            let mut replayed = old_update.clone();
+
+            // Modify timestamp so it's different
+            replayed.timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+
+            // Re-sign with our key
+            let signing_data = {
+                let mut data = Vec::new();
+                data.extend_from_slice(&replayed.message);
+                data.extend_from_slice(&replayed.message_type.to_le_bytes());
+                data.extend_from_slice(&replayed.sequence_number.to_le_bytes());
+                data.extend_from_slice(&replayed.previous_hash);
+                data.extend_from_slice(&replayed.current_hash);
+                data.extend_from_slice(&replayed.timestamp.to_le_bytes());
+                data
+            };
+
+            let msg_hash = sha256_hash(&signing_data);
+            let message = Message::from_digest(msg_hash);
+            let sig = secp.sign_schnorr(&message, &secret_key.keypair(&secp));
+            replayed.operator_signature = sig.serialize();
+
+            println!("Replaying update at sequence {} with modified timestamp", replayed.sequence_number);
+
+            replayed
+        }
+
+        unknown => {
+            return Err(format!("Unknown violation type: {}. Valid: invalid-hash, skip-sequence, replay", unknown).into());
+        }
+    };
+
+    println!("Created invalid update:");
+    println!("  Sequence: {}", invalid_update.sequence_number);
+    println!("  Previous hash: {}...", &hex::encode(invalid_update.previous_hash)[..16]);
+    println!("  Current hash: {}...", &hex::encode(invalid_update.current_hash)[..16]);
+
+    // Broadcast to Nostr
+    println!();
+    println!("Broadcasting to relay: {}", relay_url);
+
+    let transport = NostrTransportBuilder::new(secret_key)
+        .relay(&relay_url)
+        .build()
+        .await?;
+
+    let event_id = transport.broadcast_ledger_update(&invalid_update).await?;
+
+    transport.disconnect().await;
+
+    println!("Published invalid update!");
+    println!("  Event ID: {}", event_id);
+    println!();
+    println!("To test recovery, try:");
+    println!("  deposits-bdk nostr import {}:{}", node.node_id, reserves_id);
+    println!("  deposits-bdk ledger validate {}", reserves_id);
+
+    Ok(())
+}
+
+#[cfg(feature = "dangerous-testing")]
+fn sha256_hash(data: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    let result = hasher.finalize();
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&result);
+    hash
 }

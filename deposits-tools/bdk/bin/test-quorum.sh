@@ -590,6 +590,88 @@ full_validate_ledgers() {
 }
 
 # ============================================================================
+# Phase 9: Test Invalid Update Detection
+# ============================================================================
+
+test_invalid_update_detection() {
+    log_info ""
+    log_info "=== Phase 9: Invalid Update Detection Test ==="
+    log_info "(Alice publishes invalid update, Bob and Charlie detect it)"
+    echo ""
+
+    local alice_reserves=$(get_value "reserves_id_bdk-alice")
+    local alice_ledger_id=$(get_value "ledger_id_bdk-alice")
+
+    # First, Alice exports her valid ledger to Nostr
+    log_info "Alice exporting valid ledger to Nostr..."
+    run_bdk_cmd "bdk-alice" nostr export "$alice_ledger_id" >/dev/null 2>&1
+
+    # Verify Alice's ledger is valid on Nostr before the attack
+    log_info "Verifying Alice's ledger is valid before attack..."
+    local pre_validate=$(run_bdk_cmd "bdk-bob" nostr validate "$alice_ledger_id" 2>&1)
+    if echo "$pre_validate" | grep -q "Valid: YES"; then
+        local update_count=$(echo "$pre_validate" | grep "Updates:" | awk '{print $2}')
+        test_pass "alice's ledger is valid on Nostr ($update_count updates)"
+    else
+        log_warn "Alice's ledger validation failed before attack"
+        echo "$pre_validate" | head -10
+    fi
+
+    # Alice publishes an invalid update
+    log_info "Alice publishing invalid update (invalid-hash violation)..."
+    local danger_output=$(run_bdk_cmd "bdk-alice" danger publish-invalid \
+        "$alice_reserves" invalid-hash 2>&1)
+
+    if echo "$danger_output" | grep -q "Published invalid update"; then
+        local event_id=$(echo "$danger_output" | grep "Event ID:" | awk '{print $3}')
+        test_pass "alice published invalid update: ${event_id:0:16}..."
+    else
+        log_warn "Failed to publish invalid update, skipping detection test"
+        echo "Output: $danger_output"
+        return 0
+    fi
+
+    # Give Nostr time to propagate
+    sleep 2
+
+    # Bob validates Alice's ledger from Nostr - should detect the broken hash chain
+    log_info "Bob validating Alice's ledger from Nostr..."
+    local bob_validate=$(run_bdk_cmd "bdk-bob" nostr validate "$alice_ledger_id" 2>&1)
+
+    if echo "$bob_validate" | grep -q "Valid: NO"; then
+        local errors=$(echo "$bob_validate" | grep "Errors:" | awk '{print $2}')
+        local issue=$(echo "$bob_validate" | grep -E "^\s+-" | head -1 | sed 's/^\s*- //')
+        test_pass "bob detected invalid update ($errors errors): ${issue:0:50}..."
+    elif echo "$bob_validate" | grep -q "Valid: YES"; then
+        test_fail "bob did NOT detect invalid update (reported valid)"
+        echo "Validation output:"
+        echo "$bob_validate" | head -15
+    else
+        log_warn "bob: unexpected validation output"
+        echo "$bob_validate" | head -10
+    fi
+
+    # Charlie validates Alice's ledger from Nostr
+    log_info "Charlie validating Alice's ledger from Nostr..."
+    local charlie_validate=$(run_bdk_cmd "bdk-charlie" nostr validate "$alice_ledger_id" 2>&1)
+
+    if echo "$charlie_validate" | grep -q "Valid: NO"; then
+        local errors=$(echo "$charlie_validate" | grep "Errors:" | awk '{print $2}')
+        local issue=$(echo "$charlie_validate" | grep -E "^\s+-" | head -1 | sed 's/^\s*- //')
+        test_pass "charlie detected invalid update ($errors errors): ${issue:0:50}..."
+    elif echo "$charlie_validate" | grep -q "Valid: YES"; then
+        test_fail "charlie did NOT detect invalid update (reported valid)"
+        echo "Validation output:"
+        echo "$charlie_validate" | head -15
+    else
+        log_warn "charlie: unexpected validation output"
+        echo "$charlie_validate" | head -10
+    fi
+
+    log_info "Invalid update detection test complete"
+}
+
+# ============================================================================
 # Show final state
 # ============================================================================
 
@@ -646,6 +728,7 @@ main() {
     mine_to_enforcement
     validate_ledgers
     full_validate_ledgers
+    test_invalid_update_detection
     show_final_state
 
     echo ""
