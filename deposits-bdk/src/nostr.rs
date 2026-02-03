@@ -10,28 +10,34 @@
 //! Uses Nostr encrypted direct messages (NIP-04) to send deposits protocol
 //! messages between peers, and public events for ledger updates.
 //!
+//! # Ledger Addressing
+//!
+//! All ledger-related events are addressed by **ledger_id** (a 64-char hex hash),
+//! NOT by operator pubkey. This allows custody to transfer between operators
+//! while maintaining the same ledger identity.
+//!
 //! # Custom Kinds
 //!
 //! - **Kind 9100**: Ledger updates (regular event, not replaceable)
-//!   - Tag `d`: `<operator_pubkey>:<reserves_id>` (ledger identifier)
+//!   - Tag `d`: ledger_id (64-char hex hash)
 //!   - Tag `seq`: sequence number
 //!   - Tag `prev`: previous hash (hex)
 //!   - Tag `hash`: current hash (hex)
 //!   - Content: base64-encoded TLV wire format of SignedLedgerUpdate
 //!
 //! - **Kind 9101**: Ledger requests (deposit_open, etc.)
-//!   - Tag `l`: `<operator_pubkey>:<reserves_id>` (ledger identifier)
+//!   - Tag `l`: ledger_id (64-char hex hash)
 //!   - Tag `action`: action name (e.g., "deposit_open")
 //!   - Content: JSON with action parameters
 //!
 //! - **Kind 9102**: Ledger responses (replies to requests)
 //!   - Tag `e`: reference to request event ID
-//!   - Tag `l`: ledger identifier
+//!   - Tag `l`: ledger_id
 //!   - Tag `status`: "ok" or "error"
 //!   - Content: JSON with result or error message
 //!
 //! - **Kind 9103**: Ledger disputes (invalid ledger detected)
-//!   - Tag `l`: ledger identifier
+//!   - Tag `d`: ledger_id
 //!   - Tag `reason`: dispute reason (e.g., "hash_chain_broken")
 //!   - Tag `disputer`: disputer's pubkey (hex)
 //!   - Content: JSON with LedgerDispute details
@@ -139,7 +145,7 @@ pub struct InboundLedgerUpdate {
     /// The signed ledger update
     pub update: SignedLedgerUpdate,
 
-    /// Ledger identifier (operator_pubkey:reserves_id)
+    /// Ledger identifier (64-char hex hash)
     pub ledger_id: String,
 
     /// Nostr event timestamp
@@ -155,7 +161,7 @@ pub struct LedgerRequest {
     /// Action to perform
     pub action: String,
 
-    /// Ledger identifier (operator:reserves_id)
+    /// Ledger identifier (64-char hex hash)
     pub ledger_id: String,
 
     /// Action-specific parameters as JSON
@@ -211,7 +217,7 @@ pub struct LedgerDispute {
     /// The disputer's secp256k1 pubkey (who detected the violation)
     pub disputer_pubkey: String,
 
-    /// Ledger identifier (operator:reserves_id)
+    /// Ledger identifier (64-char hex hash)
     pub ledger_id: String,
 
     /// Reason for dispute (e.g., "hash_chain_broken", "invalid_signature", "business_rule_violation")
@@ -444,7 +450,7 @@ impl NostrTransport {
 
     /// Subscribe to ledger updates for a specific ledger.
     ///
-    /// The ledger_id format is `<operator_pubkey>:<reserves_id>`.
+    /// The ledger_id is a 64-char hex hash that uniquely identifies the ledger.
     pub async fn subscribe_to_ledger(&self, ledger_id: &str) -> Result<(), Error> {
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_UPDATE))
