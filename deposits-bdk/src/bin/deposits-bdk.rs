@@ -5497,12 +5497,21 @@ async fn recovery_status(args: &[String]) -> Result<(), Box<dyn std::error::Erro
 ///
 /// This command:
 /// 1. Fetches the target ledger from Nostr
-/// 2. Validates it and finds the last valid state
-/// 3. Creates a CustodyAcquire operation signed by us
-/// 4. Publishes the CustodyAcquire to Nostr
-/// Complete a recovery after quorum has agreed
-/// Checks for sufficient agreements, then executes the custody transfer.
+/// DEPRECATED: Use the new dispute protocol commands instead:
+///   recovery dispute -> recovery rebuild -> recovery arm -> recovery claim -> recovery spend
+///
+/// This legacy command attempted to do everything in one step, which doesn't follow
+/// the proper dispute protocol (CustodyDispute -> CustodyArmed -> CustodyAcquire).
 async fn recovery_complete(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    eprintln!("WARNING: 'recovery complete' is deprecated and uses the old protocol.");
+    eprintln!("Please use the new dispute protocol commands instead:");
+    eprintln!("  1. recovery dispute <ledger_id>   - Open dispute with CustodyDispute");
+    eprintln!("  2. recovery rebuild <ledger_id>   - Rebuild quorum");
+    eprintln!("  3. recovery arm <ledger_id>       - Publish CustodyArmed pre-commitment");
+    eprintln!("  4. recovery claim <ledger_id>     - Claim with CustodyAcquire/CustodyYield");
+    eprintln!("  5. recovery spend <ledger_id>     - Execute on-chain spend");
+    eprintln!();
+
     use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey, PublicKey};
     use bitcoin::hashes::{Hash, sha256};
     use deposits_core::messages::LedgerOperation;
@@ -6398,12 +6407,20 @@ async fn recovery_complete(args: &[String]) -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
-/// Publish a CustodyAcquire operation as the new custodian.
+/// DEPRECATED: Use the new dispute protocol commands instead:
+///   recovery dispute -> recovery rebuild -> recovery arm -> recovery claim -> recovery spend
 ///
-/// This command is run by the new custodian after another party completed the
-/// on-chain custody transfer. It signs and publishes the CustodyAcquire ledger
-/// operation, officially recording the custody change on the ledger.
+/// This legacy command published CustodyAcquire directly without following
+/// the proper dispute protocol (CustodyDispute -> CustodyArmed -> CustodyAcquire).
 async fn recovery_publish_transfer(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    eprintln!("WARNING: 'recovery publish-transfer' is deprecated and uses the old protocol.");
+    eprintln!("Please use the new dispute protocol commands instead:");
+    eprintln!("  1. recovery dispute <ledger_id>   - Open dispute with CustodyDispute");
+    eprintln!("  2. recovery rebuild <ledger_id>   - Rebuild quorum");
+    eprintln!("  3. recovery arm <ledger_id>       - Publish CustodyArmed pre-commitment");
+    eprintln!("  4. recovery claim <ledger_id>     - Claim with CustodyAcquire/CustodyYield");
+    eprintln!("  5. recovery spend <ledger_id>     - Execute on-chain spend");
+    eprintln!();
     use bitcoin::hashes::{Hash, sha256};
     use bitcoin::secp256k1::{Keypair, Secp256k1};
     use deposits_bdk::nostr::{NostrTransportBuilder, KIND_LEDGER_UPDATE, KIND_LEDGER_DISPUTE};
@@ -6735,11 +6752,14 @@ async fn recovery_publish_transfer(args: &[String]) -> Result<(), Box<dyn std::e
 /// Prepare as a candidate for custody acquisition.
 ///
 /// This command is run by each party who wants to be a candidate in the recovery.
-/// It publishes a CustodyAcquire operation with this node as the new_custodian,
-/// along with the necessary quorum setup and attestations.
+/// It publishes a CustodyDispute operation to open a dispute on the ledger.
+/// This is the first step in the dispute protocol.
 ///
-/// After all candidates have prepared, anyone can execute the on-chain spend
-/// once the entropy block arrives. The entropy will select one candidate.
+/// After CustodyDispute, candidates must:
+/// 1. Rebuild quorum (recovery rebuild)
+/// 2. Publish CustodyArmed pre-commitment (recovery arm)
+/// 3. Wait for entropy block
+/// 4. Claim custody with CustodyAcquire/CustodyYield (recovery claim)
 async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     use bitcoin::hashes::{Hash, sha256};
     use bitcoin::secp256k1::{Keypair, Secp256k1, Message};
@@ -6912,22 +6932,17 @@ async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error::Err
     // Create evidence hash
     let evidence_hash = *sha256::Hash::hash(violation_details.as_bytes()).as_byte_array();
 
-    // The candidate pool will include all candidates who publish CustodyAcquire
-    // For now, just include ourselves - validators will merge all candidates
-    let candidate_pool = vec![our_pubkey];
-
-    // Create the CustodyAcquire operation
-    // NOTE: In the full dispute protocol, this follows CustodyDispute -> CustodyArmed
-    let custody_acquire = LedgerOperation::CustodyAcquire {
-        new_custodian: our_pubkey,
-        entropy_block_height,
-        entropy_block_hash,
+    // Create the CustodyDispute operation (opens the dispute)
+    // This is the correct first step in the dispute protocol
+    let custody_dispute = LedgerOperation::CustodyDispute {
+        last_valid_sequence,
+        reason: violation_details.clone(),
     };
     // Record for audit trail
-    let _ = (violation_details.clone(), last_valid_hash, last_valid_sequence, evidence_hash, initiation_block, candidate_pool);
+    let _ = (last_valid_hash, evidence_hash, initiation_block, entropy_block_height, entropy_block_hash);
 
     // Serialize the operation
-    let message_bytes = custody_acquire.tlv_encode();
+    let message_bytes = custody_dispute.tlv_encode();
 
     // Compute the new hash (forking from last valid)
     let sequence = last_valid_sequence + 1;
@@ -6975,7 +6990,7 @@ async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     // Publish to Nostr
     println!();
-    println!("Publishing CustodyAcquire to Nostr...");
+    println!("Publishing CustodyDispute to Nostr...");
 
     let publish_transport = NostrTransportBuilder::new(secret_key)
         .relay(&relay_url)
@@ -6985,16 +7000,18 @@ async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error::Err
     publish_transport.broadcast_ledger_update(&signed_update).await?;
 
     println!();
-    println!("CustodyAcquire published successfully!");
-    println!("  Candidate: {}...", &our_pubkey.to_string()[..16]);
+    println!("CustodyDispute published successfully!");
+    println!("  Disputer: {}...", &our_pubkey.to_string()[..16]);
     println!("  Sequence: {} (forked from {})", sequence, last_valid_sequence);
     println!("  Hash: {}...", &hex::encode(new_hash)[..16]);
+    println!("  Reason: {}", violation_details);
     println!();
-    println!("Next steps:");
-    println!("  1. Add quorum members: collateral add-quorum-member <operator_pubkey>");
-    println!("  2. Get attestations: collateral request-attestation <operator_pubkey>");
-    println!("  3. Wait for entropy block: {}", entropy_block_height);
-    println!("  4. After entropy: recovery spend <ledger_id>");
+    println!("Next steps (dispute protocol):");
+    println!("  1. Rebuild quorum: recovery rebuild <ledger_id>");
+    println!("  2. Arm for entropy: recovery arm <ledger_id>");
+    println!("  3. Wait for entropy block (armed_block + 6)");
+    println!("  4. Claim custody: recovery claim <ledger_id>");
+    println!("  5. On-chain spend: recovery spend <ledger_id>");
 
     Ok(())
 }
