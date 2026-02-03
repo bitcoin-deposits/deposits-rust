@@ -7697,9 +7697,15 @@ async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     println!();
     println!("Ledger is now in ARMED state. Quorum is locked.");
     println!();
+    println!("IMPORTANT: ALL candidates MUST run 'recovery claim' after entropy block!");
+    println!("  - Winner publishes CustodyAcquire (gains custody)");
+    println!("  - Losers publish CustodyYield (tombstones their branch)");
+    println!();
     println!("Next steps:");
     println!("  1. Wait for entropy block: {} (current: {})", entropy_block, current_block_height);
     println!("  2. After entropy block: recovery claim {}", &ledger_id[..16]);
+    println!();
+    println!("The entropy block hash determines the winner. Run 'recovery claim' regardless of outcome.");
 
     Ok(())
 }
@@ -7865,10 +7871,14 @@ async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::error::E
     let we_won = winner == our_pubkey;
 
     println!();
+    println!("Entropy selection result:");
+    println!("  Winner: {}...", &winner.to_string()[..16]);
+    println!();
     if we_won {
-        println!("🎉 YOU WON the entropy selection!");
+        println!("🎉 YOU WON! You will become the new custodian.");
     } else {
-        println!("You did not win. Winner: {}...", &winner.to_string()[..16]);
+        println!("You did NOT win. You must publish CustodyYield to tombstone your branch.");
+        println!("This is required to release your quorum members from their attestation obligations.");
     }
 
     // Create the appropriate operation
@@ -7951,8 +7961,9 @@ async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::error::E
         println!("  recovery spend {} - Execute on-chain spend to claim reserves", &ledger_id[..16]);
     } else {
         println!();
-        println!("Your branch is now TOMBSTONED.");
-        println!("Your quorum members are released from attestation obligations.");
+        println!("✓ Your branch is now TOMBSTONED (CustodyYield published).");
+        println!("  Your quorum members are released from attestation obligations.");
+        println!("  The winner ({}...) can now proceed with on-chain spend.", &winner.to_string()[..16]);
     }
 
     Ok(())
