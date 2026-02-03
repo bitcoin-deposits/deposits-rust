@@ -3096,26 +3096,11 @@ async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         }
     }
 
-    // Sort and filter to canonical hash chain
-    // When there's a fork (same sequence, different hash), we follow the chain
-    // where previous_hash matches the prior update's current_hash
+    // Sort updates by sequence number but keep ALL updates (including branches)
     for updates in ledgers.values_mut() {
-        updates.sort_by_key(|u| u.sequence_number);
-
-        // Build canonical chain by following hash links
-        let mut canonical: Vec<SignedLedgerUpdate> = Vec::new();
-        let mut expected_prev_hash = [0u8; 32]; // First update has all-zeros previous_hash
-
-        for update in updates.iter() {
-            // If this update follows our chain
-            if update.previous_hash == expected_prev_hash {
-                expected_prev_hash = update.current_hash;
-                canonical.push(update.clone());
-            }
-            // Skip updates that don't follow the chain (fork branches)
-        }
-
-        *updates = canonical;
+        updates.sort_by_key(|u| (u.sequence_number, u.current_hash));
+        // Deduplicate by (sequence, hash) - same update from multiple relays
+        updates.dedup_by(|a, b| a.sequence_number == b.sequence_number && a.current_hash == b.current_hash);
     }
 
     println!("Found {} ledger(s) with updates:", ledgers.len());
@@ -3193,43 +3178,89 @@ async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 
         if dry_run {
             println!("  (dry-run: would import {} updates)", updates.len());
-            // Print updates in same format as ledger history
+
+            // Build tree structure: map from previous_hash to children
+            let mut children: std::collections::HashMap<[u8; 32], Vec<&SignedLedgerUpdate>> = std::collections::HashMap::new();
             for update in updates {
-                let seq = update.sequence_number;
-                let prev = &update.previous_hash;
-                let curr = &update.current_hash;
-
-                // Determine signature status and signer
-                let has_partner_sig = update.partner_signature != [0u8; 64];
-                let has_operator_sig = update.operator_signature != [0u8; 64];
-                let sig_status = format!("[{}{}]",
-                    if has_operator_sig { "O" } else { "·" },
-                    if has_partner_sig { "P" } else { "·" }
-                );
-
-                // Show signer: actual operator_id from update
-                let signer = if has_operator_sig {
-                    let pk = update.operator_id.serialize();
-                    format!("{:02x}{:02x}", pk[1], pk[2])
-                } else {
-                    "····".to_string()
-                };
-
-                // Get operation name and details
-                let (op_name, op_details) = format_operation(update.message_type, &update.message);
-
-                // Truncated hash: last 2 bytes of prev, last 2 bytes of curr
-                println!("{:>4} ↑{:<6} [{:02x}{:02x}~{:02x}{:02x}] {} {} {}{}",
-                    seq,
-                    update.block_height,
-                    prev[30], prev[31],
-                    curr[30], curr[31],
-                    sig_status,
-                    signer,
-                    op_name,
-                    if op_details.is_empty() { String::new() } else { format!("  {}", op_details) }
-                );
+                children.entry(update.previous_hash).or_default().push(update);
             }
+
+            // Sort children by sequence number
+            for kids in children.values_mut() {
+                kids.sort_by_key(|u| u.sequence_number);
+            }
+
+            // Print tree recursively
+            fn print_tree(
+                children: &std::collections::HashMap<[u8; 32], Vec<&SignedLedgerUpdate>>,
+                parent_hash: [u8; 32],
+                prefix: &str,
+                is_branch: bool,
+            ) {
+                if let Some(kids) = children.get(&parent_hash) {
+                    for (i, update) in kids.iter().enumerate() {
+                        let is_last = i == kids.len() - 1;
+                        let seq = update.sequence_number;
+                        let prev = &update.previous_hash;
+                        let curr = &update.current_hash;
+
+                        // Determine signature status and signer
+                        let has_partner_sig = update.partner_signature != [0u8; 64];
+                        let has_operator_sig = update.operator_signature != [0u8; 64];
+                        let sig_status = format!("[{}{}]",
+                            if has_operator_sig { "O" } else { "·" },
+                            if has_partner_sig { "P" } else { "·" }
+                        );
+
+                        let signer = if has_operator_sig {
+                            let pk = update.operator_id.serialize();
+                            format!("{:02x}{:02x}", pk[1], pk[2])
+                        } else {
+                            "····".to_string()
+                        };
+
+                        let (op_name, op_details) = format_operation(update.message_type, &update.message);
+
+                        // Tree characters for branches
+                        let branch_char = if is_branch {
+                            if is_last { "└─" } else { "├─" }
+                        } else {
+                            "  "
+                        };
+
+                        println!("{}{}{:>4} ↑{:<6} [{:02x}{:02x}~{:02x}{:02x}] {} {} {}{}",
+                            prefix,
+                            branch_char,
+                            seq,
+                            update.block_height,
+                            prev[30], prev[31],
+                            curr[30], curr[31],
+                            sig_status,
+                            signer,
+                            op_name,
+                            if op_details.is_empty() { String::new() } else { format!("  {}", op_details) }
+                        );
+
+                        // Check if this update has children (continuations or branches)
+                        let child_count = children.get(&update.current_hash).map(|c| c.len()).unwrap_or(0);
+
+                        // Build prefix for children
+                        let new_prefix = if is_branch {
+                            format!("{}{}", prefix, if is_last { "  " } else { "│ " })
+                        } else {
+                            prefix.to_string()
+                        };
+
+                        // Print children - mark as branch if there are multiple children at same level
+                        // or if this node itself was a branch
+                        let has_multiple_children = child_count > 1;
+                        print_tree(children, update.current_hash, &new_prefix, has_multiple_children);
+                    }
+                }
+            }
+
+            // Start from genesis (previous_hash = [0; 32])
+            print_tree(&children, [0u8; 32], "", false);
         } else if let Some(ref n) = node {
             // Import the ledger
             match n.import_ledger(export) {
