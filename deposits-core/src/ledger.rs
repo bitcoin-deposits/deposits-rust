@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{DepositsError, DepositsResult};
 use crate::messages::LedgerOperation;
-use crate::types::{Deposit, LedgerState, ReservesOutput, SignedLedgerUpdate};
+use crate::types::{Deposit, DisputeState, LedgerState, ReservesOutput, SignedLedgerUpdate};
 
 /// Role of a node in a ledger relationship.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -297,6 +297,204 @@ impl Ledger {
     /// Check if there are gaps in the update history.
     pub fn has_gaps(&self) -> bool {
         self.state.has_pending_updates()
+    }
+
+    // ========================================================================
+    // Signer Validation (Dispute Protocol)
+    // ========================================================================
+
+    /// Validate that an update is signed by an authorized pubkey.
+    ///
+    /// Per the dispute protocol:
+    /// - Normal case: update must be signed by `parent_pubkey`
+    /// - Exception: `CustodyDispute` can be signed by anyone who was in the quorum
+    ///   at the fork point (stored in `quorum_at_fork`)
+    ///
+    /// This should be called BEFORE appending an incoming signed update.
+    pub fn validate_update_signer(&self, update: &SignedLedgerUpdate) -> DepositsResult<()> {
+        use crate::tlv::TlvDecode;
+
+        let signer = &update.operator_id;
+
+        // Decode the operation to check if it's CustodyDispute
+        let operation = LedgerOperation::tlv_decode(&update.message)
+            .map_err(|e| DepositsError::InvalidMessage { reason: format!("Failed to decode operation: {}", e) })?;
+
+        // CustodyDispute exception: can be signed by any quorum member at fork point
+        if matches!(operation, LedgerOperation::CustodyDispute { .. }) {
+            // For the first CustodyDispute (entering disputed state from normal),
+            // the signer must be in the current quorum
+            if self.state.dispute_state == DisputeState::Normal {
+                if !self.state.quorum_members.contains(signer) {
+                    return Err(DepositsError::ProtocolViolation {
+                        violation_type: "custody_dispute_unauthorized".to_string(),
+                        details: format!(
+                            "CustodyDispute signer {} is not a quorum member",
+                            signer
+                        ),
+                    });
+                }
+                // Valid - quorum member can open dispute
+                return Ok(());
+            }
+            // If already disputed, this shouldn't happen (state validation prevents it)
+        }
+
+        // Normal case: must be signed by parent_pubkey
+        if signer != &self.state.parent_pubkey {
+            return Err(DepositsError::ProtocolViolation {
+                violation_type: "invalid_signer".to_string(),
+                details: format!(
+                    "Update signed by {} but parent_pubkey is {}",
+                    signer, self.state.parent_pubkey
+                ),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Validate an incoming signed update completely.
+    ///
+    /// This performs:
+    /// 1. Signature verification
+    /// 2. Signer authorization (dispute protocol rules)
+    /// 3. Operation validation (dispute state rules)
+    /// 4. Hash chain validation
+    ///
+    /// Call this before accepting an update from a peer.
+    pub fn validate_incoming_update(
+        &self,
+        update: &SignedLedgerUpdate,
+        partner_pubkey: Option<&PublicKey>,
+    ) -> DepositsResult<()> {
+        // 1. Verify signatures
+        update.verify_signatures(partner_pubkey)
+            .map_err(|e| DepositsError::ProtocolViolation {
+                violation_type: "invalid_signature".to_string(),
+                details: e,
+            })?;
+
+        // 2. Validate signer is authorized
+        self.validate_update_signer(update)?;
+
+        // 3. Validate hash chain
+        if update.sequence_number > 0 {
+            let expected_prev_hash = if update.sequence_number as usize <= self.history.len() {
+                // We have the previous update
+                self.history.get(update.sequence_number as usize - 1)
+                    .map(|u| u.current_hash)
+                    .unwrap_or(self.state.hash)
+            } else {
+                // Future update - can't validate yet
+                return Ok(());
+            };
+
+            if update.previous_hash != expected_prev_hash {
+                return Err(DepositsError::ProtocolViolation {
+                    violation_type: "hash_chain_break".to_string(),
+                    details: format!(
+                        "Previous hash mismatch at seq {}: expected {:02x?}, got {:02x?}",
+                        update.sequence_number,
+                        &expected_prev_hash[..8],
+                        &update.previous_hash[..8]
+                    ),
+                });
+            }
+        }
+
+        // 4. Decode and validate operation against dispute state
+        use crate::tlv::TlvDecode;
+        let operation = LedgerOperation::tlv_decode(&update.message)
+            .map_err(|e| DepositsError::InvalidMessage { reason: format!("Failed to decode operation: {}", e) })?;
+
+        let discriminant = operation.discriminant();
+        if !self.state.dispute_state.allows_operation(discriminant) {
+            return Err(DepositsError::ProtocolViolation {
+                violation_type: "dispute_state_violation".to_string(),
+                details: format!(
+                    "Operation {} not allowed in {:?} state",
+                    discriminant, self.state.dispute_state
+                ),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Validate CustodyAcquire or CustodyYield against the entropy selection.
+    ///
+    /// This validates that:
+    /// - CustodyAcquire: the new_custodian is the entropy-selected winner
+    /// - CustodyYield: the parent_pubkey (branch owner) is NOT the winner
+    ///
+    /// # Arguments
+    /// * `operation` - The CustodyAcquire or CustodyYield operation
+    /// * `candidates` - All pubkeys who published CustodyArmed before the entropy block
+    ///
+    /// The caller is responsible for:
+    /// 1. Collecting all CustodyArmed updates from Nostr
+    /// 2. Filtering to only those before the entropy block height
+    /// 3. Extracting the parent_pubkey from each branch
+    pub fn validate_custody_resolution(
+        &self,
+        operation: &LedgerOperation,
+        candidates: &[PublicKey],
+    ) -> DepositsResult<()> {
+        use crate::types::{is_entropy_winner, select_entropy_winner};
+
+        match operation {
+            LedgerOperation::CustodyAcquire { new_custodian, entropy_block_hash, .. } => {
+                // The new_custodian must be the entropy-selected winner
+                if !is_entropy_winner(entropy_block_hash, new_custodian, candidates) {
+                    let actual_winner = select_entropy_winner(entropy_block_hash, candidates);
+                    return Err(DepositsError::ProtocolViolation {
+                        violation_type: "custody_acquire_not_winner".to_string(),
+                        details: format!(
+                            "CustodyAcquire new_custodian {} is not the entropy winner (winner: {:?})",
+                            new_custodian,
+                            actual_winner
+                        ),
+                    });
+                }
+            }
+            LedgerOperation::CustodyYield => {
+                // CustodyYield doesn't include entropy_block_hash
+                // Use validate_custody_yield() instead with the entropy hash
+            }
+            _ => {
+                // Not a custody resolution operation
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate CustodyYield against the entropy selection.
+    ///
+    /// Verifies that the branch owner (parent_pubkey) is NOT the entropy-selected winner.
+    /// If they were the winner, they should publish CustodyAcquire instead.
+    ///
+    /// # Arguments
+    /// * `entropy_block_hash` - The entropy block hash (from the winning CustodyAcquire)
+    /// * `candidates` - All pubkeys who published CustodyArmed before the entropy block
+    pub fn validate_custody_yield(
+        &self,
+        entropy_block_hash: &[u8; 32],
+        candidates: &[PublicKey],
+    ) -> DepositsResult<()> {
+        use crate::types::is_entropy_winner;
+
+        // The branch owner (parent_pubkey) must NOT be the winner
+        if is_entropy_winner(entropy_block_hash, &self.state.parent_pubkey, candidates) {
+            return Err(DepositsError::ProtocolViolation {
+                violation_type: "custody_yield_is_winner".to_string(),
+                details: format!(
+                    "CustodyYield invalid: {} is the entropy winner and should CustodyAcquire",
+                    self.state.parent_pubkey
+                ),
+            });
+        }
+        Ok(())
     }
 
     // ========================================================================
@@ -695,6 +893,18 @@ impl Ledger {
 
     /// Validate an operation before applying.
     fn validate_operation(&self, operation: &LedgerOperation) -> DepositsResult<()> {
+        // Check dispute state allows this operation type
+        let discriminant = operation.discriminant();
+        if !self.state.dispute_state.allows_operation(discriminant) {
+            return Err(DepositsError::ProtocolViolation {
+                violation_type: "dispute_state_violation".to_string(),
+                details: format!(
+                    "Operation {} not allowed in {:?} state",
+                    discriminant, self.state.dispute_state
+                ),
+            });
+        }
+
         match operation {
             LedgerOperation::ReservesIncrease { reserves_id: _, new_amount } => {
                 let current = self.reserves_amount();
@@ -845,6 +1055,33 @@ impl Ledger {
                         });
                     }
                 }
+            }
+            LedgerOperation::CustodyArmed { .. } => {
+                // Must have at least one quorum member to arm
+                if self.state.quorum_members.is_empty() {
+                    return Err(DepositsError::ProtocolViolation {
+                        violation_type: "custody_armed_no_quorum".to_string(),
+                        details: "Cannot arm without any quorum members".to_string(),
+                    });
+                }
+                // Must have at least one collateral attestation
+                if self.state.collateral_attestations.is_empty() {
+                    return Err(DepositsError::ProtocolViolation {
+                        violation_type: "custody_armed_no_attestations".to_string(),
+                        details: "Cannot arm without any collateral attestations".to_string(),
+                    });
+                }
+            }
+            LedgerOperation::CustodyAcquire { entropy_block_height, entropy_block_hash, .. } => {
+                // Basic validation: entropy block must be specified
+                if *entropy_block_height == 0 && *entropy_block_hash == [0u8; 32] {
+                    return Err(DepositsError::ProtocolViolation {
+                        violation_type: "custody_acquire_no_entropy".to_string(),
+                        details: "CustodyAcquire requires entropy block".to_string(),
+                    });
+                }
+                // Winner validation is done via validate_custody_resolution()
+                // which requires knowing all candidates (from Nostr observation)
             }
             _ => {
                 // Other operations have simpler or no validation
@@ -1042,15 +1279,42 @@ impl Ledger {
                     self.state.joined_quorums.push(membership);
                 }
             }
-            LedgerOperation::CustodyAcquire { new_custodian, .. } => {
-                // Transfer custody to the new operator
-                // After this operation, all future updates must be signed by new_custodian
-                self.state.operator_key = *new_custodian;
+            LedgerOperation::CustodyDispute { last_valid_sequence, .. } => {
+                // Opening a custody dispute:
+                // 1. Snapshot the current quorum for later verification
+                // 2. Disband the quorum (clear memberships)
+                // 3. Void all collateral attestations
+                // 4. Record the fork point
+                // 5. Transition to DISPUTED state
+                //
+                // Note: The parent_pubkey (dispute opener) is set by the caller
+                // after signature verification.
+                self.state.quorum_at_fork = self.state.quorum_members.clone();
+                self.state.dispute_fork_sequence = *last_valid_sequence;
+                self.state.quorum_members.clear();
+                self.state.collateral_attestations.clear();
+                self.state.dispute_state = DisputeState::Disputed;
             }
-            LedgerOperation::CustodyRelease => {
-                // This candidate was not selected - ledger branch is abandoned
-                // No state changes needed; validators verify on-chain that this
-                // candidate was not the entropy-selected winner
+            LedgerOperation::CustodyArmed { .. } => {
+                // Pre-commitment: candidate is ready for entropy selection
+                // Quorum is now locked - no more changes allowed
+                self.state.dispute_state = DisputeState::Armed;
+            }
+            LedgerOperation::CustodyAcquire { new_custodian, .. } => {
+                // Winner acquires custody:
+                // 1. Transfer operator role to the new custodian
+                // 2. Set parent_pubkey to new custodian
+                // 3. Transition back to NORMAL state
+                self.state.operator_key = *new_custodian;
+                self.state.parent_pubkey = *new_custodian;
+                self.state.dispute_state = DisputeState::Normal;
+                // Clear dispute-related state
+                self.state.quorum_at_fork.clear();
+                self.state.dispute_fork_sequence = 0;
+            }
+            LedgerOperation::CustodyYield => {
+                // Loser yields: tombstone this branch
+                self.state.dispute_state = DisputeState::Tombstoned;
             }
         }
         Ok(())

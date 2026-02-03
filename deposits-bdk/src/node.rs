@@ -952,9 +952,12 @@ impl Node {
     /// This creates a signed commitment from the operator to credit a deposit
     /// with funds sent to a specific address, up to a maximum amount, before
     /// a deadline block.
+    ///
+    /// The `ledger_id` should be the 64-char hex hash that identifies the ledger
+    /// (stable across custody transfers).
     pub fn create_deposit_offer(
         &self,
-        reserves_id: &str,
+        ledger_id: &str,
         deposit_pubkey: PublicKey,
         max_amount_sats: u64,
         min_amount_sats: u64,
@@ -971,7 +974,7 @@ impl Node {
         // Get the signing message and compute offer ID
         let signing_message = DepositOffer::signing_message(
             &self.node_id,
-            reserves_id,
+            ledger_id,
             &deposit_pubkey,
             &funding_address_str,
             max_amount_sats,
@@ -984,7 +987,7 @@ impl Node {
         let signature = deposits_core::create_deposit_offer_signature(
             &self.wallet.operator_secret(),
             &self.node_id,
-            reserves_id,
+            ledger_id,
             &deposit_pubkey,
             &funding_address_str,
             max_amount_sats,
@@ -995,7 +998,7 @@ impl Node {
         // Create the offer
         let offer = DepositOffer {
             operator_id: self.node_id,
-            reserves_id: reserves_id.to_string(),
+            ledger_id: ledger_id.to_string(),
             deposit_pubkey,
             funding_address: funding_address_str,
             max_amount_sats,
@@ -1098,6 +1101,12 @@ impl Node {
             map.insert(offer.offer_id, (offer, status));
         }
 
+        // Debug: print what we loaded
+        println!("DEBUG: Loaded {} deposit offers from {:?}", map.len(), offers_file);
+        for (offer_id, (offer, _status)) in &map {
+            println!("DEBUG:   offer_id={} ledger={}", hex::encode(&offer_id[..8]), &offer.ledger_id[..20.min(offer.ledger_id.len())]);
+        }
+
         tracing::info!("Loaded {} deposit offers from disk", map.len());
         Ok(map)
     }
@@ -1113,6 +1122,12 @@ impl Node {
 
         let contents = serde_json::to_string_pretty(&offers)
             .map_err(|e| Error::Wallet(format!("Failed to serialize deposit offers: {}", e)))?;
+
+        // Debug: print what we're saving
+        println!("DEBUG: Saving {} deposit offers to {:?}", offers.len(), offers_file);
+        for (offer, status) in &offers {
+            println!("DEBUG:   offer_id={} ledger={}", hex::encode(&offer.offer_id[..8]), &offer.ledger_id[..20.min(offer.ledger_id.len())]);
+        }
 
         std::fs::write(&offers_file, contents)
             .map_err(|e| Error::Wallet(format!("Failed to write deposit offers: {}", e)))?;
@@ -1740,8 +1755,15 @@ impl Node {
             .try_into()
             .map_err(|_| Error::Protocol("Invalid txid length".to_string()))?;
 
+        // Look up the ledger by ledger_id to get the current reserves_id
+        let (reserves_id, _) = self.get_ledger_by_ledger_id(&offer.ledger_id)
+            .ok_or_else(|| Error::Protocol(format!(
+                "Ledger not found for ledger_id: {}",
+                &offer.ledger_id[..16.min(offer.ledger_id.len())]
+            )))?;
+
         let new_balance = self.credit_deposit_onchain(
-            &offer.reserves_id,
+            &reserves_id,
             offer.deposit_pubkey,
             amount_msats,
             txid_bytes,
@@ -1850,6 +1872,20 @@ impl Node {
         for ((_operator, rid), ledger_arc) in ledgers.iter() {
             if rid == reserves_id {
                 let ledger = ledger_arc.read().unwrap();
+                return Some((rid.clone(), ledger.clone()));
+            }
+        }
+        None
+    }
+
+    /// Get a ledger by ledger_id (64-char hex hash)
+    /// Returns (reserves_id, ledger) tuple
+    /// The ledger_id is stable across custody transfers
+    pub fn get_ledger_by_ledger_id(&self, ledger_id_hex: &str) -> Option<(String, Ledger)> {
+        let ledgers = self.handler.ledgers.lock().unwrap();
+        for ((_operator, rid), ledger_arc) in ledgers.iter() {
+            let ledger = ledger_arc.read().unwrap();
+            if ledger.ledger_id_hex() == ledger_id_hex {
                 return Some((rid.clone(), ledger.clone()));
             }
         }

@@ -1423,6 +1423,36 @@ impl Wallet {
         // Finalize
         self.finalize_custody_transfer(&spend, &signatures)
     }
+
+    /// Create a mock wallet for testing
+    #[cfg(test)]
+    pub fn new_mock(data_dir: PathBuf) -> Self {
+        let secp = Secp256k1::new();
+        let operator_secret = SecretKey::from_slice(&[1u8; 32]).unwrap();
+        let operator_pubkey = PublicKey::from_secret_key(&secp, &operator_secret);
+
+        // Create a minimal wallet with a simple descriptor
+        let desc = "wpkh(tprv8ZgxMBicQKsPd9TeAdPADNnSyH9SSUUbTVeFszDE23Ki6TBB5nCefAdHkK8Fm3qMQR6sHwA56zqRmKmxnHk37JkiFzvncDqoKmPWubu7hDF/84'/1'/0'/0/*)";
+        let change_desc = "wpkh(tprv8ZgxMBicQKsPd9TeAdPADNnSyH9SSUUbTVeFszDE23Ki6TBB5nCefAdHkK8Fm3qMQR6sHwA56zqRmKmxnHk37JkiFzvncDqoKmPWubu7hDF/84'/1'/0'/1/*)";
+
+        let wallet = BdkWallet::create(desc, change_desc)
+            .network(Network::Signet)
+            .create_wallet_no_persist()
+            .expect("Failed to create mock wallet");
+
+        Self {
+            inner: Mutex::new(wallet),
+            electrum_url: "".to_string(),
+            network: Network::Signet,
+            operator_secret,
+            operator_pubkey,
+            reserves: RwLock::new(HashMap::new()),
+            taproot_reserves: RwLock::new(HashMap::new()),
+            block_height: Mutex::new(800_000),
+            block_hash: Mutex::new([0u8; 32]),
+            data_dir,
+        }
+    }
 }
 
 /// A reserves output ready for broadcast

@@ -151,7 +151,7 @@ mod tests {
             message: vec![],
             message_type: 10, // DepositOpen
             operator_id: valid_pubkey,
-            reserves_id: "partner123".to_string(),
+            ledger_id: [0u8; 32],
             sequence_number: 42,
             previous_hash: [0u8; 32],
             current_hash: [1u8; 32],

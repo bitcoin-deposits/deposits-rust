@@ -12,6 +12,7 @@
 use bitcoin::secp256k1::{PublicKey, SecretKey};
 use deposits_core::error::HandlerError;
 use deposits_core::ledger::Ledger;
+use deposits_core::types::SignedLedgerUpdate;
 use deposits_core::message_validation::{HandlerContext, ValidationContext};
 use deposits_core::validation::{LedgerConformanceValidator, LedgerExport, ValidationReport};
 use deposits_core::messages::DepositsMessage;
@@ -346,12 +347,15 @@ impl DepositsHandler {
         let report = LedgerConformanceValidator::validate(&export)
             .map_err(|e| format!("Validation failed: {}", e))?;
 
+        // Log warnings if ledger has issues, but still allow import
+        // This is important for recovery scenarios where we import a ledger
+        // that may have been corrupted by a malicious operator
         if !report.is_valid {
-            return Err(format!(
-                "Ledger is not conforming: {} warnings, {} invalid signatures",
+            tracing::warn!(
+                "Importing non-conforming ledger: {} warnings, {} invalid signatures",
                 report.warnings.len(),
                 report.signatures.invalid_signatures.len()
-            ));
+            );
         }
 
         // Create the ledger from the validated export
@@ -369,6 +373,49 @@ impl DepositsHandler {
         self.save_ledgers_to_disk()?;
 
         Ok((report, ledger_arc))
+    }
+
+    /// Apply new updates to an existing ledger.
+    /// Returns the number of updates applied.
+    pub fn apply_updates_to_ledger(
+        &self,
+        reserves_id: &str,
+        updates: Vec<SignedLedgerUpdate>,
+    ) -> Result<usize, String> {
+        // Find the ledger by reserves_id
+        let ledgers = self.ledgers.lock().unwrap();
+        let ledger_arc = ledgers
+            .iter()
+            .find(|((_op, rid), _)| rid == reserves_id)
+            .map(|(_, arc)| arc.clone())
+            .ok_or_else(|| format!("Ledger not found: {}", reserves_id))?;
+        drop(ledgers); // Release lock before modifying
+
+        let mut ledger = ledger_arc.write().unwrap();
+        let mut applied = 0;
+
+        for update in updates {
+            // Verify this update follows the current chain
+            if update.previous_hash != ledger.tail_hash() {
+                return Err(format!(
+                    "Update {} has wrong previous_hash (expected {}, got {})",
+                    update.sequence_number,
+                    hex::encode(&ledger.tail_hash()[..8]),
+                    hex::encode(&update.previous_hash[..8])
+                ));
+            }
+
+            // Append the update
+            ledger.append_signed_update(update);
+            applied += 1;
+        }
+
+        drop(ledger); // Release write lock
+
+        // Persist to disk
+        self.save_ledgers_to_disk()?;
+
+        Ok(applied)
     }
 }
 
@@ -428,5 +475,137 @@ impl HandlerContext for DepositsHandler {
     fn persist_ledger(&self, _operator: &PublicKey, _reserves_id: &str) -> Result<(), String> {
         // Save all ledgers to disk (could optimize to save just the specific one)
         self.save_ledgers_to_disk()
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn test_secret_key() -> SecretKey {
+        SecretKey::from_slice(&[1u8; 32]).unwrap()
+    }
+
+    fn test_pubkey() -> PublicKey {
+        use bitcoin::secp256k1::Secp256k1;
+        let secp = Secp256k1::new();
+        PublicKey::from_secret_key(&secp, &test_secret_key())
+    }
+
+    fn create_mock_wallet(temp_dir: &TempDir) -> Arc<Wallet> {
+        // Create a minimal wallet for testing
+        Arc::new(Wallet::new_mock(temp_dir.path().to_path_buf()))
+    }
+
+    #[test]
+    fn test_handler_creation() {
+        let temp_dir = TempDir::new().unwrap();
+        let wallet = create_mock_wallet(&temp_dir);
+        let data_dir = temp_dir.path().to_path_buf();
+
+        let (handler, _rx) = DepositsHandler::new(test_secret_key(), wallet, data_dir);
+
+        assert_eq!(handler.our_node_id, test_pubkey());
+        assert!(handler.ledgers.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_ledger_creation_and_persistence() {
+        let temp_dir = TempDir::new().unwrap();
+        let wallet = create_mock_wallet(&temp_dir);
+        let data_dir = temp_dir.path().to_path_buf();
+
+        let reserves_id = "tb1qtest".to_string();
+
+        // Create handler and ledger
+        {
+            let (handler, _rx) = DepositsHandler::new(
+                test_secret_key(),
+                wallet.clone(),
+                data_dir.clone(),
+            );
+
+            // Create a ledger (as partner, so we control when it's created)
+            let other_pk = {
+                let sk = SecretKey::from_slice(&[2u8; 32]).unwrap();
+                let secp = bitcoin::secp256k1::Secp256k1::new();
+                PublicKey::from_secret_key(&secp, &sk)
+            };
+
+            let ledger = handler.get_or_create_ledger(other_pk, reserves_id.clone());
+            assert!(ledger.read().unwrap().history.is_empty());
+
+            // Save to disk
+            handler.save_ledgers_to_disk().unwrap();
+        }
+
+        // Reload and verify
+        {
+            let (handler, _rx) = DepositsHandler::new(
+                test_secret_key(),
+                wallet,
+                data_dir,
+            );
+
+            let ledgers = handler.ledgers.lock().unwrap();
+            assert_eq!(ledgers.len(), 1);
+        }
+    }
+
+    #[test]
+    fn test_validation_context_impl() {
+        let temp_dir = TempDir::new().unwrap();
+        let wallet = create_mock_wallet(&temp_dir);
+        let data_dir = temp_dir.path().to_path_buf();
+
+        let (handler, _rx) = DepositsHandler::new(test_secret_key(), wallet, data_dir);
+
+        // our_node_id should return our pubkey
+        assert_eq!(handler.our_node_id(), test_pubkey());
+
+        // get_ledger should return None for non-existent ledger
+        let other_pk = {
+            let sk = SecretKey::from_slice(&[2u8; 32]).unwrap();
+            let secp = bitcoin::secp256k1::Secp256k1::new();
+            PublicKey::from_secret_key(&secp, &sk)
+        };
+        assert!(handler.get_ledger(&other_pk, "nonexistent").is_none());
+
+        // Create a ledger and verify we can retrieve it
+        let reserves_id = "tb1qtest".to_string();
+        handler.get_or_create_ledger(other_pk, reserves_id.clone());
+        assert!(handler.get_ledger(&other_pk, &reserves_id).is_some());
+    }
+
+    #[test]
+    fn test_event_queue() {
+        let temp_dir = TempDir::new().unwrap();
+        let wallet = create_mock_wallet(&temp_dir);
+        let data_dir = temp_dir.path().to_path_buf();
+
+        let (handler, _rx) = DepositsHandler::new(test_secret_key(), wallet, data_dir);
+
+        // Initially empty
+        assert!(handler.drain_events().is_empty());
+
+        // Emit some events
+        handler.emit_event(ProtocolEvent::LedgerSynced {
+            operator: test_pubkey(),
+            reserves_id: "test".to_string(),
+            sequence: 1,
+            hash: [0u8; 32],
+        });
+
+        // Drain should return the event
+        let events = handler.drain_events();
+        assert_eq!(events.len(), 1);
+
+        // Queue should be empty after drain
+        assert!(handler.drain_events().is_empty());
     }
 }

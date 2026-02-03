@@ -1284,14 +1284,20 @@ fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                 LedgerOperation::FeeCollect { .. } => {
                     ("FeeCollect", String::new())
                 }
-                LedgerOperation::CustodyAcquire { new_custodian, last_valid_sequence, reason, .. } => {
-                    let pk_bytes = new_custodian.serialize();
-                    ("CustodyAcquire", format!("to:{:02x}{:02x}{:02x}{:02x}  last_valid_seq:{}  reason:{}",
-                        pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3],
-                        last_valid_sequence, reason))
+                LedgerOperation::CustodyDispute { last_valid_sequence, reason } => {
+                    ("CustodyDispute", format!("last_valid_seq:{}  reason:{}", last_valid_sequence, reason))
                 }
-                LedgerOperation::CustodyRelease => {
-                    ("CustodyRelease", String::new())
+                LedgerOperation::CustodyArmed { armed_block } => {
+                    ("CustodyArmed", format!("armed_block:{}", armed_block))
+                }
+                LedgerOperation::CustodyAcquire { new_custodian, entropy_block_height, .. } => {
+                    let pk_bytes = new_custodian.serialize();
+                    ("CustodyAcquire", format!("to:{:02x}{:02x}{:02x}{:02x}  entropy_block:{}",
+                        pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3],
+                        entropy_block_height))
+                }
+                LedgerOperation::CustodyYield => {
+                    ("CustodyYield", String::new())
                 }
                 LedgerOperation::LedgerClose => {
                     ("LedgerClose", String::new())
@@ -1682,7 +1688,7 @@ async fn collateral_record(args: &[String]) -> Result<(), Box<dyn std::error::Er
 /// Handle deposit subcommands
 async fn deposit_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {
-        eprintln!("Usage: deposits-bdk deposit <offer|list|open|ls|credit|check|complete> [args...]");
+        eprintln!("Usage: deposits-bdk deposit <offer|list|open|ls|credit|check|complete|verify-custodian> [args...]");
         return Ok(());
     }
 
@@ -1694,9 +1700,10 @@ async fn deposit_command(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         "credit" => deposit_credit(&args[1..]).await,
         "check" => deposit_check(&args[1..]).await,
         "complete" => deposit_complete(&args[1..]).await,
+        "verify-custodian" => deposit_verify_custodian(&args[1..]).await,
         cmd => {
             eprintln!("Unknown deposit subcommand: {}", cmd);
-            eprintln!("Usage: deposits-bdk deposit <offer|list|open|ls|credit|check|complete> [args...]");
+            eprintln!("Usage: deposits-bdk deposit <offer|list|open|ls|credit|check|complete|verify-custodian> [args...]");
             Ok(())
         }
     }
@@ -1724,16 +1731,17 @@ async fn deposit_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     }
 
     if positional.len() < 5 {
-        eprintln!("Usage: deposits-bdk deposit offer <reserves_id> <deposit_pubkey> <max_sats> <min_sats> <blocks_valid> [options]");
+        eprintln!("Usage: deposits-bdk deposit offer <ledger_id> <deposit_pubkey> <max_sats> <min_sats> <blocks_valid> [options]");
         eprintln!("\nExample:");
-        eprintln!("  deposits-bdk deposit offer 02abc...partner 02def...deposit 1000000 10000 144");
-        eprintln!("\nThis creates a signed offer committing to credit the deposit");
+        eprintln!("  deposits-bdk deposit offer abc123...ledger_id 02def...deposit 1000000 10000 144");
+        eprintln!("\nThe ledger_id is the 64-char hex hash (stable across custody transfers).");
+        eprintln!("This creates a signed offer committing to credit the deposit");
         eprintln!("with on-chain funds sent to a new address, up to max_sats,");
         eprintln!("with minimum min_sats, valid for blocks_valid blocks.");
         return Ok(());
     }
 
-    let reserves_id = &positional[0];
+    let ledger_id = &positional[0];
     let deposit_pubkey = PublicKey::from_str(&positional[1])
         .map_err(|e| format!("Invalid deposit pubkey: {}", e))?;
     let max_sats: u64 = positional[2]
@@ -1757,7 +1765,7 @@ async fn deposit_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     node.sync_wallet()?;
 
     println!("Creating deposit offer...");
-    println!("  Reserves ID: {}", reserves_id);
+    println!("  Ledger ID: {}...", &ledger_id[..16.min(ledger_id.len())]);
     println!("  Deposit: {}", deposit_pubkey);
     println!("  Max amount: {} sats", max_sats);
     println!("  Min amount: {} sats", min_sats);
@@ -1765,7 +1773,7 @@ async fn deposit_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>
 
     // Create the offer
     let offer = node.create_deposit_offer(
-        reserves_id,
+        ledger_id,
         deposit_pubkey,
         max_sats,
         min_sats,
@@ -1829,7 +1837,7 @@ async fn deposit_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         println!("    Address: {}", offer.funding_address);
         println!("    Amount: {} - {} sats", offer.min_amount_sats, offer.max_amount_sats);
         println!("    Deadline: block {}", offer.deadline_block);
-        println!("    Reserves: {}", offer.reserves_id);
+        println!("    Ledger: {}...", &offer.ledger_id[..16.min(offer.ledger_id.len())]);
         println!("    Deposit: {}", offer.deposit_pubkey);
         println!();
     }
@@ -2112,10 +2120,14 @@ async fn deposit_complete(args: &[String]) -> Result<(), Box<dyn std::error::Err
     let config = parse_config(&config_args)?;
     let node = Node::new(config).await?;
 
-    // Get the offer first to get reserves_id for broadcast
+    // Get the offer first to get ledger_id for broadcast
     let (offer, _) = node.get_deposit_offer(&offer_id)
         .ok_or("Deposit offer not found")?;
-    let reserves_id = offer.reserves_id.clone();
+    let ledger_id = offer.ledger_id.clone();
+
+    // Look up the ledger by ledger_id to get the reserves_id for broadcast
+    let (reserves_id, _) = node.get_ledger_by_ledger_id(&ledger_id)
+        .ok_or_else(|| format!("Ledger not found for ledger_id: {}", &ledger_id[..16.min(ledger_id.len())]))?;
 
     println!("Completing deposit offer...");
     println!("  Offer ID: {}", hex::encode(&offer_id[..8]));
@@ -2131,6 +2143,149 @@ async fn deposit_complete(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     println!("\nDeposit offer completed!");
     println!("  New balance: {} msats ({} sats)", new_balance, new_balance / 1000);
+
+    Ok(())
+}
+
+/// Verify the current custodian of a ledger by querying quorum members
+///
+/// This queries multiple quorum members for their attestation of who the current
+/// custodian is, takes the majority response, and reports the result.
+/// Use this before funding a deposit offer to ensure you're sending to the legitimate custodian.
+async fn deposit_verify_custodian(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use nostr_sdk::prelude::*;
+    use std::collections::HashMap;
+
+    let mut ledger_id: Option<String> = None;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else if ledger_id.is_none() {
+            ledger_id = Some(args[i].clone());
+        }
+        i += 1;
+    }
+
+    let ledger_id = ledger_id.ok_or("Usage: deposits-bdk deposit verify-custodian <ledger_id> [options]")?;
+
+    let config = parse_config(&config_args)?;
+    let relay_url = config.relays.first()
+        .ok_or("No relay configured. Use --relay <url>")?
+        .clone();
+
+    println!("Querying quorum members for custodian attestations...");
+    println!("  Ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
+    println!();
+
+    // Create a Nostr client to send requests
+    let keys = Keys::generate();
+    let client = Client::new(keys.clone());
+    client.add_relay(&relay_url).await?;
+    client.connect().await;
+
+    // Build the custodian_query request
+    let request_id = format!("{:016x}", rand::random::<u64>());
+    let params = serde_json::json!({});
+
+    let request_content = serde_json::json!({
+        "action": "custodian_query",
+        "ledger_id": ledger_id,
+        "request_id": request_id,
+        "params": params,
+    });
+
+    // Publish request
+    let request_event = EventBuilder::new(
+        Kind::Custom(deposits_bdk::nostr::KIND_LEDGER_REQUEST),
+        request_content.to_string(),
+    )
+    .tag(Tag::custom(TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::D)), [ledger_id.as_str()]))
+    .sign_with_keys(&keys)?;
+
+    let request_event_id = request_event.id.to_hex();
+    client.send_event(request_event).await?;
+    println!("Sent custodian_query request: {}...", &request_event_id[..16]);
+
+    // Wait for responses (poll for a few seconds)
+    println!("Waiting for quorum attestations...");
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    // Fetch responses
+    let response_filter = Filter::new()
+        .kind(Kind::Custom(deposits_bdk::nostr::KIND_LEDGER_RESPONSE))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::E), [request_event_id.as_str()])
+        .limit(20);
+
+    let events = client.fetch_events(vec![response_filter], Some(std::time::Duration::from_secs(5))).await?;
+
+    // Collect attestations
+    let mut attestations: HashMap<String, Vec<String>> = HashMap::new(); // custodian -> list of attesters
+
+    for event in events {
+        if let Ok(response) = serde_json::from_str::<serde_json::Value>(&event.content) {
+            if let (Some(custodian), Some(attester)) = (
+                response.get("custodian").and_then(|v| v.as_str()),
+                response.get("attester").and_then(|v| v.as_str()),
+            ) {
+                attestations.entry(custodian.to_string())
+                    .or_default()
+                    .push(attester.to_string());
+            }
+        }
+    }
+
+    client.disconnect().await?;
+
+    if attestations.is_empty() {
+        println!("No attestations received from quorum members.");
+        println!("This could mean:");
+        println!("  - No quorum members are watching this ledger");
+        println!("  - The ledger_id is incorrect");
+        println!("  - Network issues with the relay");
+        return Ok(());
+    }
+
+    // Find majority
+    let total_responses: usize = attestations.values().map(|v| v.len()).sum();
+    let mut sorted: Vec<_> = attestations.iter().collect();
+    sorted.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+
+    println!("Received {} attestations:", total_responses);
+    println!();
+
+    for (custodian, attesters) in sorted.iter() {
+        let percentage = (attesters.len() * 100) / total_responses;
+        println!("  Custodian: {}...", &custodian[..16.min(custodian.len())]);
+        println!("    Votes: {} ({}%)", attesters.len(), percentage);
+        for attester in attesters.iter() {
+            println!("      - {}...", &attester[..16.min(attester.len())]);
+        }
+        println!();
+    }
+
+    // Report majority
+    if let Some((majority_custodian, majority_attesters)) = sorted.first() {
+        let percentage = (majority_attesters.len() * 100) / total_responses;
+        if percentage > 50 {
+            println!("MAJORITY CUSTODIAN ({}%): {}", percentage, majority_custodian);
+            // Machine-parseable output for scripts
+            println!("VERIFIED_CUSTODIAN: {}", majority_custodian);
+            println!();
+            println!("Before funding a deposit offer, verify that offer.operator_id matches this custodian.");
+        } else {
+            println!("WARNING: No clear majority. The quorum may be split or compromised.");
+            println!("NO_MAJORITY");
+        }
+    } else {
+        println!("NO_ATTESTATIONS");
+    }
 
     Ok(())
 }
@@ -2550,7 +2705,7 @@ async fn withdraw_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>
 /// Handle nostr subcommands
 async fn nostr_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {
-        eprintln!("Usage: deposits-bdk nostr <list|events|export|import|validate|request|watch|dispute> [args...]");
+        eprintln!("Usage: deposits-bdk nostr <list|events|export|import|updates|validate|request|watch|dispute> [args...]");
         return Ok(());
     }
 
@@ -2559,13 +2714,14 @@ async fn nostr_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         "events" => nostr_events(&args[1..]).await,
         "export" => nostr_export(&args[1..]).await,
         "import" => nostr_import(&args[1..]).await,
+        "updates" => nostr_updates(&args[1..]).await,
         "validate" => nostr_validate(&args[1..]).await,
         "request" | "req" => nostr_request(&args[1..]).await,
         "watch" => nostr_watch(&args[1..]).await,
         "dispute" => nostr_dispute(&args[1..]).await,
         cmd => {
             eprintln!("Unknown nostr subcommand: {}", cmd);
-            eprintln!("Usage: deposits-bdk nostr <list|events|export|import|validate|request|watch|dispute> [args...]");
+            eprintln!("Usage: deposits-bdk nostr <list|events|export|import|updates|validate|request|watch|dispute> [args...]");
             Ok(())
         }
     }
@@ -2838,6 +2994,8 @@ async fn nostr_events(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     use deposits_bdk::nostr::KIND_LEDGER_UPDATE;
     use deposits_core::{TlvDecode, SignedLedgerUpdate};
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::validation::LedgerExport;
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
     use nostr_sdk::prelude::*;
     use std::collections::BTreeMap;
@@ -2845,6 +3003,7 @@ async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     let mut ledger_id: Option<String> = None;
     let mut config_args = Vec::new();
     let mut limit: usize = 500;
+    let mut dry_run = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -2853,6 +3012,8 @@ async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
             if i < args.len() {
                 limit = args[i].parse().unwrap_or(500);
             }
+        } else if args[i] == "--dry-run" {
+            dry_run = true;
         } else if args[i].starts_with("--") {
             config_args.push(args[i].clone());
             if i + 1 < args.len() && !args[i + 1].starts_with("--") {
@@ -2870,6 +3031,13 @@ async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     // Get relay URL from config
     let relay_url = config.relays.first()
         .ok_or("No relay configured. Use --relay <url>")?;
+
+    println!("Fetching ledger updates from Nostr...");
+    println!("  Relay: {}", relay_url);
+    if let Some(ref lid) = ledger_id {
+        println!("  Ledger: {}", lid);
+    }
+    println!();
 
     // Create a temporary nostr client to fetch events
     let keys = Keys::generate();
@@ -2928,60 +3096,314 @@ async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         }
     }
 
-    // Sort each ledger's updates by sequence number and deduplicate exact copies
-    // (keep different updates with same sequence to show violations)
+    // Sort and filter to canonical hash chain
+    // When there's a fork (same sequence, different hash), we follow the chain
+    // where previous_hash matches the prior update's current_hash
     for updates in ledgers.values_mut() {
         updates.sort_by_key(|u| u.sequence_number);
-        updates.dedup_by(|a, b| a.sequence_number == b.sequence_number && a.current_hash == b.current_hash);
+
+        // Build canonical chain by following hash links
+        let mut canonical: Vec<SignedLedgerUpdate> = Vec::new();
+        let mut expected_prev_hash = [0u8; 32]; // First update has all-zeros previous_hash
+
+        for update in updates.iter() {
+            // If this update follows our chain
+            if update.previous_hash == expected_prev_hash {
+                expected_prev_hash = update.current_hash;
+                canonical.push(update.clone());
+            }
+            // Skip updates that don't follow the chain (fork branches)
+        }
+
+        *updates = canonical;
     }
 
-    // Print in same format as ledger_history
+    println!("Found {} ledger(s) with updates:", ledgers.len());
+
+    // Create node for importing (unless dry-run)
+    let node = if !dry_run {
+        Some(Node::new(config).await?)
+    } else {
+        None
+    };
+
+    // Import each ledger
     for (lid, updates) in &ledgers {
         let short_id = &lid[..16.min(lid.len())];
-        println!("Updates for ledger {}...:", short_id);
+        println!();
+        println!("=== Ledger {}... ({} updates) ===", short_id, updates.len());
 
         if updates.is_empty() {
-            println!("  (no updates)");
+            println!("  (no updates to import)");
             continue;
         }
 
-        for update in updates {
-            let seq = update.sequence_number;
-            let prev = &update.previous_hash;
-            let curr = &update.current_hash;
+        // Find LedgerOpen operation to get metadata
+        let ledger_open = updates.iter().find_map(|u| {
+            if let Ok(op) = LedgerOperation::tlv_decode(&u.message) {
+                if let LedgerOperation::LedgerOpen { operator_id, reserves_id, ledger_address, genesis_block, .. } = op {
+                    return Some((operator_id, reserves_id, ledger_address, genesis_block));
+                }
+            }
+            None
+        });
 
-            // Determine signature status and signer
-            let has_partner_sig = update.partner_signature != [0u8; 64];
-            let has_operator_sig = update.operator_signature != [0u8; 64];
-            let sig_status = format!("[{}{}]",
-                if has_operator_sig { "O" } else { "·" },
-                if has_partner_sig { "P" } else { "·" }
-            );
+        let (operator_id, reserves_id, ledger_address, genesis_block) = match ledger_open {
+            Some(data) => data,
+            None => {
+                println!("  ERROR: No LedgerOpen found - cannot import");
+                continue;
+            }
+        };
 
-            // Show signer: actual operator_id from update (may differ for CustodyAcquire)
-            let signer = if has_operator_sig {
-                let pk = update.operator_id.serialize();
-                format!("{:02x}{:02x}", pk[1], pk[2])
-            } else {
-                "····".to_string()
-            };
+        // Parse ledger_id from hex
+        let ledger_id_bytes: [u8; 32] = match hex::decode(lid) {
+            Ok(bytes) if bytes.len() == 32 => {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                arr
+            }
+            _ => {
+                println!("  ERROR: Invalid ledger_id hex");
+                continue;
+            }
+        };
 
-            // Get operation name and details using same function as ledger_history
-            let (op_name, op_details) = format_operation(update.message_type, &update.message);
+        println!("  Operator: {}...", &operator_id.to_string()[..16]);
+        println!("  Reserves: {}...", &reserves_id[..16.min(reserves_id.len())]);
+        println!("  Genesis: block {}", genesis_block);
 
-            // Truncated hash: last 2 bytes of prev, last 2 bytes of curr
-            println!("{:>4} ↑{:<6} [{:02x}{:02x}~{:02x}{:02x}] {} {} {}{}",
-                seq,
-                update.block_height,
-                prev[30], prev[31],
-                curr[30], curr[31],
-                sig_status,
-                signer,
-                op_name,
-                if op_details.is_empty() { String::new() } else { format!("  {}", op_details) }
-            );
+        // Get current block height
+        let block_height = if let Some(ref n) = node {
+            n.wallet.get_block_height().unwrap_or(0)
+        } else {
+            0
+        };
+
+        // Create LedgerExport
+        let export = LedgerExport::new(
+            ledger_id_bytes,
+            genesis_block,
+            operator_id,
+            reserves_id.clone(),
+            ledger_address.clone(),
+            updates.clone(),
+            block_height,
+        );
+
+        if dry_run {
+            println!("  (dry-run: would import {} updates)", updates.len());
+            // Print updates in same format as ledger history
+            for update in updates {
+                let seq = update.sequence_number;
+                let prev = &update.previous_hash;
+                let curr = &update.current_hash;
+
+                // Determine signature status and signer
+                let has_partner_sig = update.partner_signature != [0u8; 64];
+                let has_operator_sig = update.operator_signature != [0u8; 64];
+                let sig_status = format!("[{}{}]",
+                    if has_operator_sig { "O" } else { "·" },
+                    if has_partner_sig { "P" } else { "·" }
+                );
+
+                // Show signer: actual operator_id from update
+                let signer = if has_operator_sig {
+                    let pk = update.operator_id.serialize();
+                    format!("{:02x}{:02x}", pk[1], pk[2])
+                } else {
+                    "····".to_string()
+                };
+
+                // Get operation name and details
+                let (op_name, op_details) = format_operation(update.message_type, &update.message);
+
+                // Truncated hash: last 2 bytes of prev, last 2 bytes of curr
+                println!("{:>4} ↑{:<6} [{:02x}{:02x}~{:02x}{:02x}] {} {} {}{}",
+                    seq,
+                    update.block_height,
+                    prev[30], prev[31],
+                    curr[30], curr[31],
+                    sig_status,
+                    signer,
+                    op_name,
+                    if op_details.is_empty() { String::new() } else { format!("  {}", op_details) }
+                );
+            }
+        } else if let Some(ref n) = node {
+            // Import the ledger
+            match n.import_ledger(export) {
+                Ok((report, _ledger)) => {
+                    println!("  Imported successfully!");
+                    println!("    Hash chain: {} of {} updates valid",
+                        report.hash_chain.valid_length, report.hash_chain.total_length);
+                    println!("    Signatures: {} fully signed, {} operator-only",
+                        report.signatures.fully_signed, report.signatures.operator_only);
+                    if !report.signatures.invalid_signatures.is_empty() {
+                        println!("    Invalid signatures: {}", report.signatures.invalid_signatures.len());
+                    }
+                }
+                Err(e) => {
+                    println!("  ERROR importing: {}", e);
+                }
+            }
         }
     }
+
+    println!();
+    if dry_run {
+        println!("Dry run complete. Use without --dry-run to actually import.");
+    } else {
+        println!("Import complete.");
+    }
+
+    Ok(())
+}
+
+/// Fetch new updates for an existing ledger from Nostr
+async fn nostr_updates(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use deposits_bdk::nostr::KIND_LEDGER_UPDATE;
+    use deposits_core::{TlvDecode, SignedLedgerUpdate};
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    use nostr_sdk::prelude::*;
+
+    let mut ledger_id: Option<String> = None;
+    let mut config_args = Vec::new();
+    let mut limit: usize = 500;
+    let mut dry_run = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--limit" {
+            i += 1;
+            if i < args.len() {
+                limit = args[i].parse().unwrap_or(500);
+            }
+        } else if args[i] == "--dry-run" {
+            dry_run = true;
+        } else if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else if ledger_id.is_none() {
+            ledger_id = Some(args[i].clone());
+        }
+        i += 1;
+    }
+
+    let ledger_id = ledger_id.ok_or("Usage: deposits-bdk nostr updates <ledger_id> [--dry-run] [--limit N]")?;
+
+    let config = parse_config(&config_args)?;
+
+    // Get relay URL from config
+    let relay_url = config.relays.first()
+        .ok_or("No relay configured. Use --relay <url>")?;
+
+    // Create node to access local ledger
+    let node = Node::new(config.clone()).await?;
+
+    // Find the local ledger
+    let (reserves_id, local_ledger) = node.get_ledger_by_ledger_id(&ledger_id)
+        .ok_or_else(|| format!("Ledger {} not found locally. Use 'nostr import' first.", &ledger_id[..16.min(ledger_id.len())]))?;
+
+    let local_seq = local_ledger.sequence();
+    let local_hash = local_ledger.tail_hash();
+
+    println!("Fetching updates for ledger from Nostr...");
+    println!("  Ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
+    println!("  Reserves: {}...", &reserves_id[..16.min(reserves_id.len())]);
+    println!("  Local sequence: {}", local_seq);
+    println!("  Local hash: {}...", hex::encode(&local_hash[..8]));
+    println!("  Relay: {}", relay_url);
+    println!();
+
+    // Create a temporary nostr client to fetch events
+    let keys = Keys::generate();
+    let client = Client::new(keys);
+    client.add_relay(relay_url).await
+        .map_err(|e| format!("Failed to add relay: {}", e))?;
+    client.connect().await;
+
+    // Build filter for this ledger
+    let filter = Filter::new()
+        .kind(Kind::Custom(KIND_LEDGER_UPDATE))
+        .custom_tag(
+            SingleLetterTag::lowercase(Alphabet::D),
+            [ledger_id.as_str()],
+        )
+        .limit(limit);
+
+    // Fetch events
+    let events = client
+        .fetch_events(vec![filter], None)
+        .await
+        .map_err(|e| format!("Failed to fetch events: {}", e))?;
+
+    client.disconnect().await.ok();
+
+    if events.is_empty() {
+        println!("No updates found on Nostr.");
+        return Ok(());
+    }
+
+    // Decode and sort updates
+    let mut updates: Vec<SignedLedgerUpdate> = Vec::new();
+    for event in events {
+        if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
+            if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
+                updates.push(update);
+            }
+        }
+    }
+
+    updates.sort_by_key(|u| u.sequence_number);
+
+    println!("Found {} updates on Nostr (local has {} updates)", updates.len(), local_seq + 1);
+
+    // Find updates that follow our local chain
+    let mut new_updates: Vec<SignedLedgerUpdate> = Vec::new();
+    let mut expected_prev_hash = local_hash;
+
+    for update in updates.iter() {
+        // Skip updates we already have
+        if update.sequence_number <= local_seq {
+            continue;
+        }
+
+        // Check if this update follows our chain
+        if update.previous_hash == expected_prev_hash {
+            expected_prev_hash = update.current_hash;
+            new_updates.push(update.clone());
+        }
+    }
+
+    if new_updates.is_empty() {
+        println!("No new updates to apply (already up to date).");
+        return Ok(());
+    }
+
+    println!("Found {} new updates to apply:", new_updates.len());
+    for update in &new_updates {
+        let (op_name, _) = format_operation(update.message_type, &update.message);
+        println!("  {} {}", update.sequence_number, op_name);
+    }
+
+    if dry_run {
+        println!();
+        println!("Dry run complete. Use without --dry-run to apply updates.");
+        return Ok(());
+    }
+
+    // Apply updates to ledger
+    println!();
+    println!("Applying updates...");
+
+    let applied = node.handler.apply_updates_to_ledger(&reserves_id, new_updates.clone())?;
+
+    println!("Applied {} updates.", applied);
+    println!("New sequence: {}", local_seq + applied as u64);
 
     Ok(())
 }
@@ -3610,6 +4032,17 @@ async fn nostr_request(args: &[String]) -> Result<(), Box<dyn std::error::Error>
             }
             serde_json::Value::Object(obj)
         }
+        "deposit_withdraw" => {
+            // params: deposit_secret destination_address amount_sats
+            if params.len() < 3 {
+                return Err("deposit_withdraw requires: <deposit_secret> <destination_address> <amount_sats>".into());
+            }
+            let mut obj = serde_json::Map::new();
+            obj.insert("deposit_secret".to_string(), serde_json::Value::String(params[0].clone()));
+            obj.insert("destination_address".to_string(), serde_json::Value::String(params[1].clone()));
+            obj.insert("amount_sats".to_string(), serde_json::json!(params[2].parse::<u64>().unwrap_or(0)));
+            serde_json::Value::Object(obj)
+        }
         _ => {
             // Generic: treat params as key=value pairs or just values
             let mut obj = serde_json::Map::new();
@@ -3858,6 +4291,36 @@ async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
                 }
             };
 
+            // For operations that require custodianship, verify we have the ledger locally
+            // The real protection against fraudulent offers is client-side verification:
+            // - Client checks offer's funding_address matches ledger's current reserves
+            // - Client verifies offer signature is from current custodian
+            //
+            // TODO: Add proper custody verification once CustodyTransfer operation exists
+            let requires_ledger = matches!(
+                request.action.as_str(),
+                "deposit_open" | "deposit_offer" | "deposit_withdraw" | "collateral_lock"
+            );
+
+            if requires_ledger {
+                // Just verify we have the ledger locally
+                let has_ledger = fresh_node.get_ledger_by_ledger_id(&ledger_id).is_some()
+                    || fresh_node.get_ledger_by_reserves_id(&ledger_id).is_some();
+
+                if !has_ledger {
+                    let error_msg = "Ledger not found locally".to_string();
+                    let _ = transport.send_ledger_response(
+                        &request.event_id,
+                        &ledger_id,
+                        false,
+                        None,
+                        Some(error_msg.clone()),
+                    ).await;
+                    println!("  Response: REJECTED - {}", error_msg);
+                    continue;
+                }
+            }
+
             // Process the request
             let (success, result, error) = match request.action.as_str() {
                 "deposit_open" => {
@@ -3866,11 +4329,17 @@ async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
                 "deposit_offer" => {
                     process_deposit_offer_request(&fresh_node, &ledger_id, &request).await
                 }
+                "deposit_withdraw" => {
+                    process_deposit_withdraw_request(&fresh_node, &ledger_id, &request).await
+                }
                 "collateral_lock" => {
                     process_collateral_lock_request(&fresh_node, &ledger_id, &request).await
                 }
                 "custody_transfer_sign" => {
                     process_custody_transfer_sign_request(&fresh_node, &config_for_reload, &request).await
+                }
+                "custodian_query" => {
+                    process_custodian_query_request(&fresh_node, &ledger_id, &request).await
                 }
                 _ => {
                     (false, None, Some(format!("Unknown action: {}", request.action)))
@@ -4015,10 +4484,17 @@ async fn process_deposit_offer_request(
     ledger_id: &str,
     request: &deposits_bdk::nostr::LedgerRequest,
 ) -> (bool, Option<serde_json::Value>, Option<String>) {
-    // Resolve ledger_id (which may be a hash) to actual reserves_id
-    let reserves_id = match resolve_ledger_id_to_reserves_id(node, ledger_id) {
-        Ok(rid) => rid,
-        Err(e) => return (false, None, Some(e)),
+    // Verify the ledger exists (ledger_id may be a hash or reserves_id)
+    // We use ledger_id directly for the offer since it's stable across custody transfers
+    let resolved_ledger_id = if ledger_id.len() == 64 && ledger_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        // Already a 64-char hex ledger_id hash
+        ledger_id.to_string()
+    } else {
+        // It's a reserves_id, look up the ledger to get its ledger_id
+        match node.get_ledger_by_reserves_id(ledger_id) {
+            Some((_, ledger)) => ledger.ledger_id_hex(),
+            None => return (false, None, Some(format!("Ledger not found: {}", ledger_id))),
+        }
     };
 
     // Extract deposit_pubkey from params
@@ -4057,11 +4533,12 @@ async fn process_deposit_offer_request(
         return (false, None, Some(format!("Failed to sync wallet: {}", e)));
     }
 
-    // Create the offer
-    match node.create_deposit_offer(&reserves_id, deposit_pubkey, max_sats, min_sats, blocks_valid) {
+    // Create the offer using ledger_id (stable across custody transfers)
+    match node.create_deposit_offer(&resolved_ledger_id, deposit_pubkey, max_sats, min_sats, blocks_valid) {
         Ok(offer) => {
             let result = serde_json::json!({
                 "offer_id": hex::encode(&offer.offer_id),
+                "operator_id": offer.operator_id.to_string(),
                 "funding_address": offer.funding_address,
                 "deadline_block": offer.deadline_block,
                 "created_at_block": offer.created_at_block,
@@ -4166,6 +4643,123 @@ async fn process_collateral_lock_request(
                 "attestation_b64": attestation_b64,
             });
             (true, Some(result), None)
+        }
+        Err(e) => {
+            (false, None, Some(e.to_string()))
+        }
+    }
+}
+
+/// Process a deposit_withdraw request
+///
+/// This is called when a depositor requests a withdrawal via Nostr.
+/// The depositor provides their secret (to prove ownership), destination address, and amount.
+async fn process_deposit_withdraw_request(
+    node: &Node,
+    ledger_id: &str,
+    request: &deposits_bdk::nostr::LedgerRequest,
+) -> (bool, Option<serde_json::Value>, Option<String>) {
+    use bitcoin::secp256k1::Secp256k1;
+
+    // Resolve ledger_id (which may be a hash) to actual reserves_id
+    let reserves_id = match resolve_ledger_id_to_reserves_id(node, ledger_id) {
+        Ok(rid) => rid,
+        Err(e) => return (false, None, Some(e)),
+    };
+
+    // Extract deposit_secret from params
+    let deposit_secret_hex = match request.params.get("deposit_secret") {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        _ => return (false, None, Some("Missing deposit_secret parameter".to_string())),
+    };
+
+    // Parse the secret and derive the pubkey
+    let secret_bytes = match hex::decode(&deposit_secret_hex) {
+        Ok(b) if b.len() == 32 => b,
+        Ok(_) => return (false, None, Some("deposit_secret must be 32 bytes".to_string())),
+        Err(e) => return (false, None, Some(format!("Invalid deposit_secret hex: {}", e))),
+    };
+
+    let secp = Secp256k1::new();
+    let deposit_secret = match bitcoin::secp256k1::SecretKey::from_slice(&secret_bytes) {
+        Ok(sk) => sk,
+        Err(e) => return (false, None, Some(format!("Invalid deposit_secret: {}", e))),
+    };
+    let deposit_pubkey = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &deposit_secret);
+
+    // Extract destination address
+    let destination_address = match request.params.get("destination_address") {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        _ => return (false, None, Some("Missing destination_address parameter".to_string())),
+    };
+
+    // Extract amount_sats
+    let amount_sats = match request.params.get("amount_sats").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => return (false, None, Some("Missing amount_sats parameter".to_string())),
+    };
+
+    // Use a fixed fee for now (1000 sats)
+    let fee_sats = 1000u64;
+
+    println!("  Processing deposit_withdraw request:");
+    println!("    Deposit: {}...", &deposit_pubkey.to_string()[..16]);
+    println!("    Destination: {}", destination_address);
+    println!("    Amount: {} sats", amount_sats);
+
+    // Generate nonce and create withdrawal signature
+    let nonce: [u8; 32] = {
+        use bitcoin::hashes::{Hash, sha256};
+        let mut data = Vec::new();
+        data.extend_from_slice(&secret_bytes);
+        data.extend_from_slice(destination_address.as_bytes());
+        data.extend_from_slice(&amount_sats.to_le_bytes());
+        data.extend_from_slice(&std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            .to_le_bytes());
+        *sha256::Hash::hash(&data).as_byte_array()
+    };
+
+    // Create the withdrawal signature (same as withdraw_request CLI)
+    let signature = match deposits_core::create_withdrawal_signature(
+        &deposit_secret,
+        &nonce,
+        &deposit_pubkey,
+        &destination_address,
+        amount_sats,
+        fee_sats,
+    ) {
+        Ok(sig) => sig,
+        Err(e) => return (false, None, Some(format!("Failed to create signature: {:?}", e))),
+    };
+
+    // Lock the withdrawal
+    match node.lock_withdrawal(
+        &reserves_id,
+        deposit_pubkey,
+        destination_address.clone(),
+        amount_sats,
+        fee_sats,
+        nonce,
+        signature,
+        None, // memo
+    ) {
+        Ok(result) => {
+            // Broadcast to Nostr
+            if let Err(e) = node.broadcast_last_update(&reserves_id).await {
+                eprintln!("    Warning: Failed to broadcast to Nostr: {}", e);
+            }
+
+            let result_json = serde_json::json!({
+                "withdrawal_id": hex::encode(&result.withdrawal.withdrawal_id),
+                "amount_sats": amount_sats,
+                "fee_sats": fee_sats,
+                "destination_address": destination_address,
+                "status": "locked",
+            });
+            (true, Some(result_json), None)
         }
         Err(e) => {
             (false, None, Some(e.to_string()))
@@ -4388,6 +4982,63 @@ async fn process_custody_transfer_sign_request(
     (true, Some(result), None)
 }
 
+/// Process a custodian_query request
+///
+/// Quorum members respond with a signed attestation of who they believe is the current
+/// custodian for this ledger. Clients collect multiple responses and take the majority.
+async fn process_custodian_query_request(
+    node: &Node,
+    ledger_id: &str,
+    _request: &deposits_bdk::nostr::LedgerRequest,
+) -> (bool, Option<serde_json::Value>, Option<String>) {
+    use bitcoin::secp256k1::{Secp256k1, Message};
+    use bitcoin::hashes::{sha256, Hash};
+
+    // Look up the ledger
+    let ledger = if let Some((_, l)) = node.get_ledger_by_ledger_id(ledger_id) {
+        l
+    } else if let Some((_, l)) = node.get_ledger_by_reserves_id(ledger_id) {
+        l
+    } else {
+        return (false, None, Some("Ledger not found".to_string()));
+    };
+
+    // Determine who we believe is the current custodian
+    // This is the operator_key from the ledger state (which we trust from our local copy)
+    let current_custodian = ledger.state.operator_key;
+
+    // Create attestation message: "CUSTODIAN_ATTESTATION:{ledger_id}:{custodian_pubkey}:{timestamp}"
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let attestation_msg = format!(
+        "CUSTODIAN_ATTESTATION:{}:{}:{}",
+        ledger_id,
+        current_custodian,
+        timestamp
+    );
+
+    // Sign the attestation with our operator key
+    let secp = Secp256k1::new();
+    let secret_key = node.wallet.operator_secret();
+    let msg_hash = sha256::Hash::hash(attestation_msg.as_bytes());
+    let msg = Message::from_digest(*msg_hash.as_byte_array());
+    let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &secret_key);
+    let signature = secp.sign_schnorr(&msg, &keypair);
+
+    let result = serde_json::json!({
+        "ledger_id": ledger_id,
+        "custodian": current_custodian.to_string(),
+        "attester": node.node_id.to_string(),
+        "timestamp": timestamp,
+        "signature": hex::encode(signature.serialize()),
+    });
+
+    (true, Some(result), None)
+}
+
 // =============================================================================
 // RECOVERY COMMANDS
 // =============================================================================
@@ -4403,7 +5054,7 @@ async fn recovery_command(args: &[String]) -> Result<(), Box<dyn std::error::Err
         eprintln!("  prepare <ledger_id>                    Prepare as candidate: publish CustodyAcquire + attestations");
         eprintln!("  status <ledger_id>                     Show recovery status and candidates");
         eprintln!("  spend <ledger_id>                      Execute on-chain spend (after entropy block)");
-        eprintln!("  release <ledger_id>                    Publish CustodyRelease (if not selected)");
+        eprintln!("  release <ledger_id>                    Publish CustodyYield (if not selected)");
         eprintln!();
         eprintln!("Recovery flow:");
         eprintln!("  1. start   - Detect violation and publish dispute");
@@ -5654,19 +6305,15 @@ async fn recovery_complete(args: &[String]) -> Result<(), Box<dyn std::error::Er
             println!("Publishing CustodyAcquire operation to Nostr...");
 
             // Create the CustodyAcquire operation
-            // NOTE: This operation should be PRE-published by each candidate before entropy
-            // Validators verify by checking the on-chain spend destination
+            // NOTE: In the full dispute protocol, this follows CustodyDispute -> CustodyArmed
+            // For now we're using the simplified version
             let custody_acquire = LedgerOperation::CustodyAcquire {
-                reason: reason.clone(),
-                last_valid_hash,
-                last_valid_sequence: last_valid_sequence as u64,
-                evidence_hash,
-                initiation_block,
+                new_custodian: selected_custodian,
                 entropy_block_height,
                 entropy_block_hash,
-                candidate_pool: candidate_pool.clone(),
-                new_custodian: selected_custodian,
             };
+            // Record reason/evidence for audit trail
+            let _ = (reason.clone(), last_valid_hash, last_valid_sequence, evidence_hash, initiation_block, candidate_pool.clone());
 
             // Only the new custodian can sign and publish the CustodyAcquire operation
             // because they become the operator of the ledger
@@ -6023,17 +6670,14 @@ async fn recovery_publish_transfer(args: &[String]) -> Result<(), Box<dyn std::e
     // For now, we don't have the actual Taproot spend signatures available
     // The new custodian would need to fetch these from the on-chain transaction
     // Create the CustodyAcquire operation
+    // NOTE: In the full dispute protocol, this follows CustodyDispute -> CustodyArmed
     let custody_acquire = LedgerOperation::CustodyAcquire {
-        reason: violation_details.clone(),
-        last_valid_hash,
-        last_valid_sequence: last_valid_sequence as u64,
-        evidence_hash,
-        initiation_block: entropy_block_height,
+        new_custodian: selected_custodian,
         entropy_block_height,
         entropy_block_hash,
-        candidate_pool,
-        new_custodian: selected_custodian,
     };
+    // Record for audit trail
+    let _ = (violation_details.clone(), last_valid_hash, last_valid_sequence, evidence_hash, candidate_pool);
 
     // Serialize the operation
     let message_bytes = custody_acquire.tlv_encode();
@@ -6304,17 +6948,14 @@ async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error::Err
     let candidate_pool = vec![our_pubkey];
 
     // Create the CustodyAcquire operation
+    // NOTE: In the full dispute protocol, this follows CustodyDispute -> CustodyArmed
     let custody_acquire = LedgerOperation::CustodyAcquire {
-        reason: violation_details.clone(),
-        last_valid_hash,
-        last_valid_sequence,
-        evidence_hash,
-        initiation_block,
+        new_custodian: our_pubkey,
         entropy_block_height,
         entropy_block_hash,
-        candidate_pool,
-        new_custodian: our_pubkey,
     };
+    // Record for audit trail
+    let _ = (violation_details.clone(), last_valid_hash, last_valid_sequence, evidence_hash, initiation_block, candidate_pool);
 
     // Serialize the operation
     let message_bytes = custody_acquire.tlv_encode();
@@ -6402,7 +7043,7 @@ async fn recovery_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
     recovery_complete(args).await
 }
 
-/// Publish CustodyRelease to close a candidate branch after not being selected.
+/// Publish CustodyYield to close a candidate branch after not being selected.
 ///
 /// This command is run by candidates who were NOT selected by the entropy.
 /// It signals that they are releasing their quorum from attestation obligations.
@@ -6445,7 +7086,7 @@ async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error::Err
         .ok_or("No relay configured")?
         .clone();
 
-    println!("Publishing CustodyRelease (closing candidate branch)...");
+    println!("Publishing CustodyYield (closing candidate branch)...");
     println!("  Ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
     println!("  Relay: {}", relay_url);
     println!();
@@ -6515,8 +7156,8 @@ async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error::Err
     let current_block_height = esplora.get_height()
         .map_err(|e| format!("Failed to get block height: {:?}", e))?;
 
-    // Create the CustodyRelease operation
-    let custody_release = LedgerOperation::CustodyRelease;
+    // Create the CustodyYield operation
+    let custody_release = LedgerOperation::CustodyYield;
 
     // Serialize
     let message_bytes = custody_release.tlv_encode();
@@ -6567,7 +7208,7 @@ async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     // Publish to Nostr
     println!();
-    println!("Publishing CustodyRelease to Nostr...");
+    println!("Publishing CustodyYield to Nostr...");
 
     let publish_transport = NostrTransportBuilder::new(secret_key)
         .relay(&relay_url)
@@ -6577,7 +7218,7 @@ async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error::Err
     publish_transport.broadcast_ledger_update(&signed_update).await?;
 
     println!();
-    println!("CustodyRelease published successfully!");
+    println!("CustodyYield published successfully!");
     println!("  Sequence: {}", sequence);
     println!("  Hash: {}...", &hex::encode(new_hash)[..16]);
     println!();

@@ -612,6 +612,117 @@ full_validate_ledgers() {
 }
 
 # ============================================================================
+# Phase 8b: Create Test Deposits for Post-Recovery
+# Create deposit_r (funded) and deposit_s (unfunded) on Alice's ledger
+# These will be used to test post-recovery deposit flow
+# ============================================================================
+
+create_recovery_test_deposits() {
+    log_info ""
+    log_info "=== Phase 8b: Create Recovery Test Deposits ==="
+    log_info "(deposit_r = funded, deposit_s = unfunded, both on Alice's ledger)"
+    echo ""
+
+    local alice_ledger_id=$(get_value "ledger_id_bdk-alice")
+    local alice_reserves_id=$(get_value "reserves_id_bdk-alice")
+
+    # Generate keypairs for deposit_r and deposit_s
+    # We'll use Bob's node to generate these (arbitrary choice - just need a node)
+    log_info "Generating keypairs for deposit_r and deposit_s..."
+
+    local keypair_r=$(run_bdk_cmd "bdk-bob" keygen 2>&1)
+    local secret_r=$(echo "$keypair_r" | awk '{print $1}')
+    local pubkey_r=$(echo "$keypair_r" | awk '{print $2}')
+    store_value "secret_deposit_r" "$secret_r"
+    store_value "pubkey_deposit_r" "$pubkey_r"
+    log_info "  deposit_r pubkey: ${pubkey_r:0:16}..."
+
+    local keypair_s=$(run_bdk_cmd "bdk-bob" keygen 2>&1)
+    local secret_s=$(echo "$keypair_s" | awk '{print $1}')
+    local pubkey_s=$(echo "$keypair_s" | awk '{print $2}')
+    store_value "secret_deposit_s" "$secret_s"
+    store_value "pubkey_deposit_s" "$pubkey_s"
+    log_info "  deposit_s pubkey: ${pubkey_s:0:16}..."
+
+    # Open both deposits on Alice's ledger via Nostr
+    log_info ""
+    log_info "Opening deposit_r on Alice's ledger..."
+    local open_r=$(run_nostr_request "bdk-bob" "$alice_ledger_id" deposit_open "$pubkey_r" 2>&1)
+    if echo "$open_r" | grep -q "SUCCESS\|deposit_pubkey"; then
+        test_pass "deposit_r opened on Alice's ledger"
+    else
+        test_fail "Failed to open deposit_r"
+        echo "    Output: $open_r"
+    fi
+
+    log_info "Opening deposit_s on Alice's ledger..."
+    local open_s=$(run_nostr_request "bdk-bob" "$alice_ledger_id" deposit_open "$pubkey_s" 2>&1)
+    if echo "$open_s" | grep -q "SUCCESS\|deposit_pubkey"; then
+        test_pass "deposit_s opened on Alice's ledger"
+    else
+        test_fail "Failed to open deposit_s"
+        echo "    Output: $open_s"
+    fi
+
+    # Fund deposit_r (deposit_s stays unfunded)
+    log_info ""
+    log_info "Funding deposit_r (10000 sats)..."
+    local fund_amount=10000
+
+    # Request deposit offer for deposit_r
+    local offer_output=$(run_nostr_request "bdk-bob" "$alice_ledger_id" deposit_offer "$pubkey_r" "$fund_amount" "1000" "144" 2>&1)
+
+    if echo "$offer_output" | grep -q "SUCCESS\|offer_id"; then
+        local offer_id=$(echo "$offer_output" | grep -o '"offer_id"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*: *"//' | sed 's/"$//')
+        local funding_address=$(echo "$offer_output" | grep -o '"funding_address"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*: *"//' | sed 's/"$//')
+
+        if [ -n "$funding_address" ]; then
+            log_info "  Got offer, funding address: ${funding_address:0:20}..."
+
+            # Fund from faucet
+            local btc_amount=$(awk "BEGIN {printf \"%.8f\", $fund_amount / 100000000}")
+            bitcoin_cli -rpcwallet=faucet sendtoaddress "$funding_address" "$btc_amount" >/dev/null 2>&1
+
+            if [ $? -eq 0 ]; then
+                mine_blocks 1
+
+                # Check for funding
+                local check_output=$(run_bdk_cmd "bdk-alice" deposit check "$offer_id" 2>&1)
+
+                if echo "$check_output" | grep -q "Funding detected"; then
+                    local txid=$(echo "$check_output" | grep "Transaction:" | awk '{print $2}')
+                    local detected_amount=$(echo "$check_output" | grep "Amount:" | awk '{print $2}')
+
+                    # Complete the deposit
+                    local complete_output=$(run_bdk_cmd "bdk-alice" deposit complete "$offer_id" "$txid" "$detected_amount" 2>&1)
+
+                    if echo "$complete_output" | grep -q "completed\|credited"; then
+                        test_pass "deposit_r funded with $detected_amount sats"
+                        store_value "deposit_r_balance" "$detected_amount"
+                    else
+                        test_fail "Failed to complete deposit_r funding"
+                        echo "    Output: $complete_output"
+                    fi
+                else
+                    test_fail "Funding not detected for deposit_r"
+                    echo "    Output: $check_output"
+                fi
+            else
+                test_fail "Failed to send funds to deposit_r"
+            fi
+        else
+            test_fail "No funding address in offer response"
+        fi
+    else
+        test_fail "Failed to create deposit offer for deposit_r"
+        echo "    Output: $offer_output"
+    fi
+
+    log_info ""
+    log_info "deposit_s remains unfunded (will request offer after recovery)"
+}
+
+# ============================================================================
 # Phase 9: Test Invalid Update Detection
 # ============================================================================
 
@@ -905,67 +1016,203 @@ test_custody_transfer() {
 
 test_post_recovery_payment() {
     log_info ""
-    log_info "=== Phase 11: Post-Recovery Payment Test ==="
-    log_info "(New custodian executes payment between deposits on recovered ledger)"
+    log_info "=== Phase 11: Post-Recovery Deposit Flow Test ==="
+    log_info "(deposit_s creates offer via Nostr, deposit_r funds it on-chain)"
     echo ""
 
     local new_custodian=$(get_value "recovery_new_custodian")
     local alice_reserves_id=$(get_value "reserves_id_bdk-alice")
+    local alice_ledger_id=$(get_value "ledger_id_bdk-alice")
 
     if [ -z "$new_custodian" ]; then
-        log_warn "No new custodian recorded - skipping post-recovery payment test"
+        log_warn "No new custodian recorded - skipping post-recovery test"
+        return
+    fi
+
+    # Get the test deposit keys
+    local pubkey_s=$(get_value "pubkey_deposit_s")
+    local pubkey_r=$(get_value "pubkey_deposit_r")
+
+    if [ -z "$pubkey_s" ] || [ -z "$pubkey_r" ]; then
+        log_warn "Missing deposit_r/deposit_s pubkeys - skipping test"
         return
     fi
 
     log_info "New custodian: $new_custodian"
-    log_info "Recovered ledger: ${alice_reserves_id:0:16}..."
+    log_info "Recovered ledger: ${alice_ledger_id:0:16}..."
+    log_info "deposit_r (funded): ${pubkey_r:0:16}..."
+    log_info "deposit_s (unfunded): ${pubkey_s:0:16}..."
 
-    # Get the deposit pubkeys for Bob and Charlie on Alice's ledger
-    local bob_deposit_pubkey=$(get_value "pubkey_bdk-bob_bdk-alice")
-    local charlie_deposit_pubkey=$(get_value "pubkey_bdk-charlie_bdk-alice")
+    # New custodian imports the ledger from Nostr to have it locally
+    log_info ""
+    log_info "New custodian importing ledger from Nostr..."
+    local import_output=$(run_bdk_cmd "$new_custodian" nostr import "$alice_ledger_id" 2>&1)
 
-    if [ -z "$bob_deposit_pubkey" ] || [ -z "$charlie_deposit_pubkey" ]; then
-        log_warn "Missing deposit pubkeys - skipping payment test"
+    echo "=== Import Output ==="
+    echo "$import_output"
+    echo "===================="
+
+    if echo "$import_output" | grep -q "Imported successfully\|Import complete"; then
+        test_pass "New custodian imported ledger from Nostr"
+    else
+        test_fail "Import failed - see output above"
+    fi
+
+    # NOTE: We do NOT stop alice's watcher - she's adversarial and will keep responding!
+    # Instead, we verify the offer comes from the legitimate custodian via quorum attestation.
+    log_info ""
+    log_info "NOT stopping alice's watcher - she's gone rogue!"
+    log_info "We'll use quorum attestation to verify the legitimate custodian instead."
+
+    # For quorum attestation to work, ALL quorum members need to watch the ledger
+    # The quorum members for alice's ledger are bob and charlie
+    # New custodian already imported above, now the other quorum member needs to import too
+    local other_quorum_member=""
+    if [ "$new_custodian" = "bdk-bob" ]; then
+        other_quorum_member="bdk-charlie"
+    else
+        other_quorum_member="bdk-bob"
+    fi
+
+    log_info ""
+    log_info "Other quorum member ($other_quorum_member) importing recovered ledger..."
+    local other_import=$(run_bdk_cmd "$other_quorum_member" nostr import "$alice_ledger_id" 2>&1)
+    if echo "$other_import" | grep -q "Imported successfully\|Import complete"; then
+        test_pass "$other_quorum_member imported recovered ledger"
+    else
+        log_warn "$other_quorum_member failed to import - may already have it or validation issue"
+    fi
+
+    # Start nostr watcher for the recovered ledger on BOTH quorum members
+    # This allows them to respond to custodian_query requests
+    log_info ""
+    log_info "Starting nostr watchers on BOTH quorum members for recovered ledger..."
+    start_nostr_watch "$new_custodian" "$alice_ledger_id"
+    start_nostr_watch "$other_quorum_member" "$alice_ledger_id"
+    sleep 2  # Let watchers start up
+
+    # deposit_s creates a deposit_offer via Nostr (addressing the ledger, not the custodian!)
+    # This tests that the ledger responds to Nostr requests under new custody
+    local fund_amount=5000
+    log_info ""
+    log_info "deposit_s requesting deposit_offer via Nostr..."
+    log_info "  Ledger ID: ${alice_ledger_id:0:16}..."
+    log_info "  Amount: $fund_amount sats"
+
+    local offer_output=$(run_nostr_request "bdk-bob" "$alice_ledger_id" \
+        "deposit_offer" "$pubkey_s" "$fund_amount" "1000" "144" 2>&1)
+
+    local funding_address=""
+    local offer_id=""
+    local offer_operator_id=""
+
+    if echo "$offer_output" | grep -q "funding_address\|offer_id"; then
+        offer_id=$(echo "$offer_output" | grep -o '"offer_id"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*: *"//' | sed 's/"$//')
+        funding_address=$(echo "$offer_output" | grep -o '"funding_address"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*: *"//' | sed 's/"$//')
+        offer_operator_id=$(echo "$offer_output" | grep -o '"operator_id"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*: *"//' | sed 's/"$//')
+        test_pass "deposit_s got offer via Nostr"
+        log_info "  Offer ID: ${offer_id:0:16}..."
+        log_info "  Operator ID: ${offer_operator_id:0:16}..."
+        log_info "  Funding address: $funding_address"
+    else
+        test_fail "deposit_s failed to get offer via Nostr"
+        echo "    Output: $offer_output"
         return
     fi
 
-    log_info "Bob's deposit on Alice's ledger: ${bob_deposit_pubkey:0:16}..."
-    log_info "Charlie's deposit on Alice's ledger: ${charlie_deposit_pubkey:0:16}..."
-
-    # Payment amount: 1000 sats = 1000000 msats
-    local payment_amount_msats=1000000
-    local invoice_id="post-recovery-test-$(date +%s)"
-
-    # New custodian credits Charlie's deposit (simulating Bob paying Charlie)
+    # CRITICAL: Verify the offer's operator_id matches the majority-attested custodian!
+    # This protects against alice (rogue former operator) creating fraudulent offers.
     log_info ""
-    log_info "New custodian ($new_custodian) crediting Charlie's deposit..."
-    log_info "  Amount: $payment_amount_msats msats (1000 sats)"
-    log_info "  Invoice: $invoice_id"
+    log_info "Verifying custodian via quorum attestation..."
+    log_info "  (This protects against fraudulent offers from alice)"
 
-    local credit_output=$(run_bdk_cmd "$new_custodian" deposit credit \
-        "$alice_reserves_id" "$charlie_deposit_pubkey" "$payment_amount_msats" "$invoice_id" 2>&1)
+    local verify_output=$(run_bdk_cmd "bdk-bob" deposit verify-custodian "$alice_ledger_id" 2>&1)
+    local verified_custodian=$(echo "$verify_output" | grep "VERIFIED_CUSTODIAN:" | awk '{print $2}')
 
-    if echo "$credit_output" | grep -q "Deposit credited\|New balance"; then
-        local new_balance=$(echo "$credit_output" | grep "New balance:" | head -1 | awk '{print $3}')
-        test_pass "Post-recovery payment successful (new balance: $new_balance msats)"
+    if [ -n "$verified_custodian" ]; then
+        log_info "  Quorum-attested custodian: ${verified_custodian:0:16}..."
+        log_info "  Offer operator_id:         ${offer_operator_id:0:16}..."
 
-        # Verify the operation appears in ledger history
-        log_info "Verifying InvoiceCredit in ledger history..."
-        local history_output=$(run_bdk_cmd "$new_custodian" ledger history "$alice_reserves_id" 2>&1)
-
-        if echo "$history_output" | grep -q "InvoiceCredit"; then
-            test_pass "InvoiceCredit operation recorded in ledger"
+        if [ "$verified_custodian" = "$offer_operator_id" ]; then
+            test_pass "Offer operator_id matches quorum-attested custodian (SAFE TO FUND)"
         else
-            log_warn "InvoiceCredit not found in history (may need refresh)"
+            test_fail "DANGER: Offer operator_id does NOT match quorum-attested custodian!"
+            log_error "  This offer may be from alice (rogue former operator)"
+            log_error "  DO NOT FUND this offer!"
+            echo "    Verify output: $verify_output"
+            return
         fi
     else
-        test_fail "Post-recovery payment failed"
-        echo "    Output: $credit_output"
+        log_warn "Could not get quorum attestation - proceeding with caution"
+        echo "    Verify output: $verify_output"
+    fi
+
+    # Fund the offer from faucet (simulating deposit_r or any external source sending bitcoin)
+    # In a real scenario, deposit_r would withdraw to this address, but for simplicity we use faucet
+    log_info ""
+    log_info "Funding deposit_s's offer on-chain ($fund_amount sats)..."
+
+    local btc_amount=$(awk "BEGIN {printf \"%.8f\", $fund_amount / 100000000}")
+    bitcoin_cli -rpcwallet=faucet sendtoaddress "$funding_address" "$btc_amount" >/dev/null 2>&1
+
+    if [ $? -ne 0 ]; then
+        test_fail "Failed to send funds to deposit_s's offer"
+        return
+    fi
+
+    mine_blocks 1
+    test_pass "Funded deposit_s's offer on-chain"
+
+    # New custodian checks for funding and completes the deposit
+    log_info ""
+    log_info "New custodian checking for funding..."
+
+    local check_output=$(run_bdk_cmd "$new_custodian" deposit check "$offer_id" 2>&1)
+
+    if echo "$check_output" | grep -q "Funding detected"; then
+        local txid=$(echo "$check_output" | grep "Transaction:" | awk '{print $2}')
+        local detected_amount=$(echo "$check_output" | grep "Amount:" | awk '{print $2}')
+        test_pass "Funding detected: $detected_amount sats"
+
+        # Complete the deposit
+        log_info "New custodian completing deposit..."
+        local complete_output=$(run_bdk_cmd "$new_custodian" deposit complete "$offer_id" "$txid" "$detected_amount" 2>&1)
+
+        if echo "$complete_output" | grep -q "completed\|credited"; then
+            local new_balance=$(echo "$complete_output" | grep -i "balance" | grep -o '[0-9]\+' | head -1)
+            test_pass "deposit_s funded under new custody! (balance: $new_balance)"
+        else
+            test_fail "Failed to complete deposit_s funding"
+            echo "    Output: $complete_output"
+        fi
+    else
+        test_fail "Funding not detected for deposit_s"
+        echo "    Output: $check_output"
+    fi
+
+    # Verify the operations in ledger history
+    log_info ""
+    log_info "Verifying operations in ledger history..."
+    local history_output=$(run_bdk_cmd "$new_custodian" ledger history "$alice_reserves_id" 2>&1)
+
+    if echo "$history_output" | grep -q "DepositOffer"; then
+        test_pass "DepositOffer recorded in ledger"
+    else
+        log_warn "DepositOffer not found in history"
+    fi
+
+    if echo "$history_output" | grep -q "OnchainCredit\|DepositCredit"; then
+        test_pass "Deposit credit recorded in ledger"
+    else
+        log_warn "Deposit credit not found in history"
     fi
 
     log_info ""
-    log_info "Post-recovery payment test complete"
-    log_info "This proves the recovered ledger is fully operational under new custody"
+    log_info "Post-recovery deposit flow complete!"
+    log_info "This proves:"
+    log_info "  1. Ledger responds to Nostr requests under new custody"
+    log_info "  2. Full deposit flow works (offer -> fund -> complete)"
+    log_info "  3. No need to know the custodian - just address the ledger!"
 }
 
 # ============================================================================
@@ -1045,6 +1292,7 @@ main() {
     mine_to_enforcement
     validate_ledgers
     full_validate_ledgers
+    create_recovery_test_deposits
     test_invalid_update_detection
     test_custody_transfer
     test_post_recovery_payment

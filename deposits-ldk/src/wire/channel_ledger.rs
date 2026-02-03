@@ -642,10 +642,23 @@ impl ChannelLedger {
                 // QuorumJoin is recorded on the consenting party's own ledger
                 // ChannelLedger doesn't need to track this (it's in LedgerState.joined_quorums)
             }
+            LedgerOperation::CustodyDispute { .. } => {
+                // CustodyDispute disbands quorum and voids attestations
+                self.quorum_members.clear();
+                self.collateral_attestations.clear();
+            }
+            LedgerOperation::CustodyArmed { .. } => {
+                // CustodyArmed locks in the candidate for entropy selection
+                // No state changes needed here (it's a pre-commitment)
+            }
             LedgerOperation::CustodyAcquire { new_custodian, .. } => {
                 // Transfer custody to new operator
                 // After this, all future updates must be signed by new_custodian
                 self.operator_node_id = *new_custodian;
+            }
+            LedgerOperation::CustodyYield => {
+                // CustodyYield terminates this branch - candidate was not selected
+                // No state changes, just marks branch as dead
             }
             LedgerOperation::LedgerClose => {
                 self.deposits.clear();

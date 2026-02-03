@@ -22,15 +22,18 @@ while [[ $# -gt 0 ]]; do
         --help|-h)
             echo "Usage: $0 [list|events|LEDGER_ID]"
             echo ""
-            echo "Fetch ledger data from Nostr relay."
+            echo "View ledger data from Nostr relay (read-only)."
             echo ""
             echo "Commands:"
             echo "  list              List all ledgers on the relay"
             echo "  events            Show all events (updates, disputes, agreements)"
-            echo "  <ledger_id>       Show updates for a specific ledger"
-            echo "                    Format: operator_pubkey:reserves_id"
+            echo "  <ledger_id>       Validate and show updates for a specific ledger"
             echo ""
-            echo "If no argument is given, lists all ledgers then shows updates for each."
+            echo "If no argument is given, lists all ledgers on the relay."
+            echo ""
+            echo "To actually import or update ledgers, use deposits-bdk directly:"
+            echo "  deposits-bdk nostr import <ledger_id>   # Import new ledger"
+            echo "  deposits-bdk nostr updates <ledger_id>  # Fetch updates for existing ledger"
             exit 0
             ;;
         list|ls)
@@ -89,20 +92,20 @@ elif [ "$SHOW_EVENTS" = true ]; then
     echo ""
     run_nostr_cmd events
 elif [ -n "$LEDGER_ID" ]; then
-    # Show updates for specific ledger
+    # Show updates for specific ledger (dry-run shows formatted operations)
     log_info "Fetching updates for ledger: $LEDGER_ID"
     echo ""
-    run_nostr_cmd import "$LEDGER_ID"
+    run_nostr_cmd import "$LEDGER_ID" --dry-run
 else
     # List all ledgers then show updates for each
     log_info "Fetching all ledger updates from Nostr relay..."
     echo ""
 
-    # First list ledgers
-    echo "=== Ledgers on Relay ==="
-    run_nostr_cmd list
+    # Get list of ledger IDs
+    ledger_ids=$(run_nostr_cmd list 2>/dev/null | grep -E '^  [0-9a-f]{64}$' | tr -d ' ')
 
-    echo ""
-    echo "=== All Updates ==="
-    run_nostr_cmd import
+    for lid in $ledger_ids; do
+        run_nostr_cmd import "$lid" --dry-run 2>&1 | grep -v "^Fetching\|^  Relay:\|^  Ledger:\|^Found\|^Dry run"
+        echo ""
+    done
 fi

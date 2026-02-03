@@ -524,8 +524,10 @@ pub fn handle_ledger_update<C: HandlerContext>(
                 LedgerOperation::CollateralDecrease { .. } |
                 LedgerOperation::CollateralAttestation { .. } |
                 LedgerOperation::ReservesRotate { .. } |
+                LedgerOperation::CustodyDispute { .. } |
+                LedgerOperation::CustodyArmed { .. } |
                 LedgerOperation::CustodyAcquire { .. } |
-                LedgerOperation::CustodyRelease |
+                LedgerOperation::CustodyYield |
                 LedgerOperation::Tombstone { .. } |
                 LedgerOperation::LedgerOpen { .. } => {}
             }

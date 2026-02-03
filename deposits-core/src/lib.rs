@@ -111,6 +111,8 @@ pub use tapscript_reserves::{
 pub use types::{
     Deposit, FeeStructure, PendingInvoice, ReservesOutput, Invoice,
     LedgerState, LedgerUpdate, SignedLedgerUpdate, SignedLedgerUpdateLog,
+    // Dispute protocol types
+    DisputeState, entropy_selection_score, select_entropy_winner, is_entropy_winner,
     DepositInfo, InvoiceInfo, ReservesStatus, CollateralAttestation,
     AuditResult, Violation, CrossLedgerViolation, LedgerStateUpdate,
     QuorumJoinRequestMsg, QuorumJoinResponseMsg, QuorumVoteMsg,

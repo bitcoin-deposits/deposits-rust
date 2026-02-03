@@ -204,6 +204,22 @@ pub mod serde_pubkey_vec {
 }
 
 // ============================================================================
+// Serde Default Helpers
+// ============================================================================
+
+/// Default pubkey for serde deserialization (generator point G).
+/// Used when deserializing older ledgers that don't have parent_pubkey.
+pub fn default_parent_pubkey() -> PublicKey {
+    // Use generator point G as default pubkey (well-known, deterministic)
+    let generator_bytes = [
+        0x02, 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62,
+        0x95, 0xce, 0x87, 0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28,
+        0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8, 0x17, 0x98,
+    ];
+    PublicKey::from_slice(&generator_bytes).expect("Generator point is a valid pubkey")
+}
+
+// ============================================================================
 // Fee Structure
 // ============================================================================
 
@@ -562,6 +578,133 @@ impl CollateralAttestation {
 }
 
 // ============================================================================
+// Dispute State
+// ============================================================================
+
+/// State of a ledger with respect to custody disputes.
+///
+/// A ledger's dispute state follows this state machine:
+/// ```text
+/// NORMAL
+///   │
+///   │ CustodyDispute (from quorum member)
+///   ▼
+/// DISPUTED
+///   │  - Quorum is disbanded
+///   │  - All collateral attestations voided
+///   │  - Only QuorumAddMember and CollateralAttestation allowed
+///   │
+///   │ CustodyArmed (pre-commitment)
+///   ▼
+/// ARMED
+///   │  - No more quorum/collateral changes
+///   │  - Candidate is locked in for entropy selection
+///   │  - Only CustodyAcquire or CustodyYield allowed
+///   │
+///   ├─── CustodyAcquire ──► NORMAL (new operator, reserves spent)
+///   │
+///   └─── CustodyYield ───► TOMBSTONED (branch terminated)
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DisputeState {
+    /// Normal operation - no active dispute
+    #[default]
+    Normal,
+    /// Dispute has been opened. Quorum is disbanded, only QuorumAddMember
+    /// and CollateralAttestation operations are allowed.
+    Disputed,
+    /// Candidate is armed and locked in for entropy selection.
+    /// No more quorum/collateral changes allowed.
+    Armed,
+    /// Branch has been terminated (lost entropy selection or yielded).
+    /// No further updates allowed.
+    Tombstoned,
+}
+
+impl DisputeState {
+    /// Check if operations can be appended in this state.
+    pub fn allows_operations(&self) -> bool {
+        !matches!(self, DisputeState::Tombstoned)
+    }
+
+    /// Check if this state allows the given operation type.
+    ///
+    /// Returns true if the operation is valid for this state, false otherwise.
+    pub fn allows_operation(&self, operation_discriminant: u8) -> bool {
+        match self {
+            DisputeState::Normal => {
+                // Normal state allows all operations except CustodyArmed, CustodyAcquire, CustodyYield
+                // CustodyDispute is the only way to transition out
+                !matches!(operation_discriminant, 57 | 55 | 56) // CustodyArmed, CustodyAcquire, CustodyYield
+            }
+            DisputeState::Disputed => {
+                // Only QuorumAddMember, CollateralAttestation, and CustodyArmed allowed
+                matches!(operation_discriminant, 43 | 42 | 57) // QuorumAddMember, CollateralAttestation, CustodyArmed
+            }
+            DisputeState::Armed => {
+                // Only CustodyAcquire or CustodyYield allowed
+                matches!(operation_discriminant, 55 | 56) // CustodyAcquire, CustodyYield
+            }
+            DisputeState::Tombstoned => {
+                // No operations allowed
+                false
+            }
+        }
+    }
+}
+
+/// Compute the entropy selection score for a candidate.
+///
+/// The score is computed as: SHA256(entropy_block_hash || candidate_pubkey)
+/// Lower scores win (sorted ascending).
+pub fn entropy_selection_score(entropy_block_hash: &[u8; 32], candidate: &PublicKey) -> [u8; 32] {
+    use bitcoin::hashes::{Hash, sha256};
+
+    let mut input = Vec::with_capacity(32 + 33);
+    input.extend_from_slice(entropy_block_hash);
+    input.extend_from_slice(&candidate.serialize());
+    *sha256::Hash::hash(&input).as_byte_array()
+}
+
+/// Select the winner from a list of candidates using entropy-based selection.
+///
+/// Per the dispute protocol, the winner is determined by:
+/// `winner = candidates.sort_by(|c| hash(entropy_block_hash || c.pubkey)).first()`
+///
+/// This ensures:
+/// - No one can predict the winner before the entropy block
+/// - Everyone can verify the winner after the entropy block
+/// - The selection is deterministic
+///
+/// Returns None if candidates is empty.
+pub fn select_entropy_winner(
+    entropy_block_hash: &[u8; 32],
+    candidates: &[PublicKey],
+) -> Option<PublicKey> {
+    if candidates.is_empty() {
+        return None;
+    }
+
+    candidates
+        .iter()
+        .min_by_key(|c| entropy_selection_score(entropy_block_hash, c))
+        .copied()
+}
+
+/// Check if a candidate is the entropy-selected winner.
+///
+/// Returns true if this candidate has the lowest score among all candidates.
+pub fn is_entropy_winner(
+    entropy_block_hash: &[u8; 32],
+    candidate: &PublicKey,
+    all_candidates: &[PublicKey],
+) -> bool {
+    select_entropy_winner(entropy_block_hash, all_candidates)
+        .map(|winner| &winner == candidate)
+        .unwrap_or(false)
+}
+
+// ============================================================================
 // Ledger State
 // ============================================================================
 
@@ -656,6 +799,27 @@ pub struct LedgerState {
     /// Records our commitment to monitor other operators' ledgers.
     #[serde(default)]
     pub joined_quorums: Vec<QuorumMembership>,
+    // ========================================================================
+    // Dispute State
+    // ========================================================================
+    /// Current dispute state of the ledger.
+    /// Determines which operations are allowed and signature requirements.
+    #[serde(default)]
+    pub dispute_state: DisputeState,
+    /// The pubkey that signed the last update.
+    /// All subsequent updates must be signed by this same pubkey (except CustodyDispute).
+    /// For Normal state this is typically the operator; for Disputed/Ready it's the dispute opener.
+    #[serde(with = "serde_pubkey", default = "default_parent_pubkey")]
+    pub parent_pubkey: PublicKey,
+    /// Quorum members at the point of the last CustodyDispute.
+    /// Used to verify that CustodyDispute signers were actually quorum members at the fork point.
+    /// Only populated when dispute_state != Normal.
+    #[serde(with = "serde_pubkey_vec", default)]
+    pub quorum_at_fork: Vec<PublicKey>,
+    /// Sequence number of the last valid update before the dispute.
+    /// Used for dispute validation.
+    #[serde(default)]
+    pub dispute_fork_sequence: u64,
 }
 
 impl LedgerState {
@@ -711,6 +875,11 @@ impl LedgerState {
             sequence: 0,
             hash: [0u8; 32],
             joined_quorums: Vec::new(),
+            // Dispute state - start in Normal
+            dispute_state: DisputeState::Normal,
+            parent_pubkey: operator_key, // Initially operator signs everything
+            quorum_at_fork: Vec::new(),
+            dispute_fork_sequence: 0,
         }
     }
 
@@ -1846,8 +2015,8 @@ pub struct DepositOffer {
     #[serde(with = "serde_pubkey")]
     pub operator_id: PublicKey,
 
-    /// The reserves identifier (e.g., Bitcoin address for BDK, pubkey hex for LDK).
-    pub reserves_id: String,
+    /// The ledger ID (64-char hex hash stable across custody transfers).
+    pub ledger_id: String,
 
     /// The deposit pubkey (identifier for the deposit).
     #[serde(with = "serde_pubkey")]
@@ -1884,7 +2053,7 @@ impl DepositOffer {
     /// Returns the canonical message format that should be signed by the operator.
     pub fn signing_message(
         operator_id: &PublicKey,
-        reserves_id: &str,
+        ledger_id: &str,
         deposit_pubkey: &PublicKey,
         funding_address: &str,
         max_amount_sats: u64,
@@ -1895,7 +2064,7 @@ impl DepositOffer {
         format!(
             "DEPOSIT_OFFER:{}:{}:{}:{}:{}:{}:{}",
             hex::encode(operator_id.serialize()),
-            reserves_id,
+            ledger_id,
             hex::encode(deposit_pubkey.serialize()),
             funding_address,
             max_amount_sats,
@@ -1925,7 +2094,7 @@ impl DepositOffer {
     pub fn get_signing_message(&self) -> String {
         Self::signing_message(
             &self.operator_id,
-            &self.reserves_id,
+            &self.ledger_id,
             &self.deposit_pubkey,
             &self.funding_address,
             self.max_amount_sats,
@@ -2470,5 +2639,106 @@ mod tests {
         // Stale attestations should not count
         assert_eq!(state.total_available_collateral(800_400, 200), 0);
         assert_eq!(state.missing_attestations(800_400, 200).len(), 2);
+    }
+
+    // ========================================================================
+    // Dispute State Tests
+    // ========================================================================
+
+    #[test]
+    fn test_dispute_state_allows_operations() {
+        // Normal state
+        assert!(DisputeState::Normal.allows_operations());
+        assert!(DisputeState::Normal.allows_operation(10)); // Some random op
+        assert!(!DisputeState::Normal.allows_operation(55)); // CustodyAcquire
+        assert!(!DisputeState::Normal.allows_operation(56)); // CustodyYield
+        assert!(!DisputeState::Normal.allows_operation(57)); // CustodyArmed
+
+        // Disputed state - only QuorumAddMember(43), CollateralAttestation(42), CustodyArmed(57)
+        assert!(DisputeState::Disputed.allows_operations());
+        assert!(DisputeState::Disputed.allows_operation(42)); // CollateralAttestation
+        assert!(DisputeState::Disputed.allows_operation(43)); // QuorumAddMember
+        assert!(DisputeState::Disputed.allows_operation(57)); // CustodyArmed
+        assert!(!DisputeState::Disputed.allows_operation(10)); // Random op blocked
+        assert!(!DisputeState::Disputed.allows_operation(55)); // CustodyAcquire
+
+        // Armed state - only CustodyAcquire(55) or CustodyYield(56)
+        assert!(DisputeState::Armed.allows_operations());
+        assert!(DisputeState::Armed.allows_operation(55)); // CustodyAcquire
+        assert!(DisputeState::Armed.allows_operation(56)); // CustodyYield
+        assert!(!DisputeState::Armed.allows_operation(43)); // QuorumAddMember blocked
+        assert!(!DisputeState::Armed.allows_operation(57)); // CustodyArmed blocked
+
+        // Tombstoned - nothing allowed
+        assert!(!DisputeState::Tombstoned.allows_operations());
+        assert!(!DisputeState::Tombstoned.allows_operation(55));
+        assert!(!DisputeState::Tombstoned.allows_operation(56));
+    }
+
+    #[test]
+    fn test_entropy_selection_deterministic() {
+        let entropy_hash = [0x42u8; 32];
+
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let pk1 = PublicKey::from_secret_key(&secp, &bitcoin::secp256k1::SecretKey::from_slice(&[1u8; 32]).unwrap());
+        let pk2 = PublicKey::from_secret_key(&secp, &bitcoin::secp256k1::SecretKey::from_slice(&[2u8; 32]).unwrap());
+        let pk3 = PublicKey::from_secret_key(&secp, &bitcoin::secp256k1::SecretKey::from_slice(&[3u8; 32]).unwrap());
+
+        let candidates = vec![pk1, pk2, pk3];
+
+        // Selection should be deterministic
+        let winner1 = select_entropy_winner(&entropy_hash, &candidates);
+        let winner2 = select_entropy_winner(&entropy_hash, &candidates);
+        assert_eq!(winner1, winner2);
+
+        // Order shouldn't matter
+        let reversed = vec![pk3, pk2, pk1];
+        let winner3 = select_entropy_winner(&entropy_hash, &reversed);
+        assert_eq!(winner1, winner3);
+    }
+
+    #[test]
+    fn test_entropy_selection_different_hashes() {
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let pk1 = PublicKey::from_secret_key(&secp, &bitcoin::secp256k1::SecretKey::from_slice(&[1u8; 32]).unwrap());
+        let pk2 = PublicKey::from_secret_key(&secp, &bitcoin::secp256k1::SecretKey::from_slice(&[2u8; 32]).unwrap());
+
+        let candidates = vec![pk1, pk2];
+
+        // Different entropy hashes should (usually) produce different winners
+        let hash1 = [0x01u8; 32];
+        let hash2 = [0x02u8; 32];
+
+        // Note: It's possible both produce the same winner, but unlikely
+        // Just verify both return Some
+        assert!(select_entropy_winner(&hash1, &candidates).is_some());
+        assert!(select_entropy_winner(&hash2, &candidates).is_some());
+    }
+
+    #[test]
+    fn test_is_entropy_winner() {
+        let entropy_hash = [0x42u8; 32];
+
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let pk1 = PublicKey::from_secret_key(&secp, &bitcoin::secp256k1::SecretKey::from_slice(&[1u8; 32]).unwrap());
+        let pk2 = PublicKey::from_secret_key(&secp, &bitcoin::secp256k1::SecretKey::from_slice(&[2u8; 32]).unwrap());
+
+        let candidates = vec![pk1, pk2];
+        let winner = select_entropy_winner(&entropy_hash, &candidates).unwrap();
+
+        // Winner should report as winner
+        assert!(is_entropy_winner(&entropy_hash, &winner, &candidates));
+
+        // Loser should not report as winner
+        let loser = if winner == pk1 { pk2 } else { pk1 };
+        assert!(!is_entropy_winner(&entropy_hash, &loser, &candidates));
+    }
+
+    #[test]
+    fn test_entropy_selection_empty() {
+        let entropy_hash = [0x42u8; 32];
+        let candidates: Vec<PublicKey> = vec![];
+
+        assert!(select_entropy_winner(&entropy_hash, &candidates).is_none());
     }
 }

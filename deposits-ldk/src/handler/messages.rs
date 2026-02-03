@@ -107,7 +107,10 @@ impl LedgerOperationExt for LedgerOperation {
             LedgerOperation::CollateralLock { .. } => "CollateralLock",
             LedgerOperation::QuorumJoin { .. } => "QuorumJoin",
             LedgerOperation::FeeCollect { .. } => "FeeCollect",
+            LedgerOperation::CustodyDispute { .. } => "CustodyDispute",
+            LedgerOperation::CustodyArmed { .. } => "CustodyArmed",
             LedgerOperation::CustodyAcquire { .. } => "CustodyAcquire",
+            LedgerOperation::CustodyYield => "CustodyYield",
             LedgerOperation::LedgerClose => "LedgerClose",
             LedgerOperation::Tombstone { .. } => "Tombstone",
         }
