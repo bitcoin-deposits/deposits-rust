@@ -267,18 +267,15 @@ mod tests {
 
         // For replay testing, we need to know Alice's node ID.
         // Let's look for it in HandshakeResponse messages which contain operator info.
+        // TODO: V2 API changed - HandshakeResponseMsg no longer has partner_id field
+        // Try to find Alice's ID from Handshake messages where she's the operator
         let mut alice_id: Option<PublicKey> = None;
-        for (sender, msg_type, _, msg) in &messages {
-            if *msg_type == 0x8007 { // HANDSHAKE_RESPONSE
-                if let DepositsMessage::HandshakeResponse(resp) = msg {
-                    // The responder is our partner (Bob/Charlie), so their operator field tells us about them
-                    // We need to look at the partner_id field which should be Alice (the initiator)
-                    // Actually in handshake flow: Initiator sends Handshake, responder sends HandshakeResponse
-                    // The HandshakeResponse.partner_id should be the initiator (Alice)
-                    let partner_id = &resp.partner_id;
-                    if alice_id.is_none() || alice_id == Some(*partner_id) {
-                        alice_id = Some(*partner_id);
-                        println!("Found potential Alice ID from HandshakeResponse: {}", partner_id);
+        for (_sender, msg_type, _, msg) in &messages {
+            if *msg_type == 0x8006 { // HANDSHAKE
+                if let DepositsMessage::Handshake(init) = msg {
+                    if alice_id.is_none() {
+                        alice_id = Some(init.operator_id);
+                        println!("Found potential Alice ID from Handshake: {}", init.operator_id);
                     }
                 }
             }
@@ -368,21 +365,14 @@ mod tests {
     ///   - They receive Handshake where partner_id is THEIR node ID
     ///   - The sender's public_key field is the initiator (not us)
     fn discover_node_id_from_messages(messages: &[(PublicKey, u16, String, DepositsMessage)]) -> Option<PublicKey> {
-        // First, try HandshakeResponse - this is more reliable as it's what the initiator receives back
-        for (_, _, _, msg) in messages {
-            if let DepositsMessage::HandshakeResponse(resp) = msg {
-                return Some(resp.partner_id);
-            }
-        }
-
-        // If no HandshakeResponse, try Handshake - this is what partners/auditors receive
-        // The partner_id field in Handshake is the intended recipient (the partner)
+        // TODO: V2 API changed - HandshakeMsg now has operator_id instead of partner_id
+        // For now, try to use operator_id from Handshake messages
         for (_, _, _, msg) in messages {
             if let DepositsMessage::Handshake(init) = msg {
-                return Some(init.partner_id);
+                return Some(init.operator_id);
             }
         }
-
+        let _ = messages; // silence unused warning
         None
     }
 
@@ -468,10 +458,10 @@ mod tests {
         match msg {
             DepositsMessage::LedgerUpdate(update_msg) => {
                 match &update_msg.operation {
-                    LedgerOperation::PaymentCredit { amount, .. } => Some(*amount),
-                    LedgerOperation::PaymentLock { amount, .. } => Some(*amount),
-                    LedgerOperation::PaymentFail { amount, .. } => Some(*amount),
-                    LedgerOperation::PaymentFulfill { amount, .. } => Some(*amount),
+                    LedgerOperation::InvoiceCredit { amount, .. } => Some(*amount),
+                    LedgerOperation::InvoiceLock { amount, .. } => Some(*amount),
+                    LedgerOperation::InvoiceFail { amount, .. } => Some(*amount),
+                    LedgerOperation::InvoiceFulfill { amount, .. } => Some(*amount),
                     LedgerOperation::ReservesIncrease { new_amount, .. } => Some(*new_amount),
                     LedgerOperation::ReservesDecrease { new_amount, .. } => Some(*new_amount),
                     _ => None,

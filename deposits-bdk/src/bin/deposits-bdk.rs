@@ -5046,40 +5046,46 @@ async fn process_custodian_query_request(
 /// Handle recovery subcommands for non-conforming ledgers
 async fn recovery_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {
-        eprintln!("Usage: deposits-bdk recovery <start|agree|prepare|status|spend|release> [args...]");
+        eprintln!("Usage: deposits-bdk recovery <dispute|rebuild|arm|claim|spend|status> [args...]");
         eprintln!();
-        eprintln!("Subcommands:");
-        eprintln!("  start <ledger_id> [--reason <text>]    Validate ledger, publish dispute if invalid");
-        eprintln!("  agree <ledger_id>                      Independently verify and agree to recovery");
-        eprintln!("  prepare <ledger_id>                    Prepare as candidate: publish CustodyAcquire + attestations");
+        eprintln!("Subcommands (Dispute Protocol):");
+        eprintln!("  dispute <ledger_id> [--reason <text>]  Open dispute: publish CustodyDispute operation");
+        eprintln!("  rebuild <ledger_id>                    Rebuild quorum: add members + get attestations");
+        eprintln!("  arm <ledger_id>                        Pre-commit: publish CustodyArmed operation");
+        eprintln!("  claim <ledger_id>                      After entropy: CustodyAcquire (win) or CustodyYield (lose)");
+        eprintln!("  spend <ledger_id>                      Execute on-chain spend (winner only)");
         eprintln!("  status <ledger_id>                     Show recovery status and candidates");
-        eprintln!("  spend <ledger_id>                      Execute on-chain spend (after entropy block)");
-        eprintln!("  release <ledger_id>                    Publish CustodyYield (if not selected)");
         eprintln!();
         eprintln!("Recovery flow:");
-        eprintln!("  1. start   - Detect violation and publish dispute");
-        eprintln!("  2. agree   - Quorum members verify and agree");
-        eprintln!("  3. prepare - Each candidate publishes CustodyAcquire + attestations");
-        eprintln!("  4. (wait)  - Wait for entropy block");
-        eprintln!("  5. spend   - Anyone broadcasts on-chain spend to selected candidate");
-        eprintln!("  6. release - Non-selected candidates close their branch");
+        eprintln!("  1. dispute - Detect violation, publish CustodyDispute (quorum disbanded)");
+        eprintln!("  2. rebuild - Add new quorum members, collect attestations");
+        eprintln!("  3. arm     - Publish CustodyArmed (locks in for entropy selection)");
+        eprintln!("  4. (wait)  - Wait for entropy block to be mined");
+        eprintln!("  5. claim   - Winner: CustodyAcquire, Losers: CustodyYield");
+        eprintln!("  6. spend   - Winner broadcasts on-chain spend to claim reserves");
+        eprintln!();
+        eprintln!("State machine: NORMAL -> DISPUTED -> ARMED -> NORMAL (winner) / TOMBSTONED (losers)");
         return Ok(());
     }
 
     match args[0].as_str() {
+        // New dispute protocol commands
+        "dispute" => recovery_dispute(&args[1..]).await,
+        "rebuild" => recovery_rebuild(&args[1..]).await,
+        "arm" => recovery_arm(&args[1..]).await,
+        "claim" => recovery_claim_new(&args[1..]).await,
+        "spend" => recovery_spend(&args[1..]).await,
+        "status" => recovery_status(&args[1..]).await,
+        // Legacy commands (for backward compatibility)
         "start" => recovery_start(&args[1..]).await,
         "agree" => recovery_agree(&args[1..]).await,
         "prepare" => recovery_prepare(&args[1..]).await,
-        "status" => recovery_status(&args[1..]).await,
-        "spend" => recovery_spend(&args[1..]).await,
         "release" => recovery_release(&args[1..]).await,
-        // Legacy aliases
-        "claim" => recovery_claim(&args[1..]).await,
         "complete" => recovery_complete(&args[1..]).await,
         "publish-transfer" => recovery_publish_transfer(&args[1..]).await,
         cmd => {
             eprintln!("Unknown recovery subcommand: {}", cmd);
-            eprintln!("Usage: deposits-bdk recovery <start|agree|prepare|status|spend|release> [args...]");
+            eprintln!("Usage: deposits-bdk recovery <dispute|rebuild|arm|claim|spend|status> [args...]");
             Ok(())
         }
     }
@@ -5483,43 +5489,6 @@ async fn recovery_status(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     println!("  2. If invalid, publish dispute: deposits-bdk nostr dispute publish {} <reason> <details>", ledger_id);
     println!("  3. Submit vote: deposits-bdk recovery vote {} non-conforming", ledger_id);
     println!("  4. Claim if eligible: deposits-bdk recovery claim {}", ledger_id);
-
-    Ok(())
-}
-
-/// Execute a recovery claim if eligible
-async fn recovery_claim(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    use deposits_core::recovery::{DAY_BLOCKS, WEEK_BLOCKS, TWO_WEEKS_BLOCKS};
-
-    let mut ledger_id: Option<String> = None;
-
-    let mut i = 0;
-    while i < args.len() {
-        if args[i].starts_with("--") {
-            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
-                i += 1;
-            }
-        } else if ledger_id.is_none() {
-            ledger_id = Some(args[i].clone());
-        }
-        i += 1;
-    }
-
-    let ledger_id = ledger_id.ok_or("Missing ledger_id")?;
-
-    println!("Recovery claim for: {}", ledger_id);
-    println!();
-    println!("Claim eligibility tiers (blocks since force close):");
-    println!("  Tier 0 (0-{} blocks): Only deterministically selected partner", DAY_BLOCKS);
-    println!("  Tier 1 ({}-{} blocks): Any 3 quorum members", DAY_BLOCKS, WEEK_BLOCKS);
-    println!("  Tier 2 ({}-{} blocks): Any single quorum member", WEEK_BLOCKS, TWO_WEEKS_BLOCKS);
-    println!("  Tier 3 ({}+ blocks): Community fallback", TWO_WEEKS_BLOCKS);
-    println!();
-    println!("To execute custody transfer:");
-    println!("  1. Collect CustodyAcquire signatures from quorum members");
-    println!("  2. Append CustodyAcquire operation to ledger (published to Nostr)");
-    println!("  3. New custodian signs all future updates");
-    println!("  4. Reserves are transferred on-chain via VoterSet spending paths");
 
     Ok(())
 }
@@ -7224,6 +7193,719 @@ async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error::Err
     println!();
     println!("Your candidate branch is now closed.");
     println!("Your quorum members are released from attestation obligations.");
+
+    Ok(())
+}
+
+// =============================================================================
+// NEW DISPUTE PROTOCOL COMMANDS
+// =============================================================================
+// These implement the proper dispute protocol flow:
+// NORMAL -> DISPUTED -> ARMED -> NORMAL (winner) / TOMBSTONED (losers)
+
+/// Open a custody dispute by publishing a CustodyDispute ledger operation.
+///
+/// This is the first step in the dispute protocol. It:
+/// 1. Validates the ledger and finds the violation
+/// 2. Creates a CustodyDispute operation (disbands quorum, records fork point)
+/// 3. Publishes the signed operation to Nostr
+///
+/// After this, the ledger is in DISPUTED state. Next step: `recovery rebuild`
+async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use bitcoin::hashes::{Hash, sha256};
+    use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey, Message};
+    use deposits_core::{TlvDecode, TlvEncode, SignedLedgerUpdate};
+    use deposits_core::messages::LedgerOperation;
+    use deposits_bdk::nostr::{NostrTransportBuilder, KIND_LEDGER_UPDATE};
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    use nostr_sdk::prelude::*;
+
+    let mut ledger_id: Option<String> = None;
+    let mut reason: Option<String> = None;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--reason" | "-r" => {
+                i += 1;
+                if i < args.len() {
+                    reason = Some(args[i].clone());
+                }
+            }
+            s if s.starts_with("--") => {
+                config_args.push(args[i].clone());
+                if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                    config_args.push(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            _ => {
+                if ledger_id.is_none() {
+                    ledger_id = Some(args[i].clone());
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let ledger_id = ledger_id.ok_or("Missing ledger_id")?.trim().to_string();
+    let reason = reason.unwrap_or_else(|| "Non-conforming ledger detected".to_string());
+
+    let config = parse_config(&config_args)?;
+    let relay_url = config.relays.first()
+        .ok_or("No relay configured. Use --relay <url>")?
+        .clone();
+
+    let secp = Secp256k1::new();
+    let secret_key = SecretKey::from_slice(&config.seed)
+        .map_err(|e| format!("Invalid seed: {}", e))?;
+    let keypair = Keypair::from_secret_key(&secp, &secret_key);
+    let our_pubkey = keypair.public_key();
+
+    println!("Opening custody dispute for ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
+    println!("  Reason: {}", reason);
+    println!();
+
+    // Fetch ledger from Nostr
+    println!("Fetching ledger from Nostr...");
+    let keys = Keys::generate();
+    let client = Client::new(keys);
+    client.add_relay(&relay_url).await
+        .map_err(|e| format!("Failed to add relay: {}", e))?;
+    client.connect().await;
+
+    let filter = Filter::new()
+        .kind(Kind::Custom(KIND_LEDGER_UPDATE))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()])
+        .limit(500);
+
+    let events = client
+        .fetch_events(vec![filter], None)
+        .await
+        .map_err(|e| format!("Failed to fetch events: {}", e))?;
+
+    client.disconnect().await.ok();
+
+    // Decode and sort updates
+    let mut updates: Vec<SignedLedgerUpdate> = Vec::new();
+    for event in events.iter() {
+        if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
+            if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
+                updates.push(update);
+            }
+        }
+    }
+    updates.sort_by_key(|u| u.sequence_number);
+    updates.dedup_by(|a, b| a.sequence_number == b.sequence_number && a.current_hash == b.current_hash);
+
+    println!("  Found {} updates", updates.len());
+
+    // Validate the hash chain to find the last valid point
+    let mut last_valid_hash = [0u8; 32];
+    let mut last_valid_sequence: i64 = -1;
+    let mut violation_details = String::new();
+
+    for update in &updates {
+        let expected_seq = (last_valid_sequence + 1) as u64;
+        if update.sequence_number != expected_seq && last_valid_sequence >= 0 {
+            violation_details = format!(
+                "Sequence gap: expected {}, got {}",
+                expected_seq, update.sequence_number
+            );
+            break;
+        }
+
+        let expected_prev = if update.sequence_number == 0 {
+            [0u8; 32]
+        } else {
+            last_valid_hash
+        };
+
+        if update.previous_hash != expected_prev {
+            violation_details = format!(
+                "Hash chain broken at seq {}: expected {}..., got {}...",
+                update.sequence_number,
+                hex::encode(&expected_prev[..4]),
+                hex::encode(&update.previous_hash[..4])
+            );
+            break;
+        }
+
+        let computed_hash = update.compute_hash();
+        if computed_hash != update.current_hash {
+            violation_details = format!(
+                "Invalid hash at seq {}: computed {}..., stored {}...",
+                update.sequence_number,
+                hex::encode(&computed_hash[..4]),
+                hex::encode(&update.current_hash[..4])
+            );
+            break;
+        }
+
+        last_valid_hash = update.current_hash;
+        last_valid_sequence = update.sequence_number as i64;
+    }
+
+    let last_valid_sequence_u64 = if last_valid_sequence >= 0 {
+        last_valid_sequence as u64
+    } else {
+        0
+    };
+
+    if violation_details.is_empty() {
+        println!();
+        println!("Ledger appears conforming (no violation found).");
+        println!("Cannot open dispute for a conforming ledger.");
+        return Ok(());
+    }
+
+    println!();
+    println!("Violation detected!");
+    println!("  {}", violation_details);
+    println!("  Last valid sequence: {}", last_valid_sequence_u64);
+    println!("  Last valid hash: {}...", hex::encode(&last_valid_hash[..8]));
+
+    // Create CustodyDispute operation
+    let custody_dispute = LedgerOperation::CustodyDispute {
+        last_valid_sequence: last_valid_sequence_u64,
+        reason: format!("{}: {}", reason, violation_details),
+    };
+
+    // Serialize
+    let message_bytes = custody_dispute.tlv_encode();
+
+    // Compute the new hash (forking from last valid)
+    let sequence = last_valid_sequence_u64 + 1;
+    let mut hash_input = Vec::new();
+    hash_input.extend_from_slice(&sequence.to_le_bytes());
+    hash_input.extend_from_slice(&last_valid_hash);
+    hash_input.extend_from_slice(&message_bytes);
+    let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
+
+    // Get current block height
+    use bdk_esplora::esplora_client::Builder as EsploraBuilder;
+    let esplora = EsploraBuilder::new(&config.electrum_url).build_blocking();
+    let current_block_height = esplora.get_height()
+        .map_err(|e| format!("Failed to get block height: {:?}", e))?;
+
+    // Sign the update
+    let update_msg = format!(
+        "deposits:ledger:{}:{}:{}",
+        hex::encode(last_valid_hash),
+        sequence,
+        hex::encode(&new_hash)
+    );
+    let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
+    let signature = secp.sign_schnorr(
+        &Message::from_digest(*msg_hash.as_ref()),
+        &keypair
+    );
+    let operator_sig_bytes: [u8; 64] = *signature.as_ref();
+
+    // Create the signed update
+    let ledger_id_bytes: [u8; 32] = {
+        let decoded = hex::decode(&ledger_id)
+            .map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
+        decoded.try_into().map_err(|_| "Ledger ID must be 32 bytes")?
+    };
+
+    let signed_update = SignedLedgerUpdate {
+        message: message_bytes,
+        message_type: 0x8001, // LEDGER_UPDATE
+        operator_signature: operator_sig_bytes,
+        partner_signature: [0u8; 64],
+        operator_id: our_pubkey,
+        ledger_id: ledger_id_bytes,
+        sequence_number: sequence,
+        previous_hash: last_valid_hash,
+        current_hash: new_hash,
+        timestamp: deposits_core::now_unix_timestamp(),
+        block_height: current_block_height,
+        block_hash: [0u8; 32],
+    };
+
+    // Publish to Nostr
+    println!();
+    println!("Publishing CustodyDispute to Nostr...");
+
+    let publish_transport = NostrTransportBuilder::new(secret_key)
+        .relay(&relay_url)
+        .build()
+        .await?;
+
+    publish_transport.broadcast_ledger_update(&signed_update).await?;
+
+    println!();
+    println!("CustodyDispute published successfully!");
+    println!("  Dispute opener: {}...", &our_pubkey.to_string()[..16]);
+    println!("  Sequence: {} (forked from {})", sequence, last_valid_sequence_u64);
+    println!("  Hash: {}...", &hex::encode(new_hash)[..16]);
+    println!();
+    println!("Ledger is now in DISPUTED state. Quorum has been disbanded.");
+    println!();
+    println!("Next steps:");
+    println!("  1. Rebuild quorum: recovery rebuild {}", &ledger_id[..16]);
+    println!("  2. Collect attestations from new quorum members");
+    println!("  3. Pre-commit: recovery arm {}", &ledger_id[..16]);
+
+    Ok(())
+}
+
+/// Rebuild the quorum during a dispute.
+///
+/// This command helps add new quorum members and collect attestations
+/// while the ledger is in DISPUTED state.
+async fn recovery_rebuild(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let ledger_id = args.first().ok_or("Missing ledger_id")?;
+
+    println!("Rebuilding quorum for ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
+    println!();
+    println!("To rebuild the quorum, use the collateral commands:");
+    println!();
+    println!("  1. Add quorum members:");
+    println!("     deposits-bdk collateral add-quorum-member <member_pubkey>");
+    println!();
+    println!("  2. Request attestations from each member:");
+    println!("     deposits-bdk collateral request-attestation <member_pubkey>");
+    println!();
+    println!("  3. Once quorum is rebuilt with attestations:");
+    println!("     deposits-bdk recovery arm {}", &ledger_id[..16.min(ledger_id.len())]);
+    println!();
+    println!("Note: You need at least 1 quorum member with a valid collateral attestation");
+    println!("before you can arm (pre-commit) for entropy selection.");
+
+    Ok(())
+}
+
+/// Publish CustodyArmed to pre-commit for entropy selection.
+///
+/// This locks in the current quorum - no more changes allowed after this.
+/// The candidate is now registered for entropy-based selection.
+async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use bitcoin::hashes::{Hash, sha256};
+    use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey, Message};
+    use deposits_core::{TlvDecode, TlvEncode, SignedLedgerUpdate};
+    use deposits_core::messages::LedgerOperation;
+    use deposits_bdk::nostr::{NostrTransportBuilder, KIND_LEDGER_UPDATE};
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    use nostr_sdk::prelude::*;
+
+    let mut ledger_id: Option<String> = None;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            s if s.starts_with("--") => {
+                config_args.push(args[i].clone());
+                if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                    config_args.push(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            _ => {
+                if ledger_id.is_none() {
+                    ledger_id = Some(args[i].clone());
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let ledger_id = ledger_id.ok_or("Missing ledger_id")?.trim().to_string();
+    let config = parse_config(&config_args)?;
+    let relay_url = config.relays.first()
+        .ok_or("No relay configured. Use --relay <url>")?
+        .clone();
+
+    let secp = Secp256k1::new();
+    let secret_key = SecretKey::from_slice(&config.seed)
+        .map_err(|e| format!("Invalid seed: {}", e))?;
+    let keypair = Keypair::from_secret_key(&secp, &secret_key);
+    let our_pubkey = keypair.public_key();
+
+    println!("Arming (pre-committing) for ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
+
+    // Fetch our branch from Nostr
+    println!("Fetching ledger from Nostr...");
+    let keys = Keys::generate();
+    let client = Client::new(keys);
+    client.add_relay(&relay_url).await
+        .map_err(|e| format!("Failed to add relay: {}", e))?;
+    client.connect().await;
+
+    let filter = Filter::new()
+        .kind(Kind::Custom(KIND_LEDGER_UPDATE))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()])
+        .limit(500);
+
+    let events = client
+        .fetch_events(vec![filter], None)
+        .await
+        .map_err(|e| format!("Failed to fetch events: {}", e))?;
+
+    client.disconnect().await.ok();
+
+    // Find our CustodyDispute and get the latest update
+    let mut our_updates: Vec<SignedLedgerUpdate> = Vec::new();
+    for event in events.iter() {
+        if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
+            if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
+                if update.operator_id == our_pubkey {
+                    our_updates.push(update);
+                }
+            }
+        }
+    }
+    our_updates.sort_by_key(|u| u.sequence_number);
+
+    if our_updates.is_empty() {
+        return Err("No updates found from you. Did you run 'recovery dispute' first?".into());
+    }
+
+    // Find our latest update (should be CustodyDispute or quorum additions)
+    let latest = our_updates.last().unwrap();
+    println!("  Found {} updates from you", our_updates.len());
+    println!("  Latest sequence: {}", latest.sequence_number);
+
+    // Get current block height for armed_block
+    use bdk_esplora::esplora_client::Builder as EsploraBuilder;
+    let esplora = EsploraBuilder::new(&config.electrum_url).build_blocking();
+    let current_block_height = esplora.get_height()
+        .map_err(|e| format!("Failed to get block height: {:?}", e))?;
+
+    // Create CustodyArmed operation
+    let custody_armed = LedgerOperation::CustodyArmed {
+        armed_block: current_block_height,
+    };
+
+    // Serialize
+    let message_bytes = custody_armed.tlv_encode();
+
+    // Compute the new hash
+    let sequence = latest.sequence_number + 1;
+    let mut hash_input = Vec::new();
+    hash_input.extend_from_slice(&sequence.to_le_bytes());
+    hash_input.extend_from_slice(&latest.current_hash);
+    hash_input.extend_from_slice(&message_bytes);
+    let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
+
+    // Sign the update
+    let update_msg = format!(
+        "deposits:ledger:{}:{}:{}",
+        hex::encode(latest.current_hash),
+        sequence,
+        hex::encode(&new_hash)
+    );
+    let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
+    let signature = secp.sign_schnorr(
+        &Message::from_digest(*msg_hash.as_ref()),
+        &keypair
+    );
+    let operator_sig_bytes: [u8; 64] = *signature.as_ref();
+
+    // Create the signed update
+    let ledger_id_bytes: [u8; 32] = {
+        let decoded = hex::decode(&ledger_id)
+            .map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
+        decoded.try_into().map_err(|_| "Ledger ID must be 32 bytes")?
+    };
+
+    let signed_update = SignedLedgerUpdate {
+        message: message_bytes,
+        message_type: 0x8001,
+        operator_signature: operator_sig_bytes,
+        partner_signature: [0u8; 64],
+        operator_id: our_pubkey,
+        ledger_id: ledger_id_bytes,
+        sequence_number: sequence,
+        previous_hash: latest.current_hash,
+        current_hash: new_hash,
+        timestamp: deposits_core::now_unix_timestamp(),
+        block_height: current_block_height,
+        block_hash: [0u8; 32],
+    };
+
+    // Publish to Nostr
+    println!();
+    println!("Publishing CustodyArmed to Nostr...");
+
+    let publish_transport = NostrTransportBuilder::new(secret_key)
+        .relay(&relay_url)
+        .build()
+        .await?;
+
+    publish_transport.broadcast_ledger_update(&signed_update).await?;
+
+    // Compute entropy block (6 blocks after armed)
+    let entropy_block = current_block_height + 6;
+
+    println!();
+    println!("CustodyArmed published successfully!");
+    println!("  Armed block: {}", current_block_height);
+    println!("  Sequence: {}", sequence);
+    println!("  Hash: {}...", &hex::encode(new_hash)[..16]);
+    println!();
+    println!("Ledger is now in ARMED state. Quorum is locked.");
+    println!();
+    println!("Next steps:");
+    println!("  1. Wait for entropy block: {} (current: {})", entropy_block, current_block_height);
+    println!("  2. After entropy block: recovery claim {}", &ledger_id[..16]);
+
+    Ok(())
+}
+
+/// Claim custody after entropy block - publish CustodyAcquire (winner) or CustodyYield (loser).
+async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use bitcoin::hashes::{Hash, sha256};
+    use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey, PublicKey, Message};
+    use deposits_core::{TlvDecode, TlvEncode, SignedLedgerUpdate};
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::types::select_entropy_winner;
+    use deposits_bdk::nostr::{NostrTransportBuilder, KIND_LEDGER_UPDATE};
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    use nostr_sdk::prelude::*;
+
+    let mut ledger_id: Option<String> = None;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            s if s.starts_with("--") => {
+                config_args.push(args[i].clone());
+                if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                    config_args.push(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            _ => {
+                if ledger_id.is_none() {
+                    ledger_id = Some(args[i].clone());
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let ledger_id = ledger_id.ok_or("Missing ledger_id")?.trim().to_string();
+    let config = parse_config(&config_args)?;
+    let relay_url = config.relays.first()
+        .ok_or("No relay configured. Use --relay <url>")?
+        .clone();
+
+    let secp = Secp256k1::new();
+    let secret_key = SecretKey::from_slice(&config.seed)
+        .map_err(|e| format!("Invalid seed: {}", e))?;
+    let keypair = Keypair::from_secret_key(&secp, &secret_key);
+    let our_pubkey = keypair.public_key();
+
+    println!("Claiming custody for ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
+
+    // Fetch all updates from Nostr
+    println!("Fetching ledger from Nostr...");
+    let keys = Keys::generate();
+    let client = Client::new(keys);
+    client.add_relay(&relay_url).await
+        .map_err(|e| format!("Failed to add relay: {}", e))?;
+    client.connect().await;
+
+    let filter = Filter::new()
+        .kind(Kind::Custom(KIND_LEDGER_UPDATE))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()])
+        .limit(500);
+
+    let events = client
+        .fetch_events(vec![filter], None)
+        .await
+        .map_err(|e| format!("Failed to fetch events: {}", e))?;
+
+    client.disconnect().await.ok();
+
+    // Find all CustodyArmed candidates and their armed_block
+    let mut candidates: Vec<(PublicKey, u32, SignedLedgerUpdate)> = Vec::new(); // (pubkey, armed_block, latest_update)
+    let mut our_latest: Option<SignedLedgerUpdate> = None;
+    let mut our_armed_block: Option<u32> = None;
+
+    for event in events.iter() {
+        if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
+            if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
+                // Decode the operation
+                if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+                    if let LedgerOperation::CustodyArmed { armed_block } = op {
+                        candidates.push((update.operator_id, armed_block, update.clone()));
+                        if update.operator_id == our_pubkey {
+                            our_armed_block = Some(armed_block);
+                        }
+                    }
+                }
+
+                // Track our latest update
+                if update.operator_id == our_pubkey {
+                    if our_latest.is_none() || update.sequence_number > our_latest.as_ref().unwrap().sequence_number {
+                        our_latest = Some(update);
+                    }
+                }
+            }
+        }
+    }
+
+    if candidates.is_empty() {
+        return Err("No CustodyArmed candidates found. Did everyone run 'recovery arm' first?".into());
+    }
+
+    let our_latest = our_latest.ok_or("No updates found from you")?;
+    if our_armed_block.is_none() {
+        return Err("You haven't published CustodyArmed yet. Run 'recovery arm' first.".into());
+    }
+
+    println!("  Found {} armed candidates", candidates.len());
+    for (pk, block, _) in &candidates {
+        let marker = if *pk == our_pubkey { " (you)" } else { "" };
+        println!("    - {}... armed at block {}{}", &pk.to_string()[..16], block, marker);
+    }
+
+    // Get current block height and the entropy block hash
+    use bdk_esplora::esplora_client::Builder as EsploraBuilder;
+    let esplora = EsploraBuilder::new(&config.electrum_url).build_blocking();
+    let current_block_height = esplora.get_height()
+        .map_err(|e| format!("Failed to get block height: {:?}", e))?;
+
+    // Find the earliest armed_block to determine entropy block
+    let earliest_armed = candidates.iter().map(|(_, b, _)| *b).min().unwrap();
+    let entropy_block_height = earliest_armed + 6;
+
+    if current_block_height < entropy_block_height {
+        println!();
+        println!("Entropy block not yet mined!");
+        println!("  Current block: {}", current_block_height);
+        println!("  Entropy block: {} (need {} more blocks)", entropy_block_height, entropy_block_height - current_block_height);
+        println!();
+        println!("Please wait for the entropy block to be mined, then run this command again.");
+        return Ok(());
+    }
+
+    // Get the entropy block hash
+    let entropy_block_hash_hex = esplora.get_block_hash(entropy_block_height)
+        .map_err(|e| format!("Failed to get entropy block hash: {:?}", e))?;
+    let entropy_block_hash: [u8; 32] = {
+        let hash_bytes = entropy_block_hash_hex.to_byte_array();
+        // Block hashes are little-endian, reverse for consistency
+        let mut reversed = hash_bytes;
+        reversed.reverse();
+        reversed
+    };
+
+    println!();
+    println!("Entropy block: {} (hash: {}...)", entropy_block_height, hex::encode(&entropy_block_hash[..8]));
+
+    // Get candidate pubkeys (only those armed before entropy block)
+    let eligible_candidates: Vec<PublicKey> = candidates.iter()
+        .filter(|(_, armed_block, _)| *armed_block < entropy_block_height)
+        .map(|(pk, _, _)| *pk)
+        .collect();
+
+    if eligible_candidates.is_empty() {
+        return Err("No eligible candidates (all armed after entropy block)".into());
+    }
+
+    // Determine winner using entropy selection
+    let winner = select_entropy_winner(&entropy_block_hash, &eligible_candidates)
+        .ok_or("Failed to select winner")?;
+
+    let we_won = winner == our_pubkey;
+
+    println!();
+    if we_won {
+        println!("🎉 YOU WON the entropy selection!");
+    } else {
+        println!("You did not win. Winner: {}...", &winner.to_string()[..16]);
+    }
+
+    // Create the appropriate operation
+    let (operation, op_name): (LedgerOperation, &str) = if we_won {
+        (LedgerOperation::CustodyAcquire {
+            new_custodian: our_pubkey,
+            entropy_block_height,
+            entropy_block_hash,
+        }, "CustodyAcquire")
+    } else {
+        (LedgerOperation::CustodyYield, "CustodyYield")
+    };
+
+    // Serialize
+    let message_bytes = operation.tlv_encode();
+
+    // Compute the new hash
+    let sequence = our_latest.sequence_number + 1;
+    let mut hash_input = Vec::new();
+    hash_input.extend_from_slice(&sequence.to_le_bytes());
+    hash_input.extend_from_slice(&our_latest.current_hash);
+    hash_input.extend_from_slice(&message_bytes);
+    let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
+
+    // Sign the update
+    let update_msg = format!(
+        "deposits:ledger:{}:{}:{}",
+        hex::encode(our_latest.current_hash),
+        sequence,
+        hex::encode(&new_hash)
+    );
+    let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
+    let signature = secp.sign_schnorr(
+        &Message::from_digest(*msg_hash.as_ref()),
+        &keypair
+    );
+    let operator_sig_bytes: [u8; 64] = *signature.as_ref();
+
+    // Create the signed update
+    let ledger_id_bytes: [u8; 32] = {
+        let decoded = hex::decode(&ledger_id)
+            .map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
+        decoded.try_into().map_err(|_| "Ledger ID must be 32 bytes")?
+    };
+
+    let signed_update = SignedLedgerUpdate {
+        message: message_bytes,
+        message_type: 0x8001,
+        operator_signature: operator_sig_bytes,
+        partner_signature: [0u8; 64],
+        operator_id: our_pubkey,
+        ledger_id: ledger_id_bytes,
+        sequence_number: sequence,
+        previous_hash: our_latest.current_hash,
+        current_hash: new_hash,
+        timestamp: deposits_core::now_unix_timestamp(),
+        block_height: current_block_height,
+        block_hash: entropy_block_hash,
+    };
+
+    // Publish to Nostr
+    println!();
+    println!("Publishing {} to Nostr...", op_name);
+
+    let publish_transport = NostrTransportBuilder::new(secret_key)
+        .relay(&relay_url)
+        .build()
+        .await?;
+
+    publish_transport.broadcast_ledger_update(&signed_update).await?;
+
+    println!();
+    println!("{} published successfully!", op_name);
+    println!("  Sequence: {}", sequence);
+    println!("  Hash: {}...", &hex::encode(new_hash)[..16]);
+
+    if we_won {
+        println!();
+        println!("You are now the custodian! Next step:");
+        println!("  recovery spend {} - Execute on-chain spend to claim reserves", &ledger_id[..16]);
+    } else {
+        println!();
+        println!("Your branch is now TOMBSTONED.");
+        println!("Your quorum members are released from attestation obligations.");
+    }
 
     Ok(())
 }
