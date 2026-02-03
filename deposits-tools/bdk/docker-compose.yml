@@ -189,10 +189,8 @@ services:
       bdk_network:
         ipv4_address: 172.21.0.22
 
-  # deposits-bdk Node 4 - Diana (Partner)
+  # deposits-bdk Node 4 - Diana (Operator for 4-op tests)
   bdk-diana:
-    profiles:
-      - dev
     image: deposits-bdk:latest
     container_name: bdk-diana
     command:
