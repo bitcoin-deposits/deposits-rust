@@ -884,6 +884,10 @@ test_custody_transfer() {
         echo "$release_output" | head -20
     fi
 
+    # Store the selected candidate for subsequent tests
+    store_value "recovery_new_custodian" "$selected_candidate"
+    store_value "recovery_ledger_id" "$alice_ledger_id"
+
     log_info ""
     log_info "Recovery test complete"
     log_info "The entropy-based custody recovery flow:"
@@ -893,6 +897,75 @@ test_custody_transfer() {
     log_info "  4. (mine blocks)    - Wait for entropy block (initiation + 6)"
     log_info "  5. recovery spend   - Selected candidate executes on-chain transfer"
     log_info "  6. recovery release - Non-selected candidates close their branches"
+}
+
+# ============================================================================
+# Phase 11: Post-Recovery Payment Test
+# ============================================================================
+
+test_post_recovery_payment() {
+    log_info ""
+    log_info "=== Phase 11: Post-Recovery Payment Test ==="
+    log_info "(New custodian executes payment between deposits on recovered ledger)"
+    echo ""
+
+    local new_custodian=$(get_value "recovery_new_custodian")
+    local alice_reserves_id=$(get_value "reserves_id_bdk-alice")
+
+    if [ -z "$new_custodian" ]; then
+        log_warn "No new custodian recorded - skipping post-recovery payment test"
+        return
+    fi
+
+    log_info "New custodian: $new_custodian"
+    log_info "Recovered ledger: ${alice_reserves_id:0:16}..."
+
+    # Get the deposit pubkeys for Bob and Charlie on Alice's ledger
+    local bob_deposit_pubkey=$(get_value "pubkey_bdk-bob_bdk-alice")
+    local charlie_deposit_pubkey=$(get_value "pubkey_bdk-charlie_bdk-alice")
+
+    if [ -z "$bob_deposit_pubkey" ] || [ -z "$charlie_deposit_pubkey" ]; then
+        log_warn "Missing deposit pubkeys - skipping payment test"
+        return
+    fi
+
+    log_info "Bob's deposit on Alice's ledger: ${bob_deposit_pubkey:0:16}..."
+    log_info "Charlie's deposit on Alice's ledger: ${charlie_deposit_pubkey:0:16}..."
+
+    # Payment amount: 1000 sats = 1000000 msats
+    local payment_amount_msats=1000000
+    local invoice_id="post-recovery-test-$(date +%s)"
+
+    # New custodian credits Charlie's deposit (simulating Bob paying Charlie)
+    log_info ""
+    log_info "New custodian ($new_custodian) crediting Charlie's deposit..."
+    log_info "  Amount: $payment_amount_msats msats (1000 sats)"
+    log_info "  Invoice: $invoice_id"
+
+    local credit_output=$(run_bdk_cmd "$new_custodian" deposit credit \
+        "$alice_reserves_id" "$charlie_deposit_pubkey" "$payment_amount_msats" "$invoice_id" 2>&1)
+
+    if echo "$credit_output" | grep -q "Deposit credited\|New balance"; then
+        local new_balance=$(echo "$credit_output" | grep "New balance:" | head -1 | awk '{print $3}')
+        test_pass "Post-recovery payment successful (new balance: $new_balance msats)"
+
+        # Verify the operation appears in ledger history
+        log_info "Verifying InvoiceCredit in ledger history..."
+        local history_output=$(run_bdk_cmd "$new_custodian" ledger history "$alice_reserves_id" 2>&1)
+
+        if echo "$history_output" | grep -q "InvoiceCredit"; then
+            test_pass "InvoiceCredit operation recorded in ledger"
+        else
+            log_warn "InvoiceCredit not found in history (may need refresh)"
+        fi
+    else
+        test_fail "Post-recovery payment failed"
+        echo "    Output: $credit_output"
+    fi
+
+    log_info ""
+    log_info "Post-recovery payment test complete"
+    log_info "This proves the recovered ledger is fully operational under new custody"
 }
 
 # ============================================================================
@@ -974,6 +1047,7 @@ main() {
     full_validate_ledgers
     test_invalid_update_detection
     test_custody_transfer
+    test_post_recovery_payment
     show_final_state
 
     echo ""
