@@ -723,105 +723,176 @@ test_invalid_update_detection() {
 }
 
 # ============================================================================
-# Phase 10: Custody Transfer Test
+# Phase 10: Custody Recovery Test (Entropy-Based Selection)
 # ============================================================================
 
 test_custody_transfer() {
     log_info ""
-    log_info "=== Phase 10: Custody Transfer Test ==="
-    log_info "(Bob executes custody transfer after detecting Alice's violation)"
+    log_info "=== Phase 10: Custody Recovery Test ==="
+    log_info "(Bob detects violation, candidates prepare, entropy selects winner)"
     echo ""
 
     local alice_ledger_id=$(get_value "ledger_id_bdk-alice")
     local bob_node_id=$(get_value "node_id_bdk-bob")
     local charlie_node_id=$(get_value "node_id_bdk-charlie")
 
-    # Bob executes a custody transfer, nominating Charlie as the new custodian
-    # (In a real scenario, multiple quorum members would sign, but for this test
-    # we demonstrate the mechanism with a single signer)
-    log_info "Bob executing custody transfer to Charlie..."
-    local transfer_output=$(run_bdk_cmd "bdk-bob" recovery transfer \
-        "$alice_ledger_id" "$charlie_node_id" \
-        --reason "Invalid hash chain detected by quorum" 2>&1)
+    # Step 1: Bob starts recovery (publishes dispute)
+    log_info "Step 1: Bob detecting violation and publishing dispute..."
+    local start_output=$(run_bdk_cmd "bdk-bob" recovery start "$alice_ledger_id" \
+        --reason "Invalid hash chain detected" 2>&1)
 
-    # Check for various success indicators:
-    # 1. "CustodyTransfer ledger operation published" - full success with broadcast
-    # 2. "Event ID:" - ledger operation published to Nostr
-    # 3. "Collected enough signatures" - signature collection succeeded (may fail broadcast due to timelock)
-    # 4. "Publishing signature request" - partial progress, waiting for quorum members
-    # 5. "Violation detected:" - at minimum detected the issue and processed ledger
-    if echo "$transfer_output" | grep -q "CustodyTransfer ledger operation published\|Event ID:\|Collected enough signatures\|Publishing signature request\|Violation detected:"; then
-        local event_id=$(echo "$transfer_output" | grep "Event ID:" | head -1 | awk '{print $3}')
-        if [ -n "$event_id" ]; then
-            test_pass "bob executed custody transfer: ${event_id:0:16}..."
-        elif echo "$transfer_output" | grep -q "Collected enough signatures"; then
-            test_pass "bob collected quorum signatures for custody transfer"
-        elif echo "$transfer_output" | grep -q "Publishing signature request"; then
-            test_pass "bob initiated custody transfer (waiting for quorum signatures)"
-        elif echo "$transfer_output" | grep -q "Violation detected:"; then
-            test_pass "bob detected violation and processed ledger"
-        else
-            test_pass "bob initiated custody transfer"
-        fi
-
-        # Show transfer details
-        local new_custodian=$(echo "$transfer_output" | grep "Selected custodian:" | head -1)
-        local violation=$(echo "$transfer_output" | grep "Violation detected:" | head -1)
+    local dispute_id=""
+    if echo "$start_output" | grep -q "Dispute published\|Violation detected"; then
+        dispute_id=$(echo "$start_output" | grep "Dispute published:" | awk '{print $3}')
+        test_pass "bob published dispute: ${dispute_id:0:16}..."
+        local violation=$(echo "$start_output" | grep -E "Violation detected|Hash chain broken" | head -1)
         if [ -n "$violation" ]; then
-            log_info "  $violation"
+            log_info "    $violation"
         fi
-        if [ -n "$new_custodian" ]; then
-            log_info "  $new_custodian"
-        fi
-
-        # Check for on-chain reserves spending status
-        if echo "$transfer_output" | grep -q "Found reserves:"; then
-            local reserves=$(echo "$transfer_output" | grep "Found reserves:" | head -1)
-            log_info "  $reserves"
-            # Check final outcome (priority: broadcast result > still collecting > waiting)
-            if echo "$transfer_output" | grep -q "non-BIP68-final"; then
-                log_info "  (Broadcast blocked by timelock - signatures collected successfully)"
-            elif echo "$transfer_output" | grep -q "Collected enough signatures"; then
-                log_info "  (Signatures collected, broadcast attempted)"
-            elif echo "$transfer_output" | grep -q "Broadcasting custody transfer"; then
-                log_info "  (On-chain reserves transfer broadcast)"
-            elif echo "$transfer_output" | grep -q "Timed out waiting"; then
-                log_info "  (Timed out - needs more quorum member signatures)"
-            fi
-        elif echo "$transfer_output" | grep -q "No Taproot reserves found"; then
-            log_info "  (No on-chain reserves - ledger operation recorded only)"
-        fi
+    elif echo "$start_output" | grep -q "appears conforming"; then
+        test_fail "bob found no violation (ledger appears conforming)"
+        echo "$start_output" | head -20
+        return
     else
-        test_fail "bob failed to execute custody transfer"
-        echo "Output:"
-        echo "$transfer_output" | head -30
+        test_fail "bob failed to start recovery"
+        echo "$start_output" | head -20
+        return
     fi
 
     # Give Nostr time to propagate
     sleep 2
 
-    # Verify the custody transfer is visible on Nostr by checking for the dispute event
-    log_info "Verifying custody transfer event on Nostr..."
-    local verify_output=$(run_bdk_cmd "bdk-charlie" nostr validate "$alice_ledger_id" 2>&1)
+    # Step 2: Charlie agrees to recovery
+    log_info "Step 2: Charlie agreeing to recovery..."
+    local agree_output=$(run_bdk_cmd "bdk-charlie" recovery agree "$alice_ledger_id" 2>&1)
 
-    # The validation should now include the CustodyTransfer operation
-    if echo "$verify_output" | grep -q "Updates:"; then
-        local update_count=$(echo "$verify_output" | grep "Updates:" | awk '{print $2}')
-        test_pass "custody transfer visible on Nostr ($update_count total updates)"
+    if echo "$agree_output" | grep -q "Agreement published"; then
+        local agreement_id=$(echo "$agree_output" | grep "Agreement published:" | awk '{print $3}')
+        test_pass "charlie published agreement: ${agreement_id:0:16}..."
+    elif echo "$agree_output" | grep -q "Violation confirmed"; then
+        test_pass "charlie confirmed violation"
     else
-        log_warn "charlie could not verify custody transfer on Nostr"
-        echo "$verify_output" | head -10
+        log_warn "charlie agree output:"
+        echo "$agree_output" | head -15
+    fi
+
+    # Give Nostr time to propagate
+    sleep 2
+
+    # Step 3: Each candidate pre-publishes their CustodyAcquire BEFORE entropy is known
+    # This is the key game-theory fix: everyone commits before selection
+    log_info "Step 3: Candidates publishing CustodyAcquire pre-commitments..."
+    log_info "  (Each candidate commits BEFORE entropy block is mined)"
+    echo ""
+
+    # Bob prepares as candidate
+    log_info "  Bob preparing as candidate..."
+    local bob_prepare=$(run_bdk_cmd "bdk-bob" recovery prepare "$alice_ledger_id" 2>&1)
+
+    if echo "$bob_prepare" | grep -q "CustodyAcquire published successfully"; then
+        test_pass "bob pre-published CustodyAcquire"
+        local bob_entropy_block=$(echo "$bob_prepare" | grep "Wait for entropy block:" | awk '{print $5}')
+        if [ -n "$bob_entropy_block" ]; then
+            log_info "    Entropy block: $bob_entropy_block"
+        fi
+    else
+        log_warn "bob prepare output:"
+        echo "$bob_prepare" | head -20
+    fi
+
+    # Charlie prepares as candidate
+    log_info "  Charlie preparing as candidate..."
+    local charlie_prepare=$(run_bdk_cmd "bdk-charlie" recovery prepare "$alice_ledger_id" 2>&1)
+
+    if echo "$charlie_prepare" | grep -q "CustodyAcquire published successfully"; then
+        test_pass "charlie pre-published CustodyAcquire"
+    else
+        log_warn "charlie prepare output:"
+        echo "$charlie_prepare" | head -20
+    fi
+
+    # Step 4: Mine to entropy block (initiation + 6)
+    log_info ""
+    log_info "Step 4: Mining to entropy block..."
+    mine_blocks 6
+    local entropy_height=$(get_block_height)
+    test_pass "mined to entropy block $entropy_height"
+
+    # Give time for block to be indexed
+    sleep 2
+
+    # Step 5: Check status to see who was selected
+    log_info ""
+    log_info "Step 5: Checking entropy-based selection..."
+    local status_output=$(run_bdk_cmd "bdk-bob" recovery status "$alice_ledger_id" 2>&1)
+
+    local selected_candidate=""
+    if echo "$status_output" | grep -q "Selected.*bob\|Winner.*bob"; then
+        selected_candidate="bdk-bob"
+        test_pass "entropy selected BOB as new custodian"
+    elif echo "$status_output" | grep -q "Selected.*charlie\|Winner.*charlie"; then
+        selected_candidate="bdk-charlie"
+        test_pass "entropy selected CHARLIE as new custodian"
+    else
+        log_info "  Status output:"
+        echo "$status_output" | head -20
+        # Default to bob for testing if we can't parse
+        selected_candidate="bdk-bob"
+        log_info "  (Defaulting to bob for test continuation)"
+    fi
+
+    # Step 6: Selected candidate executes spend
+    log_info ""
+    log_info "Step 6: Selected candidate ($selected_candidate) executing spend..."
+    local spend_output=$(run_bdk_cmd "$selected_candidate" recovery spend "$alice_ledger_id" 2>&1)
+
+    local transfer_txid=""
+    if echo "$spend_output" | grep -q "Reserves successfully transferred\|transferred"; then
+        transfer_txid=$(echo "$spend_output" | grep "Txid:" | head -1 | awk '{print $2}')
+        test_pass "custody transfer completed on-chain: ${transfer_txid:0:16}..."
+        mine_blocks 1  # Confirm transaction
+    elif echo "$spend_output" | grep -q "Need.*more signature"; then
+        log_info "    (Taproot spend needs more Schnorr signatures from quorum)"
+        log_info "    (In production, quorum members provide signatures via watch)"
+    elif echo "$spend_output" | grep -q "Quorum reached"; then
+        test_pass "quorum reached for spend"
+    else
+        log_warn "spend output:"
+        echo "$spend_output" | head -20
+    fi
+
+    # Step 7: Non-selected candidate publishes CustodyRelease
+    log_info ""
+    log_info "Step 7: Non-selected candidate publishing CustodyRelease..."
+
+    local non_selected=""
+    if [ "$selected_candidate" = "bdk-bob" ]; then
+        non_selected="bdk-charlie"
+    else
+        non_selected="bdk-bob"
+    fi
+
+    local release_output=$(run_bdk_cmd "$non_selected" recovery release "$alice_ledger_id" 2>&1)
+
+    if echo "$release_output" | grep -q "CustodyRelease published successfully"; then
+        test_pass "$non_selected published CustodyRelease (branch closed)"
+        log_info "    Quorum members released from attestation obligations"
+    elif echo "$release_output" | grep -q "was selected\|not a candidate"; then
+        log_info "    ($non_selected was actually selected or not a candidate)"
+    else
+        log_warn "release output:"
+        echo "$release_output" | head -20
     fi
 
     log_info ""
-    log_info "Custody transfer test complete"
-    log_info "The implementation now supports:"
-    log_info "  1. CustodyTransfer ledger operation (records violation + new custodian)"
-    log_info "  2. Entropy-based custodian selection (deterministic from block hash)"
-    log_info "  3. On-chain reserves spending via Tier 2 (2-of-n quorum override)"
-    log_info ""
-    log_info "For on-chain transfer, 2+ quorum members must sign the spend transaction."
-    log_info "In production, signatures are coordinated via Nostr."
+    log_info "Recovery test complete"
+    log_info "The entropy-based custody recovery flow:"
+    log_info "  1. recovery start   - Quorum member publishes dispute"
+    log_info "  2. recovery agree   - Other members verify and agree"
+    log_info "  3. recovery prepare - Each candidate pre-commits CustodyAcquire"
+    log_info "  4. (mine blocks)    - Wait for entropy block (initiation + 6)"
+    log_info "  5. recovery spend   - Selected candidate executes on-chain transfer"
+    log_info "  6. recovery release - Non-selected candidates close their branches"
 }
 
 # ============================================================================

@@ -66,6 +66,11 @@ pub const KIND_LEDGER_RESPONSE: u16 = 9102;
 /// Published when a quorum member detects a non-conforming ledger.
 pub const KIND_LEDGER_DISPUTE: u16 = 9103;
 
+/// Custom Kind for recovery agreement (quorum member agrees to recovery)
+/// Uses range 1000-9999 (regular custom events) for relay storage.
+/// Published in response to a dispute, signaling agreement to recover.
+pub const KIND_RECOVERY_AGREE: u16 = 9104;
+
 /// Default relay URLs for the network
 /// Empty by default - relays should be explicitly configured
 pub const DEFAULT_RELAYS: &[&str] = &[];
@@ -237,6 +242,36 @@ pub struct LedgerDispute {
     pub timestamp: u64,
 }
 
+/// A recovery agreement (quorum member agrees to recover a ledger)
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RecoveryAgreement {
+    /// The agreeing member's secp256k1 pubkey
+    pub member_pubkey: String,
+
+    /// Ledger identifier (the ledger being recovered)
+    pub ledger_id: String,
+
+    /// Reference to the dispute event ID we're agreeing with
+    pub dispute_event_id: String,
+
+    /// Our independently verified last valid sequence
+    pub last_valid_sequence: u64,
+
+    /// Our independently verified last valid hash (hex)
+    pub last_valid_hash: String,
+
+    /// Schnorr signature over the agreement (hex)
+    pub signature: String,
+
+    /// Nostr event ID of this agreement
+    #[serde(skip)]
+    pub event_id: String,
+
+    /// Timestamp
+    #[serde(skip)]
+    pub timestamp: u64,
+}
+
 impl NostrTransport {
     /// Create a new Nostr transport
     pub async fn new(secret_key: SecretKey, relays: Vec<String>) -> Result<Self, Error> {
@@ -303,6 +338,11 @@ impl NostrTransport {
     /// Get a reference to the underlying Nostr client
     pub fn client(&self) -> &Client {
         &self.client
+    }
+
+    /// Get our nostr keys for signing
+    pub fn keys(&self) -> &Keys {
+        &self.keys
     }
 
     /// Get our nostr public key
@@ -590,6 +630,10 @@ impl NostrTransport {
 
         let event = EventBuilder::new(Kind::Custom(KIND_LEDGER_DISPUTE), &content)
             .tag(Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::D)),
+                [ledger_id],
+            ))
+            .tag(Tag::custom(
                 TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)),
                 [ledger_id],
             ))
@@ -651,6 +695,144 @@ impl NostrTransport {
 
         tracing::info!("Subscribed to all ledger disputes (kind {})", KIND_LEDGER_DISPUTE);
         Ok(())
+    }
+
+    /// Publish a recovery agreement (quorum member agreeing to recover)
+    pub async fn publish_recovery_agreement(
+        &self,
+        ledger_id: &str,
+        dispute_event_id: &str,
+        last_valid_sequence: u64,
+        last_valid_hash: [u8; 32],
+        keypair: &bitcoin::secp256k1::Keypair,
+    ) -> Result<String, Error> {
+        use bitcoin::hashes::{Hash, sha256};
+        use bitcoin::secp256k1::{Secp256k1, Message};
+
+        // Build the message to sign
+        let mut preimage = Vec::new();
+        preimage.extend_from_slice(ledger_id.as_bytes());
+        preimage.extend_from_slice(dispute_event_id.as_bytes());
+        preimage.extend_from_slice(&last_valid_sequence.to_le_bytes());
+        preimage.extend_from_slice(&last_valid_hash);
+
+        let sighash = sha256::Hash::hash(&preimage);
+        let secp = Secp256k1::new();
+        let msg = Message::from_digest(sighash.to_byte_array());
+        let signature = secp.sign_schnorr(&msg, keypair);
+
+        let member_pubkey = hex::encode(keypair.public_key().serialize());
+
+        let agreement = RecoveryAgreement {
+            member_pubkey: member_pubkey.clone(),
+            ledger_id: ledger_id.to_string(),
+            dispute_event_id: dispute_event_id.to_string(),
+            last_valid_sequence,
+            last_valid_hash: hex::encode(last_valid_hash),
+            signature: hex::encode(signature.serialize()),
+            event_id: String::new(),
+            timestamp: 0,
+        };
+
+        let content = serde_json::to_string(&agreement)
+            .map_err(|e| Error::Serialization(format!("Failed to serialize agreement: {}", e)))?;
+
+        let event = EventBuilder::new(Kind::Custom(KIND_RECOVERY_AGREE), &content)
+            .tag(Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::D)),
+                [ledger_id],
+            ))
+            .tag(Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)),
+                [ledger_id],
+            ))
+            .tag(Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::E)),
+                [dispute_event_id],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("member"),
+                [&member_pubkey],
+            ))
+            .sign_with_keys(&self.keys)
+            .map_err(|e| Error::Nostr(format!("Failed to sign event: {}", e)))?;
+
+        let event_id = event.id.to_hex();
+
+        self.client
+            .send_event(event)
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to send agreement: {}", e)))?;
+
+        tracing::info!(
+            "Published recovery agreement: ledger={}, dispute={}, event={}",
+            &ledger_id[..16.min(ledger_id.len())],
+            &dispute_event_id[..16],
+            &event_id[..16]
+        );
+
+        Ok(event_id)
+    }
+
+    /// Fetch recovery agreements for a specific dispute
+    pub async fn fetch_recovery_agreements(
+        &self,
+        dispute_event_id: &str,
+    ) -> Result<Vec<RecoveryAgreement>, Error> {
+        let filter = Filter::new()
+            .kind(Kind::Custom(KIND_RECOVERY_AGREE))
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::E),
+                [dispute_event_id],
+            );
+
+        let events = self.client
+            .fetch_events(vec![filter], Some(std::time::Duration::from_secs(10)))
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to fetch agreements: {}", e)))?;
+
+        let mut agreements = Vec::new();
+        for event in events.iter() {
+            if let Ok(mut agreement) = serde_json::from_str::<RecoveryAgreement>(&event.content) {
+                agreement.event_id = event.id.to_hex();
+                agreement.timestamp = event.created_at.as_u64();
+                agreements.push(agreement);
+            }
+        }
+
+        Ok(agreements)
+    }
+
+    /// Fetch disputes for a ledger
+    pub async fn fetch_disputes(
+        &self,
+        ledger_id: &str,
+    ) -> Result<Vec<LedgerDispute>, Error> {
+        let filter = Filter::new()
+            .kind(Kind::Custom(KIND_LEDGER_DISPUTE))
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::L),
+                [ledger_id],
+            );
+
+        let events = self.client
+            .fetch_events(vec![filter], Some(std::time::Duration::from_secs(10)))
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to fetch disputes: {}", e)))?;
+
+        let mut disputes = Vec::new();
+        for event in events.iter() {
+            if let Ok(mut dispute) = serde_json::from_str::<LedgerDispute>(&event.content) {
+                dispute.event_id = event.id.to_hex();
+                dispute.timestamp = event.created_at.as_u64();
+                disputes.push(dispute);
+            }
+        }
+
+        // Sort by timestamp (oldest first)
+        disputes.sort_by_key(|d| d.timestamp);
+
+        Ok(disputes)
     }
 
     /// Subscribe to ledger requests for a specific ledger (for operators)

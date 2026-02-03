@@ -118,6 +118,21 @@ format_tx() {
     fi
 }
 
+export -f format_tx get_input_addresses
+export ELECTRS_URL SHOW_COINBASE
+
+# Collect txids for a single block
+collect_block_txids() {
+    local HEIGHT=$1
+    HASH=$(curl -s "$ELECTRS_URL/block-height/$HEIGHT" 2>/dev/null)
+    if [ -n "$HASH" ] && [ "$HASH" != "Block not found" ]; then
+        curl -s "$ELECTRS_URL/block/$HASH/txids" 2>/dev/null | jq -r ".[]" 2>/dev/null | while read txid; do
+            echo "$HEIGHT $txid"
+        done
+    fi
+}
+export -f collect_block_txids
+
 if [ -n "$SPECIFIC_BLOCK" ]; then
     # Show single block
     HEIGHT=$SPECIFIC_BLOCK
@@ -125,25 +140,17 @@ if [ -n "$SPECIFIC_BLOCK" ]; then
     echo "=== Block $HEIGHT ==="
     echo ""
 
-    TXIDS=$(curl -s "$ELECTRS_URL/block/$HASH/txids")
-    echo "$TXIDS" | jq -r '.[]' | while read txid; do
-        format_tx "$txid" "$HEIGHT"
-    done
+    curl -s "$ELECTRS_URL/block/$HASH/txids" | jq -r '.[]' | while read txid; do
+        echo "$HEIGHT $txid"
+    done | xargs -P 8 -L 1 bash -c 'format_tx "$2" "$1"' _ | sort -n
 else
-    # Show all non-coinbase transactions across recent blocks
+    # Show all non-coinbase transactions across all blocks (after initial mining)
     TIP=$(curl -s "$ELECTRS_URL/blocks/tip/height")
-    START=$((TIP > 100 ? TIP - 20 : 101))  # Last 20 blocks after initial mining
+    START=101  # Start after initial mining blocks
 
-    echo "=== Recent Transactions (blocks $START-$TIP) ==="
+    echo "=== Transactions (blocks $START-$TIP) ==="
     echo ""
 
-    for HEIGHT in $(seq $START $TIP); do
-        HASH=$(curl -s "$ELECTRS_URL/block-height/$HEIGHT" 2>/dev/null)
-        if [ -n "$HASH" ] && [ "$HASH" != "Block not found" ]; then
-            TXIDS=$(curl -s "$ELECTRS_URL/block/$HASH/txids" 2>/dev/null)
-            echo "$TXIDS" | jq -r '.[]' 2>/dev/null | while read txid; do
-                format_tx "$txid" "$HEIGHT"
-            done
-        fi
-    done
+    # Collect txids in parallel, then process in parallel
+    seq $START $TIP | xargs -P 16 -I {} bash -c 'collect_block_txids {}' | xargs -P 16 -L 1 bash -c 'format_tx "$2" "$1"' _ | sort -n
 fi

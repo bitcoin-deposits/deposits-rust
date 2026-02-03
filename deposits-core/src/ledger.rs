@@ -1042,10 +1042,15 @@ impl Ledger {
                     self.state.joined_quorums.push(membership);
                 }
             }
-            LedgerOperation::CustodyTransfer { new_custodian, .. } => {
+            LedgerOperation::CustodyAcquire { new_custodian, .. } => {
                 // Transfer custody to the new operator
                 // After this operation, all future updates must be signed by new_custodian
                 self.state.operator_key = *new_custodian;
+            }
+            LedgerOperation::CustodyRelease => {
+                // This candidate was not selected - ledger branch is abandoned
+                // No state changes needed; validators verify on-chain that this
+                // candidate was not the entropy-selected winner
             }
         }
         Ok(())

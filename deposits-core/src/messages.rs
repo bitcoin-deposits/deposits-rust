@@ -717,17 +717,31 @@ pub enum LedgerOperation {
         block_height: u32,
     },
 
-    // ========== Custody Transfer (1) ==========
-    /// Transfer custody of the ledger to a new operator.
+    // ========== Custody Acquire/Release (2) ==========
+    /// Acquire custody of the ledger as a new operator.
     ///
-    /// This operation is signed by quorum members (not the current operator) when
-    /// they detect non-conformance. Once applied:
-    /// - The ledger's operator changes to new_custodian
-    /// - All future updates must be signed by the new custodian
-    /// - Reserves will need to be reassigned on-chain separately
+    /// This operation is PRE-PUBLISHED by each candidate BEFORE the entropy block,
+    /// along with their CollateralAttestations and QuorumMembership setup. This ensures
+    /// all candidates are equally committed before random selection occurs.
     ///
-    /// Validation requires signatures from a threshold of quorum members.
-    CustodyTransfer {
+    /// Flow:
+    /// 1. Violation detected, dispute published
+    /// 2. Each candidate publishes CustodyAcquire + attestations + quorum setup
+    /// 3. Entropy block arrives, selection is deterministic
+    /// 4. On-chain spend goes to the selected candidate
+    /// 5. Selected candidate's CustodyAcquire becomes canonical
+    /// 6. Non-selected candidates publish CustodyRelease (quorum freed)
+    ///
+    /// Validation:
+    /// 1. Look up the reserves UTXO from the last ReservesRotate
+    /// 2. Find the on-chain spend of that UTXO
+    /// 3. Derive entropy from the spend's confirmation block
+    /// 4. Verify this candidate was selected by that entropy
+    /// 5. Verify the spend destination matches this new_custodian
+    ///
+    /// Multiple parties publish competing CustodyAcquire operations, but only one
+    /// will match the on-chain reality after the spend occurs.
+    CustodyAcquire {
         /// Reason for transfer (e.g., "hash_chain_broken", "double_spend")
         reason: String,
         /// Hash of the last valid update before non-conformance
@@ -736,22 +750,33 @@ pub enum LedgerOperation {
         last_valid_sequence: u64,
         /// Hash of the first invalid/non-conforming update (evidence)
         evidence_hash: [u8; 32],
-        /// Block height when transfer was initiated
+        /// Block height when recovery was initiated (dispute published)
         initiation_block: u32,
         /// Block height used for entropy (initiation_block + 6)
         entropy_block_height: u32,
-        /// Hash of the entropy block (populated after block is mined)
-        /// Used to deterministically select the new custodian
+        /// Hash of the entropy block (may be zeroed if pre-published before entropy)
+        /// Validators derive this from the on-chain spend's confirmation block
         entropy_block_hash: [u8; 32],
-        /// Pool of eligible custodians (quorum members who signed)
+        /// Pool of eligible custodians (all candidates who published CustodyAcquire)
         candidate_pool: Vec<PublicKey>,
-        /// The new custodian selected by entropy (computed from entropy_block_hash + candidate_pool)
-        /// Validation must verify this matches select_recovery_partner(entropy_block_hash, candidate_pool)
+        /// The new custodian (this candidate's pubkey)
+        /// Validators verify this matches the entropy-selected winner
         new_custodian: PublicKey,
-        /// Quorum member signatures authorizing this transfer
-        /// Each entry is (quorum_member_pubkey, signature over transfer details)
-        quorum_signatures: Vec<(PublicKey, [u8; 64])>,
     },
+
+    /// Release custody claim after not being selected.
+    ///
+    /// Published by candidates who were NOT selected by the entropy. This signals
+    /// that the candidate is closing their branch and releasing their quorum members
+    /// from their attestation obligations.
+    ///
+    /// Validators independently verify by:
+    /// 1. Finding the reserves UTXO spend on-chain
+    /// 2. Deriving the entropy from the confirmation block
+    /// 3. Computing the selection - confirming this candidate wasn't chosen
+    ///
+    /// This operation is minimal - all proof is derived from on-chain state.
+    CustodyRelease,
 
     // ========== Lifecycle (2) ==========
     /// Close the ledger
@@ -791,7 +816,8 @@ impl LedgerOperation {
             Self::CollateralLock { .. } => 45,
             Self::QuorumJoin { .. } => 46,
             Self::FeeCollect { .. } => 50,
-            Self::CustodyTransfer { .. } => 55,
+            Self::CustodyAcquire { .. } => 55,
+            Self::CustodyRelease => 56,
             Self::LedgerClose => 60,
             Self::Tombstone { .. } => 61,
         }
@@ -1533,7 +1559,7 @@ impl BinaryCodec for LedgerOperation {
                 write_u64(w, *amount)?;
                 write_u32(w, *block_height)?;
             }
-            Self::CustodyTransfer { reason, last_valid_hash, last_valid_sequence, evidence_hash, initiation_block, entropy_block_height, entropy_block_hash, candidate_pool, new_custodian, quorum_signatures } => {
+            Self::CustodyAcquire { reason, last_valid_hash, last_valid_sequence, evidence_hash, initiation_block, entropy_block_height, entropy_block_hash, candidate_pool, new_custodian } => {
                 write_string(w, reason)?;
                 write_32(w, last_valid_hash)?;
                 write_u64(w, *last_valid_sequence)?;
@@ -1547,13 +1573,8 @@ impl BinaryCodec for LedgerOperation {
                     write_pubkey(w, pubkey)?;
                 }
                 write_pubkey(w, new_custodian)?;
-                // Write quorum signatures as length-prefixed array
-                write_u16(w, quorum_signatures.len() as u16)?;
-                for (pubkey, sig) in quorum_signatures {
-                    write_pubkey(w, pubkey)?;
-                    write_64(w, sig)?;
-                }
             }
+            Self::CustodyRelease => {}
             Self::LedgerClose => {}
             Self::Tombstone { channel_id, close_reason, timestamp } => {
                 write_32(w, channel_id)?;
@@ -1707,7 +1728,7 @@ impl BinaryCodec for LedgerOperation {
                 amount: read_u64(r)?,
                 block_height: read_u32(r)?,
             }),
-            // CustodyTransfer (55)
+            // CustodyAcquire (55)
             55 => {
                 let reason = read_string(r)?;
                 let last_valid_hash = read_32(r)?;
@@ -1723,15 +1744,7 @@ impl BinaryCodec for LedgerOperation {
                     candidate_pool.push(read_pubkey(r)?);
                 }
                 let new_custodian = read_pubkey(r)?;
-                // Read quorum signatures
-                let sig_count = read_u16(r)? as usize;
-                let mut quorum_signatures = Vec::with_capacity(sig_count);
-                for _ in 0..sig_count {
-                    let pubkey = read_pubkey(r)?;
-                    let sig = read_64(r)?;
-                    quorum_signatures.push((pubkey, sig));
-                }
-                Ok(Self::CustodyTransfer {
+                Ok(Self::CustodyAcquire {
                     reason,
                     last_valid_hash,
                     last_valid_sequence,
@@ -1741,9 +1754,10 @@ impl BinaryCodec for LedgerOperation {
                     entropy_block_hash,
                     candidate_pool,
                     new_custodian,
-                    quorum_signatures,
                 })
             }
+            // CustodyRelease (56)
+            56 => Ok(Self::CustodyRelease),
             // Close operations (60-61)
             60 => Ok(Self::LedgerClose),
             61 => Ok(Self::Tombstone {
@@ -2505,7 +2519,7 @@ mod ledger_op_tlv {
     pub const QUORUM_THRESHOLD: u64 = 93;
     pub const QUORUM_SIZE: u64 = 94;
     pub const FIRST_EXPIRY_BLOCK: u64 = 95;
-    // CustodyTransfer fields
+    // CustodyAcquire fields
     pub const REASON: u64 = 100;
     pub const LAST_VALID_HASH: u64 = 101;
     pub const LAST_VALID_SEQUENCE: u64 = 102;
@@ -2515,7 +2529,6 @@ mod ledger_op_tlv {
     pub const ENTROPY_BLOCK_HASH: u64 = 106;
     pub const CANDIDATE_POOL: u64 = 107;
     pub const NEW_CUSTODIAN: u64 = 108;
-    pub const QUORUM_SIGNATURES: u64 = 109;
 }
 
 impl TlvEncode for LedgerOperation {
@@ -2689,7 +2702,7 @@ impl TlvEncode for LedgerOperation {
                     .u64_field(AMOUNT, *amount)
                     .u32_field(BLOCK_HEIGHT, *block_height);
             }
-            Self::CustodyTransfer { reason, last_valid_hash, last_valid_sequence, evidence_hash, initiation_block, entropy_block_height, entropy_block_hash, candidate_pool, new_custodian, quorum_signatures } => {
+            Self::CustodyAcquire { reason, last_valid_hash, last_valid_sequence, evidence_hash, initiation_block, entropy_block_height, entropy_block_hash, candidate_pool, new_custodian } => {
                 builder = builder
                     .string_field(REASON, reason)
                     .bytes_field(LAST_VALID_HASH, last_valid_hash)
@@ -2707,15 +2720,8 @@ impl TlvEncode for LedgerOperation {
                 builder = builder
                     .bytes_field(CANDIDATE_POOL, &pool_data)
                     .pubkey_field(NEW_CUSTODIAN, new_custodian);
-                // Encode quorum signatures as a blob: count(u16) + [pubkey(33) + sig(64)]*
-                let mut sigs_data = Vec::new();
-                sigs_data.extend_from_slice(&(quorum_signatures.len() as u16).to_be_bytes());
-                for (pk, sig) in quorum_signatures {
-                    sigs_data.extend_from_slice(&pk.serialize());
-                    sigs_data.extend_from_slice(sig);
-                }
-                builder = builder.bytes_field(QUORUM_SIGNATURES, &sigs_data);
             }
+            Self::CustodyRelease => {}
             Self::LedgerClose => {}
             Self::Tombstone { channel_id, close_reason, timestamp } => {
                 builder = builder.bytes_field(CHANNEL_ID, channel_id);
@@ -2897,26 +2903,7 @@ impl TlvDecode for LedgerOperation {
                     }
                 }
                 let new_custodian = reader.read_pubkey(NEW_CUSTODIAN)?;
-                // Decode quorum signatures blob
-                let sigs_data = reader.read_raw(QUORUM_SIGNATURES)?;
-                let mut quorum_signatures = Vec::new();
-                if sigs_data.len() >= 2 {
-                    let sig_count = u16::from_be_bytes([sigs_data[0], sigs_data[1]]) as usize;
-                    let mut offset = 2;
-                    for _ in 0..sig_count {
-                        if offset + 33 + 64 > sigs_data.len() { break; }
-                        let pk = bitcoin::secp256k1::PublicKey::from_slice(&sigs_data[offset..offset+33])
-                            .map_err(|_| TlvError::InvalidFieldValue {
-                                field_type: QUORUM_SIGNATURES,
-                                reason: "invalid pubkey".to_string(),
-                            })?;
-                        let mut sig = [0u8; 64];
-                        sig.copy_from_slice(&sigs_data[offset+33..offset+33+64]);
-                        quorum_signatures.push((pk, sig));
-                        offset += 33 + 64;
-                    }
-                }
-                Ok(Self::CustodyTransfer {
+                Ok(Self::CustodyAcquire {
                     reason,
                     last_valid_hash,
                     last_valid_sequence,
@@ -2926,9 +2913,9 @@ impl TlvDecode for LedgerOperation {
                     entropy_block_hash,
                     candidate_pool,
                     new_custodian,
-                    quorum_signatures,
                 })
             }
+            56 => Ok(Self::CustodyRelease),
             60 => Ok(Self::LedgerClose),
             61 => Ok(Self::Tombstone {
                 channel_id: reader.read_bytes(CHANNEL_ID)?,

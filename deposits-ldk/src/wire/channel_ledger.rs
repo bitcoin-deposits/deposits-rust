@@ -642,7 +642,7 @@ impl ChannelLedger {
                 // QuorumJoin is recorded on the consenting party's own ledger
                 // ChannelLedger doesn't need to track this (it's in LedgerState.joined_quorums)
             }
-            LedgerOperation::CustodyTransfer { new_custodian, .. } => {
+            LedgerOperation::CustodyAcquire { new_custodian, .. } => {
                 // Transfer custody to new operator
                 // After this, all future updates must be signed by new_custodian
                 self.operator_node_id = *new_custodian;

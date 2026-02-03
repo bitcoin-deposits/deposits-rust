@@ -641,7 +641,8 @@ pub fn validate_ledger_operation<C: ValidationContext>(
         LedgerOperation::CollateralLock { .. } |
         LedgerOperation::QuorumJoin { .. } |
         LedgerOperation::ReservesRotate { .. } |
-        LedgerOperation::CustodyTransfer { .. } |
+        LedgerOperation::CustodyAcquire { .. } |
+        LedgerOperation::CustodyRelease |
         LedgerOperation::Tombstone { .. } => Ok(()),
     }
 }

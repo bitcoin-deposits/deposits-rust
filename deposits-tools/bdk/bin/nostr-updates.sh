@@ -4,6 +4,7 @@
 # Usage:
 #   ./bin/nostr-updates.sh              # List all ledgers, then show updates
 #   ./bin/nostr-updates.sh list         # List all ledgers
+#   ./bin/nostr-updates.sh events       # Show all events (updates, disputes, agreements)
 #   ./bin/nostr-updates.sh <ledger_id>  # Show updates for specific ledger
 
 set -e
@@ -14,16 +15,18 @@ source "$SCRIPT_DIR/_common.sh"
 # Parse arguments
 LEDGER_ID=""
 LIST_ONLY=false
+SHOW_EVENTS=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --help|-h)
-            echo "Usage: $0 [list|LEDGER_ID]"
+            echo "Usage: $0 [list|events|LEDGER_ID]"
             echo ""
-            echo "Fetch ledger updates from Nostr relay."
+            echo "Fetch ledger data from Nostr relay."
             echo ""
             echo "Commands:"
             echo "  list              List all ledgers on the relay"
+            echo "  events            Show all events (updates, disputes, agreements)"
             echo "  <ledger_id>       Show updates for a specific ledger"
             echo "                    Format: operator_pubkey:reserves_id"
             echo ""
@@ -32,6 +35,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         list|ls)
             LIST_ONLY=true
+            shift
+            ;;
+        events|ev)
+            SHOW_EVENTS=true
             shift
             ;;
         -*)
@@ -76,6 +83,11 @@ if [ "$LIST_ONLY" = true ]; then
     log_info "Listing ledgers from Nostr relay..."
     echo ""
     run_nostr_cmd list
+elif [ "$SHOW_EVENTS" = true ]; then
+    # Show all events
+    log_info "Fetching all events from Nostr relay..."
+    echo ""
+    run_nostr_cmd events
 elif [ -n "$LEDGER_ID" ]; then
     # Show updates for specific ledger
     log_info "Fetching updates for ledger: $LEDGER_ID"
