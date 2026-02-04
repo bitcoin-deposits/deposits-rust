@@ -8643,13 +8643,23 @@ async fn recovery_continue(args: &[String]) -> Result<(), Box<dyn std::error::Er
 
     client.disconnect().await.ok();
 
-    // Find our latest update (should be CustodyAcquire)
+    // Find our latest update (should be CustodyAcquire) and collect original depositors
     let mut our_latest: Option<SignedLedgerUpdate> = None;
     let mut has_custody_acquire = false;
+    let mut original_depositors: Vec<PublicKey> = Vec::new();
 
     for event in events.iter() {
         if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
             if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
+                // Collect original depositors from DepositOpen operations
+                if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+                    if let LedgerOperation::DepositOpen { pubkey, .. } = op {
+                        if !original_depositors.contains(&pubkey) {
+                            original_depositors.push(pubkey);
+                        }
+                    }
+                }
+
                 if update.operator_id == our_pubkey {
                     // Check if this is CustodyAcquire
                     if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
@@ -8673,6 +8683,14 @@ async fn recovery_continue(args: &[String]) -> Result<(), Box<dyn std::error::Er
     }
 
     println!("  Your latest: seq {} (hash: {}...)", latest.sequence_number, hex::encode(&latest.current_hash[..8]));
+
+    // Use first original depositor for payments (shows continuity)
+    let depositor_pubkey = original_depositors.first().copied().unwrap_or(our_pubkey);
+    if !original_depositors.is_empty() {
+        let pk_bytes = depositor_pubkey.serialize();
+        println!("  Using original depositor: {:02x}{:02x}{:02x}{:02x}...",
+            pk_bytes[1], pk_bytes[2], pk_bytes[3], pk_bytes[4]);
+    }
 
     // Get current block height
     use bdk_esplora::esplora_client::Builder as EsploraBuilder;
@@ -8714,7 +8732,7 @@ async fn recovery_continue(args: &[String]) -> Result<(), Box<dyn std::error::Er
 
         let operation = LedgerOperation::InvoiceCredit {
             payment_hash,
-            deposit_pubkey: our_pubkey,
+            deposit_pubkey: depositor_pubkey,  // Use original depositor for continuity
             amount: 50000 + (op_num as u64 * 10000), // 50k, 60k, 70k msat
             invoice_id: format!("post-recovery-{}", op_num + 1),
             sequence_number: latest.sequence_number + 1,
