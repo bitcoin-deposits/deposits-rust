@@ -7624,22 +7624,33 @@ async fn recovery_rebuild_quorum_add(ledger_id: &str, args: &[String]) -> Result
         .await
         .map_err(|e| format!("Failed to fetch events: {}", e))?;
 
-    // Find our latest update
-    let mut our_latest: Option<SignedLedgerUpdate> = None;
+    // Find our updates and verify we have a CustodyDispute
+    let mut our_updates: Vec<SignedLedgerUpdate> = Vec::new();
     for event in events.iter() {
         if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
             if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
                 if update.operator_id == our_pubkey {
-                    if our_latest.is_none() || update.sequence_number > our_latest.as_ref().unwrap().sequence_number {
-                        our_latest = Some(update);
-                    }
+                    our_updates.push(update);
                 }
             }
         }
     }
 
-    let our_latest = our_latest.ok_or("No updates found from you. Did you run 'recovery dispute' first?")?;
-    println!("  Found your latest update at sequence {}", our_latest.sequence_number);
+    if our_updates.is_empty() {
+        return Err("No updates found from you. Run 'recovery dispute' first to open your own dispute branch.".into());
+    }
+
+    // Verify our first update is a CustodyDispute (required to start a dispute branch)
+    our_updates.sort_by_key(|u| u.sequence_number);
+    let first_update = &our_updates[0];
+    if let Ok(op) = LedgerOperation::tlv_decode(&first_update.message) {
+        if !matches!(op, LedgerOperation::CustodyDispute { .. }) {
+            return Err("Your first update is not a CustodyDispute. Run 'recovery dispute' first.".into());
+        }
+    }
+
+    let our_latest = our_updates.last().unwrap().clone();
+    println!("  Found {} updates from you, latest at sequence {}", our_updates.len(), our_latest.sequence_number);
 
     // Get current block info
     use bdk_esplora::esplora_client::Builder as EsploraBuilder;
@@ -7798,22 +7809,33 @@ async fn recovery_rebuild_attestation(ledger_id: &str, args: &[String]) -> Resul
         .await
         .map_err(|e| format!("Failed to fetch events: {}", e))?;
 
-    // Find our latest update
-    let mut our_latest: Option<SignedLedgerUpdate> = None;
+    // Find our updates and verify we have a CustodyDispute
+    let mut our_updates: Vec<SignedLedgerUpdate> = Vec::new();
     for event in events.iter() {
         if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
             if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
                 if update.operator_id == our_pubkey {
-                    if our_latest.is_none() || update.sequence_number > our_latest.as_ref().unwrap().sequence_number {
-                        our_latest = Some(update);
-                    }
+                    our_updates.push(update);
                 }
             }
         }
     }
 
-    let our_latest = our_latest.ok_or("No updates found from you. Did you run 'recovery dispute' first?")?;
-    println!("  Found your latest update at sequence {}", our_latest.sequence_number);
+    if our_updates.is_empty() {
+        return Err("No updates found from you. Run 'recovery dispute' first to open your own dispute branch.".into());
+    }
+
+    // Verify our first update is a CustodyDispute (required to start a dispute branch)
+    our_updates.sort_by_key(|u| u.sequence_number);
+    let first_update = &our_updates[0];
+    if let Ok(op) = LedgerOperation::tlv_decode(&first_update.message) {
+        if !matches!(op, LedgerOperation::CustodyDispute { .. }) {
+            return Err("Your first update is not a CustodyDispute. Run 'recovery dispute' first.".into());
+        }
+    }
+
+    let our_latest = our_updates.last().unwrap().clone();
+    println!("  Found {} updates from you, latest at sequence {}", our_updates.len(), our_latest.sequence_number);
 
     // Get current block info
     use bdk_esplora::esplora_client::Builder as EsploraBuilder;
