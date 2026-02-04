@@ -7335,19 +7335,34 @@ async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     client.disconnect().await.ok();
 
-    // Decode and sort updates
-    let mut updates: Vec<SignedLedgerUpdate> = Vec::new();
+    // Decode all updates
+    let mut all_updates: Vec<SignedLedgerUpdate> = Vec::new();
     for event in events.iter() {
         if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
             if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
-                updates.push(update);
+                all_updates.push(update);
             }
         }
     }
-    updates.sort_by_key(|u| u.sequence_number);
-    updates.dedup_by(|a, b| a.sequence_number == b.sequence_number && a.current_hash == b.current_hash);
 
-    println!("  Found {} updates", updates.len());
+    println!("  Found {} total updates", all_updates.len());
+
+    // Find the original operator (the one who posted LedgerOpen at seq 0)
+    let original_operator = all_updates.iter()
+        .find(|u| u.sequence_number == 0)
+        .map(|u| u.operator_id)
+        .ok_or("No LedgerOpen found (seq 0)")?;
+
+    println!("  Original operator: {}...", &original_operator.to_string()[..16]);
+
+    // Filter to only the original operator's updates (ignore other operators' disputes)
+    // This ensures we validate the original chain, not someone else's dispute branch
+    let mut updates: Vec<&SignedLedgerUpdate> = all_updates.iter()
+        .filter(|u| u.operator_id == original_operator)
+        .collect();
+    updates.sort_by_key(|u| u.sequence_number);
+
+    println!("  Original operator's updates: {}", updates.len());
 
     // Validate the hash chain to find the last valid point
     let mut last_valid_hash = [0u8; 32];
