@@ -5150,13 +5150,14 @@ async fn process_custodian_query_request(
 /// Handle recovery subcommands for non-conforming ledgers
 async fn recovery_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {
-        eprintln!("Usage: deposits-bdk recovery <dispute|rebuild|arm|claim|spend|status> [args...]");
+        eprintln!("Usage: deposits-bdk recovery <dispute|rebuild|arm|claim|continue|spend|status> [args...]");
         eprintln!();
         eprintln!("Subcommands (Dispute Protocol):");
         eprintln!("  dispute <ledger_id> [--reason <text>]  Open dispute: publish CustodyDispute operation");
         eprintln!("  rebuild <ledger_id>                    Rebuild quorum: add members + get attestations");
         eprintln!("  arm <ledger_id>                        Pre-commit: publish CustodyArmed operation");
         eprintln!("  claim <ledger_id>                      After entropy: CustodyAcquire (win) or CustodyYield (lose)");
+        eprintln!("  continue <ledger_id> [--count N]       Winner: add operations to continue the ledger");
         eprintln!("  spend <ledger_id>                      Execute on-chain spend (winner only)");
         eprintln!("  status <ledger_id>                     Show recovery status and candidates");
         eprintln!();
@@ -5166,7 +5167,8 @@ async fn recovery_command(args: &[String]) -> Result<(), Box<dyn std::error::Err
         eprintln!("  3. arm     - Publish CustodyArmed (locks in for entropy selection)");
         eprintln!("  4. (wait)  - Wait for entropy block to be mined");
         eprintln!("  5. claim   - Winner: CustodyAcquire, Losers: CustodyYield");
-        eprintln!("  6. spend   - Winner broadcasts on-chain spend to claim reserves");
+        eprintln!("  6. continue- Winner adds operations to resume normal ledger operation");
+        eprintln!("  7. spend   - Winner broadcasts on-chain spend to claim reserves");
         eprintln!();
         eprintln!("State machine: NORMAL -> DISPUTED -> ARMED -> NORMAL (winner) / TOMBSTONED (losers)");
         return Ok(());
@@ -5178,6 +5180,7 @@ async fn recovery_command(args: &[String]) -> Result<(), Box<dyn std::error::Err
         "rebuild" => recovery_rebuild(&args[1..]).await,
         "arm" => recovery_arm(&args[1..]).await,
         "claim" => recovery_claim_new(&args[1..]).await,
+        "continue" => recovery_continue(&args[1..]).await,
         "spend" => recovery_spend(&args[1..]).await,
         "status" => recovery_status(&args[1..]).await,
         // Legacy commands (for backward compatibility)
@@ -8562,6 +8565,210 @@ async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::error::E
         println!("  Your quorum members are released from attestation obligations.");
         println!("  The winner ({}...) can now proceed with on-chain spend.", &winner.to_string()[..16]);
     }
+
+    Ok(())
+}
+
+/// Continue the ledger after winning custody (add operations after CustodyAcquire)
+/// Usage: recovery continue <ledger_id> [--count <n>]
+async fn recovery_continue(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use bitcoin::hashes::{Hash, sha256};
+    use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey, PublicKey, Message};
+    use deposits_core::{TlvDecode, TlvEncode, SignedLedgerUpdate};
+    use deposits_core::messages::LedgerOperation;
+    use deposits_bdk::nostr::{NostrTransportBuilder, KIND_LEDGER_UPDATE};
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    use nostr_sdk::prelude::*;
+
+    let mut ledger_id: Option<String> = None;
+    let mut count: u32 = 2; // Default: add 2 operations
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--count" => {
+                if i + 1 < args.len() {
+                    count = args[i + 1].parse().unwrap_or(2);
+                    i += 1;
+                }
+            }
+            s if s.starts_with("--") => {
+                config_args.push(args[i].clone());
+                if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                    config_args.push(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            _ => {
+                if ledger_id.is_none() {
+                    ledger_id = Some(args[i].clone());
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let ledger_id = ledger_id.ok_or("Missing ledger_id")?.trim().to_string();
+    let config = parse_config(&config_args)?;
+    let relay_url = config.relays.first()
+        .ok_or("No relay configured. Use --relay <url>")?
+        .clone();
+
+    let secp = Secp256k1::new();
+    let secret_key = SecretKey::from_slice(&config.seed)
+        .map_err(|e| format!("Invalid seed: {}", e))?;
+    let keypair = Keypair::from_secret_key(&secp, &secret_key);
+    let our_pubkey = keypair.public_key();
+
+    println!("Continuing ledger: {}... (adding {} operations)", &ledger_id[..16.min(ledger_id.len())], count);
+
+    // Fetch all updates from Nostr
+    println!("Fetching ledger from Nostr...");
+    let keys = Keys::generate();
+    let client = Client::new(keys);
+    client.add_relay(&relay_url).await
+        .map_err(|e| format!("Failed to add relay: {}", e))?;
+    client.connect().await;
+
+    let filter = Filter::new()
+        .kind(Kind::Custom(KIND_LEDGER_UPDATE))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()])
+        .limit(500);
+
+    let events = client
+        .fetch_events(vec![filter], None)
+        .await
+        .map_err(|e| format!("Failed to fetch events: {}", e))?;
+
+    client.disconnect().await.ok();
+
+    // Find our latest update (should be CustodyAcquire)
+    let mut our_latest: Option<SignedLedgerUpdate> = None;
+    let mut has_custody_acquire = false;
+
+    for event in events.iter() {
+        if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
+            if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
+                if update.operator_id == our_pubkey {
+                    // Check if this is CustodyAcquire
+                    if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+                        if matches!(op, LedgerOperation::CustodyAcquire { .. }) {
+                            has_custody_acquire = true;
+                        }
+                    }
+                    // Track our latest
+                    if our_latest.is_none() || update.sequence_number > our_latest.as_ref().unwrap().sequence_number {
+                        our_latest = Some(update);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut latest = our_latest.ok_or("No updates found from you. Did you win custody?")?;
+
+    if !has_custody_acquire {
+        return Err("You don't have CustodyAcquire. You must win custody first (recovery claim).".into());
+    }
+
+    println!("  Your latest: seq {} (hash: {}...)", latest.sequence_number, hex::encode(&latest.current_hash[..8]));
+
+    // Get current block height
+    use bdk_esplora::esplora_client::Builder as EsploraBuilder;
+    let esplora = EsploraBuilder::new(&config.electrum_url).build_blocking();
+    let current_block_height = esplora.get_height()
+        .map_err(|e| format!("Failed to get block height: {:?}", e))?;
+    let block_hash_hex = esplora.get_block_hash(current_block_height)
+        .map_err(|e| format!("Failed to get block hash: {:?}", e))?;
+    let block_hash: [u8; 32] = {
+        let hash_bytes = block_hash_hex.to_byte_array();
+        let mut reversed = hash_bytes;
+        reversed.reverse();
+        reversed
+    };
+
+    let ledger_id_bytes: [u8; 32] = {
+        let decoded = hex::decode(&ledger_id)
+            .map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
+        decoded.try_into().map_err(|_| "Ledger ID must be 32 bytes")?
+    };
+
+    // Create Nostr transport for publishing
+    let publish_transport = NostrTransportBuilder::new(secret_key)
+        .relay(&relay_url)
+        .build()
+        .await?;
+
+    // Add operations
+    println!();
+    println!("Adding {} continuation operations...", count);
+
+    for op_num in 0..count {
+        // Create a simple operation - DepositOpen (opening a new deposit slot)
+        // This shows the ledger continuing under new custody
+        // Use our own pubkey for the deposit (just demonstrating chain continuation)
+        let operation = LedgerOperation::DepositOpen {
+            pubkey: our_pubkey,
+            fees: None,
+            payment_hash: None,
+            invoice: None,
+            cosigner_guarantee_signature: None,
+        };
+
+        let message_bytes = operation.tlv_encode();
+
+        // Compute the new hash
+        let sequence = latest.sequence_number + 1;
+        let mut hash_input = Vec::new();
+        hash_input.extend_from_slice(&sequence.to_le_bytes());
+        hash_input.extend_from_slice(&latest.current_hash);
+        hash_input.extend_from_slice(&message_bytes);
+        let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
+
+        // Sign the update
+        let update_msg = format!(
+            "deposits:ledger:{}:{}:{}",
+            hex::encode(latest.current_hash),
+            sequence,
+            hex::encode(&new_hash)
+        );
+        let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
+        let signature = secp.sign_schnorr(
+            &Message::from_digest(*msg_hash.as_ref()),
+            &keypair
+        );
+        let operator_sig_bytes: [u8; 64] = *signature.as_ref();
+
+        // Create the signed update
+        let signed_update = SignedLedgerUpdate {
+            message: message_bytes,
+            message_type: 0x8001,
+            operator_signature: operator_sig_bytes,
+            partner_signature: [0u8; 64],
+            operator_id: our_pubkey,
+            ledger_id: ledger_id_bytes,
+            sequence_number: sequence,
+            previous_hash: latest.current_hash,
+            current_hash: new_hash,
+            timestamp: deposits_core::now_unix_timestamp(),
+            block_height: current_block_height,
+            block_hash,
+        };
+
+        // Publish
+        publish_transport.broadcast_ledger_update(&signed_update).await?;
+
+        println!("  [{}/{}] seq {} - DepositOpen", op_num + 1, count, sequence);
+
+        // Update latest for next iteration
+        latest = signed_update;
+    }
+
+    println!();
+    println!("Ledger continued successfully!");
+    println!("  New latest: seq {} (hash: {}...)", latest.sequence_number, hex::encode(&latest.current_hash[..8]));
+    println!("  The winner's chain is now longer and will appear last in tree view.");
 
     Ok(())
 }

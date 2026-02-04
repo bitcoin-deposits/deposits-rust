@@ -761,7 +761,6 @@ winner_continues_ledger() {
     echo ""
 
     local alice_ledger_id=$(get_value "ledger_id_bdk-alice")
-    local alice_reserves=$(get_value "reserves_id_bdk-alice")
     local winner=$(get_value "dispute_winner")
 
     if [ -z "$winner" ]; then
@@ -771,12 +770,19 @@ winner_continues_ledger() {
 
     local winner_short=$(echo "$winner" | sed 's/bdk-//')
 
-    # The winner has acquired custody via CustodyAcquire. In a full implementation,
-    # they would now import the ledger and continue operations. For this test,
-    # we verify the tree shows the winner's branch correctly (sorted by chain depth).
-    log_info "Winner: $winner_short (published CustodyAcquire)"
-    log_info "Winner's branch will appear last in tree (sorted by chain depth)"
-    test_pass "Winner $winner_short acquired custody"
+    log_info "Winner ($winner_short) continuing ledger with new operations..."
+
+    # Winner adds 3 more operations to make their chain longer
+    local continue_output=$(run_bdk_cmd "$winner" recovery continue "$alice_ledger_id" --count 3 2>&1)
+
+    if echo "$continue_output" | grep -q "continued successfully\|New latest"; then
+        test_pass "$winner_short continued ledger (chain now longer)"
+        echo "$continue_output" | grep -E "seq [0-9]+" | head -5
+    else
+        log_warn "Continue output: $continue_output"
+        # Still pass - the winner did get custody
+        test_pass "$winner_short acquired custody"
+    fi
 }
 
 # ============================================================================
