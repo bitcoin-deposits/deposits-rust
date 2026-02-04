@@ -3192,11 +3192,43 @@ async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
                 kids.sort_by_key(|u| (u.sequence_number, u.operator_id.serialize()));
             }
 
+            // Calculate chain depth (number of descendants) for sorting branches
+            // Longer chains (surviving branches) should appear last
+            fn get_chain_depth(
+                children: &std::collections::HashMap<[u8; 32], Vec<&SignedLedgerUpdate>>,
+                hash: [u8; 32],
+                operator: bitcoin::secp256k1::PublicKey,
+            ) -> usize {
+                use deposits_core::messages::LedgerOperation;
+                use deposits_core::TlvDecode;
+
+                if let Some(kids) = children.get(&hash) {
+                    // Find children that continue this operator's chain
+                    let mut max_depth = 0;
+                    for child in kids {
+                        let is_cd = if let Ok(op) = LedgerOperation::tlv_decode(&child.message) {
+                            matches!(op, LedgerOperation::CustodyDispute { .. })
+                        } else {
+                            false
+                        };
+                        // Follow same operator's chain (CustodyDispute can branch but we track by operator)
+                        if child.operator_id == operator || is_cd {
+                            let depth = 1 + get_chain_depth(children, child.current_hash, child.operator_id);
+                            max_depth = max_depth.max(depth);
+                        }
+                    }
+                    max_depth
+                } else {
+                    0
+                }
+            }
+
             // Print tree recursively with operator continuity tracking
             // parent_operator: None for genesis, Some(op) for subsequent nodes
             // Only show children that:
             // 1. Are CustodyDispute (can branch from any operator), or
             // 2. Have same operator_id as parent (operator continuity)
+            // Branches are sorted by chain depth (ascending) so surviving chain comes last
             fn print_tree(
                 children: &std::collections::HashMap<[u8; 32], Vec<&SignedLedgerUpdate>>,
                 parent_hash: [u8; 32],
@@ -3209,7 +3241,7 @@ async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 
                 if let Some(kids) = children.get(&parent_hash) {
                     // Filter children based on operator continuity rules
-                    let filtered_kids: Vec<&&SignedLedgerUpdate> = kids.iter().filter(|update| {
+                    let mut filtered_kids: Vec<&&SignedLedgerUpdate> = kids.iter().filter(|update| {
                         // Check if this is a CustodyDispute operation
                         let is_custody_dispute = if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
                             matches!(op, LedgerOperation::CustodyDispute { .. })
@@ -3221,6 +3253,11 @@ async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
                         // Other operations must continue from same operator (or be first op from genesis)
                         is_custody_dispute || parent_operator.is_none() || parent_operator == Some(update.operator_id)
                     }).collect();
+
+                    // Sort by chain depth (ascending) so longer/surviving chains come last
+                    filtered_kids.sort_by_key(|update| {
+                        get_chain_depth(children, update.current_hash, update.operator_id)
+                    });
 
                     for (i, update) in filtered_kids.iter().enumerate() {
                         let is_last = i == filtered_kids.len() - 1;
