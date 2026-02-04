@@ -3196,13 +3196,64 @@ async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
             // Colors: red, green, yellow, blue, magenta, cyan
             let colors = ["\x1b[31m", "\x1b[32m", "\x1b[33m", "\x1b[34m", "\x1b[35m", "\x1b[36m"];
             let reset = "\x1b[0m";
+            // Make invalid updates REALLY obvious: bold + reverse video + bright red + blink
+            let invalid_style = "\x1b[1;5;7;91m";
             let mut operator_colors: std::collections::HashMap<[u8; 33], &str> = std::collections::HashMap::new();
             let mut color_idx = 0;
+
+            // Collect invalid update hashes from CustodyDispute reasons (which now contain the hash)
+            // Also collect the actual invalid updates for display
+            let mut invalid_hashes: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+            let mut invalid_updates: Vec<&SignedLedgerUpdate> = Vec::new();
             for update in updates {
                 let key = update.operator_id.serialize();
                 if !operator_colors.contains_key(&key) {
                     operator_colors.insert(key, colors[color_idx % colors.len()]);
                     color_idx += 1;
+                }
+                // Check if this is a CustodyDispute and extract the invalid hash from reason
+                if let Ok(op) = deposits_core::messages::LedgerOperation::tlv_decode(&update.message) {
+                    if let deposits_core::messages::LedgerOperation::CustodyDispute { reason, .. } = op {
+                        // The reason is now the invalid update's hash (64 hex chars)
+                        if reason.len() == 64 {
+                            if let Ok(hash_bytes) = hex::decode(&reason) {
+                                if hash_bytes.len() == 32 {
+                                    let mut hash: [u8; 32] = [0u8; 32];
+                                    hash.copy_from_slice(&hash_bytes);
+                                    invalid_hashes.insert(hash);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Find the actual invalid updates (those whose current_hash matches an invalid hash)
+            // Also find the branch point hash (last valid hash before the invalid update)
+            let mut branch_point_hash: Option<[u8; 32]> = None;
+            for update in updates {
+                if invalid_hashes.contains(&update.current_hash) {
+                    invalid_updates.push(update);
+                    // Find the branch point: the update at sequence - 1
+                    if update.sequence_number > 0 {
+                        for prev_update in updates {
+                            if prev_update.sequence_number == update.sequence_number - 1 {
+                                branch_point_hash = Some(prev_update.current_hash);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Inject invalid updates at the branch point so they appear in the tree (with blinking!)
+            if let Some(branch_hash) = branch_point_hash {
+                for invalid_update in &invalid_updates {
+                    children.entry(branch_hash).or_default().push(invalid_update);
+                }
+                // Re-sort that branch's children
+                if let Some(kids) = children.get_mut(&branch_hash) {
+                    kids.sort_by_key(|u| (u.sequence_number, u.operator_id.serialize()));
                 }
             }
 
@@ -3250,6 +3301,8 @@ async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
                 prefix: &str,
                 is_branch: bool,
                 operator_colors: &std::collections::HashMap<[u8; 33], &str>,
+                invalid_hashes: &std::collections::HashSet<[u8; 32]>,
+                invalid_style: &str,
                 reset: &str,
             ) {
                 use deposits_core::messages::LedgerOperation;
@@ -3265,14 +3318,22 @@ async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
                             false
                         };
 
+                        // Also show invalid updates (so they can blink)
+                        let is_invalid = invalid_hashes.contains(&update.current_hash);
+
                         // CustodyDispute can branch from anyone
+                        // Invalid updates should be shown (with blinking)
                         // Other operations must continue from same operator (or be first op from genesis)
-                        is_custody_dispute || parent_operator.is_none() || parent_operator == Some(update.operator_id)
+                        is_custody_dispute || is_invalid || parent_operator.is_none() || parent_operator == Some(update.operator_id)
                     }).collect();
 
-                    // Sort by chain depth (ascending) so longer/surviving chains come last
+                    // Sort: invalid updates first (blinking), then by chain depth (ascending)
+                    // so invalid updates are visible and surviving chains come last
                     filtered_kids.sort_by_key(|update| {
-                        get_chain_depth(children, update.current_hash, update.operator_id)
+                        let is_invalid = invalid_hashes.contains(&update.current_hash);
+                        let depth = get_chain_depth(children, update.current_hash, update.operator_id);
+                        // Invalid updates get priority 0, others get their depth + 1000
+                        if is_invalid { 0 } else { depth + 1000 }
                     });
 
                     for (i, update) in filtered_kids.iter().enumerate() {
@@ -3305,11 +3366,17 @@ async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
                             "  "
                         };
 
-                        // Get color for this operator
+                        // Get color for this operator, add blink if this is an invalid update
                         let color = operator_colors.get(&update.operator_id.serialize()).unwrap_or(&"");
+                        let is_invalid = invalid_hashes.contains(&update.current_hash);
+                        let style_start = if is_invalid {
+                            format!("{}{}", invalid_style, color)
+                        } else {
+                            color.to_string()
+                        };
 
                         println!("{}{}{}{:>4} ↑{:<6} [{:02x}{:02x}~{:02x}{:02x}] {} {} {}{}{}",
-                            color,
+                            style_start,
                             prefix,
                             branch_char,
                             seq,
@@ -3346,13 +3413,13 @@ async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 
                         // Print children - mark as branch if there are multiple children at same level
                         let has_multiple_children = child_count > 1;
-                        print_tree(children, update.current_hash, Some(update.operator_id), &new_prefix, has_multiple_children, operator_colors, reset);
+                        print_tree(children, update.current_hash, Some(update.operator_id), &new_prefix, has_multiple_children, operator_colors, invalid_hashes, invalid_style, reset);
                     }
                 }
             }
 
             // Start from genesis (previous_hash = [0; 32], no parent operator)
-            print_tree(&children, [0u8; 32], None, "", false, &operator_colors, reset);
+            print_tree(&children, [0u8; 32], None, "", false, &operator_colors, &invalid_hashes, invalid_style, reset);
         } else if let Some(ref n) = node {
             // Import the ledger
             match n.import_ledger(export) {
@@ -7472,6 +7539,7 @@ async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error::Err
     let mut last_valid_sequence: i64 = -1;
     let mut violation_details = String::new();
 
+    let mut invalid_update_hash: Option<[u8; 32]> = None;
     for update in &updates {
         let expected_seq = (last_valid_sequence + 1) as u64;
         if update.sequence_number != expected_seq && last_valid_sequence >= 0 {
@@ -7479,6 +7547,7 @@ async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error::Err
                 "Sequence gap: expected {}, got {}",
                 expected_seq, update.sequence_number
             );
+            invalid_update_hash = Some(update.current_hash);
             break;
         }
 
@@ -7495,6 +7564,7 @@ async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error::Err
                 hex::encode(&expected_prev[..4]),
                 hex::encode(&update.previous_hash[..4])
             );
+            invalid_update_hash = Some(update.current_hash);
             break;
         }
 
@@ -7506,6 +7576,7 @@ async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error::Err
                 hex::encode(&computed_hash[..4]),
                 hex::encode(&update.current_hash[..4])
             );
+            invalid_update_hash = Some(update.current_hash);
             break;
         }
 
@@ -7532,10 +7603,15 @@ async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error::Err
     println!("  Last valid sequence: {}", last_valid_sequence_u64);
     println!("  Last valid hash: {}...", hex::encode(&last_valid_hash[..8]));
 
-    // Create CustodyDispute operation
+    // Create CustodyDispute operation - reason is just the invalid update's hash
+    let dispute_reason = if let Some(hash) = invalid_update_hash {
+        hex::encode(hash)
+    } else {
+        violation_details.clone()
+    };
     let custody_dispute = LedgerOperation::CustodyDispute {
         last_valid_sequence: last_valid_sequence_u64,
-        reason: format!("{}: {}", reason, violation_details),
+        reason: dispute_reason,
     };
 
     // Serialize
