@@ -46,7 +46,7 @@ format_tx() {
     if [ "$IS_COINBASE" = "true" ]; then
         if [ "$SHOW_COINBASE" = "true" ]; then
             VALUE=$(echo "$TX" | jq -r '.vout[0].value')
-            echo "  $block_height  [coinbase]    ${txid:0:12}...  +${VALUE} sats"
+            printf "  %s  [coinbase]    %s...  +%s sats§              └─ Mining reward (not protocol-related)\n" "$block_height" "${txid:0:12}" "$VALUE"
         fi
         return
     fi
@@ -87,9 +87,9 @@ format_tx() {
                 AMT=$(echo "$TX" | jq -r '.vout[] | select(.scriptpubkey_type == "v0_p2wpkh") | .value' | head -1)
             fi
 
-            echo "  $block_height  [withdrawal]  ${txid:0:12}...  wdrl:$WDRL_ID  ${AMT} sats → ${DEST:0:10}..${DEST: -6}"
+            printf "  %s  [withdrawal]  %s...  wdrl:%s  %s sats → %s..%s§              └─ User withdrawing from deposit balance (OnchainLock fulfilled)\n" "$block_height" "${txid:0:12}" "$WDRL_ID" "$AMT" "${DEST:0:10}" "${DEST: -6}"
         else
-            echo "  $block_height  [op_return]   ${txid:0:12}...  fee:$FEE"
+            printf "  %s  [op_return]   %s...  fee:%s§              └─ Data anchor transaction\n" "$block_height" "${txid:0:12}" "$FEE"
         fi
     else
         # Regular transaction - find payment output (not change)
@@ -111,9 +111,18 @@ format_tx() {
         # If all outputs go back to input addresses, it's a consolidation
         if [ -z "$DEST" ]; then
             TOTAL_OUT=$(echo "$TX" | jq '[.vout[].value] | add')
-            echo "  $block_height  [consolidate] ${txid:0:12}...  ${TOTAL_OUT} sats (self-transfer)"
+            printf "  %s  [consolidate] %s...  %s sats (self-transfer)§              └─ Wallet maintenance (UTXO consolidation)\n" "$block_height" "${txid:0:12}" "$TOTAL_OUT"
         else
-            echo "  $block_height  [transfer]    ${txid:0:12}...  ${AMT} sats → ${DEST:0:10}..${DEST: -6}"
+            # Try to identify the transaction type based on patterns
+            # Check if destination is a P2TR (Taproot) address - likely reserves rotation
+            if [[ "$DEST" == bcrt1p* ]] || [[ "$DEST" == bc1p* ]]; then
+                printf "  %s  [transfer]    %s...  %s sats → %s..%s§              └─ Reserves rotation: moving to quorum-controlled Taproot address\n" "$block_height" "${txid:0:12}" "$AMT" "${DEST:0:10}" "${DEST: -6}"
+            # Check if it's a large amount (likely reserves creation or deposit funding)
+            elif [ "$AMT" -ge 10000000 ] 2>/dev/null; then
+                printf "  %s  [transfer]    %s...  %s sats → %s..%s§              └─ Reserves creation or deposit funding (large transfer)\n" "$block_height" "${txid:0:12}" "$AMT" "${DEST:0:10}" "${DEST: -6}"
+            else
+                printf "  %s  [transfer]    %s...  %s sats → %s..%s§              └─ Deposit funding: user sending funds to operator custody\n" "$block_height" "${txid:0:12}" "$AMT" "${DEST:0:10}" "${DEST: -6}"
+            fi
         fi
     fi
 }
@@ -142,7 +151,7 @@ if [ -n "$SPECIFIC_BLOCK" ]; then
 
     curl -s "$ELECTRS_URL/block/$HASH/txids" | jq -r '.[]' | while read txid; do
         echo "$HEIGHT $txid"
-    done | xargs -P 8 -L 1 bash -c 'format_tx "$2" "$1"' _ | sort -n
+    done | xargs -P 8 -L 1 bash -c 'format_tx "$2" "$1"' _ | sort -n | sed 's/§/\n/g'
 else
     # Show all non-coinbase transactions across all blocks (after initial mining)
     TIP=$(curl -s "$ELECTRS_URL/blocks/tip/height")
@@ -152,5 +161,5 @@ else
     echo ""
 
     # Collect txids in parallel, then process in parallel
-    seq $START $TIP | xargs -P 16 -I {} bash -c 'collect_block_txids {}' | xargs -P 16 -L 1 bash -c 'format_tx "$2" "$1"' _ | sort -n
+    seq $START $TIP | xargs -P 16 -I {} bash -c 'collect_block_txids {}' | xargs -P 16 -L 1 bash -c 'format_tx "$2" "$1"' _ | sort -n | sed 's/§/\n/g'
 fi
