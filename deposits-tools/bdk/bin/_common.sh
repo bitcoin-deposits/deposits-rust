@@ -47,9 +47,9 @@ get_node_seed() {
 }
 
 # Filter out Rust tracing log lines from output
-# Strips ANSI codes and removes timestamp-prefixed log lines
+# Removes timestamp-prefixed log lines (preserves colors for tree visualization)
 filter_logs() {
-    sed 's/\x1b\[[0-9;]*m//g' | grep -v -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}'
+    grep -v -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}|^\x1b\[[0-9;]*m[0-9]{4}-[0-9]{2}-[0-9]{2}T'
 }
 
 # Print colored output
