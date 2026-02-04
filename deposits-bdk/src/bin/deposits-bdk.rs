@@ -3187,21 +3187,43 @@ async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
                 children.entry(update.previous_hash).or_default().push(update);
             }
 
-            // Sort children by sequence number
+            // Sort children by sequence number, then by operator
             for kids in children.values_mut() {
-                kids.sort_by_key(|u| u.sequence_number);
+                kids.sort_by_key(|u| (u.sequence_number, u.operator_id.serialize()));
             }
 
-            // Print tree recursively
+            // Print tree recursively with operator continuity tracking
+            // parent_operator: None for genesis, Some(op) for subsequent nodes
+            // Only show children that:
+            // 1. Are CustodyDispute (can branch from any operator), or
+            // 2. Have same operator_id as parent (operator continuity)
             fn print_tree(
                 children: &std::collections::HashMap<[u8; 32], Vec<&SignedLedgerUpdate>>,
                 parent_hash: [u8; 32],
+                parent_operator: Option<bitcoin::secp256k1::PublicKey>,
                 prefix: &str,
                 is_branch: bool,
             ) {
+                use deposits_core::messages::LedgerOperation;
+                use deposits_core::TlvDecode;
+
                 if let Some(kids) = children.get(&parent_hash) {
-                    for (i, update) in kids.iter().enumerate() {
-                        let is_last = i == kids.len() - 1;
+                    // Filter children based on operator continuity rules
+                    let filtered_kids: Vec<&&SignedLedgerUpdate> = kids.iter().filter(|update| {
+                        // Check if this is a CustodyDispute operation
+                        let is_custody_dispute = if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+                            matches!(op, LedgerOperation::CustodyDispute { .. })
+                        } else {
+                            false
+                        };
+
+                        // CustodyDispute can branch from anyone
+                        // Other operations must continue from same operator (or be first op from genesis)
+                        is_custody_dispute || parent_operator.is_none() || parent_operator == Some(update.operator_id)
+                    }).collect();
+
+                    for (i, update) in filtered_kids.iter().enumerate() {
+                        let is_last = i == filtered_kids.len() - 1;
                         let seq = update.sequence_number;
                         let prev = &update.previous_hash;
                         let curr = &update.current_hash;
@@ -3243,8 +3265,19 @@ async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
                             if op_details.is_empty() { String::new() } else { format!("  {}", op_details) }
                         );
 
-                        // Check if this update has children (continuations or branches)
-                        let child_count = children.get(&update.current_hash).map(|c| c.len()).unwrap_or(0);
+                        // Check how many children this update has (considering operator continuity)
+                        let child_count = if let Some(child_kids) = children.get(&update.current_hash) {
+                            child_kids.iter().filter(|c| {
+                                let is_cd = if let Ok(op) = LedgerOperation::tlv_decode(&c.message) {
+                                    matches!(op, LedgerOperation::CustodyDispute { .. })
+                                } else {
+                                    false
+                                };
+                                is_cd || c.operator_id == update.operator_id
+                            }).count()
+                        } else {
+                            0
+                        };
 
                         // Build prefix for children
                         let new_prefix = if is_branch {
@@ -3254,15 +3287,14 @@ async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
                         };
 
                         // Print children - mark as branch if there are multiple children at same level
-                        // or if this node itself was a branch
                         let has_multiple_children = child_count > 1;
-                        print_tree(children, update.current_hash, &new_prefix, has_multiple_children);
+                        print_tree(children, update.current_hash, Some(update.operator_id), &new_prefix, has_multiple_children);
                     }
                 }
             }
 
-            // Start from genesis (previous_hash = [0; 32])
-            print_tree(&children, [0u8; 32], "", false);
+            // Start from genesis (previous_hash = [0; 32], no parent operator)
+            print_tree(&children, [0u8; 32], None, "", false);
         } else if let Some(ref n) = node {
             // Import the ledger
             match n.import_ledger(export) {
