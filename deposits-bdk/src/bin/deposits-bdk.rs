@@ -3192,6 +3192,20 @@ async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
                 kids.sort_by_key(|u| (u.sequence_number, u.operator_id.serialize()));
             }
 
+            // Build operator -> color map for colorized output
+            // Colors: red, green, yellow, blue, magenta, cyan
+            let colors = ["\x1b[31m", "\x1b[32m", "\x1b[33m", "\x1b[34m", "\x1b[35m", "\x1b[36m"];
+            let reset = "\x1b[0m";
+            let mut operator_colors: std::collections::HashMap<[u8; 33], &str> = std::collections::HashMap::new();
+            let mut color_idx = 0;
+            for update in updates {
+                let key = update.operator_id.serialize();
+                if !operator_colors.contains_key(&key) {
+                    operator_colors.insert(key, colors[color_idx % colors.len()]);
+                    color_idx += 1;
+                }
+            }
+
             // Calculate chain depth (number of descendants) for sorting branches
             // Longer chains (surviving branches) should appear last
             fn get_chain_depth(
@@ -3235,6 +3249,8 @@ async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
                 parent_operator: Option<bitcoin::secp256k1::PublicKey>,
                 prefix: &str,
                 is_branch: bool,
+                operator_colors: &std::collections::HashMap<[u8; 33], &str>,
+                reset: &str,
             ) {
                 use deposits_core::messages::LedgerOperation;
                 use deposits_core::TlvDecode;
@@ -3289,7 +3305,11 @@ async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
                             "  "
                         };
 
-                        println!("{}{}{:>4} ↑{:<6} [{:02x}{:02x}~{:02x}{:02x}] {} {} {}{}",
+                        // Get color for this operator
+                        let color = operator_colors.get(&update.operator_id.serialize()).unwrap_or(&"");
+
+                        println!("{}{}{}{:>4} ↑{:<6} [{:02x}{:02x}~{:02x}{:02x}] {} {} {}{}{}",
+                            color,
                             prefix,
                             branch_char,
                             seq,
@@ -3299,7 +3319,8 @@ async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
                             sig_status,
                             signer,
                             op_name,
-                            if op_details.is_empty() { String::new() } else { format!("  {}", op_details) }
+                            if op_details.is_empty() { String::new() } else { format!("  {}", op_details) },
+                            reset
                         );
 
                         // Check how many children this update has (considering operator continuity)
@@ -3325,13 +3346,13 @@ async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 
                         // Print children - mark as branch if there are multiple children at same level
                         let has_multiple_children = child_count > 1;
-                        print_tree(children, update.current_hash, Some(update.operator_id), &new_prefix, has_multiple_children);
+                        print_tree(children, update.current_hash, Some(update.operator_id), &new_prefix, has_multiple_children, operator_colors, reset);
                     }
                 }
             }
 
             // Start from genesis (previous_hash = [0; 32], no parent operator)
-            print_tree(&children, [0u8; 32], None, "", false);
+            print_tree(&children, [0u8; 32], None, "", false, &operator_colors, reset);
         } else if let Some(ref n) = node {
             // Import the ledger
             match n.import_ledger(export) {
