@@ -7361,6 +7361,8 @@ async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error::Err
         .filter(|u| u.operator_id == original_operator)
         .collect();
     updates.sort_by_key(|u| u.sequence_number);
+    // Dedup by sequence number (keep first occurrence at each seq)
+    updates.dedup_by(|a, b| a.sequence_number == b.sequence_number);
 
     println!("  Original operator's updates: {}", updates.len());
 
