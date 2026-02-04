@@ -8705,15 +8705,19 @@ async fn recovery_continue(args: &[String]) -> Result<(), Box<dyn std::error::Er
     println!("Adding {} continuation operations...", count);
 
     for op_num in 0..count {
-        // Create a simple operation - DepositOpen (opening a new deposit slot)
-        // This shows the ledger continuing under new custody
-        // Use our own pubkey for the deposit (just demonstrating chain continuation)
-        let operation = LedgerOperation::DepositOpen {
-            pubkey: our_pubkey,
-            fees: None,
-            payment_hash: None,
-            invoice: None,
-            cosigner_guarantee_signature: None,
+        // Create an InvoiceCredit operation (simulating received payments)
+        // This shows the ledger continuing under new custody with real payment activity
+        // Generate a deterministic payment hash based on sequence
+        let mut payment_hash = [0u8; 32];
+        payment_hash[0..8].copy_from_slice(&(op_num as u64).to_le_bytes());
+        payment_hash[8..16].copy_from_slice(&latest.current_hash[0..8]);
+
+        let operation = LedgerOperation::InvoiceCredit {
+            payment_hash,
+            deposit_pubkey: our_pubkey,
+            amount: 50000 + (op_num as u64 * 10000), // 50k, 60k, 70k msat
+            invoice_id: format!("post-recovery-{}", op_num + 1),
+            sequence_number: latest.sequence_number + 1,
         };
 
         let message_bytes = operation.tlv_encode();
@@ -8759,7 +8763,7 @@ async fn recovery_continue(args: &[String]) -> Result<(), Box<dyn std::error::Er
         // Publish
         publish_transport.broadcast_ledger_update(&signed_update).await?;
 
-        println!("  [{}/{}] seq {} - DepositOpen", op_num + 1, count, sequence);
+        println!("  [{}/{}] seq {} - InvoiceCredit {} msat", op_num + 1, count, sequence, 50000 + (op_num as u64 * 10000));
 
         // Update latest for next iteration
         latest = signed_update;
