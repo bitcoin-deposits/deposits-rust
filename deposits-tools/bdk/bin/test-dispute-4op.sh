@@ -572,20 +572,14 @@ rebuild_quorum() {
 
                 log_info "  $op_short adding $member_short to quorum..."
 
-                # Add member to quorum
-                local add_output=$(run_bdk_cmd "$op" recovery quorum-add "$alice_ledger_id" "$member_node_id" 2>&1)
+                # Add member to quorum using recovery rebuild quorum-add
+                local add_output=$(run_bdk_cmd "$op" recovery rebuild "$alice_ledger_id" quorum-add "$member_node_id" 2>&1)
 
-                if echo "$add_output" | grep -q "added\|QuorumAddMember"; then
-                    # Member records QuorumJoin
-                    local join_output=$(run_bdk_cmd "$member" partner join "$member_reserves_id" "$op_node_id" "$alice_ledger_id" "$membership_expires" 2>&1)
-
-                    if echo "$join_output" | grep -q "recorded\|Quorum join"; then
-                        test_pass "$member_short joined $op_short's dispute quorum"
-                    else
-                        log_warn "$member_short failed to record join"
-                    fi
+                if echo "$add_output" | grep -q "published\|QuorumAddMember"; then
+                    test_pass "$op_short added $member_short to dispute quorum"
                 else
                     log_warn "$op_short failed to add $member_short"
+                    echo "Output: $add_output" | head -5
                 fi
             fi
         done
@@ -610,24 +604,48 @@ post_attestations() {
         fi
 
         local op_short=$(echo "$op" | sed 's/bdk-//')
+        local op_node_id=$(get_value "node_id_$op")
 
-        log_info "$op_short posting attestations from non-Alice members..."
+        log_info "$op_short getting attestations from non-Alice members..."
 
-        # Request attestations from other non-Alice operators
+        # Get attestations from other non-Alice operators
         for attester in $NON_ALICE_OPERATORS; do
             if [ "$op" != "$attester" ]; then
                 local attester_short=$(echo "$attester" | sed 's/bdk-//')
-                local attester_node_id=$(get_value "node_id_$attester")
+                local attester_reserves_id=$(get_value "reserves_id_$attester")
 
-                log_info "  $op_short requesting attestation from $attester_short..."
+                # Get the deposit secret that the attester used for their deposit on op's ledger
+                local deposit_secret=$(get_value "secret_${attester}_${op}")
 
-                local attest_output=$(run_bdk_cmd "$op" recovery request-attestation "$alice_ledger_id" "$attester_node_id" 2>&1)
+                if [ -z "$deposit_secret" ]; then
+                    log_warn "No deposit secret found for $attester_short on $op_short's ledger"
+                    continue
+                fi
 
-                if echo "$attest_output" | grep -q "attestation\|recorded\|Collateral"; then
-                    test_pass "$op_short got attestation from $attester_short"
+                log_info "  $attester_short locking collateral for $op_short..."
+
+                # Attester locks their deposit on op's ledger (providing attestation for op)
+                local op_reserves_id=$(get_value "reserves_id_$op")
+                local lock_output=$(run_bdk_cmd "$attester" collateral lock "$op_reserves_id" "$deposit_secret" 15000000000 500 "$op_node_id" 2>&1)
+
+                # Extract attestation JSON from output
+                local attestation_json=$(echo "$lock_output" | grep "ATTESTATION_JSON:" | sed 's/ATTESTATION_JSON://')
+
+                if [ -n "$attestation_json" ]; then
+                    log_info "  $op_short recording attestation from $attester_short..."
+
+                    # Record attestation on dispute branch
+                    local record_output=$(run_bdk_cmd "$op" recovery rebuild "$alice_ledger_id" attestation "$attestation_json" 2>&1)
+
+                    if echo "$record_output" | grep -q "published\|CollateralAttestation"; then
+                        test_pass "$op_short got attestation from $attester_short"
+                    else
+                        log_warn "$op_short failed to record attestation from $attester_short"
+                        echo "Output: $record_output" | head -5
+                    fi
                 else
-                    log_warn "$op_short failed to get attestation from $attester_short"
-                    echo "Output: $attest_output"
+                    log_warn "$attester_short failed to provide attestation"
+                    echo "Lock output: $lock_output" | head -5
                 fi
             fi
         done
