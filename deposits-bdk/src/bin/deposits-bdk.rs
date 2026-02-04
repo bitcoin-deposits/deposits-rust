@@ -3097,10 +3097,12 @@ async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     }
 
     // Sort updates by sequence number but keep ALL updates (including branches)
+    // Include operator_id in sort/dedup to preserve different operators' updates at same sequence
+    // (e.g., parallel CustodyDisputes from different quorum members)
     for updates in ledgers.values_mut() {
-        updates.sort_by_key(|u| (u.sequence_number, u.current_hash));
-        // Deduplicate by (sequence, hash) - same update from multiple relays
-        updates.dedup_by(|a, b| a.sequence_number == b.sequence_number && a.current_hash == b.current_hash);
+        updates.sort_by_key(|u| (u.sequence_number, u.operator_id.serialize(), u.current_hash));
+        // Deduplicate exact copies only (same seq, same operator, same hash)
+        updates.dedup_by(|a, b| a.sequence_number == b.sequence_number && a.operator_id == b.operator_id && a.current_hash == b.current_hash);
     }
 
     println!("Found {} ledger(s) with updates:", ledgers.len());
@@ -3520,8 +3522,9 @@ async fn nostr_validate(args: &[String]) -> Result<(), Box<dyn std::error::Error
     }
 
     // Sort by sequence number and deduplicate (relay may have duplicates)
-    updates.sort_by_key(|u| u.sequence_number);
-    updates.dedup_by(|a, b| a.sequence_number == b.sequence_number && a.current_hash == b.current_hash);
+    // Include operator_id to preserve different operators' updates at same sequence (e.g., parallel CustodyDisputes)
+    updates.sort_by_key(|u| (u.sequence_number, u.operator_id));
+    updates.dedup_by(|a, b| a.sequence_number == b.sequence_number && a.operator_id == b.operator_id && a.current_hash == b.current_hash);
 
     println!("Found {} update(s), validating hash chain...", updates.len());
     println!();
@@ -4920,10 +4923,11 @@ async fn process_custody_transfer_sign_request(
         }
     }
 
-    updates.sort_by_key(|u| u.sequence_number);
+    updates.sort_by_key(|u| (u.sequence_number, u.operator_id));
 
-    // Deduplicate by (sequence_number, current_hash) to handle relay duplicates
-    updates.dedup_by(|a, b| a.sequence_number == b.sequence_number && a.current_hash == b.current_hash);
+    // Deduplicate by (sequence_number, operator_id, current_hash) to handle relay duplicates
+    // Include operator_id to preserve different operators' updates at same sequence
+    updates.dedup_by(|a, b| a.sequence_number == b.sequence_number && a.operator_id == b.operator_id && a.current_hash == b.current_hash);
 
     // Verify the violation exists
     let mut last_valid_hash = [0u8; 32];
@@ -5207,9 +5211,10 @@ async fn recovery_start(args: &[String]) -> Result<(), Box<dyn std::error::Error
             }
         }
     }
-    updates.sort_by_key(|u| u.sequence_number);
-    // Deduplicate exact copies only (keep different updates with same seq to detect violations)
-    updates.dedup_by(|a, b| a.sequence_number == b.sequence_number && a.current_hash == b.current_hash);
+    updates.sort_by_key(|u| (u.sequence_number, u.operator_id));
+    // Deduplicate exact copies only (keep different updates with same seq/operator to detect violations)
+    // Include operator_id to preserve different operators' updates at same sequence
+    updates.dedup_by(|a, b| a.sequence_number == b.sequence_number && a.operator_id == b.operator_id && a.current_hash == b.current_hash);
 
     println!("  Found {} updates", updates.len());
 
@@ -5410,9 +5415,10 @@ async fn recovery_agree(args: &[String]) -> Result<(), Box<dyn std::error::Error
             }
         }
     }
-    updates.sort_by_key(|u| u.sequence_number);
-    // Deduplicate exact copies only (keep different updates with same seq to detect violations)
-    updates.dedup_by(|a, b| a.sequence_number == b.sequence_number && a.current_hash == b.current_hash);
+    updates.sort_by_key(|u| (u.sequence_number, u.operator_id));
+    // Deduplicate exact copies only (keep different updates with same seq/operator to detect violations)
+    // Include operator_id to preserve different operators' updates at same sequence
+    updates.dedup_by(|a, b| a.sequence_number == b.sequence_number && a.operator_id == b.operator_id && a.current_hash == b.current_hash);
 
     println!("  Found {} updates", updates.len());
 
@@ -5741,10 +5747,10 @@ async fn recovery_complete(args: &[String]) -> Result<(), Box<dyn std::error::Er
     }
 
     // Sort by sequence number and deduplicate exact copies
-    // (keep different updates with same sequence to detect violations)
-    updates.sort_by_key(|u| u.sequence_number);
+    // Include operator_id to preserve different operators' updates at same sequence
+    updates.sort_by_key(|u| (u.sequence_number, u.operator_id));
     let total_before_dedup = updates.len();
-    updates.dedup_by(|a, b| a.sequence_number == b.sequence_number && a.current_hash == b.current_hash);
+    updates.dedup_by(|a, b| a.sequence_number == b.sequence_number && a.operator_id == b.operator_id && a.current_hash == b.current_hash);
     println!("  Found {} updates ({} after dedup)", total_before_dedup, updates.len());
 
     // Validate ledger hash chain and find violation
@@ -6547,8 +6553,9 @@ async fn recovery_publish_transfer(args: &[String]) -> Result<(), Box<dyn std::e
         }
     }
 
-    updates.sort_by_key(|u| u.sequence_number);
-    updates.dedup_by(|a, b| a.sequence_number == b.sequence_number && a.current_hash == b.current_hash);
+    updates.sort_by_key(|u| (u.sequence_number, u.operator_id));
+    // Include operator_id to preserve different operators' updates at same sequence
+    updates.dedup_by(|a, b| a.sequence_number == b.sequence_number && a.operator_id == b.operator_id && a.current_hash == b.current_hash);
 
     println!("  Found {} updates", updates.len());
 
@@ -6878,8 +6885,9 @@ async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error::Err
         }
     }
 
-    updates.sort_by_key(|u| u.sequence_number);
-    updates.dedup_by(|a, b| a.sequence_number == b.sequence_number && a.current_hash == b.current_hash);
+    updates.sort_by_key(|u| (u.sequence_number, u.operator_id));
+    // Include operator_id to preserve different operators' updates at same sequence
+    updates.dedup_by(|a, b| a.sequence_number == b.sequence_number && a.operator_id == b.operator_id && a.current_hash == b.current_hash);
 
     println!("  Found {} updates", updates.len());
 
