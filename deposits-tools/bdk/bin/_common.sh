@@ -342,7 +342,16 @@ start_nostr_watch() {
 stop_nostr_watch() {
     local container=$1
     # pkill may not be available, so use kill with grep from /proc
-    docker exec "$container" sh -c 'for pid in $(ls /proc | grep -E "^[0-9]+$"); do if grep -q "nostr watch" /proc/$pid/cmdline 2>/dev/null; then kill $pid 2>/dev/null || true; fi; done' 2>/dev/null || true
+    # Use SIGKILL (-9) to ensure processes die
+    docker exec "$container" sh -c '
+        for pid in $(ls /proc 2>/dev/null | grep -E "^[0-9]+$"); do
+            if [ -f /proc/$pid/cmdline ] && grep -q "nostr watch" /proc/$pid/cmdline 2>/dev/null; then
+                kill -9 $pid 2>/dev/null || true
+            fi
+        done
+    ' 2>/dev/null || true
+    # Give processes time to die
+    sleep 0.5
 }
 
 # Check if all services are healthy
