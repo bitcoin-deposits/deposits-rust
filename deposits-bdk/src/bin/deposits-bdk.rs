@@ -8176,16 +8176,188 @@ async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::erro
     println!("Winner: {}...", &winner_pubkey.to_string()[..16]);
     println!("Target reserves: {}...", &winner_participant.target_reserves[..20.min(winner_participant.target_reserves.len())]);
 
-    if *winner_pubkey == our_pubkey {
+    if *winner_pubkey != our_pubkey {
         println!();
-        println!("🎉 YOU WON!");
-        println!();
-        println!("TODO: Build and broadcast claim transaction");
-        println!("The claim transaction spends the lottery output to your target_reserves.");
-    } else {
-        println!();
-        println!("You did not win. Run 'recovery claim' to publish CustodyYield.");
+        println!("You did not win. Run 'recovery release' to publish CustodyYield.");
+        return Ok(());
     }
+
+    println!();
+    println!("YOU WON! Building claim transaction...");
+    println!();
+
+    // Extract quorum members and original operator from ledger
+    let mut quorum_members: Vec<PublicKey> = Vec::new();
+    let mut original_operator: Option<PublicKey> = None;
+
+    for event in update_events.iter() {
+        if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
+            if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
+                if update.sequence_number == 0 {
+                    original_operator = Some(update.operator_id);
+                }
+                if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+                    if let LedgerOperation::QuorumAddMember { quorum_member, .. } = op {
+                        if !quorum_members.contains(&quorum_member) {
+                            quorum_members.push(quorum_member);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let original_operator = original_operator.ok_or("Could not find original operator")?;
+
+    // Build the recovery voters list (quorum members minus original operator)
+    let recovery_voters: Vec<bitcoin::secp256k1::XOnlyPublicKey> = quorum_members.iter()
+        .filter(|pk| **pk != original_operator)
+        .map(|pk| pk.x_only_public_key().0)
+        .collect();
+
+    println!("  Original operator: {}...", &original_operator.to_string()[..16]);
+    println!("  Quorum members: {}", quorum_members.len());
+    println!("  Recovery voters: {}", recovery_voters.len());
+
+    // Build lottery participants (just the LotteryParticipant part)
+    let lottery_participants: Vec<LotteryParticipant> = participants.iter()
+        .map(|(_, p)| p.clone())
+        .collect();
+
+    // Calculate recovery threshold (majority of recovery voters)
+    let recovery_threshold = (recovery_voters.len() + 1) / 2;
+    if recovery_threshold == 0 {
+        return Err("Not enough recovery voters".into());
+    }
+
+    // Build the lottery output to get the address and scripts
+    let lottery_builder = LotteryScriptBuilder::new(
+        lottery_participants.clone(),
+        recovery_voters.clone(),
+        recovery_threshold,
+        config.network,
+    );
+
+    let lottery_output = lottery_builder.build()
+        .map_err(|e| format!("Failed to build lottery output: {:?}", e))?;
+
+    println!("  Lottery address: {}...", &lottery_output.address.to_string()[..20]);
+
+    // Find the lottery UTXO on-chain
+    use bdk_esplora::esplora_client::Builder as EsploraBuilder;
+    let esplora = EsploraBuilder::new(&config.electrum_url).build_blocking();
+
+    let lottery_script = lottery_output.address.script_pubkey();
+
+    // Query for transactions at the lottery address
+    let txs = esplora.scripthash_txs(&lottery_script, None)
+        .map_err(|e| format!("Failed to query lottery address: {:?}", e))?;
+
+    // Find unspent output
+    let mut lottery_utxo: Option<(bitcoin::OutPoint, u64)> = None;
+    for tx in &txs {
+        for (vout, output) in tx.vout.iter().enumerate() {
+            if output.scriptpubkey == lottery_script {
+                let outpoint = bitcoin::OutPoint::new(tx.txid, vout as u32);
+                let status = esplora.get_output_status(&tx.txid, vout as u64)
+                    .map_err(|e| format!("Failed to check output status: {:?}", e))?;
+                if status.map(|s| !s.spent).unwrap_or(true) {
+                    lottery_utxo = Some((outpoint, output.value));
+                    break;
+                }
+            }
+        }
+        if lottery_utxo.is_some() { break; }
+    }
+
+    let (lottery_outpoint, lottery_amount) = lottery_utxo
+        .ok_or("No unspent UTXO found at lottery address. Was confiscation transaction confirmed?")?;
+
+    println!("  Found lottery UTXO: {} ({} sats)", lottery_outpoint, lottery_amount);
+
+    // Parse the winner's target_reserves address
+    let target_address: bitcoin::Address<bitcoin::address::NetworkUnchecked> = winner_participant.target_reserves.parse()
+        .map_err(|e| format!("Invalid target_reserves address: {}", e))?;
+    let target_address = target_address.require_network(config.network)
+        .map_err(|e| format!("Address network mismatch: {}", e))?;
+
+    // Build claim transaction
+    use bitcoin::{ScriptBuf, Witness, Amount, TxIn, TxOut};
+
+    let claim_fee = 400u64; // Reasonable fee for single-input tx
+    let output_amount = lottery_amount.saturating_sub(claim_fee);
+
+    let claim_tx = bitcoin::Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: lottery_outpoint,
+            script_sig: ScriptBuf::new(),
+            sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(output_amount),
+            script_pubkey: target_address.script_pubkey(),
+        }],
+    };
+
+    // Compute sighash for the lottery script path
+    use bitcoin::sighash::{SighashCache, TapSighashType};
+    use bitcoin::taproot::TapLeafHash;
+
+    let prevouts = vec![TxOut {
+        value: Amount::from_sat(lottery_amount),
+        script_pubkey: lottery_script.clone(),
+    }];
+
+    let leaf_hash = TapLeafHash::from_script(&lottery_output.lottery_script, bitcoin::taproot::LeafVersion::TapScript);
+
+    let mut sighash_cache = SighashCache::new(&claim_tx);
+    let sighash = sighash_cache.taproot_script_spend_signature_hash(
+        0,
+        &bitcoin::sighash::Prevouts::All(&prevouts),
+        leaf_hash,
+        TapSighashType::Default,
+    ).map_err(|e| format!("Failed to compute sighash: {}", e))?;
+
+    let sighash_bytes: [u8; 32] = *sighash.as_ref();
+
+    // Sign with our key
+    let msg = bitcoin::secp256k1::Message::from_digest(sighash_bytes);
+    let signature = secp.sign_schnorr(&msg, &keypair);
+    let sig_bytes: [u8; 64] = *signature.as_ref();
+
+    println!("  Signed claim transaction");
+
+    // Create witness
+    let witness = lottery_output.create_claim_witness(&sig_bytes, &ordered_preimages)
+        .map_err(|e| format!("Failed to create witness: {:?}", e))?;
+
+    let mut claim_tx = claim_tx;
+    claim_tx.input[0].witness = witness;
+
+    // Broadcast
+    println!("  Broadcasting claim transaction...");
+
+    let data_dir = config.data_dir.clone();
+    let wallet = deposits_bdk::wallet::Wallet::new(
+        config.seed,
+        config.network,
+        data_dir,
+        config.electrum_url.clone(),
+    )?;
+    wallet.broadcast(&claim_tx)?;
+
+    let claim_txid = claim_tx.compute_txid();
+    println!();
+    println!("Claim transaction broadcast!");
+    println!("  Txid: {}", claim_txid);
+    println!("  Output: {} sats to {}", output_amount, winner_participant.target_reserves);
+    println!();
+    println!("Next steps:");
+    println!("  1. Wait for confirmation");
+    println!("  2. Run 'recovery complete' to publish CustodyAcquire with claim txid");
 
     Ok(())
 }
