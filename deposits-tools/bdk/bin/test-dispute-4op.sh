@@ -1,5 +1,5 @@
 #!/bin/bash
-# Four-operator dispute protocol test script
+# Four-operator dispute protocol test script (with on-chain lottery)
 #
 # This script tests the full dispute protocol with 4 operators:
 # 1. Each creates reserves UTXOs of the same amount
@@ -11,9 +11,11 @@
 #    - Rebuild quorum with non-Alice members
 #    - Post collateral attestations from non-Alice members
 #    - Request non-Alice quorum members join their chain
-#    - Publish CustodyArmed (pre-commitment)
-# 6. Wait for entropy block
-# 7. Winner: CustodyAcquire, Losers: CustodyYield
+#    - Publish CustodyArmed (pre-commitment with lottery hash)
+# 6. Confiscate reserves to lottery Tapscript output
+# 7. All participants reveal preimages via Nostr
+# 8. Winner determined by preimage-size lottery, claims output
+# 9. Winner: CustodyAcquire, Losers: CustodyYield
 #
 # Usage:
 #   ./bin/test-dispute-4op.sh
@@ -723,31 +725,94 @@ arm_for_entropy() {
 }
 
 # ============================================================================
-# Phase 13: Mine to entropy block
+# Phase 13: Confiscate reserves to lottery output
 # ============================================================================
 
-mine_to_entropy() {
+confiscate_to_lottery() {
     log_info ""
-    log_info "=== Phase 13: Mine to Entropy Block ==="
+    log_info "=== Phase 13: Confiscate Reserves to Lottery Output ==="
     echo ""
 
-    # Entropy block is armed_block + 6
-    log_info "Mining 6 blocks to entropy block..."
-    mine_blocks 6
+    local alice_ledger_id=$(get_value "ledger_id_bdk-alice")
 
-    local entropy_height=$(get_block_height)
-    test_pass "Mined to entropy block $entropy_height"
+    # First armed operator initiates confiscation
+    local confiscator=""
+    for op in $NON_ALICE_OPERATORS; do
+        local has_armed=$(get_value "armed_${op}")
+        if [ "$has_armed" == "1" ]; then
+            confiscator="$op"
+            break
+        fi
+    done
+
+    if [ -z "$confiscator" ]; then
+        test_fail "No armed operator found for confiscation"
+        return 1
+    fi
+
+    local op_short=$(echo "$confiscator" | sed 's/bdk-//')
+    log_info "$op_short initiating confiscation to lottery output..."
+
+    local confiscate_output=$(run_bdk_cmd "$confiscator" recovery confiscate "$alice_ledger_id" 2>&1)
+
+    if echo "$confiscate_output" | grep -q "Confiscation transaction broadcast"; then
+        local txid=$(echo "$confiscate_output" | grep "Txid:" | awk '{print $2}')
+        test_pass "$op_short broadcast confiscation TX: ${txid:0:16}..."
+        store_value "confiscation_txid" "$txid"
+
+        # Mine to confirm
+        log_info "Mining to confirm confiscation..."
+        mine_blocks 1
+        test_pass "Confiscation confirmed"
+    else
+        test_fail "$op_short failed to confiscate"
+        echo "Output: $confiscate_output" | tail -20
+        return 1
+    fi
 
     sleep 2
 }
 
 # ============================================================================
-# Phase 14: Claim (Winner: CustodyAcquire, Losers: CustodyYield)
+# Phase 14: All participants reveal preimages
+# ============================================================================
+
+reveal_preimages() {
+    log_info ""
+    log_info "=== Phase 14: Reveal Preimages ==="
+    echo ""
+
+    local alice_ledger_id=$(get_value "ledger_id_bdk-alice")
+
+    for op in $NON_ALICE_OPERATORS; do
+        local has_armed=$(get_value "armed_${op}")
+        if [ "$has_armed" != "1" ]; then
+            continue
+        fi
+
+        local op_short=$(echo "$op" | sed 's/bdk-//')
+        log_info "$op_short revealing preimage..."
+
+        local reveal_output=$(run_bdk_cmd "$op" recovery reveal "$alice_ledger_id" 2>&1)
+
+        if echo "$reveal_output" | grep -q "Preimage revealed"; then
+            test_pass "$op_short revealed preimage"
+        else
+            test_fail "$op_short failed to reveal preimage"
+            echo "Output: $reveal_output" | tail -10
+        fi
+    done
+
+    sleep 2
+}
+
+# ============================================================================
+# Phase 15: Lottery claim (Winner: CustodyAcquire, Losers: CustodyYield)
 # ============================================================================
 
 claim_custody() {
     log_info ""
-    log_info "=== Phase 14: Claim Custody (Entropy Selection) ==="
+    log_info "=== Phase 15: Lottery Claim ==="
     echo ""
 
     local alice_ledger_id=$(get_value "ledger_id_bdk-alice")
@@ -761,46 +826,77 @@ claim_custody() {
 
         local op_short=$(echo "$op" | sed 's/bdk-//')
 
-        log_info "$op_short running recovery claim..."
+        log_info "$op_short checking lottery result..."
 
-        local claim_output=$(run_bdk_cmd "$op" recovery claim "$alice_ledger_id" 2>&1)
+        local claim_output=$(run_bdk_cmd "$op" recovery lottery-claim "$alice_ledger_id" 2>&1)
 
         if echo "$claim_output" | grep -q "CustodyAcquire published successfully"; then
             test_pass "$op_short WON (published CustodyAcquire)"
             winner="$op"
             store_value "dispute_winner" "$op"
+
+            # Mine to confirm claim TX
+            log_info "Mining to confirm claim transaction..."
+            mine_blocks 1
         elif echo "$claim_output" | grep -q "YOU WON"; then
-            # Won entropy selection but CustodyAcquire may have failed
-            if echo "$claim_output" | grep -q "Could not collect enough signatures"; then
-                test_fail "$op_short won entropy but failed to collect signatures"
-                echo "    Output: $(echo "$claim_output" | grep -E 'signatures|Poll' | tail -5)"
+            # Won but something may have failed
+            if echo "$claim_output" | grep -q "Claim transaction broadcast"; then
+                test_pass "$op_short WON and claimed"
+                winner="$op"
+                store_value "dispute_winner" "$op"
+                mine_blocks 1
             else
-                test_fail "$op_short won entropy but CustodyAcquire not published"
+                test_fail "$op_short won but claim failed"
                 echo "    Output: $(echo "$claim_output" | tail -10)"
             fi
-        elif echo "$claim_output" | grep -q "CustodyYield published"; then
-            test_pass "$op_short yielded (published CustodyYield)"
-        elif echo "$claim_output" | grep -q "did NOT win"; then
-            test_pass "$op_short lost (should publish CustodyYield)"
+        elif echo "$claim_output" | grep -q "did not win\|You did not win"; then
+            test_pass "$op_short lost lottery"
+        elif echo "$claim_output" | grep -q "Not all preimages"; then
+            log_warn "$op_short waiting for more preimages"
         else
-            log_warn "$op_short claim output:"
+            log_warn "$op_short lottery-claim output:"
             echo "$claim_output" | head -15
         fi
     done
 
     if [ -n "$winner" ]; then
         log_info ""
-        log_info "Winner: $winner"
+        log_info "Lottery Winner: $winner"
     fi
+
+    # Losers publish CustodyYield
+    log_info ""
+    log_info "Losers publishing CustodyYield..."
+    for op in $NON_ALICE_OPERATORS; do
+        local has_armed=$(get_value "armed_${op}")
+        if [ "$has_armed" != "1" ]; then
+            continue
+        fi
+
+        if [ "$op" == "$winner" ]; then
+            continue
+        fi
+
+        local op_short=$(echo "$op" | sed 's/bdk-//')
+        log_info "$op_short publishing CustodyYield..."
+
+        local release_output=$(run_bdk_cmd "$op" recovery release "$alice_ledger_id" 2>&1)
+
+        if echo "$release_output" | grep -q "CustodyYield published"; then
+            test_pass "$op_short yielded"
+        else
+            log_warn "$op_short release output: $(echo "$release_output" | tail -5)"
+        fi
+    done
 }
 
 # ============================================================================
-# Phase 15: Winner continues the ledger with new operations
+# Phase 16: Winner continues the ledger with new operations
 # ============================================================================
 
 winner_continues_ledger() {
     log_info ""
-    log_info "=== Phase 15: Winner Continues Ledger ==="
+    log_info "=== Phase 16: Winner Continues Ledger ==="
     echo ""
 
     local alice_ledger_id=$(get_value "ledger_id_bdk-alice")
@@ -829,12 +925,12 @@ winner_continues_ledger() {
 }
 
 # ============================================================================
-# Phase 16: Show final state
+# Phase 17: Show final state
 # ============================================================================
 
 show_final_state() {
     log_info ""
-    log_info "=== Final State ==="
+    log_info "=== Phase 17: Final State ==="
     echo ""
 
     local alice_ledger_id=$(get_value "ledger_id_bdk-alice")
@@ -921,12 +1017,11 @@ main() {
     rebuild_quorum
     post_attestations
     arm_for_entropy
-    mine_to_entropy
-    claim_custody
 
-    # Mine the CustodyAcquire on-chain transaction
-    log_info "Mining CustodyAcquire transaction..."
-    mine_blocks 1
+    # Lottery phase (on-chain dispute resolution)
+    confiscate_to_lottery
+    reveal_preimages
+    claim_custody
 
     # Post-dispute: winner continues ledger
     winner_continues_ledger

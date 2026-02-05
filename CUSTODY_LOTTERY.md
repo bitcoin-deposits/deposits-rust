@@ -246,4 +246,4 @@ The collateral mechanism (already implemented) incentivizes revelation.
 - [x] Build and broadcast claim transaction (lottery → winner)
 - [x] Add confiscation_sign handler for quorum watcher
 - [x] Update CustodyAcquire to use claim txid
-- [ ] Update test-dispute-4op.sh for new flow
+- [x] Update test-dispute-4op.sh for new flow
