@@ -4620,6 +4620,9 @@ async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
                 "custody_transfer_sign" => {
                     process_custody_transfer_sign_request(&fresh_node, &config_for_reload, &request).await
                 }
+                "confiscation_sign" => {
+                    process_confiscation_sign_request(&fresh_node, &config_for_reload, &request).await
+                }
                 "custodian_query" => {
                     process_custodian_query_request(&fresh_node, &ledger_id, &request).await
                 }
@@ -5263,6 +5266,173 @@ async fn process_custody_transfer_sign_request(
 
     // TODO: Optionally verify the unsigned_tx is spending the correct UTXO to the correct destination
     // For now, we trust that the sighash is computed correctly
+
+    // Sign the sighash
+    let msg = bitcoin::secp256k1::Message::from_digest(sighash_bytes);
+    let signature = secp.sign_schnorr(&msg, &keypair);
+    let signature_bytes = signature.serialize();
+
+    println!("    Signed sighash: {}...", &hex::encode(&signature_bytes[..4]));
+
+    // Return the signature
+    let result = serde_json::json!({
+        "signer": our_pubkey.to_string(),
+        "signature": hex::encode(signature_bytes),
+        "sighash": sighash_hex,
+    });
+
+    (true, Some(result), None)
+}
+
+/// Process a confiscation_sign request
+///
+/// This is called when a quorum member requests signatures for a confiscation transaction
+/// that moves reserves to a lottery output for dispute resolution.
+async fn process_confiscation_sign_request(
+    node: &Node,
+    config: &NodeConfig,
+    request: &deposits_bdk::nostr::LedgerRequest,
+) -> (bool, Option<serde_json::Value>, Option<String>) {
+    use bitcoin::secp256k1::{Keypair, Secp256k1};
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::{TlvDecode, SignedLedgerUpdate};
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    use nostr_sdk::prelude::*;
+
+    // Unused: node (we don't need the node for this handler, we fetch ledger from Nostr directly)
+    let _ = node;
+
+    println!("  Processing confiscation_sign request...");
+
+    // Extract required parameters
+    let ledger_id = match request.params.get("ledger_id").and_then(|v| v.as_str()) {
+        Some(id) => id.to_string(),
+        None => return (false, None, Some("Missing ledger_id parameter".to_string())),
+    };
+
+    let sighash_hex = match request.params.get("sighash").and_then(|v| v.as_str()) {
+        Some(h) => h.to_string(),
+        None => return (false, None, Some("Missing sighash parameter".to_string())),
+    };
+
+    let _unsigned_tx_hex = match request.params.get("unsigned_tx").and_then(|v| v.as_str()) {
+        Some(tx) => tx.to_string(),
+        None => return (false, None, Some("Missing unsigned_tx parameter".to_string())),
+    };
+
+    let lottery_address = match request.params.get("lottery_address").and_then(|v| v.as_str()) {
+        Some(a) => a.to_string(),
+        None => return (false, None, Some("Missing lottery_address parameter".to_string())),
+    };
+
+    let violation_details = match request.params.get("violation_details").and_then(|v| v.as_str()) {
+        Some(d) => d.to_string(),
+        None => return (false, None, Some("Missing violation_details parameter".to_string())),
+    };
+
+    // Parse sighash
+    let sighash_bytes = match hex::decode(&sighash_hex) {
+        Ok(b) if b.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&b);
+            arr
+        }
+        Ok(_) => return (false, None, Some("Invalid sighash length".to_string())),
+        Err(e) => return (false, None, Some(format!("Invalid sighash hex: {}", e))),
+    };
+
+    println!("    Ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
+    println!("    Lottery addr: {}...", &lottery_address[..20.min(lottery_address.len())]);
+    println!("    Reason: {}", &violation_details[..50.min(violation_details.len())]);
+
+    // Use the node's operator key (BIP32-derived from seed, not raw seed)
+    let secp = Secp256k1::new();
+    let secret_key = node.wallet.operator_secret();
+    let keypair = Keypair::from_secret_key(&secp, &secret_key);
+    let our_pubkey = node.node_id;
+
+    println!("    Our key: {}...", &our_pubkey.to_string()[..16]);
+
+    let relay_url = match config.relays.first() {
+        Some(url) => url.clone(),
+        None => return (false, None, Some("No relay configured".to_string())),
+    };
+
+    // Fetch and validate the ledger from Nostr
+    let keys = Keys::generate();
+    let client = Client::new(keys);
+    if let Err(e) = client.add_relay(&relay_url).await {
+        return (false, None, Some(format!("Failed to add relay: {}", e)));
+    }
+    client.connect().await;
+
+    let filter = Filter::new()
+        .kind(Kind::Custom(deposits_bdk::nostr::KIND_LEDGER_UPDATE))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()])
+        .limit(500);
+
+    let events = match client.fetch_events(vec![filter], None).await {
+        Ok(e) => e,
+        Err(e) => {
+            let _ = client.disconnect().await;
+            return (false, None, Some(format!("Failed to fetch ledger: {}", e)));
+        }
+    };
+
+    let _ = client.disconnect().await;
+
+    // Decode and validate updates
+    let mut updates: Vec<SignedLedgerUpdate> = Vec::new();
+    for event in events.iter() {
+        if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
+            if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
+                updates.push(update);
+            }
+        }
+    }
+
+    updates.sort_by_key(|u| (u.sequence_number, u.operator_id));
+    updates.dedup_by(|a, b| a.sequence_number == b.sequence_number && a.operator_id == b.operator_id && a.current_hash == b.current_hash);
+
+    // Verify we're a quorum member by checking the ledger operations
+    let mut is_quorum_member = false;
+    for update in updates.iter() {
+        if let Ok(operation) = LedgerOperation::tlv_decode(&update.message) {
+            match operation {
+                LedgerOperation::QuorumAddMember { quorum_member, .. } => {
+                    if quorum_member == our_pubkey {
+                        is_quorum_member = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if !is_quorum_member {
+        return (false, None, Some("We are not a quorum member for this ledger".to_string()));
+    }
+
+    println!("    Verified: we are a quorum member");
+
+    // Verify there are CustodyArmed messages (active dispute)
+    let mut armed_count = 0;
+    for update in updates.iter() {
+        if let Ok(operation) = LedgerOperation::tlv_decode(&update.message) {
+            if let LedgerOperation::CustodyArmed { .. } = operation {
+                armed_count += 1;
+            }
+        }
+    }
+
+    if armed_count < 2 {
+        return (false, None, Some(format!(
+            "Not enough armed participants for confiscation (found {})",
+            armed_count
+        )));
+    }
+
+    println!("    Found {} armed participants", armed_count);
 
     // Sign the sighash
     let msg = bitcoin::secp256k1::Message::from_digest(sighash_bytes);
