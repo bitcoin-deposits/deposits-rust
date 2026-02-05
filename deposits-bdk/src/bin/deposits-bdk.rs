@@ -1290,11 +1290,15 @@ fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                 LedgerOperation::CustodyArmed { armed_block } => {
                     ("CustodyArmed", format!("armed_block:{}", armed_block))
                 }
-                LedgerOperation::CustodyAcquire { new_custodian, entropy_block_height, .. } => {
+                LedgerOperation::CustodyAcquire { new_custodian, entropy_block_height, spend_txid, new_reserves_address, .. } => {
                     let pk_bytes = new_custodian.serialize();
-                    ("CustodyAcquire", format!("to:{:02x}{:02x}{:02x}{:02x}  entropy_block:{}",
+                    let txid_hex = hex::encode(spend_txid);
+                    ("CustodyAcquire", format!("to:{:02x}{:02x}{:02x}{:02x}  entropy_block:{}  txid:{}..  reserves:{}..{}",
                         pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3],
-                        entropy_block_height))
+                        entropy_block_height,
+                        &txid_hex[..8],
+                        &new_reserves_address[..10.min(new_reserves_address.len())],
+                        &new_reserves_address[new_reserves_address.len().saturating_sub(6)..]))
                 }
                 LedgerOperation::CustodyYield => {
                     ("CustodyYield", String::new())
@@ -4399,9 +4403,45 @@ async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         format!("{}:{}", op, rid)
     };
 
+    // Find all ledgers we've joined (via QuorumJoin operations in our ledgers)
+    let joined_ledger_ids: Vec<String> = {
+        use deposits_core::messages::LedgerOperation;
+        use deposits_core::tlv::TlvDecode;
+        use deposits_core::messages::consts::QUORUM_JOIN;
+
+        let mut joined = Vec::new();
+        let ledgers = node.list_ledgers();
+
+        for ((_operator, _reserves_id), ledger_arc) in ledgers.iter() {
+            let ledger = ledger_arc.read().unwrap();
+
+            // Scan history for QuorumJoin operations
+            for update in &ledger.history {
+                if update.message_type == QUORUM_JOIN {
+                    // Decode the operation to get target ledger info
+                    if let Ok(LedgerOperation::QuorumJoin { operator_id, reserves_id, .. }) =
+                        LedgerOperation::tlv_decode(&update.message)
+                    {
+                        let joined_id = format!("{}:{}", operator_id, reserves_id);
+                        if !joined.contains(&joined_id) && joined_id != ledger_id {
+                            joined.push(joined_id);
+                        }
+                    }
+                }
+            }
+        }
+        joined
+    };
+
     println!("Watching for requests on ledger...");
     println!("  Relay: {}", relay_url);
     println!("  Ledger: {}", ledger_id);
+    if !joined_ledger_ids.is_empty() {
+        println!("  Also joined {} other ledger(s):", joined_ledger_ids.len());
+        for jid in &joined_ledger_ids {
+            println!("    - {}...", &jid[..40.min(jid.len())]);
+        }
+    }
     println!();
     println!("Press Ctrl+C to stop.");
     println!();
@@ -4417,6 +4457,12 @@ async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     // Also subscribe to disputes for this ledger
     transport.subscribe_to_disputes(&ledger_id).await?;
 
+    // Subscribe to requests for all joined ledgers (for custody_transfer_sign)
+    for joined_id in &joined_ledger_ids {
+        transport.subscribe_to_requests(joined_id).await?;
+        transport.subscribe_to_disputes(joined_id).await?;
+    }
+
     let mut transport = transport;
     let mut last_poll = std::time::Instant::now();
     let mut seen_events: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -4431,14 +4477,17 @@ async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         if last_poll.elapsed() > std::time::Duration::from_millis(500) {
             if let Ok(requests) = transport.fetch_recent_requests(60).await {
                 for request in requests {
-                    // Queue requests for our ledger, or custody_transfer_sign for any ledger
-                    // (we might be a quorum member for other ledgers)
-                    let should_queue = request.ledger_id == ledger_id
-                        || request.action == "custody_transfer_sign";
+                    // Queue requests for our ledger, joined ledgers, or custody_transfer_sign for any ledger
+                    let is_our_ledger = request.ledger_id == ledger_id;
+                    let is_joined_ledger = joined_ledger_ids.contains(&request.ledger_id);
+                    let is_custody_transfer = request.action == "custody_transfer_sign";
+                    let should_queue = is_our_ledger || is_joined_ledger || is_custody_transfer;
+
                     if should_queue && !seen_events.contains(&request.event_id) {
-                        if request.action == "custody_transfer_sign" && request.ledger_id != ledger_id {
-                            println!("[{}] Received custody_transfer_sign for external ledger: {}...",
+                        if is_custody_transfer && !is_our_ledger {
+                            println!("[{}] Received custody_transfer_sign for {}ledger: {}...",
                                 chrono::Utc::now().format("%H:%M:%S"),
+                                if is_joined_ledger { "joined " } else { "external " },
                                 &request.ledger_id[..16.min(request.ledger_id.len())]);
                         }
                         seen_events.insert(request.event_id.clone());
@@ -4451,8 +4500,12 @@ async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
 
         // Check for requests
         while let Some(request) = transport.try_recv_request() {
-            // Skip requests not for our ledger (except custody_transfer_sign which we handle for any ledger)
-            if request.ledger_id != ledger_id && request.action != "custody_transfer_sign" {
+            // Skip requests not for our ledger or joined ledgers (except custody_transfer_sign)
+            let is_our_ledger = request.ledger_id == ledger_id;
+            let is_joined_ledger = joined_ledger_ids.contains(&request.ledger_id);
+            let is_custody_transfer = request.action == "custody_transfer_sign";
+
+            if !is_our_ledger && !is_joined_ledger && !is_custody_transfer {
                 tracing::debug!("Skipping request for different ledger: {} (ours: {})",
                     request.ledger_id, ledger_id);
                 continue;
@@ -5086,12 +5139,28 @@ async fn process_custody_transfer_sign_request(
     // Include operator_id to preserve different operators' updates at same sequence
     updates.dedup_by(|a, b| a.sequence_number == b.sequence_number && a.operator_id == b.operator_id && a.current_hash == b.current_hash);
 
-    // Verify the violation exists
+    // Find the original operator (the one who opened the ledger)
+    let original_operator = updates.iter()
+        .find(|u| u.sequence_number == 0)
+        .map(|u| u.operator_id);
+
+    let original_operator = match original_operator {
+        Some(op) => op,
+        None => return (false, None, Some("Could not find ledger genesis (sequence 0)".to_string())),
+    };
+
+    // Filter to only the original operator's updates for violation validation
+    // (dispute branches from other operators are valid forks, not violations)
+    let original_updates: Vec<&SignedLedgerUpdate> = updates.iter()
+        .filter(|u| u.operator_id == original_operator)
+        .collect();
+
+    // Verify the violation exists on the original operator's chain
     let mut last_valid_hash = [0u8; 32];
     let mut found_violation = false;
     let mut validated_sequence: i64 = -1;
 
-    for update in &updates {
+    for update in &original_updates {
         let expected_seq = (validated_sequence + 1) as u64;
         if update.sequence_number != expected_seq && validated_sequence >= 0 {
             found_violation = true;
@@ -6486,6 +6555,8 @@ async fn recovery_complete(args: &[String]) -> Result<(), Box<dyn std::error::Er
                 new_custodian: selected_custodian,
                 entropy_block_height,
                 entropy_block_hash,
+                spend_txid: [0u8; 32], // Deprecated: old code path
+                new_reserves_address: String::new(), // Deprecated: old code path
             };
             // Record reason/evidence for audit trail
             let _ = (reason.clone(), last_valid_hash, last_valid_sequence, evidence_hash, initiation_block, candidate_pool.clone());
@@ -6859,6 +6930,8 @@ async fn recovery_publish_transfer(args: &[String]) -> Result<(), Box<dyn std::e
         new_custodian: selected_custodian,
         entropy_block_height,
         entropy_block_hash,
+        spend_txid: [0u8; 32], // Deprecated: old code path
+        new_reserves_address: String::new(), // Deprecated: old code path
     };
     // Record for audit trail
     let _ = (violation_details.clone(), last_valid_hash, last_valid_sequence, evidence_hash, candidate_pool);
@@ -8571,96 +8644,470 @@ async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::error::E
     println!("Entropy selection result:");
     println!("  Winner: {}...", &winner.to_string()[..16]);
     println!();
-    if we_won {
-        println!("🎉 YOU WON! You will become the new custodian.");
-    } else {
-        println!("You did NOT win. You must publish CustodyYield to tombstone your branch.");
-        println!("This is required to release your quorum members from their attestation obligations.");
-    }
 
-    // Create the appropriate operation
-    let (operation, op_name): (LedgerOperation, &str) = if we_won {
-        (LedgerOperation::CustodyAcquire {
+    // Variables to hold spend info (only set if we win and spend succeeds)
+    let mut spend_txid: [u8; 32] = [0u8; 32];
+    let mut new_reserves_address = String::new();
+
+    if we_won {
+        println!("🎉 YOU WON! Executing on-chain spend first...");
+        println!();
+
+        // Extract quorum members, reserves address, and dispute info from the ledger
+        let mut quorum_members: Vec<PublicKey> = Vec::new();
+        let mut reserves_address: Option<String> = None;
+        let mut ledger_hash: Option<[u8; 32]> = None;
+        let mut original_operator: Option<PublicKey> = None;
+        let mut our_dispute_info: Option<(u64, String)> = None;
+
+        for event in events.iter() {
+            if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
+                if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
+                    if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+                        match op {
+                            LedgerOperation::LedgerOpen { operator_id, .. } => {
+                                original_operator = Some(operator_id);
+                            }
+                            LedgerOperation::QuorumAddMember { quorum_member, .. } => {
+                                if !quorum_members.contains(&quorum_member) {
+                                    quorum_members.push(quorum_member);
+                                }
+                            }
+                            LedgerOperation::ReservesRotate { reserves_id, ledger_hash: lh, .. } => {
+                                reserves_address = Some(reserves_id);
+                                ledger_hash = Some(lh);
+                            }
+                            LedgerOperation::CustodyDispute { last_valid_sequence, reason, .. } => {
+                                if update.operator_id == our_pubkey {
+                                    our_dispute_info = Some((last_valid_sequence, reason));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        let original_operator = original_operator.ok_or("Could not find original operator")?;
+        let reserves_address_str = match reserves_address {
+            Some(addr) => addr,
+            None => {
+                return Err("No reserves address found - cannot proceed with CustodyAcquire without on-chain spend".into());
+            }
+        };
+        let ledger_hash = ledger_hash.ok_or("Could not find ledger_hash from ReservesRotate")?;
+
+        println!("  Original operator: {}...", &original_operator.to_string()[..16]);
+        println!("  Quorum members: {}", quorum_members.len());
+        println!("  Reserves address: {}...", &reserves_address_str[..20.min(reserves_address_str.len())]);
+
+        // Look up the reserves UTXO
+        let reserves_addr: bitcoin::Address<bitcoin::address::NetworkUnchecked> = reserves_address_str.parse()
+            .map_err(|e| format!("Invalid reserves address: {}", e))?;
+        let reserves_addr = reserves_addr.require_network(config.network)
+            .map_err(|e| format!("Address network mismatch: {}", e))?;
+
+        let script_pubkey = reserves_addr.script_pubkey();
+        let utxos = esplora.scripthash_txs(&script_pubkey, None)
+            .map_err(|e| format!("Failed to query Esplora: {:?}", e))?;
+
+        // Find unspent output
+        let mut reserves_utxo: Option<(bitcoin::OutPoint, u64)> = None;
+        for tx in &utxos {
+            for (vout, output) in tx.vout.iter().enumerate() {
+                if output.scriptpubkey == script_pubkey {
+                    let outpoint = bitcoin::OutPoint::new(tx.txid, vout as u32);
+                    let status = esplora.get_output_status(&tx.txid, vout as u64)
+                        .map_err(|e| format!("Failed to check output status: {:?}", e))?;
+                    if status.map(|s| !s.spent).unwrap_or(true) {
+                        reserves_utxo = Some((outpoint, output.value));
+                        break;
+                    }
+                }
+            }
+            if reserves_utxo.is_some() { break; }
+        }
+
+        let (reserves_outpoint, reserves_amount) = reserves_utxo
+            .ok_or("No unspent reserves found - cannot proceed with CustodyAcquire")?;
+
+        println!("  Found reserves: {} sats at {}", reserves_amount, reserves_outpoint);
+
+        // Build the Taproot output structure
+        use deposits_core::{VoterSet, ThresholdConfig, TapscriptReservesBuilder};
+        use bitcoin::{Transaction, TxIn, TxOut, Sequence, Witness};
+        use bitcoin::sighash::{SighashCache, TapSighashType};
+
+        let voter_set = VoterSet::new(original_operator, quorum_members.clone());
+        let voter_count = voter_set.all_voters().len();
+        let threshold_config = ThresholdConfig::default_for_voter_count(voter_count);
+
+        let taproot_builder = TapscriptReservesBuilder::new(
+            voter_set.clone(),
+            threshold_config.clone(),
+            config.network,
+            ledger_hash,
+        );
+
+        let taproot_output = taproot_builder.build()
+            .map_err(|e| format!("Failed to build Taproot output: {:?}", e))?;
+
+        // Find the quorum-override tier
+        let (tier_index, tier) = threshold_config.tiers.iter()
+            .enumerate()
+            .find(|(_, t)| !t.requires_tie_breaker && t.threshold > 1)
+            .ok_or("No quorum-override tier found")?;
+
+        println!("  Using Tier {} for custody transfer (threshold={}/{})",
+            tier_index, tier.threshold, voter_count);
+
+        // Build destination address (winner's P2WPKH)
+        let winner_script = bitcoin::ScriptBuf::new_p2wpkh(
+            &bitcoin::WPubkeyHash::hash(&our_pubkey.serialize()),
+        );
+        let winner_address = bitcoin::Address::from_script(&winner_script, config.network)
+            .map_err(|e| format!("Failed to create winner address: {}", e))?;
+
+        new_reserves_address = winner_address.to_string();
+        println!("  Destination: {}", winner_address);
+
+        // Build the spending transaction
+        let fee_rate = 2u64;
+        let estimated_vsize = 200u64;
+        let fee = fee_rate * estimated_vsize;
+        let output_amount = reserves_amount.saturating_sub(fee);
+
+        let mut unsigned_tx = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::from_height(tier.timelock_blocks as u32)
+                .unwrap_or(bitcoin::absolute::LockTime::ZERO),
+            input: vec![TxIn {
+                previous_output: reserves_outpoint,
+                script_sig: bitcoin::ScriptBuf::new(),
+                sequence: if tier.timelock_blocks > 0 {
+                    Sequence::from_height(tier.timelock_blocks as u16)
+                } else {
+                    Sequence::ENABLE_RBF_NO_LOCKTIME
+                },
+                witness: Witness::default(),
+            }],
+            output: vec![TxOut {
+                value: bitcoin::Amount::from_sat(output_amount),
+                script_pubkey: winner_address.script_pubkey(),
+            }],
+        };
+
+        // Compute sighash
+        let prevouts = vec![TxOut {
+            value: bitcoin::Amount::from_sat(reserves_amount),
+            script_pubkey: reserves_addr.script_pubkey(),
+        }];
+
+        let leaf_script = taproot_builder.build_threshold_leaf(tier)
+            .map_err(|e| format!("Failed to build leaf script: {:?}", e))?;
+
+        let leaf_hash = bitcoin::taproot::TapLeafHash::from_script(&leaf_script, bitcoin::taproot::LeafVersion::TapScript);
+
+        let mut sighash_cache = SighashCache::new(&unsigned_tx);
+        let sighash = sighash_cache.taproot_script_spend_signature_hash(
+            0,
+            &bitcoin::sighash::Prevouts::All(&prevouts),
+            leaf_hash,
+            TapSighashType::Default,
+        ).map_err(|e| format!("Failed to compute sighash: {}", e))?;
+
+        let sighash_bytes: [u8; 32] = *sighash.as_ref();
+
+        // Sign with our key
+        let msg = bitcoin::secp256k1::Message::from_digest(sighash_bytes);
+        let our_signature = secp.sign_schnorr(&msg, &keypair);
+
+        let mut signatures = std::collections::HashMap::new();
+        signatures.insert(our_pubkey, our_signature.serialize());
+
+        println!("  Signed with our key");
+
+        // Request signatures from other quorum members
+        let required_sigs = tier.threshold;
+        println!("  Need {}/{} signatures", required_sigs, voter_count);
+
+        // Create Nostr transport for signature requests
+        let publish_transport = NostrTransportBuilder::new(secret_key)
+            .relay(&relay_url)
+            .build()
+            .await?;
+
+        if signatures.len() < required_sigs {
+            println!();
+            println!("  Requesting signatures from quorum members via Nostr...");
+
+            use deposits_bdk::nostr::{KIND_LEDGER_RESPONSE, LedgerResponse};
+
+            let unsigned_tx_bytes = bitcoin::consensus::encode::serialize(&unsigned_tx);
+            let unsigned_tx_hex = hex::encode(&unsigned_tx_bytes);
+
+            let (last_valid_seq, violation_reason) = our_dispute_info.clone()
+                .unwrap_or((0, "CustodyAcquire spending".to_string()));
+
+            let request_params = serde_json::json!({
+                "ledger_id": ledger_id,
+                "sighash": hex::encode(sighash_bytes),
+                "unsigned_tx": unsigned_tx_hex,
+                "new_custodian": our_pubkey.to_string(),
+                "violation_details": violation_reason,
+                "last_valid_sequence": last_valid_seq,
+            });
+
+            let request_id = publish_transport.send_ledger_request(
+                &ledger_id,
+                "custody_transfer_sign",
+                request_params,
+            ).await.map_err(|e| format!("Failed to send sign request: {:?}", e))?;
+
+            println!("  Request ID: {}...", &request_id[..16]);
+
+            let max_attempts = 20;
+            let poll_interval = std::time::Duration::from_secs(3);
+
+            for attempt in 1..=max_attempts {
+                tokio::time::sleep(poll_interval).await;
+
+                let since = nostr_sdk::Timestamp::now() - 120;
+                let filter = Filter::new()
+                    .kind(Kind::Custom(KIND_LEDGER_RESPONSE))
+                    .since(since);
+
+                let response_events = publish_transport.client()
+                    .fetch_events(vec![filter], Some(std::time::Duration::from_secs(5)))
+                    .await
+                    .map_err(|e| format!("Failed to fetch responses: {:?}", e))?;
+
+                for event in response_events.iter() {
+                    let mut is_our_request = false;
+                    for tag in event.tags.iter() {
+                        if tag.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::E)) {
+                            if let Some(val) = tag.content() {
+                                if val == request_id {
+                                    is_our_request = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if !is_our_request { continue; }
+
+                    if let Ok(response) = serde_json::from_str::<deposits_bdk::nostr::LedgerResponse>(&event.content) {
+                        if response.success {
+                            if let Some(result) = &response.result {
+                                if let (Some(signer_hex), Some(sig_hex)) = (
+                                    result.get("signer").and_then(|v| v.as_str()),
+                                    result.get("signature").and_then(|v| v.as_str())
+                                ) {
+                                    if let (Ok(signer), Ok(sig_bytes)) = (
+                                        signer_hex.parse::<PublicKey>(),
+                                        hex::decode(sig_hex)
+                                    ) {
+                                        if sig_bytes.len() == 64 && !signatures.contains_key(&signer) {
+                                            let mut sig_arr = [0u8; 64];
+                                            sig_arr.copy_from_slice(&sig_bytes);
+                                            signatures.insert(signer, sig_arr);
+                                            println!("    Received signature from {}...", &signer.to_string()[..16]);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                println!("    Poll {}/{}: {}/{} signatures", attempt, max_attempts, signatures.len(), required_sigs);
+
+                if signatures.len() >= required_sigs { break; }
+            }
+        }
+
+        // Must have enough signatures to proceed
+        if signatures.len() < required_sigs {
+            return Err(format!(
+                "Could not collect enough signatures ({}/{}). Cannot publish CustodyAcquire without on-chain spend.",
+                signatures.len(), required_sigs
+            ).into());
+        }
+
+        println!();
+        println!("  Building witness with {} signatures...", signatures.len());
+
+        let control_block = taproot_output.control_block_for_tier(tier_index)
+            .ok_or("Failed to get control block for tier")?;
+
+        let mut witness = Witness::new();
+        let sorted_keys = voter_set.sorted_x_only_pubkeys();
+
+        for x_only in sorted_keys.iter().rev() {
+            for voter in voter_set.all_voters() {
+                if voter.x_only_public_key().0 == *x_only {
+                    if let Some(sig) = signatures.get(&voter) {
+                        witness.push(sig);
+                    } else {
+                        witness.push(&[] as &[u8]);
+                    }
+                    break;
+                }
+            }
+        }
+
+        witness.push(leaf_script.as_bytes());
+        witness.push(control_block.serialize());
+
+        unsigned_tx.input[0].witness = witness;
+
+        println!("  Broadcasting custody transfer transaction...");
+
+        let data_dir = std::path::PathBuf::from(&config.data_dir);
+        let wallet = deposits_bdk::wallet::Wallet::new(
+            config.seed,
+            config.network,
+            data_dir,
+            config.electrum_url.clone(),
+        )?;
+        wallet.broadcast(&unsigned_tx)?;
+
+        let txid = unsigned_tx.compute_txid();
+        spend_txid = *txid.as_ref();
+
+        println!();
+        println!("🎉 Reserves confiscated successfully!");
+        println!("  Txid: {}", txid);
+        println!("  Amount: {} sats → {}", output_amount, winner_address);
+
+        // Now publish CustodyAcquire with the spend info
+        println!();
+        println!("Publishing CustodyAcquire to Nostr...");
+
+        let operation = LedgerOperation::CustodyAcquire {
             new_custodian: our_pubkey,
             entropy_block_height,
             entropy_block_hash,
-        }, "CustodyAcquire")
-    } else {
-        (LedgerOperation::CustodyYield, "CustodyYield")
-    };
+            spend_txid,
+            new_reserves_address: new_reserves_address.clone(),
+        };
 
-    // Serialize
-    let message_bytes = operation.tlv_encode();
+        let message_bytes = operation.tlv_encode();
 
-    // Compute the new hash
-    let sequence = our_latest.sequence_number + 1;
-    let mut hash_input = Vec::new();
-    hash_input.extend_from_slice(&sequence.to_le_bytes());
-    hash_input.extend_from_slice(&our_latest.current_hash);
-    hash_input.extend_from_slice(&message_bytes);
-    let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
+        let sequence = our_latest.sequence_number + 1;
+        let mut hash_input = Vec::new();
+        hash_input.extend_from_slice(&sequence.to_le_bytes());
+        hash_input.extend_from_slice(&our_latest.current_hash);
+        hash_input.extend_from_slice(&message_bytes);
+        let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
 
-    // Sign the update
-    let update_msg = format!(
-        "deposits:ledger:{}:{}:{}",
-        hex::encode(our_latest.current_hash),
-        sequence,
-        hex::encode(&new_hash)
-    );
-    let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
-    let signature = secp.sign_schnorr(
-        &Message::from_digest(*msg_hash.as_ref()),
-        &keypair
-    );
-    let operator_sig_bytes: [u8; 64] = *signature.as_ref();
+        let update_msg = format!(
+            "deposits:ledger:{}:{}:{}",
+            hex::encode(our_latest.current_hash),
+            sequence,
+            hex::encode(&new_hash)
+        );
+        let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
+        let signature = secp.sign_schnorr(
+            &Message::from_digest(*msg_hash.as_ref()),
+            &keypair
+        );
+        let operator_sig_bytes: [u8; 64] = *signature.as_ref();
 
-    // Create the signed update
-    let ledger_id_bytes: [u8; 32] = {
-        let decoded = hex::decode(&ledger_id)
-            .map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
-        decoded.try_into().map_err(|_| "Ledger ID must be 32 bytes")?
-    };
+        let ledger_id_bytes: [u8; 32] = {
+            let decoded = hex::decode(&ledger_id)
+                .map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
+            decoded.try_into().map_err(|_| "Ledger ID must be 32 bytes")?
+        };
 
-    let signed_update = SignedLedgerUpdate {
-        message: message_bytes,
-        message_type: 0x8001,
-        operator_signature: operator_sig_bytes,
-        partner_signature: [0u8; 64],
-        operator_id: our_pubkey,
-        ledger_id: ledger_id_bytes,
-        sequence_number: sequence,
-        previous_hash: our_latest.current_hash,
-        current_hash: new_hash,
-        timestamp: deposits_core::now_unix_timestamp(),
-        block_height: current_block_height,
-        block_hash: entropy_block_hash,
-    };
+        let signed_update = SignedLedgerUpdate {
+            message: message_bytes,
+            message_type: 0x8001,
+            operator_signature: operator_sig_bytes,
+            partner_signature: [0u8; 64],
+            operator_id: our_pubkey,
+            ledger_id: ledger_id_bytes,
+            sequence_number: sequence,
+            previous_hash: our_latest.current_hash,
+            current_hash: new_hash,
+            timestamp: deposits_core::now_unix_timestamp(),
+            block_height: current_block_height,
+            block_hash: entropy_block_hash,
+        };
 
-    // Publish to Nostr
-    println!();
-    println!("Publishing {} to Nostr...", op_name);
+        publish_transport.broadcast_ledger_update(&signed_update).await?;
 
-    let publish_transport = NostrTransportBuilder::new(secret_key)
-        .relay(&relay_url)
-        .build()
-        .await?;
-
-    publish_transport.broadcast_ledger_update(&signed_update).await?;
-
-    println!();
-    println!("{} published successfully!", op_name);
-    println!("  Sequence: {}", sequence);
-    println!("  Hash: {}...", &hex::encode(new_hash)[..16]);
-
-    if we_won {
         println!();
-        println!("You are now the custodian! Next step:");
-        println!("  recovery spend {} - Execute on-chain spend to claim reserves", &ledger_id[..16]);
+        println!("CustodyAcquire published successfully!");
+        println!("  Sequence: {}", sequence);
+        println!("  Hash: {}...", &hex::encode(new_hash)[..16]);
+        println!("  Spend txid: {}...", &hex::encode(spend_txid)[..16]);
+        println!("  New reserves: {}..{}", &new_reserves_address[..10], &new_reserves_address[new_reserves_address.len()-6..]);
+
     } else {
+        println!("You did NOT win. Publishing CustodyYield to tombstone your branch.");
         println!();
-        println!("✓ Your branch is now TOMBSTONED (CustodyYield published).");
+
+        let operation = LedgerOperation::CustodyYield;
+        let message_bytes = operation.tlv_encode();
+
+        let sequence = our_latest.sequence_number + 1;
+        let mut hash_input = Vec::new();
+        hash_input.extend_from_slice(&sequence.to_le_bytes());
+        hash_input.extend_from_slice(&our_latest.current_hash);
+        hash_input.extend_from_slice(&message_bytes);
+        let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
+
+        let update_msg = format!(
+            "deposits:ledger:{}:{}:{}",
+            hex::encode(our_latest.current_hash),
+            sequence,
+            hex::encode(&new_hash)
+        );
+        let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
+        let signature = secp.sign_schnorr(
+            &Message::from_digest(*msg_hash.as_ref()),
+            &keypair
+        );
+        let operator_sig_bytes: [u8; 64] = *signature.as_ref();
+
+        let ledger_id_bytes: [u8; 32] = {
+            let decoded = hex::decode(&ledger_id)
+                .map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
+            decoded.try_into().map_err(|_| "Ledger ID must be 32 bytes")?
+        };
+
+        let signed_update = SignedLedgerUpdate {
+            message: message_bytes,
+            message_type: 0x8001,
+            operator_signature: operator_sig_bytes,
+            partner_signature: [0u8; 64],
+            operator_id: our_pubkey,
+            ledger_id: ledger_id_bytes,
+            sequence_number: sequence,
+            previous_hash: our_latest.current_hash,
+            current_hash: new_hash,
+            timestamp: deposits_core::now_unix_timestamp(),
+            block_height: current_block_height,
+            block_hash: entropy_block_hash,
+        };
+
+        let publish_transport = NostrTransportBuilder::new(secret_key)
+            .relay(&relay_url)
+            .build()
+            .await?;
+
+        publish_transport.broadcast_ledger_update(&signed_update).await?;
+
+        println!("CustodyYield published successfully!");
+        println!("  Sequence: {}", sequence);
+        println!("  Hash: {}...", &hex::encode(new_hash)[..16]);
+        println!();
+        println!("✓ Your branch is now TOMBSTONED.");
         println!("  Your quorum members are released from attestation obligations.");
-        println!("  The winner ({}...) can now proceed with on-chain spend.", &winner.to_string()[..16]);
+        println!("  The winner ({}...) will execute the on-chain spend.", &winner.to_string()[..16]);
     }
 
     Ok(())

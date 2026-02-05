@@ -31,7 +31,7 @@ ELECTRS_HOST="localhost"
 ELECTRS_PORT="3102"
 
 # Node containers
-NODES=("bdk-alice" "bdk-bob" "bdk-charlie")
+NODES=("bdk-alice" "bdk-bob" "bdk-charlie" "bdk-diana")
 
 # Get seed for a node (compatible with bash 3.x)
 get_node_seed() {
@@ -341,7 +341,8 @@ start_nostr_watch() {
 # Stop all nostr watch processes on a node
 stop_nostr_watch() {
     local container=$1
-    docker exec "$container" pkill -f "nostr watch" 2>/dev/null || true
+    # pkill may not be available, so use kill with grep from /proc
+    docker exec "$container" sh -c 'for pid in $(ls /proc | grep -E "^[0-9]+$"); do if grep -q "nostr watch" /proc/$pid/cmdline 2>/dev/null; then kill $pid 2>/dev/null || true; fi; done' 2>/dev/null || true
 }
 
 # Check if all services are healthy

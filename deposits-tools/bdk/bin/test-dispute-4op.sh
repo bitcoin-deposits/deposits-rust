@@ -214,6 +214,35 @@ start_nostr_watchers() {
 }
 
 # ============================================================================
+# Restart Nostr watchers (to pick up new QuorumJoin operations)
+# ============================================================================
+
+restart_nostr_watchers() {
+    log_info ""
+    log_info "=== Restarting Nostr Watchers ==="
+    log_info "(Watchers need restart to subscribe to joined ledgers)"
+    echo ""
+
+    # Stop existing watchers
+    for op in $OPERATORS; do
+        stop_nostr_watch "$op"
+    done
+    sleep 1
+
+    # Restart watchers
+    for op in $OPERATORS; do
+        local ledger_id=$(get_value "ledger_id_$op")
+        if [ -n "$ledger_id" ]; then
+            start_nostr_watch "$op" "$ledger_id"
+            test_pass "$op nostr watcher restarted"
+        fi
+    done
+
+    # Give watchers time to connect and scan for QuorumJoin operations
+    sleep 3
+}
+
+# ============================================================================
 # Phase 3b: Add all nodes as quorum members to each other
 # ============================================================================
 
@@ -858,6 +887,10 @@ main() {
     start_nostr_watchers
     add_quorum_members
     rotate_reserves_to_quorum
+
+    # Restart watchers now that QuorumJoin operations exist
+    # (watchers need to scan for QuorumJoin to subscribe to joined ledgers)
+    restart_nostr_watchers
     generate_deposit_keys
     open_cross_deposits
     fund_deposits

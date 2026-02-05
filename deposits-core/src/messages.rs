@@ -772,6 +772,10 @@ pub enum LedgerOperation {
         entropy_block_height: u32,
         /// Hash of the entropy block.
         entropy_block_hash: [u8; 32],
+        /// Transaction ID of the on-chain confiscation spend (proves control).
+        spend_txid: [u8; 32],
+        /// New reserves address (where the confiscated funds now reside).
+        new_reserves_address: String,
     },
 
     /// Yield custody claim after not being selected. Tombstones this branch.
@@ -1578,10 +1582,12 @@ impl BinaryCodec for LedgerOperation {
             Self::CustodyArmed { armed_block } => {
                 write_u32(w, *armed_block)?;
             }
-            Self::CustodyAcquire { new_custodian, entropy_block_height, entropy_block_hash } => {
+            Self::CustodyAcquire { new_custodian, entropy_block_height, entropy_block_hash, spend_txid, new_reserves_address } => {
                 write_pubkey(w, new_custodian)?;
                 write_u32(w, *entropy_block_height)?;
                 write_32(w, entropy_block_hash)?;
+                write_32(w, spend_txid)?;
+                write_string(w, new_reserves_address)?;
             }
             Self::CustodyYield => {}
             Self::LedgerClose => {}
@@ -1747,6 +1753,8 @@ impl BinaryCodec for LedgerOperation {
                 new_custodian: read_pubkey(r)?,
                 entropy_block_height: read_u32(r)?,
                 entropy_block_hash: read_32(r)?,
+                spend_txid: read_32(r)?,
+                new_reserves_address: read_string(r)?,
             }),
             // CustodyYield (56)
             56 => Ok(Self::CustodyYield),
@@ -2526,6 +2534,8 @@ mod ledger_op_tlv {
     pub const CANDIDATE_POOL: u64 = 107;  // Deprecated, but kept for backward compat
     pub const NEW_CUSTODIAN: u64 = 108;
     pub const ARMED_BLOCK: u64 = 109;
+    pub const SPEND_TXID: u64 = 110;
+    pub const NEW_RESERVES_ADDRESS: u64 = 111;
 }
 
 impl TlvEncode for LedgerOperation {
@@ -2707,11 +2717,13 @@ impl TlvEncode for LedgerOperation {
             Self::CustodyArmed { armed_block } => {
                 builder = builder.u32_field(ARMED_BLOCK, *armed_block);
             }
-            Self::CustodyAcquire { new_custodian, entropy_block_height, entropy_block_hash } => {
+            Self::CustodyAcquire { new_custodian, entropy_block_height, entropy_block_hash, spend_txid, new_reserves_address } => {
                 builder = builder
                     .pubkey_field(NEW_CUSTODIAN, new_custodian)
                     .u32_field(ENTROPY_BLOCK_HEIGHT, *entropy_block_height)
-                    .bytes_field(ENTROPY_BLOCK_HASH, entropy_block_hash);
+                    .bytes_field(ENTROPY_BLOCK_HASH, entropy_block_hash)
+                    .bytes_field(SPEND_TXID, spend_txid)
+                    .string_field(NEW_RESERVES_ADDRESS, new_reserves_address);
             }
             Self::CustodyYield => {}
             Self::LedgerClose => {}
@@ -2877,6 +2889,8 @@ impl TlvDecode for LedgerOperation {
                 new_custodian: reader.read_pubkey(NEW_CUSTODIAN)?,
                 entropy_block_height: reader.read_u32(ENTROPY_BLOCK_HEIGHT)?,
                 entropy_block_hash: reader.read_bytes(ENTROPY_BLOCK_HASH)?,
+                spend_txid: reader.read_bytes(SPEND_TXID)?,
+                new_reserves_address: reader.read_string(NEW_RESERVES_ADDRESS)?,
             }),
             56 => Ok(Self::CustodyYield),
             57 => Ok(Self::CustodyArmed {

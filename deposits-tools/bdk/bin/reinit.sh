@@ -93,7 +93,7 @@ setup_faucet
 
 # Start BDK nodes
 log_info "Starting BDK nodes..."
-$DC up -d bdk-alice bdk-bob bdk-charlie
+$DC up -d bdk-alice bdk-bob bdk-charlie bdk-diana
 
 # Give nodes time to start
 log_info "Waiting for nodes to initialize..."
