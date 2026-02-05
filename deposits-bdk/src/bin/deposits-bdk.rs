@@ -7544,14 +7544,218 @@ async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::error::
         }],
     };
 
+    // Build the Taproot reserves structure for signing
+    use deposits_core::{VoterSet, ThresholdConfig, TapscriptReservesBuilder};
+    use bitcoin::sighash::{SighashCache, TapSighashType};
+
+    let ledger_hash_val = ledger_hash.ok_or("Could not find ledger_hash")?;
+    let voter_set = VoterSet::new(original_operator, quorum_members.clone());
+    let voter_count = voter_set.all_voters().len();
+    let threshold_config = ThresholdConfig::default_for_voter_count(voter_count);
+
+    let taproot_builder = TapscriptReservesBuilder::new(
+        voter_set.clone(),
+        threshold_config.clone(),
+        config.network,
+        ledger_hash_val,
+    );
+
+    let taproot_output = taproot_builder.build()
+        .map_err(|e| format!("Failed to build Taproot output: {:?}", e))?;
+
+    // Use quorum-override tier (threshold without tie-breaker)
+    let (tier_index, tier) = threshold_config.tiers.iter()
+        .enumerate()
+        .find(|(_, t)| !t.requires_tie_breaker && t.threshold > 1)
+        .ok_or("No quorum-override tier found")?;
+
+    println!("  Using Tier {} for confiscation (threshold={}/{})",
+        tier_index, tier.threshold, voter_count);
+
+    // Build leaf script and compute sighash
+    let leaf_script = taproot_builder.build_threshold_leaf(tier)
+        .map_err(|e| format!("Failed to build leaf script: {:?}", e))?;
+
+    let leaf_hash = bitcoin::taproot::TapLeafHash::from_script(&leaf_script, bitcoin::taproot::LeafVersion::TapScript);
+
+    let prevouts = vec![TxOut {
+        value: Amount::from_sat(reserves_amount),
+        script_pubkey: reserves_addr.script_pubkey(),
+    }];
+
+    let mut confiscation_tx = confiscation_tx; // Make mutable
+    let mut sighash_cache = SighashCache::new(&confiscation_tx);
+    let sighash = sighash_cache.taproot_script_spend_signature_hash(
+        0,
+        &bitcoin::sighash::Prevouts::All(&prevouts),
+        leaf_hash,
+        TapSighashType::Default,
+    ).map_err(|e| format!("Failed to compute sighash: {}", e))?;
+
+    let sighash_bytes: [u8; 32] = *sighash.as_ref();
+
+    // Sign with our key
+    let msg = bitcoin::secp256k1::Message::from_digest(sighash_bytes);
+    let our_signature = secp.sign_schnorr(&msg, &keypair);
+
+    let mut signatures = std::collections::HashMap::new();
+    signatures.insert(our_pubkey, our_signature.serialize());
+
+    println!("  Signed with our key");
+
+    // Request signatures from other quorum members
+    let required_sigs = tier.threshold;
+    println!("  Need {}/{} signatures", required_sigs, voter_count);
+
+    let publish_transport = NostrTransportBuilder::new(secret_key)
+        .relay(&relay_url)
+        .build()
+        .await?;
+
+    if signatures.len() < required_sigs {
+        println!();
+        println!("  Requesting signatures from quorum members via Nostr...");
+
+        use deposits_bdk::nostr::KIND_LEDGER_RESPONSE;
+
+        let unsigned_tx_bytes = bitcoin::consensus::encode::serialize(&confiscation_tx);
+        let unsigned_tx_hex = hex::encode(&unsigned_tx_bytes);
+
+        let request_params = serde_json::json!({
+            "ledger_id": ledger_id,
+            "sighash": hex::encode(sighash_bytes),
+            "unsigned_tx": unsigned_tx_hex,
+            "lottery_address": lottery_output.address.to_string(),
+            "violation_details": "Confiscation to lottery for dispute resolution",
+            "last_valid_sequence": 0,
+        });
+
+        let request_id = publish_transport.send_ledger_request(
+            &ledger_id,
+            "confiscation_sign",
+            request_params,
+        ).await.map_err(|e| format!("Failed to send sign request: {:?}", e))?;
+
+        println!("  Request ID: {}...", &request_id[..16]);
+
+        let max_attempts = 20;
+        let poll_interval = std::time::Duration::from_secs(3);
+
+        for attempt in 1..=max_attempts {
+            tokio::time::sleep(poll_interval).await;
+
+            let since = nostr_sdk::Timestamp::now() - 120;
+            let filter = Filter::new()
+                .kind(Kind::Custom(KIND_LEDGER_RESPONSE))
+                .since(since);
+
+            let response_events = publish_transport.client()
+                .fetch_events(vec![filter], Some(std::time::Duration::from_secs(5)))
+                .await
+                .map_err(|e| format!("Failed to fetch responses: {:?}", e))?;
+
+            for event in response_events.iter() {
+                let mut is_our_request = false;
+                for tag in event.tags.iter() {
+                    if tag.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::E)) {
+                        if let Some(val) = tag.content() {
+                            if val == request_id {
+                                is_our_request = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if !is_our_request { continue; }
+
+                if let Ok(response) = serde_json::from_str::<deposits_bdk::nostr::LedgerResponse>(&event.content) {
+                    if response.success {
+                        if let Some(result) = &response.result {
+                            if let (Some(signer_hex), Some(sig_hex)) = (
+                                result.get("signer").and_then(|v| v.as_str()),
+                                result.get("signature").and_then(|v| v.as_str())
+                            ) {
+                                if let (Ok(signer), Ok(sig_bytes)) = (
+                                    signer_hex.parse::<PublicKey>(),
+                                    hex::decode(sig_hex)
+                                ) {
+                                    if sig_bytes.len() == 64 && !signatures.contains_key(&signer) {
+                                        let mut sig_arr = [0u8; 64];
+                                        sig_arr.copy_from_slice(&sig_bytes);
+                                        signatures.insert(signer, sig_arr);
+                                        println!("    Received signature from {}...", &signer.to_string()[..16]);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            println!("    Poll {}/{}: {}/{} signatures", attempt, max_attempts, signatures.len(), required_sigs);
+
+            if signatures.len() >= required_sigs { break; }
+        }
+    }
+
+    if signatures.len() < required_sigs {
+        return Err(format!(
+            "Could not collect enough signatures ({}/{}). Confiscation failed.",
+            signatures.len(), required_sigs
+        ).into());
+    }
+
+    // Build witness
+    println!();
+    println!("  Building witness with {} signatures...", signatures.len());
+
+    let control_block = taproot_output.control_block_for_tier(tier_index)
+        .ok_or("Failed to get control block for tier")?;
+
+    let mut witness = Witness::new();
+    let sorted_keys = voter_set.sorted_x_only_pubkeys();
+
+    for x_only in sorted_keys.iter().rev() {
+        for voter in voter_set.all_voters() {
+            if voter.x_only_public_key().0 == *x_only {
+                if let Some(sig) = signatures.get(&voter) {
+                    witness.push(sig);
+                } else {
+                    witness.push(&[] as &[u8]);
+                }
+                break;
+            }
+        }
+    }
+
+    witness.push(leaf_script.as_bytes());
+    witness.push(control_block.serialize());
+
+    confiscation_tx.input[0].witness = witness;
+
+    // Broadcast
+    println!("  Broadcasting confiscation transaction...");
+
+    let data_dir = config.data_dir.clone();
+    let wallet = deposits_bdk::wallet::Wallet::new(
+        config.seed,
+        config.network,
+        data_dir,
+        config.electrum_url.clone(),
+    )?;
+    wallet.broadcast(&confiscation_tx)?;
+
     let confiscation_txid = confiscation_tx.compute_txid();
     println!();
-    println!("Confiscation transaction built:");
+    println!("Confiscation transaction broadcast!");
     println!("  Txid: {}", confiscation_txid);
-    println!("  Output: {} sats to lottery", output_amount);
+    println!("  Lottery address: {}", lottery_output.address);
     println!();
-    println!("TODO: Implement quorum signature collection for confiscation TX");
-    println!("For now, the lottery mechanism requires manual coordination.");
+    println!("Next steps:");
+    println!("  1. Wait for confirmation");
+    println!("  2. All participants run: recovery reveal {}...", &ledger_id[..16.min(ledger_id.len())]);
+    println!("  3. Winner runs: recovery lottery-claim {}...", &ledger_id[..16.min(ledger_id.len())]);
 
     Ok(())
 }
