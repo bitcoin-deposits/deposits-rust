@@ -653,12 +653,17 @@ post_attestations() {
 
                 log_info "  $attester_short locking collateral for $op_short..."
 
-                # Attester locks their deposit on op's ledger (providing attestation for op)
-                local op_reserves_id=$(get_value "reserves_id_$op")
-                local lock_output=$(run_bdk_cmd "$attester" collateral lock "$op_reserves_id" "$deposit_secret" 15000000000 500 "$op_node_id" 2>&1)
+                # Attester locks their deposit on op's ledger via Nostr request
+                # (the deposit is on op's ledger, so op must process the lock request)
+                local op_ledger_id=$(get_value "ledger_id_$op")
+                local lock_output=$(run_nostr_request "$attester" "$op_ledger_id" collateral_lock "$deposit_secret" 15000000000 500 "$op_node_id" 2>&1)
 
-                # Extract attestation JSON from output
-                local attestation_json=$(echo "$lock_output" | grep "ATTESTATION_JSON:" | sed 's/ATTESTATION_JSON://')
+                # Extract attestation JSON from Nostr response (base64 encoded)
+                local attestation_b64=$(echo "$lock_output" | grep -o '"attestation_b64"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/"attestation_b64"[[:space:]]*:[[:space:]]*"//' | sed 's/"$//')
+                local attestation_json=""
+                if [ -n "$attestation_b64" ]; then
+                    attestation_json=$(echo "$attestation_b64" | base64 -d 2>/dev/null)
+                fi
 
                 if [ -n "$attestation_json" ]; then
                     log_info "  $op_short recording attestation from $attester_short..."
@@ -760,17 +765,26 @@ claim_custody() {
 
         local claim_output=$(run_bdk_cmd "$op" recovery claim "$alice_ledger_id" 2>&1)
 
-        if echo "$claim_output" | grep -q "YOU WON"; then
+        if echo "$claim_output" | grep -q "CustodyAcquire published successfully"; then
             test_pass "$op_short WON (published CustodyAcquire)"
             winner="$op"
             store_value "dispute_winner" "$op"
+        elif echo "$claim_output" | grep -q "YOU WON"; then
+            # Won entropy selection but CustodyAcquire may have failed
+            if echo "$claim_output" | grep -q "Could not collect enough signatures"; then
+                test_fail "$op_short won entropy but failed to collect signatures"
+                echo "    Output: $(echo "$claim_output" | grep -E 'signatures|Poll' | tail -5)"
+            else
+                test_fail "$op_short won entropy but CustodyAcquire not published"
+                echo "    Output: $(echo "$claim_output" | tail -10)"
+            fi
         elif echo "$claim_output" | grep -q "CustodyYield published"; then
             test_pass "$op_short yielded (published CustodyYield)"
         elif echo "$claim_output" | grep -q "did NOT win"; then
             test_pass "$op_short lost (should publish CustodyYield)"
         else
             log_warn "$op_short claim output:"
-            echo "$claim_output" | head -10
+            echo "$claim_output" | head -15
         fi
     done
 
@@ -884,13 +898,17 @@ main() {
     setup_operators
     create_reserves
     open_ledgers
+
+    # Start watchers EARLY - they will dynamically discover QuorumJoin operations
+    # as they happen (no need to wait or restart)
     start_nostr_watchers
+
     add_quorum_members
     rotate_reserves_to_quorum
 
-    # Restart watchers now that QuorumJoin operations exist
-    # (watchers need to scan for QuorumJoin to subscribe to joined ledgers)
-    restart_nostr_watchers
+    # Give watchers a moment to discover the new QuorumJoin operations
+    sleep 2
+
     generate_deposit_keys
     open_cross_deposits
     fund_deposits

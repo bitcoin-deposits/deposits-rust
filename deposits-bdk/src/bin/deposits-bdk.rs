@@ -4403,13 +4403,13 @@ async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         format!("{}:{}", op, rid)
     };
 
-    // Find all ledgers we've joined (via QuorumJoin operations in our ledgers)
-    let joined_ledger_ids: Vec<String> = {
+    // Helper to scan for joined ledgers from QuorumJoin operations
+    fn scan_joined_ledgers(node: &Node, exclude_ledger_id: &str) -> std::collections::HashSet<String> {
         use deposits_core::messages::LedgerOperation;
         use deposits_core::tlv::TlvDecode;
         use deposits_core::messages::consts::QUORUM_JOIN;
 
-        let mut joined = Vec::new();
+        let mut joined = std::collections::HashSet::new();
         let ledgers = node.list_ledgers();
 
         for ((_operator, _reserves_id), ledger_arc) in ledgers.iter() {
@@ -4423,15 +4423,18 @@ async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
                         LedgerOperation::tlv_decode(&update.message)
                     {
                         let joined_id = format!("{}:{}", operator_id, reserves_id);
-                        if !joined.contains(&joined_id) && joined_id != ledger_id {
-                            joined.push(joined_id);
+                        if joined_id != exclude_ledger_id {
+                            joined.insert(joined_id);
                         }
                     }
                 }
             }
         }
         joined
-    };
+    }
+
+    // Find all ledgers we've joined (via QuorumJoin operations in our ledgers)
+    let mut joined_ledger_ids = scan_joined_ledgers(&node, &ledger_id);
 
     println!("Watching for requests on ledger...");
     println!("  Relay: {}", relay_url);
@@ -4442,6 +4445,7 @@ async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
             println!("    - {}...", &jid[..40.min(jid.len())]);
         }
     }
+    println!("  (Will dynamically discover new QuorumJoin ledgers)");
     println!();
     println!("Press Ctrl+C to stop.");
     println!();
@@ -4465,6 +4469,7 @@ async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
 
     let mut transport = transport;
     let mut last_poll = std::time::Instant::now();
+    let mut last_join_scan = std::time::Instant::now();
     let mut seen_events: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     loop {
@@ -4496,6 +4501,33 @@ async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
                 }
             }
             last_poll = std::time::Instant::now();
+        }
+
+        // Periodically rescan for new QuorumJoin operations (every 5 seconds)
+        if last_join_scan.elapsed() > std::time::Duration::from_secs(5) {
+            // Reload node to get fresh data
+            if let Ok(fresh_node) = Node::new(config_for_reload.clone()).await {
+                let current_joined = scan_joined_ledgers(&fresh_node, &ledger_id);
+
+                // Subscribe to any newly discovered ledgers
+                for new_id in &current_joined {
+                    if !joined_ledger_ids.contains(new_id) {
+                        println!("[{}] Discovered new QuorumJoin: {}...",
+                            chrono::Utc::now().format("%H:%M:%S"),
+                            &new_id[..40.min(new_id.len())]);
+
+                        if let Err(e) = transport.subscribe_to_requests(new_id).await {
+                            tracing::warn!("Failed to subscribe to {}: {}", new_id, e);
+                        }
+                        if let Err(e) = transport.subscribe_to_disputes(new_id).await {
+                            tracing::warn!("Failed to subscribe to disputes for {}: {}", new_id, e);
+                        }
+
+                        joined_ledger_ids.insert(new_id.clone());
+                    }
+                }
+            }
+            last_join_scan = std::time::Instant::now();
         }
 
         // Check for requests

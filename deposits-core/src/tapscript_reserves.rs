@@ -251,7 +251,7 @@ impl TapscriptReservesBuilder {
             }
         } else {
             // Multi-sig case using CHECKSIGADD (BIP-342)
-            // Pattern: <key1> CHECKSIG <key2> CHECKSIGADD <key3> CHECKSIGADD ... <threshold> NUMEQUAL
+            // Pattern: <key1> CHECKSIG <key2> CHECKSIGADD <key3> CHECKSIGADD ... <threshold> GREATERTHANOREQUAL
 
             let keys_to_use = if tier.requires_tie_breaker {
                 // Must include tie-breaker, plus enough others to meet threshold
@@ -289,10 +289,10 @@ impl TapscriptReservesBuilder {
                     .push_opcode(OP_CHECKSIGADD);
             }
 
-            // Check threshold
+            // Check threshold (use >= so meeting OR exceeding threshold works)
             builder = builder
                 .push_int(tier.threshold as i64)
-                .push_opcode(OP_NUMEQUAL);
+                .push_opcode(OP_GREATERTHANOREQUAL);
         }
 
         Ok(builder.into_script())
