@@ -4488,16 +4488,18 @@ async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         if last_poll.elapsed() > std::time::Duration::from_millis(500) {
             if let Ok(requests) = transport.fetch_recent_requests(60).await {
                 for request in requests {
-                    // Queue requests for our ledger, joined ledgers, or custody_transfer_sign for any ledger
+                    // Queue requests for our ledger, joined ledgers, or cross-ledger signing requests
                     let is_our_ledger = request.ledger_id == ledger_id;
                     let is_joined_ledger = joined_ledger_ids.contains(&request.ledger_id);
-                    let is_custody_transfer = request.action == "custody_transfer_sign";
-                    let should_queue = is_our_ledger || is_joined_ledger || is_custody_transfer;
+                    let is_cross_ledger_sign = request.action == "custody_transfer_sign"
+                        || request.action == "confiscation_sign";
+                    let should_queue = is_our_ledger || is_joined_ledger || is_cross_ledger_sign;
 
                     if should_queue && !seen_events.contains(&request.event_id) {
-                        if is_custody_transfer && !is_our_ledger {
-                            println!("[{}] Received custody_transfer_sign for {}ledger: {}...",
+                        if is_cross_ledger_sign && !is_our_ledger {
+                            println!("[{}] Received {} for {}ledger: {}...",
                                 chrono::Utc::now().format("%H:%M:%S"),
+                                request.action,
                                 if is_joined_ledger { "joined " } else { "external " },
                                 &request.ledger_id[..16.min(request.ledger_id.len())]);
                         }
@@ -4538,12 +4540,13 @@ async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
 
         // Check for requests
         while let Some(request) = transport.try_recv_request() {
-            // Skip requests not for our ledger or joined ledgers (except custody_transfer_sign)
+            // Skip requests not for our ledger or joined ledgers (except cross-ledger signing)
             let is_our_ledger = request.ledger_id == ledger_id;
             let is_joined_ledger = joined_ledger_ids.contains(&request.ledger_id);
-            let is_custody_transfer = request.action == "custody_transfer_sign";
+            let is_cross_ledger_sign = request.action == "custody_transfer_sign"
+                || request.action == "confiscation_sign";
 
-            if !is_our_ledger && !is_joined_ledger && !is_custody_transfer {
+            if !is_our_ledger && !is_joined_ledger && !is_cross_ledger_sign {
                 tracing::debug!("Skipping request for different ledger: {} (ours: {})",
                     request.ledger_id, ledger_id);
                 continue;
