@@ -755,6 +755,11 @@ confiscate_to_lottery() {
 
     local confiscate_output=$(run_bdk_cmd "$confiscator" recovery confiscate "$alice_ledger_id" 2>&1)
 
+    # Debug: show full confiscate output
+    echo "=== Confiscate debug output ==="
+    echo "$confiscate_output"
+    echo "=== End confiscate debug ==="
+
     if echo "$confiscate_output" | grep -q "Confiscation transaction broadcast"; then
         local txid=$(echo "$confiscate_output" | grep "Txid:" | awk '{print $2}')
         test_pass "$op_short broadcast confiscation TX: ${txid:0:16}..."
@@ -795,7 +800,7 @@ reveal_preimages() {
 
         local reveal_output=$(run_bdk_cmd "$op" recovery reveal "$alice_ledger_id" 2>&1)
 
-        if echo "$reveal_output" | grep -q "Preimage revealed"; then
+        if echo "$reveal_output" | grep -qi "preimage revealed"; then
             test_pass "$op_short revealed preimage"
         else
             test_fail "$op_short failed to reveal preimage"
@@ -847,15 +852,16 @@ claim_custody() {
                 mine_blocks 1
             else
                 test_fail "$op_short won but claim failed"
-                echo "    Output: $(echo "$claim_output" | tail -10)"
+                echo "    Output: $claim_output"
             fi
         elif echo "$claim_output" | grep -q "did not win\|You did not win"; then
             test_pass "$op_short lost lottery"
         elif echo "$claim_output" | grep -q "Not all preimages"; then
             log_warn "$op_short waiting for more preimages"
+            echo "$claim_output" | head -20
         else
             log_warn "$op_short lottery-claim output:"
-            echo "$claim_output" | head -15
+            echo "$claim_output" | head -20
         fi
     done
 
@@ -888,6 +894,47 @@ claim_custody() {
             log_warn "$op_short release output: $(echo "$release_output" | tail -5)"
         fi
     done
+}
+
+# ============================================================================
+# Phase 15b: Winner rotates reserves to quorum-controlled Taproot
+# ============================================================================
+
+winner_rotates_to_quorum() {
+    log_info ""
+    log_info "=== Phase 15b: Winner Rotates to Quorum Taproot ==="
+    echo ""
+
+    local alice_ledger_id=$(get_value "ledger_id_bdk-alice")
+    local winner=$(get_value "dispute_winner")
+
+    if [ -z "$winner" ]; then
+        log_warn "No winner determined, skipping rotation"
+        return
+    fi
+
+    local winner_short=$(echo "$winner" | sed 's/bdk-//')
+
+    log_info "Winner ($winner_short) rotating reserves to quorum-controlled Taproot..."
+
+    local rotate_output=$(run_bdk_cmd "$winner" recovery rotate-to-quorum "$alice_ledger_id" 2>&1)
+
+    if echo "$rotate_output" | grep -q "Reserves rotated to quorum-controlled Taproot"; then
+        local new_addr=$(echo "$rotate_output" | grep "New address:" | awk '{print $3}')
+        local amount=$(echo "$rotate_output" | grep "Amount:" | awk '{print $2}')
+        test_pass "$winner_short rotated to quorum Taproot: ${new_addr:0:16}... ($amount sats)"
+        store_value "winner_reserves_addr" "$new_addr"
+
+        # Mine to confirm
+        log_info "Mining to confirm rotation..."
+        mine_blocks 1
+        test_pass "Rotation confirmed"
+    else
+        test_fail "$winner_short failed to rotate to quorum"
+        echo "Output: $rotate_output" | tail -20
+    fi
+
+    sleep 2
 }
 
 # ============================================================================
@@ -1022,6 +1069,9 @@ main() {
     confiscate_to_lottery
     reveal_preimages
     claim_custody
+
+    # Winner rotates to quorum-controlled reserves
+    winner_rotates_to_quorum
 
     # Post-dispute: winner continues ledger
     winner_continues_ledger

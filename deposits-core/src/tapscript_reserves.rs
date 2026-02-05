@@ -760,8 +760,45 @@ impl LotteryScriptBuilder {
         // Stack: <sig> <total_sum>
 
         // Calculate winner index: sum mod N
-        builder = builder.push_int(n as i64);
-        builder = builder.push_opcode(OP_MOD);
+        // NOTE: OP_MOD (0x97) is OP_SUCCESS in Tapscript, so we must emulate it
+        // For n=2: mod 2 = AND 1
+        // For n=3: use conditional subtraction
+        // For n=4: mod 4 = AND 3
+        match n {
+            2 => {
+                // mod 2 = value & 1
+                builder = builder.push_int(1);
+                builder = builder.push_opcode(OP_AND);
+            }
+            3 => {
+                // mod 3: if sum >= 9, subtract 9; if sum >= 6, subtract 6; if sum >= 3, subtract 3
+                // Sum range for 3 participants with contributions 1-4: 3 to 12
+                // We repeatedly subtract 3 until result < 3
+                // DUP 9 GREATERTHANOREQUAL IF 9 SUB ENDIF
+                // DUP 6 GREATERTHANOREQUAL IF 6 SUB ENDIF  (but value might now be < 6)
+                // Actually simpler: DUP 3 >= IF 3 - DUP 3 >= IF 3 - DUP 3 >= IF 3 - ENDIF ENDIF ENDIF
+                // Max value is 12, so we need at most 4 subtractions
+                for _ in 0..4 {
+                    builder = builder.push_opcode(OP_DUP);
+                    builder = builder.push_int(3);
+                    builder = builder.push_opcode(OP_GREATERTHANOREQUAL);
+                    builder = builder.push_opcode(OP_IF);
+                    builder = builder.push_int(3);
+                    builder = builder.push_opcode(OP_SUB);
+                    builder = builder.push_opcode(OP_ENDIF);
+                }
+            }
+            4 => {
+                // mod 4 = value & 3
+                builder = builder.push_int(3);
+                builder = builder.push_opcode(OP_AND);
+            }
+            _ => {
+                return Err(DepositsError::InvalidState(
+                    format!("Unsupported participant count for lottery: {}", n)
+                ));
+            }
+        }
         // Stack: <sig> <winner_index>
 
         // Branch based on winner index
@@ -993,13 +1030,21 @@ impl LotteryOutput {
 
         let mut witness = Witness::new();
 
-        // Push preimages in reverse order (stack is LIFO)
+        // Witness stack order (top to bottom after Tapscript setup):
+        //   preimage_0 (top) - processed first by script
+        //   preimage_1
+        //   ...
+        //   preimage_n-1
+        //   signature (bottom) - used by CHECKSIG at script end
+        //
+        // Witness array maps to stack: witness[0] -> bottom, witness[n-1] -> top
+        // So push: signature first, then preimages in reverse order
+
+        witness.push(&winner_signature[..]);
+
         for preimage in preimages.iter().rev() {
             witness.push(preimage);
         }
-
-        // Push winner's signature
-        witness.push(&winner_signature[..]);
 
         // Push the lottery script
         witness.push(self.lottery_script.as_bytes());

@@ -9,11 +9,31 @@
 //!
 //! A deposits protocol node using BDK for on-chain reserves and Nostr for messaging.
 
-use bitcoin::secp256k1::{PublicKey, Secp256k1};
+use bitcoin::secp256k1::{PublicKey, SecretKey, Secp256k1};
+use bitcoin::bip32::{DerivationPath, Xpriv};
 use bitcoin::Network;
 use deposits_bdk::{Node, NodeConfig};
 use std::path::PathBuf;
 use std::str::FromStr;
+
+/// Derive the operator secret key from a seed using HD derivation.
+/// This matches what the Wallet does, ensuring consistent key usage across the codebase.
+fn derive_operator_secret(seed: &[u8; 32], network: Network) -> Result<SecretKey, String> {
+    let secp = Secp256k1::new();
+
+    let xpriv = Xpriv::new_master(network, seed)
+        .map_err(|e| format!("Failed to create master key: {}", e))?;
+
+    // Use the same derivation path as the Wallet: m/86'/0'/0'/0/0
+    let operator_path = DerivationPath::from_str("m/86'/0'/0'/0/0")
+        .map_err(|e| format!("Invalid derivation path: {}", e))?;
+
+    let operator_xpriv = xpriv
+        .derive_priv(&secp, &operator_path)
+        .map_err(|e| format!("Failed to derive operator key: {}", e))?;
+
+    Ok(operator_xpriv.private_key)
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -4044,8 +4064,7 @@ async fn nostr_export(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         .clone();
 
     // Derive secret key from seed
-    let secret_key = SecretKey::from_slice(&config.seed)
-        .map_err(|e| format!("Invalid seed: {}", e))?;
+    let secret_key = derive_operator_secret(&config.seed, config.network)?;
 
     // Get the node to access the ledger
     let node = Node::new(config).await?;
@@ -4184,8 +4203,7 @@ async fn nostr_request(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         .ok_or("No relay configured. Use --relay <url>")?
         .clone();
 
-    let secret_key = SecretKey::from_slice(&config.seed)
-        .map_err(|e| format!("Invalid seed: {}", e))?;
+    let secret_key = derive_operator_secret(&config.seed, config.network)?;
 
     // Build params JSON based on action
     let params_json = match action.as_str() {
@@ -4387,8 +4405,7 @@ async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         .ok_or("No relay configured. Use --relay <url>")?
         .clone();
 
-    let secret_key = SecretKey::from_slice(&config.seed)
-        .map_err(|e| format!("Invalid seed: {}", e))?;
+    let secret_key = derive_operator_secret(&config.seed, config.network)?;
 
     // Clone config for later use (collateral_lock needs to reload node)
     let config_for_reload = config.clone();
@@ -5567,6 +5584,7 @@ async fn recovery_command(args: &[String]) -> Result<(), Box<dyn std::error::Err
         "confiscate" => recovery_confiscate(&args[1..]).await,
         "reveal" => recovery_reveal(&args[1..]).await,
         "lottery-claim" => recovery_lottery_claim(&args[1..]).await,
+        "rotate-to-quorum" => recovery_rotate_to_quorum(&args[1..]).await,
         // Legacy commands (for backward compatibility)
         "start" => recovery_start(&args[1..]).await,
         "agree" => recovery_agree(&args[1..]).await,
@@ -5630,8 +5648,7 @@ async fn recovery_start(args: &[String]) -> Result<(), Box<dyn std::error::Error
 
     // Build keypair from seed
     let secp = Secp256k1::new();
-    let secret_key = SecretKey::from_slice(&config.seed)
-        .map_err(|e| format!("Invalid seed: {}", e))?;
+    let secret_key = derive_operator_secret(&config.seed, config.network)?;
     let keypair = Keypair::from_secret_key(&secp, &secret_key);
 
     println!("Starting recovery for ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
@@ -5807,8 +5824,7 @@ async fn recovery_agree(args: &[String]) -> Result<(), Box<dyn std::error::Error
 
     // Build keypair from seed
     let secp = Secp256k1::new();
-    let secret_key = SecretKey::from_slice(&config.seed)
-        .map_err(|e| format!("Invalid seed: {}", e))?;
+    let secret_key = derive_operator_secret(&config.seed, config.network)?;
     let keypair = Keypair::from_secret_key(&secp, &secret_key);
     let our_pubkey = PublicKey::from(keypair.public_key());
 
@@ -6051,8 +6067,7 @@ async fn recovery_complete(args: &[String]) -> Result<(), Box<dyn std::error::Er
 
     // Build keypair from seed
     let secp = Secp256k1::new();
-    let secret_key = SecretKey::from_slice(&config.seed)
-        .map_err(|e| format!("Invalid seed: {}", e))?;
+    let secret_key = derive_operator_secret(&config.seed, config.network)?;
     let keypair = Keypair::from_secret_key(&secp, &secret_key);
     let our_pubkey = PublicKey::from(keypair.public_key());
 
@@ -7561,8 +7576,7 @@ async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::error::
         .clone();
 
     let secp = Secp256k1::new();
-    let secret_key = SecretKey::from_slice(&config.seed)
-        .map_err(|e| format!("Invalid seed: {}", e))?;
+    let secret_key = derive_operator_secret(&config.seed, config.network)?;
     let keypair = Keypair::from_secret_key(&secp, &secret_key);
     let our_pubkey = keypair.public_key();
 
@@ -7629,6 +7643,15 @@ async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::error::
 
     if participants.len() < 2 {
         return Err(format!("Need at least 2 CustodyArmed participants, found {}", participants.len()).into());
+    }
+
+    // Sort participants by pubkey for deterministic order
+    participants.sort_by(|a, b| a.pubkey.serialize().cmp(&b.pubkey.serialize()));
+
+    // Debug: print participant order
+    println!("  Participant order (confiscate):");
+    for (i, p) in participants.iter().enumerate() {
+        println!("    {}: {}...", i, hex::encode(&p.pubkey.serialize()[..8]));
     }
 
     let original_operator = original_operator.ok_or("Could not find original operator")?;
@@ -7970,8 +7993,7 @@ async fn recovery_reveal(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         .clone();
 
     let secp = Secp256k1::new();
-    let secret_key = SecretKey::from_slice(&config.seed)
-        .map_err(|e| format!("Invalid seed: {}", e))?;
+    let secret_key = derive_operator_secret(&config.seed, config.network)?;
 
     println!("Revealing lottery preimage for ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
 
@@ -8057,8 +8079,7 @@ async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::erro
         .clone();
 
     let secp = Secp256k1::new();
-    let secret_key = SecretKey::from_slice(&config.seed)
-        .map_err(|e| format!("Invalid seed: {}", e))?;
+    let secret_key = derive_operator_secret(&config.seed, config.network)?;
     let keypair = Keypair::from_secret_key(&secp, &secret_key);
     let our_pubkey = keypair.public_key();
 
@@ -8082,10 +8103,10 @@ async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::erro
         .await
         .map_err(|e| format!("Failed to fetch updates: {}", e))?;
 
-    // Fetch lottery reveals
+    // Fetch lottery reveals (tagged with "l" for ledger_id)
     let reveal_filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_REQUEST))
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()])
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::L), [ledger_id.as_str()])
         .limit(100);
 
     let reveal_events = client
@@ -8119,23 +8140,44 @@ async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::erro
         return Err("No CustodyArmed participants found".into());
     }
 
+    // Sort participants by x-only pubkey for deterministic order (must match confiscate)
+    participants.sort_by(|a, b| a.1.pubkey.serialize().cmp(&b.1.pubkey.serialize()));
+
+    // Debug: print participant order with full details
+    println!("  Participant order (lottery-claim):");
+    for (i, (op_id, p)) in participants.iter().enumerate() {
+        let op_hex = hex::encode(&op_id.serialize()[..8]);
+        let xonly_hex = hex::encode(&p.pubkey.serialize()[..8]);
+        let target_short = if p.target_reserves.len() > 20 {
+            format!("{}...", &p.target_reserves[..20])
+        } else {
+            p.target_reserves.clone()
+        };
+        println!("    {}: x-only={} op_id={} target={}", i, xonly_hex, op_hex, target_short);
+    }
+
     println!("  Found {} participants", participants.len());
 
-    // Collect revealed preimages
+    // Collect revealed preimages (keyed by x-only pubkey to match Bitcoin pubkeys)
     let mut preimages: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
 
+    println!("  Checking {} reveal events...", reveal_events.len());
+
     for event in reveal_events.iter() {
-        if let Ok(content) = serde_json::from_str::<serde_json::Value>(&event.content) {
-            if content.get("action").and_then(|v| v.as_str()) == Some("lottery_reveal") {
-                if let Some(params) = content.get("params") {
-                    if let (Some(preimage_hex), Some(_lid)) = (
-                        params.get("preimage").and_then(|v| v.as_str()),
-                        params.get("ledger_id").and_then(|v| v.as_str()),
-                    ) {
-                        if let Ok(preimage) = hex::decode(preimage_hex) {
-                            // Use event pubkey to identify revealer
-                            preimages.insert(event.pubkey.to_string(), preimage);
-                        }
+        // Check if this is a lottery_reveal action (action is in a tag, not content)
+        let is_lottery_reveal = event.tags.iter().any(|tag| {
+            tag.kind() == TagKind::custom("action") &&
+            tag.content().map(|c| c == "lottery_reveal").unwrap_or(false)
+        });
+
+        if is_lottery_reveal {
+            // Content is directly the params: {"ledger_id": "...", "preimage": "..."}
+            if let Ok(content) = serde_json::from_str::<serde_json::Value>(&event.content) {
+                if let Some(preimage_hex) = content.get("preimage").and_then(|v| v.as_str()) {
+                    if let Ok(preimage) = hex::decode(preimage_hex) {
+                        // Use event pubkey (x-only) to identify revealer
+                        println!("    Found reveal from: {}...", &event.pubkey.to_string()[..16]);
+                        preimages.insert(event.pubkey.to_string(), preimage);
                     }
                 }
             }
@@ -8154,10 +8196,24 @@ async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::erro
     }
 
     // Match preimages to participants and calculate winner
+    // Use x-only pubkey format for matching (Nostr event pubkeys are x-only)
     let mut ordered_preimages: Vec<Vec<u8>> = Vec::new();
-    for (pubkey, _participant) in &participants {
-        let pubkey_str = pubkey.to_string();
+    for (pubkey, participant) in &participants {
+        // Convert Bitcoin PublicKey to x-only format to match Nostr pubkeys
+        let x_only = pubkey.x_only_public_key().0;
+        let pubkey_str = x_only.to_string();
         if let Some(preimage) = preimages.get(&pubkey_str) {
+            // Debug: verify hash matches commitment
+            let computed_hash: [u8; 20] = *bitcoin::hashes::hash160::Hash::hash(preimage).as_byte_array();
+            let expected_hash = participant.commitment_hash;
+            if computed_hash != expected_hash {
+                println!("  WARNING: Hash mismatch for {}...", &pubkey_str[..16]);
+                println!("    Preimage: {}...", &hex::encode(preimage)[..32.min(preimage.len()*2)]);
+                println!("    Computed HASH160:  {}", hex::encode(&computed_hash));
+                println!("    Expected (commit): {}", hex::encode(&expected_hash));
+            } else {
+                println!("  Hash OK for {}...", &pubkey_str[..16]);
+            }
             ordered_preimages.push(preimage.clone());
         } else {
             return Err(format!("Missing preimage from participant {}", &pubkey_str[..16]).into());
@@ -8461,6 +8517,337 @@ async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::erro
     println!("  New reserves: {}...", &winner_participant.target_reserves[..20.min(winner_participant.target_reserves.len())]);
     println!();
     println!("Custody transfer complete. You are now the operator.");
+    println!();
+    println!("Next: Run 'recovery rotate-to-quorum {}' to move funds to quorum-controlled Taproot address.", &ledger_id[..16.min(ledger_id.len())]);
+
+    Ok(())
+}
+
+/// Rotate lottery winnings to a quorum-controlled Taproot address.
+///
+/// After winning the lottery, funds are at the winner's target_reserves (P2WPKH).
+/// This command moves them to a proper Taproot address controlled by the rebuilt quorum.
+async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use bitcoin::hashes::{sha256, Hash};
+    use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey, PublicKey};
+    use deposits_core::{TlvDecode, TlvEncode, SignedLedgerUpdate, VoterSet, ThresholdConfig, TapscriptReservesBuilder};
+    use deposits_core::messages::LedgerOperation;
+    use deposits_bdk::nostr::NostrTransportBuilder;
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    use nostr_sdk::prelude::*;
+    use bdk_esplora::esplora_client::Builder as EsploraBuilder;
+    use bitcoin::{Transaction, TxIn, TxOut, Witness, Amount, ScriptBuf};
+
+    let mut ledger_id: Option<String> = None;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            s if s.starts_with("--") => {
+                config_args.push(args[i].clone());
+                if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                    config_args.push(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            _ => {
+                if ledger_id.is_none() {
+                    ledger_id = Some(args[i].clone());
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let ledger_id = ledger_id.ok_or("Missing ledger_id")?.trim().to_string();
+    let config = parse_config(&config_args)?;
+    let relay_url = config.relays.first()
+        .ok_or("No relay configured. Use --relay <url>")?
+        .clone();
+
+    let secp = Secp256k1::new();
+    let secret_key = derive_operator_secret(&config.seed, config.network)?;
+    let keypair = Keypair::from_secret_key(&secp, &secret_key);
+    let our_pubkey = keypair.public_key();
+
+    println!("Rotating lottery winnings to quorum-controlled Taproot...");
+    println!("  Ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
+
+    // Fetch ledger updates from Nostr
+    let keys = Keys::generate();
+    let client = Client::new(keys);
+    client.add_relay(&relay_url).await
+        .map_err(|e| format!("Failed to add relay: {}", e))?;
+    client.connect().await;
+
+    let filter = Filter::new()
+        .kind(Kind::Custom(deposits_bdk::nostr::KIND_LEDGER_UPDATE))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()])
+        .limit(500);
+
+    let events = client
+        .fetch_events(vec![filter], None)
+        .await
+        .map_err(|e| format!("Failed to fetch updates: {}", e))?;
+
+    client.disconnect().await.ok();
+
+    // Decode updates and find our branch
+    let mut updates: Vec<SignedLedgerUpdate> = Vec::new();
+    for event in events.iter() {
+        if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
+            if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
+                updates.push(update);
+            }
+        }
+    }
+
+    updates.sort_by_key(|u| (u.sequence_number, u.operator_id));
+    updates.dedup_by(|a, b| a.sequence_number == b.sequence_number && a.operator_id == b.operator_id && a.current_hash == b.current_hash);
+
+    // Find our updates (we're the new operator after CustodyAcquire)
+    let our_updates: Vec<&SignedLedgerUpdate> = updates.iter()
+        .filter(|u| u.operator_id == our_pubkey)
+        .collect();
+
+    if our_updates.is_empty() {
+        return Err("No updates found from you. Did you win the lottery?".into());
+    }
+
+    // Find our CustodyAcquire to get the current reserves address
+    let mut current_reserves_address: Option<String> = None;
+    let mut our_latest: Option<&SignedLedgerUpdate> = None;
+
+    for update in &our_updates {
+        if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+            if let LedgerOperation::CustodyAcquire { new_reserves_address, .. } = op {
+                current_reserves_address = Some(new_reserves_address);
+            }
+        }
+        if our_latest.is_none() || update.sequence_number > our_latest.unwrap().sequence_number {
+            our_latest = Some(update);
+        }
+    }
+
+    let current_reserves_address = current_reserves_address
+        .ok_or("Could not find CustodyAcquire with reserves address")?;
+    let our_latest = our_latest.ok_or("Could not find latest update")?;
+
+    println!("  Current reserves: {}...", &current_reserves_address[..20.min(current_reserves_address.len())]);
+    println!("  Latest sequence: {}", our_latest.sequence_number);
+
+    // Get quorum members from our branch (rebuilt during dispute)
+    let mut quorum_members: Vec<PublicKey> = Vec::new();
+    for update in &our_updates {
+        if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+            if let LedgerOperation::QuorumAddMember { quorum_member, .. } = op {
+                if !quorum_members.contains(&quorum_member) {
+                    quorum_members.push(quorum_member);
+                }
+            }
+        }
+    }
+
+    if quorum_members.is_empty() {
+        return Err("No quorum members found. Did you rebuild the quorum?".into());
+    }
+
+    println!("  Quorum members: {}", quorum_members.len());
+
+    // Find the UTXO at current_reserves_address
+    let esplora = EsploraBuilder::new(&config.electrum_url).build_blocking();
+
+    let reserves_addr: bitcoin::Address<bitcoin::address::NetworkUnchecked> = current_reserves_address.parse()
+        .map_err(|e| format!("Invalid reserves address: {}", e))?;
+    let reserves_addr = reserves_addr.require_network(config.network)
+        .map_err(|e| format!("Address network mismatch: {}", e))?;
+
+    let script_pubkey = reserves_addr.script_pubkey();
+    let txs = esplora.scripthash_txs(&script_pubkey, None)
+        .map_err(|e| format!("Failed to query address: {:?}", e))?;
+
+    // Find unspent output
+    let mut reserves_utxo: Option<(bitcoin::OutPoint, u64)> = None;
+    for tx in &txs {
+        for (vout, output) in tx.vout.iter().enumerate() {
+            if output.scriptpubkey == script_pubkey {
+                let outpoint = bitcoin::OutPoint::new(tx.txid, vout as u32);
+                let status = esplora.get_output_status(&tx.txid, vout as u64)
+                    .map_err(|e| format!("Failed to check output status: {:?}", e))?;
+                if status.map(|s| !s.spent).unwrap_or(true) {
+                    reserves_utxo = Some((outpoint, output.value));
+                    break;
+                }
+            }
+        }
+        if reserves_utxo.is_some() { break; }
+    }
+
+    let (reserves_outpoint, reserves_amount) = reserves_utxo
+        .ok_or("No unspent UTXO found at reserves address")?;
+
+    println!("  Found UTXO: {} ({} sats)", reserves_outpoint, reserves_amount);
+
+    // Compute ledger hash for Taproot address derivation
+    let ledger_hash: [u8; 32] = our_latest.current_hash;
+
+    // Build Taproot quorum address
+    let voter_set = VoterSet::new(our_pubkey, quorum_members.clone());
+    let voter_count = voter_set.all_voters().len();
+    let threshold_config = ThresholdConfig::default_for_voter_count(voter_count);
+
+    let taproot_builder = TapscriptReservesBuilder::new(
+        voter_set,
+        threshold_config,
+        config.network,
+        ledger_hash,
+    );
+
+    let taproot_output = taproot_builder.build()
+        .map_err(|e| format!("Failed to build Taproot output: {:?}", e))?;
+
+    let new_reserves_address = &taproot_output.address;
+    println!("  New Taproot address: {}...", &new_reserves_address.to_string()[..20]);
+
+    // Build rotation transaction
+    let fee = 200u64;
+    let output_amount = reserves_amount.saturating_sub(fee);
+
+    let mut rotation_tx = Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: reserves_outpoint,
+            script_sig: ScriptBuf::new(),
+            sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(output_amount),
+            script_pubkey: new_reserves_address.script_pubkey(),
+        }],
+    };
+
+    // Sign the transaction (P2WPKH input)
+    use bitcoin::sighash::{SighashCache, EcdsaSighashType};
+
+    let mut sighash_cache = SighashCache::new(&rotation_tx);
+    let sighash = sighash_cache.p2wpkh_signature_hash(
+        0,
+        &script_pubkey,
+        Amount::from_sat(reserves_amount),
+        EcdsaSighashType::All,
+    ).map_err(|e| format!("Failed to compute sighash: {}", e))?;
+
+    let msg = bitcoin::secp256k1::Message::from_digest(*sighash.as_ref());
+    let ecdsa_sig = secp.sign_ecdsa(&msg, &secret_key);
+    let signature = bitcoin::ecdsa::Signature::sighash_all(ecdsa_sig);
+
+    // Build witness for P2WPKH
+    let mut witness = Witness::new();
+    witness.push(signature.serialize());
+    witness.push(our_pubkey.serialize());
+    rotation_tx.input[0].witness = witness;
+
+    // Broadcast
+    println!("  Broadcasting rotation transaction...");
+
+    let data_dir = config.data_dir.clone();
+    let wallet = deposits_bdk::wallet::Wallet::new(
+        config.seed,
+        config.network,
+        data_dir,
+        config.electrum_url.clone(),
+    )?;
+    wallet.broadcast(&rotation_tx)?;
+
+    let rotation_txid = rotation_tx.compute_txid();
+    println!("  Rotation txid: {}", rotation_txid);
+
+    // Publish ReservesRotate operation
+    println!();
+    println!("Publishing ReservesRotate to Nostr...");
+
+    let txid_bytes: [u8; 32] = *rotation_txid.as_ref();
+
+    // Get current block height for first_expiry_block calculation
+    let current_block_height = esplora.get_height()
+        .map_err(|e| format!("Failed to get block height: {:?}", e))?;
+    let current_block_hash = esplora.get_block_hash(current_block_height)
+        .map_err(|e| format!("Failed to get block hash: {:?}", e))?;
+    let block_hash: [u8; 32] = *current_block_hash.as_ref();
+
+    let quorum_size = (quorum_members.len() + 1) as u8;
+    let quorum_threshold = (quorum_size / 2) + 1;
+    let first_expiry_block = current_block_height + 144; // ~1 day for degraded spending
+
+    let operation = LedgerOperation::ReservesRotate {
+        reserves_id: new_reserves_address.to_string(),
+        spending_txid: txid_bytes,
+        new_outpoint_txid: txid_bytes,
+        new_outpoint_vout: 0,
+        amount: output_amount,
+        quorum_threshold,
+        quorum_size,
+        first_expiry_block,
+        ledger_hash,
+    };
+
+    let message_bytes = operation.tlv_encode();
+
+    let sequence = our_latest.sequence_number + 1;
+    let mut hash_input = Vec::new();
+    hash_input.extend_from_slice(&sequence.to_le_bytes());
+    hash_input.extend_from_slice(&our_latest.current_hash);
+    hash_input.extend_from_slice(&message_bytes);
+    let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
+
+    let update_msg = format!(
+        "deposits:ledger:{}:{}:{}",
+        hex::encode(our_latest.current_hash),
+        sequence,
+        hex::encode(&new_hash)
+    );
+    let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
+    let msg = bitcoin::secp256k1::Message::from_digest(*msg_hash.as_ref());
+    let signature = secp.sign_schnorr(&msg, &keypair);
+    let operator_sig_bytes: [u8; 64] = *signature.as_ref();
+
+    let ledger_id_bytes: [u8; 32] = {
+        let decoded = hex::decode(&ledger_id)
+            .map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
+        decoded.try_into().map_err(|_| "Ledger ID must be 32 bytes")?
+    };
+
+    let signed_update = SignedLedgerUpdate {
+        message: message_bytes,
+        message_type: 0x8001,
+        operator_signature: operator_sig_bytes,
+        partner_signature: [0u8; 64],
+        operator_id: our_pubkey,
+        ledger_id: ledger_id_bytes,
+        sequence_number: sequence,
+        previous_hash: our_latest.current_hash,
+        current_hash: new_hash,
+        timestamp: deposits_core::now_unix_timestamp(),
+        block_height: current_block_height,
+        block_hash,
+    };
+
+    let publish_transport = NostrTransportBuilder::new(secret_key)
+        .relay(&relay_url)
+        .build()
+        .await?;
+
+    publish_transport.broadcast_ledger_update(&signed_update).await?;
+
+    println!();
+    println!("Reserves rotated to quorum-controlled Taproot!");
+    println!("  New address: {}", new_reserves_address);
+    println!("  Amount: {} sats", output_amount);
+    println!("  Quorum: {}-of-{}", (quorum_members.len() + 1) / 2 + 1, quorum_members.len() + 1);
+    println!("  Sequence: {}", sequence);
 
     Ok(())
 }
@@ -8724,13 +9111,14 @@ async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error::Err
         .clone();
 
     let secp = Secp256k1::new();
-    let secret_key = SecretKey::from_slice(&config.seed)
-        .map_err(|e| format!("Invalid seed: {}", e))?;
+    let secret_key = derive_operator_secret(&config.seed, config.network)?;
     let keypair = Keypair::from_secret_key(&secp, &secret_key);
     let our_pubkey = keypair.public_key();
 
     println!("Opening custody dispute for ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
     println!("  Reason: {}", reason);
+    println!("  Our pubkey: {}", our_pubkey);
+    println!("  Seed (first 8 bytes): {}...", hex::encode(&config.seed[..8]));
     println!();
 
     // Fetch ledger from Nostr
@@ -9024,8 +9412,7 @@ async fn recovery_rebuild_quorum_add(ledger_id: &str, args: &[String]) -> Result
         .clone();
 
     let secp = Secp256k1::new();
-    let secret_key = SecretKey::from_slice(&config.seed)
-        .map_err(|e| format!("Invalid seed: {}", e))?;
+    let secret_key = derive_operator_secret(&config.seed, config.network)?;
     let keypair = Keypair::from_secret_key(&secp, &secret_key);
     let our_pubkey = keypair.public_key();
 
@@ -9207,8 +9594,7 @@ async fn recovery_rebuild_attestation(ledger_id: &str, args: &[String]) -> Resul
         .clone();
 
     let secp = Secp256k1::new();
-    let secret_key = SecretKey::from_slice(&config.seed)
-        .map_err(|e| format!("Invalid seed: {}", e))?;
+    let secret_key = derive_operator_secret(&config.seed, config.network)?;
     let keypair = Keypair::from_secret_key(&secp, &secret_key);
     let our_pubkey = keypair.public_key();
 
@@ -9378,8 +9764,7 @@ async fn recovery_rebuild_status(ledger_id: &str, args: &[String]) -> Result<(),
         .clone();
 
     let secp = Secp256k1::new();
-    let secret_key = SecretKey::from_slice(&config.seed)
-        .map_err(|e| format!("Invalid seed: {}", e))?;
+    let secret_key = derive_operator_secret(&config.seed, config.network)?;
     let our_pubkey = PublicKey::from_secret_key(&secp, &secret_key);
 
     println!("Checking dispute branch status for ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
@@ -9526,8 +9911,7 @@ async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         .clone();
 
     let secp = Secp256k1::new();
-    let secret_key = SecretKey::from_slice(&config.seed)
-        .map_err(|e| format!("Invalid seed: {}", e))?;
+    let secret_key = derive_operator_secret(&config.seed, config.network)?;
     let keypair = Keypair::from_secret_key(&secp, &secret_key);
     let our_pubkey = keypair.public_key();
 
@@ -9595,17 +9979,13 @@ async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     let target_reserves_addr = if let Some(addr) = target_reserves {
         addr
     } else {
-        // Use a fresh receiving address from wallet
-        let data_dir = config.data_dir.clone();
-        let wallet = deposits_bdk::wallet::Wallet::new(
-            config.seed,
-            config.network,
-            data_dir,
-            config.electrum_url.clone(),
-        )?;
-        wallet.get_new_address()
-            .map_err(|e| format!("Could not get receiving address: {:?}", e))?
-            .to_string()
+        // Use P2WPKH address derived from operator pubkey
+        // This ensures rotate-to-quorum can sign with the operator key
+        use bitcoin::Address;
+        let pubkey_bytes: [u8; 33] = our_pubkey.serialize();
+        let compressed = bitcoin::CompressedPublicKey::from_slice(&pubkey_bytes)
+            .map_err(|e| format!("Invalid pubkey: {}", e))?;
+        Address::p2wpkh(&compressed, config.network).to_string()
     };
 
     // Store preimage for later reveal
@@ -9745,8 +10125,7 @@ async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::error::E
         .clone();
 
     let secp = Secp256k1::new();
-    let secret_key = SecretKey::from_slice(&config.seed)
-        .map_err(|e| format!("Invalid seed: {}", e))?;
+    let secret_key = derive_operator_secret(&config.seed, config.network)?;
     let keypair = Keypair::from_secret_key(&secp, &secret_key);
     let our_pubkey = keypair.public_key();
 
@@ -10385,8 +10764,7 @@ async fn recovery_continue(args: &[String]) -> Result<(), Box<dyn std::error::Er
         .clone();
 
     let secp = Secp256k1::new();
-    let secret_key = SecretKey::from_slice(&config.seed)
-        .map_err(|e| format!("Invalid seed: {}", e))?;
+    let secret_key = derive_operator_secret(&config.seed, config.network)?;
     let keypair = Keypair::from_secret_key(&secp, &secret_key);
     let our_pubkey = keypair.public_key();
 
@@ -10622,8 +11000,7 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
         .ok_or("No relay configured. Use --relay <url>")?
         .clone();
 
-    let secret_key = SecretKey::from_slice(&config.seed)
-        .map_err(|e| format!("Invalid seed: {}", e))?;
+    let secret_key = derive_operator_secret(&config.seed, config.network)?;
     let secp = Secp256k1::new();
 
     // Get the node to access the ledger
