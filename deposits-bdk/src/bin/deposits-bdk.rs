@@ -5356,7 +5356,12 @@ async fn recovery_command(args: &[String]) -> Result<(), Box<dyn std::error::Err
         eprintln!("  spend <ledger_id>                      Execute on-chain spend (winner only)");
         eprintln!("  status <ledger_id>                     Show recovery status and candidates");
         eprintln!();
-        eprintln!("Recovery flow:");
+        eprintln!("Lottery Protocol (on-chain winner selection):");
+        eprintln!("  confiscate <ledger_id>                 Build and broadcast confiscation TX to lottery");
+        eprintln!("  reveal <ledger_id>                     Reveal lottery preimage via Nostr");
+        eprintln!("  lottery-claim <ledger_id>              Claim lottery output if winner");
+        eprintln!();
+        eprintln!("Recovery flow (entropy-based):");
         eprintln!("  1. dispute - Detect violation, publish CustodyDispute (quorum disbanded)");
         eprintln!("  2. rebuild - Add new quorum members, collect attestations");
         eprintln!("  3. arm     - Publish CustodyArmed (locks in for entropy selection)");
@@ -5364,6 +5369,13 @@ async fn recovery_command(args: &[String]) -> Result<(), Box<dyn std::error::Err
         eprintln!("  5. claim   - Winner: CustodyAcquire, Losers: CustodyYield");
         eprintln!("  6. continue- Winner adds operations to resume normal ledger operation");
         eprintln!("  7. spend   - Winner broadcasts on-chain spend to claim reserves");
+        eprintln!();
+        eprintln!("Recovery flow (lottery-based):");
+        eprintln!("  1-3. Same as above (dispute, rebuild, arm with commitment_hash)");
+        eprintln!("  4. confiscate - Quorum signs TX spending reserves to lottery output");
+        eprintln!("  5. reveal     - All disputants reveal their preimages");
+        eprintln!("  6. lottery-claim - Winner (determined by preimage sizes) claims lottery");
+        eprintln!("  7. continue   - Winner adds operations to resume normal operation");
         eprintln!();
         eprintln!("State machine: NORMAL -> DISPUTED -> ARMED -> NORMAL (winner) / TOMBSTONED (losers)");
         return Ok(());
@@ -5378,6 +5390,10 @@ async fn recovery_command(args: &[String]) -> Result<(), Box<dyn std::error::Err
         "continue" => recovery_continue(&args[1..]).await,
         "spend" => recovery_spend(&args[1..]).await,
         "status" => recovery_status(&args[1..]).await,
+        // Lottery protocol commands
+        "confiscate" => recovery_confiscate(&args[1..]).await,
+        "reveal" => recovery_reveal(&args[1..]).await,
+        "lottery-claim" => recovery_lottery_claim(&args[1..]).await,
         // Legacy commands (for backward compatibility)
         "start" => recovery_start(&args[1..]).await,
         "agree" => recovery_agree(&args[1..]).await,
@@ -7322,6 +7338,480 @@ async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error::Err
     println!("  3. Wait for entropy block (armed_block + 6)");
     println!("  4. Claim custody: recovery claim <ledger_id>");
     println!("  5. On-chain spend: recovery spend <ledger_id>");
+
+    Ok(())
+}
+
+// =============================================================================
+// LOTTERY PROTOCOL COMMANDS
+// =============================================================================
+
+/// Build and broadcast the confiscation transaction (reserves → lottery output).
+///
+/// This collects all CustodyArmed data, builds a lottery output, and requests
+/// quorum signatures to spend the reserves to the lottery.
+async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey, PublicKey, XOnlyPublicKey};
+    use deposits_core::{TlvDecode, SignedLedgerUpdate};
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::tapscript_reserves::{LotteryScriptBuilder, LotteryParticipant};
+    use deposits_bdk::nostr::{NostrTransportBuilder, KIND_LEDGER_UPDATE};
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    use nostr_sdk::prelude::*;
+
+    let mut ledger_id: Option<String> = None;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            s if s.starts_with("--") => {
+                config_args.push(args[i].clone());
+                if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                    config_args.push(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            _ => {
+                if ledger_id.is_none() {
+                    ledger_id = Some(args[i].clone());
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let ledger_id = ledger_id.ok_or("Missing ledger_id")?.trim().to_string();
+    let config = parse_config(&config_args)?;
+    let relay_url = config.relays.first()
+        .ok_or("No relay configured. Use --relay <url>")?
+        .clone();
+
+    let secp = Secp256k1::new();
+    let secret_key = SecretKey::from_slice(&config.seed)
+        .map_err(|e| format!("Invalid seed: {}", e))?;
+    let keypair = Keypair::from_secret_key(&secp, &secret_key);
+    let our_pubkey = keypair.public_key();
+
+    println!("Building confiscation transaction for ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
+
+    // Fetch all updates from Nostr
+    println!("Fetching ledger from Nostr...");
+    let keys = Keys::generate();
+    let client = Client::new(keys);
+    client.add_relay(&relay_url).await
+        .map_err(|e| format!("Failed to add relay: {}", e))?;
+    client.connect().await;
+
+    let filter = Filter::new()
+        .kind(Kind::Custom(KIND_LEDGER_UPDATE))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()])
+        .limit(500);
+
+    let events = client
+        .fetch_events(vec![filter], None)
+        .await
+        .map_err(|e| format!("Failed to fetch events: {}", e))?;
+
+    client.disconnect().await.ok();
+
+    // Extract CustodyArmed data and quorum info
+    let mut participants: Vec<LotteryParticipant> = Vec::new();
+    let mut quorum_members: Vec<PublicKey> = Vec::new();
+    let mut reserves_address: Option<String> = None;
+    let mut ledger_hash: Option<[u8; 32]> = None;
+    let mut original_operator: Option<PublicKey> = None;
+
+    for event in events.iter() {
+        if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
+            if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
+                if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+                    match op {
+                        LedgerOperation::LedgerOpen { operator_id, .. } => {
+                            original_operator = Some(operator_id);
+                        }
+                        LedgerOperation::QuorumAddMember { quorum_member, .. } => {
+                            if !quorum_members.contains(&quorum_member) {
+                                quorum_members.push(quorum_member);
+                            }
+                        }
+                        LedgerOperation::ReservesRotate { reserves_id, ledger_hash: lh, .. } => {
+                            reserves_address = Some(reserves_id);
+                            ledger_hash = Some(lh);
+                        }
+                        LedgerOperation::CustodyArmed { commitment_hash, target_reserves, .. } => {
+                            let x_only = update.operator_id.x_only_public_key().0;
+                            participants.push(LotteryParticipant::new(
+                                x_only,
+                                commitment_hash,
+                                target_reserves,
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    if participants.len() < 2 {
+        return Err(format!("Need at least 2 CustodyArmed participants, found {}", participants.len()).into());
+    }
+
+    let original_operator = original_operator.ok_or("Could not find original operator")?;
+    let reserves_address_str = reserves_address.ok_or("No reserves address found")?;
+    let _ledger_hash = ledger_hash.ok_or("Could not find ledger_hash")?;
+
+    println!("  Found {} lottery participants", participants.len());
+    println!("  Reserves address: {}...", &reserves_address_str[..20.min(reserves_address_str.len())]);
+
+    // Build recovery voters (quorum minus original operator)
+    let recovery_voters: Vec<XOnlyPublicKey> = quorum_members.iter()
+        .filter(|pk| **pk != original_operator)
+        .map(|pk| pk.x_only_public_key().0)
+        .collect();
+
+    let recovery_threshold = (recovery_voters.len() / 2) + 1;
+
+    // Build the lottery output
+    let lottery_builder = LotteryScriptBuilder::new(
+        participants.clone(),
+        recovery_voters,
+        recovery_threshold,
+        config.network,
+    );
+
+    let lottery_output = lottery_builder.build()
+        .map_err(|e| format!("Failed to build lottery output: {:?}", e))?;
+
+    println!("  Lottery address: {}", lottery_output.address);
+
+    // Look up reserves UTXO
+    use bdk_esplora::esplora_client::Builder as EsploraBuilder;
+    let esplora = EsploraBuilder::new(&config.electrum_url).build_blocking();
+
+    let reserves_addr: bitcoin::Address<bitcoin::address::NetworkUnchecked> = reserves_address_str.parse()
+        .map_err(|e| format!("Invalid reserves address: {}", e))?;
+    let reserves_addr = reserves_addr.require_network(config.network)
+        .map_err(|e| format!("Address network mismatch: {}", e))?;
+
+    let script_pubkey = reserves_addr.script_pubkey();
+    let utxos = esplora.scripthash_txs(&script_pubkey, None)
+        .map_err(|e| format!("Failed to query Esplora: {:?}", e))?;
+
+    // Find unspent output
+    let mut reserves_utxo: Option<(bitcoin::OutPoint, u64)> = None;
+    for tx in &utxos {
+        for (vout, output) in tx.vout.iter().enumerate() {
+            if output.scriptpubkey == script_pubkey {
+                let outpoint = bitcoin::OutPoint::new(tx.txid, vout as u32);
+                let status = esplora.get_output_status(&tx.txid, vout as u64)
+                    .map_err(|e| format!("Failed to check output status: {:?}", e))?;
+                if status.map(|s| !s.spent).unwrap_or(true) {
+                    reserves_utxo = Some((outpoint, output.value));
+                    break;
+                }
+            }
+        }
+        if reserves_utxo.is_some() { break; }
+    }
+
+    let (reserves_outpoint, reserves_amount) = reserves_utxo
+        .ok_or("No unspent reserves found")?;
+
+    println!("  Found reserves: {} sats at {}", reserves_amount, reserves_outpoint);
+
+    // Build confiscation transaction
+    use bitcoin::{Transaction, TxIn, TxOut, Sequence, Witness, Amount};
+
+    let fee_rate = 2u64;
+    let estimated_vsize = 200u64;
+    let fee = fee_rate * estimated_vsize;
+    let output_amount = reserves_amount.saturating_sub(fee);
+
+    let confiscation_tx = Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: reserves_outpoint,
+            script_sig: bitcoin::ScriptBuf::new(),
+            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: Witness::default(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(output_amount),
+            script_pubkey: lottery_output.script_pubkey(),
+        }],
+    };
+
+    let confiscation_txid = confiscation_tx.compute_txid();
+    println!();
+    println!("Confiscation transaction built:");
+    println!("  Txid: {}", confiscation_txid);
+    println!("  Output: {} sats to lottery", output_amount);
+    println!();
+    println!("TODO: Implement quorum signature collection for confiscation TX");
+    println!("For now, the lottery mechanism requires manual coordination.");
+
+    Ok(())
+}
+
+/// Reveal the lottery preimage via Nostr.
+///
+/// This publishes the preimage that was generated during `recovery arm`.
+/// All participants must reveal for the lottery to proceed.
+async fn recovery_reveal(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use bitcoin::secp256k1::{Secp256k1, SecretKey};
+    use deposits_bdk::nostr::NostrTransportBuilder;
+
+    let mut ledger_id: Option<String> = None;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            s if s.starts_with("--") => {
+                config_args.push(args[i].clone());
+                if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                    config_args.push(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            _ => {
+                if ledger_id.is_none() {
+                    ledger_id = Some(args[i].clone());
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let ledger_id = ledger_id.ok_or("Missing ledger_id")?.trim().to_string();
+    let config = parse_config(&config_args)?;
+    let relay_url = config.relays.first()
+        .ok_or("No relay configured. Use --relay <url>")?
+        .clone();
+
+    let secp = Secp256k1::new();
+    let secret_key = SecretKey::from_slice(&config.seed)
+        .map_err(|e| format!("Invalid seed: {}", e))?;
+
+    println!("Revealing lottery preimage for ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
+
+    // Load preimage from file
+    let preimage_file = format!("{}/lottery_preimage_{}.hex",
+        config.data_dir.display(),
+        &ledger_id[..16.min(ledger_id.len())]);
+
+    let preimage_hex = std::fs::read_to_string(&preimage_file)
+        .map_err(|e| format!("Failed to read preimage file {}: {}", preimage_file, e))?;
+
+    let preimage = hex::decode(preimage_hex.trim())
+        .map_err(|e| format!("Invalid preimage hex: {}", e))?;
+
+    println!("  Preimage length: {} bytes (contribution: {})", preimage.len(), preimage.len() - 16);
+
+    // Publish reveal via Nostr
+    let transport = NostrTransportBuilder::new(secret_key)
+        .relay(&relay_url)
+        .build()
+        .await?;
+
+    let reveal_params = serde_json::json!({
+        "ledger_id": ledger_id,
+        "preimage": hex::encode(&preimage),
+    });
+
+    let request_id = transport.send_ledger_request(
+        &ledger_id,
+        "lottery_reveal",
+        reveal_params,
+    ).await.map_err(|e| format!("Failed to send reveal: {:?}", e))?;
+
+    println!();
+    println!("Lottery preimage revealed!");
+    println!("  Request ID: {}...", &request_id[..16]);
+    println!();
+    println!("Wait for all participants to reveal, then run:");
+    println!("  recovery lottery-claim {}...", &ledger_id[..16.min(ledger_id.len())]);
+
+    Ok(())
+}
+
+/// Claim the lottery output if we are the winner.
+///
+/// This collects all revealed preimages, calculates the winner, and if we won,
+/// builds and broadcasts the claim transaction.
+async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey, PublicKey};
+    use deposits_core::{TlvDecode, SignedLedgerUpdate};
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::tapscript_reserves::{LotteryScriptBuilder, LotteryParticipant, LotteryOutput};
+    use deposits_bdk::nostr::{NostrTransportBuilder, KIND_LEDGER_UPDATE, KIND_LEDGER_REQUEST};
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    use nostr_sdk::prelude::*;
+
+    let mut ledger_id: Option<String> = None;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            s if s.starts_with("--") => {
+                config_args.push(args[i].clone());
+                if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                    config_args.push(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            _ => {
+                if ledger_id.is_none() {
+                    ledger_id = Some(args[i].clone());
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let ledger_id = ledger_id.ok_or("Missing ledger_id")?.trim().to_string();
+    let config = parse_config(&config_args)?;
+    let relay_url = config.relays.first()
+        .ok_or("No relay configured. Use --relay <url>")?
+        .clone();
+
+    let secp = Secp256k1::new();
+    let secret_key = SecretKey::from_slice(&config.seed)
+        .map_err(|e| format!("Invalid seed: {}", e))?;
+    let keypair = Keypair::from_secret_key(&secp, &secret_key);
+    let our_pubkey = keypair.public_key();
+
+    println!("Checking lottery result for ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
+
+    // Fetch updates and reveals from Nostr
+    let keys = Keys::generate();
+    let client = Client::new(keys);
+    client.add_relay(&relay_url).await
+        .map_err(|e| format!("Failed to add relay: {}", e))?;
+    client.connect().await;
+
+    // Fetch ledger updates
+    let filter = Filter::new()
+        .kind(Kind::Custom(KIND_LEDGER_UPDATE))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()])
+        .limit(500);
+
+    let update_events = client
+        .fetch_events(vec![filter], None)
+        .await
+        .map_err(|e| format!("Failed to fetch updates: {}", e))?;
+
+    // Fetch lottery reveals
+    let reveal_filter = Filter::new()
+        .kind(Kind::Custom(KIND_LEDGER_REQUEST))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()])
+        .limit(100);
+
+    let reveal_events = client
+        .fetch_events(vec![reveal_filter], None)
+        .await
+        .map_err(|e| format!("Failed to fetch reveals: {}", e))?;
+
+    client.disconnect().await.ok();
+
+    // Extract CustodyArmed participants
+    let mut participants: Vec<(PublicKey, LotteryParticipant)> = Vec::new();
+
+    for event in update_events.iter() {
+        if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
+            if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
+                if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+                    if let LedgerOperation::CustodyArmed { commitment_hash, target_reserves, .. } = op {
+                        let x_only = update.operator_id.x_only_public_key().0;
+                        participants.push((update.operator_id, LotteryParticipant::new(
+                            x_only,
+                            commitment_hash,
+                            target_reserves,
+                        )));
+                    }
+                }
+            }
+        }
+    }
+
+    if participants.is_empty() {
+        return Err("No CustodyArmed participants found".into());
+    }
+
+    println!("  Found {} participants", participants.len());
+
+    // Collect revealed preimages
+    let mut preimages: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
+
+    for event in reveal_events.iter() {
+        if let Ok(content) = serde_json::from_str::<serde_json::Value>(&event.content) {
+            if content.get("action").and_then(|v| v.as_str()) == Some("lottery_reveal") {
+                if let Some(params) = content.get("params") {
+                    if let (Some(preimage_hex), Some(_lid)) = (
+                        params.get("preimage").and_then(|v| v.as_str()),
+                        params.get("ledger_id").and_then(|v| v.as_str()),
+                    ) {
+                        if let Ok(preimage) = hex::decode(preimage_hex) {
+                            // Use event pubkey to identify revealer
+                            preimages.insert(event.pubkey.to_string(), preimage);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    println!("  Found {} preimage reveals", preimages.len());
+
+    if preimages.len() < participants.len() {
+        println!();
+        println!("Not all preimages revealed yet.");
+        println!("  Have: {}, Need: {}", preimages.len(), participants.len());
+        println!();
+        println!("Waiting for remaining participants to run 'recovery reveal'...");
+        return Ok(());
+    }
+
+    // Match preimages to participants and calculate winner
+    let mut ordered_preimages: Vec<Vec<u8>> = Vec::new();
+    for (pubkey, _participant) in &participants {
+        let pubkey_str = pubkey.to_string();
+        if let Some(preimage) = preimages.get(&pubkey_str) {
+            ordered_preimages.push(preimage.clone());
+        } else {
+            return Err(format!("Missing preimage from participant {}", &pubkey_str[..16]).into());
+        }
+    }
+
+    let winner_index = LotteryOutput::calculate_winner(&ordered_preimages)
+        .map_err(|e| format!("Failed to calculate winner: {:?}", e))?;
+
+    let (winner_pubkey, winner_participant) = &participants[winner_index];
+
+    println!();
+    println!("Lottery result:");
+    for (i, preimage) in ordered_preimages.iter().enumerate() {
+        let marker = if i == winner_index { " <-- WINNER" } else { "" };
+        println!("  Participant {}: {} bytes (contribution {}){}", i, preimage.len(), preimage.len() - 16, marker);
+    }
+    println!();
+    println!("Winner: {}...", &winner_pubkey.to_string()[..16]);
+    println!("Target reserves: {}...", &winner_participant.target_reserves[..20.min(winner_participant.target_reserves.len())]);
+
+    if *winner_pubkey == our_pubkey {
+        println!();
+        println!("🎉 YOU WON!");
+        println!();
+        println!("TODO: Build and broadcast claim transaction");
+        println!("The claim transaction spends the lottery output to your target_reserves.");
+    } else {
+        println!();
+        println!("You did not win. Run 'recovery claim' to publish CustodyYield.");
+    }
 
     Ok(())
 }
