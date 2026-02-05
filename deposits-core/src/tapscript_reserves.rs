@@ -642,6 +642,375 @@ impl ReservesSpendBuilder {
     }
 }
 
+// ============================================================================
+// LOTTERY SCRIPT BUILDER
+// ============================================================================
+
+/// A participant in the custody lottery
+#[derive(Clone, Debug)]
+pub struct LotteryParticipant {
+    /// The participant's public key (x-only for Taproot)
+    pub pubkey: XOnlyPublicKey,
+    /// HASH160 of their committed preimage
+    pub commitment_hash: [u8; 20],
+    /// Target address where they want funds sent if they win
+    pub target_reserves: String,
+}
+
+impl LotteryParticipant {
+    pub fn new(pubkey: XOnlyPublicKey, commitment_hash: [u8; 20], target_reserves: String) -> Self {
+        Self { pubkey, commitment_hash, target_reserves }
+    }
+}
+
+/// Builder for lottery Tapscript outputs used in custody dispute resolution.
+///
+/// The lottery mechanism uses preimage-size entropy:
+/// 1. Each participant commits HASH160(preimage) where preimage is 17-20 bytes
+/// 2. When revealing, the SIZE of each preimage contributes entropy (size - 16 = 1-4)
+/// 3. Sum of all contributions mod N determines the winner
+/// 4. Only the winner can spend with their signature + all preimages
+///
+/// The script verifies all preimages and checks the signer is the entropy-selected winner.
+pub struct LotteryScriptBuilder {
+    participants: Vec<LotteryParticipant>,
+    network: Network,
+    /// Quorum members (excluding disputed operator) for timeout recovery
+    recovery_voters: Vec<XOnlyPublicKey>,
+    /// Recovery threshold
+    recovery_threshold: usize,
+}
+
+impl LotteryScriptBuilder {
+    pub fn new(
+        participants: Vec<LotteryParticipant>,
+        recovery_voters: Vec<XOnlyPublicKey>,
+        recovery_threshold: usize,
+        network: Network,
+    ) -> Self {
+        Self { participants, recovery_voters, recovery_threshold, network }
+    }
+
+    /// Build the lottery claim script.
+    ///
+    /// Witness stack (bottom to top): <sig> <preimage_n> ... <preimage_1>
+    ///
+    /// Script logic:
+    /// 1. Verify each preimage: HASH160(preimage) == committed_hash
+    /// 2. Extract size contribution: SIZE - 16 (gives 1-4 for 17-20 byte preimages)
+    /// 3. Sum all contributions
+    /// 4. Calculate winner index: sum mod N
+    /// 5. Branch to winner's pubkey and verify signature
+    pub fn build_lottery_script(&self) -> DepositsResult<ScriptBuf> {
+        let n = self.participants.len();
+        if n < 2 {
+            return Err(DepositsError::InvalidState(
+                "Lottery requires at least 2 participants".to_string()
+            ));
+        }
+        if n > 4 {
+            return Err(DepositsError::InvalidState(
+                "Lottery supports at most 4 participants".to_string()
+            ));
+        }
+
+        let mut builder = Builder::new();
+
+        // Process each preimage and accumulate size contributions
+        // Stack starts with: <sig> <preimage_n> ... <preimage_1>
+        // After processing preimage_1: altstack has contribution_1
+
+        for (i, participant) in self.participants.iter().enumerate() {
+            // Stack: ... <preimage_i>
+            // Duplicate for hash check
+            builder = builder.push_opcode(OP_DUP);
+            // Hash the preimage
+            builder = builder.push_opcode(OP_HASH160);
+            // Push expected hash and verify
+            builder = builder.push_slice(&participant.commitment_hash);
+            builder = builder.push_opcode(OP_EQUALVERIFY);
+            // Now stack has: ... <preimage_i>
+            // Get size
+            builder = builder.push_opcode(OP_SIZE);
+            // Stack: ... <preimage_i> <size>
+            // Swap and drop the preimage (we only need the size)
+            builder = builder.push_opcode(OP_SWAP);
+            builder = builder.push_opcode(OP_DROP);
+            // Stack: ... <size>
+            // Subtract 16 to get contribution (1-4)
+            builder = builder.push_int(16);
+            builder = builder.push_opcode(OP_SUB);
+            // Stack: ... <contribution_i>
+
+            if i < n - 1 {
+                // Not the last one - save to altstack
+                builder = builder.push_opcode(OP_TOALTSTACK);
+            }
+            // Last contribution stays on main stack
+        }
+
+        // Now main stack has: <sig> <contribution_n>
+        // Altstack has: <contribution_1> ... <contribution_n-1>
+
+        // Sum all contributions
+        for _ in 0..(n - 1) {
+            builder = builder.push_opcode(OP_FROMALTSTACK);
+            builder = builder.push_opcode(OP_ADD);
+        }
+        // Stack: <sig> <total_sum>
+
+        // Calculate winner index: sum mod N
+        builder = builder.push_int(n as i64);
+        builder = builder.push_opcode(OP_MOD);
+        // Stack: <sig> <winner_index>
+
+        // Branch based on winner index
+        // Use nested IF/ELSE for each possible winner
+        for (i, participant) in self.participants.iter().enumerate() {
+            builder = builder.push_opcode(OP_DUP);
+            builder = builder.push_int(i as i64);
+            builder = builder.push_opcode(OP_EQUAL);
+            builder = builder.push_opcode(OP_IF);
+            // Winner is participant i
+            builder = builder.push_opcode(OP_DROP); // Drop the index
+            builder = builder.push_x_only_key(&participant.pubkey);
+            builder = builder.push_opcode(OP_CHECKSIG);
+            builder = builder.push_opcode(OP_ELSE);
+        }
+
+        // If none matched (shouldn't happen with valid mod), fail
+        builder = builder.push_opcode(OP_DROP);
+        builder = builder.push_opcode(OP_PUSHBYTES_0); // OP_FALSE
+
+        // Close all the IF/ELSE branches
+        for _ in 0..n {
+            builder = builder.push_opcode(OP_ENDIF);
+        }
+
+        Ok(builder.into_script())
+    }
+
+    /// Build a recovery script for when revelation stalls.
+    ///
+    /// After CSV timeout, the quorum (minus disputed operator) can recover funds.
+    pub fn build_recovery_script(&self, csv_blocks: u32) -> DepositsResult<ScriptBuf> {
+        if self.recovery_voters.len() < self.recovery_threshold {
+            return Err(DepositsError::InvalidState(
+                format!("Not enough recovery voters ({}) for threshold ({})",
+                    self.recovery_voters.len(), self.recovery_threshold)
+            ));
+        }
+
+        let mut builder = Builder::new();
+
+        // Add CSV timelock
+        builder = builder
+            .push_int(csv_blocks as i64)
+            .push_opcode(OP_CSV)
+            .push_opcode(OP_DROP);
+
+        // Sort keys for deterministic script
+        let mut sorted_keys = self.recovery_voters.clone();
+        sorted_keys.sort_by(|a, b| a.serialize().cmp(&b.serialize()));
+
+        // Multi-sig using CHECKSIGADD pattern
+        if self.recovery_threshold == 1 {
+            // Single-sig case
+            builder = builder
+                .push_x_only_key(&sorted_keys[0])
+                .push_opcode(OP_CHECKSIG);
+        } else {
+            // First key uses CHECKSIG
+            builder = builder
+                .push_x_only_key(&sorted_keys[0])
+                .push_opcode(OP_CHECKSIG);
+
+            // Subsequent keys use CHECKSIGADD
+            for key in sorted_keys.iter().skip(1) {
+                builder = builder
+                    .push_x_only_key(key)
+                    .push_opcode(OP_CHECKSIGADD);
+            }
+
+            // Check threshold
+            builder = builder
+                .push_int(self.recovery_threshold as i64)
+                .push_opcode(OP_GREATERTHANOREQUAL);
+        }
+
+        Ok(builder.into_script())
+    }
+
+    /// Build the complete Taproot lottery output.
+    ///
+    /// Structure:
+    /// - Leaf 0: Lottery claim script (preimage reveal + winner sig)
+    /// - Leaf 1: Recovery (CSV 144 blocks, threshold T)
+    /// - Leaf 2: Recovery (CSV 1008 blocks, threshold T-1)
+    /// - Leaf 3: Recovery (CSV 4032 blocks, threshold T-2)
+    pub fn build(&self) -> DepositsResult<LotteryOutput> {
+        let secp = Secp256k1::new();
+
+        // Build lottery claim script
+        let lottery_script = self.build_lottery_script()?;
+
+        // Build recovery scripts with degrading thresholds
+        let recovery_scripts = vec![
+            (144, self.recovery_threshold),                                    // ~1 day
+            (1008, self.recovery_threshold.saturating_sub(1).max(1)),          // ~1 week
+            (4032, self.recovery_threshold.saturating_sub(2).max(1)),          // ~4 weeks
+        ];
+
+        let mut leaves: Vec<ScriptBuf> = vec![lottery_script.clone()];
+        for (csv, threshold) in recovery_scripts {
+            let builder = LotteryScriptBuilder::new(
+                self.participants.clone(),
+                self.recovery_voters.clone(),
+                threshold,
+                self.network,
+            );
+            leaves.push(builder.build_recovery_script(csv)?);
+        }
+
+        // Use NUMS point as internal key (unspendable key path)
+        // NUMS = "Nothing Up My Sleeve" - provably unspendable
+        let nums_point = XOnlyPublicKey::from_slice(&[
+            0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54,
+            0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9, 0x7a, 0x5e,
+            0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5,
+            0x47, 0xbf, 0xee, 0x9a, 0xce, 0x80, 0x3a, 0xc0,
+        ]).map_err(|_| DepositsError::InvalidState("Invalid NUMS point".to_string()))?;
+
+        // Build Taproot tree with balanced structure
+        let mut builder = TaprootBuilder::new();
+
+        // Add leaves at appropriate depths for 4 leaves (balanced tree)
+        // Depth 2 for all 4 leaves in a balanced binary tree
+        for script in &leaves {
+            builder = builder.add_leaf(2, script.clone())
+                .map_err(|e| DepositsError::InvalidState(
+                    format!("Failed to add Tapscript leaf: {:?}", e)
+                ))?;
+        }
+
+        let spend_info = builder.finalize(&secp, nums_point)
+            .map_err(|e| DepositsError::InvalidState(
+                format!("Failed to finalize Taproot tree: {:?}", e)
+            ))?;
+
+        let address = Address::p2tr(&secp, nums_point, spend_info.merkle_root(), self.network);
+
+        Ok(LotteryOutput {
+            address,
+            spend_info,
+            participants: self.participants.clone(),
+            lottery_script,
+            recovery_voters: self.recovery_voters.clone(),
+            recovery_threshold: self.recovery_threshold,
+            network: self.network,
+        })
+    }
+}
+
+/// A complete lottery Taproot output for custody dispute resolution
+#[derive(Clone, Debug)]
+pub struct LotteryOutput {
+    /// The P2TR address for this lottery output
+    pub address: Address,
+    /// Taproot spend info (needed for spending)
+    pub spend_info: TaprootSpendInfo,
+    /// Lottery participants
+    pub participants: Vec<LotteryParticipant>,
+    /// The lottery claim script
+    pub lottery_script: ScriptBuf,
+    /// Recovery voters (quorum minus disputed operator)
+    pub recovery_voters: Vec<XOnlyPublicKey>,
+    /// Recovery threshold
+    pub recovery_threshold: usize,
+    /// Network
+    pub network: Network,
+}
+
+impl LotteryOutput {
+    /// Get the script pubkey for use in TxOut
+    pub fn script_pubkey(&self) -> ScriptBuf {
+        self.address.script_pubkey()
+    }
+
+    /// Create a TxOut with specified amount
+    pub fn to_tx_out(&self, amount_sats: u64) -> TxOut {
+        TxOut {
+            value: Amount::from_sat(amount_sats),
+            script_pubkey: self.script_pubkey(),
+        }
+    }
+
+    /// Get the control block for the lottery claim script
+    pub fn lottery_control_block(&self) -> Option<bitcoin::taproot::ControlBlock> {
+        self.spend_info.control_block(&(self.lottery_script.clone(), LeafVersion::TapScript))
+    }
+
+    /// Calculate the winner given revealed preimages.
+    ///
+    /// Each preimage must be 17-20 bytes. Returns the index of the winner.
+    pub fn calculate_winner(preimages: &[Vec<u8>]) -> DepositsResult<usize> {
+        let n = preimages.len();
+        if n < 2 {
+            return Err(DepositsError::InvalidState("Need at least 2 preimages".to_string()));
+        }
+
+        let mut sum: usize = 0;
+        for (i, preimage) in preimages.iter().enumerate() {
+            let len = preimage.len();
+            if len < 17 || len > 20 {
+                return Err(DepositsError::InvalidState(
+                    format!("Preimage {} has invalid length {} (must be 17-20)", i, len)
+                ));
+            }
+            sum += len - 16; // Contribution is 1-4
+        }
+
+        Ok(sum % n)
+    }
+
+    /// Create a witness for claiming the lottery output.
+    ///
+    /// The winner must provide their signature and all participants' preimages.
+    /// Preimages must be in the same order as participants.
+    pub fn create_claim_witness(
+        &self,
+        winner_signature: &[u8; 64],
+        preimages: &[Vec<u8>],
+    ) -> DepositsResult<Witness> {
+        if preimages.len() != self.participants.len() {
+            return Err(DepositsError::InvalidState(
+                format!("Expected {} preimages, got {}", self.participants.len(), preimages.len())
+            ));
+        }
+
+        let control_block = self.lottery_control_block()
+            .ok_or_else(|| DepositsError::InvalidState("No control block".to_string()))?;
+
+        let mut witness = Witness::new();
+
+        // Push preimages in reverse order (stack is LIFO)
+        for preimage in preimages.iter().rev() {
+            witness.push(preimage);
+        }
+
+        // Push winner's signature
+        witness.push(&winner_signature[..]);
+
+        // Push the lottery script
+        witness.push(self.lottery_script.as_bytes());
+
+        // Push the control block
+        witness.push(control_block.serialize());
+
+        Ok(witness)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -750,5 +1119,148 @@ mod tests {
         assert_ne!(output1.merkle_root(), output2.merkle_root());
         // And different addresses
         assert_ne!(output1.address, output2.address);
+    }
+
+    // ========================================================================
+    // LOTTERY TESTS
+    // ========================================================================
+
+    fn generate_x_only_pubkey(seed: u8) -> XOnlyPublicKey {
+        generate_test_pubkey(seed).x_only_public_key().0
+    }
+
+    fn test_commitment_hash(seed: u8) -> [u8; 20] {
+        let mut hash = [0u8; 20];
+        hash[0] = seed;
+        hash
+    }
+
+    #[test]
+    fn test_lottery_winner_calculation() {
+        // Test with 2 participants
+        // Preimage lengths 17 and 18 -> contributions 1 and 2 -> sum 3 -> 3 % 2 = 1
+        let preimages = vec![
+            vec![0u8; 17], // contribution 1
+            vec![0u8; 18], // contribution 2
+        ];
+        let winner = LotteryOutput::calculate_winner(&preimages).unwrap();
+        assert_eq!(winner, 1); // (1 + 2) % 2 = 1
+
+        // Preimage lengths 17 and 17 -> contributions 1 and 1 -> sum 2 -> 2 % 2 = 0
+        let preimages = vec![
+            vec![0u8; 17], // contribution 1
+            vec![0u8; 17], // contribution 1
+        ];
+        let winner = LotteryOutput::calculate_winner(&preimages).unwrap();
+        assert_eq!(winner, 0); // (1 + 1) % 2 = 0
+    }
+
+    #[test]
+    fn test_lottery_winner_four_participants() {
+        // Test with 4 participants
+        // Lengths: 17, 18, 19, 20 -> contributions: 1, 2, 3, 4 -> sum 10 -> 10 % 4 = 2
+        let preimages = vec![
+            vec![0u8; 17],
+            vec![0u8; 18],
+            vec![0u8; 19],
+            vec![0u8; 20],
+        ];
+        let winner = LotteryOutput::calculate_winner(&preimages).unwrap();
+        assert_eq!(winner, 2); // (1 + 2 + 3 + 4) % 4 = 2
+    }
+
+    #[test]
+    fn test_lottery_script_build() {
+        let participants = vec![
+            LotteryParticipant::new(
+                generate_x_only_pubkey(1),
+                test_commitment_hash(1),
+                "bcrt1p...".to_string(),
+            ),
+            LotteryParticipant::new(
+                generate_x_only_pubkey(2),
+                test_commitment_hash(2),
+                "bcrt1p...".to_string(),
+            ),
+        ];
+
+        let recovery_voters = vec![
+            generate_x_only_pubkey(10),
+            generate_x_only_pubkey(11),
+            generate_x_only_pubkey(12),
+        ];
+
+        let builder = LotteryScriptBuilder::new(
+            participants,
+            recovery_voters,
+            2, // 2-of-3 recovery
+            Network::Regtest,
+        );
+
+        let script = builder.build_lottery_script().expect("Should build lottery script");
+        // Basic sanity check - script should be non-empty
+        assert!(!script.is_empty());
+    }
+
+    #[test]
+    fn test_lottery_output_build() {
+        let participants = vec![
+            LotteryParticipant::new(
+                generate_x_only_pubkey(1),
+                test_commitment_hash(1),
+                "bcrt1p...".to_string(),
+            ),
+            LotteryParticipant::new(
+                generate_x_only_pubkey(2),
+                test_commitment_hash(2),
+                "bcrt1p...".to_string(),
+            ),
+            LotteryParticipant::new(
+                generate_x_only_pubkey(3),
+                test_commitment_hash(3),
+                "bcrt1p...".to_string(),
+            ),
+        ];
+
+        let recovery_voters = vec![
+            generate_x_only_pubkey(10),
+            generate_x_only_pubkey(11),
+        ];
+
+        let builder = LotteryScriptBuilder::new(
+            participants,
+            recovery_voters,
+            2, // 2-of-2 recovery
+            Network::Regtest,
+        );
+
+        let output = builder.build().expect("Should build lottery output");
+
+        // Verify we got a valid P2TR address
+        assert!(output.script_pubkey().is_p2tr());
+
+        // Verify control block exists
+        assert!(output.lottery_control_block().is_some());
+    }
+
+    #[test]
+    fn test_lottery_reject_invalid_participant_count() {
+        // Too few participants
+        let participants = vec![
+            LotteryParticipant::new(
+                generate_x_only_pubkey(1),
+                test_commitment_hash(1),
+                "bcrt1p...".to_string(),
+            ),
+        ];
+
+        let builder = LotteryScriptBuilder::new(
+            participants,
+            vec![generate_x_only_pubkey(10)],
+            1,
+            Network::Regtest,
+        );
+
+        assert!(builder.build_lottery_script().is_err());
     }
 }
