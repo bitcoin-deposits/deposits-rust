@@ -9592,7 +9592,7 @@ async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     let target_reserves_addr = if let Some(addr) = target_reserves {
         addr
     } else {
-        // Use wallet's reserves address
+        // Use a fresh receiving address from wallet
         let data_dir = config.data_dir.clone();
         let wallet = deposits_bdk::wallet::Wallet::new(
             config.seed,
@@ -9600,8 +9600,8 @@ async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
             data_dir,
             config.electrum_url.clone(),
         )?;
-        wallet.get_reserves_address()
-            .ok_or("Could not get reserves address from wallet")?
+        wallet.get_new_address()
+            .map_err(|e| format!("Could not get receiving address: {:?}", e))?
             .to_string()
     };
 
