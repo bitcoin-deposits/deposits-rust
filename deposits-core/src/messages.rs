@@ -752,6 +752,10 @@ pub enum LedgerOperation {
     CustodyArmed {
         /// Block height when this candidate is ready (used for eligibility cutoff).
         armed_block: u32,
+        /// HASH160 of secret preimage (17-20 bytes) for lottery entropy.
+        commitment_hash: [u8; 20],
+        /// Bitcoin address where winner wants reserves sent.
+        target_reserves: String,
     },
 
     /// Acquire custody after winning entropy selection.
@@ -1303,6 +1307,11 @@ fn write_pubkey<W: Write>(w: &mut W, pk: &PublicKey) -> Result<(), CodecError> {
     Ok(())
 }
 
+fn write_20<W: Write>(w: &mut W, v: &[u8; 20]) -> Result<(), CodecError> {
+    w.write_all(v)?;
+    Ok(())
+}
+
 fn write_32<W: Write>(w: &mut W, v: &[u8; 32]) -> Result<(), CodecError> {
     w.write_all(v)?;
     Ok(())
@@ -1382,6 +1391,12 @@ fn read_pubkey<R: Read>(r: &mut R) -> Result<PublicKey, CodecError> {
     let mut buf = [0u8; 33];
     r.read_exact(&mut buf)?;
     PublicKey::from_slice(&buf).map_err(|e| CodecError::InvalidData(e.to_string()))
+}
+
+fn read_20<R: Read>(r: &mut R) -> Result<[u8; 20], CodecError> {
+    let mut buf = [0u8; 20];
+    r.read_exact(&mut buf)?;
+    Ok(buf)
 }
 
 fn read_32<R: Read>(r: &mut R) -> Result<[u8; 32], CodecError> {
@@ -1579,8 +1594,10 @@ impl BinaryCodec for LedgerOperation {
                 write_u64(w, *last_valid_sequence)?;
                 write_string(w, reason)?;
             }
-            Self::CustodyArmed { armed_block } => {
+            Self::CustodyArmed { armed_block, commitment_hash, target_reserves } => {
                 write_u32(w, *armed_block)?;
+                write_20(w, commitment_hash)?;
+                write_string(w, target_reserves)?;
             }
             Self::CustodyAcquire { new_custodian, entropy_block_height, entropy_block_hash, spend_txid, new_reserves_address } => {
                 write_pubkey(w, new_custodian)?;
@@ -1761,6 +1778,8 @@ impl BinaryCodec for LedgerOperation {
             // CustodyArmed (57)
             57 => Ok(Self::CustodyArmed {
                 armed_block: read_u32(r)?,
+                commitment_hash: read_20(r)?,
+                target_reserves: read_string(r)?,
             }),
             // Close operations (60-61)
             60 => Ok(Self::LedgerClose),
@@ -2536,6 +2555,9 @@ mod ledger_op_tlv {
     pub const ARMED_BLOCK: u64 = 109;
     pub const SPEND_TXID: u64 = 110;
     pub const NEW_RESERVES_ADDRESS: u64 = 111;
+    // CustodyArmed lottery fields
+    pub const COMMITMENT_HASH: u64 = 112;
+    pub const TARGET_RESERVES: u64 = 113;
 }
 
 impl TlvEncode for LedgerOperation {
@@ -2714,8 +2736,11 @@ impl TlvEncode for LedgerOperation {
                     .u64_field(LAST_VALID_SEQUENCE, *last_valid_sequence)
                     .string_field(REASON, reason);
             }
-            Self::CustodyArmed { armed_block } => {
-                builder = builder.u32_field(ARMED_BLOCK, *armed_block);
+            Self::CustodyArmed { armed_block, commitment_hash, target_reserves } => {
+                builder = builder
+                    .u32_field(ARMED_BLOCK, *armed_block)
+                    .bytes_field(COMMITMENT_HASH, commitment_hash)
+                    .string_field(TARGET_RESERVES, target_reserves);
             }
             Self::CustodyAcquire { new_custodian, entropy_block_height, entropy_block_hash, spend_txid, new_reserves_address } => {
                 builder = builder
@@ -2895,6 +2920,8 @@ impl TlvDecode for LedgerOperation {
             56 => Ok(Self::CustodyYield),
             57 => Ok(Self::CustodyArmed {
                 armed_block: reader.read_u32(ARMED_BLOCK)?,
+                commitment_hash: reader.read_bytes(COMMITMENT_HASH)?,
+                target_reserves: reader.read_string(TARGET_RESERVES)?,
             }),
             60 => Ok(Self::LedgerClose),
             61 => Ok(Self::Tombstone {

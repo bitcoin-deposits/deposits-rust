@@ -1287,8 +1287,14 @@ fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                 LedgerOperation::CustodyDispute { last_valid_sequence, reason } => {
                     ("CustodyDispute", format!("last_valid_seq:{}  reason:{}", last_valid_sequence, reason))
                 }
-                LedgerOperation::CustodyArmed { armed_block } => {
-                    ("CustodyArmed", format!("armed_block:{}", armed_block))
+                LedgerOperation::CustodyArmed { armed_block, commitment_hash, target_reserves } => {
+                    let hash_hex = hex::encode(commitment_hash);
+                    let target_short = if target_reserves.len() > 16 {
+                        format!("{}..{}", &target_reserves[..8], &target_reserves[target_reserves.len()-6..])
+                    } else {
+                        target_reserves.clone()
+                    };
+                    ("CustodyArmed", format!("armed_block:{}  commit:{}..  target:{}", armed_block, &hash_hex[..8], target_short))
                 }
                 LedgerOperation::CustodyAcquire { new_custodian, entropy_block_height, spend_txid, new_reserves_address, .. } => {
                     let pk_bytes = new_custodian.serialize();
@@ -8331,22 +8337,33 @@ async fn recovery_rebuild_status(ledger_id: &str, args: &[String]) -> Result<(),
 /// Publish CustodyArmed to pre-commit for entropy selection.
 ///
 /// This locks in the current quorum - no more changes allowed after this.
-/// The candidate is now registered for entropy-based selection.
+/// The candidate is now registered for entropy-based selection via on-chain lottery.
+///
+/// Generates a secret preimage and commits its HASH160. The preimage is stored
+/// locally and must be revealed after confiscation to participate in the lottery.
 async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    use bitcoin::hashes::{Hash, sha256};
+    use bitcoin::hashes::{Hash, sha256, hash160};
     use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey, Message};
     use deposits_core::{TlvDecode, TlvEncode, SignedLedgerUpdate};
     use deposits_core::messages::LedgerOperation;
     use deposits_bdk::nostr::{NostrTransportBuilder, KIND_LEDGER_UPDATE};
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
     use nostr_sdk::prelude::*;
+    use rand::Rng;
 
     let mut ledger_id: Option<String> = None;
+    let mut target_reserves: Option<String> = None;
     let mut config_args = Vec::new();
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--target-reserves" | "--target" => {
+                if i + 1 < args.len() {
+                    target_reserves = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
             s if s.starts_with("--") => {
                 config_args.push(args[i].clone());
                 if i + 1 < args.len() && !args[i + 1].starts_with("--") {
@@ -8363,7 +8380,7 @@ async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         i += 1;
     }
 
-    let ledger_id = ledger_id.ok_or("Missing ledger_id")?.trim().to_string();
+    let ledger_id = ledger_id.ok_or("Missing ledger_id. Usage: recovery arm <ledger_id> [--target-reserves <address>]")?.trim().to_string();
     let config = parse_config(&config_args)?;
     let relay_url = config.relays.first()
         .ok_or("No relay configured. Use --relay <url>")?
@@ -8425,9 +8442,46 @@ async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     let current_block_height = esplora.get_height()
         .map_err(|e| format!("Failed to get block height: {:?}", e))?;
 
+    // Generate random preimage (17-20 bytes for lottery entropy)
+    // Use 18 bytes = contribution of 2 (18 - 16 = 2)
+    let mut rng = rand::thread_rng();
+    let preimage_len = rng.gen_range(17..=20);
+    let mut preimage = vec![0u8; preimage_len];
+    rng.fill(&mut preimage[..]);
+
+    // Compute commitment_hash = HASH160(preimage)
+    let commitment_hash: [u8; 20] = *hash160::Hash::hash(&preimage).as_byte_array();
+
+    // Get target_reserves address (where winner wants funds sent)
+    let target_reserves_addr = if let Some(addr) = target_reserves {
+        addr
+    } else {
+        // Use wallet's reserves address
+        let data_dir = config.data_dir.clone();
+        let wallet = deposits_bdk::wallet::Wallet::new(
+            config.seed,
+            config.network,
+            data_dir,
+            config.electrum_url.clone(),
+        )?;
+        wallet.get_reserves_address()
+            .ok_or("Could not get reserves address from wallet")?
+            .to_string()
+    };
+
+    // Store preimage for later reveal
+    let preimage_file = format!("{}/lottery_preimage_{}.hex",
+        config.data_dir.display(),
+        &ledger_id[..16.min(ledger_id.len())]);
+    std::fs::write(&preimage_file, hex::encode(&preimage))
+        .map_err(|e| format!("Failed to store preimage: {}", e))?;
+    println!("  Stored lottery preimage in: {}", preimage_file);
+
     // Create CustodyArmed operation
     let custody_armed = LedgerOperation::CustodyArmed {
         armed_block: current_block_height,
+        commitment_hash,
+        target_reserves: target_reserves_addr.clone(),
     };
 
     // Serialize
@@ -8589,7 +8643,7 @@ async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::error::E
             if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
                 // Decode the operation
                 if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                    if let LedgerOperation::CustodyArmed { armed_block } = op {
+                    if let LedgerOperation::CustodyArmed { armed_block, .. } = op {
                         candidates.push((update.operator_id, armed_block, update.clone()));
                         if update.operator_id == our_pubkey {
                             our_armed_block = Some(armed_block);
