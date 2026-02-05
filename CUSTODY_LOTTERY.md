@@ -235,12 +235,14 @@ The collateral mechanism (already implemented) incentivizes revelation.
 
 ## Implementation Checklist
 
-- [ ] Add `commitment_hash` and `target_reserves` to CustodyArmed
-- [ ] Create lottery Tapscript builder
-- [ ] Build confiscation transaction (quorum → lottery output)
-- [ ] Add CustodyLotteryReveal message type
-- [ ] Implement preimage collection via Nostr
-- [ ] Build claim transaction (lottery → winner reserves)
+- [x] Add `commitment_hash` and `target_reserves` to CustodyArmed
+- [x] Create lottery Tapscript builder (LotteryScriptBuilder)
+- [x] Add preimage generation/storage in `recovery arm`
+- [x] Add `recovery confiscate` command (builds lottery output)
+- [x] Add `recovery reveal` command (publishes preimage via Nostr)
+- [x] Add `recovery lottery-claim` command (calculates winner)
+- [x] Add timeout recovery scripts (CSV timelocks)
+- [ ] Implement quorum signature collection for confiscation TX
+- [ ] Build and broadcast claim transaction (lottery → winner)
 - [ ] Update CustodyAcquire to use claim txid
-- [ ] Add timeout recovery path
 - [ ] Update test-dispute-4op.sh for new flow
