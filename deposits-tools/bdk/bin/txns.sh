@@ -108,14 +108,25 @@ format_tx() {
             fi
         done <<< "$OUTPUTS"
 
+        # Check if spending from a Taproot address (P2TR input = reserves spend)
+        INPUT_FROM_P2TR=$(echo "$TX" | jq -r '.vin[].prevout.scriptpubkey_type' 2>/dev/null | grep -c "v1_p2tr" || true)
+
         # If all outputs go back to input addresses, it's a consolidation
         if [ -z "$DEST" ]; then
             TOTAL_OUT=$(echo "$TX" | jq '[.vout[].value] | add')
             printf "  %s  [consolidate] %s...  %s sats (self-transfer)§              └─ Wallet maintenance (UTXO consolidation)\n" "$block_height" "${txid:0:12}" "$TOTAL_OUT"
         else
             # Try to identify the transaction type based on patterns
+            # Check if spending FROM P2TR (Taproot) - this is a reserves spend
+            if [ "$INPUT_FROM_P2TR" -gt 0 ]; then
+                # Spending from Taproot reserves - either dispute resolution or rotation
+                if [[ "$DEST" == bcrt1p* ]] || [[ "$DEST" == bc1p* ]]; then
+                    printf "  %s  [dispute]     %s...  %s sats → %s..%s§              └─ CustodyAcquire: dispute winner claiming reserves via threshold sig\n" "$block_height" "${txid:0:12}" "$AMT" "${DEST:0:10}" "${DEST: -6}"
+                else
+                    printf "  %s  [confiscate]  %s...  %s sats → %s..%s§              └─ Quorum confiscation: reserves spent to non-Taproot address\n" "$block_height" "${txid:0:12}" "$AMT" "${DEST:0:10}" "${DEST: -6}"
+                fi
             # Check if destination is a P2TR (Taproot) address - likely reserves rotation
-            if [[ "$DEST" == bcrt1p* ]] || [[ "$DEST" == bc1p* ]]; then
+            elif [[ "$DEST" == bcrt1p* ]] || [[ "$DEST" == bc1p* ]]; then
                 printf "  %s  [transfer]    %s...  %s sats → %s..%s§              └─ Reserves rotation: moving to quorum-controlled Taproot address\n" "$block_height" "${txid:0:12}" "$AMT" "${DEST:0:10}" "${DEST: -6}"
             # Check if it's a large amount (likely reserves creation or deposit funding)
             elif [ "$AMT" -ge 10000000 ] 2>/dev/null; then

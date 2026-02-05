@@ -924,6 +924,10 @@ main() {
     mine_to_entropy
     claim_custody
 
+    # Mine the CustodyAcquire on-chain transaction
+    log_info "Mining CustodyAcquire transaction..."
+    mine_blocks 1
+
     # Post-dispute: winner continues ledger
     winner_continues_ledger
 
