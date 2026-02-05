@@ -8354,10 +8354,110 @@ async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::erro
     println!("Claim transaction broadcast!");
     println!("  Txid: {}", claim_txid);
     println!("  Output: {} sats to {}", output_amount, winner_participant.target_reserves);
+
+    // Publish CustodyAcquire to Nostr
     println!();
-    println!("Next steps:");
-    println!("  1. Wait for confirmation");
-    println!("  2. Run 'recovery complete' to publish CustodyAcquire with claim txid");
+    println!("Publishing CustodyAcquire to Nostr...");
+
+    use bitcoin::hashes::{sha256, Hash};
+    use deposits_core::TlvEncode;
+
+    // Find our CustodyArmed to get sequence number and hash
+    let mut our_armed: Option<SignedLedgerUpdate> = None;
+    for event in update_events.iter() {
+        if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
+            if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
+                if update.operator_id == our_pubkey {
+                    if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+                        if matches!(op, LedgerOperation::CustodyArmed { .. }) {
+                            our_armed = Some(update);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let our_armed = our_armed.ok_or("Could not find our CustodyArmed update")?;
+
+    // Get current block for entropy reference
+    let current_block_height = esplora.get_height()
+        .map_err(|e| format!("Failed to get block height: {:?}", e))?;
+    let current_block_hash = esplora.get_block_hash(current_block_height)
+        .map_err(|e| format!("Failed to get block hash: {:?}", e))?;
+    let current_block_hash: [u8; 32] = *current_block_hash.as_ref();
+
+    // Create CustodyAcquire operation
+    let spend_txid_bytes: [u8; 32] = *claim_txid.as_ref();
+
+    let operation = LedgerOperation::CustodyAcquire {
+        new_custodian: our_pubkey,
+        entropy_block_height: current_block_height,
+        entropy_block_hash: current_block_hash,
+        spend_txid: spend_txid_bytes,
+        new_reserves_address: winner_participant.target_reserves.clone(),
+    };
+
+    let message_bytes = operation.tlv_encode();
+
+    // Build update continuing from our CustodyArmed
+    let sequence = our_armed.sequence_number + 1;
+    let mut hash_input = Vec::new();
+    hash_input.extend_from_slice(&sequence.to_le_bytes());
+    hash_input.extend_from_slice(&our_armed.current_hash);
+    hash_input.extend_from_slice(&message_bytes);
+    let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
+
+    // Sign the update
+    let update_msg = format!(
+        "deposits:ledger:{}:{}:{}",
+        hex::encode(our_armed.current_hash),
+        sequence,
+        hex::encode(&new_hash)
+    );
+    let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
+    let msg = bitcoin::secp256k1::Message::from_digest(*msg_hash.as_ref());
+    let signature = secp.sign_schnorr(&msg, &keypair);
+    let operator_sig_bytes: [u8; 64] = *signature.as_ref();
+
+    // Parse ledger_id into bytes
+    let ledger_id_bytes: [u8; 32] = {
+        let decoded = hex::decode(&ledger_id)
+            .map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
+        decoded.try_into().map_err(|_| "Ledger ID must be 32 bytes")?
+    };
+
+    let signed_update = SignedLedgerUpdate {
+        message: message_bytes,
+        message_type: 0x8001,
+        operator_signature: operator_sig_bytes,
+        partner_signature: [0u8; 64],
+        operator_id: our_pubkey,
+        ledger_id: ledger_id_bytes,
+        sequence_number: sequence,
+        previous_hash: our_armed.current_hash,
+        current_hash: new_hash,
+        timestamp: deposits_core::now_unix_timestamp(),
+        block_height: current_block_height,
+        block_hash: current_block_hash,
+    };
+
+    // Publish to Nostr
+    let publish_transport = NostrTransportBuilder::new(secret_key)
+        .relay(&relay_url)
+        .build()
+        .await?;
+
+    publish_transport.broadcast_ledger_update(&signed_update).await?;
+
+    println!();
+    println!("CustodyAcquire published successfully!");
+    println!("  Sequence: {}", sequence);
+    println!("  Hash: {}...", &hex::encode(new_hash)[..16]);
+    println!("  Spend txid: {}...", &hex::encode(spend_txid_bytes)[..16]);
+    println!("  New reserves: {}...", &winner_participant.target_reserves[..20.min(winner_participant.target_reserves.len())]);
+    println!();
+    println!("Custody transfer complete. You are now the operator.");
 
     Ok(())
 }

@@ -242,7 +242,8 @@ The collateral mechanism (already implemented) incentivizes revelation.
 - [x] Add `recovery reveal` command (publishes preimage via Nostr)
 - [x] Add `recovery lottery-claim` command (calculates winner)
 - [x] Add timeout recovery scripts (CSV timelocks)
-- [ ] Implement quorum signature collection for confiscation TX
-- [ ] Build and broadcast claim transaction (lottery → winner)
+- [x] Implement quorum signature collection for confiscation TX
+- [x] Build and broadcast claim transaction (lottery → winner)
+- [x] Add confiscation_sign handler for quorum watcher
 - [ ] Update CustodyAcquire to use claim txid
 - [ ] Update test-dispute-4op.sh for new flow
