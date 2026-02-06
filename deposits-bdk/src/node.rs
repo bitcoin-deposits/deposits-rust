@@ -13,6 +13,7 @@ use bitcoin::Network;
 use deposits_core::ledger::Ledger;
 use deposits_core::message_validation::HandlerContext;
 use deposits_core::messages::LedgerOperation;
+use deposits_core::TlvDecode;
 use deposits_core::types::{
     Deposit, DepositOffer, DepositOfferStatus, FeeStructure,
     OnChainWithdrawal, OnChainWithdrawalStatus,
@@ -246,18 +247,86 @@ impl Node {
     /// Start listening for messages
     pub async fn start(&mut self) -> Result<(), Error> {
         self.nostr.start_listening().await?;
+
+        // Auto-subscribe to ledger requests/disputes for all our ledgers
+        let ledgers = self.handler.ledgers.lock().unwrap().clone();
+        for ((operator, _reserves_id), ledger_arc) in ledgers.iter() {
+            // Only subscribe to ledgers where we're the operator
+            if *operator == self.node_id {
+                let ledger = ledger_arc.read().unwrap();
+                let ledger_id = ledger.ledger_id_hex();
+
+                if let Err(e) = self.nostr.subscribe_to_requests(&ledger_id).await {
+                    tracing::warn!("Failed to subscribe to requests for ledger {}: {}", &ledger_id[..16], e);
+                } else {
+                    tracing::info!("Subscribed to requests for ledger {}...", &ledger_id[..16]);
+                }
+
+                if let Err(e) = self.nostr.subscribe_to_disputes(&ledger_id).await {
+                    tracing::warn!("Failed to subscribe to disputes for ledger {}: {}", &ledger_id[..16], e);
+                } else {
+                    tracing::info!("Subscribed to disputes for ledger {}...", &ledger_id[..16]);
+                }
+            }
+        }
+
+        // Also subscribe to joined ledgers (where we're a quorum member)
+        let joined_ledgers = self.get_joined_ledger_ids();
+        for ledger_id in joined_ledgers {
+            if let Err(e) = self.nostr.subscribe_to_requests(&ledger_id).await {
+                tracing::warn!("Failed to subscribe to requests for joined ledger {}: {}", &ledger_id[..16], e);
+            }
+            if let Err(e) = self.nostr.subscribe_to_disputes(&ledger_id).await {
+                tracing::warn!("Failed to subscribe to disputes for joined ledger {}: {}", &ledger_id[..16], e);
+            }
+        }
+
         tracing::info!("Node started, listening for messages");
         Ok(())
+    }
+
+    /// Get ledger IDs of ledgers we've joined as a quorum member
+    fn get_joined_ledger_ids(&self) -> Vec<String> {
+        let mut joined = Vec::new();
+        let ledgers = self.handler.ledgers.lock().unwrap();
+
+        for ((operator, _), ledger_arc) in ledgers.iter() {
+            if *operator == self.node_id {
+                let ledger = ledger_arc.read().unwrap();
+                for update in &ledger.history {
+                    if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+                        if let LedgerOperation::QuorumJoin { reserves_id, .. } = op {
+                            if !joined.contains(&reserves_id) {
+                                joined.push(reserves_id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        joined
     }
 
     /// Run the main event loop
     pub async fn run(&mut self) -> Result<(), Error> {
         loop {
             tokio::select! {
-                // Process inbound messages from nostr
+                // Process inbound messages from nostr (P2P + ledger events)
                 _ = self.nostr.process_events() => {
+                    // Handle P2P messages
                     while let Some(inbound) = self.nostr.try_recv() {
                         self.handle_inbound(inbound);
+                    }
+
+                    // Handle ledger requests
+                    while let Some(request) = self.nostr.try_recv_request() {
+                        self.handle_ledger_request(request).await;
+                    }
+
+                    // Handle disputes
+                    while let Some(dispute) = self.nostr.try_recv_dispute() {
+                        self.handle_dispute(dispute).await;
                     }
                 }
 
@@ -283,6 +352,130 @@ impl Node {
                 }
             }
         }
+    }
+
+    /// Handle a ledger request from Nostr
+    async fn handle_ledger_request(&self, request: crate::nostr::LedgerRequest) {
+        tracing::info!(
+            "Ledger request: action={}, ledger={}..., event={}...",
+            request.action,
+            &request.ledger_id[..16.min(request.ledger_id.len())],
+            &request.event_id[..16.min(request.event_id.len())]
+        );
+
+        // Check if this request is for a ledger we own or have joined
+        let is_our_ledger = self.get_ledger_by_ledger_id(&request.ledger_id).is_some()
+            || self.get_ledger_by_reserves_id(&request.ledger_id).is_some();
+        let is_cross_ledger_sign = request.action == "custody_transfer_sign"
+            || request.action == "confiscation_sign";
+
+        if !is_our_ledger && !is_cross_ledger_sign {
+            tracing::debug!("Skipping request for unknown ledger: {}", &request.ledger_id[..16]);
+            return;
+        }
+
+        // Process the request based on action
+        let (success, result, error) = match request.action.as_str() {
+            "deposit_open" => self.process_deposit_open_request(&request).await,
+            "deposit_offer" => self.process_deposit_offer_request(&request).await,
+            "collateral_lock" => self.process_collateral_lock_request(&request).await,
+            "custody_transfer_sign" => self.process_custody_transfer_sign_request(&request).await,
+            "confiscation_sign" => self.process_confiscation_sign_request(&request).await,
+            "custodian_query" => self.process_custodian_query_request(&request).await,
+            _ => {
+                tracing::warn!("Unknown request action: {}", request.action);
+                (false, None, Some(format!("Unknown action: {}", request.action)))
+            }
+        };
+
+        // Send response - convert result String to serde_json::Value
+        let result_json = result.map(|s| serde_json::Value::String(s));
+        if let Err(e) = self.nostr.send_ledger_response(
+            &request.event_id,
+            &request.ledger_id,
+            success,
+            result_json,
+            error.clone(),
+        ).await {
+            tracing::error!("Failed to send response: {}", e);
+        } else if success {
+            tracing::info!("Request {} processed successfully", &request.event_id[..16]);
+        } else {
+            tracing::warn!("Request {} failed: {}", &request.event_id[..16], error.unwrap_or_default());
+        }
+    }
+
+    /// Handle a dispute notification from Nostr
+    async fn handle_dispute(&self, dispute: crate::nostr::LedgerDispute) {
+        tracing::warn!(
+            "!!! DISPUTE RECEIVED for ledger {}...: {} (by {}...)",
+            &dispute.ledger_id[..16.min(dispute.ledger_id.len())],
+            dispute.reason,
+            &dispute.disputer_pubkey[..16.min(dispute.disputer_pubkey.len())]
+        );
+
+        // TODO: Auto-validate and participate in dispute resolution
+        // For now, just log it prominently
+        tracing::warn!("  Last valid seq: {}", dispute.last_valid_sequence);
+        if let Some(vs) = dispute.violation_sequence {
+            tracing::warn!("  Violation seq: {}", vs);
+        }
+        tracing::warn!("  ACTION REQUIRED: Run 'recovery dispute' to participate");
+    }
+
+    // ========================================================================
+    // Request Handlers (stubs - full implementation is in CLI's nostr watch)
+    // These are placeholders for future Node-integrated handling.
+    // ========================================================================
+
+    async fn process_deposit_open_request(&self, _request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+        // TODO: Implement - for now handled by CLI's nostr watch
+        tracing::info!("deposit_open request received (not yet handled by Node)");
+        (false, None, Some("deposit_open: use 'nostr watch' CLI for now".to_string()))
+    }
+
+    async fn process_deposit_offer_request(&self, _request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+        // TODO: Implement - for now handled by CLI's nostr watch
+        tracing::info!("deposit_offer request received (not yet handled by Node)");
+        (false, None, Some("deposit_offer: use 'nostr watch' CLI for now".to_string()))
+    }
+
+    async fn process_collateral_lock_request(&self, _request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+        // TODO: Implement - for now handled by CLI's nostr watch
+        tracing::info!("collateral_lock request received (not yet handled by Node)");
+        (false, None, Some("collateral_lock: use 'nostr watch' CLI for now".to_string()))
+    }
+
+    async fn process_custody_transfer_sign_request(&self, _request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+        // TODO: Implement - for now handled by CLI's nostr watch
+        tracing::info!("custody_transfer_sign request received (not yet handled by Node)");
+        (false, None, Some("custody_transfer_sign: use 'nostr watch' CLI for now".to_string()))
+    }
+
+    async fn process_confiscation_sign_request(&self, _request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+        // TODO: Implement - for now handled by CLI's nostr watch
+        tracing::info!("confiscation_sign request received (not yet handled by Node)");
+        (false, None, Some("confiscation_sign: use 'nostr watch' CLI for now".to_string()))
+    }
+
+    async fn process_custodian_query_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+        // Get ledger
+        let (reserves_id, ledger) = match self.get_ledger_by_ledger_id(&request.ledger_id)
+            .or_else(|| self.get_ledger_by_reserves_id(&request.ledger_id))
+        {
+            Some(l) => l,
+            None => return (false, None, Some("Ledger not found".to_string())),
+        };
+
+        let custodian_hex = hex::encode(ledger.operator_key().serialize());
+
+        let result = serde_json::json!({
+            "status": "SUCCESS",
+            "custodian": custodian_hex,
+            "reserves_id": reserves_id,
+            "ledger_id": ledger.ledger_id_hex(),
+        });
+        (true, Some(result.to_string()), None)
     }
 
     /// Handle an inbound message
