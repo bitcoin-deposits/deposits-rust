@@ -46,6 +46,20 @@ get_node_seed() {
     esac
 }
 
+# Get the wallet-derived deposit secret for a node
+# This derives the key at m/84'/0'/0'/0/0 from the node's seed
+get_deposit_secret() {
+    local node=$1
+    local seed=$(get_node_seed "$node")
+    if [ -z "$seed" ]; then
+        return 1
+    fi
+    # Use deposits-bdk to derive the key (keygen with seed derives deterministically)
+    docker exec -e RUST_LOG=error "$node" deposits-bdk derive-deposit-key \
+        --seed "$seed" \
+        --network regtest 2>&1 | grep "^[0-9a-f]\{64\}$" | head -1
+}
+
 # Filter out Rust tracing log lines from output
 # Removes timestamp-prefixed log lines (preserves colors for tree visualization)
 filter_logs() {

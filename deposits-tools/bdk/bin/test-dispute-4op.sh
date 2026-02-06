@@ -468,10 +468,19 @@ lock_collateral() {
 
                 log_info "$dep_short locking collateral on $op_short's ledger..."
 
-                # Use deposits-bdk collateral lock command (derives key from seed)
-                local lock_output=$(run_bdk_cmd "$depositor" collateral lock "$ledger_id" "$deposit_amount_msats" "$COLLATERAL_LOCK_BLOCKS" 2>&1)
+                # Get the wallet-derived deposit secret for the depositor
+                local deposit_secret=$(get_deposit_secret "$depositor")
+                if [ -z "$deposit_secret" ]; then
+                    test_fail "$dep_short: could not derive deposit secret"
+                    continue
+                fi
 
-                if echo "$lock_output" | grep -q "Collateral locked\|attestation"; then
+                # Send collateral_lock request via Nostr to the operator's ledger
+                # Format: collateral_lock <secret> <amount_msats> <lock_blocks> [requesting_op]
+                local lock_output=$(run_nostr_request "$depositor" "$ledger_id" collateral_lock \
+                    "$deposit_secret" "$deposit_amount_msats" "$COLLATERAL_LOCK_BLOCKS" "$depositor_node_id" 2>&1)
+
+                if echo "$lock_output" | grep -q "success\|attestation\|locked"; then
                     local attestation_b64=$(echo "$lock_output" | grep -o 'attestation_b64:[[:space:]]*[A-Za-z0-9+/=]*' | sed 's/attestation_b64:[[:space:]]*//')
 
                     if [ -n "$attestation_b64" ]; then
@@ -650,14 +659,23 @@ post_attestations() {
             if [ "$op" != "$attester" ]; then
                 local attester_short=$(echo "$attester" | sed 's/bdk-//')
                 local attester_reserves_id=$(get_value "reserves_id_$attester")
+                local attester_node_id=$(get_value "node_id_$attester")
                 local op_ledger_id=$(get_value "ledger_id_$op")
 
                 log_info "  $attester_short locking collateral for $op_short..."
 
-                # Attester locks their deposit on op's ledger using their derived key
-                local lock_output=$(run_bdk_cmd "$attester" collateral lock "$op_ledger_id" 15000000000 500 2>&1)
+                # Get the attester's wallet-derived deposit secret
+                local deposit_secret=$(get_deposit_secret "$attester")
+                if [ -z "$deposit_secret" ]; then
+                    log_warn "$attester_short: could not derive deposit secret"
+                    continue
+                fi
 
-                if echo "$lock_output" | grep -q "Collateral locked\|attestation"; then
+                # Send collateral_lock request via Nostr to op's ledger
+                local lock_output=$(run_nostr_request "$attester" "$op_ledger_id" collateral_lock \
+                    "$deposit_secret" 15000000000 500 "$attester_node_id" 2>&1)
+
+                if echo "$lock_output" | grep -q "success\|attestation\|locked"; then
                     # Extract attestation (may be auto-recorded or returned)
                     local attestation_b64=$(echo "$lock_output" | grep -o 'attestation_b64:[[:space:]]*[A-Za-z0-9+/=]*' | sed 's/attestation_b64:[[:space:]]*//')
                     local attestation_json=""
@@ -1013,7 +1031,7 @@ reset_nostr_data() {
     docker volume rm bdk_bdk_nostr_data >/dev/null 2>&1 || true
     $DC stop bdk-alice bdk-bob bdk-charlie bdk-diana >/dev/null 2>&1 || true
     $DC rm -f bdk-alice bdk-bob bdk-charlie bdk-diana >/dev/null 2>&1 || true
-    docker volume rm bdk_bdk_alice_data bdk_bdk_bob_data bdk_bdk_charlie_data bdk_bdk_dave_data >/dev/null 2>&1 || true
+    docker volume rm bdk_bdk_alice_data bdk_bdk_bob_data bdk_bdk_charlie_data bdk_bdk_diana_data >/dev/null 2>&1 || true
     $DC up -d nostr-relay bdk-alice bdk-bob bdk-charlie bdk-diana >/dev/null 2>&1
     sleep 5
     log_success "Nostr relay and BDK nodes reset"

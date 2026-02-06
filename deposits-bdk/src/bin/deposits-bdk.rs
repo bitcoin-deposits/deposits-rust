@@ -67,6 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "nostr" => nostr_command(&args[2..]).await?,
         "recovery" => recovery_command(&args[2..]).await?,
         "keygen" => keygen(),
+        "derive-deposit-key" => derive_deposit_key(&args[2..])?,
         #[cfg(feature = "dangerous-testing")]
         "danger" => danger_command(&args[2..]).await?,
         "help" | "--help" | "-h" => print_usage(&args[0]),
@@ -91,6 +92,8 @@ COMMANDS:
     info            Show node info
     address         Generate a new receiving address
     keygen          Generate a new secp256k1 keypair for deposits
+    derive-deposit-key
+                    Derive wallet deposit secret key from seed (for collateral lock)
     reserves        Manage reserves UTXOs (create, rotate, list)
     ledger          Manage ledgers (open, list)
     partner         Manage quorum members (request, add, join, list)
@@ -436,6 +439,67 @@ fn keygen() {
 
     // Output: secret_key_hex public_key_hex
     println!("{} {}", hex::encode(secret_key.secret_bytes()), public_key);
+}
+
+/// Derive the wallet deposit secret key from seed.
+/// This matches the derivation used by deposits-wallet at m/84'/0'/0'/0/0.
+fn derive_deposit_key(args: &[String]) -> Result<(), String> {
+    let mut seed: Option<[u8; 32]> = None;
+    let mut network = Network::Signet;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--seed" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("--seed requires a value".to_string());
+                }
+                let hex_str = &args[i];
+                if hex_str.len() != 64 {
+                    return Err("Seed must be 64 hex characters".to_string());
+                }
+                let bytes = hex::decode(hex_str).map_err(|e| format!("Invalid hex: {}", e))?;
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                seed = Some(arr);
+            }
+            "--network" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("--network requires a value".to_string());
+                }
+                network = match args[i].as_str() {
+                    "mainnet" | "bitcoin" => Network::Bitcoin,
+                    "testnet" | "testnet3" => Network::Testnet,
+                    "signet" => Network::Signet,
+                    "regtest" => Network::Regtest,
+                    n => return Err(format!("Unknown network: {}", n)),
+                };
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    let seed = seed.ok_or("--seed is required")?;
+
+    // Derive the deposit key using BIP-84 path (same as wallet)
+    let secp = Secp256k1::new();
+    let xpriv = Xpriv::new_master(network, &seed)
+        .map_err(|e| format!("Failed to create master key: {}", e))?;
+
+    let deposit_path = DerivationPath::from_str("m/84'/0'/0'/0/0")
+        .map_err(|e| format!("Invalid derivation path: {}", e))?;
+
+    let deposit_xpriv = xpriv
+        .derive_priv(&secp, &deposit_path)
+        .map_err(|e| format!("Failed to derive deposit key: {}", e))?;
+
+    // Output just the secret key hex (for piping)
+    println!("{}", hex::encode(deposit_xpriv.private_key.secret_bytes()));
+
+    Ok(())
 }
 
 /// Handle reserves subcommands

@@ -4396,6 +4396,26 @@ impl Node {
                 &offer.ledger_id[..16.min(offer.ledger_id.len())]
             )))?;
 
+        // First, open the deposit if it doesn't already exist
+        // (DepositOpen creates the deposit entry in the ledger state)
+        match self.open_deposit(&reserves_id, offer.deposit_pubkey, None) {
+            Ok(_) => {
+                tracing::info!(
+                    "Opened deposit for {} in ledger {}",
+                    offer.deposit_pubkey,
+                    &reserves_id[..16.min(reserves_id.len())]
+                );
+            }
+            Err(e) => {
+                // If deposit already exists, that's fine - continue to credit
+                let err_msg = format!("{}", e);
+                if !err_msg.contains("already exists") {
+                    return Err(e);
+                }
+                tracing::debug!("Deposit already exists, proceeding to credit");
+            }
+        }
+
         let new_balance = self.credit_deposit_onchain(
             &reserves_id,
             offer.deposit_pubkey,
