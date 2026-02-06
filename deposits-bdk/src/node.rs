@@ -433,6 +433,7 @@ impl Node {
         let (success, result, error) = match request.action.as_str() {
             "deposit_open" => self.process_deposit_open_request(&request).await,
             "deposit_offer" => self.process_deposit_offer_request(&request).await,
+            "withdraw" => self.process_withdraw_request(&request).await,
             "collateral_lock" => self.process_collateral_lock_request(&request).await,
             "custody_transfer_sign" => self.process_custody_transfer_sign_request(&request).await,
             "confiscation_sign" => self.process_confiscation_sign_request(&request).await,
@@ -2510,6 +2511,124 @@ impl Node {
         // TODO: Implement - for now handled by CLI's nostr watch
         tracing::info!("deposit_offer request received (not yet handled by Node)");
         (false, None, Some("deposit_offer: use 'nostr watch' CLI for now".to_string()))
+    }
+
+    /// Process a withdrawal request from a depositor
+    ///
+    /// Params:
+    /// - deposit_pubkey: hex-encoded depositor's pubkey
+    /// - address: destination Bitcoin address
+    /// - amount_sats: amount to withdraw
+    /// - fee_sats: fee for the withdrawal transaction
+    /// - nonce: hex-encoded 32-byte nonce
+    /// - signature: hex-encoded Schnorr signature over withdrawal message
+    async fn process_withdraw_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+        use bitcoin::secp256k1::{Secp256k1, schnorr::Signature, Message};
+        use bitcoin::hashes::{sha256, Hash};
+
+        tracing::info!("Processing withdraw request for ledger {}...",
+            &request.ledger_id[..16.min(request.ledger_id.len())]);
+
+        // Extract parameters
+        let deposit_pubkey_hex = match request.params.get("deposit_pubkey").and_then(|v| v.as_str()) {
+            Some(p) => p,
+            None => return (false, None, Some("Missing deposit_pubkey".to_string())),
+        };
+        let address = match request.params.get("address").and_then(|v| v.as_str()) {
+            Some(a) => a,
+            None => return (false, None, Some("Missing address".to_string())),
+        };
+        let amount_sats = match request.params.get("amount_sats").and_then(|v| v.as_u64()) {
+            Some(a) => a,
+            None => return (false, None, Some("Missing amount_sats".to_string())),
+        };
+        let fee_sats = match request.params.get("fee_sats").and_then(|v| v.as_u64()) {
+            Some(f) => f,
+            None => return (false, None, Some("Missing fee_sats".to_string())),
+        };
+        let nonce_hex = match request.params.get("nonce").and_then(|v| v.as_str()) {
+            Some(n) => n,
+            None => return (false, None, Some("Missing nonce".to_string())),
+        };
+        let signature_hex = match request.params.get("signature").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => return (false, None, Some("Missing signature".to_string())),
+        };
+
+        // Parse deposit pubkey
+        let deposit_pubkey = match hex::decode(deposit_pubkey_hex)
+            .ok()
+            .and_then(|bytes| bitcoin::secp256k1::PublicKey::from_slice(&bytes).ok())
+        {
+            Some(pk) => pk,
+            None => return (false, None, Some("Invalid deposit_pubkey".to_string())),
+        };
+
+        // Parse nonce
+        let nonce: [u8; 32] = match hex::decode(nonce_hex) {
+            Ok(bytes) if bytes.len() == 32 => {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                arr
+            }
+            _ => return (false, None, Some("Invalid nonce (must be 32 bytes hex)".to_string())),
+        };
+
+        // Parse signature
+        let signature = match hex::decode(signature_hex)
+            .ok()
+            .and_then(|bytes| Signature::from_slice(&bytes).ok())
+        {
+            Some(sig) => sig,
+            None => return (false, None, Some("Invalid signature".to_string())),
+        };
+
+        // Verify signature
+        // Message format: "withdraw:{address}:{amount_sats}:{fee_sats}:{nonce_hex}"
+        let msg_str = format!("withdraw:{}:{}:{}:{}", address, amount_sats, fee_sats, nonce_hex);
+        let msg_hash = sha256::Hash::hash(msg_str.as_bytes());
+        let secp = Secp256k1::new();
+        let msg = Message::from_digest(*msg_hash.as_byte_array());
+        let x_only = deposit_pubkey.x_only_public_key().0;
+
+        if secp.verify_schnorr(&signature, &msg, &x_only).is_err() {
+            return (false, None, Some("Invalid signature".to_string()));
+        }
+
+        // Find the ledger
+        let (reserves_id, _ledger) = match self.get_ledger_by_ledger_id(&request.ledger_id)
+            .or_else(|| self.get_ledger_by_reserves_id(&request.ledger_id))
+        {
+            Some(l) => l,
+            None => return (false, None, Some("Ledger not found".to_string())),
+        };
+
+        // Lock the withdrawal
+        match self.lock_withdrawal(
+            &reserves_id,
+            deposit_pubkey,
+            address.to_string(),
+            amount_sats,
+            fee_sats,
+            nonce,
+            signature.serialize(),
+            None, // no memo
+        ) {
+            Ok(lock_result) => {
+                let withdrawal_id = lock_result.withdrawal.withdrawal_id;
+                let result = serde_json::json!({
+                    "status": "locked",
+                    "withdrawal_id": hex::encode(withdrawal_id),
+                    "message": "Withdrawal locked. Will be broadcast after lock period.",
+                });
+                tracing::info!("Withdrawal locked: {}", hex::encode(&withdrawal_id[..8]));
+                (true, Some(result.to_string()), None)
+            }
+            Err(e) => {
+                tracing::warn!("Withdrawal failed: {}", e);
+                (false, None, Some(format!("Withdrawal failed: {}", e)))
+            }
+        }
     }
 
     async fn process_collateral_lock_request(&self, _request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {

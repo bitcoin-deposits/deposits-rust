@@ -537,9 +537,14 @@ async fn show_balance(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 
 /// Withdraw from a deposit
 async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use bitcoin::hashes::{sha256, Hash};
+    use bitcoin::secp256k1::rand::rngs::OsRng;
+    use bitcoin::secp256k1::rand::RngCore;
+
     let mut ledger_id: Option<String> = None;
     let mut amount_sats: Option<u64> = None;
     let mut destination: Option<String> = None;
+    let mut fee_sats: u64 = 500; // Default fee
     let mut config_args = Vec::new();
 
     let mut i = 0;
@@ -547,6 +552,10 @@ async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         match args[i].as_str() {
             "--to" if i + 1 < args.len() => {
                 destination = Some(args[i + 1].clone());
+                i += 1;
+            }
+            "--fee" if i + 1 < args.len() => {
+                fee_sats = args[i + 1].parse()?;
                 i += 1;
             }
             s if s.starts_with("--") => {
@@ -571,20 +580,104 @@ async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         "Usage: deposits-wallet withdraw <ledger_id> <amount_sats> --to <address> --relay <url>"
     )?;
     let amount_sats = amount_sats.ok_or("Missing amount")?;
-    let _destination = destination.ok_or("Missing destination. Use --to <address>")?;
+    let destination = destination.ok_or("Missing destination. Use --to <address>")?;
     let config = parse_config(&config_args)?;
 
     if config.relays.is_empty() {
         return Err("No relay specified. Use --relay <url>".into());
     }
 
-    println!("Withdrawal request");
+    let secret_key = derive_secret_key(&config.seed, config.network)?;
+    let secp = Secp256k1::new();
+    let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &secret_key);
+    let our_pubkey = keypair.public_key();
+
+    // Generate nonce
+    let mut rng = OsRng;
+    let mut nonce = [0u8; 32];
+    rng.fill_bytes(&mut nonce);
+    let nonce_hex = hex::encode(&nonce);
+
+    // Sign the withdrawal message
+    // Format: "withdraw:{address}:{amount_sats}:{fee_sats}:{nonce_hex}"
+    let msg_str = format!("withdraw:{}:{}:{}:{}", destination, amount_sats, fee_sats, nonce_hex);
+    let msg_hash = sha256::Hash::hash(msg_str.as_bytes());
+    let msg = bitcoin::secp256k1::Message::from_digest(*msg_hash.as_byte_array());
+    let signature = secp.sign_schnorr(&msg, &keypair);
+
+    println!("Withdrawal Request");
+    println!("==================");
     println!("  Ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
     println!("  Amount: {} sats", amount_sats);
+    println!("  Fee: {} sats", fee_sats);
+    println!("  To: {}", destination);
     println!();
-    println!("(Withdrawal implementation pending - use deposits-bdk for now)");
 
-    Ok(())
+    let transport = NostrTransportBuilder::new(secret_key)
+        .relay(&config.relays[0])
+        .build()
+        .await?;
+
+    let request_params = serde_json::json!({
+        "deposit_pubkey": hex::encode(our_pubkey.serialize()),
+        "address": destination,
+        "amount_sats": amount_sats,
+        "fee_sats": fee_sats,
+        "nonce": nonce_hex,
+        "signature": hex::encode(signature.serialize()),
+    });
+
+    println!("Sending signed withdrawal request...");
+
+    let request_id = transport.send_ledger_request(
+        &ledger_id,
+        "withdraw",
+        request_params,
+    ).await?;
+
+    println!("  Request ID: {}...", &request_id[..16]);
+    println!();
+
+    // Poll for response
+    println!("Waiting for operator response...");
+
+    let max_attempts = 30;
+    let poll_interval = std::time::Duration::from_secs(2);
+
+    for _attempt in 1..=max_attempts {
+        tokio::time::sleep(poll_interval).await;
+
+        let responses = transport.fetch_responses_since(
+            nostr_sdk::Timestamp::now() - 120
+        ).await?;
+
+        for response in responses {
+            if response.request_id == request_id {
+                if response.success {
+                    println!("Withdrawal accepted!");
+                    if let Some(result) = &response.result {
+                        if let Some(withdrawal_id) = result.get("withdrawal_id").and_then(|v| v.as_str()) {
+                            println!("  Withdrawal ID: {}", withdrawal_id);
+                        }
+                        if let Some(message) = result.get("message").and_then(|v| v.as_str()) {
+                            println!("  {}", message);
+                        }
+                    }
+                    return Ok(());
+                } else {
+                    let error = response.error.as_deref().unwrap_or("Unknown error");
+                    return Err(format!("Withdrawal failed: {}", error).into());
+                }
+            }
+        }
+
+        print!(".");
+        use std::io::Write;
+        std::io::stdout().flush()?;
+    }
+
+    println!();
+    Err("Timeout waiting for operator response".into())
 }
 
 /// Show transaction history for a deposit
