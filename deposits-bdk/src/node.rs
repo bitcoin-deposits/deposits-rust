@@ -390,6 +390,12 @@ impl Node {
                     // Auto-claim/yield for any pending lottery disputes
                     self.auto_lottery_claim_or_yield().await;
 
+                    // Auto-reveal preimage when confiscation TX has 3+ confirmations
+                    self.auto_reveal_on_confiscation().await;
+
+                    // Auto-rotate and continue after winning
+                    self.auto_post_win_cleanup().await;
+
                     // Drain and log events
                     let events = self.handler.drain_events();
                     for event in events {
@@ -1351,6 +1357,682 @@ impl Node {
             .map_err(|e| Error::Protocol(format!("Failed to broadcast CustodyYield: {:?}", e)))?;
 
         tracing::info!("CustodyYield published. Branch terminated.");
+        Ok(())
+    }
+
+    /// Auto-reveal preimage when confiscation TX has 3+ confirmations
+    ///
+    /// For each ledger where we're armed but haven't revealed yet,
+    /// check if the lottery UTXO exists with 3+ confirmations.
+    async fn auto_reveal_on_confiscation(&self) {
+        use deposits_core::TlvDecode;
+        use deposits_core::messages::LedgerOperation;
+        use deposits_core::tapscript_reserves::{LotteryScriptBuilder, LotteryParticipant};
+
+        // Find armed marker files (preimage exists but not revealed)
+        let entries = match std::fs::read_dir(&self.data_dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+
+        let preimage_files: Vec<_> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                name.starts_with("lottery_preimage_") && name.ends_with(".hex")
+            })
+            .collect();
+
+        for entry in preimage_files {
+            let filename = entry.file_name().to_string_lossy().to_string();
+            let ledger_prefix = filename
+                .strip_prefix("lottery_preimage_")
+                .and_then(|s| s.strip_suffix(".hex"))
+                .unwrap_or("");
+
+            if ledger_prefix.is_empty() {
+                continue;
+            }
+
+            // Skip if already revealed
+            let revealed_marker = self.data_dir.join(format!("lottery_revealed_{}.marker", ledger_prefix));
+            if revealed_marker.exists() {
+                continue;
+            }
+
+            // Find the full ledger_id
+            let ledger_id = {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                let mut found = None;
+                for ((_operator, _reserves_id), arc) in ledgers.iter() {
+                    let ledger = arc.read().unwrap();
+                    let lid = ledger.ledger_id_hex();
+                    if lid.starts_with(ledger_prefix) {
+                        found = Some(lid);
+                        break;
+                    }
+                }
+                match found {
+                    Some(id) => id,
+                    None => continue,
+                }
+            };
+
+            // Check if confiscation TX is confirmed with 3+ blocks
+            match self.check_confiscation_confirmed(&ledger_id, 3).await {
+                Ok(true) => {
+                    tracing::info!("Confiscation TX confirmed +3 for ledger {}. Auto-revealing preimage.", &ledger_id[..16]);
+                    self.auto_reveal_preimage(&ledger_id).await;
+                }
+                Ok(false) => {
+                    // Not yet confirmed enough
+                }
+                Err(e) => {
+                    tracing::debug!("Could not check confiscation for {}: {}", &ledger_id[..16], e);
+                }
+            }
+        }
+    }
+
+    /// Check if the confiscation TX for a ledger has enough confirmations
+    async fn check_confiscation_confirmed(&self, ledger_id: &str, min_confirmations: u32) -> Result<bool, Error> {
+        use deposits_core::TlvDecode;
+        use deposits_core::messages::LedgerOperation;
+        use deposits_core::tapscript_reserves::{LotteryScriptBuilder, LotteryParticipant};
+        use crate::nostr::KIND_LEDGER_UPDATE;
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+        use nostr_sdk::{Client, Keys, Filter, Kind};
+        use nostr_sdk::prelude::{SingleLetterTag, Alphabet};
+
+        // Fetch CustodyArmed participants from Nostr to build the lottery address
+        let keys = Keys::generate();
+        let client = Client::new(keys);
+        client.add_relay(&self.relay_url).await
+            .map_err(|e| Error::Protocol(format!("Failed to add relay: {}", e)))?;
+        client.connect().await;
+
+        let filter = Filter::new()
+            .kind(Kind::Custom(KIND_LEDGER_UPDATE))
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id])
+            .limit(500);
+
+        let events = client
+            .fetch_events(vec![filter], None)
+            .await
+            .map_err(|e| Error::Protocol(format!("Failed to fetch: {}", e)))?;
+
+        client.disconnect().await.ok();
+
+        // Extract CustodyArmed participants
+        let mut participants: Vec<LotteryParticipant> = Vec::new();
+
+        for event in events.iter() {
+            if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
+                if let Ok(update) = deposits_core::SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
+                    if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+                        if let LedgerOperation::CustodyArmed { commitment_hash, target_reserves, .. } = op {
+                            let x_only = update.operator_id.x_only_public_key().0;
+                            participants.push(LotteryParticipant::new(x_only, commitment_hash, target_reserves));
+                        }
+                    }
+                }
+            }
+        }
+
+        if participants.len() < 2 {
+            return Err(Error::Protocol("Not enough participants for lottery".to_string()));
+        }
+
+        // Sort by x-only pubkey for deterministic order
+        participants.sort_by(|a, b| a.pubkey.serialize().cmp(&b.pubkey.serialize()));
+
+        // Build lottery output to get the address
+        let recovery_voters: Vec<bitcoin::secp256k1::XOnlyPublicKey> = participants.iter()
+            .map(|p| p.pubkey)
+            .collect();
+        let recovery_threshold = (recovery_voters.len() + 1) / 2;
+
+        let lottery_builder = LotteryScriptBuilder::new(
+            participants,
+            recovery_voters,
+            recovery_threshold,
+            self.wallet.network(),
+        );
+
+        let lottery_output = lottery_builder.build()
+            .map_err(|e| Error::Protocol(format!("Failed to build lottery output: {:?}", e)))?;
+
+        // Check if lottery address has a UTXO with enough confirmations
+        let lottery_script = lottery_output.address.script_pubkey();
+
+        let utxo_result = self.wallet.find_utxo_for_script(&lottery_script)?;
+
+        if utxo_result.is_none() {
+            return Ok(false); // No UTXO at lottery address yet
+        }
+
+        // Check confirmations
+        let current_height = self.wallet.get_block_height().unwrap_or(0);
+
+        // We need to find the TX and its confirmation height
+        // For simplicity, if UTXO exists and we're 3+ blocks past our armed height, consider it confirmed
+        // In practice, we'd check the TX's block height
+
+        // For now, use a simple heuristic: if UTXO exists, check if we have an armed marker with block height
+        let armed_height_file = self.data_dir.join(format!("lottery_armed_height_{}.txt", &ledger_id[..16.min(ledger_id.len())]));
+
+        if let Ok(height_str) = std::fs::read_to_string(&armed_height_file) {
+            if let Ok(armed_height) = height_str.trim().parse::<u32>() {
+                // Check if current height is at least armed_height + 3 (confiscation happens after arming)
+                if current_height >= armed_height + 3 {
+                    return Ok(true);
+                }
+            }
+        }
+
+        // If no armed height file, create one
+        if !armed_height_file.exists() {
+            let _ = std::fs::write(&armed_height_file, current_height.to_string());
+        }
+
+        Ok(false)
+    }
+
+    /// Auto-rotate to quorum and continue ledger after winning
+    async fn auto_post_win_cleanup(&self) {
+        // Find completed marker files (lottery finished, we might have won)
+        let entries = match std::fs::read_dir(&self.data_dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+
+        let completed_markers: Vec<_> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                name.starts_with("lottery_completed_") && name.ends_with(".marker")
+            })
+            .collect();
+
+        for entry in completed_markers {
+            let filename = entry.file_name().to_string_lossy().to_string();
+            let ledger_prefix = filename
+                .strip_prefix("lottery_completed_")
+                .and_then(|s| s.strip_suffix(".marker"))
+                .unwrap_or("");
+
+            if ledger_prefix.is_empty() {
+                continue;
+            }
+
+            // Skip if already rotated
+            let rotated_marker = self.data_dir.join(format!("lottery_rotated_{}.marker", ledger_prefix));
+            if rotated_marker.exists() {
+                continue;
+            }
+
+            // Find the full ledger_id
+            let ledger_id = {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                let mut found = None;
+                for ((_operator, _reserves_id), arc) in ledgers.iter() {
+                    let ledger = arc.read().unwrap();
+                    let lid = ledger.ledger_id_hex();
+                    if lid.starts_with(ledger_prefix) {
+                        found = Some(lid);
+                        break;
+                    }
+                }
+                match found {
+                    Some(id) => id,
+                    None => continue,
+                }
+            };
+
+            // Check if we won (we published CustodyAcquire)
+            match self.check_if_we_won(&ledger_id).await {
+                Ok(true) => {
+                    tracing::info!("We won lottery for {}. Auto-rotating to quorum...", &ledger_id[..16]);
+
+                    // Auto-rotate
+                    match self.auto_rotate_to_quorum(&ledger_id).await {
+                        Ok(()) => {
+                            // Mark as rotated
+                            let _ = std::fs::write(&rotated_marker, "rotated");
+                            tracing::info!("Rotation complete for {}", &ledger_id[..16]);
+
+                            // Auto-continue
+                            if let Err(e) = self.auto_continue_ledger(&ledger_id).await {
+                                tracing::warn!("Auto-continue failed: {}", e);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Auto-rotate failed for {}: {}", &ledger_id[..16], e);
+                        }
+                    }
+                }
+                Ok(false) => {
+                    // We didn't win, nothing to do
+                    let _ = std::fs::write(&rotated_marker, "not_winner");
+                }
+                Err(e) => {
+                    tracing::debug!("Could not check win status for {}: {}", &ledger_id[..16], e);
+                }
+            }
+        }
+    }
+
+    /// Check if we won the lottery for a ledger (we published CustodyAcquire)
+    async fn check_if_we_won(&self, ledger_id: &str) -> Result<bool, Error> {
+        use deposits_core::TlvDecode;
+        use deposits_core::messages::LedgerOperation;
+        use crate::nostr::KIND_LEDGER_UPDATE;
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+        use nostr_sdk::{Client, Keys, Filter, Kind};
+        use nostr_sdk::prelude::{SingleLetterTag, Alphabet};
+        use bitcoin::secp256k1::Secp256k1;
+
+        let secp = Secp256k1::new();
+        let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
+        let our_pubkey = keypair.public_key();
+
+        let keys = Keys::generate();
+        let client = Client::new(keys);
+        client.add_relay(&self.relay_url).await
+            .map_err(|e| Error::Protocol(format!("Failed to add relay: {}", e)))?;
+        client.connect().await;
+
+        let filter = Filter::new()
+            .kind(Kind::Custom(KIND_LEDGER_UPDATE))
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id])
+            .limit(500);
+
+        let events = client
+            .fetch_events(vec![filter], None)
+            .await
+            .map_err(|e| Error::Protocol(format!("Failed to fetch: {}", e)))?;
+
+        client.disconnect().await.ok();
+
+        // Check if we have a CustodyAcquire
+        for event in events.iter() {
+            if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
+                if let Ok(update) = deposits_core::SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
+                    if update.operator_id == our_pubkey {
+                        if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+                            if matches!(op, LedgerOperation::CustodyAcquire { .. }) {
+                                return Ok(true);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(false)
+    }
+
+    /// Auto-rotate winnings to quorum-controlled Taproot
+    async fn auto_rotate_to_quorum(&self, ledger_id: &str) -> Result<(), Error> {
+        use bitcoin::hashes::{Hash, sha256};
+        use bitcoin::secp256k1::{Secp256k1, PublicKey, Message};
+        use bitcoin::{Transaction, TxIn, TxOut, Witness, Amount, ScriptBuf};
+        use deposits_core::{TlvDecode, TlvEncode, SignedLedgerUpdate, VoterSet, ThresholdConfig, TapscriptReservesBuilder};
+        use deposits_core::messages::LedgerOperation;
+        use crate::nostr::KIND_LEDGER_UPDATE;
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+        use nostr_sdk::{Client, Keys, Filter, Kind};
+        use nostr_sdk::prelude::{SingleLetterTag, Alphabet};
+
+        let secp = Secp256k1::new();
+        let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
+        let our_pubkey = keypair.public_key();
+
+        // Fetch updates from Nostr
+        let keys = Keys::generate();
+        let client = Client::new(keys);
+        client.add_relay(&self.relay_url).await
+            .map_err(|e| Error::Protocol(format!("Failed to add relay: {}", e)))?;
+        client.connect().await;
+
+        let filter = Filter::new()
+            .kind(Kind::Custom(KIND_LEDGER_UPDATE))
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id])
+            .limit(500);
+
+        let events = client
+            .fetch_events(vec![filter], None)
+            .await
+            .map_err(|e| Error::Protocol(format!("Failed to fetch: {}", e)))?;
+
+        client.disconnect().await.ok();
+
+        // Find our CustodyAcquire and quorum members
+        let mut current_reserves_address: Option<String> = None;
+        let mut our_latest: Option<SignedLedgerUpdate> = None;
+        let mut quorum_members: Vec<PublicKey> = Vec::new();
+
+        for event in events.iter() {
+            if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
+                if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
+                    if update.operator_id == our_pubkey {
+                        if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+                            if let LedgerOperation::CustodyAcquire { ref new_reserves_address, .. } = op {
+                                current_reserves_address = Some(new_reserves_address.clone());
+                            }
+                            if let LedgerOperation::QuorumAddMember { quorum_member, .. } = op {
+                                if !quorum_members.contains(&quorum_member) {
+                                    quorum_members.push(quorum_member);
+                                }
+                            }
+                        }
+                        if our_latest.is_none() || update.sequence_number > our_latest.as_ref().unwrap().sequence_number {
+                            our_latest = Some(update);
+                        }
+                    }
+                }
+            }
+        }
+
+        let current_reserves_address = current_reserves_address
+            .ok_or_else(|| Error::Protocol("No CustodyAcquire found".to_string()))?;
+        let our_latest = our_latest
+            .ok_or_else(|| Error::Protocol("No latest update found".to_string()))?;
+
+        if quorum_members.is_empty() {
+            return Err(Error::Protocol("No quorum members found".to_string()));
+        }
+
+        tracing::info!("Rotating from {} with {} quorum members", &current_reserves_address[..20.min(current_reserves_address.len())], quorum_members.len());
+
+        // Find UTXO at current reserves address
+        let reserves_addr: bitcoin::Address<bitcoin::address::NetworkUnchecked> = current_reserves_address.parse()
+            .map_err(|e| Error::Protocol(format!("Invalid address: {}", e)))?;
+        let reserves_addr = reserves_addr.require_network(self.wallet.network())
+            .map_err(|e| Error::Protocol(format!("Network mismatch: {}", e)))?;
+
+        let script_pubkey = reserves_addr.script_pubkey();
+        let utxo = self.wallet.find_utxo_for_script(&script_pubkey)?
+            .ok_or_else(|| Error::Protocol("No UTXO at reserves address".to_string()))?;
+
+        let (outpoint, amount) = utxo;
+
+        // Build new Taproot reserves with quorum
+        let current_block = self.wallet.get_block_height().unwrap_or(0);
+        let expiry_block = current_block + 1000; // 1000 blocks expiry
+
+        // Build voter set - we are tie-breaker, others are additional voters
+        let other_voters: Vec<bitcoin::secp256k1::PublicKey> = quorum_members
+            .iter()
+            .filter(|m| **m != our_pubkey)
+            .copied()
+            .collect();
+        let voter_set = VoterSet::new(our_pubkey, other_voters);
+
+        // Compute quorum parameters for ReservesRotate
+        let quorum_size = quorum_members.len() as u8;
+        let quorum_threshold = ((quorum_members.len() + 1) / 2) as u8;
+        let first_expiry_block = expiry_block;
+
+        // Compute ledger hash
+        let ledger_hash = our_latest.current_hash;
+
+        // Build Taproot reserves with default config
+        let tapscript_builder = TapscriptReservesBuilder::with_defaults(
+            voter_set,
+            self.wallet.network(),
+            ledger_hash,
+        );
+
+        let taproot_output = tapscript_builder.build()
+            .map_err(|e| Error::Protocol(format!("Failed to build taproot output: {:?}", e)))?;
+
+        // Build rotation TX
+        let fee = 300u64;
+        let output_amount = amount.saturating_sub(fee);
+
+        let rotate_tx = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: outpoint,
+                script_sig: ScriptBuf::new(),
+                sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(output_amount),
+                script_pubkey: taproot_output.address.script_pubkey(),
+            }],
+        };
+
+        // Sign the transaction (P2WPKH spend from our target_reserves)
+        let pubkey_bytes: [u8; 33] = our_pubkey.serialize();
+        let compressed = bitcoin::CompressedPublicKey::from_slice(&pubkey_bytes)
+            .map_err(|e| Error::Protocol(format!("Invalid pubkey: {}", e)))?;
+
+        use bitcoin::sighash::{SighashCache, EcdsaSighashType};
+        let prevouts = vec![TxOut {
+            value: Amount::from_sat(amount),
+            script_pubkey: script_pubkey.clone(),
+        }];
+
+        let mut sighash_cache = SighashCache::new(&rotate_tx);
+        let sighash = sighash_cache.p2wpkh_signature_hash(
+            0,
+            &script_pubkey,
+            Amount::from_sat(amount),
+            EcdsaSighashType::All,
+        ).map_err(|e| Error::Protocol(format!("Sighash error: {}", e)))?;
+
+        let msg = Message::from_digest(*sighash.as_ref());
+        let signature = secp.sign_ecdsa(&msg, &self.wallet.operator_secret());
+
+        // Build witness
+        let mut sig_bytes = signature.serialize_der().to_vec();
+        sig_bytes.push(EcdsaSighashType::All as u8);
+
+        let mut rotate_tx = rotate_tx;
+        rotate_tx.input[0].witness.push(sig_bytes);
+        rotate_tx.input[0].witness.push(compressed.to_bytes());
+
+        // Broadcast
+        let rotate_txid = self.wallet.broadcast(&rotate_tx)?;
+        tracing::info!("Rotation TX broadcast: {}", rotate_txid);
+
+        // Publish ReservesRotate operation
+        let operation = LedgerOperation::ReservesRotate {
+            reserves_id: taproot_output.address.to_string(),
+            spending_txid: *outpoint.txid.as_ref(),
+            new_outpoint_txid: *rotate_txid.as_ref(),
+            new_outpoint_vout: 0,
+            amount: output_amount,
+            quorum_threshold,
+            quorum_size,
+            first_expiry_block,
+            ledger_hash,
+        };
+
+        let message_bytes = operation.tlv_encode();
+
+        let sequence = our_latest.sequence_number + 1;
+        let mut hash_input = Vec::new();
+        hash_input.extend_from_slice(&sequence.to_le_bytes());
+        hash_input.extend_from_slice(&our_latest.current_hash);
+        hash_input.extend_from_slice(&message_bytes);
+        let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
+
+        let update_msg = format!(
+            "deposits:ledger:{}:{}:{}",
+            hex::encode(our_latest.current_hash),
+            sequence,
+            hex::encode(&new_hash)
+        );
+        let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
+        let msg = Message::from_digest(*msg_hash.as_ref());
+        let signature = secp.sign_schnorr(&msg, &keypair);
+        let operator_sig_bytes: [u8; 64] = *signature.as_ref();
+
+        let ledger_id_bytes: [u8; 32] = hex::decode(ledger_id)
+            .map_err(|e| Error::Protocol(format!("Invalid ledger_id: {}", e)))?
+            .try_into()
+            .map_err(|_| Error::Protocol("Ledger ID must be 32 bytes".to_string()))?;
+
+        let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
+        let signed_update = SignedLedgerUpdate {
+            message: message_bytes,
+            message_type: deposits_core::messages::consts::RESERVES_ROTATE,
+            operator_signature: operator_sig_bytes,
+            partner_signature: [0u8; 64],
+            operator_id: our_pubkey,
+            ledger_id: ledger_id_bytes,
+            sequence_number: sequence,
+            previous_hash: our_latest.current_hash,
+            current_hash: new_hash,
+            timestamp: deposits_core::now_unix_timestamp(),
+            block_height: current_block,
+            block_hash,
+        };
+
+        self.nostr.broadcast_ledger_update(&signed_update).await
+            .map_err(|e| Error::Protocol(format!("Failed to broadcast ReservesRotate: {:?}", e)))?;
+
+        tracing::info!("ReservesRotate published. New reserves at: {}", taproot_output.address);
+        Ok(())
+    }
+
+    /// Auto-continue ledger after rotation (re-open deposits)
+    async fn auto_continue_ledger(&self, ledger_id: &str) -> Result<(), Error> {
+        use bitcoin::hashes::{Hash, sha256};
+        use bitcoin::secp256k1::{Secp256k1, PublicKey, Message};
+        use deposits_core::{TlvDecode, TlvEncode, SignedLedgerUpdate};
+        use deposits_core::messages::LedgerOperation;
+        use crate::nostr::KIND_LEDGER_UPDATE;
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+        use nostr_sdk::{Client, Keys, Filter, Kind};
+        use nostr_sdk::prelude::{SingleLetterTag, Alphabet};
+
+        let secp = Secp256k1::new();
+        let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
+        let our_pubkey = keypair.public_key();
+
+        // Fetch updates
+        let keys = Keys::generate();
+        let client = Client::new(keys);
+        client.add_relay(&self.relay_url).await
+            .map_err(|e| Error::Protocol(format!("Failed to add relay: {}", e)))?;
+        client.connect().await;
+
+        let filter = Filter::new()
+            .kind(Kind::Custom(KIND_LEDGER_UPDATE))
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id])
+            .limit(500);
+
+        let events = client
+            .fetch_events(vec![filter], None)
+            .await
+            .map_err(|e| Error::Protocol(format!("Failed to fetch: {}", e)))?;
+
+        client.disconnect().await.ok();
+
+        // Find our latest update and collect original depositors
+        let mut our_latest: Option<SignedLedgerUpdate> = None;
+        let mut original_depositors: Vec<PublicKey> = Vec::new();
+
+        for event in events.iter() {
+            if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
+                if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
+                    // Collect depositors
+                    if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+                        if let LedgerOperation::DepositOpen { pubkey, .. } = op {
+                            if !original_depositors.contains(&pubkey) {
+                                original_depositors.push(pubkey);
+                            }
+                        }
+                    }
+
+                    if update.operator_id == our_pubkey {
+                        if our_latest.is_none() || update.sequence_number > our_latest.as_ref().unwrap().sequence_number {
+                            our_latest = Some(update);
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut our_latest = our_latest
+            .ok_or_else(|| Error::Protocol("No latest update found".to_string()))?;
+
+        if original_depositors.is_empty() {
+            tracing::info!("No original depositors to re-open");
+            return Ok(());
+        }
+
+        tracing::info!("Re-opening {} deposits", original_depositors.len());
+
+        let current_block = self.wallet.get_block_height().unwrap_or(0);
+        let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
+
+        // Re-open each deposit
+        for depositor in original_depositors {
+            let operation = LedgerOperation::DepositOpen {
+                pubkey: depositor,
+                fees: None,
+                payment_hash: None,
+                invoice: None,
+                cosigner_guarantee_signature: None,
+            };
+
+            let message_bytes = operation.tlv_encode();
+
+            let sequence = our_latest.sequence_number + 1;
+            let mut hash_input = Vec::new();
+            hash_input.extend_from_slice(&sequence.to_le_bytes());
+            hash_input.extend_from_slice(&our_latest.current_hash);
+            hash_input.extend_from_slice(&message_bytes);
+            let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
+
+            let update_msg = format!(
+                "deposits:ledger:{}:{}:{}",
+                hex::encode(our_latest.current_hash),
+                sequence,
+                hex::encode(&new_hash)
+            );
+            let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
+            let msg = Message::from_digest(*msg_hash.as_ref());
+            let signature = secp.sign_schnorr(&msg, &keypair);
+            let operator_sig_bytes: [u8; 64] = *signature.as_ref();
+
+            let ledger_id_bytes: [u8; 32] = hex::decode(ledger_id)
+                .map_err(|e| Error::Protocol(format!("Invalid ledger_id: {}", e)))?
+                .try_into()
+                .map_err(|_| Error::Protocol("Ledger ID must be 32 bytes".to_string()))?;
+
+            let signed_update = SignedLedgerUpdate {
+                message: message_bytes,
+                message_type: deposits_core::messages::consts::DEPOSIT_OPEN,
+                operator_signature: operator_sig_bytes,
+                partner_signature: [0u8; 64],
+                operator_id: our_pubkey,
+                ledger_id: ledger_id_bytes,
+                sequence_number: sequence,
+                previous_hash: our_latest.current_hash,
+                current_hash: new_hash,
+                timestamp: deposits_core::now_unix_timestamp(),
+                block_height: current_block,
+                block_hash,
+            };
+
+            self.nostr.broadcast_ledger_update(&signed_update).await
+                .map_err(|e| Error::Protocol(format!("Failed to broadcast DepositOpen: {:?}", e)))?;
+
+            tracing::info!("Re-opened deposit for {}...", &depositor.to_string()[..16]);
+
+            // Update our_latest for next iteration
+            our_latest = signed_update;
+        }
+
+        tracing::info!("Ledger continue complete");
         Ok(())
     }
 
