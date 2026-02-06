@@ -466,7 +466,7 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     // Send deposit_offer request
     let request_params = serde_json::json!({
-        "pubkey": hex::encode(our_pubkey.serialize()),
+        "deposit_pubkey": hex::encode(our_pubkey.serialize()),
         "amount_sats": amount_sats,
     });
 
@@ -525,6 +525,7 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
                                 "alias": final_alias,
                                 "offer_id": offer_id,
                                 "ledger_id": ledger_id,
+                                "deposit_pubkey": hex::encode(our_pubkey.serialize()),
                                 "amount_sats": amount_sats,
                                 "status": "pending",
                                 "created_at": Utc::now().to_rfc3339(),
@@ -625,7 +626,7 @@ async fn add_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     // Send deposit_offer request for existing deposit
     let request_params = serde_json::json!({
-        "pubkey": pubkey_hex,
+        "deposit_pubkey": pubkey_hex,
         "amount_sats": amount_sats,
     });
 
