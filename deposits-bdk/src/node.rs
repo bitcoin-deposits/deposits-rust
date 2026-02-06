@@ -362,6 +362,9 @@ impl Node {
                         tracing::warn!("Wallet sync failed: {}", e);
                     }
 
+                    // Auto-complete funded deposits
+                    self.auto_complete_deposits().await;
+
                     // Drain and log events
                     let events = self.handler.drain_events();
                     for event in events {
@@ -494,6 +497,92 @@ impl Node {
             "ledger_id": ledger.ledger_id_hex(),
         });
         (true, Some(result.to_string()), None)
+    }
+
+    // ========================================================================
+    // Auto-Response Tasks
+    // ========================================================================
+
+    /// Auto-complete deposits that have been funded on-chain
+    async fn auto_complete_deposits(&self) {
+        use deposits_core::types::DepositOfferStatus;
+
+        let offers = self.list_deposit_offers();
+        let pending: Vec<_> = offers.iter()
+            .filter(|(_, status)| matches!(status, DepositOfferStatus::Pending))
+            .collect();
+
+        if pending.is_empty() {
+            return;
+        }
+
+        for (offer, _) in pending {
+            let offer_id = offer.offer_id;
+
+            // Check if funded
+            match self.check_deposit_offer_funding(&offer_id) {
+                Ok(Some((txid, amount_sats))) => {
+                    tracing::info!(
+                        "Auto-completing funded deposit: offer={}... txid={}... amount={} sats",
+                        hex::encode(&offer_id[..8]),
+                        &txid[..16.min(txid.len())],
+                        amount_sats
+                    );
+
+                    // Complete the deposit
+                    match self.complete_deposit_offer(&offer_id, txid.clone(), amount_sats) {
+                        Ok(new_balance) => {
+                            tracing::info!(
+                                "Deposit completed! New balance: {} msats",
+                                new_balance
+                            );
+
+                            // Broadcast the update to Nostr
+                            if let Some(reserves_id) = self.find_ledger_for_offer(&offer_id) {
+                                if let Err(e) = self.broadcast_last_update(&reserves_id).await {
+                                    tracing::warn!("Failed to broadcast deposit complete: {}", e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "Failed to complete deposit {}...: {}",
+                                hex::encode(&offer_id[..8]),
+                                e
+                            );
+                        }
+                    }
+                }
+                Ok(None) => {
+                    // Not funded yet, skip
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        "Error checking deposit funding {}...: {}",
+                        hex::encode(&offer_id[..8]),
+                        e
+                    );
+                }
+            }
+        }
+    }
+
+    /// Find the ledger (reserves_id) for a specific deposit offer
+    fn find_ledger_for_offer(&self, offer_id: &[u8; 32]) -> Option<String> {
+        // Get the offer to find its ledger_id
+        let (offer, _) = self.get_deposit_offer(offer_id)?;
+
+        // Find the ledger by ledger_id
+        let ledgers = self.handler.ledgers.lock().unwrap();
+        for ((operator, reserves_id), ledger_arc) in ledgers.iter() {
+            if *operator == self.node_id {
+                let ledger = ledger_arc.read().unwrap();
+                if ledger.ledger_id_hex() == offer.ledger_id {
+                    return Some(reserves_id.clone());
+                }
+            }
+        }
+        None
     }
 
     /// Handle an inbound message
