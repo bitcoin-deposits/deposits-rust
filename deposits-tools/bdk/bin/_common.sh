@@ -334,6 +334,14 @@ run_wallet_cmd() {
         --data-dir /data/wallet 2>&1
 }
 
+# Send a bump request to trigger immediate wallet sync and deposit completion
+# Usage: bump_operator <from_container> <ledger_id>
+bump_operator() {
+    local container=$1
+    local ledger_id=$2
+    run_nostr_request "$container" "$ledger_id" bump 2>&1
+}
+
 # Start nostr watch on a node in the background
 # Usage: start_nostr_watch <container> <ledger_id>
 # Returns the background process name for later cleanup

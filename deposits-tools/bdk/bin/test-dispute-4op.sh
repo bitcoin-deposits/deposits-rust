@@ -410,9 +410,17 @@ fund_deposits() {
     log_info "Mining to confirm funding transactions..."
     mine_blocks 1
 
-    # Wait for operators to auto-complete funded deposits
-    log_info "Waiting for operators to detect and complete deposits..."
-    sleep 5
+    # Bump all operators to trigger immediate wallet sync and deposit completion
+    log_info "Bumping operators to complete deposits..."
+    for operator in $OPERATORS; do
+        local ledger_id=$(get_value "ledger_id_$operator")
+        if [ -n "$ledger_id" ]; then
+            bump_operator "$operator" "$ledger_id" >/dev/null 2>&1 || true
+        fi
+    done
+
+    # Give auto-complete a moment to process
+    sleep 2
 
     # Verify deposits were completed
     for depositor in $OPERATORS; do

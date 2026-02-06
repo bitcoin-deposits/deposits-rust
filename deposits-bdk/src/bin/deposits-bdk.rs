@@ -4772,6 +4772,7 @@ async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     let mut transport = transport;
     let mut last_poll = std::time::Instant::now();
     let mut last_join_scan = std::time::Instant::now();
+    let mut last_auto_complete = std::time::Instant::now();
     let mut seen_events: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     loop {
@@ -4805,6 +4806,20 @@ async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
                 }
             }
             last_poll = std::time::Instant::now();
+        }
+
+        // Periodically check for funded deposits to auto-complete (every 3 seconds)
+        if last_auto_complete.elapsed() > std::time::Duration::from_secs(3) {
+            // Reload node to get fresh data and sync wallet
+            if let Ok(fresh_node) = Node::new(config_for_reload.clone()).await {
+                // Sync wallet first to detect new transactions
+                if let Err(e) = fresh_node.sync_wallet() {
+                    tracing::debug!("Wallet sync error during auto-complete: {}", e);
+                }
+                // Check and complete any funded deposits
+                fresh_node.auto_complete_deposits().await;
+            }
+            last_auto_complete = std::time::Instant::now();
         }
 
         // Periodically rescan for new QuorumJoin operations (every 5 seconds)
@@ -4924,6 +4939,16 @@ async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
                 }
                 "custodian_query" => {
                     process_custodian_query_request(&fresh_node, &ledger_id, &request).await
+                }
+                "bump" => {
+                    // Trigger immediate wallet sync and auto-completion
+                    println!("  Bump requested - syncing wallet and checking deposits...");
+                    if let Err(e) = fresh_node.sync_wallet() {
+                        (false, None, Some(format!("Wallet sync failed: {}", e)))
+                    } else {
+                        fresh_node.auto_complete_deposits().await;
+                        (true, Some(serde_json::json!({"message": "Wallet synced and deposits checked"})), None)
+                    }
                 }
                 _ => {
                     (false, None, Some(format!("Unknown action: {}", request.action)))

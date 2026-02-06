@@ -2713,7 +2713,7 @@ impl Node {
     // ========================================================================
 
     /// Auto-complete deposits that have been funded on-chain
-    async fn auto_complete_deposits(&self) {
+    pub async fn auto_complete_deposits(&self) {
         use deposits_core::types::DepositOfferStatus;
 
         let offers = self.list_deposit_offers();
