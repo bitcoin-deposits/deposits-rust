@@ -1014,6 +1014,34 @@ impl Wallet {
         Ok(txid)
     }
 
+    /// Find an unspent UTXO for a given script pubkey
+    ///
+    /// Returns (OutPoint, amount) if found, None if no unspent output exists.
+    pub fn find_utxo_for_script(&self, script: &bitcoin::ScriptBuf) -> Result<Option<(OutPoint, u64)>, Error> {
+        let client = EsploraBuilder::new(&self.electrum_url)
+            .build_blocking();
+
+        let txs = client
+            .scripthash_txs(script, None)
+            .map_err(|e| Error::Wallet(format!("Failed to query script: {:?}", e)))?;
+
+        for tx in &txs {
+            for (vout, output) in tx.vout.iter().enumerate() {
+                if &output.scriptpubkey == script {
+                    let outpoint = OutPoint::new(tx.txid, vout as u32);
+                    let status = client
+                        .get_output_status(&tx.txid, vout as u64)
+                        .map_err(|e| Error::Wallet(format!("Failed to check output: {:?}", e)))?;
+                    if status.map(|s| !s.spent).unwrap_or(true) {
+                        return Ok(Some((outpoint, output.value)));
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
     /// Get all tracked reserves
     pub fn get_reserves(&self) -> Vec<ReservesInfo> {
         self.reserves.read().unwrap().values().cloned().collect()

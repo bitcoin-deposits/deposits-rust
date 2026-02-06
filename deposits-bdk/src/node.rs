@@ -106,6 +106,9 @@ pub struct Node {
 
     /// Data directory for persistence
     data_dir: PathBuf,
+
+    /// Primary relay URL for Nostr
+    relay_url: String,
 }
 
 impl Node {
@@ -118,11 +121,14 @@ impl Node {
             config.seed,
             config.network,
             config.data_dir.join("wallet"),
-            config.electrum_url,
+            config.electrum_url.clone(),
         )?);
 
         let secret_key = wallet.operator_secret();
         let node_id = PublicKey::from_secret_key(&secp, &secret_key);
+
+        // Store relay URL for later use
+        let relay_url = config.relays.first().cloned().unwrap_or_default();
 
         // Create nostr transport
         let nostr = NostrTransport::new(secret_key, config.relays).await?;
@@ -157,6 +163,7 @@ impl Node {
             withdrawals: Mutex::new(withdrawals),
             pending_collateral_requests: Mutex::new(HashMap::new()),
             data_dir: config.data_dir,
+            relay_url,
         })
     }
 
@@ -356,6 +363,11 @@ impl Node {
                     while let Some(response) = self.nostr.try_recv_response() {
                         self.handle_ledger_response(response).await;
                     }
+
+                    // Handle ledger updates (validate and auto-dispute on invalid)
+                    while let Some(update) = self.nostr.try_recv_ledger_update() {
+                        self.handle_ledger_update(update).await;
+                    }
                 }
 
                 // Send outbound messages via nostr
@@ -374,6 +386,9 @@ impl Node {
 
                     // Auto-complete funded deposits
                     self.auto_complete_deposits().await;
+
+                    // Auto-claim/yield for any pending lottery disputes
+                    self.auto_lottery_claim_or_yield().await;
 
                     // Drain and log events
                     let events = self.handler.drain_events();
@@ -413,6 +428,11 @@ impl Node {
             "custody_transfer_sign" => self.process_custody_transfer_sign_request(&request).await,
             "confiscation_sign" => self.process_confiscation_sign_request(&request).await,
             "custodian_query" => self.process_custodian_query_request(&request).await,
+            "lottery_reveal" => {
+                // When we see another participant's reveal, auto-reveal ours
+                self.auto_reveal_preimage(&request.ledger_id).await;
+                (true, None, None) // No response needed
+            }
             _ => {
                 tracing::warn!("Unknown request action: {}", request.action);
                 (false, None, Some(format!("Unknown action: {}", request.action)))
@@ -436,6 +456,72 @@ impl Node {
         }
     }
 
+    /// Handle an incoming ledger update - validate and auto-dispute if invalid
+    async fn handle_ledger_update(&self, inbound: crate::nostr::InboundLedgerUpdate) {
+        // Check if we care about this ledger (we're a quorum member)
+        if !self.is_quorum_member_of_ledger(&inbound.ledger_id) {
+            return; // Not our concern
+        }
+
+        // Find the ledger
+        let ledger_arc = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let mut found = None;
+            for ((_operator, _reserves_id), arc) in ledgers.iter() {
+                let ledger = arc.read().unwrap();
+                if ledger.ledger_id_hex() == inbound.ledger_id {
+                    found = Some(arc.clone());
+                    break;
+                }
+            }
+            found
+        };
+
+        let Some(ledger_arc) = ledger_arc else {
+            return; // Ledger not found locally
+        };
+
+        // Validate the update
+        let validation_result = {
+            let ledger = ledger_arc.read().unwrap();
+
+            // Skip if already in dispute state
+            if ledger.state.dispute_state != deposits_core::types::DisputeState::Normal {
+                return;
+            }
+
+            ledger.validate_incoming_update(&inbound.update, None)
+        };
+
+        if let Err(e) = validation_result {
+            tracing::warn!(
+                "!!! INVALID UPDATE DETECTED on ledger {}...: {:?}",
+                &inbound.ledger_id[..16.min(inbound.ledger_id.len())],
+                e
+            );
+            tracing::warn!("  From operator: {}...", hex::encode(inbound.update.operator_id.serialize())[..16].to_string());
+            tracing::warn!("  Sequence: {}", inbound.update.sequence_number);
+
+            // Get the last valid sequence number (the one before this invalid update)
+            let last_valid_seq = if inbound.update.sequence_number > 0 {
+                inbound.update.sequence_number - 1
+            } else {
+                0
+            };
+
+            // Auto-arm for the dispute
+            tracing::info!("Auto-arming for dispute...");
+            match self.auto_arm_for_dispute(&inbound.ledger_id, last_valid_seq).await {
+                Ok(()) => {
+                    tracing::info!("Successfully auto-armed for dispute on invalid update");
+                }
+                Err(e) => {
+                    tracing::error!("Failed to auto-arm for dispute: {}", e);
+                }
+            }
+        }
+    }
+
     /// Handle a dispute notification from Nostr
     async fn handle_dispute(&self, dispute: crate::nostr::LedgerDispute) {
         tracing::warn!(
@@ -445,13 +531,827 @@ impl Node {
             &dispute.disputer_pubkey[..16.min(dispute.disputer_pubkey.len())]
         );
 
-        // TODO: Auto-validate and participate in dispute resolution
-        // For now, just log it prominently
         tracing::warn!("  Last valid seq: {}", dispute.last_valid_sequence);
         if let Some(vs) = dispute.violation_sequence {
             tracing::warn!("  Violation seq: {}", vs);
         }
-        tracing::warn!("  ACTION REQUIRED: Run 'recovery dispute' to participate");
+
+        // Check if we're a quorum member of this ledger
+        let is_member = self.is_quorum_member_of_ledger(&dispute.ledger_id);
+        if !is_member {
+            tracing::info!("Not a quorum member of this ledger, skipping auto-arm");
+            return;
+        }
+
+        tracing::info!("We are a quorum member - auto-participating in dispute");
+
+        // Auto-arm for the dispute
+        match self.auto_arm_for_dispute(&dispute.ledger_id, dispute.last_valid_sequence).await {
+            Ok(()) => {
+                tracing::info!("Successfully auto-armed for dispute");
+            }
+            Err(e) => {
+                tracing::error!("Failed to auto-arm for dispute: {}", e);
+                tracing::warn!("Manual intervention required: Run 'recovery arm {}'", dispute.ledger_id);
+            }
+        }
+    }
+
+    /// Check if we're a quorum member of a ledger (by ledger_id hash)
+    fn is_quorum_member_of_ledger(&self, ledger_id: &str) -> bool {
+        // Check our joined ledgers
+        let joined = self.get_joined_ledger_ids();
+
+        // The ledger_id in disputes is the ledger hash, not the reserves_id
+        // We need to check if we've joined this specific ledger or if it's our own
+        let ledgers = self.handler.ledgers.lock().unwrap();
+        for ((operator, _reserves_id), ledger_arc) in ledgers.iter() {
+            let ledger = ledger_arc.read().unwrap();
+            if ledger.ledger_id_hex() == ledger_id {
+                // It's one of our ledgers (either we're operator or we've joined)
+                if *operator == self.node_id {
+                    return true;
+                }
+            }
+        }
+
+        // Also check if we have a QuorumJoin for this ledger
+        for jid in joined {
+            if jid == ledger_id || jid.contains(ledger_id) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Auto-arm for a dispute by publishing CustodyDispute and CustodyArmed
+    async fn auto_arm_for_dispute(&self, ledger_id: &str, last_valid_seq: u64) -> Result<(), Error> {
+        use bitcoin::hashes::{Hash, hash160};
+        use bitcoin::secp256k1::Secp256k1;
+        use bitcoin::secp256k1::rand::rngs::OsRng;
+        use bitcoin::secp256k1::rand::Rng;
+        use deposits_core::TlvEncode;
+        use deposits_core::messages::LedgerOperation;
+
+        let secp = Secp256k1::new();
+
+        // Get our operator keypair
+        let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
+        let our_pubkey = keypair.public_key();
+
+        // Find our reserves_id (our ledger where we'll record the dispute/arm)
+        let our_reserves_id = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let mut found = None;
+            for ((operator, reserves_id), _) in ledgers.iter() {
+                if *operator == self.node_id {
+                    found = Some(reserves_id.clone());
+                    break;
+                }
+            }
+            found.ok_or_else(|| Error::Protocol("No ledger found for our operator".to_string()))?
+        };
+
+        // Get our ledger's current state
+        let ledger_arc = self.handler.get_or_create_ledger(self.node_id, our_reserves_id.clone());
+        let current_block = self.wallet.get_block_height().unwrap_or(0);
+        let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
+
+        // 1. First publish CustodyDispute on our branch
+        {
+            let mut ledger = ledger_arc.write().unwrap();
+
+            // Check if we've already published a CustodyDispute for this ledger
+            let already_disputed = ledger.history.iter().any(|u| {
+                if let Ok(op) = LedgerOperation::tlv_decode(&u.message) {
+                    matches!(op, LedgerOperation::CustodyDispute { .. })
+                } else {
+                    false
+                }
+            });
+
+            if already_disputed {
+                tracing::info!("Already have CustodyDispute on our ledger");
+            } else {
+                let dispute_op = LedgerOperation::CustodyDispute {
+                    last_valid_sequence: last_valid_seq,
+                    reason: "auto_dispute".to_string(),
+                };
+
+                ledger.append_operation_with_block(
+                    dispute_op,
+                    deposits_core::messages::consts::CUSTODY_DISPUTE,
+                    current_block,
+                    block_hash,
+                ).map_err(|e| Error::Protocol(format!("Failed to append CustodyDispute: {:?}", e)))?;
+
+                tracing::info!("Published CustodyDispute on our ledger");
+            }
+        }
+
+        // Sign the dispute update
+        self.sign_last_update(&our_reserves_id)?;
+
+        // 2. Copy our existing attestations from our own ledger history
+        // These are attestations we received (proving we have collateral backing)
+        {
+            let ledger = ledger_arc.read().unwrap();
+
+            // Find all CollateralAttestation operations in our history
+            let mut attestations_to_copy: Vec<LedgerOperation> = Vec::new();
+            let mut quorum_members_to_add: Vec<bitcoin::secp256k1::PublicKey> = Vec::new();
+
+            for update in ledger.history.iter() {
+                if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+                    match &op {
+                        LedgerOperation::CollateralAttestation { collateral_operator, quorum_member, .. } => {
+                            // We want attestations where WE are the quorum_member
+                            // (proving we locked collateral on other operators' ledgers)
+                            if quorum_member == &our_pubkey {
+                                attestations_to_copy.push(op.clone());
+                                // Also need to add the collateral_operator as a quorum member
+                                if !quorum_members_to_add.contains(collateral_operator) {
+                                    quorum_members_to_add.push(*collateral_operator);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            drop(ledger);
+
+            // First add quorum members, then attestations
+            for member in quorum_members_to_add {
+                let mut ledger = ledger_arc.write().unwrap();
+
+                // Check if already added
+                if ledger.state.quorum_members.contains(&member) {
+                    continue;
+                }
+
+                // Create QuorumAddMember operation
+                // Note: The signature should come from the member, but for auto-arm
+                // we use a placeholder since the member will broadcast their own version
+                let add_op = LedgerOperation::QuorumAddMember {
+                    quorum_member: member,
+                    quorum_member_signature: [0u8; 64], // Placeholder
+                };
+
+                if let Err(e) = ledger.append_operation_with_block(
+                    add_op,
+                    deposits_core::messages::consts::QUORUM_ADD_MEMBER,
+                    current_block,
+                    block_hash,
+                ) {
+                    tracing::warn!("Failed to add quorum member: {:?}", e);
+                } else {
+                    tracing::info!("Added quorum member: {}...", &hex::encode(member.serialize())[..16]);
+                }
+            }
+
+            // Now copy attestations
+            for attestation in attestations_to_copy {
+                let mut ledger = ledger_arc.write().unwrap();
+
+                if let Err(e) = ledger.append_operation_with_block(
+                    attestation,
+                    deposits_core::messages::consts::COLLATERAL_ATTESTATION,
+                    current_block,
+                    block_hash,
+                ) {
+                    tracing::warn!("Failed to copy attestation: {:?}", e);
+                } else {
+                    tracing::info!("Copied existing attestation to dispute branch");
+                }
+            }
+
+            // Sign after adding members and attestations
+            self.sign_last_update(&our_reserves_id)?;
+        }
+
+        // 3. Now publish CustodyArmed with preimage commitment
+        {
+            let mut ledger = ledger_arc.write().unwrap();
+
+            // Check if we've already armed
+            let already_armed = ledger.history.iter().any(|u| {
+                if let Ok(op) = LedgerOperation::tlv_decode(&u.message) {
+                    matches!(op, LedgerOperation::CustodyArmed { .. })
+                } else {
+                    false
+                }
+            });
+
+            if already_armed {
+                tracing::info!("Already have CustodyArmed on our ledger");
+            } else {
+                // Generate random preimage (17-20 bytes for lottery entropy)
+                let mut rng = OsRng;
+                let preimage_len = rng.gen_range(17..=20);
+                let mut preimage = vec![0u8; preimage_len];
+                rng.fill(&mut preimage[..]);
+
+                // Compute commitment_hash = HASH160(preimage)
+                let commitment_hash: [u8; 20] = *hash160::Hash::hash(&preimage).as_byte_array();
+
+                // Store preimage for later reveal
+                let preimage_file = self.data_dir.join(format!("lottery_preimage_{}.hex",
+                    &ledger_id[..16.min(ledger_id.len())]));
+                if let Err(e) = std::fs::write(&preimage_file, hex::encode(&preimage)) {
+                    tracing::warn!("Failed to store preimage: {}", e);
+                } else {
+                    tracing::info!("Stored lottery preimage in: {:?}", preimage_file);
+                }
+
+                // Use P2WPKH address derived from our operator pubkey for target_reserves
+                let pubkey_bytes: [u8; 33] = our_pubkey.serialize();
+                let compressed = bitcoin::CompressedPublicKey::from_slice(&pubkey_bytes)
+                    .map_err(|e| Error::Protocol(format!("Invalid pubkey: {}", e)))?;
+                let target_reserves = bitcoin::Address::p2wpkh(&compressed, self.wallet.network()).to_string();
+
+                let armed_op = LedgerOperation::CustodyArmed {
+                    armed_block: current_block,
+                    commitment_hash,
+                    target_reserves,
+                };
+
+                ledger.append_operation_with_block(
+                    armed_op,
+                    deposits_core::messages::consts::CUSTODY_ARMED,
+                    current_block,
+                    block_hash,
+                ).map_err(|e| Error::Protocol(format!("Failed to append CustodyArmed: {:?}", e)))?;
+
+                tracing::info!("Published CustodyArmed on our ledger");
+            }
+        }
+
+        // Sign the armed update
+        self.sign_last_update(&our_reserves_id)?;
+
+        // Persist
+        if let Err(e) = self.handler.persist_ledger(&self.node_id, &our_reserves_id) {
+            tracing::error!("Failed to persist ledger: {}", e);
+        }
+
+        // Broadcast all updates
+        if let Err(e) = self.broadcast_all_updates(&our_reserves_id).await {
+            tracing::warn!("Failed to broadcast dispute updates: {}", e);
+        }
+
+        Ok(())
+    }
+
+    /// Auto-reveal our lottery preimage when we see another participant's reveal
+    async fn auto_reveal_preimage(&self, ledger_id: &str) {
+        // Check if we're a quorum member of this ledger
+        if !self.is_quorum_member_of_ledger(ledger_id) {
+            return;
+        }
+
+        // Check if we have a preimage file for this ledger
+        let preimage_file = self.data_dir.join(format!("lottery_preimage_{}.hex",
+            &ledger_id[..16.min(ledger_id.len())]));
+
+        if !preimage_file.exists() {
+            tracing::debug!("No preimage file for ledger {}", &ledger_id[..16]);
+            return;
+        }
+
+        // Check if we already revealed (marker file)
+        let revealed_marker = self.data_dir.join(format!("lottery_revealed_{}.marker",
+            &ledger_id[..16.min(ledger_id.len())]));
+        if revealed_marker.exists() {
+            tracing::debug!("Already revealed preimage for ledger {}", &ledger_id[..16]);
+            return;
+        }
+
+        // Load and reveal the preimage
+        let preimage_hex = match std::fs::read_to_string(&preimage_file) {
+            Ok(hex) => hex.trim().to_string(),
+            Err(e) => {
+                tracing::warn!("Failed to read preimage file: {}", e);
+                return;
+            }
+        };
+
+        let preimage = match hex::decode(&preimage_hex) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::warn!("Invalid preimage hex: {}", e);
+                return;
+            }
+        };
+
+        tracing::info!("Auto-revealing lottery preimage for ledger {}...", &ledger_id[..16]);
+        tracing::info!("  Preimage length: {} bytes (contribution: {})", preimage.len(), preimage.len().saturating_sub(16));
+
+        // Publish reveal via Nostr
+        let reveal_params = serde_json::json!({
+            "ledger_id": ledger_id,
+            "preimage": preimage_hex,
+        });
+
+        match self.nostr.send_ledger_request(
+            ledger_id,
+            "lottery_reveal",
+            reveal_params,
+        ).await {
+            Ok(request_id) => {
+                tracing::info!("Lottery preimage revealed! Request ID: {}...", &request_id[..16.min(request_id.len())]);
+
+                // Create marker file to prevent double-reveal
+                if let Err(e) = std::fs::write(&revealed_marker, "revealed") {
+                    tracing::warn!("Failed to write revealed marker: {}", e);
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to send reveal: {:?}", e);
+            }
+        }
+    }
+
+    /// Auto-claim or yield for any pending lottery disputes
+    ///
+    /// For each ledger where we've revealed our preimage:
+    /// 1. Check if all preimages are collected
+    /// 2. Determine winner
+    /// 3. Winner: claim lottery output + publish CustodyAcquire
+    /// 4. Loser: publish CustodyYield
+    async fn auto_lottery_claim_or_yield(&self) {
+        use bitcoin::secp256k1::Secp256k1;
+
+        let secp = Secp256k1::new();
+        let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
+
+        // Find revealed marker files in data_dir
+        let entries = match std::fs::read_dir(&self.data_dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+
+        let revealed_markers: Vec<_> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name().to_string_lossy().starts_with("lottery_revealed_")
+                    && e.file_name().to_string_lossy().ends_with(".marker")
+            })
+            .collect();
+
+        for entry in revealed_markers {
+            let marker_path = entry.path();
+            // Extract ledger_id prefix from filename
+            let filename = match marker_path.file_name().and_then(|f| f.to_str()) {
+                Some(f) => f,
+                None => continue,
+            };
+
+            // lottery_revealed_<prefix>.marker
+            let ledger_prefix = filename
+                .strip_prefix("lottery_revealed_")
+                .and_then(|s| s.strip_suffix(".marker"))
+                .unwrap_or("");
+
+            if ledger_prefix.is_empty() {
+                continue;
+            }
+
+            // Check if we've already claimed/yielded (completed marker)
+            let completed_marker = self.data_dir.join(format!("lottery_completed_{}.marker", ledger_prefix));
+            if completed_marker.exists() {
+                continue;
+            }
+
+            // Find the full ledger_id
+            let ledger_id = {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                let mut found = None;
+                for ((_operator, _reserves_id), arc) in ledgers.iter() {
+                    let ledger = arc.read().unwrap();
+                    let lid = ledger.ledger_id_hex();
+                    if lid.starts_with(ledger_prefix) {
+                        found = Some(lid);
+                        break;
+                    }
+                }
+                match found {
+                    Some(id) => id,
+                    None => continue,
+                }
+            };
+
+            // Try to claim or yield
+            match self.try_lottery_claim_or_yield(&ledger_id, &keypair).await {
+                Ok(completed) => {
+                    if completed {
+                        // Create completed marker
+                        if let Err(e) = std::fs::write(&completed_marker, "completed") {
+                            tracing::warn!("Failed to write completed marker: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!("Lottery claim/yield not ready for {}: {}", ledger_prefix, e);
+                }
+            }
+        }
+    }
+
+    /// Try to claim or yield for a specific ledger
+    /// Returns Ok(true) if completed, Ok(false) if not ready, Err if failed
+    async fn try_lottery_claim_or_yield(
+        &self,
+        ledger_id: &str,
+        keypair: &bitcoin::secp256k1::Keypair,
+    ) -> Result<bool, Error> {
+        use bitcoin::hashes::{Hash, sha256, hash160};
+        use bitcoin::secp256k1::{Secp256k1, PublicKey};
+        use deposits_core::{TlvDecode, TlvEncode, SignedLedgerUpdate};
+        use deposits_core::messages::LedgerOperation;
+        use deposits_core::tapscript_reserves::{LotteryScriptBuilder, LotteryParticipant, LotteryOutput};
+        use crate::nostr::{KIND_LEDGER_UPDATE, KIND_LEDGER_REQUEST};
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+        use nostr_sdk::{Client, Keys, Filter, Kind, TagKind};
+        use nostr_sdk::prelude::{SingleLetterTag, Alphabet};
+
+        let secp = Secp256k1::new();
+        let our_pubkey = keypair.public_key();
+
+        // Fetch updates and reveals from Nostr
+        let keys = Keys::generate();
+        let client = Client::new(keys);
+        client.add_relay(&self.relay_url).await
+            .map_err(|e| Error::Protocol(format!("Failed to add relay: {}", e)))?;
+        client.connect().await;
+
+        // Fetch ledger updates
+        let filter = Filter::new()
+            .kind(Kind::Custom(KIND_LEDGER_UPDATE))
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id])
+            .limit(500);
+
+        let update_events = client
+            .fetch_events(vec![filter], None)
+            .await
+            .map_err(|e| Error::Protocol(format!("Failed to fetch updates: {}", e)))?;
+
+        // Fetch lottery reveals
+        let reveal_filter = Filter::new()
+            .kind(Kind::Custom(KIND_LEDGER_REQUEST))
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::L), [ledger_id])
+            .limit(100);
+
+        let reveal_events = client
+            .fetch_events(vec![reveal_filter], None)
+            .await
+            .map_err(|e| Error::Protocol(format!("Failed to fetch reveals: {}", e)))?;
+
+        client.disconnect().await.ok();
+
+        // Extract CustodyArmed participants
+        let mut participants: Vec<(PublicKey, LotteryParticipant)> = Vec::new();
+        let mut our_armed: Option<SignedLedgerUpdate> = None;
+
+        for event in update_events.iter() {
+            if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
+                if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
+                    if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+                        if let LedgerOperation::CustodyArmed { commitment_hash, target_reserves, .. } = op {
+                            let x_only = update.operator_id.x_only_public_key().0;
+                            participants.push((update.operator_id, LotteryParticipant::new(
+                                x_only,
+                                commitment_hash,
+                                target_reserves,
+                            )));
+                            if update.operator_id == our_pubkey {
+                                our_armed = Some(update);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if participants.is_empty() {
+            return Err(Error::Protocol("No CustodyArmed participants found".to_string()));
+        }
+
+        let our_armed = our_armed.ok_or_else(||
+            Error::Protocol("Could not find our CustodyArmed".to_string()))?;
+
+        // Sort participants by x-only pubkey for deterministic order
+        participants.sort_by(|a, b| a.1.pubkey.serialize().cmp(&b.1.pubkey.serialize()));
+
+        // Collect revealed preimages
+        let mut preimages: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
+
+        for event in reveal_events.iter() {
+            let is_lottery_reveal = event.tags.iter().any(|tag| {
+                tag.kind() == TagKind::custom("action") &&
+                tag.content().map(|c| c == "lottery_reveal").unwrap_or(false)
+            });
+
+            if is_lottery_reveal {
+                if let Ok(content) = serde_json::from_str::<serde_json::Value>(&event.content) {
+                    if let Some(preimage_hex) = content.get("preimage").and_then(|v| v.as_str()) {
+                        if let Ok(preimage) = hex::decode(preimage_hex) {
+                            preimages.insert(event.pubkey.to_string(), preimage);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Not ready if not all preimages revealed
+        if preimages.len() < participants.len() {
+            return Ok(false);
+        }
+
+        // Match preimages to participants
+        let mut ordered_preimages: Vec<Vec<u8>> = Vec::new();
+        for (pubkey, _participant) in &participants {
+            let x_only = pubkey.x_only_public_key().0;
+            let pubkey_str = x_only.to_string();
+            if let Some(preimage) = preimages.get(&pubkey_str) {
+                ordered_preimages.push(preimage.clone());
+            } else {
+                return Err(Error::Protocol(format!("Missing preimage from participant")));
+            }
+        }
+
+        // Determine winner
+        let winner_index = LotteryOutput::calculate_winner(&ordered_preimages)
+            .map_err(|e| Error::Protocol(format!("Failed to calculate winner: {:?}", e)))?;
+
+        let (winner_pubkey, winner_participant) = &participants[winner_index];
+
+        if *winner_pubkey == our_pubkey {
+            // WE WON - claim the lottery
+            tracing::info!("We won the lottery for ledger {}!", &ledger_id[..16]);
+            self.claim_lottery(ledger_id, &participants, &ordered_preimages, winner_index, &our_armed, keypair).await?;
+        } else {
+            // We lost - yield
+            tracing::info!("We lost the lottery for ledger {}. Publishing CustodyYield.", &ledger_id[..16]);
+            self.publish_custody_yield(ledger_id, &our_armed, keypair).await?;
+        }
+
+        Ok(true)
+    }
+
+    /// Claim the lottery output as the winner
+    async fn claim_lottery(
+        &self,
+        ledger_id: &str,
+        participants: &[(bitcoin::secp256k1::PublicKey, deposits_core::tapscript_reserves::LotteryParticipant)],
+        ordered_preimages: &[Vec<u8>],
+        winner_index: usize,
+        our_armed: &deposits_core::SignedLedgerUpdate,
+        keypair: &bitcoin::secp256k1::Keypair,
+    ) -> Result<(), Error> {
+        use bitcoin::hashes::{Hash, sha256};
+        use bitcoin::secp256k1::{Secp256k1, PublicKey, Message};
+        use bitcoin::{Transaction, TxIn, TxOut, Witness, Amount, ScriptBuf};
+        use bitcoin::sighash::{SighashCache, TapSighashType};
+        use bitcoin::taproot::TapLeafHash;
+        use deposits_core::{TlvDecode, TlvEncode, SignedLedgerUpdate};
+        use deposits_core::messages::LedgerOperation;
+        use deposits_core::tapscript_reserves::{LotteryScriptBuilder, LotteryParticipant, LotteryOutput};
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+
+        let secp = Secp256k1::new();
+        let our_pubkey = keypair.public_key();
+        let (_, winner_participant) = &participants[winner_index];
+
+        // Build lottery participants list
+        let lottery_participants: Vec<LotteryParticipant> = participants.iter()
+            .map(|(_, p)| p.clone())
+            .collect();
+
+        // Get recovery voters (need to fetch from ledger)
+        // For now, use participants as recovery voters
+        let recovery_voters: Vec<bitcoin::secp256k1::XOnlyPublicKey> = participants.iter()
+            .map(|(pk, _)| pk.x_only_public_key().0)
+            .collect();
+
+        let recovery_threshold = (recovery_voters.len() + 1) / 2;
+
+        // Build the lottery output
+        let lottery_builder = LotteryScriptBuilder::new(
+            lottery_participants.clone(),
+            recovery_voters.clone(),
+            recovery_threshold,
+            self.wallet.network(),
+        );
+
+        let lottery_output = lottery_builder.build()
+            .map_err(|e| Error::Protocol(format!("Failed to build lottery output: {:?}", e)))?;
+
+        // Find the lottery UTXO on-chain
+        let lottery_script = lottery_output.address.script_pubkey();
+
+        // Use wallet's esplora to find UTXO
+        let lottery_utxo = self.wallet.find_utxo_for_script(&lottery_script)
+            .map_err(|e| Error::Protocol(format!("Failed to find lottery UTXO: {:?}", e)))?;
+
+        let (lottery_outpoint, lottery_amount) = lottery_utxo
+            .ok_or_else(|| Error::Protocol("No unspent UTXO at lottery address".to_string()))?;
+
+        tracing::info!("Found lottery UTXO: {} ({} sats)", lottery_outpoint, lottery_amount);
+
+        // Parse winner's target address
+        let target_address: bitcoin::Address<bitcoin::address::NetworkUnchecked> = winner_participant.target_reserves.parse()
+            .map_err(|e| Error::Protocol(format!("Invalid target address: {}", e)))?;
+        let target_address = target_address.require_network(self.wallet.network())
+            .map_err(|e| Error::Protocol(format!("Address network mismatch: {}", e)))?;
+
+        // Build claim transaction
+        let claim_fee = 400u64;
+        let output_amount = lottery_amount.saturating_sub(claim_fee);
+
+        let claim_tx = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: lottery_outpoint,
+                script_sig: ScriptBuf::new(),
+                sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(output_amount),
+                script_pubkey: target_address.script_pubkey(),
+            }],
+        };
+
+        // Compute sighash
+        let prevouts = vec![TxOut {
+            value: Amount::from_sat(lottery_amount),
+            script_pubkey: lottery_script.clone(),
+        }];
+
+        let leaf_hash = TapLeafHash::from_script(&lottery_output.lottery_script, bitcoin::taproot::LeafVersion::TapScript);
+
+        let mut sighash_cache = SighashCache::new(&claim_tx);
+        let sighash = sighash_cache.taproot_script_spend_signature_hash(
+            0,
+            &bitcoin::sighash::Prevouts::All(&prevouts),
+            leaf_hash,
+            TapSighashType::Default,
+        ).map_err(|e| Error::Protocol(format!("Failed to compute sighash: {}", e)))?;
+
+        // Sign
+        let msg = Message::from_digest(*sighash.as_ref());
+        let signature = secp.sign_schnorr(&msg, keypair);
+        let sig_bytes: [u8; 64] = *signature.as_ref();
+
+        // Create witness
+        let witness = lottery_output.create_claim_witness(&sig_bytes, ordered_preimages)
+            .map_err(|e| Error::Protocol(format!("Failed to create witness: {:?}", e)))?;
+
+        let mut claim_tx = claim_tx;
+        claim_tx.input[0].witness = witness;
+
+        // Broadcast
+        tracing::info!("Broadcasting claim transaction...");
+        self.wallet.broadcast(&claim_tx)?;
+
+        let claim_txid = claim_tx.compute_txid();
+        tracing::info!("Claim TX broadcast: {}", claim_txid);
+
+        // Publish CustodyAcquire
+        let current_block = self.wallet.get_block_height().unwrap_or(0);
+        let current_block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
+        let spend_txid_bytes: [u8; 32] = *claim_txid.as_ref();
+
+        let operation = LedgerOperation::CustodyAcquire {
+            new_custodian: our_pubkey,
+            entropy_block_height: current_block,
+            entropy_block_hash: current_block_hash,
+            spend_txid: spend_txid_bytes,
+            new_reserves_address: winner_participant.target_reserves.clone(),
+        };
+
+        let message_bytes = operation.tlv_encode();
+
+        // Build update continuing from our CustodyArmed
+        let sequence = our_armed.sequence_number + 1;
+        let mut hash_input = Vec::new();
+        hash_input.extend_from_slice(&sequence.to_le_bytes());
+        hash_input.extend_from_slice(&our_armed.current_hash);
+        hash_input.extend_from_slice(&message_bytes);
+        let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
+
+        // Sign the update
+        let update_msg = format!(
+            "deposits:ledger:{}:{}:{}",
+            hex::encode(our_armed.current_hash),
+            sequence,
+            hex::encode(&new_hash)
+        );
+        let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
+        let msg = Message::from_digest(*msg_hash.as_ref());
+        let signature = secp.sign_schnorr(&msg, keypair);
+        let operator_sig_bytes: [u8; 64] = *signature.as_ref();
+
+        let ledger_id_bytes: [u8; 32] = hex::decode(ledger_id)
+            .map_err(|e| Error::Protocol(format!("Invalid ledger_id: {}", e)))?
+            .try_into()
+            .map_err(|_| Error::Protocol("Ledger ID must be 32 bytes".to_string()))?;
+
+        let signed_update = SignedLedgerUpdate {
+            message: message_bytes,
+            message_type: 0x8001,
+            operator_signature: operator_sig_bytes,
+            partner_signature: [0u8; 64],
+            operator_id: our_pubkey,
+            ledger_id: ledger_id_bytes,
+            sequence_number: sequence,
+            previous_hash: our_armed.current_hash,
+            current_hash: new_hash,
+            timestamp: deposits_core::now_unix_timestamp(),
+            block_height: current_block,
+            block_hash: current_block_hash,
+        };
+
+        // Broadcast to Nostr
+        self.nostr.broadcast_ledger_update(&signed_update).await
+            .map_err(|e| Error::Protocol(format!("Failed to broadcast CustodyAcquire: {:?}", e)))?;
+
+        tracing::info!("CustodyAcquire published! We are now the operator.");
+        Ok(())
+    }
+
+    /// Publish CustodyYield as a loser
+    async fn publish_custody_yield(
+        &self,
+        ledger_id: &str,
+        our_armed: &deposits_core::SignedLedgerUpdate,
+        keypair: &bitcoin::secp256k1::Keypair,
+    ) -> Result<(), Error> {
+        use bitcoin::hashes::{Hash, sha256};
+        use bitcoin::secp256k1::{Secp256k1, Message};
+        use deposits_core::{TlvEncode, SignedLedgerUpdate};
+        use deposits_core::messages::LedgerOperation;
+
+        let secp = Secp256k1::new();
+        let our_pubkey = keypair.public_key();
+
+        let current_block = self.wallet.get_block_height().unwrap_or(0);
+        let current_block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
+
+        // Create CustodyYield operation
+        let operation = LedgerOperation::CustodyYield;
+        let message_bytes = operation.tlv_encode();
+
+        // Build update continuing from our CustodyArmed
+        let sequence = our_armed.sequence_number + 1;
+        let mut hash_input = Vec::new();
+        hash_input.extend_from_slice(&sequence.to_le_bytes());
+        hash_input.extend_from_slice(&our_armed.current_hash);
+        hash_input.extend_from_slice(&message_bytes);
+        let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
+
+        // Sign the update
+        let update_msg = format!(
+            "deposits:ledger:{}:{}:{}",
+            hex::encode(our_armed.current_hash),
+            sequence,
+            hex::encode(&new_hash)
+        );
+        let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
+        let msg = Message::from_digest(*msg_hash.as_ref());
+        let signature = secp.sign_schnorr(&msg, keypair);
+        let operator_sig_bytes: [u8; 64] = *signature.as_ref();
+
+        let ledger_id_bytes: [u8; 32] = hex::decode(ledger_id)
+            .map_err(|e| Error::Protocol(format!("Invalid ledger_id: {}", e)))?
+            .try_into()
+            .map_err(|_| Error::Protocol("Ledger ID must be 32 bytes".to_string()))?;
+
+        let signed_update = SignedLedgerUpdate {
+            message: message_bytes,
+            message_type: 0x8001,
+            operator_signature: operator_sig_bytes,
+            partner_signature: [0u8; 64],
+            operator_id: our_pubkey,
+            ledger_id: ledger_id_bytes,
+            sequence_number: sequence,
+            previous_hash: our_armed.current_hash,
+            current_hash: new_hash,
+            timestamp: deposits_core::now_unix_timestamp(),
+            block_height: current_block,
+            block_hash: current_block_hash,
+        };
+
+        // Broadcast to Nostr
+        self.nostr.broadcast_ledger_update(&signed_update).await
+            .map_err(|e| Error::Protocol(format!("Failed to broadcast CustodyYield: {:?}", e)))?;
+
+        tracing::info!("CustodyYield published. Branch terminated.");
+        Ok(())
     }
 
     // ========================================================================
