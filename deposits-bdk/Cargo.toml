@@ -51,3 +51,11 @@ dangerous-testing = []
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3"
+
+[[bin]]
+name = "deposits-bdk"
+path = "src/bin/deposits-bdk.rs"
+
+[[bin]]
+name = "deposits-wallet"
+path = "src/bin/deposits-wallet.rs"

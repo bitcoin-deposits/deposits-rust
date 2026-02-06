@@ -1160,6 +1160,27 @@ impl NostrTransport {
         Ok(None)
     }
 
+    /// Fetch all responses since a timestamp
+    pub async fn fetch_responses_since(&self, since: nostr_sdk::Timestamp) -> Result<Vec<LedgerResponse>, Error> {
+        let filter = Filter::new()
+            .kind(Kind::Custom(KIND_LEDGER_RESPONSE))
+            .since(since);
+
+        let events = self.client
+            .fetch_events(vec![filter], Some(tokio::time::Duration::from_secs(5)))
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to fetch events: {}", e)))?;
+
+        let mut responses = Vec::new();
+        for event in events.into_iter() {
+            if let Ok(response) = self.process_ledger_response(&event) {
+                responses.push(response);
+            }
+        }
+
+        Ok(responses)
+    }
+
     /// Start listening for inbound messages
     pub async fn start_listening(&self) -> Result<(), Error> {
         // Subscribe to DMs addressed to us
