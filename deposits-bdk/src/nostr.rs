@@ -284,6 +284,19 @@ pub struct RecoveryAgreement {
     pub timestamp: u64,
 }
 
+/// Information about a quorum member in a ledger advertisement
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct QuorumMemberInfo {
+    /// Member's public key (hex)
+    pub pubkey: String,
+
+    /// Amount of collateral locked by this member (sats)
+    pub collateral_sats: u64,
+
+    /// Block height when the collateral lock expires
+    pub lock_expires_block: u64,
+}
+
 /// A ledger advertisement (operator terms and limits)
 /// Published as a NIP-33 parameterized replaceable event.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -337,6 +350,19 @@ pub struct LedgerAdvertisement {
 
     // === Trust Info ===
 
+    // === Capacity ===
+
+    /// Current total obligations (deposit balances) in sats
+    #[serde(default)]
+    pub total_obligations_sats: u64,
+
+    /// Available headroom for new deposits in sats
+    /// Calculated as: reserves_amount - total_obligations (or fraction thereof)
+    #[serde(default)]
+    pub available_headroom_sats: u64,
+
+    // === Trust Info ===
+
     /// Number of quorum members
     pub quorum_size: u8,
 
@@ -345,6 +371,14 @@ pub struct LedgerAdvertisement {
 
     /// Current total reserves backing the ledger (sats)
     pub reserves_amount_sats: u64,
+
+    /// Total received collateral from quorum members (sats)
+    #[serde(default)]
+    pub received_collateral_sats: u64,
+
+    /// Quorum member details (pubkey, collateral amount, expiry block)
+    #[serde(default)]
+    pub quorum_members: Vec<QuorumMemberInfo>,
 
     // === Metadata ===
 
@@ -388,9 +422,13 @@ impl LedgerAdvertisement {
             max_deposit_sats: u64::MAX,
             min_deposit_sats: 0,
             max_balance_sats: 0,
+            total_obligations_sats: 0,
+            available_headroom_sats: 0,
             quorum_size: 0,
             collateral_enforcement_block: 0,
             reserves_amount_sats: 0,
+            received_collateral_sats: 0,
+            quorum_members: Vec::new(),
             network,
             version: 1,
             event_id: String::new(),

@@ -226,10 +226,13 @@ async fn discover(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         let name = ad.name.as_deref().unwrap_or("Unnamed");
         println!("{}. {}", i + 1, name);
         println!("   Ledger: {}...", &ad.ledger_id[..16.min(ad.ledger_id.len())]);
-        println!("   Reserves: {} sats ({} BTC)",
-            ad.reserves_amount_sats,
-            ad.reserves_amount_sats as f64 / 100_000_000.0);
-        println!("   Quorum: {} members", ad.quorum_size);
+        println!("   Available: {} sats ({} BTC)",
+            ad.available_headroom_sats,
+            ad.available_headroom_sats as f64 / 100_000_000.0);
+        println!("   Reserves: {} sats, Obligations: {} sats",
+            ad.reserves_amount_sats, ad.total_obligations_sats);
+        println!("   Quorum: {} members ({} sats collateral)",
+            ad.quorum_size, ad.received_collateral_sats);
 
         // Fee summary
         let mut fees = Vec::new();
@@ -333,13 +336,32 @@ async fn ledger_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     println!("Operator: {}", ad.operator_pubkey);
     println!("Reserves Address: {}", ad.reserves_address);
     println!();
+    println!("Capacity");
+    println!("--------");
+    println!("Available Headroom: {} sats ({} BTC)",
+        ad.available_headroom_sats,
+        ad.available_headroom_sats as f64 / 100_000_000.0);
+    println!("Total Reserves: {} sats", ad.reserves_amount_sats);
+    println!("Current Obligations: {} sats", ad.total_obligations_sats);
+    println!();
     println!("Trust & Security");
     println!("----------------");
-    println!("Reserves: {} sats ({} BTC)",
-        ad.reserves_amount_sats,
-        ad.reserves_amount_sats as f64 / 100_000_000.0);
     println!("Quorum Size: {} members", ad.quorum_size);
+    println!("Received Collateral: {} sats", ad.received_collateral_sats);
     println!("Collateral Enforcement Block: {}", ad.collateral_enforcement_block);
+    if !ad.quorum_members.is_empty() {
+        println!("Quorum Members:");
+        for member in &ad.quorum_members {
+            if member.collateral_sats > 0 {
+                println!("  - {}...: {} sats (expires block {})",
+                    &member.pubkey[..12.min(member.pubkey.len())],
+                    member.collateral_sats,
+                    member.lock_expires_block);
+            } else {
+                println!("  - {}...: no attestation", &member.pubkey[..12.min(member.pubkey.len())]);
+            }
+        }
+    }
     println!();
     println!("Fee Structure");
     println!("-------------");

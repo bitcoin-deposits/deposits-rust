@@ -1278,10 +1278,41 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
     ad.collateral_enforcement_block = ledger.state.collateral_enforcement_block.unwrap_or(0);
     ad.reserves_amount_sats = ledger.reserves_amount();
 
+    // Calculate obligations and headroom
+    let total_obligations_msats = ledger.total_deposit_balance();
+    let total_obligations_sats = total_obligations_msats / 1000;
+    ad.total_obligations_sats = total_obligations_sats;
+
+    // Headroom is the difference between reserves and obligations
+    // For BDK, we advertise 80% of the raw headroom as available
+    let raw_headroom = ad.reserves_amount_sats.saturating_sub(total_obligations_sats);
+    ad.available_headroom_sats = (raw_headroom * 80) / 100;
+
+    // Received collateral
+    ad.received_collateral_sats = ledger.state.received_collateral_amount / 1000; // msats to sats
+
+    // Quorum member details
+    use deposits_bdk::nostr::QuorumMemberInfo;
+    for member_pubkey in &quorum_members {
+        let attestation = ledger.state.collateral_attestations.get(member_pubkey);
+        let (collateral_sats, lock_expires) = attestation
+            .map(|a| (a.amount / 1000, a.lock_until_block as u64)) // msats to sats
+            .unwrap_or((0, 0));
+
+        ad.quorum_members.push(QuorumMemberInfo {
+            pubkey: hex::encode(member_pubkey.serialize()),
+            collateral_sats,
+            lock_expires_block: lock_expires,
+        });
+    }
+
     println!("Publishing ledger advertisement...");
     println!("  Ledger ID: {}...", &ledger_id[..16]);
     println!("  Reserves: {} sats", ad.reserves_amount_sats);
-    println!("  Quorum size: {}", ad.quorum_size);
+    println!("  Obligations: {} sats", ad.total_obligations_sats);
+    println!("  Available headroom: {} sats (80% of {})", ad.available_headroom_sats, raw_headroom);
+    println!("  Quorum: {} members, {} sats received collateral",
+        ad.quorum_size, ad.received_collateral_sats);
     println!("  Fees: {}bps annual, {}bps deposit, {}bps withdrawal",
         ad.annual_fee_bps, ad.deposit_fee_bps, ad.withdrawal_fee_bps);
     println!();
@@ -1353,8 +1384,22 @@ async fn ledger_discover(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         println!("{}:", ad.name.as_deref().unwrap_or("Unnamed Ledger"));
         println!("  Ledger ID: {}...", &ad.ledger_id[..16.min(ad.ledger_id.len())]);
         println!("  Operator: {}...", &ad.operator_pubkey[..16.min(ad.operator_pubkey.len())]);
-        println!("  Reserves: {} sats", ad.reserves_amount_sats);
-        println!("  Quorum: {} members", ad.quorum_size);
+        println!("  Capacity:");
+        println!("    Reserves: {} sats", ad.reserves_amount_sats);
+        println!("    Obligations: {} sats", ad.total_obligations_sats);
+        println!("    Available: {} sats", ad.available_headroom_sats);
+        println!("  Quorum ({} members):", ad.quorum_size);
+        println!("    Received collateral: {} sats", ad.received_collateral_sats);
+        if !ad.quorum_members.is_empty() {
+            for member in &ad.quorum_members {
+                let collateral_str = if member.collateral_sats > 0 {
+                    format!("{} sats (expires block {})", member.collateral_sats, member.lock_expires_block)
+                } else {
+                    "no attestation".to_string()
+                };
+                println!("    - {}...: {}", &member.pubkey[..12.min(member.pubkey.len())], collateral_str);
+            }
+        }
         println!("  Fees:");
         println!("    Annual: {}bps ({}%)", ad.annual_fee_bps, ad.annual_fee_bps as f64 / 100.0);
         println!("    Deposit: {}bps", ad.deposit_fee_bps);
