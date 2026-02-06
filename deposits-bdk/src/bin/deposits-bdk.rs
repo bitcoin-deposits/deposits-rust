@@ -663,7 +663,7 @@ async fn reserves_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>
 /// Handle ledger subcommands
 async fn ledger_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {
-        eprintln!("Usage: deposits-bdk ledger <open|list|history|validate|export|import> [args...]");
+        eprintln!("Usage: deposits-bdk ledger <open|list|history|validate|export|import|advertise|discover> [args...]");
         return Ok(());
     }
 
@@ -674,9 +674,11 @@ async fn ledger_command(args: &[String]) -> Result<(), Box<dyn std::error::Error
         "validate" => ledger_validate(&args[1..]).await,
         "export" => ledger_export(&args[1..]).await,
         "import" => ledger_import(&args[1..]).await,
+        "advertise" => ledger_advertise(&args[1..]).await,
+        "discover" => ledger_discover(&args[1..]).await,
         cmd => {
             eprintln!("Unknown ledger subcommand: {}", cmd);
-            eprintln!("Usage: deposits-bdk ledger <open|list|history|validate|export|import> [args...]");
+            eprintln!("Usage: deposits-bdk ledger <open|list|history|validate|export|import|advertise|discover> [args...]");
             Ok(())
         }
     }
@@ -1175,6 +1177,200 @@ async fn ledger_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>
             println!("Import FAILED: {}", e);
             return Err(e.into());
         }
+    }
+
+    Ok(())
+}
+
+/// Publish a ledger advertisement to Nostr
+async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use deposits_bdk::nostr::{NostrTransportBuilder, LedgerAdvertisement};
+
+    // Parse arguments: <reserves_id> [options]
+    let mut reserves_id: Option<String> = None;
+    let mut name: Option<String> = None;
+    let mut description: Option<String> = None;
+    let mut annual_fee_bps: u32 = 0;
+    let mut deposit_fee_bps: u32 = 0;
+    let mut withdrawal_fee_bps: u32 = 0;
+    let mut invoice_fee_bps: u32 = 0;
+    let mut min_fee_sats: u64 = 0;
+    let mut max_deposit_sats: u64 = u64::MAX;
+    let mut min_deposit_sats: u64 = 0;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--name" if i + 1 < args.len() => { name = Some(args[i + 1].clone()); i += 1; }
+            "--description" if i + 1 < args.len() => { description = Some(args[i + 1].clone()); i += 1; }
+            "--annual-fee" if i + 1 < args.len() => { annual_fee_bps = args[i + 1].parse()?; i += 1; }
+            "--deposit-fee" if i + 1 < args.len() => { deposit_fee_bps = args[i + 1].parse()?; i += 1; }
+            "--withdrawal-fee" if i + 1 < args.len() => { withdrawal_fee_bps = args[i + 1].parse()?; i += 1; }
+            "--invoice-fee" if i + 1 < args.len() => { invoice_fee_bps = args[i + 1].parse()?; i += 1; }
+            "--min-fee" if i + 1 < args.len() => { min_fee_sats = args[i + 1].parse()?; i += 1; }
+            "--max-deposit" if i + 1 < args.len() => { max_deposit_sats = args[i + 1].parse()?; i += 1; }
+            "--min-deposit" if i + 1 < args.len() => { min_deposit_sats = args[i + 1].parse()?; i += 1; }
+            s if s.starts_with("--") => {
+                config_args.push(args[i].clone());
+                if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                    config_args.push(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            _ => {
+                if reserves_id.is_none() {
+                    reserves_id = Some(args[i].clone());
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let reserves_id = reserves_id.ok_or(
+        "Usage: deposits-bdk ledger advertise <reserves_id> [--name <name>] [--annual-fee <bps>] ..."
+    )?;
+
+    let config = parse_config(&config_args)?;
+    let relay_url = config.relays.first()
+        .ok_or("No relay configured. Use --relay <url>")?
+        .clone();
+
+    // Load node to get ledger info
+    let node = Node::new(config.clone()).await?;
+
+    // Find the ledger
+    let (_, ledger) = node.get_ledger_by_reserves_id(&reserves_id)
+        .ok_or_else(|| format!("Ledger not found for reserves: {}", reserves_id))?;
+
+    let ledger_id = ledger.ledger_id_hex();
+    let operator_pubkey = hex::encode(ledger.operator_key().serialize());
+    let quorum_members: Vec<_> = ledger.state.quorum_members.iter().collect();
+
+    let network = match config.network {
+        bitcoin::Network::Bitcoin => "bitcoin",
+        bitcoin::Network::Testnet => "testnet",
+        bitcoin::Network::Signet => "signet",
+        bitcoin::Network::Regtest => "regtest",
+        _ => "unknown",
+    };
+
+    let mut ad = LedgerAdvertisement::new(
+        ledger_id.clone(),
+        operator_pubkey,
+        reserves_id.clone(),
+        network.to_string(),
+    );
+
+    ad.name = name;
+    ad.description = description;
+    ad.annual_fee_bps = annual_fee_bps;
+    ad.deposit_fee_bps = deposit_fee_bps;
+    ad.withdrawal_fee_bps = withdrawal_fee_bps;
+    ad.invoice_fee_bps = invoice_fee_bps;
+    ad.min_fee_sats = min_fee_sats;
+    ad.max_deposit_sats = max_deposit_sats;
+    ad.min_deposit_sats = min_deposit_sats;
+    ad.quorum_size = quorum_members.len() as u8;
+    ad.collateral_enforcement_block = ledger.state.collateral_enforcement_block.unwrap_or(0);
+    ad.reserves_amount_sats = ledger.reserves_amount();
+
+    println!("Publishing ledger advertisement...");
+    println!("  Ledger ID: {}...", &ledger_id[..16]);
+    println!("  Reserves: {} sats", ad.reserves_amount_sats);
+    println!("  Quorum size: {}", ad.quorum_size);
+    println!("  Fees: {}bps annual, {}bps deposit, {}bps withdrawal",
+        ad.annual_fee_bps, ad.deposit_fee_bps, ad.withdrawal_fee_bps);
+    println!();
+
+    let secret_key = derive_operator_secret(&config.seed, config.network)?;
+    let transport = NostrTransportBuilder::new(secret_key)
+        .relay(&relay_url)
+        .build()
+        .await?;
+
+    let event_id = transport.publish_ledger_advertisement(&ad).await?;
+    println!("Advertisement published!");
+    println!("  Event ID: {}", event_id);
+
+    Ok(())
+}
+
+/// Discover ledgers advertising on Nostr
+async fn ledger_discover(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use deposits_bdk::nostr::NostrTransportBuilder;
+
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        }
+        i += 1;
+    }
+
+    let config = parse_config(&config_args)?;
+    let relay_url = config.relays.first()
+        .ok_or("No relay configured. Use --relay <url>")?
+        .clone();
+
+    let network = match config.network {
+        bitcoin::Network::Bitcoin => "bitcoin",
+        bitcoin::Network::Testnet => "testnet",
+        bitcoin::Network::Signet => "signet",
+        bitcoin::Network::Regtest => "regtest",
+        _ => "unknown",
+    };
+
+    println!("Discovering ledgers on {} network...", network);
+    println!();
+
+    let secret_key = derive_operator_secret(&config.seed, config.network)?;
+    let transport = NostrTransportBuilder::new(secret_key)
+        .relay(&relay_url)
+        .build()
+        .await?;
+
+    let ads = transport.fetch_ledger_advertisements(network).await?;
+
+    if ads.is_empty() {
+        println!("No ledger advertisements found.");
+        return Ok(());
+    }
+
+    println!("Found {} ledger(s):", ads.len());
+    println!();
+
+    for ad in ads {
+        println!("{}:", ad.name.as_deref().unwrap_or("Unnamed Ledger"));
+        println!("  Ledger ID: {}...", &ad.ledger_id[..16.min(ad.ledger_id.len())]);
+        println!("  Operator: {}...", &ad.operator_pubkey[..16.min(ad.operator_pubkey.len())]);
+        println!("  Reserves: {} sats", ad.reserves_amount_sats);
+        println!("  Quorum: {} members", ad.quorum_size);
+        println!("  Fees:");
+        println!("    Annual: {}bps ({}%)", ad.annual_fee_bps, ad.annual_fee_bps as f64 / 100.0);
+        println!("    Deposit: {}bps", ad.deposit_fee_bps);
+        println!("    Withdrawal: {}bps", ad.withdrawal_fee_bps);
+        println!("    Invoice: {}bps", ad.invoice_fee_bps);
+        if ad.min_fee_sats > 0 {
+            println!("    Min fee: {} sats", ad.min_fee_sats);
+        }
+        println!("  Limits:");
+        if ad.max_deposit_sats < u64::MAX {
+            println!("    Max deposit: {} sats", ad.max_deposit_sats);
+        }
+        if ad.min_deposit_sats > 0 {
+            println!("    Min deposit: {} sats", ad.min_deposit_sats);
+        }
+        if let Some(desc) = &ad.description {
+            println!("  Description: {}", desc);
+        }
+        println!();
     }
 
     Ok(())

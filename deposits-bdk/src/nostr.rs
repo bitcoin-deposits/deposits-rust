@@ -77,6 +77,12 @@ pub const KIND_LEDGER_DISPUTE: u16 = 9103;
 /// Published in response to a dispute, signaling agreement to recover.
 pub const KIND_RECOVERY_AGREE: u16 = 9104;
 
+/// Custom Kind for ledger advertisement (operator terms)
+/// Uses NIP-33 parameterized replaceable events (30000-39999).
+/// Tag `d` = ledger_id ensures only latest ad per ledger is kept.
+/// Content: JSON with fees, limits, and metadata.
+pub const KIND_LEDGER_ADVERTISE: u16 = 39100;
+
 /// Default relay URLs for the network
 /// Empty by default - relays should be explicitly configured
 pub const DEFAULT_RELAYS: &[&str] = &[];
@@ -276,6 +282,121 @@ pub struct RecoveryAgreement {
     /// Timestamp
     #[serde(skip)]
     pub timestamp: u64,
+}
+
+/// A ledger advertisement (operator terms and limits)
+/// Published as a NIP-33 parameterized replaceable event.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LedgerAdvertisement {
+    /// Ledger identifier (64-char hex hash)
+    pub ledger_id: String,
+
+    /// Operator's secp256k1 pubkey (hex)
+    pub operator_pubkey: String,
+
+    /// Current reserves address (for verification)
+    pub reserves_address: String,
+
+    /// Human-readable name for the ledger
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    /// Description of the service
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+
+    // === Fee Structure (all in basis points, 100 bps = 1%) ===
+
+    /// Annual custody fee (e.g., 50 = 0.5% per year)
+    pub annual_fee_bps: u32,
+
+    /// One-time fee on deposits (e.g., 10 = 0.1%)
+    pub deposit_fee_bps: u32,
+
+    /// Fee on withdrawals (e.g., 10 = 0.1%)
+    pub withdrawal_fee_bps: u32,
+
+    /// Fee per Lightning invoice payment (e.g., 5 = 0.05%)
+    pub invoice_fee_bps: u32,
+
+    /// Minimum fee per transaction in sats (floor)
+    #[serde(default)]
+    pub min_fee_sats: u64,
+
+    // === Deposit Limits ===
+
+    /// Maximum single deposit size in sats
+    pub max_deposit_sats: u64,
+
+    /// Minimum deposit size in sats
+    pub min_deposit_sats: u64,
+
+    /// Maximum total balance per depositor in sats (0 = unlimited)
+    #[serde(default)]
+    pub max_balance_sats: u64,
+
+    // === Trust Info ===
+
+    /// Number of quorum members
+    pub quorum_size: u8,
+
+    /// Block height when collateral requirements are enforced
+    pub collateral_enforcement_block: u64,
+
+    /// Current total reserves backing the ledger (sats)
+    pub reserves_amount_sats: u64,
+
+    // === Metadata ===
+
+    /// Network (bitcoin, testnet, signet, regtest)
+    pub network: String,
+
+    /// Version of the advertisement format
+    #[serde(default = "default_version")]
+    pub version: u8,
+
+    /// Nostr event ID of this advertisement
+    #[serde(skip)]
+    pub event_id: String,
+
+    /// Timestamp when published
+    #[serde(skip)]
+    pub timestamp: u64,
+}
+
+fn default_version() -> u8 { 1 }
+
+impl LedgerAdvertisement {
+    /// Create a new advertisement with required fields
+    pub fn new(
+        ledger_id: String,
+        operator_pubkey: String,
+        reserves_address: String,
+        network: String,
+    ) -> Self {
+        Self {
+            ledger_id,
+            operator_pubkey,
+            reserves_address,
+            name: None,
+            description: None,
+            annual_fee_bps: 0,
+            deposit_fee_bps: 0,
+            withdrawal_fee_bps: 0,
+            invoice_fee_bps: 0,
+            min_fee_sats: 0,
+            max_deposit_sats: u64::MAX,
+            min_deposit_sats: 0,
+            max_balance_sats: 0,
+            quorum_size: 0,
+            collateral_enforcement_block: 0,
+            reserves_amount_sats: 0,
+            network,
+            version: 1,
+            event_id: String::new(),
+            timestamp: 0,
+        }
+    }
 }
 
 impl NostrTransport {
@@ -807,6 +928,110 @@ impl NostrTransport {
         }
 
         Ok(agreements)
+    }
+
+    /// Publish a ledger advertisement
+    ///
+    /// Uses NIP-33 parameterized replaceable events, so only the latest
+    /// advertisement per ledger_id is retained by relays.
+    pub async fn publish_ledger_advertisement(
+        &self,
+        ad: &LedgerAdvertisement,
+    ) -> Result<String, Error> {
+        let content = serde_json::to_string(ad)
+            .map_err(|e| Error::Serialization(format!("Failed to serialize advertisement: {}", e)))?;
+
+        let event = EventBuilder::new(Kind::Custom(KIND_LEDGER_ADVERTISE), &content)
+            .tag(Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::D)),
+                [ad.ledger_id.as_str()],
+            ))
+            .tag(Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::N)),
+                [ad.network.as_str()],
+            ))
+            .tag(Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::P)),
+                [ad.operator_pubkey.as_str()],
+            ))
+            .sign_with_keys(&self.keys)
+            .map_err(|e| Error::Nostr(format!("Failed to sign event: {}", e)))?;
+
+        let event_id = event.id.to_hex();
+
+        self.client
+            .send_event(event)
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to send advertisement: {}", e)))?;
+
+        tracing::info!(
+            "Published ledger advertisement: ledger={}, event={}",
+            &ad.ledger_id[..16.min(ad.ledger_id.len())],
+            &event_id[..16]
+        );
+
+        Ok(event_id)
+    }
+
+    /// Fetch all ledger advertisements for a network
+    pub async fn fetch_ledger_advertisements(
+        &self,
+        network: &str,
+    ) -> Result<Vec<LedgerAdvertisement>, Error> {
+        let filter = Filter::new()
+            .kind(Kind::Custom(KIND_LEDGER_ADVERTISE))
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::N),
+                [network],
+            );
+
+        let events = self.client
+            .fetch_events(vec![filter], Some(std::time::Duration::from_secs(10)))
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to fetch advertisements: {}", e)))?;
+
+        let mut ads = Vec::new();
+        for event in events.iter() {
+            if let Ok(mut ad) = serde_json::from_str::<LedgerAdvertisement>(&event.content) {
+                ad.event_id = event.id.to_hex();
+                ad.timestamp = event.created_at.as_u64();
+                ads.push(ad);
+            }
+        }
+
+        // Sort by timestamp descending (newest first)
+        ads.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+
+        Ok(ads)
+    }
+
+    /// Fetch a specific ledger's advertisement
+    pub async fn fetch_ledger_advertisement(
+        &self,
+        ledger_id: &str,
+    ) -> Result<Option<LedgerAdvertisement>, Error> {
+        let filter = Filter::new()
+            .kind(Kind::Custom(KIND_LEDGER_ADVERTISE))
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::D),
+                [ledger_id],
+            )
+            .limit(1);
+
+        let events = self.client
+            .fetch_events(vec![filter], Some(std::time::Duration::from_secs(10)))
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to fetch advertisement: {}", e)))?;
+
+        if let Some(event) = events.iter().next() {
+            if let Ok(mut ad) = serde_json::from_str::<LedgerAdvertisement>(&event.content) {
+                ad.event_id = event.id.to_hex();
+                ad.timestamp = event.created_at.as_u64();
+                return Ok(Some(ad));
+            }
+        }
+
+        Ok(None)
     }
 
     /// Fetch disputes for a ledger
