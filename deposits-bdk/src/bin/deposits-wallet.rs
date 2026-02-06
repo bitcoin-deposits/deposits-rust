@@ -502,7 +502,7 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
                 if response.success {
                     println!("Deposit offer accepted!");
                     if let Some(result) = &response.result {
-                        if let Some(address) = result.get("deposit_address").and_then(|v| v.as_str()) {
+                        if let Some(address) = result.get("funding_address").and_then(|v| v.as_str()) {
                             println!();
                             println!("Send {} sats to:", amount_sats);
                             println!("  {}", address);
@@ -664,7 +664,7 @@ async fn add_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 if response.success {
                     println!("Offer accepted!");
                     if let Some(result) = &response.result {
-                        if let Some(address) = result.get("deposit_address").and_then(|v| v.as_str()) {
+                        if let Some(address) = result.get("funding_address").and_then(|v| v.as_str()) {
                             println!();
                             println!("Send {} sats to:", amount_sats);
                             println!("  {}", address);
