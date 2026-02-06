@@ -8936,8 +8936,9 @@ async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     println!("Our pubkey: {}...", &our_pubkey.to_string()[..16]);
 
-    // Fetch our CustodyAcquire to find the previous hash
-    println!("Fetching our CustodyAcquire branch...");
+    // Fetch our CustodyArmed to find the previous hash
+    // (Losers yield from their CustodyArmed branch, not CustodyAcquire - that's for winners)
+    println!("Fetching our CustodyArmed branch...");
     let keys = Keys::generate();
     let client = Client::new(keys);
     client.add_relay(&relay_url).await
@@ -8954,16 +8955,16 @@ async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error::Err
         .await
         .map_err(|e| format!("Failed to fetch events: {}", e))?;
 
-    // Find our CustodyAcquire update
-    let mut our_acquire: Option<SignedLedgerUpdate> = None;
+    // Find our CustodyArmed update (the branch we yield from as a loser)
+    let mut our_armed: Option<SignedLedgerUpdate> = None;
     for event in events.iter() {
         if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
             if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
                 if update.operator_id == our_pubkey {
-                    // Check if it's a CustodyAcquire
+                    // Check if it's a CustodyArmed
                     if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                        if matches!(op, LedgerOperation::CustodyAcquire { .. }) {
-                            our_acquire = Some(update);
+                        if matches!(op, LedgerOperation::CustodyArmed { .. }) {
+                            our_armed = Some(update);
                             break;
                         }
                     }
@@ -8974,11 +8975,11 @@ async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     client.disconnect().await?;
 
-    let our_acquire = our_acquire.ok_or(
-        "Could not find our CustodyAcquire. Did you run 'recovery prepare' first?"
+    let our_armed = our_armed.ok_or(
+        "Could not find our CustodyArmed. Did you run 'recovery arm' first?"
     )?;
 
-    println!("  Found our CustodyAcquire at sequence {}", our_acquire.sequence_number);
+    println!("  Found our CustodyArmed at sequence {}", our_armed.sequence_number);
 
     // Get current block height
     use bdk_esplora::esplora_client::Builder as EsploraBuilder;
@@ -8992,18 +8993,18 @@ async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error::Err
     // Serialize
     let message_bytes = custody_release.tlv_encode();
 
-    // Compute the new hash (continuing from our CustodyAcquire)
-    let sequence = our_acquire.sequence_number + 1;
+    // Compute the new hash (continuing from our CustodyArmed)
+    let sequence = our_armed.sequence_number + 1;
     let mut hash_input = Vec::new();
     hash_input.extend_from_slice(&sequence.to_le_bytes());
-    hash_input.extend_from_slice(&our_acquire.current_hash);
+    hash_input.extend_from_slice(&our_armed.current_hash);
     hash_input.extend_from_slice(&message_bytes);
     let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
 
     // Sign the update
     let update_msg = format!(
         "deposits:ledger:{}:{}:{}",
-        hex::encode(our_acquire.current_hash),
+        hex::encode(our_armed.current_hash),
         sequence,
         hex::encode(&new_hash)
     );
@@ -9029,7 +9030,7 @@ async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error::Err
         operator_id: our_pubkey,
         ledger_id: ledger_id_bytes,
         sequence_number: sequence,
-        previous_hash: our_acquire.current_hash,
+        previous_hash: our_armed.current_hash,
         current_hash: new_hash,
         timestamp: deposits_core::now_unix_timestamp(),
         block_height: current_block_height,
