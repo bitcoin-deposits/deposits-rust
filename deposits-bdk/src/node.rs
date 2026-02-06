@@ -390,6 +390,9 @@ impl Node {
                     // Auto-claim/yield for any pending lottery disputes
                     self.auto_lottery_claim_or_yield().await;
 
+                    // Auto-initiate confiscation when all participants are armed
+                    self.auto_confiscate().await;
+
                     // Auto-reveal preimage when confiscation TX has 3+ confirmations
                     self.auto_reveal_on_confiscation().await;
 
@@ -1360,6 +1363,462 @@ impl Node {
         Ok(())
     }
 
+    /// Auto-initiate confiscation when all participants are armed
+    ///
+    /// For each ledger where we're armed but confiscation hasn't happened yet,
+    /// check if all participants have armed. If so, build the confiscation TX,
+    /// request signatures from quorum members, and broadcast.
+    async fn auto_confiscate(&self) {
+        use bitcoin::secp256k1::{Secp256k1, Keypair, Message, PublicKey, XOnlyPublicKey};
+        use deposits_core::{TlvDecode, TlvEncode, SignedLedgerUpdate, VoterSet, ThresholdConfig, TapscriptReservesBuilder};
+        use deposits_core::messages::LedgerOperation;
+        use deposits_core::tapscript_reserves::{LotteryScriptBuilder, LotteryParticipant};
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+        use nostr_sdk::{Client, Keys, Filter, Kind};
+        use nostr_sdk::prelude::{SingleLetterTag, Alphabet};
+        use bitcoin::{Transaction, TxIn, TxOut, Witness, Amount};
+        use bitcoin::sighash::{SighashCache, TapSighashType};
+        use std::collections::HashMap;
+
+        let secp = Secp256k1::new();
+        let keypair = Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
+        let our_pubkey = keypair.public_key();
+
+        // Find armed markers (ledgers where we've armed)
+        let entries = match std::fs::read_dir(&self.data_dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.starts_with("custody_armed_") || !name.ends_with(".marker") {
+                continue;
+            }
+
+            // Extract ledger prefix from marker name
+            let ledger_prefix = name
+                .trim_start_matches("custody_armed_")
+                .trim_end_matches(".marker");
+
+            // Skip if already confiscated or revealed
+            let confiscated_marker = self.data_dir.join(format!("confiscated_{}.marker", ledger_prefix));
+            let revealed_marker = self.data_dir.join(format!("lottery_revealed_{}.marker", ledger_prefix));
+            if confiscated_marker.exists() || revealed_marker.exists() {
+                continue;
+            }
+
+            tracing::debug!("Checking if confiscation ready for ledger {}...", ledger_prefix);
+
+            // Find the full ledger_id by looking at our ledgers
+            let ledger_id = {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                let mut found = None;
+                for ((_op, _res), arc) in ledgers.iter() {
+                    let ledger = arc.read().unwrap();
+                    let lid = ledger.ledger_id_hex();
+                    if lid.starts_with(ledger_prefix) {
+                        found = Some(lid);
+                        break;
+                    }
+                }
+                match found {
+                    Some(id) => id,
+                    None => continue,
+                }
+            };
+
+            // Fetch ledger updates from Nostr
+            let keys = Keys::generate();
+            let client = Client::new(keys);
+
+            if client.add_relay(&self.relay_url).await.is_err() {
+                continue;
+            }
+            client.connect().await;
+
+            let filter = Filter::new()
+                .kind(Kind::Custom(crate::nostr::KIND_LEDGER_UPDATE))
+                .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()])
+                .limit(500);
+
+            let events = match client.fetch_events(vec![filter], Some(std::time::Duration::from_secs(10))).await {
+                Ok(e) => e,
+                Err(_) => {
+                    client.disconnect().await.ok();
+                    continue;
+                }
+            };
+            client.disconnect().await.ok();
+
+            // Extract CustodyArmed participants, quorum members, and reserves info
+            let mut participants: Vec<LotteryParticipant> = Vec::new();
+            let mut quorum_members: Vec<PublicKey> = Vec::new();
+            let mut reserves_address: Option<String> = None;
+            let mut ledger_hash: Option<[u8; 32]> = None;
+            let mut original_operator: Option<PublicKey> = None;
+
+            for event in events.iter() {
+                if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
+                    if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
+                        if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+                            match op {
+                                LedgerOperation::LedgerOpen { operator_id, .. } => {
+                                    original_operator = Some(operator_id);
+                                }
+                                LedgerOperation::QuorumAddMember { quorum_member, .. } => {
+                                    if !quorum_members.contains(&quorum_member) {
+                                        quorum_members.push(quorum_member);
+                                    }
+                                }
+                                LedgerOperation::ReservesRotate { reserves_id, ledger_hash: lh, .. } => {
+                                    reserves_address = Some(reserves_id);
+                                    ledger_hash = Some(lh);
+                                }
+                                LedgerOperation::CustodyArmed { commitment_hash, target_reserves, .. } => {
+                                    let x_only = update.operator_id.x_only_public_key().0;
+                                    // Check if we already have this participant
+                                    if !participants.iter().any(|p| p.pubkey == x_only) {
+                                        participants.push(LotteryParticipant::new(
+                                            x_only,
+                                            commitment_hash,
+                                            target_reserves,
+                                        ));
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Need at least 2 participants to proceed
+            if participants.len() < 2 {
+                tracing::debug!("Not enough CustodyArmed participants yet ({}/2)", participants.len());
+                continue;
+            }
+
+            let original_operator = match original_operator {
+                Some(op) => op,
+                None => continue,
+            };
+            let reserves_address_str = match reserves_address {
+                Some(addr) => addr,
+                None => continue,
+            };
+            let ledger_hash_val = match ledger_hash {
+                Some(lh) => lh,
+                None => continue,
+            };
+
+            tracing::info!("All {} participants armed for ledger {}..., initiating confiscation",
+                participants.len(), ledger_prefix);
+
+            // Sort participants by pubkey for deterministic order
+            participants.sort_by(|a, b| a.pubkey.serialize().cmp(&b.pubkey.serialize()));
+
+            // Build recovery voters (quorum minus original operator)
+            let recovery_voters: Vec<XOnlyPublicKey> = quorum_members.iter()
+                .filter(|pk| **pk != original_operator)
+                .map(|pk| pk.x_only_public_key().0)
+                .collect();
+
+            let recovery_threshold = (recovery_voters.len() / 2) + 1;
+
+            // Build the lottery output
+            let lottery_builder = LotteryScriptBuilder::new(
+                participants.clone(),
+                recovery_voters,
+                recovery_threshold,
+                self.wallet.network(),
+            );
+
+            let lottery_output = match lottery_builder.build() {
+                Ok(out) => out,
+                Err(e) => {
+                    tracing::error!("Failed to build lottery output: {:?}", e);
+                    continue;
+                }
+            };
+
+            tracing::info!("  Lottery address: {}", lottery_output.address);
+
+            // Look up reserves UTXO
+            let reserves_addr: bitcoin::Address<bitcoin::address::NetworkUnchecked> = match reserves_address_str.parse() {
+                Ok(a) => a,
+                Err(_) => continue,
+            };
+            let reserves_addr = match reserves_addr.require_network(self.wallet.network()) {
+                Ok(a) => a,
+                Err(_) => continue,
+            };
+
+            let script_pubkey = reserves_addr.script_pubkey();
+            let utxo = match self.wallet.find_utxo_for_script(&script_pubkey) {
+                Ok(Some(u)) => u,
+                Ok(None) => {
+                    tracing::debug!("No unspent reserves UTXO found");
+                    continue;
+                }
+                Err(_) => continue,
+            };
+
+            let (reserves_outpoint, reserves_amount) = utxo;
+            tracing::info!("  Found reserves: {} sats at {}", reserves_amount, reserves_outpoint);
+
+            // Build confiscation transaction
+            let fee_rate = 2u64;
+            let estimated_vsize = 200u64;
+            let fee = fee_rate * estimated_vsize;
+            let output_amount = reserves_amount.saturating_sub(fee);
+
+            let confiscation_tx = Transaction {
+                version: bitcoin::transaction::Version::TWO,
+                lock_time: bitcoin::absolute::LockTime::ZERO,
+                input: vec![TxIn {
+                    previous_output: reserves_outpoint,
+                    script_sig: bitcoin::ScriptBuf::new(),
+                    sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    witness: Witness::default(),
+                }],
+                output: vec![TxOut {
+                    value: Amount::from_sat(output_amount),
+                    script_pubkey: lottery_output.script_pubkey(),
+                }],
+            };
+
+            // Build the Taproot reserves structure for signing
+            let voter_set = VoterSet::new(original_operator, quorum_members.clone());
+            let voter_count = voter_set.all_voters().len();
+            let threshold_config = ThresholdConfig::default_for_voter_count(voter_count);
+
+            let taproot_builder = TapscriptReservesBuilder::new(
+                voter_set.clone(),
+                threshold_config.clone(),
+                self.wallet.network(),
+                ledger_hash_val,
+            );
+
+            let taproot_output = match taproot_builder.build() {
+                Ok(out) => out,
+                Err(e) => {
+                    tracing::error!("Failed to build Taproot output: {:?}", e);
+                    continue;
+                }
+            };
+
+            // Use quorum-override tier (threshold without tie-breaker)
+            let (tier_index, tier) = match threshold_config.tiers.iter()
+                .enumerate()
+                .find(|(_, t)| !t.requires_tie_breaker && t.threshold > 1)
+            {
+                Some(t) => t,
+                None => {
+                    tracing::error!("No quorum-override tier found");
+                    continue;
+                }
+            };
+
+            tracing::info!("  Using Tier {} for confiscation (threshold={}/{})",
+                tier_index, tier.threshold, voter_count);
+
+            // Build leaf script and compute sighash
+            let leaf_script = match taproot_builder.build_threshold_leaf(tier) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("Failed to build leaf script: {:?}", e);
+                    continue;
+                }
+            };
+
+            let leaf_hash = bitcoin::taproot::TapLeafHash::from_script(&leaf_script, bitcoin::taproot::LeafVersion::TapScript);
+
+            let prevouts = vec![TxOut {
+                value: Amount::from_sat(reserves_amount),
+                script_pubkey: reserves_addr.script_pubkey(),
+            }];
+
+            let mut confiscation_tx = confiscation_tx;
+            let mut sighash_cache = SighashCache::new(&confiscation_tx);
+            let sighash = match sighash_cache.taproot_script_spend_signature_hash(
+                0,
+                &bitcoin::sighash::Prevouts::All(&prevouts),
+                leaf_hash,
+                TapSighashType::Default,
+            ) {
+                Ok(sh) => sh,
+                Err(e) => {
+                    tracing::error!("Failed to compute sighash: {}", e);
+                    continue;
+                }
+            };
+
+            let sighash_bytes: [u8; 32] = *sighash.as_ref();
+
+            // Sign with our key
+            let msg = Message::from_digest(sighash_bytes);
+            let our_signature = secp.sign_schnorr(&msg, &keypair);
+
+            let mut signatures: HashMap<PublicKey, [u8; 64]> = HashMap::new();
+            signatures.insert(our_pubkey, our_signature.serialize());
+
+            tracing::info!("  Signed with our key");
+
+            // Request signatures from other quorum members via Nostr
+            let required_sigs = tier.threshold;
+            tracing::info!("  Need {}/{} signatures", required_sigs, voter_count);
+
+            if signatures.len() < required_sigs {
+                let unsigned_tx_bytes = bitcoin::consensus::encode::serialize(&confiscation_tx);
+                let unsigned_tx_hex = hex::encode(&unsigned_tx_bytes);
+
+                let request_params = serde_json::json!({
+                    "ledger_id": ledger_id,
+                    "sighash": hex::encode(sighash_bytes),
+                    "unsigned_tx": unsigned_tx_hex,
+                    "lottery_address": lottery_output.address.to_string(),
+                    "violation_details": "Confiscation to lottery for dispute resolution",
+                });
+
+                let request_id = match self.nostr.send_ledger_request(
+                    &ledger_id,
+                    "confiscation_sign",
+                    request_params,
+                ).await {
+                    Ok(id) => id,
+                    Err(e) => {
+                        tracing::error!("Failed to send sign request: {:?}", e);
+                        continue;
+                    }
+                };
+
+                tracing::info!("  Request ID: {}...", &request_id[..16.min(request_id.len())]);
+
+                // Poll for signatures
+                let max_attempts = 20;
+                let poll_interval = std::time::Duration::from_secs(3);
+
+                for attempt in 1..=max_attempts {
+                    tokio::time::sleep(poll_interval).await;
+
+                    let since = nostr_sdk::Timestamp::now() - 120;
+                    let filter = Filter::new()
+                        .kind(Kind::Custom(crate::nostr::KIND_LEDGER_RESPONSE))
+                        .since(since);
+
+                    let response_events = match self.nostr.client()
+                        .fetch_events(vec![filter], Some(std::time::Duration::from_secs(5)))
+                        .await
+                    {
+                        Ok(e) => e,
+                        Err(_) => continue,
+                    };
+
+                    for event in response_events.iter() {
+                        let mut is_our_request = false;
+                        for tag in event.tags.iter() {
+                            if tag.kind() == nostr_sdk::TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::E)) {
+                                if let Some(val) = tag.content() {
+                                    if val == request_id {
+                                        is_our_request = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        if !is_our_request { continue; }
+
+                        if let Ok(response) = serde_json::from_str::<crate::nostr::LedgerResponse>(&event.content) {
+                            if response.success {
+                                if let Some(result) = &response.result {
+                                    if let (Some(signer_hex), Some(sig_hex)) = (
+                                        result.get("signer").and_then(|v| v.as_str()),
+                                        result.get("signature").and_then(|v| v.as_str())
+                                    ) {
+                                        if let (Ok(signer), Ok(sig_bytes)) = (
+                                            signer_hex.parse::<PublicKey>(),
+                                            hex::decode(sig_hex)
+                                        ) {
+                                            if sig_bytes.len() == 64 && !signatures.contains_key(&signer) {
+                                                let mut sig_arr = [0u8; 64];
+                                                sig_arr.copy_from_slice(&sig_bytes);
+                                                signatures.insert(signer, sig_arr);
+                                                tracing::info!("    Received signature from {}...", &signer.to_string()[..16]);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    tracing::debug!("    Poll {}/{}: {}/{} signatures", attempt, max_attempts, signatures.len(), required_sigs);
+
+                    if signatures.len() >= required_sigs { break; }
+                }
+            }
+
+            if signatures.len() < required_sigs {
+                tracing::warn!("Could not collect enough signatures ({}/{}), will retry later",
+                    signatures.len(), required_sigs);
+                continue;
+            }
+
+            // Build witness
+            tracing::info!("  Building witness with {} signatures...", signatures.len());
+
+            let control_block = match taproot_output.control_block_for_tier(tier_index) {
+                Some(cb) => cb,
+                None => {
+                    tracing::error!("Failed to get control block for tier");
+                    continue;
+                }
+            };
+
+            let mut witness = Witness::new();
+            let sorted_keys = voter_set.sorted_x_only_pubkeys();
+
+            for x_only in sorted_keys.iter().rev() {
+                for voter in voter_set.all_voters() {
+                    if voter.x_only_public_key().0 == *x_only {
+                        if let Some(sig) = signatures.get(&voter) {
+                            witness.push(sig);
+                        } else {
+                            witness.push(&[] as &[u8]);
+                        }
+                        break;
+                    }
+                }
+            }
+
+            witness.push(leaf_script.as_bytes());
+            witness.push(control_block.serialize());
+
+            confiscation_tx.input[0].witness = witness;
+
+            // Broadcast
+            tracing::info!("  Broadcasting confiscation transaction...");
+
+            match self.wallet.broadcast(&confiscation_tx) {
+                Ok(_) => {
+                    let confiscation_txid = confiscation_tx.compute_txid();
+                    tracing::info!("Confiscation transaction broadcast! Txid: {}", confiscation_txid);
+                    tracing::info!("  Lottery address: {}", lottery_output.address);
+
+                    // Write confiscated marker
+                    if let Err(e) = std::fs::write(&confiscated_marker, confiscation_txid.to_string()) {
+                        tracing::warn!("Failed to write confiscated marker: {}", e);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Failed to broadcast confiscation TX: {}", e);
+                }
+            }
+        }
+    }
+
     /// Auto-reveal preimage when confiscation TX has 3+ confirmations
     ///
     /// For each ledger where we're armed but haven't revealed yet,
@@ -2065,10 +2524,49 @@ impl Node {
         (false, None, Some("custody_transfer_sign: use 'nostr watch' CLI for now".to_string()))
     }
 
-    async fn process_confiscation_sign_request(&self, _request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
-        // TODO: Implement - for now handled by CLI's nostr watch
-        tracing::info!("confiscation_sign request received (not yet handled by Node)");
-        (false, None, Some("confiscation_sign: use 'nostr watch' CLI for now".to_string()))
+    async fn process_confiscation_sign_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+        use bitcoin::secp256k1::{Secp256k1, Message};
+
+        tracing::info!("Processing confiscation_sign request for ledger {}...",
+            &request.ledger_id[..16.min(request.ledger_id.len())]);
+
+        // Extract sighash from request params
+        let sighash_hex = match request.params.get("sighash").and_then(|v| v.as_str()) {
+            Some(h) => h,
+            None => return (false, None, Some("Missing sighash parameter".to_string())),
+        };
+
+        let sighash_bytes: [u8; 32] = match hex::decode(sighash_hex) {
+            Ok(bytes) if bytes.len() == 32 => {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                arr
+            }
+            _ => return (false, None, Some("Invalid sighash format".to_string())),
+        };
+
+        // Check if we have an armed marker for this ledger (meaning we're participating in the dispute)
+        let ledger_prefix = &request.ledger_id[..16.min(request.ledger_id.len())];
+        let armed_marker = self.data_dir.join(format!("custody_armed_{}.marker", ledger_prefix));
+
+        if !armed_marker.exists() {
+            return (false, None, Some("Not armed for this dispute".to_string()));
+        }
+
+        // Sign the sighash
+        let secp = Secp256k1::new();
+        let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
+        let msg = Message::from_digest(sighash_bytes);
+        let signature = secp.sign_schnorr(&msg, &keypair);
+
+        let our_pubkey = keypair.public_key();
+        let result = serde_json::json!({
+            "signer": our_pubkey.to_string(),
+            "signature": hex::encode(signature.serialize()),
+        });
+
+        tracing::info!("Signed confiscation sighash for ledger {}...", ledger_prefix);
+        (true, Some(result.to_string()), None)
     }
 
     async fn process_custodian_query_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
