@@ -100,6 +100,10 @@ pub struct Node {
     /// Pending withdrawals indexed by withdrawal_id
     withdrawals: Mutex<HashMap<[u8; 32], (OnChainWithdrawal, OnChainWithdrawalStatus)>>,
 
+    /// Pending collateral lock requests (request_id -> our_reserves_id)
+    /// Used to auto-record attestations when responses arrive
+    pending_collateral_requests: Mutex<HashMap<String, String>>,
+
     /// Data directory for persistence
     data_dir: PathBuf,
 }
@@ -151,6 +155,7 @@ impl Node {
             outbound_rx,
             deposit_offers: Mutex::new(deposit_offers),
             withdrawals: Mutex::new(withdrawals),
+            pending_collateral_requests: Mutex::new(HashMap::new()),
             data_dir: config.data_dir,
         })
     }
@@ -345,6 +350,11 @@ impl Node {
                     // Handle disputes
                     while let Some(dispute) = self.nostr.try_recv_dispute() {
                         self.handle_dispute(dispute).await;
+                    }
+
+                    // Handle responses (for auto-recording attestations)
+                    while let Some(response) = self.nostr.try_recv_response() {
+                        self.handle_ledger_response(response).await;
                     }
                 }
 
@@ -583,6 +593,131 @@ impl Node {
             }
         }
         None
+    }
+
+    /// Handle a ledger response (for auto-recording attestations)
+    async fn handle_ledger_response(&self, response: crate::nostr::LedgerResponse) {
+        // Check if this is a response to one of our pending collateral_lock requests
+        let our_reserves_id = {
+            let pending = self.pending_collateral_requests.lock().unwrap();
+            pending.get(&response.request_id).cloned()
+        };
+
+        let Some(reserves_id) = our_reserves_id else {
+            // Not a tracked request, ignore
+            return;
+        };
+
+        // Remove from pending
+        {
+            let mut pending = self.pending_collateral_requests.lock().unwrap();
+            pending.remove(&response.request_id);
+        }
+
+        if !response.success {
+            tracing::warn!(
+                "Collateral lock request {} failed: {}",
+                &response.request_id[..16.min(response.request_id.len())],
+                response.error.unwrap_or_default()
+            );
+            return;
+        }
+
+        // Extract and decode attestation from response
+        let Some(result) = response.result else {
+            tracing::warn!("Collateral lock response has no result data");
+            return;
+        };
+
+        let Some(attestation_b64) = result.get("attestation_b64").and_then(|v| v.as_str()) else {
+            tracing::warn!("Collateral lock response missing attestation_b64");
+            return;
+        };
+
+        // Decode base64 -> JSON -> CollateralAttestationMsg
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+        let attestation_json = match BASE64.decode(attestation_b64) {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("Failed to decode attestation as UTF-8: {}", e);
+                    return;
+                }
+            },
+            Err(e) => {
+                tracing::error!("Failed to decode attestation base64: {}", e);
+                return;
+            }
+        };
+
+        let attestation: deposits_core::CollateralAttestationMsg = match serde_json::from_str(&attestation_json) {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::error!("Failed to parse attestation JSON: {}", e);
+                return;
+            }
+        };
+
+        tracing::info!(
+            "Auto-recording attestation: amount={} msats, until_block={}, from operator {}...",
+            attestation.amount,
+            attestation.lock_until_block,
+            &hex::encode(attestation.operator.serialize())[..16]
+        );
+
+        // Record the attestation on our ledger
+        match self.record_collateral_attestation(&reserves_id, attestation) {
+            Ok(()) => {
+                tracing::info!("Attestation recorded successfully on ledger {}", &reserves_id[..16.min(reserves_id.len())]);
+
+                // Broadcast the update
+                if let Err(e) = self.broadcast_last_update(&reserves_id).await {
+                    tracing::warn!("Failed to broadcast attestation: {}", e);
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to record attestation: {}", e);
+            }
+        }
+    }
+
+    /// Send a collateral_lock request and track it for auto-recording the attestation response
+    ///
+    /// When the response arrives with an attestation, it will be automatically recorded
+    /// on our ledger (specified by `our_reserves_id`).
+    pub async fn send_collateral_lock_request(
+        &self,
+        target_ledger_id: &str,
+        our_reserves_id: &str,
+        deposit_secret: &bitcoin::secp256k1::SecretKey,
+        amount_msats: u64,
+        lock_blocks: u32,
+    ) -> Result<String, Error> {
+        let params = serde_json::json!({
+            "deposit_secret": hex::encode(deposit_secret.secret_bytes()),
+            "amount_msats": amount_msats,
+            "lock_blocks": lock_blocks,
+            "requesting_operator": hex::encode(self.node_id.serialize()),
+        });
+
+        // Send the request
+        let request_id = self.nostr.send_ledger_request(target_ledger_id, "collateral_lock", params)
+            .await
+            .map_err(|e| Error::Protocol(format!("Failed to send collateral_lock request: {:?}", e)))?;
+
+        // Track for auto-recording
+        {
+            let mut pending = self.pending_collateral_requests.lock().unwrap();
+            pending.insert(request_id.clone(), our_reserves_id.to_string());
+        }
+
+        tracing::info!(
+            "Sent collateral_lock request {} to ledger {}..., tracking for auto-record",
+            &request_id[..16.min(request_id.len())],
+            &target_ledger_id[..16.min(target_ledger_id.len())]
+        );
+
+        Ok(request_id)
     }
 
     /// Handle an inbound message
