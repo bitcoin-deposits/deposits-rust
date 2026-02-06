@@ -3,15 +3,16 @@
 //! Discovers ledger operators, opens deposits, and manages balances.
 //!
 //! Usage:
-//!   deposits-wallet discover              - Find available ledgers
-//!   deposits-wallet deposit <ledger_id>   - Open a deposit
-//!   deposits-wallet balance               - Check balances
-//!   deposits-wallet withdraw <amount>     - Withdraw funds
+//!   deposits-wallet discover                   - Find available ledgers
+//!   deposits-wallet open <ledger_id> <sats>    - Open a new deposit
+//!   deposits-wallet offer <alias> <sats>       - Add funds to existing deposit
+//!   deposits-wallet list                       - List deposits with aliases
+//!   deposits-wallet balance                    - Check balances
+//!   deposits-wallet withdraw <alias> <amount>  - Withdraw funds
 
 use bitcoin::secp256k1::{Secp256k1, SecretKey};
-use deposits_bdk::nostr::{NostrTransportBuilder, LedgerAdvertisement, KIND_LEDGER_ADVERTISE};
-use nostr_sdk::{Client, Keys, Filter, Kind};
-use nostr_sdk::prelude::{SingleLetterTag, Alphabet};
+use chrono::Utc;
+use deposits_bdk::nostr::NostrTransportBuilder;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
@@ -30,20 +31,25 @@ fn print_usage(program: &str) {
     eprintln!("Commands:");
     eprintln!("  discover                    Find available ledgers on the network");
     eprintln!("  info <ledger_id>            Get details about a specific ledger");
-    eprintln!("  deposit <ledger_id> <sats>  Open a deposit on a ledger");
+    eprintln!("  open <ledger_id> <sats>     Open a new deposit on a ledger");
+    eprintln!("  offer <alias> <sats>        Add funds to an existing deposit");
     eprintln!("  balance                     Show balances across all deposits");
-    eprintln!("  withdraw <ledger_id> <amt>  Withdraw from a deposit");
-    eprintln!("  history <ledger_id>         Show transaction history");
+    eprintln!("  withdraw <alias> <amt>      Withdraw from a deposit");
+    eprintln!("  history <alias>             Show transaction history");
+    eprintln!("  list                        List all your deposits with aliases");
     eprintln!();
     eprintln!("Options:");
     eprintln!("  --relay <url>       Nostr relay URL (required)");
     eprintln!("  --network <net>     Network: bitcoin, testnet, signet, regtest (default: regtest)");
     eprintln!("  --data-dir <path>   Data directory (default: ~/.deposits-wallet)");
     eprintln!("  --seed <hex>        Wallet seed (32 bytes hex)");
+    eprintln!("  --alias <name>      Local alias for the deposit (for open command)");
     eprintln!();
     eprintln!("Examples:");
     eprintln!("  {} discover --relay ws://localhost:8080", program);
-    eprintln!("  {} deposit abc123... 100000 --relay ws://localhost:8080", program);
+    eprintln!("  {} open abc123... 100000 --alias savings --relay ws://localhost:8080", program);
+    eprintln!("  {} offer savings 50000 --relay ws://localhost:8080", program);
+    eprintln!("  {} withdraw savings 25000 --to bc1q... --relay ws://localhost:8080", program);
 }
 
 fn parse_config(args: &[String]) -> Result<WalletConfig, Box<dyn std::error::Error>> {
@@ -160,10 +166,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match args[1].as_str() {
         "discover" => discover(&args[2..]).await,
         "info" => ledger_info(&args[2..]).await,
-        "deposit" => open_deposit(&args[2..]).await,
+        "open" => open_new_deposit(&args[2..]).await,
+        "offer" => add_offer(&args[2..]).await,
         "balance" => show_balance(&args[2..]).await,
         "withdraw" => withdraw(&args[2..]).await,
         "history" => show_history(&args[2..]).await,
+        "list" => list_deposits(&args[2..]).await,
         "help" | "--help" | "-h" => {
             print_usage(&args[0]);
             Ok(())
@@ -251,8 +259,8 @@ async fn discover(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         println!();
     }
 
-    println!("To deposit, use:");
-    println!("  deposits-wallet deposit <ledger_id> <amount_sats>");
+    println!("To open a deposit, use:");
+    println!("  deposits-wallet open <ledger_id> <amount_sats> --alias <name>");
 
     Ok(())
 }
@@ -365,29 +373,39 @@ async fn ledger_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
-/// Open a deposit on a ledger
-async fn open_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+/// Open a new deposit on a ledger
+async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut ledger_id: Option<String> = None;
     let mut amount_sats: Option<u64> = None;
+    let mut alias: Option<String> = None;
     let mut config_args = Vec::new();
 
     let mut i = 0;
     while i < args.len() {
-        if args[i].starts_with("--") {
-            config_args.push(args[i].clone());
-            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
-                config_args.push(args[i + 1].clone());
+        match args[i].as_str() {
+            "--alias" if i + 1 < args.len() => {
+                alias = Some(args[i + 1].clone());
                 i += 1;
             }
-        } else if ledger_id.is_none() {
-            ledger_id = Some(args[i].clone());
-        } else if amount_sats.is_none() {
-            amount_sats = Some(args[i].parse()?);
+            s if s.starts_with("--") => {
+                config_args.push(args[i].clone());
+                if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                    config_args.push(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            _ => {
+                if ledger_id.is_none() {
+                    ledger_id = Some(args[i].clone());
+                } else if amount_sats.is_none() {
+                    amount_sats = Some(args[i].parse()?);
+                }
+            }
         }
         i += 1;
     }
 
-    let ledger_id = ledger_id.ok_or("Usage: deposits-wallet deposit <ledger_id> <amount_sats> --relay <url>")?;
+    let ledger_id = ledger_id.ok_or("Usage: deposits-wallet open <ledger_id> <amount_sats> [--alias <name>] --relay <url>")?;
     let amount_sats = amount_sats.ok_or("Missing amount")?;
     let config = parse_config(&config_args)?;
 
@@ -395,9 +413,24 @@ async fn open_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         return Err("No relay specified. Use --relay <url>".into());
     }
 
+    // Check if alias is already taken
+    if let Some(ref a) = alias {
+        let deposits_file = config.data_dir.join("deposits.json");
+        if deposits_file.exists() {
+            let data = std::fs::read_to_string(&deposits_file)?;
+            let deposits: Vec<serde_json::Value> = serde_json::from_str(&data).unwrap_or_default();
+            if deposits.iter().any(|d| d.get("alias").and_then(|v| v.as_str()) == Some(a)) {
+                return Err(format!("Alias '{}' is already in use. Use 'list' to see existing deposits.", a).into());
+            }
+        }
+    }
+
     println!("Opening deposit...");
     println!("  Ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
     println!("  Amount: {} sats", amount_sats);
+    if let Some(ref a) = alias {
+        println!("  Alias: {}", a);
+    }
     println!();
 
     let secret_key = derive_secret_key(&config.seed, config.network)?;
@@ -432,7 +465,7 @@ async fn open_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     let max_attempts = 30;
     let poll_interval = std::time::Duration::from_secs(2);
 
-    for attempt in 1..=max_attempts {
+    for _attempt in 1..=max_attempts {
         tokio::time::sleep(poll_interval).await;
 
         let responses = transport.fetch_responses_since(
@@ -452,21 +485,32 @@ async fn open_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
                             println!("After funding, the deposit will be automatically completed.");
                         }
                         if let Some(offer_id) = result.get("offer_id").and_then(|v| v.as_str()) {
-                            // Save offer to local storage
-                            let offers_file = config.data_dir.join("offers.json");
-                            let mut offers: Vec<serde_json::Value> = if offers_file.exists() {
-                                let data = std::fs::read_to_string(&offers_file)?;
+                            // Save deposit to local storage with alias
+                            let deposits_file = config.data_dir.join("deposits.json");
+                            let mut deposits: Vec<serde_json::Value> = if deposits_file.exists() {
+                                let data = std::fs::read_to_string(&deposits_file)?;
                                 serde_json::from_str(&data).unwrap_or_default()
                             } else {
                                 Vec::new()
                             };
-                            offers.push(serde_json::json!({
+
+                            // Generate auto-alias if none provided
+                            let final_alias = alias.clone().unwrap_or_else(|| {
+                                format!("deposit-{}", deposits.len() + 1)
+                            });
+
+                            deposits.push(serde_json::json!({
+                                "alias": final_alias,
                                 "offer_id": offer_id,
                                 "ledger_id": ledger_id,
                                 "amount_sats": amount_sats,
                                 "status": "pending",
+                                "created_at": Utc::now().to_rfc3339(),
                             }));
-                            std::fs::write(&offers_file, serde_json::to_string_pretty(&offers)?)?;
+                            std::fs::write(&deposits_file, serde_json::to_string_pretty(&deposits)?)?;
+
+                            println!();
+                            println!("Deposit alias: {}", final_alias);
                             println!("Offer ID: {}", offer_id);
                         }
                     }
@@ -487,24 +531,157 @@ async fn open_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     Err("Timeout waiting for operator response".into())
 }
 
-/// Show balances across all deposits
-async fn show_balance(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+/// Add funds to an existing deposit
+async fn add_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut alias: Option<String> = None;
+    let mut amount_sats: Option<u64> = None;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else if alias.is_none() {
+            alias = Some(args[i].clone());
+        } else if amount_sats.is_none() {
+            amount_sats = Some(args[i].parse()?);
+        }
+        i += 1;
+    }
+
+    let alias = alias.ok_or("Usage: deposits-wallet offer <alias> <amount_sats> --relay <url>")?;
+    let amount_sats = amount_sats.ok_or("Missing amount")?;
+    let config = parse_config(&config_args)?;
+
+    if config.relays.is_empty() {
+        return Err("No relay specified. Use --relay <url>".into());
+    }
+
+    // Look up deposit by alias
+    let deposits_file = config.data_dir.join("deposits.json");
+    if !deposits_file.exists() {
+        return Err("No deposits found. Use 'open' to create a new deposit first.".into());
+    }
+
+    let data = std::fs::read_to_string(&deposits_file)?;
+    let deposits: Vec<serde_json::Value> = serde_json::from_str(&data)?;
+
+    let deposit = deposits.iter()
+        .find(|d| d.get("alias").and_then(|v| v.as_str()) == Some(&alias))
+        .ok_or_else(|| format!("No deposit found with alias '{}'. Use 'list' to see your deposits.", alias))?;
+
+    let ledger_id = deposit.get("ledger_id")
+        .and_then(|v| v.as_str())
+        .ok_or("Invalid deposit record: missing ledger_id")?;
+
+    let deposit_pubkey = deposit.get("deposit_pubkey")
+        .and_then(|v| v.as_str());
+
+    println!("Adding funds to deposit...");
+    println!("  Alias: {}", alias);
+    println!("  Ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
+    println!("  Amount: {} sats", amount_sats);
+    println!();
+
+    let secret_key = derive_secret_key(&config.seed, config.network)?;
+    let secp = Secp256k1::new();
+    let our_pubkey = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
+
+    // Use stored pubkey or derive fresh
+    let pubkey_hex = deposit_pubkey
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| hex::encode(our_pubkey.serialize()));
+
+    let transport = NostrTransportBuilder::new(secret_key)
+        .relay(&config.relays[0])
+        .build()
+        .await?;
+
+    // Send deposit_offer request for existing deposit
+    let request_params = serde_json::json!({
+        "pubkey": pubkey_hex,
+        "amount_sats": amount_sats,
+    });
+
+    println!("Sending offer request to operator...");
+
+    let request_id = transport.send_ledger_request(
+        ledger_id,
+        "deposit_offer",
+        request_params,
+    ).await?;
+
+    println!("  Request ID: {}...", &request_id[..16]);
+    println!();
+
+    // Poll for response
+    println!("Waiting for operator response...");
+
+    let max_attempts = 30;
+    let poll_interval = std::time::Duration::from_secs(2);
+
+    for _attempt in 1..=max_attempts {
+        tokio::time::sleep(poll_interval).await;
+
+        let responses = transport.fetch_responses_since(
+            nostr_sdk::Timestamp::now() - 120
+        ).await?;
+
+        for response in responses {
+            if response.request_id == request_id {
+                if response.success {
+                    println!("Offer accepted!");
+                    if let Some(result) = &response.result {
+                        if let Some(address) = result.get("deposit_address").and_then(|v| v.as_str()) {
+                            println!();
+                            println!("Send {} sats to:", amount_sats);
+                            println!("  {}", address);
+                            println!();
+                            println!("After funding, the deposit will be automatically completed.");
+                        }
+                        if let Some(offer_id) = result.get("offer_id").and_then(|v| v.as_str()) {
+                            println!("Offer ID: {}", offer_id);
+                        }
+                    }
+                    return Ok(());
+                } else {
+                    let error = response.error.as_deref().unwrap_or("Unknown error");
+                    return Err(format!("Offer request failed: {}", error).into());
+                }
+            }
+        }
+
+        print!(".");
+        use std::io::Write;
+        std::io::stdout().flush()?;
+    }
+
+    println!();
+    Err("Timeout waiting for operator response".into())
+}
+
+/// List all deposits with aliases
+async fn list_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let config = parse_config(args)?;
 
-    let offers_file = config.data_dir.join("offers.json");
-    if !offers_file.exists() {
+    let deposits_file = config.data_dir.join("deposits.json");
+    if !deposits_file.exists() {
         println!("No deposits found.");
         println!();
         println!("To open a deposit:");
         println!("  deposits-wallet discover --relay <url>");
-        println!("  deposits-wallet deposit <ledger_id> <amount_sats> --relay <url>");
+        println!("  deposits-wallet open <ledger_id> <amount_sats> --alias <name> --relay <url>");
         return Ok(());
     }
 
-    let data = std::fs::read_to_string(&offers_file)?;
-    let offers: Vec<serde_json::Value> = serde_json::from_str(&data)?;
+    let data = std::fs::read_to_string(&deposits_file)?;
+    let deposits: Vec<serde_json::Value> = serde_json::from_str(&data)?;
 
-    if offers.is_empty() {
+    if deposits.is_empty() {
         println!("No deposits found.");
         return Ok(());
     }
@@ -513,24 +690,82 @@ async fn show_balance(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     println!("=============");
     println!();
 
+    for deposit in &deposits {
+        let alias = deposit.get("alias").and_then(|v| v.as_str()).unwrap_or("(none)");
+        let ledger_id = deposit.get("ledger_id").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let amount = deposit.get("amount_sats").and_then(|v| v.as_u64()).unwrap_or(0);
+        let status = deposit.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let created_at = deposit.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
+
+        println!("  {} ", alias);
+        println!("    Ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
+        println!("    Amount: {} sats", amount);
+        println!("    Status: {}", status);
+        if !created_at.is_empty() {
+            println!("    Created: {}", created_at);
+        }
+        println!();
+    }
+
+    println!("Commands:");
+    println!("  offer <alias> <sats>      Add funds to a deposit");
+    println!("  withdraw <alias> <sats>   Withdraw from a deposit");
+    println!("  history <alias>           View transaction history");
+
+    Ok(())
+}
+
+/// Show balances across all deposits
+async fn show_balance(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let config = parse_config(args)?;
+
+    let deposits_file = config.data_dir.join("deposits.json");
+    if !deposits_file.exists() {
+        println!("No deposits found.");
+        println!();
+        println!("To open a deposit:");
+        println!("  deposits-wallet discover --relay <url>");
+        println!("  deposits-wallet open <ledger_id> <amount_sats> --alias <name> --relay <url>");
+        return Ok(());
+    }
+
+    let data = std::fs::read_to_string(&deposits_file)?;
+    let deposits: Vec<serde_json::Value> = serde_json::from_str(&data)?;
+
+    if deposits.is_empty() {
+        println!("No deposits found.");
+        return Ok(());
+    }
+
+    println!("Deposit Balances");
+    println!("================");
+    println!();
+
     let mut total_sats = 0u64;
 
-    for (i, offer) in offers.iter().enumerate() {
-        let ledger_id = offer.get("ledger_id").and_then(|v| v.as_str()).unwrap_or("unknown");
-        let amount = offer.get("amount_sats").and_then(|v| v.as_u64()).unwrap_or(0);
-        let status = offer.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
+    for deposit in &deposits {
+        let alias = deposit.get("alias").and_then(|v| v.as_str()).unwrap_or("(none)");
+        let ledger_id = deposit.get("ledger_id").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let amount = deposit.get("amount_sats").and_then(|v| v.as_u64()).unwrap_or(0);
+        let status = deposit.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
 
-        println!("{}. Ledger: {}...", i + 1, &ledger_id[..16.min(ledger_id.len())]);
-        println!("   Amount: {} sats", amount);
-        println!("   Status: {}", status);
-        println!();
+        let status_symbol = match status {
+            "completed" | "funded" => "+",
+            "pending" => "~",
+            _ => "?",
+        };
+
+        println!("  {} {} {:>10} sats  ({})", status_symbol, alias, amount, &ledger_id[..8.min(ledger_id.len())]);
 
         if status == "funded" || status == "completed" {
             total_sats += amount;
         }
     }
 
-    println!("Total: {} sats ({} BTC)", total_sats, total_sats as f64 / 100_000_000.0);
+    println!();
+    println!("  Total:  {} sats ({} BTC)", total_sats, total_sats as f64 / 100_000_000.0);
+    println!();
+    println!("  + = funded/completed, ~ = pending");
 
     Ok(())
 }
@@ -541,7 +776,7 @@ async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     use bitcoin::secp256k1::rand::rngs::OsRng;
     use bitcoin::secp256k1::rand::RngCore;
 
-    let mut ledger_id: Option<String> = None;
+    let mut alias: Option<String> = None;
     let mut amount_sats: Option<u64> = None;
     let mut destination: Option<String> = None;
     let mut fee_sats: u64 = 500; // Default fee
@@ -566,8 +801,8 @@ async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             _ => {
-                if ledger_id.is_none() {
-                    ledger_id = Some(args[i].clone());
+                if alias.is_none() {
+                    alias = Some(args[i].clone());
                 } else if amount_sats.is_none() {
                     amount_sats = Some(args[i].parse()?);
                 }
@@ -576,8 +811,8 @@ async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         i += 1;
     }
 
-    let ledger_id = ledger_id.ok_or(
-        "Usage: deposits-wallet withdraw <ledger_id> <amount_sats> --to <address> --relay <url>"
+    let alias = alias.ok_or(
+        "Usage: deposits-wallet withdraw <alias> <amount_sats> --to <address> --relay <url>"
     )?;
     let amount_sats = amount_sats.ok_or("Missing amount")?;
     let destination = destination.ok_or("Missing destination. Use --to <address>")?;
@@ -586,6 +821,23 @@ async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if config.relays.is_empty() {
         return Err("No relay specified. Use --relay <url>".into());
     }
+
+    // Look up deposit by alias
+    let deposits_file = config.data_dir.join("deposits.json");
+    if !deposits_file.exists() {
+        return Err("No deposits found. Use 'open' to create a deposit first.".into());
+    }
+
+    let data = std::fs::read_to_string(&deposits_file)?;
+    let deposits: Vec<serde_json::Value> = serde_json::from_str(&data)?;
+
+    let deposit = deposits.iter()
+        .find(|d| d.get("alias").and_then(|v| v.as_str()) == Some(&alias))
+        .ok_or_else(|| format!("No deposit found with alias '{}'. Use 'list' to see your deposits.", alias))?;
+
+    let ledger_id = deposit.get("ledger_id")
+        .and_then(|v| v.as_str())
+        .ok_or("Invalid deposit record: missing ledger_id")?;
 
     let secret_key = derive_secret_key(&config.seed, config.network)?;
     let secp = Secp256k1::new();
@@ -607,6 +859,7 @@ async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Withdrawal Request");
     println!("==================");
+    println!("  Alias: {}", alias);
     println!("  Ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
     println!("  Amount: {} sats", amount_sats);
     println!("  Fee: {} sats", fee_sats);
@@ -630,7 +883,7 @@ async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     println!("Sending signed withdrawal request...");
 
     let request_id = transport.send_ledger_request(
-        &ledger_id,
+        ledger_id,
         "withdraw",
         request_params,
     ).await?;
@@ -682,21 +935,41 @@ async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
 /// Show transaction history for a deposit
 async fn show_history(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let mut ledger_id: Option<String> = None;
+    let mut alias: Option<String> = None;
     let mut config_args = Vec::new();
 
     for arg in args {
         if arg.starts_with("--") {
             config_args.push(arg.clone());
-        } else if ledger_id.is_none() {
-            ledger_id = Some(arg.clone());
+        } else if alias.is_none() {
+            alias = Some(arg.clone());
         }
     }
 
-    let ledger_id = ledger_id.ok_or("Usage: deposits-wallet history <ledger_id> --relay <url>")?;
-    let _config = parse_config(&config_args)?;
+    let alias = alias.ok_or("Usage: deposits-wallet history <alias> --relay <url>")?;
+    let config = parse_config(&config_args)?;
 
-    println!("Transaction history for ledger {}...", &ledger_id[..16.min(ledger_id.len())]);
+    // Look up deposit by alias
+    let deposits_file = config.data_dir.join("deposits.json");
+    if !deposits_file.exists() {
+        return Err("No deposits found. Use 'open' to create a deposit first.".into());
+    }
+
+    let data = std::fs::read_to_string(&deposits_file)?;
+    let deposits: Vec<serde_json::Value> = serde_json::from_str(&data)?;
+
+    let deposit = deposits.iter()
+        .find(|d| d.get("alias").and_then(|v| v.as_str()) == Some(&alias))
+        .ok_or_else(|| format!("No deposit found with alias '{}'. Use 'list' to see your deposits.", alias))?;
+
+    let ledger_id = deposit.get("ledger_id")
+        .and_then(|v| v.as_str())
+        .ok_or("Invalid deposit record: missing ledger_id")?;
+
+    println!("Transaction History: {}", alias);
+    println!("====================");
+    println!();
+    println!("  Ledger: {}", ledger_id);
     println!();
     println!("(History implementation pending - use deposits-bdk for now)");
 

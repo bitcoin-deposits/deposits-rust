@@ -9,6 +9,7 @@
 //!
 //! A deposits protocol node using BDK for on-chain reserves and Nostr for messaging.
 
+use base64::Engine;
 use bitcoin::secp256k1::{PublicKey, SecretKey, Secp256k1};
 use bitcoin::bip32::{DerivationPath, Xpriv};
 use bitcoin::Network;
@@ -128,8 +129,10 @@ PARTNER SUBCOMMANDS:
     partner list               List all quorum members
 
 COLLATERAL SUBCOMMANDS:
-    collateral pledge <reserves_id> <deposit_secret> <amount_msats> <lock_blocks>
-                    Pledge deposit balance as collateral backing for the operator.
+    collateral lock <ledger_id> <amount_msats> <lock_blocks>
+                    Lock deposit balance as collateral (derives key from seed).
+    collateral lock <reserves_id> <deposit_secret> <amount_msats> <lock_blocks>
+                    Lock deposit balance as collateral (explicit secret).
                     lock_blocks is how many blocks from now until the lock expires.
 
 DEPOSIT SUBCOMMANDS:
@@ -1767,15 +1770,20 @@ async fn collateral_command(args: &[String]) -> Result<(), Box<dyn std::error::E
 
 /// Lock deposit balance as collateral backing for the operator
 /// Returns a signed attestation that the requesting operator can record on their ledger
+///
+/// Usage:
+///   collateral lock <ledger_id> <amount_msats> <lock_blocks> [requesting_operator]
+///       Derives deposit key from seed (wallet mode)
+///   collateral lock <reserves_id> <deposit_secret> <amount_msats> <lock_blocks> [requesting_operator]
+///       Uses explicit deposit secret (legacy mode)
 async fn collateral_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    // Parse positional arguments: <reserves_id> <deposit_secret> <amount_msats> <lock_blocks> [requesting_operator]
-    let mut reserves_id: Option<String> = None;
-    let mut deposit_secret_hex: Option<String> = None;
-    let mut amount_msats: Option<u64> = None;
-    let mut lock_blocks: Option<u32> = None;
-    let mut requesting_operator_hex: Option<String> = None;
-    let mut config_args = Vec::new();
+    use bitcoin::bip32::{Xpriv, DerivationPath};
+    use std::str::FromStr as _;
 
+    let mut config_args = Vec::new();
+    let mut positional_args = Vec::new();
+
+    // Separate config args from positional args
     let mut i = 0;
     while i < args.len() {
         if args[i].starts_with("--") {
@@ -1784,37 +1792,57 @@ async fn collateral_lock(args: &[String]) -> Result<(), Box<dyn std::error::Erro
                 config_args.push(args[i + 1].clone());
                 i += 1;
             }
-        } else if reserves_id.is_none() {
-            reserves_id = Some(args[i].clone());
-        } else if deposit_secret_hex.is_none() {
-            deposit_secret_hex = Some(args[i].clone());
-        } else if amount_msats.is_none() {
-            amount_msats = Some(args[i].parse().map_err(|_| "Invalid amount_msats")?);
-        } else if lock_blocks.is_none() {
-            lock_blocks = Some(args[i].parse().map_err(|_| "Invalid lock_blocks")?);
-        } else if requesting_operator_hex.is_none() {
-            requesting_operator_hex = Some(args[i].clone());
+        } else {
+            positional_args.push(args[i].clone());
         }
         i += 1;
     }
 
-    let reserves_id = reserves_id.ok_or("reserves_id required")?;
-    let deposit_secret_hex = deposit_secret_hex.ok_or("deposit_secret required")?;
-    let amount_msats = amount_msats.ok_or("amount_msats required")?;
-    let lock_blocks = lock_blocks.ok_or("lock_blocks required")?;
+    let config = parse_config(&config_args)?;
+    let node = Node::new(config.clone()).await?;
 
-    // Parse the deposit secret
-    let secret_bytes = hex::decode(&deposit_secret_hex)
-        .map_err(|e| format!("Invalid deposit secret hex: {}", e))?;
-    let deposit_secret = bitcoin::secp256k1::SecretKey::from_slice(&secret_bytes)
-        .map_err(|e| format!("Invalid deposit secret: {}", e))?;
+    // Determine if we're in wallet mode (3 positional args) or legacy mode (4+ positional args)
+    // Wallet mode: <ledger_id> <amount_msats> <lock_blocks>
+    // Legacy mode: <reserves_id> <deposit_secret> <amount_msats> <lock_blocks>
+    let (ledger_id, deposit_secret, amount_msats, lock_blocks, requesting_operator_hex) =
+        if positional_args.len() >= 4 && positional_args[1].len() == 64 && hex::decode(&positional_args[1]).is_ok() {
+            // Legacy mode: second arg looks like a hex secret
+            let reserves_id = positional_args[0].clone();
+            let secret_hex = positional_args[1].clone();
+            let amount: u64 = positional_args[2].parse().map_err(|_| "Invalid amount_msats")?;
+            let blocks: u32 = positional_args[3].parse().map_err(|_| "Invalid lock_blocks")?;
+            let req_op = positional_args.get(4).cloned();
+
+            let secret_bytes = hex::decode(&secret_hex)
+                .map_err(|e| format!("Invalid deposit secret hex: {}", e))?;
+            let secret = bitcoin::secp256k1::SecretKey::from_slice(&secret_bytes)
+                .map_err(|e| format!("Invalid deposit secret: {}", e))?;
+
+            (reserves_id, secret, amount, blocks, req_op)
+        } else if positional_args.len() >= 3 {
+            // Wallet mode: derive key from seed
+            let ledger_id = positional_args[0].clone();
+            let amount: u64 = positional_args[1].parse().map_err(|_| "Invalid amount_msats")?;
+            let blocks: u32 = positional_args[2].parse().map_err(|_| "Invalid lock_blocks")?;
+            let req_op = positional_args.get(3).cloned();
+
+            // Derive deposit key from seed using BIP-84 path (same as deposits-wallet)
+            let xpriv = Xpriv::new_master(config.network, &config.seed)?;
+            let secp = Secp256k1::new();
+            let path = DerivationPath::from_str("m/84'/0'/0'/0/0")?;
+            let derived = xpriv.derive_priv(&secp, &path)?;
+            let secret = derived.private_key;
+
+            println!("(Using wallet-derived deposit key)");
+
+            (ledger_id, secret, amount, blocks, req_op)
+        } else {
+            return Err("Usage: collateral lock <ledger_id> <amount_msats> <lock_blocks> [requesting_op]\n       collateral lock <reserves_id> <deposit_secret> <amount_msats> <lock_blocks> [requesting_op]".into());
+        };
 
     // Derive the deposit pubkey from the secret
     let secp = Secp256k1::new();
     let deposit_pubkey = PublicKey::from_secret_key(&secp, &deposit_secret);
-
-    let config = parse_config(&config_args)?;
-    let node = Node::new(config).await?;
 
     // Get current block height and compute lock_until_block
     let current_block = node.wallet.get_block_height()?;
@@ -1828,14 +1856,14 @@ async fn collateral_lock(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     };
 
     println!("Creating collateral lock...");
-    println!("  Reserves ID: {}", reserves_id);
+    println!("  Ledger: {}", ledger_id);
     println!("  Deposit: {}", deposit_pubkey);
     println!("  Amount: {} msats", amount_msats);
     println!("  Lock until block: {} (current: {}, +{} blocks)", lock_until_block, current_block, lock_blocks);
     println!("  Requesting operator: {}", requesting_operator);
 
     let attestation = node.lock_collateral(
-        &reserves_id,
+        &ledger_id,
         deposit_pubkey,
         &deposit_secret,
         amount_msats,
@@ -1844,11 +1872,11 @@ async fn collateral_lock(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     )?;
 
     // Broadcast to Nostr
-    if let Err(e) = node.broadcast_last_update(&reserves_id).await {
+    if let Err(e) = node.broadcast_last_update(&ledger_id).await {
         eprintln!("Warning: Failed to broadcast to Nostr: {}", e);
     }
 
-    println!("\nCollateral lock created!");
+    println!("\nCollateral locked!");
     println!("  Total locked: {} msats", attestation.amount);
     println!("  Lock expires: block {}", attestation.lock_until_block);
     println!("  Attestation for: {}", attestation.quorum_member);
@@ -1857,6 +1885,8 @@ async fn collateral_lock(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     let attestation_json = serde_json::to_string(&attestation)?;
     println!("\nAttestation (record on requesting operator's ledger):");
     println!("ATTESTATION_JSON:{}", attestation_json);
+    // Also output base64 for easier scripting
+    println!("attestation_b64: {}", base64::engine::general_purpose::STANDARD.encode(&attestation_json));
 
     Ok(())
 }

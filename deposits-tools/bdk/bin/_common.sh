@@ -313,6 +313,27 @@ run_nostr_request() {
         --data-dir /data 2>&1
 }
 
+# Run a deposits-wallet command on a node
+# Usage: run_wallet_cmd <container> <command> [args...]
+# The container name determines the wallet seed/identity
+run_wallet_cmd() {
+    local container=$1
+    shift
+
+    local seed=$(get_node_seed "$container")
+    if [ -z "$seed" ]; then
+        log_error "Unknown node: $container"
+        return 1
+    fi
+
+    # Run deposits-wallet with the node's seed
+    docker exec -e RUST_LOG=error "$container" deposits-wallet "$@" \
+        --seed "$seed" \
+        --network regtest \
+        --relay ws://nostr-relay:7777 \
+        --data-dir /data/wallet 2>&1
+}
+
 # Start nostr watch on a node in the background
 # Usage: start_nostr_watch <container> <ledger_id>
 # Returns the background process name for later cleanup

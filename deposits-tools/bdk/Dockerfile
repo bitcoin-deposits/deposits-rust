@@ -20,9 +20,9 @@ COPY deposits-rust/deposits-bdk ./deposits-bdk
 # Create a minimal workspace Cargo.toml for Docker build
 RUN echo '[workspace]\nmembers = ["deposits-core", "deposits-bdk"]\nresolver = "2"' > Cargo.toml
 
-# Build deposits-bdk with dangerous-testing for test environments
+# Build deposits-bdk and deposits-wallet with dangerous-testing for test environments
 # WARNING: Do not use this image in production
-RUN cargo build --release -p deposits-bdk --bin deposits-bdk --features dangerous-testing
+RUN cargo build --release -p deposits-bdk --bin deposits-bdk --bin deposits-wallet --features dangerous-testing
 
 # Runtime image
 FROM debian:bookworm-slim
@@ -34,8 +34,9 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy binary from builder
+# Copy binaries from builder
 COPY --from=builder /app/target/release/deposits-bdk /usr/local/bin/
+COPY --from=builder /app/target/release/deposits-wallet /usr/local/bin/
 
 # Create data directory
 RUN mkdir -p /data
