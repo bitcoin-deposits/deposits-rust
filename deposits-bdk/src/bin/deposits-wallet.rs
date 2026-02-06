@@ -465,9 +465,12 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
         .await?;
 
     // Send deposit_offer request
+    // max_sats = requested amount, min_sats = 1000 (minimum useful), blocks_valid = 144 (~1 day)
     let request_params = serde_json::json!({
         "deposit_pubkey": hex::encode(our_pubkey.serialize()),
-        "amount_sats": amount_sats,
+        "max_sats": amount_sats,
+        "min_sats": 1000_u64,
+        "blocks_valid": 144_u64,
     });
 
     println!("Sending deposit request to operator...");
@@ -627,7 +630,9 @@ async fn add_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // Send deposit_offer request for existing deposit
     let request_params = serde_json::json!({
         "deposit_pubkey": pubkey_hex,
-        "amount_sats": amount_sats,
+        "max_sats": amount_sats,
+        "min_sats": 1000_u64,
+        "blocks_valid": 144_u64,
     });
 
     println!("Sending offer request to operator...");
