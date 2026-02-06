@@ -285,6 +285,24 @@ impl Node {
         Ok(())
     }
 
+    /// Subscribe to requests and disputes for a specific ledger
+    /// Call this after opening a new ledger to start watching it
+    pub async fn subscribe_to_ledger(&self, ledger_id: &str) -> Result<(), Error> {
+        if let Err(e) = self.nostr.subscribe_to_requests(ledger_id).await {
+            tracing::warn!("Failed to subscribe to requests for ledger {}: {}", &ledger_id[..16.min(ledger_id.len())], e);
+        } else {
+            tracing::info!("Subscribed to requests for ledger {}...", &ledger_id[..16.min(ledger_id.len())]);
+        }
+
+        if let Err(e) = self.nostr.subscribe_to_disputes(ledger_id).await {
+            tracing::warn!("Failed to subscribe to disputes for ledger {}: {}", &ledger_id[..16.min(ledger_id.len())], e);
+        } else {
+            tracing::info!("Subscribed to disputes for ledger {}...", &ledger_id[..16.min(ledger_id.len())]);
+        }
+
+        Ok(())
+    }
+
     /// Get ledger IDs of ledgers we've joined as a quorum member
     fn get_joined_ledger_ids(&self) -> Vec<String> {
         let mut joined = Vec::new();

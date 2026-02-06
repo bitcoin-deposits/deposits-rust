@@ -747,6 +747,14 @@ async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         Err(e) => eprintln!("  Warning: Failed to broadcast to Nostr: {}", e),
     }
 
+    // Subscribe to requests/disputes for this ledger
+    let ledger_id = ledger.ledger_id_hex();
+    if let Err(e) = node.subscribe_to_ledger(&ledger_id).await {
+        eprintln!("  Warning: Failed to subscribe to ledger events: {}", e);
+    } else {
+        println!("  Subscribed to ledger events (requests/disputes)");
+    }
+
     Ok(())
 }
 
