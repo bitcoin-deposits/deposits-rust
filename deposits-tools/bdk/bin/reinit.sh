@@ -68,6 +68,13 @@ log_info "=== Reinitializing BDK Test Network ==="
 log_info "Stopping all containers..."
 $DC down -v --remove-orphans 2>/dev/null || true
 
+# Clear wallet data (deposits become invalid after reinit)
+WALLET_DATA_DIR="${WALLET_DATA_DIR:-$HOME/.deposits-wallet}"
+if [ -d "$WALLET_DATA_DIR" ]; then
+    log_info "Clearing wallet data ($WALLET_DATA_DIR)..."
+    rm -rf "$WALLET_DATA_DIR"
+fi
+
 # Remove any dangling images
 docker image prune -f 2>/dev/null || true
 

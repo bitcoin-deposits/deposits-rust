@@ -49,10 +49,15 @@ use deposits_core::types::SignedLedgerUpdate;
 use deposits_core::{TlvDecode, TlvEncode};
 use nostr_sdk::prelude::*;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 use tokio::sync::mpsc;
 
 use crate::Error;
+
+/// Track last advertisement timestamp to ensure monotonic ordering.
+/// NIP-33 replaceable events use created_at to determine which event is "latest".
+static LAST_AD_TIMESTAMP: AtomicU64 = AtomicU64::new(0);
 
 /// Custom Kind for ledger updates.
 /// Uses range 1000-9999 (regular custom events) to ensure relay storage.
@@ -310,11 +315,11 @@ pub struct LedgerAdvertisement {
     /// Current reserves address (for verification)
     pub reserves_address: String,
 
-    /// Human-readable name for the ledger
+    /// Human-readable name for the operator/custodian
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
+    pub operator_name: Option<String>,
 
-    /// Description of the service
+    /// Description of the operator's service
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 
@@ -412,7 +417,7 @@ impl LedgerAdvertisement {
             ledger_id,
             operator_pubkey,
             reserves_address,
-            name: None,
+            operator_name: None,
             description: None,
             annual_fee_bps: 0,
             deposit_fee_bps: 0,
@@ -972,6 +977,8 @@ impl NostrTransport {
     ///
     /// Uses NIP-33 parameterized replaceable events, so only the latest
     /// advertisement per ledger_id is retained by relays.
+    /// Queries the relay for existing advertisement timestamp to ensure
+    /// the new event has a strictly greater timestamp.
     pub async fn publish_ledger_advertisement(
         &self,
         ad: &LedgerAdvertisement,
@@ -979,7 +986,22 @@ impl NostrTransport {
         let content = serde_json::to_string(ad)
             .map_err(|e| Error::Serialization(format!("Failed to serialize advertisement: {}", e)))?;
 
+        // Query relay for existing advertisement's timestamp
+        let existing_timestamp = self.get_advertisement_timestamp(&ad.ledger_id).await.unwrap_or(0);
+
+        // Ensure new timestamp is strictly greater than existing
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let timestamp = std::cmp::max(now, existing_timestamp + 1);
+
+        // Update the static counter too for same-process rapid updates
+        LAST_AD_TIMESTAMP.fetch_max(timestamp, Ordering::SeqCst);
+
         let event = EventBuilder::new(Kind::Custom(KIND_LEDGER_ADVERTISE), &content)
+            .custom_created_at(Timestamp::from(timestamp))
             .tag(Tag::custom(
                 TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::D)),
                 [ad.ledger_id.as_str()],
@@ -989,7 +1011,7 @@ impl NostrTransport {
                 [ad.network.as_str()],
             ))
             .tag(Tag::custom(
-                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::P)),
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::O)),
                 [ad.operator_pubkey.as_str()],
             ))
             .sign_with_keys(&self.keys)
@@ -1009,6 +1031,30 @@ impl NostrTransport {
         );
 
         Ok(event_id)
+    }
+
+    /// Get the timestamp of an existing advertisement for a ledger
+    async fn get_advertisement_timestamp(&self, ledger_id: &str) -> Option<u64> {
+        let filter = Filter::new()
+            .kind(Kind::Custom(KIND_LEDGER_ADVERTISE))
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::D),
+                [ledger_id],
+            )
+            .limit(1);
+
+        let events = self.client
+            .fetch_events(vec![filter], Some(std::time::Duration::from_secs(5)))
+            .await
+            .ok()?;
+
+        // Extract timestamp from first event
+        let mut timestamp = None;
+        for event in events.iter() {
+            timestamp = Some(event.created_at.as_u64());
+            break;
+        }
+        timestamp
     }
 
     /// Fetch all ledger advertisements for a network

@@ -29,9 +29,9 @@ COPY deposits-rust/deposits-nwc/ deposits-rust/deposits-nwc/
 # Copy ldk-server workspace
 COPY ldk-server/ ldk-server/
 
-# Build ldk-server (includes deposits support via deposits-ldk dependency)
+# Build ldk-server and ldk-server-cli (includes deposits support via deposits-ldk dependency)
 WORKDIR /app/ldk-server
-RUN cargo clean && cargo build --release --bin ldk-server
+RUN cargo clean && cargo build --release --bin ldk-server --bin ldk-server-cli
 
 # Runtime stage - use same base as builder to avoid GLIBC issues
 FROM rust:latest
@@ -45,8 +45,9 @@ RUN apt-get update && apt-get install -y \
 # Create ldk user
 RUN useradd -m -s /bin/bash ldk
 
-# Copy binary from builder
+# Copy binaries from builder
 COPY --from=builder /app/ldk-server/target/release/ldk-server /usr/local/bin/ldk-server
+COPY --from=builder /app/ldk-server/target/release/ldk-server-cli /usr/local/bin/ldk-server-cli
 
 # Copy entrypoint script
 COPY deposits-rust/deposits-tools/ldk-server-entrypoint.sh /usr/local/bin/ldk-server-entrypoint.sh
@@ -54,6 +55,9 @@ RUN chmod +x /usr/local/bin/ldk-server-entrypoint.sh
 
 # Create data directory with proper permissions
 RUN mkdir -p /ldk && chown -R ldk:ldk /ldk && chmod -R 755 /ldk
+
+# Create shared CLI directory (for sharing ldk-server-cli with BDK containers)
+RUN mkdir -p /ldk-cli && chown -R ldk:ldk /ldk-cli && chmod -R 755 /ldk-cli
 
 # Switch to ldk user
 USER ldk

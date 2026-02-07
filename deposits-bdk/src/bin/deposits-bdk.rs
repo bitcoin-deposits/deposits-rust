@@ -64,6 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "collateral" => collateral_command(&args[2..]).await?,
         "deposit" => deposit_command(&args[2..]).await?,
         "withdraw" => withdraw_command(&args[2..]).await?,
+        "lightning" | "ln" => lightning_command(&args[2..]).await?,
         "nostr" => nostr_command(&args[2..]).await?,
         "recovery" => recovery_command(&args[2..]).await?,
         "keygen" => keygen(),
@@ -100,6 +101,7 @@ COMMANDS:
     collateral      Manage collateral pledges
     deposit         Manage deposit offers for on-chain funding
     withdraw        Manage on-chain withdrawals
+    lightning (ln)  Lightning invoice payment operations (lock, fail, fulfill)
     nostr           Nostr relay operations (updates, broadcast)
     help            Show this help message
 
@@ -163,6 +165,27 @@ WITHDRAW SUBCOMMANDS:
     withdraw cancel <withdrawal_id>
                     Cancel a pending withdrawal (only before broadcast)
     withdraw list   List all withdrawals
+
+LIGHTNING SUBCOMMANDS (alias: ln):
+  LDK Sidecar (via ldk-server-cli):
+    lightning invoice <amount_sats> [description]
+                    Create a Lightning invoice via LDK sidecar
+    lightning pay <bolt11_invoice>
+                    Pay a Lightning invoice via LDK sidecar
+    lightning balance
+                    Show Lightning wallet balance
+    lightning info  Show LDK node info
+    lightning channels
+                    List Lightning channels
+    lightning payments
+                    List Lightning payments
+  Ledger Operations:
+    lightning lock <reserves_id> <deposit_pubkey> <amount_msats> <payment_id> <signature>
+                    Lock deposit funds for an outgoing Lightning payment
+    lightning fail <reserves_id> <deposit_pubkey> <amount_msats> <payment_id>
+                    Fail/cancel a pending Lightning payment and unlock funds
+    lightning fulfill <reserves_id> <deposit_pubkey> <amount_msats> <payment_id> <preimage> <signature>
+                    Complete a Lightning payment with the preimage
 
 NOSTR SUBCOMMANDS:
     nostr list      List all ledgers available on the Nostr relay
@@ -249,6 +272,7 @@ fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
     let mut electrum_url = "https://mempool.space/signet/api".to_string();
     let mut relays = Vec::new();
     let mut nwc_uri = None;
+    let mut operator_name = None;
     let mut data_dir = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".deposits-bdk");
@@ -256,6 +280,13 @@ fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--name" | "--operator-name" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("--name requires a value".to_string());
+                }
+                operator_name = Some(args[i].clone());
+            }
             "--seed" => {
                 i += 1;
                 if i >= args.len() {
@@ -343,6 +374,7 @@ fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
         relays,
         nwc_uri,
         data_dir,
+        operator_name,
     })
 }
 
@@ -751,6 +783,90 @@ async fn ledger_command(args: &[String]) -> Result<(), Box<dyn std::error::Error
     }
 }
 
+/// Helper to auto-advertise a ledger for wallet discovery
+async fn auto_advertise_ledger(
+    node: &Node,
+    reserves_id: &str,
+    seed: &[u8; 32],
+    network: bitcoin::Network,
+    relays: &[String],
+    operator_name: Option<&str>,
+) {
+    use deposits_bdk::nostr::{NostrTransportBuilder, LedgerAdvertisement};
+
+    let relay_url = match relays.first() {
+        Some(r) => r,
+        None => return,
+    };
+
+    let (_, ledger) = match node.get_ledger_by_reserves_id(reserves_id) {
+        Some(l) => l,
+        None => return,
+    };
+
+    let ledger_id_hex = ledger.ledger_id_hex();
+    let operator_pubkey = hex::encode(ledger.operator_key().serialize());
+    let network_str = match network {
+        bitcoin::Network::Bitcoin => "bitcoin",
+        bitcoin::Network::Testnet => "testnet",
+        bitcoin::Network::Signet => "signet",
+        bitcoin::Network::Regtest => "regtest",
+        _ => "unknown",
+    };
+
+    let mut ad = LedgerAdvertisement::new(
+        ledger_id_hex.clone(),
+        operator_pubkey,
+        reserves_id.to_string(),
+        network_str.to_string(),
+    );
+    ad.operator_name = operator_name.map(|s| s.to_string());
+    ad.reserves_amount_sats = ledger.reserves_amount();
+    ad.collateral_enforcement_block = ledger.state.collateral_enforcement_block.unwrap_or(0);
+    ad.quorum_size = ledger.state.quorum_members.len() as u8;
+    ad.received_collateral_sats = ledger.state.received_collateral_amount / 1000;
+
+    // Calculate headroom
+    let total_obligations_sats = ledger.total_deposit_balance() / 1000;
+    ad.total_obligations_sats = total_obligations_sats;
+    let raw_headroom = ad.reserves_amount_sats.saturating_sub(total_obligations_sats);
+    ad.available_headroom_sats = (raw_headroom * 80) / 100;
+
+    // Add quorum member details
+    use deposits_bdk::nostr::QuorumMemberInfo;
+    for member_pubkey in ledger.state.quorum_members.iter() {
+        let attestation = ledger.state.collateral_attestations.get(member_pubkey);
+        let (collateral_sats, lock_expires) = attestation
+            .map(|a| (a.amount / 1000, a.lock_until_block as u64))
+            .unwrap_or((0, 0));
+
+        ad.quorum_members.push(QuorumMemberInfo {
+            pubkey: hex::encode(member_pubkey.serialize()),
+            collateral_sats,
+            lock_expires_block: lock_expires,
+        });
+    }
+
+    let secret_key = match derive_operator_secret(seed, network) {
+        Ok(sk) => sk,
+        Err(_) => return,
+    };
+
+    let transport = match NostrTransportBuilder::new(secret_key)
+        .relay(relay_url)
+        .build()
+        .await
+    {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+
+    match transport.publish_ledger_advertisement(&ad).await {
+        Ok(_) => println!("  Advertised ledger for wallet discovery"),
+        Err(e) => eprintln!("  Warning: Failed to advertise ledger: {}", e),
+    }
+}
+
 /// Open a new ledger backed by our reserves UTXO
 async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // Parse positional arguments: [enforcement_block]
@@ -776,6 +892,10 @@ async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     }
 
     let config = parse_config(&config_args)?;
+    let seed = config.seed.clone();
+    let network = config.network;
+    let relays = config.relays.clone();
+    let operator_name = config.operator_name.clone();
     let node = Node::new(config).await?;
 
     // Sync wallet to get current state
@@ -815,6 +935,9 @@ async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         Ok(count) => println!("  Broadcast {} updates to Nostr", count),
         Err(e) => eprintln!("  Warning: Failed to broadcast to Nostr: {}", e),
     }
+
+    // Auto-advertise ledger for wallet discovery
+    auto_advertise_ledger(&node, &reserves_id, &seed, network, &relays, operator_name.as_deref()).await;
 
     // Subscribe to requests/disputes for this ledger
     let ledger_id = ledger.ledger_id_hex();
@@ -1255,7 +1378,7 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     // Parse arguments: <reserves_id> [options]
     let mut reserves_id: Option<String> = None;
-    let mut name: Option<String> = None;
+    let mut operator_name: Option<String> = None;
     let mut description: Option<String> = None;
     let mut annual_fee_bps: u32 = 0;
     let mut deposit_fee_bps: u32 = 0;
@@ -1269,7 +1392,7 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--name" if i + 1 < args.len() => { name = Some(args[i + 1].clone()); i += 1; }
+            "--name" | "--operator-name" if i + 1 < args.len() => { operator_name = Some(args[i + 1].clone()); i += 1; }
             "--description" if i + 1 < args.len() => { description = Some(args[i + 1].clone()); i += 1; }
             "--annual-fee" if i + 1 < args.len() => { annual_fee_bps = args[i + 1].parse()?; i += 1; }
             "--deposit-fee" if i + 1 < args.len() => { deposit_fee_bps = args[i + 1].parse()?; i += 1; }
@@ -1329,7 +1452,7 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
         network.to_string(),
     );
 
-    ad.name = name;
+    ad.operator_name = operator_name;
     ad.description = description;
     ad.annual_fee_bps = annual_fee_bps;
     ad.deposit_fee_bps = deposit_fee_bps;
@@ -1445,9 +1568,9 @@ async fn ledger_discover(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     println!();
 
     for ad in ads {
-        println!("{}:", ad.name.as_deref().unwrap_or("Unnamed Ledger"));
+        let operator_name = ad.operator_name.as_deref().unwrap_or("Anonymous");
+        println!("{} ({}...):", operator_name, &ad.operator_pubkey[..12.min(ad.operator_pubkey.len())]);
         println!("  Ledger ID: {}...", &ad.ledger_id[..16.min(ad.ledger_id.len())]);
-        println!("  Operator: {}...", &ad.operator_pubkey[..16.min(ad.operator_pubkey.len())]);
         println!("  Capacity:");
         println!("    Reserves: {} sats", ad.reserves_amount_sats);
         println!("    Obligations: {} sats", ad.total_obligations_sats);
@@ -1747,6 +1870,10 @@ async fn partner_add(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         .map_err(|e| format!("Invalid quorum member pubkey: {}", e))?;
 
     let config = parse_config(&config_args)?;
+    let seed = config.seed.clone();
+    let network = config.network;
+    let relays = config.relays.clone();
+    let operator_name = config.operator_name.clone();
     let node = Node::new(config).await?;
 
     println!("Adding quorum member {} to ledger {}...", quorum_member, reserves_id);
@@ -1760,6 +1887,9 @@ async fn partner_add(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     if let Err(e) = node.broadcast_last_update(&reserves_id).await {
         eprintln!("Warning: Failed to broadcast to Nostr: {}", e);
     }
+
+    // Re-advertise with updated quorum info
+    auto_advertise_ledger(&node, &reserves_id, &seed, network, &relays, operator_name.as_deref()).await;
 
     println!("Quorum member added!");
     println!("  Member: {}", quorum_member);
@@ -2498,9 +2628,9 @@ async fn deposit_complete(args: &[String]) -> Result<(), Box<dyn std::error::Err
         .ok_or("Deposit offer not found")?;
     let ledger_id = offer.ledger_id.clone();
 
-    // Look up the ledger by ledger_id to get the reserves_id for broadcast
-    let (reserves_id, _) = node.get_ledger_by_ledger_id(&ledger_id)
-        .ok_or_else(|| format!("Ledger not found for ledger_id: {}", &ledger_id[..16.min(ledger_id.len())]))?;
+    // Look up the ledger by reserves_id (offer stores reserves_id in ledger_id field)
+    let (reserves_id, _) = node.get_ledger_by_reserves_id(&ledger_id)
+        .ok_or_else(|| format!("Ledger not found for reserves_id: {}", &ledger_id[..16.min(ledger_id.len())]))?;
 
     println!("Completing deposit offer...");
     println!("  Offer ID: {}", hex::encode(&offer_id[..8]));
@@ -3067,6 +3197,600 @@ async fn withdraw_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         }
         println!();
     }
+
+    Ok(())
+}
+
+// ============================================================================
+// Lightning Commands
+// ============================================================================
+
+/// Handle lightning (ln) subcommands
+async fn lightning_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    if args.is_empty() {
+        eprintln!("Usage: deposits-bdk lightning <command> [args...]");
+        eprintln!("\nLDK Sidecar Commands (via ldk-server-cli):");
+        eprintln!("  invoice <amount_sats> [description]  Create a Lightning invoice");
+        eprintln!("  pay <bolt11_invoice>                 Pay a Lightning invoice");
+        eprintln!("  balance                              Show Lightning wallet balance");
+        eprintln!("  info                                 Show LDK node info");
+        eprintln!("  channels                             List Lightning channels");
+        eprintln!("  payments                             List payments");
+        eprintln!("\nDeposit Payment Commands:");
+        eprintln!("  send     Pay invoice FROM a deposit (lock, pay, fulfill in one step)");
+        eprintln!("\nLedger Operation Commands:");
+        eprintln!("  lock     Lock deposit funds for an outgoing Lightning payment");
+        eprintln!("  fail     Fail/cancel a pending Lightning payment and unlock funds");
+        eprintln!("  fulfill  Complete a Lightning payment with the preimage");
+        return Ok(());
+    }
+
+    match args[0].as_str() {
+        // LDK sidecar commands
+        "invoice" => lightning_invoice(&args[1..]).await,
+        "pay" => lightning_pay(&args[1..]).await,
+        "balance" => lightning_balance(&args[1..]).await,
+        "info" => lightning_info(&args[1..]).await,
+        "channels" => lightning_channels(&args[1..]).await,
+        "payments" => lightning_payments(&args[1..]).await,
+        // Ledger operation commands
+        "lock" => lightning_lock(&args[1..]).await,
+        "fail" => lightning_fail(&args[1..]).await,
+        "fulfill" => lightning_fulfill(&args[1..]).await,
+        // Combined commands
+        "send" => lightning_send(&args[1..]).await,
+        cmd => {
+            eprintln!("Unknown lightning subcommand: {}", cmd);
+            eprintln!("Usage: deposits-bdk lightning <invoice|pay|balance|info|channels|send|lock|fail|fulfill> [args...]");
+            Ok(())
+        }
+    }
+}
+
+/// Create a Lightning invoice via LDK sidecar
+async fn lightning_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use deposits_bdk::ldk_cli::LdkCli;
+
+    if args.is_empty() {
+        eprintln!("Usage: deposits-bdk lightning invoice <amount_sats> [description]");
+        eprintln!("\nExample:");
+        eprintln!("  deposits-bdk lightning invoice 50000 \"Payment for service\"");
+        return Ok(());
+    }
+
+    let amount_sats: u64 = args[0].parse()
+        .map_err(|_| format!("Invalid amount: {}", args[0]))?;
+    let amount_msat = amount_sats * 1000;
+    let description = args.get(1).map(|s| s.as_str()).unwrap_or("Deposit invoice");
+
+    let cli = LdkCli::from_env();
+    let invoice = cli.create_invoice(amount_msat, description)?;
+
+    println!("{}", invoice);
+    Ok(())
+}
+
+/// Pay a Lightning invoice via LDK sidecar
+async fn lightning_pay(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use deposits_bdk::ldk_cli::LdkCli;
+
+    if args.is_empty() {
+        eprintln!("Usage: deposits-bdk lightning pay <bolt11_invoice>");
+        eprintln!("\nExample:");
+        eprintln!("  deposits-bdk lightning pay lnbc50u1p...");
+        return Ok(());
+    }
+
+    let invoice = &args[0];
+
+    let cli = LdkCli::from_env();
+    let payment_id = cli.pay_invoice(invoice)?;
+
+    println!("Payment initiated!");
+    println!("  Payment ID: {}", payment_id);
+    Ok(())
+}
+
+/// Show Lightning wallet balance
+async fn lightning_balance(_args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use deposits_bdk::ldk_cli::LdkCli;
+
+    let cli = LdkCli::from_env();
+    let balances = cli.get_balances()?;
+
+    println!("Lightning Wallet Balance:");
+    println!("  On-chain total:     {} sats", balances.total_onchain_balance_sats);
+    println!("  On-chain spendable: {} sats", balances.spendable_onchain_balance_sats);
+    println!("  Lightning balance:  {} sats", balances.total_lightning_balance_sats);
+    println!("  Anchor reserves:    {} sats", balances.total_anchor_channels_reserve_sats);
+    Ok(())
+}
+
+/// Show LDK node info
+async fn lightning_info(_args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use deposits_bdk::ldk_cli::LdkCli;
+
+    let cli = LdkCli::from_env();
+    let info = cli.get_node_info()?;
+
+    println!("LDK Node Info:");
+    println!("  Node ID: {}", info.node_id);
+    if let Some(block) = info.current_best_block {
+        println!("  Block height: {}", block.height);
+        println!("  Block hash: {}", block.block_hash);
+    }
+    Ok(())
+}
+
+/// List Lightning channels
+async fn lightning_channels(_args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use deposits_bdk::ldk_cli::LdkCli;
+
+    let cli = LdkCli::from_env();
+    let response = cli.list_channels()?;
+
+    if response.channels.is_empty() {
+        println!("No channels found.");
+        return Ok(());
+    }
+
+    println!("Lightning Channels ({} total):", response.channels.len());
+    println!();
+
+    for channel in response.channels {
+        let status = if channel.is_usable {
+            "usable"
+        } else if channel.is_channel_ready {
+            "ready"
+        } else {
+            "pending"
+        };
+
+        println!("  Channel: {}...", &channel.channel_id[..16]);
+        println!("    Counterparty: {}...", &channel.counterparty_node_id[..16]);
+        println!("    Capacity:  {} sats", channel.channel_value_sats);
+        println!("    Outbound:  {} msat", channel.outbound_capacity_msat);
+        println!("    Inbound:   {} msat", channel.inbound_capacity_msat);
+        println!("    Status:    {}", status);
+        println!();
+    }
+    Ok(())
+}
+
+/// List Lightning payments
+async fn lightning_payments(_args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use deposits_bdk::ldk_cli::LdkCli;
+
+    let cli = LdkCli::from_env();
+    let response = cli.list_payments()?;
+
+    if response.payments.is_empty() {
+        println!("No payments found.");
+        return Ok(());
+    }
+
+    println!("Lightning Payments ({} total):", response.payments.len());
+    println!();
+
+    for payment in response.payments {
+        let status = match payment.status {
+            0 => "pending",
+            1 => "succeeded",
+            2 => "failed",
+            _ => "unknown",
+        };
+
+        println!("  Payment: {}...", &payment.id[..16.min(payment.id.len())]);
+        if let Some(amount) = payment.amount_msat {
+            println!("    Amount: {} msat ({} sats)", amount, amount / 1000);
+        }
+        println!("    Status: {}", status);
+        println!();
+    }
+    Ok(())
+}
+
+/// Lock deposit funds for an outgoing Lightning payment
+async fn lightning_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    // Parse positional arguments:
+    // <reserves_id> <deposit_pubkey> <amount_msats> <payment_id> <signature>
+    let mut positional: Vec<String> = Vec::new();
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else {
+            positional.push(args[i].clone());
+        }
+        i += 1;
+    }
+
+    if positional.len() < 5 {
+        eprintln!("Usage: deposits-bdk lightning lock <reserves_id> <deposit_pubkey> <amount_msats> <payment_id> <signature>");
+        eprintln!("\nExample:");
+        eprintln!("  deposits-bdk lightning lock 02abc...partner 02def...deposit 1000000 abc123...hash def456...sig");
+        eprintln!("\nThis locks funds from a deposit for an outgoing Lightning payment.");
+        return Ok(());
+    }
+
+    let reserves_id = &positional[0];
+    let deposit_pubkey = PublicKey::from_str(&positional[1])
+        .map_err(|e| format!("Invalid deposit pubkey: {}", e))?;
+    let amount_msats: u64 = positional[2]
+        .parse()
+        .map_err(|_| format!("Invalid amount_msats: {}", positional[2]))?;
+
+    let payment_id_bytes = hex::decode(&positional[3])
+        .map_err(|e| format!("Invalid payment_id hex: {}", e))?;
+    if payment_id_bytes.len() != 32 {
+        return Err("Payment ID must be 32 bytes (64 hex characters)".into());
+    }
+    let mut payment_id = [0u8; 32];
+    payment_id.copy_from_slice(&payment_id_bytes);
+
+    let signature_bytes = hex::decode(&positional[4])
+        .map_err(|e| format!("Invalid signature hex: {}", e))?;
+    if signature_bytes.len() != 64 {
+        return Err("Signature must be 64 bytes (128 hex characters)".into());
+    }
+    let mut signature = [0u8; 64];
+    signature.copy_from_slice(&signature_bytes);
+
+    let config = parse_config(&config_args)?;
+    let node = Node::new(config).await?;
+
+    println!("Locking deposit for Lightning payment...");
+    println!("  Reserves ID: {}", reserves_id);
+    println!("  Deposit: {}", deposit_pubkey);
+    println!("  Amount: {} msats ({} sats)", amount_msats, amount_msats / 1000);
+    println!("  Payment ID: {}", &positional[3][..16.min(positional[3].len())]);
+
+    let new_locked = node.lock_invoice_payment(
+        reserves_id,
+        deposit_pubkey,
+        amount_msats,
+        payment_id,
+        signature,
+    )?;
+
+    // Broadcast to Nostr
+    if let Err(e) = node.broadcast_last_update(reserves_id).await {
+        eprintln!("Warning: Failed to broadcast to Nostr: {}", e);
+    }
+
+    println!("\nPayment locked!");
+    println!("  Locked balance: {} msats ({} sats)", new_locked, new_locked / 1000);
+
+    Ok(())
+}
+
+/// Fail/cancel a pending Lightning payment
+async fn lightning_fail(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    // Parse positional arguments:
+    // <reserves_id> <deposit_pubkey> <amount_msats> <payment_id>
+    let mut positional: Vec<String> = Vec::new();
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else {
+            positional.push(args[i].clone());
+        }
+        i += 1;
+    }
+
+    if positional.len() < 4 {
+        eprintln!("Usage: deposits-bdk lightning fail <reserves_id> <deposit_pubkey> <amount_msats> <payment_id>");
+        eprintln!("\nExample:");
+        eprintln!("  deposits-bdk lightning fail 02abc...partner 02def...deposit 1000000 abc123...hash");
+        eprintln!("\nThis cancels a pending Lightning payment and unlocks the funds.");
+        return Ok(());
+    }
+
+    let reserves_id = &positional[0];
+    let deposit_pubkey = PublicKey::from_str(&positional[1])
+        .map_err(|e| format!("Invalid deposit pubkey: {}", e))?;
+    let amount_msats: u64 = positional[2]
+        .parse()
+        .map_err(|_| format!("Invalid amount_msats: {}", positional[2]))?;
+
+    let payment_id_bytes = hex::decode(&positional[3])
+        .map_err(|e| format!("Invalid payment_id hex: {}", e))?;
+    if payment_id_bytes.len() != 32 {
+        return Err("Payment ID must be 32 bytes (64 hex characters)".into());
+    }
+    let mut payment_id = [0u8; 32];
+    payment_id.copy_from_slice(&payment_id_bytes);
+
+    let config = parse_config(&config_args)?;
+    let node = Node::new(config).await?;
+
+    println!("Failing Lightning payment...");
+    println!("  Reserves ID: {}", reserves_id);
+    println!("  Deposit: {}", deposit_pubkey);
+    println!("  Amount to unlock: {} msats ({} sats)", amount_msats, amount_msats / 1000);
+    println!("  Payment ID: {}", &positional[3][..16.min(positional[3].len())]);
+
+    let new_balance = node.fail_invoice_payment(
+        reserves_id,
+        deposit_pubkey,
+        amount_msats,
+        payment_id,
+    )?;
+
+    // Broadcast to Nostr
+    if let Err(e) = node.broadcast_last_update(reserves_id).await {
+        eprintln!("Warning: Failed to broadcast to Nostr: {}", e);
+    }
+
+    println!("\nPayment failed/cancelled!");
+    println!("  New balance: {} msats ({} sats)", new_balance, new_balance / 1000);
+
+    Ok(())
+}
+
+/// Complete a Lightning payment with the preimage
+async fn lightning_fulfill(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    // Parse positional arguments:
+    // <reserves_id> <deposit_pubkey> <amount_msats> <payment_id> <preimage> <signature>
+    let mut positional: Vec<String> = Vec::new();
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else {
+            positional.push(args[i].clone());
+        }
+        i += 1;
+    }
+
+    if positional.len() < 6 {
+        eprintln!("Usage: deposits-bdk lightning fulfill <reserves_id> <deposit_pubkey> <amount_msats> <payment_id> <preimage> <signature>");
+        eprintln!("\nExample:");
+        eprintln!("  deposits-bdk lightning fulfill 02abc...partner 02def...deposit 1000000 abc123...hash fed987...preimage def456...sig");
+        eprintln!("\nThis completes a Lightning payment by providing the preimage.");
+        return Ok(());
+    }
+
+    let reserves_id = &positional[0];
+    let deposit_pubkey = PublicKey::from_str(&positional[1])
+        .map_err(|e| format!("Invalid deposit pubkey: {}", e))?;
+    let amount_msats: u64 = positional[2]
+        .parse()
+        .map_err(|_| format!("Invalid amount_msats: {}", positional[2]))?;
+
+    let payment_id_bytes = hex::decode(&positional[3])
+        .map_err(|e| format!("Invalid payment_id hex: {}", e))?;
+    if payment_id_bytes.len() != 32 {
+        return Err("Payment ID must be 32 bytes (64 hex characters)".into());
+    }
+    let mut payment_id = [0u8; 32];
+    payment_id.copy_from_slice(&payment_id_bytes);
+
+    let preimage_bytes = hex::decode(&positional[4])
+        .map_err(|e| format!("Invalid preimage hex: {}", e))?;
+    if preimage_bytes.len() != 32 {
+        return Err("Preimage must be 32 bytes (64 hex characters)".into());
+    }
+    let mut preimage = [0u8; 32];
+    preimage.copy_from_slice(&preimage_bytes);
+
+    let signature_bytes = hex::decode(&positional[5])
+        .map_err(|e| format!("Invalid signature hex: {}", e))?;
+    if signature_bytes.len() != 64 {
+        return Err("Signature must be 64 bytes (128 hex characters)".into());
+    }
+    let mut signature = [0u8; 64];
+    signature.copy_from_slice(&signature_bytes);
+
+    let config = parse_config(&config_args)?;
+    let node = Node::new(config).await?;
+
+    println!("Fulfilling Lightning payment...");
+    println!("  Reserves ID: {}", reserves_id);
+    println!("  Deposit: {}", deposit_pubkey);
+    println!("  Amount: {} msats ({} sats)", amount_msats, amount_msats / 1000);
+    println!("  Payment ID: {}", &positional[3][..16.min(positional[3].len())]);
+
+    let new_balance = node.fulfill_invoice_payment(
+        reserves_id,
+        deposit_pubkey,
+        amount_msats,
+        payment_id,
+        preimage,
+        signature,
+    )?;
+
+    // Broadcast to Nostr
+    if let Err(e) = node.broadcast_last_update(reserves_id).await {
+        eprintln!("Warning: Failed to broadcast to Nostr: {}", e);
+    }
+
+    println!("\nPayment fulfilled!");
+    println!("  New balance: {} msats ({} sats)", new_balance, new_balance / 1000);
+
+    Ok(())
+}
+
+/// Send a Lightning payment FROM a deposit (combined lock + pay + fulfill)
+///
+/// This is the depositor-facing command that:
+/// 1. Locks funds from the deposit (InvoiceLock)
+/// 2. Pays the invoice via the LDK sidecar
+/// 3. Fulfills the payment with the preimage (InvoiceFulfill)
+async fn lightning_send(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use bitcoin::secp256k1::SecretKey;
+    use deposits_bdk::ldk_cli::LdkCli;
+
+    // Parse positional arguments:
+    // <reserves_id> <deposit_secret> <bolt11_invoice>
+    let mut positional: Vec<String> = Vec::new();
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else {
+            positional.push(args[i].clone());
+        }
+        i += 1;
+    }
+
+    if positional.len() < 3 {
+        eprintln!("Usage: deposits-bdk lightning send <reserves_id> <deposit_secret_hex> <bolt11_invoice>");
+        eprintln!("\nExample:");
+        eprintln!("  deposits-bdk lightning send bcrt1q... abc123...secret lnbc50u1p...");
+        eprintln!("\nThis pays an invoice FROM a deposit by:");
+        eprintln!("  1. Locking funds (InvoiceLock)");
+        eprintln!("  2. Paying via Lightning (LDK sidecar)");
+        eprintln!("  3. Fulfilling with preimage (InvoiceFulfill)");
+        return Ok(());
+    }
+
+    let reserves_id = &positional[0];
+    let secret_hex = &positional[1];
+    let invoice = &positional[2];
+
+    // Parse secret key
+    let secret_bytes = hex::decode(secret_hex)
+        .map_err(|e| format!("Invalid secret hex: {}", e))?;
+    if secret_bytes.len() != 32 {
+        return Err("Secret key must be 32 bytes".into());
+    }
+    let secret_key = SecretKey::from_slice(&secret_bytes)
+        .map_err(|e| format!("Invalid secret key: {}", e))?;
+
+    // Derive public key
+    let secp = Secp256k1::new();
+    let deposit_pubkey = PublicKey::from_secret_key(&secp, &secret_key);
+
+    // Decode invoice to get amount
+    // For now, we'll pay via LDK first to get the amount, then do ledger operations
+    // In production, we'd parse the BOLT11 invoice to get the amount
+    let cli = LdkCli::from_env();
+
+    println!("Sending Lightning payment from deposit...");
+    println!("  Reserves: {}", reserves_id);
+    println!("  Deposit: {}", deposit_pubkey);
+    println!("  Invoice: {}...", &invoice[..40.min(invoice.len())]);
+
+    // Step 1: Pay the invoice via LDK to get payment_id and check success
+    println!("\nStep 1: Paying invoice via Lightning...");
+    let payment_id_hex = cli.pay_invoice(invoice)?;
+    println!("  Payment initiated: {}...", &payment_id_hex[..20.min(payment_id_hex.len())]);
+
+    // Convert payment_id to bytes
+    let payment_id_bytes = hex::decode(&payment_id_hex)
+        .map_err(|e| format!("Invalid payment_id hex: {}", e))?;
+    if payment_id_bytes.len() != 32 {
+        return Err(format!("Payment ID unexpected length: {}", payment_id_bytes.len()).into());
+    }
+    let mut payment_id = [0u8; 32];
+    payment_id.copy_from_slice(&payment_id_bytes);
+
+    // Wait for payment to complete
+    println!("  Waiting for payment to settle...");
+    std::thread::sleep(std::time::Duration::from_secs(3));
+
+    // Check payment status and get preimage
+    let payments = cli.list_payments()?;
+    let payment = payments.payments.iter()
+        .find(|p| p.id == payment_id_hex)
+        .ok_or("Payment not found in payment list")?;
+
+    if payment.status != 1 {
+        return Err(format!("Payment failed with status: {}", payment.status).into());
+    }
+
+    let preimage_hex = payment.preimage.as_ref()
+        .ok_or("Payment succeeded but no preimage returned")?;
+    let preimage_bytes = hex::decode(preimage_hex)
+        .map_err(|e| format!("Invalid preimage hex: {}", e))?;
+    if preimage_bytes.len() != 32 {
+        return Err("Preimage unexpected length".into());
+    }
+    let mut preimage = [0u8; 32];
+    preimage.copy_from_slice(&preimage_bytes);
+
+    let amount_msats = payment.amount_msat
+        .ok_or("Payment succeeded but no amount returned")?;
+
+    println!("  Payment succeeded!");
+    println!("  Amount: {} msats", amount_msats);
+    println!("  Preimage: {}...", &preimage_hex[..16]);
+
+    // Step 2: Create signatures and record ledger operations
+    println!("\nStep 2: Recording on ledger...");
+
+    let config = parse_config(&config_args)?;
+    let node = Node::new(config).await?;
+
+    // Create signatures for lock and fulfill
+    let lock_signature = deposits_core::create_payment_signature(
+        &secret_key,
+        &payment_id,
+        amount_msats,
+    ).map_err(|e| format!("Failed to create lock signature: {:?}", e))?;
+
+    let fulfill_signature = deposits_core::create_payment_signature(
+        &secret_key,
+        &payment_id,
+        amount_msats,
+    ).map_err(|e| format!("Failed to create fulfill signature: {:?}", e))?;
+
+    // Lock the funds
+    println!("  Locking {} msats...", amount_msats);
+    let locked_balance = node.lock_invoice_payment(
+        reserves_id,
+        deposit_pubkey,
+        amount_msats,
+        payment_id,
+        lock_signature,
+    )?;
+    println!("  Locked balance: {} msats", locked_balance);
+
+    // Fulfill with preimage
+    println!("  Fulfilling with preimage...");
+    let new_balance = node.fulfill_invoice_payment(
+        reserves_id,
+        deposit_pubkey,
+        amount_msats,
+        payment_id,
+        preimage,
+        fulfill_signature,
+    )?;
+
+    // Broadcast to Nostr
+    if let Err(e) = node.broadcast_last_update(reserves_id).await {
+        eprintln!("Warning: Failed to broadcast to Nostr: {}", e);
+    }
+
+    println!("\nPayment complete!");
+    println!("  Paid: {} msats ({} sats)", amount_msats, amount_msats / 1000);
+    println!("  New balance: {} msats ({} sats)", new_balance, new_balance / 1000);
 
     Ok(())
 }
@@ -4757,20 +5481,50 @@ async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     let node = Node::new(config).await?;
 
     // Determine ledger_id - use from args or find our primary ledger
+    // The ledger_id for Nostr events is the hex hash from ledger.ledger_id_hex()
     let ledger_id = if let Some(lid) = ledger_id {
-        lid
+        // Arg provided - might be reserves address (bcrt1q...), hex prefix, or full hex
+        let ledgers = node.list_ledgers();
+
+        // First, try to match by reserves_id (bcrt1q...)
+        if lid.starts_with("bcrt1") || lid.starts_with("bc1") || lid.starts_with("tb1") {
+            let found = ledgers.iter()
+                .find(|((_op, rid), _)| rid == &lid || rid.starts_with(&lid));
+            if let Some((_, ledger_arc)) = found {
+                let ledger = ledger_arc.read().unwrap();
+                ledger.ledger_id_hex()
+            } else {
+                return Err(format!("No ledger found with reserves: {}", lid).into());
+            }
+        } else {
+            // Try to match by hex ledger_id prefix
+            let found = ledgers.iter()
+                .find(|(_, ledger_arc)| {
+                    let ledger = ledger_arc.read().unwrap();
+                    ledger.ledger_id_hex().starts_with(&lid)
+                });
+            if let Some((_, ledger_arc)) = found {
+                let ledger = ledger_arc.read().unwrap();
+                ledger.ledger_id_hex()
+            } else {
+                // Assume it's a full or partial ledger_id and use as-is
+                lid
+            }
+        }
     } else {
         // Find our primary ledger
         let ledgers = node.list_ledgers();
         if ledgers.is_empty() {
             return Err("No ledgers found. Specify a ledger ID or open a ledger first.".into());
         }
-        let ((op, rid), _) = ledgers.into_iter().next().unwrap();
-        format!("{}:{}", op, rid)
+        let (_, ledger_arc) = ledgers.into_iter().next().unwrap();
+        let ledger = ledger_arc.read().unwrap();
+        ledger.ledger_id_hex()
     };
 
     // Helper to scan for joined ledgers from QuorumJoin operations
-    fn scan_joined_ledgers(node: &Node, exclude_ledger_id: &str) -> std::collections::HashSet<String> {
+    // Returns set of reserves_id strings that we need to find hex ledger_ids for
+    fn scan_joined_reserves(node: &Node) -> std::collections::HashSet<String> {
         use deposits_core::messages::LedgerOperation;
         use deposits_core::tlv::TlvDecode;
         use deposits_core::messages::consts::QUORUM_JOIN;
@@ -4784,14 +5538,10 @@ async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
             // Scan history for QuorumJoin operations
             for update in &ledger.history {
                 if update.message_type == QUORUM_JOIN {
-                    // Decode the operation to get target ledger info
-                    if let Ok(LedgerOperation::QuorumJoin { operator_id, reserves_id, .. }) =
+                    if let Ok(LedgerOperation::QuorumJoin { reserves_id, .. }) =
                         LedgerOperation::tlv_decode(&update.message)
                     {
-                        let joined_id = format!("{}:{}", operator_id, reserves_id);
-                        if joined_id != exclude_ledger_id {
-                            joined.insert(joined_id);
-                        }
+                        joined.insert(reserves_id);
                     }
                 }
             }
@@ -4799,8 +5549,34 @@ async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         joined
     }
 
-    // Find all ledgers we've joined (via QuorumJoin operations in our ledgers)
-    let mut joined_ledger_ids = scan_joined_ledgers(&node, &ledger_id);
+    // Create transport early so we can use it for ad lookups
+    let transport = NostrTransportBuilder::new(secret_key)
+        .relay(&relay_url)
+        .build()
+        .await?;
+
+    // Find hex ledger_ids for joined ledgers by matching reserves addresses from advertisements
+    let joined_reserves = scan_joined_reserves(&node);
+    let mut joined_ledger_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    if !joined_reserves.is_empty() {
+        // Fetch all advertisements to find ledger_ids for joined reserves
+        let network_str = match config_for_reload.network {
+            bitcoin::Network::Bitcoin => "bitcoin",
+            bitcoin::Network::Testnet => "testnet",
+            bitcoin::Network::Signet => "signet",
+            bitcoin::Network::Regtest => "regtest",
+            _ => "regtest",
+        };
+        if let Ok(ads) = transport.fetch_ledger_advertisements(network_str).await {
+            for ad in ads {
+                // Check if this ad's reserves matches any of our joined reserves
+                if joined_reserves.contains(&ad.reserves_address) && ad.ledger_id != ledger_id {
+                    joined_ledger_ids.insert(ad.ledger_id.clone());
+                }
+            }
+        }
+    }
 
     println!("Watching for requests on ledger...");
     println!("  Relay: {}", relay_url);
@@ -4815,11 +5591,6 @@ async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     println!();
     println!("Press Ctrl+C to stop.");
     println!();
-
-    let transport = NostrTransportBuilder::new(secret_key)
-        .relay(&relay_url)
-        .build()
-        .await?;
 
     // Subscribe to requests for this ledger
     transport.subscribe_to_requests(&ledger_id).await?;
@@ -4886,27 +5657,39 @@ async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
             last_auto_complete = std::time::Instant::now();
         }
 
-        // Periodically rescan for new QuorumJoin operations (every 5 seconds)
-        if last_join_scan.elapsed() > std::time::Duration::from_secs(5) {
+        // Periodically rescan for new QuorumJoin operations (every 30 seconds)
+        if last_join_scan.elapsed() > std::time::Duration::from_secs(30) {
             // Reload node to get fresh data
             if let Ok(fresh_node) = Node::new(config_for_reload.clone()).await {
-                let current_joined = scan_joined_ledgers(&fresh_node, &ledger_id);
+                let current_reserves = scan_joined_reserves(&fresh_node);
 
-                // Subscribe to any newly discovered ledgers
-                for new_id in &current_joined {
-                    if !joined_ledger_ids.contains(new_id) {
-                        println!("[{}] Discovered new QuorumJoin: {}...",
-                            chrono::Utc::now().format("%H:%M:%S"),
-                            &new_id[..40.min(new_id.len())]);
+                // Find ledger IDs for any new reserves by looking up advertisements
+                let network_str = match config_for_reload.network {
+                    bitcoin::Network::Bitcoin => "bitcoin",
+                    bitcoin::Network::Testnet => "testnet",
+                    bitcoin::Network::Signet => "signet",
+                    bitcoin::Network::Regtest => "regtest",
+                    _ => "regtest",
+                };
+                if let Ok(ads) = transport.fetch_ledger_advertisements(network_str).await {
+                    for ad in ads {
+                        if current_reserves.contains(&ad.reserves_address)
+                            && ad.ledger_id != ledger_id
+                            && !joined_ledger_ids.contains(&ad.ledger_id)
+                        {
+                            println!("[{}] Discovered new QuorumJoin: {}...",
+                                chrono::Utc::now().format("%H:%M:%S"),
+                                &ad.ledger_id[..40.min(ad.ledger_id.len())]);
 
-                        if let Err(e) = transport.subscribe_to_requests(new_id).await {
-                            tracing::warn!("Failed to subscribe to {}: {}", new_id, e);
+                            if let Err(e) = transport.subscribe_to_requests(&ad.ledger_id).await {
+                                tracing::warn!("Failed to subscribe to {}: {}", ad.ledger_id, e);
+                            }
+                            if let Err(e) = transport.subscribe_to_disputes(&ad.ledger_id).await {
+                                tracing::warn!("Failed to subscribe to disputes for {}: {}", ad.ledger_id, e);
+                            }
+
+                            joined_ledger_ids.insert(ad.ledger_id.clone());
                         }
-                        if let Err(e) = transport.subscribe_to_disputes(new_id).await {
-                            tracing::warn!("Failed to subscribe to disputes for {}: {}", new_id, e);
-                        }
-
-                        joined_ledger_ids.insert(new_id.clone());
                     }
                 }
             }

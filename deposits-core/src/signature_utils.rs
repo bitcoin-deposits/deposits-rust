@@ -118,6 +118,43 @@ pub fn verify_payment_signature(
     secp.verify_schnorr(&sig, &msg, &x_only).is_ok()
 }
 
+/// Create a payment signature for invoice lock/fulfill operations
+///
+/// The signed message is: SHA256(pubkey || payment_id || amount)
+/// This proves the deposit owner authorized this specific payment.
+///
+/// Returns the 64-byte Schnorr signature.
+pub fn create_payment_signature(
+    secret_key: &SecretKey,
+    payment_id: &[u8; 32],
+    amount: u64,
+) -> Result<[u8; 64], DepositsError> {
+    use bitcoin::secp256k1::schnorr::Signature;
+    use bitcoin::secp256k1::Keypair;
+
+    let secp = Secp256k1::new();
+
+    // Derive the public key
+    let pubkey = PublicKey::from_secret_key(&secp, secret_key);
+
+    // Build the message to sign
+    let mut message_data = Vec::with_capacity(33 + 32 + 8);
+    message_data.extend_from_slice(&pubkey.serialize());
+    message_data.extend_from_slice(payment_id);
+    message_data.extend_from_slice(&amount.to_le_bytes());
+
+    let message_hash = sha256::Hash::hash(&message_data);
+    let msg = Message::from_digest(message_hash.to_byte_array());
+
+    // Create keypair for Schnorr signing
+    let keypair = Keypair::from_secret_key(&secp, secret_key);
+
+    // Sign with Schnorr
+    let sig: Signature = secp.sign_schnorr(&msg, &keypair);
+
+    Ok(sig.serialize())
+}
+
 /// Create a payment authorization signature (for testing and wallet integration)
 /// The deposit owner's private key signs: "PAY:{amount}:{invoice}:{preimage_hex}"
 pub fn create_payment_authorization_signature(

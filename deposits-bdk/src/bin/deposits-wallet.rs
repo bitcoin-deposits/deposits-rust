@@ -222,9 +222,17 @@ async fn discover(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     println!("Found {} ledger(s):", ads.len());
     println!();
 
+    // Build a map of operator pubkey -> name for quorum member lookups
+    let pubkey_to_name: std::collections::HashMap<&str, &str> = ads.iter()
+        .filter_map(|a| {
+            a.operator_name.as_deref()
+                .map(|name| (a.operator_pubkey.as_str(), name))
+        })
+        .collect();
+
     for (i, ad) in ads.iter().enumerate() {
-        let name = ad.name.as_deref().unwrap_or("Unnamed");
-        println!("{}. {}", i + 1, name);
+        let operator_name = ad.operator_name.as_deref().unwrap_or("Anonymous");
+        println!("{}. {} ({}...)", i + 1, operator_name, &ad.operator_pubkey[..8.min(ad.operator_pubkey.len())]);
         println!("   Ledger: {}...", &ad.ledger_id[..16.min(ad.ledger_id.len())]);
         println!("   Available: {} sats ({} BTC)",
             ad.available_headroom_sats,
@@ -233,6 +241,17 @@ async fn discover(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             ad.reserves_amount_sats, ad.total_obligations_sats);
         println!("   Quorum: {} members ({} sats collateral)",
             ad.quorum_size, ad.received_collateral_sats);
+        if !ad.quorum_members.is_empty() {
+            let member_names: Vec<String> = ad.quorum_members.iter()
+                .map(|m| {
+                    match pubkey_to_name.get(m.pubkey.as_str()) {
+                        Some(name) => format!("{} ({}...)", name, &m.pubkey[..8.min(m.pubkey.len())]),
+                        None => format!("{}...", &m.pubkey[..8.min(m.pubkey.len())]),
+                    }
+                })
+                .collect();
+            println!("     Members: {}", member_names.join(", "));
+        }
 
         // Fee summary
         let mut fees = Vec::new();
@@ -306,16 +325,17 @@ async fn ledger_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         .build()
         .await?;
 
+    let network_str = match config.network {
+        bitcoin::Network::Bitcoin => "bitcoin",
+        bitcoin::Network::Testnet => "testnet",
+        bitcoin::Network::Signet => "signet",
+        bitcoin::Network::Regtest => "regtest",
+        _ => "unknown",
+    };
+
     // Try to find by prefix match
     let full_ledger_id = if ledger_id.len() < 64 {
         // Search for matching ledger
-        let network_str = match config.network {
-            bitcoin::Network::Bitcoin => "bitcoin",
-            bitcoin::Network::Testnet => "testnet",
-            bitcoin::Network::Signet => "signet",
-            bitcoin::Network::Regtest => "regtest",
-            _ => "unknown",
-        };
         let ads = transport.fetch_ledger_advertisements(network_str).await?;
         ads.into_iter()
             .find(|a| a.ledger_id.starts_with(&ledger_id))
@@ -331,9 +351,9 @@ async fn ledger_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     println!("Ledger Information");
     println!("==================");
     println!();
-    println!("Name: {}", ad.name.as_deref().unwrap_or("Unnamed"));
+    println!("Operator: {}", ad.operator_name.as_deref().unwrap_or("Anonymous"));
+    println!("Operator Pubkey: {}", ad.operator_pubkey);
     println!("Ledger ID: {}", ad.ledger_id);
-    println!("Operator: {}", ad.operator_pubkey);
     println!("Reserves Address: {}", ad.reserves_address);
     println!();
     println!("Capacity");
@@ -350,15 +370,28 @@ async fn ledger_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     println!("Received Collateral: {} sats", ad.received_collateral_sats);
     println!("Collateral Enforcement Block: {}", ad.collateral_enforcement_block);
     if !ad.quorum_members.is_empty() {
+        // Fetch all ads to build pubkey -> name map for quorum member lookups
+        let all_ads = transport.fetch_ledger_advertisements(network_str).await.unwrap_or_default();
+        let pubkey_to_name: std::collections::HashMap<&str, &str> = all_ads.iter()
+            .filter_map(|a| {
+                a.operator_name.as_deref()
+                    .map(|name| (a.operator_pubkey.as_str(), name))
+            })
+            .collect();
+
         println!("Quorum Members:");
         for member in &ad.quorum_members {
+            let name_display = match pubkey_to_name.get(member.pubkey.as_str()) {
+                Some(name) => format!("{} ({}...)", name, &member.pubkey[..12.min(member.pubkey.len())]),
+                None => format!("{}...", &member.pubkey[..12.min(member.pubkey.len())]),
+            };
             if member.collateral_sats > 0 {
-                println!("  - {}...: {} sats (expires block {})",
-                    &member.pubkey[..12.min(member.pubkey.len())],
+                println!("  - {}: {} sats (expires block {})",
+                    name_display,
                     member.collateral_sats,
                     member.lock_expires_block);
             } else {
-                println!("  - {}...: no attestation", &member.pubkey[..12.min(member.pubkey.len())]);
+                println!("  - {}: no attestation", name_display);
             }
         }
     }
@@ -447,14 +480,6 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
         }
     }
 
-    println!("Opening deposit...");
-    println!("  Ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
-    println!("  Amount: {} sats", amount_sats);
-    if let Some(ref a) = alias {
-        println!("  Alias: {}", a);
-    }
-    println!();
-
     let secret_key = derive_secret_key(&config.seed, config.network)?;
     let secp = Secp256k1::new();
     let our_pubkey = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
@@ -464,12 +489,40 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
         .build()
         .await?;
 
+    // Resolve prefix to full ledger ID
+    let ledger_id = if ledger_id.len() < 64 {
+        let network_str = match config.network {
+            bitcoin::Network::Bitcoin => "bitcoin",
+            bitcoin::Network::Testnet => "testnet",
+            bitcoin::Network::Signet => "signet",
+            bitcoin::Network::Regtest => "regtest",
+            _ => "unknown",
+        };
+        let ads = transport.fetch_ledger_advertisements(network_str).await?;
+        ads.into_iter()
+            .find(|a| a.ledger_id.starts_with(&ledger_id))
+            .map(|a| a.ledger_id)
+            .ok_or_else(|| format!("No ledger found matching: {}", ledger_id))?
+    } else {
+        ledger_id
+    };
+
+    println!("Opening deposit...");
+    println!("  Ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
+    println!("  Amount: {} sats", amount_sats);
+    if let Some(ref a) = alias {
+        println!("  Alias: {}", a);
+    }
+    println!();
+
     // Send deposit_offer request
-    // max_sats = requested amount, min_sats = 1000 (minimum useful), blocks_valid = 144 (~1 day)
+    // max_sats = requested amount, min_sats = 1 (or less than max), blocks_valid = 144 (~1 day)
+    // min_sats must be strictly less than max_sats
+    let min_sats = std::cmp::min(1000_u64, amount_sats.saturating_sub(1).max(1));
     let request_params = serde_json::json!({
         "deposit_pubkey": hex::encode(our_pubkey.serialize()),
         "max_sats": amount_sats,
-        "min_sats": 1000_u64,
+        "min_sats": min_sats,
         "blocks_valid": 144_u64,
     });
 
@@ -500,16 +553,13 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
         for response in responses {
             if response.request_id == request_id {
                 if response.success {
-                    println!("Deposit offer accepted!");
                     if let Some(result) = &response.result {
-                        if let Some(address) = result.get("funding_address").and_then(|v| v.as_str()) {
-                            println!();
-                            println!("Send {} sats to:", amount_sats);
-                            println!("  {}", address);
-                            println!();
-                            println!("After funding, the deposit will be automatically completed.");
-                        }
-                        if let Some(offer_id) = result.get("offer_id").and_then(|v| v.as_str()) {
+                        let address = result.get("funding_address").and_then(|v| v.as_str());
+                        let offer_id = result.get("offer_id").and_then(|v| v.as_str());
+                        let min_sats = result.get("min_sats").and_then(|v| v.as_u64()).unwrap_or(1);
+                        let max_sats = result.get("max_sats").and_then(|v| v.as_u64()).unwrap_or(amount_sats);
+
+                        if let (Some(address), Some(offer_id)) = (address, offer_id) {
                             // Save deposit to local storage with alias
                             let deposits_file = config.data_dir.join("deposits.json");
                             let mut deposits: Vec<serde_json::Value> = if deposits_file.exists() {
@@ -528,16 +578,19 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
                                 "alias": final_alias,
                                 "offer_id": offer_id,
                                 "ledger_id": ledger_id,
+                                "funding_address": address,
                                 "deposit_pubkey": hex::encode(our_pubkey.serialize()),
-                                "amount_sats": amount_sats,
+                                "min_sats": min_sats,
+                                "max_sats": max_sats,
                                 "status": "pending",
                                 "created_at": Utc::now().to_rfc3339(),
                             }));
                             std::fs::write(&deposits_file, serde_json::to_string_pretty(&deposits)?)?;
 
+                            println!("Deposit '{}' created!", final_alias);
                             println!();
-                            println!("Deposit alias: {}", final_alias);
-                            println!("Offer ID: {}", offer_id);
+                            println!("Fund with {}-{} sats:", min_sats, max_sats);
+                            println!("  {}", address);
                         }
                     }
                     return Ok(());

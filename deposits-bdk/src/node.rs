@@ -50,6 +50,9 @@ pub struct NodeConfig {
 
     /// Data directory
     pub data_dir: PathBuf,
+
+    /// Operator name for advertisements (optional)
+    pub operator_name: Option<String>,
 }
 
 /// Result of rotating reserves to quorum-based Taproot spending
@@ -4317,6 +4320,273 @@ impl Node {
         Ok(new_balance)
     }
 
+    /// Lock funds for an outgoing Lightning invoice payment
+    ///
+    /// This applies an InvoiceLock operation to lock funds from a deposit
+    /// for an outgoing Lightning payment. The payment must be fulfilled or
+    /// failed to release the locked funds.
+    ///
+    /// # Arguments
+    /// * `reserves_id` - The reserves ID (ledger address) where the deposit exists
+    /// * `deposit_pubkey` - The deposit's public key
+    /// * `amount_msats` - Amount to lock (millisatoshis)
+    /// * `payment_id` - Unique identifier for this payment (typically payment hash)
+    /// * `scriptpubkey_signature` - Signature from the deposit holder authorizing the lock
+    ///
+    /// # Returns
+    /// The new locked balance for the deposit
+    pub fn lock_invoice_payment(
+        &self,
+        reserves_id: &str,
+        deposit_pubkey: PublicKey,
+        amount_msats: u64,
+        payment_id: [u8; 32],
+        scriptpubkey_signature: [u8; 64],
+    ) -> Result<u64, Error> {
+        let ledger_arc = self.handler.get_or_create_ledger(self.node_id, reserves_id.to_string());
+
+        let (previous_balance, new_locked) = {
+            let mut ledger = ledger_arc.write().unwrap();
+
+            // Check if deposit exists
+            let deposit = ledger.state.deposits.get(&deposit_pubkey)
+                .ok_or_else(|| Error::Protocol(format!(
+                    "Deposit not found for pubkey {}",
+                    deposit_pubkey
+                )))?;
+
+            // Check sufficient available balance
+            if deposit.available_balance() < amount_msats {
+                return Err(Error::Protocol(format!(
+                    "Insufficient available balance: {} msats available, {} msats needed",
+                    deposit.available_balance(), amount_msats
+                )));
+            }
+
+            let prev_balance = deposit.balance;
+
+            // Get the next sequence number
+            let sequence_number = ledger.sequence() + 1;
+
+            // Apply the InvoiceLock operation
+            let operation = LedgerOperation::InvoiceLock {
+                pubkey: deposit_pubkey,
+                amount: amount_msats,
+                payment_id,
+                sequence_number,
+                scriptpubkey_signature,
+            };
+
+            let block_height = self.wallet.get_block_height().unwrap_or(0);
+            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
+            ledger.append_operation_with_block(operation, deposits_core::messages::consts::SENDING_LOCK_PAYMENT, block_height, block_hash)
+                .map_err(|e| Error::Protocol(format!("Failed to lock payment: {:?}", e)))?;
+
+            // Get new locked balance
+            let new_locked = ledger.state.deposits.get(&deposit_pubkey)
+                .map(|d| d.locked_balance)
+                .unwrap_or(0);
+
+            (prev_balance, new_locked)
+        };
+
+        // Sign the update
+        self.sign_last_update(reserves_id)?;
+
+        // Persist the ledger
+        if let Err(e) = self.handler.persist_ledger(&self.node_id, reserves_id) {
+            tracing::error!("Failed to persist ledger: {}", e);
+        }
+
+        tracing::info!(
+            "Locked {} msats for invoice payment {} on deposit {}, previous balance: {} msats",
+            amount_msats,
+            hex::encode(&payment_id[..8]),
+            deposit_pubkey,
+            previous_balance
+        );
+
+        Ok(new_locked)
+    }
+
+    /// Fail an outgoing Lightning invoice payment
+    ///
+    /// This applies an InvoiceFail operation to unlock funds from a deposit
+    /// when a Lightning payment fails. The locked funds are returned to
+    /// the deposit's available balance.
+    ///
+    /// # Arguments
+    /// * `reserves_id` - The reserves ID (ledger address) where the deposit exists
+    /// * `deposit_pubkey` - The deposit's public key
+    /// * `amount_msats` - Amount to unlock (millisatoshis)
+    /// * `payment_id` - The payment identifier from the original lock
+    ///
+    /// # Returns
+    /// The new available balance for the deposit
+    pub fn fail_invoice_payment(
+        &self,
+        reserves_id: &str,
+        deposit_pubkey: PublicKey,
+        amount_msats: u64,
+        payment_id: [u8; 32],
+    ) -> Result<u64, Error> {
+        let ledger_arc = self.handler.get_or_create_ledger(self.node_id, reserves_id.to_string());
+
+        let (previous_locked, new_balance) = {
+            let mut ledger = ledger_arc.write().unwrap();
+
+            // Check if deposit exists
+            let deposit = ledger.state.deposits.get(&deposit_pubkey)
+                .ok_or_else(|| Error::Protocol(format!(
+                    "Deposit not found for pubkey {}",
+                    deposit_pubkey
+                )))?;
+
+            // Check sufficient locked balance
+            if deposit.locked_balance < amount_msats {
+                return Err(Error::Protocol(format!(
+                    "Insufficient locked balance: {} msats locked, {} msats to unlock",
+                    deposit.locked_balance, amount_msats
+                )));
+            }
+
+            let prev_locked = deposit.locked_balance;
+
+            // Get the next sequence number
+            let sequence_number = ledger.sequence() + 1;
+
+            // Apply the InvoiceFail operation
+            let operation = LedgerOperation::InvoiceFail {
+                pubkey: deposit_pubkey,
+                amount: amount_msats,
+                payment_id,
+                sequence_number,
+            };
+
+            let block_height = self.wallet.get_block_height().unwrap_or(0);
+            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
+            ledger.append_operation_with_block(operation, deposits_core::messages::consts::SENDING_FAIL_PAYMENT, block_height, block_hash)
+                .map_err(|e| Error::Protocol(format!("Failed to fail payment: {:?}", e)))?;
+
+            // Get new balance
+            let new_bal = ledger.state.deposits.get(&deposit_pubkey)
+                .map(|d| d.balance)
+                .unwrap_or(0);
+
+            (prev_locked, new_bal)
+        };
+
+        // Sign the update
+        self.sign_last_update(reserves_id)?;
+
+        // Persist the ledger
+        if let Err(e) = self.handler.persist_ledger(&self.node_id, reserves_id) {
+            tracing::error!("Failed to persist ledger: {}", e);
+        }
+
+        tracing::info!(
+            "Failed invoice payment {} on deposit {}, unlocked {} msats, previous locked: {} msats",
+            hex::encode(&payment_id[..8]),
+            deposit_pubkey,
+            amount_msats,
+            previous_locked
+        );
+
+        Ok(new_balance)
+    }
+
+    /// Fulfill an outgoing Lightning invoice payment
+    ///
+    /// This applies an InvoiceFulfill operation to complete a Lightning payment.
+    /// The locked funds are deducted from the deposit's balance.
+    ///
+    /// # Arguments
+    /// * `reserves_id` - The reserves ID (ledger address) where the deposit exists
+    /// * `deposit_pubkey` - The deposit's public key
+    /// * `amount_msats` - Amount to deduct (millisatoshis)
+    /// * `payment_id` - The payment identifier from the original lock
+    /// * `preimage` - The payment preimage proving payment success
+    /// * `scriptpubkey_signature` - Signature from the deposit holder authorizing fulfillment
+    ///
+    /// # Returns
+    /// The new balance for the deposit
+    pub fn fulfill_invoice_payment(
+        &self,
+        reserves_id: &str,
+        deposit_pubkey: PublicKey,
+        amount_msats: u64,
+        payment_id: [u8; 32],
+        preimage: [u8; 32],
+        scriptpubkey_signature: [u8; 64],
+    ) -> Result<u64, Error> {
+        let ledger_arc = self.handler.get_or_create_ledger(self.node_id, reserves_id.to_string());
+
+        let (previous_balance, new_balance) = {
+            let mut ledger = ledger_arc.write().unwrap();
+
+            // Check if deposit exists
+            let deposit = ledger.state.deposits.get(&deposit_pubkey)
+                .ok_or_else(|| Error::Protocol(format!(
+                    "Deposit not found for pubkey {}",
+                    deposit_pubkey
+                )))?;
+
+            // Check sufficient locked balance
+            if deposit.locked_balance < amount_msats {
+                return Err(Error::Protocol(format!(
+                    "Insufficient locked balance: {} msats locked, {} msats to fulfill",
+                    deposit.locked_balance, amount_msats
+                )));
+            }
+
+            let prev_balance = deposit.balance;
+
+            // Get the next sequence number
+            let sequence_number = ledger.sequence() + 1;
+
+            // Apply the InvoiceFulfill operation
+            let operation = LedgerOperation::InvoiceFulfill {
+                pubkey: deposit_pubkey,
+                amount: amount_msats,
+                payment_id,
+                sequence_number,
+                scriptpubkey_signature,
+                preimage,
+            };
+
+            let block_height = self.wallet.get_block_height().unwrap_or(0);
+            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
+            ledger.append_operation_with_block(operation, deposits_core::messages::consts::SENDING_FULFILL_PAYMENT, block_height, block_hash)
+                .map_err(|e| Error::Protocol(format!("Failed to fulfill payment: {:?}", e)))?;
+
+            // Get new balance
+            let new_bal = ledger.state.deposits.get(&deposit_pubkey)
+                .map(|d| d.balance)
+                .unwrap_or(0);
+
+            (prev_balance, new_bal)
+        };
+
+        // Sign the update
+        self.sign_last_update(reserves_id)?;
+
+        // Persist the ledger
+        if let Err(e) = self.handler.persist_ledger(&self.node_id, reserves_id) {
+            tracing::error!("Failed to persist ledger: {}", e);
+        }
+
+        tracing::info!(
+            "Fulfilled invoice payment {} on deposit {}, deducted {} msats, balance {} -> {} msats",
+            hex::encode(&payment_id[..8]),
+            deposit_pubkey,
+            amount_msats,
+            previous_balance,
+            new_balance
+        );
+
+        Ok(new_balance)
+    }
+
     /// Get a deposit by pubkey from a ledger
     pub fn get_deposit(
         &self,
@@ -4389,10 +4659,10 @@ impl Node {
             .try_into()
             .map_err(|_| Error::Protocol("Invalid txid length".to_string()))?;
 
-        // Look up the ledger by ledger_id to get the current reserves_id
-        let (reserves_id, _) = self.get_ledger_by_ledger_id(&offer.ledger_id)
+        // Look up the ledger by reserves_id (the offer stores reserves_id in ledger_id field)
+        let (reserves_id, _) = self.get_ledger_by_reserves_id(&offer.ledger_id)
             .ok_or_else(|| Error::Protocol(format!(
-                "Ledger not found for ledger_id: {}",
+                "Ledger not found for reserves_id: {}",
                 &offer.ledger_id[..16.min(offer.ledger_id.len())]
             )))?;
 

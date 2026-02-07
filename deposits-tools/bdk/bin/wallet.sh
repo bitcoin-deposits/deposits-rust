@@ -4,7 +4,8 @@
 # Usage:
 #   ./bin/wallet.sh discover                    Find available ledgers
 #   ./bin/wallet.sh info <ledger_id>            Get ledger details
-#   ./bin/wallet.sh open <ledger_id> <sats>     Open a new deposit
+#   ./bin/wallet.sh open <ledger_id> [sats]     Open a new deposit (default: 10000 sats)
+#   ./bin/wallet.sh faucet <alias|addr> [sats]  Send from faucet to deposit (regtest)
 #   ./bin/wallet.sh offer <alias> <sats>        Add funds to existing deposit
 #   ./bin/wallet.sh balance                     Show all balances
 #   ./bin/wallet.sh withdraw <alias> <amt>      Withdraw from a deposit
@@ -23,13 +24,14 @@ BDK_DIR="$(dirname "$SCRIPT_DIR")"
 REPO_ROOT="$(dirname "$(dirname "$BDK_DIR")")"
 
 # Default configuration
-RELAY="${WALLET_RELAY:-ws://localhost:7777}"
+RELAY="${WALLET_RELAY:-ws://localhost:7778}"
 NETWORK="${WALLET_NETWORK:-regtest}"
 DATA_DIR="${WALLET_DATA_DIR:-$HOME/.deposits-wallet}"
 
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
@@ -42,6 +44,7 @@ print_usage() {
     echo "  discover                    Find available ledgers on the network"
     echo "  info <ledger_id>            Get details about a specific ledger"
     echo "  open <ledger_id> <sats>     Open a new deposit on a ledger"
+    echo "  faucet <alias|addr> [sats]  Send from faucet to deposit (regtest only)"
     echo "  offer <alias> <sats>        Add funds to an existing deposit"
     echo "  balance                     Show balances across all deposits"
     echo "  withdraw <alias> <amt>      Withdraw from a deposit"
@@ -62,9 +65,146 @@ print_usage() {
     echo "Examples:"
     echo "  $0 discover"
     echo "  $0 open abc123... 100000 --alias savings"
+    echo "  $0 faucet mydeposit"
     echo "  $0 offer savings 50000"
     echo "  $0 withdraw savings 25000 --to bc1q..."
     echo "  $0 balance"
+}
+
+# Send from the regtest faucet to an address or deposit alias
+# Note: Bitcoin has a dust limit (~546 sats), so very small amounts will fail
+faucet_send() {
+    local target="$1"
+    local sats="${2:-}"
+
+    if [ -z "$target" ]; then
+        echo -e "${RED}Usage: $0 faucet <alias|address> [sats]${NC}"
+        exit 1
+    fi
+
+    local address="$target"
+    local default_sats=10000
+
+    local min_sats=546  # dust limit
+    local max_sats=0
+
+    # Check if target is an alias (not starting with bc/tb/bcrt)
+    if [[ ! "$target" =~ ^(bc1|tb1|bcrt1) ]]; then
+        # Try to look up alias in deposits.json
+        local deposits_file="$DATA_DIR/deposits.json"
+        if [ -f "$deposits_file" ]; then
+            local found_addr=$(jq -r --arg alias "$target" '.[] | select(.alias == $alias) | .funding_address' "$deposits_file" 2>/dev/null)
+            local found_min=$(jq -r --arg alias "$target" '.[] | select(.alias == $alias) | .min_sats' "$deposits_file" 2>/dev/null)
+            local found_max=$(jq -r --arg alias "$target" '.[] | select(.alias == $alias) | .max_sats' "$deposits_file" 2>/dev/null)
+
+            if [ -n "$found_addr" ] && [ "$found_addr" != "null" ] && [ "$found_addr" != "" ]; then
+                address="$found_addr"
+                # Get min/max from deposit
+                if [ -n "$found_min" ] && [ "$found_min" != "null" ]; then
+                    min_sats="$found_min"
+                fi
+                if [ -n "$found_max" ] && [ "$found_max" != "null" ]; then
+                    max_sats="$found_max"
+                    default_sats="$found_max"  # default to max if no arg
+                fi
+                echo -e "${BLUE}Found deposit '$target' (${min_sats}-${max_sats} sats)${NC}"
+            else
+                echo -e "${RED}No deposit found with alias '$target'${NC}"
+                echo "Use './bin/wallet.sh list' to see your deposits"
+                exit 1
+            fi
+        else
+            echo -e "${RED}No deposits file found. Is '$target' an address?${NC}"
+            exit 1
+        fi
+    fi
+
+    sats="${sats:-$default_sats}"
+
+    # Clamp sats to min/max range: max(min_sats, min(max_sats, sats))
+    if [ "$max_sats" -gt 0 ]; then
+        if [ "$sats" -gt "$max_sats" ]; then
+            echo -e "${YELLOW}Clamping $sats to max $max_sats${NC}"
+            sats="$max_sats"
+        fi
+        if [ "$sats" -lt "$min_sats" ]; then
+            echo -e "${YELLOW}Clamping $sats to min $min_sats${NC}"
+            sats="$min_sats"
+        fi
+    fi
+
+    # Convert sats to BTC
+    local btc=$(awk "BEGIN {printf \"%.8f\", $sats / 100000000}")
+
+    echo -e "${BLUE}Funding address from faucet...${NC}"
+    echo "  Address: $address"
+    echo "  Amount: $sats sats ($btc BTC)"
+    echo ""
+
+    # Send from faucet
+    local txid=$(docker exec bdk-bitcoind bitcoin-cli -regtest \
+        -rpcuser=user -rpcpassword=pass \
+        -rpcwallet=faucet sendtoaddress "$address" "$btc" 2>&1)
+
+    if [[ "$txid" =~ ^[a-f0-9]{64}$ ]]; then
+        echo -e "${GREEN}Sent!${NC} TXID: ${txid:0:16}..."
+
+        # Mine a block to confirm
+        echo -e "${BLUE}Mining block to confirm...${NC}"
+        docker exec bdk-bitcoind bitcoin-cli -regtest \
+            -rpcuser=user -rpcpassword=pass \
+            -rpcwallet=faucet -generate 1 >/dev/null 2>&1
+
+        echo -e "${GREEN}Done!${NC} Deposit should be credited automatically."
+        echo ""
+        echo "Check with: $0 balance"
+    else
+        echo -e "${RED}Failed to send:${NC} $txid"
+        exit 1
+    fi
+}
+
+# List all deposits from local storage
+list_deposits() {
+    local deposits_file="$DATA_DIR/deposits.json"
+
+    if [ ! -f "$deposits_file" ]; then
+        echo "No deposits found."
+        echo ""
+        echo "Create one with:"
+        echo "  $0 open <ledger_id> [sats] --alias <name>"
+        return
+    fi
+
+    local count=$(jq 'length' "$deposits_file" 2>/dev/null)
+    if [ "$count" = "0" ] || [ -z "$count" ]; then
+        echo "No deposits found."
+        return
+    fi
+
+    echo "Your Deposits ($count)"
+    echo "============="
+    echo ""
+
+    # Parse and display each deposit
+    jq -r '.[] | "\(.alias)|\(.min_sats // .amount_sats)|\(.max_sats // .amount_sats)|\(.status)|\(.funding_address)|\(.ledger_id)"' "$deposits_file" 2>/dev/null | while IFS='|' read -r alias min_sats max_sats status addr ledger; do
+        echo -e "${GREEN}$alias${NC}"
+        if [ "$min_sats" = "$max_sats" ]; then
+            echo "  Amount: $max_sats sats"
+        else
+            echo "  Amount: $min_sats-$max_sats sats"
+        fi
+        echo "  Status: $status"
+        if [ -n "$addr" ] && [ "$addr" != "null" ]; then
+            echo "  Address: ${addr:0:20}...${addr: -8}"
+        fi
+        echo "  Ledger: ${ledger:0:16}..."
+        echo ""
+    done
+
+    echo "Commands:"
+    echo "  faucet <alias>            Send from faucet to deposit"
+    echo "  balance                   Check all balances"
 }
 
 # Check if deposits-wallet binary exists, build if needed
@@ -91,10 +231,28 @@ case "$1" in
         print_usage
         exit 0
         ;;
+    faucet)
+        faucet_send "$2" "$3"
+        exit 0
+        ;;
+    list|ls)
+        list_deposits
+        exit 0
+        ;;
 esac
 
 # Build args array
 ARGS=("$@")
+
+# For 'open' command, insert default amount if not provided
+# Usage: open <ledger_id> [sats] [--alias name]
+if [ "$1" = "open" ] && [ -n "$2" ]; then
+    # Check if $3 is missing, empty, or starts with --
+    if [ -z "$3" ] || [[ "$3" == --* ]]; then
+        # Insert default amount (10000 sats) after ledger_id
+        ARGS=("open" "$2" "10000" "${@:3}")
+    fi
+fi
 
 # Add default relay and network if not specified in args
 if ! printf '%s\n' "${ARGS[@]}" | grep -q -- '--relay'; then

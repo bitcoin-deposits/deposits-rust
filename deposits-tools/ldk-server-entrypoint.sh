@@ -31,6 +31,19 @@ EOF
 echo "Generated config at $CONFIG_FILE:"
 cat "$CONFIG_FILE"
 echo ""
+
+# Copy CLI binary to shared volume if it exists (for BDK nodes to use)
+if [ -d "/ldk-cli" ] && [ -x "/usr/local/bin/ldk-server-cli" ]; then
+    echo "Copying ldk-server-cli to shared volume..."
+    if cp /usr/local/bin/ldk-server-cli /ldk-cli/ 2>/dev/null; then
+        chmod +x /ldk-cli/ldk-server-cli
+        echo "CLI copied successfully"
+    else
+        echo "Warning: Could not copy CLI to shared volume (permission denied)"
+        echo "The test scripts will use local CLI instead"
+    fi
+fi
+
 echo "Starting ldk-server..."
 
 exec ldk-server "$CONFIG_FILE"

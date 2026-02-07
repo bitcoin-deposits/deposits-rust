@@ -46,6 +46,19 @@ get_node_seed() {
     esac
 }
 
+# Get operator name for a node
+get_node_name() {
+    local node=$1
+    case "$node" in
+        "bdk-alice")   echo "Alice" ;;
+        "bdk-bob")     echo "Bob" ;;
+        "bdk-charlie") echo "Charlie" ;;
+        "bdk-diana")   echo "Diana" ;;
+        "bdk-eve")     echo "Eve" ;;
+        *) echo "" ;;
+    esac
+}
+
 # Get the wallet-derived deposit secret for a node
 # This derives the key at m/84'/0'/0'/0/0 from the node's seed
 get_deposit_secret() {
@@ -187,12 +200,15 @@ run_bdk_cmd() {
         return 1
     fi
 
+    local name=$(get_node_name "$container")
+
     # Run command with positional args first, then config args at the end
     # This supports subcommands like: ledger open <block> --seed ...
     # Use RUST_LOG=error to suppress INFO logs from CLI output
     docker exec -e RUST_LOG=error "$container" deposits-bdk "$cmd" \
         "$@" \
         --seed "$seed" \
+        --name "$name" \
         --network regtest \
         --esplora http://electrs:3002 \
         --relay ws://nostr-relay:7777 \

@@ -168,6 +168,7 @@ pub use reserves_proposal::{
 pub use signature_utils::{
     create_deposit_guarantee_signature, verify_deposit_guarantee_signature,
     create_payment_authorization_signature, verify_payment_signature,
+    create_payment_signature,
     create_deposit_offer_signature, verify_deposit_offer_signature,
     create_withdrawal_signature, verify_withdrawal_signature,
 };

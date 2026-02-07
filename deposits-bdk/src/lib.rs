@@ -43,6 +43,7 @@
 
 pub mod error;
 pub mod handler;
+pub mod ldk_cli;
 pub mod lightning;
 pub mod node;
 pub mod nostr;
