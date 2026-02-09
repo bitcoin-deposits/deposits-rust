@@ -122,6 +122,357 @@ Partner operators who:
 | `CustodyAcquire` | Winner claims reserves |
 | `CustodyYield` | Loser acknowledges loss |
 
+## Validation Rules
+
+Every operation must pass validation before being applied. Invalid operations are rejected.
+
+### Global Constraints
+
+These constraints apply to all operations:
+
+**Hash Chain Integrity:**
+- `sequence_number` must be exactly `previous_sequence + 1`
+- `previous_hash` must match the hash of the prior update
+- `current_hash` must match `SHA256(previous_hash || sequence_number || operation_bytes)`
+
+**Signature Authorization:**
+- Normal operations: Must be signed by `operator_key`
+- `CustodyDispute`: May be signed by any `quorum_at_fork` member
+
+**Reserves Backing (100% Model):**
+- `sum(deposits.balance) <= reserves_amount` (always enforced)
+- Checked on: `InvoiceCredit`, `OnchainCredit`
+
+**Collateral Backing (Quorum Model):**
+- If `quorum_members.len() > 0`: `sum(deposits.balance) <= received_collateral_amount`
+- Checked on: `InvoiceCredit`
+
+### Reserves Operations
+
+#### ReservesIncrease
+
+| Check | Rule |
+|-------|------|
+| Direction | `new_amount > current_reserves` (or `current == 0` for initial) |
+| Limit | If channel balance known: `new_amount <= channel_balance` |
+
+**State changes:**
+- `reserves.amount = new_amount`
+
+#### ReservesDecrease
+
+| Check | Rule |
+|-------|------|
+| Direction | `new_amount < current_reserves` |
+| Coverage | `new_amount >= sum(deposits.balance) + max_pending_invoice` |
+
+**State changes:**
+- `reserves.amount = new_amount`
+
+### Deposit Operations
+
+#### DepositOpen
+
+| Check | Rule |
+|-------|------|
+| Uniqueness | Deposit with this pubkey must not exist |
+| Valid pubkey | Pubkey must not be all zeros |
+| Fee structure | If provided: `frequency_blocks > 0` and `annualized_bps <= 10000` |
+
+**State changes:**
+- Creates `Deposit { pubkey, balance: 0, locked_balance: 0, fees, last_fee_assessment: 0 }`
+
+#### DepositClose
+
+| Check | Rule |
+|-------|------|
+| Exists | Deposit must exist |
+| Zero balance | `deposit.balance == 0` |
+| No locks | `deposit.locked_balance == 0` |
+
+**State changes:**
+- Removes deposit from state
+
+#### DepositUpdate
+
+| Check | Rule |
+|-------|------|
+| Exists | Deposit must exist |
+| Valid fees | `frequency_blocks > 0` and `annualized_bps <= 10000` |
+
+**State changes:**
+- `deposit.fees = new_fees`
+
+### Payment Operations
+
+#### InvoiceCredit
+
+| Check | Rule |
+|-------|------|
+| Exists | Deposit must exist |
+| Positive | `amount > 0` |
+| Reasonable | `amount <= 100,000,000 sats` (1 BTC) |
+| Valid hash | Payment hash not all same byte (fake detection) |
+| Reserves | `sum(deposits.balance) + amount <= reserves_amount` |
+| Collateral | If quorum exists: `sum(deposits.balance) + amount <= received_collateral` |
+
+**State changes:**
+- `deposit.balance += amount`
+
+#### InvoiceLock
+
+| Check | Rule |
+|-------|------|
+| Exists | Deposit must exist |
+| Positive | `amount > 0` |
+| Available | `deposit.balance - deposit.locked_balance >= amount` |
+| Signature | `scriptpubkey_signature` valid |
+
+**State changes:**
+- `deposit.locked_balance += amount`
+
+#### InvoiceFulfill
+
+| Check | Rule |
+|-------|------|
+| Positive | `amount > 0` |
+| Signature | `scriptpubkey_signature` valid |
+| Preimage | `SHA256(preimage) == payment_id` |
+
+**State changes:**
+- `deposit.locked_balance -= amount`
+- `deposit.balance -= amount`
+
+#### InvoiceFail
+
+| Check | Rule |
+|-------|------|
+| Positive | `amount > 0` |
+
+**State changes:**
+- `deposit.locked_balance -= amount`
+
+#### OnchainCredit
+
+| Check | Rule |
+|-------|------|
+| Exists | Deposit must exist |
+| Positive | `amount > 0` |
+
+**State changes:**
+- `deposit.balance += amount`
+
+#### OnchainLock
+
+| Check | Rule |
+|-------|------|
+| Exists | Deposit must exist |
+| Available | `deposit.balance - deposit.locked_balance >= amount` |
+
+**State changes:**
+- `deposit.locked_balance += amount`
+
+#### OnchainFulfill
+
+| Check | Rule |
+|-------|------|
+| Locked | Funds were previously locked |
+
+**State changes:**
+- `deposit.locked_balance -= amount`
+- `deposit.balance -= amount`
+
+#### OnchainFail
+
+| Check | Rule |
+|-------|------|
+| Locked | Funds were previously locked |
+
+**State changes:**
+- `deposit.locked_balance -= amount`
+
+### Fee Operations
+
+#### FeeCollect
+
+| Check | Rule |
+|-------|------|
+| Exists | Deposit must exist |
+| Available | `deposit.balance - deposit.locked_balance >= amount` |
+| Schedule | `block_height >= last_fee_assessment + frequency_blocks` |
+
+**State changes:**
+- `deposit.balance -= amount`
+- `deposit.last_fee_assessment = block_height`
+
+#### Fee Minimum Validation (on DepositOpen/DepositOffer)
+
+| Check | Rule |
+|-------|------|
+| Annual rate | `proposed.annualized_bps >= operator_min_annual_bps` |
+| Fixed fee | `proposed.annualized_fixed / periods_per_year >= operator_min_fixed_per_period` |
+
+### Collateral Operations
+
+#### CollateralIncrease
+
+| Check | Rule |
+|-------|------|
+| Direction | `new_amount >= current_collateral` (idempotent OK) |
+| Limit | `new_amount <= reserves_amount` |
+
+**State changes:**
+- `collateral_amount = new_amount`
+- `last_collateral_increase_block = block_height`
+
+#### CollateralDecrease
+
+| Check | Rule |
+|-------|------|
+| Direction | `new_amount < current_collateral` |
+| Cooldown | `block_height >= last_collateral_increase_block + 144` |
+
+**State changes:**
+- `collateral_amount = new_amount`
+
+#### CollateralLock
+
+| Check | Rule |
+|-------|------|
+| Exists | Deposit must exist |
+| Signature | `deposit_holder_signature` valid over `(amount, lock_until_block, operator_id)` |
+| Limit | `amount <= deposit.balance` |
+| Ratchet (amount) | If existing lock: `new_amount >= existing_amount` |
+| Ratchet (time) | If existing lock: `new_lock_until_block > existing_lock_until_block` |
+| Operator | `operator_id == ledger.operator_key` |
+
+**State changes:**
+- `deposit.collateral_lock_amount = amount`
+- `deposit.collateral_lock_expires = lock_until_block`
+
+#### QuorumAddMember
+
+| Check | Rule |
+|-------|------|
+| State | Ledger not in `Tombstoned` state |
+
+**State changes:**
+- Adds pubkey to `quorum_members` (if not present)
+
+#### QuorumRemoveMember
+
+| Check | Rule |
+|-------|------|
+| Exists | Member must be in quorum |
+
+**State changes:**
+- Removes from `quorum_members`
+- Removes from `collateral_attestations`
+
+#### QuorumJoin
+
+| Check | Rule |
+|-------|------|
+| Authority | Must be on operator's own ledger |
+| Ratchet | If renewing: `new_expires >= existing_expires` |
+
+**State changes:**
+- Adds/updates entry in `joined_quorums`
+
+#### CollateralAttestation
+
+| Check | Rule |
+|-------|------|
+| Quorum | Attester must be valid quorum member |
+| Signature | Attestation signature valid |
+
+**State changes:**
+- Updates `collateral_attestations[quorum_member]`
+- Recalculates `received_collateral_amount`
+
+### Dispute Operations
+
+#### CustodyDispute
+
+| Check | Rule |
+|-------|------|
+| State | Ledger must be in `Normal` state |
+| Authority | Signer must be in current quorum |
+
+**State changes:**
+- `quorum_at_fork = quorum_members` (snapshot)
+- `dispute_fork_sequence = last_valid_sequence`
+- `quorum_members.clear()`
+- `collateral_attestations.clear()`
+- `dispute_state = Disputed`
+
+#### CustodyArmed
+
+| Check | Rule |
+|-------|------|
+| State | Ledger must be in `Disputed` state |
+| Quorum | At least one quorum member exists |
+| Collateral | At least one collateral attestation exists |
+
+**State changes:**
+- `dispute_state = Armed`
+
+#### CustodyAcquire
+
+| Check | Rule |
+|-------|------|
+| State | Ledger must be in `Armed` state |
+| Entropy | `entropy_block_height > 0` or `entropy_block_hash != [0; 32]` |
+| Winner | `new_custodian` is entropy-selected winner |
+
+**State changes:**
+- `operator_key = new_custodian`
+- `dispute_state = Normal`
+- `quorum_at_fork.clear()`
+
+#### CustodyYield
+
+| Check | Rule |
+|-------|------|
+| State | Ledger must be in `Armed` state |
+| Loser | Signer is NOT the entropy-selected winner |
+
+**State changes:**
+- `dispute_state = Tombstoned`
+
+### Lifecycle Operations
+
+#### LedgerOpen
+
+| Check | Rule |
+|-------|------|
+| First | Must be first operation (sequence 0) |
+
+**State changes:**
+- Initializes all ledger state fields
+
+#### LedgerClose
+
+| Check | Rule |
+|-------|------|
+| Empty | `sum(deposits.balance) == 0` |
+| No locks | `sum(deposits.locked_balance) == 0` |
+
+**State changes:**
+- `collateral_attestations.clear()`
+
+### Dispute State Machine
+
+| Current State | Allowed Operations | Next State |
+|---------------|-------------------|------------|
+| `Normal` | All except dispute ops | `Normal` |
+| `Normal` | `CustodyDispute` | `Disputed` |
+| `Disputed` | `QuorumAddMember`, `CollateralAttestation` | `Disputed` |
+| `Disputed` | `CustodyArmed` | `Armed` |
+| `Armed` | `CustodyAcquire` | `Normal` |
+| `Armed` | `CustodyYield` | `Tombstoned` |
+| `Tombstoned` | None | `Tombstoned` |
+
 ## Wire Protocol
 
 ### Signed Updates
