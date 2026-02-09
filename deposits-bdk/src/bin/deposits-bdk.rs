@@ -5419,15 +5419,25 @@ async fn nostr_request(args: &[String]) -> Result<(), Box<dyn std::error::Error>
             serde_json::Value::Object(obj)
         }
         "deposit_offer" => {
-            // params: deposit_pubkey max_sats min_sats blocks_valid
+            // params: deposit_pubkey max_sats min_sats blocks_valid [fee_bps] [fee_fixed] [fee_frequency]
             if params.len() < 4 {
-                return Err("deposit_offer requires: <deposit_pubkey> <max_sats> <min_sats> <blocks_valid>".into());
+                return Err("deposit_offer requires: <deposit_pubkey> <max_sats> <min_sats> <blocks_valid> [fee_bps] [fee_fixed] [fee_frequency]".into());
             }
             let mut obj = serde_json::Map::new();
             obj.insert("deposit_pubkey".to_string(), serde_json::Value::String(params[0].clone()));
             obj.insert("max_sats".to_string(), serde_json::json!(params[1].parse::<u64>().unwrap_or(0)));
             obj.insert("min_sats".to_string(), serde_json::json!(params[2].parse::<u64>().unwrap_or(0)));
             obj.insert("blocks_valid".to_string(), serde_json::json!(params[3].parse::<u32>().unwrap_or(144)));
+            // Optional fee params
+            if params.len() > 4 {
+                obj.insert("fee_bps".to_string(), serde_json::json!(params[4].parse::<u64>().unwrap_or(0)));
+            }
+            if params.len() > 5 {
+                obj.insert("fee_fixed".to_string(), serde_json::json!(params[5].parse::<u64>().unwrap_or(0)));
+            }
+            if params.len() > 6 {
+                obj.insert("fee_frequency".to_string(), serde_json::json!(params[6].parse::<u32>().unwrap_or(2016)));
+            }
             serde_json::Value::Object(obj)
         }
         "collateral_lock" => {
