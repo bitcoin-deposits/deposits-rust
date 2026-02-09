@@ -1779,7 +1779,8 @@ pub async fn nostr_request(args: &[String]) -> Result<(), Box<dyn std::error::Er
     println!("  Ledger: {}", ledger_id);
     println!("  Action: {}", action);
     println!("  Params: {}", serde_json::to_string(&params_json)?);
-    println!();
+    use std::io::Write;
+    std::io::stdout().flush().ok();
 
     let transport = NostrTransportBuilder::new(secret_key)
         .relay(&relay_url)
