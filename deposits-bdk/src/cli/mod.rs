@@ -9,3 +9,4 @@ pub mod nostr_commands;
 pub mod recovery;
 
 pub use common::{parse_config, derive_operator_secret, resolve_ledger_id_to_reserves_id};
+pub use recovery::recovery_command;
