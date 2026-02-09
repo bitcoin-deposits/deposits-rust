@@ -1779,21 +1779,15 @@ pub async fn nostr_request(args: &[String]) -> Result<(), Box<dyn std::error::Er
     println!("  Ledger: {}", ledger_id);
     println!("  Action: {}", action);
     println!("  Params: {}", serde_json::to_string(&params_json)?);
-    use std::io::Write;
-    std::io::stdout().flush().ok();
-
-    eprintln!("DEBUG: Connecting to relay...");
     let transport = NostrTransportBuilder::new(secret_key)
         .relay(&relay_url)
         .build()
         .await?;
-    eprintln!("DEBUG: Connected, sending request...");
 
     // Subscribe to responses for this request
     let event_id = transport
         .send_ledger_request(&ledger_id, &action, params_json)
         .await?;
-    eprintln!("DEBUG: Request sent");
 
     println!("Request sent! Event ID: {}", event_id);
     println!();
@@ -2155,6 +2149,12 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
 
         // Check for requests
         while let Some(request) = transport.try_recv_request() {
+            // Skip already-processed requests (can arrive via both subscription and polling)
+            if seen_events.contains(&request.event_id) {
+                continue;
+            }
+            seen_events.insert(request.event_id.clone());
+
             // Skip requests not for our ledger or joined ledgers (except cross-ledger signing)
             let is_our_ledger = request.ledger_id == ledger_id;
             let is_joined_ledger = joined_ledger_ids.contains(&request.ledger_id);
