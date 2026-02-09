@@ -41,6 +41,7 @@
 //! | Wallet | Channel manager | BDK wallet |
 //! | Peer discovery | LN peer connections | Nostr pubkeys |
 
+pub mod cli;
 pub mod error;
 pub mod handler;
 pub mod ldk_cli;
