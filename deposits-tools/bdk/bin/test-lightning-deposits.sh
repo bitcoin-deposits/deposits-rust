@@ -158,12 +158,14 @@ create_ledgers() {
 
         if echo "$ledger_output" | grep -q "Ledger opened\|already"; then
             local reserves_id=$(echo "$ledger_output" | grep "Reserves:.*bcrt1" | awk '{print $2}')
+            local ledger_id=$(echo "$ledger_output" | grep "Ledger ID:" | awk '{print $3}')
             if [ -z "$reserves_id" ]; then
                 # Fallback: get from info
                 local info=$(run_bdk_cmd "$op" info 2>&1)
                 reserves_id=$(echo "$info" | grep "Reserves address:" | awk '{print $3}')
             fi
             store_value "reserves_id_$op" "$reserves_id"
+            store_value "ledger_id_$op" "$ledger_id"
             test_pass "$op ledger ready"
         else
             test_fail "$op ledger creation failed"
@@ -662,6 +664,67 @@ test_fee_collection() {
 }
 
 # ============================================================================
+# Phase 8: Test Fee Minimum Rejection
+# ============================================================================
+
+test_fee_rejection() {
+    log_info ""
+    log_info "=== Phase 8: Test Fee Minimum Rejection ==="
+    log_info "(Verify deposits with insufficient fees are rejected)"
+    echo ""
+
+    # Use Alice's ledger which has 100 bps + 1000 sats/period minimums
+    local alice_reserves=$(get_value "reserves_id_bdk-alice")
+    local alice_ledger=$(get_value "ledger_id_bdk-alice")
+
+    # Generate a new keypair for this test
+    local keypair=$(run_bdk_cmd bdk-alice keygen 2>&1)
+    local pubkey=$(echo "$keypair" | awk '{print $2}')
+
+    log_info "Testing with deposit pubkey: ${pubkey:0:20}..."
+
+    # Start Alice's watch loop in background
+    run_bdk_cmd bdk-alice nostr watch "$alice_ledger" > /tmp/fee_test_watch.log 2>&1 &
+    local watch_pid=$!
+    sleep 2
+
+    # Test 1: Try with fees BELOW minimum (should fail)
+    log_info "Test 1: Sending request with fees below minimum..."
+    log_info "  (50 bps < min 100 bps, 500 fixed < min 1000)"
+    local low_fee_result=$(run_bdk_cmd bdk-bob nostr request "$alice_ledger" deposit_offer \
+        "$pubkey" 50000 5000 144 50 500 10 2>&1)
+    sleep 1
+
+    if echo "$low_fee_result" | grep -q "Fee validation failed"; then
+        test_pass "Low fees correctly rejected"
+        log_info "  Error: $(echo "$low_fee_result" | grep "Error:" | head -1)"
+    else
+        test_fail "Low fees should have been rejected"
+        log_info "  Result: $(echo "$low_fee_result" | grep -E "Response:|Error:" | head -2)"
+    fi
+
+    # Test 2: Try with fees AT minimum (should succeed)
+    log_info ""
+    log_info "Test 2: Sending request with fees at minimum..."
+    log_info "  (100 bps = min, 1000 fixed = min)"
+    # annualized_fixed for 1000/period at 10 blocks = 1000 * (52560/10) = 5256000
+    local ok_fee_result=$(run_bdk_cmd bdk-bob nostr request "$alice_ledger" deposit_offer \
+        "$pubkey" 50000 5000 144 100 5256000 10 2>&1)
+    sleep 1
+
+    if echo "$ok_fee_result" | grep -q "SUCCESS"; then
+        test_pass "Minimum fees accepted"
+    else
+        test_fail "Minimum fees should have been accepted"
+        log_info "  Result: $(echo "$ok_fee_result" | grep -E "Response:|Error:" | head -2)"
+    fi
+
+    # Cleanup
+    kill $watch_pid 2>/dev/null || true
+    rm -f /tmp/fee_test_watch.log
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -688,6 +751,7 @@ main() {
     test_deposit_payment_alice_to_bob
     show_final_state
     test_fee_collection
+    test_fee_rejection
 
     echo ""
     log_info "=== Test Summary ==="
