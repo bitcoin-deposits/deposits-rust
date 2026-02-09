@@ -79,6 +79,10 @@ fi
 docker image prune -f 2>/dev/null || true
 
 if ! $QUICK; then
+    # Build local wallet binary for ./bin/wallet.sh
+    log_info "Building local deposits-wallet binary..."
+    cargo build --release --manifest-path "$BDK_DIR/../../Cargo.toml" -p deposits-bdk --bin deposits-wallet 2>&1 | tail -3
+
     # Rebuild deposits-bdk image (shared by all nodes)
     log_info "Building deposits-bdk image..."
     $DC build --no-cache bdk-alice

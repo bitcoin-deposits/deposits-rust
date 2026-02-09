@@ -341,6 +341,10 @@ pub struct LedgerAdvertisement {
     #[serde(default)]
     pub min_fee_sats: u64,
 
+    /// Fee collection period in blocks
+    #[serde(default)]
+    pub fee_period_blocks: u32,
+
     // === Deposit Limits ===
 
     /// Maximum single deposit size in sats
@@ -424,6 +428,7 @@ impl LedgerAdvertisement {
             withdrawal_fee_bps: 0,
             invoice_fee_bps: 0,
             min_fee_sats: 0,
+            fee_period_blocks: 0,
             max_deposit_sats: u64::MAX,
             min_deposit_sats: 0,
             max_balance_sats: 0,
@@ -439,6 +444,31 @@ impl LedgerAdvertisement {
             event_id: String::new(),
             timestamp: 0,
         }
+    }
+
+    /// Convert advertisement fees to FeeStructure for new deposits.
+    ///
+    /// Uses the advertisement's annual_fee_bps, min_fee_sats, and fee_period_blocks.
+    /// If fee_period_blocks is 0, returns a FeeStructure with frequency_blocks=0
+    /// (caller should handle this case or provide a fallback).
+    pub fn to_fee_structure(&self) -> deposits_core::types::FeeStructure {
+        const BLOCKS_PER_YEAR: u64 = 52560;
+        let frequency = self.fee_period_blocks;
+        let periods_per_year = if frequency > 0 { BLOCKS_PER_YEAR / frequency as u64 } else { 0 };
+        deposits_core::types::FeeStructure {
+            annualized_fixed: self.min_fee_sats.saturating_mul(periods_per_year),
+            annualized_bps: self.annual_fee_bps as u16,
+            frequency_blocks: frequency,
+        }
+    }
+
+    /// Get minimum acceptable fee parameters for deposit validation.
+    ///
+    /// Returns (min_annual_bps, min_fixed_per_period) where:
+    /// - min_annual_bps: minimum annual fee in basis points
+    /// - min_fixed_per_period: minimum fixed fee per collection period in sats
+    pub fn minimum_fees(&self) -> (u16, u64) {
+        (self.annual_fee_bps as u16, self.min_fee_sats)
     }
 }
 

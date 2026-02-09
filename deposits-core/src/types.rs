@@ -2045,6 +2045,10 @@ pub struct DepositOffer {
     /// Signs: "DEPOSIT_OFFER:{offer_id}:{operator}:{partner}:{deposit}:{address}:{max}:{min}:{deadline}"
     #[serde(with = "serde_64")]
     pub operator_signature: [u8; 64],
+
+    /// Fee structure for the deposit (established at offer creation).
+    #[serde(default)]
+    pub fees: Option<FeeStructure>,
 }
 
 impl DepositOffer {

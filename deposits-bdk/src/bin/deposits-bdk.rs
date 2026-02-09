@@ -1385,6 +1385,7 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
     let mut withdrawal_fee_bps: u32 = 0;
     let mut invoice_fee_bps: u32 = 0;
     let mut min_fee_sats: u64 = 0;
+    let mut fee_period_blocks: u32 = 2016; // default ~2 weeks
     let mut max_deposit_sats: u64 = u64::MAX;
     let mut min_deposit_sats: u64 = 0;
     let mut config_args = Vec::new();
@@ -1394,11 +1395,27 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
         match args[i].as_str() {
             "--name" | "--operator-name" if i + 1 < args.len() => { operator_name = Some(args[i + 1].clone()); i += 1; }
             "--description" if i + 1 < args.len() => { description = Some(args[i + 1].clone()); i += 1; }
-            "--annual-fee" if i + 1 < args.len() => { annual_fee_bps = args[i + 1].parse()?; i += 1; }
+            "--annual-fee" if i + 1 < args.len() => {
+                annual_fee_bps = args[i + 1].parse().map_err(|e| {
+                    format!("Invalid --annual-fee value '{}': {}", args[i + 1], e)
+                })?;
+                i += 1;
+            }
             "--deposit-fee" if i + 1 < args.len() => { deposit_fee_bps = args[i + 1].parse()?; i += 1; }
             "--withdrawal-fee" if i + 1 < args.len() => { withdrawal_fee_bps = args[i + 1].parse()?; i += 1; }
             "--invoice-fee" if i + 1 < args.len() => { invoice_fee_bps = args[i + 1].parse()?; i += 1; }
-            "--min-fee" if i + 1 < args.len() => { min_fee_sats = args[i + 1].parse()?; i += 1; }
+            "--min-fee" if i + 1 < args.len() => {
+                min_fee_sats = args[i + 1].parse().map_err(|e| {
+                    format!("Invalid --min-fee value '{}': {}", args[i + 1], e)
+                })?;
+                i += 1;
+            }
+            "--fee-period" if i + 1 < args.len() => {
+                fee_period_blocks = args[i + 1].parse().map_err(|e| {
+                    format!("Invalid --fee-period value '{}': {}", args[i + 1], e)
+                })?;
+                i += 1;
+            }
             "--max-deposit" if i + 1 < args.len() => { max_deposit_sats = args[i + 1].parse()?; i += 1; }
             "--min-deposit" if i + 1 < args.len() => { min_deposit_sats = args[i + 1].parse()?; i += 1; }
             s if s.starts_with("--") => {
@@ -1459,6 +1476,7 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
     ad.withdrawal_fee_bps = withdrawal_fee_bps;
     ad.invoice_fee_bps = invoice_fee_bps;
     ad.min_fee_sats = min_fee_sats;
+    ad.fee_period_blocks = fee_period_blocks;
     ad.max_deposit_sats = max_deposit_sats;
     ad.min_deposit_sats = min_deposit_sats;
     ad.quorum_size = quorum_members.len() as u8;
@@ -1500,8 +1518,17 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
     println!("  Available headroom: {} sats (80% of {})", ad.available_headroom_sats, raw_headroom);
     println!("  Quorum: {} members, {} sats received collateral",
         ad.quorum_size, ad.received_collateral_sats);
-    println!("  Fees: {}bps annual, {}bps deposit, {}bps withdrawal",
-        ad.annual_fee_bps, ad.deposit_fee_bps, ad.withdrawal_fee_bps);
+    let periods_per_year = 52560u64 / ad.fee_period_blocks.max(1) as u64;
+    let annualized_fixed = ad.min_fee_sats.saturating_mul(periods_per_year);
+    let annual_pct = ad.annual_fee_bps as f64 / 100.0;
+    let fee_str = match (ad.annual_fee_bps > 0, annualized_fixed > 0) {
+        (true, true) => format!("{}% and {} sats per year", annual_pct, annualized_fixed),
+        (true, false) => format!("{}% per year", annual_pct),
+        (false, true) => format!("{} sats per year", annualized_fixed),
+        (false, false) => "None".to_string(),
+    };
+    println!("  Fees: {} (period: {} blocks, {}bps deposit, {}bps withdrawal)",
+        fee_str, ad.fee_period_blocks, ad.deposit_fee_bps, ad.withdrawal_fee_bps);
     println!();
 
     let secret_key = derive_operator_secret(&config.seed, config.network)?;
@@ -2191,7 +2218,7 @@ async fn collateral_record(args: &[String]) -> Result<(), Box<dyn std::error::Er
 /// Handle deposit subcommands
 async fn deposit_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {
-        eprintln!("Usage: deposits-bdk deposit <offer|list|open|ls|credit|check|complete|verify-custodian> [args...]");
+        eprintln!("Usage: deposits-bdk deposit <offer|list|open|ls|credit|check|complete|verify-custodian|collect-fees> [args...]");
         return Ok(());
     }
 
@@ -2204,9 +2231,10 @@ async fn deposit_command(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         "check" => deposit_check(&args[1..]).await,
         "complete" => deposit_complete(&args[1..]).await,
         "verify-custodian" => deposit_verify_custodian(&args[1..]).await,
+        "collect-fees" => deposit_collect_fees(&args[1..]).await,
         cmd => {
             eprintln!("Unknown deposit subcommand: {}", cmd);
-            eprintln!("Usage: deposits-bdk deposit <offer|list|open|ls|credit|check|complete|verify-custodian> [args...]");
+            eprintln!("Usage: deposits-bdk deposit <offer|list|open|ls|credit|check|complete|verify-custodian|collect-fees> [args...]");
             Ok(())
         }
     }
@@ -2214,6 +2242,8 @@ async fn deposit_command(args: &[String]) -> Result<(), Box<dyn std::error::Erro
 
 /// Create a deposit offer for on-chain funding
 async fn deposit_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use deposits_bdk::nostr::NostrTransportBuilder;
+
     // Parse positional arguments:
     // <reserves_id> <deposit_pubkey> <max_sats> <min_sats> <blocks_valid>
     let mut positional: Vec<String> = Vec::new();
@@ -2262,10 +2292,34 @@ async fn deposit_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     }
 
     let config = parse_config(&config_args)?;
-    let node = Node::new(config).await?;
+    let node = Node::new(config.clone()).await?;
 
     // Sync wallet to get current block height
     node.sync_wallet()?;
+
+    // Fetch the advertisement to get fee structure
+    let relay_url = config.relays.first()
+        .ok_or("No relay configured. Use --relay <url>")?
+        .clone();
+    let secret_key = derive_operator_secret(&config.seed, config.network)?;
+    let transport = NostrTransportBuilder::new(secret_key)
+        .relay(&relay_url)
+        .build()
+        .await?;
+
+    let fees = match transport.fetch_ledger_advertisement(ledger_id).await? {
+        Some(ad) => {
+            let fee_struct = ad.to_fee_structure();
+            println!("  Using fees from advertisement:");
+            println!("    {} bps/year + {} sats/year (period: {} blocks)",
+                fee_struct.annualized_bps, fee_struct.annualized_fixed, fee_struct.frequency_blocks);
+            Some(fee_struct)
+        }
+        None => {
+            println!("  No advertisement found - using default fees");
+            None
+        }
+    };
 
     println!("Creating deposit offer...");
     println!("  Ledger ID: {}...", &ledger_id[..16.min(ledger_id.len())]);
@@ -2281,6 +2335,7 @@ async fn deposit_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         max_sats,
         min_sats,
         blocks_valid,
+        fees,
     )?;
 
     println!("\nDeposit offer created!");
@@ -2350,6 +2405,8 @@ async fn deposit_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 
 /// Open a new deposit in a ledger
 async fn deposit_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use deposits_bdk::nostr::NostrTransportBuilder;
+
     // Parse positional arguments: <reserves_id> <deposit_pubkey>
     let mut positional: Vec<String> = Vec::new();
     let mut config_args = Vec::new();
@@ -2381,13 +2438,41 @@ async fn deposit_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         .map_err(|e| format!("Invalid deposit pubkey: {}", e))?;
 
     let config = parse_config(&config_args)?;
-    let node = Node::new(config).await?;
+    let node = Node::new(config.clone()).await?;
+
+    // Fetch the advertisement to get fee structure
+    // First get the ledger_id from reserves_id
+    let ledger_id = match node.get_ledger_by_reserves_id(reserves_id) {
+        Some((_, ledger)) => ledger.ledger_id_hex(),
+        None => reserves_id.to_string(), // Fall back to using reserves_id as lookup key
+    };
+
+    let relay_url = config.relays.first()
+        .ok_or("No relay configured. Use --relay <url>")?
+        .clone();
+    let secret_key = derive_operator_secret(&config.seed, config.network)?;
+    let transport = NostrTransportBuilder::new(secret_key)
+        .relay(&relay_url)
+        .build()
+        .await?;
+
+    let fees = match transport.fetch_ledger_advertisement(&ledger_id).await? {
+        Some(ad) => {
+            let fee_struct = ad.to_fee_structure();
+            Some(fee_struct)
+        }
+        None => None,
+    };
 
     println!("Opening deposit...");
     println!("  Reserves ID: {}", reserves_id);
     println!("  Deposit pubkey: {}", deposit_pubkey);
+    if let Some(ref f) = fees {
+        println!("  Fees: {} bps/year + {} sats/year (period: {} blocks)",
+            f.annualized_bps, f.annualized_fixed, f.frequency_blocks);
+    }
 
-    let deposit = node.open_deposit(reserves_id, deposit_pubkey, None)?;
+    let deposit = node.open_deposit(reserves_id, deposit_pubkey, fees)?;
 
     // Broadcast to Nostr
     if let Err(e) = node.broadcast_last_update(reserves_id).await {
@@ -2790,6 +2875,47 @@ async fn deposit_verify_custodian(args: &[String]) -> Result<(), Box<dyn std::er
         println!("NO_ATTESTATIONS");
     }
 
+    Ok(())
+}
+
+/// Manually trigger fee collection for all operated ledgers
+async fn deposit_collect_fees(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let config = parse_config(args)?;
+    let node = Node::new(config).await?;
+
+    println!("Collecting fees from deposits...");
+
+    // Sync wallet first to get current block height
+    if let Err(e) = node.sync_wallet() {
+        eprintln!("Warning: Wallet sync failed: {}", e);
+    }
+
+    let current_block = node.wallet.get_block_height()?;
+    println!("  Current block: {}", current_block);
+
+    // Debug: show deposit fee info
+    let ledgers = node.handler.ledgers.lock().unwrap().clone();
+    for ((op, reserves_id), ledger_arc) in ledgers.iter() {
+        if *op != node.node_id {
+            continue;
+        }
+        let ledger = ledger_arc.read().unwrap();
+        for (pubkey, deposit) in &ledger.state.deposits {
+            let fee_due = deposit.calculate_fees_due(current_block);
+            println!("  Deposit {}...:", &hex::encode(pubkey.serialize())[..16]);
+            println!("    Balance: {} msats", deposit.balance);
+            println!("    Fee structure: {} bps, {} fixed, {} block period",
+                deposit.fees.annualized_bps, deposit.fees.annualized_fixed, deposit.fees.frequency_blocks);
+            println!("    Last fee assessment: block {}", deposit.last_fee_assessment);
+            println!("    Blocks since assessment: {}", current_block.saturating_sub(deposit.last_fee_assessment));
+            println!("    Fee due: {} msats", fee_due);
+        }
+    }
+
+    // Run fee collection
+    node.auto_collect_fees().await;
+
+    println!("Fee collection complete.");
     Ok(())
 }
 
@@ -5767,7 +5893,7 @@ async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
             // Process the request
             let (success, result, error) = match request.action.as_str() {
                 "deposit_open" => {
-                    process_deposit_open_request(&fresh_node, &ledger_id, &request).await
+                    process_deposit_open_request(&fresh_node, &ledger_id, &request, &transport).await
                 }
                 "deposit_offer" => {
                     process_deposit_offer_request(&fresh_node, &ledger_id, &request).await
@@ -5872,6 +5998,7 @@ async fn process_deposit_open_request(
     node: &Node,
     ledger_id: &str,
     request: &deposits_bdk::nostr::LedgerRequest,
+    transport: &deposits_bdk::nostr::NostrTransport,
 ) -> (bool, Option<serde_json::Value>, Option<String>) {
     // Resolve ledger_id (which may be a hash) to actual reserves_id
     let reserves_id = match resolve_ledger_id_to_reserves_id(node, ledger_id) {
@@ -5890,27 +6017,68 @@ async fn process_deposit_open_request(
         Err(e) => return (false, None, Some(format!("Invalid deposit_pubkey: {}", e))),
     };
 
-    // Extract optional fee parameters
+    // Fetch the advertisement to get fee minimums
+    let advertisement = match transport.fetch_ledger_advertisement(ledger_id).await {
+        Ok(Some(ad)) => ad,
+        Ok(None) => {
+            tracing::warn!("No advertisement found for ledger {}, using zero fee minimums", ledger_id);
+            deposits_bdk::nostr::LedgerAdvertisement::new(
+                ledger_id.to_string(),
+                String::new(),
+                String::new(),
+                String::new(),
+            )
+        }
+        Err(e) => {
+            tracing::warn!("Failed to fetch advertisement: {}, using zero fee minimums", e);
+            deposits_bdk::nostr::LedgerAdvertisement::new(
+                ledger_id.to_string(),
+                String::new(),
+                String::new(),
+                String::new(),
+            )
+        }
+    };
+
+    let (min_annual_bps, min_fixed_per_period) = advertisement.minimum_fees();
+
+    // Extract fee parameters from request OR use advertisement defaults
+    // Use advertisement's fee_period_blocks unless client overrides
+    // If fee_period_blocks is 0 (not set), use default of 2016 blocks (~2 weeks)
+    let ad_period = if advertisement.fee_period_blocks > 0 { advertisement.fee_period_blocks } else { 2016 };
+    let frequency_blocks = request.params.get("fee_frequency")
+        .and_then(|v| v.as_u64())
+        .map(|v| if v > 0 { v as u32 } else { 2016 })
+        .unwrap_or(ad_period);
+
     let fees = if request.params.get("fee_fixed").is_some()
         || request.params.get("fee_bps").is_some()
     {
-        Some(deposits_core::FeeStructure {
+        deposits_core::FeeStructure {
             annualized_fixed: request.params.get("fee_fixed")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0),
             annualized_bps: request.params.get("fee_bps")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as u16,
-            frequency_blocks: request.params.get("fee_frequency")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(144) as u32,
-        })
+            frequency_blocks,
+        }
     } else {
-        None
+        // Use advertisement defaults if no fees specified
+        advertisement.to_fee_structure()
     };
 
+    // Validate proposed fees meet operator minimums
+    if let Err(e) = deposits_core::operation_validation::validate_fee_minimum(
+        &fees,
+        min_annual_bps,
+        min_fixed_per_period,
+    ) {
+        return (false, None, Some(format!("Fee validation failed: {}", e)));
+    }
+
     // Open the deposit
-    match node.open_deposit(&reserves_id, deposit_pubkey, fees) {
+    match node.open_deposit(&reserves_id, deposit_pubkey, Some(fees)) {
         Ok(deposit) => {
             // Broadcast the update to Nostr
             if let Err(e) = node.broadcast_last_update(&reserves_id).await {
@@ -5984,13 +6152,37 @@ async fn process_deposit_offer_request(
         return (false, None, Some("min_sats must be less than max_sats".to_string()));
     }
 
+    // Extract fee parameters from request if provided
+    let fees = if request.params.get("fee_fixed").is_some()
+        || request.params.get("fee_bps").is_some()
+        || request.params.get("fee_frequency").is_some()
+    {
+        let frequency_blocks = request.params.get("fee_frequency")
+            .and_then(|v| v.as_u64())
+            .map(|v| if v > 0 { v as u32 } else { 2016 })
+            .unwrap_or(2016);
+
+        Some(deposits_core::FeeStructure {
+            annualized_fixed: request.params.get("fee_fixed")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            annualized_bps: request.params.get("fee_bps")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u16,
+            frequency_blocks,
+        })
+    } else {
+        None // Wallet didn't provide fees - will use defaults when deposit is completed
+    };
+
     // Sync wallet to get current block height
     if let Err(e) = node.sync_wallet() {
         return (false, None, Some(format!("Failed to sync wallet: {}", e)));
     }
 
     // Create the offer using ledger_id (stable across custody transfers)
-    match node.create_deposit_offer(&resolved_ledger_id, deposit_pubkey, max_sats, min_sats, blocks_valid) {
+    // Include fees so they're stored with the offer and applied when deposit is completed
+    match node.create_deposit_offer(&resolved_ledger_id, deposit_pubkey, max_sats, min_sats, blocks_valid, fees) {
         Ok(offer) => {
             let result = serde_json::json!({
                 "offer_id": hex::encode(&offer.offer_id),

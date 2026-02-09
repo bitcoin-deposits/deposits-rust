@@ -390,6 +390,9 @@ impl Node {
                     // Auto-complete funded deposits
                     self.auto_complete_deposits().await;
 
+                    // Auto-collect fees from deposits when due
+                    self.auto_collect_fees().await;
+
                     // Auto-claim/yield for any pending lottery disputes
                     self.auto_lottery_claim_or_yield().await;
 
@@ -2779,6 +2782,98 @@ impl Node {
         }
     }
 
+    /// Auto-collect fees from deposits when due
+    ///
+    /// This checks all operated ledgers for deposits that have fees due (based on
+    /// block height and fee collection frequency) and applies FeeCollect operations.
+    pub async fn auto_collect_fees(&self) {
+        let current_block = match self.wallet.get_block_height() {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::debug!("Failed to get block height for fee collection: {}", e);
+                return;
+            }
+        };
+
+        let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
+
+        // Get operated ledgers (where we are the operator)
+        let ledgers = self.handler.ledgers.lock().unwrap().clone();
+        let operated: Vec<_> = ledgers.into_iter()
+            .filter(|((op, _), _)| *op == self.node_id)
+            .collect();
+
+        for ((_, reserves_id), ledger_arc) in operated {
+            // Collect fees that are due
+            let fee_ops: Vec<(bitcoin::secp256k1::PublicKey, u64)> = {
+                let ledger = ledger_arc.read().unwrap();
+                ledger.state.deposits.iter()
+                    .filter_map(|(pubkey, deposit)| {
+                        let fee = deposit.calculate_fees_due(current_block);
+                        let available = deposit.balance.saturating_sub(deposit.locked_balance);
+                        if fee > 0 && fee <= available {
+                            Some((*pubkey, fee))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            };
+
+            if fee_ops.is_empty() {
+                continue;
+            }
+
+            // Apply each FeeCollect operation
+            for (deposit_pubkey, amount) in fee_ops {
+                tracing::info!(
+                    "Collecting fee: deposit={}... amount={} sats",
+                    &hex::encode(deposit_pubkey.serialize())[..16],
+                    amount / 1000 // Convert msats to sats for logging
+                );
+
+                let operation = LedgerOperation::FeeCollect {
+                    pubkey: deposit_pubkey,
+                    amount,
+                    block_height: current_block,
+                };
+
+                {
+                    let mut ledger = ledger_arc.write().unwrap();
+                    if let Err(e) = ledger.append_operation_with_block(
+                        operation,
+                        deposits_core::messages::consts::MAINTENANCE_FEE_COLLECT,
+                        current_block,
+                        block_hash,
+                    ) {
+                        tracing::warn!(
+                            "Failed to collect fee from deposit {}...: {:?}",
+                            &hex::encode(deposit_pubkey.serialize())[..16],
+                            e
+                        );
+                        continue;
+                    }
+                }
+
+                // Sign the update
+                if let Err(e) = self.sign_last_update(&reserves_id) {
+                    tracing::warn!("Failed to sign fee collection update: {}", e);
+                    continue;
+                }
+
+                // Broadcast to Nostr
+                if let Err(e) = self.broadcast_last_update(&reserves_id).await {
+                    tracing::warn!("Failed to broadcast fee collection: {}", e);
+                }
+
+                // Save ledger to disk
+                if let Err(e) = self.handler.persist_ledger(&self.node_id, &reserves_id) {
+                    tracing::warn!("Failed to save ledger after fee collection: {}", e);
+                }
+            }
+        }
+    }
+
     /// Find the ledger (reserves_id) for a specific deposit offer
     fn find_ledger_for_offer(&self, offer_id: &[u8; 32]) -> Option<String> {
         // Get the offer to find its ledger_id
@@ -3599,6 +3694,7 @@ impl Node {
         max_amount_sats: u64,
         min_amount_sats: u64,
         blocks_valid: u32,
+        fees: Option<FeeStructure>,
     ) -> Result<DepositOffer, Error> {
         // Get current block height
         let current_block = self.wallet.get_block_height()?;
@@ -3644,6 +3740,7 @@ impl Node {
             created_at_block: current_block,
             offer_id,
             operator_signature: signature,
+            fees,
         };
 
         // Store the offer
@@ -4668,7 +4765,8 @@ impl Node {
 
         // First, open the deposit if it doesn't already exist
         // (DepositOpen creates the deposit entry in the ledger state)
-        match self.open_deposit(&reserves_id, offer.deposit_pubkey, None) {
+        // Use the fees stored in the offer (established at offer creation)
+        match self.open_deposit(&reserves_id, offer.deposit_pubkey, offer.fees.clone()) {
             Ok(_) => {
                 tracing::info!(
                     "Opened deposit for {} in ledger {}",

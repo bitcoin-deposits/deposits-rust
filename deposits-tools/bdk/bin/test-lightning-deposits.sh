@@ -222,6 +222,43 @@ add_quorum_members() {
 }
 
 # ============================================================================
+# Phase 3c: Advertise ledgers with fees (after quorum setup)
+# ============================================================================
+
+advertise_with_fees() {
+    log_info ""
+    log_info "=== Phase 3c: Advertise Ledgers with Fees ==="
+    log_info "(100 bps annual + 1000 sat minimum, 10 block period)"
+    echo ""
+
+    for op in bdk-alice bdk-bob bdk-charlie bdk-diana; do
+        local reserves_id=$(get_value "reserves_id_$op")
+        local op_short=$(echo "$op" | sed 's/bdk-//')
+
+        log_info "Advertising $op_short's ledger with fees..."
+        # Note: arguments must be separate for proper parsing
+        # --fee-period 10 for fast testing (10 blocks instead of 2016)
+        local ad_output=$(run_bdk_cmd "$op" ledger advertise "$reserves_id" \
+            --annual-fee "100" \
+            --min-fee "1000" \
+            --fee-period "10" 2>&1)
+
+        if echo "$ad_output" | grep -q "Advertisement published\|published"; then
+            # Verify the fees were set correctly
+            if echo "$ad_output" | grep -q "period: 10 blocks"; then
+                test_pass "$op_short advertised (100 bps, 1000 sat min, 10 block period)"
+            else
+                log_warn "  $op_short fees may not be set correctly"
+                echo "$ad_output" | grep -i "fees\|period"
+            fi
+        else
+            log_warn "  $op_short advertisement issue:"
+            echo "    $ad_output"
+        fi
+    done
+}
+
+# ============================================================================
 # Phase 4: Create deposits on each ledger
 # ============================================================================
 
@@ -581,6 +618,50 @@ show_final_state() {
 }
 
 # ============================================================================
+# Phase 7: Test Automatic Fee Collection
+# ============================================================================
+
+test_fee_collection() {
+    log_info ""
+    log_info "=== Phase 7: Test Automatic Fee Collection ==="
+    log_info "(Mine 15 blocks to trigger fee collection on 10-block period)"
+    echo ""
+
+    # Get initial balances for alice's deposit
+    local alice_reserves=$(get_value "reserves_id_bdk-alice")
+    local alice_deposit_before=$(run_bdk_cmd bdk-alice deposit ls "$alice_reserves" 2>&1 | grep "Balance:" | head -1 | awk '{print $2}')
+    log_info "Alice deposit balance before: $alice_deposit_before msat"
+
+    # Mine enough blocks to trigger fee collection (fee period is 10 blocks)
+    log_info "Mining 15 blocks to trigger fee collection..."
+    mine_blocks 15
+
+    # Manually trigger fee collection
+    log_info "Triggering fee collection..."
+    run_bdk_cmd bdk-alice deposit collect-fees 2>&1
+
+    # Check if balance decreased (fees were collected)
+    local alice_deposit_after=$(run_bdk_cmd bdk-alice deposit ls "$alice_reserves" 2>&1 | grep "Balance:" | head -1 | awk '{print $2}')
+    log_info "Alice deposit balance after: $alice_deposit_after msat"
+
+    if [ -n "$alice_deposit_before" ] && [ -n "$alice_deposit_after" ]; then
+        # Convert to integers for comparison
+        local before=${alice_deposit_before//[^0-9]/}
+        local after=${alice_deposit_after//[^0-9]/}
+
+        if [ "$after" -lt "$before" ]; then
+            local fee_collected=$((before - after))
+            test_pass "Fee collected from alice's deposit: $fee_collected msat"
+        else
+            log_warn "Fees not collected (balance unchanged: $before -> $after)"
+            log_info "  Check: deposit.last_fee_assessment vs current block"
+        fi
+    else
+        log_warn "Could not parse deposit balances"
+    fi
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -601,10 +682,12 @@ main() {
     setup_operators
     create_ledgers
     add_quorum_members
+    advertise_with_fees
     create_deposits
     test_deposit_payment_bob_to_alice
     test_deposit_payment_alice_to_bob
     show_final_state
+    test_fee_collection
 
     echo ""
     log_info "=== Test Summary ==="

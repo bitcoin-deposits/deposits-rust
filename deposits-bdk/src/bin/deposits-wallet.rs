@@ -254,18 +254,25 @@ async fn discover(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Fee summary
-        let mut fees = Vec::new();
-        if ad.annual_fee_bps > 0 {
-            fees.push(format!("{}% annual", ad.annual_fee_bps as f64 / 100.0));
-        }
-        if ad.deposit_fee_bps > 0 {
-            fees.push(format!("{}% deposit", ad.deposit_fee_bps as f64 / 100.0));
-        }
-        if fees.is_empty() {
-            println!("   Fees: None");
+        let annual_pct = ad.annual_fee_bps as f64 / 100.0;
+        // Annualize the fixed fee using actual fee period
+        let periods_per_year = 52560u64 / ad.fee_period_blocks.max(1) as u64;
+        let annualized_fixed = ad.min_fee_sats.saturating_mul(periods_per_year);
+
+        let fee_str = match (ad.annual_fee_bps > 0, annualized_fixed > 0) {
+            (true, true) => format!("{}% and {} sats per year", annual_pct, annualized_fixed),
+            (true, false) => format!("{}% per year", annual_pct),
+            (false, true) => format!("{} sats per year", annualized_fixed),
+            (false, false) => "None".to_string(),
+        };
+
+        let deposit_fee = if ad.deposit_fee_bps > 0 {
+            format!(" ({}% on deposit)", ad.deposit_fee_bps as f64 / 100.0)
         } else {
-            println!("   Fees: {}", fees.join(", "));
-        }
+            String::new()
+        };
+
+        println!("   Fees: {}{}", fee_str, deposit_fee);
 
         // Limits
         if ad.max_deposit_sats < u64::MAX {
@@ -489,22 +496,26 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
         .build()
         .await?;
 
-    // Resolve prefix to full ledger ID
-    let ledger_id = if ledger_id.len() < 64 {
-        let network_str = match config.network {
-            bitcoin::Network::Bitcoin => "bitcoin",
-            bitcoin::Network::Testnet => "testnet",
-            bitcoin::Network::Signet => "signet",
-            bitcoin::Network::Regtest => "regtest",
-            _ => "unknown",
-        };
+    // Resolve prefix to full ledger ID and fetch advertisement for fees
+    let network_str = match config.network {
+        bitcoin::Network::Bitcoin => "bitcoin",
+        bitcoin::Network::Testnet => "testnet",
+        bitcoin::Network::Signet => "signet",
+        bitcoin::Network::Regtest => "regtest",
+        _ => "unknown",
+    };
+
+    let (ledger_id, advertisement) = if ledger_id.len() < 64 {
         let ads = transport.fetch_ledger_advertisements(network_str).await?;
-        ads.into_iter()
+        let ad = ads.into_iter()
             .find(|a| a.ledger_id.starts_with(&ledger_id))
-            .map(|a| a.ledger_id)
-            .ok_or_else(|| format!("No ledger found matching: {}", ledger_id))?
+            .ok_or_else(|| format!("No ledger found matching: {}", ledger_id))?;
+        let lid = ad.ledger_id.clone();
+        (lid, Some(ad))
     } else {
-        ledger_id
+        // Fetch the advertisement for the full ledger ID
+        let ad = transport.fetch_ledger_advertisement(&ledger_id).await?;
+        (ledger_id, ad)
     };
 
     println!("Opening deposit...");
@@ -513,6 +524,19 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
     if let Some(ref a) = alias {
         println!("  Alias: {}", a);
     }
+
+    // Get fee structure from advertisement
+    // If fee_period_blocks is 0 (not set), use default of 2016 blocks (~2 weeks)
+    let (fee_fixed, fee_bps, fee_frequency) = if let Some(ref ad) = advertisement {
+        let period = if ad.fee_period_blocks > 0 { ad.fee_period_blocks } else { 2016 };
+        let fee_struct = ad.to_fee_structure();
+        println!("  Fees: {} bps/year + {} sats/year fixed (period: {} blocks)",
+            ad.annual_fee_bps, fee_struct.annualized_fixed, period);
+        (fee_struct.annualized_fixed, fee_struct.annualized_bps as u64, period as u64)
+    } else {
+        println!("  Fees: (using defaults - no advertisement found)");
+        (0, 0, 2016)
+    };
     println!();
 
     // Send deposit_offer request
@@ -524,6 +548,9 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
         "max_sats": amount_sats,
         "min_sats": min_sats,
         "blocks_valid": 144_u64,
+        "fee_fixed": fee_fixed,
+        "fee_bps": fee_bps,
+        "fee_frequency": fee_frequency,
     });
 
     println!("Sending deposit request to operator...");
@@ -680,12 +707,25 @@ async fn add_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         .build()
         .await?;
 
+    // Fetch advertisement for fee structure
+    let advertisement = transport.fetch_ledger_advertisement(ledger_id).await?;
+    let (fee_fixed, fee_bps, fee_frequency) = if let Some(ref ad) = advertisement {
+        let period = if ad.fee_period_blocks > 0 { ad.fee_period_blocks } else { 2016 };
+        let fee_struct = ad.to_fee_structure();
+        (fee_struct.annualized_fixed, fee_struct.annualized_bps as u64, period as u64)
+    } else {
+        (0, 0, 2016)
+    };
+
     // Send deposit_offer request for existing deposit
     let request_params = serde_json::json!({
         "deposit_pubkey": pubkey_hex,
         "max_sats": amount_sats,
         "min_sats": 1000_u64,
         "blocks_valid": 144_u64,
+        "fee_fixed": fee_fixed,
+        "fee_bps": fee_bps,
+        "fee_frequency": fee_frequency,
     });
 
     println!("Sending offer request to operator...");

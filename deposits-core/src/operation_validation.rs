@@ -280,6 +280,47 @@ pub fn validate_payment_fail(amount: u64) -> ValidationResult {
 // Fee Validations
 // ============================================================================
 
+/// Validate that a proposed fee structure meets operator minimums.
+///
+/// This is used when a wallet proposes fees during deposit opening. The operator
+/// can enforce minimum fees to ensure deposits are profitable enough to service.
+///
+/// Checks:
+/// - Proposed annual bps >= operator's minimum annual bps
+/// - Proposed fixed fee per period >= operator's minimum fixed fee per period
+pub fn validate_fee_minimum(
+    proposed: &FeeStructure,
+    min_annual_bps: u16,
+    min_fixed_per_period: u64,
+) -> ValidationResult {
+    // Check annual bps meets minimum
+    if proposed.annualized_bps < min_annual_bps {
+        return Err(format!(
+            "Proposed annual fee {} bps is below operator minimum {} bps",
+            proposed.annualized_bps, min_annual_bps
+        ));
+    }
+
+    // Calculate the proposed fixed fee per period from annualized fixed
+    const BLOCKS_PER_YEAR: u64 = 52560;
+    let periods_per_year = BLOCKS_PER_YEAR / proposed.frequency_blocks.max(1) as u64;
+    let proposed_fixed_per_period = if periods_per_year > 0 {
+        proposed.annualized_fixed / periods_per_year
+    } else {
+        0
+    };
+
+    // Check fixed fee meets minimum per period
+    if proposed_fixed_per_period < min_fixed_per_period {
+        return Err(format!(
+            "Proposed fixed fee {} sats/period is below operator minimum {} sats/period",
+            proposed_fixed_per_period, min_fixed_per_period
+        ));
+    }
+
+    Ok(())
+}
+
 /// Validate a fee collection operation
 ///
 /// Checks:
