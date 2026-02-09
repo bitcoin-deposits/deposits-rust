@@ -5896,7 +5896,7 @@ async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
                     process_deposit_open_request(&fresh_node, &ledger_id, &request, &transport).await
                 }
                 "deposit_offer" => {
-                    process_deposit_offer_request(&fresh_node, &ledger_id, &request).await
+                    process_deposit_offer_request(&fresh_node, &ledger_id, &request, &transport).await
                 }
                 "deposit_withdraw" => {
                     process_deposit_withdraw_request(&fresh_node, &ledger_id, &request).await
@@ -6107,6 +6107,7 @@ async fn process_deposit_offer_request(
     node: &Node,
     ledger_id: &str,
     request: &deposits_bdk::nostr::LedgerRequest,
+    transport: &deposits_bdk::nostr::NostrTransport,
 ) -> (bool, Option<serde_json::Value>, Option<String>) {
     // Verify the ledger exists (ledger_id may be a hash or reserves_id)
     // We use ledger_id directly for the offer since it's stable across custody transfers
@@ -6152,17 +6153,43 @@ async fn process_deposit_offer_request(
         return (false, None, Some("min_sats must be less than max_sats".to_string()));
     }
 
-    // Extract fee parameters from request if provided
+    // Fetch the advertisement to get fee minimums
+    let advertisement = match transport.fetch_ledger_advertisement(&resolved_ledger_id).await {
+        Ok(Some(ad)) => ad,
+        Ok(None) => {
+            tracing::warn!("No advertisement found for ledger {}, using zero fee minimums", resolved_ledger_id);
+            deposits_bdk::nostr::LedgerAdvertisement::new(
+                resolved_ledger_id.clone(),
+                String::new(),
+                String::new(),
+                String::new(),
+            )
+        }
+        Err(e) => {
+            tracing::warn!("Failed to fetch advertisement: {}, using zero fee minimums", e);
+            deposits_bdk::nostr::LedgerAdvertisement::new(
+                resolved_ledger_id.clone(),
+                String::new(),
+                String::new(),
+                String::new(),
+            )
+        }
+    };
+
+    let (min_annual_bps, min_fixed_per_period) = advertisement.minimum_fees();
+    let ad_period = if advertisement.fee_period_blocks > 0 { advertisement.fee_period_blocks } else { 2016 };
+
+    // Extract fee parameters from request if provided, or use advertisement defaults
     let fees = if request.params.get("fee_fixed").is_some()
         || request.params.get("fee_bps").is_some()
         || request.params.get("fee_frequency").is_some()
     {
         let frequency_blocks = request.params.get("fee_frequency")
             .and_then(|v| v.as_u64())
-            .map(|v| if v > 0 { v as u32 } else { 2016 })
-            .unwrap_or(2016);
+            .map(|v| if v > 0 { v as u32 } else { ad_period })
+            .unwrap_or(ad_period);
 
-        Some(deposits_core::FeeStructure {
+        deposits_core::FeeStructure {
             annualized_fixed: request.params.get("fee_fixed")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0),
@@ -6170,10 +6197,20 @@ async fn process_deposit_offer_request(
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as u16,
             frequency_blocks,
-        })
+        }
     } else {
-        None // Wallet didn't provide fees - will use defaults when deposit is completed
+        // Use advertisement defaults if no fees specified
+        advertisement.to_fee_structure()
     };
+
+    // Validate proposed fees meet operator minimums
+    if let Err(e) = deposits_core::operation_validation::validate_fee_minimum(
+        &fees,
+        min_annual_bps,
+        min_fixed_per_period,
+    ) {
+        return (false, None, Some(format!("Fee validation failed: {}", e)));
+    }
 
     // Sync wallet to get current block height
     if let Err(e) = node.sync_wallet() {
@@ -6182,7 +6219,7 @@ async fn process_deposit_offer_request(
 
     // Create the offer using ledger_id (stable across custody transfers)
     // Include fees so they're stored with the offer and applied when deposit is completed
-    match node.create_deposit_offer(&resolved_ledger_id, deposit_pubkey, max_sats, min_sats, blocks_valid, fees) {
+    match node.create_deposit_offer(&resolved_ledger_id, deposit_pubkey, max_sats, min_sats, blocks_valid, Some(fees)) {
         Ok(offer) => {
             let result = serde_json::json!({
                 "offer_id": hex::encode(&offer.offer_id),
