@@ -1782,15 +1782,18 @@ pub async fn nostr_request(args: &[String]) -> Result<(), Box<dyn std::error::Er
     use std::io::Write;
     std::io::stdout().flush().ok();
 
+    eprintln!("DEBUG: Connecting to relay...");
     let transport = NostrTransportBuilder::new(secret_key)
         .relay(&relay_url)
         .build()
         .await?;
+    eprintln!("DEBUG: Connected, sending request...");
 
     // Subscribe to responses for this request
     let event_id = transport
         .send_ledger_request(&ledger_id, &action, params_json)
         .await?;
+    eprintln!("DEBUG: Request sent");
 
     println!("Request sent! Event ID: {}", event_id);
     println!();
