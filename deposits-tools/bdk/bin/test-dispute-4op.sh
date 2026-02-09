@@ -346,7 +346,7 @@ open_cross_deposits() {
                 # Use deposits-wallet to open the deposit
                 local open_output=$(run_wallet_cmd "$depositor" open "$ledger_id" "$deposit_amount" --alias "$alias" 2>&1)
 
-                if echo "$open_output" | grep -q "Deposit offer accepted\|Send.*sats to"; then
+                if echo "$open_output" | grep -q "Deposit.*created\|Fund with.*sats\|Send.*sats to"; then
                     # Extract funding address from output
                     local funding_address=$(echo "$open_output" | grep -E "^\s*bcrt1" | head -1 | tr -d ' ')
 
