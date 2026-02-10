@@ -2149,17 +2149,32 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
 
         // Check for requests
         while let Some(request) = transport.try_recv_request() {
-            // Skip already-processed requests (can arrive via both subscription and polling)
-            if seen_events.contains(&request.event_id) {
-                continue;
-            }
-            seen_events.insert(request.event_id.clone());
+            // Note: seen_events is already checked when queuing, so no need to check here
+            // Requests in the queue have already been validated for relevance
 
             // Skip requests not for our ledger or joined ledgers (except cross-ledger signing)
             let is_our_ledger = request.ledger_id == ledger_id;
             let is_joined_ledger = joined_ledger_ids.contains(&request.ledger_id);
             let is_cross_ledger_sign =
                 request.action == "custody_transfer_sign" || request.action == "confiscation_sign";
+
+            // Operator-only actions: only the ledger operator should handle these
+            let is_operator_only = matches!(
+                request.action.as_str(),
+                "deposit_open" | "deposit_offer" | "deposit_withdraw" | "collateral_lock"
+            );
+
+            // For operator-only actions, only process if this is our ledger
+            // Quorum members should NOT respond to these (they don't have the ledger data)
+            if is_operator_only && !is_our_ledger {
+                tracing::debug!(
+                    "Skipping operator-only request {} for different ledger: {} (ours: {})",
+                    request.action,
+                    request.ledger_id,
+                    ledger_id
+                );
+                continue;
+            }
 
             if !is_our_ledger && !is_joined_ledger && !is_cross_ledger_sign {
                 tracing::debug!(
@@ -2185,7 +2200,7 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
                 Err(e) => {
                     let error_msg = format!("Failed to reload node: {}", e);
                     let _ = transport
-                        .send_ledger_response(&request.event_id, &ledger_id, false, None, Some(error_msg.clone()))
+                        .send_ledger_response(&request.event_id, &request.ledger_id, false, None, Some(error_msg.clone()))
                         .await;
                     println!("  Response: ERROR - {}", error_msg);
                     continue;
@@ -2205,15 +2220,15 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
 
             if requires_ledger {
                 // Just verify we have the ledger locally
-                let has_ledger = fresh_node.get_ledger_by_ledger_id(&ledger_id).is_some()
-                    || fresh_node.get_ledger_by_reserves_id(&ledger_id).is_some();
+                let has_ledger = fresh_node.get_ledger_by_ledger_id(&request.ledger_id).is_some()
+                    || fresh_node.get_ledger_by_reserves_id(&request.ledger_id).is_some();
 
                 if !has_ledger {
                     let error_msg = "Ledger not found locally".to_string();
                     let _ = transport
                         .send_ledger_response(
                             &request.event_id,
-                            &ledger_id,
+                            &request.ledger_id,
                             false,
                             None,
                             Some(error_msg.clone()),
@@ -2293,12 +2308,7 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
                 ),
             };
 
-            // Send response (use request's ledger_id for custody_transfer_sign)
-            let response_ledger_id = if request.action == "custody_transfer_sign" {
-                &request.ledger_id
-            } else {
-                &ledger_id
-            };
+            // Send response - always use the request's ledger_id so requester receives it
             println!(
                 "  Sending response for request: {}",
                 &request.event_id[..16]
@@ -2306,7 +2316,7 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
             match transport
                 .send_ledger_response(
                     &request.event_id,
-                    response_ledger_id,
+                    &request.ledger_id,
                     success,
                     result.clone(),
                     error.clone(),
