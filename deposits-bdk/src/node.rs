@@ -437,7 +437,7 @@ impl Node {
     }
 
     /// Handle a ledger request from Nostr
-    async fn handle_ledger_request(&self, request: crate::nostr::LedgerRequest) {
+    async fn handle_ledger_request(&mut self, request: crate::nostr::LedgerRequest) {
         tracing::info!(
             "Ledger request: action={}, ledger={}..., event={}...",
             request.action,
@@ -2516,7 +2516,7 @@ impl Node {
     // These process incoming Nostr requests for ledger operations.
     // ========================================================================
 
-    async fn process_deposit_open_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_deposit_open_request(&mut self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
         use std::str::FromStr;
 
         tracing::info!("Processing deposit_open request for ledger {}...",
@@ -2597,14 +2597,9 @@ impl Node {
             return (false, None, Some(format!("Fee validation failed: {}", e)));
         }
 
-        // Open the deposit
-        match self.open_deposit(&ledger_id, deposit_pubkey, Some(fees)) {
+        // Open the deposit with co-signing
+        match self.open_deposit_with_cosign(&ledger_id, deposit_pubkey, Some(fees)).await {
             Ok(deposit) => {
-                // Broadcast the update to Nostr
-                if let Err(e) = self.broadcast_last_update(&ledger_id).await {
-                    tracing::warn!("Failed to broadcast deposit open to Nostr: {}", e);
-                }
-
                 let result = serde_json::json!({
                     "deposit_pubkey": deposit_pubkey_str,
                     "balance": deposit.balance,
@@ -2768,7 +2763,7 @@ impl Node {
     /// - fee_sats: fee for the withdrawal transaction
     /// - nonce: hex-encoded 32-byte nonce
     /// - signature: hex-encoded Schnorr signature over withdrawal message
-    async fn process_withdraw_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_withdraw_request(&mut self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
         use bitcoin::secp256k1::{Secp256k1, schnorr::Signature, Message};
         use bitcoin::hashes::{sha256, Hash};
 
@@ -2849,8 +2844,8 @@ impl Node {
             None => return (false, None, Some("Ledger not found".to_string())),
         };
 
-        // Lock the withdrawal
-        match self.lock_withdrawal(
+        // Lock the withdrawal with co-signing
+        match self.lock_withdrawal_with_cosign(
             &reserves_id,
             deposit_pubkey,
             address.to_string(),
@@ -2859,7 +2854,7 @@ impl Node {
             nonce,
             signature.serialize(),
             None, // no memo
-        ) {
+        ).await {
             Ok(lock_result) => {
                 let withdrawal_id = lock_result.withdrawal.withdrawal_id;
                 let result = serde_json::json!({
@@ -3418,7 +3413,7 @@ impl Node {
     // ========================================================================
 
     /// Auto-complete deposits that have been funded on-chain
-    pub async fn auto_complete_deposits(&self) {
+    pub async fn auto_complete_deposits(&mut self) {
         use deposits_core::types::DepositOfferStatus;
 
         let offers = self.list_deposit_offers();
@@ -3443,20 +3438,13 @@ impl Node {
                         amount_sats
                     );
 
-                    // Complete the deposit
-                    match self.complete_deposit_offer(&offer_id, txid.clone(), amount_sats) {
+                    // Complete the deposit with co-signing
+                    match self.complete_deposit_offer_with_cosign(&offer_id, txid.clone(), amount_sats).await {
                         Ok(new_balance) => {
                             tracing::info!(
                                 "Deposit completed! New balance: {} msats",
                                 new_balance
                             );
-
-                            // Broadcast the update to Nostr
-                            if let Some(reserves_id) = self.find_ledger_for_offer(&offer_id) {
-                                if let Err(e) = self.broadcast_last_update(&reserves_id).await {
-                                    tracing::warn!("Failed to broadcast deposit complete: {}", e);
-                                }
-                            }
                         }
                         Err(e) => {
                             tracing::error!(
@@ -6769,6 +6757,112 @@ impl Node {
             0, // vout - typically 0 for deposit offers
             offer.funding_address.clone(),
         )?;
+
+        // Update offer status
+        {
+            let mut offers = self.deposit_offers.lock().unwrap();
+            if let Some((_, ref mut current_status)) = offers.get_mut(offer_id) {
+                *current_status = DepositOfferStatus::Completed {
+                    txid: funding_txid,
+                    amount_sats: credited_amount,
+                    confirmed_at_block: current_block,
+                };
+            }
+        }
+        self.save_deposit_offers()?;
+
+        tracing::info!(
+            "Completed deposit offer {}: credited {} msats to {}",
+            hex::encode(&offer_id[..8]),
+            amount_msats,
+            offer.deposit_pubkey
+        );
+
+        Ok(new_balance)
+    }
+
+    /// Complete a deposit offer with co-signing and broadcast.
+    ///
+    /// This is the async version that handles the full co-signing flow.
+    pub async fn complete_deposit_offer_with_cosign(
+        &mut self,
+        offer_id: &[u8; 32],
+        funding_txid: String,
+        funding_amount_sats: u64,
+    ) -> Result<u64, Error> {
+        use deposits_core::types::DepositOfferStatus;
+
+        // Get the offer
+        let (offer, status) = self.get_deposit_offer(offer_id)
+            .ok_or(Error::OfferNotFound)?;
+
+        // Check offer is in correct state
+        if !matches!(status, DepositOfferStatus::Pending) {
+            return Err(Error::Protocol(format!(
+                "Deposit offer not in Pending state: {:?}",
+                status
+            )));
+        }
+
+        // Check amount is within bounds
+        if funding_amount_sats < offer.min_amount_sats {
+            return Err(Error::Protocol(format!(
+                "Funding amount {} sats below minimum {} sats",
+                funding_amount_sats, offer.min_amount_sats
+            )));
+        }
+        let credited_amount = funding_amount_sats.min(offer.max_amount_sats);
+
+        // Check deadline
+        let current_block = self.wallet.get_block_height()?;
+        if offer.is_expired(current_block) {
+            return Err(Error::Protocol("Deposit offer has expired".to_string()));
+        }
+
+        // Credit the deposit (convert sats to msats)
+        let amount_msats = credited_amount * 1000;
+
+        // Parse txid from hex string to bytes
+        let txid_bytes: [u8; 32] = hex::decode(&funding_txid)
+            .map_err(|e| Error::Protocol(format!("Invalid txid hex: {}", e)))?
+            .try_into()
+            .map_err(|_| Error::Protocol("Invalid txid length".to_string()))?;
+
+        // Look up the ledger by ledger_id hash
+        let (reserves_id, _) = self.get_ledger_by_ledger_id(&offer.ledger_id)
+            .ok_or_else(|| Error::Protocol(format!(
+                "Ledger not found for ledger_id: {}",
+                &offer.ledger_id[..16.min(offer.ledger_id.len())]
+            )))?;
+
+        // First, open the deposit if it doesn't already exist (with co-signing)
+        match self.open_deposit_with_cosign(&reserves_id, offer.deposit_pubkey, offer.fees.clone()).await {
+            Ok(_) => {
+                tracing::info!(
+                    "Opened deposit for {} in ledger {}",
+                    offer.deposit_pubkey,
+                    &reserves_id[..16.min(reserves_id.len())]
+                );
+            }
+            Err(e) => {
+                // If deposit already exists, that's fine - continue to credit
+                let err_msg = format!("{}", e);
+                if !err_msg.contains("already exists") {
+                    return Err(e);
+                }
+                tracing::debug!("Deposit already exists, proceeding to credit");
+            }
+        }
+
+        // Credit the deposit with co-signing
+        let new_balance = self.credit_deposit_onchain_with_cosign(
+            &reserves_id,
+            offer.deposit_pubkey,
+            amount_msats,
+            txid_bytes,
+            0, // vout - typically 0 for deposit offers
+            offer.funding_address.clone(),
+        ).await?;
 
         // Update offer status
         {

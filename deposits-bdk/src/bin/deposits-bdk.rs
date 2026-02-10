@@ -2781,28 +2781,14 @@ async fn deposit_complete(args: &[String]) -> Result<(), Box<dyn std::error::Err
         .map_err(|_| format!("Invalid amount_sats: {}", positional[2]))?;
 
     let config = parse_config(&config_args)?;
-    let node = Node::new(config).await?;
-
-    // Get the offer first to get ledger_id for broadcast
-    let (offer, _) = node.get_deposit_offer(&offer_id)
-        .ok_or("Deposit offer not found")?;
-    let ledger_id = offer.ledger_id.clone();
-
-    // Look up the ledger by reserves_id (offer stores reserves_id in ledger_id field)
-    let (reserves_id, _) = node.get_ledger_by_reserves_key(&ledger_id)
-        .ok_or_else(|| format!("Ledger not found for reserves_id: {}", &ledger_id[..16.min(ledger_id.len())]))?;
+    let mut node = Node::new(config).await?;
 
     println!("Completing deposit offer...");
     println!("  Offer ID: {}", hex::encode(&offer_id[..8]));
     println!("  Transaction: {}", txid);
     println!("  Amount: {} sats", amount_sats);
 
-    let new_balance = node.complete_deposit_offer(&offer_id, txid, amount_sats)?;
-
-    // Broadcast to Nostr
-    if let Err(e) = node.broadcast_last_update(&reserves_id).await {
-        eprintln!("Warning: Failed to broadcast to Nostr: {}", e);
-    }
+    let new_balance = node.complete_deposit_offer_with_cosign(&offer_id, txid, amount_sats).await?;
 
     println!("\nDeposit offer completed!");
     println!("  New balance: {} msats ({} sats)", new_balance, new_balance / 1000);

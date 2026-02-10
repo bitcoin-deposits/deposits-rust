@@ -2081,7 +2081,7 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         // Periodically check for funded deposits to auto-complete (every 3 seconds)
         if last_auto_complete.elapsed() > std::time::Duration::from_secs(3) {
             // Reload node to get fresh data and sync wallet
-            if let Ok(fresh_node) = Node::new(config_for_reload.clone()).await {
+            if let Ok(mut fresh_node) = Node::new(config_for_reload.clone()).await {
                 // Sync wallet first to detect new transactions
                 if let Err(e) = fresh_node.sync_wallet() {
                     tracing::debug!("Wallet sync error during auto-complete: {}", e);
@@ -2189,7 +2189,7 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
 
             // Reload the node to get fresh ledger state from disk
             // (the CLI may have updated the ledger concurrently)
-            let fresh_node = match Node::new(config_for_reload.clone()).await {
+            let mut fresh_node = match Node::new(config_for_reload.clone()).await {
                 Ok(n) => n,
                 Err(e) => {
                     let error_msg = format!("Failed to reload node: {}", e);
