@@ -2503,7 +2503,7 @@ async fn deposit_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         .map_err(|e| format!("Invalid deposit pubkey: {}", e))?;
 
     let config = parse_config(&config_args)?;
-    let node = Node::new(config.clone()).await?;
+    let mut node = Node::new(config.clone()).await?;
 
     // Resolve reserves_id to ledger_id
     let ledger_id = if reserves_id_arg.len() == 64 && reserves_id_arg.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -2539,12 +2539,7 @@ async fn deposit_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
             f.annualized_bps, f.annualized_fixed, f.frequency_blocks);
     }
 
-    let deposit = node.open_deposit(&ledger_id, deposit_pubkey, fees)?;
-
-    // Broadcast to Nostr
-    if let Err(e) = node.broadcast_last_update(&ledger_id).await {
-        eprintln!("Warning: Failed to broadcast to Nostr: {}", e);
-    }
+    let deposit = node.open_deposit_with_cosign(&ledger_id, deposit_pubkey, fees).await?;
 
     println!("\nDeposit opened!");
     println!("  Pubkey: {}", deposit.pubkey);
@@ -2651,7 +2646,7 @@ async fn deposit_credit(args: &[String]) -> Result<(), Box<dyn std::error::Error
     let payment_hash = sha256::Hash::hash(invoice_id.as_bytes()).to_byte_array();
 
     let config = parse_config(&config_args)?;
-    let node = Node::new(config).await?;
+    let mut node = Node::new(config).await?;
 
     // Resolve reserves_id to ledger_id
     let ledger_id = if reserves_id_arg.len() == 64 && reserves_id_arg.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -2668,18 +2663,13 @@ async fn deposit_credit(args: &[String]) -> Result<(), Box<dyn std::error::Error
     println!("  Amount: {} msats ({} sats)", amount_msats, amount_msats / 1000);
     println!("  Invoice ID: {}", invoice_id);
 
-    let new_balance = node.credit_deposit(
+    let new_balance = node.credit_deposit_with_cosign(
         &ledger_id,
         deposit_pubkey,
         amount_msats,
         payment_hash,
         invoice_id,
-    )?;
-
-    // Broadcast to Nostr
-    if let Err(e) = node.broadcast_last_update(&ledger_id).await {
-        eprintln!("Warning: Failed to broadcast to Nostr: {}", e);
-    }
+    ).await?;
 
     println!("\nDeposit credited!");
     println!("  New balance: {} msats ({} sats)", new_balance, new_balance / 1000);
@@ -3107,7 +3097,7 @@ async fn withdraw_request(args: &[String]) -> Result<(), Box<dyn std::error::Err
     ).map_err(|e| format!("Failed to create signature: {:?}", e))?;
 
     let config = parse_config(&config_args)?;
-    let node = Node::new(config).await?;
+    let mut node = Node::new(config).await?;
 
     // Resolve reserves_id to ledger_id
     let ledger_id = if reserves_id_arg.len() == 64 && reserves_id_arg.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -3131,8 +3121,8 @@ async fn withdraw_request(args: &[String]) -> Result<(), Box<dyn std::error::Err
         println!("  Memo: {}", m);
     }
 
-    // Lock the withdrawal
-    let result = node.lock_withdrawal(
+    // Lock the withdrawal with co-signing
+    let result = node.lock_withdrawal_with_cosign(
         &ledger_id,
         deposit_pubkey,
         destination_address,
@@ -3141,12 +3131,7 @@ async fn withdraw_request(args: &[String]) -> Result<(), Box<dyn std::error::Err
         nonce,
         signature,
         memo,
-    )?;
-
-    // Broadcast to Nostr
-    if let Err(e) = node.broadcast_last_update(&ledger_id).await {
-        eprintln!("Warning: Failed to broadcast to Nostr: {}", e);
-    }
+    ).await?;
 
     println!("\nWithdrawal locked!");
     println!("  Withdrawal ID: {}", hex::encode(&result.withdrawal.withdrawal_id));
@@ -3226,7 +3211,7 @@ async fn withdraw_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     signature.copy_from_slice(&sig_bytes);
 
     let config = parse_config(&config_args)?;
-    let node = Node::new(config).await?;
+    let mut node = Node::new(config).await?;
 
     // Resolve reserves_id to ledger_id
     let ledger_id = if reserves_id_arg.len() == 64 && reserves_id_arg.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -3250,8 +3235,8 @@ async fn withdraw_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         println!("  Memo: {}", m);
     }
 
-    // Lock the withdrawal
-    let result = node.lock_withdrawal(
+    // Lock the withdrawal with co-signing
+    let result = node.lock_withdrawal_with_cosign(
         &ledger_id,
         deposit_pubkey,
         destination_address,
@@ -3260,12 +3245,7 @@ async fn withdraw_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         nonce,
         signature,
         memo,
-    )?;
-
-    // Broadcast to Nostr
-    if let Err(e) = node.broadcast_last_update(&ledger_id).await {
-        eprintln!("Warning: Failed to broadcast to Nostr: {}", e);
-    }
+    ).await?;
 
     println!("\nWithdrawal locked!");
     println!("  Withdrawal ID: {}", hex::encode(&result.withdrawal.withdrawal_id));
@@ -3314,7 +3294,7 @@ async fn withdraw_complete(args: &[String]) -> Result<(), Box<dyn std::error::Er
     withdrawal_id.copy_from_slice(&id_bytes);
 
     let config = parse_config(&config_args)?;
-    let node = Node::new(config).await?;
+    let mut node = Node::new(config).await?;
 
     // Resolve reserves_id to ledger_id
     let ledger_id = if reserves_id_arg.len() == 64 && reserves_id_arg.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -3330,12 +3310,7 @@ async fn withdraw_complete(args: &[String]) -> Result<(), Box<dyn std::error::Er
 
     println!("Completing withdrawal {}...", &withdrawal_id_hex[..16]);
 
-    let result = node.complete_withdrawal(&ledger_id, &withdrawal_id)?;
-
-    // Broadcast to Nostr
-    if let Err(e) = node.broadcast_last_update(&ledger_id).await {
-        eprintln!("Warning: Failed to broadcast to Nostr: {}", e);
-    }
+    let result = node.complete_withdrawal_with_cosign(&ledger_id, &withdrawal_id).await?;
 
     println!("\nWithdrawal completed!");
     println!("  Transaction ID: {}", result.txid);
@@ -3682,7 +3657,7 @@ async fn lightning_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error
     signature.copy_from_slice(&signature_bytes);
 
     let config = parse_config(&config_args)?;
-    let node = Node::new(config).await?;
+    let mut node = Node::new(config).await?;
 
     println!("Locking deposit for Lightning payment...");
     println!("  Reserves ID: {}", reserves_id);
@@ -3690,18 +3665,13 @@ async fn lightning_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error
     println!("  Amount: {} msats ({} sats)", amount_msats, amount_msats / 1000);
     println!("  Payment ID: {}", &positional[3][..16.min(positional[3].len())]);
 
-    let new_locked = node.lock_invoice_payment(
+    let new_locked = node.lock_invoice_payment_with_cosign(
         reserves_id,
         deposit_pubkey,
         amount_msats,
         payment_id,
         signature,
-    )?;
-
-    // Broadcast to Nostr
-    if let Err(e) = node.broadcast_last_update(reserves_id).await {
-        eprintln!("Warning: Failed to broadcast to Nostr: {}", e);
-    }
+    ).await?;
 
     println!("\nPayment locked!");
     println!("  Locked balance: {} msats ({} sats)", new_locked, new_locked / 1000);
@@ -3754,7 +3724,7 @@ async fn lightning_fail(args: &[String]) -> Result<(), Box<dyn std::error::Error
     payment_id.copy_from_slice(&payment_id_bytes);
 
     let config = parse_config(&config_args)?;
-    let node = Node::new(config).await?;
+    let mut node = Node::new(config).await?;
 
     println!("Failing Lightning payment...");
     println!("  Reserves ID: {}", reserves_id);
@@ -3762,17 +3732,12 @@ async fn lightning_fail(args: &[String]) -> Result<(), Box<dyn std::error::Error
     println!("  Amount to unlock: {} msats ({} sats)", amount_msats, amount_msats / 1000);
     println!("  Payment ID: {}", &positional[3][..16.min(positional[3].len())]);
 
-    let new_balance = node.fail_invoice_payment(
+    let new_balance = node.fail_invoice_payment_with_cosign(
         reserves_id,
         deposit_pubkey,
         amount_msats,
         payment_id,
-    )?;
-
-    // Broadcast to Nostr
-    if let Err(e) = node.broadcast_last_update(reserves_id).await {
-        eprintln!("Warning: Failed to broadcast to Nostr: {}", e);
-    }
+    ).await?;
 
     println!("\nPayment failed/cancelled!");
     println!("  New balance: {} msats ({} sats)", new_balance, new_balance / 1000);
@@ -3841,7 +3806,7 @@ async fn lightning_fulfill(args: &[String]) -> Result<(), Box<dyn std::error::Er
     signature.copy_from_slice(&signature_bytes);
 
     let config = parse_config(&config_args)?;
-    let node = Node::new(config).await?;
+    let mut node = Node::new(config).await?;
 
     println!("Fulfilling Lightning payment...");
     println!("  Reserves ID: {}", reserves_id);
@@ -3849,19 +3814,14 @@ async fn lightning_fulfill(args: &[String]) -> Result<(), Box<dyn std::error::Er
     println!("  Amount: {} msats ({} sats)", amount_msats, amount_msats / 1000);
     println!("  Payment ID: {}", &positional[3][..16.min(positional[3].len())]);
 
-    let new_balance = node.fulfill_invoice_payment(
+    let new_balance = node.fulfill_invoice_payment_with_cosign(
         reserves_id,
         deposit_pubkey,
         amount_msats,
         payment_id,
         preimage,
         signature,
-    )?;
-
-    // Broadcast to Nostr
-    if let Err(e) = node.broadcast_last_update(reserves_id).await {
-        eprintln!("Warning: Failed to broadcast to Nostr: {}", e);
-    }
+    ).await?;
 
     println!("\nPayment fulfilled!");
     println!("  New balance: {} msats ({} sats)", new_balance, new_balance / 1000);
@@ -3985,7 +3945,7 @@ async fn lightning_send(args: &[String]) -> Result<(), Box<dyn std::error::Error
     println!("\nStep 2: Recording on ledger...");
 
     let config = parse_config(&config_args)?;
-    let node = Node::new(config).await?;
+    let mut node = Node::new(config).await?;
 
     // Create signatures for lock and fulfill
     let lock_signature = deposits_core::create_payment_signature(
@@ -4000,32 +3960,27 @@ async fn lightning_send(args: &[String]) -> Result<(), Box<dyn std::error::Error
         amount_msats,
     ).map_err(|e| format!("Failed to create fulfill signature: {:?}", e))?;
 
-    // Lock the funds
+    // Lock the funds with co-signing
     println!("  Locking {} msats...", amount_msats);
-    let locked_balance = node.lock_invoice_payment(
+    let locked_balance = node.lock_invoice_payment_with_cosign(
         reserves_id,
         deposit_pubkey,
         amount_msats,
         payment_id,
         lock_signature,
-    )?;
+    ).await?;
     println!("  Locked balance: {} msats", locked_balance);
 
-    // Fulfill with preimage
+    // Fulfill with preimage and co-signing
     println!("  Fulfilling with preimage...");
-    let new_balance = node.fulfill_invoice_payment(
+    let new_balance = node.fulfill_invoice_payment_with_cosign(
         reserves_id,
         deposit_pubkey,
         amount_msats,
         payment_id,
         preimage,
         fulfill_signature,
-    )?;
-
-    // Broadcast to Nostr
-    if let Err(e) = node.broadcast_last_update(reserves_id).await {
-        eprintln!("Warning: Failed to broadcast to Nostr: {}", e);
-    }
+    ).await?;
 
     println!("\nPayment complete!");
     println!("  Paid: {} msats ({} sats)", amount_msats, amount_msats / 1000);
