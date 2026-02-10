@@ -450,9 +450,9 @@ impl Node {
             || self.get_ledger_by_reserves_key(&request.ledger_id).is_some();
         let is_cross_ledger_sign = request.action == "custody_transfer_sign"
             || request.action == "confiscation_sign";
-        // co_sign_update requests can come from ledgers where we're a quorum member
+        // cosign_update requests can come from ledgers where we're a quorum member
         // (we may not have the full ledger locally, just a QuorumJoin record)
-        let is_cosign_request = request.action == "co_sign_update";
+        let is_cosign_request = request.action == "cosign_update";
 
         if !is_our_ledger && !is_cross_ledger_sign && !is_cosign_request {
             tracing::debug!("Skipping request for unknown ledger: {}", &request.ledger_id[..16]);
@@ -473,7 +473,7 @@ impl Node {
                 self.auto_reveal_preimage(&request.ledger_id).await;
                 (true, None, None) // No response needed
             }
-            "co_sign_update" => self.process_co_sign_request(&request).await,
+            "cosign_update" => self.process_cosign_request(&request).await,
             _ => {
                 tracing::warn!("Unknown request action: {}", request.action);
                 (false, None, Some(format!("Unknown action: {}", request.action)))
@@ -2981,11 +2981,11 @@ impl Node {
     ///
     /// The signature covers: partner_signing_data || our_ledger_current_hash
     /// This binds the co-signature to the current state of our own ledger.
-    async fn process_co_sign_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_cosign_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
         use bitcoin::hashes::{sha256, Hash};
         use bitcoin::secp256k1::{Message, Secp256k1};
 
-        tracing::info!("Processing co_sign_update request for ledger {}...",
+        tracing::info!("Processing cosign_update request for ledger {}...",
             &request.ledger_id[..16.min(request.ledger_id.len())]);
 
         // Extract required parameters
@@ -3772,7 +3772,7 @@ impl Node {
 
     /// Request a co-signature from a quorum member for an update.
     ///
-    /// This sends a co_sign_update request via Nostr and waits for the response.
+    /// This sends a cosign_update request via Nostr and waits for the response.
     /// The quorum member will validate the update and return their ECDSA signature
     /// over (partner_signing_data || member_ledger_hash).
     ///
@@ -3786,7 +3786,7 @@ impl Node {
     ///
     /// # Returns
     /// A CoSignResult containing the partner signature and the member's ledger hash
-    pub async fn request_co_sign(
+    pub async fn request_cosign(
         &mut self,
         ledger_id: &str,
         update: &deposits_core::SignedLedgerUpdate,
@@ -3808,7 +3808,7 @@ impl Node {
         let (tx, rx) = tokio::sync::oneshot::channel();
 
         // Send the multicast request to the ledger
-        let request_id = self.nostr.send_ledger_request(ledger_id, "co_sign_update", params)
+        let request_id = self.nostr.send_ledger_request(ledger_id, "cosign_update", params)
             .await
             .map_err(|e| Error::Protocol(format!("Failed to send co_sign request: {:?}", e)))?;
 
@@ -3913,7 +3913,7 @@ impl Node {
         }
 
         // Send multicast co-sign request - first responder wins
-        match self.request_co_sign(ledger_id, &update_clone).await {
+        match self.request_cosign(ledger_id, &update_clone).await {
             Ok(result) => {
                 // Apply partner signature
                 let ledgers = self.handler.ledgers.lock().unwrap();
