@@ -8,5 +8,5 @@ pub mod handlers;
 pub mod nostr_commands;
 pub mod recovery;
 
-pub use common::{parse_config, derive_operator_secret, resolve_ledger_id_to_reserves_id};
+pub use common::{parse_config, derive_operator_secret, resolve_ledger_id_to_reserves_key};
 pub use recovery::recovery_command;

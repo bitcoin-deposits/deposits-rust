@@ -1498,39 +1498,30 @@ pub async fn nostr_export(args: &[String]) -> Result<(), Box<dyn std::error::Err
             let reserves_id = parts[1];
 
             let (_, ledger) = node
-                .get_ledger_by_reserves_id(reserves_id)
+                .get_ledger_by_reserves_key(reserves_id)
                 .ok_or_else(|| format!("Ledger not found: {}", reserves_id))?;
             vec![(lid.clone(), ledger)]
         }
         Some(lid) => {
             // Check if it's a 64-char hex hash (ledger_id)
             if lid.len() == 64 && lid.chars().all(|c| c.is_ascii_hexdigit()) {
-                // Look up by ledger_id hash
-                let mut found = None;
-                for ((op, rid), ledger_arc) in node.list_ledgers() {
-                    let ledger = ledger_arc.read().unwrap();
-                    if ledger.ledger_id_hex() == *lid {
-                        found = Some((format!("{}:{}", op, rid), ledger.clone()));
-                        break;
-                    }
+                // Direct lookup by ledger_id
+                if let Some(ledger_arc) = node.list_ledgers().get(lid.as_str()) {
+                    let ledger = ledger_arc.read().unwrap().clone();
+                    vec![(lid.clone(), ledger)]
+                } else {
+                    return Err(format!(
+                        "Ledger not found by hash: {}. Try using reserves_key instead.",
+                        lid
+                    )
+                    .into());
                 }
-                match found {
-                    Some((full_lid, ledger)) => vec![(full_lid, ledger)],
-                    None => {
-                        return Err(format!(
-                            "Ledger not found by hash: {}. Try using reserves_id instead.",
-                            lid
-                        )
-                        .into());
-                    }
-                }
-            } else if let Some((_, ledger)) = node.get_ledger_by_reserves_id(lid) {
-                // Might be just a reserves_id
-                let full_lid = format!("{}:{}", ledger.state.operator_key, lid);
-                vec![(full_lid, ledger)]
+            } else if let Some((ledger_id, ledger)) = node.get_ledger_by_reserves_key(lid) {
+                // Might be a reserves_key
+                vec![(ledger_id, ledger)]
             } else {
                 return Err(format!(
-                    "Ledger not found: {}. Use format operator:reserves_id, reserves_id, or ledger_id hash",
+                    "Ledger not found: {}. Use ledger_id hash or reserves_key",
                     lid
                 )
                 .into());
@@ -1540,10 +1531,9 @@ pub async fn nostr_export(args: &[String]) -> Result<(), Box<dyn std::error::Err
             // Export all ledgers
             node.list_ledgers()
                 .into_iter()
-                .map(|((op, rid), ledger_arc)| {
-                    let lid = format!("{}:{}", op, rid);
+                .map(|(ledger_id, ledger_arc)| {
                     let ledger = ledger_arc.read().unwrap().clone();
-                    (lid, ledger)
+                    (ledger_id, ledger)
                 })
                 .collect()
         }
@@ -1922,11 +1912,14 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         // Arg provided - might be reserves address (bcrt1q...), hex prefix, or full hex
         let ledgers = node.list_ledgers();
 
-        // First, try to match by reserves_id (bcrt1q...)
+        // First, try to match by reserves_key (bcrt1q...)
         if lid.starts_with("bcrt1") || lid.starts_with("bc1") || lid.starts_with("tb1") {
             let found = ledgers
                 .iter()
-                .find(|((_op, rid), _)| rid == &lid || rid.starts_with(&lid));
+                .find(|(_lid, ledger_arc)| {
+                    let ledger = ledger_arc.read().unwrap();
+                    ledger.reserves_key() == lid || ledger.reserves_key().starts_with(&lid)
+                });
             if let Some((_, ledger_arc)) = found {
                 let ledger = ledger_arc.read().unwrap();
                 ledger.ledger_id_hex()
@@ -1953,7 +1946,7 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         if ledgers.is_empty() {
             return Err("No ledgers found. Specify a ledger ID or open a ledger first.".into());
         }
-        let (_, ledger_arc) = ledgers.into_iter().next().unwrap();
+        let (ledger_id, ledger_arc) = ledgers.into_iter().next().unwrap();
         let ledger = ledger_arc.read().unwrap();
         ledger.ledger_id_hex()
     };
@@ -1964,7 +1957,7 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         let mut joined = HashSet::new();
         let ledgers = node.list_ledgers();
 
-        for ((_operator, _reserves_id), ledger_arc) in ledgers.iter() {
+        for (_ledger_id, ledger_arc) in ledgers.iter() {
             let ledger = ledger_arc.read().unwrap();
 
             // Scan history for QuorumJoin operations
@@ -2052,7 +2045,8 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         }
 
         // Poll frequently for events (subscription may not work reliably)
-        if last_poll.elapsed() > std::time::Duration::from_millis(500) {
+        // Use 200ms for faster response times during testing
+        if last_poll.elapsed() > std::time::Duration::from_millis(200) {
             if let Ok(requests) = transport.fetch_recent_requests(60).await {
                 for request in requests {
                     // Queue requests for our ledger, joined ledgers, or cross-ledger signing requests
@@ -2221,7 +2215,7 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
             if requires_ledger {
                 // Just verify we have the ledger locally
                 let has_ledger = fresh_node.get_ledger_by_ledger_id(&request.ledger_id).is_some()
-                    || fresh_node.get_ledger_by_reserves_id(&request.ledger_id).is_some();
+                    || fresh_node.get_ledger_by_reserves_key(&request.ledger_id).is_some();
 
                 if !has_ledger {
                     let error_msg = "Ledger not found locally".to_string();

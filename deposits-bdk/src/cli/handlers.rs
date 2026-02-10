@@ -8,8 +8,6 @@ use std::str::FromStr;
 use crate::nostr::{LedgerAdvertisement, LedgerRequest, NostrTransport};
 use crate::{Node, NodeConfig};
 
-use super::common::resolve_ledger_id_to_reserves_id;
-
 /// Process a deposit_open request
 pub async fn process_deposit_open_request(
     node: &Node,
@@ -17,11 +15,10 @@ pub async fn process_deposit_open_request(
     request: &LedgerRequest,
     transport: &NostrTransport,
 ) -> (bool, Option<serde_json::Value>, Option<String>) {
-    // Resolve ledger_id (which may be a hash) to actual reserves_id
-    let reserves_id = match resolve_ledger_id_to_reserves_id(node, ledger_id) {
-        Ok(rid) => rid,
-        Err(e) => return (false, None, Some(e)),
-    };
+    // Verify ledger exists - we use ledger_id directly now
+    if node.get_ledger(ledger_id).is_none() {
+        return (false, None, Some(format!("Ledger not found: {}", ledger_id)));
+    }
 
     // Extract deposit_pubkey from params
     let deposit_pubkey_str = match request.params.get("deposit_pubkey") {
@@ -95,10 +92,10 @@ pub async fn process_deposit_open_request(
     }
 
     // Open the deposit
-    match node.open_deposit(&reserves_id, deposit_pubkey, Some(fees)) {
+    match node.open_deposit(ledger_id, deposit_pubkey, Some(fees)) {
         Ok(deposit) => {
             // Broadcast the update to Nostr
-            if let Err(e) = node.broadcast_last_update(&reserves_id).await {
+            if let Err(e) = node.broadcast_last_update(ledger_id).await {
                 tracing::warn!("Failed to broadcast deposit open to Nostr: {}", e);
             }
 
@@ -133,7 +130,7 @@ pub async fn process_deposit_offer_request(
         ledger_id.to_string()
     } else {
         // It's a reserves_id, look up the ledger to get its ledger_id
-        match node.get_ledger_by_reserves_id(ledger_id) {
+        match node.get_ledger_by_reserves_key(ledger_id) {
             Some((_, ledger)) => ledger.ledger_id_hex(),
             None => return (false, None, Some(format!("Ledger not found: {}", ledger_id))),
         }
@@ -263,11 +260,10 @@ pub async fn process_collateral_lock_request(
 ) -> (bool, Option<serde_json::Value>, Option<String>) {
     use bitcoin::secp256k1::Secp256k1;
 
-    // Resolve ledger_id (which may be a hash) to actual reserves_id
-    let reserves_id = match resolve_ledger_id_to_reserves_id(node, ledger_id) {
-        Ok(rid) => rid,
-        Err(e) => return (false, None, Some(e)),
-    };
+    // Verify ledger exists - we use ledger_id directly now
+    if node.get_ledger(ledger_id).is_none() {
+        return (false, None, Some(format!("Ledger not found: {}", ledger_id)));
+    }
 
     // Extract deposit_secret from params
     let deposit_secret_hex = match request.params.get("deposit_secret") {
@@ -320,7 +316,7 @@ pub async fn process_collateral_lock_request(
 
     // Lock the collateral
     match node.lock_collateral(
-        &reserves_id,
+        ledger_id,
         deposit_pubkey,
         &deposit_secret,
         amount_msats,
@@ -329,7 +325,7 @@ pub async fn process_collateral_lock_request(
     ) {
         Ok(attestation) => {
             // Broadcast the update to Nostr
-            if let Err(e) = node.broadcast_last_update(&reserves_id).await {
+            if let Err(e) = node.broadcast_last_update(ledger_id).await {
                 tracing::warn!("Failed to broadcast collateral lock to Nostr: {}", e);
             }
 
@@ -363,11 +359,10 @@ pub async fn process_deposit_withdraw_request(
 ) -> (bool, Option<serde_json::Value>, Option<String>) {
     use bitcoin::secp256k1::Secp256k1;
 
-    // Resolve ledger_id (which may be a hash) to actual reserves_id
-    let reserves_id = match resolve_ledger_id_to_reserves_id(node, ledger_id) {
-        Ok(rid) => rid,
-        Err(e) => return (false, None, Some(e)),
-    };
+    // Verify ledger exists - we use ledger_id directly now
+    if node.get_ledger(ledger_id).is_none() {
+        return (false, None, Some(format!("Ledger not found: {}", ledger_id)));
+    }
 
     // Extract deposit_secret from params
     let deposit_secret_hex = match request.params.get("deposit_secret") {
@@ -439,7 +434,7 @@ pub async fn process_deposit_withdraw_request(
 
     // Lock the withdrawal
     match node.lock_withdrawal(
-        &reserves_id,
+        ledger_id,
         deposit_pubkey,
         destination_address.clone(),
         amount_sats,
@@ -450,7 +445,7 @@ pub async fn process_deposit_withdraw_request(
     ) {
         Ok(result) => {
             // Broadcast to Nostr
-            if let Err(e) = node.broadcast_last_update(&reserves_id).await {
+            if let Err(e) = node.broadcast_last_update(ledger_id).await {
                 eprintln!("    Warning: Failed to broadcast to Nostr: {}", e);
             }
 
@@ -885,7 +880,7 @@ pub async fn process_custodian_query_request(
     // Look up the ledger
     let ledger = if let Some((_, l)) = node.get_ledger_by_ledger_id(ledger_id) {
         l
-    } else if let Some((_, l)) = node.get_ledger_by_reserves_id(ledger_id) {
+    } else if let Some((_, l)) = node.get_ledger_by_reserves_key(ledger_id) {
         l
     } else {
         return (false, None, Some("Ledger not found".to_string()));

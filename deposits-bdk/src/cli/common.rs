@@ -140,14 +140,13 @@ pub fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
     })
 }
 
-/// Resolve a ledger_id (hash) to the actual reserves_id
-pub fn resolve_ledger_id_to_reserves_id(node: &Node, ledger_id: &str) -> Result<String, String> {
-    // Look up by ledger_id hash
-    for ((_op, rid), ledger_arc) in node.list_ledgers() {
+/// Resolve a ledger_id (hash) to the actual reserves_key
+pub fn resolve_ledger_id_to_reserves_key(node: &Node, ledger_id: &str) -> Result<String, String> {
+    // Direct lookup by ledger_id (now the key)
+    let ledgers = node.list_ledgers();
+    if let Some(ledger_arc) = ledgers.get(ledger_id) {
         let ledger = ledger_arc.read().unwrap();
-        if ledger.ledger_id_hex() == ledger_id {
-            return Ok(rid);
-        }
+        return Ok(ledger.reserves_key().to_string());
     }
     Err(format!("Ledger not found by hash: {}", ledger_id))
 }

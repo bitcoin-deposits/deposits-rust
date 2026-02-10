@@ -265,17 +265,19 @@ add_quorum_members() {
             if [ "$op" != "$member" ]; then
                 local member_node_id=$(get_value "node_id_$member")
                 local member_ledger_id=$(get_value "ledger_id_$member")
+                local member_reserves_id=$(get_value "reserves_id_$member")
+                local op_ledger_id=$(get_value "ledger_id_$op")
                 local op_short=$(echo "$op" | sed 's/bdk-//')
                 local member_short=$(echo "$member" | sed 's/bdk-//')
 
                 log_info "$op_short adding $member_short as quorum member..."
 
                 # Add member to op's quorum (pass member's ledger ID for collateral binding)
-                local add_output=$(run_bdk_cmd "$op" partner add "$op_reserves_id" "$member_node_id" "$member_ledger_id" 2>&1)
+                local add_output=$(run_bdk_cmd "$op" partner add "$op_ledger_id" "$member_node_id" "$member_ledger_id" 2>&1)
 
                 if echo "$add_output" | grep -q "Quorum member added\|added"; then
-                    # Record the join on member's ledger
-                    local join_output=$(run_bdk_cmd "$member" partner join "$member_reserves_id" "$op_node_id" "$op_reserves_id" "$membership_expires" 2>&1)
+                    # Record the join on member's ledger (use ledger_id for both our ledger and target)
+                    local join_output=$(run_bdk_cmd "$member" partner join "$member_ledger_id" "$op_node_id" "$op_ledger_id" "$membership_expires" 2>&1)
 
                     if echo "$join_output" | grep -q "Quorum join recorded\|recorded"; then
                         test_pass "$member_short joined $op_short's quorum (both sides recorded)"
@@ -538,10 +540,10 @@ alice_goes_rogue() {
     log_info "Alice exporting valid ledger to Nostr..."
     run_bdk_cmd "bdk-alice" nostr export "$alice_ledger_id" >/dev/null 2>&1
 
-    # Publish invalid update
+    # Publish invalid update (use ledger_id since reserves may have been rotated)
     log_info "Alice publishing invalid update (hash chain broken)..."
     local danger_output=$(run_bdk_cmd "bdk-alice" danger publish-invalid \
-        "$alice_reserves" invalid-hash 2>&1)
+        "$alice_ledger_id" invalid-hash 2>&1)
 
     if echo "$danger_output" | grep -q "Published invalid update"; then
         local event_id=$(echo "$danger_output" | grep "Event ID:" | awk '{print $3}')

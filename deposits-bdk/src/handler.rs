@@ -12,7 +12,7 @@
 use bitcoin::secp256k1::{PublicKey, SecretKey};
 use deposits_core::error::HandlerError;
 use deposits_core::ledger::Ledger;
-use deposits_core::types::SignedLedgerUpdate;
+use deposits_core::types::{SignedLedgerUpdate, LedgerState};
 use deposits_core::message_validation::{HandlerContext, ValidationContext};
 use deposits_core::validation::{LedgerConformanceValidator, LedgerExport, ValidationReport};
 use deposits_core::messages::DepositsMessage;
@@ -37,8 +37,7 @@ pub struct OutboundMessage {
 /// Serializable ledger entry for persistence
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LedgerEntry {
-    operator: String,
-    reserves_id: String,
+    ledger_id: String,
     ledger: Ledger,
 }
 
@@ -52,8 +51,8 @@ pub struct DepositsHandler {
     /// Our secret key for signing
     secret_key: SecretKey,
 
-    /// Ledgers indexed by (operator, reserves_id)
-    pub ledgers: Mutex<HashMap<(PublicKey, String), Arc<RwLock<Ledger>>>>,
+    /// Ledgers indexed by ledger_id (the unique hash identifier)
+    pub ledgers: Mutex<HashMap<String, Arc<RwLock<Ledger>>>>,
 
     /// Pending events to be processed
     events: Mutex<Vec<ProtocolEvent>>,
@@ -101,7 +100,7 @@ impl DepositsHandler {
     }
 
     /// Load ledgers from disk
-    fn load_ledgers_from_disk(data_dir: &PathBuf) -> HashMap<(PublicKey, String), Arc<RwLock<Ledger>>> {
+    fn load_ledgers_from_disk(data_dir: &PathBuf) -> HashMap<String, Arc<RwLock<Ledger>>> {
         let ledgers_file = data_dir.join("ledgers.json");
         if !ledgers_file.exists() {
             return HashMap::new();
@@ -125,15 +124,7 @@ impl DepositsHandler {
 
         let mut ledgers = HashMap::new();
         for entry in entries {
-            let operator = match entry.operator.parse::<PublicKey>() {
-                Ok(pk) => pk,
-                Err(e) => {
-                    tracing::warn!("Invalid operator pubkey in ledger: {}", e);
-                    continue;
-                }
-            };
-            // reserves_id is now a String, no parsing needed
-            ledgers.insert((operator, entry.reserves_id), Arc::new(RwLock::new(entry.ledger)));
+            ledgers.insert(entry.ledger_id, Arc::new(RwLock::new(entry.ledger)));
         }
 
         tracing::info!("Loaded {} ledgers from disk", ledgers.len());
@@ -151,11 +142,10 @@ impl DepositsHandler {
         let ledgers = self.ledgers.lock().unwrap();
         let entries: Vec<LedgerEntry> = ledgers
             .iter()
-            .map(|((operator, reserves_id), ledger_arc)| {
+            .map(|(ledger_id, ledger_arc)| {
                 let ledger = ledger_arc.read().unwrap();
                 LedgerEntry {
-                    operator: operator.to_string(),
-                    reserves_id: reserves_id.clone(),
+                    ledger_id: ledger_id.clone(),
                     ledger: ledger.clone(),
                 }
             })
@@ -206,16 +196,21 @@ impl DepositsHandler {
     pub fn get_or_create_ledger(
         &self,
         operator: PublicKey,
-        reserves_id: String,
+        reserves_address: String,
     ) -> Arc<RwLock<Ledger>> {
+        use deposits_core::types::LedgerState;
+
         // Get current block height for genesis_block
         let genesis_block = self.wallet.get_block_height().unwrap_or(0);
 
+        // Compute ledger_id from genesis parameters
+        let ledger_id_bytes = LedgerState::compute_ledger_id(&operator, &reserves_address, genesis_block);
+        let ledger_id = hex::encode(ledger_id_bytes);
+
         let mut ledgers = self.ledgers.lock().unwrap();
-        let key = (operator, reserves_id.clone());
-        let is_new = !ledgers.contains_key(&key);
+        let is_new = !ledgers.contains_key(&ledger_id);
         let ledger = ledgers
-            .entry(key)
+            .entry(ledger_id.clone())
             .or_insert_with(|| {
                 let role = if operator == self.our_node_id {
                     deposits_core::LedgerRole::Operator
@@ -224,10 +219,10 @@ impl DepositsHandler {
                 };
                 Arc::new(RwLock::new(Ledger::new(
                     operator,
-                    reserves_id.clone(),
+                    reserves_address.clone(),
                     role,
                     vec![],
-                    reserves_id.clone(), // Use reserves_id as ledger_address for BDK
+                    reserves_address.clone(), // Use reserves_address as ledger_address for BDK
                     genesis_block,
                 )))
             })
@@ -243,8 +238,8 @@ impl DepositsHandler {
                 let mut ledger_guard = ledger.write().unwrap();
                 let operation = deposits_core::messages::LedgerOperation::LedgerOpen {
                     operator_id: operator,
-                    reserves_id: reserves_id.clone(),
-                    ledger_address: reserves_id.clone(),
+                    reserves_id: reserves_address.clone(),
+                    ledger_address: reserves_address.clone(),
                     genesis_block,
                     collateral_enforcement_block: 0, // Default to immediate enforcement
                 };
@@ -262,7 +257,7 @@ impl DepositsHandler {
             if reserves_balance > 0 {
                 let mut ledger_guard = ledger.write().unwrap();
                 let operation = deposits_core::messages::LedgerOperation::ReservesIncrease {
-                    reserves_id: reserves_id.clone(),
+                    reserves_id: reserves_address.clone(),
                     new_amount: reserves_balance,
                 };
                 if let Err(e) = ledger_guard.append_operation(
@@ -292,8 +287,9 @@ impl DepositsHandler {
     }
 
     /// Persist a specific ledger to disk
-    pub fn persist_ledger(&self, _operator: &PublicKey, _reserves_id: &str) -> Result<(), String> {
+    pub fn persist_ledger(&self, ledger_id: &str) -> Result<(), String> {
         // Save all ledgers to disk (could optimize to save just the specific one)
+        let _ = ledger_id; // TODO: optimize to save just this ledger
         self.save_ledgers_to_disk()
     }
 
@@ -331,11 +327,18 @@ impl DepositsHandler {
             return Err("Cannot import your own ledger. Use 'ledger open' instead.".to_string());
         }
 
+        // Compute the ledger_id from export parameters
+        let ledger_id_bytes = LedgerState::compute_ledger_id(
+            &export.operator_id,
+            &export.reserves_id,
+            export.genesis_block,
+        );
+        let ledger_id = hex::encode(ledger_id_bytes);
+
         // Check if ledger already exists
-        let key = (export.operator_id, export.reserves_id.clone());
         {
             let ledgers = self.ledgers.lock().unwrap();
-            if ledgers.contains_key(&key) {
+            if ledgers.contains_key(&ledger_id) {
                 return Err(format!(
                     "Ledger already exists for operator {} with reserves {}",
                     export.operator_id, export.reserves_id
@@ -366,7 +369,7 @@ impl DepositsHandler {
         let ledger_arc = Arc::new(RwLock::new(ledger));
         {
             let mut ledgers = self.ledgers.lock().unwrap();
-            ledgers.insert(key, ledger_arc.clone());
+            ledgers.insert(ledger_id, ledger_arc.clone());
         }
 
         // Persist to disk
@@ -379,16 +382,15 @@ impl DepositsHandler {
     /// Returns the number of updates applied.
     pub fn apply_updates_to_ledger(
         &self,
-        reserves_id: &str,
+        ledger_id: &str,
         updates: Vec<SignedLedgerUpdate>,
     ) -> Result<usize, String> {
-        // Find the ledger by reserves_id
+        // Find the ledger by ledger_id
         let ledgers = self.ledgers.lock().unwrap();
         let ledger_arc = ledgers
-            .iter()
-            .find(|((_op, rid), _)| rid == reserves_id)
-            .map(|(_, arc)| arc.clone())
-            .ok_or_else(|| format!("Ledger not found: {}", reserves_id))?;
+            .get(ledger_id)
+            .cloned()
+            .ok_or_else(|| format!("Ledger not found: {}", ledger_id))?;
         drop(ledgers); // Release lock before modifying
 
         let mut ledger = ledger_arc.write().unwrap();
@@ -425,8 +427,15 @@ impl DepositsHandler {
 
 impl ValidationContext for DepositsHandler {
     fn get_ledger(&self, operator: &PublicKey, reserves_id: &str) -> Option<Arc<RwLock<Ledger>>> {
+        // Search ledgers by operator and reserves_key (reserves_id)
         let ledgers = self.ledgers.lock().unwrap();
-        ledgers.get(&(*operator, reserves_id.to_string())).cloned()
+        for (_ledger_id, ledger_arc) in ledgers.iter() {
+            let ledger = ledger_arc.read().unwrap();
+            if ledger.operator_key() == *operator && ledger.reserves_key() == reserves_id {
+                return Some(ledger_arc.clone());
+            }
+        }
+        None
     }
 
     fn our_node_id(&self) -> PublicKey {
