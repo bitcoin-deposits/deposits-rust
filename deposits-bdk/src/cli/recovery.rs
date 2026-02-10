@@ -3242,6 +3242,16 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
 
 /// Rotate lottery winnings to a quorum-controlled Taproot address.
 pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use bitcoin::hashes::{sha256, Hash};
+    use bitcoin::secp256k1::{Keypair, Secp256k1, PublicKey};
+    use deposits_core::{TlvDecode, TlvEncode, SignedLedgerUpdate, VoterSet, ThresholdConfig, TapscriptReservesBuilder};
+    use deposits_core::messages::LedgerOperation;
+    use crate::nostr::NostrTransportBuilder;
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    use nostr_sdk::prelude::*;
+    use bdk_esplora::esplora_client::Builder as EsploraBuilder;
+    use bitcoin::{Transaction, TxIn, TxOut, Witness, Amount, ScriptBuf};
+
     let mut ledger_id: Option<String> = None;
     let mut config_args = Vec::new();
 
@@ -3266,10 +3276,292 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
 
     let ledger_id = ledger_id.ok_or("Missing ledger_id")?.trim().to_string();
     let config = parse_config(&config_args)?;
+    let relay_url = config.relays.first()
+        .ok_or("No relay configured. Use --relay <url>")?
+        .clone();
+
+    let secp = Secp256k1::new();
+    let secret_key = derive_operator_secret(&config.seed, config.network)?;
+    let keypair = Keypair::from_secret_key(&secp, &secret_key);
+    let our_pubkey = keypair.public_key();
 
     println!("Rotating lottery winnings to quorum-controlled Taproot...");
     println!("  Ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
-    println!("Note: Full implementation requires on-chain transaction.");
+
+    // Fetch ledger updates from Nostr
+    let keys = Keys::generate();
+    let client = Client::new(keys);
+    client.add_relay(&relay_url).await
+        .map_err(|e| format!("Failed to add relay: {}", e))?;
+    client.connect().await;
+
+    let filter = Filter::new()
+        .kind(Kind::Custom(crate::nostr::KIND_LEDGER_UPDATE))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()])
+        .limit(500);
+
+    let events = client
+        .fetch_events(vec![filter], None)
+        .await
+        .map_err(|e| format!("Failed to fetch updates: {}", e))?;
+
+    client.disconnect().await.ok();
+
+    // Decode updates and find our branch
+    let mut updates: Vec<SignedLedgerUpdate> = Vec::new();
+    for event in events.iter() {
+        if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
+            if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
+                updates.push(update);
+            }
+        }
+    }
+
+    updates.sort_by_key(|u| (u.sequence_number, u.operator_id));
+    updates.dedup_by(|a, b| a.sequence_number == b.sequence_number && a.operator_id == b.operator_id && a.current_hash == b.current_hash);
+
+    // Find our updates (we're the new operator after CustodyAcquire)
+    let our_updates: Vec<&SignedLedgerUpdate> = updates.iter()
+        .filter(|u| u.operator_id == our_pubkey)
+        .collect();
+
+    if our_updates.is_empty() {
+        return Err("No updates found from you. Did you win the lottery?".into());
+    }
+
+    // Find our CustodyAcquire to get the current reserves address
+    let mut current_reserves_address: Option<String> = None;
+    let mut our_latest: Option<&SignedLedgerUpdate> = None;
+
+    for update in &our_updates {
+        if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+            if let LedgerOperation::CustodyAcquire { new_reserves_address, .. } = op {
+                current_reserves_address = Some(new_reserves_address);
+            }
+        }
+        if our_latest.is_none() || update.sequence_number > our_latest.unwrap().sequence_number {
+            our_latest = Some(update);
+        }
+    }
+
+    let current_reserves_address = current_reserves_address
+        .ok_or("Could not find CustodyAcquire with reserves address")?;
+    let our_latest = our_latest.ok_or("Could not find latest update")?;
+
+    println!("  Current reserves: {}...", &current_reserves_address[..20.min(current_reserves_address.len())]);
+    println!("  Latest sequence: {}", our_latest.sequence_number);
+
+    // Get quorum members from our branch (rebuilt during dispute)
+    let mut quorum_members: Vec<PublicKey> = Vec::new();
+    for update in &our_updates {
+        if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+            if let LedgerOperation::QuorumAddMember { quorum_member, .. } = op {
+                if !quorum_members.contains(&quorum_member) {
+                    quorum_members.push(quorum_member);
+                }
+            }
+        }
+    }
+
+    if quorum_members.is_empty() {
+        return Err("No quorum members found. Did you rebuild the quorum?".into());
+    }
+
+    println!("  Quorum members: {}", quorum_members.len());
+
+    // Find the UTXO at current_reserves_address
+    let esplora = EsploraBuilder::new(&config.electrum_url).build_blocking();
+
+    let reserves_addr: bitcoin::Address<bitcoin::address::NetworkUnchecked> = current_reserves_address.parse()
+        .map_err(|e| format!("Invalid reserves address: {}", e))?;
+    let reserves_addr = reserves_addr.require_network(config.network)
+        .map_err(|e| format!("Address network mismatch: {}", e))?;
+
+    let script_pubkey = reserves_addr.script_pubkey();
+    let txs = esplora.scripthash_txs(&script_pubkey, None)
+        .map_err(|e| format!("Failed to query address: {:?}", e))?;
+
+    // Find unspent output
+    let mut reserves_utxo: Option<(bitcoin::OutPoint, u64)> = None;
+    for tx in &txs {
+        for (vout, output) in tx.vout.iter().enumerate() {
+            if output.scriptpubkey == script_pubkey {
+                let outpoint = bitcoin::OutPoint::new(tx.txid, vout as u32);
+                let status = esplora.get_output_status(&tx.txid, vout as u64)
+                    .map_err(|e| format!("Failed to check output status: {:?}", e))?;
+                if status.map(|s| !s.spent).unwrap_or(true) {
+                    reserves_utxo = Some((outpoint, output.value));
+                    break;
+                }
+            }
+        }
+        if reserves_utxo.is_some() { break; }
+    }
+
+    let (reserves_outpoint, reserves_amount) = reserves_utxo
+        .ok_or("No unspent UTXO found at reserves address")?;
+
+    println!("  Found UTXO: {} ({} sats)", reserves_outpoint, reserves_amount);
+
+    // Compute ledger hash for Taproot address derivation
+    let ledger_hash: [u8; 32] = our_latest.current_hash;
+
+    // Build Taproot quorum address
+    let voter_set = VoterSet::new(our_pubkey, quorum_members.clone());
+    let voter_count = voter_set.all_voters().len();
+    let threshold_config = ThresholdConfig::default_for_voter_count(voter_count);
+
+    let taproot_builder = TapscriptReservesBuilder::new(
+        voter_set,
+        threshold_config,
+        config.network,
+        ledger_hash,
+    );
+
+    let taproot_output = taproot_builder.build()
+        .map_err(|e| format!("Failed to build Taproot output: {:?}", e))?;
+
+    let new_reserves_address = &taproot_output.address;
+    println!("  New Taproot address: {}...", &new_reserves_address.to_string()[..20]);
+
+    // Build rotation transaction
+    let fee = 200u64;
+    let output_amount = reserves_amount.saturating_sub(fee);
+
+    let mut rotation_tx = Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: reserves_outpoint,
+            script_sig: ScriptBuf::new(),
+            sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(output_amount),
+            script_pubkey: new_reserves_address.script_pubkey(),
+        }],
+    };
+
+    // Sign the transaction (P2WPKH input)
+    use bitcoin::sighash::{SighashCache, EcdsaSighashType};
+
+    let mut sighash_cache = SighashCache::new(&rotation_tx);
+    let sighash = sighash_cache.p2wpkh_signature_hash(
+        0,
+        &script_pubkey,
+        Amount::from_sat(reserves_amount),
+        EcdsaSighashType::All,
+    ).map_err(|e| format!("Failed to compute sighash: {}", e))?;
+
+    let msg = bitcoin::secp256k1::Message::from_digest(*sighash.as_ref());
+    let ecdsa_sig = secp.sign_ecdsa(&msg, &secret_key);
+    let signature = bitcoin::ecdsa::Signature::sighash_all(ecdsa_sig);
+
+    // Build witness for P2WPKH
+    let mut witness = Witness::new();
+    witness.push(signature.serialize());
+    witness.push(our_pubkey.serialize());
+    rotation_tx.input[0].witness = witness;
+
+    // Broadcast
+    println!("  Broadcasting rotation transaction...");
+
+    let data_dir = config.data_dir.clone();
+    let wallet = crate::wallet::Wallet::new(
+        config.seed,
+        config.network,
+        data_dir,
+        config.electrum_url.clone(),
+    )?;
+    wallet.broadcast(&rotation_tx)?;
+
+    let rotation_txid = rotation_tx.compute_txid();
+    println!("  Rotation txid: {}", rotation_txid);
+
+    // Publish ReservesRotate operation
+    println!();
+    println!("Publishing ReservesRotate to Nostr...");
+
+    let txid_bytes: [u8; 32] = *rotation_txid.as_ref();
+
+    // Get current block height for first_expiry_block calculation
+    let current_block_height = esplora.get_height()
+        .map_err(|e| format!("Failed to get block height: {:?}", e))?;
+    let current_block_hash = esplora.get_block_hash(current_block_height)
+        .map_err(|e| format!("Failed to get block hash: {:?}", e))?;
+    let block_hash: [u8; 32] = *current_block_hash.as_ref();
+
+    let quorum_size = (quorum_members.len() + 1) as u8;
+    let quorum_threshold = (quorum_size / 2) + 1;
+    let first_expiry_block = current_block_height + 144; // ~1 day for degraded spending
+
+    let operation = LedgerOperation::ReservesRotate {
+        reserves_id: new_reserves_address.to_string(),
+        spending_txid: txid_bytes,
+        new_outpoint_txid: txid_bytes,
+        new_outpoint_vout: 0,
+        amount: output_amount,
+        quorum_threshold,
+        quorum_size,
+        first_expiry_block,
+        ledger_hash,
+    };
+
+    let message_bytes = operation.tlv_encode();
+
+    let sequence = our_latest.sequence_number + 1;
+    let mut hash_input = Vec::new();
+    hash_input.extend_from_slice(&sequence.to_le_bytes());
+    hash_input.extend_from_slice(&our_latest.current_hash);
+    hash_input.extend_from_slice(&message_bytes);
+    let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
+
+    let update_msg = format!(
+        "deposits:ledger:{}:{}:{}",
+        hex::encode(our_latest.current_hash),
+        sequence,
+        hex::encode(&new_hash)
+    );
+    let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
+    let msg = bitcoin::secp256k1::Message::from_digest(*msg_hash.as_ref());
+    let signature = secp.sign_schnorr(&msg, &keypair);
+    let operator_sig_bytes: [u8; 64] = *signature.as_ref();
+
+    let ledger_id_bytes: [u8; 32] = {
+        let decoded = hex::decode(&ledger_id)
+            .map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
+        decoded.try_into().map_err(|_| "Ledger ID must be 32 bytes")?
+    };
+
+    let signed_update = SignedLedgerUpdate {
+        message: message_bytes,
+        message_type: 0x8001,
+        operator_signature: operator_sig_bytes,
+        partner_signature: [0u8; 64],
+        operator_id: our_pubkey,
+        ledger_id: ledger_id_bytes,
+        sequence_number: sequence,
+        previous_hash: our_latest.current_hash,
+        current_hash: new_hash,
+        timestamp: deposits_core::now_unix_timestamp(),
+        block_height: current_block_height,
+        block_hash,
+    };
+
+    let publish_transport = NostrTransportBuilder::new(secret_key)
+        .relay(&relay_url)
+        .build()
+        .await?;
+
+    publish_transport.broadcast_ledger_update(&signed_update).await?;
+
+    println!();
+    println!("Reserves rotated to quorum-controlled Taproot!");
+    println!("  New address: {}", new_reserves_address);
+    println!("  Amount: {} sats", output_amount);
+    println!("  Quorum: {}-of-{}", (quorum_members.len() + 1) / 2 + 1, quorum_members.len() + 1);
+    println!("  Sequence: {}", sequence);
 
     Ok(())
 }
