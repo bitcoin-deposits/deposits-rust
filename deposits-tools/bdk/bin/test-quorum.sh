@@ -232,14 +232,15 @@ add_quorum_members() {
         for member in $OPERATORS; do
             if [ "$op" != "$member" ]; then
                 local member_node_id=$(get_value "node_id_$member")
+                local member_ledger_id=$(get_value "ledger_id_$member")
                 local member_reserves_id=$(get_value "reserves_id_$member")
                 local op_short=$(echo "$op" | sed 's/bdk-//')
                 local member_short=$(echo "$member" | sed 's/bdk-//')
 
                 log_info "$op_short adding $member_short as quorum member..."
 
-                # Add member to op's quorum
-                local add_output=$(run_bdk_cmd "$op" partner add "$op_reserves_id" "$member_node_id" 2>&1)
+                # Add member to op's quorum (pass member's ledger ID for collateral binding)
+                local add_output=$(run_bdk_cmd "$op" partner add "$op_reserves_id" "$member_node_id" "$member_ledger_id" 2>&1)
 
                 if echo "$add_output" | grep -q "Quorum member added\|added"; then
                     # Record the join on member's ledger

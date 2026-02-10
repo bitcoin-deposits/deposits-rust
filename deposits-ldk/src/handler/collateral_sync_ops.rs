@@ -31,10 +31,16 @@ where
     /// Add a quorum member to a ledger
     /// This first requests consent from the quorum member, then sends the QuorumAddMember
     /// message to the channel partner with both signatures proving consent.
+    ///
+    /// # Arguments
+    /// * `partner_node_id` - The channel partner's node ID
+    /// * `quorum_member` - The quorum member's public key
+    /// * `member_ledger_id` - The ledger ID where the member will lock collateral (64-char hex)
     pub fn add_quorum_member(
         &self,
         partner_node_id: PublicKey,
         quorum_member: PublicKey,
+        member_ledger_id: String,
     ) -> Result<(), DepositsError> {
         use super::messages::DepositsMessage;
 
@@ -50,7 +56,7 @@ where
             // Check the actual ledger state for duplicate quorum member
             if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let ledger = ledger_arc.read().unwrap();
-                if ledger.state.quorum_members.contains(&quorum_member) {
+                if ledger.state.quorum_members.iter().any(|m| m.pubkey == quorum_member) {
                     log_info!(
                         self.logger,
                         "📋 OPERATOR: Quorum member {} already exists in ledger, skipping",
@@ -96,6 +102,7 @@ where
             LedgerOperation::QuorumAddMember {
                 quorum_member,
                 quorum_member_signature,
+                member_ledger_id: member_ledger_id.clone(),
             },
         ));
 

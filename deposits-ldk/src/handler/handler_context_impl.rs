@@ -583,11 +583,11 @@ where
         let local_msg = super::messages::DepositsMessage::from_v2(accusation_msg);
 
         for partner in partners {
-            if partner != self.our_node_id {
-                if let Err(e) = self.send_message(partner, local_msg.clone()) {
-                    log_warn!(self.logger, "⚠️ FRAUD: Failed to rebroadcast to {}: {:?}", partner, e);
+            if partner.pubkey != self.our_node_id {
+                if let Err(e) = self.send_message(partner.pubkey, local_msg.clone()) {
+                    log_warn!(self.logger, "⚠️ FRAUD: Failed to rebroadcast to {}: {:?}", partner.pubkey, e);
                 } else {
-                    log_info!(self.logger, "⚠️ FRAUD: Rebroadcast accusation to {}", partner);
+                    log_info!(self.logger, "⚠️ FRAUD: Rebroadcast accusation to {}", partner.pubkey);
                 }
             }
         }

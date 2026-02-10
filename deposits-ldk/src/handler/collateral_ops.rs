@@ -26,10 +26,10 @@ where
             let ledger = ledger_arc.read().unwrap();
 
             let quorum_members: Vec<QuorumMemberInfo> = ledger.state.quorum_members.iter()
-                .map(|reserves_id| {
-                    let attestation = ledger.state.collateral_attestations.get(reserves_id);
+                .map(|member| {
+                    let attestation = ledger.state.collateral_attestations.get(&member.pubkey);
                     QuorumMemberInfo {
-                        pubkey: *reserves_id,
+                        pubkey: member.pubkey,
                         collateral_amount: attestation.map(|a| a.amount).unwrap_or(0),
                         block_height: attestation.map(|a| a.block_height).unwrap_or(0),
                         has_attestation: attestation.is_some(),
@@ -62,7 +62,7 @@ where
 
         if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
             let ledger = ledger_arc.read().unwrap();
-            ledger.state.quorum_members.iter().cloned().collect()
+            ledger.state.quorum_members.iter().map(|m| m.pubkey).collect()
         } else {
             Vec::new()
         }
@@ -73,7 +73,7 @@ where
 
         if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
             let ledger = ledger_arc.read().unwrap();
-            ledger.state.quorum_members.contains(&potential_collateral)
+            ledger.state.quorum_members.iter().any(|m| m.pubkey == potential_collateral)
         } else {
             false
         }

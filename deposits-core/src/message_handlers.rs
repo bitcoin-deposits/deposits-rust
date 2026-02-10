@@ -405,10 +405,10 @@ pub fn handle_ledger_update<C: HandlerContext>(
         // Check for idempotent operations first - these still need ACKs but don't modify state
         let is_idempotent = match &operation {
             LedgerOperation::QuorumAddMember { quorum_member, .. } => {
-                ledger.state.quorum_members.contains(quorum_member)
+                ledger.state.quorum_members.iter().any(|m| m.pubkey == *quorum_member)
             }
             LedgerOperation::QuorumRemoveMember { quorum_member, .. } => {
-                !ledger.state.quorum_members.contains(quorum_member)
+                !ledger.state.quorum_members.iter().any(|m| m.pubkey == *quorum_member)
             }
             LedgerOperation::DepositOpen { pubkey, .. } => {
                 ledger.state.deposits.contains_key(pubkey)
@@ -1017,6 +1017,7 @@ pub fn handle_collateral_add_partner<C: HandlerContext>(
     let operation = LedgerOperation::QuorumAddMember {
         quorum_member: msg.quorum_member,
         quorum_member_signature: msg.quorum_member_signature,
+        member_ledger_id: msg.member_ledger_id.clone(),
     };
 
     // Check for idempotency and append (single write lock scope)
@@ -1026,7 +1027,7 @@ pub fn handle_collateral_add_partner<C: HandlerContext>(
         )?;
 
         // Idempotency check
-        if ledger.state.quorum_members.contains(&msg.quorum_member) {
+        if ledger.state.quorum_members.iter().any(|m| m.pubkey == msg.quorum_member) {
             let seq = ledger.sequence();
             let hash = ledger.hash();
             (hash, hash, seq, Vec::new(), true)
@@ -1107,7 +1108,7 @@ pub fn handle_collateral_remove_partner<C: HandlerContext>(
         )?;
 
         // Idempotency check - if already removed, return success
-        if !ledger.state.quorum_members.contains(&msg.quorum_member) {
+        if !ledger.state.quorum_members.iter().any(|m| m.pubkey == msg.quorum_member) {
             let seq = ledger.sequence();
             let hash = ledger.hash();
             (hash, hash, seq, Vec::new(), true)
@@ -2608,7 +2609,7 @@ pub fn handle_ledger_export_request<C: HandlerContext>(
     // Validate: sender should be a partner or quorum member
     let is_partner = ledger_guard.reserves_key() == sender.to_string()
         || sender.to_string() == msg.reserves_id;
-    let is_quorum_member = ledger_guard.state.quorum_members.contains(&sender);
+    let is_quorum_member = ledger_guard.state.quorum_members.iter().any(|m| m.pubkey == sender);
 
     if !is_partner && !is_quorum_member {
         return Ok(HandlerResult::Response(ResponseData::LedgerExportResponse {
@@ -2932,6 +2933,7 @@ mod tests {
             reserves_id: other_partner.to_string(), // Not us
             quorum_member,
             quorum_member_signature: [0u8; 64],
+            member_ledger_id: String::new(),
         };
 
         // We're not the target partner - should be rejected
@@ -2952,6 +2954,7 @@ mod tests {
             reserves_id: our_node_id.to_string(),
             quorum_member,
             quorum_member_signature: [0u8; 64],
+            member_ledger_id: String::new(),
         };
 
         // No ledger exists - should error
@@ -2976,6 +2979,7 @@ mod tests {
             reserves_id: our_node_id.to_string(),
             quorum_member,
             quorum_member_signature: [0u8; 64],
+            member_ledger_id: String::new(),
         };
 
         // Valid request - should return Ok (actual mutation happens in LDK layer)
@@ -2993,7 +2997,7 @@ mod tests {
 
         // Create a ledger with the quorum member already added
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
-        ledger.state.quorum_members.push(quorum_member);
+        ledger.state.quorum_members.push(crate::types::QuorumMember { pubkey: quorum_member, ledger_id: String::new() });
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = QuorumAddMemberMsg {
@@ -3001,6 +3005,7 @@ mod tests {
             reserves_id: our_node_id.to_string(),
             quorum_member,
             quorum_member_signature: [0u8; 64],
+            member_ledger_id: String::new(),
         };
 
         // Already exists - should return Ok (idempotent success)
@@ -3061,7 +3066,7 @@ mod tests {
 
         // Create a ledger with the quorum member
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
-        ledger.state.quorum_members.push(quorum_member);
+        ledger.state.quorum_members.push(crate::types::QuorumMember { pubkey: quorum_member, ledger_id: String::new() });
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = QuorumRemoveMemberMsg {
@@ -3090,6 +3095,7 @@ mod tests {
         let msg = CollateralAttestationMsg {
             operator: our_node_id,
             quorum_member,
+            collateral_ledger_id: String::new(),
             amount: 100_000,
             block_height: 100,
             lock_until_block: 0,
@@ -3113,6 +3119,7 @@ mod tests {
         let msg = CollateralAttestationMsg {
             operator: other_operator, // Not us
             quorum_member,
+            collateral_ledger_id: String::new(),
             amount: 100_000,
             block_height: 100,
             lock_until_block: 0,
@@ -3135,6 +3142,7 @@ mod tests {
         let msg = CollateralAttestationMsg {
             operator: our_node_id,
             quorum_member,
+            collateral_ledger_id: String::new(),
             amount: 0, // Zero
             block_height: 100,
             lock_until_block: 0,
@@ -3157,6 +3165,7 @@ mod tests {
         let msg = CollateralAttestationMsg {
             operator: our_node_id,
             quorum_member,
+            collateral_ledger_id: String::new(),
             amount: 100_000,
             block_height: 100,
             lock_until_block: 0,

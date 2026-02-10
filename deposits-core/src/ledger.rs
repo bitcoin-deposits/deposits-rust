@@ -146,7 +146,7 @@ impl Ledger {
         operator_key: PublicKey,
         reserves_key: String,
         role: LedgerRole,
-        quorum_members: Vec<PublicKey>,
+        quorum_members: Vec<crate::types::QuorumMember>,
         ledger_address: String,
         genesis_block: u32,
     ) -> Self {
@@ -173,7 +173,7 @@ impl Ledger {
         operator_key: PublicKey,
         reserves_key: String,
         role: LedgerRole,
-        quorum_members: Vec<PublicKey>,
+        quorum_members: Vec<crate::types::QuorumMember>,
         ledger_address: String,
         genesis_block: u32,
         collateral_enforcement_block: Option<u64>,
@@ -325,7 +325,7 @@ impl Ledger {
             // For the first CustodyDispute (entering disputed state from normal),
             // the signer must be in the current quorum
             if self.state.dispute_state == DisputeState::Normal {
-                if !self.state.quorum_members.contains(signer) {
+                if !self.state.quorum_members.iter().any(|m| m.pubkey == *signer) {
                     return Err(DepositsError::ProtocolViolation {
                         violation_type: "custody_dispute_unauthorized".to_string(),
                         details: format!(
@@ -557,7 +557,7 @@ impl Ledger {
         if let Some(reserves_pubkey) = self.reserves_key_as_pubkey() {
             participants.push(reserves_pubkey);
         }
-        participants.extend(self.state.quorum_members.iter().cloned());
+        participants.extend(self.state.quorum_members.iter().map(|m| m.pubkey));
         participants
     }
 
@@ -569,12 +569,12 @@ impl Ledger {
         if let Some(reserves_pubkey) = self.reserves_key_as_pubkey() {
             partners.push(reserves_pubkey);
         }
-        partners.extend(self.state.quorum_members.iter().cloned());
+        partners.extend(self.state.quorum_members.iter().map(|m| m.pubkey));
         partners
     }
 
-    /// Add a quorum member to this ledger.
-    pub fn add_quorum_member(&mut self, partner: PublicKey) -> DepositsResult<()> {
+    /// Add a quorum member to this ledger with their collateral ledger ID.
+    pub fn add_quorum_member(&mut self, partner: PublicKey, member_ledger_id: String) -> DepositsResult<()> {
         if partner == self.state.operator_key {
             return Err(DepositsError::InvalidState(
                 "Operator cannot be a quorum member".to_string()
@@ -586,12 +586,15 @@ impl Ledger {
                 "Channel partner is already part of the quorum".to_string()
             ));
         }
-        if self.state.quorum_members.contains(&partner) {
+        if self.state.quorum_members.iter().any(|m| m.pubkey == partner) {
             return Err(DepositsError::InvalidState(
                 format!("Quorum member {} already exists", partner)
             ));
         }
-        self.state.quorum_members.push(partner);
+        self.state.quorum_members.push(crate::types::QuorumMember {
+            pubkey: partner,
+            ledger_id: member_ledger_id,
+        });
         Ok(())
     }
 
@@ -1083,6 +1086,32 @@ impl Ledger {
                 // Winner validation is done via validate_custody_resolution()
                 // which requires knowing all candidates (from Nostr observation)
             }
+            LedgerOperation::CollateralAttestation { quorum_member, collateral_ledger_id, .. } => {
+                // Verify the attestation's collateral_ledger_id matches the member's registered ledger
+                let member = self.state.quorum_members.iter().find(|m| m.pubkey == *quorum_member);
+                match member {
+                    Some(m) => {
+                        if &m.ledger_id != collateral_ledger_id {
+                            return Err(DepositsError::ProtocolViolation {
+                                violation_type: "collateral_ledger_mismatch".to_string(),
+                                details: format!(
+                                    "Attestation collateral_ledger_id {} doesn't match member's registered ledger {}",
+                                    collateral_ledger_id, m.ledger_id
+                                ),
+                            });
+                        }
+                    }
+                    None => {
+                        return Err(DepositsError::ProtocolViolation {
+                            violation_type: "collateral_attestation_from_non_member".to_string(),
+                            details: format!(
+                                "Attestation from {} who is not a quorum member",
+                                quorum_member
+                            ),
+                        });
+                    }
+                }
+            }
             _ => {
                 // Other operations have simpler or no validation
             }
@@ -1204,16 +1233,22 @@ impl Ledger {
                 self.state.collateral_amount = *new_amount;
             }
             LedgerOperation::QuorumAddMember {
-                quorum_member, ..
+                quorum_member, member_ledger_id, ..
             } => {
-                if !self.state.quorum_members.contains(quorum_member) {
-                    self.state.quorum_members.push(*quorum_member);
+                use crate::types::QuorumMember;
+                // Check if this member already exists (by pubkey)
+                if !self.state.quorum_members.iter().any(|m| m.pubkey == *quorum_member) {
+                    let member = QuorumMember {
+                        pubkey: *quorum_member,
+                        ledger_id: member_ledger_id.clone(),
+                    };
+                    self.state.quorum_members.push(member);
                 }
             }
             LedgerOperation::QuorumRemoveMember {
                 quorum_member, ..
             } => {
-                self.state.quorum_members.retain(|k| k != quorum_member);
+                self.state.quorum_members.retain(|m| m.pubkey != *quorum_member);
                 // Also remove any attestations from this partner
                 self.state.collateral_attestations.remove(quorum_member);
             }
@@ -1235,6 +1270,7 @@ impl Ledger {
             LedgerOperation::CollateralAttestation {
                 collateral_operator,
                 quorum_member,
+                collateral_ledger_id,
                 amount,
                 block_height,
                 lock_until_block,
@@ -1246,6 +1282,7 @@ impl Ledger {
                 let attestation = CollateralAttestation::new(
                     *collateral_operator,
                     *quorum_member,
+                    collateral_ledger_id.clone(),
                     *amount,
                     *block_height,
                     *lock_until_block,
@@ -1866,7 +1903,7 @@ impl LedgerManager {
         operator_key: PublicKey,
         reserves_key: String,
         role: LedgerRole,
-        quorum_members: Vec<PublicKey>,
+        quorum_members: Vec<crate::types::QuorumMember>,
         ledger_address: String,
         genesis_block: u32,
     ) -> (Self, [u8; 32]) {
@@ -1890,7 +1927,7 @@ impl LedgerManager {
         operator_key: PublicKey,
         reserves_key: String,
         role: LedgerRole,
-        quorum_members: Vec<PublicKey>,
+        quorum_members: Vec<crate::types::QuorumMember>,
         ledger_address: String,
         genesis_block: u32,
         genesis_operation: LedgerOperation,

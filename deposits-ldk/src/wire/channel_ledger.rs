@@ -618,11 +618,12 @@ impl ChannelLedger {
                 self.quorum_members.retain(|p| p != quorum_member);
                 self.collateral_attestations.remove(quorum_member);
             }
-            LedgerOperation::CollateralAttestation { collateral_operator, quorum_member, amount, block_height, lock_until_block, signature, ledger_hash } => {
+            LedgerOperation::CollateralAttestation { collateral_operator, quorum_member, collateral_ledger_id, amount, block_height, lock_until_block, signature, ledger_hash } => {
                 // Store attestation by the actual quorum member
                 let attestation_msg = CollateralAttestationMsg {
                     operator: *collateral_operator,
                     quorum_member: *quorum_member,
+                    collateral_ledger_id: collateral_ledger_id.clone(),
                     amount: *amount,
                     block_height: *block_height,
                     lock_until_block: *lock_until_block,

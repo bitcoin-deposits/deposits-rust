@@ -1187,8 +1187,10 @@ pub async fn recovery_rebuild(args: &[String]) -> Result<(), Box<dyn std::error:
 }
 
 /// Add a quorum member to our dispute branch.
+/// Usage: recovery rebuild <ledger_id> quorum-add <member_pubkey> <member_ledger_id>
 pub async fn recovery_rebuild_quorum_add(ledger_id: &str, args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut member_pubkey_str: Option<String> = None;
+    let mut member_ledger_id: Option<String> = None;
     let mut config_args = Vec::new();
 
     for (i, arg) in args.iter().enumerate() {
@@ -1199,10 +1201,13 @@ pub async fn recovery_rebuild_quorum_add(ledger_id: &str, args: &[String]) -> Re
             }
         } else if member_pubkey_str.is_none() {
             member_pubkey_str = Some(arg.clone());
+        } else if member_ledger_id.is_none() {
+            member_ledger_id = Some(arg.clone());
         }
     }
 
     let member_pubkey_str = member_pubkey_str.ok_or("Missing member_pubkey")?;
+    let member_ledger_id = member_ledger_id.ok_or("Missing member_ledger_id (64-char hex hash)")?;
     let member_pubkey = PublicKey::from_str(&member_pubkey_str)
         .map_err(|e| format!("Invalid member pubkey: {}", e))?;
 
@@ -1263,6 +1268,7 @@ pub async fn recovery_rebuild_quorum_add(ledger_id: &str, args: &[String]) -> Re
     let operation = LedgerOperation::QuorumAddMember {
         quorum_member: member_pubkey,
         quorum_member_signature: [0u8; 64],
+        member_ledger_id: member_ledger_id.clone(),
     };
 
     let message_bytes = operation.tlv_encode();
@@ -1417,6 +1423,7 @@ pub async fn recovery_rebuild_attestation(ledger_id: &str, args: &[String]) -> R
     let operation = LedgerOperation::CollateralAttestation {
         collateral_operator: attestation.operator,
         quorum_member: attestation.quorum_member,
+        collateral_ledger_id: attestation.collateral_ledger_id.clone(),
         amount: attestation.amount,
         block_height: attestation.block_height,
         lock_until_block: attestation.lock_until_block,

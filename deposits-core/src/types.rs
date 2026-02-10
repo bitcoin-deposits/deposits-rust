@@ -517,6 +517,21 @@ pub struct QuorumMembership {
     pub joined_at_sequence: u64,
 }
 
+/// A quorum member with their associated ledger for collateral binding.
+///
+/// When adding a quorum member, we explicitly record which ledger they will
+/// use to provide collateral backing. This creates a verifiable link between
+/// the quorum membership and the collateral source.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuorumMember {
+    /// The quorum member's public key.
+    #[serde(with = "serde_pubkey")]
+    pub pubkey: PublicKey,
+    /// The ledger ID where this member will lock collateral.
+    /// This must match the collateral_ledger_id in any CollateralAttestation from this member.
+    pub ledger_id: String,
+}
+
 /// A collateral attestation from a quorum member proving their reserves backing.
 ///
 /// Partners periodically sign attestations proving they have committed
@@ -529,6 +544,10 @@ pub struct CollateralAttestation {
     /// Partner who signed this attestation.
     #[serde(with = "serde_pubkey")]
     pub quorum_member: PublicKey,
+    /// The ledger ID where collateral is locked.
+    /// Must match member_ledger_id from the QuorumAddMember that added this member.
+    #[serde(default)]
+    pub collateral_ledger_id: String,
     /// Amount of collateral committed (satoshis).
     pub amount: u64,
     /// Block height when this attestation was created.
@@ -549,6 +568,7 @@ impl CollateralAttestation {
     pub fn new(
         operator_id: PublicKey,
         quorum_member: PublicKey,
+        collateral_ledger_id: String,
         amount: u64,
         block_height: u32,
         lock_until_block: u32,
@@ -558,6 +578,7 @@ impl CollateralAttestation {
         Self {
             operator_id,
             quorum_member,
+            collateral_ledger_id,
             amount,
             block_height,
             lock_until_block,
@@ -733,8 +754,9 @@ pub struct LedgerState {
     /// Pending invoice awaiting payment.
     pub pending_invoice: Option<PendingInvoice>,
     /// Quorum members who provide additional backing.
-    #[serde(with = "serde_pubkey_vec")]
-    pub quorum_members: Vec<PublicKey>,
+    /// Each member includes their pubkey and the ledger ID where they lock collateral.
+    #[serde(default)]
+    pub quorum_members: Vec<QuorumMember>,
     /// Committed collateral amount (our collateral pledged to others).
     pub collateral_amount: u64,
     /// Block height of last collateral increase.
@@ -814,8 +836,8 @@ pub struct LedgerState {
     /// Quorum members at the point of the last CustodyDispute.
     /// Used to verify that CustodyDispute signers were actually quorum members at the fork point.
     /// Only populated when dispute_state != Normal.
-    #[serde(with = "serde_pubkey_vec", default)]
-    pub quorum_at_fork: Vec<PublicKey>,
+    #[serde(default)]
+    pub quorum_at_fork: Vec<QuorumMember>,
     /// Sequence number of the last valid update before the dispute.
     /// Used for dispute validation.
     #[serde(default)]
@@ -934,7 +956,7 @@ impl LedgerState {
         partner: PublicKey,
         attestation: CollateralAttestation,
     ) -> Result<(), crate::DepositsError> {
-        if !self.quorum_members.contains(&partner) {
+        if !self.quorum_members.iter().any(|m| m.pubkey == partner) {
             return Err(crate::DepositsError::ProtocolViolation {
                 violation_type: "invalid_quorum_member".to_string(),
                 details: format!("Partner {} is not a quorum member for this ledger", partner),
@@ -968,13 +990,13 @@ impl LedgerState {
     pub fn missing_attestations(&self, current_block: u32, max_age_blocks: u32) -> Vec<PublicKey> {
         self.quorum_members
             .iter()
-            .filter(|partner| {
-                match self.collateral_attestations.get(partner) {
+            .filter(|member| {
+                match self.collateral_attestations.get(&member.pubkey) {
                     None => true,
                     Some(a) => !a.is_recent(current_block, max_age_blocks),
                 }
             })
-            .copied()
+            .map(|m| m.pubkey)
             .collect()
     }
 
@@ -1908,6 +1930,7 @@ impl TlvDecode for SignedLedgerUpdate {
 mod collateral_attestation_fields {
     pub const OPERATOR_ID: u64 = 0;
     pub const QUORUM_MEMBER: u64 = 2;
+    pub const COLLATERAL_LEDGER_ID: u64 = 3;
     pub const AMOUNT: u64 = 4;
     pub const BLOCK_HEIGHT: u64 = 6;
     pub const LOCK_UNTIL_BLOCK: u64 = 7;
@@ -1920,6 +1943,7 @@ impl TlvEncode for CollateralAttestation {
         TlvBuilder::new()
             .pubkey_field(collateral_attestation_fields::OPERATOR_ID, &self.operator_id)
             .pubkey_field(collateral_attestation_fields::QUORUM_MEMBER, &self.quorum_member)
+            .string_field(collateral_attestation_fields::COLLATERAL_LEDGER_ID, &self.collateral_ledger_id)
             .u64_field(collateral_attestation_fields::AMOUNT, self.amount)
             .u32_field(collateral_attestation_fields::BLOCK_HEIGHT, self.block_height)
             .u32_field(collateral_attestation_fields::LOCK_UNTIL_BLOCK, self.lock_until_block)
@@ -1935,6 +1959,7 @@ impl TlvDecode for CollateralAttestation {
         Ok(Self {
             operator_id: reader.read_pubkey(collateral_attestation_fields::OPERATOR_ID)?,
             quorum_member: reader.read_pubkey(collateral_attestation_fields::QUORUM_MEMBER)?,
+            collateral_ledger_id: reader.read_string_opt(collateral_attestation_fields::COLLATERAL_LEDGER_ID)?.unwrap_or_default(),
             amount: reader.read_u64(collateral_attestation_fields::AMOUNT)?,
             block_height: reader.read_u32(collateral_attestation_fields::BLOCK_HEIGHT)?,
             lock_until_block: reader.read_u32_opt(collateral_attestation_fields::LOCK_UNTIL_BLOCK)?.unwrap_or(0),
@@ -2551,6 +2576,7 @@ mod tests {
         let original = CollateralAttestation {
             operator_id: pk,
             quorum_member: pk,
+            collateral_ledger_id: "test_ledger_id".to_string(),
             amount: 1_000_000,
             block_height: 800_000,
             lock_until_block: 900_000,
@@ -2579,6 +2605,7 @@ mod tests {
         let attestation = CollateralAttestation {
             operator_id: test_pubkey(),
             quorum_member: test_pubkey_2(),
+            collateral_ledger_id: String::new(),
             amount: 100_000,
             block_height: 800_000,
             lock_until_block: 900_000,
@@ -2600,12 +2627,16 @@ mod tests {
         // Add quorum members
         let collateral1 = test_pubkey_2();
         let collateral2 = test_pubkey_3();
-        state.quorum_members = vec![collateral1, collateral2];
+        state.quorum_members = vec![
+            QuorumMember { pubkey: collateral1, ledger_id: String::new() },
+            QuorumMember { pubkey: collateral2, ledger_id: String::new() },
+        ];
 
         // Add attestation for collateral1
         let attestation1 = CollateralAttestation::new(
             op,
             collateral1,
+            String::new(),
             50_000,
             800_000,
             0, // lock_until_block
@@ -2628,6 +2659,7 @@ mod tests {
         let attestation2 = CollateralAttestation::new(
             op,
             collateral2,
+            String::new(),
             30_000,
             800_000,
             0, // lock_until_block

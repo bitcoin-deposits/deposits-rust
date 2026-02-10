@@ -676,19 +676,20 @@ impl Node {
 
             // Find all CollateralAttestation operations in our history
             let mut attestations_to_copy: Vec<LedgerOperation> = Vec::new();
-            let mut quorum_members_to_add: Vec<bitcoin::secp256k1::PublicKey> = Vec::new();
+            // Track quorum members with their collateral ledger IDs
+            let mut quorum_members_to_add: Vec<(bitcoin::secp256k1::PublicKey, String)> = Vec::new();
 
             for update in ledger.history.iter() {
                 if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
                     match &op {
-                        LedgerOperation::CollateralAttestation { collateral_operator, quorum_member, .. } => {
+                        LedgerOperation::CollateralAttestation { collateral_operator, quorum_member, collateral_ledger_id, .. } => {
                             // We want attestations where WE are the quorum_member
                             // (proving we locked collateral on other operators' ledgers)
                             if quorum_member == &our_pubkey {
                                 attestations_to_copy.push(op.clone());
-                                // Also need to add the collateral_operator as a quorum member
-                                if !quorum_members_to_add.contains(collateral_operator) {
-                                    quorum_members_to_add.push(*collateral_operator);
+                                // Also need to add the collateral_operator as a quorum member with their ledger ID
+                                if !quorum_members_to_add.iter().any(|(pk, _)| pk == collateral_operator) {
+                                    quorum_members_to_add.push((*collateral_operator, collateral_ledger_id.clone()));
                                 }
                             }
                         }
@@ -700,11 +701,11 @@ impl Node {
             drop(ledger);
 
             // First add quorum members, then attestations
-            for member in quorum_members_to_add {
+            for (member, member_ledger_id) in quorum_members_to_add {
                 let mut ledger = ledger_arc.write().unwrap();
 
                 // Check if already added
-                if ledger.state.quorum_members.contains(&member) {
+                if ledger.state.quorum_members.iter().any(|m| m.pubkey == member) {
                     continue;
                 }
 
@@ -714,6 +715,7 @@ impl Node {
                 let add_op = LedgerOperation::QuorumAddMember {
                     quorum_member: member,
                     quorum_member_signature: [0u8; 64], // Placeholder
+                    member_ledger_id: member_ledger_id.clone(),
                 };
 
                 if let Err(e) = ledger.append_operation_with_block(
@@ -724,7 +726,7 @@ impl Node {
                 ) {
                     tracing::warn!("Failed to add quorum member: {:?}", e);
                 } else {
-                    tracing::info!("Added quorum member: {}...", &hex::encode(member.serialize())[..16]);
+                    tracing::info!("Added quorum member: {}... (ledger: {}...)", &hex::encode(member.serialize())[..16], &member_ledger_id[..16.min(member_ledger_id.len())]);
                 }
             }
 
@@ -3716,11 +3718,13 @@ impl Node {
     /// # Arguments
     /// * `reserves_id` - Our ledger's reserves ID
     /// * `quorum_member` - The public key of the new quorum member
+    /// * `member_ledger_id` - The ledger ID where this member will lock collateral
     /// * `signature` - The member's consent signature (or placeholder for testing)
     pub fn add_quorum_member(
         &self,
         reserves_id: &str,
         quorum_member: PublicKey,
+        member_ledger_id: &str,
         signature: [u8; 64],
     ) -> Result<(), Error> {
         {
@@ -3734,7 +3738,7 @@ impl Node {
             let mut ledger = ledger_arc.write().unwrap();
 
             // Check if already a member
-            if ledger.state.quorum_members.contains(&quorum_member) {
+            if ledger.state.quorum_members.iter().any(|m| m.pubkey == quorum_member) {
                 return Err(Error::Protocol("Already a quorum member".to_string()));
             }
 
@@ -3746,6 +3750,7 @@ impl Node {
             let operation = deposits_core::messages::LedgerOperation::QuorumAddMember {
                 quorum_member,
                 quorum_member_signature: signature,
+                member_ledger_id: member_ledger_id.to_string(),
             };
 
             ledger.append_operation_with_block(
@@ -3849,8 +3854,8 @@ impl Node {
             }
 
             // Add quorum members
-            for cp in &ledger.state.quorum_members {
-                partners.push((cp.to_string(), "Quorum member".to_string()));
+            for member in &ledger.state.quorum_members {
+                partners.push((member.pubkey.to_string(), "Quorum member".to_string()));
             }
         }
 
@@ -3891,8 +3896,8 @@ impl Node {
         let (quorum_members, quorum_expiries, ledger_hash, _current_reserves) = {
             let ledger = ledger_arc.read().unwrap();
 
-            // Get quorum members and their expiration times
-            let members = ledger.state.quorum_members.clone();
+            // Get quorum members' pubkeys
+            let members: Vec<PublicKey> = ledger.state.quorum_members.iter().map(|m| m.pubkey).collect();
 
             // For now, use a fixed expiration window per member
             // In a real implementation, these would come from QuorumAddMember operations
@@ -4069,6 +4074,9 @@ impl Node {
             // Get current ledger hash for the attestation
             let ledger_hash = ledger.hash();
 
+            // Get ledger_id (hex-encoded) for the attestation
+            let collateral_ledger_id = hex::encode(ledger.state.ledger_id);
+
             // Create operator's attestation signature
             // Sign: operator || quorum_member || amount || block_height || lock_until_block || ledger_hash
             let attestation_signature = self.sign_collateral_attestation(
@@ -4082,6 +4090,7 @@ impl Node {
             deposits_core::CollateralAttestationMsg {
                 operator: self.node_id,
                 quorum_member: requesting_operator,
+                collateral_ledger_id,
                 amount: total_locked,
                 block_height,
                 lock_until_block: min_lock_until,
@@ -4167,6 +4176,7 @@ impl Node {
             let operation = LedgerOperation::CollateralAttestation {
                 collateral_operator: attestation.operator,
                 quorum_member: attestation.quorum_member,
+                collateral_ledger_id: attestation.collateral_ledger_id.clone(),
                 amount: attestation.amount,
                 block_height: attestation.block_height,
                 lock_until_block: attestation.lock_until_block,
@@ -4193,9 +4203,10 @@ impl Node {
         }
 
         tracing::info!(
-            "Recorded collateral attestation from {} for {} msats",
+            "Recorded collateral attestation from {} for {} msats (ledger {})",
             attestation.operator,
-            attestation.amount
+            attestation.amount,
+            attestation.collateral_ledger_id
         );
 
         Ok(())

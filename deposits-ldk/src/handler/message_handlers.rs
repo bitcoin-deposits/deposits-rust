@@ -113,7 +113,7 @@ where
 
     fn store_attestation(&self, ledger: &mut deposits_core::Ledger, msg: &crate::wire::messages::CollateralAttestationMsg, sender: PublicKey) {
         let attestation = deposits_core::types::CollateralAttestation::new(
-            msg.operator, msg.quorum_member, msg.amount, msg.block_height, msg.lock_until_block, msg.signature, msg.ledger_hash,
+            msg.operator, msg.quorum_member, msg.collateral_ledger_id.clone(), msg.amount, msg.block_height, msg.lock_until_block, msg.signature, msg.ledger_hash,
         );
         ledger.state.collateral_attestations.insert(sender, attestation);
         log_info!(self.logger, "💰 COLLATERAL: Stored attestation from {}", sender);
@@ -121,7 +121,7 @@ where
 
     fn store_attestation_as_partner(&self, ledger: &mut deposits_core::Ledger, msg: &crate::wire::messages::CollateralAttestationMsg) {
         let attestation = deposits_core::types::CollateralAttestation::new(
-            msg.operator, msg.quorum_member, msg.amount, msg.block_height, msg.lock_until_block, msg.signature, msg.ledger_hash,
+            msg.operator, msg.quorum_member, msg.collateral_ledger_id.clone(), msg.amount, msg.block_height, msg.lock_until_block, msg.signature, msg.ledger_hash,
         );
         ledger.state.collateral_attestations.insert(msg.quorum_member, attestation);
         // Recalculate from attestations HashMap - this properly handles duplicates
@@ -142,6 +142,7 @@ where
             LedgerOperation::CollateralAttestation {
                 collateral_operator: msg.operator,
                 quorum_member: msg.quorum_member,
+                collateral_ledger_id: msg.collateral_ledger_id.clone(),
                 amount: msg.amount,
                 block_height: msg.block_height,
                 lock_until_block: msg.lock_until_block,
@@ -165,7 +166,7 @@ where
                     if existing.available_collateral() == msg.amount {
                         // Same amount - update HashMap with fresh attestation but skip history entry
                         let attestation = deposits_core::types::CollateralAttestation::new(
-                            msg.operator, msg.quorum_member, msg.amount, msg.block_height, msg.lock_until_block, msg.signature, msg.ledger_hash,
+                            msg.operator, msg.quorum_member, msg.collateral_ledger_id.clone(), msg.amount, msg.block_height, msg.lock_until_block, msg.signature, msg.ledger_hash,
                         );
                         ledger.state.collateral_attestations.insert(msg.quorum_member, attestation);
                         log_info!(self.logger, "💰 COLLATERAL: Updated attestation from {} (same amount {}, fresh block {}), no history entry",

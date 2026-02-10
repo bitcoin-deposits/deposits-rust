@@ -391,6 +391,7 @@ impl DepositsMessage {
         operator: PublicKey,
         partner: PublicKey,
         quorum_member: PublicKey,
+        member_ledger_id: String,
     ) -> Self {
         Self::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             operator,
@@ -398,6 +399,7 @@ impl DepositsMessage {
             LedgerOperation::QuorumAddMember {
                 quorum_member,
                 quorum_member_signature: [0u8; 64], // Filled in at signing time
+                member_ledger_id,
             },
         ))
     }
@@ -452,6 +454,7 @@ impl DepositsMessage {
         partner: PublicKey,
         collateral_operator: PublicKey,
         quorum_member: PublicKey,
+        collateral_ledger_id: String,
         amount: u64,
         block_height: u32,
         lock_until_block: u32,
@@ -462,7 +465,7 @@ impl DepositsMessage {
             operator,
             partner.to_string(),
             LedgerOperation::CollateralAttestation {
-                collateral_operator, quorum_member, amount, block_height, lock_until_block, signature, ledger_hash
+                collateral_operator, quorum_member, collateral_ledger_id, amount, block_height, lock_until_block, signature, ledger_hash
             },
         ))
     }

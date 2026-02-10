@@ -128,8 +128,9 @@ LEDGER SUBCOMMANDS:
 
 PARTNER SUBCOMMANDS:
     partner request <pubkey>   Send quorum membership request
-    partner add <reserves_id> <quorum_member_pubkey>
+    partner add <reserves_id> <quorum_member_pubkey> <member_ledger_id>
                     Add a quorum member to your ledger (records QuorumAddMember)
+                    member_ledger_id: 64-char hex hash identifying member's collateral ledger
     partner join <our_reserves_id> <target_operator> <target_reserves_id> <expires_block>
                     Record that you joined another operator's quorum (records QuorumJoin)
     partner list               List all quorum members
@@ -835,14 +836,14 @@ async fn auto_advertise_ledger(
 
     // Add quorum member details
     use deposits_bdk::nostr::QuorumMemberInfo;
-    for member_pubkey in ledger.state.quorum_members.iter() {
-        let attestation = ledger.state.collateral_attestations.get(member_pubkey);
+    for member in ledger.state.quorum_members.iter() {
+        let attestation = ledger.state.collateral_attestations.get(&member.pubkey);
         let (collateral_sats, lock_expires) = attestation
             .map(|a| (a.amount / 1000, a.lock_until_block as u64))
             .unwrap_or((0, 0));
 
         ad.quorum_members.push(QuorumMemberInfo {
-            pubkey: hex::encode(member_pubkey.serialize()),
+            pubkey: hex::encode(member.pubkey.serialize()),
             collateral_sats,
             lock_expires_block: lock_expires,
         });
@@ -1499,14 +1500,14 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     // Quorum member details
     use deposits_bdk::nostr::QuorumMemberInfo;
-    for member_pubkey in &quorum_members {
-        let attestation = ledger.state.collateral_attestations.get(member_pubkey);
+    for member in &quorum_members {
+        let attestation = ledger.state.collateral_attestations.get(&member.pubkey);
         let (collateral_sats, lock_expires) = attestation
             .map(|a| (a.amount / 1000, a.lock_until_block as u64)) // msats to sats
             .unwrap_or((0, 0));
 
         ad.quorum_members.push(QuorumMemberInfo {
-            pubkey: hex::encode(member_pubkey.serialize()),
+            pubkey: hex::encode(member.pubkey.serialize()),
             collateral_sats,
             lock_expires_block: lock_expires,
         });
@@ -1870,10 +1871,11 @@ async fn partner_request(args: &[String]) -> Result<(), Box<dyn std::error::Erro
 }
 
 /// Add a quorum member to our ledger
-/// Usage: partner add <reserves_id> <quorum_member_pubkey>
+/// Usage: partner add <reserves_id> <quorum_member_pubkey> <member_ledger_id>
 async fn partner_add(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut reserves_id: Option<String> = None;
     let mut quorum_member_str: Option<String> = None;
+    let mut member_ledger_id: Option<String> = None;
     let mut config_args = Vec::new();
 
     let mut i = 0;
@@ -1888,14 +1890,22 @@ async fn partner_add(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
             reserves_id = Some(args[i].clone());
         } else if quorum_member_str.is_none() {
             quorum_member_str = Some(args[i].clone());
+        } else if member_ledger_id.is_none() {
+            member_ledger_id = Some(args[i].clone());
         }
         i += 1;
     }
 
     let reserves_id = reserves_id.ok_or("Reserves ID required")?;
     let quorum_member_str = quorum_member_str.ok_or("Quorum member pubkey required")?;
+    let member_ledger_id = member_ledger_id.ok_or("Member ledger ID required (64-char hex hash of member's ledger)")?;
     let quorum_member = PublicKey::from_str(&quorum_member_str)
         .map_err(|e| format!("Invalid quorum member pubkey: {}", e))?;
+
+    // Validate ledger ID format (should be 64 hex chars)
+    if member_ledger_id.len() != 64 || !member_ledger_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("Member ledger ID must be a 64-character hex string".into());
+    }
 
     let config = parse_config(&config_args)?;
     let seed = config.seed.clone();
@@ -1905,11 +1915,12 @@ async fn partner_add(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     let node = Node::new(config).await?;
 
     println!("Adding quorum member {} to ledger {}...", quorum_member, reserves_id);
+    println!("  Member's collateral ledger: {}...", &member_ledger_id[..16]);
 
     // For testing, use a placeholder signature (in production this would come from the member)
     let placeholder_sig = [0u8; 64];
 
-    node.add_quorum_member(&reserves_id, quorum_member, placeholder_sig)?;
+    node.add_quorum_member(&reserves_id, quorum_member, &member_ledger_id, placeholder_sig)?;
 
     // Broadcast to Nostr
     if let Err(e) = node.broadcast_last_update(&reserves_id).await {
@@ -1922,6 +1933,7 @@ async fn partner_add(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     println!("Quorum member added!");
     println!("  Member: {}", quorum_member);
     println!("  Ledger: {}", reserves_id);
+    println!("  Member's collateral ledger: {}", member_ledger_id);
 
     Ok(())
 }

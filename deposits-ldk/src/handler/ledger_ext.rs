@@ -153,7 +153,7 @@ impl LedgerExt for Ledger {
             .expect("reserves_key should be valid pubkey string");
         deposits_core::VoterSet::new(
             reserves_pubkey,
-            self.state.quorum_members.clone(),
+            self.state.quorum_members.iter().map(|m| m.pubkey).collect(),
         )
     }
 
@@ -194,12 +194,13 @@ impl LedgerExt for Ledger {
                 }
                 DepositsMessage::LedgerUpdate(ref update_msg) => {
                     // V2 CollateralAttestation is inside LedgerUpdate
-                    if let deposits_core::messages::LedgerOperation::CollateralAttestation { collateral_operator, quorum_member, amount, block_height, lock_until_block, signature, ledger_hash } = &update_msg.operation {
+                    if let deposits_core::messages::LedgerOperation::CollateralAttestation { collateral_operator, quorum_member, collateral_ledger_id, amount, block_height, lock_until_block, signature, ledger_hash } = &update_msg.operation {
                         // Check if this partner is relevant (is our direct partner or a quorum member)
-                        if quorum_member.to_string() == self.state.reserves_key || self.state.quorum_members.contains(quorum_member) {
+                        if quorum_member.to_string() == self.state.reserves_key || self.state.quorum_members.iter().any(|m| m.pubkey == *quorum_member) {
                             let attestation = deposits_core::CollateralAttestation {
                                 operator_id: *collateral_operator,
                                 quorum_member: *quorum_member,
+                                collateral_ledger_id: collateral_ledger_id.clone(),
                                 amount: *amount,
                                 block_height: *block_height,
                                 lock_until_block: *lock_until_block,
@@ -366,7 +367,7 @@ impl LedgerExt for Ledger {
         partner: PublicKey,
         attestation: CollateralAttestationMsg,
     ) -> Result<(), DepositsError> {
-        if !self.state.quorum_members.contains(&partner) {
+        if !self.state.quorum_members.iter().any(|m| m.pubkey == partner) {
             return Err(DepositsError::InvalidState(
                 format!("Partner {} is not a quorum member for this ledger", partner)
             ));
@@ -375,6 +376,7 @@ impl LedgerExt for Ledger {
         let core_attestation = deposits_core::CollateralAttestation {
             operator_id: attestation.operator,
             quorum_member: attestation.quorum_member,
+            collateral_ledger_id: attestation.collateral_ledger_id.clone(),
             amount: attestation.amount,
             block_height: attestation.block_height,
             lock_until_block: attestation.lock_until_block,
@@ -501,8 +503,8 @@ mod tests {
             "test_address".to_string(),
             0,
         );
-        ledger.add_quorum_member(collateral1).unwrap();
-        ledger.add_quorum_member(collateral2).unwrap();
+        ledger.add_quorum_member(collateral1, "0000000000000000000000000000000000000000000000000000000000000001".to_string()).unwrap();
+        ledger.add_quorum_member(collateral2, "0000000000000000000000000000000000000000000000000000000000000002".to_string()).unwrap();
 
         let voter_set = ledger.construct_voter_set();
 
@@ -525,7 +527,7 @@ mod tests {
             "test_address".to_string(),
             0,
         );
-        ledger.add_quorum_member(collateral).unwrap();
+        ledger.add_quorum_member(collateral, "0000000000000000000000000000000000000000000000000000000000000001".to_string()).unwrap();
 
         let voter_set = ledger.construct_voter_set();
         let ledger_hash = [0xAB; 32];
@@ -553,8 +555,8 @@ mod tests {
             "test_address".to_string(),
             0,
         );
-        ledger.add_quorum_member(collateral1).unwrap();
-        ledger.add_quorum_member(collateral2).unwrap();
+        ledger.add_quorum_member(collateral1, "0000000000000000000000000000000000000000000000000000000000000001".to_string()).unwrap();
+        ledger.add_quorum_member(collateral2, "0000000000000000000000000000000000000000000000000000000000000002".to_string()).unwrap();
 
         let participants = ledger.quorum_participants();
         assert_eq!(participants.len(), 4);
@@ -576,7 +578,7 @@ mod tests {
             "test_address".to_string(),
             0,
         );
-        ledger.add_quorum_member(collateral).unwrap();
+        ledger.add_quorum_member(collateral, "0000000000000000000000000000000000000000000000000000000000000001".to_string()).unwrap();
 
         let partners = ledger.all_partners();
         assert_eq!(partners.len(), 2);
@@ -600,10 +602,10 @@ mod tests {
         assert!(ledger.state.quorum_members.is_empty());
 
         let new_collateral = generate_test_pubkey(3);
-        let result = ledger.add_quorum_member(new_collateral);
+        let result = ledger.add_quorum_member(new_collateral, "0000000000000000000000000000000000000000000000000000000000000001".to_string());
         assert!(result.is_ok());
         assert_eq!(ledger.state.quorum_members.len(), 1);
-        assert!(ledger.state.quorum_members.contains(&new_collateral));
+        assert!(ledger.state.quorum_members.iter().any(|m| m.pubkey == new_collateral));
     }
 
     #[test]
@@ -618,7 +620,7 @@ mod tests {
             0,
         );
 
-        let result = ledger.add_quorum_member(operator);
+        let result = ledger.add_quorum_member(operator, "0000000000000000000000000000000000000000000000000000000000000001".to_string());
         assert!(result.is_err());
         assert!(ledger.state.quorum_members.is_empty());
     }
@@ -635,7 +637,7 @@ mod tests {
             0,
         );
 
-        let result = ledger.add_quorum_member(partner);
+        let result = ledger.add_quorum_member(partner, "0000000000000000000000000000000000000000000000000000000000000001".to_string());
         assert!(result.is_err());
         assert!(ledger.state.quorum_members.is_empty());
     }
@@ -653,8 +655,8 @@ mod tests {
             0,
         );
 
-        assert!(ledger.add_quorum_member(collateral).is_ok());
-        let result = ledger.add_quorum_member(collateral);
+        assert!(ledger.add_quorum_member(collateral, "0000000000000000000000000000000000000000000000000000000000000001".to_string()).is_ok());
+        let result = ledger.add_quorum_member(collateral, "0000000000000000000000000000000000000000000000000000000000000001".to_string());
         assert!(result.is_err());
         assert_eq!(ledger.state.quorum_members.len(), 1);
     }

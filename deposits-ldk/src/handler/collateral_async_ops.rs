@@ -46,7 +46,7 @@ where
             // Check the actual ledger state for duplicate quorum member
             if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let ledger = ledger_arc.read().unwrap();
-                if ledger.state.quorum_members.contains(&quorum_member) {
+                if ledger.state.quorum_members.iter().any(|m| m.pubkey == quorum_member) {
                     log_info!(
                         self.logger,
                         "📋 OPERATOR: Quorum member {} already exists in ledger, skipping",
@@ -92,6 +92,7 @@ where
             LedgerOperation::QuorumAddMember {
                 quorum_member,
                 quorum_member_signature,
+                member_ledger_id: String::new(), // TODO: Pass actual ledger ID
             },
         );
         let message = DepositsMessage::LedgerUpdate(update_msg);

@@ -682,7 +682,7 @@ where
         });
 
         // Broadcast to all quorum members
-        let mut broadcast_targets = quorum_members;
+        let mut broadcast_targets: Vec<PublicKey> = quorum_members.iter().map(|m| m.pubkey).collect();
         if !broadcast_targets.contains(&operator) {
             broadcast_targets.push(operator);
         }

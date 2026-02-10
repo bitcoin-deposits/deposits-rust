@@ -666,6 +666,8 @@ pub enum LedgerOperation {
     CollateralAttestation {
         collateral_operator: PublicKey,
         quorum_member: PublicKey,
+        /// The ledger ID where collateral is locked (must match member_ledger_id from QuorumAddMember)
+        collateral_ledger_id: String,
         amount: u64,
         block_height: u32,
         /// Block height when the collateral lock expires
@@ -679,6 +681,8 @@ pub enum LedgerOperation {
     QuorumAddMember {
         quorum_member: PublicKey,
         quorum_member_signature: [u8; 64],
+        /// The ledger ID where this member will lock collateral
+        member_ledger_id: String,
     },
     /// Remove a quorum member from the VoterSet
     QuorumRemoveMember {
@@ -1561,18 +1565,20 @@ impl BinaryCodec for LedgerOperation {
                 write_u64(w, *new_amount)?;
                 write_u32(w, *block_height)?;
             }
-            Self::CollateralAttestation { collateral_operator, quorum_member, amount, block_height, lock_until_block, signature, ledger_hash } => {
+            Self::CollateralAttestation { collateral_operator, quorum_member, collateral_ledger_id, amount, block_height, lock_until_block, signature, ledger_hash } => {
                 write_pubkey(w, collateral_operator)?;
                 write_pubkey(w, quorum_member)?;
+                write_string(w, collateral_ledger_id)?;
                 write_u64(w, *amount)?;
                 write_u32(w, *block_height)?;
                 write_u32(w, *lock_until_block)?;
                 write_64(w, signature)?;
                 write_32(w, ledger_hash)?;
             }
-            Self::QuorumAddMember { quorum_member, quorum_member_signature } => {
+            Self::QuorumAddMember { quorum_member, quorum_member_signature, member_ledger_id } => {
                 write_pubkey(w, quorum_member)?;
                 write_64(w, quorum_member_signature)?;
+                write_string(w, member_ledger_id)?;
             }
             Self::QuorumRemoveMember { quorum_member, operator_signature } => {
                 write_pubkey(w, quorum_member)?;
@@ -1733,6 +1739,7 @@ impl BinaryCodec for LedgerOperation {
             42 => Ok(Self::CollateralAttestation {
                 collateral_operator: read_pubkey(r)?,
                 quorum_member: read_pubkey(r)?,
+                collateral_ledger_id: read_string(r)?,
                 amount: read_u64(r)?,
                 block_height: read_u32(r)?,
                 lock_until_block: read_u32(r)?,
@@ -1742,6 +1749,7 @@ impl BinaryCodec for LedgerOperation {
             43 => Ok(Self::QuorumAddMember {
                 quorum_member: read_pubkey(r)?,
                 quorum_member_signature: read_64(r)?,
+                member_ledger_id: read_string(r)?,
             }),
             44 => Ok(Self::QuorumRemoveMember {
                 quorum_member: read_pubkey(r)?,
@@ -2564,6 +2572,9 @@ mod ledger_op_tlv {
     // CustodyArmed lottery fields
     pub const COMMITMENT_HASH: u64 = 112;
     pub const TARGET_RESERVES: u64 = 113;
+    // Quorum/Collateral ledger binding fields
+    pub const MEMBER_LEDGER_ID: u64 = 114;
+    pub const COLLATERAL_LEDGER_ID: u64 = 115;
 }
 
 impl TlvEncode for LedgerOperation {
@@ -2696,20 +2707,22 @@ impl TlvEncode for LedgerOperation {
                     .u64_field(NEW_AMOUNT, *new_amount)
                     .u32_field(BLOCK_HEIGHT, *block_height);
             }
-            Self::CollateralAttestation { collateral_operator, quorum_member, amount, block_height, lock_until_block, signature, ledger_hash } => {
+            Self::CollateralAttestation { collateral_operator, quorum_member, collateral_ledger_id, amount, block_height, lock_until_block, signature, ledger_hash } => {
                 builder = builder
                     .pubkey_field(COLLATERAL_OPERATOR, collateral_operator)
                     .pubkey_field(QUORUM_MEMBER, quorum_member)
+                    .string_field(COLLATERAL_LEDGER_ID, collateral_ledger_id)
                     .u64_field(AMOUNT, *amount)
                     .u32_field(BLOCK_HEIGHT, *block_height)
                     .u32_field(LOCK_UNTIL_BLOCK, *lock_until_block)
                     .bytes_field(SIGNATURE, signature)
                     .bytes_field(LEDGER_HASH, ledger_hash);
             }
-            Self::QuorumAddMember { quorum_member, quorum_member_signature } => {
+            Self::QuorumAddMember { quorum_member, quorum_member_signature, member_ledger_id } => {
                 builder = builder
                     .pubkey_field(QUORUM_MEMBER, quorum_member)
-                    .bytes_field(QUORUM_MEMBER_SIG, quorum_member_signature);
+                    .bytes_field(QUORUM_MEMBER_SIG, quorum_member_signature)
+                    .string_field(MEMBER_LEDGER_ID, member_ledger_id);
             }
             Self::QuorumRemoveMember { quorum_member, operator_signature } => {
                 builder = builder
@@ -2880,6 +2893,7 @@ impl TlvDecode for LedgerOperation {
             42 => Ok(Self::CollateralAttestation {
                 collateral_operator: reader.read_pubkey(COLLATERAL_OPERATOR)?,
                 quorum_member: reader.read_pubkey(QUORUM_MEMBER)?,
+                collateral_ledger_id: reader.read_string(COLLATERAL_LEDGER_ID)?,
                 amount: reader.read_u64(AMOUNT)?,
                 block_height: reader.read_u32(BLOCK_HEIGHT)?,
                 lock_until_block: reader.read_u32(LOCK_UNTIL_BLOCK)?,
@@ -2889,6 +2903,7 @@ impl TlvDecode for LedgerOperation {
             43 => Ok(Self::QuorumAddMember {
                 quorum_member: reader.read_pubkey(QUORUM_MEMBER)?,
                 quorum_member_signature: reader.read_bytes(QUORUM_MEMBER_SIG)?,
+                member_ledger_id: reader.read_string(MEMBER_LEDGER_ID)?,
             }),
             44 => Ok(Self::QuorumRemoveMember {
                 quorum_member: reader.read_pubkey(QUORUM_MEMBER)?,

@@ -202,11 +202,12 @@ add_quorum_members() {
             fi
 
             local member_reserves=$(get_value "reserves_id_$member")
+            local member_ledger_id=$(get_value "ledger_id_$member")
             local member_node_id=$(get_value "node_id_$member")
             local member_short=$(echo "$member" | sed 's/bdk-//')
 
-            # Owner adds member to their quorum
-            local add_output=$(run_bdk_cmd "$owner" partner add "$owner_reserves" "$member_node_id" 2>&1)
+            # Owner adds member to their quorum (pass member's ledger ID for collateral binding)
+            local add_output=$(run_bdk_cmd "$owner" partner add "$owner_reserves" "$member_node_id" "$member_ledger_id" 2>&1)
             if echo "$add_output" | grep -q "Quorum member added\|added"; then
                 # Member records the join on their side
                 local join_output=$(run_bdk_cmd "$member" partner join "$member_reserves" "$owner_node_id" "$owner_reserves" "$membership_expires" 2>&1)

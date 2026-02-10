@@ -952,6 +952,8 @@ pub struct QuorumAddMemberMsg {
     pub reserves_id: String,
     pub quorum_member: PublicKey,
     pub quorum_member_signature: [u8; 64],
+    /// The ledger ID where this member will lock collateral
+    pub member_ledger_id: String,
 }
 
 impl WireEncode for QuorumAddMemberMsg {
@@ -960,6 +962,7 @@ impl WireEncode for QuorumAddMemberMsg {
         write_string(writer, &self.reserves_id)?;
         write_pubkey(writer, &self.quorum_member)?;
         write_bytes64(writer, &self.quorum_member_signature)?;
+        write_string(writer, &self.member_ledger_id)?;
         Ok(())
     }
 }
@@ -971,6 +974,7 @@ impl WireDecode for QuorumAddMemberMsg {
             reserves_id: read_string(reader)?,
             quorum_member: read_pubkey(reader)?,
             quorum_member_signature: read_bytes64(reader)?,
+            member_ledger_id: read_string(reader)?,
         })
     }
 }
@@ -1009,6 +1013,8 @@ pub struct CollateralAttestationMsg {
     pub operator: PublicKey,
     #[serde(with = "crate::types::serde_pubkey")]
     pub quorum_member: PublicKey,
+    /// The ledger ID where collateral is locked (must match member_ledger_id from QuorumAddMember)
+    pub collateral_ledger_id: String,
     pub amount: u64,
     pub block_height: u32,
     #[serde(default)]
@@ -1030,6 +1036,7 @@ impl WireEncode for CollateralAttestationMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
         write_pubkey(writer, &self.operator)?;
         write_pubkey(writer, &self.quorum_member)?;
+        write_string(writer, &self.collateral_ledger_id)?;
         write_u64(writer, self.amount)?;
         write_u32(writer, self.block_height)?;
         write_u32(writer, self.lock_until_block)?;
@@ -1044,6 +1051,7 @@ impl WireDecode for CollateralAttestationMsg {
         Ok(Self {
             operator: read_pubkey(reader)?,
             quorum_member: read_pubkey(reader)?,
+            collateral_ledger_id: read_string(reader)?,
             amount: read_u64(reader)?,
             block_height: read_u32(reader)?,
             lock_until_block: read_u32(reader)?,

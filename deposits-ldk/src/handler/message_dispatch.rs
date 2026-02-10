@@ -76,7 +76,7 @@ where
         // Partner sends attestation instead of regular ACK for CollateralIncrease/CollateralDecrease
         // V2 format: CollateralAttestation is inside LedgerUpdate as a LedgerOperation
         if let DepositsMessage::LedgerUpdate(ref update_msg) = &message {
-            if let LedgerOperation::CollateralAttestation { collateral_operator: operator, amount, block_height, lock_until_block, signature, ledger_hash, .. } = &update_msg.operation {
+            if let LedgerOperation::CollateralAttestation { collateral_operator: operator, collateral_ledger_id, amount, block_height, lock_until_block, signature, ledger_hash, .. } = &update_msg.operation {
                 let _quorum_member = update_msg.reserves_id.clone();
                 // Check if we're the operator for a ledger with this sender as partner
                 // and have a pending CollateralIncrease/CollateralDecrease
@@ -124,6 +124,7 @@ where
                                 let attestation = deposits_core::types::CollateralAttestation::new(
                                     *operator,
                                     sender_node_id,
+                                    collateral_ledger_id.clone(),
                                     *amount,
                                     *block_height,
                                     *lock_until_block,
@@ -403,10 +404,11 @@ where
             // NOTE: CollateralAddPartner and CollateralRemovePartner are now handled by the generic handler
             // which properly sends ACKs for both idempotent and non-idempotent cases
             DepositsMessage::LedgerUpdate(ref update_msg) => match &update_msg.operation {
-                LedgerOperation::CollateralAttestation { collateral_operator, quorum_member, amount, block_height, lock_until_block, signature, ledger_hash } => {
+                LedgerOperation::CollateralAttestation { collateral_operator, quorum_member, collateral_ledger_id, amount, block_height, lock_until_block, signature, ledger_hash } => {
                     let msg = crate::wire::messages::CollateralAttestationMsg {
                         operator: *collateral_operator,
                         quorum_member: *quorum_member,
+                        collateral_ledger_id: collateral_ledger_id.clone(),
                         amount: *amount,
                         block_height: *block_height,
                         lock_until_block: *lock_until_block,
@@ -749,6 +751,7 @@ where
                             let attestation = CollateralAttestationMsg {
                                 operator: sender_node_id,
                                 quorum_member: self.our_node_id,
+                                collateral_ledger_id: String::new(), // Partner doesn't know operator's ledger ID
                                 amount: new_collateral_amount,
                                 block_height,
                                 lock_until_block: 0, // Partner doesn't set lock expiry on attestation response
@@ -773,6 +776,7 @@ where
                                 LedgerOperation::CollateralAttestation {
                                     collateral_operator: attestation.operator,
                                     quorum_member: attestation.quorum_member,
+                                    collateral_ledger_id: attestation.collateral_ledger_id.clone(),
                                     amount: attestation.amount,
                                     block_height: attestation.block_height,
                                     lock_until_block: attestation.lock_until_block,
