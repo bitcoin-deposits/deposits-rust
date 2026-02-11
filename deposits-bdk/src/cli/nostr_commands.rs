@@ -2237,7 +2237,7 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
             let (success, result, error) = match request.action.as_str() {
                 "deposit_open" => {
                     handlers::process_deposit_open_request(
-                        &fresh_node,
+                        &mut fresh_node,
                         &ledger_id,
                         &request,
                         &transport,
@@ -2254,11 +2254,11 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
                     .await
                 }
                 "deposit_withdraw" => {
-                    handlers::process_deposit_withdraw_request(&fresh_node, &ledger_id, &request)
+                    handlers::process_deposit_withdraw_request(&mut fresh_node, &ledger_id, &request)
                         .await
                 }
                 "collateral_lock" => {
-                    handlers::process_collateral_lock_request(&fresh_node, &ledger_id, &request)
+                    handlers::process_collateral_lock_request(&mut fresh_node, &ledger_id, &request)
                         .await
                 }
                 "custody_transfer_sign" => {

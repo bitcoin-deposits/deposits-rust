@@ -1954,7 +1954,7 @@ async fn partner_add(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     let placeholder_sig = [0u8; 64];
 
     // Use async version with co-signing support (falls back to operator-only if co-sign unavailable)
-    let event_id = node.add_quorum_member_with_cosign(&ledger_id, quorum_member, &member_ledger_id, placeholder_sig).await?;
+    let event_id = node.add_quorum_member(&ledger_id, quorum_member, &member_ledger_id, placeholder_sig).await?;
     println!("Broadcast to Nostr: {}...", &event_id[..16.min(event_id.len())]);
 
     // Re-advertise with updated quorum info
@@ -2031,7 +2031,7 @@ async fn partner_join(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     let placeholder_sig = [0u8; 64];
 
     // Use async version with co-signing support (falls back to operator-only if co-sign unavailable)
-    let event_id = node.record_quorum_join_with_cosign(
+    let event_id = node.record_quorum_join(
         &our_ledger_id,
         target_operator,
         &target_ledger_id,
@@ -2121,7 +2121,7 @@ async fn collateral_lock(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     }
 
     let config = parse_config(&config_args)?;
-    let node = Node::new(config.clone()).await?;
+    let mut node = Node::new(config.clone()).await?;
 
     // Determine if we're in wallet mode (3 positional args) or legacy mode (4+ positional args)
     // Wallet mode: <ledger_id> <amount_msats> <lock_blocks>
@@ -2191,12 +2191,7 @@ async fn collateral_lock(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         amount_msats,
         lock_until_block,
         requesting_operator,
-    )?;
-
-    // Broadcast to Nostr
-    if let Err(e) = node.broadcast_last_update(&ledger_id).await {
-        eprintln!("Warning: Failed to broadcast to Nostr: {}", e);
-    }
+    ).await?;
 
     println!("\nCollateral locked!");
     println!("  Total locked: {} msats", attestation.amount);
@@ -2245,7 +2240,7 @@ async fn collateral_record(args: &[String]) -> Result<(), Box<dyn std::error::Er
         .map_err(|e| format!("Invalid attestation JSON: {}", e))?;
 
     let config = parse_config(&config_args)?;
-    let node = Node::new(config).await?;
+    let mut node = Node::new(config).await?;
 
     // Resolve reserves_id to ledger_id
     let ledger_id = if reserves_id_arg.len() == 64 && reserves_id_arg.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -2262,12 +2257,7 @@ async fn collateral_record(args: &[String]) -> Result<(), Box<dyn std::error::Er
     println!("  Amount: {} msats", attestation.amount);
     println!("  Lock until: block {}", attestation.lock_until_block);
 
-    node.record_collateral_attestation(&ledger_id, attestation.clone())?;
-
-    // Broadcast to Nostr
-    if let Err(e) = node.broadcast_last_update(&ledger_id).await {
-        eprintln!("Warning: Failed to broadcast to Nostr: {}", e);
-    }
+    node.record_collateral_attestation(&ledger_id, attestation.clone()).await?;
 
     println!("\nCollateral attestation recorded!");
     println!("  Operator: {}", attestation.operator);
@@ -2539,7 +2529,7 @@ async fn deposit_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
             f.annualized_bps, f.annualized_fixed, f.frequency_blocks);
     }
 
-    let deposit = node.open_deposit_with_cosign(&ledger_id, deposit_pubkey, fees).await?;
+    let deposit = node.open_deposit(&ledger_id, deposit_pubkey, fees).await?;
 
     println!("\nDeposit opened!");
     println!("  Pubkey: {}", deposit.pubkey);
@@ -2663,7 +2653,7 @@ async fn deposit_credit(args: &[String]) -> Result<(), Box<dyn std::error::Error
     println!("  Amount: {} msats ({} sats)", amount_msats, amount_msats / 1000);
     println!("  Invoice ID: {}", invoice_id);
 
-    let new_balance = node.credit_deposit_with_cosign(
+    let new_balance = node.credit_deposit(
         &ledger_id,
         deposit_pubkey,
         amount_msats,
@@ -2788,7 +2778,7 @@ async fn deposit_complete(args: &[String]) -> Result<(), Box<dyn std::error::Err
     println!("  Transaction: {}", txid);
     println!("  Amount: {} sats", amount_sats);
 
-    let new_balance = node.complete_deposit_offer_with_cosign(&offer_id, txid, amount_sats).await?;
+    let new_balance = node.complete_deposit_offer(&offer_id, txid, amount_sats).await?;
 
     println!("\nDeposit offer completed!");
     println!("  New balance: {} msats ({} sats)", new_balance, new_balance / 1000);
@@ -3108,7 +3098,7 @@ async fn withdraw_request(args: &[String]) -> Result<(), Box<dyn std::error::Err
     }
 
     // Lock the withdrawal with co-signing
-    let result = node.lock_withdrawal_with_cosign(
+    let result = node.lock_withdrawal(
         &ledger_id,
         deposit_pubkey,
         destination_address,
@@ -3222,7 +3212,7 @@ async fn withdraw_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     }
 
     // Lock the withdrawal with co-signing
-    let result = node.lock_withdrawal_with_cosign(
+    let result = node.lock_withdrawal(
         &ledger_id,
         deposit_pubkey,
         destination_address,
@@ -3296,7 +3286,7 @@ async fn withdraw_complete(args: &[String]) -> Result<(), Box<dyn std::error::Er
 
     println!("Completing withdrawal {}...", &withdrawal_id_hex[..16]);
 
-    let result = node.complete_withdrawal_with_cosign(&ledger_id, &withdrawal_id).await?;
+    let result = node.complete_withdrawal(&ledger_id, &withdrawal_id).await?;
 
     println!("\nWithdrawal completed!");
     println!("  Transaction ID: {}", result.txid);
@@ -3651,7 +3641,7 @@ async fn lightning_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error
     println!("  Amount: {} msats ({} sats)", amount_msats, amount_msats / 1000);
     println!("  Payment ID: {}", &positional[3][..16.min(positional[3].len())]);
 
-    let new_locked = node.lock_invoice_payment_with_cosign(
+    let new_locked = node.lock_invoice_payment(
         reserves_id,
         deposit_pubkey,
         amount_msats,
@@ -3718,7 +3708,7 @@ async fn lightning_fail(args: &[String]) -> Result<(), Box<dyn std::error::Error
     println!("  Amount to unlock: {} msats ({} sats)", amount_msats, amount_msats / 1000);
     println!("  Payment ID: {}", &positional[3][..16.min(positional[3].len())]);
 
-    let new_balance = node.fail_invoice_payment_with_cosign(
+    let new_balance = node.fail_invoice_payment(
         reserves_id,
         deposit_pubkey,
         amount_msats,
@@ -3800,7 +3790,7 @@ async fn lightning_fulfill(args: &[String]) -> Result<(), Box<dyn std::error::Er
     println!("  Amount: {} msats ({} sats)", amount_msats, amount_msats / 1000);
     println!("  Payment ID: {}", &positional[3][..16.min(positional[3].len())]);
 
-    let new_balance = node.fulfill_invoice_payment_with_cosign(
+    let new_balance = node.fulfill_invoice_payment(
         reserves_id,
         deposit_pubkey,
         amount_msats,
@@ -3948,7 +3938,7 @@ async fn lightning_send(args: &[String]) -> Result<(), Box<dyn std::error::Error
 
     // Lock the funds with co-signing
     println!("  Locking {} msats...", amount_msats);
-    let locked_balance = node.lock_invoice_payment_with_cosign(
+    let locked_balance = node.lock_invoice_payment(
         reserves_id,
         deposit_pubkey,
         amount_msats,
@@ -3959,7 +3949,7 @@ async fn lightning_send(args: &[String]) -> Result<(), Box<dyn std::error::Error
 
     // Fulfill with preimage and co-signing
     println!("  Fulfilling with preimage...");
-    let new_balance = node.fulfill_invoice_payment_with_cosign(
+    let new_balance = node.fulfill_invoice_payment(
         reserves_id,
         deposit_pubkey,
         amount_msats,

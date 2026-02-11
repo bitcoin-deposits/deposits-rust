@@ -10,7 +10,7 @@ use crate::{Node, NodeConfig};
 
 /// Process a deposit_open request
 pub async fn process_deposit_open_request(
-    node: &Node,
+    node: &mut Node,
     ledger_id: &str,
     request: &LedgerRequest,
     transport: &NostrTransport,
@@ -91,14 +91,9 @@ pub async fn process_deposit_open_request(
         return (false, None, Some(format!("Fee validation failed: {}", e)));
     }
 
-    // Open the deposit
-    match node.open_deposit(ledger_id, deposit_pubkey, Some(fees)) {
+    // Open the deposit with co-signing
+    match node.open_deposit(ledger_id, deposit_pubkey, Some(fees)).await {
         Ok(deposit) => {
-            // Broadcast the update to Nostr
-            if let Err(e) = node.broadcast_last_update(ledger_id).await {
-                tracing::warn!("Failed to broadcast deposit open to Nostr: {}", e);
-            }
-
             let result = serde_json::json!({
                 "deposit_pubkey": deposit_pubkey_str,
                 "balance": deposit.balance,
@@ -254,7 +249,7 @@ pub async fn process_deposit_offer_request(
 
 /// Process a collateral_lock request
 pub async fn process_collateral_lock_request(
-    node: &Node,
+    node: &mut Node,
     ledger_id: &str,
     request: &LedgerRequest,
 ) -> (bool, Option<serde_json::Value>, Option<String>) {
@@ -314,7 +309,7 @@ pub async fn process_collateral_lock_request(
         node.node_id
     };
 
-    // Lock the collateral
+    // Lock the collateral (now includes co-signing and broadcast)
     match node.lock_collateral(
         ledger_id,
         deposit_pubkey,
@@ -322,13 +317,8 @@ pub async fn process_collateral_lock_request(
         amount_msats,
         lock_until_block,
         requesting_operator,
-    ) {
+    ).await {
         Ok(attestation) => {
-            // Broadcast the update to Nostr
-            if let Err(e) = node.broadcast_last_update(ledger_id).await {
-                tracing::warn!("Failed to broadcast collateral lock to Nostr: {}", e);
-            }
-
             // Serialize attestation as JSON then base64 encode for easy shell parsing
             // (base64 avoids escaping issues with nested JSON)
             use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -353,7 +343,7 @@ pub async fn process_collateral_lock_request(
 /// This is called when a depositor requests a withdrawal via Nostr.
 /// The depositor provides their secret (to prove ownership), destination address, and amount.
 pub async fn process_deposit_withdraw_request(
-    node: &Node,
+    node: &mut Node,
     ledger_id: &str,
     request: &LedgerRequest,
 ) -> (bool, Option<serde_json::Value>, Option<String>) {
@@ -432,7 +422,7 @@ pub async fn process_deposit_withdraw_request(
         Err(e) => return (false, None, Some(format!("Failed to create signature: {:?}", e))),
     };
 
-    // Lock the withdrawal
+    // Lock the withdrawal with co-signing
     match node.lock_withdrawal(
         ledger_id,
         deposit_pubkey,
@@ -442,13 +432,8 @@ pub async fn process_deposit_withdraw_request(
         nonce,
         signature,
         None, // memo
-    ) {
+    ).await {
         Ok(result) => {
-            // Broadcast to Nostr
-            if let Err(e) = node.broadcast_last_update(ledger_id).await {
-                eprintln!("    Warning: Failed to broadcast to Nostr: {}", e);
-            }
-
             let result_json = serde_json::json!({
                 "withdrawal_id": hex::encode(&result.withdrawal.withdrawal_id),
                 "amount_sats": amount_sats,
