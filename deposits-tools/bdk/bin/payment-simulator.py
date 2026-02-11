@@ -2,13 +2,14 @@
 """
 Payment Simulator for Bitcoin Deposits Protocol
 
-This script:
-1. Periodically generates wallets on random ledgers
-2. Funds them from the faucet
-3. Continuously makes small payments between all of them
+Drives wallet.sh to create real ledger activity:
+1. Discovers available ledgers
+2. Opens deposits with random aliases
+3. Funds them via faucet
+4. Makes withdrawals between deposits (actual ledger operations)
 
 Usage:
-    python3 payment-simulator.py [--operators N] [--wallets-per-op N] [--payment-interval SECS]
+    python3 payment-simulator.py [--wallets N] [--payment-interval SECS]
 """
 
 import argparse
@@ -19,274 +20,218 @@ import secrets
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 
 # Configuration
-DOCKER_COMPOSE_FILE = os.path.join(os.path.dirname(__file__), "..", "docker-compose.yml")
-OPERATORS = ["bdk-alice", "bdk-bob", "bdk-charlie", "bdk-diana"]
-RELAY_URL = "ws://nostr-relay:7777"
-NETWORK = "regtest"
-
-# Operator seeds (must match _common.sh)
-OPERATOR_SEEDS = {
-    "bdk-alice": "416c696365000000000000000000000000000000000000000000000000000001",
-    "bdk-bob": "426f620000000000000000000000000000000000000000000000000000000002",
-    "bdk-charlie": "436861726c696500000000000000000000000000000000000000000000000003",
-    "bdk-diana": "4469616e61000000000000000000000000000000000000000000000000000004",
-}
+SCRIPT_DIR = Path(__file__).parent.resolve()
+WALLET_SH = SCRIPT_DIR / "wallet.sh"
+DATA_DIR = Path.home() / ".deposits-wallet"
 
 
 @dataclass
-class Wallet:
-    """Represents a depositor wallet"""
-    seed: str
+class Deposit:
+    """Represents a deposit opened via wallet.sh"""
     alias: str
     ledger_id: str
-    operator: str
-    funding_address: Optional[str] = None
-    balance_msats: int = 0
-    deposit_pubkey: Optional[str] = None
+    funding_address: str
+    min_sats: int
+    max_sats: int
+    status: str = "pending"
 
 
-@dataclass
-class Ledger:
-    """Represents an operator's ledger"""
-    ledger_id: str
-    operator: str
-    operator_seed: str
-
-
-def run_cmd(cmd: list[str], capture: bool = True) -> tuple[int, str, str]:
-    """Run a command and return (returncode, stdout, stderr)"""
+def run_wallet(*args, capture: bool = True) -> tuple[int, str, str]:
+    """Run wallet.sh with given arguments"""
+    cmd = [str(WALLET_SH)] + list(args)
     result = subprocess.run(cmd, capture_output=capture, text=True)
     return result.returncode, result.stdout, result.stderr
 
 
-def docker_exec(container: str, cmd: list[str]) -> tuple[int, str, str]:
-    """Execute command in a Docker container"""
-    full_cmd = ["docker", "exec", container] + cmd
-    return run_cmd(full_cmd)
-
-
-def bitcoin_cli(*args) -> tuple[int, str, str]:
-    """Run bitcoin-cli command"""
-    cmd = [
-        "docker", "exec", "bdk-bitcoind",
-        "bitcoin-cli", "-regtest",
-        "-rpcuser=user", "-rpcpassword=pass",
-        "-rpcwallet=faucet"
-    ] + list(args)
-    return run_cmd(cmd)
-
-
-def mine_blocks(n: int = 1):
-    """Mine n blocks"""
-    bitcoin_cli("-generate", str(n))
-
-
-def get_ledger_id(operator: str) -> Optional[str]:
-    """Get the ledger ID for an operator"""
-    seed = OPERATOR_SEEDS[operator]
-    code, stdout, stderr = docker_exec(operator, [
-        "deposits-bdk", "ledger", "list",
-        "--seed", seed,
-        "--network", NETWORK,
-        "--relay", RELAY_URL,
-        "--data-dir", "/data"
-    ])
+def discover_ledgers() -> list[str]:
+    """Discover available ledgers on the network"""
+    code, stdout, stderr = run_wallet("discover")
 
     if code != 0:
-        print(f"  Warning: Failed to get ledger for {operator}: {stderr}")
-        return None
+        print(f"  Warning: discover failed: {stderr}")
+        return []
 
-    # Parse ledger ID from output
-    for line in stdout.split("\n"):
-        if "Ledger ID:" in line:
-            return line.split("Ledger ID:")[1].strip()
-
-    return None
-
-
-def discover_ledgers() -> list[Ledger]:
-    """Discover all available ledgers from operators"""
+    # Parse ledger IDs from output
+    # Format: "Ledger: <64-char-hex>"
     ledgers = []
-
-    for operator in OPERATORS:
-        ledger_id = get_ledger_id(operator)
-        if ledger_id:
-            ledgers.append(Ledger(
-                ledger_id=ledger_id,
-                operator=operator,
-                operator_seed=OPERATOR_SEEDS[operator]
-            ))
-            print(f"  Found ledger {ledger_id[:16]}... on {operator}")
+    for line in stdout.split("\n"):
+        if "Ledger:" in line or line.strip().startswith("Ledger ID:"):
+            # Extract the hex ID
+            parts = line.split(":")
+            if len(parts) >= 2:
+                ledger_id = parts[-1].strip()
+                if len(ledger_id) == 64:
+                    ledgers.append(ledger_id)
+        # Also check for lines that are just 64-char hex (ledger list format)
+        stripped = line.strip()
+        if len(stripped) == 64 and all(c in '0123456789abcdef' for c in stripped):
+            if stripped not in ledgers:
+                ledgers.append(stripped)
 
     return ledgers
 
 
-def generate_wallet_seed() -> str:
-    """Generate a random 32-byte hex seed"""
-    return secrets.token_hex(32)
+def load_deposits() -> list[Deposit]:
+    """Load deposits from wallet.sh's data file"""
+    deposits_file = DATA_DIR / "deposits.json"
+
+    if not deposits_file.exists():
+        return []
+
+    try:
+        with open(deposits_file) as f:
+            data = json.load(f)
+
+        deposits = []
+        for item in data:
+            deposits.append(Deposit(
+                alias=item.get("alias", "unknown"),
+                ledger_id=item.get("ledger_id", ""),
+                funding_address=item.get("funding_address", ""),
+                min_sats=item.get("min_sats", 0),
+                max_sats=item.get("max_sats", 0),
+                status=item.get("status", "unknown"),
+            ))
+        return deposits
+    except (json.JSONDecodeError, KeyError) as e:
+        print(f"  Warning: Failed to parse deposits.json: {e}")
+        return []
 
 
-def get_deposit_pubkey(container: str, seed: str) -> Optional[str]:
-    """Get the deposit public key for a wallet seed"""
-    code, stdout, stderr = docker_exec(container, [
-        "deposits-wallet", "balance",
-        "--seed", seed,
-        "--network", NETWORK,
-        "--relay", RELAY_URL,
-        "--data-dir", f"/data/wallet-{seed[:8]}"
-    ])
+def open_deposit(ledger_id: str, alias: str, amount_sats: int = 100000) -> Optional[Deposit]:
+    """Open a new deposit on a ledger"""
+    print(f"  Opening deposit '{alias}' for {amount_sats} sats...")
 
-    # Try to extract pubkey from keygen instead
-    code, stdout, stderr = docker_exec(container, [
-        "deposits-bdk", "keygen",
-        "--seed", seed,
-        "--network", NETWORK,
-        "--data-dir", f"/data/wallet-{seed[:8]}"
-    ])
-
-    for line in stdout.split("\n"):
-        if "Public key:" in line or "pubkey:" in line.lower():
-            return line.split(":")[-1].strip()
-
-    return None
-
-
-def create_wallet(ledger: Ledger, alias: str) -> Optional[Wallet]:
-    """Create a new wallet with a deposit on the given ledger"""
-    seed = generate_wallet_seed()
-
-    # Open deposit on the ledger
-    code, stdout, stderr = docker_exec(ledger.operator, [
-        "deposits-wallet", "open",
-        ledger.ledger_id,
-        "100000",  # 100k sats initial request
-        "--alias", alias,
-        "--seed", seed,
-        "--network", NETWORK,
-        "--relay", RELAY_URL,
-        "--data-dir", f"/data/wallet-{seed[:8]}"
-    ])
+    code, stdout, stderr = run_wallet(
+        "open", ledger_id, str(amount_sats),
+        "--alias", alias
+    )
 
     if code != 0:
-        print(f"  Warning: Failed to open deposit for {alias}: {stderr}")
+        print(f"  Warning: Failed to open deposit: {stderr}")
         return None
 
-    # Extract funding address from output
+    # Parse output for funding address
     funding_address = None
     for line in stdout.split("\n"):
         line = line.strip()
-        if line.startswith("bcrt1"):
+        if line.startswith("bcrt1") or line.startswith("bc1") or line.startswith("tb1"):
             funding_address = line
             break
 
     if not funding_address:
-        print(f"  Warning: No funding address in output for {alias}")
-        print(f"  Output: {stdout[:200]}")
+        # Try to load from deposits.json
+        deposits = load_deposits()
+        for d in deposits:
+            if d.alias == alias:
+                funding_address = d.funding_address
+                break
+
+    if funding_address:
+        print(f"  Created: {alias} -> {funding_address[:25]}...")
+        return Deposit(
+            alias=alias,
+            ledger_id=ledger_id,
+            funding_address=funding_address,
+            min_sats=1000,
+            max_sats=amount_sats,
+            status="pending"
+        )
+    else:
+        print(f"  Warning: No funding address found for {alias}")
         return None
 
-    wallet = Wallet(
-        seed=seed,
-        alias=alias,
-        ledger_id=ledger.ledger_id,
-        operator=ledger.operator,
-        funding_address=funding_address,
-        balance_msats=0
-    )
 
-    print(f"  Created wallet '{alias}' on {ledger.operator}: {funding_address[:25]}...")
-    return wallet
+def fund_deposit(alias: str, amount_sats: Optional[int] = None) -> bool:
+    """Fund a deposit via faucet"""
+    args = ["faucet", alias]
+    if amount_sats:
+        args.append(str(amount_sats))
 
-
-def fund_wallet(wallet: Wallet, amount_btc: float = 0.001) -> bool:
-    """Fund a wallet from the faucet"""
-    if not wallet.funding_address:
-        print(f"  Warning: No funding address for {wallet.alias}")
-        return False
-
-    code, stdout, stderr = bitcoin_cli(
-        "sendtoaddress",
-        wallet.funding_address,
-        str(amount_btc)
-    )
+    code, stdout, stderr = run_wallet(*args)
 
     if code != 0:
-        print(f"  Warning: Failed to fund {wallet.alias}: {stderr}")
+        print(f"  Warning: Failed to fund {alias}: {stderr}")
         return False
 
-    txid = stdout.strip()
-    wallet.balance_msats = int(amount_btc * 100_000_000 * 1000)  # Convert to msats
-    print(f"  Funded {wallet.alias} with {amount_btc} BTC (txid: {txid[:16]}...)")
-    return True
+    if "Sent!" in stdout or "Done!" in stdout:
+        print(f"  Funded {alias}")
+        return True
+
+    print(f"  Warning: Unexpected faucet output: {stdout[:100]}")
+    return False
 
 
-def get_wallet_balance(wallet: Wallet) -> int:
-    """Get the current balance of a wallet in msats"""
-    code, stdout, stderr = docker_exec(wallet.operator, [
-        "deposits-wallet", "balance",
-        "--seed", wallet.seed,
-        "--network", NETWORK,
-        "--relay", RELAY_URL,
-        "--data-dir", f"/data/wallet-{wallet.seed[:8]}"
-    ])
+def get_balance(alias: str) -> Optional[int]:
+    """Get balance for a deposit alias (in msats)"""
+    code, stdout, stderr = run_wallet("balance")
 
-    # Parse balance from output
+    if code != 0:
+        return None
+
+    # Parse balance output - look for alias and balance
+    # Format varies, look for lines with the alias and msat/sat amounts
     for line in stdout.split("\n"):
-        if wallet.alias in line and "msat" in line.lower():
-            # Try to extract number
+        if alias in line:
+            # Try to extract balance
             import re
+            # Look for patterns like "1000 msat" or "1000msat" or "balance: 1000"
             match = re.search(r'(\d+)\s*msat', line, re.IGNORECASE)
             if match:
                 return int(match.group(1))
+            match = re.search(r'(\d+)\s*sat', line, re.IGNORECASE)
+            if match:
+                return int(match.group(1)) * 1000  # Convert to msats
 
-    return wallet.balance_msats
+    return None
 
 
-def make_payment(from_wallet: Wallet, to_wallet: Wallet, amount_msats: int, ledger: Ledger) -> bool:
+def withdraw_to(from_alias: str, to_address: str, amount_sats: int) -> bool:
     """
-    Make a payment from one wallet to another.
-
-    Since direct wallet-to-wallet payments aren't directly supported,
-    we simulate this by having the operator credit the destination deposit.
-    In a real system, this would be done via Lightning invoices or on-chain withdrawals.
+    Withdraw from one deposit to an address.
+    This creates actual ledger operations (OnchainLock, OnchainFulfill).
     """
-    # For simulation, we'll use the operator's deposit credit command
-    # This credits the destination wallet on the same ledger
+    print(f"  Withdrawing {amount_sats} sats from {from_alias}...")
 
-    if from_wallet.ledger_id != to_wallet.ledger_id:
-        # Cross-ledger payments would need Lightning or on-chain
-        print(f"  Skip: Cross-ledger payment not yet implemented")
+    code, stdout, stderr = run_wallet(
+        "withdraw", from_alias, str(amount_sats),
+        "--to", to_address
+    )
+
+    if code != 0:
+        print(f"  Warning: Withdrawal failed: {stderr}")
         return False
 
-    # Generate a unique invoice ID for tracking
-    invoice_id = f"sim-{secrets.token_hex(8)}"
+    if "success" in stdout.lower() or "withdraw" in stdout.lower():
+        print(f"  Withdrawal initiated: {from_alias} -> {to_address[:20]}...")
+        return True
 
-    # Get the destination's deposit pubkey (derive from seed)
-    # For now, we'll use a simpler approach - just track balances locally
+    return False
 
-    # Simulate the payment by updating local balances
-    if from_wallet.balance_msats < amount_msats:
-        print(f"  Skip: {from_wallet.alias} has insufficient balance ({from_wallet.balance_msats} < {amount_msats})")
-        return False
 
-    from_wallet.balance_msats -= amount_msats
-    to_wallet.balance_msats += amount_msats
-
-    print(f"  Payment: {from_wallet.alias} -> {to_wallet.alias}: {amount_msats} msats")
-    return True
+def mine_block():
+    """Mine a block to confirm transactions"""
+    subprocess.run([
+        "docker", "exec", "bdk-bitcoind",
+        "bitcoin-cli", "-regtest",
+        "-rpcuser=user", "-rpcpassword=pass",
+        "-rpcwallet=faucet", "-generate", "1"
+    ], capture_output=True)
 
 
 def run_simulation(
-    num_wallets_per_operator: int = 2,
+    num_wallets: int = 4,
     wallet_creation_interval: float = 30.0,
-    payment_interval: float = 5.0,
-    funding_amount_btc: float = 0.001,
-    min_payment_msats: int = 1000,
-    max_payment_msats: int = 10000,
+    payment_interval: float = 10.0,
+    funding_amount_sats: int = 100000,
+    min_payment_sats: int = 1000,
+    max_payment_sats: int = 5000,
 ):
     """Run the payment simulation"""
 
@@ -295,25 +240,33 @@ def run_simulation(
     print("=" * 60)
     print()
 
+    # Check wallet.sh exists
+    if not WALLET_SH.exists():
+        print(f"Error: wallet.sh not found at {WALLET_SH}")
+        sys.exit(1)
+
     # Discover ledgers
     print("Discovering ledgers...")
     ledgers = discover_ledgers()
 
     if not ledgers:
         print("Error: No ledgers found. Make sure operators are running.")
+        print("Try: ./bin/wallet.sh discover")
         sys.exit(1)
 
-    print(f"Found {len(ledgers)} ledgers")
+    print(f"Found {len(ledgers)} ledgers:")
+    for lid in ledgers:
+        print(f"  {lid[:16]}...")
     print()
 
-    # Track all wallets
-    wallets: list[Wallet] = []
+    # Track deposits we've created
+    our_deposits: list[Deposit] = []
     wallet_counter = 0
     last_wallet_time = 0.0
     last_payment_time = 0.0
 
     print("Starting simulation...")
-    print(f"  - Creating up to {num_wallets_per_operator} wallets per operator")
+    print(f"  - Creating up to {num_wallets} wallets")
     print(f"  - New wallet every {wallet_creation_interval}s")
     print(f"  - Payment every {payment_interval}s")
     print()
@@ -322,107 +275,88 @@ def run_simulation(
         while True:
             now = time.time()
 
-            # Create new wallets periodically
+            # Create new deposits periodically
             if now - last_wallet_time >= wallet_creation_interval:
-                # Check if we need more wallets
-                wallets_needed = len(ledgers) * num_wallets_per_operator - len(wallets)
+                if len(our_deposits) < num_wallets:
+                    wallet_counter += 1
+                    alias = f"sim-{wallet_counter:04d}"
+                    ledger_id = random.choice(ledgers)
 
-                if wallets_needed > 0:
-                    # Pick a random ledger
-                    ledger = random.choice(ledgers)
+                    print(f"\n[{time.strftime('%H:%M:%S')}] Creating deposit {alias}...")
+                    deposit = open_deposit(ledger_id, alias, funding_amount_sats)
 
-                    # Count existing wallets on this ledger
-                    ledger_wallets = [w for w in wallets if w.ledger_id == ledger.ledger_id]
+                    if deposit:
+                        our_deposits.append(deposit)
 
-                    if len(ledger_wallets) < num_wallets_per_operator:
-                        wallet_counter += 1
-                        alias = f"sim-wallet-{wallet_counter:04d}"
-
-                        print(f"\n[{time.strftime('%H:%M:%S')}] Creating wallet {alias}...")
-                        wallet = create_wallet(ledger, alias)
-
-                        if wallet:
-                            wallets.append(wallet)
-
-                            # Fund the wallet
-                            print(f"[{time.strftime('%H:%M:%S')}] Funding {alias}...")
-                            if fund_wallet(wallet, funding_amount_btc):
-                                # Mine a block to confirm
-                                mine_blocks(1)
-                                print(f"  Mined 1 block to confirm funding")
+                        # Fund it
+                        print(f"[{time.strftime('%H:%M:%S')}] Funding {alias}...")
+                        if fund_deposit(alias):
+                            deposit.status = "funded"
+                            # Wait a moment for auto-complete
+                            time.sleep(2)
 
                 last_wallet_time = now
 
-            # Make payments periodically
-            if now - last_payment_time >= payment_interval and len(wallets) >= 2:
-                # Pick two different wallets on the same ledger
-                ledger_groups = {}
-                for w in wallets:
-                    if w.ledger_id not in ledger_groups:
-                        ledger_groups[w.ledger_id] = []
-                    ledger_groups[w.ledger_id].append(w)
+            # Make payments (withdrawals) periodically
+            if now - last_payment_time >= payment_interval and len(our_deposits) >= 2:
+                # Find deposits with funded status
+                funded = [d for d in our_deposits if d.status == "funded"]
 
-                # Find a ledger with at least 2 wallets
-                eligible_ledgers = [lid for lid, ws in ledger_groups.items() if len(ws) >= 2]
-
-                if eligible_ledgers:
-                    ledger_id = random.choice(eligible_ledgers)
-                    ledger_wallets = ledger_groups[ledger_id]
-
+                if len(funded) >= 2:
                     # Pick sender and receiver
-                    sender = random.choice(ledger_wallets)
-                    receiver = random.choice([w for w in ledger_wallets if w != sender])
+                    sender = random.choice(funded)
+                    receiver = random.choice([d for d in funded if d != sender])
 
                     # Random payment amount
-                    amount = random.randint(min_payment_msats, max_payment_msats)
+                    amount = random.randint(min_payment_sats, max_payment_sats)
 
-                    # Find the ledger object
-                    ledger = next((l for l in ledgers if l.ledger_id == ledger_id), None)
+                    print(f"\n[{time.strftime('%H:%M:%S')}] Payment: {sender.alias} -> {receiver.alias}")
 
-                    if ledger and sender.balance_msats >= amount:
-                        print(f"\n[{time.strftime('%H:%M:%S')}] Making payment...")
-                        make_payment(sender, receiver, amount, ledger)
+                    if withdraw_to(sender.alias, receiver.funding_address, amount):
+                        # Mine to confirm
+                        mine_block()
+                        print(f"  Mined block to confirm")
 
                 last_payment_time = now
 
             # Print status periodically
-            if int(now) % 30 == 0:
-                total_balance = sum(w.balance_msats for w in wallets)
-                print(f"\n[{time.strftime('%H:%M:%S')}] Status: {len(wallets)} wallets, {total_balance:,} total msats")
+            if int(now) % 60 == 0:
+                funded_count = len([d for d in our_deposits if d.status == "funded"])
+                print(f"\n[{time.strftime('%H:%M:%S')}] Status: {len(our_deposits)} deposits ({funded_count} funded)")
 
             time.sleep(1)
 
     except KeyboardInterrupt:
         print("\n\nSimulation stopped by user")
-        print(f"Final state: {len(wallets)} wallets created")
-        for w in wallets:
-            print(f"  {w.alias}: {w.balance_msats:,} msats on {w.operator}")
+        print(f"Final state: {len(our_deposits)} deposits")
+        for d in our_deposits:
+            print(f"  {d.alias}: {d.status} on ledger {d.ledger_id[:16]}...")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Bitcoin Deposits Payment Simulator")
-    parser.add_argument("--wallets-per-op", type=int, default=2,
-                        help="Number of wallets to create per operator (default: 2)")
+    parser.add_argument("--wallets", type=int, default=4,
+                        help="Number of wallets to create (default: 4)")
     parser.add_argument("--wallet-interval", type=float, default=30.0,
                         help="Seconds between wallet creations (default: 30)")
-    parser.add_argument("--payment-interval", type=float, default=5.0,
-                        help="Seconds between payments (default: 5)")
-    parser.add_argument("--funding-btc", type=float, default=0.001,
-                        help="BTC to fund each wallet (default: 0.001)")
+    parser.add_argument("--payment-interval", type=float, default=10.0,
+                        help="Seconds between payments (default: 10)")
+    parser.add_argument("--funding-sats", type=int, default=100000,
+                        help="Sats to fund each wallet (default: 100000)")
     parser.add_argument("--min-payment", type=int, default=1000,
-                        help="Minimum payment in msats (default: 1000)")
-    parser.add_argument("--max-payment", type=int, default=10000,
-                        help="Maximum payment in msats (default: 10000)")
+                        help="Minimum payment in sats (default: 1000)")
+    parser.add_argument("--max-payment", type=int, default=5000,
+                        help="Maximum payment in sats (default: 5000)")
 
     args = parser.parse_args()
 
     run_simulation(
-        num_wallets_per_operator=args.wallets_per_op,
+        num_wallets=args.wallets,
         wallet_creation_interval=args.wallet_interval,
         payment_interval=args.payment_interval,
-        funding_amount_btc=args.funding_btc,
-        min_payment_msats=args.min_payment,
-        max_payment_msats=args.max_payment,
+        funding_amount_sats=args.funding_sats,
+        min_payment_sats=args.min_payment,
+        max_payment_sats=args.max_payment,
     )
 
 
