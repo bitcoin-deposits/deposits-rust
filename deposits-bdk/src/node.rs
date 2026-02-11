@@ -122,6 +122,9 @@ pub struct Node {
     /// The result includes the partner signature and the member's ledger hash
     pending_cosign_requests: Arc<Mutex<HashMap<String, (String, tokio::sync::oneshot::Sender<CoSignResult>)>>>,
 
+    /// Processed request event IDs (to avoid duplicate processing from polling)
+    processed_requests: Mutex<std::collections::HashSet<String>>,
+
     /// Data directory for persistence
     data_dir: PathBuf,
 
@@ -181,6 +184,7 @@ impl Node {
             withdrawals: Mutex::new(withdrawals),
             pending_collateral_requests: Mutex::new(HashMap::new()),
             pending_cosign_requests: Arc::new(Mutex::new(HashMap::new())),
+            processed_requests: Mutex::new(std::collections::HashSet::new()),
             data_dir: config.data_dir,
             relay_url,
         })
@@ -364,7 +368,50 @@ impl Node {
 
     /// Run the main event loop
     pub async fn run(&mut self) -> Result<(), Error> {
+        // Track last ledger reload time
+        let mut last_reload = tokio::time::Instant::now();
+        let reload_interval = tokio::time::Duration::from_secs(5);
+
+        // Track last request poll time
+        let mut last_poll = tokio::time::Instant::now();
+        let poll_interval = tokio::time::Duration::from_secs(2);
+
         loop {
+            // Fast ledger reload check (every 5 seconds)
+            // This ensures daemon picks up changes made by CLI processes (like QuorumJoin)
+            if last_reload.elapsed() >= reload_interval {
+                let updated = self.handler.reload_ledgers();
+                if updated > 0 {
+                    // Re-subscribe to new joined ledgers
+                    let joined_ledgers = self.get_joined_ledger_ids();
+                    for ledger_id in joined_ledgers {
+                        if let Err(e) = self.nostr.subscribe_to_requests(&ledger_id).await {
+                            tracing::debug!("Re-subscribe to requests failed: {}", e);
+                        }
+                    }
+                }
+                last_reload = tokio::time::Instant::now();
+            }
+
+            // Poll for recent requests (every 2 seconds) - fallback for missed subscription events
+            if last_poll.elapsed() >= poll_interval {
+                if let Ok(requests) = self.nostr.fetch_recent_requests(30).await {
+                    for request in requests {
+                        // Check if already processed
+                        let already_processed = {
+                            let processed = self.processed_requests.lock().unwrap();
+                            processed.contains(&request.event_id)
+                        };
+                        if !already_processed {
+                            // Mark as processed before handling
+                            self.processed_requests.lock().unwrap().insert(request.event_id.clone());
+                            self.handle_ledger_request(request).await;
+                        }
+                    }
+                }
+                last_poll = tokio::time::Instant::now();
+            }
+
             tokio::select! {
                 // Process inbound messages from nostr (P2P + ledger events)
                 _ = self.nostr.process_events() => {
@@ -375,7 +422,15 @@ impl Node {
 
                     // Handle ledger requests
                     while let Some(request) = self.nostr.try_recv_request() {
-                        self.handle_ledger_request(request).await;
+                        // Check if already processed (from polling)
+                        let already_processed = {
+                            let processed = self.processed_requests.lock().unwrap();
+                            processed.contains(&request.event_id)
+                        };
+                        if !already_processed {
+                            self.processed_requests.lock().unwrap().insert(request.event_id.clone());
+                            self.handle_ledger_request(request).await;
+                        }
                     }
 
                     // Handle disputes
@@ -438,6 +493,13 @@ impl Node {
 
     /// Handle a ledger request from Nostr
     async fn handle_ledger_request(&mut self, request: crate::nostr::LedgerRequest) {
+        // Skip requests that we sent ourselves (Nostr broadcasts to all subscribers)
+        let our_x_only = hex::encode(&self.node_id.serialize()[1..]);  // x-coordinate only
+        if request.sender == our_x_only {
+            tracing::debug!("Skipping our own request: {}", &request.event_id[..16.min(request.event_id.len())]);
+            return;
+        }
+
         tracing::info!(
             "Ledger request: action={}, ledger={}..., event={}...",
             request.action,
@@ -473,15 +535,20 @@ impl Node {
                 self.auto_reveal_preimage(&request.ledger_id).await;
                 (true, None, None) // No response needed
             }
-            "cosign_update" => self.process_cosign_request(&request).await,
+            "cosign_update" => {
+                // Reload ledgers to ensure we have the latest QuorumJoin state
+                // (CLI may have recorded a QuorumJoin that we haven't seen yet)
+                self.handler.reload_ledgers();
+                self.process_cosign_request(&request).await
+            }
             _ => {
                 tracing::warn!("Unknown request action: {}", request.action);
                 (false, None, Some(format!("Unknown action: {}", request.action)))
             }
         };
 
-        // Send response - convert result String to serde_json::Value
-        let result_json = result.map(|s| serde_json::Value::String(s));
+        // Send response - parse result String as JSON Value
+        let result_json = result.and_then(|s| serde_json::from_str(&s).ok());
         if let Err(e) = self.nostr.send_ledger_response(
             &request.event_id,
             &request.ledger_id,
@@ -2598,7 +2665,7 @@ impl Node {
         }
 
         // Open the deposit with co-signing
-        match self.open_deposit_with_cosign(&ledger_id, deposit_pubkey, Some(fees)).await {
+        match self.open_deposit(&ledger_id, deposit_pubkey, Some(fees)).await {
             Ok(deposit) => {
                 let result = serde_json::json!({
                     "deposit_pubkey": deposit_pubkey_str,
@@ -2845,7 +2912,7 @@ impl Node {
         };
 
         // Lock the withdrawal with co-signing
-        match self.lock_withdrawal_with_cosign(
+        match self.lock_withdrawal(
             &reserves_id,
             deposit_pubkey,
             address.to_string(),
@@ -2872,7 +2939,7 @@ impl Node {
         }
     }
 
-    async fn process_collateral_lock_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_collateral_lock_request(&mut self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
         use bitcoin::secp256k1::SecretKey;
         use std::str::FromStr;
 
@@ -2934,7 +3001,7 @@ impl Node {
             self.node_id
         };
 
-        // Lock the collateral
+        // Lock the collateral (now includes co-signing and broadcast)
         match self.lock_collateral(
             &ledger_id,
             deposit_pubkey,
@@ -2942,13 +3009,8 @@ impl Node {
             amount_msats,
             lock_until_block,
             requesting_operator,
-        ) {
+        ).await {
             Ok(attestation) => {
-                // Broadcast the update to Nostr
-                if let Err(e) = self.broadcast_last_update(&ledger_id).await {
-                    tracing::warn!("Failed to broadcast collateral lock to Nostr: {}", e);
-                }
-
                 // Serialize attestation as JSON then base64 encode
                 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
                 let attestation_json = serde_json::to_string(&attestation).unwrap_or_default();
@@ -2979,6 +3041,7 @@ impl Node {
     async fn process_cosign_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
         use bitcoin::hashes::{sha256, Hash};
         use bitcoin::secp256k1::{Message, Secp256k1};
+        use std::str::FromStr;
 
         tracing::info!("Processing cosign_update request for ledger {}...",
             &request.ledger_id[..16.min(request.ledger_id.len())]);
@@ -3028,10 +3091,39 @@ impl Node {
             }
         };
 
-        // Verify we are a quorum member of this ledger
-        if operator_ledger_arc.is_none() && !self.is_quorum_member_of_ledger(&request.ledger_id) {
-            return (false, None, Some("Not a quorum member of this ledger".to_string()));
-        }
+        // If we don't have the ledger locally, get the operator from the request sender
+        // The sender of a cosign_update request IS the operator who needs the co-signature
+        let target_operator_id = if target_operator_id.is_none() {
+            // The request.sender is a Nostr x-only pubkey (32 bytes / 64 hex chars)
+            // We need to convert to secp256k1 PublicKey (33 bytes with 02/03 prefix)
+            match hex::decode(&request.sender) {
+                Ok(x_only_bytes) if x_only_bytes.len() == 32 => {
+                    // Convert x-only to compressed pubkey (assume even y-coordinate)
+                    let mut compressed = [0u8; 33];
+                    compressed[0] = 0x02;
+                    compressed[1..].copy_from_slice(&x_only_bytes);
+                    match PublicKey::from_slice(&compressed) {
+                        Ok(sender_key) => {
+                            tracing::debug!("Using request sender as target operator: {}...", &request.sender[..16]);
+                            Some(sender_key)
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to parse sender as pubkey: {}", e);
+                            None
+                        }
+                    }
+                }
+                _ => {
+                    tracing::warn!("Invalid sender pubkey format: {}", &request.sender[..16.min(request.sender.len())]);
+                    None
+                }
+            }
+        } else {
+            target_operator_id
+        };
+
+        // Note: We don't strictly need target_reserves_key for matching
+        // We can match by operator_id alone since each operator has one ledger
 
         // Validate sequence number if we have local ledger state
         if let Some(ref arc) = operator_ledger_arc {
@@ -3066,15 +3158,19 @@ impl Node {
                     continue;
                 }
 
-                // Check if this ledger has a QuorumJoin pointing to the target ledger
+                // Check if this ledger has a QuorumJoin pointing to the target operator
+                // Compare x-coordinates only (Nostr uses x-only pubkeys, so we can't know the y parity)
                 let has_join = ledger.state.joined_quorums.iter().any(|jq| {
-                    // Match by operator_id and reserves_key if we have them
-                    if let (Some(target_op), Some(target_res)) = (&target_operator_id, &target_reserves_key) {
-                        jq.operator_id == *target_op && jq.reserves_id == *target_res
-                    } else {
-                        // Fallback: check if reserves_id matches ledger_id prefix
-                        request.ledger_id.starts_with(&jq.reserves_id[..8.min(jq.reserves_id.len())])
+                    if let Some(target_op) = &target_operator_id {
+                        // Compare the x-coordinate (bytes 1-32 of compressed pubkey)
+                        let jq_x = &jq.operator_id.serialize()[1..];
+                        let target_x = &target_op.serialize()[1..];
+                        if jq_x == target_x {
+                            tracing::debug!("Found QuorumJoin matching operator (x-only match)");
+                            return true;
+                        }
                     }
+                    false
                 });
 
                 if has_join {
@@ -3439,7 +3535,7 @@ impl Node {
                     );
 
                     // Complete the deposit with co-signing
-                    match self.complete_deposit_offer_with_cosign(&offer_id, txid.clone(), amount_sats).await {
+                    match self.complete_deposit_offer(&offer_id, txid.clone(), amount_sats).await {
                         Ok(new_balance) => {
                             tracing::info!(
                                 "Deposit completed! New balance: {} msats",
@@ -3574,8 +3670,59 @@ impl Node {
         None
     }
 
+    /// Handle co-sign responses only (sync, to avoid recursion in request_cosign polling)
+    ///
+    /// This is a simplified version of handle_ledger_response that only processes
+    /// co-sign responses. Used inside request_cosign to avoid the recursive call:
+    /// request_cosign -> handle_ledger_response -> record_collateral_attestation -> sign_and_broadcast -> request_cosign
+    fn handle_cosign_response_only(&self, response: crate::nostr::LedgerResponse) {
+        // Check if this is a response to a pending co-sign request
+        let cosign_sender = {
+            let mut pending = self.pending_cosign_requests.lock().unwrap();
+            pending.remove(&response.request_id)
+        };
+
+        if let Some((_ledger_id, tx)) = cosign_sender {
+            // This is a co-sign response
+            if response.success {
+                if let Some(result) = &response.result {
+                    let result_obj = if result.is_object() {
+                        result.clone()
+                    } else if let Some(s) = result.as_str() {
+                        serde_json::from_str(s).unwrap_or_default()
+                    } else {
+                        serde_json::Value::Null
+                    };
+
+                    let sig_hex = result_obj.get("partner_signature_hex").and_then(|v| v.as_str());
+                    let hash_hex = result_obj.get("member_ledger_hash_hex").and_then(|v| v.as_str());
+
+                    if let (Some(sig_hex), Some(hash_hex)) = (sig_hex, hash_hex) {
+                        if let (Ok(sig_vec), Ok(hash_vec)) = (hex::decode(sig_hex), hex::decode(hash_hex)) {
+                            if sig_vec.len() == 64 && hash_vec.len() == 32 {
+                                let mut sig = [0u8; 64];
+                                sig.copy_from_slice(&sig_vec);
+                                let mut hash = [0u8; 32];
+                                hash.copy_from_slice(&hash_vec);
+
+                                let cosign_result = CoSignResult {
+                                    partner_signature: sig,
+                                    member_ledger_hash: hash,
+                                };
+                                let _ = tx.send(cosign_result);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+            // tx is dropped here on error, receiver will get an error
+        }
+        // Non-cosign responses are not handled here - they'll be processed later by handle_ledger_response
+    }
+
     /// Handle a ledger response (for auto-recording attestations and co-sign responses)
-    async fn handle_ledger_response(&self, response: crate::nostr::LedgerResponse) {
+    async fn handle_ledger_response(&mut self, response: crate::nostr::LedgerResponse) {
         // First, check if this is a response to a pending co-sign request
         let cosign_sender = {
             let mut pending = self.pending_cosign_requests.lock().unwrap();
@@ -3703,15 +3850,12 @@ impl Node {
             &hex::encode(attestation.operator.serialize())[..16]
         );
 
-        // Record the attestation on our ledger
-        match self.record_collateral_attestation(&reserves_id, attestation) {
-            Ok(()) => {
-                tracing::info!("Attestation recorded successfully on ledger {}", &reserves_id[..16.min(reserves_id.len())]);
-
-                // Broadcast the update
-                if let Err(e) = self.broadcast_last_update(&reserves_id).await {
-                    tracing::warn!("Failed to broadcast attestation: {}", e);
-                }
+        // Record the attestation on our ledger (now includes co-signing and broadcast)
+        match self.record_collateral_attestation(&reserves_id, attestation).await {
+            Ok(event_id) => {
+                tracing::info!("Attestation recorded and broadcast on ledger {}: event_id={}",
+                    &reserves_id[..16.min(reserves_id.len())],
+                    &event_id[..16.min(event_id.len())]);
             }
             Err(e) => {
                 tracing::error!("Failed to record attestation: {}", e);
@@ -3837,17 +3981,40 @@ impl Node {
 
                 // Process Nostr events to receive the response (fast poll for testing)
                 _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                    // Try to receive any pending responses
-                    while let Some(response) = self.nostr.try_recv_response() {
-                        self.handle_ledger_response(response).await;
-                    }
-
-                    // Also poll for new events actively
+                    // Poll for new events
                     if let Err(e) = self.nostr.poll_events().await {
                         tracing::debug!("Poll error: {}", e);
                     }
+
+                    // Process co-sign responses (for our pending request)
                     while let Some(response) = self.nostr.try_recv_response() {
-                        self.handle_ledger_response(response).await;
+                        self.handle_cosign_response_only(response);
+                    }
+
+                    // Also process incoming co-sign REQUESTS from others
+                    // This prevents deadlock where A waits for B while B waits for A
+                    // Safe because processing a co-sign request just signs and responds,
+                    // it doesn't trigger another sign_and_broadcast
+                    while let Some(request) = self.nostr.try_recv_request() {
+                        if request.action == "cosign_update" {
+                            // Skip our own requests
+                            let our_x_only = hex::encode(&self.node_id.serialize()[1..]);
+                            if request.sender != our_x_only {
+                                self.handler.reload_ledgers();
+                                let (success, result, error) = self.process_cosign_request(&request).await;
+                                let result_json = result.map(|s| serde_json::Value::String(s));
+                                if let Err(e) = self.nostr.send_ledger_response(
+                                    &request.event_id,
+                                    &request.ledger_id,
+                                    success,
+                                    result_json,
+                                    error,
+                                ).await {
+                                    tracing::debug!("Failed to send co-sign response: {}", e);
+                                }
+                            }
+                        }
+                        // Non-cosign requests will be processed after we exit this loop
                     }
                 }
 
@@ -3861,20 +4028,44 @@ impl Node {
         }
     }
 
+    /// Check if this ledger has had a reserves rotation to quorum-based Taproot.
+    ///
+    /// After the first ReservesRotate operation, co-signatures are required for all updates.
+    fn has_quorum_reserves(&self, ledger_id: &str) -> bool {
+        use deposits_core::messages::consts;
+
+        let ledgers = self.handler.ledgers.lock().unwrap();
+        if let Some(ledger_arc) = ledgers.get(ledger_id) {
+            let ledger = ledger_arc.read().unwrap();
+            // Check if any ReservesRotate operation exists in history
+            for update in &ledger.history {
+                if update.message_type == consts::RESERVES_ROTATE {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Sign an update with co-signature from a quorum member, then broadcast.
     ///
     /// This implements the "Porcupine Dance" signing order:
     /// 1. Partner (quorum member) signs (update content || their_ledger_hash) with ECDSA
     /// 2. Operator signs (content + partner_signature) with Schnorr
     ///
-    /// If there are no quorum members, falls back to operator-only signature.
+    /// Co-signature behavior:
+    /// - Before reserves rotation: Falls back to operator-only if no quorum members
+    /// - After reserves rotation: Co-signatures are REQUIRED (fails if none available)
     ///
     /// # Arguments
     /// * `ledger_id` - The ledger_id (hash or reserves address) identifying our ledger
     ///
     /// # Returns
     /// The Nostr event ID of the broadcast update
-    pub async fn sign_and_broadcast_with_cosign(&mut self, ledger_id: &str) -> Result<String, Error> {
+    pub async fn sign_and_broadcast(&mut self, ledger_id: &str) -> Result<String, Error> {
+        // Check if reserves have been rotated to quorum (co-signatures become required)
+        let quorum_reserves = self.has_quorum_reserves(ledger_id);
+
         // Get the ledger info we need
         let (has_quorum_members, update_clone) = {
             let ledgers = self.handler.ledgers.lock().unwrap();
@@ -3893,9 +4084,15 @@ impl Node {
             (has_quorum_members, update_clone)
         };
 
-        // If no quorum members, fall back to operator-only signature
+        // If no quorum members and no rotation yet, fall back to operator-only signature
         if !has_quorum_members {
-            tracing::debug!("No quorum members, using operator-only signature");
+            if quorum_reserves {
+                // After rotation, we should have quorum members - this is an error state
+                return Err(Error::Protocol(
+                    "Reserves have been rotated but no quorum members available - cannot sign".to_string()
+                ));
+            }
+            tracing::debug!("No quorum members yet, using operator-only signature");
             self.sign_last_update(ledger_id)?;
             return self.broadcast_last_update(ledger_id).await;
         }
@@ -3918,6 +4115,13 @@ impl Node {
                     &hex::encode(&result.member_ledger_hash[..4]));
             }
             Err(e) => {
+                if quorum_reserves {
+                    // After rotation, co-signatures are required - fail instead of falling back
+                    return Err(Error::Protocol(format!(
+                        "Co-signature required after reserves rotation, but request failed: {}", e
+                    )));
+                }
+                // Before rotation, allow fallback to operator-only
                 tracing::warn!("Co-sign multicast failed ({}), using operator-only signature", e);
             }
         }
@@ -3943,7 +4147,7 @@ impl Node {
     /// 4. Broadcasts to Nostr
     ///
     /// If there are no existing quorum members, falls back to operator-only signature.
-    pub async fn add_quorum_member_with_cosign(
+    pub async fn add_quorum_member(
         &mut self,
         ledger_id: &str,
         quorum_member: PublicKey,
@@ -3993,7 +4197,7 @@ impl Node {
 
         // Now sign and broadcast (with co-signing if we have quorum members)
         if has_quorum {
-            self.sign_and_broadcast_with_cosign(ledger_id).await
+            self.sign_and_broadcast(ledger_id).await
         } else {
             // No existing quorum, use operator-only signature
             self.sign_last_update(ledger_id)?;
@@ -4007,7 +4211,7 @@ impl Node {
     /// Record a quorum join with co-signing and broadcast.
     ///
     /// This is the async version that handles the full co-signing flow.
-    pub async fn record_quorum_join_with_cosign(
+    pub async fn record_quorum_join(
         &mut self,
         our_ledger_id: &str,
         target_operator: PublicKey,
@@ -4051,9 +4255,15 @@ impl Node {
             ).map_err(|e| Error::Protocol(format!("Failed to record quorum join: {:?}", e)))?;
         }
 
+        // Subscribe to the target ledger's requests so we can receive co-sign requests
+        // This is important for quorum members to respond to update co-signing
+        if let Err(e) = self.subscribe_to_ledger(target_ledger_id).await {
+            tracing::warn!("Failed to subscribe to target ledger {}: {}", &target_ledger_id[..16.min(target_ledger_id.len())], e);
+        }
+
         // Sign and broadcast
         if has_quorum {
-            self.sign_and_broadcast_with_cosign(our_ledger_id).await
+            self.sign_and_broadcast(our_ledger_id).await
         } else {
             self.sign_last_update(our_ledger_id)?;
             if let Err(e) = self.handler.persist_ledger(our_ledger_id) {
@@ -4067,7 +4277,7 @@ impl Node {
     ///
     /// This is the async version that handles the full co-signing flow.
     /// Returns the attestation after successfully broadcasting.
-    pub async fn lock_collateral_with_cosign(
+    pub async fn lock_collateral(
         &mut self,
         ledger_id: &str,
         deposit_pubkey: PublicKey,
@@ -4076,6 +4286,9 @@ impl Node {
         lock_until_block: u32,
         requesting_operator: PublicKey,
     ) -> Result<deposits_core::CollateralAttestationMsg, Error> {
+        use bitcoin::hashes::{sha256, Hash};
+        use bitcoin::secp256k1::{Secp256k1, Message};
+
         // Check if there are existing quorum members
         let has_quorum = {
             let ledgers = self.handler.ledgers.lock().unwrap();
@@ -4086,26 +4299,115 @@ impl Node {
             !ledger.state.quorum_members.is_empty()
         };
 
-        // Call the sync version to create the operation (it signs, but we'll re-sign if needed)
-        let attestation = self.lock_collateral(
-            ledger_id,
-            deposit_pubkey,
-            deposit_secret,
-            amount_msats,
-            lock_until_block,
-            requesting_operator,
-        )?;
+        // Create the operation and attestation
+        let attestation = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let ledger_arc = ledgers
+                .get(ledger_id)
+                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?
+                .clone();
+            drop(ledgers);
 
-        // If we have quorum members, we need to re-do the signing with co-sign
+            let mut ledger = ledger_arc.write().unwrap();
+
+            // Check if deposit exists
+            if !ledger.state.deposits.contains_key(&deposit_pubkey) {
+                return Err(Error::Protocol(format!(
+                    "Deposit not found for pubkey {}",
+                    deposit_pubkey
+                )));
+            }
+
+            // Create the deposit holder's signature for the lock
+            let lock_signature = deposits_core::signature_utils::create_collateral_lock_signature(
+                deposit_secret,
+                &deposit_pubkey,
+                amount_msats,
+                lock_until_block,
+                &self.node_id,
+            ).map_err(|e| Error::Protocol(format!("Failed to create signature: {:?}", e)))?;
+
+            // Apply the CollateralLock operation
+            let operation = LedgerOperation::CollateralLock {
+                deposit_pubkey,
+                amount: amount_msats,
+                lock_until_block,
+                operator_id: self.node_id,
+                deposit_holder_signature: lock_signature,
+            };
+
+            let block_height = self.wallet.get_block_height().unwrap_or(0);
+            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
+            ledger.append_operation_with_block(operation, deposits_core::messages::consts::COLLATERAL_LOCK, block_height, block_hash)
+                .map_err(|e| Error::Protocol(format!("Failed to lock collateral: {:?}", e)))?;
+
+            // Calculate total locked collateral from all deposits
+            let total_locked: u64 = ledger.state.deposits.values()
+                .filter(|d| d.collateral_lock_expires > block_height)
+                .map(|d| d.collateral_lock_amount)
+                .sum();
+
+            // Find minimum lock expiry among active locks
+            let min_lock_until: u32 = ledger.state.deposits.values()
+                .filter(|d| d.collateral_lock_expires > block_height && d.collateral_lock_amount > 0)
+                .map(|d| d.collateral_lock_expires)
+                .min()
+                .unwrap_or(lock_until_block);
+
+            // Get current ledger hash for the attestation
+            let ledger_hash = ledger.hash();
+
+            // Get ledger_id (hex-encoded) for the attestation
+            let collateral_ledger_id = hex::encode(ledger.state.ledger_id);
+
+            // Create operator's attestation signature
+            let mut sign_content = Vec::new();
+            sign_content.extend_from_slice(b"COLLATERAL_ATTESTATION:");
+            sign_content.extend_from_slice(&self.node_id.serialize());
+            sign_content.extend_from_slice(&requesting_operator.serialize());
+            sign_content.extend_from_slice(&total_locked.to_le_bytes());
+            sign_content.extend_from_slice(&block_height.to_le_bytes());
+            sign_content.extend_from_slice(&min_lock_until.to_le_bytes());
+            sign_content.extend_from_slice(&ledger_hash);
+
+            let hash = sha256::Hash::hash(&sign_content);
+            let msg = Message::from_digest(hash.to_byte_array());
+
+            let secp = Secp256k1::new();
+            let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
+            let sig = secp.sign_schnorr(&msg, &keypair);
+            let attestation_signature: [u8; 64] = *sig.as_ref();
+
+            deposits_core::CollateralAttestationMsg {
+                operator: self.node_id,
+                quorum_member: requesting_operator,
+                collateral_ledger_id,
+                amount: total_locked,
+                block_height,
+                lock_until_block: min_lock_until,
+                signature: attestation_signature,
+                ledger_hash,
+            }
+        };
+
+        // Sign and broadcast
         if has_quorum {
-            // The sync version already signed, but we need to get co-sign first
-            // We'll need to re-sign after getting the partner signature
-            // For now, just broadcast (the sync version already signed)
-            // TODO: Implement proper re-signing flow
-            self.broadcast_last_update(ledger_id).await?;
+            self.sign_and_broadcast(ledger_id).await?;
         } else {
+            self.sign_last_update(ledger_id)?;
+            if let Err(e) = self.handler.persist_ledger(ledger_id) {
+                tracing::warn!("Failed to persist ledger: {}", e);
+            }
             self.broadcast_last_update(ledger_id).await?;
         }
+
+        tracing::info!(
+            "Created collateral lock for deposit {}: {} msats until block {}, attestation for {}",
+            deposit_pubkey,
+            attestation.amount,
+            attestation.lock_until_block,
+            requesting_operator
+        );
 
         Ok(attestation)
     }
@@ -4113,7 +4415,7 @@ impl Node {
     /// Record a collateral attestation with co-signing and broadcast.
     ///
     /// This is the async version that handles the full co-signing flow.
-    pub async fn record_collateral_attestation_with_cosign(
+    pub async fn record_collateral_attestation(
         &mut self,
         ledger_id: &str,
         attestation: deposits_core::CollateralAttestationMsg,
@@ -4167,7 +4469,7 @@ impl Node {
 
         // Sign and broadcast
         if has_quorum {
-            self.sign_and_broadcast_with_cosign(ledger_id).await
+            self.sign_and_broadcast(ledger_id).await
         } else {
             self.sign_last_update(ledger_id)?;
             if let Err(e) = self.handler.persist_ledger(ledger_id) {
@@ -4178,7 +4480,7 @@ impl Node {
     }
 
     /// Open a deposit with co-signing and broadcast.
-    pub async fn open_deposit_with_cosign(
+    pub async fn open_deposit(
         &mut self,
         ledger_id: &str,
         deposit_pubkey: PublicKey,
@@ -4236,7 +4538,7 @@ impl Node {
 
         // Sign and broadcast
         if has_quorum {
-            self.sign_and_broadcast_with_cosign(ledger_id).await?;
+            self.sign_and_broadcast(ledger_id).await?;
         } else {
             self.sign_last_update(ledger_id)?;
             if let Err(e) = self.handler.persist_ledger(ledger_id) {
@@ -4250,7 +4552,7 @@ impl Node {
     }
 
     /// Credit a deposit with on-chain funds, with co-signing and broadcast.
-    pub async fn credit_deposit_onchain_with_cosign(
+    pub async fn credit_deposit_onchain(
         &mut self,
         ledger_id: &str,
         deposit_pubkey: PublicKey,
@@ -4310,7 +4612,7 @@ impl Node {
 
         // Sign and broadcast
         if has_quorum {
-            self.sign_and_broadcast_with_cosign(ledger_id).await?;
+            self.sign_and_broadcast(ledger_id).await?;
         } else {
             self.sign_last_update(ledger_id)?;
             if let Err(e) = self.handler.persist_ledger(ledger_id) {
@@ -4327,7 +4629,7 @@ impl Node {
     }
 
     /// Credit a deposit with Lightning invoice payment, with co-signing and broadcast.
-    pub async fn credit_deposit_with_cosign(
+    pub async fn credit_deposit(
         &mut self,
         ledger_id: &str,
         deposit_pubkey: PublicKey,
@@ -4388,7 +4690,7 @@ impl Node {
 
         // Sign and broadcast
         if has_quorum {
-            self.sign_and_broadcast_with_cosign(ledger_id).await?;
+            self.sign_and_broadcast(ledger_id).await?;
         } else {
             self.sign_last_update(ledger_id)?;
             if let Err(e) = self.handler.persist_ledger(ledger_id) {
@@ -4405,7 +4707,7 @@ impl Node {
     }
 
     /// Lock funds for an outgoing Lightning invoice payment, with co-signing and broadcast.
-    pub async fn lock_invoice_payment_with_cosign(
+    pub async fn lock_invoice_payment(
         &mut self,
         ledger_id: &str,
         deposit_pubkey: PublicKey,
@@ -4472,7 +4774,7 @@ impl Node {
 
         // Sign and broadcast
         if has_quorum {
-            self.sign_and_broadcast_with_cosign(ledger_id).await?;
+            self.sign_and_broadcast(ledger_id).await?;
         } else {
             self.sign_last_update(ledger_id)?;
             if let Err(e) = self.handler.persist_ledger(ledger_id) {
@@ -4489,7 +4791,7 @@ impl Node {
     }
 
     /// Fail an outgoing Lightning invoice payment, with co-signing and broadcast.
-    pub async fn fail_invoice_payment_with_cosign(
+    pub async fn fail_invoice_payment(
         &mut self,
         ledger_id: &str,
         deposit_pubkey: PublicKey,
@@ -4554,7 +4856,7 @@ impl Node {
 
         // Sign and broadcast
         if has_quorum {
-            self.sign_and_broadcast_with_cosign(ledger_id).await?;
+            self.sign_and_broadcast(ledger_id).await?;
         } else {
             self.sign_last_update(ledger_id)?;
             if let Err(e) = self.handler.persist_ledger(ledger_id) {
@@ -4571,7 +4873,7 @@ impl Node {
     }
 
     /// Fulfill an outgoing Lightning invoice payment, with co-signing and broadcast.
-    pub async fn fulfill_invoice_payment_with_cosign(
+    pub async fn fulfill_invoice_payment(
         &mut self,
         ledger_id: &str,
         deposit_pubkey: PublicKey,
@@ -4640,7 +4942,7 @@ impl Node {
 
         // Sign and broadcast
         if has_quorum {
-            self.sign_and_broadcast_with_cosign(ledger_id).await?;
+            self.sign_and_broadcast(ledger_id).await?;
         } else {
             self.sign_last_update(ledger_id)?;
             if let Err(e) = self.handler.persist_ledger(ledger_id) {
@@ -4657,7 +4959,7 @@ impl Node {
     }
 
     /// Lock a withdrawal with co-signing and broadcast.
-    pub async fn lock_withdrawal_with_cosign(
+    pub async fn lock_withdrawal(
         &mut self,
         ledger_id: &str,
         deposit_pubkey: PublicKey,
@@ -4762,7 +5064,7 @@ impl Node {
 
         // Sign and broadcast
         if has_quorum {
-            self.sign_and_broadcast_with_cosign(ledger_id).await?;
+            self.sign_and_broadcast(ledger_id).await?;
         } else {
             self.sign_last_update(ledger_id)?;
             if let Err(e) = self.handler.persist_ledger(ledger_id) {
@@ -4801,7 +5103,7 @@ impl Node {
     }
 
     /// Complete a withdrawal with co-signing and broadcast.
-    pub async fn complete_withdrawal_with_cosign(
+    pub async fn complete_withdrawal(
         &mut self,
         ledger_id: &str,
         withdrawal_id: &[u8; 32],
@@ -4884,7 +5186,7 @@ impl Node {
 
         // Sign and broadcast
         if has_quorum {
-            self.sign_and_broadcast_with_cosign(ledger_id).await?;
+            self.sign_and_broadcast(ledger_id).await?;
         } else {
             self.sign_last_update(ledger_id)?;
             if let Err(e) = self.handler.persist_ledger(ledger_id) {
@@ -5087,127 +5389,6 @@ impl Node {
         Ok(())
     }
 
-    /// Add a quorum member to our ledger.
-    ///
-    /// This appends a QuorumAddMember operation to our ledger with the member's signature.
-    /// For testing, we can generate a placeholder signature.
-    ///
-    /// # Arguments
-    /// * `ledger_id` - Our ledger's ID (hex-encoded hash)
-    /// * `quorum_member` - The public key of the new quorum member
-    /// * `member_ledger_id` - The ledger ID where this member will lock collateral
-    /// * `signature` - The member's consent signature (or placeholder for testing)
-    pub fn add_quorum_member(
-        &self,
-        ledger_id: &str,
-        quorum_member: PublicKey,
-        member_ledger_id: &str,
-        signature: [u8; 64],
-    ) -> Result<(), Error> {
-        {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-
-            // Find our ledger by ledger_id
-            let ledger_arc = ledgers
-                .get(ledger_id)
-                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?;
-
-            let mut ledger = ledger_arc.write().unwrap();
-
-            // Check if already a member
-            if ledger.state.quorum_members.iter().any(|m| m.pubkey == quorum_member) {
-                return Err(Error::Protocol("Already a quorum member".to_string()));
-            }
-
-            // Get current block info
-            let block_height = self.wallet.get_block_height().unwrap_or(0);
-            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
-
-            // Create and append QuorumAddMember operation
-            let operation = deposits_core::messages::LedgerOperation::QuorumAddMember {
-                quorum_member,
-                quorum_member_signature: signature,
-                member_ledger_id: member_ledger_id.to_string(),
-            };
-
-            ledger.append_operation_with_block(
-                operation,
-                deposits_core::messages::consts::QUORUM_ADD_MEMBER,
-                block_height,
-                block_hash,
-            ).map_err(|e| Error::Protocol(format!("Failed to add quorum member: {:?}", e)))?;
-        }
-
-        // Sign the update
-        self.sign_last_update(ledger_id)?;
-
-        // Persist the ledger
-        if let Err(e) = self.handler.persist_ledger(ledger_id) {
-            tracing::error!("Failed to persist ledger: {}", e);
-        }
-
-        Ok(())
-    }
-
-    /// Record that we have joined another operator's quorum.
-    ///
-    /// This appends a QuorumJoin operation to our own ledger, creating a two-sided audit trail.
-    ///
-    /// # Arguments
-    /// * `our_ledger_id` - Our own ledger's ID (hex-encoded hash)
-    /// * `target_operator` - The operator whose quorum we're joining
-    /// * `target_ledger_id` - The ledger ID of the ledger we're monitoring
-    /// * `membership_expires` - Block height when our membership commitment expires
-    /// * `signature` - Our consent signature
-    pub fn record_quorum_join(
-        &self,
-        our_ledger_id: &str,
-        target_operator: PublicKey,
-        target_ledger_id: &str,
-        membership_expires: u32,
-        signature: [u8; 64],
-    ) -> Result<(), Error> {
-        {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-
-            // Find our ledger by ledger_id
-            let ledger_arc = ledgers
-                .get(our_ledger_id)
-                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", our_ledger_id)))?;
-
-            let mut ledger = ledger_arc.write().unwrap();
-
-            // Get current block info
-            let block_height = self.wallet.get_block_height().unwrap_or(0);
-            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
-
-            // Create and append QuorumJoin operation
-            let operation = deposits_core::messages::LedgerOperation::QuorumJoin {
-                operator_id: target_operator,
-                reserves_id: target_ledger_id.to_string(),
-                membership_expires,
-                our_signature: signature,
-            };
-
-            ledger.append_operation_with_block(
-                operation,
-                deposits_core::messages::consts::QUORUM_JOIN,
-                block_height,
-                block_hash,
-            ).map_err(|e| Error::Protocol(format!("Failed to record quorum join: {:?}", e)))?;
-        }
-
-        // Sign the update
-        self.sign_last_update(our_ledger_id)?;
-
-        // Persist the ledger
-        if let Err(e) = self.handler.persist_ledger(our_ledger_id) {
-            tracing::error!("Failed to persist ledger: {}", e);
-        }
-
-        Ok(())
-    }
-
     /// List all quorum members across all ledgers
     /// Returns (identifier, role) tuples where identifier is pubkey or ledger_id string
     pub fn list_partners(&self) -> Vec<(String, String)> {
@@ -5375,229 +5556,6 @@ impl Node {
             first_expiry_block: result.first_expiry_block,
             ledger_hash,
         })
-    }
-
-    /// Lock a deposit's balance as collateral backing for the operator.
-    ///
-    /// The locked amount cannot be withdrawn until the lock expires.
-    /// Uses ratchet semantics: can only increase amount AND extend duration.
-    ///
-    /// # Arguments
-    /// * `ledger_id` - The ledger ID (hex-encoded hash)
-    /// * `deposit_pubkey` - The deposit's public key
-    /// * `deposit_secret` - The deposit holder's secret key for signing
-    /// * `amount_msats` - Amount to lock as collateral (millisatoshis)
-    /// * `lock_until_block` - Block height when the lock expires
-    ///
-    /// # Returns
-    /// A signed CollateralAttestationMsg that the requesting operator can record on their own ledger
-    pub fn lock_collateral(
-        &self,
-        ledger_id: &str,
-        deposit_pubkey: PublicKey,
-        deposit_secret: &bitcoin::secp256k1::SecretKey,
-        amount_msats: u64,
-        lock_until_block: u32,
-        requesting_operator: PublicKey,
-    ) -> Result<deposits_core::CollateralAttestationMsg, Error> {
-        let ledger_arc = {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            ledgers.get(ledger_id)
-                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?
-                .clone()
-        };
-
-        let attestation = {
-            let mut ledger = ledger_arc.write().unwrap();
-
-            // Check if deposit exists
-            if !ledger.state.deposits.contains_key(&deposit_pubkey) {
-                return Err(Error::Protocol(format!(
-                    "Deposit not found for pubkey {}",
-                    deposit_pubkey
-                )));
-            }
-
-            // Create the deposit holder's signature for the lock
-            let lock_signature = deposits_core::signature_utils::create_collateral_lock_signature(
-                deposit_secret,
-                &deposit_pubkey,
-                amount_msats,
-                lock_until_block,
-                &self.node_id,
-            ).map_err(|e| Error::Protocol(format!("Failed to create signature: {:?}", e)))?;
-
-            // Apply the CollateralLock operation
-            let operation = LedgerOperation::CollateralLock {
-                deposit_pubkey,
-                amount: amount_msats,
-                lock_until_block,
-                operator_id: self.node_id,
-                deposit_holder_signature: lock_signature,
-            };
-
-            let block_height = self.wallet.get_block_height().unwrap_or(0);
-            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
-            ledger.append_operation_with_block(operation, deposits_core::messages::consts::COLLATERAL_LOCK, block_height, block_hash)
-                .map_err(|e| Error::Protocol(format!("Failed to lock collateral: {:?}", e)))?;
-
-            // Calculate total locked collateral from all deposits
-            let total_locked: u64 = ledger.state.deposits.values()
-                .filter(|d| d.collateral_lock_expires > block_height)
-                .map(|d| d.collateral_lock_amount)
-                .sum();
-
-            // Find minimum lock expiry among active locks
-            let min_lock_until: u32 = ledger.state.deposits.values()
-                .filter(|d| d.collateral_lock_expires > block_height && d.collateral_lock_amount > 0)
-                .map(|d| d.collateral_lock_expires)
-                .min()
-                .unwrap_or(lock_until_block);
-
-            // Get current ledger hash for the attestation
-            let ledger_hash = ledger.hash();
-
-            // Get ledger_id (hex-encoded) for the attestation
-            let collateral_ledger_id = hex::encode(ledger.state.ledger_id);
-
-            // Create operator's attestation signature
-            // Sign: operator || quorum_member || amount || block_height || lock_until_block || ledger_hash
-            let attestation_signature = self.sign_collateral_attestation(
-                requesting_operator,
-                total_locked,
-                block_height,
-                min_lock_until,
-                ledger_hash,
-            )?;
-
-            deposits_core::CollateralAttestationMsg {
-                operator: self.node_id,
-                quorum_member: requesting_operator,
-                collateral_ledger_id,
-                amount: total_locked,
-                block_height,
-                lock_until_block: min_lock_until,
-                signature: attestation_signature,
-                ledger_hash,
-            }
-        };
-
-        // Sign the update
-        self.sign_last_update(ledger_id)?;
-
-        // Persist the ledger
-        if let Err(e) = self.handler.persist_ledger(ledger_id) {
-            tracing::error!("Failed to persist ledger: {}", e);
-        }
-
-        tracing::info!(
-            "Created collateral lock for deposit {}: {} msats until block {}, attestation for {}",
-            deposit_pubkey,
-            attestation.amount,
-            attestation.lock_until_block,
-            requesting_operator
-        );
-
-        Ok(attestation)
-    }
-
-    /// Sign a collateral attestation message
-    fn sign_collateral_attestation(
-        &self,
-        quorum_member: PublicKey,
-        amount: u64,
-        block_height: u32,
-        lock_until_block: u32,
-        ledger_hash: [u8; 32],
-    ) -> Result<[u8; 64], Error> {
-        use bitcoin::hashes::{sha256, Hash};
-        use bitcoin::secp256k1::{Secp256k1, Message};
-
-        let mut sign_content = Vec::new();
-        sign_content.extend_from_slice(b"COLLATERAL_ATTESTATION:");
-        sign_content.extend_from_slice(&self.node_id.serialize());
-        sign_content.extend_from_slice(&quorum_member.serialize());
-        sign_content.extend_from_slice(&amount.to_le_bytes());
-        sign_content.extend_from_slice(&block_height.to_le_bytes());
-        sign_content.extend_from_slice(&lock_until_block.to_le_bytes());
-        sign_content.extend_from_slice(&ledger_hash);
-
-        let hash = sha256::Hash::hash(&sign_content);
-        let msg = Message::from_digest(hash.to_byte_array());
-
-        let secp = Secp256k1::new();
-        let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
-        let sig = secp.sign_schnorr(&msg, &keypair);
-
-        Ok(*sig.as_ref())
-    }
-
-    /// Record a received CollateralAttestation on our own ledger
-    ///
-    /// This is called by an operator who received an attestation from another operator
-    /// after pledging collateral on their ledger. The attestation is recorded on the
-    /// caller's own ledger so quorum members can see it.
-    pub fn record_collateral_attestation(
-        &self,
-        ledger_id: &str,
-        attestation: deposits_core::CollateralAttestationMsg,
-    ) -> Result<(), Error> {
-        // Verify we are the quorum_member in the attestation
-        if attestation.quorum_member != self.node_id {
-            return Err(Error::Protocol(format!(
-                "Attestation is for {}, not us ({})",
-                attestation.quorum_member, self.node_id
-            )));
-        }
-
-        let ledger_arc = {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            ledgers.get(ledger_id)
-                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?
-                .clone()
-        };
-
-        {
-            let mut ledger = ledger_arc.write().unwrap();
-
-            // Create the CollateralAttestation operation
-            let operation = LedgerOperation::CollateralAttestation {
-                collateral_operator: attestation.operator,
-                quorum_member: attestation.quorum_member,
-                collateral_ledger_id: attestation.collateral_ledger_id.clone(),
-                amount: attestation.amount,
-                block_height: attestation.block_height,
-                lock_until_block: attestation.lock_until_block,
-                signature: attestation.signature,
-                ledger_hash: attestation.ledger_hash,
-            };
-
-            let block_height = self.wallet.get_block_height().unwrap_or(0);
-            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
-            ledger.append_operation_with_block(
-                operation,
-                deposits_core::messages::consts::COLLATERAL_ATTESTATION,
-                block_height,
-                block_hash,
-            ).map_err(|e| Error::Protocol(format!("Failed to record attestation: {:?}", e)))?;
-        }
-
-        // Sign the update
-        self.sign_last_update(ledger_id)?;
-
-        // Persist the ledger
-        if let Err(e) = self.handler.persist_ledger(ledger_id) {
-            tracing::error!("Failed to persist ledger: {}", e);
-        }
-
-        tracing::info!(
-            "Recorded collateral attestation from {} for {} msats (ledger {})",
-            attestation.operator,
-            attestation.amount,
-            attestation.collateral_ledger_id
-        );
-
-        Ok(())
     }
 
     // ========================================================================
@@ -5799,257 +5757,6 @@ impl Node {
     // On-Chain Withdrawal Management
     // ========================================================================
 
-    /// Lock funds for an on-chain withdrawal
-    ///
-    /// This creates a withdrawal request and locks the funds in the deposit.
-    /// The depositor must sign the withdrawal to authorize it.
-    /// The nonce must be provided by the depositor (who created the signature).
-    pub fn lock_withdrawal(
-        &self,
-        ledger_id: &str,
-        deposit_pubkey: PublicKey,
-        destination_address: String,
-        amount_sats: u64,
-        fee_sats: u64,
-        nonce: [u8; 32],
-        depositor_signature: [u8; 64],
-        memo: Option<String>,
-    ) -> Result<WithdrawalLockResult, Error> {
-        let current_block = self.wallet.get_block_height()?;
-
-        // Compute withdrawal ID
-        let signing_message = OnChainWithdrawal::signing_message(
-            &nonce,
-            &deposit_pubkey,
-            &destination_address,
-            amount_sats,
-            fee_sats,
-        );
-        let withdrawal_id = OnChainWithdrawal::compute_withdrawal_id(&signing_message);
-
-        // Create the withdrawal
-        let withdrawal = OnChainWithdrawal {
-            withdrawal_id,
-            nonce,
-            deposit_pubkey,
-            destination_address: destination_address.clone(),
-            amount_sats,
-            fee_sats,
-            requested_at_block: current_block,
-            memo,
-            depositor_signature,
-        };
-
-        // Verify the signature
-        let sig_valid = deposits_core::verify_withdrawal_signature(&withdrawal)
-            .map_err(|e| Error::Protocol(format!("Signature verification failed: {:?}", e)))?;
-
-        if !sig_valid {
-            return Err(Error::Protocol("Invalid withdrawal signature".to_string()));
-        }
-
-        // Get the ledger and apply OnchainLock operation
-        let ledger_arc = {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            ledgers.get(ledger_id)
-                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?
-                .clone()
-        };
-        let (previous_balance, new_balance) = {
-            let mut ledger = ledger_arc.write().unwrap();
-
-            // Check if deposit exists and has sufficient balance
-            let deposit = ledger.state.deposits.get(&deposit_pubkey)
-                .ok_or_else(|| Error::Protocol(format!(
-                    "Deposit not found for pubkey {}",
-                    deposit_pubkey
-                )))?;
-
-            let total_debit_msats = (amount_sats + fee_sats) * 1000;
-            if deposit.balance < total_debit_msats {
-                return Err(Error::Protocol(format!(
-                    "Insufficient balance: {} msats available, {} msats needed",
-                    deposit.balance, total_debit_msats
-                )));
-            }
-
-            let prev_balance = deposit.balance;
-
-            // Apply the OnchainLock operation
-            let operation = LedgerOperation::OnchainLock {
-                deposit_pubkey,
-                amount: total_debit_msats,
-                destination_address: destination_address.clone(),
-                withdrawal_id,
-            };
-
-            let block_height = self.wallet.get_block_height().unwrap_or(0);
-            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
-            ledger.append_operation_with_block(operation, deposits_core::messages::consts::ONCHAIN_LOCK, block_height, block_hash)
-                .map_err(|e| Error::Protocol(format!("Failed to lock withdrawal: {:?}", e)))?;
-
-            // Get new balance
-            let new_bal = ledger.state.deposits.get(&deposit_pubkey)
-                .map(|d| d.balance)
-                .unwrap_or(0);
-
-            (prev_balance, new_bal)
-        };
-
-        // Sign the update
-        self.sign_last_update(ledger_id)?;
-
-        // Persist the ledger
-        if let Err(e) = self.handler.persist_ledger(ledger_id) {
-            tracing::error!("Failed to persist ledger: {}", e);
-        }
-
-        // Store the withdrawal as locked
-        let status = OnChainWithdrawalStatus::Locked {
-            locked_at_block: current_block,
-        };
-
-        {
-            let mut withdrawals = self.withdrawals.lock().unwrap();
-            withdrawals.insert(withdrawal_id, (withdrawal.clone(), status));
-        }
-
-        // Persist to disk
-        self.save_withdrawals()?;
-
-        // Calculate balances (convert sats to msats for the result)
-        let total_debit_msats = withdrawal.total_debit() * 1000;
-
-        tracing::info!(
-            "Locked withdrawal {} for {} sats + {} fee to {}, balance {} -> {} msats",
-            hex::encode(&withdrawal_id[..8]),
-            amount_sats,
-            fee_sats,
-            withdrawal.destination_address,
-            previous_balance,
-            new_balance
-        );
-
-        Ok(WithdrawalLockResult {
-            withdrawal: withdrawal.clone(),
-            previous_balance_msats: previous_balance,
-            new_balance_msats: new_balance,
-            locked_amount_msats: total_debit_msats,
-        })
-    }
-
-    /// Complete a withdrawal by broadcasting the transaction
-    ///
-    /// This creates and broadcasts the on-chain transaction with the required
-    /// OP_RETURN commitment, then marks the withdrawal as complete.
-    pub fn complete_withdrawal(
-        &self,
-        ledger_id: &str,
-        withdrawal_id: &[u8; 32],
-    ) -> Result<WithdrawalCompleteResult, Error> {
-        let current_block = self.wallet.get_block_height()?;
-
-        // Get the withdrawal
-        let withdrawal = {
-            let withdrawals = self.withdrawals.lock().unwrap();
-            match withdrawals.get(withdrawal_id) {
-                Some((w, OnChainWithdrawalStatus::Locked { .. })) => w.clone(),
-                Some((_, status)) => {
-                    return Err(Error::Protocol(format!(
-                        "Withdrawal not in Locked state: {:?}",
-                        status
-                    )));
-                }
-                None => return Err(Error::OfferNotFound),
-            }
-        };
-
-        // Build and broadcast the transaction
-        let txid = self.wallet.send_withdrawal(&withdrawal)?;
-
-        // Convert txid string to bytes for the ledger operation
-        let txid_bytes: [u8; 32] = hex::decode(&txid)
-            .ok()
-            .and_then(|v| {
-                let mut arr = [0u8; 32];
-                if v.len() == 32 {
-                    arr.copy_from_slice(&v);
-                    Some(arr)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or([0u8; 32]);
-
-        // Apply OnchainFulfill operation to the ledger
-        let final_balance = {
-            let ledger_arc = {
-                let ledgers = self.handler.ledgers.lock().unwrap();
-                ledgers.get(ledger_id)
-                    .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?
-                    .clone()
-            };
-            let mut ledger = ledger_arc.write().unwrap();
-
-            let operation = LedgerOperation::OnchainFulfill {
-                deposit_pubkey: withdrawal.deposit_pubkey,
-                withdrawal_id: *withdrawal_id,
-                amount: withdrawal.amount_sats * 1000, // Convert to msats
-                txid: txid_bytes,
-                destination_address: withdrawal.destination_address.clone(),
-            };
-
-            let block_height = self.wallet.get_block_height().unwrap_or(0);
-            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
-            ledger.append_operation_with_block(operation, deposits_core::messages::consts::ONCHAIN_FULFILL, block_height, block_hash)
-                .map_err(|e| Error::Protocol(format!("Failed to fulfill withdrawal: {:?}", e)))?;
-
-            // Get final balance
-            ledger.state.deposits.get(&withdrawal.deposit_pubkey)
-                .map(|d| d.balance)
-                .unwrap_or(0)
-        };
-
-        // Sign the update
-        self.sign_last_update(ledger_id)?;
-
-        // Persist the ledger
-        if let Err(e) = self.handler.persist_ledger(ledger_id) {
-            tracing::error!("Failed to persist ledger: {}", e);
-        }
-
-        // Update status
-        let new_status = OnChainWithdrawalStatus::Broadcast {
-            txid: txid.clone(),
-            broadcast_at_block: current_block,
-        };
-
-        {
-            let mut withdrawals = self.withdrawals.lock().unwrap();
-            if let Some((_, status)) = withdrawals.get_mut(withdrawal_id) {
-                *status = new_status;
-            }
-        }
-
-        // Persist
-        self.save_withdrawals()?;
-
-        tracing::info!(
-            "Completed withdrawal {}: txid={}, final balance={} msats",
-            hex::encode(&withdrawal_id[..8]),
-            txid,
-            final_balance
-        );
-
-        Ok(WithdrawalCompleteResult {
-            withdrawal_id: *withdrawal_id,
-            txid,
-            amount_sats: withdrawal.amount_sats,
-            fee_sats: withdrawal.fee_sats,
-            final_balance_msats: final_balance,
-        })
-    }
-
     /// Cancel a withdrawal (only if not yet broadcast)
     pub fn cancel_withdrawal(
         &self,
@@ -6162,493 +5869,6 @@ impl Node {
     // Deposit Management
     // ========================================================================
 
-    /// Open a new deposit in a ledger
-    ///
-    /// Creates a deposit for a given public key in the ledger.
-    /// This applies a DepositOpen operation to the ledger.
-    pub fn open_deposit(
-        &self,
-        ledger_id: &str,
-        deposit_pubkey: PublicKey,
-        fees: Option<FeeStructure>,
-    ) -> Result<Deposit, Error> {
-        let ledger_arc = {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            ledgers.get(ledger_id)
-                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?
-                .clone()
-        };
-
-        let deposit = {
-            let mut ledger = ledger_arc.write().unwrap();
-
-            // Check if deposit already exists
-            if ledger.state.deposits.contains_key(&deposit_pubkey) {
-                return Err(Error::Protocol(format!(
-                    "Deposit already exists for pubkey {}",
-                    deposit_pubkey
-                )));
-            }
-
-            // Apply the DepositOpen operation with history tracking
-            let operation = LedgerOperation::DepositOpen {
-                pubkey: deposit_pubkey,
-                fees: fees.clone(),
-                payment_hash: None,
-                invoice: None,
-                cosigner_guarantee_signature: None,
-            };
-
-            let block_height = self.wallet.get_block_height().unwrap_or(0);
-            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
-            ledger.append_operation_with_block(operation, deposits_core::messages::consts::DEPOSIT_OPEN, block_height, block_hash)
-                .map_err(|e| Error::Protocol(format!("Failed to open deposit: {:?}", e)))?;
-
-            // Return the created deposit
-            ledger.state.deposits.get(&deposit_pubkey)
-                .cloned()
-                .ok_or_else(|| Error::Protocol("Deposit not found after creation".to_string()))?
-        };
-
-        // Sign the update
-        self.sign_last_update(ledger_id)?;
-
-        // Persist the ledger
-        if let Err(e) = self.handler.persist_ledger(ledger_id) {
-            tracing::error!("Failed to persist ledger: {}", e);
-        }
-
-        tracing::info!(
-            "Opened deposit {} in ledger {}",
-            deposit_pubkey,
-            ledger_id
-        );
-
-        Ok(deposit)
-    }
-
-    /// Credit a deposit with on-chain funds
-    ///
-    /// This applies an OnchainCredit operation to add funds to a deposit.
-    /// Used when on-chain funding is received for a deposit offer.
-    pub fn credit_deposit_onchain(
-        &self,
-        ledger_id: &str,
-        deposit_pubkey: PublicKey,
-        amount_msats: u64,
-        txid: [u8; 32],
-        vout: u32,
-        funding_address: String,
-    ) -> Result<u64, Error> {
-        let ledger_arc = {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            ledgers.get(ledger_id)
-                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?
-                .clone()
-        };
-
-        let new_balance = {
-            let mut ledger = ledger_arc.write().unwrap();
-
-            // Check if deposit exists
-            if !ledger.state.deposits.contains_key(&deposit_pubkey) {
-                return Err(Error::Protocol(format!(
-                    "Deposit not found for pubkey {}",
-                    deposit_pubkey
-                )));
-            }
-
-            // Apply the OnchainCredit operation with history tracking
-            let operation = LedgerOperation::OnchainCredit {
-                txid,
-                vout,
-                deposit_pubkey,
-                amount: amount_msats,
-                funding_address,
-            };
-
-            let block_height = self.wallet.get_block_height().unwrap_or(0);
-            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
-            ledger.append_operation_with_block(operation, deposits_core::messages::consts::ONCHAIN_CREDIT, block_height, block_hash)
-                .map_err(|e| Error::Protocol(format!("Failed to credit deposit: {:?}", e)))?;
-
-            // Return the new balance
-            ledger.state.deposits.get(&deposit_pubkey)
-                .map(|d| d.balance)
-                .unwrap_or(0)
-        };
-
-        // Sign the update
-        self.sign_last_update(ledger_id)?;
-
-        // Persist the ledger
-        if let Err(e) = self.handler.persist_ledger(ledger_id) {
-            tracing::error!("Failed to persist ledger: {}", e);
-        }
-
-        tracing::info!(
-            "Credited deposit {} with {} msats (on-chain), new balance: {} msats",
-            deposit_pubkey,
-            amount_msats,
-            new_balance
-        );
-
-        Ok(new_balance)
-    }
-
-    /// Credit a deposit with Lightning invoice payment
-    ///
-    /// This applies an InvoiceCredit operation to add funds to a deposit.
-    /// Used when a Lightning invoice payment is received.
-    pub fn credit_deposit(
-        &self,
-        ledger_id: &str,
-        deposit_pubkey: PublicKey,
-        amount_msats: u64,
-        payment_hash: [u8; 32],
-        invoice_id: String,
-    ) -> Result<u64, Error> {
-        let ledger_arc = {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            ledgers.get(ledger_id)
-                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?
-                .clone()
-        };
-
-        let new_balance = {
-            let mut ledger = ledger_arc.write().unwrap();
-
-            // Check if deposit exists
-            if !ledger.state.deposits.contains_key(&deposit_pubkey) {
-                return Err(Error::Protocol(format!(
-                    "Deposit not found for pubkey {}",
-                    deposit_pubkey
-                )));
-            }
-
-            // Get the next sequence number for this deposit's operations
-            let sequence_number = ledger.sequence() + 1;
-
-            // Apply the InvoiceCredit operation with history tracking
-            let operation = LedgerOperation::InvoiceCredit {
-                payment_hash,
-                deposit_pubkey,
-                amount: amount_msats,
-                invoice_id,
-                sequence_number,
-            };
-
-            let block_height = self.wallet.get_block_height().unwrap_or(0);
-            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
-            ledger.append_operation_with_block(operation, deposits_core::messages::consts::RECEIVING_CREDIT_PAYMENT, block_height, block_hash)
-                .map_err(|e| Error::Protocol(format!("Failed to credit deposit: {:?}", e)))?;
-
-            // Return the new balance
-            ledger.state.deposits.get(&deposit_pubkey)
-                .map(|d| d.balance)
-                .unwrap_or(0)
-        };
-
-        // Sign the update
-        self.sign_last_update(ledger_id)?;
-
-        // Persist the ledger
-        if let Err(e) = self.handler.persist_ledger(ledger_id) {
-            tracing::error!("Failed to persist ledger: {}", e);
-        }
-
-        tracing::info!(
-            "Credited deposit {} with {} msats (invoice), new balance: {} msats",
-            deposit_pubkey,
-            amount_msats,
-            new_balance
-        );
-
-        Ok(new_balance)
-    }
-
-    /// Lock funds for an outgoing Lightning invoice payment
-    ///
-    /// This applies an InvoiceLock operation to lock funds from a deposit
-    /// for an outgoing Lightning payment. The payment must be fulfilled or
-    /// failed to release the locked funds.
-    ///
-    /// # Arguments
-    /// * `ledger_id` - The ledger ID (hex-encoded hash)
-    /// * `deposit_pubkey` - The deposit's public key
-    /// * `amount_msats` - Amount to lock (millisatoshis)
-    /// * `payment_id` - Unique identifier for this payment (typically payment hash)
-    /// * `scriptpubkey_signature` - Signature from the deposit holder authorizing the lock
-    ///
-    /// # Returns
-    /// The new locked balance for the deposit
-    pub fn lock_invoice_payment(
-        &self,
-        ledger_id: &str,
-        deposit_pubkey: PublicKey,
-        amount_msats: u64,
-        payment_id: [u8; 32],
-        scriptpubkey_signature: [u8; 64],
-    ) -> Result<u64, Error> {
-        let ledger_arc = {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            ledgers.get(ledger_id)
-                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?
-                .clone()
-        };
-
-        let (previous_balance, new_locked) = {
-            let mut ledger = ledger_arc.write().unwrap();
-
-            // Check if deposit exists
-            let deposit = ledger.state.deposits.get(&deposit_pubkey)
-                .ok_or_else(|| Error::Protocol(format!(
-                    "Deposit not found for pubkey {}",
-                    deposit_pubkey
-                )))?;
-
-            // Check sufficient available balance
-            if deposit.available_balance() < amount_msats {
-                return Err(Error::Protocol(format!(
-                    "Insufficient available balance: {} msats available, {} msats needed",
-                    deposit.available_balance(), amount_msats
-                )));
-            }
-
-            let prev_balance = deposit.balance;
-
-            // Get the next sequence number
-            let sequence_number = ledger.sequence() + 1;
-
-            // Apply the InvoiceLock operation
-            let operation = LedgerOperation::InvoiceLock {
-                pubkey: deposit_pubkey,
-                amount: amount_msats,
-                payment_id,
-                sequence_number,
-                scriptpubkey_signature,
-            };
-
-            let block_height = self.wallet.get_block_height().unwrap_or(0);
-            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
-            ledger.append_operation_with_block(operation, deposits_core::messages::consts::SENDING_LOCK_PAYMENT, block_height, block_hash)
-                .map_err(|e| Error::Protocol(format!("Failed to lock payment: {:?}", e)))?;
-
-            // Get new locked balance
-            let new_locked = ledger.state.deposits.get(&deposit_pubkey)
-                .map(|d| d.locked_balance)
-                .unwrap_or(0);
-
-            (prev_balance, new_locked)
-        };
-
-        // Sign the update
-        self.sign_last_update(ledger_id)?;
-
-        // Persist the ledger
-        if let Err(e) = self.handler.persist_ledger(ledger_id) {
-            tracing::error!("Failed to persist ledger: {}", e);
-        }
-
-        tracing::info!(
-            "Locked {} msats for invoice payment {} on deposit {}, previous balance: {} msats",
-            amount_msats,
-            hex::encode(&payment_id[..8]),
-            deposit_pubkey,
-            previous_balance
-        );
-
-        Ok(new_locked)
-    }
-
-    /// Fail an outgoing Lightning invoice payment
-    ///
-    /// This applies an InvoiceFail operation to unlock funds from a deposit
-    /// when a Lightning payment fails. The locked funds are returned to
-    /// the deposit's available balance.
-    ///
-    /// # Arguments
-    /// * `ledger_id` - The ledger ID (hex-encoded hash)
-    /// * `deposit_pubkey` - The deposit's public key
-    /// * `amount_msats` - Amount to unlock (millisatoshis)
-    /// * `payment_id` - The payment identifier from the original lock
-    ///
-    /// # Returns
-    /// The new available balance for the deposit
-    pub fn fail_invoice_payment(
-        &self,
-        ledger_id: &str,
-        deposit_pubkey: PublicKey,
-        amount_msats: u64,
-        payment_id: [u8; 32],
-    ) -> Result<u64, Error> {
-        let ledger_arc = {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            ledgers.get(ledger_id)
-                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?
-                .clone()
-        };
-
-        let (previous_locked, new_balance) = {
-            let mut ledger = ledger_arc.write().unwrap();
-
-            // Check if deposit exists
-            let deposit = ledger.state.deposits.get(&deposit_pubkey)
-                .ok_or_else(|| Error::Protocol(format!(
-                    "Deposit not found for pubkey {}",
-                    deposit_pubkey
-                )))?;
-
-            // Check sufficient locked balance
-            if deposit.locked_balance < amount_msats {
-                return Err(Error::Protocol(format!(
-                    "Insufficient locked balance: {} msats locked, {} msats to unlock",
-                    deposit.locked_balance, amount_msats
-                )));
-            }
-
-            let prev_locked = deposit.locked_balance;
-
-            // Get the next sequence number
-            let sequence_number = ledger.sequence() + 1;
-
-            // Apply the InvoiceFail operation
-            let operation = LedgerOperation::InvoiceFail {
-                pubkey: deposit_pubkey,
-                amount: amount_msats,
-                payment_id,
-                sequence_number,
-            };
-
-            let block_height = self.wallet.get_block_height().unwrap_or(0);
-            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
-            ledger.append_operation_with_block(operation, deposits_core::messages::consts::SENDING_FAIL_PAYMENT, block_height, block_hash)
-                .map_err(|e| Error::Protocol(format!("Failed to fail payment: {:?}", e)))?;
-
-            // Get new balance
-            let new_bal = ledger.state.deposits.get(&deposit_pubkey)
-                .map(|d| d.balance)
-                .unwrap_or(0);
-
-            (prev_locked, new_bal)
-        };
-
-        // Sign the update
-        self.sign_last_update(ledger_id)?;
-
-        // Persist the ledger
-        if let Err(e) = self.handler.persist_ledger(ledger_id) {
-            tracing::error!("Failed to persist ledger: {}", e);
-        }
-
-        tracing::info!(
-            "Failed invoice payment {} on deposit {}, unlocked {} msats, previous locked: {} msats",
-            hex::encode(&payment_id[..8]),
-            deposit_pubkey,
-            amount_msats,
-            previous_locked
-        );
-
-        Ok(new_balance)
-    }
-
-    /// Fulfill an outgoing Lightning invoice payment
-    ///
-    /// This applies an InvoiceFulfill operation to complete a Lightning payment.
-    /// The locked funds are deducted from the deposit's balance.
-    ///
-    /// # Arguments
-    /// * `ledger_id` - The ledger ID (hex-encoded hash)
-    /// * `deposit_pubkey` - The deposit's public key
-    /// * `amount_msats` - Amount to deduct (millisatoshis)
-    /// * `payment_id` - The payment identifier from the original lock
-    /// * `preimage` - The payment preimage proving payment success
-    /// * `scriptpubkey_signature` - Signature from the deposit holder authorizing fulfillment
-    ///
-    /// # Returns
-    /// The new balance for the deposit
-    pub fn fulfill_invoice_payment(
-        &self,
-        ledger_id: &str,
-        deposit_pubkey: PublicKey,
-        amount_msats: u64,
-        payment_id: [u8; 32],
-        preimage: [u8; 32],
-        scriptpubkey_signature: [u8; 64],
-    ) -> Result<u64, Error> {
-        let ledger_arc = {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            ledgers.get(ledger_id)
-                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?
-                .clone()
-        };
-
-        let (previous_balance, new_balance) = {
-            let mut ledger = ledger_arc.write().unwrap();
-
-            // Check if deposit exists
-            let deposit = ledger.state.deposits.get(&deposit_pubkey)
-                .ok_or_else(|| Error::Protocol(format!(
-                    "Deposit not found for pubkey {}",
-                    deposit_pubkey
-                )))?;
-
-            // Check sufficient locked balance
-            if deposit.locked_balance < amount_msats {
-                return Err(Error::Protocol(format!(
-                    "Insufficient locked balance: {} msats locked, {} msats to fulfill",
-                    deposit.locked_balance, amount_msats
-                )));
-            }
-
-            let prev_balance = deposit.balance;
-
-            // Get the next sequence number
-            let sequence_number = ledger.sequence() + 1;
-
-            // Apply the InvoiceFulfill operation
-            let operation = LedgerOperation::InvoiceFulfill {
-                pubkey: deposit_pubkey,
-                amount: amount_msats,
-                payment_id,
-                sequence_number,
-                scriptpubkey_signature,
-                preimage,
-            };
-
-            let block_height = self.wallet.get_block_height().unwrap_or(0);
-            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
-            ledger.append_operation_with_block(operation, deposits_core::messages::consts::SENDING_FULFILL_PAYMENT, block_height, block_hash)
-                .map_err(|e| Error::Protocol(format!("Failed to fulfill payment: {:?}", e)))?;
-
-            // Get new balance
-            let new_bal = ledger.state.deposits.get(&deposit_pubkey)
-                .map(|d| d.balance)
-                .unwrap_or(0);
-
-            (prev_balance, new_bal)
-        };
-
-        // Sign the update
-        self.sign_last_update(ledger_id)?;
-
-        // Persist the ledger
-        if let Err(e) = self.handler.persist_ledger(ledger_id) {
-            tracing::error!("Failed to persist ledger: {}", e);
-        }
-
-        tracing::info!(
-            "Fulfilled invoice payment {} on deposit {}, deducted {} msats, balance {} -> {} msats",
-            hex::encode(&payment_id[..8]),
-            deposit_pubkey,
-            amount_msats,
-            previous_balance,
-            new_balance
-        );
-
-        Ok(new_balance)
-    }
-
     /// Get a deposit by pubkey from a ledger
     pub fn get_deposit(
         &self,
@@ -6675,116 +5895,10 @@ impl Node {
         Vec::new()
     }
 
-    /// Complete a deposit offer by crediting the deposit
-    ///
-    /// This should be called when on-chain funding is detected for a deposit offer.
-    /// It marks the offer as funded and credits the deposit.
-    pub fn complete_deposit_offer(
-        &self,
-        offer_id: &[u8; 32],
-        funding_txid: String,
-        funding_amount_sats: u64,
-    ) -> Result<u64, Error> {
-        // Get the offer
-        let (offer, status) = self.get_deposit_offer(offer_id)
-            .ok_or(Error::OfferNotFound)?;
-
-        // Check offer is in correct state
-        if !matches!(status, DepositOfferStatus::Pending) {
-            return Err(Error::Protocol(format!(
-                "Deposit offer not in Pending state: {:?}",
-                status
-            )));
-        }
-
-        // Check amount is within bounds
-        if funding_amount_sats < offer.min_amount_sats {
-            return Err(Error::Protocol(format!(
-                "Funding amount {} sats below minimum {} sats",
-                funding_amount_sats, offer.min_amount_sats
-            )));
-        }
-        let credited_amount = funding_amount_sats.min(offer.max_amount_sats);
-
-        // Check deadline
-        let current_block = self.wallet.get_block_height()?;
-        if offer.is_expired(current_block) {
-            return Err(Error::Protocol("Deposit offer has expired".to_string()));
-        }
-
-        // Credit the deposit (convert sats to msats)
-        let amount_msats = credited_amount * 1000;
-
-        // Parse txid from hex string to bytes (reversed for Bitcoin's internal byte order)
-        let txid_bytes: [u8; 32] = hex::decode(&funding_txid)
-            .map_err(|e| Error::Protocol(format!("Invalid txid hex: {}", e)))?
-            .try_into()
-            .map_err(|_| Error::Protocol("Invalid txid length".to_string()))?;
-
-        // Look up the ledger by ledger_id hash (the offer stores ledger_id hash)
-        let (reserves_id, _) = self.get_ledger_by_ledger_id(&offer.ledger_id)
-            .ok_or_else(|| Error::Protocol(format!(
-                "Ledger not found for ledger_id: {}",
-                &offer.ledger_id[..16.min(offer.ledger_id.len())]
-            )))?;
-
-        // First, open the deposit if it doesn't already exist
-        // (DepositOpen creates the deposit entry in the ledger state)
-        // Use the fees stored in the offer (established at offer creation)
-        match self.open_deposit(&reserves_id, offer.deposit_pubkey, offer.fees.clone()) {
-            Ok(_) => {
-                tracing::info!(
-                    "Opened deposit for {} in ledger {}",
-                    offer.deposit_pubkey,
-                    &reserves_id[..16.min(reserves_id.len())]
-                );
-            }
-            Err(e) => {
-                // If deposit already exists, that's fine - continue to credit
-                let err_msg = format!("{}", e);
-                if !err_msg.contains("already exists") {
-                    return Err(e);
-                }
-                tracing::debug!("Deposit already exists, proceeding to credit");
-            }
-        }
-
-        let new_balance = self.credit_deposit_onchain(
-            &reserves_id,
-            offer.deposit_pubkey,
-            amount_msats,
-            txid_bytes,
-            0, // vout - typically 0 for deposit offers
-            offer.funding_address.clone(),
-        )?;
-
-        // Update offer status
-        {
-            let mut offers = self.deposit_offers.lock().unwrap();
-            if let Some((_, ref mut current_status)) = offers.get_mut(offer_id) {
-                *current_status = DepositOfferStatus::Completed {
-                    txid: funding_txid,
-                    amount_sats: credited_amount,
-                    confirmed_at_block: current_block,
-                };
-            }
-        }
-        self.save_deposit_offers()?;
-
-        tracing::info!(
-            "Completed deposit offer {}: credited {} msats to {}",
-            hex::encode(&offer_id[..8]),
-            amount_msats,
-            offer.deposit_pubkey
-        );
-
-        Ok(new_balance)
-    }
-
     /// Complete a deposit offer with co-signing and broadcast.
     ///
     /// This is the async version that handles the full co-signing flow.
-    pub async fn complete_deposit_offer_with_cosign(
+    pub async fn complete_deposit_offer(
         &mut self,
         offer_id: &[u8; 32],
         funding_txid: String,
@@ -6836,7 +5950,7 @@ impl Node {
             )))?;
 
         // First, open the deposit if it doesn't already exist (with co-signing)
-        match self.open_deposit_with_cosign(&reserves_id, offer.deposit_pubkey, offer.fees.clone()).await {
+        match self.open_deposit(&reserves_id, offer.deposit_pubkey, offer.fees.clone()).await {
             Ok(_) => {
                 tracing::info!(
                     "Opened deposit for {} in ledger {}",
@@ -6855,7 +5969,7 @@ impl Node {
         }
 
         // Credit the deposit with co-signing
-        let new_balance = self.credit_deposit_onchain_with_cosign(
+        let new_balance = self.credit_deposit_onchain(
             &reserves_id,
             offer.deposit_pubkey,
             amount_msats,

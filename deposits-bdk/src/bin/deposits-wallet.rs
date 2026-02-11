@@ -567,18 +567,32 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
     // Poll for response
     println!("Waiting for operator response...");
 
+    // Give the relay a moment to store and propagate the request
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
     let max_attempts = 30;
     let poll_interval = std::time::Duration::from_secs(2);
 
-    for _attempt in 1..=max_attempts {
+    for attempt in 1..=max_attempts {
         tokio::time::sleep(poll_interval).await;
 
-        let responses = transport.fetch_responses_since(
+        let responses = match transport.fetch_responses_since(
             nostr_sdk::Timestamp::now() - 120
-        ).await?;
+        ).await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("  [Poll {}] Fetch error: {}", attempt, e);
+                continue;
+            }
+        };
+
+        // Show progress
+        print!(".");
+        std::io::stdout().flush().ok();
 
         for response in responses {
             if response.request_id == request_id {
+                println!(); // newline after dots
                 if response.success {
                     if let Some(result) = &response.result {
                         let address = result.get("funding_address").and_then(|v| v.as_str());
@@ -618,9 +632,14 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
                             println!();
                             println!("Fund with {}-{} sats:", min_sats, max_sats);
                             println!("  {}", address);
+                            return Ok(());
+                        } else {
+                            // Response missing required fields
+                            return Err(format!("Response missing funding_address or offer_id: {:?}", result).into());
                         }
+                    } else {
+                        return Err("Response missing result data".into());
                     }
-                    return Ok(());
                 } else {
                     let error = response.error.as_deref().unwrap_or("Unknown error");
                     return Err(format!("Deposit request failed: {}", error).into());
@@ -630,7 +649,7 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
         print!(".");
         use std::io::Write;
-        std::io::stdout().flush()?;
+        let _ = std::io::stdout().flush();
     }
 
     println!();
@@ -742,10 +761,13 @@ async fn add_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // Poll for response
     println!("Waiting for operator response...");
 
+    // Give the relay a moment to store and propagate the request
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
     let max_attempts = 30;
     let poll_interval = std::time::Duration::from_secs(2);
 
-    for _attempt in 1..=max_attempts {
+    for attempt in 1..=max_attempts {
         tokio::time::sleep(poll_interval).await;
 
         let responses = transport.fetch_responses_since(
@@ -778,7 +800,7 @@ async fn add_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
         print!(".");
         use std::io::Write;
-        std::io::stdout().flush()?;
+        let _ = std::io::stdout().flush();
     }
 
     println!();
@@ -1015,15 +1037,27 @@ async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // Poll for response
     println!("Waiting for operator response...");
 
+    // Give the relay a moment to store and propagate the request
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
     let max_attempts = 30;
     let poll_interval = std::time::Duration::from_secs(2);
 
-    for _attempt in 1..=max_attempts {
+    for attempt in 1..=max_attempts {
         tokio::time::sleep(poll_interval).await;
 
         let responses = transport.fetch_responses_since(
             nostr_sdk::Timestamp::now() - 120
         ).await?;
+
+        // Debug: show what we got
+        if !responses.is_empty() {
+            eprintln!("  [Poll {}] Got {} responses, looking for {}...",
+                attempt, responses.len(), &request_id[..16]);
+            for r in &responses {
+                eprintln!("    - response for: {}...", &r.request_id[..16.min(r.request_id.len())]);
+            }
+        }
 
         for response in responses {
             if response.request_id == request_id {
@@ -1047,7 +1081,7 @@ async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
         print!(".");
         use std::io::Write;
-        std::io::stdout().flush()?;
+        let _ = std::io::stdout().flush();
     }
 
     println!();

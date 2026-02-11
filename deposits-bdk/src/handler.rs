@@ -162,6 +162,61 @@ impl DepositsHandler {
         Ok(())
     }
 
+    /// Reload ledgers from disk, merging with in-memory state.
+    ///
+    /// This allows the daemon to pick up changes made by CLI processes.
+    /// For each ledger:
+    /// - If the disk version has more history entries, it wins
+    /// - If the in-memory version has more, keep in-memory
+    /// - New ledgers on disk are added to in-memory state
+    ///
+    /// Returns the number of ledgers that were updated.
+    pub fn reload_ledgers(&self) -> usize {
+        let disk_ledgers = Self::load_ledgers_from_disk(&self.data_dir);
+        let mut updated = 0;
+
+        let mut ledgers = self.ledgers.lock().unwrap();
+
+        for (ledger_id, disk_arc) in disk_ledgers {
+            let disk_ledger = disk_arc.read().unwrap();
+            let disk_len = disk_ledger.history.len();
+
+            if let Some(memory_arc) = ledgers.get(&ledger_id) {
+                let memory_ledger = memory_arc.read().unwrap();
+                let memory_len = memory_ledger.history.len();
+
+                if disk_len > memory_len {
+                    // Disk has newer state, update in-memory
+                    drop(memory_ledger);
+                    let mut memory_ledger = memory_arc.write().unwrap();
+                    *memory_ledger = disk_ledger.clone();
+                    updated += 1;
+                    tracing::debug!(
+                        "Reloaded ledger {}... ({} -> {} entries)",
+                        &ledger_id[..16.min(ledger_id.len())],
+                        memory_len,
+                        disk_len
+                    );
+                }
+            } else {
+                // New ledger on disk, add to in-memory
+                ledgers.insert(ledger_id.clone(), Arc::new(RwLock::new(disk_ledger.clone())));
+                updated += 1;
+                tracing::debug!(
+                    "Loaded new ledger {}... ({} entries)",
+                    &ledger_id[..16.min(ledger_id.len())],
+                    disk_len
+                );
+            }
+        }
+
+        if updated > 0 {
+            tracing::info!("Reloaded {} ledgers from disk", updated);
+        }
+
+        updated
+    }
+
     /// Process an incoming message from a peer
     pub fn handle_message(
         &self,

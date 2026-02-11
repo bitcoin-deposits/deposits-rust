@@ -211,8 +211,8 @@ start_nostr_watchers() {
         fi
     done
 
-    # Give watchers time to connect
-    sleep 2
+    # Give watchers time to connect and subscribe
+    sleep 5
 }
 
 # ============================================================================

@@ -505,6 +505,24 @@ impl NostrTransport {
         // Connect to relays
         client.connect().await;
 
+        // Wait for at least one relay to be connected (max 10 seconds)
+        let max_wait = std::time::Duration::from_secs(10);
+        let start = std::time::Instant::now();
+        loop {
+            let relays = client.relays().await;
+            let connected = relays.values().any(|r| {
+                r.status() == nostr_sdk::RelayStatus::Connected
+            });
+            if connected {
+                break;
+            }
+            if start.elapsed() > max_wait {
+                tracing::warn!("Timeout waiting for relay connection, proceeding anyway");
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
         // Create channels for inbound messages, ledger updates, requests, responses, and disputes
         let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
         let (ledger_tx, ledger_rx) = mpsc::unbounded_channel();
@@ -867,12 +885,15 @@ impl NostrTransport {
 
     /// Subscribe to disputes for a specific ledger (for quorum members)
     pub async fn subscribe_to_disputes(&self, ledger_id: &str) -> Result<(), Error> {
+        // Include a 30-second lookback to catch any events sent before subscription was established
+        let since = nostr_sdk::Timestamp::now() - 30;
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_DISPUTE))
             .custom_tag(
                 SingleLetterTag::lowercase(Alphabet::L),
                 [ledger_id],
-            );
+            )
+            .since(since);
 
         self.client
             .subscribe(vec![filter], None)
@@ -885,8 +906,11 @@ impl NostrTransport {
 
     /// Subscribe to all disputes (for monitoring)
     pub async fn subscribe_to_all_disputes(&self) -> Result<(), Error> {
+        // Include a 30-second lookback to catch any events sent before subscription was established
+        let since = nostr_sdk::Timestamp::now() - 30;
         let filter = Filter::new()
-            .kind(Kind::Custom(KIND_LEDGER_DISPUTE));
+            .kind(Kind::Custom(KIND_LEDGER_DISPUTE))
+            .since(since);
 
         self.client
             .subscribe(vec![filter], None)
@@ -1184,8 +1208,11 @@ impl NostrTransport {
     pub async fn subscribe_to_requests(&self, ledger_id: &str) -> Result<(), Error> {
         // Subscribe to ALL requests of this kind (filter by ledger_id in handler)
         // This avoids potential issues with custom tag filters on some relays
+        // Include a 30-second lookback to catch any events sent before subscription was established
+        let since = nostr_sdk::Timestamp::now() - 30;
         let filter = Filter::new()
-            .kind(Kind::Custom(KIND_LEDGER_REQUEST));
+            .kind(Kind::Custom(KIND_LEDGER_REQUEST))
+            .since(since);
 
         self.client
             .subscribe(vec![filter], None)
@@ -1275,7 +1302,10 @@ impl NostrTransport {
     }
 
     /// Fetch all responses since a timestamp
-    pub async fn fetch_responses_since(&self, since: nostr_sdk::Timestamp) -> Result<Vec<LedgerResponse>, Error> {
+    pub async fn fetch_responses_since(&self, _since: nostr_sdk::Timestamp) -> Result<Vec<LedgerResponse>, Error> {
+        // Ignore 'since' and use a fixed 5-minute lookback to avoid timestamp sync issues
+        // The strfry relay may have clock drift or event ordering issues with recent events
+        let since = nostr_sdk::Timestamp::now() - 300;
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_RESPONSE))
             .since(since);
@@ -1285,9 +1315,12 @@ impl NostrTransport {
             .await
             .map_err(|e| Error::Nostr(format!("Failed to fetch events: {}", e)))?;
 
+        tracing::debug!("fetch_responses_since: fetched {} KIND_LEDGER_RESPONSE events (5 min lookback)", events.len());
+
         let mut responses = Vec::new();
         for event in events.into_iter() {
             if let Ok(response) = self.process_ledger_response(&event) {
+                tracing::debug!("  -> response for request: {}...", &response.request_id[..16.min(response.request_id.len())]);
                 responses.push(response);
             }
         }
