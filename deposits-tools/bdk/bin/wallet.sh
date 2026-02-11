@@ -47,6 +47,7 @@ print_usage() {
     echo "  faucet <alias|addr> [sats]  Send from faucet to deposit (regtest only)"
     echo "  offer <alias> <sats>        Add funds to an existing deposit"
     echo "  balance                     Show balances across all deposits"
+    echo "  sync                        Sync deposit statuses from daemon"
     echo "  withdraw <alias> <amt>      Withdraw from a deposit"
     echo "  list                        List all your deposits with aliases"
     echo ""

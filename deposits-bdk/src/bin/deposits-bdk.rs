@@ -200,7 +200,7 @@ NOSTR SUBCOMMANDS:
     nostr request <ledger_id> <action> [params...]
                     Send a request to a ledger. Actions:
                       deposit_open <pubkey> [fee_fixed] [fee_bps] [fee_frequency]
-                      deposit_offer <pubkey> <max_sats> <min_sats> <blocks_valid>
+                      make_offer <pubkey> <max_sats> <min_sats> <blocks_valid>
                       collateral_lock <secret> <amount_msats> <lock_blocks> [requesting_op]
     nostr watch <ledger_id>
                     Watch for requests and disputes for a ledger

@@ -376,7 +376,45 @@ impl Node {
         let mut last_poll = tokio::time::Instant::now();
         let poll_interval = tokio::time::Duration::from_secs(2);
 
+        // Track last periodic tasks time (wallet sync, auto-complete deposits, etc.)
+        let mut last_periodic = tokio::time::Instant::now();
+        let periodic_interval = tokio::time::Duration::from_secs(60);
+
         loop {
+            // Periodic tasks (every 60 seconds) - moved outside select! to avoid reset on each iteration
+            if last_periodic.elapsed() >= periodic_interval {
+                // Sync wallet periodically
+                if let Err(e) = self.sync_wallet() {
+                    tracing::warn!("Wallet sync failed: {}", e);
+                }
+
+                // Auto-complete funded deposits
+                self.auto_complete_deposits().await;
+
+                // Auto-collect fees from deposits when due
+                self.auto_collect_fees().await;
+
+                // Auto-claim/yield for any pending lottery disputes
+                self.auto_lottery_claim_or_yield().await;
+
+                // Auto-initiate confiscation when all participants are armed
+                self.auto_confiscate().await;
+
+                // Auto-reveal preimage when confiscation TX has 3+ confirmations
+                self.auto_reveal_on_confiscation().await;
+
+                // Auto-rotate and continue after winning
+                self.auto_post_win_cleanup().await;
+
+                // Drain and log events
+                let events = self.handler.drain_events();
+                for event in events {
+                    tracing::info!("Protocol event: {:?}", event);
+                }
+
+                last_periodic = tokio::time::Instant::now();
+            }
+
             // Fast ledger reload check (every 5 seconds)
             // This ensures daemon picks up changes made by CLI processes (like QuorumJoin)
             if last_reload.elapsed() >= reload_interval {
@@ -390,6 +428,8 @@ impl Node {
                         }
                     }
                 }
+                // Also reload deposit offers (for status changes from CLI)
+                self.reload_deposit_offers();
                 last_reload = tokio::time::Instant::now();
             }
 
@@ -456,36 +496,9 @@ impl Node {
                     }
                 }
 
-                // Periodic tasks
-                _ = tokio::time::sleep(tokio::time::Duration::from_secs(60)) => {
-                    // Sync wallet periodically
-                    if let Err(e) = self.sync_wallet() {
-                        tracing::warn!("Wallet sync failed: {}", e);
-                    }
-
-                    // Auto-complete funded deposits
-                    self.auto_complete_deposits().await;
-
-                    // Auto-collect fees from deposits when due
-                    self.auto_collect_fees().await;
-
-                    // Auto-claim/yield for any pending lottery disputes
-                    self.auto_lottery_claim_or_yield().await;
-
-                    // Auto-initiate confiscation when all participants are armed
-                    self.auto_confiscate().await;
-
-                    // Auto-reveal preimage when confiscation TX has 3+ confirmations
-                    self.auto_reveal_on_confiscation().await;
-
-                    // Auto-rotate and continue after winning
-                    self.auto_post_win_cleanup().await;
-
-                    // Drain and log events
-                    let events = self.handler.drain_events();
-                    for event in events {
-                        tracing::info!("Protocol event: {:?}", event);
-                    }
+                // Short timeout to allow periodic tasks to run
+                _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
+                    // Just a short sleep to yield control and allow periodic checks
                 }
             }
         }
@@ -521,10 +534,22 @@ impl Node {
             return;
         }
 
+        // Some actions are operator-only - non-operators should silently skip
+        // (the actual operator will handle these and send the response)
+        let operator_only_actions = ["deposit_open", "make_offer", "withdraw", "collateral_lock", "offer_status"];
+        if operator_only_actions.contains(&request.action.as_str()) && !self.is_operator_of_ledger(&request.ledger_id) {
+            tracing::debug!(
+                "Skipping operator-only action '{}' for ledger {} - we're not the operator",
+                request.action,
+                &request.ledger_id[..16.min(request.ledger_id.len())]
+            );
+            return; // No response - the actual operator will respond
+        }
+
         // Process the request based on action
         let (success, result, error) = match request.action.as_str() {
             "deposit_open" => self.process_deposit_open_request(&request).await,
-            "deposit_offer" => self.process_deposit_offer_request(&request).await,
+            "make_offer" => self.process_make_offer_request(&request).await,
             "withdraw" => self.process_withdraw_request(&request).await,
             "collateral_lock" => self.process_collateral_lock_request(&request).await,
             "custody_transfer_sign" => self.process_custody_transfer_sign_request(&request).await,
@@ -541,6 +566,7 @@ impl Node {
                 self.handler.reload_ledgers();
                 self.process_cosign_request(&request).await
             }
+            "offer_status" => self.process_offer_status_request(&request).await,
             _ => {
                 tracing::warn!("Unknown request action: {}", request.action);
                 (false, None, Some(format!("Unknown action: {}", request.action)))
@@ -2686,10 +2712,10 @@ impl Node {
         }
     }
 
-    async fn process_deposit_offer_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_make_offer_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
         use std::str::FromStr;
 
-        tracing::info!("Processing deposit_offer request for ledger {}...",
+        tracing::info!("Processing make_offer request for ledger {}...",
             &request.ledger_id[..16.min(request.ledger_id.len())]);
 
         // Verify the ledger exists (ledger_id may be a hash or reserves_id)
@@ -2817,6 +2843,77 @@ impl Node {
             Err(e) => {
                 tracing::warn!("Failed to create deposit offer: {}", e);
                 (false, None, Some(e.to_string()))
+            }
+        }
+    }
+
+    /// Process an offer status query request
+    ///
+    /// Params:
+    /// - offer_id: hex-encoded 32-byte offer ID
+    async fn process_offer_status_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+        use deposits_core::types::DepositOfferStatus;
+
+        // Extract offer_id from params
+        let offer_id_hex = match request.params.get("offer_id").and_then(|v| v.as_str()) {
+            Some(id) => id,
+            None => return (false, None, Some("Missing offer_id parameter".to_string())),
+        };
+
+        // Parse hex offer_id
+        let offer_id_bytes = match hex::decode(offer_id_hex) {
+            Ok(bytes) if bytes.len() == 32 => {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                arr
+            }
+            Ok(_) => return (false, None, Some("offer_id must be 32 bytes".to_string())),
+            Err(e) => return (false, None, Some(format!("Invalid offer_id hex: {}", e))),
+        };
+
+        // Look up the offer
+        match self.get_deposit_offer(&offer_id_bytes) {
+            Some((offer, status)) => {
+                let status_json = match status {
+                    DepositOfferStatus::Pending => serde_json::json!({
+                        "status": "pending",
+                    }),
+                    DepositOfferStatus::FundingReceived { txid, amount_sats, detected_at_block } => serde_json::json!({
+                        "status": "funding_received",
+                        "txid": txid,
+                        "amount_sats": amount_sats,
+                        "detected_at_block": detected_at_block,
+                    }),
+                    DepositOfferStatus::Completed { txid, amount_sats, confirmed_at_block } => serde_json::json!({
+                        "status": "completed",
+                        "txid": txid,
+                        "amount_sats": amount_sats,
+                        "confirmed_at_block": confirmed_at_block,
+                    }),
+                    DepositOfferStatus::Expired { expired_at_block } => serde_json::json!({
+                        "status": "expired",
+                        "expired_at_block": expired_at_block,
+                    }),
+                    DepositOfferStatus::Cancelled => serde_json::json!({
+                        "status": "cancelled",
+                    }),
+                };
+
+                let result = serde_json::json!({
+                    "offer_id": offer_id_hex,
+                    "funding_address": offer.funding_address,
+                    "ledger_id": offer.ledger_id,
+                    "max_sats": offer.max_amount_sats,
+                    "min_sats": offer.min_amount_sats,
+                    "deadline_block": offer.deadline_block,
+                    "status": status_json,
+                });
+
+                tracing::debug!("Offer status query: {}... -> {:?}", &offer_id_hex[..16], status_json);
+                (true, Some(result.to_string()), None)
+            }
+            None => {
+                (false, None, Some(format!("Offer not found: {}...", &offer_id_hex[..16])))
             }
         }
     }
@@ -5715,12 +5812,6 @@ impl Node {
             map.insert(offer.offer_id, (offer, status));
         }
 
-        // Debug: print what we loaded
-        println!("DEBUG: Loaded {} deposit offers from {:?}", map.len(), offers_file);
-        for (offer_id, (offer, _status)) in &map {
-            println!("DEBUG:   offer_id={} ledger={}", hex::encode(&offer_id[..8]), &offer.ledger_id[..20.min(offer.ledger_id.len())]);
-        }
-
         tracing::info!("Loaded {} deposit offers from disk", map.len());
         Ok(map)
     }
@@ -5737,17 +5828,56 @@ impl Node {
         let contents = serde_json::to_string_pretty(&offers)
             .map_err(|e| Error::Wallet(format!("Failed to serialize deposit offers: {}", e)))?;
 
-        // Debug: print what we're saving
-        println!("DEBUG: Saving {} deposit offers to {:?}", offers.len(), offers_file);
-        for (offer, status) in &offers {
-            println!("DEBUG:   offer_id={} ledger={}", hex::encode(&offer.offer_id[..8]), &offer.ledger_id[..20.min(offer.ledger_id.len())]);
-        }
-
         std::fs::write(&offers_file, contents)
             .map_err(|e| Error::Wallet(format!("Failed to write deposit offers: {}", e)))?;
 
         tracing::info!("Saved {} deposit offers to disk", offers.len());
         Ok(())
+    }
+
+    /// Reload deposit offers from disk (merges with in-memory state)
+    ///
+    /// This is needed when CLI commands modify the deposit_offers file
+    /// outside of the running daemon.
+    fn reload_deposit_offers(&self) {
+        let disk_offers = match Self::load_deposit_offers(&self.data_dir) {
+            Ok(offers) => offers,
+            Err(e) => {
+                tracing::warn!("Failed to reload deposit offers: {}", e);
+                return;
+            }
+        };
+
+        let mut memory_offers = self.deposit_offers.lock().unwrap();
+
+        // Update in-memory state with any changes from disk
+        for (offer_id, (disk_offer, disk_status)) in disk_offers {
+            if let Some((_, ref mut memory_status)) = memory_offers.get_mut(&offer_id) {
+                // If disk has a "more complete" status, use it
+                // Pending < FundingReceived < Completed/Expired/Cancelled
+                let should_update = match (&*memory_status, &disk_status) {
+                    (DepositOfferStatus::Pending, DepositOfferStatus::FundingReceived { .. }) => true,
+                    (DepositOfferStatus::Pending, DepositOfferStatus::Completed { .. }) => true,
+                    (DepositOfferStatus::Pending, DepositOfferStatus::Expired { .. }) => true,
+                    (DepositOfferStatus::Pending, DepositOfferStatus::Cancelled) => true,
+                    (DepositOfferStatus::FundingReceived { .. }, DepositOfferStatus::Completed { .. }) => true,
+                    _ => false,
+                };
+
+                if should_update {
+                    tracing::debug!(
+                        "Reloaded deposit offer {}...: {:?} -> {:?}",
+                        hex::encode(&offer_id[..8]),
+                        memory_status,
+                        disk_status
+                    );
+                    *memory_status = disk_status;
+                }
+            } else {
+                // New offer on disk, add to memory
+                memory_offers.insert(offer_id, (disk_offer, disk_status));
+            }
+        }
     }
 
     // ========================================================================
@@ -6107,5 +6237,17 @@ impl Node {
             return Ok(lid);
         }
         Err(format!("Ledger not found: {}", &identifier[..16.min(identifier.len())]))
+    }
+
+    /// Check if we are the operator of the given ledger
+    /// Returns false if ledger not found or we're just a quorum member
+    fn is_operator_of_ledger(&self, ledger_id: &str) -> bool {
+        if let Some((_, ledger)) = self.get_ledger_by_ledger_id(ledger_id) {
+            return ledger.operator_key() == self.node_id;
+        }
+        if let Some((_, ledger)) = self.get_ledger_by_reserves_key(ledger_id) {
+            return ledger.operator_key() == self.node_id;
+        }
+        false
     }
 }

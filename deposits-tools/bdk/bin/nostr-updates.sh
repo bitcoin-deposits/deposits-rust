@@ -16,11 +16,12 @@ source "$SCRIPT_DIR/_common.sh"
 LEDGER_ID=""
 LIST_ONLY=false
 SHOW_EVENTS=false
+COLOR_BY_PK=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --help|-h)
-            echo "Usage: $0 [list|events|LEDGER_ID]"
+            echo "Usage: $0 [list|events|LEDGER_ID] [--color-by-pk]"
             echo ""
             echo "View ledger data from Nostr relay (read-only)."
             echo ""
@@ -28,6 +29,10 @@ while [[ $# -gt 0 ]]; do
             echo "  list              List all ledgers on the relay"
             echo "  events            Show all events (updates, disputes, agreements)"
             echo "  <ledger_id>       Validate and show updates for a specific ledger"
+            echo ""
+            echo "Options:"
+            echo "  --color-by-pk     Color output by pubkey (16 rotating colors)"
+            echo "  --color           Alias for --color-by-pk"
             echo ""
             echo "If no argument is given, lists all ledgers on the relay."
             echo ""
@@ -42,6 +47,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         events|ev)
             SHOW_EVENTS=true
+            shift
+            ;;
+        --color-by-pk|--color)
+            COLOR_BY_PK="--color-by-pk"
             shift
             ;;
         -*)
@@ -90,7 +99,7 @@ elif [ "$SHOW_EVENTS" = true ]; then
     # Show all events
     log_info "Fetching all events from Nostr relay..."
     echo ""
-    run_nostr_cmd events
+    run_nostr_cmd events $COLOR_BY_PK
 elif [ -n "$LEDGER_ID" ]; then
     # Show updates for specific ledger (dry-run shows formatted operations)
     log_info "Fetching updates for ledger: $LEDGER_ID"

@@ -153,8 +153,10 @@ wait_for_nostr() {
 setup_faucet() {
     log_info "Setting up faucet wallet..."
 
-    # Create wallet if it doesn't exist
-    bitcoin_cli createwallet "faucet" 2>/dev/null || true
+    # Try to load existing wallet, or create if it doesn't exist
+    if ! bitcoin_cli loadwallet "faucet" 2>/dev/null; then
+        bitcoin_cli createwallet "faucet" 2>/dev/null || true
+    fi
 
     # Mine initial blocks for maturity
     log_info "Mining 101 blocks for coinbase maturity..."

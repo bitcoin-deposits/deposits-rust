@@ -111,8 +111,8 @@ pub async fn process_deposit_open_request(
     }
 }
 
-/// Process a deposit_offer request
-pub async fn process_deposit_offer_request(
+/// Process a make_offer request
+pub async fn process_make_offer_request(
     node: &Node,
     ledger_id: &str,
     request: &LedgerRequest,

@@ -13,6 +13,7 @@
 use bitcoin::secp256k1::{Secp256k1, SecretKey};
 use chrono::Utc;
 use deposits_bdk::nostr::NostrTransportBuilder;
+use std::io::Write;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
@@ -34,6 +35,7 @@ fn print_usage(program: &str) {
     eprintln!("  open <ledger_id> <sats>     Open a new deposit on a ledger");
     eprintln!("  offer <alias> <sats>        Add funds to an existing deposit");
     eprintln!("  balance                     Show balances across all deposits");
+    eprintln!("  sync                        Sync deposit statuses from daemon");
     eprintln!("  withdraw <alias> <amt>      Withdraw from a deposit");
     eprintln!("  history <alias>             Show transaction history");
     eprintln!("  list                        List all your deposits with aliases");
@@ -141,17 +143,41 @@ fn parse_config(args: &[String]) -> Result<WalletConfig, Box<dyn std::error::Err
 }
 
 fn derive_secret_key(seed: &[u8; 32], network: bitcoin::Network) -> Result<SecretKey, Box<dyn std::error::Error>> {
+    derive_secret_key_at_index(seed, network, 0)
+}
+
+/// Derive a secret key at a specific index for per-deposit key isolation
+fn derive_secret_key_at_index(seed: &[u8; 32], network: bitcoin::Network, index: u32) -> Result<SecretKey, Box<dyn std::error::Error>> {
     use bitcoin::bip32::{Xpriv, DerivationPath};
     use std::str::FromStr;
 
     let xpriv = Xpriv::new_master(network, seed)?;
     let secp = Secp256k1::new();
 
-    // Use BIP-84 path for wallet keys
-    let path = DerivationPath::from_str("m/84'/0'/0'/0/0")?;
+    // Use BIP-84 path for wallet keys with varying index
+    // m/84'/0'/0'/0/{index} - each deposit gets a unique key
+    let path = DerivationPath::from_str(&format!("m/84'/0'/0'/0/{}", index))?;
     let derived = xpriv.derive_priv(&secp, &path)?;
 
     Ok(derived.private_key)
+}
+
+/// Load the next available deposit key index from disk
+fn load_deposit_key_index(data_dir: &std::path::PathBuf) -> u32 {
+    let index_file = data_dir.join("deposit_key_index.txt");
+    if !index_file.exists() {
+        return 0;
+    }
+    std::fs::read_to_string(&index_file)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// Save the deposit key index to disk
+fn save_deposit_key_index(data_dir: &std::path::PathBuf, index: u32) -> Result<(), std::io::Error> {
+    let index_file = data_dir.join("deposit_key_index.txt");
+    std::fs::write(&index_file, index.to_string())
 }
 
 #[tokio::main]
@@ -169,6 +195,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "open" => open_new_deposit(&args[2..]).await,
         "offer" => add_offer(&args[2..]).await,
         "balance" => show_balance(&args[2..]).await,
+        "sync" => sync_deposits(&args[2..]).await,
         "withdraw" => withdraw(&args[2..]).await,
         "history" => show_history(&args[2..]).await,
         "list" => list_deposits(&args[2..]).await,
@@ -487,11 +514,16 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
         }
     }
 
-    let secret_key = derive_secret_key(&config.seed, config.network)?;
+    // Get next available key index for this deposit
+    let key_index = load_deposit_key_index(&config.data_dir);
+    let secret_key = derive_secret_key_at_index(&config.seed, config.network, key_index)?;
     let secp = Secp256k1::new();
     let our_pubkey = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
 
-    let transport = NostrTransportBuilder::new(secret_key)
+    // Also derive the nostr identity key at index 0 for signing requests
+    let nostr_key = derive_secret_key(&config.seed, config.network)?;
+
+    let transport = NostrTransportBuilder::new(nostr_key)
         .relay(&config.relays[0])
         .build()
         .await?;
@@ -539,11 +571,77 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
     };
     println!();
 
-    // Send deposit_offer request
+    // Step 1: Send deposit_open request to create the deposit account
+    let open_params = serde_json::json!({
+        "deposit_pubkey": hex::encode(our_pubkey.serialize()),
+        "fee_fixed": fee_fixed,
+        "fee_bps": fee_bps,
+        "fee_frequency": fee_frequency,
+    });
+
+    println!("Sending deposit_open request to operator...");
+
+    let open_request_id = transport.send_ledger_request(
+        &ledger_id,
+        "deposit_open",
+        open_params,
+    ).await?;
+
+    println!("  Request ID: {}...", &open_request_id[..16]);
+
+    // Wait for deposit_open response
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let max_attempts = 15;
+    let poll_interval = std::time::Duration::from_secs(2);
+    let mut deposit_opened = false;
+
+    for _attempt in 1..=max_attempts {
+        tokio::time::sleep(poll_interval).await;
+
+        let responses = match transport.fetch_responses_since(
+            nostr_sdk::Timestamp::now() - 60
+        ).await {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+
+        print!(".");
+        std::io::stdout().flush().ok();
+
+        for response in responses {
+            if response.request_id == open_request_id {
+                println!();
+                if response.success {
+                    println!("  Deposit account created!");
+                    deposit_opened = true;
+                } else {
+                    let error = response.error.as_deref().unwrap_or("Unknown error");
+                    // If deposit already exists, that's fine - continue to create offer
+                    if error.contains("already exists") || error.contains("Deposit already") {
+                        println!("  Deposit account already exists, continuing...");
+                        deposit_opened = true;
+                    } else {
+                        return Err(format!("Failed to open deposit: {}", error).into());
+                    }
+                }
+                break;
+            }
+        }
+
+        if deposit_opened {
+            break;
+        }
+    }
+
+    if !deposit_opened {
+        return Err("Timeout waiting for deposit_open response".into());
+    }
+
+    // Step 2: Send make_offer request to get a funding address
     // max_sats = requested amount, min_sats = 1 (or less than max), blocks_valid = 144 (~1 day)
-    // min_sats must be strictly less than max_sats
     let min_sats = std::cmp::min(1000_u64, amount_sats.saturating_sub(1).max(1));
-    let request_params = serde_json::json!({
+    let offer_params = serde_json::json!({
         "deposit_pubkey": hex::encode(our_pubkey.serialize()),
         "max_sats": amount_sats,
         "min_sats": min_sats,
@@ -553,12 +651,12 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
         "fee_frequency": fee_frequency,
     });
 
-    println!("Sending deposit request to operator...");
+    println!("Sending make_offer request for funding address...");
 
     let request_id = transport.send_ledger_request(
         &ledger_id,
-        "deposit_offer",
-        request_params,
+        "make_offer",
+        offer_params,
     ).await?;
 
     println!("  Request ID: {}...", &request_id[..16]);
@@ -621,12 +719,16 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
                                 "ledger_id": ledger_id,
                                 "funding_address": address,
                                 "deposit_pubkey": hex::encode(our_pubkey.serialize()),
+                                "key_index": key_index,
                                 "min_sats": min_sats,
                                 "max_sats": max_sats,
                                 "status": "pending",
                                 "created_at": Utc::now().to_rfc3339(),
                             }));
                             std::fs::write(&deposits_file, serde_json::to_string_pretty(&deposits)?)?;
+
+                            // Increment and save the key index for next deposit
+                            save_deposit_key_index(&config.data_dir, key_index + 1)?;
 
                             println!("Deposit '{}' created!", final_alias);
                             println!();
@@ -712,16 +814,24 @@ async fn add_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     println!("  Amount: {} sats", amount_sats);
     println!();
 
-    let secret_key = derive_secret_key(&config.seed, config.network)?;
+    // Get the key_index for this deposit (defaults to 0 for legacy deposits)
+    let key_index = deposit.get("key_index")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+
+    let secret_key = derive_secret_key_at_index(&config.seed, config.network, key_index)?;
     let secp = Secp256k1::new();
     let our_pubkey = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
 
-    // Use stored pubkey or derive fresh
+    // Use stored pubkey or derive fresh (should match what's in the record)
     let pubkey_hex = deposit_pubkey
         .map(|s| s.to_string())
         .unwrap_or_else(|| hex::encode(our_pubkey.serialize()));
 
-    let transport = NostrTransportBuilder::new(secret_key)
+    // Use nostr identity key (index 0) for transport signing
+    let nostr_key = derive_secret_key(&config.seed, config.network)?;
+
+    let transport = NostrTransportBuilder::new(nostr_key)
         .relay(&config.relays[0])
         .build()
         .await?;
@@ -736,7 +846,7 @@ async fn add_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         (0, 0, 2016)
     };
 
-    // Send deposit_offer request for existing deposit
+    // Send make_offer request for existing deposit
     let request_params = serde_json::json!({
         "deposit_pubkey": pubkey_hex,
         "max_sats": amount_sats,
@@ -751,7 +861,7 @@ async fn add_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     let request_id = transport.send_ledger_request(
         ledger_id,
-        "deposit_offer",
+        "make_offer",
         request_params,
     ).await?;
 
@@ -767,7 +877,7 @@ async fn add_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let max_attempts = 30;
     let poll_interval = std::time::Duration::from_secs(2);
 
-    for attempt in 1..=max_attempts {
+    for _attempt in 1..=max_attempts {
         tokio::time::sleep(poll_interval).await;
 
         let responses = transport.fetch_responses_since(
@@ -862,6 +972,14 @@ async fn list_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Error>
 async fn show_balance(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let config = parse_config(args)?;
 
+    // Auto-sync if relay is provided
+    if !config.relays.is_empty() {
+        if let Err(e) = sync_deposits(args).await {
+            // Don't fail on sync error, just log it
+            eprintln!("Note: sync failed: {}", e);
+        }
+    }
+
     let deposits_file = config.data_dir.join("deposits.json");
     if !deposits_file.exists() {
         println!("No deposits found.");
@@ -909,6 +1027,118 @@ async fn show_balance(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     println!("  Total:  {} sats ({} BTC)", total_sats, total_sats as f64 / 100_000_000.0);
     println!();
     println!("  + = funded/completed, ~ = pending");
+
+    Ok(())
+}
+
+/// Sync deposit statuses from the daemon
+async fn sync_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let config = parse_config(args)?;
+
+    if config.relays.is_empty() {
+        return Err("No relay specified. Use --relay <url>".into());
+    }
+
+    let deposits_file = config.data_dir.join("deposits.json");
+    if !deposits_file.exists() {
+        println!("No deposits to sync.");
+        return Ok(());
+    }
+
+    let data = std::fs::read_to_string(&deposits_file)?;
+    let mut deposits: Vec<serde_json::Value> = serde_json::from_str(&data)?;
+
+    if deposits.is_empty() {
+        println!("No deposits to sync.");
+        return Ok(());
+    }
+
+    // Generate our secret key for signing requests
+    let secret_key = SecretKey::from_slice(&config.seed)?;
+
+    // Connect to relay
+    let transport = NostrTransportBuilder::new(secret_key)
+        .relay(&config.relays[0])
+        .build()
+        .await?;
+
+    println!("Syncing deposit statuses...");
+
+    let mut updated = false;
+
+    for deposit in &mut deposits {
+        let alias = deposit.get("alias").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let offer_id = deposit.get("offer_id").and_then(|v| v.as_str());
+        let ledger_id = deposit.get("ledger_id").and_then(|v| v.as_str());
+        let current_status = deposit.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
+
+        // Skip if already completed - no need to query again
+        if current_status == "completed" || current_status == "funded" {
+            continue;
+        }
+
+        if let (Some(offer_id), Some(ledger_id)) = (offer_id, ledger_id) {
+            // Query daemon for offer status
+            let params = serde_json::json!({
+                "offer_id": offer_id,
+            });
+
+            let request_id = transport.send_ledger_request(ledger_id, "offer_status", params).await?;
+
+            // Wait for response (with timeout)
+            let start = std::time::Instant::now();
+            let timeout = std::time::Duration::from_secs(10);
+
+            while start.elapsed() < timeout {
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                match transport.fetch_response(&request_id).await {
+                    Ok(Some(response)) => {
+                        if response.success {
+                            if let Some(result) = &response.result {
+                                // Get status from response
+                                if let Some(status_obj) = result.get("status") {
+                                    let status_str = status_obj.get("status").and_then(|v| v.as_str());
+                                    let amount = status_obj.get("amount_sats").and_then(|v| v.as_u64());
+
+                                    if let Some(status_str) = status_str {
+                                        if status_str != current_status {
+                                            println!("  {} {} -> {}", alias, current_status, status_str);
+
+                                            // Update status
+                                            deposit["status"] = serde_json::json!(status_str);
+
+                                            // Update amount if completed
+                                            if let Some(amt) = amount {
+                                                deposit["amount_sats"] = serde_json::json!(amt);
+                                            }
+
+                                            updated = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    Ok(None) => {
+                        // No response yet, keep polling
+                    }
+                    Err(_) => {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if updated {
+        // Save updated deposits
+        let data = serde_json::to_string_pretty(&deposits)?;
+        std::fs::write(&deposits_file, data)?;
+        println!("Deposits updated.");
+    } else {
+        println!("All deposits up to date.");
+    }
 
     Ok(())
 }
@@ -982,10 +1212,18 @@ async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|v| v.as_str())
         .ok_or("Invalid deposit record: missing ledger_id")?;
 
-    let secret_key = derive_secret_key(&config.seed, config.network)?;
+    // Get the key_index for this deposit (defaults to 0 for legacy deposits)
+    let key_index = deposit.get("key_index")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+
+    let secret_key = derive_secret_key_at_index(&config.seed, config.network, key_index)?;
     let secp = Secp256k1::new();
     let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &secret_key);
     let our_pubkey = keypair.public_key();
+
+    // Use nostr identity key (index 0) for transport signing
+    let nostr_key = derive_secret_key(&config.seed, config.network)?;
 
     // Generate nonce
     let mut rng = OsRng;
@@ -1009,7 +1247,7 @@ async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     println!("  To: {}", destination);
     println!();
 
-    let transport = NostrTransportBuilder::new(secret_key)
+    let transport = NostrTransportBuilder::new(nostr_key)
         .relay(&config.relays[0])
         .build()
         .await?;
@@ -1043,21 +1281,12 @@ async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let max_attempts = 30;
     let poll_interval = std::time::Duration::from_secs(2);
 
-    for attempt in 1..=max_attempts {
+    for _attempt in 1..=max_attempts {
         tokio::time::sleep(poll_interval).await;
 
         let responses = transport.fetch_responses_since(
             nostr_sdk::Timestamp::now() - 120
         ).await?;
-
-        // Debug: show what we got
-        if !responses.is_empty() {
-            eprintln!("  [Poll {}] Got {} responses, looking for {}...",
-                attempt, responses.len(), &request_id[..16]);
-            for r in &responses {
-                eprintln!("    - response for: {}...", &r.request_id[..16.min(r.request_id.len())]);
-            }
-        }
 
         for response in responses {
             if response.request_id == request_id {

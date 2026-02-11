@@ -64,6 +64,9 @@ pub struct Wallet {
 
     /// Data directory for persistence
     data_dir: PathBuf,
+
+    /// Last revealed address index (persisted to disk)
+    address_index: Mutex<u32>,
 }
 
 /// Information about a reserves output
@@ -243,20 +246,31 @@ impl Wallet {
         let operator_pubkey = PublicKey::from_secret_key(&secp, &operator_secret);
 
         // Use simple wpkh descriptor for the wallet
-        let external_desc = format!("wpkh({})", xpriv);
+        // External: m/0/* for receiving addresses
+        // Internal: m/1/* for change addresses
+        let external_desc = format!("wpkh({}/0/*)", xpriv);
         let internal_desc = format!("wpkh({}/1/*)", xpriv);
-
-        // Create wallet (in-memory for now)
-        let wallet = BdkWallet::create(external_desc, internal_desc)
-            .network(network)
-            .create_wallet_no_persist()
-            .map_err(|e| Error::Wallet(format!("Failed to create wallet: {}", e)))?;
 
         // Ensure data directory exists
         if !data_dir.exists() {
             tracing::info!("Creating data directory: {:?}", data_dir);
             fs::create_dir_all(&data_dir)
                 .map_err(|e| Error::Wallet(format!("Failed to create data dir: {}", e)))?;
+        }
+
+        // Load persisted address index
+        let address_index = Self::load_address_index(&data_dir)?;
+        tracing::info!("Loaded address index: {}", address_index);
+
+        // Create wallet (in-memory)
+        let mut wallet = BdkWallet::create(external_desc, internal_desc)
+            .network(network)
+            .create_wallet_no_persist()
+            .map_err(|e| Error::Wallet(format!("Failed to create wallet: {}", e)))?;
+
+        // Reveal addresses up to the persisted index to sync state
+        for _ in 0..address_index {
+            wallet.reveal_next_address(KeychainKind::External);
         }
 
         // Load existing reserves from disk
@@ -274,7 +288,28 @@ impl Wallet {
             block_height: Mutex::new(0),
             block_hash: Mutex::new([0u8; 32]),
             data_dir,
+            address_index: Mutex::new(address_index),
         })
+    }
+
+    /// Load address index from disk
+    fn load_address_index(data_dir: &PathBuf) -> Result<u32, Error> {
+        let index_file = data_dir.join("address_index.txt");
+        if !index_file.exists() {
+            return Ok(0);
+        }
+        let content = fs::read_to_string(&index_file)
+            .map_err(|e| Error::Wallet(format!("Failed to read address index: {}", e)))?;
+        content.trim().parse()
+            .map_err(|e| Error::Wallet(format!("Failed to parse address index: {}", e)))
+    }
+
+    /// Save address index to disk
+    fn save_address_index(data_dir: &PathBuf, index: u32) -> Result<(), Error> {
+        let index_file = data_dir.join("address_index.txt");
+        fs::write(&index_file, index.to_string())
+            .map_err(|e| Error::Wallet(format!("Failed to write address index: {}", e)))?;
+        Ok(())
     }
 
     /// Load reserves from disk
@@ -494,7 +529,24 @@ impl Wallet {
     /// Get a new receiving address
     pub fn get_new_address(&self) -> Result<Address, Error> {
         let mut wallet = self.inner.lock().unwrap();
+
+        // Reload address index from disk in case another process updated it
+        let disk_index = Self::load_address_index(&self.data_dir)?;
+        let mut index = self.address_index.lock().unwrap();
+
+        // If disk has a higher index, catch up by revealing more addresses
+        while *index < disk_index {
+            wallet.reveal_next_address(KeychainKind::External);
+            *index += 1;
+        }
+
+        // Now reveal the next address
         let addr = wallet.reveal_next_address(KeychainKind::External);
+
+        // Increment and persist address index
+        *index += 1;
+        Self::save_address_index(&self.data_dir, *index)?;
+
         Ok(addr.address)
     }
 

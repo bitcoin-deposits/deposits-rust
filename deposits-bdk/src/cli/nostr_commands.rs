@@ -134,9 +134,56 @@ pub async fn nostr_list(args: &[String]) -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
+/// 16 ANSI colors for cycling through pubkeys
+const PK_COLORS: &[&str] = &[
+    "\x1b[38;5;196m", // red
+    "\x1b[38;5;46m",  // green
+    "\x1b[38;5;226m", // yellow
+    "\x1b[38;5;21m",  // blue
+    "\x1b[38;5;201m", // magenta
+    "\x1b[38;5;51m",  // cyan
+    "\x1b[38;5;208m", // orange
+    "\x1b[38;5;129m", // purple
+    "\x1b[38;5;118m", // lime
+    "\x1b[38;5;213m", // pink
+    "\x1b[38;5;87m",  // aqua
+    "\x1b[38;5;220m", // gold
+    "\x1b[38;5;99m",  // violet
+    "\x1b[38;5;48m",  // sea green
+    "\x1b[38;5;203m", // coral
+    "\x1b[38;5;159m", // light blue
+];
+const RESET: &str = "\x1b[0m";
+
+/// Get color for a pubkey, assigning new colors as needed
+fn get_pk_color(
+    pk: &str,
+    color_map: &mut HashMap<String, usize>,
+    color_by_pk: bool,
+) -> &'static str {
+    if !color_by_pk {
+        return "";
+    }
+    let next_idx = color_map.len();
+    let idx = *color_map.entry(pk.to_string()).or_insert(next_idx);
+    PK_COLORS[idx % PK_COLORS.len()]
+}
+
 /// Show all deposits protocol events from Nostr relay
 pub async fn nostr_events(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let config = parse_config(args)?;
+    // Parse --color-by-pk flag before passing to parse_config
+    let mut color_by_pk = false;
+    let mut config_args = Vec::new();
+
+    for arg in args {
+        if arg == "--color-by-pk" || arg == "--color" {
+            color_by_pk = true;
+        } else {
+            config_args.push(arg.clone());
+        }
+    }
+
+    let config = parse_config(&config_args)?;
 
     let relay_url = config
         .relays
@@ -145,6 +192,9 @@ pub async fn nostr_events(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     println!("Fetching all deposits events from Nostr relay...");
     println!("  Relay: {}", relay_url);
+    if color_by_pk {
+        println!("  Coloring by pubkey");
+    }
     println!();
 
     let keys = Keys::generate();
@@ -186,6 +236,10 @@ pub async fn nostr_events(args: &[String]) -> Result<(), Box<dyn std::error::Err
     let mut responses = 0usize;
     let mut disputes = 0usize;
     let mut agreements = 0usize;
+
+    // Track pubkey -> color mapping
+    let mut pk_colors: HashMap<String, usize> = HashMap::new();
+    let reset = if color_by_pk { RESET } else { "" };
 
     println!("=== Events ({} total) ===", events_vec.len());
     println!();
@@ -241,13 +295,29 @@ pub async fn nostr_events(args: &[String]) -> Result<(), Box<dyn std::error::Err
         let author = event.pubkey.to_string();
         let event_id = event.id.to_string();
 
+        // Try to extract deposit_pubkey from request params for coloring
+        let wallet_pk = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&event.content) {
+            json.get("params")
+                .and_then(|p| p.get("deposit_pubkey"))
+                .and_then(|pk| pk.as_str())
+                .map(|s| s.to_string())
+        } else {
+            None
+        };
+
+        // Use wallet pk for coloring if available, otherwise fall back to author
+        let color_key = wallet_pk.as_ref().unwrap_or(&author);
+        let color = get_pk_color(color_key, &mut pk_colors, color_by_pk);
+
         // Format output based on type
         match kind_num {
             k if k == KIND_LEDGER_UPDATE => {
                 let seq_str = seq.map(|s| format!("seq:{}", s)).unwrap_or_default();
                 println!(
-                    "{} {} {}...  ledger:{}...  {}",
+                    "{}{}{} {} {}...  ledger:{}...  {}",
+                    color,
                     symbol,
+                    reset,
                     kind_name,
                     &event_id[..12],
                     &ledger_id[..16.min(ledger_id.len())],
@@ -266,12 +336,16 @@ pub async fn nostr_events(args: &[String]) -> Result<(), Box<dyn std::error::Err
                         String::new()
                     };
                 println!(
-                    "{} {} {}...  ledger:{}...  from:{}...  {}",
+                    "{}{}{} {} {}...  ledger:{}...  from:{}{}{}...  {}",
+                    color,
                     symbol,
+                    reset,
                     kind_name,
                     &event_id[..12],
                     &ledger_id[..16.min(ledger_id.len())],
+                    color,
                     &author[..12],
+                    reset,
                     &reason[..40.min(reason.len())]
                 );
             }
@@ -291,12 +365,16 @@ pub async fn nostr_events(args: &[String]) -> Result<(), Box<dyn std::error::Err
                     })
                     .unwrap_or_else(|| "-".to_string());
                 println!(
-                    "{} {} {}...  dispute:{}...  from:{}...",
+                    "{}{}{} {} {}...  dispute:{}...  from:{}{}{}...",
+                    color,
                     symbol,
+                    reset,
                     kind_name,
                     &event_id[..12],
                     &dispute_ref[..12.min(dispute_ref.len())],
-                    &author[..12]
+                    color,
+                    &author[..12],
+                    reset
                 );
             }
             k if k == KIND_LEDGER_REQUEST => {
@@ -310,21 +388,43 @@ pub async fn nostr_events(args: &[String]) -> Result<(), Box<dyn std::error::Err
                         String::new()
                     };
                 println!(
-                    "{} {} {}...  ledger:{}...  type:{}",
+                    "{}{}{} {} {}...  ledger:{}...  from:{}{}{}...  type:{}",
+                    color,
                     symbol,
+                    reset,
                     kind_name,
                     &event_id[..12],
                     &ledger_id[..16.min(ledger_id.len())],
+                    color,
+                    &author[..12],
+                    reset,
                     req_type
+                );
+            }
+            k if k == KIND_LEDGER_RESPONSE => {
+                println!(
+                    "{}{}{} {} {}...  from:{}{}{}...",
+                    color,
+                    symbol,
+                    reset,
+                    kind_name,
+                    &event_id[..12],
+                    color,
+                    &author[..12],
+                    reset
                 );
             }
             _ => {
                 println!(
-                    "{} {} {}...  from:{}...",
+                    "{}{}{} {} {}...  from:{}{}{}...",
+                    color,
                     symbol,
+                    reset,
                     kind_name,
                     &event_id[..12],
-                    &author[..12]
+                    color,
+                    &author[..12],
+                    reset
                 );
             }
         }
@@ -337,6 +437,18 @@ pub async fn nostr_events(args: &[String]) -> Result<(), Box<dyn std::error::Err
     println!("  Responses:  {}", responses);
     println!("  Disputes:   {}", disputes);
     println!("  Agreements: {}", agreements);
+
+    // If color mode, show legend
+    if color_by_pk && !pk_colors.is_empty() {
+        println!();
+        println!("=== Pubkey Legend ===");
+        let mut sorted: Vec<_> = pk_colors.iter().collect();
+        sorted.sort_by_key(|(_, idx)| *idx);
+        for (pk, idx) in sorted {
+            let color = PK_COLORS[*idx % PK_COLORS.len()];
+            println!("  {}{}...{}", color, &pk[..16], RESET);
+        }
+    }
 
     Ok(())
 }
@@ -550,25 +662,55 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
                 kids.sort_by_key(|u| (u.sequence_number, u.operator_id.serialize()));
             }
 
-            // Build operator -> color map for colorized output
-            // Colors: red, green, yellow, blue, magenta, cyan
+            // Build color map for colorized output (by wallet pk or operator)
+            // Colors: red, green, yellow, blue, magenta, cyan + more
             let colors = [
                 "\x1b[31m", "\x1b[32m", "\x1b[33m", "\x1b[34m", "\x1b[35m", "\x1b[36m",
+                "\x1b[91m", "\x1b[92m", "\x1b[93m", "\x1b[94m", "\x1b[95m", "\x1b[96m",
             ];
             let reset = "\x1b[0m";
             // Make invalid updates REALLY obvious: bold + reverse video + bright red + blink
             let invalid_style = "\x1b[1;5;7;91m";
-            let mut operator_colors: HashMap<[u8; 33], &str> = HashMap::new();
+            let mut pk_colors: HashMap<[u8; 33], &str> = HashMap::new();
             let mut color_idx = 0;
+
+            // Helper to extract deposit_pubkey from an operation
+            fn get_deposit_pubkey(op: &LedgerOperation) -> Option<[u8; 33]> {
+                match op {
+                    LedgerOperation::DepositOpen { pubkey, .. } => Some(pubkey.serialize()),
+                    LedgerOperation::DepositClose { pubkey, .. } => Some(pubkey.serialize()),
+                    LedgerOperation::CollateralLock { deposit_pubkey, .. } => Some(deposit_pubkey.serialize()),
+                    LedgerOperation::OnchainCredit { deposit_pubkey, .. } => Some(deposit_pubkey.serialize()),
+                    LedgerOperation::OnchainLock { deposit_pubkey, .. } => Some(deposit_pubkey.serialize()),
+                    LedgerOperation::OnchainFail { deposit_pubkey, .. } => Some(deposit_pubkey.serialize()),
+                    LedgerOperation::OnchainFulfill { deposit_pubkey, .. } => Some(deposit_pubkey.serialize()),
+                    LedgerOperation::InvoiceCredit { deposit_pubkey, .. } => Some(deposit_pubkey.serialize()),
+                    LedgerOperation::InvoiceLock { pubkey, .. } => Some(pubkey.serialize()),
+                    LedgerOperation::InvoiceFail { pubkey, .. } => Some(pubkey.serialize()),
+                    LedgerOperation::InvoiceFulfill { pubkey, .. } => Some(pubkey.serialize()),
+                    _ => None,
+                }
+            }
+
+            // Helper to get color key for an update (wallet pk or operator)
+            fn get_color_key(update: &SignedLedgerUpdate) -> [u8; 33] {
+                if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+                    if let Some(wallet_pk) = get_deposit_pubkey(&op) {
+                        return wallet_pk;
+                    }
+                }
+                // Fall back to operator
+                update.operator_id.serialize()
+            }
 
             // Collect invalid update hashes from CustodyDispute reasons (which now contain the hash)
             // Also collect the actual invalid updates for display
             let mut invalid_hashes: HashSet<[u8; 32]> = HashSet::new();
             let mut invalid_updates: Vec<&SignedLedgerUpdate> = Vec::new();
             for update in updates {
-                let key = update.operator_id.serialize();
-                if !operator_colors.contains_key(&key) {
-                    operator_colors.insert(key, colors[color_idx % colors.len()]);
+                let key = get_color_key(update);
+                if !pk_colors.contains_key(&key) {
+                    pk_colors.insert(key, colors[color_idx % colors.len()]);
                     color_idx += 1;
                 }
                 // Check if this is a CustodyDispute and extract the invalid hash from reason
@@ -658,7 +800,7 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
                 parent_operator: Option<PublicKey>,
                 prefix: &str,
                 is_branch: bool,
-                operator_colors: &HashMap<[u8; 33], &str>,
+                pk_colors: &HashMap<[u8; 33], &str>,
                 invalid_hashes: &HashSet<[u8; 32]>,
                 invalid_style: &str,
                 reset: &str,
@@ -738,10 +880,9 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
                             "  "
                         };
 
-                        // Get color for this operator, add blink if this is an invalid update
-                        let color = operator_colors
-                            .get(&update.operator_id.serialize())
-                            .unwrap_or(&"");
+                        // Get color for this update (by wallet pk or operator), add blink if invalid
+                        let color_key = get_color_key(update);
+                        let color = pk_colors.get(&color_key).unwrap_or(&"");
                         let is_invalid = invalid_hashes.contains(&update.current_hash);
                         let style_start = if is_invalid {
                             format!("{}{}", invalid_style, color)
@@ -804,7 +945,7 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
                             Some(update.operator_id),
                             &new_prefix,
                             has_multiple_children,
-                            operator_colors,
+                            pk_colors,
                             invalid_hashes,
                             invalid_style,
                             reset,
@@ -820,7 +961,7 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
                 None,
                 "",
                 false,
-                &operator_colors,
+                &pk_colors,
                 &invalid_hashes,
                 invalid_style,
                 reset,
@@ -1656,10 +1797,10 @@ pub async fn nostr_request(args: &[String]) -> Result<(), Box<dyn std::error::Er
             }
             serde_json::Value::Object(obj)
         }
-        "deposit_offer" => {
+        "make_offer" => {
             // params: deposit_pubkey max_sats min_sats blocks_valid [fee_bps] [fee_fixed] [fee_frequency]
             if params.len() < 4 {
-                return Err("deposit_offer requires: <deposit_pubkey> <max_sats> <min_sats> <blocks_valid> [fee_bps] [fee_fixed] [fee_frequency]".into());
+                return Err("make_offer requires: <deposit_pubkey> <max_sats> <min_sats> <blocks_valid> [fee_bps] [fee_fixed] [fee_frequency]".into());
             }
             let mut obj = serde_json::Map::new();
             obj.insert(
@@ -2155,7 +2296,7 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
             // Operator-only actions: only the ledger operator should handle these
             let is_operator_only = matches!(
                 request.action.as_str(),
-                "deposit_open" | "deposit_offer" | "deposit_withdraw" | "collateral_lock"
+                "deposit_open" | "make_offer" | "deposit_withdraw" | "collateral_lock"
             );
 
             // For operator-only actions, only process if this is our ledger
@@ -2209,7 +2350,7 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
             // TODO: Add proper custody verification once CustodyTransfer operation exists
             let requires_ledger = matches!(
                 request.action.as_str(),
-                "deposit_open" | "deposit_offer" | "deposit_withdraw" | "collateral_lock"
+                "deposit_open" | "make_offer" | "deposit_withdraw" | "collateral_lock"
             );
 
             if requires_ledger {
@@ -2244,8 +2385,8 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
                     )
                     .await
                 }
-                "deposit_offer" => {
-                    handlers::process_deposit_offer_request(
+                "make_offer" => {
+                    handlers::process_make_offer_request(
                         &fresh_node,
                         &ledger_id,
                         &request,
@@ -2295,11 +2436,14 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
                         )
                     }
                 }
-                _ => (
-                    false,
-                    None,
-                    Some(format!("Unknown action: {}", request.action)),
-                ),
+                _ => {
+                    // Skip actions we don't handle - the daemon will respond
+                    println!(
+                        "  Skipping action '{}' - handled by daemon",
+                        request.action
+                    );
+                    continue;
+                }
             };
 
             // Send response - always use the request's ledger_id so requester receives it
