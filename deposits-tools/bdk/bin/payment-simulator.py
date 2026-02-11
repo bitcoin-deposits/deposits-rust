@@ -292,20 +292,32 @@ def run_simulation(
                         print(f"[{time.strftime('%H:%M:%S')}] Funding {alias}...")
                         if fund_deposit(alias):
                             deposit.status = "funded"
-                            # Wait a moment for auto-complete
-                            time.sleep(2)
+                            # Wait for auto-complete to credit the deposit
+                            # (daemon runs auto_complete_deposits periodically)
+                            print(f"  Waiting for deposit to be credited...")
+                            time.sleep(5)
 
                 last_wallet_time = now
 
             # Make payments (withdrawals) periodically
             if now - last_payment_time >= payment_interval and len(our_deposits) >= 2:
-                # Find deposits with funded status
+                # Find deposits with funded status that have been credited
+                # (check balance to see if auto_complete has run)
                 funded = [d for d in our_deposits if d.status == "funded"]
 
-                if len(funded) >= 2:
+                # Update status of deposits that have been credited
+                for d in funded:
+                    balance = get_balance(d.alias)
+                    if balance and balance > 0:
+                        d.status = "credited"
+
+                # Only withdraw from credited deposits
+                credited = [d for d in our_deposits if d.status == "credited"]
+
+                if len(credited) >= 2:
                     # Pick sender and receiver
-                    sender = random.choice(funded)
-                    receiver = random.choice([d for d in funded if d != sender])
+                    sender = random.choice(credited)
+                    receiver = random.choice([d for d in credited if d != sender])
 
                     # Random payment amount
                     amount = random.randint(min_payment_sats, max_payment_sats)
@@ -316,6 +328,8 @@ def run_simulation(
                         # Mine to confirm
                         mine_block()
                         print(f"  Mined block to confirm")
+                elif funded and not credited:
+                    print(f"\n[{time.strftime('%H:%M:%S')}] Waiting for deposits to be credited (auto_complete)...")
 
                 last_payment_time = now
 

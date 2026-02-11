@@ -233,7 +233,7 @@ async fn discover(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     for (i, ad) in ads.iter().enumerate() {
         let operator_name = ad.operator_name.as_deref().unwrap_or("Anonymous");
         println!("{}. {} ({}...)", i + 1, operator_name, &ad.operator_pubkey[..8.min(ad.operator_pubkey.len())]);
-        println!("   Ledger: {}...", &ad.ledger_id[..16.min(ad.ledger_id.len())]);
+        println!("   Ledger: {}", ad.ledger_id);
         println!("   Available: {} sats ({} BTC)",
             ad.available_headroom_sats,
             ad.available_headroom_sats as f64 / 100_000_000.0);
@@ -993,12 +993,20 @@ async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     rng.fill_bytes(&mut nonce);
     let nonce_hex = hex::encode(&nonce);
 
-    // Sign the withdrawal message
-    // Format: "withdraw:{address}:{amount_sats}:{fee_sats}:{nonce_hex}"
-    let msg_str = format!("withdraw:{}:{}:{}:{}", destination, amount_sats, fee_sats, nonce_hex);
+    // Sign the withdrawal message using the canonical format from deposits_core
+    // Format: "WITHDRAWAL:{nonce}:{pubkey}:{address}:{amount}:{fee}"
+    let msg_str = format!(
+        "WITHDRAWAL:{}:{}:{}:{}:{}",
+        nonce_hex,
+        hex::encode(our_pubkey.serialize()),
+        destination,
+        amount_sats,
+        fee_sats
+    );
     let msg_hash = sha256::Hash::hash(msg_str.as_bytes());
     let msg = bitcoin::secp256k1::Message::from_digest(*msg_hash.as_byte_array());
-    let signature = secp.sign_schnorr(&msg, &keypair);
+    // Use ECDSA signature (not Schnorr) to match operator's verify_ecdsa
+    let signature = secp.sign_ecdsa(&msg, &secret_key);
 
     println!("Withdrawal Request");
     println!("==================");
@@ -1020,7 +1028,7 @@ async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         "amount_sats": amount_sats,
         "fee_sats": fee_sats,
         "nonce": nonce_hex,
-        "signature": hex::encode(signature.serialize()),
+        "signature": hex::encode(signature.serialize_compact()),
     });
 
     println!("Sending signed withdrawal request...");
