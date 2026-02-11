@@ -391,6 +391,9 @@ impl Node {
                 // Auto-complete funded deposits
                 self.auto_complete_deposits().await;
 
+                // Auto-complete locked withdrawals (broadcast TXs)
+                self.auto_complete_withdrawals().await;
+
                 // Auto-collect fees from deposits when due
                 self.auto_collect_fees().await;
 
@@ -3655,6 +3658,80 @@ impl Node {
                     tracing::debug!(
                         "Error checking deposit funding {}...: {}",
                         hex::encode(&offer_id[..8]),
+                        e
+                    );
+                }
+            }
+        }
+    }
+
+    /// Auto-complete locked withdrawals by broadcasting their transactions
+    pub async fn auto_complete_withdrawals(&mut self) {
+        // Get all locked withdrawals
+        let locked_withdrawals: Vec<([u8; 32], OnChainWithdrawal)> = {
+            let withdrawals = self.withdrawals.lock().unwrap();
+            withdrawals.iter()
+                .filter_map(|(id, (w, status))| {
+                    if matches!(status, OnChainWithdrawalStatus::Locked { .. }) {
+                        Some((*id, w.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        if locked_withdrawals.is_empty() {
+            return;
+        }
+
+        for (withdrawal_id, withdrawal) in locked_withdrawals {
+            // Find the ledger for this withdrawal
+            let ledger_id = {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                let mut found_id = None;
+                for (lid, arc) in ledgers.iter() {
+                    let ledger = arc.read().unwrap();
+                    // Check if this ledger is operated by us
+                    if ledger.operator_key() != self.node_id {
+                        continue;
+                    }
+                    // Check if this ledger has the withdrawal's deposit
+                    if ledger.state.deposits.contains_key(&withdrawal.deposit_pubkey) {
+                        found_id = Some(lid.clone());
+                        break;
+                    }
+                }
+                found_id
+            };
+
+            let Some(ledger_id) = ledger_id else {
+                tracing::debug!(
+                    "Could not find ledger for withdrawal {}...",
+                    hex::encode(&withdrawal_id[..8])
+                );
+                continue;
+            };
+
+            tracing::info!(
+                "Auto-completing locked withdrawal: id={}... to {} for {} sats",
+                hex::encode(&withdrawal_id[..8]),
+                &withdrawal.destination_address[..20.min(withdrawal.destination_address.len())],
+                withdrawal.amount_sats
+            );
+
+            match self.complete_withdrawal(&ledger_id, &withdrawal_id).await {
+                Ok(result) => {
+                    tracing::info!(
+                        "Withdrawal completed! txid={}, final balance={} msats",
+                        &result.txid[..16.min(result.txid.len())],
+                        result.final_balance_msats
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to complete withdrawal {}...: {}",
+                        hex::encode(&withdrawal_id[..8]),
                         e
                     );
                 }
