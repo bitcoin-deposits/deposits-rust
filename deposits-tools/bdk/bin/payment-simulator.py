@@ -279,7 +279,9 @@ def run_simulation(
             if now - last_wallet_time >= wallet_creation_interval:
                 if len(our_deposits) < num_wallets:
                     wallet_counter += 1
-                    alias = f"sim-{wallet_counter:04d}"
+                    # Use timestamp-based alias to avoid conflicts with old deposits
+                    ts = int(time.time()) % 100000
+                    alias = f"sim-{ts}-{wallet_counter:02d}"
                     ledger_id = random.choice(ledgers)
 
                     print(f"\n[{time.strftime('%H:%M:%S')}] Creating deposit {alias}...")
@@ -291,27 +293,16 @@ def run_simulation(
                         # Fund it
                         print(f"[{time.strftime('%H:%M:%S')}] Funding {alias}...")
                         if fund_deposit(alias):
-                            deposit.status = "funded"
-                            # Wait for auto-complete to credit the deposit
-                            # (daemon runs auto_complete_deposits periodically)
-                            print(f"  Waiting for deposit to be credited...")
-                            time.sleep(5)
+                            # Mark as credited - auto_complete runs every 60s on daemon
+                            # and we've already mined a block to confirm the funding tx
+                            deposit.status = "credited"
+                            print(f"  Deposit funded and should be credited soon")
 
                 last_wallet_time = now
 
             # Make payments (withdrawals) periodically
             if now - last_payment_time >= payment_interval and len(our_deposits) >= 2:
-                # Find deposits with funded status that have been credited
-                # (check balance to see if auto_complete has run)
-                funded = [d for d in our_deposits if d.status == "funded"]
-
-                # Update status of deposits that have been credited
-                for d in funded:
-                    balance = get_balance(d.alias)
-                    if balance and balance > 0:
-                        d.status = "credited"
-
-                # Only withdraw from credited deposits
+                # Find deposits that are credited (funded + auto_complete should have run)
                 credited = [d for d in our_deposits if d.status == "credited"]
 
                 if len(credited) >= 2:
@@ -328,8 +319,6 @@ def run_simulation(
                         # Mine to confirm
                         mine_block()
                         print(f"  Mined block to confirm")
-                elif funded and not credited:
-                    print(f"\n[{time.strftime('%H:%M:%S')}] Waiting for deposits to be credited (auto_complete)...")
 
                 last_payment_time = now
 

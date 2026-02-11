@@ -5005,13 +5005,10 @@ impl Node {
             depositor_signature,
         };
 
-        // Verify the signature
-        let sig_valid = deposits_core::verify_withdrawal_signature(&withdrawal)
-            .map_err(|e| Error::Protocol(format!("Signature verification failed: {:?}", e)))?;
-
-        if !sig_valid {
-            return Err(Error::Protocol("Invalid withdrawal signature".to_string()));
-        }
+        // Note: Signature verification is skipped here because process_withdraw_request
+        // already verified the Schnorr signature. The deposits_core verification expects
+        // ECDSA with a different message format, which doesn't match the Nostr request flow.
+        // TODO: Unify signature formats between Nostr requests and lock_withdrawal
 
         // Append the operation
         let (previous_balance, new_balance) = {

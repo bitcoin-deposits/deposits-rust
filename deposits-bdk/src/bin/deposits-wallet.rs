@@ -993,20 +993,12 @@ async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     rng.fill_bytes(&mut nonce);
     let nonce_hex = hex::encode(&nonce);
 
-    // Sign the withdrawal message using the canonical format from deposits_core
-    // Format: "WITHDRAWAL:{nonce}:{pubkey}:{address}:{amount}:{fee}"
-    let msg_str = format!(
-        "WITHDRAWAL:{}:{}:{}:{}:{}",
-        nonce_hex,
-        hex::encode(our_pubkey.serialize()),
-        destination,
-        amount_sats,
-        fee_sats
-    );
+    // Sign the withdrawal message
+    // Format must match node.rs process_withdraw_request: "withdraw:{address}:{amount}:{fee}:{nonce}"
+    let msg_str = format!("withdraw:{}:{}:{}:{}", destination, amount_sats, fee_sats, nonce_hex);
     let msg_hash = sha256::Hash::hash(msg_str.as_bytes());
     let msg = bitcoin::secp256k1::Message::from_digest(*msg_hash.as_byte_array());
-    // Use ECDSA signature (not Schnorr) to match operator's verify_ecdsa
-    let signature = secp.sign_ecdsa(&msg, &secret_key);
+    let signature = secp.sign_schnorr(&msg, &keypair);
 
     println!("Withdrawal Request");
     println!("==================");
@@ -1028,7 +1020,7 @@ async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         "amount_sats": amount_sats,
         "fee_sats": fee_sats,
         "nonce": nonce_hex,
-        "signature": hex::encode(signature.serialize_compact()),
+        "signature": hex::encode(signature.serialize()),
     });
 
     println!("Sending signed withdrawal request...");
