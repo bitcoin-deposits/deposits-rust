@@ -4190,6 +4190,11 @@ impl Node {
             .await
             .map_err(|e| Error::Protocol(format!("Failed to send co_sign request: {:?}", e)))?;
 
+        // Subscribe to response for this request
+        if let Err(e) = self.nostr.subscribe_to_response(&request_id).await {
+            tracing::warn!("Failed to subscribe to co-sign response: {}", e);
+        }
+
         // Store in pending requests
         {
             let mut pending = self.pending_cosign_requests.lock().unwrap();

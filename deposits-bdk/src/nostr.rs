@@ -1542,28 +1542,10 @@ impl NostrTransport {
     }
 
     /// Fast non-blocking poll for events
-    /// Fetches recent response events directly from the relay without waiting
+    /// Drains any pending notifications from existing subscriptions
     pub async fn poll_events(&self) -> Result<(), Error> {
-        use nostr_sdk::Filter;
-
-        // Fetch recent responses (last 30 seconds)
-        let since = nostr_sdk::Timestamp::now() - 30;
-        let filter = Filter::new()
-            .kind(Kind::Custom(KIND_LEDGER_RESPONSE))
-            .since(since);
-
-        let events = self.client
-            .fetch_events(vec![filter], Some(std::time::Duration::from_millis(200)))
-            .await
-            .map_err(|e| Error::Nostr(format!("Failed to fetch events: {}", e)))?;
-
-        for event in events.iter() {
-            if let Ok(response) = self.process_ledger_response(event) {
-                let _ = self.response_tx.send(response);
-            }
-        }
-
-        // Also drain any pending notifications
+        // Just drain pending notifications - don't create new subscriptions
+        // The caller should have already subscribed to the response
         while let Ok(notification) = self.client.notifications().try_recv() {
             self.handle_notification(notification);
         }
