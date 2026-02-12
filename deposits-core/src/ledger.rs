@@ -1209,10 +1209,10 @@ impl Ledger {
                     // TODO: Need to look up the withdrawal amount from withdrawal_id
                 }
             }
-            LedgerOperation::OnchainFulfill { deposit_pubkey, .. } => {
-                // On fulfillment, the locked funds are released (already deducted)
-                if let Some(_deposit) = self.state.deposits.get_mut(deposit_pubkey) {
-                    // The funds were already locked, fulfillment just confirms
+            LedgerOperation::OnchainFulfill { deposit_pubkey, amount, .. } => {
+                // On fulfillment, deduct the locked funds from balance
+                if let Some(deposit) = self.state.deposits.get_mut(deposit_pubkey) {
+                    deposit.fulfill(*amount);
                 }
             }
             LedgerOperation::FeeCollect {

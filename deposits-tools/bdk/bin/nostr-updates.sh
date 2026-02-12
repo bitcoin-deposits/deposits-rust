@@ -104,17 +104,10 @@ elif [ -n "$LEDGER_ID" ]; then
     # Show updates for specific ledger (dry-run shows formatted operations)
     log_info "Fetching updates for ledger: $LEDGER_ID"
     echo ""
-    run_nostr_cmd import "$LEDGER_ID" --dry-run
+    run_nostr_cmd import "$LEDGER_ID" --dry-run $COLOR_BY_PK
 else
-    # List all ledgers then show updates for each
+    # Fetch all ledgers in a single call (so colors are consistent across ledgers)
     log_info "Fetching all ledger updates from Nostr relay..."
     echo ""
-
-    # Get list of ledger IDs
-    ledger_ids=$(run_nostr_cmd list 2>/dev/null | grep -E '^  [0-9a-f]{64}$' | tr -d ' ')
-
-    for lid in $ledger_ids; do
-        run_nostr_cmd import "$lid" --dry-run 2>&1 | grep -v "^Fetching\|^  Relay:\|^  Ledger:\|^Found\|^Dry run"
-        echo ""
-    done
+    run_nostr_cmd import --dry-run $COLOR_BY_PK
 fi

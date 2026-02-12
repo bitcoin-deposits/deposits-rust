@@ -40,6 +40,7 @@ class Deposit:
     min_sats: int
     max_sats: int
     status: str = "pending"
+    balance_sats: int = 0  # Actual confirmed balance from ledger
 
 
 def run_wallet(*args, capture: bool = True) -> tuple[int, str, str]:
@@ -168,28 +169,36 @@ def fund_deposit(alias: str, amount_sats: Optional[int] = None) -> bool:
     return False
 
 
-def get_balance(alias: str) -> Optional[int]:
-    """Get balance for a deposit alias (in msats)"""
+def sync_and_get_balances() -> dict[str, int]:
+    """Sync deposits and get balances from the ledger. Returns alias -> sats."""
+    # First sync to get latest balances from ledger
+    run_wallet("sync")
+
+    # Then read balance output
     code, stdout, stderr = run_wallet("balance")
 
     if code != 0:
-        return None
+        return {}
 
-    # Parse balance output - look for alias and balance
-    # Format varies, look for lines with the alias and msat/sat amounts
+    # Parse balance output
+    # Format: "  + alias     12345 sats  (pubkey)"
+    balances = {}
+    import re
     for line in stdout.split("\n"):
-        if alias in line:
-            # Try to extract balance
-            import re
-            # Look for patterns like "1000 msat" or "1000msat" or "balance: 1000"
-            match = re.search(r'(\d+)\s*msat', line, re.IGNORECASE)
-            if match:
-                return int(match.group(1))
-            match = re.search(r'(\d+)\s*sat', line, re.IGNORECASE)
-            if match:
-                return int(match.group(1)) * 1000  # Convert to msats
+        # Look for lines with alias and sats
+        match = re.search(r'[+~?]\s+(\S+)\s+(\d+)\s+sats', line)
+        if match:
+            alias = match.group(1)
+            sats = int(match.group(2))
+            balances[alias] = sats
 
-    return None
+    return balances
+
+
+def get_balance(alias: str) -> Optional[int]:
+    """Get balance for a deposit alias (in sats)"""
+    balances = sync_and_get_balances()
+    return balances.get(alias)
 
 
 def withdraw_to(from_alias: str, to_address: str, amount_sats: int) -> bool:
@@ -227,8 +236,8 @@ def mine_block():
 
 def run_simulation(
     num_wallets: int = 4,
-    wallet_creation_interval: float = 30.0,
-    payment_interval: float = 10.0,
+    wallet_creation_interval: float = 10.0,
+    payment_interval: float = 5.0,
     funding_amount_sats: int = 100000,
     min_payment_sats: int = 1000,
     max_payment_sats: int = 5000,
@@ -293,41 +302,59 @@ def run_simulation(
                         # Fund it
                         print(f"[{time.strftime('%H:%M:%S')}] Funding {alias}...")
                         if fund_deposit(alias):
-                            # Mark as credited - auto_complete runs every 60s on daemon
-                            # and we've already mined a block to confirm the funding tx
-                            deposit.status = "credited"
-                            print(f"  Deposit funded and should be credited soon")
+                            # Mine block to confirm funding tx
+                            mine_block()
+                            deposit.status = "funded"
+                            print(f"  Deposit funded, waiting for balance sync")
 
                 last_wallet_time = now
 
             # Make payments (withdrawals) periodically
             if now - last_payment_time >= payment_interval and len(our_deposits) >= 2:
-                # Find deposits that are credited (funded + auto_complete should have run)
-                credited = [d for d in our_deposits if d.status == "credited"]
+                # Sync balances from ledger
+                balances = sync_and_get_balances()
 
-                if len(credited) >= 2:
+                # Update deposit balances and find ones with actual balance
+                for d in our_deposits:
+                    if d.alias in balances:
+                        d.balance_sats = balances[d.alias]
+                        if d.balance_sats > 0:
+                            d.status = "credited"
+
+                # Find deposits with sufficient balance (need balance > payment + fee)
+                min_balance_needed = max_payment_sats + 1000  # payment + fee buffer
+                funded = [d for d in our_deposits if d.balance_sats >= min_balance_needed]
+
+                if len(funded) >= 2:
                     # Pick sender and receiver
-                    sender = random.choice(credited)
-                    receiver = random.choice([d for d in credited if d != sender])
+                    sender = random.choice(funded)
+                    receiver = random.choice([d for d in our_deposits if d != sender and d.funding_address])
 
-                    # Random payment amount
-                    amount = random.randint(min_payment_sats, max_payment_sats)
+                    # Random payment amount, but don't exceed sender's balance
+                    max_amount = min(max_payment_sats, sender.balance_sats - 1000)  # Leave 1000 for fee
+                    if max_amount >= min_payment_sats:
+                        amount = random.randint(min_payment_sats, max_amount)
 
-                    print(f"\n[{time.strftime('%H:%M:%S')}] Payment: {sender.alias} -> {receiver.alias}")
+                        print(f"\n[{time.strftime('%H:%M:%S')}] Payment: {sender.alias} ({sender.balance_sats} sats) -> {receiver.alias}")
 
-                    if withdraw_to(sender.alias, receiver.funding_address, amount):
-                        # Mine to confirm
-                        mine_block()
-                        print(f"  Mined block to confirm")
+                        if withdraw_to(sender.alias, receiver.funding_address, amount):
+                            # Mine to confirm
+                            mine_block()
+                            print(f"  Mined block to confirm")
+                            # Update sender balance estimate
+                            sender.balance_sats -= (amount + 500)
+                else:
+                    print(f"\n[{time.strftime('%H:%M:%S')}] Waiting for funded deposits (need {min_balance_needed}+ sats, have: {[f'{d.alias}:{d.balance_sats}' for d in our_deposits]})")
 
                 last_payment_time = now
 
             # Print status periodically
-            if int(now) % 60 == 0:
-                funded_count = len([d for d in our_deposits if d.status == "funded"])
-                print(f"\n[{time.strftime('%H:%M:%S')}] Status: {len(our_deposits)} deposits ({funded_count} funded)")
+            if int(now) % 30 == 0:
+                funded_count = len([d for d in our_deposits if d.balance_sats > 0])
+                total_balance = sum(d.balance_sats for d in our_deposits)
+                print(f"\n[{time.strftime('%H:%M:%S')}] Status: {len(our_deposits)} deposits, {funded_count} with balance, total: {total_balance} sats")
 
-            time.sleep(1)
+            time.sleep(0.5)
 
     except KeyboardInterrupt:
         print("\n\nSimulation stopped by user")
@@ -340,10 +367,10 @@ def main():
     parser = argparse.ArgumentParser(description="Bitcoin Deposits Payment Simulator")
     parser.add_argument("--wallets", type=int, default=4,
                         help="Number of wallets to create (default: 4)")
-    parser.add_argument("--wallet-interval", type=float, default=30.0,
-                        help="Seconds between wallet creations (default: 30)")
-    parser.add_argument("--payment-interval", type=float, default=10.0,
-                        help="Seconds between payments (default: 10)")
+    parser.add_argument("--wallet-interval", type=float, default=10.0,
+                        help="Seconds between wallet creations (default: 10)")
+    parser.add_argument("--payment-interval", type=float, default=5.0,
+                        help="Seconds between payments (default: 5)")
     parser.add_argument("--funding-sats", type=int, default=100000,
                         help="Sats to fund each wallet (default: 100000)")
     parser.add_argument("--min-payment", type=int, default=1000,

@@ -459,6 +459,7 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
     let mut config_args = Vec::new();
     let mut limit: usize = 500;
     let mut dry_run = false;
+    let mut color_by_pk = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -469,6 +470,8 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
             }
         } else if args[i] == "--dry-run" {
             dry_run = true;
+        } else if args[i] == "--color-by-pk" || args[i] == "--color" {
+            color_by_pk = true;
         } else if args[i].starts_with("--") {
             config_args.push(args[i].clone());
             if i + 1 < args.len() && !args[i + 1].starts_with("--") {
@@ -574,6 +577,9 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
         None
     };
 
+    // Color map shared across all ledgers (so same pubkey gets same color)
+    let mut pk_colors: HashMap<[u8; 33], usize> = HashMap::new();
+
     // Import each ledger
     for (lid, updates) in &ledgers {
         let short_id = &lid[..16.min(lid.len())];
@@ -662,17 +668,28 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
                 kids.sort_by_key(|u| (u.sequence_number, u.operator_id.serialize()));
             }
 
-            // Build color map for colorized output (by wallet pk or operator)
-            // Colors: red, green, yellow, blue, magenta, cyan + more
-            let colors = [
-                "\x1b[31m", "\x1b[32m", "\x1b[33m", "\x1b[34m", "\x1b[35m", "\x1b[36m",
-                "\x1b[91m", "\x1b[92m", "\x1b[93m", "\x1b[94m", "\x1b[95m", "\x1b[96m",
+            // Colors for colorized output (by wallet pk or operator)
+            // Muted/calm palette - easier on the eyes
+            let colors: &[&str] = &[
+                "\x1b[38;5;131m", // muted red
+                "\x1b[38;5;108m", // muted green
+                "\x1b[38;5;179m", // muted gold
+                "\x1b[38;5;67m",  // muted blue
+                "\x1b[38;5;139m", // muted purple
+                "\x1b[38;5;73m",  // muted cyan
+                "\x1b[38;5;173m", // muted orange
+                "\x1b[38;5;107m", // olive
+                "\x1b[38;5;103m", // muted lavender
+                "\x1b[38;5;66m",  // teal
+                "\x1b[38;5;137m", // tan
+                "\x1b[38;5;96m",  // plum
+                "\x1b[38;5;72m",  // sea green
+                "\x1b[38;5;138m", // dusty rose
+                "\x1b[38;5;109m", // sage
             ];
-            let reset = "\x1b[0m";
+            let reset = if color_by_pk { "\x1b[0m" } else { "" };
             // Make invalid updates REALLY obvious: bold + reverse video + bright red + blink
             let invalid_style = "\x1b[1;5;7;91m";
-            let mut pk_colors: HashMap<[u8; 33], &str> = HashMap::new();
-            let mut color_idx = 0;
 
             // Helper to extract deposit_pubkey from an operation
             fn get_deposit_pubkey(op: &LedgerOperation) -> Option<[u8; 33]> {
@@ -708,10 +725,11 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
             let mut invalid_hashes: HashSet<[u8; 32]> = HashSet::new();
             let mut invalid_updates: Vec<&SignedLedgerUpdate> = Vec::new();
             for update in updates {
-                let key = get_color_key(update);
-                if !pk_colors.contains_key(&key) {
-                    pk_colors.insert(key, colors[color_idx % colors.len()]);
-                    color_idx += 1;
+                // Build color map (shared across ledgers)
+                if color_by_pk {
+                    let key = get_color_key(update);
+                    let next_idx = pk_colors.len();
+                    pk_colors.entry(key).or_insert(next_idx);
                 }
                 // Check if this is a CustodyDispute and extract the invalid hash from reason
                 if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
@@ -800,7 +818,9 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
                 parent_operator: Option<PublicKey>,
                 prefix: &str,
                 is_branch: bool,
-                pk_colors: &HashMap<[u8; 33], &str>,
+                pk_colors: &HashMap<[u8; 33], usize>,
+                colors: &[&str],
+                color_by_pk: bool,
                 invalid_hashes: &HashSet<[u8; 32]>,
                 invalid_style: &str,
                 reset: &str,
@@ -882,7 +902,13 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
                         // Get color for this update (by wallet pk or operator), add blink if invalid
                         let color_key = get_color_key(update);
-                        let color = pk_colors.get(&color_key).unwrap_or(&"");
+                        let color = if color_by_pk {
+                            pk_colors.get(&color_key)
+                                .map(|idx| colors[idx % colors.len()])
+                                .unwrap_or("")
+                        } else {
+                            ""
+                        };
                         let is_invalid = invalid_hashes.contains(&update.current_hash);
                         let style_start = if is_invalid {
                             format!("{}{}", invalid_style, color)
@@ -946,6 +972,8 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
                             &new_prefix,
                             has_multiple_children,
                             pk_colors,
+                            colors,
+                            color_by_pk,
                             invalid_hashes,
                             invalid_style,
                             reset,
@@ -962,6 +990,8 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
                 "",
                 false,
                 &pk_colors,
+                colors,
+                color_by_pk,
                 &invalid_hashes,
                 invalid_style,
                 reset,

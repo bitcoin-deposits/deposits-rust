@@ -1004,10 +1004,13 @@ async fn show_balance(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 
     let mut total_sats = 0u64;
 
+    let mut total_locked = 0u64;
+
     for deposit in &deposits {
         let alias = deposit.get("alias").and_then(|v| v.as_str()).unwrap_or("(none)");
-        let ledger_id = deposit.get("ledger_id").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let deposit_pubkey = deposit.get("deposit_pubkey").and_then(|v| v.as_str()).unwrap_or("unknown");
         let amount = deposit.get("amount_sats").and_then(|v| v.as_u64()).unwrap_or(0);
+        let locked = deposit.get("locked_sats").and_then(|v| v.as_u64()).unwrap_or(0);
         let status = deposit.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
 
         let status_symbol = match status {
@@ -1016,17 +1019,28 @@ async fn show_balance(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
             _ => "?",
         };
 
-        println!("  {} {} {:>10} sats  ({})", status_symbol, alias, amount, &ledger_id[..8.min(ledger_id.len())]);
+        if locked > 0 {
+            println!("  {} {} {:>10} sats  ({})  [{} pending]",
+                status_symbol, alias, amount, &deposit_pubkey[..8.min(deposit_pubkey.len())], locked);
+        } else {
+            println!("  {} {} {:>10} sats  ({})",
+                status_symbol, alias, amount, &deposit_pubkey[..8.min(deposit_pubkey.len())]);
+        }
 
         if status == "funded" || status == "completed" {
             total_sats += amount;
+            total_locked += locked;
         }
     }
 
     println!();
-    println!("  Total:  {} sats ({} BTC)", total_sats, total_sats as f64 / 100_000_000.0);
+    if total_locked > 0 {
+        println!("  Total:  {} sats ({} BTC)  [{} pending]", total_sats, total_sats as f64 / 100_000_000.0, total_locked);
+    } else {
+        println!("  Total:  {} sats ({} BTC)", total_sats, total_sats as f64 / 100_000_000.0);
+    }
     println!();
-    println!("  + = funded/completed, ~ = pending");
+    println!("  + = funded/completed, ~ = pending, [N pending] = locked for withdrawal");
 
     Ok(())
 }
@@ -1070,10 +1084,60 @@ async fn sync_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         let alias = deposit.get("alias").and_then(|v| v.as_str()).unwrap_or("unknown");
         let offer_id = deposit.get("offer_id").and_then(|v| v.as_str());
         let ledger_id = deposit.get("ledger_id").and_then(|v| v.as_str());
+        let deposit_pubkey = deposit.get("deposit_pubkey").and_then(|v| v.as_str());
         let current_status = deposit.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
 
-        // Skip if already completed - no need to query again
+        // For funded/completed deposits, query the actual balance
         if current_status == "completed" || current_status == "funded" {
+            if let (Some(ledger_id), Some(deposit_pubkey)) = (ledger_id, deposit_pubkey) {
+                let params = serde_json::json!({
+                    "deposit_pubkey": deposit_pubkey,
+                });
+
+                let request_id = transport.send_ledger_request(ledger_id, "balance_query", params).await?;
+
+                // Wait for response (with timeout)
+                let start = std::time::Instant::now();
+                let timeout = std::time::Duration::from_secs(10);
+
+                while start.elapsed() < timeout {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    match transport.fetch_response(&request_id).await {
+                        Ok(Some(response)) => {
+                            if response.success {
+                                if let Some(result) = &response.result {
+                                    // Get balance and locked from response
+                                    let balance_msats = result.get("balance_msats").and_then(|v| v.as_u64()).unwrap_or(0);
+                                    let locked_msats = result.get("locked_msats").and_then(|v| v.as_u64()).unwrap_or(0);
+                                    let available_sats = (balance_msats.saturating_sub(locked_msats)) / 1000;
+                                    let locked_sats = locked_msats / 1000;
+
+                                    let current_amount = deposit.get("amount_sats").and_then(|v| v.as_u64()).unwrap_or(0);
+                                    let current_locked = deposit.get("locked_sats").and_then(|v| v.as_u64()).unwrap_or(0);
+
+                                    if available_sats != current_amount || locked_sats != current_locked {
+                                        if locked_sats > 0 {
+                                            println!("  {} balance: {} sats ({} pending)", alias, available_sats, locked_sats);
+                                        } else {
+                                            println!("  {} balance: {} sats", alias, available_sats);
+                                        }
+                                        deposit["amount_sats"] = serde_json::json!(available_sats);
+                                        deposit["locked_sats"] = serde_json::json!(locked_sats);
+                                        updated = true;
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                        Ok(None) => {
+                            // No response yet, keep polling
+                        }
+                        Err(_) => {
+                            break;
+                        }
+                    }
+                }
+            }
             continue;
         }
 

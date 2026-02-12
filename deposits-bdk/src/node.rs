@@ -539,7 +539,7 @@ impl Node {
 
         // Some actions are operator-only - non-operators should silently skip
         // (the actual operator will handle these and send the response)
-        let operator_only_actions = ["deposit_open", "make_offer", "withdraw", "collateral_lock", "offer_status"];
+        let operator_only_actions = ["deposit_open", "make_offer", "withdraw", "collateral_lock", "offer_status", "balance_query"];
         if operator_only_actions.contains(&request.action.as_str()) && !self.is_operator_of_ledger(&request.ledger_id) {
             tracing::debug!(
                 "Skipping operator-only action '{}' for ledger {} - we're not the operator",
@@ -570,6 +570,7 @@ impl Node {
                 self.process_cosign_request(&request).await
             }
             "offer_status" => self.process_offer_status_request(&request).await,
+            "balance_query" => self.process_balance_query_request(&request).await,
             _ => {
                 tracing::warn!("Unknown request action: {}", request.action);
                 (false, None, Some(format!("Unknown action: {}", request.action)))
@@ -2921,6 +2922,56 @@ impl Node {
         }
     }
 
+    /// Process a balance query request
+    ///
+    /// Params:
+    /// - deposit_pubkey: hex-encoded depositor's pubkey
+    ///
+    /// Returns the current balance in the ledger (in millisatoshis)
+    async fn process_balance_query_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+        // Extract deposit_pubkey from params
+        let deposit_pubkey_hex = match request.params.get("deposit_pubkey").and_then(|v| v.as_str()) {
+            Some(pk) => pk,
+            None => return (false, None, Some("Missing deposit_pubkey parameter".to_string())),
+        };
+
+        // Parse pubkey
+        let deposit_pubkey = match hex::decode(deposit_pubkey_hex)
+            .ok()
+            .and_then(|bytes| bitcoin::secp256k1::PublicKey::from_slice(&bytes).ok())
+        {
+            Some(pk) => pk,
+            None => return (false, None, Some("Invalid deposit_pubkey".to_string())),
+        };
+
+        // Find the ledger
+        let (_, ledger) = match self.get_ledger_by_ledger_id(&request.ledger_id)
+            .or_else(|| self.get_ledger_by_reserves_key(&request.ledger_id))
+        {
+            Some(l) => l,
+            None => return (false, None, Some("Ledger not found".to_string())),
+        };
+
+        // Look up the deposit balance
+        match ledger.state.deposits.get(&deposit_pubkey) {
+            Some(deposit) => {
+                let result = serde_json::json!({
+                    "deposit_pubkey": deposit_pubkey_hex,
+                    "balance_msats": deposit.balance,
+                    "balance_sats": deposit.balance / 1000,
+                    "locked_msats": deposit.locked_balance,
+                    "collateral_lock_msats": deposit.collateral_lock_amount,
+                    "collateral_lock_expires": deposit.collateral_lock_expires,
+                });
+                tracing::debug!("Balance query: {}... -> {} msats", &deposit_pubkey_hex[..16], deposit.balance);
+                (true, Some(result.to_string()), None)
+            }
+            None => {
+                (false, None, Some(format!("Deposit not found for pubkey: {}...", &deposit_pubkey_hex[..16])))
+            }
+        }
+    }
+
     /// Process a withdrawal request from a depositor
     ///
     /// Params:
@@ -3727,6 +3778,11 @@ impl Node {
                         &result.txid[..16.min(result.txid.len())],
                         result.final_balance_msats
                     );
+                    // Sync wallet after each successful broadcast to update UTXO set
+                    // This prevents subsequent withdrawals from trying to spend already-used UTXOs
+                    if let Err(e) = self.sync_wallet() {
+                        tracing::warn!("Wallet sync after withdrawal failed: {}", e);
+                    }
                 }
                 Err(e) => {
                     tracing::error!(
@@ -4132,8 +4188,8 @@ impl Node {
 
         // Poll for response while processing Nostr events
         // We need to run a mini event loop to receive the response
-        // Use 5 second timeout for faster fallback during testing
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        // Use 15 second timeout to allow for network delays
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
         let mut rx = rx;
 
         loop {
@@ -4196,7 +4252,7 @@ impl Node {
                 _ = tokio::time::sleep_until(deadline) => {
                     let mut pending = self.pending_cosign_requests.lock().unwrap();
                     pending.remove(&request_id);
-                    return Err(Error::Protocol("Co-sign request timed out after 5 seconds".to_string()));
+                    return Err(Error::Protocol("Co-sign request timed out after 15 seconds".to_string()));
                 }
             }
         }
