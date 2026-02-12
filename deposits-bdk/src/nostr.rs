@@ -1420,12 +1420,17 @@ impl NostrTransport {
             }
         }
 
+        // Include lookback to catch responses sent before subscription was active
+        // (the response may arrive faster than we can subscribe)
+        let since = nostr_sdk::Timestamp::now() - 30;
+
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_RESPONSE))
             .custom_tag(
                 SingleLetterTag::lowercase(Alphabet::E),
                 [request_id],
-            );
+            )
+            .since(since);
 
         self.client
             .subscribe(vec![filter], None)
