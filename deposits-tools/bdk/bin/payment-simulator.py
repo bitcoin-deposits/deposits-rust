@@ -235,14 +235,25 @@ def mine_block():
 
 
 def run_simulation(
-    num_wallets: int = 4,
-    wallet_creation_interval: float = 10.0,
+    wallets_per_ledger: float = 2.0,
+    base_wallet_interval: float = 10.0,
     payment_interval: float = 5.0,
     funding_amount_sats: int = 100000,
     min_payment_sats: int = 1000,
     max_payment_sats: int = 5000,
+    rediscover_interval: float = 60.0,
 ):
-    """Run the payment simulation"""
+    """Run the payment simulation
+
+    Args:
+        wallets_per_ledger: Target wallets per discovered ledger (scales with network)
+        base_wallet_interval: Base interval between wallet creations (adjusted by ledger count)
+        payment_interval: Seconds between payment attempts
+        funding_amount_sats: Amount to fund each wallet
+        min_payment_sats: Minimum payment amount
+        max_payment_sats: Maximum payment amount
+        rediscover_interval: Seconds between ledger re-discovery
+    """
 
     print("=" * 60)
     print("Bitcoin Deposits Payment Simulator")
@@ -268,16 +279,25 @@ def run_simulation(
         print(f"  {lid[:16]}...")
     print()
 
+    # Scale wallet count and creation rate based on ledger count
+    num_wallets = max(4, int(len(ledgers) * wallets_per_ledger))
+    # More ledgers = faster wallet creation (but with diminishing returns)
+    # With 1 ledger: base interval, with 10 ledgers: base/3, with 25 ledgers: base/5
+    wallet_creation_interval = base_wallet_interval / (1 + len(ledgers) * 0.2)
+    wallet_creation_interval = max(2.0, wallet_creation_interval)  # Floor at 2 seconds
+
     # Track deposits we've created
     our_deposits: list[Deposit] = []
     wallet_counter = 0
     last_wallet_time = 0.0
     last_payment_time = 0.0
+    last_rediscover_time = time.time()
 
     print("Starting simulation...")
-    print(f"  - Creating up to {num_wallets} wallets")
-    print(f"  - New wallet every {wallet_creation_interval}s")
+    print(f"  - Target wallets: {num_wallets} ({wallets_per_ledger:.1f} per ledger)")
+    print(f"  - New wallet every {wallet_creation_interval:.1f}s")
     print(f"  - Payment every {payment_interval}s")
+    print(f"  - Re-discover ledgers every {rediscover_interval}s")
     print()
 
     try:
@@ -348,11 +368,25 @@ def run_simulation(
 
                 last_payment_time = now
 
+            # Periodically re-discover ledgers to find new operators
+            if now - last_rediscover_time >= rediscover_interval:
+                new_ledgers = discover_ledgers()
+                if len(new_ledgers) > len(ledgers):
+                    added = len(new_ledgers) - len(ledgers)
+                    print(f"\n[{time.strftime('%H:%M:%S')}] Discovered {added} new ledger(s)!")
+                    ledgers = new_ledgers
+                    # Recalculate targets
+                    num_wallets = max(4, int(len(ledgers) * wallets_per_ledger))
+                    wallet_creation_interval = base_wallet_interval / (1 + len(ledgers) * 0.2)
+                    wallet_creation_interval = max(2.0, wallet_creation_interval)
+                    print(f"  Adjusted: target {num_wallets} wallets, interval {wallet_creation_interval:.1f}s")
+                last_rediscover_time = now
+
             # Print status periodically
             if int(now) % 30 == 0:
                 funded_count = len([d for d in our_deposits if d.balance_sats > 0])
                 total_balance = sum(d.balance_sats for d in our_deposits)
-                print(f"\n[{time.strftime('%H:%M:%S')}] Status: {len(our_deposits)} deposits, {funded_count} with balance, total: {total_balance} sats")
+                print(f"\n[{time.strftime('%H:%M:%S')}] Status: {len(ledgers)} ledgers, {len(our_deposits)}/{num_wallets} wallets, {funded_count} funded, {total_balance} sats")
 
             time.sleep(0.5)
 
@@ -365,10 +399,10 @@ def run_simulation(
 
 def main():
     parser = argparse.ArgumentParser(description="Bitcoin Deposits Payment Simulator")
-    parser.add_argument("--wallets", type=int, default=4,
-                        help="Number of wallets to create (default: 4)")
-    parser.add_argument("--wallet-interval", type=float, default=10.0,
-                        help="Seconds between wallet creations (default: 10)")
+    parser.add_argument("--wallets-per-ledger", type=float, default=2.0,
+                        help="Target wallets per discovered ledger (default: 2.0)")
+    parser.add_argument("--base-interval", type=float, default=10.0,
+                        help="Base interval between wallet creations (default: 10)")
     parser.add_argument("--payment-interval", type=float, default=5.0,
                         help="Seconds between payments (default: 5)")
     parser.add_argument("--funding-sats", type=int, default=100000,
@@ -377,16 +411,19 @@ def main():
                         help="Minimum payment in sats (default: 1000)")
     parser.add_argument("--max-payment", type=int, default=5000,
                         help="Maximum payment in sats (default: 5000)")
+    parser.add_argument("--rediscover-interval", type=float, default=60.0,
+                        help="Seconds between ledger re-discovery (default: 60)")
 
     args = parser.parse_args()
 
     run_simulation(
-        num_wallets=args.wallets,
-        wallet_creation_interval=args.wallet_interval,
+        wallets_per_ledger=args.wallets_per_ledger,
+        base_wallet_interval=args.base_interval,
         payment_interval=args.payment_interval,
         funding_amount_sats=args.funding_sats,
         min_payment_sats=args.min_payment,
         max_payment_sats=args.max_payment,
+        rediscover_interval=args.rediscover_interval,
     )
 
 

@@ -690,6 +690,7 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
             let reset = if color_by_pk { "\x1b[0m" } else { "" };
             // Make invalid updates REALLY obvious: bold + reverse video + bright red + blink
             let invalid_style = "\x1b[1;5;7;91m";
+            let invalid_reset = "\x1b[0m"; // Always reset after invalid style
 
             // Helper to extract deposit_pubkey from an operation
             fn get_deposit_pubkey(op: &LedgerOperation) -> Option<[u8; 33]> {
@@ -823,6 +824,7 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
                 color_by_pk: bool,
                 invalid_hashes: &HashSet<[u8; 32]>,
                 invalid_style: &str,
+                invalid_reset: &str,
                 reset: &str,
             ) {
                 if let Some(kids) = children.get(&parent_hash) {
@@ -915,6 +917,8 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
                         } else {
                             color.to_string()
                         };
+                        // Always reset after invalid style to stop blinking
+                        let style_end = if is_invalid { invalid_reset } else { reset };
 
                         println!(
                             "{}{}{}{:>4} ^{:<6} [{:02x}{:02x}~{:02x}{:02x}] {} {} {}{}{}",
@@ -935,7 +939,7 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
                             } else {
                                 format!("  {}", op_details)
                             },
-                            reset
+                            style_end
                         );
 
                         // Check how many children this update has (considering operator continuity)
@@ -976,6 +980,7 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
                             color_by_pk,
                             invalid_hashes,
                             invalid_style,
+                            invalid_reset,
                             reset,
                         );
                     }
@@ -994,6 +999,7 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
                 color_by_pk,
                 &invalid_hashes,
                 invalid_style,
+                invalid_reset,
                 reset,
             );
         } else if let Some(ref n) = node {

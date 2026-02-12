@@ -79,15 +79,40 @@ get_list() {
     [ -f "$STATE_DIR/$1" ] && cat "$STATE_DIR/$1"
 }
 
+# Core nodes use compose containers with named seeds
+# Nodes 1-4: alice, bob, charlie, diana (from docker-compose)
+# Nodes 5+: bdk-eve01, bdk-eve02, etc. (dynamically created)
+
+# Container names
+CORE_NAMES=("" "bdk-alice" "bdk-bob" "bdk-charlie" "bdk-diana")
+CORE_SEEDS=(
+    ""
+    "416c696365000000000000000000000000000000000000000000000000000001"  # Alice
+    "426f620000000000000000000000000000000000000000000000000000000002"  # Bob
+    "436861726c696500000000000000000000000000000000000000000000000003"  # Charlie
+    "4469616e61000000000000000000000000000000000000000000000000000004"  # Diana
+)
+
 # Generate deterministic seed for node N (hex string, 64 chars)
 generate_seed() {
     local n=$1
-    printf "6e6f6465%02x00000000000000000000000000000000000000000000000000%04x" $n $n
+    if [ $n -le 4 ]; then
+        echo "${CORE_SEEDS[$n]}"
+    else
+        # Eve + number: 4576650000... + hex(N)
+        printf "457665%02x0000000000000000000000000000000000000000000000000000%04x" $n $n
+    fi
 }
 
 # Generate container name for node N
 node_name() {
-    printf "bdk-node%02d" $1
+    local n=$1
+    if [ $n -le 4 ]; then
+        echo "${CORE_NAMES[$n]}"
+    else
+        local eve_n=$((n - 4))
+        printf "bdk-eve%02d" $eve_n
+    fi
 }
 
 # Run a CLI command on a node
@@ -115,24 +140,32 @@ run_node_cmd() {
 setup_infrastructure() {
     log_info "=== Setting up infrastructure ==="
 
-    # Stop and remove any existing scale nodes
-    log_info "Cleaning up existing scale nodes..."
+    # Stop and remove any existing eve scale nodes (not alice/bob/charlie/diana)
+    log_info "Cleaning up existing eve scale nodes..."
     for i in $(seq 1 99); do
-        local name=$(node_name $i)
+        local name="bdk-eve$(printf '%02d' $i)"
+        docker stop "$name" 2>/dev/null || true
+        docker rm "$name" 2>/dev/null || true
+        docker volume rm "bdk_${name}_data" 2>/dev/null || true
+    done
+    # Also clean up old bdk-nodeXX format
+    for i in $(seq 1 99); do
+        local name="bdk-node$(printf '%02d' $i)"
         docker stop "$name" 2>/dev/null || true
         docker rm "$name" 2>/dev/null || true
         docker volume rm "bdk_${name}_data" 2>/dev/null || true
     done
 
-    # Reset nostr relay
-    log_info "Resetting Nostr relay..."
-    $DC stop nostr-relay >/dev/null 2>&1 || true
-    $DC rm -f nostr-relay >/dev/null 2>&1 || true
+    # Reset nostr relay and core containers
+    log_info "Resetting Nostr relay and core containers..."
+    $DC stop nostr-relay bdk-alice bdk-bob bdk-charlie bdk-diana >/dev/null 2>&1 || true
+    $DC rm -f nostr-relay bdk-alice bdk-bob bdk-charlie bdk-diana >/dev/null 2>&1 || true
     docker volume rm bdk_bdk_nostr_data 2>/dev/null || true
+    docker volume rm bdk_bdk_alice_data bdk_bdk_bob_data bdk_bdk_charlie_data bdk_bdk_diana_data 2>/dev/null || true
 
-    # Start core services
-    log_info "Starting core services..."
-    $DC up -d bitcoin electrs nostr-relay
+    # Start core services and core operator nodes
+    log_info "Starting core services and nodes..."
+    $DC up -d bitcoin electrs nostr-relay bdk-alice bdk-bob bdk-charlie bdk-diana
 
     # Wait for services
     log_info "Waiting for services to be ready..."
@@ -153,6 +186,27 @@ start_node() {
     local n=$1
     local name=$(node_name $n)
     local seed=$(generate_seed $n)
+
+    # Core nodes (1-4) are started via docker-compose in setup_infrastructure
+    # Just fund them, don't create new containers
+    if [ $n -le 4 ]; then
+        log_info "Using compose container $name (seed: ${seed:0:16}...)..."
+
+        # Wait a moment for container to be ready
+        sleep 1
+
+        # Get wallet address and fund the node
+        local address=$(run_node_cmd $n address 2>&1 | grep -E '^bcrt1' | head -1)
+        if [ -n "$address" ]; then
+            bitcoin_cli -rpcwallet=faucet sendtoaddress "$address" 5 >/dev/null 2>&1
+            log_info "  Funded $name at $address"
+        else
+            log_warn "  Could not get address for $name"
+        fi
+        return
+    fi
+
+    # Eve nodes (5+) are dynamically created
     local ip="172.21.0.$((100 + n))"
 
     log_info "Starting $name (seed: ${seed:0:16}...)..."
@@ -324,6 +378,65 @@ rotate_to_quorum() {
     run_node_cmd $n reserves rotate "$reserves_id" >/dev/null 2>&1 || true
 }
 
+# Generate random fee values for a node
+# Returns: annual_fee deposit_fee withdrawal_fee invoice_fee min_fee
+generate_random_fees() {
+    local n=$1
+
+    # Use node number as part of seed for reproducibility
+    local seed=$((n * 12345))
+
+    # Annual fee: 50-300 bps (0.5% - 3%)
+    local annual=$((50 + (seed % 251)))
+
+    # Deposit fee: 10-100 bps (0.1% - 1%)
+    local deposit=$((10 + ((seed / 251) % 91)))
+
+    # Withdrawal fee: 20-150 bps (0.2% - 1.5%)
+    local withdrawal=$((20 + ((seed / 22841) % 131)))
+
+    # Invoice fee: 5-50 bps (0.05% - 0.5%)
+    local invoice=$((5 + ((seed / 2992171) % 46)))
+
+    # Min fee: 100-1000 sats
+    local min_fee=$((100 + ((seed / 137679866) % 901)))
+
+    echo "$annual $deposit $withdrawal $invoice $min_fee"
+}
+
+advertise_node() {
+    local n=$1
+    local name=$(node_name $n)
+
+    # Get the Taproot reserves key from ledger list (not the P2WSH address from reserves create)
+    local reserves_key=$(run_node_cmd $n ledger list 2>&1 | grep "Reserves Key:" | head -1 | awk '{print $3}')
+
+    if [ -z "$reserves_key" ]; then
+        log_warn "  $name: no reserves_key found, skipping advertisement"
+        return
+    fi
+
+    # Generate random fees
+    local fees=($(generate_random_fees $n))
+    local annual_fee=${fees[0]}
+    local deposit_fee=${fees[1]}
+    local withdrawal_fee=${fees[2]}
+    local invoice_fee=${fees[3]}
+    local min_fee=${fees[4]}
+
+    log_info "  $name: fees annual=${annual_fee}bp deposit=${deposit_fee}bp withdraw=${withdrawal_fee}bp min=${min_fee}sat"
+
+    run_node_cmd $n ledger advertise "$reserves_key" \
+        --name "Node$n" \
+        --annual-fee "$annual_fee" \
+        --deposit-fee "$deposit_fee" \
+        --withdrawal-fee "$withdrawal_fee" \
+        --invoice-fee "$invoice_fee" \
+        --min-fee "$min_fee" \
+        --max-deposit "$RESERVES_AMOUNT" \
+        >/dev/null 2>&1 || log_warn "  Failed to advertise $name"
+}
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -401,6 +514,13 @@ main() {
 
         mine_blocks 1
 
+        # Advertise nodes with random fees
+        log_info ""
+        log_info "Publishing fee advertisements..."
+        for n in $(seq $((started + 1)) $wave_end); do
+            advertise_node $n
+        done
+
         started=$wave_end
         wave=$((wave + 1))
 
@@ -428,7 +548,7 @@ main() {
     log_info "Block height: $(get_block_height)"
     echo ""
     log_info "View all ledgers: ./bin/nostr-updates.sh --color"
-    log_info "Stop all: docker stop \$(docker ps -q --filter 'name=bdk-node')"
+    log_info "Stop eve nodes: docker stop \$(docker ps -q --filter 'name=bdk-eve')"
     echo ""
 
     log_success "Done! $TOTAL_NODES operators running with semi-random quorum membership."

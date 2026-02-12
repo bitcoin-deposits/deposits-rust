@@ -470,8 +470,8 @@ lock_collateral() {
 
                 log_info "$dep_short locking collateral on $op_short's ledger..."
 
-                # Get the wallet-derived deposit secret for the depositor
-                local deposit_secret=$(get_deposit_secret "$depositor")
+                # Get the wallet-derived deposit secret for the depositor's deposit on this ledger
+                local deposit_secret=$(get_deposit_secret "$depositor" "$ledger_id")
                 if [ -z "$deposit_secret" ]; then
                     test_fail "$dep_short: could not derive deposit secret"
                     continue
@@ -666,8 +666,8 @@ post_attestations() {
 
                 log_info "  $attester_short locking collateral for $op_short..."
 
-                # Get the attester's wallet-derived deposit secret
-                local deposit_secret=$(get_deposit_secret "$attester")
+                # Get the attester's wallet-derived deposit secret for this ledger
+                local deposit_secret=$(get_deposit_secret "$attester" "$op_ledger_id")
                 if [ -z "$deposit_secret" ]; then
                     log_warn "$attester_short: could not derive deposit secret"
                     continue

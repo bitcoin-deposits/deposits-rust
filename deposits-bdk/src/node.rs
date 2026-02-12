@@ -30,6 +30,14 @@ use crate::nostr::{InboundMessage, NostrTransport};
 use crate::wallet::Wallet;
 use crate::Error;
 
+/// Maximum number of quorum members a node will accept on its ledger.
+/// Beyond this limit, add_quorum_member requests will be rejected.
+pub const MAX_QUORUM_MEMBERS: usize = 8;
+
+/// Maximum number of quorums a node will join (QuorumJoin operations).
+/// Beyond this limit, quorum join requests will be rejected.
+pub const MAX_QUORUMS_JOINED: usize = 12;
+
 /// Configuration for the deposits-bdk node
 #[derive(Clone)]
 pub struct NodeConfig {
@@ -289,35 +297,26 @@ impl Node {
         self.nostr.start_listening().await?;
 
         // Auto-subscribe to ledger requests/disputes for all our ledgers
+        // Collect all ledger IDs we care about (owned + joined)
+        let mut ledger_ids: Vec<String> = Vec::new();
+
         let ledgers = self.handler.ledgers.lock().unwrap().clone();
         for (_ledger_id_key, ledger_arc) in ledgers.iter() {
             let ledger = ledger_arc.read().unwrap();
-            let ledger_id = ledger.ledger_id_hex();
-            // Only subscribe to ledgers where we're the operator
             if ledger.operator_key() == self.node_id {
-
-                if let Err(e) = self.nostr.subscribe_to_requests(&ledger_id).await {
-                    tracing::warn!("Failed to subscribe to requests for ledger {}: {}", &ledger_id[..16], e);
-                } else {
-                    tracing::info!("Subscribed to requests for ledger {}...", &ledger_id[..16]);
-                }
-
-                if let Err(e) = self.nostr.subscribe_to_disputes(&ledger_id).await {
-                    tracing::warn!("Failed to subscribe to disputes for ledger {}: {}", &ledger_id[..16], e);
-                } else {
-                    tracing::info!("Subscribed to disputes for ledger {}...", &ledger_id[..16]);
-                }
+                ledger_ids.push(ledger.ledger_id_hex());
             }
         }
 
-        // Also subscribe to joined ledgers (where we're a quorum member)
-        let joined_ledgers = self.get_joined_ledger_ids();
-        for ledger_id in joined_ledgers {
-            if let Err(e) = self.nostr.subscribe_to_requests(&ledger_id).await {
-                tracing::warn!("Failed to subscribe to requests for joined ledger {}: {}", &ledger_id[..16], e);
-            }
-            if let Err(e) = self.nostr.subscribe_to_disputes(&ledger_id).await {
-                tracing::warn!("Failed to subscribe to disputes for joined ledger {}: {}", &ledger_id[..16], e);
+        // Add joined ledgers
+        ledger_ids.extend(self.get_joined_ledger_ids());
+
+        // Subscribe to requests and disputes for all ledgers in one batched call
+        if !ledger_ids.is_empty() {
+            if let Err(e) = self.nostr.subscribe_to_ledgers_batch(&ledger_ids).await {
+                tracing::warn!("Failed to subscribe to ledgers: {}", e);
+            } else {
+                tracing::info!("Subscribed to {} ledgers (requests + disputes)", ledger_ids.len());
             }
         }
 
@@ -328,16 +327,9 @@ impl Node {
     /// Subscribe to requests and disputes for a specific ledger
     /// Call this after opening a new ledger to start watching it
     pub async fn subscribe_to_ledger(&self, ledger_id: &str) -> Result<(), Error> {
-        if let Err(e) = self.nostr.subscribe_to_requests(ledger_id).await {
-            tracing::warn!("Failed to subscribe to requests for ledger {}: {}", &ledger_id[..16.min(ledger_id.len())], e);
-        } else {
-            tracing::info!("Subscribed to requests for ledger {}...", &ledger_id[..16.min(ledger_id.len())]);
-        }
-
-        if let Err(e) = self.nostr.subscribe_to_disputes(ledger_id).await {
-            tracing::warn!("Failed to subscribe to disputes for ledger {}: {}", &ledger_id[..16.min(ledger_id.len())], e);
-        } else {
-            tracing::info!("Subscribed to disputes for ledger {}...", &ledger_id[..16.min(ledger_id.len())]);
+        // Use batch subscribe for a single ledger (handles dedup internally)
+        if let Err(e) = self.nostr.subscribe_to_ledgers_batch(&[ledger_id.to_string()]).await {
+            tracing::warn!("Failed to subscribe to ledger {}: {}", &ledger_id[..16.min(ledger_id.len())], e);
         }
 
         Ok(())
@@ -372,9 +364,9 @@ impl Node {
         let mut last_reload = tokio::time::Instant::now();
         let reload_interval = tokio::time::Duration::from_secs(5);
 
-        // Track last request poll time
+        // Track last request poll time (fallback for missed subscription events)
         let mut last_poll = tokio::time::Instant::now();
-        let poll_interval = tokio::time::Duration::from_secs(2);
+        let poll_interval = tokio::time::Duration::from_secs(30);
 
         // Track last periodic tasks time (wallet sync, auto-complete deposits, etc.)
         let mut last_periodic = tokio::time::Instant::now();
@@ -3310,15 +3302,23 @@ impl Node {
                 }
 
                 // Check if this ledger has a QuorumJoin pointing to the target operator
+                // Scan history because state.joined_quorums may not be populated after deserialization
                 // Compare x-coordinates only (Nostr uses x-only pubkeys, so we can't know the y parity)
-                let has_join = ledger.state.joined_quorums.iter().any(|jq| {
-                    if let Some(target_op) = &target_operator_id {
-                        // Compare the x-coordinate (bytes 1-32 of compressed pubkey)
-                        let jq_x = &jq.operator_id.serialize()[1..];
-                        let target_x = &target_op.serialize()[1..];
-                        if jq_x == target_x {
-                            tracing::debug!("Found QuorumJoin matching operator (x-only match)");
-                            return true;
+                let has_join = ledger.history.iter().any(|update| {
+                    if update.message_type != deposits_core::messages::consts::QUORUM_JOIN {
+                        return false;
+                    }
+                    if let Ok(LedgerOperation::QuorumJoin { operator_id, .. }) =
+                        LedgerOperation::tlv_decode(&update.message)
+                    {
+                        if let Some(target_op) = &target_operator_id {
+                            // Compare the x-coordinate (bytes 1-32 of compressed pubkey)
+                            let jq_x = &operator_id.serialize()[1..];
+                            let target_x = &target_op.serialize()[1..];
+                            if jq_x == target_x {
+                                tracing::debug!("Found QuorumJoin in history matching operator (x-only match)");
+                                return true;
+                            }
                         }
                     }
                     false
@@ -3914,39 +3914,55 @@ impl Node {
 
         if let Some((_ledger_id, tx)) = cosign_sender {
             // This is a co-sign response
-            if response.success {
-                if let Some(result) = &response.result {
-                    let result_obj = if result.is_object() {
-                        result.clone()
-                    } else if let Some(s) = result.as_str() {
-                        serde_json::from_str(s).unwrap_or_default()
-                    } else {
-                        serde_json::Value::Null
-                    };
-
-                    let sig_hex = result_obj.get("partner_signature_hex").and_then(|v| v.as_str());
-                    let hash_hex = result_obj.get("member_ledger_hash_hex").and_then(|v| v.as_str());
-
-                    if let (Some(sig_hex), Some(hash_hex)) = (sig_hex, hash_hex) {
-                        if let (Ok(sig_vec), Ok(hash_vec)) = (hex::decode(sig_hex), hex::decode(hash_hex)) {
-                            if sig_vec.len() == 64 && hash_vec.len() == 32 {
-                                let mut sig = [0u8; 64];
-                                sig.copy_from_slice(&sig_vec);
-                                let mut hash = [0u8; 32];
-                                hash.copy_from_slice(&hash_vec);
-
-                                let cosign_result = CoSignResult {
-                                    partner_signature: sig,
-                                    member_ledger_hash: hash,
-                                };
-                                let _ = tx.send(cosign_result);
-                                return;
-                            }
-                        }
-                    }
-                }
+            if !response.success {
+                tracing::warn!(
+                    "Co-sign response failed: {}",
+                    response.error.as_deref().unwrap_or("unknown error")
+                );
+                // tx dropped, receiver gets error
+                return;
             }
-            // tx is dropped here on error, receiver will get an error
+
+            if let Some(result) = &response.result {
+                let result_obj = if result.is_object() {
+                    result.clone()
+                } else if let Some(s) = result.as_str() {
+                    serde_json::from_str(s).unwrap_or_default()
+                } else {
+                    tracing::warn!("Co-sign response result is not an object or string");
+                    return;
+                };
+
+                let sig_hex = result_obj.get("partner_signature_hex").and_then(|v| v.as_str());
+                let hash_hex = result_obj.get("member_ledger_hash_hex").and_then(|v| v.as_str());
+
+                if let (Some(sig_hex), Some(hash_hex)) = (sig_hex, hash_hex) {
+                    if let (Ok(sig_vec), Ok(hash_vec)) = (hex::decode(sig_hex), hex::decode(hash_hex)) {
+                        if sig_vec.len() == 64 && hash_vec.len() == 32 {
+                            let mut sig = [0u8; 64];
+                            sig.copy_from_slice(&sig_vec);
+                            let mut hash = [0u8; 32];
+                            hash.copy_from_slice(&hash_vec);
+
+                            let cosign_result = CoSignResult {
+                                partner_signature: sig,
+                                member_ledger_hash: hash,
+                            };
+                            let _ = tx.send(cosign_result);
+                            return;
+                        } else {
+                            tracing::warn!("Co-sign response has wrong signature/hash lengths");
+                        }
+                    } else {
+                        tracing::warn!("Co-sign response has invalid hex encoding");
+                    }
+                } else {
+                    tracing::warn!("Co-sign response missing partner_signature_hex or member_ledger_hash_hex");
+                }
+            } else {
+                tracing::warn!("Co-sign response has no result");
+            }
+            // tx dropped, receiver gets error
         }
         // Non-cosign responses are not handled here - they'll be processed later by handle_ledger_response
     }
@@ -4204,7 +4220,9 @@ impl Node {
                             return Ok(cosign_result);
                         }
                         Err(_) => {
-                            return Err(Error::Protocol("Co-sign request failed: channel closed".to_string()));
+                            return Err(Error::Protocol(
+                                "Co-sign response not received (quorum member may have returned an error or response was malformed)".to_string()
+                            ));
                         }
                     }
                 }
@@ -4328,32 +4346,50 @@ impl Node {
         }
 
         // Send multicast co-sign request - first responder wins
-        match self.request_cosign(ledger_id, &update_clone).await {
-            Ok(result) => {
-                // Apply partner signature
-                let ledgers = self.handler.ledgers.lock().unwrap();
-                let ledger_arc = ledgers
-                    .get(ledger_id)
-                    .ok_or_else(|| Error::Protocol("Ledger not found".to_string()))?;
-                let mut ledger = ledger_arc.write().unwrap();
+        // Retry up to 3 times since responses can be missed during polling gaps
+        let max_attempts = 3;
+        let mut last_error = None;
 
-                if let Some(last) = ledger.history.last_mut() {
-                    last.partner_signature = result.partner_signature;
-                }
+        for attempt in 1..=max_attempts {
+            match self.request_cosign(ledger_id, &update_clone).await {
+                Ok(result) => {
+                    // Apply partner signature
+                    let ledgers = self.handler.ledgers.lock().unwrap();
+                    let ledger_arc = ledgers
+                        .get(ledger_id)
+                        .ok_or_else(|| Error::Protocol("Ledger not found".to_string()))?;
+                    let mut ledger = ledger_arc.write().unwrap();
 
-                tracing::info!("Applied partner signature (member_ledger_hash: {}...)",
-                    &hex::encode(&result.member_ledger_hash[..4]));
-            }
-            Err(e) => {
-                if quorum_reserves {
-                    // After rotation, co-signatures are required - fail instead of falling back
-                    return Err(Error::Protocol(format!(
-                        "Co-signature required after reserves rotation, but request failed: {}", e
-                    )));
+                    if let Some(last) = ledger.history.last_mut() {
+                        last.partner_signature = result.partner_signature;
+                    }
+
+                    tracing::info!("Applied partner signature (member_ledger_hash: {}...)",
+                        &hex::encode(&result.member_ledger_hash[..4]));
+                    last_error = None;
+                    break;
                 }
-                // Before rotation, allow fallback to operator-only
-                tracing::warn!("Co-sign multicast failed ({}), using operator-only signature", e);
+                Err(e) => {
+                    tracing::warn!("Co-sign attempt {}/{} failed: {}", attempt, max_attempts, e);
+                    last_error = Some(e);
+                    if attempt < max_attempts {
+                        // Brief delay before retry
+                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                    }
+                }
             }
+        }
+
+        if let Some(e) = last_error {
+            if quorum_reserves {
+                // After rotation, co-signatures are required - fail instead of falling back
+                return Err(Error::Protocol(format!(
+                    "Co-signature required after reserves rotation, but all {} attempts failed: {}",
+                    max_attempts, e
+                )));
+            }
+            // Before rotation, allow fallback to operator-only
+            tracing::warn!("Co-sign multicast failed after {} attempts, using operator-only signature", max_attempts);
         }
 
         // Sign as operator
@@ -4406,6 +4442,14 @@ impl Node {
             // Check if already a member
             if ledger.state.quorum_members.iter().any(|m| m.pubkey == quorum_member) {
                 return Err(Error::Protocol("Already a quorum member".to_string()));
+            }
+
+            // Check if we've reached the maximum quorum size
+            if ledger.state.quorum_members.len() >= MAX_QUORUM_MEMBERS {
+                return Err(Error::Protocol(format!(
+                    "Maximum quorum size reached ({} members)",
+                    MAX_QUORUM_MEMBERS
+                )));
             }
 
             let block_height = self.wallet.get_block_height().unwrap_or(0);
@@ -4467,7 +4511,29 @@ impl Node {
                 .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", our_ledger_id)))?;
 
             let mut ledger = ledger_arc.write().unwrap();
+
             let block_height = self.wallet.get_block_height().unwrap_or(0);
+
+            // Count active (non-expired) QuorumJoin operations
+            let active_quorums = ledger.history.iter().filter(|u| {
+                if u.message_type != deposits_core::messages::consts::QUORUM_JOIN {
+                    return false;
+                }
+                if let Ok(LedgerOperation::QuorumJoin { membership_expires, .. }) =
+                    LedgerOperation::tlv_decode(&u.message)
+                {
+                    membership_expires > block_height
+                } else {
+                    false
+                }
+            }).count();
+
+            if active_quorums >= MAX_QUORUMS_JOINED {
+                return Err(Error::Protocol(format!(
+                    "Maximum active quorums joined reached ({} quorums)",
+                    MAX_QUORUMS_JOINED
+                )));
+            }
             let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
 
             let operation = deposits_core::messages::LedgerOperation::QuorumJoin {
@@ -5945,7 +6011,7 @@ impl Node {
             map.insert(offer.offer_id, (offer, status));
         }
 
-        tracing::info!("Loaded {} deposit offers from disk", map.len());
+        tracing::debug!("Loaded {} deposit offers from disk", map.len());
         Ok(map)
     }
 

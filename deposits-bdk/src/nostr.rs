@@ -135,6 +135,10 @@ pub struct NostrTransport {
 
     /// Peer pubkey mapping (secp256k1 -> nostr)
     peer_keys: RwLock<HashMap<PublicKey, nostr_sdk::PublicKey>>,
+
+    /// Active subscriptions to prevent duplicates
+    /// Key format: "type:id" e.g. "requests:abc123" or "disputes:abc123"
+    active_subscriptions: RwLock<std::collections::HashSet<String>>,
 }
 
 /// An inbound message from a peer
@@ -485,8 +489,13 @@ impl NostrTransport {
         let secp = bitcoin::secp256k1::Secp256k1::new();
         let our_pubkey = PublicKey::from_secret_key(&secp, &secret_key);
 
-        // Create nostr client
-        let client = Client::new(keys.clone());
+        // Create nostr client with explicit connection options
+        let opts = Options::default()
+            .connection_timeout(Some(std::time::Duration::from_secs(30)));
+        let client = Client::builder()
+            .signer(keys.clone())
+            .opts(opts)
+            .build();
 
         // Add relays
         let relay_list: Vec<String> = if relays.is_empty() {
@@ -502,8 +511,8 @@ impl NostrTransport {
                 .map_err(|e| Error::Nostr(format!("Failed to add relay {}: {}", relay, e)))?;
         }
 
-        // Connect to relays
-        client.connect().await;
+        // Connect to relays with explicit timeout
+        client.connect_with_timeout(std::time::Duration::from_secs(30)).await;
 
         // Wait for at least one relay to be connected (max 10 seconds)
         let max_wait = std::time::Duration::from_secs(10);
@@ -545,6 +554,7 @@ impl NostrTransport {
             dispute_rx,
             dispute_tx,
             peer_keys: RwLock::new(HashMap::new()),
+            active_subscriptions: RwLock::new(std::collections::HashSet::new()),
         })
     }
 
@@ -664,6 +674,16 @@ impl NostrTransport {
     ///
     /// The ledger_id is a 64-char hex hash that uniquely identifies the ledger.
     pub async fn subscribe_to_ledger(&self, ledger_id: &str) -> Result<(), Error> {
+        // Check if already subscribed to this ledger
+        let sub_key = format!("ledger:{}", ledger_id);
+        {
+            let subs = self.active_subscriptions.read().unwrap();
+            if subs.contains(&sub_key) {
+                tracing::debug!("Already subscribed to ledger {}", ledger_id);
+                return Ok(());
+            }
+        }
+
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_UPDATE))
             .custom_tag(
@@ -676,6 +696,9 @@ impl NostrTransport {
             .await
             .map_err(|e| Error::Nostr(format!("Failed to subscribe to ledger: {}", e)))?;
 
+        // Mark as subscribed
+        self.active_subscriptions.write().unwrap().insert(sub_key);
+
         tracing::info!("Subscribed to ledger updates: {}", ledger_id);
         Ok(())
     }
@@ -684,6 +707,16 @@ impl NostrTransport {
     ///
     /// Uses prefix matching on the `d` tag to find all ledgers from this operator.
     pub async fn subscribe_to_operator(&self, operator_pubkey: &PublicKey) -> Result<(), Error> {
+        // Check if already subscribed to all updates (global subscription)
+        let sub_key = "updates:all".to_string();
+        {
+            let subs = self.active_subscriptions.read().unwrap();
+            if subs.contains(&sub_key) {
+                tracing::debug!("Already subscribed to all ledger updates");
+                return Ok(());
+            }
+        }
+
         // We can't do prefix matching in Nostr filters, so we subscribe to all
         // ledger update events and filter locally. For now, subscribe to all.
         let filter = Filter::new()
@@ -693,6 +726,9 @@ impl NostrTransport {
             .subscribe(vec![filter], None)
             .await
             .map_err(|e| Error::Nostr(format!("Failed to subscribe to operator: {}", e)))?;
+
+        // Mark as subscribed
+        self.active_subscriptions.write().unwrap().insert(sub_key);
 
         tracing::info!("Subscribed to ledger updates from operator: {}", operator_pubkey);
         Ok(())
@@ -885,6 +921,16 @@ impl NostrTransport {
 
     /// Subscribe to disputes for a specific ledger (for quorum members)
     pub async fn subscribe_to_disputes(&self, ledger_id: &str) -> Result<(), Error> {
+        // Check if already subscribed to disputes for this ledger
+        let sub_key = format!("disputes:{}", ledger_id);
+        {
+            let subs = self.active_subscriptions.read().unwrap();
+            if subs.contains(&sub_key) {
+                tracing::debug!("Already subscribed to disputes for ledger {}", ledger_id);
+                return Ok(());
+            }
+        }
+
         // Include a 30-second lookback to catch any events sent before subscription was established
         let since = nostr_sdk::Timestamp::now() - 30;
         let filter = Filter::new()
@@ -900,12 +946,25 @@ impl NostrTransport {
             .await
             .map_err(|e| Error::Nostr(format!("Failed to subscribe to disputes: {}", e)))?;
 
+        // Mark as subscribed
+        self.active_subscriptions.write().unwrap().insert(sub_key);
+
         tracing::info!("Subscribed to disputes for ledger: {}", ledger_id);
         Ok(())
     }
 
     /// Subscribe to all disputes (for monitoring)
     pub async fn subscribe_to_all_disputes(&self) -> Result<(), Error> {
+        // Check if already subscribed to all disputes
+        let sub_key = "disputes:all".to_string();
+        {
+            let subs = self.active_subscriptions.read().unwrap();
+            if subs.contains(&sub_key) {
+                tracing::debug!("Already subscribed to all disputes");
+                return Ok(());
+            }
+        }
+
         // Include a 30-second lookback to catch any events sent before subscription was established
         let since = nostr_sdk::Timestamp::now() - 30;
         let filter = Filter::new()
@@ -917,7 +976,93 @@ impl NostrTransport {
             .await
             .map_err(|e| Error::Nostr(format!("Failed to subscribe to all disputes: {}", e)))?;
 
+        // Mark as subscribed
+        self.active_subscriptions.write().unwrap().insert(sub_key);
+
         tracing::info!("Subscribed to all ledger disputes (kind {})", KIND_LEDGER_DISPUTE);
+        Ok(())
+    }
+
+    /// Subscribe to requests and disputes for multiple ledgers in a single batched call.
+    ///
+    /// This is more efficient than calling subscribe_to_requests + subscribe_to_disputes
+    /// for each ledger individually, as it creates fewer subscription calls to the relay.
+    pub async fn subscribe_to_ledgers_batch(&self, ledger_ids: &[String]) -> Result<(), Error> {
+        if ledger_ids.is_empty() {
+            return Ok(());
+        }
+
+        // Check which ledgers we haven't subscribed to disputes yet
+        // (requests use a single global subscription, disputes are per-ledger)
+        let mut new_dispute_ledgers: Vec<&String> = Vec::new();
+        let needs_request_sub: bool;
+        {
+            let subs = self.active_subscriptions.read().unwrap();
+            needs_request_sub = !subs.contains("requests:global");
+            for lid in ledger_ids {
+                let dis_key = format!("disputes:{}", lid);
+                if !subs.contains(&dis_key) {
+                    new_dispute_ledgers.push(lid);
+                }
+            }
+        }
+
+        if !needs_request_sub && new_dispute_ledgers.is_empty() {
+            tracing::debug!("All {} ledgers already subscribed", ledger_ids.len());
+            return Ok(());
+        }
+
+        // Build filters for new subscriptions
+        let since = nostr_sdk::Timestamp::now() - 30;
+        let mut filters = Vec::new();
+
+        // Add global request filter if not already subscribed
+        if needs_request_sub {
+            filters.push(
+                Filter::new()
+                    .kind(Kind::Custom(KIND_LEDGER_REQUEST))
+                    .since(since)
+            );
+        }
+
+        // Per-ledger dispute filters (relay filters by tag)
+        for lid in &new_dispute_ledgers {
+            filters.push(
+                Filter::new()
+                    .kind(Kind::Custom(KIND_LEDGER_DISPUTE))
+                    .custom_tag(
+                        SingleLetterTag::lowercase(Alphabet::L),
+                        [lid.as_str()],
+                    )
+                    .since(since)
+            );
+        }
+
+        // Only subscribe if we have filters to add
+        if filters.is_empty() {
+            return Ok(());
+        }
+
+        let filter_count = filters.len();
+
+        // Subscribe with all filters in one call
+        self.client
+            .subscribe(filters, None)
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to batch subscribe: {}", e)))?;
+
+        // Mark all as subscribed
+        {
+            let mut subs = self.active_subscriptions.write().unwrap();
+            if needs_request_sub {
+                subs.insert("requests:global".to_string());
+            }
+            for lid in &new_dispute_ledgers {
+                subs.insert(format!("disputes:{}", lid));
+            }
+        }
+
+        tracing::info!("Batch subscribed to {} ledgers ({} filters)", new_dispute_ledgers.len(), filter_count);
         Ok(())
     }
 
@@ -1206,6 +1351,16 @@ impl NostrTransport {
 
     /// Subscribe to ledger requests for a specific ledger (for operators)
     pub async fn subscribe_to_requests(&self, ledger_id: &str) -> Result<(), Error> {
+        // Check if already subscribed to requests (global subscription, filter by ledger in handler)
+        let sub_key = "requests:global".to_string();
+        {
+            let subs = self.active_subscriptions.read().unwrap();
+            if subs.contains(&sub_key) {
+                tracing::debug!("Already subscribed to requests, skipping (for ledger {})", ledger_id);
+                return Ok(());
+            }
+        }
+
         // Subscribe to ALL requests of this kind (filter by ledger_id in handler)
         // This avoids potential issues with custom tag filters on some relays
         // Include a 30-second lookback to catch any events sent before subscription was established
@@ -1218,6 +1373,9 @@ impl NostrTransport {
             .subscribe(vec![filter], None)
             .await
             .map_err(|e| Error::Nostr(format!("Failed to subscribe to requests: {}", e)))?;
+
+        // Mark as subscribed
+        self.active_subscriptions.write().unwrap().insert(sub_key);
 
         tracing::info!("Subscribed to ledger requests (kind {}), filtering for: {}", KIND_LEDGER_REQUEST, ledger_id);
         Ok(())
@@ -1244,12 +1402,24 @@ impl NostrTransport {
             }
         }
 
-        tracing::debug!("Fetched {} recent requests", requests.len());
+        if !requests.is_empty() {
+            tracing::debug!("Fetched {} recent requests", requests.len());
+        }
         Ok(requests)
     }
 
     /// Subscribe to responses for a specific request (for requesters)
     pub async fn subscribe_to_response(&self, request_id: &str) -> Result<(), Error> {
+        // Check if already subscribed to this response
+        let sub_key = format!("response:{}", request_id);
+        {
+            let subs = self.active_subscriptions.read().unwrap();
+            if subs.contains(&sub_key) {
+                tracing::debug!("Already subscribed to response for {}", &request_id[..16.min(request_id.len())]);
+                return Ok(());
+            }
+        }
+
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_RESPONSE))
             .custom_tag(
@@ -1262,7 +1432,10 @@ impl NostrTransport {
             .await
             .map_err(|e| Error::Nostr(format!("Failed to subscribe to response: {}", e)))?;
 
-        tracing::debug!("Subscribed to response for request: {}", &request_id[..16]);
+        // Mark as subscribed
+        self.active_subscriptions.write().unwrap().insert(sub_key);
+
+        tracing::debug!("Subscribed to response for request: {}", &request_id[..16.min(request_id.len())]);
         Ok(())
     }
 

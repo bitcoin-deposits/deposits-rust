@@ -59,18 +59,46 @@ get_node_name() {
     esac
 }
 
-# Get the wallet-derived deposit secret for a node
-# This derives the key at m/84'/0'/0'/0/0 from the node's seed
+# Get the wallet-derived deposit secret for a node's deposit on a target ledger
+# Usage: get_deposit_secret <depositor_node> [<target_ledger_id>]
+# If target_ledger_id is provided, looks up the key_index from deposits.json
+# Otherwise uses index 0 (for backward compatibility)
 get_deposit_secret() {
     local node=$1
+    local target_ledger=${2:-}
     local seed=$(get_node_seed "$node")
     if [ -z "$seed" ]; then
         return 1
     fi
-    # Use deposits-bdk to derive the key (keygen with seed derives deterministically)
+
+    local key_index=0
+    if [ -n "$target_ledger" ]; then
+        # Look up key_index from deposits.json for this ledger
+        # The python script outputs just the index number, nothing else
+        local idx_output
+        idx_output=$(docker exec "$node" sh -c "cat /data/wallet/deposits.json 2>/dev/null" | \
+            python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+target = sys.argv[1] if len(sys.argv) > 1 else ''
+found = 0
+for d in data:
+    lid = d.get('ledger_id', '')
+    if target and (lid.startswith(target[:16]) or target.startswith(lid[:16])):
+        found = d.get('key_index', 0)
+        break
+print(found)
+" "${target_ledger}" 2>/dev/null)
+        # Extract just the first line, strip whitespace
+        key_index=$(echo "$idx_output" | head -1 | tr -d '[:space:]')
+        key_index=${key_index:-0}
+    fi
+
+    # Use deposits-bdk to derive the key at the correct index
     docker exec -e RUST_LOG=error "$node" deposits-bdk derive-deposit-key \
         --seed "$seed" \
-        --network regtest 2>&1 | grep "^[0-9a-f]\{64\}$" | head -1
+        --network regtest \
+        --index "$key_index" 2>&1 | grep "^[0-9a-f]\{64\}$" | head -1
 }
 
 # Filter out Rust tracing log lines from output

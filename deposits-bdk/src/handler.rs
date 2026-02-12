@@ -127,7 +127,7 @@ impl DepositsHandler {
             ledgers.insert(entry.ledger_id, Arc::new(RwLock::new(entry.ledger)));
         }
 
-        tracing::info!("Loaded {} ledgers from disk", ledgers.len());
+        tracing::debug!("Loaded {} ledgers from disk", ledgers.len());
         ledgers
     }
 

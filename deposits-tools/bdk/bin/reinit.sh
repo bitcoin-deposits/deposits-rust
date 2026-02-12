@@ -64,6 +64,17 @@ fi
 
 log_info "=== Reinitializing BDK Test Network ==="
 
+# Stop any eve containers from setup-scale.sh (not managed by compose)
+log_info "Cleaning up eve containers..."
+for c in $(docker ps -aq --filter 'name=bdk-eve'); do
+    docker stop "$c" 2>/dev/null || true
+    docker rm "$c" 2>/dev/null || true
+done
+# Remove eve volumes
+for v in $(docker volume ls -q --filter 'name=bdk_bdk-eve'); do
+    docker volume rm "$v" 2>/dev/null || true
+done
+
 # Stop everything
 log_info "Stopping all containers..."
 $DC down -v --remove-orphans 2>/dev/null || true

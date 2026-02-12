@@ -476,10 +476,11 @@ fn keygen() {
 }
 
 /// Derive the wallet deposit secret key from seed.
-/// This matches the derivation used by deposits-wallet at m/84'/0'/0'/0/0.
+/// This matches the derivation used by deposits-wallet at m/84'/0'/0'/0/{index}.
 fn derive_deposit_key(args: &[String]) -> Result<(), String> {
     let mut seed: Option<[u8; 32]> = None;
     let mut network = Network::Signet;
+    let mut index: u32 = 0;
 
     let mut i = 0;
     while i < args.len() {
@@ -511,6 +512,14 @@ fn derive_deposit_key(args: &[String]) -> Result<(), String> {
                     n => return Err(format!("Unknown network: {}", n)),
                 };
             }
+            "--index" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("--index requires a value".to_string());
+                }
+                index = args[i].parse::<u32>()
+                    .map_err(|e| format!("Invalid index: {}", e))?;
+            }
             _ => {}
         }
         i += 1;
@@ -523,7 +532,7 @@ fn derive_deposit_key(args: &[String]) -> Result<(), String> {
     let xpriv = Xpriv::new_master(network, &seed)
         .map_err(|e| format!("Failed to create master key: {}", e))?;
 
-    let deposit_path = DerivationPath::from_str("m/84'/0'/0'/0/0")
+    let deposit_path = DerivationPath::from_str(&format!("m/84'/0'/0'/0/{}", index))
         .map_err(|e| format!("Invalid derivation path: {}", e))?;
 
     let deposit_xpriv = xpriv

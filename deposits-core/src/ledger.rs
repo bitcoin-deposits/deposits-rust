@@ -1001,7 +1001,7 @@ impl Ledger {
                     });
                 }
 
-                // 4. Ratchet check: if existing lock, new must have (amount >= existing) AND (lock > existing)
+                // 4. Ratchet check: if existing lock, new must have (amount >= existing) AND (lock >= existing)
                 if deposit.collateral_lock_amount > 0 {
                     if *amount < deposit.collateral_lock_amount {
                         return Err(DepositsError::ProtocolViolation {
@@ -1012,11 +1012,11 @@ impl Ledger {
                             ),
                         });
                     }
-                    if *lock_until_block <= deposit.collateral_lock_expires {
+                    if *lock_until_block < deposit.collateral_lock_expires {
                         return Err(DepositsError::ProtocolViolation {
                             violation_type: "collateral_lock_ratchet_violation".to_string(),
                             details: format!(
-                                "New lock expiry {} must be > existing expiry {}",
+                                "New lock expiry {} must be >= existing expiry {}",
                                 lock_until_block, deposit.collateral_lock_expires
                             ),
                         });
