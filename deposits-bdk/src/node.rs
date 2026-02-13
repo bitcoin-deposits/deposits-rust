@@ -320,6 +320,12 @@ impl Node {
             }
         }
 
+        // Subscribe to all responses early (needed for co-sign response handling)
+        // This ensures we receive responses even if they arrive before request_cosign runs
+        if let Err(e) = self.nostr.subscribe_to_response("").await {
+            tracing::warn!("Failed to subscribe to responses: {}", e);
+        }
+
         tracing::info!("Node started, listening for messages");
         Ok(())
     }
