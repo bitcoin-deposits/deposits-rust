@@ -179,6 +179,12 @@ impl Node {
         // Load existing withdrawals from disk
         let withdrawals = Self::load_withdrawals(&config.data_dir)?;
 
+        // Subscribe to responses early (needed for co-sign response handling in CLI commands)
+        // CLI commands don't call start(), so we need this here
+        if let Err(e) = nostr.subscribe_to_response("").await {
+            tracing::warn!("Failed to subscribe to responses during init: {}", e);
+        }
+
         tracing::info!("Node created with ID: {}", node_id);
 
         Ok(Self {
