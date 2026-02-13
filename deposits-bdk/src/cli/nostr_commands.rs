@@ -2085,9 +2085,18 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
 
     // Determine ledger_id - use from args or find our primary ledger
     // The ledger_id for Nostr events is the hex hash from ledger.ledger_id_hex()
+    let ledgers = node.list_ledgers();
+    println!("  Loaded {} ledger(s) from disk", ledgers.len());
+    for (lid, ledger_arc) in ledgers.iter() {
+        let ledger = ledger_arc.read().unwrap();
+        println!("    - key={}..., state_id={}...",
+            &lid[..16.min(lid.len())],
+            &ledger.ledger_id_hex()[..16.min(ledger.ledger_id_hex().len())]);
+    }
+
     let ledger_id = if let Some(lid) = ledger_id {
         // Arg provided - might be reserves address (bcrt1q...), hex prefix, or full hex
-        let ledgers = node.list_ledgers();
+        println!("  Arg provided: {}", lid);
 
         // First, try to match by reserves_key (bcrt1q...)
         if lid.starts_with("bcrt1") || lid.starts_with("bc1") || lid.starts_with("tb1") {
@@ -2099,6 +2108,7 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
                 });
             if let Some((_, ledger_arc)) = found {
                 let ledger = ledger_arc.read().unwrap();
+                println!("  Matched by reserves_key");
                 ledger.ledger_id_hex()
             } else {
                 return Err(format!("No ledger found with reserves: {}", lid).into());
@@ -2111,9 +2121,12 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
             });
             if let Some((_, ledger_arc)) = found {
                 let ledger = ledger_arc.read().unwrap();
-                ledger.ledger_id_hex()
+                let matched_id = ledger.ledger_id_hex();
+                println!("  Matched to: {}", matched_id);
+                matched_id
             } else {
                 // Assume it's a full or partial ledger_id and use as-is
+                println!("  No match found, using arg as-is");
                 lid
             }
         }
@@ -2221,9 +2234,9 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
             tracing::warn!("Error processing events: {}", e);
         }
 
-        // Poll frequently for events (subscription may not work reliably)
-        // Use 200ms for faster response times during testing
-        if last_poll.elapsed() > std::time::Duration::from_millis(200) {
+        // Poll as fallback for missed subscription events
+        // Use 1 second to balance responsiveness and relay load (subscriptions may not be reliable)
+        if last_poll.elapsed() > std::time::Duration::from_secs(1) {
             if let Ok(requests) = transport.fetch_recent_requests(60).await {
                 for request in requests {
                     // Queue requests for our ledger, joined ledgers, or cross-ledger signing requests
@@ -2247,8 +2260,27 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
                                 &request.ledger_id[..16.min(request.ledger_id.len())]
                             );
                         }
+                        // Log queued deposit_open for debugging
+                        if request.action == "deposit_open" {
+                            println!(
+                                "[{}] Queued deposit_open for ledger: {}...",
+                                chrono::Utc::now().format("%H:%M:%S"),
+                                &request.ledger_id[..16.min(request.ledger_id.len())]
+                            );
+                        }
                         seen_events.insert(request.event_id.clone());
                         transport.queue_request(request);
+                    } else if !should_queue && !seen_events.contains(&request.event_id) {
+                        // Log filtered requests - use eprintln for visibility since tests run with RUST_LOG=error
+                        if request.action == "deposit_open" || request.action == "collateral_lock" {
+                            eprintln!(
+                                "[WARN] Filtered {}: req_ledger={}..., our_ledger={}..., is_joined={}",
+                                request.action,
+                                &request.ledger_id[..16.min(request.ledger_id.len())],
+                                &ledger_id[..16.min(ledger_id.len())],
+                                is_joined_ledger
+                            );
+                        }
                     }
                 }
             }

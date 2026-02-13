@@ -1544,18 +1544,28 @@ impl NostrTransport {
     }
 
     /// Poll for events with a short wait
-    /// Waits briefly for notifications then drains any pending ones
+    /// Fetches recent responses and drains pending notifications
     pub async fn poll_events(&self) -> Result<(), Error> {
-        // Wait briefly for a notification (allows relay time to deliver)
-        let timeout = tokio::time::Duration::from_millis(50);
-        match tokio::time::timeout(timeout, self.client.notifications().recv()).await {
-            Ok(Ok(notification)) => {
-                self.handle_notification(notification);
+        // Fetch recent responses directly (subscriptions may not deliver reliably)
+        // Use a short 5-second lookback to avoid fetching too many events
+        let since = nostr_sdk::Timestamp::now() - 5;
+        let filter = Filter::new()
+            .kind(Kind::Custom(KIND_LEDGER_RESPONSE))
+            .since(since);
+
+        // Use short timeout to avoid blocking
+        if let Ok(events) = self.client
+            .fetch_events(vec![filter], Some(std::time::Duration::from_millis(500)))
+            .await
+        {
+            for event in events.iter() {
+                if let Ok(response) = self.process_ledger_response(event) {
+                    let _ = self.response_tx.send(response);
+                }
             }
-            _ => {}
         }
 
-        // Drain any additional pending notifications
+        // Also drain any pending notifications
         while let Ok(notification) = self.client.notifications().try_recv() {
             self.handle_notification(notification);
         }
