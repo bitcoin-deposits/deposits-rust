@@ -3,10 +3,12 @@
 //! Commands for interacting with Nostr relays for ledger operations.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::OnceLock;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use bitcoin::secp256k1::{Keypair, PublicKey, Secp256k1, SecretKey};
 use nostr_sdk::prelude::*;
+use tokio::sync::Mutex;
 
 use deposits_core::messages::LedgerOperation;
 use deposits_core::tlv::TlvDecode;
@@ -21,6 +23,34 @@ use crate::Node;
 
 use super::common::{derive_operator_secret, parse_config};
 use super::handlers;
+
+/// Cached nostr client for CLI commands
+static NOSTR_CLIENT: OnceLock<Mutex<Option<(String, Client)>>> = OnceLock::new();
+
+/// Get or create a connected nostr client for the given relay URL
+async fn get_or_create_client(relay_url: &str) -> Result<Client, Box<dyn std::error::Error>> {
+    let mutex = NOSTR_CLIENT.get_or_init(|| Mutex::new(None));
+    let mut guard = mutex.lock().await;
+
+    // Check if we have a cached client for this relay
+    if let Some((cached_url, client)) = guard.as_ref() {
+        if cached_url == relay_url {
+            return Ok(client.clone());
+        }
+    }
+
+    // Create new client
+    let keys = Keys::generate();
+    let client = Client::new(keys);
+    client.add_relay(relay_url).await
+        .map_err(|e| format!("Failed to add relay: {}", e))?;
+    client.connect().await;
+
+    // Cache it
+    *guard = Some((relay_url.to_string(), client.clone()));
+
+    Ok(client)
+}
 
 /// Handle nostr subcommands
 pub async fn nostr_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -61,14 +91,7 @@ pub async fn nostr_list(args: &[String]) -> Result<(), Box<dyn std::error::Error
     println!("  Relay: {}", relay_url);
     println!();
 
-    // Create a temporary nostr client to fetch events
-    let keys = Keys::generate();
-    let client = Client::new(keys);
-    client
-        .add_relay(relay_url)
-        .await
-        .map_err(|e| format!("Failed to add relay: {}", e))?;
-    client.connect().await;
+    let client = get_or_create_client(relay_url).await?;
 
     // Fetch all ledger update events
     let filter = Filter::new().kind(Kind::Custom(KIND_LEDGER_UPDATE));
@@ -197,13 +220,7 @@ pub async fn nostr_events(args: &[String]) -> Result<(), Box<dyn std::error::Err
     }
     println!();
 
-    let keys = Keys::generate();
-    let client = Client::new(keys);
-    client
-        .add_relay(relay_url)
-        .await
-        .map_err(|e| format!("Failed to add relay: {}", e))?;
-    client.connect().await;
+    let client = get_or_create_client(relay_url).await?;
 
     // Fetch all deposits protocol events
     let filter = Filter::new().kinds([
@@ -499,14 +516,7 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
     }
     println!();
 
-    // Create a temporary nostr client to fetch events
-    let keys = Keys::generate();
-    let client = Client::new(keys);
-    client
-        .add_relay(relay_url)
-        .await
-        .map_err(|e| format!("Failed to add relay: {}", e))?;
-    client.connect().await;
+    let client = get_or_create_client(relay_url).await?;
 
     // Build filter
     let mut filter = Filter::new()
@@ -1107,14 +1117,7 @@ pub async fn nostr_updates(args: &[String]) -> Result<(), Box<dyn std::error::Er
     println!("  Relay: {}", relay_url);
     println!();
 
-    // Create a temporary nostr client to fetch events
-    let keys = Keys::generate();
-    let client = Client::new(keys);
-    client
-        .add_relay(relay_url)
-        .await
-        .map_err(|e| format!("Failed to add relay: {}", e))?;
-    client.connect().await;
+    let client = get_or_create_client(relay_url).await?;
 
     // Build filter for this ledger
     let filter = Filter::new()
@@ -1242,14 +1245,7 @@ pub async fn nostr_validate(args: &[String]) -> Result<(), Box<dyn std::error::E
     println!("  Ledger ID: {}", ledger_id);
     println!();
 
-    // Fetch events from Nostr
-    let keys = Keys::generate();
-    let client = Client::new(keys);
-    client
-        .add_relay(relay_url)
-        .await
-        .map_err(|e| format!("Failed to add relay: {}", e))?;
-    client.connect().await;
+    let client = get_or_create_client(relay_url).await?;
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
@@ -1529,14 +1525,7 @@ pub async fn nostr_dispute(args: &[String]) -> Result<(), Box<dyn std::error::Er
             }
             println!();
 
-            // Connect to relay
-            let keys = Keys::generate();
-            let client = Client::new(keys);
-            client
-                .add_relay(&relay_url)
-                .await
-                .map_err(|e| format!("Failed to add relay: {}", e))?;
-            client.connect().await;
+            let client = get_or_create_client(&relay_url).await?;
 
             // Build filter
             let mut filter = Filter::new().kind(Kind::Custom(KIND_LEDGER_DISPUTE));

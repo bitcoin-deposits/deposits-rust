@@ -2,6 +2,9 @@
 //!
 //! Commands for dispute resolution and custody recovery.
 
+use std::str::FromStr;
+use std::sync::OnceLock;
+
 use bitcoin::hashes::{Hash, sha256, hash160};
 use bitcoin::secp256k1::{Keypair, Secp256k1, PublicKey, Message};
 use bitcoin::bip32::{DerivationPath, Xpriv};
@@ -15,10 +18,37 @@ use crate::nostr::{NostrTransportBuilder, KIND_LEDGER_UPDATE, KIND_LEDGER_DISPUT
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use nostr_sdk::prelude::*;
 use bdk_esplora::esplora_client::Builder as EsploraBuilder;
-
-use std::str::FromStr;
+use tokio::sync::Mutex;
 
 use super::common::{parse_config, derive_operator_secret};
+
+/// Cached nostr client for recovery commands
+static RECOVERY_NOSTR_CLIENT: OnceLock<Mutex<Option<(String, Client)>>> = OnceLock::new();
+
+/// Get or create a connected nostr client for the given relay URL
+async fn get_or_create_client(relay_url: &str) -> Result<Client, Box<dyn std::error::Error>> {
+    let mutex = RECOVERY_NOSTR_CLIENT.get_or_init(|| Mutex::new(None));
+    let mut guard = mutex.lock().await;
+
+    // Check if we have a cached client for this relay
+    if let Some((cached_url, client)) = guard.as_ref() {
+        if cached_url == relay_url {
+            return Ok(client.clone());
+        }
+    }
+
+    // Create new client
+    let keys = Keys::generate();
+    let client = Client::new(keys);
+    client.add_relay(relay_url).await
+        .map_err(|e| format!("Failed to add relay: {}", e))?;
+    client.connect().await;
+
+    // Cache it
+    *guard = Some((relay_url.to_string(), client.clone()));
+
+    Ok(client)
+}
 
 /// Handle recovery subcommands for non-conforming ledgers
 pub async fn recovery_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -139,11 +169,7 @@ pub async fn recovery_start(args: &[String]) -> Result<(), Box<dyn std::error::E
 
     // Fetch and validate ledger from Nostr
     println!("Fetching ledger from Nostr...");
-    let keys = Keys::generate();
-    let client = Client::new(keys);
-    client.add_relay(&relay_url).await
-        .map_err(|e| format!("Failed to add relay: {}", e))?;
-    client.connect().await;
+    let client = get_or_create_client(&relay_url).await?;
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
@@ -155,7 +181,6 @@ pub async fn recovery_start(args: &[String]) -> Result<(), Box<dyn std::error::E
         .await
         .map_err(|e| format!("Failed to fetch events: {}", e))?;
 
-    client.disconnect().await.ok();
 
     // Decode and sort updates
     let mut updates: Vec<SignedLedgerUpdate> = Vec::new();
@@ -334,11 +359,7 @@ pub async fn recovery_agree(args: &[String]) -> Result<(), Box<dyn std::error::E
     // Independently validate the ledger
     println!("Independently validating ledger...");
 
-    let keys = Keys::generate();
-    let client = Client::new(keys);
-    client.add_relay(&relay_url).await
-        .map_err(|e| format!("Failed to add relay: {}", e))?;
-    client.connect().await;
+    let client = get_or_create_client(&relay_url).await?;
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
@@ -350,7 +371,6 @@ pub async fn recovery_agree(args: &[String]) -> Result<(), Box<dyn std::error::E
         .await
         .map_err(|e| format!("Failed to fetch events: {}", e))?;
 
-    client.disconnect().await.ok();
 
     // Decode and sort updates
     let mut updates: Vec<SignedLedgerUpdate> = Vec::new();
@@ -563,11 +583,7 @@ pub async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error:
     println!("Our pubkey (candidate): {}...", &our_pubkey.to_string()[..16]);
 
     println!("Fetching ledger from Nostr...");
-    let keys = Keys::generate();
-    let client = Client::new(keys);
-    client.add_relay(&relay_url).await
-        .map_err(|e| format!("Failed to add relay: {}", e))?;
-    client.connect().await;
+    let client = get_or_create_client(&relay_url).await?;
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
@@ -594,8 +610,7 @@ pub async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error:
     println!("  Found {} updates", updates.len());
 
     if updates.is_empty() {
-        client.disconnect().await?;
-        return Err("No ledger updates found".into());
+            return Err("No ledger updates found".into());
     }
 
     let mut last_valid_sequence = 0u64;
@@ -632,8 +647,7 @@ pub async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error:
             .map_err(|e| format!("Failed to fetch disputes: {}", e))?;
 
         if disputes.is_empty() {
-            client.disconnect().await?;
-            return Err("No violation found and no dispute published. Run 'recovery start' first.".into());
+                    return Err("No violation found and no dispute published. Run 'recovery start' first.".into());
         }
 
         violation_details = "Dispute published - preparing candidate branch".to_string();
@@ -645,7 +659,6 @@ pub async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error:
     let original_operator = original_operator.ok_or("Could not determine original operator")?;
     println!("  Original operator: {}...", &original_operator.to_string()[..16]);
 
-    client.disconnect().await?;
 
     let esplora = EsploraBuilder::new(&config.electrum_url).build_blocking();
     let current_block_height = esplora.get_height()
@@ -791,11 +804,7 @@ pub async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error:
     println!("Our pubkey: {}...", &our_pubkey.to_string()[..16]);
 
     println!("Fetching our CustodyArmed branch...");
-    let keys = Keys::generate();
-    let client = Client::new(keys);
-    client.add_relay(&relay_url).await
-        .map_err(|e| format!("Failed to add relay: {}", e))?;
-    client.connect().await;
+    let client = get_or_create_client(&relay_url).await?;
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
@@ -823,7 +832,6 @@ pub async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error:
         }
     }
 
-    client.disconnect().await?;
 
     let our_armed = our_armed.ok_or(
         "Could not find our CustodyArmed. Did you run 'recovery arm' first?"
@@ -955,11 +963,7 @@ pub async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error:
 
     // Fetch ledger from Nostr
     println!("Fetching ledger from Nostr...");
-    let keys = Keys::generate();
-    let client = Client::new(keys);
-    client.add_relay(&relay_url).await
-        .map_err(|e| format!("Failed to add relay: {}", e))?;
-    client.connect().await;
+    let client = get_or_create_client(&relay_url).await?;
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
@@ -971,7 +975,6 @@ pub async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error:
         .await
         .map_err(|e| format!("Failed to fetch events: {}", e))?;
 
-    client.disconnect().await.ok();
 
     // Decode all updates
     let mut all_updates: Vec<SignedLedgerUpdate> = Vec::new();
@@ -1226,11 +1229,7 @@ pub async fn recovery_rebuild_quorum_add(ledger_id: &str, args: &[String]) -> Re
     println!("  Member: {}...", &member_pubkey_str[..16.min(member_pubkey_str.len())]);
 
     println!("Fetching ledger from Nostr...");
-    let keys = Keys::generate();
-    let client = Client::new(keys);
-    client.add_relay(&relay_url).await
-        .map_err(|e| format!("Failed to add relay: {}", e))?;
-    client.connect().await;
+    let client = get_or_create_client(&relay_url).await?;
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
@@ -1334,7 +1333,6 @@ pub async fn recovery_rebuild_quorum_add(ledger_id: &str, args: &[String]) -> Re
         .map_err(|e| format!("Failed to publish: {}", e))?;
 
     publishing_client.disconnect().await.ok();
-    client.disconnect().await.ok();
 
     println!();
     println!("QuorumAddMember published!");
@@ -1381,11 +1379,7 @@ pub async fn recovery_rebuild_attestation(ledger_id: &str, args: &[String]) -> R
     println!("  Lock until: block {}", attestation.lock_until_block);
 
     println!("Fetching ledger from Nostr...");
-    let keys = Keys::generate();
-    let client = Client::new(keys);
-    client.add_relay(&relay_url).await
-        .map_err(|e| format!("Failed to add relay: {}", e))?;
-    client.connect().await;
+    let client = get_or_create_client(&relay_url).await?;
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
@@ -1494,7 +1488,6 @@ pub async fn recovery_rebuild_attestation(ledger_id: &str, args: &[String]) -> R
         .map_err(|e| format!("Failed to publish: {}", e))?;
 
     publishing_client.disconnect().await.ok();
-    client.disconnect().await.ok();
 
     println!();
     println!("CollateralAttestation published!");
@@ -1521,11 +1514,7 @@ pub async fn recovery_rebuild_status(ledger_id: &str, args: &[String]) -> Result
 
     println!("Checking dispute branch status for ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
 
-    let keys = Keys::generate();
-    let client = Client::new(keys);
-    client.add_relay(&relay_url).await
-        .map_err(|e| format!("Failed to add relay: {}", e))?;
-    client.connect().await;
+    let client = get_or_create_client(&relay_url).await?;
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
@@ -1537,7 +1526,6 @@ pub async fn recovery_rebuild_status(ledger_id: &str, args: &[String]) -> Result
         .await
         .map_err(|e| format!("Failed to fetch events: {}", e))?;
 
-    client.disconnect().await.ok();
 
     let mut our_updates: Vec<SignedLedgerUpdate> = Vec::new();
     let mut quorum_members: Vec<PublicKey> = Vec::new();
@@ -1655,11 +1643,7 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
     println!("Arming (pre-committing) for ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
 
     println!("Fetching ledger from Nostr...");
-    let keys = Keys::generate();
-    let client = Client::new(keys);
-    client.add_relay(&relay_url).await
-        .map_err(|e| format!("Failed to add relay: {}", e))?;
-    client.connect().await;
+    let client = get_or_create_client(&relay_url).await?;
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
@@ -1671,7 +1655,6 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
         .await
         .map_err(|e| format!("Failed to fetch events: {}", e))?;
 
-    client.disconnect().await.ok();
 
     let mut our_updates: Vec<SignedLedgerUpdate> = Vec::new();
     for event in events.iter() {
@@ -1839,11 +1822,7 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
     println!("Claiming custody for ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
 
     println!("Fetching ledger from Nostr...");
-    let keys = Keys::generate();
-    let client = Client::new(keys);
-    client.add_relay(&relay_url).await
-        .map_err(|e| format!("Failed to add relay: {}", e))?;
-    client.connect().await;
+    let client = get_or_create_client(&relay_url).await?;
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
@@ -1855,7 +1834,6 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
         .await
         .map_err(|e| format!("Failed to fetch events: {}", e))?;
 
-    client.disconnect().await.ok();
 
     // Find all CustodyArmed candidates
     let mut candidates: Vec<(PublicKey, u32, SignedLedgerUpdate)> = Vec::new();
@@ -2121,11 +2099,7 @@ pub async fn recovery_continue(args: &[String]) -> Result<(), Box<dyn std::error
     println!("Continuing ledger: {}... (adding {} operations)", &ledger_id[..16.min(ledger_id.len())], count);
 
     println!("Fetching ledger from Nostr...");
-    let keys = Keys::generate();
-    let client = Client::new(keys);
-    client.add_relay(&relay_url).await
-        .map_err(|e| format!("Failed to add relay: {}", e))?;
-    client.connect().await;
+    let client = get_or_create_client(&relay_url).await?;
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
@@ -2137,7 +2111,6 @@ pub async fn recovery_continue(args: &[String]) -> Result<(), Box<dyn std::error
         .await
         .map_err(|e| format!("Failed to fetch events: {}", e))?;
 
-    client.disconnect().await.ok();
 
     let mut our_latest: Option<SignedLedgerUpdate> = None;
     let mut has_custody_acquire = false;
@@ -2319,11 +2292,7 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
 
     // Fetch all updates from Nostr
     println!("Fetching ledger from Nostr...");
-    let keys = Keys::generate();
-    let client = Client::new(keys);
-    client.add_relay(&relay_url).await
-        .map_err(|e| format!("Failed to add relay: {}", e))?;
-    client.connect().await;
+    let client = get_or_create_client(&relay_url).await?;
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
@@ -2335,7 +2304,6 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
         .await
         .map_err(|e| format!("Failed to fetch events: {}", e))?;
 
-    client.disconnect().await.ok();
 
     // Extract CustodyArmed data and quorum info
     let mut participants: Vec<LotteryParticipant> = Vec::new();
@@ -2810,11 +2778,7 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
     println!("Checking lottery result for ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
 
     // Fetch updates and reveals from Nostr
-    let keys = Keys::generate();
-    let client = Client::new(keys);
-    client.add_relay(&relay_url).await
-        .map_err(|e| format!("Failed to add relay: {}", e))?;
-    client.connect().await;
+    let client = get_or_create_client(&relay_url).await?;
 
     // Fetch ledger updates
     let filter = Filter::new()
@@ -2838,7 +2802,6 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
         .await
         .map_err(|e| format!("Failed to fetch reveals: {}", e))?;
 
-    client.disconnect().await.ok();
 
     // Extract CustodyArmed participants
     let mut participants: Vec<(PublicKey, LotteryParticipant)> = Vec::new();
@@ -3296,11 +3259,7 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
     println!("  Ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
 
     // Fetch ledger updates from Nostr
-    let keys = Keys::generate();
-    let client = Client::new(keys);
-    client.add_relay(&relay_url).await
-        .map_err(|e| format!("Failed to add relay: {}", e))?;
-    client.connect().await;
+    let client = get_or_create_client(&relay_url).await?;
 
     let filter = Filter::new()
         .kind(Kind::Custom(crate::nostr::KIND_LEDGER_UPDATE))
@@ -3312,7 +3271,6 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
         .await
         .map_err(|e| format!("Failed to fetch updates: {}", e))?;
 
-    client.disconnect().await.ok();
 
     // Decode updates and find our branch
     let mut updates: Vec<SignedLedgerUpdate> = Vec::new();

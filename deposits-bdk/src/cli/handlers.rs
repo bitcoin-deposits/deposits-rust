@@ -534,18 +534,8 @@ pub async fn process_custody_transfer_sign_request(
 
     println!("    Our key: {}...", &our_pubkey.to_string()[..16]);
 
-    let relay_url = match config.relays.first() {
-        Some(url) => url.clone(),
-        None => return (false, None, Some("No relay configured".to_string())),
-    };
-
-    // Fetch and validate the ledger from Nostr
-    let keys = Keys::generate();
-    let client = Client::new(keys);
-    if let Err(e) = client.add_relay(&relay_url).await {
-        return (false, None, Some(format!("Failed to add relay: {}", e)));
-    }
-    client.connect().await;
+    // Use the node's existing nostr client
+    let client = node.nostr.client();
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
@@ -555,12 +545,9 @@ pub async fn process_custody_transfer_sign_request(
     let events = match client.fetch_events(vec![filter], None).await {
         Ok(e) => e,
         Err(e) => {
-            let _ = client.disconnect().await;
             return (false, None, Some(format!("Failed to fetch ledger: {}", e)));
         }
     };
-
-    let _ = client.disconnect().await;
 
     // Decode and validate updates
     let mut updates: Vec<SignedLedgerUpdate> = Vec::new();
@@ -752,18 +739,8 @@ pub async fn process_confiscation_sign_request(
 
     println!("    Our key: {}...", &our_pubkey.to_string()[..16]);
 
-    let relay_url = match config.relays.first() {
-        Some(url) => url.clone(),
-        None => return (false, None, Some("No relay configured".to_string())),
-    };
-
-    // Fetch and validate the ledger from Nostr
-    let keys = Keys::generate();
-    let client = Client::new(keys);
-    if let Err(e) = client.add_relay(&relay_url).await {
-        return (false, None, Some(format!("Failed to add relay: {}", e)));
-    }
-    client.connect().await;
+    // Use the node's existing nostr client
+    let client = node.nostr.client();
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
@@ -773,12 +750,9 @@ pub async fn process_confiscation_sign_request(
     let events = match client.fetch_events(vec![filter], None).await {
         Ok(e) => e,
         Err(e) => {
-            let _ = client.disconnect().await;
             return (false, None, Some(format!("Failed to fetch ledger: {}", e)));
         }
     };
-
-    let _ = client.disconnect().await;
 
     // Decode and validate updates
     let mut updates: Vec<SignedLedgerUpdate> = Vec::new();
