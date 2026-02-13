@@ -4624,35 +4624,52 @@ impl Node {
             let mut ledger = ledger_arc.write().unwrap();
 
             // Check if deposit exists
-            if !ledger.state.deposits.contains_key(&deposit_pubkey) {
-                return Err(Error::Protocol(format!(
+            let deposit = ledger.state.deposits.get(&deposit_pubkey)
+                .ok_or_else(|| Error::Protocol(format!(
                     "Deposit not found for pubkey {}",
                     deposit_pubkey
-                )));
-            }
-
-            // Create the deposit holder's signature for the lock
-            let lock_signature = deposits_core::signature_utils::create_collateral_lock_signature(
-                deposit_secret,
-                &deposit_pubkey,
-                amount_msats,
-                lock_until_block,
-                &self.node_id,
-            ).map_err(|e| Error::Protocol(format!("Failed to create signature: {:?}", e)))?;
-
-            // Apply the CollateralLock operation
-            let operation = LedgerOperation::CollateralLock {
-                deposit_pubkey,
-                amount: amount_msats,
-                lock_until_block,
-                operator_id: self.node_id,
-                deposit_holder_signature: lock_signature,
-            };
+                )))?;
 
             let block_height = self.wallet.get_block_height().unwrap_or(0);
             let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
-            ledger.append_operation_with_block(operation, deposits_core::messages::consts::COLLATERAL_LOCK, block_height, block_hash)
-                .map_err(|e| Error::Protocol(format!("Failed to lock collateral: {:?}", e)))?;
+
+            // Check if collateral is already locked with sufficient amount and duration
+            // This makes the operation idempotent - safe to retry without error
+            let already_locked = deposit.collateral_lock_amount >= amount_msats
+                && deposit.collateral_lock_expires >= lock_until_block
+                && deposit.collateral_lock_expires > block_height;
+
+            if already_locked {
+                tracing::info!(
+                    "Collateral already locked for deposit {}: {} msats until block {} (requested {} until {})",
+                    deposit_pubkey,
+                    deposit.collateral_lock_amount,
+                    deposit.collateral_lock_expires,
+                    amount_msats,
+                    lock_until_block
+                );
+            } else {
+                // Create the deposit holder's signature for the lock
+                let lock_signature = deposits_core::signature_utils::create_collateral_lock_signature(
+                    deposit_secret,
+                    &deposit_pubkey,
+                    amount_msats,
+                    lock_until_block,
+                    &self.node_id,
+                ).map_err(|e| Error::Protocol(format!("Failed to create signature: {:?}", e)))?;
+
+                // Apply the CollateralLock operation
+                let operation = LedgerOperation::CollateralLock {
+                    deposit_pubkey,
+                    amount: amount_msats,
+                    lock_until_block,
+                    operator_id: self.node_id,
+                    deposit_holder_signature: lock_signature,
+                };
+
+                ledger.append_operation_with_block(operation, deposits_core::messages::consts::COLLATERAL_LOCK, block_height, block_hash)
+                    .map_err(|e| Error::Protocol(format!("Failed to lock collateral: {:?}", e)))?;
+            }
 
             // Calculate total locked collateral from all deposits
             let total_locked: u64 = ledger.state.deposits.values()
