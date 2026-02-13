@@ -1409,38 +1409,35 @@ impl NostrTransport {
     }
 
     /// Subscribe to responses for a specific request (for requesters)
-    pub async fn subscribe_to_response(&self, request_id: &str) -> Result<(), Error> {
-        // Check if already subscribed to this response
-        let sub_key = format!("response:{}", request_id);
+    /// Note: strfry doesn't support #e tag filtering on custom kinds well,
+    /// so we subscribe to ALL responses and filter locally in handle_notification
+    pub async fn subscribe_to_response(&self, _request_id: &str) -> Result<(), Error> {
+        // Use a single global subscription for all responses
+        // (strfry has issues with custom tag filtering on non-standard kinds)
+        let sub_key = "responses:all".to_string();
         {
             let subs = self.active_subscriptions.read().unwrap();
             if subs.contains(&sub_key) {
-                tracing::debug!("Already subscribed to response for {}", &request_id[..16.min(request_id.len())]);
                 return Ok(());
             }
         }
 
         // Include lookback to catch responses sent before subscription was active
-        // (the response may arrive faster than we can subscribe)
         let since = nostr_sdk::Timestamp::now() - 30;
 
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_RESPONSE))
-            .custom_tag(
-                SingleLetterTag::lowercase(Alphabet::E),
-                [request_id],
-            )
             .since(since);
 
         self.client
             .subscribe(vec![filter], None)
             .await
-            .map_err(|e| Error::Nostr(format!("Failed to subscribe to response: {}", e)))?;
+            .map_err(|e| Error::Nostr(format!("Failed to subscribe to responses: {}", e)))?;
 
         // Mark as subscribed
         self.active_subscriptions.write().unwrap().insert(sub_key);
 
-        tracing::debug!("Subscribed to response for request: {}", &request_id[..16.min(request_id.len())]);
+        tracing::info!("Subscribed to all ledger responses (kind {})", KIND_LEDGER_RESPONSE);
         Ok(())
     }
 
