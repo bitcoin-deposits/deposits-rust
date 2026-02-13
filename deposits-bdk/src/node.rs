@@ -1106,18 +1106,13 @@ impl Node {
         use deposits_core::tapscript_reserves::{LotteryScriptBuilder, LotteryParticipant, LotteryOutput};
         use crate::nostr::{KIND_LEDGER_UPDATE, KIND_LEDGER_REQUEST};
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-        use nostr_sdk::{Client, Keys, Filter, Kind, TagKind};
+        use nostr_sdk::{Filter, Kind, TagKind};
         use nostr_sdk::prelude::{SingleLetterTag, Alphabet};
 
-        let secp = Secp256k1::new();
         let our_pubkey = keypair.public_key();
 
-        // Fetch updates and reveals from Nostr
-        let keys = Keys::generate();
-        let client = Client::new(keys);
-        client.add_relay(&self.relay_url).await
-            .map_err(|e| Error::Protocol(format!("Failed to add relay: {}", e)))?;
-        client.connect().await;
+        // Use the existing nostr client
+        let client = self.nostr.client();
 
         // Fetch ledger updates
         let filter = Filter::new()
@@ -1140,8 +1135,6 @@ impl Node {
             .fetch_events(vec![reveal_filter], None)
             .await
             .map_err(|e| Error::Protocol(format!("Failed to fetch reveals: {}", e)))?;
-
-        client.disconnect().await.ok();
 
         // Extract CustodyArmed participants
         let mut participants: Vec<(PublicKey, LotteryParticipant)> = Vec::new();
@@ -1549,14 +1542,8 @@ impl Node {
                 }
             };
 
-            // Fetch ledger updates from Nostr
-            let keys = Keys::generate();
-            let client = Client::new(keys);
-
-            if client.add_relay(&self.relay_url).await.is_err() {
-                continue;
-            }
-            client.connect().await;
+            // Use the existing nostr client
+            let client = self.nostr.client();
 
             let filter = Filter::new()
                 .kind(Kind::Custom(crate::nostr::KIND_LEDGER_UPDATE))
@@ -1565,12 +1552,8 @@ impl Node {
 
             let events = match client.fetch_events(vec![filter], Some(std::time::Duration::from_secs(10))).await {
                 Ok(e) => e,
-                Err(_) => {
-                    client.disconnect().await.ok();
-                    continue;
-                }
+                Err(_) => continue,
             };
-            client.disconnect().await.ok();
 
             // Extract CustodyArmed participants, quorum members, and reserves info
             let mut participants: Vec<LotteryParticipant> = Vec::new();
@@ -2019,15 +2002,11 @@ impl Node {
         use deposits_core::tapscript_reserves::{LotteryScriptBuilder, LotteryParticipant};
         use crate::nostr::KIND_LEDGER_UPDATE;
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-        use nostr_sdk::{Client, Keys, Filter, Kind};
+        use nostr_sdk::{Filter, Kind};
         use nostr_sdk::prelude::{SingleLetterTag, Alphabet};
 
-        // Fetch CustodyArmed participants from Nostr to build the lottery address
-        let keys = Keys::generate();
-        let client = Client::new(keys);
-        client.add_relay(&self.relay_url).await
-            .map_err(|e| Error::Protocol(format!("Failed to add relay: {}", e)))?;
-        client.connect().await;
+        // Use the existing nostr client
+        let client = self.nostr.client();
 
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_UPDATE))
@@ -2038,8 +2017,6 @@ impl Node {
             .fetch_events(vec![filter], None)
             .await
             .map_err(|e| Error::Protocol(format!("Failed to fetch: {}", e)))?;
-
-        client.disconnect().await.ok();
 
         // Extract CustodyArmed participants
         let mut participants: Vec<LotteryParticipant> = Vec::new();
@@ -2212,11 +2189,8 @@ impl Node {
         let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
         let our_pubkey = keypair.public_key();
 
-        let keys = Keys::generate();
-        let client = Client::new(keys);
-        client.add_relay(&self.relay_url).await
-            .map_err(|e| Error::Protocol(format!("Failed to add relay: {}", e)))?;
-        client.connect().await;
+        // Use the existing nostr client
+        let client = self.nostr.client();
 
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_UPDATE))
@@ -2227,8 +2201,6 @@ impl Node {
             .fetch_events(vec![filter], None)
             .await
             .map_err(|e| Error::Protocol(format!("Failed to fetch: {}", e)))?;
-
-        client.disconnect().await.ok();
 
         // Check if we have a CustodyAcquire
         for event in events.iter() {
@@ -2257,19 +2229,15 @@ impl Node {
         use deposits_core::messages::LedgerOperation;
         use crate::nostr::KIND_LEDGER_UPDATE;
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-        use nostr_sdk::{Client, Keys, Filter, Kind};
+        use nostr_sdk::{Filter, Kind};
         use nostr_sdk::prelude::{SingleLetterTag, Alphabet};
 
         let secp = Secp256k1::new();
         let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
         let our_pubkey = keypair.public_key();
 
-        // Fetch updates from Nostr
-        let keys = Keys::generate();
-        let client = Client::new(keys);
-        client.add_relay(&self.relay_url).await
-            .map_err(|e| Error::Protocol(format!("Failed to add relay: {}", e)))?;
-        client.connect().await;
+        // Use the existing nostr client
+        let client = self.nostr.client();
 
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_UPDATE))
@@ -2280,8 +2248,6 @@ impl Node {
             .fetch_events(vec![filter], None)
             .await
             .map_err(|e| Error::Protocol(format!("Failed to fetch: {}", e)))?;
-
-        client.disconnect().await.ok();
 
         // Find our CustodyAcquire and quorum members
         let mut current_reserves_address: Option<String> = None;
@@ -2492,12 +2458,8 @@ impl Node {
         let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
         let our_pubkey = keypair.public_key();
 
-        // Fetch updates
-        let keys = Keys::generate();
-        let client = Client::new(keys);
-        client.add_relay(&self.relay_url).await
-            .map_err(|e| Error::Protocol(format!("Failed to add relay: {}", e)))?;
-        client.connect().await;
+        // Use the existing nostr client
+        let client = self.nostr.client();
 
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_UPDATE))
@@ -2508,8 +2470,6 @@ impl Node {
             .fetch_events(vec![filter], None)
             .await
             .map_err(|e| Error::Protocol(format!("Failed to fetch: {}", e)))?;
-
-        client.disconnect().await.ok();
 
         // Find our latest update and collect original depositors
         let mut our_latest: Option<SignedLedgerUpdate> = None;
@@ -3461,18 +3421,8 @@ impl Node {
 
         tracing::info!("    Our key: {}...", &our_pubkey.to_string()[..16]);
 
-        // Fetch and validate the ledger from Nostr
-        if self.relay_url.is_empty() {
-            return (false, None, Some("No relay configured".to_string()));
-        }
-        let relay_url = self.relay_url.clone();
-
-        let keys = Keys::generate();
-        let client = Client::new(keys);
-        if let Err(e) = client.add_relay(&relay_url).await {
-            return (false, None, Some(format!("Failed to add relay: {}", e)));
-        }
-        client.connect().await;
+        // Use the existing nostr client
+        let client = self.nostr.client();
 
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_UPDATE))
@@ -3482,12 +3432,9 @@ impl Node {
         let events = match client.fetch_events(vec![filter], None).await {
             Ok(e) => e,
             Err(e) => {
-                let _ = client.disconnect().await;
                 return (false, None, Some(format!("Failed to fetch ledger: {}", e)));
             }
         };
-
-        let _ = client.disconnect().await;
 
         // Decode and validate updates
         let mut updates: Vec<SignedLedgerUpdate> = Vec::new();
