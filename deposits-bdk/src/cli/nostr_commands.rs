@@ -2069,8 +2069,8 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     // Clone config for later use (collateral_lock needs to reload node)
     let config_for_reload = config.clone();
 
-    // Get the node to process requests
-    let node = Node::new(config).await?;
+    // Get the node to process requests (mutable for auto_complete_deposits)
+    let mut node = Node::new(config).await?;
 
     // Determine ledger_id - use from args or find our primary ledger
     // The ledger_id for Nostr events is the hex hash from ledger.ledger_id_hex()
@@ -2278,23 +2278,21 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
 
         // Periodically check for funded deposits to auto-complete (every 3 seconds)
         if last_auto_complete.elapsed() > std::time::Duration::from_secs(3) {
-            // Reload node to get fresh data and sync wallet
-            if let Ok(mut fresh_node) = Node::new(config_for_reload.clone()).await {
-                // Sync wallet first to detect new transactions
-                if let Err(e) = fresh_node.sync_wallet() {
-                    tracing::debug!("Wallet sync error during auto-complete: {}", e);
-                }
-                // Check and complete any funded deposits
-                fresh_node.auto_complete_deposits().await;
+            // Sync wallet first to detect new transactions
+            if let Err(e) = node.sync_wallet() {
+                tracing::debug!("Wallet sync error during auto-complete: {}", e);
             }
+            // Check and complete any funded deposits
+            node.auto_complete_deposits().await;
             last_auto_complete = std::time::Instant::now();
         }
 
         // Periodically rescan for new QuorumJoin operations (every 30 seconds)
         if last_join_scan.elapsed() > std::time::Duration::from_secs(30) {
-            // Reload node to get fresh data
-            if let Ok(fresh_node) = Node::new(config_for_reload.clone()).await {
-                let current_reserves = scan_joined_reserves(&fresh_node);
+            // Reload ledgers first to see new QuorumJoins from CLI
+            node.handler.reload_ledgers();
+            {
+                let current_reserves = scan_joined_reserves(&node);
 
                 // Find ledger IDs for any new reserves by looking up advertisements
                 let network_str = match config_for_reload.network {
@@ -2340,6 +2338,8 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         }
 
         // Check for requests
+        // Reload ledgers first to pick up changes from CLI (e.g., QuorumJoin)
+        node.handler.reload_ledgers();
         while let Some(request) = transport.try_recv_request() {
             // Note: seen_events is already checked when queuing, so no need to check here
             // Requests in the queue have already been validated for relevance
@@ -2385,20 +2385,6 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
             println!("  Event: {}", &request.event_id[..16]);
             println!("  Params: {}", request.params);
 
-            // Reload the node to get fresh ledger state from disk
-            // (the CLI may have updated the ledger concurrently)
-            let mut fresh_node = match Node::new(config_for_reload.clone()).await {
-                Ok(n) => n,
-                Err(e) => {
-                    let error_msg = format!("Failed to reload node: {}", e);
-                    let _ = transport
-                        .send_ledger_response(&request.event_id, &request.ledger_id, false, None, Some(error_msg.clone()))
-                        .await;
-                    println!("  Response: ERROR - {}", error_msg);
-                    continue;
-                }
-            };
-
             // For operations that require custodianship, verify we have the ledger locally
             // The real protection against fraudulent offers is client-side verification:
             // - Client checks offer's funding_address matches ledger's current reserves
@@ -2412,8 +2398,8 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
 
             if requires_ledger {
                 // Just verify we have the ledger locally
-                let has_ledger = fresh_node.get_ledger_by_ledger_id(&request.ledger_id).is_some()
-                    || fresh_node.get_ledger_by_reserves_key(&request.ledger_id).is_some();
+                let has_ledger = node.get_ledger_by_ledger_id(&request.ledger_id).is_some()
+                    || node.get_ledger_by_reserves_key(&request.ledger_id).is_some();
 
                 if !has_ledger {
                     let error_msg = "Ledger not found locally".to_string();
@@ -2435,7 +2421,7 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
             let (success, result, error) = match request.action.as_str() {
                 "deposit_open" => {
                     handlers::process_deposit_open_request(
-                        &mut fresh_node,
+                        &mut node,
                         &ledger_id,
                         &request,
                         &transport,
@@ -2444,7 +2430,7 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
                 }
                 "make_offer" => {
                     handlers::process_make_offer_request(
-                        &fresh_node,
+                        &node,
                         &ledger_id,
                         &request,
                         &transport,
@@ -2452,16 +2438,16 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
                     .await
                 }
                 "deposit_withdraw" => {
-                    handlers::process_deposit_withdraw_request(&mut fresh_node, &ledger_id, &request)
+                    handlers::process_deposit_withdraw_request(&mut node, &ledger_id, &request)
                         .await
                 }
                 "collateral_lock" => {
-                    handlers::process_collateral_lock_request(&mut fresh_node, &ledger_id, &request)
+                    handlers::process_collateral_lock_request(&mut node, &ledger_id, &request)
                         .await
                 }
                 "custody_transfer_sign" => {
                     handlers::process_custody_transfer_sign_request(
-                        &fresh_node,
+                        &node,
                         &config_for_reload,
                         &request,
                     )
@@ -2469,23 +2455,23 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
                 }
                 "confiscation_sign" => {
                     handlers::process_confiscation_sign_request(
-                        &fresh_node,
+                        &node,
                         &config_for_reload,
                         &request,
                     )
                     .await
                 }
                 "custodian_query" => {
-                    handlers::process_custodian_query_request(&fresh_node, &ledger_id, &request)
+                    handlers::process_custodian_query_request(&node, &ledger_id, &request)
                         .await
                 }
                 "bump" => {
                     // Trigger immediate wallet sync and auto-completion
                     println!("  Bump requested - syncing wallet and checking deposits...");
-                    if let Err(e) = fresh_node.sync_wallet() {
+                    if let Err(e) = node.sync_wallet() {
                         (false, None, Some(format!("Wallet sync failed: {}", e)))
                     } else {
-                        fresh_node.auto_complete_deposits().await;
+                        node.auto_complete_deposits().await;
                         (
                             true,
                             Some(serde_json::json!({"message": "Wallet synced and deposits checked"})),

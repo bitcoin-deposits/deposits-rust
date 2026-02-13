@@ -300,7 +300,12 @@ impl Wallet {
         }
         let content = fs::read_to_string(&index_file)
             .map_err(|e| Error::Wallet(format!("Failed to read address index: {}", e)))?;
-        content.trim().parse()
+        let trimmed = content.trim();
+        // Handle race condition where file exists but is empty (during atomic write)
+        if trimmed.is_empty() {
+            return Ok(0);
+        }
+        trimmed.parse()
             .map_err(|e| Error::Wallet(format!("Failed to parse address index: {}", e)))
     }
 
