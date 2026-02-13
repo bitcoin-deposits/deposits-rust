@@ -1543,11 +1543,19 @@ impl NostrTransport {
         Ok(())
     }
 
-    /// Fast non-blocking poll for events
-    /// Drains any pending notifications from existing subscriptions
+    /// Poll for events with a short wait
+    /// Waits briefly for notifications then drains any pending ones
     pub async fn poll_events(&self) -> Result<(), Error> {
-        // Just drain pending notifications - don't create new subscriptions
-        // The caller should have already subscribed to the response
+        // Wait briefly for a notification (allows relay time to deliver)
+        let timeout = tokio::time::Duration::from_millis(50);
+        match tokio::time::timeout(timeout, self.client.notifications().recv()).await {
+            Ok(Ok(notification)) => {
+                self.handle_notification(notification);
+            }
+            _ => {}
+        }
+
+        // Drain any additional pending notifications
         while let Ok(notification) = self.client.notifications().try_recv() {
             self.handle_notification(notification);
         }
