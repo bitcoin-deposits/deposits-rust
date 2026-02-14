@@ -1,0 +1,46 @@
+# Prometheus configuration for deposits-bdk cluster
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Main operator nodes (always running)
+  - job_name: 'deposits-bdk'
+    static_configs:
+      - targets:
+          - 'bdk-alice:9100'
+          - 'bdk-bob:9100'
+          - 'bdk-charlie:9100'
+          - 'bdk-diana:9100'
+        labels:
+          cluster: 'bdk-regtest'
+
+  # Dynamic eve nodes (scaled with payment-simulator)
+  # These are discovered via file_sd_configs or can be added manually
+  - job_name: 'deposits-bdk-eve'
+    static_configs:
+      - targets:
+          - 'bdk-eve:9100'
+          - 'bdk-eve01:9100'
+          - 'bdk-eve02:9100'
+          - 'bdk-eve03:9100'
+          - 'bdk-eve04:9100'
+          - 'bdk-eve05:9100'
+          - 'bdk-eve06:9100'
+          - 'bdk-eve07:9100'
+          - 'bdk-eve08:9100'
+          - 'bdk-eve09:9100'
+          - 'bdk-eve10:9100'
+          - 'bdk-eve11:9100'
+          - 'bdk-eve12:9100'
+          - 'bdk-eve13:9100'
+          - 'bdk-eve14:9100'
+          - 'bdk-eve15:9100'
+          - 'bdk-eve16:9100'
+          - 'bdk-eve17:9100'
+          - 'bdk-eve18:9100'
+          - 'bdk-eve19:9100'
+          - 'bdk-eve20:9100'
+        labels:
+          cluster: 'bdk-regtest'
+          node_type: 'eve'

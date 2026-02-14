@@ -14,6 +14,10 @@
 # Block explorer (electrs REST API):
 #   curl http://localhost:3102/blocks
 #   curl http://localhost:3102/tx/<txid>
+#
+# Monitoring:
+#   Prometheus: http://localhost:9090
+#   Grafana:    http://localhost:3000 (admin/admin)
 
 services:
   # Strfry Nostr relay for peer messaging
@@ -112,6 +116,8 @@ services:
       - "ws://nostr-relay:7777"
       - "--data-dir"
       - "/data"
+      - "--metrics-port"
+      - "9100"
     environment:
       - RUST_LOG=info,deposits_bdk=debug
     volumes:
@@ -143,6 +149,8 @@ services:
       - "ws://nostr-relay:7777"
       - "--data-dir"
       - "/data"
+      - "--metrics-port"
+      - "9100"
     environment:
       - RUST_LOG=info,deposits_bdk=debug
     volumes:
@@ -174,6 +182,8 @@ services:
       - "ws://nostr-relay:7777"
       - "--data-dir"
       - "/data"
+      - "--metrics-port"
+      - "9100"
     environment:
       - RUST_LOG=info,deposits_bdk=debug
     volumes:
@@ -205,6 +215,8 @@ services:
       - "ws://nostr-relay:7777"
       - "--data-dir"
       - "/data"
+      - "--metrics-port"
+      - "9100"
     environment:
       - RUST_LOG=info,deposits_bdk=debug
     volumes:
@@ -238,6 +250,8 @@ services:
       - "ws://nostr-relay:7777"
       - "--data-dir"
       - "/data"
+      - "--metrics-port"
+      - "9100"
     environment:
       - RUST_LOG=info,deposits_bdk=debug
     volumes:
@@ -309,6 +323,43 @@ services:
         ipv4_address: 172.21.0.30
     working_dir: /workspace/deposits-rust
 
+  # Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: bdk-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - bdk_prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+    networks:
+      bdk_network:
+        ipv4_address: 172.21.0.40
+
+  # Grafana for metrics visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: bdk-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - bdk_grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    networks:
+      bdk_network:
+        ipv4_address: 172.21.0.41
+
 volumes:
   bdk_nostr_data:
   bdk_bitcoin_data:
@@ -318,6 +369,8 @@ volumes:
   bdk_charlie_data:
   bdk_diana_data:
   bdk_eve_data:
+  bdk_prometheus_data:
+  bdk_grafana_data:
 
 networks:
   bdk_network:
