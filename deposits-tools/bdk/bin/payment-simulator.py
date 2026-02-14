@@ -224,8 +224,10 @@ def withdraw_to(from_alias: str, to_address: str, amount_sats: int) -> bool:
     return False
 
 
-def mine_block():
-    """Mine a block to confirm transactions"""
+def mine_block(network: str = "regtest"):
+    """Mine a block to confirm transactions (regtest only)"""
+    if network != "regtest":
+        return  # Can't mine on signet/mainnet
     subprocess.run([
         "docker", "exec", "bdk-bitcoind",
         "bitcoin-cli", "-regtest",
@@ -236,12 +238,13 @@ def mine_block():
 
 def run_simulation(
     wallets_per_ledger: float = 2.0,
-    base_wallet_interval: float = 10.0,
-    payment_interval: float = 5.0,
+    base_wallet_interval: float = 3.0,
+    payment_interval: float = 2.0,
     funding_amount_sats: int = 100000,
     min_payment_sats: int = 1000,
     max_payment_sats: int = 5000,
     rediscover_interval: float = 60.0,
+    network: str = "signet",
 ):
     """Run the payment simulation
 
@@ -253,6 +256,7 @@ def run_simulation(
         min_payment_sats: Minimum payment amount
         max_payment_sats: Maximum payment amount
         rediscover_interval: Seconds between ledger re-discovery
+        network: Bitcoin network (regtest, signet, mainnet)
     """
 
     print("=" * 60)
@@ -284,7 +288,7 @@ def run_simulation(
     # More ledgers = faster wallet creation (but with diminishing returns)
     # With 1 ledger: base interval, with 10 ledgers: base/3, with 25 ledgers: base/5
     wallet_creation_interval = base_wallet_interval / (1 + len(ledgers) * 0.2)
-    wallet_creation_interval = max(2.0, wallet_creation_interval)  # Floor at 2 seconds
+    wallet_creation_interval = max(1.0, wallet_creation_interval)  # Floor at 1 second
 
     # Track deposits we've created
     our_deposits: list[Deposit] = []
@@ -294,10 +298,13 @@ def run_simulation(
     last_rediscover_time = time.time()
 
     print("Starting simulation...")
+    print(f"  - Network: {network}")
     print(f"  - Target wallets: {num_wallets} ({wallets_per_ledger:.1f} per ledger)")
     print(f"  - New wallet every {wallet_creation_interval:.1f}s")
     print(f"  - Payment every {payment_interval}s")
     print(f"  - Re-discover ledgers every {rediscover_interval}s")
+    if network != "regtest":
+        print(f"  - Note: No block mining on {network}")
     print()
 
     try:
@@ -322,8 +329,8 @@ def run_simulation(
                         # Fund it
                         print(f"[{time.strftime('%H:%M:%S')}] Funding {alias}...")
                         if fund_deposit(alias):
-                            # Mine block to confirm funding tx
-                            mine_block()
+                            # Mine block to confirm funding tx (regtest only)
+                            mine_block(network)
                             deposit.status = "funded"
                             print(f"  Deposit funded, waiting for balance sync")
 
@@ -358,9 +365,10 @@ def run_simulation(
                         print(f"\n[{time.strftime('%H:%M:%S')}] Payment: {sender.alias} ({sender.balance_sats} sats) -> {receiver.alias}")
 
                         if withdraw_to(sender.alias, receiver.funding_address, amount):
-                            # Mine to confirm
-                            mine_block()
-                            print(f"  Mined block to confirm")
+                            # Mine to confirm (regtest only)
+                            mine_block(network)
+                            if network == "regtest":
+                                print(f"  Mined block to confirm")
                             # Update sender balance estimate
                             sender.balance_sats -= (amount + 500)
                 else:
@@ -378,7 +386,7 @@ def run_simulation(
                     # Recalculate targets
                     num_wallets = max(4, int(len(ledgers) * wallets_per_ledger))
                     wallet_creation_interval = base_wallet_interval / (1 + len(ledgers) * 0.2)
-                    wallet_creation_interval = max(2.0, wallet_creation_interval)
+                    wallet_creation_interval = max(1.0, wallet_creation_interval)
                     print(f"  Adjusted: target {num_wallets} wallets, interval {wallet_creation_interval:.1f}s")
                 last_rediscover_time = now
 
@@ -388,7 +396,7 @@ def run_simulation(
                 total_balance = sum(d.balance_sats for d in our_deposits)
                 print(f"\n[{time.strftime('%H:%M:%S')}] Status: {len(ledgers)} ledgers, {len(our_deposits)}/{num_wallets} wallets, {funded_count} funded, {total_balance} sats")
 
-            time.sleep(0.5)
+            time.sleep(0.1)
 
     except KeyboardInterrupt:
         print("\n\nSimulation stopped by user")
@@ -399,12 +407,15 @@ def run_simulation(
 
 def main():
     parser = argparse.ArgumentParser(description="Bitcoin Deposits Payment Simulator")
+    parser.add_argument("--network", type=str, default="signet",
+                        choices=["regtest", "signet", "mainnet"],
+                        help="Bitcoin network (default: signet)")
     parser.add_argument("--wallets-per-ledger", type=float, default=2.0,
                         help="Target wallets per discovered ledger (default: 2.0)")
-    parser.add_argument("--base-interval", type=float, default=10.0,
-                        help="Base interval between wallet creations (default: 10)")
-    parser.add_argument("--payment-interval", type=float, default=5.0,
-                        help="Seconds between payments (default: 5)")
+    parser.add_argument("--base-interval", type=float, default=3.0,
+                        help="Base interval between wallet creations (default: 3)")
+    parser.add_argument("--payment-interval", type=float, default=2.0,
+                        help="Seconds between payments (default: 2)")
     parser.add_argument("--funding-sats", type=int, default=100000,
                         help="Sats to fund each wallet (default: 100000)")
     parser.add_argument("--min-payment", type=int, default=1000,
@@ -424,6 +435,7 @@ def main():
         min_payment_sats=args.min_payment,
         max_payment_sats=args.max_payment,
         rediscover_interval=args.rediscover_interval,
+        network=args.network,
     )
 
 
