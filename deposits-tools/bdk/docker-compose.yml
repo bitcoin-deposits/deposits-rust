@@ -17,7 +17,7 @@
 #
 # Monitoring:
 #   Prometheus: http://localhost:9090
-#   Grafana:    http://localhost:3000 (admin/admin)
+#   Grafana:    http://localhost:3010 (admin/admin)
 
 services:
   # Strfry Nostr relay for peer messaging
@@ -366,7 +366,7 @@ services:
     image: grafana/grafana:latest
     container_name: bdk-grafana
     ports:
-      - "3001:3000"
+      - "3010:3000"
     environment:
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=admin

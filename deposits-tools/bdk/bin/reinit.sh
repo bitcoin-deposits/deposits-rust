@@ -149,4 +149,4 @@ echo "  Mine blocks:    docker exec bdk-bitcoind bitcoin-cli -regtest -rpcuser=u
 echo "  Nostr relay:    ws://localhost:7778"
 echo "  Electrs:        http://localhost:3102"
 echo "  Prometheus:     http://localhost:9090"
-echo "  Grafana:        http://localhost:3001 (admin/admin)"
+echo "  Grafana:        http://localhost:3010 (admin/admin)"
