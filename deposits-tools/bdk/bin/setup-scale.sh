@@ -214,7 +214,7 @@ start_node() {
     # Create volume
     docker volume create "bdk_${name}_data" >/dev/null 2>&1 || true
 
-    # Start container
+    # Start container with metrics port
     docker run -d \
         --name "$name" \
         --network bdk_bdk_network \
@@ -228,6 +228,7 @@ start_node() {
         --electrum http://electrs:3002 \
         --relay ws://nostr-relay:7777 \
         --data-dir /data \
+        --metrics-port 9100 \
         >/dev/null 2>&1
 
     # Wait for it to be ready
