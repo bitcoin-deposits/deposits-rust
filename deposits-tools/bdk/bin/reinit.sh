@@ -117,6 +117,10 @@ setup_faucet
 log_info "Starting BDK nodes..."
 $DC up -d bdk-alice bdk-bob bdk-charlie bdk-diana
 
+# Start monitoring stack
+log_info "Starting monitoring (Prometheus + Grafana)..."
+$DC up -d prometheus grafana
+
 # Give nodes time to start
 log_info "Waiting for nodes to initialize..."
 sleep 10
@@ -144,3 +148,5 @@ echo "  Alice logs:     $DC logs -f bdk-alice"
 echo "  Mine blocks:    docker exec bdk-bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass -rpcwallet=faucet -generate 1"
 echo "  Nostr relay:    ws://localhost:7778"
 echo "  Electrs:        http://localhost:3102"
+echo "  Prometheus:     http://localhost:9090"
+echo "  Grafana:        http://localhost:3001 (admin/admin)"
