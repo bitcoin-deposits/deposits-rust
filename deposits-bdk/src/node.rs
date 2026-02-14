@@ -6045,7 +6045,20 @@ impl Node {
             .map_err(|e| Error::Wallet(format!("Failed to write deposit offers: {}", e)))?;
 
         tracing::info!("Saved {} deposit offers to disk", offers.len());
+
+        // Update metrics
+        self.update_pending_offers_metric();
+
         Ok(())
+    }
+
+    /// Update the pending deposit offers metric
+    fn update_pending_offers_metric(&self) {
+        let offers = self.deposit_offers.lock().unwrap();
+        let pending_count = offers.values()
+            .filter(|(_, status)| matches!(status, DepositOfferStatus::Pending))
+            .count();
+        metrics::set_pending_deposit_offers(pending_count);
     }
 
     /// Reload deposit offers from disk (merges with in-memory state)
@@ -6091,6 +6104,13 @@ impl Node {
                 memory_offers.insert(offer_id, (disk_offer, disk_status));
             }
         }
+
+        // Update metrics - need to count pending within the lock
+        let pending_count = memory_offers.values()
+            .filter(|(_, status)| matches!(status, DepositOfferStatus::Pending))
+            .count();
+        drop(memory_offers);
+        metrics::set_pending_deposit_offers(pending_count);
     }
 
     // ========================================================================
