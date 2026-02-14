@@ -3865,22 +3865,32 @@ impl Node {
     /// co-sign responses. Used inside request_cosign to avoid the recursive call:
     /// request_cosign -> handle_ledger_response -> record_collateral_attestation -> sign_and_broadcast -> request_cosign
     fn handle_cosign_response_only(&self, response: crate::nostr::LedgerResponse) {
-        // Check if this is a response to a pending co-sign request
+        // For error responses, don't remove the pending request - keep waiting for success.
+        // This is important because co-sign requests are multicast and non-quorum-members
+        // will respond with errors before the actual quorum member responds.
+        if !response.success {
+            let has_pending = {
+                let pending = self.pending_cosign_requests.lock().unwrap();
+                pending.contains_key(&response.request_id)
+            };
+            if has_pending {
+                tracing::debug!(
+                    "Ignoring error co-sign response for {}: {} (waiting for quorum member)",
+                    &response.request_id[..16.min(response.request_id.len())],
+                    response.error.as_deref().unwrap_or("unknown error")
+                );
+            }
+            return;
+        }
+
+        // Only remove pending request on success
         let cosign_sender = {
             let mut pending = self.pending_cosign_requests.lock().unwrap();
             pending.remove(&response.request_id)
         };
 
         if let Some((_ledger_id, tx)) = cosign_sender {
-            // This is a co-sign response
-            if !response.success {
-                tracing::warn!(
-                    "Co-sign response failed: {}",
-                    response.error.as_deref().unwrap_or("unknown error")
-                );
-                // tx dropped, receiver gets error
-                return;
-            }
+            // This is a successful co-sign response
 
             if let Some(result) = &response.result {
                 let result_obj = if result.is_object() {
@@ -3929,14 +3939,32 @@ impl Node {
     /// Handle a ledger response (for auto-recording attestations and co-sign responses)
     async fn handle_ledger_response(&mut self, response: crate::nostr::LedgerResponse) {
         // First, check if this is a response to a pending co-sign request
-        let cosign_sender = {
-            let mut pending = self.pending_cosign_requests.lock().unwrap();
-            pending.remove(&response.request_id)
+        // For error responses, don't remove - keep waiting for success from actual quorum member
+        let is_cosign_request = {
+            let pending = self.pending_cosign_requests.lock().unwrap();
+            pending.contains_key(&response.request_id)
         };
 
-        if let Some((_ledger_id, tx)) = cosign_sender {
-            // This is a co-sign response
-            if response.success {
+        if is_cosign_request {
+            if !response.success {
+                // Ignore error responses - non-quorum-members respond with errors
+                // but we need to wait for the actual quorum member's success response
+                tracing::debug!(
+                    "Ignoring error co-sign response for {}: {} (waiting for quorum member)",
+                    &response.request_id[..16.min(response.request_id.len())],
+                    response.error.clone().unwrap_or_default()
+                );
+                return;
+            }
+
+            // Only remove on success
+            let cosign_sender = {
+                let mut pending = self.pending_cosign_requests.lock().unwrap();
+                pending.remove(&response.request_id)
+            };
+
+            if let Some((_ledger_id, tx)) = cosign_sender {
+                // This is a successful co-sign response
                 if let Some(result) = &response.result {
                     // The result might be a JSON object or a string containing JSON
                     let result_obj = if result.is_object() {
@@ -3976,14 +4004,8 @@ impl Node {
                     }
                     tracing::warn!("Co-sign response missing valid partner_signature_hex or member_ledger_hash_hex");
                 }
-            } else {
-                tracing::warn!(
-                    "Co-sign request {} failed: {}",
-                    &response.request_id[..16.min(response.request_id.len())],
-                    response.error.clone().unwrap_or_default()
-                );
             }
-            // tx is dropped here, receiver will get an error
+            // tx is dropped here if we didn't send, receiver will get an error
             return;
         }
 
