@@ -572,6 +572,15 @@ impl Node {
                 // Reload ledgers to ensure we have the latest QuorumJoin state
                 // (CLI may have recorded a QuorumJoin that we haven't seen yet)
                 self.handler.reload_ledgers();
+
+                // Silently ignore if we're not a quorum member for this ledger
+                // (co-sign requests are broadcast, only quorum members should respond)
+                if !self.is_quorum_member_of_ledger(&request.ledger_id) {
+                    tracing::debug!("Ignoring cosign_update for {} - not a quorum member",
+                        &request.ledger_id[..16.min(request.ledger_id.len())]);
+                    return;
+                }
+
                 self.process_cosign_request(&request).await
             }
             "offer_status" => self.process_offer_status_request(&request).await,
@@ -4244,6 +4253,12 @@ impl Node {
                             let our_x_only = hex::encode(&self.node_id.serialize()[1..]);
                             if request.sender != our_x_only {
                                 self.handler.reload_ledgers();
+
+                                // Silently ignore if we're not a quorum member
+                                if !self.is_quorum_member_of_ledger(&request.ledger_id) {
+                                    continue;
+                                }
+
                                 let (success, result, error) = self.process_cosign_request(&request).await;
                                 let result_json = result.map(|s| serde_json::Value::String(s));
                                 if let Err(e) = self.nostr.send_ledger_response(
