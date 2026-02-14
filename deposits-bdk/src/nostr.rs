@@ -792,6 +792,7 @@ impl NostrTransport {
         &self,
         request_id: &str,
         ledger_id: &str,
+        action: &str,
         success: bool,
         result: Option<serde_json::Value>,
         error: Option<String>,
@@ -835,12 +836,13 @@ impl NostrTransport {
             .map_err(|e| Error::Nostr(format!("Failed to send response: {}", e)))?;
 
         tracing::info!(
-            "Sent ledger response: request={}, status={}, event={}",
+            "Sent ledger response: request={}, action={}, status={}, event={}",
             &request_id[..16],
+            action,
             status,
             &event_id[..16]
         );
-        metrics::record_response_sent(success);
+        metrics::record_response_sent(action, success);
 
         Ok(event_id)
     }
@@ -1801,7 +1803,8 @@ impl NostrTransport {
             status,
             &event.id.to_hex()[..16]
         );
-        metrics::record_response_received(response.success);
+        // Note: action not available in response, using "unknown"
+        metrics::record_response_received("unknown", response.success);
 
         Ok(response)
     }

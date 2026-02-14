@@ -161,15 +161,15 @@ pub fn record_request_received(action: &str) {
 }
 
 /// Record a response sent via Nostr.
-pub fn record_response_sent(success: bool) {
+pub fn record_response_sent(action: &str, success: bool) {
     let status = if success { "success" } else { "error" };
-    counter!("nostr_responses_sent_total", "status" => status).increment(1);
+    counter!("nostr_responses_sent_total", "action" => action.to_string(), "status" => status).increment(1);
 }
 
 /// Record a response received via Nostr.
-pub fn record_response_received(success: bool) {
+pub fn record_response_received(action: &str, success: bool) {
     let status = if success { "success" } else { "error" };
-    counter!("nostr_responses_received_total", "status" => status).increment(1);
+    counter!("nostr_responses_received_total", "action" => action.to_string(), "status" => status).increment(1);
 }
 
 // ============================================================================
@@ -265,8 +265,8 @@ mod tests {
         record_disconnection();
         record_request_sent("test");
         record_request_received("test");
-        record_response_sent(true);
-        record_response_received(false);
+        record_response_sent("test", true);
+        record_response_received("test", false);
         set_pending_cosign_requests(5);
         record_cosign_duration(Duration::from_millis(100));
     }

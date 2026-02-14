@@ -239,12 +239,12 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sum by (status) (rate(nostr_responses_sent_total[1m]))",
-          "legendFormat": "{{status}}",
+          "expr": "sum by (action, status) (rate(nostr_responses_sent_total[1m]))",
+          "legendFormat": "{{action}} ({{status}})",
           "refId": "A"
         }
       ],
-      "title": "Responses Sent by Status",
+      "title": "Responses Sent by Action/Status",
       "type": "timeseries"
     },
     {

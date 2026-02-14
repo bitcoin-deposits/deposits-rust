@@ -26,6 +26,7 @@ use tokio::sync::mpsc;
 
 use crate::handler::{DepositsHandler, OutboundMessage};
 use crate::lightning::LightningClient;
+use crate::metrics;
 use crate::nostr::{InboundMessage, NostrTransport};
 use crate::wallet::Wallet;
 use crate::Error;
@@ -586,6 +587,7 @@ impl Node {
         if let Err(e) = self.nostr.send_ledger_response(
             &request.event_id,
             &request.ledger_id,
+            &request.action,
             success,
             result_json,
             error.clone(),
@@ -3886,7 +3888,9 @@ impl Node {
         // Only remove pending request on success
         let cosign_sender = {
             let mut pending = self.pending_cosign_requests.lock().unwrap();
-            pending.remove(&response.request_id)
+            let result = pending.remove(&response.request_id);
+            metrics::set_pending_cosign_requests(pending.len());
+            result
         };
 
         if let Some((_ledger_id, tx)) = cosign_sender {
@@ -3960,7 +3964,9 @@ impl Node {
             // Only remove on success
             let cosign_sender = {
                 let mut pending = self.pending_cosign_requests.lock().unwrap();
-                pending.remove(&response.request_id)
+                let result = pending.remove(&response.request_id);
+                metrics::set_pending_cosign_requests(pending.len());
+                result
             };
 
             if let Some((_ledger_id, tx)) = cosign_sender {
@@ -4024,6 +4030,7 @@ impl Node {
         {
             let mut pending = self.pending_collateral_requests.lock().unwrap();
             pending.remove(&response.request_id);
+            metrics::set_pending_collateral_requests(pending.len());
         }
 
         if !response.success {
@@ -4118,6 +4125,7 @@ impl Node {
         {
             let mut pending = self.pending_collateral_requests.lock().unwrap();
             pending.insert(request_id.clone(), our_reserves_id.to_string());
+            metrics::set_pending_collateral_requests(pending.len());
         }
 
         tracing::info!(
@@ -4180,6 +4188,7 @@ impl Node {
         {
             let mut pending = self.pending_cosign_requests.lock().unwrap();
             pending.insert(request_id.clone(), (ledger_id.to_string(), tx));
+            metrics::set_pending_cosign_requests(pending.len());
         }
 
         tracing::info!(
@@ -4240,6 +4249,7 @@ impl Node {
                                 if let Err(e) = self.nostr.send_ledger_response(
                                     &request.event_id,
                                     &request.ledger_id,
+                                    &request.action,
                                     success,
                                     result_json,
                                     error,
@@ -4256,6 +4266,7 @@ impl Node {
                 _ = tokio::time::sleep_until(deadline) => {
                     let mut pending = self.pending_cosign_requests.lock().unwrap();
                     pending.remove(&request_id);
+                    metrics::set_pending_cosign_requests(pending.len());
                     return Err(Error::Protocol("Co-sign request timed out after 15 seconds".to_string()));
                 }
             }

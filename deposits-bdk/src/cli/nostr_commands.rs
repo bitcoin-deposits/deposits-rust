@@ -2407,6 +2407,7 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
                         .send_ledger_response(
                             &request.event_id,
                             &request.ledger_id,
+                            &request.action,
                             false,
                             None,
                             Some(error_msg.clone()),
@@ -2498,6 +2499,7 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
                 .send_ledger_response(
                     &request.event_id,
                     &request.ledger_id,
+                    &request.action,
                     success,
                     result.clone(),
                     error.clone(),
