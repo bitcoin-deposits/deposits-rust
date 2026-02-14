@@ -438,6 +438,16 @@ impl Node {
                 }
                 // Also reload deposit offers (for status changes from CLI)
                 self.reload_deposit_offers();
+
+                // Update ledger history length metrics
+                {
+                    let ledgers = self.handler.ledgers.lock().unwrap();
+                    for (ledger_id, ledger_arc) in ledgers.iter() {
+                        let ledger = ledger_arc.read().unwrap();
+                        metrics::set_ledger_history_length(ledger_id, ledger.history.len());
+                    }
+                }
+
                 last_reload = tokio::time::Instant::now();
             }
 

@@ -4,6 +4,22 @@ global:
   evaluation_interval: 15s
 
 scrape_configs:
+  # Bitcoin Core via exporter
+  - job_name: 'bitcoin'
+    static_configs:
+      - targets:
+          - 'bdk-bitcoin-exporter:9332'
+        labels:
+          cluster: 'bdk-regtest'
+
+  # Electrs metrics
+  - job_name: 'electrs'
+    static_configs:
+      - targets:
+          - 'bdk-electrs:4224'
+        labels:
+          cluster: 'bdk-regtest'
+
   # Main operator nodes (always running)
   - job_name: 'deposits-bdk'
     static_configs:

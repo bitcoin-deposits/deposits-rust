@@ -87,15 +87,36 @@ services:
         "--cookie=user:pass",
         "--network=regtest",
         "--daemon-rpc-addr=bitcoin:18443",
-        "--http-addr=0.0.0.0:3002"
+        "--http-addr=0.0.0.0:3002",
+        "--monitoring-addr=0.0.0.0:4224"
       ]
     ports:
       - "3102:3002"
+      - "4224:4224"
     volumes:
       - bdk_electrs_data:/data
     networks:
       bdk_network:
         ipv4_address: 172.21.0.11
+
+  # Bitcoin Prometheus exporter
+  bitcoin-exporter:
+    image: jvstein/bitcoin-prometheus-exporter:v0.9.0
+    platform: linux/amd64
+    container_name: bdk-bitcoin-exporter
+    depends_on:
+      bitcoin:
+        condition: service_healthy
+    environment:
+      - BITCOIN_RPC_HOST=bitcoin
+      - BITCOIN_RPC_PORT=18443
+      - BITCOIN_RPC_USER=user
+      - BITCOIN_RPC_PASSWORD=pass
+      - REFRESH_SECONDS=15
+      - LOG_LEVEL=INFO
+    networks:
+      bdk_network:
+        ipv4_address: 172.21.0.12
 
   # deposits-bdk Node 1 - Alice (Operator)
   bdk-alice:

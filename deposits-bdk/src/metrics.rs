@@ -123,6 +123,10 @@ fn describe_metrics() {
         "ledger_operations_total",
         "Total ledger operations performed, labeled by type"
     );
+    describe_gauge!(
+        "ledger_history_length",
+        "Number of history entries (sequence number) per ledger"
+    );
 }
 
 // ============================================================================
@@ -224,6 +228,13 @@ pub fn set_ledger_count(count: usize) {
 /// Record a ledger operation.
 pub fn record_ledger_operation(op_type: &str) {
     counter!("ledger_operations_total", "type" => op_type.to_string()).increment(1);
+}
+
+/// Set the history length (sequence number) for a ledger.
+pub fn set_ledger_history_length(ledger_id: &str, length: usize) {
+    // Use first 16 chars of ledger_id as label to keep cardinality reasonable
+    let short_id = if ledger_id.len() > 16 { &ledger_id[..16] } else { ledger_id };
+    gauge!("ledger_history_length", "ledger_id" => short_id.to_string()).set(length as f64);
 }
 
 // ============================================================================
