@@ -246,6 +246,7 @@ DANGER SUBCOMMANDS (testing only - DO NOT USE IN PRODUCTION):
     --relay <url>      Nostr relay URL (can be specified multiple times)
     --nwc <uri>        NWC connection string for Lightning operations
     --data-dir <path>  Data directory (default: ~/.deposits-bdk)
+    --metrics-port <port>  Port for Prometheus metrics endpoint (run command only)
 
 EXAMPLES:
     # Run a node on signet
@@ -381,7 +382,30 @@ fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
 }
 
 async fn run_node(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let config = parse_config(args)?;
+    // Parse --metrics-port separately (before parse_config since it's run-specific)
+    let mut metrics_port: Option<u16> = None;
+    let mut filtered_args: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--metrics-port" {
+            i += 1;
+            if i < args.len() {
+                metrics_port = Some(args[i].parse().map_err(|_| "Invalid metrics port")?);
+            }
+        } else {
+            filtered_args.push(args[i].clone());
+        }
+        i += 1;
+    }
+
+    let config = parse_config(&filtered_args)?;
+
+    // Initialize metrics if port specified
+    if let Some(port) = metrics_port {
+        if let Err(e) = deposits_bdk::metrics::init_metrics(port) {
+            tracing::warn!("Failed to initialize metrics: {}", e);
+        }
+    }
 
     tracing::info!("Starting deposits-bdk node...");
     tracing::info!("Network: {:?}", config.network);

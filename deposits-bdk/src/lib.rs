@@ -46,6 +46,7 @@ pub mod error;
 pub mod handler;
 pub mod ldk_cli;
 pub mod lightning;
+pub mod metrics;
 pub mod node;
 pub mod nostr;
 pub mod wallet;

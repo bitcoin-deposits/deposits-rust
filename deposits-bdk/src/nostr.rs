@@ -54,6 +54,7 @@ use std::sync::RwLock;
 use tokio::sync::mpsc;
 
 use crate::Error;
+use crate::metrics;
 
 /// Track last advertisement timestamp to ensure monotonic ordering.
 /// NIP-33 replaceable events use created_at to determine which event is "latest".
@@ -532,6 +533,16 @@ impl NostrTransport {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
 
+        // Record connection metrics
+        let relays = client.relays().await;
+        let connected_count = relays.values()
+            .filter(|r| r.status() == nostr_sdk::RelayStatus::Connected)
+            .count();
+        metrics::set_active_connections(connected_count);
+        for _ in 0..connected_count {
+            metrics::record_connection();
+        }
+
         // Create channels for inbound messages, ledger updates, requests, responses, and disputes
         let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
         let (ledger_tx, ledger_rx) = mpsc::unbounded_channel();
@@ -771,6 +782,7 @@ impl NostrTransport {
             action,
             &event_id[..16]
         );
+        metrics::record_request_sent(action);
 
         Ok(event_id)
     }
@@ -828,6 +840,7 @@ impl NostrTransport {
             status,
             &event_id[..16]
         );
+        metrics::record_response_sent(success);
 
         Ok(event_id)
     }
@@ -1712,6 +1725,7 @@ impl NostrTransport {
             action,
             &event.id.to_hex()[..16]
         );
+        metrics::record_request_received(&action);
 
         Ok(LedgerRequest {
             action,
@@ -1787,6 +1801,7 @@ impl NostrTransport {
             status,
             &event.id.to_hex()[..16]
         );
+        metrics::record_response_received(response.success);
 
         Ok(response)
     }
