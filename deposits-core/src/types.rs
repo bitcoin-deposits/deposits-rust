@@ -499,14 +499,14 @@ impl Default for ReservesOutput {
 /// this record is added to the consenting node's own ledger. This creates a two-sided
 /// auditable trail:
 /// - The operator's ledger has: QuorumAddMember { quorum_member, signature }
-/// - The quorum member's ledger has: QuorumJoin { operator_id, reserves_id, signature }
+/// - The quorum member's ledger has: QuorumJoin { operator_id, ledger_id, signature }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuorumMembership {
     /// The operator whose quorum we joined.
     #[serde(with = "serde_pubkey")]
     pub operator_id: PublicKey,
-    /// The ledger identifier we're monitoring.
-    pub reserves_id: String,
+    /// The ledger_id (64-char hex hash) of the ledger we're monitoring.
+    pub ledger_id: String,
     /// Block height when our membership commitment expires.
     /// After this block, we are no longer obligated to monitor this ledger.
     pub membership_expires: u32,

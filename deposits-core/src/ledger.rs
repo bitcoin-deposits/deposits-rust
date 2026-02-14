@@ -1034,7 +1034,7 @@ impl Ledger {
                     });
                 }
             }
-            LedgerOperation::QuorumJoin { operator_id, reserves_id, membership_expires, our_signature: _ } => {
+            LedgerOperation::QuorumJoin { operator_id, ledger_id, membership_expires, our_signature: _ } => {
                 // 1. Must be on operator's own ledger (we are the operator)
                 if !self.is_operator() {
                     return Err(DepositsError::ProtocolViolation {
@@ -1046,7 +1046,7 @@ impl Ledger {
                 // where the signing key is available. Here we just validate the operation structure.
                 // 2. Ratchet check: if renewing, new expiration must be >= existing
                 if let Some(existing) = self.state.joined_quorums.iter().find(|m|
-                    &m.operator_id == operator_id && &m.reserves_id == reserves_id
+                    &m.operator_id == operator_id && &m.ledger_id == ledger_id
                 ) {
                     if *membership_expires < existing.membership_expires {
                         return Err(DepositsError::ProtocolViolation {
@@ -1295,11 +1295,11 @@ impl Ledger {
                     .map(|a| a.available_collateral())
                     .sum();
             }
-            LedgerOperation::QuorumJoin { operator_id, reserves_id, membership_expires, our_signature } => {
+            LedgerOperation::QuorumJoin { operator_id, ledger_id, membership_expires, our_signature } => {
                 use crate::types::QuorumMembership;
                 // Find and update existing membership, or add new one
                 if let Some(existing) = self.state.joined_quorums.iter_mut().find(|m|
-                    m.operator_id == *operator_id && m.reserves_id == *reserves_id
+                    m.operator_id == *operator_id && m.ledger_id == *ledger_id
                 ) {
                     // Renew/extend membership
                     existing.membership_expires = *membership_expires;
@@ -1308,7 +1308,7 @@ impl Ledger {
                     // New membership
                     let membership = QuorumMembership {
                         operator_id: *operator_id,
-                        reserves_id: reserves_id.clone(),
+                        ledger_id: ledger_id.clone(),
                         membership_expires: *membership_expires,
                         our_signature: *our_signature,
                         joined_at_sequence: self.state.sequence + 1,

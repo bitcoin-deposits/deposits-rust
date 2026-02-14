@@ -128,7 +128,7 @@ run_node_cmd() {
     docker exec -e RUST_LOG=error "$name" deposits-bdk "$cmd" "$@" \
         --seed "$seed" \
         --network regtest \
-        --esplora http://electrs:3002 \
+        --electrum http://electrs:3002 \
         --relay ws://nostr-relay:7777 \
         --data-dir /data 2>&1
 }
@@ -297,7 +297,7 @@ setup_node() {
     docker exec -d "$name" deposits-bdk nostr watch "$ledger_id" \
         --seed "$seed" \
         --network regtest \
-        --esplora http://electrs:3002 \
+        --electrum http://electrs:3002 \
         --relay ws://nostr-relay:7777 \
         --data-dir /data \
         >/dev/null 2>&1
@@ -335,6 +335,7 @@ add_quorum_members() {
     local n=$1
     local name=$(node_name $n)
     local node_id=$(get_value "node_id_$n")
+    local reserves_id=$(get_value "reserves_id_$n")
     local ledger_id=$(get_value "ledger_id_$n")
 
     # Get list of ready nodes
@@ -357,16 +358,20 @@ add_quorum_members() {
     # Pick random members
     local members=($(pick_random "$n" "$num_members" "${ready[@]}"))
 
+    # Calculate membership expiry (current block + 10000)
+    local current_block=$(get_block_height)
+    local membership_expires=$((current_block + 10000))
+
     for member_n in "${members[@]}"; do
         local member_name=$(node_name $member_n)
         local member_node_id=$(get_value "node_id_$member_n")
         local member_ledger_id=$(get_value "ledger_id_$member_n")
 
-        # Add member to our quorum
-        run_node_cmd $n partner add "$ledger_id" "$member_node_id" "$member_ledger_id" >/dev/null 2>&1 || true
+        # Add member to our quorum (our_reserves_id, member_node_id, member_ledger_id)
+        run_node_cmd $n partner add "$reserves_id" "$member_node_id" "$member_ledger_id" >/dev/null 2>&1 || true
 
-        # Record join on member's side
-        run_node_cmd $member_n partner join "$member_ledger_id" "$node_id" "$ledger_id" 1000000 >/dev/null 2>&1 || true
+        # Record join on member's side (member_ledger_id, our_node_id, our_ledger_id, membership_expires)
+        run_node_cmd $member_n partner join "$member_ledger_id" "$node_id" "$ledger_id" "$membership_expires" >/dev/null 2>&1 || true
 
         log_info "    + ${member_name}"
     done

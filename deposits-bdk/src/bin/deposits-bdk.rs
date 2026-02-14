@@ -131,8 +131,9 @@ PARTNER SUBCOMMANDS:
     partner add <reserves_id> <quorum_member_pubkey> <member_ledger_id>
                     Add a quorum member to your ledger (records QuorumAddMember)
                     member_ledger_id: 64-char hex hash identifying member's collateral ledger
-    partner join <our_reserves_id> <target_operator> <target_reserves_id> <expires_block>
+    partner join <our_ledger_id> <target_operator> <target_ledger_id> <expires_block>
                     Record that you joined another operator's quorum (records QuorumJoin)
+                    target_ledger_id: 64-char hex hash identifying target operator's ledger
     partner list               List all quorum members
 
 COLLATERAL SUBCOMMANDS:
@@ -1747,15 +1748,15 @@ fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                     let pk_bytes = quorum_member.serialize();
                     ("QuorumRemoveMember", format!("member:{:02x}{:02x}{:02x}{:02x}", pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3]))
                 }
-                LedgerOperation::QuorumJoin { operator_id, reserves_id, membership_expires, .. } => {
+                LedgerOperation::QuorumJoin { operator_id, ledger_id, membership_expires, .. } => {
                     let pk_bytes = operator_id.serialize();
-                    let reserves_short = if reserves_id.len() > 16 {
-                        format!("{}..{}", &reserves_id[..8], &reserves_id[reserves_id.len()-6..])
+                    let ledger_short = if ledger_id.len() > 16 {
+                        format!("{}...", &ledger_id[..16])
                     } else {
-                        reserves_id.clone()
+                        ledger_id.clone()
                     };
                     ("QuorumJoin", format!("op:{:02x}{:02x}{:02x}{:02x}  ledger:{}  expires:{}",
-                        pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3], reserves_short, membership_expires))
+                        pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3], ledger_short, membership_expires))
                 }
                 LedgerOperation::CollateralAttestation { collateral_operator, amount, lock_until_block, .. } => {
                     let pk_bytes = collateral_operator.serialize();
@@ -2002,11 +2003,11 @@ async fn partner_add(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
 }
 
 /// Record that we have joined another operator's quorum
-/// Usage: partner join <our_reserves_id> <target_operator> <target_reserves_id> <expires_block>
+/// Usage: partner join <our_ledger_id> <target_operator> <target_ledger_id> <expires_block>
 async fn partner_join(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let mut our_reserves_id: Option<String> = None;
+    let mut our_id: Option<String> = None;
     let mut target_operator_str: Option<String> = None;
-    let mut target_reserves_id: Option<String> = None;
+    let mut target_id: Option<String> = None;
     let mut expires_block: Option<u32> = None;
     let mut config_args = Vec::new();
 
@@ -2018,12 +2019,12 @@ async fn partner_join(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
                 config_args.push(args[i + 1].clone());
                 i += 1;
             }
-        } else if our_reserves_id.is_none() {
-            our_reserves_id = Some(args[i].clone());
+        } else if our_id.is_none() {
+            our_id = Some(args[i].clone());
         } else if target_operator_str.is_none() {
             target_operator_str = Some(args[i].clone());
-        } else if target_reserves_id.is_none() {
-            target_reserves_id = Some(args[i].clone());
+        } else if target_id.is_none() {
+            target_id = Some(args[i].clone());
         } else if expires_block.is_none() {
             expires_block = Some(args[i].parse()
                 .map_err(|_| "Invalid expires_block")?);
@@ -2031,9 +2032,9 @@ async fn partner_join(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         i += 1;
     }
 
-    let our_reserves_id = our_reserves_id.ok_or("Our reserves ID required")?;
+    let our_id = our_id.ok_or("Our ledger ID required (64-char hex hash or reserves address)")?;
     let target_operator_str = target_operator_str.ok_or("Target operator pubkey required")?;
-    let target_reserves_id = target_reserves_id.ok_or("Target reserves ID required")?;
+    let target_id = target_id.ok_or("Target ledger ID required (64-char hex hash)")?;
     let expires_block = expires_block.ok_or("Expires block required")?;
 
     let target_operator = PublicKey::from_str(&target_operator_str)
@@ -2042,20 +2043,20 @@ async fn partner_join(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     let config = parse_config(&config_args)?;
     let mut node = Node::new(config).await?;
 
-    // Resolve our identifier to ledger_id
-    let our_ledger_id = if our_reserves_id.len() == 64 && our_reserves_id.chars().all(|c| c.is_ascii_hexdigit()) {
-        our_reserves_id.clone()
+    // Resolve our identifier to ledger_id (accepts both ledger_id hash and reserves address)
+    let our_ledger_id = if our_id.len() == 64 && our_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        our_id.clone()
     } else {
-        node.get_ledger_by_reserves_key(&our_reserves_id)
+        node.get_ledger_by_reserves_key(&our_id)
             .map(|(lid, _)| lid)
-            .ok_or_else(|| format!("Ledger not found for reserves: {}", our_reserves_id))?
+            .ok_or_else(|| format!("Ledger not found for reserves: {}", our_id))?
     };
 
-    // Resolve target identifier to ledger_id (for display, kept as-is for the operation)
-    let target_ledger_id = if target_reserves_id.len() == 64 && target_reserves_id.chars().all(|c| c.is_ascii_hexdigit()) {
-        target_reserves_id.clone()
+    // Target must be a ledger_id hash (64 hex chars)
+    let target_ledger_id = if target_id.len() == 64 && target_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        target_id.clone()
     } else {
-        target_reserves_id.clone() // Keep as reserves_id for now - the join records it as-is
+        return Err(format!("Target ledger ID must be a 64-char hex hash, got: {}", target_id).into());
     };
 
     println!("Recording quorum join for operator {}...", target_operator);

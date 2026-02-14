@@ -358,9 +358,9 @@ impl Node {
             if ledger.operator_key() == self.node_id {
                 for update in &ledger.history {
                     if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                        if let LedgerOperation::QuorumJoin { reserves_id, .. } = op {
-                            if !joined.contains(&reserves_id) {
-                                joined.push(reserves_id);
+                        if let LedgerOperation::QuorumJoin { ledger_id, .. } = op {
+                            if !joined.contains(&ledger_id) {
+                                joined.push(ledger_id);
                             }
                         }
                     }
@@ -712,11 +712,12 @@ impl Node {
                 return true;
             }
         }
+        drop(ledgers);
 
-        // Check our joined ledgers
+        // Check our joined ledgers (QuorumJoin records in our ledger history)
         let joined = self.get_joined_ledger_ids();
         for jid in joined {
-            if jid == ledger_id || jid.contains(ledger_id) {
+            if jid == ledger_id {
                 return true;
             }
         }
@@ -4550,7 +4551,7 @@ impl Node {
 
             let operation = deposits_core::messages::LedgerOperation::QuorumJoin {
                 operator_id: target_operator,
-                reserves_id: target_ledger_id.to_string(),
+                ledger_id: target_ledger_id.to_string(),
                 membership_expires,
                 our_signature: signature,
             };

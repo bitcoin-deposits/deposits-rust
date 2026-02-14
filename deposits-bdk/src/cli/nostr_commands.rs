@@ -2131,8 +2131,8 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     };
 
     // Helper to scan for joined ledgers from QuorumJoin operations
-    // Returns set of reserves_id strings that we need to find hex ledger_ids for
-    fn scan_joined_reserves(node: &Node) -> HashSet<String> {
+    // Returns set of ledger_id hashes that we've joined
+    fn scan_joined_ledger_ids(node: &Node) -> HashSet<String> {
         let mut joined = HashSet::new();
         let ledgers = node.list_ledgers();
 
@@ -2142,10 +2142,10 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
             // Scan history for QuorumJoin operations
             for update in &ledger.history {
                 if update.message_type == QUORUM_JOIN {
-                    if let Ok(LedgerOperation::QuorumJoin { reserves_id, .. }) =
+                    if let Ok(LedgerOperation::QuorumJoin { ledger_id, .. }) =
                         LedgerOperation::tlv_decode(&update.message)
                     {
-                        joined.insert(reserves_id);
+                        joined.insert(ledger_id);
                     }
                 }
             }
@@ -2159,28 +2159,11 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         .build()
         .await?;
 
-    // Find hex ledger_ids for joined ledgers by matching reserves addresses from advertisements
-    let joined_reserves = scan_joined_reserves(&node);
-    let mut joined_ledger_ids: HashSet<String> = HashSet::new();
-
-    if !joined_reserves.is_empty() {
-        // Fetch all advertisements to find ledger_ids for joined reserves
-        let network_str = match config_for_reload.network {
-            bitcoin::Network::Bitcoin => "bitcoin",
-            bitcoin::Network::Testnet => "testnet",
-            bitcoin::Network::Signet => "signet",
-            bitcoin::Network::Regtest => "regtest",
-            _ => "regtest",
-        };
-        if let Ok(ads) = transport.fetch_ledger_advertisements(network_str).await {
-            for ad in ads {
-                // Check if this ad's reserves matches any of our joined reserves
-                if joined_reserves.contains(&ad.reserves_address) && ad.ledger_id != ledger_id {
-                    joined_ledger_ids.insert(ad.ledger_id.clone());
-                }
-            }
-        }
-    }
+    // Get joined ledger_ids directly from QuorumJoin operations (now stores ledger_id hash)
+    let mut joined_ledger_ids: HashSet<String> = scan_joined_ledger_ids(&node)
+        .into_iter()
+        .filter(|lid| lid != &ledger_id)
+        .collect();
 
     println!("Watching for requests on ledger...");
     println!("  Relay: {}", relay_url);
@@ -2291,47 +2274,25 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         if last_join_scan.elapsed() > std::time::Duration::from_secs(30) {
             // Reload ledgers first to see new QuorumJoins from CLI
             node.handler.reload_ledgers();
-            {
-                let current_reserves = scan_joined_reserves(&node);
 
-                // Find ledger IDs for any new reserves by looking up advertisements
-                let network_str = match config_for_reload.network {
-                    bitcoin::Network::Bitcoin => "bitcoin",
-                    bitcoin::Network::Testnet => "testnet",
-                    bitcoin::Network::Signet => "signet",
-                    bitcoin::Network::Regtest => "regtest",
-                    _ => "regtest",
-                };
-                if let Ok(ads) = transport.fetch_ledger_advertisements(network_str).await {
-                    for ad in ads {
-                        if current_reserves.contains(&ad.reserves_address)
-                            && ad.ledger_id != ledger_id
-                            && !joined_ledger_ids.contains(&ad.ledger_id)
-                        {
-                            println!(
-                                "[{}] Discovered new QuorumJoin: {}...",
-                                chrono::Utc::now().format("%H:%M:%S"),
-                                &ad.ledger_id[..40.min(ad.ledger_id.len())]
-                            );
+            // Get current joined ledger_ids directly from QuorumJoin records
+            let current_joined = scan_joined_ledger_ids(&node);
+            for joined_id in current_joined {
+                if joined_id != ledger_id && !joined_ledger_ids.contains(&joined_id) {
+                    println!(
+                        "[{}] Discovered new QuorumJoin: {}...",
+                        chrono::Utc::now().format("%H:%M:%S"),
+                        &joined_id[..40.min(joined_id.len())]
+                    );
 
-                            if let Err(e) = transport.subscribe_to_requests(&ad.ledger_id).await {
-                                tracing::warn!(
-                                    "Failed to subscribe to {}: {}",
-                                    ad.ledger_id,
-                                    e
-                                );
-                            }
-                            if let Err(e) = transport.subscribe_to_disputes(&ad.ledger_id).await {
-                                tracing::warn!(
-                                    "Failed to subscribe to disputes for {}: {}",
-                                    ad.ledger_id,
-                                    e
-                                );
-                            }
-
-                            joined_ledger_ids.insert(ad.ledger_id.clone());
-                        }
+                    if let Err(e) = transport.subscribe_to_requests(&joined_id).await {
+                        tracing::warn!("Failed to subscribe to {}: {}", joined_id, e);
                     }
+                    if let Err(e) = transport.subscribe_to_disputes(&joined_id).await {
+                        tracing::warn!("Failed to subscribe to disputes for {}: {}", joined_id, e);
+                    }
+
+                    joined_ledger_ids.insert(joined_id);
                 }
             }
             last_join_scan = std::time::Instant::now();
@@ -2658,25 +2619,21 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                 }
                 LedgerOperation::QuorumJoin {
                     operator_id,
-                    reserves_id,
+                    ledger_id,
                     membership_expires,
                     ..
                 } => {
                     let pk_bytes = operator_id.serialize();
-                    let reserves_short = if reserves_id.len() > 16 {
-                        format!(
-                            "{}..{}",
-                            &reserves_id[..8],
-                            &reserves_id[reserves_id.len() - 6..]
-                        )
+                    let ledger_short = if ledger_id.len() > 16 {
+                        format!("{}...", &ledger_id[..16])
                     } else {
-                        reserves_id.clone()
+                        ledger_id.clone()
                     };
                     (
                         "QuorumJoin",
                         format!(
                             "op:{:02x}{:02x}{:02x}{:02x}  ledger:{}  expires:{}",
-                            pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3], reserves_short, membership_expires
+                            pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3], ledger_short, membership_expires
                         ),
                     )
                 }
