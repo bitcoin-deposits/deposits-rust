@@ -142,8 +142,12 @@ services:
       - LDK_HOST=bdk-alice-ln
       - LDK_PORT=3000
       - LDK_API_KEY=test_api_key
+      - LDK_CLI=/ldk-cli/ldk-server-cli
+      - LDK_TLS_CERT=/ldk-data/tls.crt
     volumes:
       - bdk_alice_data:/data
+      - ldk_cli:/ldk-cli:ro
+      - ldk_alice_data:/ldk-data:ro
 
   # Override BDK Bob to add Lightning CLI and connection info
   bdk-bob:
@@ -152,8 +156,12 @@ services:
       - LDK_HOST=bdk-bob-ln
       - LDK_PORT=3000
       - LDK_API_KEY=test_api_key
+      - LDK_CLI=/ldk-cli/ldk-server-cli
+      - LDK_TLS_CERT=/ldk-data/tls.crt
     volumes:
       - bdk_bob_data:/data
+      - ldk_cli:/ldk-cli:ro
+      - ldk_bob_data:/ldk-data:ro
 
   # Override BDK Charlie to add Lightning connection info
   bdk-charlie:
@@ -162,8 +170,12 @@ services:
       - LDK_HOST=bdk-charlie-ln
       - LDK_PORT=3000
       - LDK_API_KEY=test_api_key
+      - LDK_CLI=/ldk-cli/ldk-server-cli
+      - LDK_TLS_CERT=/ldk-data/tls.crt
     volumes:
       - bdk_charlie_data:/data
+      - ldk_cli:/ldk-cli:ro
+      - ldk_charlie_data:/ldk-data:ro
 
   # Override BDK Diana to add Lightning connection info
   bdk-diana:
@@ -172,8 +184,12 @@ services:
       - LDK_HOST=bdk-diana-ln
       - LDK_PORT=3000
       - LDK_API_KEY=test_api_key
+      - LDK_CLI=/ldk-cli/ldk-server-cli
+      - LDK_TLS_CERT=/ldk-data/tls.crt
     volumes:
       - bdk_diana_data:/data
+      - ldk_cli:/ldk-cli:ro
+      - ldk_diana_data:/ldk-data:ro
 
 volumes:
   ldk_alice_data:

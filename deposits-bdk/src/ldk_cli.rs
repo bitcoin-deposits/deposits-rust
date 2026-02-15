@@ -7,14 +7,11 @@
 
 //! LDK Server client for Lightning operations
 //!
-//! This module provides a client for ldk-server's REST API. It can use either:
-//! - Direct HTTP calls (preferred, no external binary needed)
-//! - Shell out to ldk-server-cli (fallback if HTTP fails)
+//! This module provides a client for ldk-server via the ldk-server-cli binary.
+//! The CLI handles the protobuf encoding and HMAC authentication required by ldk-server.
 
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
-use serde::{Deserialize, Serialize};
-use bitcoin::hashes::{Hash, HashEngine, sha256, hmac::{Hmac, HmacEngine}};
+use serde::Deserialize;
 
 use crate::Error;
 
@@ -29,7 +26,7 @@ pub struct LdkCliConfig {
     pub port: u16,
     /// API key for authentication
     pub api_key: String,
-    /// Path to TLS certificate (optional, for self-signed certs)
+    /// Path to TLS certificate
     pub tls_cert: Option<String>,
 }
 
@@ -55,21 +52,15 @@ impl LdkCliConfig {
     }
 }
 
-/// LDK Server client - uses HTTP API directly
+/// LDK Server client - uses ldk-server-cli binary
 pub struct LdkCli {
     config: LdkCliConfig,
-    http_client: reqwest::blocking::Client,
 }
 
 impl LdkCli {
     /// Create a new LDK client
     pub fn new(config: LdkCliConfig) -> Self {
-        let http_client = reqwest::blocking::Client::builder()
-            .danger_accept_invalid_certs(true)  // For self-signed certs in dev
-            .build()
-            .unwrap_or_else(|_| reqwest::blocking::Client::new());
-
-        Self { config, http_client }
+        Self { config }
     }
 
     /// Create from environment variables
@@ -77,75 +68,7 @@ impl LdkCli {
         Self::new(LdkCliConfig::from_env())
     }
 
-    /// Get the base URL for the LDK server
-    fn base_url(&self) -> String {
-        format!("https://{}:{}", self.config.host, self.config.port)
-    }
-
-    /// Compute the HMAC-SHA256 authentication header value.
-    /// Format: "HMAC <timestamp>:<hmac_hex>"
-    fn compute_auth_header(&self, body: &[u8]) -> String {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("System time should be after Unix epoch")
-            .as_secs();
-
-        // Compute HMAC-SHA256(api_key, timestamp_bytes || body)
-        let mut hmac_engine: HmacEngine<sha256::Hash> = HmacEngine::new(self.config.api_key.as_bytes());
-        hmac_engine.input(&timestamp.to_be_bytes());
-        hmac_engine.input(body);
-        let hmac_result = Hmac::<sha256::Hash>::from_engine(hmac_engine);
-
-        format!("HMAC {}:{}", timestamp, hmac_result)
-    }
-
-    /// Make an HTTP POST request to the LDK server
-    fn http_post<T: Serialize, R: for<'de> Deserialize<'de>>(&self, endpoint: &str, body: &T) -> Result<R, Error> {
-        let url = format!("{}{}", self.base_url(), endpoint);
-        let body_bytes = serde_json::to_vec(body)
-            .map_err(|e| Error::Protocol(format!("Failed to serialize request: {}", e)))?;
-        let auth_header = self.compute_auth_header(&body_bytes);
-
-        let response = self.http_client
-            .post(&url)
-            .header("X-Auth", auth_header)
-            .header("Content-Type", "application/json")
-            .body(body_bytes)
-            .send()
-            .map_err(|e| Error::Protocol(format!("HTTP request failed: {}", e)))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().unwrap_or_default();
-            return Err(Error::Protocol(format!("LDK server error {}: {}", status, body)));
-        }
-
-        response.json::<R>()
-            .map_err(|e| Error::Protocol(format!("Failed to parse response: {}", e)))
-    }
-
-    /// Make an HTTP GET request to the LDK server
-    fn http_get<R: for<'de> Deserialize<'de>>(&self, endpoint: &str) -> Result<R, Error> {
-        let url = format!("{}{}", self.base_url(), endpoint);
-        let auth_header = self.compute_auth_header(&[]);
-
-        let response = self.http_client
-            .get(&url)
-            .header("X-Auth", auth_header)
-            .send()
-            .map_err(|e| Error::Protocol(format!("HTTP request failed: {}", e)))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().unwrap_or_default();
-            return Err(Error::Protocol(format!("LDK server error {}: {}", status, body)));
-        }
-
-        response.json::<R>()
-            .map_err(|e| Error::Protocol(format!("Failed to parse response: {}", e)))
-    }
-
-    /// Fallback: Run CLI command and return the JSON output
+    /// Run CLI command and return the JSON output
     fn run_command(&self, args: &[&str]) -> Result<String, Error> {
         let mut cmd = Command::new(&self.config.cli_path);
 
@@ -161,12 +84,19 @@ impl LdkCli {
         // Add command arguments
         cmd.args(args);
 
+        tracing::debug!("Running ldk-server-cli: {:?}", cmd);
+
         let output = cmd.output()
             .map_err(|e| Error::Protocol(format!("Failed to execute ldk-server-cli: {}", e)))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(Error::Protocol(format!("ldk-server-cli failed: {}", stderr)));
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return Err(Error::Protocol(format!(
+                "ldk-server-cli failed: {} {}",
+                stderr.trim(),
+                stdout.trim()
+            )));
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -177,89 +107,69 @@ impl LdkCli {
     pub fn get_node_info(&self) -> Result<NodeInfo, Error> {
         let output = self.run_command(&["get-node-info"])?;
         serde_json::from_str(&output)
-            .map_err(|e| Error::Protocol(format!("Failed to parse node info: {}", e)))
+            .map_err(|e| Error::Protocol(format!("Failed to parse node info: {} (output: {})", e, output)))
     }
 
     /// Get balances
     pub fn get_balances(&self) -> Result<Balances, Error> {
         let output = self.run_command(&["get-balances"])?;
         serde_json::from_str(&output)
-            .map_err(|e| Error::Protocol(format!("Failed to parse balances: {}", e)))
+            .map_err(|e| Error::Protocol(format!("Failed to parse balances: {} (output: {})", e, output)))
     }
 
-    /// Create a BOLT11 invoice via HTTP API
+    /// Create a BOLT11 invoice
     pub fn create_invoice(&self, amount_msat: u64, description: &str) -> Result<String, Error> {
-        #[derive(Serialize)]
-        struct Bolt11ReceiveRequest {
-            amount_msat: Option<u64>,
-            description: String,
-            expiry_secs: Option<u64>,
-        }
+        tracing::info!("Creating invoice via ldk-server-cli: {} msat", amount_msat);
+        let amount_str = amount_msat.to_string();
+        let output = self.run_command(&[
+            "bolt11-receive",
+            "--amount-msat", &amount_str,
+            "--description", description,
+        ])?;
 
-        let request = Bolt11ReceiveRequest {
-            amount_msat: Some(amount_msat),
-            description: description.to_string(),
-            expiry_secs: Some(3600),
-        };
-
-        tracing::info!("Creating invoice via {}/Bolt11Receive", self.base_url());
-        let response: Bolt11ReceiveResponse = self.http_post("/Bolt11Receive", &request)?;
+        let response: Bolt11ReceiveResponse = serde_json::from_str(&output)
+            .map_err(|e| Error::Protocol(format!("Failed to parse invoice response: {} (output: {})", e, output)))?;
         Ok(response.invoice)
     }
 
     /// Create a variable amount BOLT11 invoice
     pub fn create_invoice_any_amount(&self, description: &str) -> Result<String, Error> {
-        #[derive(Serialize)]
-        struct Bolt11ReceiveRequest {
-            amount_msat: Option<u64>,
-            description: String,
-            expiry_secs: Option<u64>,
-        }
+        tracing::info!("Creating any-amount invoice via ldk-server-cli");
+        let output = self.run_command(&[
+            "bolt11-receive",
+            "--description", description,
+        ])?;
 
-        let request = Bolt11ReceiveRequest {
-            amount_msat: None,
-            description: description.to_string(),
-            expiry_secs: Some(3600),
-        };
-
-        tracing::info!("Creating invoice via {}/Bolt11Receive", self.base_url());
-        let response: Bolt11ReceiveResponse = self.http_post("/Bolt11Receive", &request)?;
+        let response: Bolt11ReceiveResponse = serde_json::from_str(&output)
+            .map_err(|e| Error::Protocol(format!("Failed to parse invoice response: {} (output: {})", e, output)))?;
         Ok(response.invoice)
     }
 
-    /// Pay a BOLT11 invoice via HTTP API
+    /// Pay a BOLT11 invoice
     pub fn pay_invoice(&self, invoice: &str) -> Result<String, Error> {
-        #[derive(Serialize)]
-        struct Bolt11SendRequest {
-            invoice: String,
-            amount_msat: Option<u64>,
-        }
+        tracing::info!("Paying invoice via ldk-server-cli");
+        let output = self.run_command(&[
+            "bolt11-send",
+            "--invoice", invoice,
+        ])?;
 
-        let request = Bolt11SendRequest {
-            invoice: invoice.to_string(),
-            amount_msat: None,
-        };
-
-        tracing::info!("Paying invoice via {}/Bolt11Send", self.base_url());
-        let response: Bolt11SendResponse = self.http_post("/Bolt11Send", &request)?;
+        let response: Bolt11SendResponse = serde_json::from_str(&output)
+            .map_err(|e| Error::Protocol(format!("Failed to parse payment response: {} (output: {})", e, output)))?;
         Ok(response.payment_id)
     }
 
     /// Pay a BOLT11 invoice with a specific amount (for amountless invoices)
     pub fn pay_invoice_with_amount(&self, invoice: &str, amount_msat: u64) -> Result<String, Error> {
-        #[derive(Serialize)]
-        struct Bolt11SendRequest {
-            invoice: String,
-            amount_msat: Option<u64>,
-        }
+        tracing::info!("Paying invoice via ldk-server-cli with amount: {} msat", amount_msat);
+        let amount_str = amount_msat.to_string();
+        let output = self.run_command(&[
+            "bolt11-send",
+            "--invoice", invoice,
+            "--amount-msat", &amount_str,
+        ])?;
 
-        let request = Bolt11SendRequest {
-            invoice: invoice.to_string(),
-            amount_msat: Some(amount_msat),
-        };
-
-        tracing::info!("Paying invoice via {}/Bolt11Send", self.base_url());
-        let response: Bolt11SendResponse = self.http_post("/Bolt11Send", &request)?;
+        let response: Bolt11SendResponse = serde_json::from_str(&output)
+            .map_err(|e| Error::Protocol(format!("Failed to parse payment response: {} (output: {})", e, output)))?;
         Ok(response.payment_id)
     }
 
@@ -267,18 +177,18 @@ impl LdkCli {
     pub fn list_channels(&self) -> Result<ListChannelsResponse, Error> {
         let output = self.run_command(&["list-channels"])?;
         serde_json::from_str(&output)
-            .map_err(|e| Error::Protocol(format!("Failed to parse channels: {}", e)))
+            .map_err(|e| Error::Protocol(format!("Failed to parse channels: {} (output: {})", e, output)))
     }
 
     /// List payments
     pub fn list_payments(&self) -> Result<ListPaymentsResponse, Error> {
         let output = self.run_command(&["list-payments"])?;
         serde_json::from_str(&output)
-            .map_err(|e| Error::Protocol(format!("Failed to parse payments: {}", e)))
+            .map_err(|e| Error::Protocol(format!("Failed to parse payments: {} (output: {})", e, output)))
     }
 }
 
-// Response types
+// Response types for parsing CLI JSON output
 
 #[derive(Debug, Deserialize)]
 pub struct NodeInfo {
@@ -347,7 +257,6 @@ mod tests {
 
     #[test]
     fn test_config_from_env() {
-        // Just test that default config is created
         let config = LdkCliConfig::default();
         assert_eq!(config.port, 3000);
     }

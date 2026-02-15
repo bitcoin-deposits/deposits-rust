@@ -180,6 +180,13 @@ setup_infrastructure() {
     rm -rf "$BDK_DIR/certs"
     mkdir -p "$BDK_DIR/certs"
 
+    # Create shared CLI volume and populate with ldk-server-cli
+    log_info "Setting up shared LDK CLI volume..."
+    docker volume create ldk_cli >/dev/null 2>&1 || true
+    docker run --rm -v ldk_cli:/ldk-cli bdk-ldk-node:latest \
+        sh -c "cp /usr/local/bin/ldk-server-cli /ldk-cli/ && chmod +x /ldk-cli/ldk-server-cli" \
+        >/dev/null 2>&1 || log_warn "Could not copy CLI to shared volume"
+
     log_success "Infrastructure ready"
 }
 
@@ -199,15 +206,20 @@ start_bdk_node() {
     docker volume create "bdk_${name}_data" >/dev/null 2>&1 || true
 
     # All nodes started manually with LDK_HOST pointing to their sidecar
+    # Mount shared CLI volume and LDK data (for TLS cert) as read-only
     docker run -d \
         --name "$name" \
         --network bdk_bdk_network \
         --ip "$ip" \
         -v "bdk_${name}_data:/data" \
+        -v "ldk_cli:/ldk-cli:ro" \
+        -v "ldk_${name}_data:/ldk-data:ro" \
         -e RUST_LOG=warn,deposits_bdk=info \
         -e LDK_HOST="$ln_name" \
         -e LDK_PORT=3000 \
         -e LDK_API_KEY=test_api_key \
+        -e LDK_CLI=/ldk-cli/ldk-server-cli \
+        -e LDK_TLS_CERT=/ldk-data/tls.crt \
         deposits-bdk:latest \
         run \
         --seed "$seed" \
