@@ -9,6 +9,12 @@ CONFIG_FILE="/ldk/config.toml"
 # Get listen port, default to 9735
 LISTEN_PORT="${LISTEN_PORT:-9735}"
 
+# Get hostname for TLS certificate (Docker container name)
+CONTAINER_HOSTNAME=$(hostname)
+
+# Delete old TLS cert if it exists (forces regeneration with correct hostname)
+rm -f "${LDK_DATA_DIR:-/ldk}/tls.crt" "${LDK_DATA_DIR:-/ldk}/tls.key" 2>/dev/null || true
+
 # Generate TOML config from environment variables
 cat > "$CONFIG_FILE" << EOF
 [node]
@@ -23,6 +29,9 @@ dir_path = "${LDK_DATA_DIR:-/ldk}"
 
 [esplora]
 server_url = "http://${ELECTRUM_HOST:-electrs}:${ELECTRUM_PORT:-3002}"
+
+[tls]
+hosts = ["${CONTAINER_HOSTNAME}"]
 
 [log]
 level = "Debug"
