@@ -12,8 +12,9 @@ scrape_configs:
         labels:
           cluster: 'bdk-regtest'
 
-  # Electrs metrics
+  # Electrs metrics (needs fallback protocol as electrs doesn't send Content-Type)
   - job_name: 'electrs'
+    fallback_scrape_protocol: PrometheusText0.0.4
     static_configs:
       - targets:
           - 'bdk-electrs:4224'
