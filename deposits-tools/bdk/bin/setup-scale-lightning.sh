@@ -191,31 +191,23 @@ start_bdk_node() {
     local n=$1
     local name=$(node_name $n)
     local seed=$(generate_seed $n)
-
-    if [ $n -le 4 ]; then
-        log_info "Starting compose container $name..."
-        $DC up -d "$name"
-        sleep 2
-
-        local address=$(run_node_cmd $n address 2>&1 | grep -E '^bcrt1' | head -1)
-        if [ -n "$address" ]; then
-            bitcoin_cli -rpcwallet=faucet sendtoaddress "$address" 5 >/dev/null 2>&1
-            log_info "  Funded $name at ${address:0:20}..."
-        fi
-        return
-    fi
-
+    local ln_name=$(ln_node_name $n)
     local ip="172.21.0.$((100 + n))"
+
     log_info "Starting $name (seed: ${seed:0:16}...)..."
 
     docker volume create "bdk_${name}_data" >/dev/null 2>&1 || true
 
+    # All nodes started manually with LDK_HOST pointing to their sidecar
     docker run -d \
         --name "$name" \
         --network bdk_bdk_network \
         --ip "$ip" \
         -v "bdk_${name}_data:/data" \
         -e RUST_LOG=warn,deposits_bdk=info \
+        -e LDK_HOST="$ln_name" \
+        -e LDK_PORT=3000 \
+        -e LDK_API_KEY=test_api_key \
         deposits-bdk:latest \
         run \
         --seed "$seed" \
