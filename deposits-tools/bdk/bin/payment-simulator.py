@@ -271,12 +271,16 @@ def pay_invoice(alias: str, invoice: str) -> bool:
 
     if code != 0:
         print(f"  Warning: Payment failed: {stderr}")
+        # Small delay after failure to let LDK clean up pending payment state
+        time.sleep(2)
         return False
 
     # Check for success
     if "success" in stdout.lower() or "paid" in stdout.lower() or "preimage" in stdout.lower():
         return True
 
+    # Payment didn't clearly succeed, add delay before retry
+    time.sleep(1)
     return False
 
 
