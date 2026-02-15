@@ -8,8 +8,13 @@ Drives wallet.sh to create real ledger activity:
 3. Funds them via faucet
 4. Makes withdrawals between deposits (actual ledger operations)
 
+With --lightning flag, uses Lightning invoices instead of on-chain withdrawals:
+- Creates invoices via operator's LDK sidecar
+- Pays invoices via sender's operator's LDK sidecar
+
 Usage:
     python3 payment-simulator.py [--wallets N] [--payment-interval SECS]
+    python3 payment-simulator.py --lightning  # Use Lightning instead of on-chain
 """
 
 import argparse
@@ -224,6 +229,124 @@ def withdraw_to(from_alias: str, to_address: str, amount_sats: int) -> bool:
     return False
 
 
+# Lightning payment functions
+# These use docker exec to interact with LDK sidecars
+
+# Map node names to their LDK container names
+LDK_CONTAINERS = {
+    "alice": "bdk-ldk-alice",
+    "bob": "bdk-ldk-bob",
+    "charlie": "bdk-ldk-charlie",
+    "diana": "bdk-ldk-diana",
+}
+
+# Add more for scale setup
+for i in range(1, 9):
+    LDK_CONTAINERS[f"eve{i}"] = f"bdk-ldk-eve{i}"
+
+
+def get_ldk_container_for_ledger(ledger_id: str) -> Optional[str]:
+    """Map a ledger ID to its operator's LDK container."""
+    # In practice, we'd need to discover which operator owns which ledger
+    # For now, use a simple round-robin based on ledger hash
+    containers = list(LDK_CONTAINERS.values())
+    if not containers:
+        return None
+    idx = int(ledger_id[:8], 16) % len(containers)
+    return containers[idx]
+
+
+def run_ldk_cli(container: str, *args) -> tuple[int, str, str]:
+    """Run ldk-server-cli command in container."""
+    cmd = [
+        "docker", "exec", container,
+        "ldk-server-cli", "-b", "localhost:3001", "-a", "test_api_key",
+    ] + list(args)
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    return result.returncode, result.stdout, result.stderr
+
+
+def create_lightning_invoice(container: str, amount_sats: int, description: str = "Deposit payment") -> Optional[str]:
+    """Create a Lightning invoice via LDK sidecar."""
+    amount_msat = amount_sats * 1000
+    code, stdout, stderr = run_ldk_cli(
+        container, "bolt11-receive",
+        "--amount-msat", str(amount_msat),
+        "--description", description
+    )
+
+    if code != 0:
+        print(f"  Warning: Failed to create invoice: {stderr}")
+        return None
+
+    # Parse JSON output for invoice
+    try:
+        data = json.loads(stdout)
+        return data.get("invoice")
+    except json.JSONDecodeError:
+        # Try to extract invoice from plain text
+        for line in stdout.split("\n"):
+            line = line.strip()
+            if line.startswith("lnbcrt") or line.startswith("lnbc") or line.startswith("lntb"):
+                return line
+        print(f"  Warning: Could not parse invoice from: {stdout[:100]}")
+        return None
+
+
+def pay_lightning_invoice(container: str, invoice: str) -> bool:
+    """Pay a Lightning invoice via LDK sidecar."""
+    code, stdout, stderr = run_ldk_cli(
+        container, "bolt11-send",
+        "--invoice", invoice
+    )
+
+    if code != 0:
+        print(f"  Warning: Payment failed: {stderr}")
+        return False
+
+    # Check for success indicators
+    if "success" in stdout.lower() or "paid" in stdout.lower() or "preimage" in stdout.lower():
+        return True
+
+    # Parse JSON response
+    try:
+        data = json.loads(stdout)
+        if data.get("status") == "succeeded" or data.get("preimage"):
+            return True
+    except json.JSONDecodeError:
+        pass
+
+    print(f"  Warning: Unexpected payment result: {stdout[:100]}")
+    return False
+
+
+def lightning_payment(sender_ledger: str, receiver_ledger: str, amount_sats: int) -> bool:
+    """
+    Make a Lightning payment between two ledgers.
+    Uses the operators' LDK sidecars for routing.
+    """
+    sender_container = get_ldk_container_for_ledger(sender_ledger)
+    receiver_container = get_ldk_container_for_ledger(receiver_ledger)
+
+    if not sender_container or not receiver_container:
+        print(f"  Warning: Could not find LDK containers for ledgers")
+        return False
+
+    print(f"  Creating invoice on {receiver_container}...")
+    invoice = create_lightning_invoice(receiver_container, amount_sats)
+    if not invoice:
+        return False
+
+    print(f"  Invoice: {invoice[:40]}...")
+    print(f"  Paying from {sender_container}...")
+
+    if pay_lightning_invoice(sender_container, invoice):
+        print(f"  Lightning payment successful!")
+        return True
+
+    return False
+
+
 def mine_block(network: str = "regtest"):
     """Mine a block to confirm transactions (regtest only)"""
     if network != "regtest":
@@ -245,6 +368,7 @@ def run_simulation(
     max_payment_sats: int = 5000,
     rediscover_interval: float = 60.0,
     network: str = "signet",
+    lightning: bool = False,
 ):
     """Run the payment simulation
 
@@ -257,6 +381,7 @@ def run_simulation(
         max_payment_sats: Maximum payment amount
         rediscover_interval: Seconds between ledger re-discovery
         network: Bitcoin network (regtest, signet, mainnet)
+        lightning: Use Lightning invoices instead of on-chain withdrawals
     """
 
     print("=" * 60)
@@ -299,6 +424,7 @@ def run_simulation(
 
     print("Starting simulation...")
     print(f"  - Network: {network}")
+    print(f"  - Payment mode: {'Lightning' if lightning else 'On-chain'}")
     print(f"  - Target wallets: {num_wallets} ({wallets_per_ledger:.1f} per ledger)")
     print(f"  - New wallet every {wallet_creation_interval:.1f}s")
     print(f"  - Payment every {payment_interval}s")
@@ -362,15 +488,20 @@ def run_simulation(
                     if max_amount >= min_payment_sats:
                         amount = random.randint(min_payment_sats, max_amount)
 
-                        print(f"\n[{time.strftime('%H:%M:%S')}] Payment: {sender.alias} ({sender.balance_sats} sats) -> {receiver.alias}")
-
-                        if withdraw_to(sender.alias, receiver.funding_address, amount):
-                            # Mine to confirm (regtest only)
-                            mine_block(network)
-                            if network == "regtest":
-                                print(f"  Mined block to confirm")
-                            # Update sender balance estimate
-                            sender.balance_sats -= (amount + 500)
+                        if lightning:
+                            print(f"\n[{time.strftime('%H:%M:%S')}] Lightning: {sender.alias} ({sender.balance_sats} sats) -> {receiver.alias}")
+                            if lightning_payment(sender.ledger_id, receiver.ledger_id, amount):
+                                # Lightning is instant, no mining needed
+                                sender.balance_sats -= amount
+                        else:
+                            print(f"\n[{time.strftime('%H:%M:%S')}] Payment: {sender.alias} ({sender.balance_sats} sats) -> {receiver.alias}")
+                            if withdraw_to(sender.alias, receiver.funding_address, amount):
+                                # Mine to confirm (regtest only)
+                                mine_block(network)
+                                if network == "regtest":
+                                    print(f"  Mined block to confirm")
+                                # Update sender balance estimate
+                                sender.balance_sats -= (amount + 500)
                 else:
                     print(f"\n[{time.strftime('%H:%M:%S')}] Waiting for funded deposits (need {min_balance_needed}+ sats, have: {[f'{d.alias}:{d.balance_sats}' for d in our_deposits]})")
 
@@ -410,6 +541,8 @@ def main():
     parser.add_argument("--network", type=str, default="signet",
                         choices=["regtest", "signet", "mainnet"],
                         help="Bitcoin network (default: signet)")
+    parser.add_argument("--lightning", action="store_true",
+                        help="Use Lightning invoices instead of on-chain withdrawals")
     parser.add_argument("--wallets-per-ledger", type=float, default=2.0,
                         help="Target wallets per discovered ledger (default: 2.0)")
     parser.add_argument("--base-interval", type=float, default=3.0,
@@ -436,6 +569,7 @@ def main():
         max_payment_sats=args.max_payment,
         rediscover_interval=args.rediscover_interval,
         network=args.network,
+        lightning=args.lightning,
     )
 
 
