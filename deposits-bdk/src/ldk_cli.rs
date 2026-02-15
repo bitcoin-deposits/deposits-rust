@@ -178,24 +178,8 @@ impl LdkCli {
             expiry_secs: Some(3600),
         };
 
-        // Try HTTP first
-        match self.http_post::<_, Bolt11ReceiveResponse>("/bolt11/receive", &request) {
-            Ok(response) => return Ok(response.invoice),
-            Err(e) => {
-                tracing::debug!("HTTP bolt11/receive failed, trying CLI: {}", e);
-            }
-        }
-
-        // Fallback to CLI
-        let output = self.run_command(&[
-            "bolt11-receive",
-            "--amount-msat", &amount_msat.to_string(),
-            "--description", description,
-        ])?;
-
-        let response: Bolt11ReceiveResponse = serde_json::from_str(&output)
-            .map_err(|e| Error::Protocol(format!("Failed to parse invoice response: {}", e)))?;
-
+        tracing::info!("Creating invoice via {}/bolt11/receive", self.base_url());
+        let response: Bolt11ReceiveResponse = self.http_post("/bolt11/receive", &request)?;
         Ok(response.invoice)
     }
 
@@ -214,23 +198,8 @@ impl LdkCli {
             expiry_secs: Some(3600),
         };
 
-        // Try HTTP first
-        match self.http_post::<_, Bolt11ReceiveResponse>("/bolt11/receive", &request) {
-            Ok(response) => return Ok(response.invoice),
-            Err(e) => {
-                tracing::debug!("HTTP bolt11/receive failed, trying CLI: {}", e);
-            }
-        }
-
-        // Fallback to CLI
-        let output = self.run_command(&[
-            "bolt11-receive",
-            "--description", description,
-        ])?;
-
-        let response: Bolt11ReceiveResponse = serde_json::from_str(&output)
-            .map_err(|e| Error::Protocol(format!("Failed to parse invoice response: {}", e)))?;
-
+        tracing::info!("Creating invoice via {}/bolt11/receive", self.base_url());
+        let response: Bolt11ReceiveResponse = self.http_post("/bolt11/receive", &request)?;
         Ok(response.invoice)
     }
 
@@ -247,23 +216,8 @@ impl LdkCli {
             amount_msat: None,
         };
 
-        // Try HTTP first
-        match self.http_post::<_, Bolt11SendResponse>("/bolt11/send", &request) {
-            Ok(response) => return Ok(response.payment_id),
-            Err(e) => {
-                tracing::debug!("HTTP bolt11/send failed, trying CLI: {}", e);
-            }
-        }
-
-        // Fallback to CLI
-        let output = self.run_command(&[
-            "bolt11-send",
-            "--invoice", invoice,
-        ])?;
-
-        let response: Bolt11SendResponse = serde_json::from_str(&output)
-            .map_err(|e| Error::Protocol(format!("Failed to parse payment response: {}", e)))?;
-
+        tracing::info!("Paying invoice via {}/bolt11/send", self.base_url());
+        let response: Bolt11SendResponse = self.http_post("/bolt11/send", &request)?;
         Ok(response.payment_id)
     }
 
@@ -280,24 +234,8 @@ impl LdkCli {
             amount_msat: Some(amount_msat),
         };
 
-        // Try HTTP first
-        match self.http_post::<_, Bolt11SendResponse>("/bolt11/send", &request) {
-            Ok(response) => return Ok(response.payment_id),
-            Err(e) => {
-                tracing::debug!("HTTP bolt11/send failed, trying CLI: {}", e);
-            }
-        }
-
-        // Fallback to CLI
-        let output = self.run_command(&[
-            "bolt11-send",
-            "--invoice", invoice,
-            "--amount-msat", &amount_msat.to_string(),
-        ])?;
-
-        let response: Bolt11SendResponse = serde_json::from_str(&output)
-            .map_err(|e| Error::Protocol(format!("Failed to parse payment response: {}", e)))?;
-
+        tracing::info!("Paying invoice via {}/bolt11/send", self.base_url());
+        let response: Bolt11SendResponse = self.http_post("/bolt11/send", &request)?;
         Ok(response.payment_id)
     }
 
