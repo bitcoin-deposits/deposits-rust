@@ -23,6 +23,7 @@ services:
     container_name: bdk-alice-ln
     environment:
       - NODE_NAME=alice
+      - TLS_HOSTNAME=bdk-alice-ln
       - LDK_DATA_DIR=/ldk
       - ELECTRUM_HOST=electrs
       - ELECTRUM_PORT=3002
@@ -52,6 +53,7 @@ services:
     container_name: bdk-bob-ln
     environment:
       - NODE_NAME=bob
+      - TLS_HOSTNAME=bdk-bob-ln
       - LDK_DATA_DIR=/ldk
       - ELECTRUM_HOST=electrs
       - ELECTRUM_PORT=3002
@@ -83,6 +85,7 @@ services:
     container_name: bdk-charlie-ln
     environment:
       - NODE_NAME=charlie
+      - TLS_HOSTNAME=bdk-charlie-ln
       - LDK_DATA_DIR=/ldk
       - ELECTRUM_HOST=electrs
       - ELECTRUM_PORT=3002
@@ -112,6 +115,7 @@ services:
     container_name: bdk-diana-ln
     environment:
       - NODE_NAME=diana
+      - TLS_HOSTNAME=bdk-diana-ln
       - LDK_DATA_DIR=/ldk
       - ELECTRUM_HOST=electrs
       - ELECTRUM_PORT=3002

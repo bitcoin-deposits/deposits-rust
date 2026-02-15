@@ -258,6 +258,7 @@ start_ln_node() {
         -p "${host_port}:3000" \
         -v "ldk_${bdk_name}_data:/ldk" \
         -e NODE_NAME="$bdk_name" \
+        -e TLS_HOSTNAME="$ln_name" \
         -e LDK_DATA_DIR=/ldk \
         -e ELECTRUM_HOST=electrs \
         -e ELECTRUM_PORT=3002 \
