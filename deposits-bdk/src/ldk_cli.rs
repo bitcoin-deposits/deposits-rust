@@ -77,7 +77,7 @@ impl LdkCli {
 
     /// Get the base URL for the LDK server
     fn base_url(&self) -> String {
-        format!("http://{}:{}", self.config.host, self.config.port)
+        format!("https://{}:{}", self.config.host, self.config.port)
     }
 
     /// Make an HTTP POST request to the LDK server
