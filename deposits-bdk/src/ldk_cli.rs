@@ -202,8 +202,8 @@ impl LdkCli {
             expiry_secs: Some(3600),
         };
 
-        tracing::info!("Creating invoice via {}/bolt11/receive", self.base_url());
-        let response: Bolt11ReceiveResponse = self.http_post("/bolt11/receive", &request)?;
+        tracing::info!("Creating invoice via {}/Bolt11Receive", self.base_url());
+        let response: Bolt11ReceiveResponse = self.http_post("/Bolt11Receive", &request)?;
         Ok(response.invoice)
     }
 
@@ -222,8 +222,8 @@ impl LdkCli {
             expiry_secs: Some(3600),
         };
 
-        tracing::info!("Creating invoice via {}/bolt11/receive", self.base_url());
-        let response: Bolt11ReceiveResponse = self.http_post("/bolt11/receive", &request)?;
+        tracing::info!("Creating invoice via {}/Bolt11Receive", self.base_url());
+        let response: Bolt11ReceiveResponse = self.http_post("/Bolt11Receive", &request)?;
         Ok(response.invoice)
     }
 
@@ -240,8 +240,8 @@ impl LdkCli {
             amount_msat: None,
         };
 
-        tracing::info!("Paying invoice via {}/bolt11/send", self.base_url());
-        let response: Bolt11SendResponse = self.http_post("/bolt11/send", &request)?;
+        tracing::info!("Paying invoice via {}/Bolt11Send", self.base_url());
+        let response: Bolt11SendResponse = self.http_post("/Bolt11Send", &request)?;
         Ok(response.payment_id)
     }
 
@@ -258,8 +258,8 @@ impl LdkCli {
             amount_msat: Some(amount_msat),
         };
 
-        tracing::info!("Paying invoice via {}/bolt11/send", self.base_url());
-        let response: Bolt11SendResponse = self.http_post("/bolt11/send", &request)?;
+        tracing::info!("Paying invoice via {}/Bolt11Send", self.base_url());
+        let response: Bolt11SendResponse = self.http_post("/Bolt11Send", &request)?;
         Ok(response.payment_id)
     }
 
