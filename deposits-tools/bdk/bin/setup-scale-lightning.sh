@@ -21,15 +21,18 @@ source "$SCRIPT_DIR/_common.sh"
 
 # Configuration
 TOTAL_NODES=12
-RESERVES_AMOUNT=100000000  # 1 BTC - channel size will match this
+RESERVES_AMOUNT=100000000  # 1 BTC for reserves
 ENFORCEMENT_DELAY=200
-CHANNEL_AMOUNT=$RESERVES_AMOUNT  # Match reserves size
+CHANNEL_AMOUNT=10000000    # 0.1 BTC - must be under LDK's 16.7M sat limit
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
         --reserves)
             RESERVES_AMOUNT="$2"
+            shift 2
+            ;;
+        --channel-size)
             CHANNEL_AMOUNT="$2"
             shift 2
             ;;
@@ -39,7 +42,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 [--reserves N] [--nodes N]"
+            echo "Usage: $0 [--reserves N] [--channel-size N] [--nodes N]"
             exit 1
             ;;
     esac
