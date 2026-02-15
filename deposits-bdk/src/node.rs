@@ -531,13 +531,6 @@ impl Node {
             return;
         }
 
-        tracing::info!(
-            "Ledger request: action={}, ledger={}..., event={}...",
-            request.action,
-            &request.ledger_id[..16.min(request.ledger_id.len())],
-            &request.event_id[..16.min(request.event_id.len())]
-        );
-
         // Check if this request is for a ledger we own or have joined
         let is_our_ledger = self.get_ledger_by_ledger_id(&request.ledger_id).is_some()
             || self.get_ledger_by_reserves_key(&request.ledger_id).is_some();
@@ -547,22 +540,23 @@ impl Node {
         // (we may not have the full ledger locally, just a QuorumJoin record)
         let is_cosign_request = request.action == "cosign_update";
 
-        if !is_our_ledger && !is_cross_ledger_sign && !is_cosign_request {
-            tracing::debug!("Skipping request for unknown ledger: {}", &request.ledger_id[..16]);
-            return;
-        }
-
-        // Some actions are operator-only - non-operators should silently skip
-        // (the actual operator will handle these and send the response)
+        // Silently drop operator-only actions if we're not the operator
+        // (these are broadcast but only the operator should respond)
         let operator_only_actions = ["deposit_open", "make_offer", "withdraw", "collateral_lock", "offer_status", "balance_query"];
         if operator_only_actions.contains(&request.action.as_str()) && !self.is_operator_of_ledger(&request.ledger_id) {
-            tracing::debug!(
-                "Skipping operator-only action '{}' for ledger {} - we're not the operator",
-                request.action,
-                &request.ledger_id[..16.min(request.ledger_id.len())]
-            );
-            return; // No response - the actual operator will respond
+            return; // Silent drop - the actual operator will respond
         }
+
+        if !is_our_ledger && !is_cross_ledger_sign && !is_cosign_request {
+            return; // Silent drop - not our concern
+        }
+
+        tracing::info!(
+            "Ledger request: action={}, ledger={}..., event={}...",
+            request.action,
+            &request.ledger_id[..16.min(request.ledger_id.len())],
+            &request.event_id[..16.min(request.event_id.len())]
+        );
 
         // Process the request based on action
         let (success, result, error) = match request.action.as_str() {
