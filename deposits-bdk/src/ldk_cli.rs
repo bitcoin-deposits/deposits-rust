@@ -12,7 +12,9 @@
 //! - Shell out to ldk-server-cli (fallback if HTTP fails)
 
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
+use bitcoin::hashes::{Hash, HashEngine, sha256, hmac::{Hmac, HmacEngine}};
 
 use crate::Error;
 
@@ -80,14 +82,35 @@ impl LdkCli {
         format!("https://{}:{}", self.config.host, self.config.port)
     }
 
+    /// Compute the HMAC-SHA256 authentication header value.
+    /// Format: "HMAC <timestamp>:<hmac_hex>"
+    fn compute_auth_header(&self, body: &[u8]) -> String {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("System time should be after Unix epoch")
+            .as_secs();
+
+        // Compute HMAC-SHA256(api_key, timestamp_bytes || body)
+        let mut hmac_engine: HmacEngine<sha256::Hash> = HmacEngine::new(self.config.api_key.as_bytes());
+        hmac_engine.input(&timestamp.to_be_bytes());
+        hmac_engine.input(body);
+        let hmac_result = Hmac::<sha256::Hash>::from_engine(hmac_engine);
+
+        format!("HMAC {}:{}", timestamp, hmac_result)
+    }
+
     /// Make an HTTP POST request to the LDK server
     fn http_post<T: Serialize, R: for<'de> Deserialize<'de>>(&self, endpoint: &str, body: &T) -> Result<R, Error> {
         let url = format!("{}{}", self.base_url(), endpoint);
+        let body_bytes = serde_json::to_vec(body)
+            .map_err(|e| Error::Protocol(format!("Failed to serialize request: {}", e)))?;
+        let auth_header = self.compute_auth_header(&body_bytes);
 
         let response = self.http_client
             .post(&url)
-            .header("X-Auth", &self.config.api_key)
-            .json(body)
+            .header("X-Auth", auth_header)
+            .header("Content-Type", "application/json")
+            .body(body_bytes)
             .send()
             .map_err(|e| Error::Protocol(format!("HTTP request failed: {}", e)))?;
 
@@ -104,10 +127,11 @@ impl LdkCli {
     /// Make an HTTP GET request to the LDK server
     fn http_get<R: for<'de> Deserialize<'de>>(&self, endpoint: &str) -> Result<R, Error> {
         let url = format!("{}{}", self.base_url(), endpoint);
+        let auth_header = self.compute_auth_header(&[]);
 
         let response = self.http_client
             .get(&url)
-            .header("X-Auth", &self.config.api_key)
+            .header("X-Auth", auth_header)
             .send()
             .map_err(|e| Error::Protocol(format!("HTTP request failed: {}", e)))?;
 
