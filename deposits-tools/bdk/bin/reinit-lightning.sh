@@ -47,6 +47,17 @@ done
 
 log_info "=== Reinitializing BDK + Lightning Test Network ==="
 
+# Stop any eve containers from setup-scale.sh (not managed by compose)
+log_info "Cleaning up eve containers..."
+for c in $(docker ps -aq --filter 'name=bdk-eve'); do
+    docker stop "$c" 2>/dev/null || true
+    docker rm "$c" 2>/dev/null || true
+done
+# Remove eve volumes
+for v in $(docker volume ls -q --filter 'name=bdk_bdk-eve'); do
+    docker volume rm "$v" 2>/dev/null || true
+done
+
 # Stop everything
 log_info "Stopping all containers..."
 $DC_LIGHTNING down -v --remove-orphans 2>/dev/null || true
@@ -90,6 +101,10 @@ $DC_LIGHTNING up -d bdk-alice bdk-bob bdk-charlie bdk-diana
 # Start LDK nodes
 log_info "Starting LDK nodes..."
 $DC_LIGHTNING up -d bdk-alice-ln bdk-bob-ln
+
+# Start monitoring stack
+log_info "Starting monitoring (Prometheus + Grafana)..."
+$DC_LIGHTNING up -d prometheus grafana
 
 # Wait for LDK nodes to start and generate TLS certs
 log_info "Waiting for LDK nodes to initialize..."
@@ -226,16 +241,32 @@ fi
 
 log_success "=== BDK + Lightning Test Network Ready ==="
 
+echo ""
 log_info "Service status:"
 $DC_LIGHTNING ps
 
+echo ""
 log_info "Block height: $(get_block_height)"
 
-log_info ""
-log_info "LDK nodes:"
-log_info "  bdk-alice-ln: API at https://localhost:3111"
-log_info "  bdk-bob-ln:   API at https://localhost:3112"
-log_info ""
+echo ""
+log_info "Useful commands:"
+echo "  Follow logs:    $DC_LIGHTNING logs -f"
+echo "  Alice logs:     $DC_LIGHTNING logs -f bdk-alice"
+echo "  Mine blocks:    docker exec bdk-bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass -rpcwallet=faucet -generate 1"
+
+echo ""
+log_info "Services:"
+echo "  Nostr relay:    ws://localhost:7778"
+echo "  Electrs:        http://localhost:3102"
+echo "  Prometheus:     http://localhost:9090"
+echo "  Grafana:        http://localhost:3010 (admin/admin)"
+
+echo ""
+log_info "LDK Lightning nodes:"
+echo "  bdk-alice-ln:   API at https://localhost:3111"
+echo "  bdk-bob-ln:     API at https://localhost:3112"
+
+echo ""
 log_info "Next steps:"
-log_info "  1. Open channel: ./bin/test-lightning.sh open-channel"
-log_info "  2. Run full test: ./bin/test-lightning.sh"
+echo "  1. Run payment simulator: ./bin/payment-simulator.py --lightning --network regtest"
+echo "  2. Run full test: ./bin/test-lightning.sh"
