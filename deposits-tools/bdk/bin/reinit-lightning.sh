@@ -58,6 +58,17 @@ for v in $(docker volume ls -q --filter 'name=bdk_bdk-eve'); do
     docker volume rm "$v" 2>/dev/null || true
 done
 
+# Stop LDK sidecar containers explicitly (may not be managed by compose)
+log_info "Cleaning up LDK containers..."
+for node in alice bob charlie diana; do
+    docker stop "bdk-${node}-ln" 2>/dev/null || true
+    docker rm "bdk-${node}-ln" 2>/dev/null || true
+done
+# Remove LDK volumes
+for v in $(docker volume ls -q --filter 'name=ldk_'); do
+    docker volume rm "$v" 2>/dev/null || true
+done
+
 # Stop everything
 log_info "Stopping all containers..."
 $DC_LIGHTNING down -v --remove-orphans 2>/dev/null || true
