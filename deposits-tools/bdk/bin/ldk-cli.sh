@@ -23,9 +23,11 @@ fi
 case "$NODE" in
     alice)   PORT=3111 ;;
     bob)     PORT=3112 ;;
+    charlie) PORT=3113 ;;
+    diana)   PORT=3114 ;;
     *)
         echo "Unknown node: $NODE"
-        echo "Valid nodes: alice, bob"
+        echo "Valid nodes: alice, bob, charlie, diana"
         exit 1
         ;;
 esac

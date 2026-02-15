@@ -77,35 +77,107 @@ services:
       bdk_network:
         ipv4_address: 172.21.0.41
 
-  # Override BDK Alice to add Lightning CLI and connection info
+  # LDK Node for Charlie - Lightning sidecar
+  bdk-charlie-ln:
+    image: bdk-ldk-node:latest
+    container_name: bdk-charlie-ln
+    environment:
+      - NODE_NAME=charlie
+      - LDK_DATA_DIR=/ldk
+      - ELECTRUM_HOST=electrs
+      - ELECTRUM_PORT=3002
+      - LISTEN_PORT=9737
+      - RUST_LOG=info,ldk_node=debug
+      - RUST_BACKTRACE=0
+      - LDK_ONCHAIN_WALLET_SYNC_INTERVAL_SECS=10
+      - LDK_LIGHTNING_WALLET_SYNC_INTERVAL_SECS=10
+    ports:
+      - "9837:9737"   # Lightning P2P
+      - "3113:3000"   # API port
+    volumes:
+      - ldk_charlie_data:/ldk
+      - ldk_cli:/ldk-cli
+    depends_on:
+      bitcoin:
+        condition: service_healthy
+      electrs:
+        condition: service_started
+    networks:
+      bdk_network:
+        ipv4_address: 172.21.0.42
+
+  # LDK Node for Diana - Lightning sidecar
+  bdk-diana-ln:
+    image: bdk-ldk-node:latest
+    container_name: bdk-diana-ln
+    environment:
+      - NODE_NAME=diana
+      - LDK_DATA_DIR=/ldk
+      - ELECTRUM_HOST=electrs
+      - ELECTRUM_PORT=3002
+      - LISTEN_PORT=9738
+      - RUST_LOG=info,ldk_node=debug
+      - RUST_BACKTRACE=0
+      - LDK_ONCHAIN_WALLET_SYNC_INTERVAL_SECS=10
+      - LDK_LIGHTNING_WALLET_SYNC_INTERVAL_SECS=10
+    ports:
+      - "9838:9738"   # Lightning P2P
+      - "3114:3000"   # API port
+    volumes:
+      - ldk_diana_data:/ldk
+      - ldk_cli:/ldk-cli
+    depends_on:
+      bitcoin:
+        condition: service_healthy
+      electrs:
+        condition: service_started
+    networks:
+      bdk_network:
+        ipv4_address: 172.21.0.43
+
+  # Override BDK Alice to add Lightning connection info
   bdk-alice:
     environment:
       - RUST_LOG=info,deposits_bdk=debug
-      - LDK_CLI=/ldk-cli/ldk-server-cli
       - LDK_HOST=bdk-alice-ln
       - LDK_PORT=3000
       - LDK_API_KEY=test_api_key
-      - LDK_TLS_CERT=/ldk-certs/tls.crt
     volumes:
       - bdk_alice_data:/data
-      - ldk_cli:/ldk-cli:ro
-      - ldk_alice_data:/ldk-certs:ro  # Mount LDK data for TLS cert
 
   # Override BDK Bob to add Lightning CLI and connection info
   bdk-bob:
     environment:
       - RUST_LOG=info,deposits_bdk=debug
-      - LDK_CLI=/ldk-cli/ldk-server-cli
       - LDK_HOST=bdk-bob-ln
       - LDK_PORT=3000
       - LDK_API_KEY=test_api_key
-      - LDK_TLS_CERT=/ldk-certs/tls.crt
     volumes:
       - bdk_bob_data:/data
-      - ldk_cli:/ldk-cli:ro
-      - ldk_bob_data:/ldk-certs:ro  # Mount LDK data for TLS cert
+
+  # Override BDK Charlie to add Lightning connection info
+  bdk-charlie:
+    environment:
+      - RUST_LOG=info,deposits_bdk=debug
+      - LDK_HOST=bdk-charlie-ln
+      - LDK_PORT=3000
+      - LDK_API_KEY=test_api_key
+    volumes:
+      - bdk_charlie_data:/data
+
+  # Override BDK Diana to add Lightning connection info
+  bdk-diana:
+    environment:
+      - RUST_LOG=info,deposits_bdk=debug
+      - LDK_HOST=bdk-diana-ln
+      - LDK_PORT=3000
+      - LDK_API_KEY=test_api_key
+    volumes:
+      - bdk_diana_data:/data
 
 volumes:
   ldk_alice_data:
   ldk_bob_data:
+  ldk_charlie_data:
+  ldk_diana_data:
   ldk_cli:  # Shared volume for ldk-server-cli binary

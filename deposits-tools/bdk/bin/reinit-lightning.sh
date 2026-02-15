@@ -100,7 +100,7 @@ $DC_LIGHTNING up -d bdk-alice bdk-bob bdk-charlie bdk-diana
 
 # Start LDK nodes
 log_info "Starting LDK nodes..."
-$DC_LIGHTNING up -d bdk-alice-ln bdk-bob-ln
+$DC_LIGHTNING up -d bdk-alice-ln bdk-bob-ln bdk-charlie-ln bdk-diana-ln
 
 # Start monitoring stack
 log_info "Starting monitoring (Prometheus + Grafana)..."
@@ -114,7 +114,7 @@ sleep 10
 log_info "Copying TLS certificates..."
 rm -rf "$BDK_DIR/certs"
 mkdir -p "$BDK_DIR/certs"
-for node in alice bob; do
+for node in alice bob charlie diana; do
     for attempt in 1 2 3 4 5; do
         if docker cp "bdk-${node}-ln:/ldk/tls.crt" "$BDK_DIR/certs/${node}.crt" 2>/dev/null; then
             log_success "Copied TLS cert for $node"
@@ -166,6 +166,8 @@ fund_ldk_node() {
 
 fund_ldk_node "alice" 2
 fund_ldk_node "bob" 2
+fund_ldk_node "charlie" 2
+fund_ldk_node "diana" 2
 
 # Mine blocks
 mine_blocks 6
@@ -190,54 +192,63 @@ wait_for_ldk_balance() {
 
 wait_for_ldk_balance "alice"
 wait_for_ldk_balance "bob"
+wait_for_ldk_balance "charlie"
+wait_for_ldk_balance "diana"
 
-# Open channel between Alice and Bob
-log_info "Opening Lightning channel between bdk-alice-ln and bdk-bob-ln..."
+# Open channels in a ring: Alice <-> Bob <-> Charlie <-> Diana <-> Alice
+log_info "Opening Lightning channels (ring topology)..."
 
 CHANNEL_AMOUNT=5000000  # 5M sats
 
-# Get Bob's pubkey
-bob_pubkey=$(ldk_cli bob get-node-info 2>/dev/null | jq -r '.node_id // empty' || echo "")
-if [ -z "$bob_pubkey" ]; then
-    log_warn "Could not get Bob's pubkey, skipping channel open"
-else
-    # Check if channel already exists
-    existing=$(ldk_cli alice list-channels 2>/dev/null | jq -r ".channels[] | select(.counterparty_node_id == \"$bob_pubkey\") | .channel_id" 2>/dev/null || echo "")
+open_channel() {
+    local from=$1
+    local to=$2
+    local to_port=$3
 
-    if [ -n "$existing" ]; then
-        log_info "Channel already exists: ${existing:0:16}..."
-    else
-        # Open channel with 50/50 balance
-        push_msat=$((CHANNEL_AMOUNT * 500))
-        result=$(ldk_cli alice open-channel \
-            --node-pubkey "$bob_pubkey" \
-            --address "bdk-bob-ln:9736" \
-            --channel-amount-sats "$CHANNEL_AMOUNT" \
-            --push-to-counterparty-msat "$push_msat" \
-            --announce-channel 2>&1) || true
-
-        user_channel_id=$(echo "$result" | jq -r '.user_channel_id // empty' 2>/dev/null || echo "")
-        if [ -n "$user_channel_id" ]; then
-            log_info "Channel opening: ${user_channel_id:0:16}..."
-
-            # Mine blocks to confirm
-            mine_blocks 6
-
-            # Wait for channel to be ready
-            log_info "Waiting for channel to be ready..."
-            for i in 1 2 3 4 5 6 7 8 9 10; do
-                ready=$(ldk_cli alice list-channels 2>/dev/null | jq -r ".channels[] | select(.counterparty_node_id == \"$bob_pubkey\") | .is_channel_ready" 2>/dev/null || echo "false")
-                if [ "$ready" = "true" ]; then
-                    log_success "Channel opened and ready!"
-                    break
-                fi
-                sleep 3
-            done
-        else
-            log_warn "Channel open response: $result"
-        fi
+    local to_pubkey=$(ldk_cli "$to" get-node-info 2>/dev/null | jq -r '.node_id // empty' || echo "")
+    if [ -z "$to_pubkey" ]; then
+        log_warn "Could not get $to's pubkey, skipping channel"
+        return 1
     fi
-fi
+
+    # Check if channel already exists
+    local existing=$(ldk_cli "$from" list-channels 2>/dev/null | jq -r ".channels[] | select(.counterparty_node_id == \"$to_pubkey\") | .channel_id" 2>/dev/null || echo "")
+    if [ -n "$existing" ]; then
+        log_info "Channel $from -> $to already exists"
+        return 0
+    fi
+
+    log_info "Opening channel: $from -> $to..."
+    local push_msat=$((CHANNEL_AMOUNT * 500))
+    local result=$(ldk_cli "$from" open-channel \
+        --node-pubkey "$to_pubkey" \
+        --address "bdk-${to}-ln:${to_port}" \
+        --channel-amount-sats "$CHANNEL_AMOUNT" \
+        --push-to-counterparty-msat "$push_msat" \
+        --announce-channel 2>&1) || true
+
+    local user_channel_id=$(echo "$result" | jq -r '.user_channel_id // empty' 2>/dev/null || echo "")
+    if [ -n "$user_channel_id" ]; then
+        log_success "Channel $from -> $to opening: ${user_channel_id:0:16}..."
+        return 0
+    else
+        log_warn "Channel $from -> $to failed: $result"
+        return 1
+    fi
+}
+
+# Open ring: Alice -> Bob -> Charlie -> Diana -> Alice
+open_channel "alice" "bob" "9736"
+open_channel "bob" "charlie" "9737"
+open_channel "charlie" "diana" "9738"
+open_channel "diana" "alice" "9735"
+
+# Mine blocks to confirm all channels
+mine_blocks 6
+
+# Wait for channels to be ready
+log_info "Waiting for channels to be ready..."
+sleep 10
 
 log_success "=== BDK + Lightning Test Network Ready ==="
 
@@ -265,6 +276,10 @@ echo ""
 log_info "LDK Lightning nodes:"
 echo "  bdk-alice-ln:   API at https://localhost:3111"
 echo "  bdk-bob-ln:     API at https://localhost:3112"
+echo "  bdk-charlie-ln: API at https://localhost:3113"
+echo "  bdk-diana-ln:   API at https://localhost:3114"
+echo ""
+echo "Channel topology: Alice <-> Bob <-> Charlie <-> Diana <-> Alice (ring)"
 
 echo ""
 log_info "Next steps:"
