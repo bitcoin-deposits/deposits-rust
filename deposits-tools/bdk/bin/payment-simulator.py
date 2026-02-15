@@ -445,6 +445,7 @@ def run_simulation(
                             print(f"  Funding via Lightning from {funder.alias}...")
                             if fund_deposit_lightning(funder, alias, funding_amount_sats):
                                 deposit.status = "funded"
+                                deposit.balance_sats = funding_amount_sats  # Update recipient balance
                                 print(f"  Deposit funded via Lightning")
                             else:
                                 # Fall back to faucet
@@ -464,19 +465,22 @@ def run_simulation(
 
             # Make payments (withdrawals) periodically
             if now - last_payment_time >= payment_interval and len(our_deposits) >= 2:
-                # Sync balances from ledger
-                balances = sync_and_get_balances()
-
-                # Update deposit balances and find ones with actual balance
-                for d in our_deposits:
-                    if d.alias in balances:
-                        d.balance_sats = balances[d.alias]
-                        if d.balance_sats > 0:
-                            d.status = "credited"
-
                 # Find deposits with sufficient balance (need balance > payment + fee)
                 min_balance_needed = max_payment_sats + 1000  # payment + fee buffer
                 funded = [d for d in our_deposits if d.balance_sats >= min_balance_needed]
+
+                # Only sync if we don't have enough funded deposits yet
+                # (avoids constant syncing once Lightning funding is working)
+                if len(funded) < 2:
+                    balances = sync_and_get_balances()
+                    # Update deposit balances from ledger
+                    for d in our_deposits:
+                        if d.alias in balances:
+                            d.balance_sats = balances[d.alias]
+                            if d.balance_sats > 0:
+                                d.status = "credited"
+                    # Recalculate funded list after sync
+                    funded = [d for d in our_deposits if d.balance_sats >= min_balance_needed]
 
                 if len(funded) >= 2:
                     # Pick sender and receiver
@@ -491,8 +495,9 @@ def run_simulation(
                         if lightning:
                             print(f"\n[{time.strftime('%H:%M:%S')}] Lightning: {sender.alias} ({sender.balance_sats} sats) -> {receiver.alias}")
                             if lightning_payment(sender, receiver, amount):
-                                # Lightning is instant, no mining needed
+                                # Lightning is instant, update both balances
                                 sender.balance_sats -= amount
+                                receiver.balance_sats += amount
                         else:
                             print(f"\n[{time.strftime('%H:%M:%S')}] Payment: {sender.alias} ({sender.balance_sats} sats) -> {receiver.alias}")
                             if withdraw_to(sender.alias, receiver.funding_address, amount):
