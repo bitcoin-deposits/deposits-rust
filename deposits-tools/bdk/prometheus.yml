@@ -60,3 +60,11 @@ scrape_configs:
         labels:
           cluster: 'bdk-regtest'
           node_type: 'eve'
+
+  # Payment simulator (runs on host, exposes metrics on port 9200)
+  - job_name: 'payment-simulator'
+    static_configs:
+      - targets:
+          - 'host.docker.internal:9200'
+        labels:
+          cluster: 'bdk-regtest'

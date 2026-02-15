@@ -25,26 +25,71 @@ import secrets
 import subprocess
 import sys
 import time
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
+# Prometheus metrics (optional - gracefully degrade if not installed)
+try:
+    from prometheus_client import Counter, Gauge, start_http_server
+    PROMETHEUS_AVAILABLE = True
+except ImportError:
+    PROMETHEUS_AVAILABLE = False
+    print("Note: prometheus_client not installed, metrics will not be exported to Grafana")
+    print("      Install with: pip install prometheus_client")
 
 
 # Configuration
 SCRIPT_DIR = Path(__file__).parent.resolve()
 WALLET_SH = SCRIPT_DIR / "wallet.sh"
 DATA_DIR = Path.home() / ".deposits-wallet"
+METRICS_PORT = 9200  # Prometheus metrics port
 
 # Global payment counter - used to make each invoice unique by adding msat offset
 PAYMENT_COUNTER = 0
 
-# Payment metrics
+# Payment metrics (local counters)
 PAYMENTS_SUCCESS = 0
 PAYMENTS_FAILED = 0
 VOLUME_SATS = 0
 FUNDING_SUCCESS = 0
 FUNDING_FAILED = 0
 FUNDING_VOLUME_SATS = 0
+
+# Prometheus metrics (if available)
+if PROMETHEUS_AVAILABLE:
+    PROM_PAYMENTS_TOTAL = Counter(
+        'simulator_payments_total',
+        'Total number of Lightning payments attempted',
+        ['status']  # 'success' or 'failed'
+    )
+    PROM_PAYMENTS_SATS = Counter(
+        'simulator_payments_sats_total',
+        'Total sats transferred via Lightning payments'
+    )
+    PROM_FUNDING_TOTAL = Counter(
+        'simulator_funding_total',
+        'Total number of Lightning funding operations attempted',
+        ['status']  # 'success' or 'failed'
+    )
+    PROM_FUNDING_SATS = Counter(
+        'simulator_funding_sats_total',
+        'Total sats transferred via Lightning funding'
+    )
+    PROM_DEPOSITS_COUNT = Gauge(
+        'simulator_deposits_count',
+        'Current number of deposits',
+        ['status']  # 'total', 'funded'
+    )
+    PROM_DEPOSITS_BALANCE = Gauge(
+        'simulator_deposits_balance_sats',
+        'Total balance across all deposits in sats'
+    )
+    PROM_LEDGERS_COUNT = Gauge(
+        'simulator_ledgers_count',
+        'Number of discovered ledgers'
+    )
 
 
 @dataclass
@@ -314,6 +359,8 @@ def lightning_payment(sender: Deposit, receiver: Deposit, amount_sats: int) -> O
     invoice = make_invoice(receiver.alias, unique_amount)
     if not invoice:
         PAYMENTS_FAILED += 1
+        if PROMETHEUS_AVAILABLE:
+            PROM_PAYMENTS_TOTAL.labels(status='failed').inc()
         return None
 
     print(f"  Invoice: {invoice[:50]}...")
@@ -323,9 +370,14 @@ def lightning_payment(sender: Deposit, receiver: Deposit, amount_sats: int) -> O
         print(f"  Lightning payment #{PAYMENT_COUNTER} successful!")
         PAYMENTS_SUCCESS += 1
         VOLUME_SATS += unique_amount
+        if PROMETHEUS_AVAILABLE:
+            PROM_PAYMENTS_TOTAL.labels(status='success').inc()
+            PROM_PAYMENTS_SATS.inc(unique_amount)
         return unique_amount
 
     PAYMENTS_FAILED += 1
+    if PROMETHEUS_AVAILABLE:
+        PROM_PAYMENTS_TOTAL.labels(status='failed').inc()
     return None
 
 
@@ -347,6 +399,8 @@ def fund_deposit_lightning(funder: Deposit, recipient_alias: str, amount_sats: i
     invoice = make_invoice(recipient_alias, unique_amount)
     if not invoice:
         FUNDING_FAILED += 1
+        if PROMETHEUS_AVAILABLE:
+            PROM_FUNDING_TOTAL.labels(status='failed').inc()
         return False
 
     print(f"  Invoice: {invoice[:50]}...")
@@ -357,10 +411,15 @@ def fund_deposit_lightning(funder: Deposit, recipient_alias: str, amount_sats: i
         funder.balance_sats -= unique_amount
         FUNDING_SUCCESS += 1
         FUNDING_VOLUME_SATS += unique_amount
+        if PROMETHEUS_AVAILABLE:
+            PROM_FUNDING_TOTAL.labels(status='success').inc()
+            PROM_FUNDING_SATS.inc(unique_amount)
         return True
 
     print(f"  Warning: Lightning funding failed")
     FUNDING_FAILED += 1
+    if PROMETHEUS_AVAILABLE:
+        PROM_FUNDING_TOTAL.labels(status='failed').inc()
     return False
 
 
@@ -404,6 +463,11 @@ def run_simulation(
     # Lightning payments are instant, so we can run 10x faster
     if lightning and payment_interval == 2.0:
         payment_interval = 0.2
+
+    # Start Prometheus metrics server for Lightning mode
+    if lightning and PROMETHEUS_AVAILABLE:
+        start_http_server(METRICS_PORT)
+        print(f"Prometheus metrics available at http://localhost:{METRICS_PORT}/metrics")
 
     print("=" * 60)
     print("Bitcoin Deposits Payment Simulator")
@@ -576,6 +640,12 @@ def run_simulation(
                     total_payments = PAYMENTS_SUCCESS + PAYMENTS_FAILED
                     total_funding = FUNDING_SUCCESS + FUNDING_FAILED
                     print(f"  Payments: {PAYMENTS_SUCCESS}/{total_payments} ({VOLUME_SATS:,} sats) | Funding: {FUNDING_SUCCESS}/{total_funding} ({FUNDING_VOLUME_SATS:,} sats)")
+                    # Update Prometheus gauges
+                    if PROMETHEUS_AVAILABLE:
+                        PROM_DEPOSITS_COUNT.labels(status='total').set(len(our_deposits))
+                        PROM_DEPOSITS_COUNT.labels(status='funded').set(funded_count)
+                        PROM_DEPOSITS_BALANCE.set(total_balance)
+                        PROM_LEDGERS_COUNT.set(len(ledgers))
 
             time.sleep(0.1)
 
