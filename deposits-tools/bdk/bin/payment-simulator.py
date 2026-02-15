@@ -301,6 +301,29 @@ def lightning_payment(sender: Deposit, receiver: Deposit, amount_sats: int) -> b
     return False
 
 
+def fund_deposit_lightning(funder: Deposit, recipient_alias: str, amount_sats: int) -> bool:
+    """
+    Fund a new deposit via Lightning from an existing funded deposit.
+    1. Create invoice for the new deposit
+    2. Pay it from the funder deposit
+    """
+    print(f"  Creating invoice for {recipient_alias}...")
+    invoice = make_invoice(recipient_alias, amount_sats)
+    if not invoice:
+        return False
+
+    print(f"  Invoice: {invoice[:40]}...")
+    print(f"  Paying from {funder.alias}...")
+
+    if pay_invoice(funder.alias, invoice):
+        print(f"  Lightning funding successful!")
+        funder.balance_sats -= amount_sats
+        return True
+
+    print(f"  Warning: Lightning funding failed")
+    return False
+
+
 def mine_block(network: str = "regtest"):
     """Mine a block to confirm transactions (regtest only)"""
     if network != "regtest":
@@ -406,13 +429,32 @@ def run_simulation(
                     if deposit:
                         our_deposits.append(deposit)
 
-                        # Fund it
+                        # Fund it - use Lightning if enabled and we have a funded deposit
                         print(f"[{time.strftime('%H:%M:%S')}] Funding {alias}...")
-                        if fund_deposit(alias):
-                            # Mine block to confirm funding tx (regtest only)
-                            mine_block(network)
-                            deposit.status = "funded"
-                            print(f"  Deposit funded, waiting for balance sync")
+
+                        # Find a deposit with enough balance to fund via Lightning
+                        funded_deposits = [d for d in our_deposits if d.balance_sats >= funding_amount_sats + 1000 and d.alias != alias]
+
+                        if lightning and funded_deposits:
+                            # Fund via Lightning from existing deposit
+                            funder = random.choice(funded_deposits)
+                            print(f"  Funding via Lightning from {funder.alias}...")
+                            if fund_deposit_lightning(funder, alias, funding_amount_sats):
+                                deposit.status = "funded"
+                                print(f"  Deposit funded via Lightning")
+                            else:
+                                # Fall back to faucet
+                                print(f"  Lightning funding failed, falling back to faucet...")
+                                if fund_deposit(alias):
+                                    mine_block(network)
+                                    deposit.status = "funded"
+                                    print(f"  Deposit funded via faucet")
+                        else:
+                            # Fund via faucet (on-chain)
+                            if fund_deposit(alias):
+                                mine_block(network)
+                                deposit.status = "funded"
+                                print(f"  Deposit funded, waiting for balance sync")
 
                 last_wallet_time = now
 
