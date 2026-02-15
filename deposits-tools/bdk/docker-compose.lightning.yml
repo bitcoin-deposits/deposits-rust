@@ -44,7 +44,7 @@ services:
         condition: service_started
     networks:
       bdk_network:
-        ipv4_address: 172.21.0.40
+        ipv4_address: 172.21.0.50
 
   # LDK Node for Bob - Lightning sidecar
   bdk-bob-ln:
@@ -75,7 +75,7 @@ services:
         condition: service_started
     networks:
       bdk_network:
-        ipv4_address: 172.21.0.41
+        ipv4_address: 172.21.0.51
 
   # LDK Node for Charlie - Lightning sidecar
   bdk-charlie-ln:
@@ -104,7 +104,7 @@ services:
         condition: service_started
     networks:
       bdk_network:
-        ipv4_address: 172.21.0.42
+        ipv4_address: 172.21.0.52
 
   # LDK Node for Diana - Lightning sidecar
   bdk-diana-ln:
@@ -133,7 +133,7 @@ services:
         condition: service_started
     networks:
       bdk_network:
-        ipv4_address: 172.21.0.43
+        ipv4_address: 172.21.0.53
 
   # Override BDK Alice to add Lightning connection info
   bdk-alice:
