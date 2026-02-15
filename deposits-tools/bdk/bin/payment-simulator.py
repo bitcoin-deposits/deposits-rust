@@ -38,6 +38,14 @@ DATA_DIR = Path.home() / ".deposits-wallet"
 # Global payment counter - used to make each invoice unique by adding msat offset
 PAYMENT_COUNTER = 0
 
+# Payment metrics
+PAYMENTS_SUCCESS = 0
+PAYMENTS_FAILED = 0
+VOLUME_SATS = 0
+FUNDING_SUCCESS = 0
+FUNDING_FAILED = 0
+FUNDING_VOLUME_SATS = 0
+
 
 @dataclass
 class Deposit:
@@ -296,7 +304,7 @@ def lightning_payment(sender: Deposit, receiver: Deposit, amount_sats: int) -> O
     Uses PAYMENT_COUNTER to ensure unique invoice amounts.
     Returns the actual amount paid (with counter offset) on success, None on failure.
     """
-    global PAYMENT_COUNTER
+    global PAYMENT_COUNTER, PAYMENTS_SUCCESS, PAYMENTS_FAILED, VOLUME_SATS
     PAYMENT_COUNTER += 1
 
     # Add counter as extra sats to ensure unique payment hash
@@ -305,6 +313,7 @@ def lightning_payment(sender: Deposit, receiver: Deposit, amount_sats: int) -> O
     print(f"  Creating invoice for {receiver.alias} ({unique_amount} sats, payment #{PAYMENT_COUNTER})...")
     invoice = make_invoice(receiver.alias, unique_amount)
     if not invoice:
+        PAYMENTS_FAILED += 1
         return None
 
     print(f"  Invoice: {invoice[:50]}...")
@@ -312,8 +321,11 @@ def lightning_payment(sender: Deposit, receiver: Deposit, amount_sats: int) -> O
 
     if pay_invoice(sender.alias, invoice):
         print(f"  Lightning payment #{PAYMENT_COUNTER} successful!")
+        PAYMENTS_SUCCESS += 1
+        VOLUME_SATS += unique_amount
         return unique_amount
 
+    PAYMENTS_FAILED += 1
     return None
 
 
@@ -325,7 +337,7 @@ def fund_deposit_lightning(funder: Deposit, recipient_alias: str, amount_sats: i
 
     Uses PAYMENT_COUNTER to ensure unique invoice amounts.
     """
-    global PAYMENT_COUNTER
+    global PAYMENT_COUNTER, FUNDING_SUCCESS, FUNDING_FAILED, FUNDING_VOLUME_SATS
     PAYMENT_COUNTER += 1
 
     # Add counter as extra sats to ensure unique payment hash
@@ -334,6 +346,7 @@ def fund_deposit_lightning(funder: Deposit, recipient_alias: str, amount_sats: i
     print(f"  Creating invoice for {recipient_alias} ({unique_amount} sats, funding #{PAYMENT_COUNTER})...")
     invoice = make_invoice(recipient_alias, unique_amount)
     if not invoice:
+        FUNDING_FAILED += 1
         return False
 
     print(f"  Invoice: {invoice[:50]}...")
@@ -342,9 +355,12 @@ def fund_deposit_lightning(funder: Deposit, recipient_alias: str, amount_sats: i
     if pay_invoice(funder.alias, invoice):
         print(f"  Lightning funding #{PAYMENT_COUNTER} successful!")
         funder.balance_sats -= unique_amount
+        FUNDING_SUCCESS += 1
+        FUNDING_VOLUME_SATS += unique_amount
         return True
 
     print(f"  Warning: Lightning funding failed")
+    FUNDING_FAILED += 1
     return False
 
 
@@ -556,12 +572,21 @@ def run_simulation(
                 funded_count = len([d for d in our_deposits if d.balance_sats > 0])
                 total_balance = sum(d.balance_sats for d in our_deposits)
                 print(f"\n[{time.strftime('%H:%M:%S')}] Status: {len(ledgers)} ledgers, {len(our_deposits)}/{num_wallets} wallets, {funded_count} funded, {total_balance} sats")
+                if lightning:
+                    total_payments = PAYMENTS_SUCCESS + PAYMENTS_FAILED
+                    total_funding = FUNDING_SUCCESS + FUNDING_FAILED
+                    print(f"  Payments: {PAYMENTS_SUCCESS}/{total_payments} ({VOLUME_SATS:,} sats) | Funding: {FUNDING_SUCCESS}/{total_funding} ({FUNDING_VOLUME_SATS:,} sats)")
 
             time.sleep(0.1)
 
     except KeyboardInterrupt:
         print("\n\nSimulation stopped by user")
         print(f"Final state: {len(our_deposits)} deposits")
+        if lightning:
+            print(f"\nLightning Metrics:")
+            print(f"  Payments: {PAYMENTS_SUCCESS} success, {PAYMENTS_FAILED} failed, {VOLUME_SATS:,} sats volume")
+            print(f"  Funding:  {FUNDING_SUCCESS} success, {FUNDING_FAILED} failed, {FUNDING_VOLUME_SATS:,} sats volume")
+            print(f"  Total:    {PAYMENTS_SUCCESS + FUNDING_SUCCESS} success, {PAYMENTS_FAILED + FUNDING_FAILED} failed, {VOLUME_SATS + FUNDING_VOLUME_SATS:,} sats")
         for d in our_deposits:
             print(f"  {d.alias}: {d.status} on ledger {d.ledger_id[:16]}...")
 
