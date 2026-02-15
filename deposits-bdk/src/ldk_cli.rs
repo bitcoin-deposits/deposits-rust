@@ -5,13 +5,14 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-//! LDK Server CLI wrapper for Lightning operations
+//! LDK Server client for Lightning operations
 //!
-//! This module provides a wrapper around ldk-server-cli for making Lightning
-//! invoice payments. It shells out to the CLI and parses JSON responses.
+//! This module provides a client for ldk-server's REST API. It can use either:
+//! - Direct HTTP calls (preferred, no external binary needed)
+//! - Shell out to ldk-server-cli (fallback if HTTP fails)
 
 use std::process::Command;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::Error;
 
@@ -52,15 +53,21 @@ impl LdkCliConfig {
     }
 }
 
-/// LDK CLI client
+/// LDK Server client - uses HTTP API directly
 pub struct LdkCli {
     config: LdkCliConfig,
+    http_client: reqwest::blocking::Client,
 }
 
 impl LdkCli {
-    /// Create a new LDK CLI client
+    /// Create a new LDK client
     pub fn new(config: LdkCliConfig) -> Self {
-        Self { config }
+        let http_client = reqwest::blocking::Client::builder()
+            .danger_accept_invalid_certs(true)  // For self-signed certs in dev
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new());
+
+        Self { config, http_client }
     }
 
     /// Create from environment variables
@@ -68,7 +75,53 @@ impl LdkCli {
         Self::new(LdkCliConfig::from_env())
     }
 
-    /// Run a CLI command and return the JSON output
+    /// Get the base URL for the LDK server
+    fn base_url(&self) -> String {
+        format!("http://{}:{}", self.config.host, self.config.port)
+    }
+
+    /// Make an HTTP POST request to the LDK server
+    fn http_post<T: Serialize, R: for<'de> Deserialize<'de>>(&self, endpoint: &str, body: &T) -> Result<R, Error> {
+        let url = format!("{}{}", self.base_url(), endpoint);
+
+        let response = self.http_client
+            .post(&url)
+            .header("x-api-key", &self.config.api_key)
+            .json(body)
+            .send()
+            .map_err(|e| Error::Protocol(format!("HTTP request failed: {}", e)))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().unwrap_or_default();
+            return Err(Error::Protocol(format!("LDK server error {}: {}", status, body)));
+        }
+
+        response.json::<R>()
+            .map_err(|e| Error::Protocol(format!("Failed to parse response: {}", e)))
+    }
+
+    /// Make an HTTP GET request to the LDK server
+    fn http_get<R: for<'de> Deserialize<'de>>(&self, endpoint: &str) -> Result<R, Error> {
+        let url = format!("{}{}", self.base_url(), endpoint);
+
+        let response = self.http_client
+            .get(&url)
+            .header("x-api-key", &self.config.api_key)
+            .send()
+            .map_err(|e| Error::Protocol(format!("HTTP request failed: {}", e)))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().unwrap_or_default();
+            return Err(Error::Protocol(format!("LDK server error {}: {}", status, body)));
+        }
+
+        response.json::<R>()
+            .map_err(|e| Error::Protocol(format!("Failed to parse response: {}", e)))
+    }
+
+    /// Fallback: Run CLI command and return the JSON output
     fn run_command(&self, args: &[&str]) -> Result<String, Error> {
         let mut cmd = Command::new(&self.config.cli_path);
 
@@ -110,8 +163,30 @@ impl LdkCli {
             .map_err(|e| Error::Protocol(format!("Failed to parse balances: {}", e)))
     }
 
-    /// Create a BOLT11 invoice
+    /// Create a BOLT11 invoice via HTTP API
     pub fn create_invoice(&self, amount_msat: u64, description: &str) -> Result<String, Error> {
+        #[derive(Serialize)]
+        struct Bolt11ReceiveRequest {
+            amount_msat: Option<u64>,
+            description: String,
+            expiry_secs: Option<u64>,
+        }
+
+        let request = Bolt11ReceiveRequest {
+            amount_msat: Some(amount_msat),
+            description: description.to_string(),
+            expiry_secs: Some(3600),
+        };
+
+        // Try HTTP first
+        match self.http_post::<_, Bolt11ReceiveResponse>("/bolt11/receive", &request) {
+            Ok(response) => return Ok(response.invoice),
+            Err(e) => {
+                tracing::debug!("HTTP bolt11/receive failed, trying CLI: {}", e);
+            }
+        }
+
+        // Fallback to CLI
         let output = self.run_command(&[
             "bolt11-receive",
             "--amount-msat", &amount_msat.to_string(),
@@ -126,6 +201,28 @@ impl LdkCli {
 
     /// Create a variable amount BOLT11 invoice
     pub fn create_invoice_any_amount(&self, description: &str) -> Result<String, Error> {
+        #[derive(Serialize)]
+        struct Bolt11ReceiveRequest {
+            amount_msat: Option<u64>,
+            description: String,
+            expiry_secs: Option<u64>,
+        }
+
+        let request = Bolt11ReceiveRequest {
+            amount_msat: None,
+            description: description.to_string(),
+            expiry_secs: Some(3600),
+        };
+
+        // Try HTTP first
+        match self.http_post::<_, Bolt11ReceiveResponse>("/bolt11/receive", &request) {
+            Ok(response) => return Ok(response.invoice),
+            Err(e) => {
+                tracing::debug!("HTTP bolt11/receive failed, trying CLI: {}", e);
+            }
+        }
+
+        // Fallback to CLI
         let output = self.run_command(&[
             "bolt11-receive",
             "--description", description,
@@ -137,8 +234,28 @@ impl LdkCli {
         Ok(response.invoice)
     }
 
-    /// Pay a BOLT11 invoice
+    /// Pay a BOLT11 invoice via HTTP API
     pub fn pay_invoice(&self, invoice: &str) -> Result<String, Error> {
+        #[derive(Serialize)]
+        struct Bolt11SendRequest {
+            invoice: String,
+            amount_msat: Option<u64>,
+        }
+
+        let request = Bolt11SendRequest {
+            invoice: invoice.to_string(),
+            amount_msat: None,
+        };
+
+        // Try HTTP first
+        match self.http_post::<_, Bolt11SendResponse>("/bolt11/send", &request) {
+            Ok(response) => return Ok(response.payment_id),
+            Err(e) => {
+                tracing::debug!("HTTP bolt11/send failed, trying CLI: {}", e);
+            }
+        }
+
+        // Fallback to CLI
         let output = self.run_command(&[
             "bolt11-send",
             "--invoice", invoice,
@@ -152,6 +269,26 @@ impl LdkCli {
 
     /// Pay a BOLT11 invoice with a specific amount (for amountless invoices)
     pub fn pay_invoice_with_amount(&self, invoice: &str, amount_msat: u64) -> Result<String, Error> {
+        #[derive(Serialize)]
+        struct Bolt11SendRequest {
+            invoice: String,
+            amount_msat: Option<u64>,
+        }
+
+        let request = Bolt11SendRequest {
+            invoice: invoice.to_string(),
+            amount_msat: Some(amount_msat),
+        };
+
+        // Try HTTP first
+        match self.http_post::<_, Bolt11SendResponse>("/bolt11/send", &request) {
+            Ok(response) => return Ok(response.payment_id),
+            Err(e) => {
+                tracing::debug!("HTTP bolt11/send failed, trying CLI: {}", e);
+            }
+        }
+
+        // Fallback to CLI
         let output = self.run_command(&[
             "bolt11-send",
             "--invoice", invoice,

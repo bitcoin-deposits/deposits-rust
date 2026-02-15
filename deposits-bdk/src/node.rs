@@ -542,7 +542,7 @@ impl Node {
 
         // Silently drop operator-only actions if we're not the operator
         // (these are broadcast but only the operator should respond)
-        let operator_only_actions = ["deposit_open", "make_offer", "withdraw", "collateral_lock", "offer_status", "balance_query"];
+        let operator_only_actions = ["deposit_open", "make_offer", "withdraw", "collateral_lock", "offer_status", "balance_query", "make_invoice", "pay_invoice"];
         if operator_only_actions.contains(&request.action.as_str()) && !self.is_operator_of_ledger(&request.ledger_id) {
             return; // Silent drop - the actual operator will respond
         }
@@ -589,6 +589,8 @@ impl Node {
             }
             "offer_status" => self.process_offer_status_request(&request).await,
             "balance_query" => self.process_balance_query_request(&request).await,
+            "make_invoice" => self.process_make_invoice_request(&request).await,
+            "pay_invoice" => self.process_pay_invoice_request(&request).await,
             _ => {
                 tracing::warn!("Unknown request action: {}", request.action);
                 (false, None, Some(format!("Unknown action: {}", request.action)))
@@ -2948,6 +2950,145 @@ impl Node {
             }
             None => {
                 (false, None, Some(format!("Deposit not found for pubkey: {}...", &deposit_pubkey_hex[..16])))
+            }
+        }
+    }
+
+    /// Process a make_invoice request - create Lightning invoice for deposit credit
+    ///
+    /// Uses LdkCli to talk to the ldk-server sidecar (same as `deposits-bdk lightning invoice`)
+    ///
+    /// Params:
+    /// - deposit_pubkey: hex-encoded depositor's pubkey
+    /// - amount_sats: amount for the invoice
+    /// - description: optional invoice description
+    async fn process_make_invoice_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+        use crate::ldk_cli::LdkCli;
+
+        // Extract parameters
+        let deposit_pubkey_hex = match request.params.get("deposit_pubkey").and_then(|v| v.as_str()) {
+            Some(pk) => pk,
+            None => return (false, None, Some("Missing deposit_pubkey parameter".to_string())),
+        };
+
+        let amount_sats = match request.params.get("amount_sats").and_then(|v| v.as_u64()) {
+            Some(a) => a,
+            None => return (false, None, Some("Missing amount_sats parameter".to_string())),
+        };
+
+        let description = request.params.get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Deposit credit");
+
+        // Create invoice via LdkCli (same as `deposits-bdk lightning invoice`)
+        let cli = LdkCli::from_env();
+        let amount_msat = amount_sats * 1000;
+
+        match cli.create_invoice(amount_msat, description) {
+            Ok(invoice) => {
+                tracing::info!("Created invoice for {}... amount={} sats",
+                    &deposit_pubkey_hex[..16.min(deposit_pubkey_hex.len())],
+                    amount_sats);
+
+                let result = serde_json::json!({
+                    "invoice": invoice,
+                    "amount_sats": amount_sats,
+                    "deposit_pubkey": deposit_pubkey_hex,
+                });
+                (true, Some(result.to_string()), None)
+            }
+            Err(e) => {
+                tracing::error!("Failed to create invoice: {}", e);
+                (false, None, Some(format!("Failed to create invoice: {}", e)))
+            }
+        }
+    }
+
+    /// Process a pay_invoice request - pay Lightning invoice from deposit
+    ///
+    /// Uses LdkCli to talk to the ldk-server sidecar (same as `deposits-bdk lightning pay`)
+    ///
+    /// Params:
+    /// - deposit_pubkey: hex-encoded depositor's pubkey
+    /// - invoice: bolt11 invoice string
+    /// - nonce: hex-encoded 32-byte nonce
+    /// - signature: hex-encoded Schnorr signature over payment message
+    async fn process_pay_invoice_request(&mut self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+        use crate::ldk_cli::LdkCli;
+        use bitcoin::secp256k1::{Secp256k1, schnorr::Signature, Message};
+        use bitcoin::hashes::{sha256, Hash};
+
+        // Extract parameters
+        let deposit_pubkey_hex = match request.params.get("deposit_pubkey").and_then(|v| v.as_str()) {
+            Some(pk) => pk,
+            None => return (false, None, Some("Missing deposit_pubkey parameter".to_string())),
+        };
+
+        let invoice = match request.params.get("invoice").and_then(|v| v.as_str()) {
+            Some(i) => i,
+            None => return (false, None, Some("Missing invoice parameter".to_string())),
+        };
+
+        let nonce_hex = match request.params.get("nonce").and_then(|v| v.as_str()) {
+            Some(n) => n,
+            None => return (false, None, Some("Missing nonce parameter".to_string())),
+        };
+
+        let signature_hex = match request.params.get("signature").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => return (false, None, Some("Missing signature parameter".to_string())),
+        };
+
+        // Parse pubkey
+        let deposit_pubkey = match hex::decode(deposit_pubkey_hex)
+            .ok()
+            .and_then(|bytes| bitcoin::secp256k1::PublicKey::from_slice(&bytes).ok())
+        {
+            Some(pk) => pk,
+            None => return (false, None, Some("Invalid deposit_pubkey".to_string())),
+        };
+
+        // Verify signature
+        let secp = Secp256k1::verification_only();
+        let msg_str = format!("pay_invoice:{}:{}", invoice, nonce_hex);
+        let msg_hash = sha256::Hash::hash(msg_str.as_bytes());
+        let msg = Message::from_digest(*msg_hash.as_byte_array());
+
+        let sig_bytes = match hex::decode(signature_hex) {
+            Ok(b) if b.len() == 64 => b,
+            _ => return (false, None, Some("Invalid signature format".to_string())),
+        };
+
+        let signature = match Signature::from_slice(&sig_bytes) {
+            Ok(s) => s,
+            Err(_) => return (false, None, Some("Invalid signature".to_string())),
+        };
+
+        let xonly = bitcoin::secp256k1::XOnlyPublicKey::from(deposit_pubkey);
+        if secp.verify_schnorr(&signature, &msg, &xonly).is_err() {
+            return (false, None, Some("Signature verification failed".to_string()));
+        }
+
+        // Pay invoice via LdkCli (same as `deposits-bdk lightning pay`)
+        let cli = LdkCli::from_env();
+
+        match cli.pay_invoice(invoice) {
+            Ok(payment_id) => {
+                tracing::info!("Paid invoice for {}...: payment_id={}",
+                    &deposit_pubkey_hex[..16.min(deposit_pubkey_hex.len())],
+                    payment_id);
+
+                // TODO: Actually debit the deposit after payment confirmation
+                let result = serde_json::json!({
+                    "payment_id": payment_id,
+                    "deposit_pubkey": deposit_pubkey_hex,
+                    "status": "pending",
+                });
+                (true, Some(result.to_string()), None)
+            }
+            Err(e) => {
+                tracing::error!("Failed to pay invoice: {}", e);
+                (false, None, Some(format!("Failed to pay invoice: {}", e)))
             }
         }
     }

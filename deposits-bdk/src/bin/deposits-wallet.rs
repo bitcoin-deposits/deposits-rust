@@ -8,7 +8,9 @@
 //!   deposits-wallet offer <alias> <sats>       - Add funds to existing deposit
 //!   deposits-wallet list                       - List deposits with aliases
 //!   deposits-wallet balance                    - Check balances
-//!   deposits-wallet withdraw <alias> <amount>  - Withdraw funds
+//!   deposits-wallet withdraw <alias> <amount>  - Withdraw funds (on-chain)
+//!   deposits-wallet make_invoice <alias> <amt> - Create Lightning invoice
+//!   deposits-wallet pay_invoice <alias> <bolt11> - Pay Lightning invoice
 
 use bitcoin::secp256k1::{Secp256k1, SecretKey};
 use chrono::Utc;
@@ -36,7 +38,9 @@ fn print_usage(program: &str) {
     eprintln!("  offer <alias> <sats>        Add funds to an existing deposit");
     eprintln!("  balance                     Show balances across all deposits");
     eprintln!("  sync                        Sync deposit statuses from daemon");
-    eprintln!("  withdraw <alias> <amt>      Withdraw from a deposit");
+    eprintln!("  withdraw <alias> <amt>      Withdraw from a deposit (on-chain)");
+    eprintln!("  make_invoice <alias> <amt>  Create Lightning invoice for deposit");
+    eprintln!("  pay_invoice <alias> <bolt11> Pay Lightning invoice from deposit");
     eprintln!("  history <alias>             Show transaction history");
     eprintln!("  list                        List all your deposits with aliases");
     eprintln!();
@@ -197,6 +201,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "balance" => show_balance(&args[2..]).await,
         "sync" => sync_deposits(&args[2..]).await,
         "withdraw" => withdraw(&args[2..]).await,
+        "make_invoice" => make_invoice(&args[2..]).await,
+        "pay_invoice" => pay_invoice(&args[2..]).await,
         "history" => show_history(&args[2..]).await,
         "list" => list_deposits(&args[2..]).await,
         "help" | "--help" | "-h" => {
@@ -1379,6 +1385,274 @@ async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     println!();
     Err("Timeout waiting for operator response".into())
+}
+
+/// Create a Lightning invoice for a deposit
+/// The operator's LDK sidecar creates the invoice, payment credits the deposit
+async fn make_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut alias: Option<String> = None;
+    let mut amount_sats: Option<u64> = None;
+    let mut description: Option<String> = None;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--description" | "-d" if i + 1 < args.len() => {
+                description = Some(args[i + 1].clone());
+                i += 1;
+            }
+            s if s.starts_with("--") => {
+                config_args.push(args[i].clone());
+                if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                    config_args.push(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            _ => {
+                if alias.is_none() {
+                    alias = Some(args[i].clone());
+                } else if amount_sats.is_none() {
+                    amount_sats = Some(args[i].parse()?);
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let alias = alias.ok_or("Usage: deposits-wallet make_invoice <alias> <amount_sats> --relay <url>")?;
+    let amount_sats = amount_sats.ok_or("Missing amount")?;
+    let config = parse_config(&config_args)?;
+
+    if config.relays.is_empty() {
+        return Err("No relay specified. Use --relay <url>".into());
+    }
+
+    // Look up deposit by alias
+    let deposits_file = config.data_dir.join("deposits.json");
+    if !deposits_file.exists() {
+        return Err("No deposits found. Use 'open' to create a deposit first.".into());
+    }
+
+    let data = std::fs::read_to_string(&deposits_file)?;
+    let deposits: Vec<serde_json::Value> = serde_json::from_str(&data)?;
+
+    let deposit = deposits.iter()
+        .find(|d| d.get("alias").and_then(|v| v.as_str()) == Some(&alias))
+        .ok_or_else(|| format!("No deposit found with alias '{}'. Use 'list' to see your deposits.", alias))?;
+
+    let ledger_id = deposit.get("ledger_id")
+        .and_then(|v| v.as_str())
+        .ok_or("Invalid deposit record: missing ledger_id")?;
+
+    let deposit_pubkey = deposit.get("deposit_pubkey")
+        .and_then(|v| v.as_str())
+        .ok_or("Invalid deposit record: missing deposit_pubkey")?;
+
+    // Use nostr identity key for transport
+    let nostr_key = derive_secret_key(&config.seed, config.network)?;
+
+    let transport = NostrTransportBuilder::new(nostr_key)
+        .relay(&config.relays[0])
+        .build()
+        .await?;
+
+    let request_params = serde_json::json!({
+        "deposit_pubkey": deposit_pubkey,
+        "amount_sats": amount_sats,
+        "description": description.unwrap_or_else(|| format!("Deposit to {}", alias)),
+    });
+
+    println!("Requesting Lightning invoice...");
+    println!("  Alias: {}", alias);
+    println!("  Amount: {} sats", amount_sats);
+
+    let request_id = transport.send_ledger_request(
+        ledger_id,
+        "make_invoice",
+        request_params,
+    ).await?;
+
+    // Poll for response
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let max_attempts = 30;
+    let poll_interval = std::time::Duration::from_secs(2);
+
+    for _attempt in 1..=max_attempts {
+        tokio::time::sleep(poll_interval).await;
+
+        let responses = transport.fetch_responses_since(
+            nostr_sdk::Timestamp::now() - 120
+        ).await?;
+
+        for response in responses {
+            if response.request_id == request_id {
+                if response.success {
+                    if let Some(result) = &response.result {
+                        if let Some(invoice) = result.get("invoice").and_then(|v| v.as_str()) {
+                            println!();
+                            println!("{}", invoice);
+                            return Ok(());
+                        }
+                    }
+                    return Err("Response missing invoice".into());
+                } else {
+                    let error = response.error.as_deref().unwrap_or("Unknown error");
+                    return Err(format!("Invoice request failed: {}", error).into());
+                }
+            }
+        }
+
+        print!(".");
+        std::io::stdout().flush().ok();
+    }
+
+    println!();
+    Err("Timeout waiting for operator response".into())
+}
+
+/// Pay a Lightning invoice from a deposit
+/// The operator's LDK sidecar pays the invoice, debiting the deposit
+async fn pay_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use bitcoin::hashes::{sha256, Hash};
+    use bitcoin::secp256k1::rand::rngs::OsRng;
+    use bitcoin::secp256k1::rand::RngCore;
+
+    let mut alias: Option<String> = None;
+    let mut invoice: Option<String> = None;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            s if s.starts_with("--") => {
+                config_args.push(args[i].clone());
+                if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                    config_args.push(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            _ => {
+                if alias.is_none() {
+                    alias = Some(args[i].clone());
+                } else if invoice.is_none() {
+                    invoice = Some(args[i].clone());
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let alias = alias.ok_or("Usage: deposits-wallet pay_invoice <alias> <bolt11> --relay <url>")?;
+    let invoice = invoice.ok_or("Missing bolt11 invoice")?;
+    let config = parse_config(&config_args)?;
+
+    if config.relays.is_empty() {
+        return Err("No relay specified. Use --relay <url>".into());
+    }
+
+    // Look up deposit by alias
+    let deposits_file = config.data_dir.join("deposits.json");
+    if !deposits_file.exists() {
+        return Err("No deposits found. Use 'open' to create a deposit first.".into());
+    }
+
+    let data = std::fs::read_to_string(&deposits_file)?;
+    let deposits: Vec<serde_json::Value> = serde_json::from_str(&data)?;
+
+    let deposit = deposits.iter()
+        .find(|d| d.get("alias").and_then(|v| v.as_str()) == Some(&alias))
+        .ok_or_else(|| format!("No deposit found with alias '{}'. Use 'list' to see your deposits.", alias))?;
+
+    let ledger_id = deposit.get("ledger_id")
+        .and_then(|v| v.as_str())
+        .ok_or("Invalid deposit record: missing ledger_id")?;
+
+    // Get key for signing
+    let key_index = deposit.get("key_index")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+
+    let secret_key = derive_secret_key_at_index(&config.seed, config.network, key_index)?;
+    let secp = Secp256k1::new();
+    let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &secret_key);
+    let our_pubkey = keypair.public_key();
+
+    // Use nostr identity key for transport
+    let nostr_key = derive_secret_key(&config.seed, config.network)?;
+
+    // Generate nonce
+    let mut rng = OsRng;
+    let mut nonce = [0u8; 32];
+    rng.fill_bytes(&mut nonce);
+    let nonce_hex = hex::encode(&nonce);
+
+    // Sign the pay request
+    let msg_str = format!("pay_invoice:{}:{}", invoice, nonce_hex);
+    let msg_hash = sha256::Hash::hash(msg_str.as_bytes());
+    let msg = bitcoin::secp256k1::Message::from_digest(*msg_hash.as_byte_array());
+    let signature = secp.sign_schnorr(&msg, &keypair);
+
+    let transport = NostrTransportBuilder::new(nostr_key)
+        .relay(&config.relays[0])
+        .build()
+        .await?;
+
+    let request_params = serde_json::json!({
+        "deposit_pubkey": hex::encode(our_pubkey.serialize()),
+        "invoice": invoice,
+        "nonce": nonce_hex,
+        "signature": hex::encode(signature.serialize()),
+    });
+
+    println!("Paying Lightning invoice...");
+    println!("  Alias: {}", alias);
+    println!("  Invoice: {}...", &invoice[..40.min(invoice.len())]);
+
+    let request_id = transport.send_ledger_request(
+        ledger_id,
+        "pay_invoice",
+        request_params,
+    ).await?;
+
+    // Poll for response
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let max_attempts = 60; // Longer timeout for LN payments
+    let poll_interval = std::time::Duration::from_secs(2);
+
+    for _attempt in 1..=max_attempts {
+        tokio::time::sleep(poll_interval).await;
+
+        let responses = transport.fetch_responses_since(
+            nostr_sdk::Timestamp::now() - 180
+        ).await?;
+
+        for response in responses {
+            if response.request_id == request_id {
+                if response.success {
+                    println!();
+                    println!("Payment successful!");
+                    if let Some(result) = &response.result {
+                        if let Some(preimage) = result.get("preimage").and_then(|v| v.as_str()) {
+                            println!("  Preimage: {}", preimage);
+                        }
+                    }
+                    return Ok(());
+                } else {
+                    let error = response.error.as_deref().unwrap_or("Unknown error");
+                    return Err(format!("Payment failed: {}", error).into());
+                }
+            }
+        }
+
+        print!(".");
+        std::io::stdout().flush().ok();
+    }
+
+    println!();
+    Err("Timeout waiting for payment confirmation".into())
 }
 
 /// Show transaction history for a deposit
