@@ -86,7 +86,7 @@ impl LdkCli {
 
         let response = self.http_client
             .post(&url)
-            .header("x-api-key", &self.config.api_key)
+            .header("X-Auth", &self.config.api_key)
             .json(body)
             .send()
             .map_err(|e| Error::Protocol(format!("HTTP request failed: {}", e)))?;
@@ -107,7 +107,7 @@ impl LdkCli {
 
         let response = self.http_client
             .get(&url)
-            .header("x-api-key", &self.config.api_key)
+            .header("X-Auth", &self.config.api_key)
             .send()
             .map_err(|e| Error::Protocol(format!("HTTP request failed: {}", e)))?;
 
