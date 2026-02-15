@@ -106,6 +106,10 @@ fn describe_metrics() {
         "Time from request sent to response received"
     );
     describe_histogram!(
+        "nostr_request_processing_seconds",
+        "Time to process an incoming Nostr request (node-side)"
+    );
+    describe_histogram!(
         "cosign_request_duration_seconds",
         "Time to complete a co-sign request"
     );
@@ -202,6 +206,13 @@ pub fn set_pending_deposit_offers(count: usize) {
 /// Record request duration (time from send to response).
 pub fn record_request_duration(action: &str, duration: Duration) {
     histogram!("nostr_request_duration_seconds", "action" => action.to_string())
+        .record(duration.as_secs_f64());
+}
+
+/// Record request processing time (node-side time to handle a request).
+pub fn record_request_processing(action: &str, success: bool, duration: Duration) {
+    let status = if success { "success" } else { "error" };
+    histogram!("nostr_request_processing_seconds", "action" => action.to_string(), "status" => status)
         .record(duration.as_secs_f64());
 }
 

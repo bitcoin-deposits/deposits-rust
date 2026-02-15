@@ -558,6 +558,12 @@ impl Node {
             &request.event_id[..16.min(request.event_id.len())]
         );
 
+        // Record request received metric
+        crate::metrics::record_request_received(&request.action);
+
+        // Start timing request processing
+        let start_time = std::time::Instant::now();
+
         // Process the request based on action
         let (success, result, error) = match request.action.as_str() {
             "deposit_open" => self.process_deposit_open_request(&request).await,
@@ -596,6 +602,11 @@ impl Node {
                 (false, None, Some(format!("Unknown action: {}", request.action)))
             }
         };
+
+        // Record request processing time
+        let processing_time = start_time.elapsed();
+        crate::metrics::record_request_processing(&request.action, success, processing_time);
+        crate::metrics::record_response_sent(&request.action, success);
 
         // Send response - parse result String as JSON Value
         let result_json = result.and_then(|s| serde_json::from_str(&s).ok());

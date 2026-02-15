@@ -544,8 +544,53 @@
       "type": "timeseries"
     },
     {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": { "type": "linear" },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": { "group": "A", "mode": "none" },
+            "thresholdsStyle": { "mode": "off" }
+          },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 28 },
+      "id": 400,
+      "options": {
+        "legend": { "calcs": ["mean", "max", "p99"], "displayMode": "table", "placement": "right", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (action, le) (rate(nostr_request_processing_seconds_bucket[5m])))", "legendFormat": "p50 {{action}}", "refId": "A" },
+        { "expr": "histogram_quantile(0.95, sum by (action, le) (rate(nostr_request_processing_seconds_bucket[5m])))", "legendFormat": "p95 {{action}}", "refId": "B" },
+        { "expr": "histogram_quantile(0.99, sum by (action, le) (rate(nostr_request_processing_seconds_bucket[5m])))", "legendFormat": "p99 {{action}}", "refId": "C" }
+      ],
+      "title": "Request Processing Time (p50/p95/p99)",
+      "type": "timeseries"
+    },
+    {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 28 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 34 },
       "id": 102,
       "panels": [],
       "title": "Per-Node Metrics",
