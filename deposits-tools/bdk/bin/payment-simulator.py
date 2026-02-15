@@ -365,6 +365,10 @@ def run_simulation(
         lightning: Use Lightning invoices instead of on-chain withdrawals
     """
 
+    # Lightning payments are instant, so we can run 10x faster
+    if lightning and payment_interval == 2.0:
+        payment_interval = 0.2
+
     print("=" * 60)
     print("Bitcoin Deposits Payment Simulator")
     print("=" * 60)
