@@ -35,6 +35,9 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 WALLET_SH = SCRIPT_DIR / "wallet.sh"
 DATA_DIR = Path.home() / ".deposits-wallet"
 
+# Global payment counter - used to make each invoice unique by adding msat offset
+PAYMENT_COUNTER = 0
+
 
 @dataclass
 class Deposit:
@@ -284,25 +287,34 @@ def pay_invoice(alias: str, invoice: str) -> bool:
     return False
 
 
-def lightning_payment(sender: Deposit, receiver: Deposit, amount_sats: int) -> bool:
+def lightning_payment(sender: Deposit, receiver: Deposit, amount_sats: int) -> Optional[int]:
     """
     Make a Lightning payment between two deposits.
     1. Receiver requests invoice from their operator
     2. Sender pays invoice via their operator
-    """
-    print(f"  Creating invoice for {receiver.alias}...")
-    invoice = make_invoice(receiver.alias, amount_sats)
-    if not invoice:
-        return False
 
-    print(f"  Invoice: {invoice[:40]}...")
-    print(f"  Paying from {sender.alias}...")
+    Uses PAYMENT_COUNTER to ensure unique invoice amounts.
+    Returns the actual amount paid (with counter offset) on success, None on failure.
+    """
+    global PAYMENT_COUNTER
+    PAYMENT_COUNTER += 1
+
+    # Add counter as extra sats to ensure unique payment hash
+    unique_amount = amount_sats + PAYMENT_COUNTER
+
+    print(f"  Creating invoice for {receiver.alias} ({unique_amount} sats, payment #{PAYMENT_COUNTER})...")
+    invoice = make_invoice(receiver.alias, unique_amount)
+    if not invoice:
+        return None
+
+    print(f"  Invoice: {invoice[:50]}...")
+    print(f"  Paying {unique_amount} sats from {sender.alias}...")
 
     if pay_invoice(sender.alias, invoice):
-        print(f"  Lightning payment successful!")
-        return True
+        print(f"  Lightning payment #{PAYMENT_COUNTER} successful!")
+        return unique_amount
 
-    return False
+    return None
 
 
 def fund_deposit_lightning(funder: Deposit, recipient_alias: str, amount_sats: int) -> bool:
@@ -310,18 +322,26 @@ def fund_deposit_lightning(funder: Deposit, recipient_alias: str, amount_sats: i
     Fund a new deposit via Lightning from an existing funded deposit.
     1. Create invoice for the new deposit
     2. Pay it from the funder deposit
+
+    Uses PAYMENT_COUNTER to ensure unique invoice amounts.
     """
-    print(f"  Creating invoice for {recipient_alias}...")
-    invoice = make_invoice(recipient_alias, amount_sats)
+    global PAYMENT_COUNTER
+    PAYMENT_COUNTER += 1
+
+    # Add counter as extra sats to ensure unique payment hash
+    unique_amount = amount_sats + PAYMENT_COUNTER
+
+    print(f"  Creating invoice for {recipient_alias} ({unique_amount} sats, funding #{PAYMENT_COUNTER})...")
+    invoice = make_invoice(recipient_alias, unique_amount)
     if not invoice:
         return False
 
-    print(f"  Invoice: {invoice[:40]}...")
-    print(f"  Paying from {funder.alias}...")
+    print(f"  Invoice: {invoice[:50]}...")
+    print(f"  Paying {unique_amount} sats from {funder.alias}...")
 
     if pay_invoice(funder.alias, invoice):
-        print(f"  Lightning funding successful!")
-        funder.balance_sats -= amount_sats
+        print(f"  Lightning funding #{PAYMENT_COUNTER} successful!")
+        funder.balance_sats -= unique_amount
         return True
 
     print(f"  Warning: Lightning funding failed")
@@ -498,10 +518,11 @@ def run_simulation(
 
                         if lightning:
                             print(f"\n[{time.strftime('%H:%M:%S')}] Lightning: {sender.alias} ({sender.balance_sats} sats) -> {receiver.alias}")
-                            if lightning_payment(sender, receiver, amount):
-                                # Lightning is instant, update both balances
-                                sender.balance_sats -= amount
-                                receiver.balance_sats += amount
+                            paid_amount = lightning_payment(sender, receiver, amount)
+                            if paid_amount:
+                                # Lightning is instant, update both balances with actual amount
+                                sender.balance_sats -= paid_amount
+                                receiver.balance_sats += paid_amount
                         else:
                             print(f"\n[{time.strftime('%H:%M:%S')}] Payment: {sender.alias} ({sender.balance_sats} sats) -> {receiver.alias}")
                             if withdraw_to(sender.alias, receiver.funding_address, amount):
