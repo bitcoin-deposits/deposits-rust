@@ -58,9 +58,11 @@ for v in $(docker volume ls -q --filter 'name=bdk_bdk-eve'); do
     docker volume rm "$v" 2>/dev/null || true
 done
 
-# Stop LDK sidecar containers explicitly (may not be managed by compose)
-log_info "Cleaning up LDK containers..."
+# Stop BDK and LDK containers explicitly (may not be managed by compose if started by setup-scale)
+log_info "Cleaning up BDK and LDK containers..."
 for node in alice bob charlie diana; do
+    docker stop "bdk-${node}" 2>/dev/null || true
+    docker rm "bdk-${node}" 2>/dev/null || true
     docker stop "bdk-${node}-ln" 2>/dev/null || true
     docker rm "bdk-${node}-ln" 2>/dev/null || true
 done
