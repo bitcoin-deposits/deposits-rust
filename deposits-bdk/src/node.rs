@@ -3028,6 +3028,9 @@ impl Node {
         use crate::ldk_cli::LdkCli;
         use bitcoin::secp256k1::{Secp256k1, schnorr::Signature, Message};
         use bitcoin::hashes::{sha256, Hash};
+        use deposits_core::messages::LedgerOperation;
+        use lightning_invoice::Bolt11Invoice;
+        use std::str::FromStr;
 
         // Extract parameters
         let deposit_pubkey_hex = match request.params.get("deposit_pubkey").and_then(|v| v.as_str()) {
@@ -3035,7 +3038,7 @@ impl Node {
             None => return (false, None, Some("Missing deposit_pubkey parameter".to_string())),
         };
 
-        let invoice = match request.params.get("invoice").and_then(|v| v.as_str()) {
+        let invoice_str = match request.params.get("invoice").and_then(|v| v.as_str()) {
             Some(i) => i,
             None => return (false, None, Some("Missing invoice parameter".to_string())),
         };
@@ -3050,6 +3053,21 @@ impl Node {
             None => return (false, None, Some("Missing signature parameter".to_string())),
         };
 
+        // Parse the BOLT11 invoice to get amount and payment hash
+        let invoice = match Bolt11Invoice::from_str(invoice_str) {
+            Ok(inv) => inv,
+            Err(e) => return (false, None, Some(format!("Invalid invoice: {}", e))),
+        };
+
+        let amount_msat = match invoice.amount_milli_satoshis() {
+            Some(a) => a,
+            None => return (false, None, Some("Invoice has no amount".to_string())),
+        };
+
+        let payment_hash = invoice.payment_hash();
+        let mut payment_id = [0u8; 32];
+        payment_id.copy_from_slice(payment_hash.as_ref());
+
         // Parse pubkey
         let deposit_pubkey = match hex::decode(deposit_pubkey_hex)
             .ok()
@@ -3061,7 +3079,7 @@ impl Node {
 
         // Verify signature
         let secp = Secp256k1::verification_only();
-        let msg_str = format!("pay_invoice:{}:{}", invoice, nonce_hex);
+        let msg_str = format!("pay_invoice:{}:{}", invoice_str, nonce_hex);
         let msg_hash = sha256::Hash::hash(msg_str.as_bytes());
         let msg = Message::from_digest(*msg_hash.as_byte_array());
 
@@ -3080,27 +3098,198 @@ impl Node {
             return (false, None, Some("Signature verification failed".to_string()));
         }
 
-        // Pay invoice via LdkCli (same as `deposits-bdk lightning pay`)
+        // Find the ledger and check deposit balance
+        let ledger_id = &request.ledger_id;
+        let ledger_arc = match self.handler.ledgers.lock().unwrap().get(ledger_id).cloned() {
+            Some(l) => l,
+            None => return (false, None, Some("Ledger not found".to_string())),
+        };
+
+        let sequence_number = {
+            let ledger = ledger_arc.read().unwrap();
+
+            let deposit = match ledger.state.deposits.get(&deposit_pubkey) {
+                Some(d) => d,
+                None => return (false, None, Some("Deposit not found".to_string())),
+            };
+
+            if deposit.balance < amount_msat {
+                return (false, None, Some(format!(
+                    "Insufficient balance: {} msat available, {} msat needed",
+                    deposit.balance, amount_msat
+                )));
+            }
+
+            ledger.history.len() as u64
+        };
+
+        // Create InvoiceLock operation to lock the funds
+        let mut scriptpubkey_sig = [0u8; 64];
+        scriptpubkey_sig.copy_from_slice(&sig_bytes);
+
+        let lock_operation = LedgerOperation::InvoiceLock {
+            pubkey: deposit_pubkey,
+            amount: amount_msat,
+            payment_id,
+            sequence_number,
+            scriptpubkey_signature: scriptpubkey_sig,
+        };
+
+        // Append the lock operation
+        {
+            let mut ledger = ledger_arc.write().unwrap();
+            let block_height = self.wallet.get_block_height().unwrap_or(0);
+            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
+
+            if let Err(e) = ledger.append_operation_with_block(
+                lock_operation,
+                deposits_core::messages::consts::SENDING_LOCK_PAYMENT,
+                block_height,
+                block_hash,
+            ) {
+                return (false, None, Some(format!("Failed to lock funds: {:?}", e)));
+            }
+        }
+
+        // Sign and broadcast the lock
+        if let Err(e) = self.sign_and_broadcast(ledger_id).await {
+            tracing::error!("Failed to broadcast lock: {}", e);
+            // Note: funds are locked locally, but broadcast failed
+        }
+
+        tracing::info!("Locked {} msat for payment {}",
+            amount_msat, hex::encode(&payment_id[..8]));
+
+        // Pay invoice via LdkCli
         let cli = LdkCli::from_env();
+        let pay_result = cli.pay_invoice(invoice_str);
 
-        match cli.pay_invoice(invoice) {
-            Ok(payment_id) => {
-                tracing::info!("Paid invoice for {}...: payment_id={}",
-                    &deposit_pubkey_hex[..16.min(deposit_pubkey_hex.len())],
-                    payment_id);
+        // Poll for payment completion (with timeout)
+        let mut preimage: Option<[u8; 32]> = None;
+        let mut payment_succeeded = false;
 
-                // TODO: Actually debit the deposit after payment confirmation
-                let result = serde_json::json!({
-                    "payment_id": payment_id,
-                    "deposit_pubkey": deposit_pubkey_hex,
-                    "status": "pending",
-                });
-                (true, Some(result.to_string()), None)
+        if pay_result.is_ok() {
+            // Wait for payment to complete
+            for _ in 0..30 {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+                if let Ok(payments) = cli.list_payments() {
+                    for p in payments.payments {
+                        if let Ok(p_hash) = hex::decode(&p.id) {
+                            if p_hash.len() >= 32 && p_hash[..32] == payment_id[..] {
+                                match p.status {
+                                    1 => {
+                                        // Succeeded
+                                        payment_succeeded = true;
+                                        if let Some(ref pre_hex) = p.preimage {
+                                            if let Ok(pre_bytes) = hex::decode(pre_hex) {
+                                                if pre_bytes.len() == 32 {
+                                                    let mut pre = [0u8; 32];
+                                                    pre.copy_from_slice(&pre_bytes);
+                                                    preimage = Some(pre);
+                                                }
+                                            }
+                                        }
+                                        break;
+                                    }
+                                    2 => {
+                                        // Failed
+                                        break;
+                                    }
+                                    _ => continue, // Still pending
+                                }
+                            }
+                        }
+                    }
+                    if payment_succeeded || preimage.is_some() {
+                        break;
+                    }
+                }
             }
-            Err(e) => {
-                tracing::error!("Failed to pay invoice: {}", e);
-                (false, None, Some(format!("Failed to pay invoice: {}", e)))
+        }
+
+        // Create fulfill or fail operation
+        let final_sequence = {
+            let ledger = ledger_arc.read().unwrap();
+            ledger.history.len() as u64
+        };
+
+        if payment_succeeded {
+            let pre = preimage.unwrap_or([0u8; 32]);
+            let fulfill_operation = LedgerOperation::InvoiceFulfill {
+                pubkey: deposit_pubkey,
+                amount: amount_msat,
+                payment_id,
+                sequence_number: final_sequence,
+                scriptpubkey_signature: scriptpubkey_sig,
+                preimage: pre,
+            };
+
+            {
+                let mut ledger = ledger_arc.write().unwrap();
+                let block_height = self.wallet.get_block_height().unwrap_or(0);
+                let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
+
+                if let Err(e) = ledger.append_operation_with_block(
+                    fulfill_operation,
+                    deposits_core::messages::consts::SENDING_FULFILL_PAYMENT,
+                    block_height,
+                    block_hash,
+                ) {
+                    tracing::error!("Failed to record fulfill: {:?}", e);
+                }
             }
+
+            if let Err(e) = self.sign_and_broadcast(ledger_id).await {
+                tracing::error!("Failed to broadcast fulfill: {}", e);
+            }
+
+            tracing::info!("Payment {} fulfilled, {} msat debited from {}",
+                hex::encode(&payment_id[..8]), amount_msat,
+                &deposit_pubkey_hex[..16]);
+
+            let result = serde_json::json!({
+                "payment_id": hex::encode(&payment_id),
+                "deposit_pubkey": deposit_pubkey_hex,
+                "amount_msat": amount_msat,
+                "preimage": preimage.map(|p| hex::encode(p)),
+                "status": "succeeded",
+            });
+            (true, Some(result.to_string()), None)
+        } else {
+            // Payment failed - unlock funds
+            let fail_operation = LedgerOperation::InvoiceFail {
+                pubkey: deposit_pubkey,
+                amount: amount_msat,
+                payment_id,
+                sequence_number: final_sequence,
+            };
+
+            {
+                let mut ledger = ledger_arc.write().unwrap();
+                let block_height = self.wallet.get_block_height().unwrap_or(0);
+                let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
+
+                if let Err(e) = ledger.append_operation_with_block(
+                    fail_operation,
+                    deposits_core::messages::consts::SENDING_FAIL_PAYMENT,
+                    block_height,
+                    block_hash,
+                ) {
+                    tracing::error!("Failed to record fail: {:?}", e);
+                }
+            }
+
+            if let Err(e) = self.sign_and_broadcast(ledger_id).await {
+                tracing::error!("Failed to broadcast fail: {}", e);
+            }
+
+            tracing::warn!("Payment {} failed, {} msat unlocked for {}",
+                hex::encode(&payment_id[..8]), amount_msat,
+                &deposit_pubkey_hex[..16]);
+
+            let error_msg = pay_result.err().map(|e| e.to_string()).unwrap_or_else(|| "Payment timed out".to_string());
+            (false, None, Some(format!("Payment failed: {}", error_msg)))
         }
     }
 
