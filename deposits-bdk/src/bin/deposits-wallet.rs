@@ -1333,17 +1333,24 @@ async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // Use nostr identity key (index 0) for transport signing
     let nostr_key = derive_secret_key(&config.seed, config.network)?;
 
-    // Generate nonce
+    // Compute deposit_id from descriptor
+    let descriptor = format!("pk({})", hex::encode(our_pubkey.serialize()));
+    let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
+
+    // Generate nonce (becomes withdrawal_id when hashed)
     let mut rng = OsRng;
     let mut nonce = [0u8; 32];
     rng.fill_bytes(&mut nonce);
-    let nonce_hex = hex::encode(&nonce);
 
-    // Sign the withdrawal message
-    // Format must match node.rs process_withdraw_request: "withdraw:{address}:{amount}:{fee}:{nonce}"
-    let msg_str = format!("withdraw:{}:{}:{}:{}", destination, amount_sats, fee_sats, nonce_hex);
-    let msg_hash = sha256::Hash::hash(msg_str.as_bytes());
-    let msg = bitcoin::secp256k1::Message::from_digest(*msg_hash.as_byte_array());
+    // Sign the WITHDRAWAL message (nonce, deposit_id, address, amount, fee)
+    let msg_hash = deposits_core::signature_utils::withdrawal_signing_message(
+        &nonce,
+        &deposit_id,
+        &destination,
+        amount_sats,
+        fee_sats,
+    );
+    let msg = bitcoin::secp256k1::Message::from_digest(msg_hash);
     let signature = secp.sign_schnorr(&msg, &keypair);
 
     println!("Withdrawal Request");
@@ -1362,10 +1369,11 @@ async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     let request_params = serde_json::json!({
         "deposit_pubkey": hex::encode(our_pubkey.serialize()),
+        "deposit_id": hex::encode(deposit_id),
         "address": destination,
         "amount_sats": amount_sats,
         "fee_sats": fee_sats,
-        "nonce": nonce_hex,
+        "nonce": hex::encode(nonce),
         "signature": hex::encode(signature.serialize()),
     });
 

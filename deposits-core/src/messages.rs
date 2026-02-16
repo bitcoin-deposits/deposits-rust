@@ -650,8 +650,10 @@ pub enum LedgerOperation {
     OnchainLock {
         deposit_id: DepositId,
         amount: u64,
+        fee_sats: u64,
         destination_address: String,
         withdrawal_id: [u8; 32],
+        witness: DescriptorWitness,
     },
     /// Fail a pending on-chain withdrawal (returns funds to deposit)
     OnchainFail {
@@ -1611,14 +1613,20 @@ impl BinaryCodec for LedgerOperation {
                 write_u64(w, *amount)?;
                 write_string(w, funding_address)?;
             }
-            Self::OnchainLock { deposit_id, amount, destination_address, withdrawal_id } => {
+            Self::OnchainLock { deposit_id, amount, fee_sats, destination_address, withdrawal_id, witness } => {
                 let mut legacy_bytes = [0u8; 33];
                 legacy_bytes[0] = 0x02;
                 legacy_bytes[1..17].copy_from_slice(deposit_id);
                 w.write_all(&legacy_bytes)?;
                 write_u64(w, *amount)?;
+                write_u64(w, *fee_sats)?;
                 write_string(w, destination_address)?;
                 write_32(w, withdrawal_id)?;
+                // Write first stack element (signature) as 64 bytes or zeros
+                let sig_bytes: [u8; 64] = witness.stack.first()
+                    .and_then(|s| if s.len() >= 64 { s[..64].try_into().ok() } else { None })
+                    .unwrap_or([0u8; 64]);
+                w.write_all(&sig_bytes)?;
             }
             Self::OnchainFail { deposit_id, withdrawal_id } => {
                 let mut legacy_bytes = [0u8; 33];
@@ -1871,11 +1879,18 @@ impl BinaryCodec for LedgerOperation {
                 let legacy_bytes = read_33(r)?;
                 let mut deposit_id = [0u8; 16];
                 deposit_id.copy_from_slice(&legacy_bytes[1..17]);
+                let amount = read_u64(r)?;
+                let fee_sats = read_u64(r)?;
+                let destination_address = read_string(r)?;
+                let withdrawal_id = read_32(r)?;
+                let sig_bytes = read_64(r)?;
                 Ok(Self::OnchainLock {
                     deposit_id,
-                    amount: read_u64(r)?,
-                    destination_address: read_string(r)?,
-                    withdrawal_id: read_32(r)?,
+                    amount,
+                    fee_sats,
+                    destination_address,
+                    withdrawal_id,
+                    witness: DescriptorWitness { stack: vec![sig_bytes.to_vec()] },
                 })
             }
             37 => {
@@ -2877,12 +2892,14 @@ impl TlvEncode for LedgerOperation {
                     .u64_field(AMOUNT, *amount)
                     .string_field(FUNDING_ADDRESS, funding_address);
             }
-            Self::OnchainLock { deposit_id, amount, destination_address, withdrawal_id } => {
+            Self::OnchainLock { deposit_id, amount, fee_sats, destination_address, withdrawal_id, witness } => {
                 builder = builder
                     .deposit_id_field(DEPOSIT_ID, deposit_id)
                     .u64_field(AMOUNT, *amount)
+                    .u64_field(FEES, *fee_sats)
                     .string_field(DESTINATION_ADDRESS, destination_address)
-                    .bytes_field(WITHDRAWAL_ID, withdrawal_id);
+                    .bytes_field(WITHDRAWAL_ID, withdrawal_id)
+                    .witness_field(WITNESS, witness);
             }
             Self::OnchainFail { deposit_id, withdrawal_id } => {
                 builder = builder
@@ -3076,8 +3093,10 @@ impl TlvDecode for LedgerOperation {
             36 => Ok(Self::OnchainLock {
                 deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
                 amount: reader.read_u64(AMOUNT)?,
+                fee_sats: reader.read_u64(FEES)?,
                 destination_address: reader.read_string(DESTINATION_ADDRESS)?,
                 withdrawal_id: reader.read_bytes(WITHDRAWAL_ID)?,
+                witness: reader.read_witness(WITNESS)?,
             }),
             37 => Ok(Self::OnchainFail {
                 deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,

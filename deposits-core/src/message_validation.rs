@@ -62,7 +62,7 @@ use crate::operation_validation::{
     // DepositId-based validation functions
     validate_deposit_add_by_id, validate_deposit_close_by_id, validate_deposit_update_by_id,
     validate_payment_lock_by_id, validate_payment_fulfill_by_id, validate_credit_payment_by_id,
-    validate_fee_collect_by_id, validate_deposit_key_rotate,
+    validate_fee_collect_by_id, validate_deposit_key_rotate, validate_onchain_lock_by_id,
     ValidationResult,
 };
 use crate::wire_messages::{
@@ -583,11 +583,19 @@ pub fn validate_ledger_operation<C: ValidationContext>(
         }
         // Onchain operations
         LedgerOperation::OnchainCredit { .. } |
-        LedgerOperation::OnchainLock { .. } |
         LedgerOperation::OnchainFail { .. } |
         LedgerOperation::OnchainFulfill { .. } => {
-            // Onchain operations are validated in message_handlers
+            // These onchain operations are validated in message_handlers
             Ok(())
+        }
+        LedgerOperation::OnchainLock { deposit_id, amount, fee_sats, destination_address, withdrawal_id, witness } => {
+            // Validate withdrawal lock with descriptor witness
+            if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
+                let ledger = ledger_arc.read().unwrap();
+                validate_onchain_lock_by_id(&ledger, deposit_id, *amount, *fee_sats, destination_address, withdrawal_id, witness)
+            } else {
+                Err(format!("No channel ledger found for sender {}", sender))
+            }
         }
         LedgerOperation::ReservesIncrease { reserves_id, new_amount } => {
             let msg = ReservesIncreaseMsg {

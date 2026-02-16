@@ -845,6 +845,76 @@ pub fn validate_payment_lock_by_id(
     Ok(())
 }
 
+/// Validate an on-chain withdrawal lock operation with descriptor witness
+///
+/// Checks:
+/// - Deposit exists
+/// - Sufficient available balance (amount + fees)
+/// - Amount is positive
+/// - Witness satisfies the deposit's descriptor
+pub fn validate_onchain_lock_by_id(
+    ledger: &Ledger,
+    deposit_id: &DepositId,
+    amount: u64,
+    fee_sats: u64,
+    destination_address: &str,
+    withdrawal_id: &[u8; 32],
+    witness: &DescriptorWitness,
+) -> ValidationResult {
+    // Check deposit exists
+    let deposit = ledger.state.deposits.get(deposit_id)
+        .ok_or_else(|| format!("Deposit with id {} does not exist", hex::encode(deposit_id)))?;
+
+    // Calculate total debit (amount + fees)
+    let total_debit = amount.saturating_add(fee_sats);
+
+    // Calculate available balance
+    let available_balance = deposit.balance.saturating_sub(deposit.locked_balance);
+
+    // Check sufficient balance
+    if available_balance < total_debit {
+        return Err(format!(
+            "Insufficient available balance: {} < {} (amount) + {} (fee)",
+            available_balance, amount, fee_sats
+        ));
+    }
+
+    // Check amount is positive
+    if amount == 0 {
+        return Err("Withdrawal amount must be greater than zero".to_string());
+    }
+
+    // Check destination address is non-empty
+    if destination_address.is_empty() {
+        return Err("Destination address cannot be empty".to_string());
+    }
+
+    // Verify witness satisfies the deposit's descriptor
+    // The signing message is: WITHDRAWAL:{withdrawal_id}:{deposit_id}:{address}:{amount}:{fee}
+    let message_hash = crate::signature_utils::withdrawal_signing_message(
+        withdrawal_id,
+        deposit_id,
+        destination_address,
+        amount,
+        fee_sats,
+    );
+
+    match crate::signature_utils::verify_descriptor_witness(
+        &deposit.descriptor,
+        deposit_id,
+        &message_hash,
+        total_debit,
+        witness,
+        0, // Block height not relevant for withdrawals
+    ) {
+        Ok(true) => {}
+        Ok(false) => return Err("Witness does not satisfy deposit descriptor".to_string()),
+        Err(e) => return Err(format!("Failed to verify witness: {:?}", e)),
+    }
+
+    Ok(())
+}
+
 /// Validate a payment fulfill operation by deposit_id with descriptor witness
 ///
 /// Checks:

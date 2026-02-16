@@ -3383,14 +3383,14 @@ impl Node {
     ///
     /// Params:
     /// - deposit_pubkey: hex-encoded depositor's pubkey
+    /// - deposit_id: hex-encoded 16-byte deposit identifier
     /// - address: destination Bitcoin address
     /// - amount_sats: amount to withdraw
     /// - fee_sats: fee for the withdrawal transaction
     /// - nonce: hex-encoded 32-byte nonce
-    /// - signature: hex-encoded Schnorr signature over withdrawal message
+    /// - signature: hex-encoded Schnorr signature over WITHDRAWAL message
     async fn process_withdraw_request(&mut self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
         use bitcoin::secp256k1::{Secp256k1, schnorr::Signature, Message};
-        use bitcoin::hashes::{sha256, Hash};
 
         tracing::info!("Processing withdraw request for ledger {}...",
             &request.ledger_id[..16.min(request.ledger_id.len())]);
@@ -3399,6 +3399,10 @@ impl Node {
         let deposit_pubkey_hex = match request.params.get("deposit_pubkey").and_then(|v| v.as_str()) {
             Some(p) => p,
             None => return (false, None, Some("Missing deposit_pubkey".to_string())),
+        };
+        let deposit_id_hex = match request.params.get("deposit_id").and_then(|v| v.as_str()) {
+            Some(d) => d,
+            None => return (false, None, Some("Missing deposit_id".to_string())),
         };
         let address = match request.params.get("address").and_then(|v| v.as_str()) {
             Some(a) => a,
@@ -3430,6 +3434,20 @@ impl Node {
             None => return (false, None, Some("Invalid deposit_pubkey".to_string())),
         };
 
+        // Parse deposit_id
+        let mut deposit_id = [0u8; 16];
+        match hex::decode(deposit_id_hex) {
+            Ok(bytes) if bytes.len() == 16 => deposit_id.copy_from_slice(&bytes),
+            _ => return (false, None, Some("Invalid deposit_id (must be 16 bytes hex)".to_string())),
+        }
+
+        // Verify deposit_id matches pubkey
+        let descriptor = format!("pk({})", deposit_pubkey_hex);
+        let expected_deposit_id = compute_deposit_id(&descriptor);
+        if deposit_id != expected_deposit_id {
+            return (false, None, Some("deposit_id does not match deposit_pubkey".to_string()));
+        }
+
         // Parse nonce
         let nonce: [u8; 32] = match hex::decode(nonce_hex) {
             Ok(bytes) if bytes.len() == 32 => {
@@ -3449,16 +3467,20 @@ impl Node {
             None => return (false, None, Some("Invalid signature".to_string())),
         };
 
-        // Verify signature
-        // Message format: "withdraw:{address}:{amount_sats}:{fee_sats}:{nonce_hex}"
-        let msg_str = format!("withdraw:{}:{}:{}:{}", address, amount_sats, fee_sats, nonce_hex);
-        let msg_hash = sha256::Hash::hash(msg_str.as_bytes());
+        // Verify WITHDRAWAL signature (nonce, deposit_id, address, amount, fee)
+        let msg_hash = deposits_core::signature_utils::withdrawal_signing_message(
+            &nonce,
+            &deposit_id,
+            address,
+            amount_sats,
+            fee_sats,
+        );
         let secp = Secp256k1::new();
-        let msg = Message::from_digest(*msg_hash.as_byte_array());
+        let msg = Message::from_digest(msg_hash);
         let x_only = deposit_pubkey.x_only_public_key().0;
 
         if secp.verify_schnorr(&signature, &msg, &x_only).is_err() {
-            return (false, None, Some("Invalid signature".to_string()));
+            return (false, None, Some("Invalid withdrawal signature".to_string()));
         }
 
         // Find the ledger
@@ -5882,6 +5904,9 @@ impl Node {
         );
         let withdrawal_id = OnChainWithdrawal::compute_withdrawal_id(&signing_message);
 
+        // Clone witness for use in OnchainLock operation
+        let witness_for_lock = depositor_witness.clone();
+
         // Create the withdrawal
         let withdrawal = OnChainWithdrawal {
             withdrawal_id,
@@ -5928,9 +5953,11 @@ impl Node {
 
             let operation = LedgerOperation::OnchainLock {
                 deposit_id,
-                amount: total_debit_msats,
+                amount: amount_sats * 1000, // Convert to msats
+                fee_sats,
                 destination_address: destination_address.clone(),
                 withdrawal_id,
+                witness: witness_for_lock,
             };
 
             let block_height = self.wallet.get_block_height().unwrap_or(0);
