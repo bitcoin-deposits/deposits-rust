@@ -42,6 +42,7 @@ mod tests {
             operator_id,
             reserves_id: reserves_id.clone(),
             quorum_member,
+            member_ledger_id: "member_collateral_ledger".to_string(),
             quorum_member_signature: [0xCD; 64],
         };
 
@@ -128,6 +129,7 @@ mod tests {
         let msg = CollateralAttestationMsg {
             operator,
             quorum_member,
+            collateral_ledger_id: "collateral_ledger".to_string(),
             amount: 100_000,
             block_height: 800_000,
             lock_until_block: 0,
@@ -216,6 +218,7 @@ mod tests {
             generate_test_pubkey(2).to_string(),
             LedgerOperation::QuorumAddMember {
                 quorum_member: generate_test_pubkey(3),
+                member_ledger_id: "member_collateral_ledger".to_string(),
                 quorum_member_signature: [0u8; 64],
             },
         ));
@@ -321,6 +324,7 @@ mod tests {
             operator_id: operator,
             reserves_id: reserves_id.clone(),
             quorum_member,
+            member_ledger_id: "member_collateral_ledger".to_string(),
             quorum_member_signature: [0xBB; 64],
         };
 
@@ -333,6 +337,7 @@ mod tests {
             reserves_id,
             LedgerOperation::QuorumAddMember {
                 quorum_member,
+                member_ledger_id: "member_collateral_ledger".to_string(),
                 quorum_member_signature: [0xBB; 64],
             },
         ));
@@ -405,6 +410,7 @@ mod tests {
             generate_test_pubkey(2).to_string(),
             LedgerOperation::QuorumAddMember {
                 quorum_member: generate_test_pubkey(3),
+                member_ledger_id: "member_collateral_ledger".to_string(),
                 quorum_member_signature: [0u8; 64],
             },
         ));
@@ -433,6 +439,7 @@ mod tests {
             LedgerOperation::CollateralAttestation {
                 collateral_operator: generate_test_pubkey(3),
                 quorum_member: generate_test_pubkey(4),
+                collateral_ledger_id: "collateral_ledger".to_string(),
                 amount: 100_000,
                 block_height: 800_000,
                 lock_until_block: 0,

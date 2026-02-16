@@ -186,10 +186,10 @@ mod tests {
         if let Some(ledger_arc) = ledgers.get(&(handler.our_node_id, partner.to_string())) {
             let mut ledger = ledger_arc.write().unwrap();
             // Use deposits-core Deposit type
-            let mut deposit = deposits_core::Deposit::new(deposit_pubkey, None);
+            let mut deposit = deposits_core::Deposit::from_pubkey(&deposit_pubkey, None);
             deposit.balance = balance;
             deposit.locked_balance = locked_balance;
-            ledger.state.deposits.insert(deposit_pubkey, deposit);
+            ledger.state.deposits.insert(deposit.deposit_id, deposit);
         }
     }
 

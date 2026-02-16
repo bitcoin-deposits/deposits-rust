@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use bitcoin::secp256k1::PublicKey;
 
 use crate::ledger::Ledger;
+use crate::types::DepositId;
 use crate::traits::{
     Broadcaster, ChainSource, ChannelRegistry, EventEmitter, Logger, LogLevel,
     MessageHandler, PaymentTracker, PeerTransport, SignatureProvider, Storage,
@@ -860,70 +861,64 @@ where
     E: EventEmitter,
     L: Logger,
 {
-    fn list_deposits(&self) -> Result<Vec<PublicKey>, crate::DepositsError> {
+    fn list_deposits(&self) -> Result<Vec<DepositId>, crate::DepositsError> {
         let mut all_deposits = Vec::new();
         let ledgers = self.ledgers.lock().unwrap();
         for ledger_arc in ledgers.values() {
             let ledger = ledger_arc.read().unwrap();
             for deposit in ledger.state.deposits.values() {
-                all_deposits.push(deposit.pubkey);
+                all_deposits.push(deposit.deposit_id);
             }
         }
         Ok(all_deposits)
     }
 
-    fn list_deposits_for_depositor(
+    fn list_deposits_for_deposit_id(
         &self,
-        depositor_pubkey: PublicKey,
-    ) -> Result<Vec<PublicKey>, crate::DepositsError> {
-        let mut depositor_deposits = Vec::new();
-        let ledgers = self.ledgers.lock().unwrap();
-        for ledger_arc in ledgers.values() {
-            let ledger = ledger_arc.read().unwrap();
-            if let Some(deposit) = ledger.state.deposits.get(&depositor_pubkey) {
-                depositor_deposits.push(deposit.pubkey);
-            }
-        }
-        Ok(depositor_deposits)
-    }
-
-    fn list_deposits_for_pubkey(
-        &self,
-        deposit_pubkey: PublicKey,
-    ) -> Result<Vec<PublicKey>, crate::DepositsError> {
+        deposit_id: DepositId,
+    ) -> Result<Vec<DepositId>, crate::DepositsError> {
         let mut matching_deposits = Vec::new();
         let ledgers = self.ledgers.lock().unwrap();
         for ledger_arc in ledgers.values() {
             let ledger = ledger_arc.read().unwrap();
-            for deposit in ledger.state.deposits.values() {
-                if deposit.pubkey == deposit_pubkey {
-                    matching_deposits.push(deposit.pubkey);
-                }
+            if ledger.state.deposits.contains_key(&deposit_id) {
+                matching_deposits.push(deposit_id);
             }
         }
         Ok(matching_deposits)
     }
 
-    fn get_deposit_balance(&self, deposit_pubkey: PublicKey) -> Result<u64, crate::DepositsError> {
+    fn get_deposit_balance(&self, deposit_id: DepositId) -> Result<u64, crate::DepositsError> {
         let ledgers = self.ledgers.lock().unwrap();
         for ledger_arc in ledgers.values() {
             let ledger = ledger_arc.read().unwrap();
-            if let Some(deposit) = ledger.state.deposits.get(&deposit_pubkey) {
+            if let Some(deposit) = ledger.state.deposits.get(&deposit_id) {
                 return Ok(deposit.balance.saturating_sub(deposit.locked_balance));
             }
         }
         Err(crate::DepositsError::DepositNotFound)
     }
 
-    fn find_deposit_by_payment_hash(&self, payment_hash: &[u8; 32]) -> Option<(String, PublicKey, u64)> {
+    fn get_deposit_descriptor(&self, deposit_id: DepositId) -> Result<String, crate::DepositsError> {
+        let ledgers = self.ledgers.lock().unwrap();
+        for ledger_arc in ledgers.values() {
+            let ledger = ledger_arc.read().unwrap();
+            if let Some(deposit) = ledger.state.deposits.get(&deposit_id) {
+                return Ok(deposit.descriptor.clone());
+            }
+        }
+        Err(crate::DepositsError::DepositNotFound)
+    }
+
+    fn find_deposit_by_payment_hash(&self, payment_hash: &[u8; 32]) -> Option<(String, DepositId, u64)> {
         let ledgers = self.ledgers.lock().unwrap();
         for ((operator_id, reserves_id), ledger_arc) in ledgers.iter() {
             if *operator_id == self.node_id {
                 let ledger = ledger_arc.read().unwrap();
-                for (deposit_pubkey, deposit) in ledger.state.deposits.iter() {
+                for (deposit_id, deposit) in ledger.state.deposits.iter() {
                     for invoice in &deposit.invoices {
                         if &invoice.payment_hash == payment_hash {
-                            return Some((reserves_id.clone(), *deposit_pubkey, invoice.amount));
+                            return Some((reserves_id.clone(), *deposit_id, invoice.amount));
                         }
                     }
                 }
@@ -932,14 +927,14 @@ where
         None
     }
 
-    fn get_active_depositors(&self) -> Vec<PublicKey> {
+    fn get_active_depositors(&self) -> Vec<DepositId> {
         let mut active_depositors = Vec::new();
         let ledgers = self.ledgers.lock().unwrap();
         for ledger_arc in ledgers.values() {
             let ledger = ledger_arc.read().unwrap();
-            for (depositor_pubkey, deposit) in &ledger.state.deposits {
+            for (deposit_id, deposit) in &ledger.state.deposits {
                 if deposit.balance > 0 {
-                    active_depositors.push(*depositor_pubkey);
+                    active_depositors.push(*deposit_id);
                 }
             }
         }
@@ -959,12 +954,12 @@ where
         }
     }
 
-    fn get_deposits_for_partner(&self, partner_node_id: PublicKey) -> Option<Vec<(PublicKey, u64, u64)>> {
+    fn get_deposits_for_partner(&self, partner_node_id: PublicKey) -> Option<Vec<(DepositId, u64, u64)>> {
         let ledgers = self.ledgers.lock().unwrap();
         if let Some(ledger_arc) = ledgers.get(&(self.node_id, partner_node_id.to_string())) {
             let ledger = ledger_arc.read().unwrap();
-            let deposits: Vec<(PublicKey, u64, u64)> = ledger.state.deposits.iter()
-                .map(|(depositor_pubkey, deposit)| (*depositor_pubkey, deposit.balance, deposit.locked_balance))
+            let deposits: Vec<(DepositId, u64, u64)> = ledger.state.deposits.iter()
+                .map(|(deposit_id, deposit)| (*deposit_id, deposit.balance, deposit.locked_balance))
                 .collect();
             Some(deposits)
         } else {
@@ -1351,22 +1346,24 @@ mod tests {
             PublicKey::from_secret_key(&secp, &secret)
         };
 
-        {
+        let deposit_id = {
             let ledger_arc = handler.get_ledger(test_pubkey(), &partner_str).unwrap();
             let mut ledger = ledger_arc.write().unwrap();
-            let mut deposit = crate::types::Deposit::new(deposit_pubkey, None);
+            let mut deposit = crate::types::Deposit::from_pubkey(&deposit_pubkey, None);
             deposit.balance = 100_000;
             deposit.locked_balance = 10_000;
-            ledger.state.deposits.insert(deposit_pubkey, deposit);
-        }
+            let deposit_id = deposit.deposit_id;
+            ledger.state.deposits.insert(deposit_id, deposit);
+            deposit_id
+        };
 
         // Now we should see the deposit
         let deposits = handler.list_deposits().unwrap();
         assert_eq!(deposits.len(), 1);
-        assert_eq!(deposits[0], deposit_pubkey);
+        assert_eq!(deposits[0], deposit_id);
 
         // Check balance (balance - locked)
-        let balance = handler.get_deposit_balance(deposit_pubkey).unwrap();
+        let balance = handler.get_deposit_balance(deposit_id).unwrap();
         assert_eq!(balance, 90_000);
 
         // Check total balances
@@ -1375,12 +1372,12 @@ mod tests {
         // Check active depositors
         let active = handler.get_active_depositors();
         assert_eq!(active.len(), 1);
-        assert_eq!(active[0], deposit_pubkey);
+        assert_eq!(active[0], deposit_id);
 
         // Check deposits for partner
         let partner_deposits = handler.get_deposits_for_partner(partner).unwrap();
         assert_eq!(partner_deposits.len(), 1);
-        assert_eq!(partner_deposits[0], (deposit_pubkey, 100_000, 10_000));
+        assert_eq!(partner_deposits[0], (deposit_id, 100_000, 10_000));
     }
 
     #[test]

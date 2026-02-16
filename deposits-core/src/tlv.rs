@@ -508,6 +508,25 @@ impl TlvBuilder {
         self
     }
 
+    /// Add a deposit_id field (16 bytes)
+    pub fn deposit_id_field(mut self, field_type: u64, value: &[u8; 16]) -> Self {
+        self.stream.insert(field_type, value.to_vec());
+        self
+    }
+
+    /// Add a descriptor witness field (nested TLV with stack elements)
+    pub fn witness_field(mut self, field_type: u64, witness: &crate::types::DescriptorWitness) -> Self {
+        // Encode as: varint(count) || (varint(len) || element)*
+        let mut buf = Vec::new();
+        write_varint(&mut buf, witness.stack.len() as u64).expect("vec write cannot fail");
+        for element in &witness.stack {
+            write_varint(&mut buf, element.len() as u64).expect("vec write cannot fail");
+            buf.extend(element);
+        }
+        self.stream.insert(field_type, buf);
+        self
+    }
+
     /// Build the final encoded bytes
     pub fn build(self) -> Vec<u8> {
         self.stream.encode()
@@ -712,6 +731,81 @@ impl TlvReader {
     pub fn read_vec_opt<T: TlvDecode>(&self, field_type: u64) -> TlvResult<Option<Vec<T>>> {
         match self.read_raw_opt(field_type) {
             Some(_) => Ok(Some(self.read_vec(field_type)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Read a required deposit_id field (16 bytes)
+    pub fn read_deposit_id(&self, field_type: u64) -> TlvResult<[u8; 16]> {
+        let data = self.stream.get(field_type)
+            .ok_or(TlvError::MissingRequiredField { field_type })?;
+        if data.len() != 16 {
+            return Err(TlvError::InvalidFieldValue {
+                field_type,
+                reason: format!("expected 16 bytes for deposit_id, got {}", data.len()),
+            });
+        }
+        let mut id = [0u8; 16];
+        id.copy_from_slice(data);
+        Ok(id)
+    }
+
+    /// Read an optional deposit_id field (16 bytes)
+    pub fn read_deposit_id_opt(&self, field_type: u64) -> TlvResult<Option<[u8; 16]>> {
+        match self.stream.get(field_type) {
+            Some(data) => {
+                if data.len() != 16 {
+                    return Err(TlvError::InvalidFieldValue {
+                        field_type,
+                        reason: format!("expected 16 bytes for deposit_id, got {}", data.len()),
+                    });
+                }
+                let mut id = [0u8; 16];
+                id.copy_from_slice(data);
+                Ok(Some(id))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Read a required witness field
+    pub fn read_witness(&self, field_type: u64) -> TlvResult<crate::types::DescriptorWitness> {
+        let data = self.stream.get(field_type)
+            .ok_or(TlvError::MissingRequiredField { field_type })?;
+
+        let mut cursor = Cursor::new(data);
+        let count = read_varint(&mut cursor)? as usize;
+
+        const MAX_STACK_SIZE: usize = 1000;
+        if count > MAX_STACK_SIZE {
+            return Err(TlvError::InvalidFieldValue {
+                field_type,
+                reason: format!("witness stack size {} exceeds maximum {}", count, MAX_STACK_SIZE),
+            });
+        }
+
+        let mut stack = Vec::with_capacity(count);
+        for _ in 0..count {
+            let len = read_varint(&mut cursor)? as usize;
+            const MAX_ELEMENT_SIZE: usize = 520; // Bitcoin script element limit
+            if len > MAX_ELEMENT_SIZE {
+                return Err(TlvError::InvalidFieldValue {
+                    field_type,
+                    reason: format!("witness element size {} exceeds maximum {}", len, MAX_ELEMENT_SIZE),
+                });
+            }
+            let mut element = vec![0u8; len];
+            cursor.read_exact(&mut element)?;
+            stack.push(element);
+        }
+
+        Ok(crate::types::DescriptorWitness { stack })
+    }
+
+    /// Read an optional witness field
+    pub fn read_witness_opt(&self, field_type: u64) -> TlvResult<Option<crate::types::DescriptorWitness>> {
+        match self.stream.get(field_type) {
+            Some(_) => Ok(Some(self.read_witness(field_type)?)),
             None => Ok(None),
         }
     }

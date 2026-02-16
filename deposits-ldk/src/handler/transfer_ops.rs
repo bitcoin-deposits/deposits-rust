@@ -14,6 +14,7 @@ use bitcoin::secp256k1::PublicKey;
 
 use super::core::DepositsHandler;
 use deposits_core::DepositsError;
+use deposits_core::types::{DepositId, compute_deposit_id};
 use deposits_core::log_info;
 use lightning::util::logger::Logger as LdkLogger;
 
@@ -29,8 +30,8 @@ where
     pub fn execute_same_node_transfer(
         &self,
         partner_node_id: PublicKey,
-        sender_deposit: PublicKey,
-        receiver_deposit: PublicKey,
+        sender_deposit: DepositId,
+        receiver_deposit: DepositId,
         amount_msat: u64,
         payment_hash: [u8; 32],
     ) -> Result<(), DepositsError> {
@@ -76,8 +77,8 @@ where
             // Update timestamp
             ledger.state.last_updated = deposits_core::time_utils::now_unix_timestamp();
 
-            log_info!(self.logger, "✅ Same-node transfer: {} msat from {} to {} (payment_hash: {:02x?})",
-                     amount_msat, sender_deposit, receiver_deposit, &payment_hash[0..4]);
+            log_info!(self.logger, "✅ Same-node transfer: {} msat from {:02x?} to {:02x?} (payment_hash: {:02x?})",
+                     amount_msat, &sender_deposit[..4], &receiver_deposit[..4], &payment_hash[0..4]);
 
             Ok(())
         } else {

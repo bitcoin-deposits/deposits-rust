@@ -17,6 +17,7 @@ use super::messages::{LedgerUpdateMsg, LedgerUpdateMsgExt, LedgerOperation};
 use super::ledger_ext::LedgerExt;
 use deposits_core::quorum::LedgerId;
 use deposits_core::{log_debug, log_error, log_info, log_warn};
+use deposits_core::types::compute_deposit_id;
 use lightning::util::logger::Logger as LdkLogger;
 
 use std::ops::Deref;
@@ -914,6 +915,10 @@ where
     ) -> Result<(), DepositsError> {
         use super::messages::DepositsMessage;
 
+        // Convert pubkey to deposit_id
+        let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
+        let deposit_id = compute_deposit_id(&descriptor);
+
         // First validate that the deposit exists and has zero balance
         {
             let ledgers = self.ledgers.lock().unwrap();
@@ -921,7 +926,7 @@ where
                 let ledger = ledger_arc.read().unwrap();
 
                 // Ensure deposit balance is zero before removing
-                if let Some(deposit) = ledger.state.deposits.get(&deposit_pubkey) {
+                if let Some(deposit) = ledger.state.deposits.get(&deposit_id) {
                     if deposit.balance > 0 {
                         return Err(DepositsError::ProtocolViolation {
                             violation_type: "non_zero_balance".to_string(),
@@ -951,14 +956,14 @@ where
         let update_msg = LedgerUpdateMsg::new_with_operation(
             self.our_node_id,    // operator
             partner_node_id.to_string(),     // partner
-            LedgerOperation::DepositClose { pubkey: deposit_pubkey },
+            LedgerOperation::DepositClose { deposit_id },
         );
         let message = DepositsMessage::LedgerUpdate(update_msg);
 
         let message_hash = self.calculate_message_hash(&message);
         let message_for_broadcast = message.clone();
 
-        log_info!(self.logger, "Sending DepositClose message for deposit {} to partner {}", deposit_pubkey, partner_node_id);
+        log_info!(self.logger, "Sending DepositClose message for deposit {:02x?} to partner {}", &deposit_id[0..4], partner_node_id);
 
         // Send message and wait for acknowledgment using async version
         self.send_message_with_ack_async(partner_node_id, message.clone(), 30000).await?;
@@ -988,7 +993,7 @@ where
             log_error!(self.logger, "Failed to broadcast deposit close: {}", e);
         }
 
-        log_info!(self.logger, "Successfully removed deposit {} from channel with {}", deposit_pubkey, partner_node_id);
+        log_info!(self.logger, "Successfully removed deposit {:02x?} from channel with {}", &deposit_id[0..4], partner_node_id);
         Ok(())
     }
 }

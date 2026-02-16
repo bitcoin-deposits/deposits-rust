@@ -541,12 +541,26 @@ def run_simulation(
                         print(f"[{time.strftime('%H:%M:%S')}] Funding {alias}...")
 
                         # Find a deposit with enough balance to fund via Lightning
-                        funded_deposits = [d for d in our_deposits if d.balance_sats >= funding_amount_sats + 1000 and d.alias != alias]
+                        # Require 10% buffer to account for fees and balance drift
+                        min_funder_balance = int(funding_amount_sats * 1.1) + 5000
+                        funded_deposits = [d for d in our_deposits if d.balance_sats >= min_funder_balance and d.alias != alias]
+
+                        if lightning and funded_deposits:
+                            # Sync balances first to get accurate ledger state
+                            balances = sync_and_get_balances()
+                            for d in our_deposits:
+                                if d.alias in balances:
+                                    d.balance_sats = balances[d.alias]
+
+                            # Re-check with fresh balances
+                            funded_deposits = [d for d in our_deposits if d.balance_sats >= min_funder_balance and d.alias != alias]
+                            if not funded_deposits:
+                                print(f"  No deposits with sufficient balance after sync, using faucet...")
 
                         if lightning and funded_deposits:
                             # Fund via Lightning from existing deposit
                             funder = random.choice(funded_deposits)
-                            print(f"  Funding via Lightning from {funder.alias}...")
+                            print(f"  Funding via Lightning from {funder.alias} ({funder.balance_sats} sats)...")
                             if fund_deposit_lightning(funder, alias, funding_amount_sats):
                                 deposit.status = "funded"
                                 deposit.balance_sats = funding_amount_sats  # Update recipient balance

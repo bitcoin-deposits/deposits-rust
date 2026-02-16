@@ -14,6 +14,7 @@ use deposits_core::DepositsError;
 use super::messages::DepositsMessage;
 use super::ledger_ext::LedgerExt;
 use deposits_core::{log_debug, log_error, log_info};
+use deposits_core::types::compute_deposit_id;
 use lightning::util::logger::Logger as LdkLogger;
 
 use std::ops::Deref;
@@ -37,21 +38,25 @@ where
             partner_node_id
         );
 
+        // Convert pubkey to deposit_id for lookups and messages
+        let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
+        let deposit_id = compute_deposit_id(&descriptor);
+
         // Check for duplicate deposit before proceeding
         {
             let ledgers = self.ledgers.lock().unwrap();
             if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                 let ledger = ledger_arc.read().unwrap();
-                if ledger.state.deposits.contains_key(&deposit_pubkey) {
+                if ledger.state.deposits.contains_key(&deposit_id) {
                     log_info!(
                         self.logger,
-                        "⚠️ Deposit {} already exists on ledger with {}, skipping duplicate add",
-                        deposit_pubkey,
+                        "⚠️ Deposit {:02x?} already exists on ledger with {}, skipping duplicate add",
+                        &deposit_id[0..4],
                         partner_node_id
                     );
                     return Err(DepositsError::ProtocolViolation {
                         violation_type: "Duplicate deposit".to_string(),
-                        details: format!("Deposit {} already exists on this ledger", deposit_pubkey),
+                        details: format!("Deposit {:02x?} already exists on this ledger", &deposit_id[0..4]),
                     });
                 }
             }
@@ -131,7 +136,8 @@ where
         let message = DepositsMessage::new_deposit_open(
             self.our_node_id,
             partner_node_id,
-            deposit_pubkey,
+            deposit_id,
+            descriptor,
             fees.clone(),
             None,
             None,

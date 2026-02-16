@@ -9,6 +9,7 @@
 #![cfg(feature = "bitcoin-deposits")]
 
 use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+use deposits_core::types::QuorumMember;
 use deposits_ldk::handler::ledger_ext::{Ledger, LedgerRole};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -300,13 +301,17 @@ fn test_multiple_ledgers_same_channel() {
 fn test_ledger_with_quorum_members() {
     let operator = generate_test_pubkey(1);
     let partner = generate_test_pubkey(2);
-    let quorum_member = generate_test_pubkey(3);
+    let quorum_member_pubkey = generate_test_pubkey(3);
+    let quorum_member = QuorumMember {
+        pubkey: quorum_member_pubkey,
+        ledger_id: "collateral_ledger".to_string(),
+    };
 
     let ledger = Ledger::new(
         operator,
         partner.to_string(),
         LedgerRole::Operator,
-        vec![quorum_member],
+        vec![quorum_member.clone()],
         "addr".to_string(),
         0,
     );
@@ -319,15 +324,24 @@ fn test_ledger_with_quorum_members() {
 fn test_ledger_multiple_quorum_members() {
     let operator = generate_test_pubkey(1);
     let partner = generate_test_pubkey(2);
-    let qm1 = generate_test_pubkey(3);
-    let qm2 = generate_test_pubkey(4);
-    let qm3 = generate_test_pubkey(5);
+    let qm1 = QuorumMember {
+        pubkey: generate_test_pubkey(3),
+        ledger_id: "collateral_ledger_1".to_string(),
+    };
+    let qm2 = QuorumMember {
+        pubkey: generate_test_pubkey(4),
+        ledger_id: "collateral_ledger_2".to_string(),
+    };
+    let qm3 = QuorumMember {
+        pubkey: generate_test_pubkey(5),
+        ledger_id: "collateral_ledger_3".to_string(),
+    };
 
     let ledger = Ledger::new(
         operator,
         partner.to_string(),
         LedgerRole::Operator,
-        vec![qm1, qm2, qm3],
+        vec![qm1.clone(), qm2.clone(), qm3.clone()],
         "addr".to_string(),
         0,
     );

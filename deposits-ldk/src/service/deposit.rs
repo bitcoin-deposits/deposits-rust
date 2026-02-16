@@ -68,8 +68,8 @@ where
         handler.get_deposits_for_partner(reserves_id)
             .map(|deps| {
                 deps.into_iter()
-                    .map(|(pubkey, balance_msat, locked_msat)| DepositInfo {
-                        deposit_pubkey: pubkey.to_string(),
+                    .map(|(deposit_id, balance_msat, locked_msat)| DepositInfo {
+                        deposit_pubkey: hex::encode(deposit_id),
                         ledger_id: reserves_id.to_string(),
                         balance_msat,
                         locked_balance_msat: locked_msat,
@@ -86,8 +86,8 @@ where
             .flat_map(|((_, reserves_id), ledger_arc)| {
                 let ledger = ledger_arc.read().unwrap();
                 ledger.state.deposits.iter()
-                    .map(|(pubkey, deposit)| DepositInfo {
-                        deposit_pubkey: pubkey.to_string(),
+                    .map(|(deposit_id, deposit)| DepositInfo {
+                        deposit_pubkey: hex::encode(deposit_id),
                         ledger_id: reserves_id.to_string(),
                         balance_msat: deposit.balance,
                         locked_balance_msat: deposit.locked_balance,

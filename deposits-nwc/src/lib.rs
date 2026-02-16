@@ -23,6 +23,7 @@ use tokio::sync::mpsc;
 use rand::{self, RngCore};
 use ldk_node::Node;
 use deposits_ldk::handler::{RecoveryOperations, DepositOperations, LedgerOperationsExt};
+use deposits_core::{DepositId, compute_deposit_id};
 
 // NIP-44 encryption
 use chacha20::cipher::{KeyIvInit, StreamCipher};
@@ -368,7 +369,7 @@ pub enum NWCAccessLevel {
     /// Node-level access - can control entire Lightning node
     Node,
     /// Deposit-level access - can only access one specific deposit
-    Deposit(bitcoin::secp256k1::PublicKey),
+    Deposit(DepositId),
 }
 
 /// Individual NWC session with a client
@@ -601,9 +602,11 @@ impl NWCService {
 
     /// Register a new deposit-specific NWC key
     pub async fn register_deposit_nwc_key(&self, nwc_pubkey: XOnlyPublicKey, deposit_pubkey: bitcoin::secp256k1::PublicKey) {
+        let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
+        let deposit_id = compute_deposit_id(&descriptor);
         let mut registry = self.access_registry.lock().await;
-        registry.insert(nwc_pubkey.to_string(), NWCAccessLevel::Deposit(deposit_pubkey));
-        println!("🔑 Registered deposit NWC key {} for deposit {}", nwc_pubkey, deposit_pubkey);
+        registry.insert(nwc_pubkey.to_string(), NWCAccessLevel::Deposit(deposit_id));
+        println!("🔑 Registered deposit NWC key {} for deposit {}", nwc_pubkey, hex::encode(&deposit_id));
         drop(registry);
 
         // Trigger subscription update to include the new key immediately
@@ -625,15 +628,15 @@ impl NWCService {
         #[cfg(feature = "bitcoin-deposits")]
         {
             if let Some(bd_handler) = self.node.deposits() {
-                let deposits: Vec<bitcoin::secp256k1::PublicKey> = bd_handler.list_deposits()
+                let deposits: Vec<DepositId> = bd_handler.list_deposits()
                     .map_err(|e| format!("Failed to list deposits: {}", e))?;
 
                 let mut registry = self.access_registry.lock().await;
                 let mut count = 0;
 
-                for deposit_pubkey in deposits {
-                    let (deposit_nwc_keypair, deposit_nwc_pubkey) = self.generate_deposit_nwc_keypair(deposit_pubkey);
-                    registry.insert(deposit_nwc_pubkey.to_string(), NWCAccessLevel::Deposit(deposit_pubkey));
+                for deposit_id in deposits {
+                    let (_deposit_nwc_keypair, deposit_nwc_pubkey) = self.generate_deposit_nwc_keypair(deposit_id);
+                    registry.insert(deposit_nwc_pubkey.to_string(), NWCAccessLevel::Deposit(deposit_id));
                     count += 1;
                 }
 
@@ -663,7 +666,7 @@ impl NWCService {
     }
 
     /// Generate a deposit-specific NWC keypair using HKDF from the NWC service's private key
-    pub fn generate_deposit_nwc_keypair(&self, deposit_pubkey: bitcoin::secp256k1::PublicKey) -> (Keypair, XOnlyPublicKey) {
+    pub fn generate_deposit_nwc_keypair(&self, deposit_id: DepositId) -> (Keypair, XOnlyPublicKey) {
         // Derive deposit NWC key from NWC service's secret key using HKDF
         // This is secure: only the node operator can derive these keys
         let nwc_secret = self.keypair.secret_bytes();
@@ -671,7 +674,7 @@ impl NWCService {
         // HKDF: salt provides domain separation, info is the deposit identifier
         let hk = Hkdf::<Sha256>::new(Some(b"nwc-deposit-key-v1"), &nwc_secret);
         let mut secret_bytes = [0u8; 32];
-        hk.expand(&deposit_pubkey.serialize(), &mut secret_bytes)
+        hk.expand(&deposit_id, &mut secret_bytes)
             .expect("HKDF expand for deposit NWC key");
 
         let secret_key = SecretKey::from_slice(&secret_bytes)
@@ -682,6 +685,30 @@ impl NWCService {
         (keypair, xonly_pubkey)
     }
 
+    /// Look up a deposit's descriptor and extract the pubkey (for single-key deposits).
+    /// Returns None if the deposit is not found or is not a single-key descriptor.
+    fn get_pubkey_for_deposit(&self, deposit_id: &DepositId) -> Option<bitcoin::secp256k1::PublicKey> {
+        if let Some(bd_handler) = self.node.deposits() {
+            // Get all ledgers and search for this deposit
+            for ((_, _), ledger_arc) in bd_handler.get_all_ledgers() {
+                let ledger = ledger_arc.read().ok()?;
+                if let Some(deposit) = ledger.state.deposits.get(deposit_id) {
+                    // Parse single-key descriptor: "pk(hex_pubkey)"
+                    let descriptor = &deposit.descriptor;
+                    if descriptor.starts_with("pk(") && descriptor.ends_with(")") {
+                        let hex_pubkey = &descriptor[3..descriptor.len()-1];
+                        if let Ok(pubkey_bytes) = hex::decode(hex_pubkey) {
+                            if let Ok(pubkey) = bitcoin::secp256k1::PublicKey::from_slice(&pubkey_bytes) {
+                                return Some(pubkey);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Get the keypair for a specific NWC pubkey
     /// Returns the main keypair if it's the node's pubkey, or derives the deposit keypair
     async fn get_keypair_for_nwc_pubkey(&self, nwc_pubkey: &str, access_level: &NWCAccessLevel) -> Option<Keypair> {
@@ -690,10 +717,10 @@ impl NWCService {
             return Some(self.keypair.clone());
         }
 
-        // Otherwise, it's a deposit-specific key - derive it from the deposit pubkey
+        // Otherwise, it's a deposit-specific key - derive it from the deposit id
         match access_level {
-            NWCAccessLevel::Deposit(deposit_pubkey) => {
-                let (keypair, _) = self.generate_deposit_nwc_keypair(*deposit_pubkey);
+            NWCAccessLevel::Deposit(deposit_id) => {
+                let (keypair, _) = self.generate_deposit_nwc_keypair(*deposit_id);
                 Some(keypair)
             }
             NWCAccessLevel::Node => {
@@ -704,8 +731,8 @@ impl NWCService {
     }
 
     /// Verify if a client pubkey is a validly-derived deposit NWC key
-    /// Returns the deposit pubkey if valid, None otherwise
-    fn verify_deposit_client_pubkey(&self, client_pubkey_str: &str) -> Option<PublicKey> {
+    /// Returns the deposit_id if valid, None otherwise
+    fn verify_deposit_client_pubkey(&self, client_pubkey_str: &str) -> Option<DepositId> {
         // Parse the client pubkey as x-only (Nostr format)
         let client_xonly = match XOnlyPublicKey::from_str(client_pubkey_str) {
             Ok(pk) => pk,
@@ -715,13 +742,13 @@ impl NWCService {
         // Get all deposits from the node
         if let Some(bd_handler) = self.node.deposits_handler() {
             if let Ok(deposits) = bd_handler.list_deposits() {
-                for deposit_pubkey in deposits {
+                for deposit_id in deposits {
                     // Derive the client NWC pubkey for this deposit
-                    let (_, derived_xonly) = self.generate_deposit_nwc_keypair(deposit_pubkey);
+                    let (_, derived_xonly) = self.generate_deposit_nwc_keypair(deposit_id);
 
                     // Check if it matches
                     if derived_xonly == client_xonly {
-                        return Some(deposit_pubkey);
+                        return Some(deposit_id);
                     }
                 }
             }
@@ -1357,9 +1384,9 @@ impl NWCService {
             Some(level) => level,
             None => {
                 // Check if this is a validly-derived deposit NWC key
-                if let Some(deposit_pubkey) = self.verify_deposit_client_pubkey(&pubkey) {
-                    println!("🔓 Client NWC key {} verified as deposit-derived key for deposit {}", pubkey, deposit_pubkey);
-                    NWCAccessLevel::Deposit(deposit_pubkey)
+                if let Some(deposit_id) = self.verify_deposit_client_pubkey(&pubkey) {
+                    println!("🔓 Client NWC key {} verified as deposit-derived key for deposit {}", pubkey, hex::encode(&deposit_id));
+                    NWCAccessLevel::Deposit(deposit_id)
                 } else {
                     println!("🚫 SECURITY: Rejecting request from unregistered NWC key: {}", pubkey);
                     println!("🚫 This key is not registered in the access registry - denying by default");
@@ -1472,16 +1499,17 @@ impl NWCService {
                     "channels": channel_balances
                 }))
             }
-            NWCAccessLevel::Deposit(deposit_pubkey) => {
+            NWCAccessLevel::Deposit(deposit_id) => {
                 // Deposit-level access: return only this specific deposit's balance
                 if let Some(bd_handler) = self.node.deposits() {
-                    match bd_handler.get_deposit_balance(*deposit_pubkey) {
+                    match bd_handler.get_deposit_balance(*deposit_id) {
                         Ok(balance_sat) => {
                             let balance_msat = balance_sat * 1000; // Convert sat to msat
-                            println!("🔒 Deposit-level get_balance: returning deposit {} balance {} msat", deposit_pubkey, balance_msat);
+                            let deposit_id_hex = hex::encode(deposit_id);
+                            println!("🔒 Deposit-level get_balance: returning deposit {} balance {} msat", deposit_id_hex, balance_msat);
                             Ok(json!({
                                 "balance": balance_msat,
-                                "deposit_pubkey": deposit_pubkey.to_string()
+                                "deposit_id": deposit_id_hex
                             }))
                         },
                         Err(e) => Err(format!("Failed to get deposit balance: {:?}", e))
@@ -1536,18 +1564,22 @@ impl NWCService {
                     "settled_at": null
                 }))
             }
-            NWCAccessLevel::Deposit(deposit_pubkey) => {
+            NWCAccessLevel::Deposit(deposit_id) => {
                 // Deposit-level access: create invoice scoped to this deposit
-                println!("🔒 Deposit-level make_invoice: creating invoice for deposit {} amount {} msat", deposit_pubkey, amount);
+                let deposit_id_hex = hex::encode(deposit_id);
+                println!("🔒 Deposit-level make_invoice: creating invoice for deposit {} amount {} msat", deposit_id_hex, amount);
 
-                // Verify deposit exists
+                // Verify deposit exists and get pubkey for legacy APIs
                 if let Some(bd_handler) = self.node.deposits() {
-                    match bd_handler.get_deposit_balance(*deposit_pubkey) {
+                    match bd_handler.get_deposit_balance(*deposit_id) {
                         Ok(_) => {
+                            // Get pubkey for legacy APIs that still require it
+                            let deposit_pubkey = self.get_pubkey_for_deposit(deposit_id)
+                                .ok_or_else(|| format!("Could not find pubkey for deposit {}", deposit_id_hex))?;
+
                             // Create Lightning invoice using the node
-                            let deposit_pubkey_str = deposit_pubkey.to_string();
                             let description_obj = lightning_invoice::Bolt11InvoiceDescription::Direct(
-                                lightning_invoice::Description::new(format!("{} (Deposit: {})", description, &deposit_pubkey_str[..8]))
+                                lightning_invoice::Description::new(format!("{} (Deposit: {})", description, &deposit_id_hex[..8]))
                                     .map_err(|e| format!("Invalid description: {}", e))?
                             );
 
@@ -1562,13 +1594,11 @@ impl NWCService {
 
                             // Register this payment with the Lightning Event Service so it gets credited to the deposit
                             let partner_id = if let Some(lightning_service) = self.node.lightning_event_service() {
-                                // TODO: Need to determine which partner_node_id this deposit belongs to
-                                // For now, we'll iterate through channel ledgers to find it
-                                let partner_id = bd_handler.find_partner_for_deposit(*deposit_pubkey)
-                                    .ok_or_else(|| format!("Could not find partner for deposit {}", deposit_pubkey))?;
+                                let partner_id = bd_handler.find_partner_for_deposit_id(*deposit_id)
+                                    .ok_or_else(|| format!("Could not find partner for deposit {}", deposit_id_hex))?;
 
                                 println!("📋 Registering payment {} for deposit {} with partner {}",
-                                    payment_hash, deposit_pubkey, partner_id);
+                                    payment_hash, deposit_id_hex, partner_id);
 
                                 // Use payment_hash as invoice_id for now (can be improved later)
                                 let invoice_id = payment_hash.clone();
@@ -1576,7 +1606,7 @@ impl NWCService {
                                 lightning_service.register_payment_for_deposit(
                                     payment_hash_bytes,
                                     partner_id,
-                                    *deposit_pubkey,
+                                    deposit_pubkey,
                                     invoice_id,
                                     invoice.to_string()
                                 );
@@ -1591,7 +1621,7 @@ impl NWCService {
                             println!("🔐 NWC: Requesting cosignature from partner {} for invoice {}", partner_id, payment_hash);
                             let cosignature = bd_handler.request_invoice_cosignature(
                                 partner_id,
-                                *deposit_pubkey,
+                                deposit_pubkey,
                                 payment_hash_bytes,
                                 amount,
                                 invoice.to_string(),
@@ -1610,7 +1640,7 @@ impl NWCService {
                                 "payment_hash": payment_hash,
                                 "amount": amount,
                                 "fees_paid": 0,
-                                "deposit_pubkey": deposit_pubkey_str,
+                                "deposit_id": deposit_id_hex,
                                 "cosignature": cosignature_hex,
                                 "created_at": std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
@@ -1623,7 +1653,7 @@ impl NWCService {
                                 "settled_at": null
                             }))
                         },
-                        Err(_) => Err(format!("Deposit not found: {}", deposit_pubkey))
+                        Err(_) => Err(format!("Deposit not found: {}", deposit_id_hex))
                     }
                 } else {
                     Err("Bitcoin Deposits not enabled".to_string())
@@ -1679,14 +1709,15 @@ impl NWCService {
                         .as_secs()
                 }))
             }
-            NWCAccessLevel::Deposit(deposit_pubkey) => {
+            NWCAccessLevel::Deposit(deposit_id) => {
                 // Deposit-level access: pay from this deposit's balance
-                println!("🔒 Deposit-level pay_invoice: paying {} msat from deposit {}", amount_msat, deposit_pubkey);
+                let deposit_id_hex = hex::encode(deposit_id);
+                println!("🔒 Deposit-level pay_invoice: paying {} msat from deposit {}", amount_msat, deposit_id_hex);
 
                 if let Some(bd_handler) = self.node.deposits() {
-                    println!("📋 Checking deposit balance for {}", deposit_pubkey);
+                    println!("📋 Checking deposit balance for {}", deposit_id_hex);
                     // Check if deposit has sufficient balance (both in millisatoshis)
-                    match bd_handler.get_deposit_balance(*deposit_pubkey) {
+                    match bd_handler.get_deposit_balance(*deposit_id) {
                         Ok(balance_sat) => {
                             let balance_msat = balance_sat * 1000; // Convert sat to msat
                             println!("💰 Deposit balance: {} msat, payment requires: {} msat", balance_msat, amount_msat);
@@ -1703,17 +1734,21 @@ impl NWCService {
 
                             if payee_pubkey == our_node_id {
                                 // Same-node payment: both sender and receiver are deposits on this node
-                                println!("🔄 Same-node payment detected: {} -> invoice on same node", deposit_pubkey);
+                                println!("🔄 Same-node payment detected: {} -> invoice on same node", deposit_id_hex);
 
                                 // Find the receiver deposit using the lightning_event_service
                                 // (invoices are registered there when created, not stored in ledger)
                                 if let Some(lightning_service) = self.node.lightning_event_service() {
-                                    if let Ok((partner_node_id, receiver_deposit, _invoice_id, _bolt11)) =
+                                    if let Ok((partner_node_id, receiver_deposit_pubkey, _invoice_id, _bolt11)) =
                                         lightning_service.find_deposit_for_payment(payment_hash_bytes)
                                     {
+                                        // Convert receiver pubkey to deposit_id
+                                        let receiver_descriptor = format!("pk({})", hex::encode(receiver_deposit_pubkey.serialize()));
+                                        let receiver_deposit_id = compute_deposit_id(&receiver_descriptor);
+
                                         // Get the sender's partner (should be the same for same-node transfers)
-                                        let sender_partner = bd_handler.find_partner_for_deposit(*deposit_pubkey)
-                                            .ok_or_else(|| format!("Sender deposit {} not found in any ledger", deposit_pubkey))?;
+                                        let sender_partner = bd_handler.find_partner_for_deposit_id(*deposit_id)
+                                            .ok_or_else(|| format!("Sender deposit {} not found in any ledger", deposit_id_hex))?;
 
                                         if sender_partner != partner_node_id {
                                             return Err(format!(
@@ -1725,14 +1760,14 @@ impl NWCService {
                                         // Execute the same-node transfer (amount in millisatoshis)
                                         bd_handler.execute_same_node_transfer(
                                             partner_node_id,
-                                            *deposit_pubkey,
-                                            receiver_deposit,
+                                            *deposit_id,
+                                            receiver_deposit_id,
                                             amount_msat,
                                             payment_hash_bytes,
                                         ).map_err(|e| format!("Same-node transfer failed: {}", e))?;
 
                                         println!("✅ Same-node transfer complete: {} msat from {} to {}",
-                                                amount_msat, deposit_pubkey, receiver_deposit);
+                                                amount_msat, deposit_id_hex, hex::encode(&receiver_deposit_id));
 
                                         // Get preimage from payment store and mark payment as settled
                                         let preimage_hex = self.node.list_payments().iter()
@@ -1775,9 +1810,9 @@ impl NWCService {
                                             "payment_hash": payment_hash_hex,
                                             "amount": amount_msat,
                                             "fees_paid": 0, // No fees for same-node transfers
-                                            "deposit_pubkey": deposit_pubkey.to_string(),
+                                            "deposit_id": deposit_id_hex.clone(),
                                             "same_node_transfer": true,
-                                            "receiver_deposit": receiver_deposit.to_string(),
+                                            "receiver_deposit": hex::encode(&receiver_deposit_id),
                                             "created_at": std::time::SystemTime::now()
                                                 .duration_since(std::time::UNIX_EPOCH)
                                                 .unwrap()
@@ -1797,13 +1832,17 @@ impl NWCService {
                             }
 
                             // Different-node payment: use Lightning with lock/fulfill flow
-                            println!("🔒 Locking {} msat from deposit {} for payment", amount_msat, deposit_pubkey);
+                            println!("🔒 Locking {} msat from deposit {} for payment", amount_msat, deposit_id_hex);
+
+                            // Get pubkey for legacy wire messages that still require it
+                            let deposit_pubkey = self.get_pubkey_for_deposit(deposit_id)
+                                .ok_or_else(|| format!("Could not find pubkey for deposit {}", deposit_id_hex))?;
 
                             // Sequence number is assigned atomically in handle_sending_lock_payment
                             // TODO: Sign with deposit's scriptpubkey private key for ownership proof
                             let lock_msg = deposits_ldk::wire::messages::SendingLockPaymentMsg {
                                 payment_id: payment_hash_bytes, // Use payment_hash as payment_id
-                                pubkey: *deposit_pubkey,
+                                pubkey: deposit_pubkey,
                                 amount: amount_msat, // Deposits protocol uses millisatoshis
                                 sequence_number: 0, // Ignored - assigned atomically in handler
                                 scriptpubkey_signature: [0; 64], // TODO: Real signature required
@@ -1828,7 +1867,7 @@ impl NWCService {
                                     // Sequence number is assigned atomically in handle_sending_fail_payment_async
                                     let fail_msg = deposits_ldk::wire::messages::SendingFailPaymentMsg {
                                         payment_id: payment_hash_bytes,
-                                        pubkey: *deposit_pubkey,
+                                        pubkey: deposit_pubkey,
                                         amount: amount_msat, // Deposits protocol uses millisatoshis
                                         sequence_number: 0, // Ignored - assigned atomically in handler
                                     };
@@ -1844,7 +1883,7 @@ impl NWCService {
                             let (tx, rx) = tokio::sync::oneshot::channel();
                             {
                                 let mut pending = self.pending_outgoing_payments.lock().await;
-                                pending.insert(payment_id.0, (tx, *deposit_pubkey, amount_msat));
+                                pending.insert(payment_id.0, (tx, deposit_pubkey, amount_msat));
                             }
                             println!("⏳ Waiting for payment completion event...");
 
@@ -1864,7 +1903,7 @@ impl NWCService {
                                     let preimage_bytes = preimage_opt.unwrap_or([0u8; 32]);
                                     let fulfill_msg = deposits_ldk::wire::messages::SendingFulfillPaymentMsg {
                                         payment_id: payment_hash_bytes,
-                                        pubkey: *deposit_pubkey,
+                                        pubkey: deposit_pubkey,
                                         amount: amount_msat, // Deposits protocol uses millisatoshis
                                         sequence_number: 0, // Ignored - assigned atomically in handler
                                         scriptpubkey_signature: [0; 64], // TODO: Real signature required
@@ -1889,7 +1928,7 @@ impl NWCService {
                                         "payment_hash": payment_hash,
                                         "amount": amount_msat, // Response uses msat for NWC compatibility
                                         "fees_paid": 0,
-                                        "deposit_pubkey": deposit_pubkey.to_string(),
+                                        "deposit_id": deposit_id_hex.clone(),
                                         "created_at": std::time::SystemTime::now()
                                             .duration_since(std::time::UNIX_EPOCH)
                                             .unwrap()
@@ -1909,7 +1948,7 @@ impl NWCService {
                                     // Sequence number is assigned atomically in handle_sending_fail_payment_async
                                     let fail_msg = deposits_ldk::wire::messages::SendingFailPaymentMsg {
                                         payment_id: payment_hash_bytes,
-                                        pubkey: *deposit_pubkey,
+                                        pubkey: deposit_pubkey,
                                         amount: amount_msat, // Deposits protocol uses millisatoshis
                                         sequence_number: 0, // Ignored - assigned atomically in handler
                                     };
@@ -1927,7 +1966,7 @@ impl NWCService {
                                     // Sequence number is assigned atomically in handle_sending_fail_payment_async
                                     let fail_msg = deposits_ldk::wire::messages::SendingFailPaymentMsg {
                                         payment_id: payment_hash_bytes,
-                                        pubkey: *deposit_pubkey,
+                                        pubkey: deposit_pubkey,
                                         amount: amount_msat, // Deposits protocol uses millisatoshis
                                         sequence_number: 0, // Ignored - assigned atomically in handler
                                     };
@@ -1943,7 +1982,7 @@ impl NWCService {
                                 }
                             }
                         },
-                        Err(_) => Err(format!("Deposit not found: {}", deposit_pubkey))
+                        Err(_) => Err(format!("Deposit not found: {}", deposit_id_hex))
                     }
                 } else {
                     Err("Bitcoin Deposits not enabled".to_string())
@@ -2048,13 +2087,15 @@ impl NWCService {
         let deposit_pubkey_str = params.get("deposit_pubkey").and_then(|v| v.as_str())
             .ok_or("Missing deposit_pubkey parameter")?;
 
-        // Parse deposit pubkey
+        // Parse deposit pubkey and convert to deposit_id
         let deposit_pubkey = deposit_pubkey_str.parse::<bitcoin::secp256k1::PublicKey>()
             .map_err(|e| format!("Invalid deposit_pubkey: {}", e))?;
+        let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
+        let deposit_id = compute_deposit_id(&descriptor);
 
         // Get deposit balance via Bitcoin Deposits handler
         if let Some(bd_handler) = self.node.deposits() {
-            match bd_handler.get_deposit_balance(deposit_pubkey) {
+            match bd_handler.get_deposit_balance(deposit_id) {
                 Ok(balance_sat) => {
                     let balance_msat = balance_sat * 1000; // Convert sat to msat
                     Ok(json!({
@@ -2074,12 +2115,12 @@ impl NWCService {
     async fn handle_list_deposits(&self, access_level: &NWCAccessLevel, _params: &Value) -> Result<Value, String> {
         if let Some(bd_handler) = self.node.deposits() {
             match bd_handler.list_deposits() {
-                Ok(deposit_pubkeys) => {
-                    let deposits: Vec<Value> = deposit_pubkeys.iter().map(|pubkey| {
-                        let balance_sat = bd_handler.get_deposit_balance(*pubkey).unwrap_or(0);
+                Ok(deposit_ids) => {
+                    let deposits: Vec<Value> = deposit_ids.iter().map(|deposit_id| {
+                        let balance_sat = bd_handler.get_deposit_balance(*deposit_id).unwrap_or(0);
                         let balance_msat = balance_sat * 1000; // Convert sat to msat
                         json!({
-                            "deposit_pubkey": pubkey.to_string(),
+                            "deposit_id": hex::encode(deposit_id),
                             "balance": balance_msat,
                             "balance_sat": balance_sat
                         })
@@ -2104,13 +2145,15 @@ impl NWCService {
         let deposit_pubkey_str = params.get("deposit_pubkey").and_then(|v| v.as_str())
             .ok_or("Missing deposit_pubkey parameter")?;
 
-        // Parse deposit pubkey
+        // Parse deposit pubkey and convert to deposit_id
         let deposit_pubkey = deposit_pubkey_str.parse::<bitcoin::secp256k1::PublicKey>()
             .map_err(|e| format!("Invalid deposit_pubkey: {}", e))?;
+        let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
+        let deposit_id = compute_deposit_id(&descriptor);
 
         // Verify deposit exists
         if let Some(bd_handler) = self.node.deposits() {
-            match bd_handler.get_deposit_balance(deposit_pubkey) {
+            match bd_handler.get_deposit_balance(deposit_id) {
                 Ok(_) => {
                     // Create Lightning invoice using the node
                     let description_obj = lightning_invoice::Bolt11InvoiceDescription::Direct(
@@ -2194,9 +2237,11 @@ impl NWCService {
         let deposit_pubkey_str = params.get("deposit_pubkey").and_then(|v| v.as_str())
             .ok_or("Missing deposit_pubkey parameter")?;
 
-        // Parse deposit pubkey
+        // Parse deposit pubkey and convert to deposit_id
         let deposit_pubkey = deposit_pubkey_str.parse::<bitcoin::secp256k1::PublicKey>()
             .map_err(|e| format!("Invalid deposit_pubkey: {}", e))?;
+        let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
+        let deposit_id = compute_deposit_id(&descriptor);
 
         // Parse and pay the invoice using deposit funds
         let invoice = invoice_str.parse::<lightning_invoice::Bolt11Invoice>()
@@ -2206,7 +2251,7 @@ impl NWCService {
 
         if let Some(bd_handler) = self.node.deposits() {
             // Check if deposit has sufficient balance (both in millisatoshis)
-            match bd_handler.get_deposit_balance(deposit_pubkey) {
+            match bd_handler.get_deposit_balance(deposit_id) {
                 Ok(balance_sat) => {
                     let balance_msat = balance_sat * 1000; // Convert sat to msat
                     if balance_msat < amount_msat {
@@ -2221,16 +2266,21 @@ impl NWCService {
 
                     if payee_pubkey == our_node_id {
                         // Same-node payment: both sender and receiver are deposits on this node
-                        println!("🔄 Same-node payment detected: {} -> invoice on same node", deposit_pubkey);
+                        let deposit_id_hex = hex::encode(&deposit_id);
+                        println!("🔄 Same-node payment detected: {} -> invoice on same node", deposit_id_hex);
 
                         // Find the receiver deposit using the lightning_event_service
                         if let Some(lightning_service) = self.node.lightning_event_service() {
-                            if let Ok((partner_node_id, receiver_deposit, _invoice_id, _bolt11)) =
+                            if let Ok((partner_node_id, receiver_deposit_pubkey, _invoice_id, _bolt11)) =
                                 lightning_service.find_deposit_for_payment(payment_hash_bytes)
                             {
+                                // Convert receiver pubkey to deposit_id
+                                let receiver_descriptor = format!("pk({})", hex::encode(receiver_deposit_pubkey.serialize()));
+                                let receiver_deposit_id = compute_deposit_id(&receiver_descriptor);
+
                                 // Get the sender's partner (should be the same for same-node transfers)
                                 let sender_partner = bd_handler.find_partner_for_deposit(deposit_pubkey)
-                                    .ok_or_else(|| format!("Sender deposit {} not found in any ledger", deposit_pubkey))?;
+                                    .ok_or_else(|| format!("Sender deposit {} not found in any ledger", deposit_id_hex))?;
 
                                 if sender_partner != partner_node_id {
                                     return Err(format!(
@@ -2242,14 +2292,14 @@ impl NWCService {
                                 // Execute the same-node transfer (amount in millisatoshis)
                                 bd_handler.execute_same_node_transfer(
                                     partner_node_id,
-                                    deposit_pubkey,
-                                    receiver_deposit,
+                                    deposit_id,
+                                    receiver_deposit_id,
                                     amount_msat,
                                     payment_hash_bytes,
                                 ).map_err(|e| format!("Same-node transfer failed: {}", e))?;
 
                                 println!("✅ Same-node transfer complete: {} msat from {} to {}",
-                                        amount_msat, deposit_pubkey, receiver_deposit);
+                                        amount_msat, deposit_id_hex, hex::encode(&receiver_deposit_id));
 
                                 // Get preimage from payment store and mark payment as settled
                                 let preimage_hex = self.node.list_payments().iter()
@@ -2294,7 +2344,7 @@ impl NWCService {
                                     "fees_paid": 0, // No fees for same-node transfers
                                     "deposit_pubkey": deposit_pubkey_str,
                                     "same_node_transfer": true,
-                                    "receiver_deposit": receiver_deposit.to_string(),
+                                    "receiver_deposit": hex::encode(&receiver_deposit_id),
                                     "created_at": std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH)
                                         .unwrap()
@@ -2551,8 +2601,12 @@ impl NWCService {
 
             println!("✅ Successfully created deposit {} for partner {}", deposit_pubkey, partner_node_id);
 
+            // Convert pubkey to deposit_id for NWC key generation
+            let descriptor = format!("pk({})", hex::encode(deposit_public_key.serialize()));
+            let deposit_id = compute_deposit_id(&descriptor);
+
             // Generate deposit-specific NWC keypair
-            let (deposit_nwc_keypair, deposit_nwc_pubkey) = self.generate_deposit_nwc_keypair(deposit_public_key);
+            let (deposit_nwc_keypair, deposit_nwc_pubkey) = self.generate_deposit_nwc_keypair(deposit_id);
 
             // Register the deposit NWC key with scoped permissions
             self.register_deposit_nwc_key(deposit_nwc_pubkey, deposit_public_key).await;
@@ -2962,6 +3016,64 @@ impl NWCService {
 
 /// Implementation for background task context
 impl NWCServiceTaskContext {
+    /// Generate a deposit-specific NWC keypair using HKDF from the NWC service's private key
+    fn generate_deposit_nwc_keypair(&self, deposit_id: DepositId) -> (Keypair, XOnlyPublicKey) {
+        // Derive deposit NWC key from NWC service's secret key using HKDF
+        let nwc_secret = self.keypair.secret_bytes();
+        let hk = Hkdf::<Sha256>::new(Some(b"nwc-deposit-key-v1"), &nwc_secret);
+        let mut secret_bytes = [0u8; 32];
+        hk.expand(&deposit_id, &mut secret_bytes)
+            .expect("HKDF expand for deposit NWC key");
+
+        let secret_key = SecretKey::from_slice(&secret_bytes)
+            .expect("Valid deposit NWC private key");
+        let keypair = Keypair::from_secret_key(&self.secp, &secret_key);
+        let (xonly_pubkey, _) = XOnlyPublicKey::from_keypair(&keypair);
+
+        (keypair, xonly_pubkey)
+    }
+
+    /// Look up a deposit's descriptor and extract the pubkey (for single-key deposits).
+    fn get_pubkey_for_deposit(&self, deposit_id: &DepositId) -> Option<bitcoin::secp256k1::PublicKey> {
+        if let Some(bd_handler) = self.node.deposits() {
+            for ((_, _), ledger_arc) in bd_handler.get_all_ledgers() {
+                let ledger = ledger_arc.read().ok()?;
+                if let Some(deposit) = ledger.state.deposits.get(deposit_id) {
+                    let descriptor = &deposit.descriptor;
+                    if descriptor.starts_with("pk(") && descriptor.ends_with(")") {
+                        let hex_pubkey = &descriptor[3..descriptor.len()-1];
+                        if let Ok(pubkey_bytes) = hex::decode(hex_pubkey) {
+                            if let Ok(pubkey) = bitcoin::secp256k1::PublicKey::from_slice(&pubkey_bytes) {
+                                return Some(pubkey);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Verify if a client pubkey is a validly-derived deposit NWC key
+    fn verify_deposit_client_pubkey(&self, client_pubkey_str: &str) -> Option<DepositId> {
+        let client_xonly = match XOnlyPublicKey::from_str(client_pubkey_str) {
+            Ok(pk) => pk,
+            Err(_) => return None,
+        };
+
+        if let Some(bd_handler) = self.node.deposits_handler() {
+            if let Ok(deposits) = bd_handler.list_deposits() {
+                for deposit_id in deposits {
+                    let (_, derived_xonly) = self.generate_deposit_nwc_keypair(deposit_id);
+                    if derived_xonly == client_xonly {
+                        return Some(deposit_id);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Get the keypair for a specific NWC pubkey
     /// Returns the main keypair if it's the node's pubkey, or derives the deposit keypair
     async fn get_keypair_for_nwc_pubkey(&self, nwc_pubkey: &str, access_level: &NWCAccessLevel) -> Option<Keypair> {
@@ -2970,10 +3082,10 @@ impl NWCServiceTaskContext {
             return Some(self.keypair.clone());
         }
 
-        // Otherwise, it's a deposit-specific key - derive it from the deposit pubkey
+        // Otherwise, it's a deposit-specific key - derive it from the deposit id
         match access_level {
-            NWCAccessLevel::Deposit(deposit_pubkey) => {
-                let (keypair, _) = self.generate_deposit_nwc_keypair(*deposit_pubkey);
+            NWCAccessLevel::Deposit(deposit_id) => {
+                let (keypair, _) = self.generate_deposit_nwc_keypair(*deposit_id);
                 Some(keypair)
             }
             NWCAccessLevel::Node => {
@@ -3478,9 +3590,9 @@ impl NWCServiceTaskContext {
             }
             None => {
                 // Check if this is a validly-derived deposit NWC key
-                if let Some(deposit_pubkey) = self.verify_deposit_client_pubkey(pubkey) {
-                    println!("🔓 Client NWC key {} verified as deposit-derived key for deposit {}", pubkey, deposit_pubkey);
-                    NWCAccessLevel::Deposit(deposit_pubkey)
+                if let Some(deposit_id) = self.verify_deposit_client_pubkey(pubkey) {
+                    println!("🔓 Client NWC key {} verified as deposit-derived key for deposit {}", pubkey, hex::encode(&deposit_id));
+                    NWCAccessLevel::Deposit(deposit_id)
                 } else {
                     println!("🚫 SECURITY: Rejecting request from unregistered NWC key: {}", pubkey);
                     // Send UNAUTHORIZED error response instead of silently ignoring
@@ -3563,14 +3675,14 @@ impl NWCServiceTaskContext {
                     "lightning_balance_msat": total_ln_balance_msat
                 }))
             }
-            NWCAccessLevel::Deposit(deposit_pubkey) => {
+            NWCAccessLevel::Deposit(deposit_id) => {
                 if let Some(bd_handler) = self.node.deposits() {
-                    match bd_handler.get_deposit_balance(*deposit_pubkey) {
+                    match bd_handler.get_deposit_balance(*deposit_id) {
                         Ok(balance_sat) => {
                             let balance_msat = balance_sat * 1000; // Convert sat to msat
                             Ok(json!({
                                 "balance": balance_msat,
-                                "deposit_pubkey": deposit_pubkey.to_string()
+                                "deposit_id": hex::encode(deposit_id)
                             }))
                         },
                         Err(e) => Err(format!("Failed to get deposit balance: {:?}", e))
@@ -3614,13 +3726,13 @@ impl NWCServiceTaskContext {
                         .as_secs()
                 }))
             }
-            NWCAccessLevel::Deposit(deposit_pubkey) => {
+            NWCAccessLevel::Deposit(deposit_id) => {
                 if let Some(bd_handler) = self.node.deposits() {
-                    match bd_handler.get_deposit_balance(*deposit_pubkey) {
+                    let deposit_id_hex = hex::encode(deposit_id);
+                    match bd_handler.get_deposit_balance(*deposit_id) {
                         Ok(_) => {
-                            let deposit_pubkey_str = deposit_pubkey.to_string();
                             let description_obj = lightning_invoice::Bolt11InvoiceDescription::Direct(
-                                lightning_invoice::Description::new(format!("{} (Deposit: {})", description, &deposit_pubkey_str[..8]))
+                                lightning_invoice::Description::new(format!("{} (Deposit: {})", description, &deposit_id_hex[..8]))
                                     .map_err(|e| format!("Invalid description: {}", e))?
                             );
 
@@ -3630,19 +3742,23 @@ impl NWCServiceTaskContext {
                                 3600
                             ).map_err(|e| format!("Failed to create invoice: {}", e))?;
 
+                            // Get pubkey for legacy APIs
+                            let deposit_pubkey = self.get_pubkey_for_deposit(deposit_id)
+                                .ok_or_else(|| format!("Could not find pubkey for deposit {}", deposit_id_hex))?;
+
                             let payment_hash_bytes: [u8; 32] = *invoice.payment_hash().as_ref();
                             let payment_hash = hex::encode(&payment_hash_bytes);
 
                             // Register this payment with the Lightning Event Service
                             let partner_id = if let Some(lightning_service) = self.node.lightning_event_service() {
-                                let partner_id = bd_handler.find_partner_for_deposit(*deposit_pubkey)
-                                    .ok_or_else(|| format!("Could not find partner for deposit {}", deposit_pubkey))?;
+                                let partner_id = bd_handler.find_partner_for_deposit_id(*deposit_id)
+                                    .ok_or_else(|| format!("Could not find partner for deposit {}", deposit_id_hex))?;
 
                                 let invoice_id = payment_hash.clone();
                                 lightning_service.register_payment_for_deposit(
                                     payment_hash_bytes,
                                     partner_id,
-                                    *deposit_pubkey,
+                                    deposit_pubkey,
                                     invoice_id,
                                     invoice.to_string()
                                 );
@@ -3655,7 +3771,7 @@ impl NWCServiceTaskContext {
                             // Request cosignature from partner
                             let cosignature = bd_handler.request_invoice_cosignature(
                                 partner_id,
-                                *deposit_pubkey,
+                                deposit_pubkey,
                                 payment_hash_bytes,
                                 amount,
                                 invoice.to_string(),
@@ -3670,7 +3786,7 @@ impl NWCServiceTaskContext {
                                 "description": description,
                                 "payment_hash": payment_hash,
                                 "amount": amount,
-                                "deposit_pubkey": deposit_pubkey_str,
+                                "deposit_id": deposit_id_hex,
                                 "cosignature": cosignature_hex,
                                 "created_at": std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
@@ -3678,7 +3794,7 @@ impl NWCServiceTaskContext {
                                     .as_secs()
                             }))
                         },
-                        Err(_) => Err(format!("Deposit not found: {}", deposit_pubkey))
+                        Err(_) => Err(format!("Deposit not found: {}", deposit_id_hex))
                     }
                 } else {
                     Err("Bitcoin Deposits not enabled".to_string())
@@ -3722,9 +3838,10 @@ impl NWCServiceTaskContext {
                         .as_secs()
                 }))
             }
-            NWCAccessLevel::Deposit(deposit_pubkey) => {
+            NWCAccessLevel::Deposit(deposit_id) => {
                 if let Some(bd_handler) = self.node.deposits() {
-                    match bd_handler.get_deposit_balance(*deposit_pubkey) {
+                    let deposit_id_hex = hex::encode(deposit_id);
+                    match bd_handler.get_deposit_balance(*deposit_id) {
                         Ok(balance_sat) => {
                             let balance_msat = balance_sat * 1000; // Convert sat to msat
                             if balance_msat < amount_msat {
@@ -3741,11 +3858,15 @@ impl NWCServiceTaskContext {
                             if payee_pubkey == our_node_id {
                                 // Same-node payment
                                 if let Some(lightning_service) = self.node.lightning_event_service() {
-                                    if let Ok((partner_node_id, receiver_deposit, _invoice_id, _bolt11)) =
+                                    if let Ok((partner_node_id, receiver_deposit_pubkey, _invoice_id, _bolt11)) =
                                         lightning_service.find_deposit_for_payment(payment_hash_bytes)
                                     {
-                                        let sender_partner = bd_handler.find_partner_for_deposit(*deposit_pubkey)
-                                            .ok_or_else(|| format!("Sender deposit {} not found", deposit_pubkey))?;
+                                        // Convert receiver pubkey to deposit_id
+                                        let receiver_descriptor = format!("pk({})", hex::encode(receiver_deposit_pubkey.serialize()));
+                                        let receiver_deposit_id = compute_deposit_id(&receiver_descriptor);
+
+                                        let sender_partner = bd_handler.find_partner_for_deposit_id(*deposit_id)
+                                            .ok_or_else(|| format!("Sender deposit {} not found", deposit_id_hex))?;
 
                                         if sender_partner != partner_node_id {
                                             return Err(format!("Cross-partner transfers not supported"));
@@ -3754,8 +3875,8 @@ impl NWCServiceTaskContext {
                                         // Execute the same-node transfer (amount in millisatoshis)
                                         bd_handler.execute_same_node_transfer(
                                             partner_node_id,
-                                            *deposit_pubkey,
-                                            receiver_deposit,
+                                            *deposit_id,
+                                            receiver_deposit_id,
                                             amount_msat,
                                             payment_hash_bytes,
                                         ).map_err(|e| format!("Same-node transfer failed: {}", e))?;
@@ -3803,11 +3924,15 @@ impl NWCServiceTaskContext {
                             }
 
                             // Different-node payment: use Lightning with lock/fulfill flow
+                            // Get pubkey for legacy wire messages
+                            let deposit_pubkey = self.get_pubkey_for_deposit(deposit_id)
+                                .ok_or_else(|| format!("Could not find pubkey for deposit {}", deposit_id_hex))?;
+
                             // Sequence number is assigned atomically in handle_sending_lock_payment
                             // TODO: Sign with deposit's scriptpubkey private key for ownership proof
                             let lock_msg = deposits_ldk::wire::messages::SendingLockPaymentMsg {
                                 payment_id: payment_hash_bytes,
-                                pubkey: *deposit_pubkey,
+                                pubkey: deposit_pubkey,
                                 amount: amount_msat, // Deposits protocol uses millisatoshis
                                 sequence_number: 0, // Ignored - assigned atomically in handler
                                 scriptpubkey_signature: [0; 64], // TODO: Real signature required
@@ -3826,7 +3951,7 @@ impl NWCServiceTaskContext {
                                     // Sequence number is assigned atomically in handle_sending_fail_payment_async
                                     let fail_msg = deposits_ldk::wire::messages::SendingFailPaymentMsg {
                                         payment_id: payment_hash_bytes,
-                                        pubkey: *deposit_pubkey,
+                                        pubkey: deposit_pubkey,
                                         amount: amount_msat, // Deposits protocol uses millisatoshis
                                         sequence_number: 0, // Ignored - assigned atomically in handler
                                     };
@@ -3842,7 +3967,7 @@ impl NWCServiceTaskContext {
                             let (tx, rx) = tokio::sync::oneshot::channel();
                             {
                                 let mut pending = self.pending_outgoing_payments.lock().await;
-                                pending.insert(payment_id.0, (tx, *deposit_pubkey, amount_msat));
+                                pending.insert(payment_id.0, (tx, deposit_pubkey, amount_msat));
                             }
 
                             let completion_result = tokio::time::timeout(
@@ -3856,7 +3981,7 @@ impl NWCServiceTaskContext {
                                     let preimage_bytes = preimage_opt.unwrap_or([0u8; 32]);
                                     let fulfill_msg = deposits_ldk::wire::messages::SendingFulfillPaymentMsg {
                                         payment_id: payment_hash_bytes,
-                                        pubkey: *deposit_pubkey,
+                                        pubkey: deposit_pubkey,
                                         amount: amount_msat, // Deposits protocol uses millisatoshis
                                         sequence_number: 0, // Ignored - assigned atomically in handler
                                         scriptpubkey_signature: [0; 64], // TODO: Real signature required
@@ -3874,14 +3999,14 @@ impl NWCServiceTaskContext {
                                         "payment_hash": payment_hash_hex,
                                         "amount": amount_msat,
                                         "fees_paid": 0,
-                                        "deposit_pubkey": deposit_pubkey.to_string()
+                                        "deposit_id": deposit_id_hex.clone()
                                     }))
                                 }
                                 Ok(Ok(Err(error_msg))) => {
                                     // Sequence number is assigned atomically in handle_sending_fail_payment_async
                                     let fail_msg = deposits_ldk::wire::messages::SendingFailPaymentMsg {
                                         payment_id: payment_hash_bytes,
-                                        pubkey: *deposit_pubkey,
+                                        pubkey: deposit_pubkey,
                                         amount: amount_msat, // Deposits protocol uses millisatoshis
                                         sequence_number: 0, // Ignored - assigned atomically in handler
                                     };
@@ -3895,7 +4020,7 @@ impl NWCServiceTaskContext {
                                     // Timeout - sequence number is assigned atomically in handler
                                     let fail_msg = deposits_ldk::wire::messages::SendingFailPaymentMsg {
                                         payment_id: payment_hash_bytes,
-                                        pubkey: *deposit_pubkey,
+                                        pubkey: deposit_pubkey,
                                         amount: amount_msat, // Deposits protocol uses millisatoshis
                                         sequence_number: 0, // Ignored - assigned atomically in handler
                                     };
@@ -3910,7 +4035,7 @@ impl NWCServiceTaskContext {
                                 }
                             }
                         },
-                        Err(_) => Err(format!("Deposit not found: {}", deposit_pubkey))
+                        Err(_) => Err(format!("Deposit not found: {}", deposit_id_hex))
                     }
                 } else {
                     Err("Bitcoin Deposits not enabled".to_string())
@@ -3927,8 +4052,12 @@ impl NWCServiceTaskContext {
         let deposit_pubkey = deposit_pubkey_str.parse::<bitcoin::secp256k1::PublicKey>()
             .map_err(|e| format!("Invalid deposit_pubkey: {}", e))?;
 
+        // Compute deposit_id from pubkey
+        let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
+        let deposit_id = compute_deposit_id(&descriptor);
+
         if let Some(bd_handler) = self.node.deposits() {
-            match bd_handler.get_deposit_balance(deposit_pubkey) {
+            match bd_handler.get_deposit_balance(deposit_id) {
                 Ok(balance_sat) => {
                     let balance_msat = balance_sat * 1000; // Convert sat to msat
                     Ok(json!({
@@ -3948,12 +4077,12 @@ impl NWCServiceTaskContext {
     async fn handle_list_deposits_async(&self, _access_level: &NWCAccessLevel, _params: &Value) -> Result<Value, String> {
         if let Some(bd_handler) = self.node.deposits() {
             match bd_handler.list_deposits() {
-                Ok(deposit_pubkeys) => {
-                    let deposits: Vec<Value> = deposit_pubkeys.iter().map(|pubkey| {
-                        let balance_sat = bd_handler.get_deposit_balance(*pubkey).unwrap_or(0);
+                Ok(deposit_ids) => {
+                    let deposits: Vec<Value> = deposit_ids.iter().map(|deposit_id| {
+                        let balance_sat = bd_handler.get_deposit_balance(*deposit_id).unwrap_or(0);
                         let balance_msat = balance_sat * 1000; // Convert sat to msat
                         json!({
-                            "deposit_pubkey": pubkey.to_string(),
+                            "deposit_id": hex::encode(deposit_id),
                             "balance": balance_msat,
                             "balance_sat": balance_sat
                         })
@@ -4700,9 +4829,11 @@ impl NWCServiceTaskContext {
 
     /// Register a new deposit-specific NWC key in the access registry
     async fn register_deposit_nwc_key(&self, nwc_pubkey: XOnlyPublicKey, deposit_pubkey: bitcoin::secp256k1::PublicKey) {
+        let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
+        let deposit_id = compute_deposit_id(&descriptor);
         let mut registry = self.access_registry.lock().await;
-        registry.insert(nwc_pubkey.to_string(), NWCAccessLevel::Deposit(deposit_pubkey));
-        println!("🔑 Registered deposit NWC key {} for deposit {}", nwc_pubkey, deposit_pubkey);
+        registry.insert(nwc_pubkey.to_string(), NWCAccessLevel::Deposit(deposit_id));
+        println!("🔑 Registered deposit NWC key {} for deposit {}", nwc_pubkey, hex::encode(&deposit_id));
         drop(registry);
 
         // Trigger subscription update to include the new key immediately
@@ -4732,8 +4863,12 @@ impl NWCServiceTaskContext {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use tokio::time::{timeout, Duration};
 
+        // Compute deposit_id from pubkey for NWC keypair generation
+        let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
+        let deposit_id = compute_deposit_id(&descriptor);
+
         // Generate the deposit-specific NWC keypair
-        let (deposit_keypair, deposit_nwc_pubkey) = self.generate_deposit_nwc_keypair(deposit_pubkey);
+        let (deposit_keypair, deposit_nwc_pubkey) = self.generate_deposit_nwc_keypair(deposit_id);
         let pubkey_hex = deposit_nwc_pubkey.to_string();
 
         // NIP-47 supported methods for deposit wallets
@@ -4979,8 +5114,12 @@ impl NWCServiceTaskContext {
 
             println!("✅ Successfully created deposit {} for partner {}", deposit_pubkey, partner_node_id);
 
+            // Compute deposit_id from pubkey for NWC keypair generation
+            let descriptor = format!("pk({})", hex::encode(deposit_public_key.serialize()));
+            let deposit_id = compute_deposit_id(&descriptor);
+
             // Generate deposit-specific NWC keypair
-            let (deposit_nwc_keypair, deposit_nwc_pubkey) = self.generate_deposit_nwc_keypair(deposit_public_key);
+            let (deposit_nwc_keypair, deposit_nwc_pubkey) = self.generate_deposit_nwc_keypair(deposit_id);
 
             // Register the deposit NWC key with scoped permissions
             self.register_deposit_nwc_key(deposit_nwc_pubkey, deposit_public_key).await;
@@ -5020,49 +5159,4 @@ impl NWCServiceTaskContext {
         }
     }
 
-    /// Generate a deposit-specific NWC keypair using HKDF (same logic as NWCService)
-    fn generate_deposit_nwc_keypair(&self, deposit_pubkey: bitcoin::secp256k1::PublicKey) -> (Keypair, XOnlyPublicKey) {
-        // Derive from NWC service's secret key using HKDF
-        let nwc_secret = self.keypair.secret_bytes();
-
-        // HKDF: salt provides domain separation, info is the deposit identifier
-        let hk = Hkdf::<Sha256>::new(Some(b"nwc-deposit-key-v1"), &nwc_secret);
-        let mut secret_bytes = [0u8; 32];
-        hk.expand(&deposit_pubkey.serialize(), &mut secret_bytes)
-            .expect("HKDF expand for deposit NWC key");
-
-        let secret_key = SecretKey::from_slice(&secret_bytes)
-            .expect("Valid deposit NWC private key");
-        let keypair = Keypair::from_secret_key(&self.secp, &secret_key);
-        let (xonly_pubkey, _) = XOnlyPublicKey::from_keypair(&keypair);
-
-        (keypair, xonly_pubkey)
-    }
-
-    /// Verify if a client pubkey is a validly-derived deposit NWC key
-    /// Returns the deposit pubkey if valid, None otherwise
-    fn verify_deposit_client_pubkey(&self, client_pubkey_str: &str) -> Option<PublicKey> {
-        // Parse the client pubkey as x-only (Nostr format)
-        let client_xonly = match XOnlyPublicKey::from_str(client_pubkey_str) {
-            Ok(pk) => pk,
-            Err(_) => return None,
-        };
-
-        // Get all deposits from the node
-        if let Some(bd_handler) = self.node.deposits_handler() {
-            if let Ok(deposits) = bd_handler.list_deposits() {
-                for deposit_pubkey in deposits {
-                    // Derive the client NWC pubkey for this deposit
-                    let (_, derived_xonly) = self.generate_deposit_nwc_keypair(deposit_pubkey);
-
-                    // Check if it matches
-                    if derived_xonly == client_xonly {
-                        return Some(deposit_pubkey);
-                    }
-                }
-            }
-        }
-
-        None
-    }
 }

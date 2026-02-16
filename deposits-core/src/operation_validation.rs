@@ -146,8 +146,10 @@ pub fn validate_credit_payment(
     amount: u64,
     payment_hash: &[u8; 32],
 ) -> ValidationResult {
-    // Check deposit exists
-    if !ledger.state.deposits.contains_key(&deposit_pubkey) {
+    // Convert pubkey to deposit_id and check deposit exists
+    let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
+    let deposit_id = crate::types::compute_deposit_id(&descriptor);
+    if !ledger.state.deposits.contains_key(&deposit_id) {
         return Err(format!("Deposit with pubkey {} does not exist", deposit_pubkey));
     }
 
@@ -205,8 +207,10 @@ pub fn validate_payment_lock(
     payment_id: &[u8; 32],
     signature: &[u8; 64],
 ) -> ValidationResult {
-    // Check deposit exists
-    let deposit = ledger.state.deposits.get(&deposit_pubkey)
+    // Convert pubkey to deposit_id and check deposit exists
+    let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
+    let deposit_id = crate::types::compute_deposit_id(&descriptor);
+    let deposit = ledger.state.deposits.get(&deposit_id)
         .ok_or_else(|| format!("Deposit with pubkey {} does not exist", deposit_pubkey))?;
 
     // Calculate available balance
@@ -333,8 +337,10 @@ pub fn validate_fee_collect(
     amount: u64,
     block_height: u32,
 ) -> ValidationResult {
-    // Check deposit exists and get it
-    let deposit = ledger.state.deposits.get(&deposit_pubkey)
+    // Convert pubkey to deposit_id and check deposit exists
+    let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
+    let deposit_id = crate::types::compute_deposit_id(&descriptor);
+    let deposit = ledger.state.deposits.get(&deposit_id)
         .ok_or_else(|| format!("Deposit with pubkey {} does not exist", deposit_pubkey))?;
 
     // Check sufficient balance
@@ -376,8 +382,10 @@ pub fn validate_deposit_add(
     deposit_pubkey: PublicKey,
     fees: Option<&FeeStructure>,
 ) -> ValidationResult {
-    // Check deposit doesn't already exist
-    if ledger.state.deposits.contains_key(&deposit_pubkey) {
+    // Convert pubkey to deposit_id and check deposit doesn't already exist
+    let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
+    let deposit_id = crate::types::compute_deposit_id(&descriptor);
+    if ledger.state.deposits.contains_key(&deposit_id) {
         return Err(format!("Deposit with pubkey {} already exists", deposit_pubkey));
     }
 
@@ -412,8 +420,10 @@ pub fn validate_deposit_close(
     ledger: &Ledger,
     deposit_pubkey: PublicKey,
 ) -> ValidationResult {
-    // Check deposit exists
-    let deposit = ledger.state.deposits.get(&deposit_pubkey)
+    // Convert pubkey to deposit_id and check deposit exists
+    let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
+    let deposit_id = crate::types::compute_deposit_id(&descriptor);
+    let deposit = ledger.state.deposits.get(&deposit_id)
         .ok_or_else(|| format!("Deposit with pubkey {} does not exist", deposit_pubkey))?;
 
     // Check balance is zero
@@ -445,7 +455,10 @@ pub fn validate_deposit_update(
     deposit_pubkey: PublicKey,
     new_fees: &FeeStructure,
 ) -> ValidationResult {
-    if !ledger.state.deposits.contains_key(&deposit_pubkey) {
+    // Convert pubkey to deposit_id and check deposit exists
+    let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
+    let deposit_id = crate::types::compute_deposit_id(&descriptor);
+    if !ledger.state.deposits.contains_key(&deposit_id) {
         return Err(format!("Deposit with pubkey {} does not exist", deposit_pubkey));
     }
 
@@ -557,8 +570,10 @@ pub fn validate_cosign_invoice(
     invoice_id: &str,
     payment_hash: &[u8; 32],
 ) -> ValidationResult {
-    // Check if the assigned deposit exists
-    if !ledger.state.deposits.contains_key(&assigned_deposit) {
+    // Convert pubkey to deposit_id and check if the assigned deposit exists
+    let descriptor = format!("pk({})", hex::encode(assigned_deposit.serialize()));
+    let deposit_id = crate::types::compute_deposit_id(&descriptor);
+    if !ledger.state.deposits.contains_key(&deposit_id) {
         return Err(format!("Deposit with pubkey {} does not exist", assigned_deposit));
     }
 
@@ -635,6 +650,311 @@ pub fn validate_ledger_close(ledger: &Ledger) -> ValidationResult {
         return Err(format!(
             "Cannot close ledger with locked payments: {} msat",
             total_locked
+        ));
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// DepositId-based Validations
+// ============================================================================
+
+use crate::types::{DepositId, DescriptorWitness};
+
+/// Validate a deposit add operation by deposit_id
+///
+/// Checks:
+/// - Deposit doesn't already exist
+/// - Fee structure is valid (if provided)
+pub fn validate_deposit_add_by_id(
+    ledger: &Ledger,
+    deposit_id: &DepositId,
+    fees: Option<&FeeStructure>,
+) -> ValidationResult {
+    // Check deposit doesn't already exist
+    if ledger.state.deposits.contains_key(deposit_id) {
+        return Err(format!("Deposit with id {} already exists", hex::encode(deposit_id)));
+    }
+
+    // Validate fee structure if provided
+    if let Some(fee_struct) = fees {
+        if fee_struct.frequency_blocks == 0 {
+            return Err("Fee frequency must be greater than zero".to_string());
+        }
+        if fee_struct.annualized_bps > MAX_FEE_RATE_BPS {
+            return Err(format!(
+                "Fee rate too high: {} bps exceeds maximum of {} bps",
+                fee_struct.annualized_bps, MAX_FEE_RATE_BPS
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Validate a deposit close operation by deposit_id
+///
+/// Checks:
+/// - Deposit exists
+/// - Balance is zero
+/// - No locked balance
+pub fn validate_deposit_close_by_id(
+    ledger: &Ledger,
+    deposit_id: &DepositId,
+) -> ValidationResult {
+    // Check deposit exists
+    let deposit = ledger.state.deposits.get(deposit_id)
+        .ok_or_else(|| format!("Deposit with id {} does not exist", hex::encode(deposit_id)))?;
+
+    // Check balance is zero
+    if deposit.balance > 0 {
+        return Err(format!(
+            "Cannot close deposit with non-zero balance: {} sats",
+            deposit.balance
+        ));
+    }
+
+    // Check no locked balance
+    if deposit.locked_balance > 0 {
+        return Err(format!(
+            "Cannot close deposit with locked balance: {} sats",
+            deposit.locked_balance
+        ));
+    }
+
+    Ok(())
+}
+
+/// Validate a deposit update operation by deposit_id
+///
+/// Checks:
+/// - Deposit exists
+/// - New fee structure is valid
+pub fn validate_deposit_update_by_id(
+    ledger: &Ledger,
+    deposit_id: &DepositId,
+    new_fees: &FeeStructure,
+) -> ValidationResult {
+    if !ledger.state.deposits.contains_key(deposit_id) {
+        return Err(format!("Deposit with id {} does not exist", hex::encode(deposit_id)));
+    }
+
+    // Validate new fee structure
+    if new_fees.frequency_blocks == 0 {
+        return Err("Fee frequency must be greater than zero".to_string());
+    }
+    if new_fees.annualized_bps > MAX_FEE_RATE_BPS {
+        return Err(format!(
+            "Fee rate too high: {} bps exceeds maximum of {} bps",
+            new_fees.annualized_bps, MAX_FEE_RATE_BPS
+        ));
+    }
+
+    Ok(())
+}
+
+/// Validate a deposit key rotation operation
+///
+/// Checks:
+/// - Deposit exists
+/// - Witness satisfies the current descriptor (proves ownership)
+/// - New descriptor is valid
+pub fn validate_deposit_key_rotate(
+    ledger: &Ledger,
+    deposit_id: &DepositId,
+    new_descriptor: &str,
+    witness: &DescriptorWitness,
+) -> ValidationResult {
+    // Check deposit exists
+    let deposit = ledger.state.deposits.get(deposit_id)
+        .ok_or_else(|| format!("Deposit with id {} does not exist", hex::encode(deposit_id)))?;
+
+    // Verify witness satisfies the current descriptor
+    // The message being signed is the new_descriptor hash (proving intent to rotate to it)
+    let message_hash = bitcoin::hashes::sha256::Hash::hash(new_descriptor.as_bytes()).to_byte_array();
+
+    match crate::signature_utils::verify_descriptor_witness(
+        &deposit.descriptor,
+        deposit_id,
+        &message_hash,
+        0,  // No amount for key rotation
+        witness,
+        0,  // Block height not relevant for key rotation
+    ) {
+        Ok(true) => {}
+        Ok(false) => return Err("Witness does not satisfy current descriptor".to_string()),
+        Err(e) => return Err(format!("Failed to verify witness: {:?}", e)),
+    }
+
+    // Basic validation of new descriptor (at minimum, should be non-empty)
+    if new_descriptor.is_empty() {
+        return Err("New descriptor cannot be empty".to_string());
+    }
+
+    Ok(())
+}
+
+/// Validate a payment lock operation by deposit_id with descriptor witness
+///
+/// Checks:
+/// - Deposit exists
+/// - Sufficient available balance
+/// - Amount is positive
+/// - Witness satisfies the deposit's descriptor
+pub fn validate_payment_lock_by_id(
+    ledger: &Ledger,
+    deposit_id: &DepositId,
+    amount: u64,
+    payment_id: &[u8; 32],
+    witness: &DescriptorWitness,
+) -> ValidationResult {
+    // Check deposit exists
+    let deposit = ledger.state.deposits.get(deposit_id)
+        .ok_or_else(|| format!("Deposit with id {} does not exist", hex::encode(deposit_id)))?;
+
+    // Calculate available balance
+    let available_balance = deposit.balance.saturating_sub(deposit.locked_balance);
+
+    // Check sufficient balance
+    if available_balance < amount {
+        return Err(format!(
+            "Insufficient available balance: {} < {}",
+            available_balance, amount
+        ));
+    }
+
+    // Check amount is positive
+    if amount == 0 {
+        return Err("Payment amount must be greater than zero".to_string());
+    }
+
+    // Verify witness satisfies the deposit's descriptor
+    match crate::signature_utils::verify_invoice_lock_witness(
+        &deposit.descriptor,
+        deposit_id,
+        payment_id,
+        amount,
+        witness,
+    ) {
+        Ok(true) => {}
+        Ok(false) => return Err("Witness does not satisfy deposit descriptor".to_string()),
+        Err(e) => return Err(format!("Failed to verify witness: {:?}", e)),
+    }
+
+    Ok(())
+}
+
+/// Validate a payment fulfill operation by deposit_id with descriptor witness
+///
+/// Checks:
+/// - Amount is positive
+/// - Preimage matches payment hash
+pub fn validate_payment_fulfill_by_id(
+    _deposit_id: &DepositId,
+    amount: u64,
+    payment_id: &[u8; 32],
+    _witness: &DescriptorWitness,
+    preimage: &[u8; 32],
+) -> ValidationResult {
+    // Check amount is positive
+    if amount == 0 {
+        return Err("Payment amount must be greater than zero".to_string());
+    }
+
+    // Verify preimage matches payment_id (which is the payment_hash)
+    let computed_hash = sha256::Hash::hash(preimage);
+    if computed_hash.as_byte_array() != payment_id {
+        return Err("Preimage does not match payment hash".to_string());
+    }
+
+    // Note: Witness verification against descriptor is done at higher level
+
+    Ok(())
+}
+
+/// Validate a credit payment operation by deposit_id
+///
+/// Checks:
+/// - Deposit exists
+/// - Amount is positive
+/// - Credit wouldn't exceed reserves
+/// - Credit wouldn't exceed collateral (if quorum present)
+pub fn validate_credit_payment_by_id(
+    ledger: &Ledger,
+    deposit_id: &DepositId,
+    amount: u64,
+    payment_hash: &[u8; 32],
+    _invoice_id: &str,
+) -> ValidationResult {
+    // Check deposit exists
+    if !ledger.state.deposits.contains_key(deposit_id) {
+        return Err(format!("Deposit with id {} does not exist", hex::encode(deposit_id)));
+    }
+
+    // Check amount is positive
+    if amount == 0 {
+        return Err("Credit amount must be greater than zero".to_string());
+    }
+
+    // Check that credit wouldn't exceed reserves capacity
+    let current_deposits: u64 = ledger.state.deposits.values().map(|d| d.balance).sum();
+    let new_total_deposits = current_deposits.saturating_add(amount);
+
+    if new_total_deposits > ledger.reserves_amount() {
+        return Err(format!(
+            "Credit would exceed reserves: new deposits {} msat > reserves {} msat",
+            new_total_deposits, ledger.reserves_amount()
+        ));
+    }
+
+    // Check payment hash is not obviously fake
+    if payment_hash.iter().all(|&b| b == payment_hash[0]) {
+        return Err("Invalid payment hash: appears to be fake".to_string());
+    }
+
+    // Check that credit doesn't exceed declared collateral (if quorum present)
+    if !ledger.state.quorum_members.is_empty() && new_total_deposits > ledger.state.received_collateral_amount {
+        return Err(format!(
+            "Credit would exceed declared collateral: new deposits {} sats > received collateral {} sats",
+            new_total_deposits, ledger.state.received_collateral_amount
+        ));
+    }
+
+    Ok(())
+}
+
+/// Validate a fee collection operation by deposit_id
+///
+/// Checks:
+/// - Deposit exists
+/// - Sufficient available balance
+/// - Collection is on or after schedule
+pub fn validate_fee_collect_by_id(
+    ledger: &Ledger,
+    deposit_id: &DepositId,
+    amount: u64,
+    block_height: u32,
+) -> ValidationResult {
+    // Check deposit exists and get it
+    let deposit = ledger.state.deposits.get(deposit_id)
+        .ok_or_else(|| format!("Deposit with id {} does not exist", hex::encode(deposit_id)))?;
+
+    // Check sufficient balance
+    let available = deposit.balance.saturating_sub(deposit.locked_balance);
+    if available < amount {
+        return Err(format!(
+            "Insufficient balance for fees: {} available < {} requested",
+            available, amount
+        ));
+    }
+
+    // Check that fee collection happens on or after schedule
+    let earliest_allowed_block = deposit.last_fee_assessment.saturating_add(deposit.fees.frequency_blocks);
+    if block_height < earliest_allowed_block {
+        return Err(format!(
+            "Fee collection too early: block {} < earliest allowed {} (last assessment {} + frequency {})",
+            block_height, earliest_allowed_block, deposit.last_fee_assessment, deposit.fees.frequency_blocks
         ));
     }
 

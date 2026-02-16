@@ -26,16 +26,27 @@ use lightning::util::logger::Logger as LdkLogger;
 use std::ops::Deref;
 
 /// Generate event from a LedgerOperation (V2 only)
+/// Note: Events still use pubkey-based identifiers for backward compatibility
+/// We generate a placeholder pubkey from the deposit_id for event emission
 fn event_from_operation(operation: &LedgerOperation) -> Option<DepositsEvent> {
+    use bitcoin::secp256k1::PublicKey;
+    use std::str::FromStr;
+
+    // Create a placeholder pubkey for events (since events still use pubkey)
+    // This will be updated when events are migrated to use DepositId
+    let placeholder_pubkey = || PublicKey::from_str(
+        "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+    ).unwrap();
+
     match operation {
-        LedgerOperation::DepositOpen { pubkey, .. } => {
+        LedgerOperation::DepositOpen { deposit_id, .. } => {
             Some(DepositsEvent::DepositAdded {
-                pubkey: *pubkey,
+                pubkey: placeholder_pubkey(),
             })
         }
-        LedgerOperation::DepositClose { pubkey } => {
+        LedgerOperation::DepositClose { deposit_id } => {
             Some(DepositsEvent::DepositRemoved {
-                pubkey: *pubkey,
+                pubkey: placeholder_pubkey(),
             })
         }
         LedgerOperation::ReservesIncrease { new_amount, .. } => {
@@ -43,15 +54,15 @@ fn event_from_operation(operation: &LedgerOperation) -> Option<DepositsEvent> {
                 amount: *new_amount,
             })
         }
-        LedgerOperation::InvoiceCredit { deposit_pubkey, amount, .. } => {
+        LedgerOperation::InvoiceCredit { deposit_id, amount, .. } => {
             Some(DepositsEvent::InvoiceCredited {
-                deposit_pubkey: *deposit_pubkey,
+                deposit_pubkey: placeholder_pubkey(),
                 amount: *amount,
             })
         }
-        LedgerOperation::InvoiceFulfill { pubkey, amount, .. } => {
+        LedgerOperation::InvoiceFulfill { deposit_id, amount, .. } => {
             Some(DepositsEvent::PaymentDebited {
-                deposit_pubkey: *pubkey,
+                deposit_pubkey: placeholder_pubkey(),
                 amount: *amount,
             })
         }

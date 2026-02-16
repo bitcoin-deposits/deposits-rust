@@ -2,112 +2,129 @@
 # Show ledger updates from Nostr relay
 #
 # Usage:
-#   ./bin/nostr-updates.sh              # List all ledgers, then show updates
+#   ./bin/nostr-updates.sh              # List all ledgers
 #   ./bin/nostr-updates.sh list         # List all ledgers
-#   ./bin/nostr-updates.sh events       # Show all events (updates, disputes, agreements)
-#   ./bin/nostr-updates.sh <ledger_id>  # Show updates for specific ledger
+#   ./bin/nostr-updates.sh show <id>    # Show updates for specific ledger
+#   ./bin/nostr-updates.sh validate <id> # Validate ledger hash chain
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/_common.sh"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+WALLET_BIN="$REPO_ROOT/target/release/deposits-wallet"
+
+# Default relay (can be overridden with --relay)
+RELAY_URL="ws://localhost:7778"
 
 # Parse arguments
+COMMAND=""
 LEDGER_ID=""
-LIST_ONLY=false
-SHOW_EVENTS=false
-COLOR_BY_PK=""
+COLOR_FLAG=""
+
+print_usage() {
+    echo "Usage: $0 [command] [options]"
+    echo ""
+    echo "View ledger data from Nostr relay (read-only, no Docker required)."
+    echo ""
+    echo "Commands:"
+    echo "  list              List all ledgers on the relay (default)"
+    echo "  show <id>         Show all updates for a specific ledger"
+    echo "  validate <id>     Validate ledger hash chain"
+    echo ""
+    echo "Options:"
+    echo "  --relay <url>     Nostr relay URL (default: ws://localhost:7778)"
+    echo "  --color-by-pk     Color output by operator pubkey"
+    echo "  --color           Alias for --color-by-pk"
+    echo ""
+    echo "Examples:"
+    echo "  $0                           # List all ledgers"
+    echo "  $0 list                      # List all ledgers"
+    echo "  $0 show 2bd07                # Show updates (supports partial ID)"
+    echo "  $0 show 2bd07 --color        # Show with colors by operator"
+    echo "  $0 validate 2bd07            # Validate hash chain"
+}
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --help|-h)
-            echo "Usage: $0 [list|events|LEDGER_ID] [--color-by-pk]"
-            echo ""
-            echo "View ledger data from Nostr relay (read-only)."
-            echo ""
-            echo "Commands:"
-            echo "  list              List all ledgers on the relay"
-            echo "  events            Show all events (updates, disputes, agreements)"
-            echo "  <ledger_id>       Validate and show updates for a specific ledger"
-            echo ""
-            echo "Options:"
-            echo "  --color-by-pk     Color output by pubkey (16 rotating colors)"
-            echo "  --color           Alias for --color-by-pk"
-            echo ""
-            echo "If no argument is given, lists all ledgers on the relay."
-            echo ""
-            echo "To actually import or update ledgers, use deposits-bdk directly:"
-            echo "  deposits-bdk nostr import <ledger_id>   # Import new ledger"
-            echo "  deposits-bdk nostr updates <ledger_id>  # Fetch updates for existing ledger"
+            print_usage
             exit 0
             ;;
-        list|ls)
-            LIST_ONLY=true
-            shift
-            ;;
-        events|ev)
-            SHOW_EVENTS=true
-            shift
+        --relay)
+            RELAY_URL="$2"
+            shift 2
             ;;
         --color-by-pk|--color)
-            COLOR_BY_PK="--color-by-pk"
+            COLOR_FLAG="--color-by-pk"
             shift
             ;;
+        list|ls)
+            COMMAND="list"
+            shift
+            ;;
+        show)
+            COMMAND="show"
+            shift
+            if [[ $# -gt 0 && ! "$1" =~ ^-- ]]; then
+                LEDGER_ID="$1"
+                shift
+            fi
+            ;;
+        validate)
+            COMMAND="validate"
+            shift
+            if [[ $# -gt 0 && ! "$1" =~ ^-- ]]; then
+                LEDGER_ID="$1"
+                shift
+            fi
+            ;;
         -*)
-            log_error "Unknown option: $1"
+            echo "Unknown option: $1" >&2
+            print_usage
             exit 1
             ;;
         *)
-            LEDGER_ID=$1
+            # If no command yet, treat as ledger ID for show
+            if [ -z "$COMMAND" ]; then
+                COMMAND="show"
+                LEDGER_ID="$1"
+            fi
             shift
             ;;
     esac
 done
 
-# Use one of the BDK nodes to run the nostr commands
-# We just need access to a node with the relay configured
-CONTAINER="bdk-alice"
+# Default to list if no command
+if [ -z "$COMMAND" ]; then
+    COMMAND="list"
+fi
 
-# Check if container is running
-if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
-    log_error "Container $CONTAINER is not running"
-    log_info "Start the BDK environment with: ./bin/start.sh"
+# Check if wallet binary exists
+if [ ! -x "$WALLET_BIN" ]; then
+    echo "Error: deposits-wallet not found at $WALLET_BIN" >&2
+    echo "Build it with: cargo build --release --bin deposits-wallet" >&2
     exit 1
 fi
 
-# Get a seed (we need one to parse config, but for read-only operations it doesn't matter which)
-SEED=$(get_node_seed "$CONTAINER")
-
-run_nostr_cmd() {
-    local subcmd=$1
-    shift
-    docker exec -e RUST_LOG=error "$CONTAINER" deposits-bdk nostr "$subcmd" \
-        "$@" \
-        --seed "$SEED" \
-        --network regtest \
-        --esplora http://electrs:3002 \
-        --relay ws://nostr-relay:7777 \
-        --data-dir /data 2>&1 | filter_logs
-}
-
-if [ "$LIST_ONLY" = true ]; then
-    # Just list ledgers
-    log_info "Listing ledgers from Nostr relay..."
-    echo ""
-    run_nostr_cmd list
-elif [ "$SHOW_EVENTS" = true ]; then
-    # Show all events
-    log_info "Fetching all events from Nostr relay..."
-    echo ""
-    run_nostr_cmd events $COLOR_BY_PK
-elif [ -n "$LEDGER_ID" ]; then
-    # Show updates for specific ledger (dry-run shows formatted operations)
-    log_info "Fetching updates for ledger: $LEDGER_ID"
-    echo ""
-    run_nostr_cmd import "$LEDGER_ID" --dry-run $COLOR_BY_PK
-else
-    # Fetch all ledgers in a single call (so colors are consistent across ledgers)
-    log_info "Fetching all ledger updates from Nostr relay..."
-    echo ""
-    run_nostr_cmd import --dry-run $COLOR_BY_PK
-fi
+# Run the appropriate command
+case $COMMAND in
+    list)
+        "$WALLET_BIN" ledger list --relay "$RELAY_URL"
+        ;;
+    show)
+        if [ -z "$LEDGER_ID" ]; then
+            echo "Error: show requires a ledger ID" >&2
+            echo "Usage: $0 show <ledger_id>" >&2
+            exit 1
+        fi
+        "$WALLET_BIN" ledger show "$LEDGER_ID" --relay "$RELAY_URL" $COLOR_FLAG
+        ;;
+    validate)
+        if [ -z "$LEDGER_ID" ]; then
+            echo "Error: validate requires a ledger ID" >&2
+            echo "Usage: $0 validate <ledger_id>" >&2
+            exit 1
+        fi
+        "$WALLET_BIN" ledger validate "$LEDGER_ID" --relay "$RELAY_URL"
+        ;;
+esac

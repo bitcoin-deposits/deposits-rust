@@ -15,9 +15,9 @@ use deposits_core::message_validation::HandlerContext;
 use deposits_core::messages::LedgerOperation;
 use deposits_core::TlvDecode;
 use deposits_core::types::{
-    Deposit, DepositOffer, DepositOfferStatus, FeeStructure,
+    Deposit, DepositId, DepositOffer, DepositOfferStatus, DescriptorWitness, FeeStructure,
     OnChainWithdrawal, OnChainWithdrawalStatus,
-    WithdrawalLockResult, WithdrawalCompleteResult,
+    WithdrawalLockResult, WithdrawalCompleteResult, compute_deposit_id,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -97,6 +97,23 @@ pub struct CoSignResult {
     pub member_ledger_hash: [u8; 32],
 }
 
+/// A pending Lightning invoice waiting for payment
+#[derive(Debug, Clone)]
+pub struct PendingInvoice {
+    /// The ledger this invoice belongs to
+    pub ledger_id: String,
+    /// The deposit_id to credit
+    pub deposit_id: DepositId,
+    /// The descriptor for this deposit
+    pub descriptor: String,
+    /// Amount in millisatoshis
+    pub amount_msat: u64,
+    /// The bolt11 invoice string
+    pub invoice: String,
+    /// When the invoice was created
+    pub created_at: u64,
+}
+
 /// A deposits-bdk node
 pub struct Node {
     /// Our node ID (secp256k1 pubkey)
@@ -130,6 +147,10 @@ pub struct Node {
     /// Pending co-sign requests: request_id -> (ledger_id, oneshot sender for co-sign result)
     /// The result includes the partner signature and the member's ledger hash
     pending_cosign_requests: Arc<Mutex<HashMap<String, (String, tokio::sync::oneshot::Sender<CoSignResult>)>>>,
+
+    /// Pending Lightning invoices: payment_hash -> (ledger_id, deposit_pubkey, amount_msat)
+    /// Used to credit deposits when payments are received
+    pending_invoices: Arc<Mutex<HashMap<[u8; 32], PendingInvoice>>>,
 
     /// Processed request event IDs (to avoid duplicate processing from polling)
     processed_requests: Mutex<std::collections::HashSet<String>>,
@@ -199,6 +220,7 @@ impl Node {
             withdrawals: Mutex::new(withdrawals),
             pending_collateral_requests: Mutex::new(HashMap::new()),
             pending_cosign_requests: Arc::new(Mutex::new(HashMap::new())),
+            pending_invoices: Arc::new(Mutex::new(HashMap::new())),
             processed_requests: Mutex::new(std::collections::HashSet::new()),
             data_dir: config.data_dir,
             relay_url,
@@ -395,6 +417,9 @@ impl Node {
 
                 // Auto-complete funded deposits
                 self.auto_complete_deposits().await;
+
+                // Auto-credit received Lightning payments
+                self.auto_credit_received_payments().await;
 
                 // Auto-complete locked withdrawals (broadcast TXs)
                 self.auto_complete_withdrawals().await;
@@ -2500,18 +2525,18 @@ impl Node {
             .await
             .map_err(|e| Error::Protocol(format!("Failed to fetch: {}", e)))?;
 
-        // Find our latest update and collect original depositors
+        // Find our latest update and collect original depositors (deposit_id, descriptor)
         let mut our_latest: Option<SignedLedgerUpdate> = None;
-        let mut original_depositors: Vec<PublicKey> = Vec::new();
+        let mut original_depositors: Vec<(DepositId, String)> = Vec::new();
 
         for event in events.iter() {
             if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
                 if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
                     // Collect depositors
                     if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                        if let LedgerOperation::DepositOpen { pubkey, .. } = op {
-                            if !original_depositors.contains(&pubkey) {
-                                original_depositors.push(pubkey);
+                        if let LedgerOperation::DepositOpen { deposit_id, descriptor, .. } = op {
+                            if !original_depositors.iter().any(|(id, _)| *id == deposit_id) {
+                                original_depositors.push((deposit_id, descriptor));
                             }
                         }
                     }
@@ -2539,9 +2564,10 @@ impl Node {
         let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
 
         // Re-open each deposit
-        for depositor in original_depositors {
+        for (deposit_id, descriptor) in original_depositors {
             let operation = LedgerOperation::DepositOpen {
-                pubkey: depositor,
+                deposit_id,
+                descriptor: descriptor.clone(),
                 fees: None,
                 payment_hash: None,
                 invoice: None,
@@ -2591,7 +2617,7 @@ impl Node {
             self.nostr.broadcast_ledger_update(&signed_update).await
                 .map_err(|e| Error::Protocol(format!("Failed to broadcast DepositOpen: {:?}", e)))?;
 
-            tracing::info!("Re-opened deposit for {}...", &depositor.to_string()[..16]);
+            tracing::info!("Re-opened deposit {}...", hex::encode(&deposit_id[..8]));
 
             // Update our_latest for next iteration
             our_latest = signed_update;
@@ -2687,8 +2713,11 @@ impl Node {
             return (false, None, Some(format!("Fee validation failed: {}", e)));
         }
 
+        // Create descriptor from pubkey (single-key deposit)
+        let descriptor = format!("pk({})", deposit_pubkey_str);
+
         // Open the deposit with co-signing
-        match self.open_deposit(&ledger_id, deposit_pubkey, Some(fees)).await {
+        match self.open_deposit(&ledger_id, &descriptor, Some(fees)).await {
             Ok(deposit) => {
                 let result = serde_json::json!({
                     "deposit_pubkey": deposit_pubkey_str,
@@ -2918,7 +2947,7 @@ impl Node {
     /// Process a balance query request
     ///
     /// Params:
-    /// - deposit_pubkey: hex-encoded depositor's pubkey
+    /// - deposit_pubkey: hex-encoded depositor's pubkey (legacy, converted to deposit_id)
     ///
     /// Returns the current balance in the ledger (in millisatoshis)
     async fn process_balance_query_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
@@ -2928,14 +2957,9 @@ impl Node {
             None => return (false, None, Some("Missing deposit_pubkey parameter".to_string())),
         };
 
-        // Parse pubkey
-        let deposit_pubkey = match hex::decode(deposit_pubkey_hex)
-            .ok()
-            .and_then(|bytes| bitcoin::secp256k1::PublicKey::from_slice(&bytes).ok())
-        {
-            Some(pk) => pk,
-            None => return (false, None, Some("Invalid deposit_pubkey".to_string())),
-        };
+        // Convert pubkey hex to deposit_id via descriptor
+        let descriptor = format!("pk({})", deposit_pubkey_hex);
+        let deposit_id = compute_deposit_id(&descriptor);
 
         // Find the ledger
         let (_, ledger) = match self.get_ledger_by_ledger_id(&request.ledger_id)
@@ -2946,10 +2970,11 @@ impl Node {
         };
 
         // Look up the deposit balance
-        match ledger.state.deposits.get(&deposit_pubkey) {
+        match ledger.state.deposits.get(&deposit_id) {
             Some(deposit) => {
                 let result = serde_json::json!({
                     "deposit_pubkey": deposit_pubkey_hex,
+                    "deposit_id": hex::encode(deposit_id),
                     "balance_msats": deposit.balance,
                     "balance_sats": deposit.balance / 1000,
                     "locked_msats": deposit.locked_balance,
@@ -2975,12 +3000,18 @@ impl Node {
     /// - description: optional invoice description
     async fn process_make_invoice_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
         use crate::ldk_cli::LdkCli;
+        use lightning_invoice::Bolt11Invoice;
+        use std::str::FromStr;
 
         // Extract parameters
         let deposit_pubkey_hex = match request.params.get("deposit_pubkey").and_then(|v| v.as_str()) {
             Some(pk) => pk,
             None => return (false, None, Some("Missing deposit_pubkey parameter".to_string())),
         };
+
+        // Convert pubkey hex to descriptor and deposit_id
+        let descriptor = format!("pk({})", deposit_pubkey_hex);
+        let deposit_id = compute_deposit_id(&descriptor);
 
         let amount_sats = match request.params.get("amount_sats").and_then(|v| v.as_u64()) {
             Some(a) => a,
@@ -2996,15 +3027,51 @@ impl Node {
         let amount_msat = amount_sats * 1000;
 
         match cli.create_invoice(amount_msat, description) {
-            Ok(invoice) => {
-                tracing::info!("Created invoice for {}... amount={} sats",
+            Ok(invoice_str) => {
+                // Parse the invoice to get the payment hash
+                let payment_hash = match Bolt11Invoice::from_str(&invoice_str) {
+                    Ok(inv) => {
+                        let mut hash = [0u8; 32];
+                        hash.copy_from_slice(inv.payment_hash().as_ref());
+                        hash
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to parse created invoice: {}", e);
+                        // Generate a hash from the invoice string as fallback
+                        use bitcoin::hashes::{sha256, Hash};
+                        let hash = sha256::Hash::hash(invoice_str.as_bytes());
+                        let mut arr = [0u8; 32];
+                        arr.copy_from_slice(hash.as_ref());
+                        arr
+                    }
+                };
+
+                // Track the pending invoice for crediting when paid
+                let pending = PendingInvoice {
+                    ledger_id: request.ledger_id.clone(),
+                    deposit_id,
+                    descriptor: descriptor.clone(),
+                    amount_msat,
+                    invoice: invoice_str.clone(),
+                    created_at: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
+                };
+
+                self.pending_invoices.lock().unwrap().insert(payment_hash, pending);
+
+                tracing::info!("Created invoice for {}... amount={} sats, hash={}",
                     &deposit_pubkey_hex[..16.min(deposit_pubkey_hex.len())],
-                    amount_sats);
+                    amount_sats,
+                    hex::encode(&payment_hash[..8]));
 
                 let result = serde_json::json!({
-                    "invoice": invoice,
+                    "invoice": invoice_str,
                     "amount_sats": amount_sats,
                     "deposit_pubkey": deposit_pubkey_hex,
+                    "deposit_id": hex::encode(deposit_id),
+                    "payment_hash": hex::encode(payment_hash),
                 });
                 (true, Some(result.to_string()), None)
             }
@@ -3027,7 +3094,6 @@ impl Node {
     async fn process_pay_invoice_request(&mut self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
         use crate::ldk_cli::LdkCli;
         use bitcoin::secp256k1::{Secp256k1, schnorr::Signature, Message};
-        use bitcoin::hashes::{sha256, Hash};
         use deposits_core::messages::LedgerOperation;
         use lightning_invoice::Bolt11Invoice;
         use std::str::FromStr;
@@ -3043,9 +3109,14 @@ impl Node {
             None => return (false, None, Some("Missing invoice parameter".to_string())),
         };
 
-        let nonce_hex = match request.params.get("nonce").and_then(|v| v.as_str()) {
-            Some(n) => n,
-            None => return (false, None, Some("Missing nonce parameter".to_string())),
+        let payment_hash_hex = match request.params.get("payment_hash").and_then(|v| v.as_str()) {
+            Some(h) => h,
+            None => return (false, None, Some("Missing payment_hash parameter".to_string())),
+        };
+
+        let amount_msat = match request.params.get("amount_msats").and_then(|v| v.as_u64()) {
+            Some(a) => a,
+            None => return (false, None, Some("Missing amount_msats parameter".to_string())),
         };
 
         let signature_hex = match request.params.get("signature").and_then(|v| v.as_str()) {
@@ -3053,22 +3124,35 @@ impl Node {
             None => return (false, None, Some("Missing signature parameter".to_string())),
         };
 
-        // Parse the BOLT11 invoice to get amount and payment hash
+        // Parse payment_hash from client
+        let mut payment_id = [0u8; 32];
+        match hex::decode(payment_hash_hex) {
+            Ok(bytes) if bytes.len() == 32 => payment_id.copy_from_slice(&bytes),
+            _ => return (false, None, Some("Invalid payment_hash".to_string())),
+        }
+
+        // Parse the BOLT11 invoice and verify it matches client's payment_hash and amount
         let invoice = match Bolt11Invoice::from_str(invoice_str) {
             Ok(inv) => inv,
             Err(e) => return (false, None, Some(format!("Invalid invoice: {}", e))),
         };
 
-        let amount_msat = match invoice.amount_milli_satoshis() {
-            Some(a) => a,
-            None => return (false, None, Some("Invoice has no amount".to_string())),
-        };
+        let invoice_payment_hash = invoice.payment_hash();
+        let invoice_hash_bytes: &[u8] = invoice_payment_hash.as_ref();
+        if invoice_hash_bytes != &payment_id {
+            return (false, None, Some("payment_hash does not match invoice".to_string()));
+        }
 
-        let payment_hash = invoice.payment_hash();
-        let mut payment_id = [0u8; 32];
-        payment_id.copy_from_slice(payment_hash.as_ref());
+        let invoice_amount = invoice.amount_milli_satoshis().unwrap_or(0);
+        if invoice_amount != amount_msat {
+            return (false, None, Some("amount_msats does not match invoice".to_string()));
+        }
 
-        // Parse pubkey
+        // Convert pubkey hex to descriptor and deposit_id
+        let descriptor = format!("pk({})", deposit_pubkey_hex);
+        let deposit_id = compute_deposit_id(&descriptor);
+
+        // Parse pubkey for signature verification
         let deposit_pubkey = match hex::decode(deposit_pubkey_hex)
             .ok()
             .and_then(|bytes| bitcoin::secp256k1::PublicKey::from_slice(&bytes).ok())
@@ -3077,11 +3161,14 @@ impl Node {
             None => return (false, None, Some("Invalid deposit_pubkey".to_string())),
         };
 
-        // Verify signature
+        // Verify INVOICE_LOCK signature (deposit_id, payment_hash, amount)
         let secp = Secp256k1::verification_only();
-        let msg_str = format!("pay_invoice:{}:{}", invoice_str, nonce_hex);
-        let msg_hash = sha256::Hash::hash(msg_str.as_bytes());
-        let msg = Message::from_digest(*msg_hash.as_byte_array());
+        let msg_hash = deposits_core::signature_utils::invoice_lock_signing_message(
+            &deposit_id,
+            &payment_id,
+            amount_msat,
+        );
+        let msg = Message::from_digest(msg_hash);
 
         let sig_bytes = match hex::decode(signature_hex) {
             Ok(b) if b.len() == 64 => b,
@@ -3108,7 +3195,7 @@ impl Node {
         let sequence_number = {
             let ledger = ledger_arc.read().unwrap();
 
-            let deposit = match ledger.state.deposits.get(&deposit_pubkey) {
+            let deposit = match ledger.state.deposits.get(&deposit_id) {
                 Some(d) => d,
                 None => return (false, None, Some("Deposit not found".to_string())),
             };
@@ -3123,16 +3210,15 @@ impl Node {
             ledger.history.len() as u64
         };
 
-        // Create InvoiceLock operation to lock the funds
-        let mut scriptpubkey_sig = [0u8; 64];
-        scriptpubkey_sig.copy_from_slice(&sig_bytes);
+        // Create witness from signature
+        let witness = DescriptorWitness { stack: vec![sig_bytes.clone()] };
 
         let lock_operation = LedgerOperation::InvoiceLock {
-            pubkey: deposit_pubkey,
+            deposit_id,
             amount: amount_msat,
             payment_id,
             sequence_number,
-            scriptpubkey_signature: scriptpubkey_sig,
+            witness: witness.clone(),
         };
 
         // Append the lock operation
@@ -3217,11 +3303,11 @@ impl Node {
         if payment_succeeded {
             let pre = preimage.unwrap_or([0u8; 32]);
             let fulfill_operation = LedgerOperation::InvoiceFulfill {
-                pubkey: deposit_pubkey,
+                deposit_id,
                 amount: amount_msat,
                 payment_id,
                 sequence_number: final_sequence,
-                scriptpubkey_signature: scriptpubkey_sig,
+                witness: witness.clone(),
                 preimage: pre,
             };
 
@@ -3259,7 +3345,7 @@ impl Node {
         } else {
             // Payment failed - unlock funds
             let fail_operation = LedgerOperation::InvoiceFail {
-                pubkey: deposit_pubkey,
+                deposit_id,
                 amount: amount_msat,
                 payment_id,
                 sequence_number: final_sequence,
@@ -3383,15 +3469,24 @@ impl Node {
             None => return (false, None, Some("Ledger not found".to_string())),
         };
 
+        // Compute deposit_id from pubkey
+        let descriptor = format!("pk({})", deposit_pubkey_hex);
+        let deposit_id = compute_deposit_id(&descriptor);
+
+        // Create witness from signature
+        let depositor_witness = DescriptorWitness {
+            stack: vec![signature.serialize().to_vec()],
+        };
+
         // Lock the withdrawal with co-signing
         match self.lock_withdrawal(
             &reserves_id,
-            deposit_pubkey,
+            deposit_id,
             address.to_string(),
             amount_sats,
             fee_sats,
             nonce,
-            signature.serialize(),
+            depositor_witness,
             None, // no memo
         ).await {
             Ok(lock_result) => {
@@ -3440,9 +3535,10 @@ impl Node {
             Err(e) => return (false, None, Some(format!("Invalid deposit_secret: {}", e))),
         };
 
-        // Derive the deposit pubkey from the secret
+        // Derive the deposit pubkey from the secret and create descriptor
         let secp = Secp256k1::new();
         let deposit_pubkey = PublicKey::from_secret_key(&secp, &deposit_secret);
+        let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
 
         // Extract required parameters
         let amount_msats = match request.params.get("amount_msats").and_then(|v| v.as_u64()) {
@@ -3476,7 +3572,7 @@ impl Node {
         // Lock the collateral (now includes co-signing and broadcast)
         match self.lock_collateral(
             &ledger_id,
-            deposit_pubkey,
+            &descriptor,
             &deposit_secret,
             amount_msats,
             lock_until_block,
@@ -4064,7 +4160,7 @@ impl Node {
                         continue;
                     }
                     // Check if this ledger has the withdrawal's deposit
-                    if ledger.state.deposits.contains_key(&withdrawal.deposit_pubkey) {
+                    if ledger.state.deposits.contains_key(&withdrawal.deposit_id) {
                         found_id = Some(lid.clone());
                         break;
                     }
@@ -4134,14 +4230,14 @@ impl Node {
 
         for (ledger_id, ledger_arc) in operated {
             // Collect fees that are due
-            let fee_ops: Vec<(bitcoin::secp256k1::PublicKey, u64)> = {
+            let fee_ops: Vec<(DepositId, u64)> = {
                 let ledger = ledger_arc.read().unwrap();
                 ledger.state.deposits.iter()
-                    .filter_map(|(pubkey, deposit)| {
+                    .filter_map(|(deposit_id, deposit)| {
                         let fee = deposit.calculate_fees_due(current_block);
                         let available = deposit.balance.saturating_sub(deposit.locked_balance);
                         if fee > 0 && fee <= available {
-                            Some((*pubkey, fee))
+                            Some((*deposit_id, fee))
                         } else {
                             None
                         }
@@ -4154,15 +4250,15 @@ impl Node {
             }
 
             // Apply each FeeCollect operation
-            for (deposit_pubkey, amount) in fee_ops {
+            for (deposit_id, amount) in fee_ops {
                 tracing::info!(
                     "Collecting fee: deposit={}... amount={} sats",
-                    &hex::encode(deposit_pubkey.serialize())[..16],
+                    hex::encode(&deposit_id[..8]),
                     amount / 1000 // Convert msats to sats for logging
                 );
 
                 let operation = LedgerOperation::FeeCollect {
-                    pubkey: deposit_pubkey,
+                    deposit_id,
                     amount,
                     block_height: current_block,
                 };
@@ -4177,7 +4273,7 @@ impl Node {
                     ) {
                         tracing::warn!(
                             "Failed to collect fee from deposit {}...: {:?}",
-                            &hex::encode(deposit_pubkey.serialize())[..16],
+                            hex::encode(&deposit_id[..8]),
                             e
                         );
                         continue;
@@ -4199,6 +4295,111 @@ impl Node {
                 if let Err(e) = self.handler.persist_ledger(&ledger_id) {
                     tracing::warn!("Failed to save ledger after fee collection: {}", e);
                 }
+            }
+        }
+    }
+
+    /// Automatically credit deposits when Lightning invoices are paid.
+    ///
+    /// This polls LDK for payment status and creates InvoiceCredit operations
+    /// for any pending invoices that have been successfully paid.
+    pub async fn auto_credit_received_payments(&mut self) {
+        use crate::ldk_cli::LdkCli;
+
+        // Get pending invoices
+        let pending: Vec<([u8; 32], PendingInvoice)> = {
+            self.pending_invoices.lock().unwrap()
+                .iter()
+                .map(|(h, p)| (*h, p.clone()))
+                .collect()
+        };
+
+        if pending.is_empty() {
+            return;
+        }
+
+        // Query LDK for payment status
+        let cli = LdkCli::from_env();
+        let payments = match cli.list_payments() {
+            Ok(resp) => resp.payments,
+            Err(e) => {
+                tracing::debug!("Failed to list payments for invoice check: {}", e);
+                return;
+            }
+        };
+
+        // Check each pending invoice against payments
+        for (payment_hash, invoice) in pending {
+            let payment_hash_hex = hex::encode(payment_hash);
+
+            // Find matching payment by ID (payment hash)
+            let matching_payment = payments.iter()
+                .find(|p| p.id == payment_hash_hex);
+
+            if let Some(payment) = matching_payment {
+                // status: 0 = pending, 1 = succeeded, 2 = failed
+                match payment.status {
+                    1 => {
+                        // Payment succeeded - credit the deposit
+                        tracing::info!(
+                            "Invoice paid! Crediting deposit {}... with {} msat (hash: {}...)",
+                            hex::encode(&invoice.deposit_id[..8]),
+                            invoice.amount_msat,
+                            &payment_hash_hex[..16]
+                        );
+
+                        // Generate invoice_id from the invoice string
+                        let invoice_id = format!("bolt11:{}", &invoice.invoice[..32.min(invoice.invoice.len())]);
+
+                        match self.credit_deposit(
+                            &invoice.ledger_id,
+                            invoice.deposit_id,
+                            invoice.amount_msat,
+                            payment_hash,
+                            invoice_id,
+                        ).await {
+                            Ok(new_balance) => {
+                                tracing::info!(
+                                    "Deposit credited! New balance: {} msat",
+                                    new_balance
+                                );
+                                // Remove from pending
+                                self.pending_invoices.lock().unwrap().remove(&payment_hash);
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "Failed to credit deposit for invoice {}...: {}",
+                                    &payment_hash_hex[..16],
+                                    e
+                                );
+                            }
+                        }
+                    }
+                    2 => {
+                        // Payment failed - remove from pending (invoice expired or rejected)
+                        tracing::warn!(
+                            "Invoice {}... payment failed, removing from pending",
+                            &payment_hash_hex[..16]
+                        );
+                        self.pending_invoices.lock().unwrap().remove(&payment_hash);
+                    }
+                    _ => {
+                        // Still pending, do nothing
+                    }
+                }
+            }
+
+            // Clean up old invoices (older than 1 hour)
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            if now > invoice.created_at + 3600 {
+                tracing::debug!(
+                    "Removing expired pending invoice {}...",
+                    &payment_hash_hex[..16]
+                );
+                self.pending_invoices.lock().unwrap().remove(&payment_hash);
             }
         }
     }
@@ -4930,11 +5131,12 @@ impl Node {
     /// Lock collateral with co-signing and broadcast.
     ///
     /// This is the async version that handles the full co-signing flow.
+    /// Takes a descriptor string (e.g., "pk(02abc...)" for single-key deposits).
     /// Returns the attestation after successfully broadcasting.
     pub async fn lock_collateral(
         &mut self,
         ledger_id: &str,
-        deposit_pubkey: PublicKey,
+        descriptor: &str,
         deposit_secret: &bitcoin::secp256k1::SecretKey,
         amount_msats: u64,
         lock_until_block: u32,
@@ -4942,6 +5144,8 @@ impl Node {
     ) -> Result<deposits_core::CollateralAttestationMsg, Error> {
         use bitcoin::hashes::{sha256, Hash};
         use bitcoin::secp256k1::{Secp256k1, Message};
+
+        let deposit_id = compute_deposit_id(descriptor);
 
         // Check if there are existing quorum members
         let has_quorum = {
@@ -4965,10 +5169,10 @@ impl Node {
             let mut ledger = ledger_arc.write().unwrap();
 
             // Check if deposit exists
-            let deposit = ledger.state.deposits.get(&deposit_pubkey)
+            let deposit = ledger.state.deposits.get(&deposit_id)
                 .ok_or_else(|| Error::Protocol(format!(
-                    "Deposit not found for pubkey {}",
-                    deposit_pubkey
+                    "Deposit not found for descriptor {}",
+                    descriptor
                 )))?;
 
             let block_height = self.wallet.get_block_height().unwrap_or(0);
@@ -4983,7 +5187,7 @@ impl Node {
             if already_locked {
                 tracing::info!(
                     "Collateral already locked for deposit {}: {} msats until block {} (requested {} until {})",
-                    deposit_pubkey,
+                    hex::encode(deposit_id),
                     deposit.collateral_lock_amount,
                     deposit.collateral_lock_expires,
                     amount_msats,
@@ -4991,21 +5195,29 @@ impl Node {
                 );
             } else {
                 // Create the deposit holder's signature for the lock
-                let lock_signature = deposits_core::signature_utils::create_collateral_lock_signature(
-                    deposit_secret,
-                    &deposit_pubkey,
+                let secp = Secp256k1::signing_only();
+                let deposit_pubkey = PublicKey::from_secret_key(&secp, deposit_secret);
+                let msg_str = format!("COLLATERAL_LOCK:{}:{}:{}:{}",
+                    hex::encode(deposit_id),
                     amount_msats,
                     lock_until_block,
-                    &self.node_id,
-                ).map_err(|e| Error::Protocol(format!("Failed to create signature: {:?}", e)))?;
+                    hex::encode(self.node_id.serialize())
+                );
+                let msg_hash = sha256::Hash::hash(msg_str.as_bytes());
+                let msg = Message::from_digest(*msg_hash.as_byte_array());
+                let signature = secp.sign_ecdsa(&msg, deposit_secret);
+                let lock_signature: [u8; 64] = signature.serialize_compact();
+
+                // Create witness from signature
+                let witness = DescriptorWitness { stack: vec![lock_signature.to_vec()] };
 
                 // Apply the CollateralLock operation
                 let operation = LedgerOperation::CollateralLock {
-                    deposit_pubkey,
+                    deposit_id,
                     amount: amount_msats,
                     lock_until_block,
                     operator_id: self.node_id,
-                    deposit_holder_signature: lock_signature,
+                    witness,
                 };
 
                 ledger.append_operation_with_block(operation, deposits_core::messages::consts::COLLATERAL_LOCK, block_height, block_hash)
@@ -5074,7 +5286,7 @@ impl Node {
 
         tracing::info!(
             "Created collateral lock for deposit {}: {} msats until block {}, attestation for {}",
-            deposit_pubkey,
+            hex::encode(deposit_id),
             attestation.amount,
             attestation.lock_until_block,
             requesting_operator
@@ -5151,12 +5363,16 @@ impl Node {
     }
 
     /// Open a deposit with co-signing and broadcast.
+    ///
+    /// Takes a descriptor string (e.g., "pk(02abc...)" for single-key deposits).
     pub async fn open_deposit(
         &mut self,
         ledger_id: &str,
-        deposit_pubkey: PublicKey,
+        descriptor: &str,
         fees: Option<FeeStructure>,
     ) -> Result<Deposit, Error> {
+        let deposit_id = compute_deposit_id(descriptor);
+
         // Check if there are existing quorum members
         let has_quorum = {
             let ledgers = self.handler.ledgers.lock().unwrap();
@@ -5178,15 +5394,16 @@ impl Node {
             let mut ledger = ledger_arc.write().unwrap();
 
             // Check if deposit already exists
-            if ledger.state.deposits.contains_key(&deposit_pubkey) {
+            if ledger.state.deposits.contains_key(&deposit_id) {
                 return Err(Error::Protocol(format!(
-                    "Deposit already exists for pubkey {}",
-                    deposit_pubkey
+                    "Deposit already exists for descriptor {}",
+                    descriptor
                 )));
             }
 
             let operation = LedgerOperation::DepositOpen {
-                pubkey: deposit_pubkey,
+                deposit_id,
+                descriptor: descriptor.to_string(),
                 fees: fees.clone(),
                 payment_hash: None,
                 invoice: None,
@@ -5202,7 +5419,7 @@ impl Node {
                 block_hash,
             ).map_err(|e| Error::Protocol(format!("Failed to open deposit: {:?}", e)))?;
 
-            ledger.state.deposits.get(&deposit_pubkey)
+            ledger.state.deposits.get(&deposit_id)
                 .cloned()
                 .ok_or_else(|| Error::Protocol("Deposit not found after creation".to_string()))?
         };
@@ -5218,7 +5435,7 @@ impl Node {
             self.broadcast_last_update(ledger_id).await?;
         }
 
-        tracing::info!("Opened deposit {} in ledger {}", deposit_pubkey, ledger_id);
+        tracing::info!("Opened deposit {} in ledger {}", hex::encode(deposit_id), ledger_id);
         Ok(deposit)
     }
 
@@ -5226,12 +5443,14 @@ impl Node {
     pub async fn credit_deposit_onchain(
         &mut self,
         ledger_id: &str,
-        deposit_pubkey: PublicKey,
+        descriptor: &str,
         amount_msats: u64,
         txid: [u8; 32],
         vout: u32,
         funding_address: String,
     ) -> Result<u64, Error> {
+        let deposit_id = compute_deposit_id(descriptor);
+
         // Check if there are existing quorum members
         let has_quorum = {
             let ledgers = self.handler.ledgers.lock().unwrap();
@@ -5252,17 +5471,17 @@ impl Node {
 
             let mut ledger = ledger_arc.write().unwrap();
 
-            if !ledger.state.deposits.contains_key(&deposit_pubkey) {
+            if !ledger.state.deposits.contains_key(&deposit_id) {
                 return Err(Error::Protocol(format!(
-                    "Deposit not found for pubkey {}",
-                    deposit_pubkey
+                    "Deposit not found for descriptor {}",
+                    descriptor
                 )));
             }
 
             let operation = LedgerOperation::OnchainCredit {
                 txid,
                 vout,
-                deposit_pubkey,
+                deposit_id,
                 amount: amount_msats,
                 funding_address,
             };
@@ -5276,7 +5495,7 @@ impl Node {
                 block_hash,
             ).map_err(|e| Error::Protocol(format!("Failed to credit deposit: {:?}", e)))?;
 
-            ledger.state.deposits.get(&deposit_pubkey)
+            ledger.state.deposits.get(&deposit_id)
                 .map(|d| d.balance)
                 .unwrap_or(0)
         };
@@ -5294,7 +5513,7 @@ impl Node {
 
         tracing::info!(
             "Credited deposit {} with {} msats (on-chain), new balance: {} msats",
-            deposit_pubkey, amount_msats, new_balance
+            hex::encode(deposit_id), amount_msats, new_balance
         );
         Ok(new_balance)
     }
@@ -5303,7 +5522,7 @@ impl Node {
     pub async fn credit_deposit(
         &mut self,
         ledger_id: &str,
-        deposit_pubkey: PublicKey,
+        deposit_id: DepositId,
         amount_msats: u64,
         payment_hash: [u8; 32],
         invoice_id: String,
@@ -5328,10 +5547,10 @@ impl Node {
 
             let mut ledger = ledger_arc.write().unwrap();
 
-            if !ledger.state.deposits.contains_key(&deposit_pubkey) {
+            if !ledger.state.deposits.contains_key(&deposit_id) {
                 return Err(Error::Protocol(format!(
-                    "Deposit not found for pubkey {}",
-                    deposit_pubkey
+                    "Deposit not found for id {}",
+                    hex::encode(deposit_id)
                 )));
             }
 
@@ -5339,7 +5558,7 @@ impl Node {
 
             let operation = LedgerOperation::InvoiceCredit {
                 payment_hash,
-                deposit_pubkey,
+                deposit_id,
                 amount: amount_msats,
                 invoice_id,
                 sequence_number,
@@ -5354,7 +5573,7 @@ impl Node {
                 block_hash,
             ).map_err(|e| Error::Protocol(format!("Failed to credit deposit: {:?}", e)))?;
 
-            ledger.state.deposits.get(&deposit_pubkey)
+            ledger.state.deposits.get(&deposit_id)
                 .map(|d| d.balance)
                 .unwrap_or(0)
         };
@@ -5372,7 +5591,7 @@ impl Node {
 
         tracing::info!(
             "Credited deposit {} with {} msats (invoice), new balance: {} msats",
-            deposit_pubkey, amount_msats, new_balance
+            hex::encode(deposit_id), amount_msats, new_balance
         );
         Ok(new_balance)
     }
@@ -5381,10 +5600,10 @@ impl Node {
     pub async fn lock_invoice_payment(
         &mut self,
         ledger_id: &str,
-        deposit_pubkey: PublicKey,
+        deposit_id: DepositId,
         amount_msats: u64,
         payment_id: [u8; 32],
-        scriptpubkey_signature: [u8; 64],
+        witness: DescriptorWitness,
     ) -> Result<u64, Error> {
         // Check if there are existing quorum members
         let has_quorum = {
@@ -5406,10 +5625,10 @@ impl Node {
 
             let mut ledger = ledger_arc.write().unwrap();
 
-            let deposit = ledger.state.deposits.get(&deposit_pubkey)
+            let deposit = ledger.state.deposits.get(&deposit_id)
                 .ok_or_else(|| Error::Protocol(format!(
-                    "Deposit not found for pubkey {}",
-                    deposit_pubkey
+                    "Deposit not found for id {}",
+                    hex::encode(deposit_id)
                 )))?;
 
             if deposit.available_balance() < amount_msats {
@@ -5422,11 +5641,11 @@ impl Node {
             let sequence_number = ledger.sequence() + 1;
 
             let operation = LedgerOperation::InvoiceLock {
-                pubkey: deposit_pubkey,
+                deposit_id,
                 amount: amount_msats,
                 payment_id,
                 sequence_number,
-                scriptpubkey_signature,
+                witness,
             };
 
             let block_height = self.wallet.get_block_height().unwrap_or(0);
@@ -5438,7 +5657,7 @@ impl Node {
                 block_hash,
             ).map_err(|e| Error::Protocol(format!("Failed to lock payment: {:?}", e)))?;
 
-            ledger.state.deposits.get(&deposit_pubkey)
+            ledger.state.deposits.get(&deposit_id)
                 .map(|d| d.locked_balance)
                 .unwrap_or(0)
         };
@@ -5456,7 +5675,7 @@ impl Node {
 
         tracing::info!(
             "Locked {} msats for invoice payment {} on deposit {}",
-            amount_msats, hex::encode(&payment_id[..8]), deposit_pubkey
+            amount_msats, hex::encode(&payment_id[..8]), hex::encode(deposit_id)
         );
         Ok(new_locked)
     }
@@ -5465,7 +5684,7 @@ impl Node {
     pub async fn fail_invoice_payment(
         &mut self,
         ledger_id: &str,
-        deposit_pubkey: PublicKey,
+        deposit_id: DepositId,
         amount_msats: u64,
         payment_id: [u8; 32],
     ) -> Result<u64, Error> {
@@ -5489,10 +5708,10 @@ impl Node {
 
             let mut ledger = ledger_arc.write().unwrap();
 
-            let deposit = ledger.state.deposits.get(&deposit_pubkey)
+            let deposit = ledger.state.deposits.get(&deposit_id)
                 .ok_or_else(|| Error::Protocol(format!(
-                    "Deposit not found for pubkey {}",
-                    deposit_pubkey
+                    "Deposit not found for id {}",
+                    hex::encode(deposit_id)
                 )))?;
 
             if deposit.locked_balance < amount_msats {
@@ -5505,7 +5724,7 @@ impl Node {
             let sequence_number = ledger.sequence() + 1;
 
             let operation = LedgerOperation::InvoiceFail {
-                pubkey: deposit_pubkey,
+                deposit_id,
                 amount: amount_msats,
                 payment_id,
                 sequence_number,
@@ -5520,7 +5739,7 @@ impl Node {
                 block_hash,
             ).map_err(|e| Error::Protocol(format!("Failed to fail payment: {:?}", e)))?;
 
-            ledger.state.deposits.get(&deposit_pubkey)
+            ledger.state.deposits.get(&deposit_id)
                 .map(|d| d.balance)
                 .unwrap_or(0)
         };
@@ -5538,7 +5757,7 @@ impl Node {
 
         tracing::info!(
             "Failed invoice payment {} for {} msats on deposit {}, new balance: {} msats",
-            hex::encode(&payment_id[..8]), amount_msats, deposit_pubkey, new_balance
+            hex::encode(&payment_id[..8]), amount_msats, hex::encode(deposit_id), new_balance
         );
         Ok(new_balance)
     }
@@ -5547,11 +5766,11 @@ impl Node {
     pub async fn fulfill_invoice_payment(
         &mut self,
         ledger_id: &str,
-        deposit_pubkey: PublicKey,
+        deposit_id: DepositId,
         amount_msats: u64,
         payment_id: [u8; 32],
         preimage: [u8; 32],
-        scriptpubkey_signature: [u8; 64],
+        witness: DescriptorWitness,
     ) -> Result<u64, Error> {
         // Check if there are existing quorum members
         let has_quorum = {
@@ -5573,10 +5792,10 @@ impl Node {
 
             let mut ledger = ledger_arc.write().unwrap();
 
-            let deposit = ledger.state.deposits.get(&deposit_pubkey)
+            let deposit = ledger.state.deposits.get(&deposit_id)
                 .ok_or_else(|| Error::Protocol(format!(
-                    "Deposit not found for pubkey {}",
-                    deposit_pubkey
+                    "Deposit not found for id {}",
+                    hex::encode(deposit_id)
                 )))?;
 
             if deposit.locked_balance < amount_msats {
@@ -5589,12 +5808,12 @@ impl Node {
             let sequence_number = ledger.sequence() + 1;
 
             let operation = LedgerOperation::InvoiceFulfill {
-                pubkey: deposit_pubkey,
+                deposit_id,
                 amount: amount_msats,
                 payment_id,
                 preimage,
                 sequence_number,
-                scriptpubkey_signature,
+                witness,
             };
 
             let block_height = self.wallet.get_block_height().unwrap_or(0);
@@ -5606,7 +5825,7 @@ impl Node {
                 block_hash,
             ).map_err(|e| Error::Protocol(format!("Failed to fulfill payment: {:?}", e)))?;
 
-            ledger.state.deposits.get(&deposit_pubkey)
+            ledger.state.deposits.get(&deposit_id)
                 .map(|d| d.balance)
                 .unwrap_or(0)
         };
@@ -5624,7 +5843,7 @@ impl Node {
 
         tracing::info!(
             "Fulfilled invoice payment {} for {} msats on deposit {}, new balance: {} msats",
-            hex::encode(&payment_id[..8]), amount_msats, deposit_pubkey, new_balance
+            hex::encode(&payment_id[..8]), amount_msats, hex::encode(deposit_id), new_balance
         );
         Ok(new_balance)
     }
@@ -5633,12 +5852,12 @@ impl Node {
     pub async fn lock_withdrawal(
         &mut self,
         ledger_id: &str,
-        deposit_pubkey: PublicKey,
+        deposit_id: DepositId,
         destination_address: String,
         amount_sats: u64,
         fee_sats: u64,
         nonce: [u8; 32],
-        depositor_signature: [u8; 64],
+        depositor_witness: DescriptorWitness,
         memo: Option<String>,
     ) -> Result<WithdrawalLockResult, Error> {
         // Check if there are existing quorum members
@@ -5656,7 +5875,7 @@ impl Node {
         // Compute withdrawal ID
         let signing_message = OnChainWithdrawal::signing_message(
             &nonce,
-            &deposit_pubkey,
+            &deposit_id,
             &destination_address,
             amount_sats,
             fee_sats,
@@ -5667,13 +5886,13 @@ impl Node {
         let withdrawal = OnChainWithdrawal {
             withdrawal_id,
             nonce,
-            deposit_pubkey,
+            deposit_id,
             destination_address: destination_address.clone(),
             amount_sats,
             fee_sats,
             requested_at_block: current_block,
             memo,
-            depositor_signature,
+            depositor_witness,
         };
 
         // Note: Signature verification is skipped here because process_withdraw_request
@@ -5691,10 +5910,10 @@ impl Node {
 
             let mut ledger = ledger_arc.write().unwrap();
 
-            let deposit = ledger.state.deposits.get(&deposit_pubkey)
+            let deposit = ledger.state.deposits.get(&deposit_id)
                 .ok_or_else(|| Error::Protocol(format!(
-                    "Deposit not found for pubkey {}",
-                    deposit_pubkey
+                    "Deposit not found for id {}",
+                    hex::encode(deposit_id)
                 )))?;
 
             let total_debit_msats = (amount_sats + fee_sats) * 1000;
@@ -5708,7 +5927,7 @@ impl Node {
             let prev_balance = deposit.balance;
 
             let operation = LedgerOperation::OnchainLock {
-                deposit_pubkey,
+                deposit_id,
                 amount: total_debit_msats,
                 destination_address: destination_address.clone(),
                 withdrawal_id,
@@ -5723,7 +5942,7 @@ impl Node {
                 block_hash,
             ).map_err(|e| Error::Protocol(format!("Failed to lock withdrawal: {:?}", e)))?;
 
-            let new_bal = ledger.state.deposits.get(&deposit_pubkey)
+            let new_bal = ledger.state.deposits.get(&deposit_id)
                 .map(|d| d.balance)
                 .unwrap_or(0);
 
@@ -5831,7 +6050,7 @@ impl Node {
             let mut ledger = ledger_arc.write().unwrap();
 
             let operation = LedgerOperation::OnchainFulfill {
-                deposit_pubkey: withdrawal.deposit_pubkey,
+                deposit_id: withdrawal.deposit_id,
                 withdrawal_id: *withdrawal_id,
                 amount: withdrawal.amount_sats * 1000,
                 txid: txid_bytes,
@@ -5847,7 +6066,7 @@ impl Node {
                 block_hash,
             ).map_err(|e| Error::Protocol(format!("Failed to fulfill withdrawal: {:?}", e)))?;
 
-            ledger.state.deposits.get(&withdrawal.deposit_pubkey)
+            ledger.state.deposits.get(&withdrawal.deposit_id)
                 .map(|d| d.balance)
                 .unwrap_or(0)
         };
@@ -6255,11 +6474,15 @@ impl Node {
         let funding_address = self.wallet.get_new_address()?;
         let funding_address_str = funding_address.to_string();
 
+        // Create descriptor and compute deposit_id from pubkey
+        let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
+        let deposit_id = compute_deposit_id(&descriptor);
+
         // Get the signing message and compute offer ID
         let signing_message = DepositOffer::signing_message(
             &self.node_id,
             ledger_id,
-            &deposit_pubkey,
+            &deposit_id,
             &funding_address_str,
             max_amount_sats,
             min_amount_sats,
@@ -6272,7 +6495,7 @@ impl Node {
             &self.wallet.operator_secret(),
             &self.node_id,
             ledger_id,
-            &deposit_pubkey,
+            &deposit_id,
             &funding_address_str,
             max_amount_sats,
             min_amount_sats,
@@ -6283,7 +6506,8 @@ impl Node {
         let offer = DepositOffer {
             operator_id: self.node_id,
             ledger_id: ledger_id.to_string(),
-            deposit_pubkey,
+            deposit_id,
+            descriptor,
             funding_address: funding_address_str,
             max_amount_sats,
             min_amount_sats,
@@ -6590,22 +6814,22 @@ impl Node {
     // Deposit Management
     // ========================================================================
 
-    /// Get a deposit by pubkey from a ledger
+    /// Get a deposit by deposit_id from a ledger
     pub fn get_deposit(
         &self,
         ledger_id: &str,
-        deposit_pubkey: PublicKey,
+        deposit_id: DepositId,
     ) -> Option<Deposit> {
         let ledgers = self.handler.ledgers.lock().unwrap();
         if let Some(ledger_arc) = ledgers.get(ledger_id) {
             let ledger = ledger_arc.read().unwrap();
-            return ledger.state.deposits.get(&deposit_pubkey).cloned();
+            return ledger.state.deposits.get(&deposit_id).cloned();
         }
         None
     }
 
     /// List all deposits in a ledger
-    pub fn list_deposits(&self, ledger_id: &str) -> Vec<(PublicKey, Deposit)> {
+    pub fn list_deposits(&self, ledger_id: &str) -> Vec<(DepositId, Deposit)> {
         let ledgers = self.handler.ledgers.lock().unwrap();
         if let Some(ledger_arc) = ledgers.get(ledger_id) {
             let ledger = ledger_arc.read().unwrap();
@@ -6671,11 +6895,11 @@ impl Node {
             )))?;
 
         // First, open the deposit if it doesn't already exist (with co-signing)
-        match self.open_deposit(&reserves_id, offer.deposit_pubkey, offer.fees.clone()).await {
+        match self.open_deposit(&reserves_id, &offer.descriptor, offer.fees.clone()).await {
             Ok(_) => {
                 tracing::info!(
                     "Opened deposit for {} in ledger {}",
-                    offer.deposit_pubkey,
+                    hex::encode(offer.deposit_id),
                     &reserves_id[..16.min(reserves_id.len())]
                 );
             }
@@ -6692,7 +6916,7 @@ impl Node {
         // Credit the deposit with co-signing
         let new_balance = self.credit_deposit_onchain(
             &reserves_id,
-            offer.deposit_pubkey,
+            &offer.descriptor,
             amount_msats,
             txid_bytes,
             0, // vout - typically 0 for deposit offers
@@ -6716,7 +6940,7 @@ impl Node {
             "Completed deposit offer {}: credited {} msats to {}",
             hex::encode(&offer_id[..8]),
             amount_msats,
-            offer.deposit_pubkey
+            hex::encode(offer.deposit_id)
         );
 
         Ok(new_balance)

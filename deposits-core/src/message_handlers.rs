@@ -49,6 +49,10 @@ use crate::operation_validation::{
     validate_deposit_add, validate_deposit_close, validate_deposit_update,
     validate_reserves_add, validate_reserves_increase, validate_reserves_decrease,
     validate_fee_collect, validate_ledger_close, validate_cosign_invoice,
+    // DepositId-based validation functions
+    validate_deposit_add_by_id, validate_deposit_close_by_id, validate_deposit_update_by_id,
+    validate_payment_lock_by_id, validate_payment_fulfill_by_id, validate_credit_payment_by_id,
+    validate_fee_collect_by_id, validate_deposit_key_rotate,
 };
 use crate::messages::{DepositsMessage, CoordinationMsg, CoordinationResponseMsg, SyncMsg, RecoveryResponseMsg};
 
@@ -410,11 +414,11 @@ pub fn handle_ledger_update<C: HandlerContext>(
             LedgerOperation::QuorumRemoveMember { quorum_member, .. } => {
                 !ledger.state.quorum_members.iter().any(|m| m.pubkey == *quorum_member)
             }
-            LedgerOperation::DepositOpen { pubkey, .. } => {
-                ledger.state.deposits.contains_key(pubkey)
+            LedgerOperation::DepositOpen { deposit_id, .. } => {
+                ledger.state.deposits.contains_key(deposit_id)
             }
-            LedgerOperation::DepositClose { pubkey } => {
-                !ledger.state.deposits.contains_key(pubkey)
+            LedgerOperation::DepositClose { deposit_id } => {
+                !ledger.state.deposits.contains_key(deposit_id)
             }
             _ => false,
         };
@@ -429,30 +433,34 @@ pub fn handle_ledger_update<C: HandlerContext>(
             // Operation-specific validation
             match &operation {
                 // Deposit operations (non-idempotent cases already filtered above)
-                LedgerOperation::DepositOpen { pubkey, fees, .. } => {
-                    validate_deposit_add(&ledger, *pubkey, fees.as_ref())
+                LedgerOperation::DepositOpen { deposit_id, fees, .. } => {
+                    validate_deposit_add_by_id(&ledger, deposit_id, fees.as_ref())
                         .map_err(|e| HandlerError::ValidationFailed(e))?;
                 }
-                LedgerOperation::DepositClose { pubkey } => {
-                    validate_deposit_close(&ledger, *pubkey)
+                LedgerOperation::DepositClose { deposit_id } => {
+                    validate_deposit_close_by_id(&ledger, deposit_id)
                         .map_err(|e| HandlerError::ValidationFailed(e))?;
                 }
-                LedgerOperation::DepositUpdate { pubkey, new_fees } => {
-                    validate_deposit_update(&ledger, *pubkey, new_fees)
+                LedgerOperation::DepositUpdate { deposit_id, new_fees } => {
+                    validate_deposit_update_by_id(&ledger, deposit_id, new_fees)
+                        .map_err(|e| HandlerError::ValidationFailed(e))?;
+                }
+                LedgerOperation::DepositKeyRotate { deposit_id, new_descriptor, witness } => {
+                    validate_deposit_key_rotate(&ledger, deposit_id, new_descriptor, witness)
                         .map_err(|e| HandlerError::ValidationFailed(e))?;
                 }
 
                 // Invoice operations
-                LedgerOperation::InvoiceCredit { payment_hash, deposit_pubkey, amount, .. } => {
-                    validate_credit_payment(&ledger, *deposit_pubkey, *amount, payment_hash)
+                LedgerOperation::InvoiceCredit { payment_hash, deposit_id, amount, invoice_id, .. } => {
+                    validate_credit_payment_by_id(&ledger, deposit_id, *amount, payment_hash, invoice_id)
                         .map_err(|e| HandlerError::ValidationFailed(e))?;
                 }
-                LedgerOperation::InvoiceLock { pubkey, amount, payment_id, scriptpubkey_signature, .. } => {
-                    validate_payment_lock(&ledger, *pubkey, *amount, payment_id, scriptpubkey_signature)
+                LedgerOperation::InvoiceLock { deposit_id, amount, payment_id, witness, .. } => {
+                    validate_payment_lock_by_id(&ledger, deposit_id, *amount, payment_id, witness)
                         .map_err(|e| HandlerError::ValidationFailed(e))?;
                 }
-                LedgerOperation::InvoiceFulfill { pubkey, amount, payment_id, scriptpubkey_signature, preimage, .. } => {
-                    validate_payment_fulfill(pubkey, *amount, payment_id, scriptpubkey_signature, preimage)
+                LedgerOperation::InvoiceFulfill { deposit_id, amount, payment_id, witness, preimage, .. } => {
+                    validate_payment_fulfill_by_id(deposit_id, *amount, payment_id, witness, preimage)
                         .map_err(|e| HandlerError::ValidationFailed(e))?;
                 }
                 LedgerOperation::InvoiceFail { amount, .. } => {
@@ -461,9 +469,9 @@ pub fn handle_ledger_update<C: HandlerContext>(
                 }
 
                 // Onchain operations - basic validation
-                LedgerOperation::OnchainCredit { deposit_pubkey, amount, .. } => {
+                LedgerOperation::OnchainCredit { deposit_id, amount, .. } => {
                     // Verify deposit exists
-                    if !ledger.state.deposits.contains_key(deposit_pubkey) {
+                    if !ledger.state.deposits.contains_key(deposit_id) {
                         return Err(HandlerError::ValidationFailed(
                             "Deposit not found for onchain credit".to_string()
                         ));
@@ -474,8 +482,8 @@ pub fn handle_ledger_update<C: HandlerContext>(
                         ));
                     }
                 }
-                LedgerOperation::OnchainLock { deposit_pubkey, amount, .. } => {
-                    if let Some(deposit) = ledger.state.deposits.get(deposit_pubkey) {
+                LedgerOperation::OnchainLock { deposit_id, amount, .. } => {
+                    if let Some(deposit) = ledger.state.deposits.get(deposit_id) {
                         if deposit.available_balance() < *amount {
                             return Err(HandlerError::ValidationFailed(
                                 "Insufficient balance for onchain withdrawal".to_string()
@@ -503,8 +511,8 @@ pub fn handle_ledger_update<C: HandlerContext>(
                 }
 
                 // Fee collection
-                LedgerOperation::FeeCollect { pubkey, amount, block_height } => {
-                    validate_fee_collect(&ledger, *pubkey, *amount, *block_height)
+                LedgerOperation::FeeCollect { deposit_id, amount, block_height } => {
+                    validate_fee_collect_by_id(&ledger, deposit_id, *amount, *block_height)
                         .map_err(|e| HandlerError::ValidationFailed(e))?;
                 }
 
@@ -1445,7 +1453,10 @@ pub fn handle_sending_fulfill_payment<C: HandlerContext>(
             HandlerError::Internal("Failed to acquire ledger read lock".to_string())
         )?;
 
-        if !ledger.state.deposits.contains_key(&msg.pubkey) {
+        // Convert pubkey to deposit_id for lookup
+        let descriptor = format!("pk({})", hex::encode(msg.pubkey.serialize()));
+        let deposit_id = crate::types::compute_deposit_id(&descriptor);
+        if !ledger.state.deposits.contains_key(&deposit_id) {
             return Ok(HandlerResult::Rejected(format!(
                 "Deposit with pubkey {} does not exist",
                 msg.pubkey
@@ -1512,7 +1523,10 @@ pub fn handle_sending_fail_payment<C: HandlerContext>(
             HandlerError::Internal("Failed to acquire ledger read lock".to_string())
         )?;
 
-        if !ledger.state.deposits.contains_key(&msg.pubkey) {
+        // Convert pubkey to deposit_id for lookup
+        let descriptor = format!("pk({})", hex::encode(msg.pubkey.serialize()));
+        let deposit_id = crate::types::compute_deposit_id(&descriptor);
+        if !ledger.state.deposits.contains_key(&deposit_id) {
             return Ok(HandlerResult::Rejected(format!(
                 "Deposit with pubkey {} does not exist",
                 msg.pubkey
@@ -1573,8 +1587,13 @@ pub fn handle_deposit_open<C: HandlerContext>(
             reserves_id: msg.reserves_id.clone(),
         })?;
 
+    // Convert pubkey to descriptor and compute deposit_id
+    let descriptor = format!("pk({})", hex::encode(msg.pubkey.serialize()));
+    let deposit_id = crate::types::compute_deposit_id(&descriptor);
+
     let operation = LedgerOperation::DepositOpen {
-        pubkey: msg.pubkey,
+        deposit_id,
+        descriptor: descriptor.clone(),
         fees: msg.fees.clone(),
         payment_hash: msg.payment_hash,
         invoice: msg.invoice.clone(),
@@ -1588,15 +1607,15 @@ pub fn handle_deposit_open<C: HandlerContext>(
         )?;
 
         // Idempotency check
-        if ledger.state.deposits.contains_key(&msg.pubkey) {
+        if ledger.state.deposits.contains_key(&deposit_id) {
             let seq = ledger.sequence();
             let hash = ledger.hash();
             (hash, hash, seq, Vec::new(), true)
         } else {
             // Validate first
-            validate_deposit_add(
+            validate_deposit_add_by_id(
                 &ledger,
-                msg.pubkey,
+                &deposit_id,
                 msg.fees.as_ref(),
             ).map_err(|e| HandlerError::ValidationFailed(e))?;
 
@@ -1671,8 +1690,12 @@ pub fn handle_deposit_close<C: HandlerContext>(
             reserves_id: msg.reserves_id.clone(),
         })?;
 
+    // Convert pubkey to descriptor and compute deposit_id
+    let descriptor = format!("pk({})", hex::encode(msg.pubkey.serialize()));
+    let deposit_id = crate::types::compute_deposit_id(&descriptor);
+
     let operation = LedgerOperation::DepositClose {
-        pubkey: msg.pubkey,
+        deposit_id,
     };
 
     // Check for idempotency and append (single write lock scope)
@@ -1682,20 +1705,20 @@ pub fn handle_deposit_close<C: HandlerContext>(
         )?;
 
         // Idempotency check - if deposit doesn't exist, already closed
-        if !ledger.state.deposits.contains_key(&msg.pubkey) {
+        if !ledger.state.deposits.contains_key(&deposit_id) {
             let seq = ledger.sequence();
             let hash = ledger.hash();
             (hash, hash, seq, Vec::new(), true, 0u64)
         } else {
             // Get final balance before close
-            let final_balance = ledger.state.deposits.get(&msg.pubkey)
+            let final_balance = ledger.state.deposits.get(&deposit_id)
                 .map(|d| d.balance)
                 .unwrap_or(0);
 
             // Validate first
-            validate_deposit_close(
+            validate_deposit_close_by_id(
                 &ledger,
-                msg.pubkey,
+                &deposit_id,
             ).map_err(|e| HandlerError::ValidationFailed(e))?;
 
             // Append operation
@@ -1772,8 +1795,12 @@ pub fn handle_deposit_update<C: HandlerContext>(
             reserves_id: msg.reserves_id.clone(),
         })?;
 
+    // Convert pubkey to descriptor and compute deposit_id
+    let descriptor = format!("pk({})", hex::encode(msg.pubkey.serialize()));
+    let deposit_id = crate::types::compute_deposit_id(&descriptor);
+
     let operation = LedgerOperation::DepositUpdate {
-        pubkey: msg.pubkey,
+        deposit_id,
         new_fees: msg.new_fees.clone(),
     };
 
@@ -1784,9 +1811,9 @@ pub fn handle_deposit_update<C: HandlerContext>(
         )?;
 
         // Validate first
-        validate_deposit_update(
+        validate_deposit_update_by_id(
             &ledger,
-            msg.pubkey,
+            &deposit_id,
             &msg.new_fees,
         ).map_err(|e| HandlerError::ValidationFailed(e))?;
 
@@ -3395,8 +3422,8 @@ mod tests {
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
         ledger.state.reserves.amount = 100_000;
         ledger.state.received_collateral_amount = 100_000;
-        let deposit = Deposit::new(deposit_pubkey, None);
-        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        let deposit = Deposit::from_pubkey(&deposit_pubkey, None);
+        ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         // Create payment hash that's not all the same byte
@@ -3470,8 +3497,8 @@ mod tests {
 
         // Create a ledger with a different deposit
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
-        let deposit = Deposit::new(other_deposit, None);
-        ledger.state.deposits.insert(other_deposit, deposit);
+        let deposit = Deposit::from_pubkey(&other_deposit, None);
+        ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = SendingLockPaymentMsg {
@@ -3499,9 +3526,9 @@ mod tests {
 
         // Create a ledger with a deposit that has low balance
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
-        let mut deposit = Deposit::new(deposit_pubkey, None);
+        let mut deposit = Deposit::from_pubkey(&deposit_pubkey, None);
         deposit.balance = 10_000; // Low balance
-        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = SendingLockPaymentMsg {
@@ -3529,9 +3556,9 @@ mod tests {
 
         // Create a ledger with a deposit that has sufficient balance
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
-        let mut deposit = Deposit::new(deposit_pubkey, None);
+        let mut deposit = Deposit::from_pubkey(&deposit_pubkey, None);
         deposit.balance = 100_000;
-        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = SendingLockPaymentMsg {
@@ -3590,8 +3617,8 @@ mod tests {
 
         // Create a ledger with the deposit
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
-        let deposit = Deposit::new(deposit_pubkey, None);
-        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        let deposit = Deposit::from_pubkey(&deposit_pubkey, None);
+        ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         // Create a preimage that doesn't match the payment_id
@@ -3625,9 +3652,9 @@ mod tests {
 
         // Create a ledger with the deposit
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
-        let mut deposit = Deposit::new(deposit_pubkey, None);
+        let mut deposit = Deposit::from_pubkey(&deposit_pubkey, None);
         deposit.balance = 100_000;
-        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         // Create a valid preimage and compute its hash
@@ -3700,8 +3727,8 @@ mod tests {
 
         // Create a ledger with the deposit
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
-        let deposit = Deposit::new(deposit_pubkey, None);
-        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        let deposit = Deposit::from_pubkey(&deposit_pubkey, None);
+        ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = SendingFailPaymentMsg {
@@ -3729,8 +3756,8 @@ mod tests {
 
         // Create a ledger with a different deposit
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
-        let deposit = Deposit::new(other_deposit, None);
-        ledger.state.deposits.insert(other_deposit, deposit);
+        let deposit = Deposit::from_pubkey(&other_deposit, None);
+        ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = SendingFailPaymentMsg {
@@ -3757,8 +3784,8 @@ mod tests {
 
         // Create a ledger with the deposit
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
-        let deposit = Deposit::new(deposit_pubkey, None);
-        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        let deposit = Deposit::from_pubkey(&deposit_pubkey, None);
+        ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = SendingFailPaymentMsg {
@@ -3865,8 +3892,8 @@ mod tests {
 
         // Create a ledger with the deposit already added
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
-        let deposit = Deposit::new(deposit_pubkey, None);
-        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        let deposit = Deposit::from_pubkey(&deposit_pubkey, None);
+        ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = DepositOpenMsg {
@@ -4005,8 +4032,8 @@ mod tests {
 
         // Create a ledger with a deposit that has zero balance
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
-        let deposit = Deposit::new(deposit_pubkey, None); // balance=0 by default
-        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        let deposit = Deposit::from_pubkey(&deposit_pubkey, None); // balance=0 by default
+        ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = DepositCloseMsg {
@@ -4031,9 +4058,9 @@ mod tests {
 
         // Create a ledger with a deposit that has non-zero balance
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
-        let mut deposit = Deposit::new(deposit_pubkey, None);
+        let mut deposit = Deposit::from_pubkey(&deposit_pubkey, None);
         deposit.balance = 50_000; // Non-zero balance
-        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = DepositCloseMsg {
@@ -4058,9 +4085,9 @@ mod tests {
 
         // Create a ledger with a deposit that has locked balance
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
-        let mut deposit = Deposit::new(deposit_pubkey, None);
+        let mut deposit = Deposit::from_pubkey(&deposit_pubkey, None);
         deposit.locked_balance = 10_000; // Has locked funds
-        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = DepositCloseMsg {
@@ -4179,8 +4206,8 @@ mod tests {
 
         // Create a ledger with the deposit
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
-        let deposit = Deposit::new(deposit_pubkey, None);
-        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        let deposit = Deposit::from_pubkey(&deposit_pubkey, None);
+        ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let new_fees = FeeStructure {
@@ -4212,8 +4239,8 @@ mod tests {
 
         // Create a ledger with the deposit
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
-        let deposit = Deposit::new(deposit_pubkey, None);
-        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        let deposit = Deposit::from_pubkey(&deposit_pubkey, None);
+        ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         // Invalid fee structure with zero frequency
@@ -4246,8 +4273,8 @@ mod tests {
 
         // Create a ledger with the deposit
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
-        let deposit = Deposit::new(deposit_pubkey, None);
-        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        let deposit = Deposit::from_pubkey(&deposit_pubkey, None);
+        ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         // Fee rate too high (over 100%)
@@ -4476,9 +4503,9 @@ mod tests {
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
         ledger.state.reserves.amount = 100_000;
         ledger.state.reserves.spend_to = spend_to;
-        let mut deposit = Deposit::new(deposit_pubkey, None);
+        let mut deposit = Deposit::from_pubkey(&deposit_pubkey, None);
         deposit.balance = 50_000;
-        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = ReservesRemoveOutputMsg {
@@ -4714,9 +4741,9 @@ mod tests {
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
         ledger.state.reserves.amount = 200_000;
         ledger.state.reserves.spend_to = spend_to;
-        let mut deposit = Deposit::new(deposit_pubkey, None);
+        let mut deposit = Deposit::from_pubkey(&deposit_pubkey, None);
         deposit.balance = 100_000;
-        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = ReservesDecreaseMsg {
@@ -4787,14 +4814,14 @@ mod tests {
 
         // Create a ledger with a deposit that has balance and is eligible for fee collection
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
-        let mut deposit = Deposit::new(deposit_pubkey, Some(FeeStructure {
+        let mut deposit = Deposit::from_pubkey(&deposit_pubkey, Some(FeeStructure {
             annualized_fixed: 0,
             annualized_bps: 100,
             frequency_blocks: 100,
         }));
         deposit.balance = 100_000;
         deposit.last_fee_assessment = 0; // Fee eligible from the start
-        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = FeeCollectMsg {
@@ -4837,14 +4864,14 @@ mod tests {
 
         // Create a ledger with a deposit where fees were recently collected
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
-        let mut deposit = Deposit::new(deposit_pubkey, Some(FeeStructure {
+        let mut deposit = Deposit::from_pubkey(&deposit_pubkey, Some(FeeStructure {
             annualized_fixed: 0,
             annualized_bps: 100,
             frequency_blocks: 100,
         }));
         deposit.balance = 100_000;
         deposit.last_fee_assessment = 50; // Collected at block 50
-        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = FeeCollectMsg {
@@ -4907,9 +4934,9 @@ mod tests {
 
         // Create a ledger with a deposit that has balance
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
-        let mut deposit = Deposit::new(deposit_pubkey, None);
+        let mut deposit = Deposit::from_pubkey(&deposit_pubkey, None);
         deposit.balance = 100_000; // Has balance
-        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = LedgerCloseMsg {
@@ -4933,10 +4960,10 @@ mod tests {
 
         // Create a ledger with a deposit that has locked balance
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
-        let mut deposit = Deposit::new(deposit_pubkey, None);
+        let mut deposit = Deposit::from_pubkey(&deposit_pubkey, None);
         deposit.balance = 0;
         deposit.locked_balance = 50_000; // Has locked balance
-        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = LedgerCloseMsg {
@@ -4997,8 +5024,8 @@ mod tests {
 
         // Create a ledger with zero-balance deposits
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
-        let deposit = Deposit::new(deposit_pubkey, None); // Balance defaults to 0
-        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        let deposit = Deposit::from_pubkey(&deposit_pubkey, None); // Balance defaults to 0
+        ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = LedgerCloseMsg {
@@ -5075,8 +5102,8 @@ mod tests {
 
         // Create a ledger with a deposit
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
-        let deposit = Deposit::new(deposit_pubkey, None);
-        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        let deposit = Deposit::from_pubkey(&deposit_pubkey, None);
+        ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ledger.state.reserves.amount = 200_000;
         ledger.state.reserves.spend_to = spend_to;
         ctx.add_ledger(operator, our_node_id, ledger);
@@ -5108,8 +5135,8 @@ mod tests {
 
         // Create a ledger with a deposit, sufficient reserves, and collateral
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
-        let deposit = Deposit::new(deposit_pubkey, None);
-        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        let deposit = Deposit::from_pubkey(&deposit_pubkey, None);
+        ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ledger.state.reserves.amount = 200_000;
         ledger.state.reserves.spend_to = spend_to;
         ledger.state.received_collateral_amount = 200_000; // Set collateral to allow invoice
@@ -5165,8 +5192,8 @@ mod tests {
 
         // Create a ledger with a deposit but insufficient reserves
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
-        let deposit = Deposit::new(deposit_pubkey, None);
-        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        let deposit = Deposit::from_pubkey(&deposit_pubkey, None);
+        ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ledger.state.reserves.amount = 50_000; // Only 50k reserves
         ledger.state.reserves.spend_to = spend_to;
         ctx.add_ledger(operator, our_node_id, ledger);

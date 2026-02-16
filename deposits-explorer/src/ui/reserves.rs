@@ -67,7 +67,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         for member in &ledger.ledger.state.quorum_members {
             lines.push(Line::from(vec![
                 Span::raw("  "),
-                Span::styled(member.to_string(), Style::default().fg(Color::Cyan)),
+                Span::styled(format!("{}", member.pubkey), Style::default().fg(Color::Cyan)),
             ]));
         }
     }
@@ -106,9 +106,9 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(""));
 
         // List individual deposits (truncated if too many)
-        for (i, (pubkey, deposit)) in deposits.iter().enumerate().take(10) {
+        for (i, (deposit_id, deposit)) in deposits.iter().enumerate().take(10) {
             let short_pk = {
-                let s = pubkey.to_string();
+                let s = hex::encode(deposit_id);
                 format!("{}...", &s[..12.min(s.len())])
             };
             lines.push(Line::from(vec![

@@ -1728,17 +1728,17 @@ fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                     ("ReservesRotate", format!("addr:{}  amt:{} sat  quorum:{}/{}  expiry:{}",
                         addr_short, amount, quorum_threshold, quorum_size, first_expiry_block))
                 }
-                LedgerOperation::DepositOpen { pubkey, .. } => {
-                    let pk_bytes = pubkey.serialize();
-                    ("DepositOpen", format!("pk:{:02x}{:02x}{:02x}{:02x}", pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3]))
+                LedgerOperation::DepositOpen { deposit_id, .. } => {
+                    ("DepositOpen", format!("id:{:02x}{:02x}{:02x}{:02x}", deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]))
                 }
-                LedgerOperation::DepositClose { pubkey, .. } => {
-                    let pk_bytes = pubkey.serialize();
-                    ("DepositClose", format!("pk:{:02x}{:02x}{:02x}{:02x}", pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3]))
+                LedgerOperation::DepositClose { deposit_id, .. } => {
+                    ("DepositClose", format!("id:{:02x}{:02x}{:02x}{:02x}", deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]))
                 }
-                LedgerOperation::DepositUpdate { pubkey, .. } => {
-                    let pk_bytes = pubkey.serialize();
-                    ("DepositUpdate", format!("pk:{:02x}{:02x}{:02x}{:02x}", pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3]))
+                LedgerOperation::DepositUpdate { deposit_id, .. } => {
+                    ("DepositUpdate", format!("id:{:02x}{:02x}{:02x}{:02x}", deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]))
+                }
+                LedgerOperation::DepositKeyRotate { deposit_id, .. } => {
+                    ("DepositKeyRotate", format!("id:{:02x}{:02x}{:02x}{:02x}", deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]))
                 }
                 LedgerOperation::QuorumAddMember { quorum_member, .. } => {
                     let pk_bytes = quorum_member.serialize();
@@ -1763,10 +1763,9 @@ fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                     ("CollateralAttestation", format!("from:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  until_block:{}",
                         pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3], amount, lock_until_block))
                 }
-                LedgerOperation::CollateralLock { deposit_pubkey, amount, lock_until_block, .. } => {
-                    let pk_bytes = deposit_pubkey.serialize();
-                    ("CollateralLock", format!("pk:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  until_block:{}",
-                        pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3], amount, lock_until_block))
+                LedgerOperation::CollateralLock { deposit_id, amount, lock_until_block, .. } => {
+                    ("CollateralLock", format!("id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  until_block:{}",
+                        deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3], amount, lock_until_block))
                 }
                 LedgerOperation::CollateralIncrease { .. } => {
                     ("CollateralIncrease", String::new())
@@ -1774,50 +1773,44 @@ fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                 LedgerOperation::CollateralDecrease { .. } => {
                     ("CollateralDecrease", String::new())
                 }
-                LedgerOperation::OnchainCredit { deposit_pubkey, amount, funding_address, .. } => {
-                    let pk_bytes = deposit_pubkey.serialize();
+                LedgerOperation::OnchainCredit { deposit_id, amount, funding_address, .. } => {
                     let addr_short = if funding_address.len() > 20 {
                         format!("{}..{}", &funding_address[..8], &funding_address[funding_address.len()-6..])
                     } else {
                         funding_address.clone()
                     };
-                    ("OnchainCredit", format!("pk:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  addr:{}",
-                        pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3], amount, addr_short))
+                    ("OnchainCredit", format!("id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  addr:{}",
+                        deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3], amount, addr_short))
                 }
-                LedgerOperation::OnchainLock { deposit_pubkey, amount, destination_address, withdrawal_id, .. } => {
-                    let pk_bytes = deposit_pubkey.serialize();
+                LedgerOperation::OnchainLock { deposit_id, amount, destination_address, withdrawal_id, .. } => {
                     let addr_short = if destination_address.len() > 20 {
                         format!("{}..{}", &destination_address[..8], &destination_address[destination_address.len()-6..])
                     } else {
                         destination_address.clone()
                     };
-                    ("OnchainLock", format!("pk:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  wdrl:{}  addr:{}",
-                        pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3], amount,
+                    ("OnchainLock", format!("id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  wdrl:{}  addr:{}",
+                        deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3], amount,
                         hex::encode(&withdrawal_id[..4]), addr_short))
                 }
-                LedgerOperation::OnchainFail { deposit_pubkey, withdrawal_id, .. } => {
-                    let pk_bytes = deposit_pubkey.serialize();
-                    ("OnchainFail", format!("pk:{:02x}{:02x}{:02x}{:02x}  wdrl:{}",
-                        pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3],
+                LedgerOperation::OnchainFail { deposit_id, withdrawal_id, .. } => {
+                    ("OnchainFail", format!("id:{:02x}{:02x}{:02x}{:02x}  wdrl:{}",
+                        deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3],
                         hex::encode(&withdrawal_id[..4])))
                 }
-                LedgerOperation::OnchainFulfill { deposit_pubkey, withdrawal_id, amount, txid, .. } => {
-                    let pk_bytes = deposit_pubkey.serialize();
-                    ("OnchainFulfill", format!("pk:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  wdrl:{}  txn:{}",
-                        pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3],
+                LedgerOperation::OnchainFulfill { deposit_id, withdrawal_id, amount, txid, .. } => {
+                    ("OnchainFulfill", format!("id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  wdrl:{}  txn:{}",
+                        deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3],
                         amount,
                         hex::encode(&withdrawal_id[..4]),
                         hex::encode(&txid[..4])))
                 }
-                LedgerOperation::InvoiceCredit { deposit_pubkey, amount, .. } => {
-                    let pk_bytes = deposit_pubkey.serialize();
-                    ("InvoiceCredit", format!("pk:{:02x}{:02x}{:02x}{:02x}  amt:{} msat",
-                        pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3], amount))
+                LedgerOperation::InvoiceCredit { deposit_id, amount, .. } => {
+                    ("InvoiceCredit", format!("id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat",
+                        deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3], amount))
                 }
-                LedgerOperation::InvoiceLock { pubkey, amount, .. } => {
-                    let pk_bytes = pubkey.serialize();
-                    ("InvoiceLock", format!("pk:{:02x}{:02x}{:02x}{:02x}  amt:{} msat",
-                        pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3], amount))
+                LedgerOperation::InvoiceLock { deposit_id, amount, .. } => {
+                    ("InvoiceLock", format!("id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat",
+                        deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3], amount))
                 }
                 LedgerOperation::InvoiceFail { .. } => {
                     ("InvoiceFail", String::new())
@@ -2196,9 +2189,10 @@ async fn collateral_lock(args: &[String]) -> Result<(), Box<dyn std::error::Erro
             return Err("Usage: collateral lock <ledger_id> <amount_msats> <lock_blocks> [requesting_op]\n       collateral lock <reserves_id> <deposit_secret> <amount_msats> <lock_blocks> [requesting_op]".into());
         };
 
-    // Derive the deposit pubkey from the secret
+    // Derive the deposit pubkey from the secret and create descriptor
     let secp = Secp256k1::new();
     let deposit_pubkey = PublicKey::from_secret_key(&secp, &deposit_secret);
+    let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
 
     // Get current block height and compute lock_until_block
     let current_block = node.wallet.get_block_height()?;
@@ -2220,7 +2214,7 @@ async fn collateral_lock(args: &[String]) -> Result<(), Box<dyn std::error::Erro
 
     let attestation = node.lock_collateral(
         &ledger_id,
-        deposit_pubkey,
+        &descriptor,
         &deposit_secret,
         amount_msats,
         lock_until_block,
@@ -2485,7 +2479,7 @@ async fn deposit_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         println!("    Amount: {} - {} sats", offer.min_amount_sats, offer.max_amount_sats);
         println!("    Deadline: block {}", offer.deadline_block);
         println!("    Ledger: {}...", &offer.ledger_id[..16.min(offer.ledger_id.len())]);
-        println!("    Deposit: {}", offer.deposit_pubkey);
+        println!("    Deposit ID: {}", hex::encode(offer.deposit_id));
         println!();
     }
 
@@ -2523,7 +2517,8 @@ async fn deposit_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     }
 
     let reserves_id_arg = &positional[0];
-    let deposit_pubkey = PublicKey::from_str(&positional[1])
+    // Validate pubkey hex (used for descriptor creation below)
+    let _deposit_pubkey = PublicKey::from_str(&positional[1])
         .map_err(|e| format!("Invalid deposit pubkey: {}", e))?;
 
     let config = parse_config(&config_args)?;
@@ -2555,18 +2550,21 @@ async fn deposit_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         None => None,
     };
 
+    // Create descriptor from pubkey
+    let descriptor = format!("pk({})", positional[1]);
+
     println!("Opening deposit...");
     println!("  Ledger ID: {}", ledger_id);
-    println!("  Deposit pubkey: {}", deposit_pubkey);
+    println!("  Descriptor: {}", descriptor);
     if let Some(ref f) = fees {
         println!("  Fees: {} bps/year + {} sats/year (period: {} blocks)",
             f.annualized_bps, f.annualized_fixed, f.frequency_blocks);
     }
 
-    let deposit = node.open_deposit(&ledger_id, deposit_pubkey, fees).await?;
+    let deposit = node.open_deposit(&ledger_id, &descriptor, fees).await?;
 
     println!("\nDeposit opened!");
-    println!("  Pubkey: {}", deposit.pubkey);
+    println!("  Deposit ID: {}", hex::encode(deposit.deposit_id));
     println!("  Balance: {} msats", deposit.balance);
 
     Ok(())
@@ -2616,8 +2614,8 @@ async fn deposit_ls(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     println!("Deposits in ledger {} ({} total):", ledger_id, deposits.len());
     println!();
 
-    for (pubkey, deposit) in deposits {
-        println!("  Deposit: {}", pubkey);
+    for (deposit_id, deposit) in deposits {
+        println!("  Deposit ID: {}", hex::encode(deposit_id));
         println!("    Balance: {} msats ({} sats)", deposit.balance, deposit.balance / 1000);
         println!("    Locked: {} msats", deposit.locked_balance);
         let fees = &deposit.fees;
@@ -2658,7 +2656,8 @@ async fn deposit_credit(args: &[String]) -> Result<(), Box<dyn std::error::Error
     }
 
     let reserves_id_arg = &positional[0];
-    let deposit_pubkey = PublicKey::from_str(&positional[1])
+    let deposit_pubkey_hex = &positional[1];
+    let _deposit_pubkey = PublicKey::from_str(deposit_pubkey_hex)
         .map_err(|e| format!("Invalid deposit pubkey: {}", e))?;
     let amount_msats: u64 = positional[2]
         .parse()
@@ -2668,6 +2667,10 @@ async fn deposit_credit(args: &[String]) -> Result<(), Box<dyn std::error::Error
     // Generate a payment hash
     use bitcoin::hashes::{sha256, Hash};
     let payment_hash = sha256::Hash::hash(invoice_id.as_bytes()).to_byte_array();
+
+    // Compute deposit_id from pubkey
+    let descriptor = format!("pk({})", deposit_pubkey_hex);
+    let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
 
     let config = parse_config(&config_args)?;
     let mut node = Node::new(config).await?;
@@ -2683,13 +2686,13 @@ async fn deposit_credit(args: &[String]) -> Result<(), Box<dyn std::error::Error
 
     println!("Crediting deposit...");
     println!("  Ledger ID: {}", ledger_id);
-    println!("  Deposit: {}", deposit_pubkey);
+    println!("  Deposit ID: {}", hex::encode(deposit_id));
     println!("  Amount: {} msats ({} sats)", amount_msats, amount_msats / 1000);
     println!("  Invoice ID: {}", invoice_id);
 
     let new_balance = node.credit_deposit(
         &ledger_id,
-        deposit_pubkey,
+        deposit_id,
         amount_msats,
         payment_hash,
         invoice_id,
@@ -2985,9 +2988,9 @@ async fn deposit_collect_fees(args: &[String]) -> Result<(), Box<dyn std::error:
         if ledger.operator_key() != node.node_id {
             continue;
         }
-        for (pubkey, deposit) in &ledger.state.deposits {
+        for (deposit_id, deposit) in &ledger.state.deposits {
             let fee_due = deposit.calculate_fees_due(current_block);
-            println!("  Deposit {}...:", &hex::encode(pubkey.serialize())[..16]);
+            println!("  Deposit {}...:", &hex::encode(deposit_id)[..16]);
             println!("    Balance: {} msats", deposit.balance);
             println!("    Fee structure: {} bps, {} fixed, {} block period",
                 deposit.fees.annualized_bps, deposit.fees.annualized_fixed, deposit.fees.frequency_blocks);
@@ -3121,9 +3124,16 @@ async fn withdraw_request(args: &[String]) -> Result<(), Box<dyn std::error::Err
     // Sync wallet
     node.sync_wallet()?;
 
+    // Compute deposit_id from pubkey and create witness
+    let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
+    let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
+    let depositor_witness = deposits_core::types::DescriptorWitness {
+        stack: vec![signature.to_vec()],
+    };
+
     println!("Requesting withdrawal...");
     println!("  Ledger ID: {}", ledger_id);
-    println!("  Deposit: {}", deposit_pubkey);
+    println!("  Deposit ID: {}", hex::encode(deposit_id));
     println!("  Destination: {}", destination_address);
     println!("  Amount: {} sats", amount_sats);
     println!("  Fee: {} sats", fee_sats);
@@ -3134,12 +3144,12 @@ async fn withdraw_request(args: &[String]) -> Result<(), Box<dyn std::error::Err
     // Lock the withdrawal with co-signing
     let result = node.lock_withdrawal(
         &ledger_id,
-        deposit_pubkey,
+        deposit_id,
         destination_address,
         amount_sats,
         fee_sats,
         nonce,
-        signature,
+        depositor_witness,
         memo,
     ).await?;
 
@@ -3190,7 +3200,8 @@ async fn withdraw_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     }
 
     let reserves_id_arg = &positional[0];
-    let deposit_pubkey = PublicKey::from_str(&positional[1])
+    // Validate pubkey hex (used for descriptor creation below)
+    let _deposit_pubkey = PublicKey::from_str(&positional[1])
         .map_err(|e| format!("Invalid deposit pubkey: {}", e))?;
     let destination_address = positional[2].clone();
     let amount_sats: u64 = positional[3]
@@ -3237,7 +3248,14 @@ async fn withdraw_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
 
     println!("Locking withdrawal...");
     println!("  Ledger ID: {}", ledger_id);
-    println!("  Deposit: {}", deposit_pubkey);
+    // Compute deposit_id from pubkey and create witness
+    let descriptor = format!("pk({})", positional[1]);
+    let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
+    let depositor_witness = deposits_core::types::DescriptorWitness {
+        stack: vec![signature.to_vec()],
+    };
+
+    println!("  Deposit ID: {}", hex::encode(deposit_id));
     println!("  Destination: {}", destination_address);
     println!("  Amount: {} sats", amount_sats);
     println!("  Fee: {} sats", fee_sats);
@@ -3248,12 +3266,12 @@ async fn withdraw_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     // Lock the withdrawal with co-signing
     let result = node.lock_withdrawal(
         &ledger_id,
-        deposit_pubkey,
+        deposit_id,
         destination_address,
         amount_sats,
         fee_sats,
         nonce,
-        signature,
+        depositor_witness,
         memo,
     ).await?;
 
@@ -3413,7 +3431,7 @@ async fn withdraw_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>
 
         println!("  Withdrawal: {}", hex::encode(&withdrawal.withdrawal_id[..8]));
         println!("    Status: {}", status_str);
-        println!("    Deposit: {}", withdrawal.deposit_pubkey);
+        println!("    Deposit ID: {}", hex::encode(withdrawal.deposit_id));
         println!("    Destination: {}", withdrawal.destination_address);
         println!("    Amount: {} sats + {} fee", withdrawal.amount_sats, withdrawal.fee_sats);
         if let Some(ref memo) = withdrawal.memo {
@@ -3644,7 +3662,7 @@ async fn lightning_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error
     }
 
     let reserves_id = &positional[0];
-    let deposit_pubkey = PublicKey::from_str(&positional[1])
+    let _deposit_pubkey = PublicKey::from_str(&positional[1])
         .map_err(|e| format!("Invalid deposit pubkey: {}", e))?;
     let amount_msats: u64 = positional[2]
         .parse()
@@ -3666,21 +3684,28 @@ async fn lightning_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error
     let mut signature = [0u8; 64];
     signature.copy_from_slice(&signature_bytes);
 
+    // Compute deposit_id from pubkey and create witness
+    let descriptor = format!("pk({})", positional[1]);
+    let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
+    let witness = deposits_core::types::DescriptorWitness {
+        stack: vec![signature.to_vec()],
+    };
+
     let config = parse_config(&config_args)?;
     let mut node = Node::new(config).await?;
 
     println!("Locking deposit for Lightning payment...");
     println!("  Reserves ID: {}", reserves_id);
-    println!("  Deposit: {}", deposit_pubkey);
+    println!("  Deposit ID: {}", hex::encode(deposit_id));
     println!("  Amount: {} msats ({} sats)", amount_msats, amount_msats / 1000);
     println!("  Payment ID: {}", &positional[3][..16.min(positional[3].len())]);
 
     let new_locked = node.lock_invoice_payment(
         reserves_id,
-        deposit_pubkey,
+        deposit_id,
         amount_msats,
         payment_id,
-        signature,
+        witness,
     ).await?;
 
     println!("\nPayment locked!");
@@ -3719,7 +3744,7 @@ async fn lightning_fail(args: &[String]) -> Result<(), Box<dyn std::error::Error
     }
 
     let reserves_id = &positional[0];
-    let deposit_pubkey = PublicKey::from_str(&positional[1])
+    let _deposit_pubkey = PublicKey::from_str(&positional[1])
         .map_err(|e| format!("Invalid deposit pubkey: {}", e))?;
     let amount_msats: u64 = positional[2]
         .parse()
@@ -3733,18 +3758,22 @@ async fn lightning_fail(args: &[String]) -> Result<(), Box<dyn std::error::Error
     let mut payment_id = [0u8; 32];
     payment_id.copy_from_slice(&payment_id_bytes);
 
+    // Compute deposit_id from pubkey
+    let descriptor = format!("pk({})", positional[1]);
+    let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
+
     let config = parse_config(&config_args)?;
     let mut node = Node::new(config).await?;
 
     println!("Failing Lightning payment...");
     println!("  Reserves ID: {}", reserves_id);
-    println!("  Deposit: {}", deposit_pubkey);
+    println!("  Deposit ID: {}", hex::encode(deposit_id));
     println!("  Amount to unlock: {} msats ({} sats)", amount_msats, amount_msats / 1000);
     println!("  Payment ID: {}", &positional[3][..16.min(positional[3].len())]);
 
     let new_balance = node.fail_invoice_payment(
         reserves_id,
-        deposit_pubkey,
+        deposit_id,
         amount_msats,
         payment_id,
     ).await?;
@@ -3785,7 +3814,7 @@ async fn lightning_fulfill(args: &[String]) -> Result<(), Box<dyn std::error::Er
     }
 
     let reserves_id = &positional[0];
-    let deposit_pubkey = PublicKey::from_str(&positional[1])
+    let _deposit_pubkey = PublicKey::from_str(&positional[1])
         .map_err(|e| format!("Invalid deposit pubkey: {}", e))?;
     let amount_msats: u64 = positional[2]
         .parse()
@@ -3815,22 +3844,29 @@ async fn lightning_fulfill(args: &[String]) -> Result<(), Box<dyn std::error::Er
     let mut signature = [0u8; 64];
     signature.copy_from_slice(&signature_bytes);
 
+    // Compute deposit_id from pubkey and create witness
+    let descriptor = format!("pk({})", positional[1]);
+    let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
+    let witness = deposits_core::types::DescriptorWitness {
+        stack: vec![signature.to_vec()],
+    };
+
     let config = parse_config(&config_args)?;
     let mut node = Node::new(config).await?;
 
     println!("Fulfilling Lightning payment...");
     println!("  Reserves ID: {}", reserves_id);
-    println!("  Deposit: {}", deposit_pubkey);
+    println!("  Deposit ID: {}", hex::encode(deposit_id));
     println!("  Amount: {} msats ({} sats)", amount_msats, amount_msats / 1000);
     println!("  Payment ID: {}", &positional[3][..16.min(positional[3].len())]);
 
     let new_balance = node.fulfill_invoice_payment(
         reserves_id,
-        deposit_pubkey,
+        deposit_id,
         amount_msats,
         payment_id,
         preimage,
-        signature,
+        witness,
     ).await?;
 
     println!("\nPayment fulfilled!");
@@ -3892,9 +3928,11 @@ async fn lightning_send(args: &[String]) -> Result<(), Box<dyn std::error::Error
     let secret_key = SecretKey::from_slice(&secret_bytes)
         .map_err(|e| format!("Invalid secret key: {}", e))?;
 
-    // Derive public key
+    // Derive public key and compute deposit_id
     let secp = Secp256k1::new();
     let deposit_pubkey = PublicKey::from_secret_key(&secp, &secret_key);
+    let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
+    let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
 
     // Decode invoice to get amount
     // For now, we'll pay via LDK first to get the amount, then do ledger operations
@@ -3903,7 +3941,7 @@ async fn lightning_send(args: &[String]) -> Result<(), Box<dyn std::error::Error
 
     println!("Sending Lightning payment from deposit...");
     println!("  Reserves: {}", reserves_id);
-    println!("  Deposit: {}", deposit_pubkey);
+    println!("  Deposit ID: {}", hex::encode(deposit_id));
     println!("  Invoice: {}...", &invoice[..40.min(invoice.len())]);
 
     // Step 1: Pay the invoice via LDK to get payment_id and check success
@@ -3970,14 +4008,22 @@ async fn lightning_send(args: &[String]) -> Result<(), Box<dyn std::error::Error
         amount_msats,
     ).map_err(|e| format!("Failed to create fulfill signature: {:?}", e))?;
 
+    // Create witnesses from signatures
+    let lock_witness = deposits_core::types::DescriptorWitness {
+        stack: vec![lock_signature.to_vec()],
+    };
+    let fulfill_witness = deposits_core::types::DescriptorWitness {
+        stack: vec![fulfill_signature.to_vec()],
+    };
+
     // Lock the funds with co-signing
     println!("  Locking {} msats...", amount_msats);
     let locked_balance = node.lock_invoice_payment(
         reserves_id,
-        deposit_pubkey,
+        deposit_id,
         amount_msats,
         payment_id,
-        lock_signature,
+        lock_witness,
     ).await?;
     println!("  Locked balance: {} msats", locked_balance);
 
@@ -3985,11 +4031,11 @@ async fn lightning_send(args: &[String]) -> Result<(), Box<dyn std::error::Error
     println!("  Fulfilling with preimage...");
     let new_balance = node.fulfill_invoice_payment(
         reserves_id,
-        deposit_pubkey,
+        deposit_id,
         amount_msats,
         payment_id,
         preimage,
-        fulfill_signature,
+        fulfill_witness,
     ).await?;
 
     println!("\nPayment complete!");

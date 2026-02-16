@@ -111,6 +111,8 @@ pub use tapscript_reserves::{
 pub use types::{
     Deposit, FeeStructure, PendingInvoice, ReservesOutput, Invoice,
     LedgerState, LedgerUpdate, SignedLedgerUpdate, SignedLedgerUpdateLog,
+    // Deposit identifier types
+    DepositId, DescriptorWitness, compute_deposit_id,
     // Dispute protocol types
     DisputeState, entropy_selection_score, select_entropy_winner, is_entropy_winner,
     DepositInfo, InvoiceInfo, ReservesStatus, CollateralAttestation,
@@ -170,7 +172,10 @@ pub use signature_utils::{
     create_payment_authorization_signature, verify_payment_signature,
     create_payment_signature,
     create_deposit_offer_signature, verify_deposit_offer_signature,
-    create_withdrawal_signature, verify_withdrawal_signature,
+    withdrawal_signing_message, verify_withdrawal_witness,
+    verify_descriptor_witness, verify_collateral_lock_witness,
+    create_withdrawal_signature, create_collateral_lock_signature,
+    invoice_lock_signing_message, verify_invoice_lock_witness,
 };
 pub use tlv::{
     TlvEncode, TlvDecode, TlvStream, TlvBuilder, TlvReader,

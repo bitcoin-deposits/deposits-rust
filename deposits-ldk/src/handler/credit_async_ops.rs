@@ -21,6 +21,7 @@ use super::messages::{DepositsMessage, LedgerUpdateMsg, LedgerUpdateMsgExt, Ledg
 use super::ledger_ext::LedgerExt;
 use deposits_core::LedgerValidator;
 use deposits_core::{log_error, log_info, PendingAck};
+use deposits_core::types::compute_deposit_id;
 use lightning::util::logger::Logger as LdkLogger;
 
 use std::ops::Deref;
@@ -40,6 +41,10 @@ where
         payment_hash: [u8; 32],
         invoice_id: String,
     ) -> Result<(), DepositsError> {
+        // Convert pubkey to deposit_id
+        let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
+        let deposit_id = compute_deposit_id(&descriptor);
+
         // Acquire channel lock to prevent commitment signature races
         let _channel_lock = self.acquire_channel_lock_async(self.our_node_id, partner_node_id).await;
 
@@ -176,7 +181,7 @@ where
                     ledger.reserves_key().to_string(),
                     LedgerOperation::InvoiceCredit {
                         payment_hash,
-                        deposit_pubkey,
+                        deposit_id,
                         amount: credit_amount,
                         invoice_id: invoice_id.clone(),
                         sequence_number,
@@ -284,8 +289,8 @@ where
 
         log_info!(
             self.logger,
-            "Credited {} msat to deposit {} (RECORD-THEN-COMMIT complete)",
-            credit_amount, deposit_pubkey
+            "Credited {} msat to deposit {:02x?} (RECORD-THEN-COMMIT complete)",
+            credit_amount, &deposit_id[0..4]
         );
 
         // NOTE: No refresh_reserves_commitment needed here - we already committed via predict-then-commit
@@ -314,6 +319,10 @@ where
     /// The other 100% collateral comes from other channels via ensure_collateral_across_ledgers
     /// This is a legacy method for testing - production should use credit_deposit_and_move_reserves_async
     pub fn credit_deposit_and_move_reserves(&self, partner_node_id: PublicKey, deposit_pubkey: PublicKey, credit_amount: u64) -> Result<(), DepositsError> {
+        // Convert pubkey to deposit_id
+        let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
+        let deposit_id = compute_deposit_id(&descriptor);
+
         // Calculate amount to move to reserves (100% of credit amount)
         let reserve_move_amount = credit_amount;
 
@@ -334,7 +343,7 @@ where
         // Credit deposit with automatic reserves topup using LedgerManager
         let credit_operation = LedgerOperation::InvoiceCredit {
             payment_hash: [0u8; 32], // Dummy for testing
-            deposit_pubkey,
+            deposit_id,
             amount: credit_amount,
             invoice_id: String::from("test"),
             sequence_number,
@@ -360,8 +369,8 @@ where
 
         log_info!(
             self.logger,
-            "Credited {} msat to deposit {} and moved {} msat to reserves (auto-committed at {})",
-            credit_amount, deposit_pubkey, reserve_move_amount, commitment_number
+            "Credited {} msat to deposit {:02x?} and moved {} msat to reserves (auto-committed at {})",
+            credit_amount, &deposit_id[0..4], reserve_move_amount, commitment_number
         );
 
         Ok(())

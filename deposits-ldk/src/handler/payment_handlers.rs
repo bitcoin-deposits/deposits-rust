@@ -15,11 +15,26 @@ use deposits_core::DepositsError;
 use super::messages::{DepositsMessage, LedgerUpdateMsg, LedgerUpdateMsgExt, LedgerOperation};
 use super::ledger_ext::LedgerExt;
 use deposits_core::{log_error, log_info};
+use deposits_core::types::{DepositId, DescriptorWitness, compute_deposit_id};
 use lightning::util::logger::Logger as LdkLogger;
 use bitcoin::secp256k1::PublicKey;
 use std::str::FromStr;
 
 use std::ops::Deref;
+
+/// Helper to convert a PublicKey to a descriptor and compute deposit_id
+fn pubkey_to_deposit_id(pubkey: &PublicKey) -> (DepositId, String) {
+    let descriptor = format!("pk({})", hex::encode(pubkey.serialize()));
+    let deposit_id = compute_deposit_id(&descriptor);
+    (deposit_id, descriptor)
+}
+
+/// Helper to convert a 64-byte signature to a DescriptorWitness
+fn sig_to_witness(signature: [u8; 64]) -> DescriptorWitness {
+    DescriptorWitness {
+        stack: vec![signature.to_vec()],
+    }
+}
 
 impl<L: Deref + Clone + Send + Sync> DepositsHandler<L>
 where
@@ -31,8 +46,9 @@ where
         &self,
         msg: crate::wire::messages::SendingFulfillPaymentMsg,
     ) -> Result<(), DepositsError> {
-        log_info!(self.logger, "🔵 FULFILL: payment_id={:02x?}, pubkey={}, amount={}",
-                 &msg.payment_id[0..4], msg.pubkey, msg.amount);
+        let (deposit_id, _descriptor) = pubkey_to_deposit_id(&msg.pubkey);
+        log_info!(self.logger, "🔵 FULFILL: payment_id={:02x?}, deposit_id={:02x?}, amount={}",
+                 &msg.payment_id[0..4], &deposit_id[0..4], msg.amount);
 
         // STAGE 1: Validate and apply locally (optimistic - payment already succeeded)
         let (partner_node_id, reserves_id_str, prev_hash, new_hash, fulfill_message, broadcast_seq) = {
@@ -40,10 +56,10 @@ where
             let ledgers = self.ledgers.lock().unwrap();
 
             // Validate payment lock
-            let (locked_pubkey, locked_amount) = payment_locks.get(&msg.payment_id)
+            let (locked_deposit_id, locked_amount) = payment_locks.get(&msg.payment_id)
                 .ok_or(DepositsError::PaymentNotLocked)?;
 
-            if *locked_pubkey != msg.pubkey || *locked_amount != msg.amount {
+            if *locked_deposit_id != deposit_id || *locked_amount != msg.amount {
                 return Err(DepositsError::PaymentAmountMismatch);
             }
 
@@ -54,7 +70,7 @@ where
                     continue;
                 }
                 let mut ledger = ledger_arc.write().unwrap();
-                if !ledger.state.deposits.contains_key(&msg.pubkey) {
+                if !ledger.state.deposits.contains_key(&deposit_id) {
                     continue; // Deposit not in this ledger, check next one
                 }
 
@@ -75,11 +91,11 @@ where
                     ledger.operator_key(),
                     ledger.reserves_key().to_string(),
                     LedgerOperation::InvoiceFulfill {
-                        pubkey: msg.pubkey,
+                        deposit_id,
                         amount: msg.amount,
                         payment_id: msg.payment_id,
                         sequence_number: expected_sequence,
-                        scriptpubkey_signature: msg.scriptpubkey_signature,
+                        witness: sig_to_witness(msg.scriptpubkey_signature),
                         preimage: msg.preimage,
                     },
                 );
@@ -126,8 +142,8 @@ where
         // broadcast after updating the ack hash, which allows flush_stale_updates to trigger
         // the commitment update.
 
-        log_info!(self.logger, "✅ FULFILL complete: {} msat from deposit {} (payment {:02x?})",
-                 msg.amount, msg.pubkey, &msg.payment_id[0..4]);
+        log_info!(self.logger, "✅ FULFILL complete: {} msat from deposit {:02x?} (payment {:02x?})",
+                 msg.amount, &deposit_id[0..4], &msg.payment_id[0..4]);
 
         Ok(())
     }
@@ -138,19 +154,20 @@ where
         &self,
         msg: crate::wire::messages::SendingFailPaymentMsg,
     ) -> Result<(), DepositsError> {
-        log_info!(self.logger, "🔵 FAIL: payment_id={:02x?}, pubkey={}, amount={}",
-                 &msg.payment_id[0..4], msg.pubkey, msg.amount);
+        let (deposit_id, _descriptor) = pubkey_to_deposit_id(&msg.pubkey);
+        log_info!(self.logger, "🔵 FAIL: payment_id={:02x?}, deposit_id={:02x?}, amount={}",
+                 &msg.payment_id[0..4], &deposit_id[0..4], msg.amount);
 
         // STAGE 1: Validate and apply locally (optimistic - unlock balance immediately)
-        let (partner_pubkey, reserves_id_str, prev_hash, new_hash, msg, broadcast_seq) = {
+        let (partner_pubkey, reserves_id_str, prev_hash, new_hash, expected_sequence, broadcast_seq) = {
             let mut payment_locks = self.payment_locks.lock().unwrap();
             let ledgers = self.ledgers.lock().unwrap();
 
             // Validate payment lock
-            let (locked_pubkey, _) = payment_locks.get(&msg.payment_id)
+            let (locked_deposit_id, _) = payment_locks.get(&msg.payment_id)
                 .ok_or(DepositsError::PaymentNotLocked)?;
 
-            if *locked_pubkey != msg.pubkey {
+            if *locked_deposit_id != deposit_id {
                 return Err(DepositsError::PaymentAmountMismatch);
             }
 
@@ -161,7 +178,7 @@ where
                     continue;
                 }
                 let mut ledger = ledger_arc.write().unwrap();
-                if !ledger.state.deposits.contains_key(&msg.pubkey) {
+                if !ledger.state.deposits.contains_key(&deposit_id) {
                     continue; // Deposit not in this ledger, check next one
                 }
 
@@ -177,14 +194,6 @@ where
                 // The message's sequence_number must match ledger.history.len() at append time
                 let expected_sequence = ledger.history.len() as u64;
 
-                // Build the message with the correct sequence number
-                let msg = crate::wire::messages::SendingFailPaymentMsg {
-                    pubkey: msg.pubkey,
-                    amount: msg.amount,
-                    payment_id: msg.payment_id,
-                    sequence_number: expected_sequence,
-                };
-
                 // Use append_mut_with_metadata to atomically get prev_hash, new_hash, and sequence_number
                 // This prevents race conditions where another thread could append between operations
                 // Returns 0-based sequence number for broadcasting
@@ -192,15 +201,15 @@ where
                     ledger.operator_key(),
                     ledger.reserves_key().to_string(),
                     LedgerOperation::InvoiceFail {
-                        pubkey: msg.pubkey,
+                        deposit_id,
                         amount: msg.amount,
                         payment_id: msg.payment_id,
-                        sequence_number: msg.sequence_number,
+                        sequence_number: expected_sequence,
                     },
                 );
                 let (prev_hash, new_hash, broadcast_seq) = ledger.append_mut_with_metadata(DepositsMessage::LedgerUpdate(update_msg))?;
 
-                found_result = Some((partner_pk, reserves_id.clone(), prev_hash, new_hash, msg, broadcast_seq));
+                found_result = Some((partner_pk, reserves_id.clone(), prev_hash, new_hash, expected_sequence, broadcast_seq));
                 break;
             }
             found_result.ok_or(DepositsError::DepositNotFound)?
@@ -211,10 +220,10 @@ where
             self.our_node_id,
             reserves_id_str.clone(),
             LedgerOperation::InvoiceFail {
-                pubkey: msg.pubkey,
+                deposit_id,
                 amount: msg.amount,
                 payment_id: msg.payment_id,
-                sequence_number: msg.sequence_number,
+                sequence_number: expected_sequence,
             },
         );
         let message = DepositsMessage::LedgerUpdate(fail_update_msg);
@@ -247,8 +256,8 @@ where
         // broadcast after updating the ack hash, which allows flush_stale_updates to trigger
         // the commitment update.
 
-        log_info!(self.logger, "✅ FAIL complete: {} msat unlocked for deposit {} (payment {:02x?})",
-                 msg.amount, msg.pubkey, &msg.payment_id[0..4]);
+        log_info!(self.logger, "✅ FAIL complete: {} msat unlocked for deposit {:02x?} (payment {:02x?})",
+                 msg.amount, &deposit_id[0..4], &msg.payment_id[0..4]);
 
         Ok(())
     }
@@ -256,6 +265,8 @@ where
     /// Handle sending payment lock message - locks balance to prevent double spending
     /// Note: The sequence_number in msg is ignored - it's assigned atomically from the ledger
     pub fn handle_sending_lock_payment(&self, msg: crate::wire::messages::SendingLockPaymentMsg) -> Result<(), DepositsError> {
+        let (deposit_id, _descriptor) = pubkey_to_deposit_id(&msg.pubkey);
+
         // LOCK ORDERING: Always acquire payment_locks BEFORE ledgers to prevent deadlock
         let mut payment_locks = self.payment_locks.lock().unwrap();
         let ledgers = self.ledgers.lock().unwrap();
@@ -267,7 +278,7 @@ where
             // Validate sufficient balance (scoped to release borrow)
             // Continue to next ledger if deposit not found in this one
             {
-                if let Some(deposit) = ledger.state.deposits.get(&msg.pubkey) {
+                if let Some(deposit) = ledger.state.deposits.get(&deposit_id) {
                     let available_balance = deposit.balance.saturating_sub(deposit.locked_balance);
                     if available_balance < msg.amount {
                         return Err(DepositsError::InsufficientBalance);
@@ -281,8 +292,8 @@ where
             // The message's sequence_number must match ledger.history.len() at append time
             let expected_sequence = ledger.history.len() as u64;
 
-            // Track this specific payment lock
-            payment_locks.insert(msg.payment_id, (msg.pubkey, msg.amount));
+            // Track this specific payment lock using deposit_id
+            payment_locks.insert(msg.payment_id, (deposit_id, msg.amount));
 
             // Update timestamp to current time
             ledger.state.last_updated = deposits_core::time_utils::now_unix_timestamp();
@@ -292,11 +303,11 @@ where
                 ledger.operator_key(),
                 ledger.reserves_key().to_string(),
                 LedgerOperation::InvoiceLock {
-                    pubkey: msg.pubkey,
+                    deposit_id,
                     amount: msg.amount,
                     payment_id: msg.payment_id,
                     sequence_number: expected_sequence,
-                    scriptpubkey_signature: msg.scriptpubkey_signature,
+                    witness: sig_to_witness(msg.scriptpubkey_signature),
                 },
             );
             let lock_message = DepositsMessage::LedgerUpdate(update_msg);
@@ -308,8 +319,8 @@ where
                 e
             })?;
 
-            log_info!(self.logger, "Locked {} msat from deposit {} for payment {:?}",
-                     msg.amount, msg.pubkey, &msg.payment_id[0..8]);
+            log_info!(self.logger, "Locked {} msat from deposit {:02x?} for payment {:?}",
+                     msg.amount, &deposit_id[0..4], &msg.payment_id[0..8]);
 
             // Notify partner about the lock
             let partner_node_id_str = ledger.reserves_key().to_string();
@@ -363,23 +374,25 @@ where
 
     /// Handle sending payment failure - releases locked balance back to available
     pub fn handle_sending_fail_payment(&self, msg: crate::wire::messages::SendingFailPaymentMsg) -> Result<(), DepositsError> {
+        let (deposit_id, _descriptor) = pubkey_to_deposit_id(&msg.pubkey);
+
         // LOCK ORDERING: Always acquire payment_locks BEFORE ledgers to prevent deadlock
         let mut payment_locks = self.payment_locks.lock().unwrap();
         let ledgers = self.ledgers.lock().unwrap();
 
         // Check if payment was locked
-        if let Some((locked_pubkey, locked_amount)) = payment_locks.remove(&msg.payment_id) {
-            // Verify locked pubkey matches
-            if locked_pubkey != msg.pubkey {
-                log_error!(self.logger, "Payment pubkey mismatch: locked={}, fail={}",
-                          locked_pubkey, msg.pubkey);
+        if let Some((locked_deposit_id, locked_amount)) = payment_locks.remove(&msg.payment_id) {
+            // Verify locked deposit_id matches
+            if locked_deposit_id != deposit_id {
+                log_error!(self.logger, "Payment deposit_id mismatch: locked={:02x?}, fail={:02x?}",
+                          &locked_deposit_id[0..4], &deposit_id[0..4]);
                 return Err(DepositsError::PaymentAmountMismatch);
             }
 
             // Find the deposit and reduce locked balance
             for ledger_arc in ledgers.values() {
                 let mut ledger = ledger_arc.write().unwrap();
-                if ledger.state.deposits.contains_key(&msg.pubkey) {
+                if ledger.state.deposits.contains_key(&deposit_id) {
                     // Update timestamp to current time
                     ledger.state.last_updated = deposits_core::time_utils::now_unix_timestamp();
 
@@ -391,7 +404,7 @@ where
                         ledger.operator_key(),
                         ledger.reserves_key().to_string(),
                         LedgerOperation::InvoiceFail {
-                            pubkey: msg.pubkey,
+                            deposit_id,
                             amount: msg.amount,
                             payment_id: msg.payment_id,
                             sequence_number: msg.sequence_number,
@@ -406,8 +419,8 @@ where
                     })?;
                     let chain_index = (ledger.history.len() - 1) as u64; // 0-based (index of just-appended entry)
 
-                    log_info!(self.logger, "Payment failed: {} msat unlocked for deposit {} (payment {:?})",
-                             locked_amount, msg.pubkey, &msg.payment_id[0..8]);
+                    log_info!(self.logger, "Payment failed: {} msat unlocked for deposit {:02x?} (payment {:?})",
+                             locked_amount, &deposit_id[0..4], &msg.payment_id[0..8]);
 
                     // Notify partner about the failure
                     let partner_node_id_str = ledger.reserves_key().to_string();

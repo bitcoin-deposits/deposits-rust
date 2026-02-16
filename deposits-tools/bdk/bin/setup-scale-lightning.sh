@@ -159,13 +159,13 @@ setup_infrastructure() {
     $DC stop nostr-relay bdk-alice bdk-bob bdk-charlie bdk-diana >/dev/null 2>&1 || true
     $DC rm -f nostr-relay bdk-alice bdk-bob bdk-charlie bdk-diana >/dev/null 2>&1 || true
     docker volume rm bdk_bdk_nostr_data 2>/dev/null || true
-    docker volume rm bdk_bdk_alice_data bdk_bdk_bob_data bdk_bdk_charlie_data bdk_bdk_diana_data 2>/dev/null || true
+    docker volume rm bdk_bdk-alice_data bdk_bdk-bob_data bdk_bdk-charlie_data bdk_bdk-diana_data 2>/dev/null || true
 
     # Stop LDK sidecars for core nodes
     for node in alice bob charlie diana; do
         docker stop "bdk-${node}-ln" 2>/dev/null || true
         docker rm "bdk-${node}-ln" 2>/dev/null || true
-        docker volume rm "ldk_${node}_data" 2>/dev/null || true
+        docker volume rm "ldk_bdk-${node}_data" 2>/dev/null || true
     done
 
     # Start core services

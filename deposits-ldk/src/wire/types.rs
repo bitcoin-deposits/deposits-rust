@@ -185,7 +185,7 @@ impl Invoice {
         payment_hash: [u8; 32],
         amount: u64,
         expires: u64,
-        assigned_deposit: PublicKey,
+        assigned_deposit: deposits_core::types::DepositId,
         bolt11: String,
     ) -> Self {
         Invoice(deposits_core::Invoice {
@@ -260,7 +260,7 @@ impl PendingInvoice {
         amount: u64,
         payment_hash: [u8; 32],
         expires: u64,
-        assigned_deposit: PublicKey,
+        assigned_deposit: deposits_core::types::DepositId,
         invoice_id: String,
         bolt11: String,
     ) -> Self {
@@ -331,22 +331,23 @@ impl Readable for PendingInvoice {
 pub struct Deposit(pub deposits_core::Deposit);
 
 impl Deposit {
-    /// Create a new deposit.
-    pub fn new(pubkey: PublicKey, fees: Option<deposits_core::FeeStructure>) -> Self {
-        Deposit(deposits_core::Deposit::new(pubkey, fees))
+    /// Create a new deposit from a descriptor.
+    pub fn new(descriptor: String, fees: Option<deposits_core::FeeStructure>) -> Self {
+        Deposit(deposits_core::Deposit::new(descriptor, fees))
+    }
+
+    /// Create a new deposit from a pubkey (convenience method that builds descriptor).
+    pub fn from_pubkey(pubkey: PublicKey, fees: Option<deposits_core::FeeStructure>) -> Self {
+        let descriptor = format!("pk({})", hex::encode(pubkey.serialize()));
+        Deposit(deposits_core::Deposit::new(descriptor, fees))
     }
 }
 
 impl Default for Deposit {
     fn default() -> Self {
-        // Use a valid but arbitrary pubkey for default
-        let default_pubkey = PublicKey::from_slice(&[
-            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 1,
-        ])
-        .unwrap();
-
-        Deposit(deposits_core::Deposit::new(default_pubkey, None))
+        // Use a default descriptor for testing
+        let default_descriptor = "pk(020000000000000000000000000000000000000000000000000000000000000001)".to_string();
+        Deposit(deposits_core::Deposit::new(default_descriptor, None))
     }
 }
 
@@ -608,12 +609,14 @@ mod tests {
     #[test]
     fn test_invoice_roundtrip() {
         let pubkey = test_pubkey();
+        let descriptor = format!("pk({})", hex::encode(pubkey.serialize()));
+        let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
         let original = Invoice::new(
             "inv123".to_string(),
             [2u8; 32],
             100000,
             1700000000,
-            pubkey,
+            deposit_id,
             "lnbc...".to_string(),
         );
         let mut buffer = Vec::new();
@@ -628,11 +631,13 @@ mod tests {
     #[test]
     fn test_pending_invoice_roundtrip() {
         let pubkey = test_pubkey();
+        let descriptor = format!("pk({})", hex::encode(pubkey.serialize()));
+        let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
         let original = PendingInvoice::new(
             50000,
             [3u8; 32],
             1700000000,
-            pubkey,
+            deposit_id,
             "pending123".to_string(),
             "lnbc...".to_string(),
         );
@@ -648,7 +653,9 @@ mod tests {
     #[test]
     fn test_deposit_roundtrip() {
         let pubkey = test_pubkey();
-        let mut original = Deposit::new(pubkey, Some(FeeStructure::new(500, 25, 144).into()));
+        let descriptor = format!("pk({})", hex::encode(pubkey.serialize()));
+        let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
+        let mut original = Deposit::from_pubkey(pubkey, Some(deposits_core::FeeStructure::new(500, 25, 144)));
         original.balance = 100000;
         original.locked_balance = 5000;
         original.invoices.push(deposits_core::Invoice {
@@ -656,7 +663,7 @@ mod tests {
             payment_hash: [4u8; 32],
             amount: 50000,
             expires: 1700000000,
-            assigned_deposit: pubkey,
+            assigned_deposit: deposit_id,
             bolt11: "lnbc...".to_string(),
         });
         original.last_fee_assessment = 800000;

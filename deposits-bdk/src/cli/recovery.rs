@@ -2114,15 +2114,15 @@ pub async fn recovery_continue(args: &[String]) -> Result<(), Box<dyn std::error
 
     let mut our_latest: Option<SignedLedgerUpdate> = None;
     let mut has_custody_acquire = false;
-    let mut original_depositors: Vec<PublicKey> = Vec::new();
+    let mut original_deposit_ids: Vec<deposits_core::types::DepositId> = Vec::new();
 
     for event in events.iter() {
         if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
             if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
                 if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                    if let LedgerOperation::DepositOpen { pubkey, .. } = op {
-                        if !original_depositors.contains(&pubkey) {
-                            original_depositors.push(pubkey);
+                    if let LedgerOperation::DepositOpen { deposit_id, .. } = op {
+                        if !original_deposit_ids.contains(&deposit_id) {
+                            original_deposit_ids.push(deposit_id);
                         }
                     }
                 }
@@ -2149,7 +2149,11 @@ pub async fn recovery_continue(args: &[String]) -> Result<(), Box<dyn std::error
 
     println!("  Your latest: seq {} (hash: {}...)", latest.sequence_number, hex::encode(&latest.current_hash[..8]));
 
-    let depositor_pubkey = original_depositors.first().copied().unwrap_or(our_pubkey);
+    // Use first deposit_id or derive from our pubkey
+    let deposit_id = original_deposit_ids.first().copied().unwrap_or_else(|| {
+        let descriptor = format!("pk({})", hex::encode(our_pubkey.serialize()));
+        deposits_core::types::compute_deposit_id(&descriptor)
+    });
 
     let esplora = EsploraBuilder::new(&config.electrum_url).build_blocking();
     let current_block_height = esplora.get_height()
@@ -2184,7 +2188,7 @@ pub async fn recovery_continue(args: &[String]) -> Result<(), Box<dyn std::error
 
         let operation = LedgerOperation::InvoiceCredit {
             payment_hash,
-            deposit_pubkey: depositor_pubkey,
+            deposit_id,
             amount: 50000 + (op_num as u64 * 10000),
             invoice_id: format!("post-recovery-{}", op_num + 1),
             sequence_number: latest.sequence_number + 1,

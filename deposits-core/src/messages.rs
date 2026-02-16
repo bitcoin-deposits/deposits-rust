@@ -24,7 +24,7 @@
 use bitcoin::secp256k1::PublicKey;
 use std::io::{self, Read, Write};
 
-use crate::types::FeeStructure;
+use crate::types::{DepositId, DescriptorWitness, FeeStructure};
 use crate::types::SignedLedgerUpdate as StorageSignedLedgerUpdate;
 
 // ============================================================================
@@ -85,6 +85,7 @@ pub mod consts {
     pub const DEPOSIT_OPEN: u16 = 0x80D1;
     pub const DEPOSIT_CLOSE: u16 = 0x80D3;
     pub const DEPOSIT_UPDATE: u16 = 0x80D5;
+    pub const DEPOSIT_KEY_ROTATE: u16 = 0x80D7;
 
     // Onchain operations (Bitcoin layer credits/withdrawals)
     pub const ONCHAIN_CREDIT: u16 = 0x80E1;
@@ -574,50 +575,65 @@ pub enum LedgerOperation {
     // ========== Deposit Operations (6) ==========
     /// Open a new deposit
     DepositOpen {
-        pubkey: PublicKey,
+        /// Unique identifier (hash of descriptor)
+        deposit_id: DepositId,
+        /// Miniscript descriptor controlling this deposit
+        descriptor: String,
         fees: Option<FeeStructure>,
         payment_hash: Option<[u8; 32]>,
         invoice: Option<String>,
         cosigner_guarantee_signature: Option<[u8; 64]>,
     },
     /// Close a deposit
-    DepositClose { pubkey: PublicKey },
+    DepositClose { deposit_id: DepositId },
     /// Update deposit fee structure
     DepositUpdate {
-        pubkey: PublicKey,
+        deposit_id: DepositId,
         new_fees: FeeStructure,
+    },
+    /// Rotate the deposit's spending key/descriptor
+    /// The deposit_id stays the same (derived from original descriptor)
+    /// but the current descriptor changes to new_descriptor.
+    /// Requires witness proving authorization from the current descriptor.
+    DepositKeyRotate {
+        deposit_id: DepositId,
+        new_descriptor: String,
+        /// Witness satisfying the CURRENT descriptor (proves ownership)
+        witness: DescriptorWitness,
     },
     // ========== Invoice Operations (4) ==========
     /// Credit a received invoice payment to a deposit
     InvoiceCredit {
         payment_hash: [u8; 32],
-        deposit_pubkey: PublicKey,
+        deposit_id: DepositId,
         amount: u64,
         invoice_id: String,
         sequence_number: u64,
     },
     /// Lock funds for an outgoing invoice payment
     InvoiceLock {
-        pubkey: PublicKey,
+        deposit_id: DepositId,
         amount: u64,
         payment_id: [u8; 32],
         sequence_number: u64,
-        scriptpubkey_signature: [u8; 64],
+        /// Witness satisfying the deposit descriptor
+        witness: DescriptorWitness,
     },
     /// Fail a pending invoice payment
     InvoiceFail {
-        pubkey: PublicKey,
+        deposit_id: DepositId,
         amount: u64,
         payment_id: [u8; 32],
         sequence_number: u64,
     },
     /// Fulfill a pending invoice payment
     InvoiceFulfill {
-        pubkey: PublicKey,
+        deposit_id: DepositId,
         amount: u64,
         payment_id: [u8; 32],
         sequence_number: u64,
-        scriptpubkey_signature: [u8; 64],
+        /// Witness satisfying the deposit descriptor
+        witness: DescriptorWitness,
         preimage: [u8; 32],
     },
 
@@ -626,25 +642,25 @@ pub enum LedgerOperation {
     OnchainCredit {
         txid: [u8; 32],
         vout: u32,
-        deposit_pubkey: PublicKey,
+        deposit_id: DepositId,
         amount: u64,
         funding_address: String,
     },
     /// Lock funds for an on-chain withdrawal (outgoing, debits balance)
     OnchainLock {
-        deposit_pubkey: PublicKey,
+        deposit_id: DepositId,
         amount: u64,
         destination_address: String,
         withdrawal_id: [u8; 32],
     },
     /// Fail a pending on-chain withdrawal (returns funds to deposit)
     OnchainFail {
-        deposit_pubkey: PublicKey,
+        deposit_id: DepositId,
         withdrawal_id: [u8; 32],
     },
     /// Fulfill an on-chain withdrawal (confirmed on-chain)
     OnchainFulfill {
-        deposit_pubkey: PublicKey,
+        deposit_id: DepositId,
         withdrawal_id: [u8; 32],
         amount: u64,
         txid: [u8; 32],
@@ -694,15 +710,15 @@ pub enum LedgerOperation {
     /// Uses ratchet semantics: can only increase amount AND extend duration.
     CollateralLock {
         /// Which deposit is locking collateral
-        deposit_pubkey: PublicKey,
+        deposit_id: DepositId,
         /// Amount locked as collateral (millisatoshis)
         amount: u64,
         /// Block height when the lock expires
         lock_until_block: u32,
         /// Operator being backed
         operator_id: PublicKey,
-        /// Deposit holder's signature authorizing the lock
-        deposit_holder_signature: [u8; 64],
+        /// Witness satisfying the deposit descriptor to authorize the lock
+        witness: DescriptorWitness,
     },
     /// Record that we have joined another operator's quorum as a monitoring member.
     /// This is appended to the consenting party's own ledger when they grant consent.
@@ -722,7 +738,7 @@ pub enum LedgerOperation {
     // ========== Maintenance (1) ==========
     /// Collect maintenance fees from a deposit
     FeeCollect {
-        pubkey: PublicKey,
+        deposit_id: DepositId,
         amount: u64,
         block_height: u32,
     },
@@ -827,6 +843,7 @@ impl LedgerOperation {
             Self::DepositOpen { .. } => 20,
             Self::DepositClose { .. } => 21,
             Self::DepositUpdate { .. } => 22,
+            Self::DepositKeyRotate { .. } => 23,
             Self::InvoiceCredit { .. } => 30,
             Self::InvoiceLock { .. } => 31,
             Self::InvoiceFail { .. } => 32,
@@ -1415,6 +1432,12 @@ fn read_32<R: Read>(r: &mut R) -> Result<[u8; 32], CodecError> {
     Ok(buf)
 }
 
+fn read_33<R: Read>(r: &mut R) -> Result<[u8; 33], CodecError> {
+    let mut buf = [0u8; 33];
+    r.read_exact(&mut buf)?;
+    Ok(buf)
+}
+
 fn read_64<R: Read>(r: &mut R) -> Result<[u8; 64], CodecError> {
     let mut buf = [0u8; 64];
     r.read_exact(&mut buf)?;
@@ -1493,65 +1516,122 @@ impl BinaryCodec for LedgerOperation {
                 write_u32(w, *first_expiry_block)?;
                 write_32(w, ledger_hash)?;
             }
-            Self::DepositOpen { pubkey, fees, payment_hash, invoice, cosigner_guarantee_signature } => {
-                write_pubkey(w, pubkey)?;
+            // Legacy encoding - deposit operations now use deposit_id/descriptor, but we encode
+            // the deposit_id bytes as a placeholder for legacy compatibility
+            Self::DepositOpen { deposit_id, fees, payment_hash, invoice, cosigner_guarantee_signature, .. } => {
+                // Write deposit_id padded to 33 bytes (legacy pubkey size)
+                let mut legacy_bytes = [0u8; 33];
+                legacy_bytes[0] = 0x02; // Valid compressed pubkey prefix
+                legacy_bytes[1..17].copy_from_slice(deposit_id);
+                w.write_all(&legacy_bytes)?;
                 write_option(w, fees, |w, f| f.write_to(w))?;
                 write_option(w, payment_hash, |w, h| write_32(w, h))?;
                 write_option(w, invoice, |w, s| write_string(w, s))?;
                 write_option(w, cosigner_guarantee_signature, |w, s| write_64(w, s))?;
             }
-            Self::DepositClose { pubkey } => write_pubkey(w, pubkey)?,
-            Self::DepositUpdate { pubkey, new_fees } => {
-                write_pubkey(w, pubkey)?;
+            Self::DepositClose { deposit_id } => {
+                let mut legacy_bytes = [0u8; 33];
+                legacy_bytes[0] = 0x02;
+                legacy_bytes[1..17].copy_from_slice(deposit_id);
+                w.write_all(&legacy_bytes)?;
+            }
+            Self::DepositUpdate { deposit_id, new_fees } => {
+                let mut legacy_bytes = [0u8; 33];
+                legacy_bytes[0] = 0x02;
+                legacy_bytes[1..17].copy_from_slice(deposit_id);
+                w.write_all(&legacy_bytes)?;
                 new_fees.write_to(w)?;
             }
-            Self::InvoiceCredit { payment_hash, deposit_pubkey, amount, invoice_id, sequence_number } => {
+            Self::DepositKeyRotate { deposit_id, new_descriptor, witness } => {
+                let mut legacy_bytes = [0u8; 33];
+                legacy_bytes[0] = 0x02;
+                legacy_bytes[1..17].copy_from_slice(deposit_id);
+                w.write_all(&legacy_bytes)?;
+                write_string(w, new_descriptor)?;
+                // Write first stack element (signature) as 64 bytes or zeros
+                let sig_bytes: [u8; 64] = witness.stack.first()
+                    .and_then(|s| if s.len() >= 64 { s[..64].try_into().ok() } else { None })
+                    .unwrap_or([0u8; 64]);
+                w.write_all(&sig_bytes)?;
+            }
+            Self::InvoiceCredit { payment_hash, deposit_id, amount, invoice_id, sequence_number } => {
                 write_32(w, payment_hash)?;
-                write_pubkey(w, deposit_pubkey)?;
+                let mut legacy_bytes = [0u8; 33];
+                legacy_bytes[0] = 0x02;
+                legacy_bytes[1..17].copy_from_slice(deposit_id);
+                w.write_all(&legacy_bytes)?;
                 write_u64(w, *amount)?;
                 write_string(w, invoice_id)?;
                 write_u64(w, *sequence_number)?;
             }
-            Self::InvoiceLock { pubkey, amount, payment_id, sequence_number, scriptpubkey_signature } => {
-                write_pubkey(w, pubkey)?;
+            Self::InvoiceLock { deposit_id, amount, payment_id, sequence_number, witness } => {
+                let mut legacy_bytes = [0u8; 33];
+                legacy_bytes[0] = 0x02;
+                legacy_bytes[1..17].copy_from_slice(deposit_id);
+                w.write_all(&legacy_bytes)?;
                 write_u64(w, *amount)?;
                 write_32(w, payment_id)?;
                 write_u64(w, *sequence_number)?;
-                write_64(w, scriptpubkey_signature)?;
+                // Write first stack element (signature) as 64 bytes or zeros
+                let sig_bytes: [u8; 64] = witness.stack.first()
+                    .and_then(|s| if s.len() >= 64 { s[..64].try_into().ok() } else { None })
+                    .unwrap_or([0u8; 64]);
+                w.write_all(&sig_bytes)?;
             }
-            Self::InvoiceFail { pubkey, amount, payment_id, sequence_number } => {
-                write_pubkey(w, pubkey)?;
+            Self::InvoiceFail { deposit_id, amount, payment_id, sequence_number } => {
+                let mut legacy_bytes = [0u8; 33];
+                legacy_bytes[0] = 0x02;
+                legacy_bytes[1..17].copy_from_slice(deposit_id);
+                w.write_all(&legacy_bytes)?;
                 write_u64(w, *amount)?;
                 write_32(w, payment_id)?;
                 write_u64(w, *sequence_number)?;
             }
-            Self::InvoiceFulfill { pubkey, amount, payment_id, sequence_number, scriptpubkey_signature, preimage } => {
-                write_pubkey(w, pubkey)?;
+            Self::InvoiceFulfill { deposit_id, amount, payment_id, sequence_number, witness, preimage } => {
+                let mut legacy_bytes = [0u8; 33];
+                legacy_bytes[0] = 0x02;
+                legacy_bytes[1..17].copy_from_slice(deposit_id);
+                w.write_all(&legacy_bytes)?;
                 write_u64(w, *amount)?;
                 write_32(w, payment_id)?;
                 write_u64(w, *sequence_number)?;
-                write_64(w, scriptpubkey_signature)?;
+                let sig_bytes: [u8; 64] = witness.stack.first()
+                    .and_then(|s| if s.len() >= 64 { s[..64].try_into().ok() } else { None })
+                    .unwrap_or([0u8; 64]);
+                w.write_all(&sig_bytes)?;
                 write_32(w, preimage)?;
             }
-            Self::OnchainCredit { txid, vout, deposit_pubkey, amount, funding_address } => {
+            Self::OnchainCredit { txid, vout, deposit_id, amount, funding_address } => {
                 write_32(w, txid)?;
                 write_u32(w, *vout)?;
-                write_pubkey(w, deposit_pubkey)?;
+                let mut legacy_bytes = [0u8; 33];
+                legacy_bytes[0] = 0x02;
+                legacy_bytes[1..17].copy_from_slice(deposit_id);
+                w.write_all(&legacy_bytes)?;
                 write_u64(w, *amount)?;
                 write_string(w, funding_address)?;
             }
-            Self::OnchainLock { deposit_pubkey, amount, destination_address, withdrawal_id } => {
-                write_pubkey(w, deposit_pubkey)?;
+            Self::OnchainLock { deposit_id, amount, destination_address, withdrawal_id } => {
+                let mut legacy_bytes = [0u8; 33];
+                legacy_bytes[0] = 0x02;
+                legacy_bytes[1..17].copy_from_slice(deposit_id);
+                w.write_all(&legacy_bytes)?;
                 write_u64(w, *amount)?;
                 write_string(w, destination_address)?;
                 write_32(w, withdrawal_id)?;
             }
-            Self::OnchainFail { deposit_pubkey, withdrawal_id } => {
-                write_pubkey(w, deposit_pubkey)?;
+            Self::OnchainFail { deposit_id, withdrawal_id } => {
+                let mut legacy_bytes = [0u8; 33];
+                legacy_bytes[0] = 0x02;
+                legacy_bytes[1..17].copy_from_slice(deposit_id);
+                w.write_all(&legacy_bytes)?;
                 write_32(w, withdrawal_id)?;
             }
-            Self::OnchainFulfill { deposit_pubkey, withdrawal_id, amount, txid, destination_address } => {
-                write_pubkey(w, deposit_pubkey)?;
+            Self::OnchainFulfill { deposit_id, withdrawal_id, amount, txid, destination_address } => {
+                let mut legacy_bytes = [0u8; 33];
+                legacy_bytes[0] = 0x02;
+                legacy_bytes[1..17].copy_from_slice(deposit_id);
+                w.write_all(&legacy_bytes)?;
                 write_32(w, withdrawal_id)?;
                 write_u64(w, *amount)?;
                 write_32(w, txid)?;
@@ -1584,12 +1664,18 @@ impl BinaryCodec for LedgerOperation {
                 write_pubkey(w, quorum_member)?;
                 write_64(w, operator_signature)?;
             }
-            Self::CollateralLock { deposit_pubkey, amount, lock_until_block, operator_id, deposit_holder_signature } => {
-                write_pubkey(w, deposit_pubkey)?;
+            Self::CollateralLock { deposit_id, amount, lock_until_block, operator_id, witness } => {
+                let mut legacy_bytes = [0u8; 33];
+                legacy_bytes[0] = 0x02;
+                legacy_bytes[1..17].copy_from_slice(deposit_id);
+                w.write_all(&legacy_bytes)?;
                 write_u64(w, *amount)?;
                 write_u32(w, *lock_until_block)?;
                 write_pubkey(w, operator_id)?;
-                write_64(w, deposit_holder_signature)?;
+                let sig_bytes: [u8; 64] = witness.stack.first()
+                    .and_then(|s| if s.len() >= 64 { s[..64].try_into().ok() } else { None })
+                    .unwrap_or([0u8; 64]);
+                w.write_all(&sig_bytes)?;
             }
             Self::QuorumJoin { operator_id, ledger_id, membership_expires, our_signature } => {
                 write_pubkey(w, operator_id)?;
@@ -1597,8 +1683,11 @@ impl BinaryCodec for LedgerOperation {
                 write_u32(w, *membership_expires)?;
                 write_64(w, our_signature)?;
             }
-            Self::FeeCollect { pubkey, amount, block_height } => {
-                write_pubkey(w, pubkey)?;
+            Self::FeeCollect { deposit_id, amount, block_height } => {
+                let mut legacy_bytes = [0u8; 33];
+                legacy_bytes[0] = 0x02;
+                legacy_bytes[1..17].copy_from_slice(deposit_id);
+                w.write_all(&legacy_bytes)?;
                 write_u64(w, *amount)?;
                 write_u32(w, *block_height)?;
             }
@@ -1660,73 +1749,156 @@ impl BinaryCodec for LedgerOperation {
                 first_expiry_block: read_u32(r)?,
                 ledger_hash: read_32(r)?,
             }),
-            // Deposit operations (20-25)
-            20 => Ok(Self::DepositOpen {
-                pubkey: read_pubkey(r)?,
-                fees: read_option(r, FeeStructure::read_from)?,
-                payment_hash: read_option(r, read_32)?,
-                invoice: read_option(r, read_string)?,
-                cosigner_guarantee_signature: read_option(r, read_64)?,
-            }),
-            21 => Ok(Self::DepositClose { pubkey: read_pubkey(r)? }),
-            22 => Ok(Self::DepositUpdate {
-                pubkey: read_pubkey(r)?,
-                new_fees: FeeStructure::read_from(r)?,
-            }),
+            // Deposit operations (20-25) - legacy decoding extracts deposit_id from embedded bytes
+            20 => {
+                let legacy_bytes = read_33(r)?;
+                let mut deposit_id = [0u8; 16];
+                deposit_id.copy_from_slice(&legacy_bytes[1..17]);
+                Ok(Self::DepositOpen {
+                    deposit_id,
+                    descriptor: format!("legacy({})", hex::encode(&deposit_id)),
+                    fees: read_option(r, FeeStructure::read_from)?,
+                    payment_hash: read_option(r, read_32)?,
+                    invoice: read_option(r, read_string)?,
+                    cosigner_guarantee_signature: read_option(r, read_64)?,
+                })
+            }
+            21 => {
+                let legacy_bytes = read_33(r)?;
+                let mut deposit_id = [0u8; 16];
+                deposit_id.copy_from_slice(&legacy_bytes[1..17]);
+                Ok(Self::DepositClose { deposit_id })
+            }
+            22 => {
+                let legacy_bytes = read_33(r)?;
+                let mut deposit_id = [0u8; 16];
+                deposit_id.copy_from_slice(&legacy_bytes[1..17]);
+                Ok(Self::DepositUpdate {
+                    deposit_id,
+                    new_fees: FeeStructure::read_from(r)?,
+                })
+            }
+            23 => {
+                let legacy_bytes = read_33(r)?;
+                let mut deposit_id = [0u8; 16];
+                deposit_id.copy_from_slice(&legacy_bytes[1..17]);
+                let new_descriptor = read_string(r)?;
+                let sig_bytes = read_64(r)?;
+                let witness = DescriptorWitness {
+                    stack: vec![sig_bytes.to_vec()],
+                };
+                Ok(Self::DepositKeyRotate {
+                    deposit_id,
+                    new_descriptor,
+                    witness,
+                })
+            }
             // Invoice operations (30-33)
-            30 => Ok(Self::InvoiceCredit {
-                payment_hash: read_32(r)?,
-                deposit_pubkey: read_pubkey(r)?,
-                amount: read_u64(r)?,
-                invoice_id: read_string(r)?,
-                sequence_number: read_u64(r)?,
-            }),
-            31 => Ok(Self::InvoiceLock {
-                pubkey: read_pubkey(r)?,
-                amount: read_u64(r)?,
-                payment_id: read_32(r)?,
-                sequence_number: read_u64(r)?,
-                scriptpubkey_signature: read_64(r)?,
-            }),
-            32 => Ok(Self::InvoiceFail {
-                pubkey: read_pubkey(r)?,
-                amount: read_u64(r)?,
-                payment_id: read_32(r)?,
-                sequence_number: read_u64(r)?,
-            }),
-            33 => Ok(Self::InvoiceFulfill {
-                pubkey: read_pubkey(r)?,
-                amount: read_u64(r)?,
-                payment_id: read_32(r)?,
-                sequence_number: read_u64(r)?,
-                scriptpubkey_signature: read_64(r)?,
-                preimage: read_32(r)?,
-            }),
+            30 => {
+                let payment_hash = read_32(r)?;
+                let legacy_bytes = read_33(r)?;
+                let mut deposit_id = [0u8; 16];
+                deposit_id.copy_from_slice(&legacy_bytes[1..17]);
+                Ok(Self::InvoiceCredit {
+                    payment_hash,
+                    deposit_id,
+                    amount: read_u64(r)?,
+                    invoice_id: read_string(r)?,
+                    sequence_number: read_u64(r)?,
+                })
+            }
+            31 => {
+                let legacy_bytes = read_33(r)?;
+                let mut deposit_id = [0u8; 16];
+                deposit_id.copy_from_slice(&legacy_bytes[1..17]);
+                let amount = read_u64(r)?;
+                let payment_id = read_32(r)?;
+                let sequence_number = read_u64(r)?;
+                let sig = read_64(r)?;
+                Ok(Self::InvoiceLock {
+                    deposit_id,
+                    amount,
+                    payment_id,
+                    sequence_number,
+                    witness: crate::types::DescriptorWitness { stack: vec![sig.to_vec()] },
+                })
+            }
+            32 => {
+                let legacy_bytes = read_33(r)?;
+                let mut deposit_id = [0u8; 16];
+                deposit_id.copy_from_slice(&legacy_bytes[1..17]);
+                Ok(Self::InvoiceFail {
+                    deposit_id,
+                    amount: read_u64(r)?,
+                    payment_id: read_32(r)?,
+                    sequence_number: read_u64(r)?,
+                })
+            }
+            33 => {
+                let legacy_bytes = read_33(r)?;
+                let mut deposit_id = [0u8; 16];
+                deposit_id.copy_from_slice(&legacy_bytes[1..17]);
+                let amount = read_u64(r)?;
+                let payment_id = read_32(r)?;
+                let sequence_number = read_u64(r)?;
+                let sig = read_64(r)?;
+                let preimage = read_32(r)?;
+                Ok(Self::InvoiceFulfill {
+                    deposit_id,
+                    amount,
+                    payment_id,
+                    sequence_number,
+                    witness: crate::types::DescriptorWitness { stack: vec![sig.to_vec()] },
+                    preimage,
+                })
+            }
             // Onchain operations (35-38)
-            35 => Ok(Self::OnchainCredit {
-                txid: read_32(r)?,
-                vout: read_u32(r)?,
-                deposit_pubkey: read_pubkey(r)?,
-                amount: read_u64(r)?,
-                funding_address: read_string(r)?,
-            }),
-            36 => Ok(Self::OnchainLock {
-                deposit_pubkey: read_pubkey(r)?,
-                amount: read_u64(r)?,
-                destination_address: read_string(r)?,
-                withdrawal_id: read_32(r)?,
-            }),
-            37 => Ok(Self::OnchainFail {
-                deposit_pubkey: read_pubkey(r)?,
-                withdrawal_id: read_32(r)?,
-            }),
-            38 => Ok(Self::OnchainFulfill {
-                deposit_pubkey: read_pubkey(r)?,
-                withdrawal_id: read_32(r)?,
-                amount: read_u64(r)?,
-                txid: read_32(r)?,
-                destination_address: read_string(r)?,
-            }),
+            35 => {
+                let txid = read_32(r)?;
+                let vout = read_u32(r)?;
+                let legacy_bytes = read_33(r)?;
+                let mut deposit_id = [0u8; 16];
+                deposit_id.copy_from_slice(&legacy_bytes[1..17]);
+                Ok(Self::OnchainCredit {
+                    txid,
+                    vout,
+                    deposit_id,
+                    amount: read_u64(r)?,
+                    funding_address: read_string(r)?,
+                })
+            }
+            36 => {
+                let legacy_bytes = read_33(r)?;
+                let mut deposit_id = [0u8; 16];
+                deposit_id.copy_from_slice(&legacy_bytes[1..17]);
+                Ok(Self::OnchainLock {
+                    deposit_id,
+                    amount: read_u64(r)?,
+                    destination_address: read_string(r)?,
+                    withdrawal_id: read_32(r)?,
+                })
+            }
+            37 => {
+                let legacy_bytes = read_33(r)?;
+                let mut deposit_id = [0u8; 16];
+                deposit_id.copy_from_slice(&legacy_bytes[1..17]);
+                Ok(Self::OnchainFail {
+                    deposit_id,
+                    withdrawal_id: read_32(r)?,
+                })
+            }
+            38 => {
+                let legacy_bytes = read_33(r)?;
+                let mut deposit_id = [0u8; 16];
+                deposit_id.copy_from_slice(&legacy_bytes[1..17]);
+                Ok(Self::OnchainFulfill {
+                    deposit_id,
+                    withdrawal_id: read_32(r)?,
+                    amount: read_u64(r)?,
+                    txid: read_32(r)?,
+                    destination_address: read_string(r)?,
+                })
+            }
             // Collateral operations (40-44)
             40 => Ok(Self::CollateralIncrease {
                 new_amount: read_u64(r)?,
@@ -1755,13 +1927,22 @@ impl BinaryCodec for LedgerOperation {
                 quorum_member: read_pubkey(r)?,
                 operator_signature: read_64(r)?,
             }),
-            45 => Ok(Self::CollateralLock {
-                deposit_pubkey: read_pubkey(r)?,
-                amount: read_u64(r)?,
-                lock_until_block: read_u32(r)?,
-                operator_id: read_pubkey(r)?,
-                deposit_holder_signature: read_64(r)?,
-            }),
+            45 => {
+                let legacy_bytes = read_33(r)?;
+                let mut deposit_id = [0u8; 16];
+                deposit_id.copy_from_slice(&legacy_bytes[1..17]);
+                let amount = read_u64(r)?;
+                let lock_until_block = read_u32(r)?;
+                let operator_id = read_pubkey(r)?;
+                let sig = read_64(r)?;
+                Ok(Self::CollateralLock {
+                    deposit_id,
+                    amount,
+                    lock_until_block,
+                    operator_id,
+                    witness: crate::types::DescriptorWitness { stack: vec![sig.to_vec()] },
+                })
+            }
             46 => Ok(Self::QuorumJoin {
                 operator_id: read_pubkey(r)?,
                 ledger_id: read_string(r)?,
@@ -1769,11 +1950,16 @@ impl BinaryCodec for LedgerOperation {
                 our_signature: read_64(r)?,
             }),
             // Fee operations (50)
-            50 => Ok(Self::FeeCollect {
-                pubkey: read_pubkey(r)?,
-                amount: read_u64(r)?,
-                block_height: read_u32(r)?,
-            }),
+            50 => {
+                let legacy_bytes = read_33(r)?;
+                let mut deposit_id = [0u8; 16];
+                deposit_id.copy_from_slice(&legacy_bytes[1..17]);
+                Ok(Self::FeeCollect {
+                    deposit_id,
+                    amount: read_u64(r)?,
+                    block_height: read_u32(r)?,
+                })
+            }
             // CustodyDispute (54)
             54 => Ok(Self::CustodyDispute {
                 last_valid_sequence: read_u64(r)?,
@@ -2575,6 +2761,12 @@ mod ledger_op_tlv {
     // Quorum/Collateral ledger binding fields
     pub const MEMBER_LEDGER_ID: u64 = 114;
     pub const COLLATERAL_LEDGER_ID: u64 = 115;
+    // Descriptor-based deposit fields
+    pub const DEPOSIT_ID: u64 = 200;      // 16-byte deposit identifier
+    pub const DESCRIPTOR: u64 = 202;       // Variable-length string
+    pub const WITNESS: u64 = 204;          // Nested TLV with stack elements
+    pub const WITNESS_ELEMENT: u64 = 206;  // Single stack element (bytes)
+    pub const NEW_DESCRIPTOR: u64 = 208;   // New descriptor for key rotation
 }
 
 impl TlvEncode for LedgerOperation {
@@ -2614,8 +2806,10 @@ impl TlvEncode for LedgerOperation {
                     .u32_field(FIRST_EXPIRY_BLOCK, *first_expiry_block)
                     .bytes_field(LEDGER_HASH, ledger_hash);
             }
-            Self::DepositOpen { pubkey, fees, payment_hash, invoice, cosigner_guarantee_signature } => {
-                builder = builder.pubkey_field(PUBKEY, pubkey);
+            Self::DepositOpen { deposit_id, descriptor, fees, payment_hash, invoice, cosigner_guarantee_signature } => {
+                builder = builder
+                    .deposit_id_field(DEPOSIT_ID, deposit_id)
+                    .string_field(DESCRIPTOR, descriptor);
                 if let Some(f) = fees {
                     builder = builder.nested(FEES, f);
                 }
@@ -2629,69 +2823,75 @@ impl TlvEncode for LedgerOperation {
                     builder = builder.bytes_field(COSIGNER_SIG, sig);
                 }
             }
-            Self::DepositClose { pubkey } => {
-                builder = builder.pubkey_field(PUBKEY, pubkey);
+            Self::DepositClose { deposit_id } => {
+                builder = builder.deposit_id_field(DEPOSIT_ID, deposit_id);
             }
-            Self::DepositUpdate { pubkey, new_fees } => {
+            Self::DepositUpdate { deposit_id, new_fees } => {
                 builder = builder
-                    .pubkey_field(PUBKEY, pubkey)
+                    .deposit_id_field(DEPOSIT_ID, deposit_id)
                     .nested(NEW_FEES, new_fees);
             }
-            Self::InvoiceCredit { payment_hash, deposit_pubkey, amount, invoice_id, sequence_number } => {
+            Self::DepositKeyRotate { deposit_id, new_descriptor, witness } => {
+                builder = builder
+                    .deposit_id_field(DEPOSIT_ID, deposit_id)
+                    .string_field(NEW_DESCRIPTOR, new_descriptor)
+                    .witness_field(WITNESS, witness);
+            }
+            Self::InvoiceCredit { payment_hash, deposit_id, amount, invoice_id, sequence_number } => {
                 builder = builder
                     .bytes_field(PAYMENT_HASH, payment_hash)
-                    .pubkey_field(DEPOSIT_PUBKEY, deposit_pubkey)
+                    .deposit_id_field(DEPOSIT_ID, deposit_id)
                     .u64_field(AMOUNT, *amount)
                     .string_field(INVOICE_ID, invoice_id)
                     .u64_field(SEQUENCE_NUMBER, *sequence_number);
             }
-            Self::InvoiceLock { pubkey, amount, payment_id, sequence_number, scriptpubkey_signature } => {
+            Self::InvoiceLock { deposit_id, amount, payment_id, sequence_number, witness } => {
                 builder = builder
-                    .pubkey_field(PUBKEY, pubkey)
+                    .deposit_id_field(DEPOSIT_ID, deposit_id)
                     .u64_field(AMOUNT, *amount)
                     .bytes_field(PAYMENT_ID, payment_id)
                     .u64_field(SEQUENCE_NUMBER, *sequence_number)
-                    .bytes_field(SCRIPTPUBKEY_SIG, scriptpubkey_signature);
+                    .witness_field(WITNESS, witness);
             }
-            Self::InvoiceFail { pubkey, amount, payment_id, sequence_number } => {
+            Self::InvoiceFail { deposit_id, amount, payment_id, sequence_number } => {
                 builder = builder
-                    .pubkey_field(PUBKEY, pubkey)
+                    .deposit_id_field(DEPOSIT_ID, deposit_id)
                     .u64_field(AMOUNT, *amount)
                     .bytes_field(PAYMENT_ID, payment_id)
                     .u64_field(SEQUENCE_NUMBER, *sequence_number);
             }
-            Self::InvoiceFulfill { pubkey, amount, payment_id, sequence_number, scriptpubkey_signature, preimage } => {
+            Self::InvoiceFulfill { deposit_id, amount, payment_id, sequence_number, witness, preimage } => {
                 builder = builder
-                    .pubkey_field(PUBKEY, pubkey)
+                    .deposit_id_field(DEPOSIT_ID, deposit_id)
                     .u64_field(AMOUNT, *amount)
                     .bytes_field(PAYMENT_ID, payment_id)
                     .u64_field(SEQUENCE_NUMBER, *sequence_number)
-                    .bytes_field(SCRIPTPUBKEY_SIG, scriptpubkey_signature)
+                    .witness_field(WITNESS, witness)
                     .bytes_field(PREIMAGE, preimage);
             }
-            Self::OnchainCredit { txid, vout, deposit_pubkey, amount, funding_address } => {
+            Self::OnchainCredit { txid, vout, deposit_id, amount, funding_address } => {
                 builder = builder
                     .bytes_field(TXID, txid)
                     .u32_field(VOUT, *vout)
-                    .pubkey_field(DEPOSIT_PUBKEY, deposit_pubkey)
+                    .deposit_id_field(DEPOSIT_ID, deposit_id)
                     .u64_field(AMOUNT, *amount)
                     .string_field(FUNDING_ADDRESS, funding_address);
             }
-            Self::OnchainLock { deposit_pubkey, amount, destination_address, withdrawal_id } => {
+            Self::OnchainLock { deposit_id, amount, destination_address, withdrawal_id } => {
                 builder = builder
-                    .pubkey_field(DEPOSIT_PUBKEY, deposit_pubkey)
+                    .deposit_id_field(DEPOSIT_ID, deposit_id)
                     .u64_field(AMOUNT, *amount)
                     .string_field(DESTINATION_ADDRESS, destination_address)
                     .bytes_field(WITHDRAWAL_ID, withdrawal_id);
             }
-            Self::OnchainFail { deposit_pubkey, withdrawal_id } => {
+            Self::OnchainFail { deposit_id, withdrawal_id } => {
                 builder = builder
-                    .pubkey_field(DEPOSIT_PUBKEY, deposit_pubkey)
+                    .deposit_id_field(DEPOSIT_ID, deposit_id)
                     .bytes_field(WITHDRAWAL_ID, withdrawal_id);
             }
-            Self::OnchainFulfill { deposit_pubkey, withdrawal_id, amount, txid, destination_address } => {
+            Self::OnchainFulfill { deposit_id, withdrawal_id, amount, txid, destination_address } => {
                 builder = builder
-                    .pubkey_field(DEPOSIT_PUBKEY, deposit_pubkey)
+                    .deposit_id_field(DEPOSIT_ID, deposit_id)
                     .bytes_field(WITHDRAWAL_ID, withdrawal_id)
                     .u64_field(AMOUNT, *amount)
                     .bytes_field(TXID, txid)
@@ -2729,13 +2929,13 @@ impl TlvEncode for LedgerOperation {
                     .pubkey_field(QUORUM_MEMBER, quorum_member)
                     .bytes_field(OPERATOR_SIG, operator_signature);
             }
-            Self::CollateralLock { deposit_pubkey, amount, lock_until_block, operator_id, deposit_holder_signature } => {
+            Self::CollateralLock { deposit_id, amount, lock_until_block, operator_id, witness } => {
                 builder = builder
-                    .pubkey_field(DEPOSIT_PUBKEY, deposit_pubkey)
+                    .deposit_id_field(DEPOSIT_ID, deposit_id)
                     .u64_field(AMOUNT, *amount)
                     .u32_field(LOCK_UNTIL_BLOCK, *lock_until_block)
                     .pubkey_field(OPERATOR_ID, operator_id)
-                    .bytes_field(DEPOSIT_HOLDER_SIG, deposit_holder_signature);
+                    .witness_field(WITNESS, witness);
             }
             Self::QuorumJoin { operator_id, ledger_id, membership_expires, our_signature } => {
                 // Note: TLV field ID is RESERVES_ID (58) for wire compatibility,
@@ -2746,9 +2946,9 @@ impl TlvEncode for LedgerOperation {
                     .u32_field(MEMBERSHIP_EXPIRES, *membership_expires)
                     .bytes_field(OUR_SIGNATURE, our_signature);
             }
-            Self::FeeCollect { pubkey, amount, block_height } => {
+            Self::FeeCollect { deposit_id, amount, block_height } => {
                 builder = builder
-                    .pubkey_field(PUBKEY, pubkey)
+                    .deposit_id_field(DEPOSIT_ID, deposit_id)
                     .u64_field(AMOUNT, *amount)
                     .u32_field(BLOCK_HEIGHT, *block_height);
             }
@@ -2821,64 +3021,70 @@ impl TlvDecode for LedgerOperation {
                 ledger_hash: reader.read_bytes(LEDGER_HASH)?,
             }),
             20 => Ok(Self::DepositOpen {
-                pubkey: reader.read_pubkey(PUBKEY)?,
+                deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
+                descriptor: reader.read_string(DESCRIPTOR)?,
                 fees: reader.read_nested_opt(FEES)?,
                 payment_hash: reader.read_bytes_opt(PAYMENT_HASH)?,
                 invoice: reader.read_string_opt(INVOICE)?,
                 cosigner_guarantee_signature: reader.read_bytes_opt(COSIGNER_SIG)?,
             }),
-            21 => Ok(Self::DepositClose { pubkey: reader.read_pubkey(PUBKEY)? }),
+            21 => Ok(Self::DepositClose { deposit_id: reader.read_deposit_id(DEPOSIT_ID)? }),
             22 => Ok(Self::DepositUpdate {
-                pubkey: reader.read_pubkey(PUBKEY)?,
+                deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
                 new_fees: reader.read_nested(NEW_FEES)?,
+            }),
+            23 => Ok(Self::DepositKeyRotate {
+                deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
+                new_descriptor: reader.read_string(NEW_DESCRIPTOR)?,
+                witness: reader.read_witness(WITNESS)?,
             }),
             30 => Ok(Self::InvoiceCredit {
                 payment_hash: reader.read_bytes(PAYMENT_HASH)?,
-                deposit_pubkey: reader.read_pubkey(DEPOSIT_PUBKEY)?,
+                deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
                 amount: reader.read_u64(AMOUNT)?,
                 invoice_id: reader.read_string(INVOICE_ID)?,
                 sequence_number: reader.read_u64(SEQUENCE_NUMBER)?,
             }),
             31 => Ok(Self::InvoiceLock {
-                pubkey: reader.read_pubkey(PUBKEY)?,
+                deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
                 amount: reader.read_u64(AMOUNT)?,
                 payment_id: reader.read_bytes(PAYMENT_ID)?,
                 sequence_number: reader.read_u64(SEQUENCE_NUMBER)?,
-                scriptpubkey_signature: reader.read_bytes(SCRIPTPUBKEY_SIG)?,
+                witness: reader.read_witness(WITNESS)?,
             }),
             32 => Ok(Self::InvoiceFail {
-                pubkey: reader.read_pubkey(PUBKEY)?,
+                deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
                 amount: reader.read_u64(AMOUNT)?,
                 payment_id: reader.read_bytes(PAYMENT_ID)?,
                 sequence_number: reader.read_u64(SEQUENCE_NUMBER)?,
             }),
             33 => Ok(Self::InvoiceFulfill {
-                pubkey: reader.read_pubkey(PUBKEY)?,
+                deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
                 amount: reader.read_u64(AMOUNT)?,
                 payment_id: reader.read_bytes(PAYMENT_ID)?,
                 sequence_number: reader.read_u64(SEQUENCE_NUMBER)?,
-                scriptpubkey_signature: reader.read_bytes(SCRIPTPUBKEY_SIG)?,
+                witness: reader.read_witness(WITNESS)?,
                 preimage: reader.read_bytes(PREIMAGE)?,
             }),
             35 => Ok(Self::OnchainCredit {
                 txid: reader.read_bytes(TXID)?,
                 vout: reader.read_u32(VOUT)?,
-                deposit_pubkey: reader.read_pubkey(DEPOSIT_PUBKEY)?,
+                deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
                 amount: reader.read_u64(AMOUNT)?,
                 funding_address: reader.read_string(FUNDING_ADDRESS)?,
             }),
             36 => Ok(Self::OnchainLock {
-                deposit_pubkey: reader.read_pubkey(DEPOSIT_PUBKEY)?,
+                deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
                 amount: reader.read_u64(AMOUNT)?,
                 destination_address: reader.read_string(DESTINATION_ADDRESS)?,
                 withdrawal_id: reader.read_bytes(WITHDRAWAL_ID)?,
             }),
             37 => Ok(Self::OnchainFail {
-                deposit_pubkey: reader.read_pubkey(DEPOSIT_PUBKEY)?,
+                deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
                 withdrawal_id: reader.read_bytes(WITHDRAWAL_ID)?,
             }),
             38 => Ok(Self::OnchainFulfill {
-                deposit_pubkey: reader.read_pubkey(DEPOSIT_PUBKEY)?,
+                deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
                 withdrawal_id: reader.read_bytes(WITHDRAWAL_ID)?,
                 amount: reader.read_u64(AMOUNT)?,
                 txid: reader.read_bytes(TXID)?,
@@ -2912,11 +3118,11 @@ impl TlvDecode for LedgerOperation {
                 operator_signature: reader.read_bytes(OPERATOR_SIG)?,
             }),
             45 => Ok(Self::CollateralLock {
-                deposit_pubkey: reader.read_pubkey(DEPOSIT_PUBKEY)?,
+                deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
                 amount: reader.read_u64(AMOUNT)?,
                 lock_until_block: reader.read_u32(LOCK_UNTIL_BLOCK)?,
                 operator_id: reader.read_pubkey(OPERATOR_ID)?,
-                deposit_holder_signature: reader.read_bytes(DEPOSIT_HOLDER_SIG)?,
+                witness: reader.read_witness(WITNESS)?,
             }),
             46 => Ok(Self::QuorumJoin {
                 operator_id: reader.read_pubkey(OPERATOR_ID)?,
@@ -2926,7 +3132,7 @@ impl TlvDecode for LedgerOperation {
                 our_signature: reader.read_bytes(OUR_SIGNATURE)?,
             }),
             50 => Ok(Self::FeeCollect {
-                pubkey: reader.read_pubkey(PUBKEY)?,
+                deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
                 amount: reader.read_u64(AMOUNT)?,
                 block_height: reader.read_u32(BLOCK_HEIGHT)?,
             }),
@@ -4182,22 +4388,12 @@ mod tests {
 
     #[test]
     fn test_ledger_operation_roundtrip() {
+        // Test non-deposit operations that fully round-trip with BinaryCodec
         let ops = vec![
             LedgerOperation::ReservesIncrease { reserves_id: "bcrt1q...".to_string(), new_amount: 200000 },
             LedgerOperation::ReservesDecrease { reserves_id: "bcrt1q...".to_string(), new_amount: 100000 },
-            LedgerOperation::DepositOpen {
-                pubkey: test_pubkey(),
-                fees: Some(FeeStructure {
-                    annualized_fixed: 1000,
-                    annualized_bps: 50,
-                    frequency_blocks: 144,
-                }),
-                payment_hash: Some([0xAB; 32]),
-                invoice: Some("lnbc...".to_string()),
-                cosigner_guarantee_signature: None,
-            },
             LedgerOperation::FeeCollect {
-                pubkey: test_pubkey(),
+                deposit_id: crate::types::compute_deposit_id("pk(test)"),
                 amount: 500,
                 block_height: 800000,
             },
@@ -4213,6 +4409,35 @@ mod tests {
             op.write_to(&mut bytes).unwrap();
             let decoded = LedgerOperation::read_from(&mut &bytes[..]).unwrap();
             assert_eq!(op, decoded);
+        }
+
+        // Test DepositOpen separately - BinaryCodec is a legacy format that uses 33-byte
+        // legacy pubkey encoding for deposit_id and doesn't preserve the descriptor.
+        // The descriptor becomes "legacy(<hex_deposit_id>)" on decode.
+        let deposit_id = crate::types::compute_deposit_id("pk(test)");
+        let deposit_open = LedgerOperation::DepositOpen {
+            deposit_id,
+            descriptor: "pk(test)".to_string(),
+            fees: Some(FeeStructure {
+                annualized_fixed: 1000,
+                annualized_bps: 50,
+                frequency_blocks: 144,
+            }),
+            payment_hash: Some([0xAB; 32]),
+            invoice: Some("lnbc...".to_string()),
+            cosigner_guarantee_signature: None,
+        };
+
+        let mut bytes = Vec::new();
+        deposit_open.write_to(&mut bytes).unwrap();
+        let decoded = LedgerOperation::read_from(&mut &bytes[..]).unwrap();
+
+        // Verify deposit_id is preserved, descriptor becomes legacy format
+        if let LedgerOperation::DepositOpen { deposit_id: decoded_id, descriptor, .. } = decoded {
+            assert_eq!(decoded_id, deposit_id);
+            assert_eq!(descriptor, format!("legacy({})", hex::encode(&deposit_id)));
+        } else {
+            panic!("Expected DepositOpen");
         }
     }
 
@@ -4317,16 +4542,17 @@ mod tests {
             LedgerOperation::ReservesIncrease { reserves_id: "bcrt1q...".to_string(), new_amount: 200000 },
             LedgerOperation::ReservesDecrease { reserves_id: "bcrt1q...".to_string(), new_amount: 50000 },
             LedgerOperation::DepositOpen {
-                pubkey: test_pubkey(),
+                deposit_id: crate::types::compute_deposit_id("pk(test)"),
+                descriptor: "pk(test)".to_string(),
                 fees: Some(FeeStructure::new(100, 10, 144)),
                 payment_hash: Some([0xAA; 32]),
                 invoice: Some("lnbc...".to_string()),
                 cosigner_guarantee_signature: None,
             },
-            LedgerOperation::DepositClose { pubkey: test_pubkey() },
+            LedgerOperation::DepositClose { deposit_id: crate::types::compute_deposit_id("pk(test)") },
             LedgerOperation::InvoiceCredit {
                 payment_hash: [0xBB; 32],
-                deposit_pubkey: test_pubkey(),
+                deposit_id: crate::types::compute_deposit_id("pk(test)"),
                 amount: 50000,
                 invoice_id: "inv123".to_string(),
                 sequence_number: 1,
@@ -4640,7 +4866,7 @@ mod tests {
                 reserves_id: test_pubkey().to_string(),
                 operation: LedgerOperation::InvoiceCredit {
                     payment_hash: [0xAA; 32],
-                    deposit_pubkey: test_pubkey(),
+                    deposit_id: crate::types::compute_deposit_id("pk(test)"),
                     amount: 100000,
                     invoice_id: "inv123".to_string(),
                     sequence_number: 1,

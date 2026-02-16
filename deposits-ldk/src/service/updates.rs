@@ -110,16 +110,16 @@ fn extract_operation_details(msg: &DepositsMessage) -> (Option<u64>, Option<Stri
 /// Extract details from a LedgerOperation
 fn extract_from_ledger_operation(op: &LedgerOperation) -> (Option<u64>, Option<String>, Option<String>) {
     match op {
-        LedgerOperation::DepositOpen { pubkey, .. } => (None, Some(pubkey.to_string()), None),
-        LedgerOperation::DepositClose { pubkey } => (None, Some(pubkey.to_string()), None),
-        LedgerOperation::InvoiceCredit { deposit_pubkey, amount, .. } => (Some(*amount), Some(deposit_pubkey.to_string()), None),
-        LedgerOperation::InvoiceLock { pubkey, amount, .. } => (Some(*amount), Some(pubkey.to_string()), None),
-        LedgerOperation::InvoiceFail { pubkey, amount, .. } => (Some(*amount), Some(pubkey.to_string()), None),
-        LedgerOperation::InvoiceFulfill { pubkey, amount, .. } => (Some(*amount), Some(pubkey.to_string()), None),
-        LedgerOperation::OnchainCredit { deposit_pubkey, amount, .. } => (Some(*amount), Some(deposit_pubkey.to_string()), None),
-        LedgerOperation::OnchainLock { deposit_pubkey, amount, .. } => (Some(*amount), Some(deposit_pubkey.to_string()), None),
-        LedgerOperation::OnchainFail { deposit_pubkey, .. } => (None, Some(deposit_pubkey.to_string()), None),
-        LedgerOperation::OnchainFulfill { deposit_pubkey, .. } => (None, Some(deposit_pubkey.to_string()), None),
+        LedgerOperation::DepositOpen { deposit_id, .. } => (None, Some(hex::encode(deposit_id)), None),
+        LedgerOperation::DepositClose { deposit_id } => (None, Some(hex::encode(deposit_id)), None),
+        LedgerOperation::InvoiceCredit { deposit_id, amount, .. } => (Some(*amount), Some(hex::encode(deposit_id)), None),
+        LedgerOperation::InvoiceLock { deposit_id, amount, .. } => (Some(*amount), Some(hex::encode(deposit_id)), None),
+        LedgerOperation::InvoiceFail { deposit_id, amount, .. } => (Some(*amount), Some(hex::encode(deposit_id)), None),
+        LedgerOperation::InvoiceFulfill { deposit_id, amount, .. } => (Some(*amount), Some(hex::encode(deposit_id)), None),
+        LedgerOperation::OnchainCredit { deposit_id, amount, .. } => (Some(*amount), Some(hex::encode(deposit_id)), None),
+        LedgerOperation::OnchainLock { deposit_id, amount, .. } => (Some(*amount), Some(hex::encode(deposit_id)), None),
+        LedgerOperation::OnchainFail { deposit_id, .. } => (None, Some(hex::encode(deposit_id)), None),
+        LedgerOperation::OnchainFulfill { deposit_id, .. } => (None, Some(hex::encode(deposit_id)), None),
         LedgerOperation::ReservesIncrease { new_amount, .. } => (Some(*new_amount), None, None),
         LedgerOperation::ReservesDecrease { new_amount, .. } => (Some(*new_amount), None, None),
         LedgerOperation::QuorumAddMember { quorum_member, .. } =>
@@ -129,7 +129,7 @@ fn extract_from_ledger_operation(op: &LedgerOperation) -> (Option<u64>, Option<S
         LedgerOperation::CollateralIncrease { new_amount, .. } => (Some(*new_amount), None, None),
         LedgerOperation::CollateralDecrease { new_amount, .. } => (Some(*new_amount), None, None),
         LedgerOperation::CollateralAttestation { amount, .. } => (Some(*amount), None, None),
-        LedgerOperation::FeeCollect { pubkey, amount, .. } => (Some(*amount), Some(pubkey.to_string()), None),
+        LedgerOperation::FeeCollect { deposit_id, amount, .. } => (Some(*amount), Some(hex::encode(deposit_id)), None),
         _ => (None, None, None),
     }
 }

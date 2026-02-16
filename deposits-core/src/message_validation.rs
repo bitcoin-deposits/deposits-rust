@@ -59,6 +59,10 @@ use crate::operation_validation::{
     validate_reserves_decrease, validate_fee_collect,
     validate_collateral_increase, validate_collateral_decrease,
     validate_cosign_invoice, validate_ledger_close,
+    // DepositId-based validation functions
+    validate_deposit_add_by_id, validate_deposit_close_by_id, validate_deposit_update_by_id,
+    validate_payment_lock_by_id, validate_payment_fulfill_by_id, validate_credit_payment_by_id,
+    validate_fee_collect_by_id, validate_deposit_key_rotate,
     ValidationResult,
 };
 use crate::wire_messages::{
@@ -515,72 +519,67 @@ pub fn validate_ledger_operation<C: ValidationContext>(
     match operation {
         // LedgerOpen is the first operation - always valid
         LedgerOperation::LedgerOpen { .. } => Ok(()),
-        LedgerOperation::DepositOpen { pubkey, fees, .. } => {
-            let msg = DepositOpenMsg {
-                reserves_id: partner_pubkey.to_string(),
-                pubkey: *pubkey,
-                fees: fees.clone(),
-                payment_hash: None, // Not used in validation
-                invoice: None,
-                cosigner_guarantee_signature: None,
-            };
-            validate_add_deposit_msg(ctx, &msg, sender)
+        LedgerOperation::DepositOpen { deposit_id, fees, .. } => {
+            // Validate deposit doesn't exist and fees are valid
+            if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
+                let ledger = ledger_arc.read().unwrap();
+                validate_deposit_add_by_id(&ledger, deposit_id, fees.as_ref())
+            } else {
+                Err(format!("No channel ledger found for sender {}", sender))
+            }
         }
-        LedgerOperation::DepositClose { pubkey } => {
-            let msg = DepositCloseMsg {
-                reserves_id: partner_pubkey.to_string(),
-                pubkey: *pubkey,
-            };
-            validate_remove_deposit_msg(ctx, &msg, sender)
+        LedgerOperation::DepositClose { deposit_id } => {
+            // Validate deposit exists and can be closed
+            if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
+                let ledger = ledger_arc.read().unwrap();
+                validate_deposit_close_by_id(&ledger, deposit_id)
+            } else {
+                Err(format!("No channel ledger found for sender {}", sender))
+            }
         }
-        LedgerOperation::DepositUpdate { pubkey, new_fees } => {
-            let msg = DepositUpdateMsg {
-                reserves_id: partner_pubkey.to_string(),
-                pubkey: *pubkey,
-                new_fees: new_fees.clone(),
-            };
-            validate_update_deposit_msg(ctx, &msg, sender)
+        LedgerOperation::DepositUpdate { deposit_id, new_fees } => {
+            // Validate deposit exists and new fees are valid
+            if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
+                let ledger = ledger_arc.read().unwrap();
+                validate_deposit_update_by_id(&ledger, deposit_id, new_fees)
+            } else {
+                Err(format!("No channel ledger found for sender {}", sender))
+            }
         }
-        LedgerOperation::InvoiceLock { pubkey, amount, payment_id, scriptpubkey_signature, .. } => {
-            let msg = SendingLockPaymentMsg {
-                pubkey: *pubkey,
-                amount: *amount,
-                payment_id: *payment_id,
-                sequence_number: 0, // Not used in validation
-                scriptpubkey_signature: *scriptpubkey_signature,
-            };
-            validate_sending_lock_payment_msg(ctx, &msg, sender)
+        LedgerOperation::DepositKeyRotate { deposit_id, new_descriptor, witness } => {
+            // Validate deposit exists and witness satisfies current descriptor
+            if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
+                let ledger = ledger_arc.read().unwrap();
+                validate_deposit_key_rotate(&ledger, deposit_id, new_descriptor, witness)
+            } else {
+                Err(format!("No channel ledger found for sender {}", sender))
+            }
         }
-        LedgerOperation::InvoiceFulfill { pubkey, amount, payment_id, scriptpubkey_signature, preimage, .. } => {
-            let msg = SendingFulfillPaymentMsg {
-                pubkey: *pubkey,
-                amount: *amount,
-                payment_id: *payment_id,
-                sequence_number: 0,
-                scriptpubkey_signature: *scriptpubkey_signature,
-                preimage: *preimage,
-            };
-            validate_sending_fulfill_payment_msg(&msg)
+        LedgerOperation::InvoiceLock { deposit_id, amount, payment_id, witness, .. } => {
+            // Validate payment lock with descriptor witness
+            if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
+                let ledger = ledger_arc.read().unwrap();
+                validate_payment_lock_by_id(&ledger, deposit_id, *amount, payment_id, witness)
+            } else {
+                Err(format!("No channel ledger found for sender {}", sender))
+            }
+        }
+        LedgerOperation::InvoiceFulfill { deposit_id, amount, payment_id, witness, preimage, .. } => {
+            // Validate payment fulfill with descriptor witness
+            validate_payment_fulfill_by_id(deposit_id, *amount, payment_id, witness, preimage)
         }
         LedgerOperation::InvoiceFail { amount, .. } => {
-            let msg = SendingFailPaymentMsg {
-                pubkey: PublicKey::from_slice(&[2; 33]).unwrap(), // Placeholder
-                amount: *amount,
-                payment_id: [0; 32],
-                sequence_number: 0,
-            };
-            validate_sending_fail_payment_msg(&msg)
+            // Basic validation for payment fail
+            validate_payment_fail(*amount)
         }
-        LedgerOperation::InvoiceCredit { payment_hash, deposit_pubkey, amount, invoice_id, .. } => {
-            let msg = ReceivingCreditPaymentMsg {
-                payment_hash: *payment_hash,
-                deposit_pubkey: *deposit_pubkey,
-                amount: *amount,
-                invoice_id: invoice_id.clone(),
-                reserves_id: partner_pubkey.to_string(),
-                sequence_number: 0,
-            };
-            validate_receiving_credit_payment_msg(ctx, &msg, sender)
+        LedgerOperation::InvoiceCredit { payment_hash, deposit_id, amount, invoice_id, .. } => {
+            // Validate credit payment
+            if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
+                let ledger = ledger_arc.read().unwrap();
+                validate_credit_payment_by_id(&ledger, deposit_id, *amount, payment_hash, invoice_id)
+            } else {
+                Err(format!("No channel ledger found for sender {}", sender))
+            }
         }
         // Onchain operations
         LedgerOperation::OnchainCredit { .. } |
@@ -620,13 +619,14 @@ pub fn validate_ledger_operation<C: ValidationContext>(
             };
             validate_collateral_decrease_msg(ctx, &msg, sender)
         }
-        LedgerOperation::FeeCollect { pubkey, amount, block_height } => {
-            let msg = FeeCollectMsg {
-                pubkey: *pubkey,
-                amount: *amount,
-                block_height: *block_height,
-            };
-            validate_fee_collect_msg(ctx, &msg, sender)
+        LedgerOperation::FeeCollect { deposit_id, amount, block_height } => {
+            // Validate fee collection
+            if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
+                let ledger = ledger_arc.read().unwrap();
+                validate_fee_collect_by_id(&ledger, deposit_id, *amount, *block_height)
+            } else {
+                Err(format!("No channel ledger found for sender {}", sender))
+            }
         }
         LedgerOperation::LedgerClose => {
             let msg = LedgerCloseMsg {
@@ -1195,9 +1195,9 @@ mod tests {
         ledger.state.reserves.amount = 100_000;
 
         // Add a deposit with 80k balance - this requires reserves backing
-        let mut deposit = Deposit::new(deposit_pubkey, None);
+        let mut deposit = Deposit::from_pubkey(&deposit_pubkey, None);
         deposit.balance = 80_000;
-        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id.to_string(), ledger);
 
         // Try to decrease reserves below what's required to back deposits
@@ -1226,9 +1226,9 @@ mod tests {
             "tb1qtest".to_string(),
             0,
         );
-        let mut deposit = Deposit::new(deposit_pubkey, None);
+        let mut deposit = Deposit::from_pubkey(&deposit_pubkey, None);
         deposit.balance = 50_000; // Has balance
-        ledger.state.deposits.insert(deposit_pubkey, deposit);
+        ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id.to_string(), ledger);
 
         let msg = LedgerCloseMsg {

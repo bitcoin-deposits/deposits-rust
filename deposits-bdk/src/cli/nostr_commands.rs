@@ -52,6 +52,62 @@ async fn get_or_create_client(relay_url: &str) -> Result<Client, Box<dyn std::er
     Ok(client)
 }
 
+/// Relay's max events per request (strfry default)
+const RELAY_PAGE_SIZE: usize = 500;
+
+/// Fetch all events matching a filter using pagination.
+/// Works around relay's maxFilterLimit by fetching in batches using `until`.
+async fn fetch_all_events_paginated(
+    client: &Client,
+    base_filter: Filter,
+) -> Result<Vec<Event>, Box<dyn std::error::Error>> {
+    let mut all_events = Vec::new();
+    let mut until: Option<Timestamp> = None;
+    let mut seen_ids: HashSet<EventId> = HashSet::new();
+
+    loop {
+        // Build filter with pagination
+        let mut filter = base_filter.clone().limit(RELAY_PAGE_SIZE);
+        if let Some(ts) = until {
+            filter = filter.until(ts);
+        }
+
+        let events = client
+            .fetch_events(vec![filter], None)
+            .await
+            .map_err(|e| format!("Failed to fetch events: {}", e))?;
+
+        let batch_size = events.len();
+        let mut oldest_ts: Option<Timestamp> = None;
+
+        for event in events {
+            // Track oldest timestamp for next page
+            if oldest_ts.is_none() || event.created_at < oldest_ts.unwrap() {
+                oldest_ts = Some(event.created_at);
+            }
+
+            // Deduplicate across pages
+            if seen_ids.insert(event.id) {
+                all_events.push(event);
+            }
+        }
+
+        // Stop if we got fewer than page size (no more events)
+        if batch_size < RELAY_PAGE_SIZE {
+            break;
+        }
+
+        // Set until to oldest - 1 second for next page
+        if let Some(ts) = oldest_ts {
+            until = Some(Timestamp::from(ts.as_u64().saturating_sub(1)));
+        } else {
+            break;
+        }
+    }
+
+    Ok(all_events)
+}
+
 /// Handle nostr subcommands
 pub async fn nostr_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {
@@ -93,8 +149,8 @@ pub async fn nostr_list(args: &[String]) -> Result<(), Box<dyn std::error::Error
 
     let client = get_or_create_client(relay_url).await?;
 
-    // Fetch all ledger update events
-    let filter = Filter::new().kind(Kind::Custom(KIND_LEDGER_UPDATE));
+    // Fetch all ledger update events (high limit to get all history)
+    let filter = Filter::new().kind(Kind::Custom(KIND_LEDGER_UPDATE)).limit(50000);
 
     let events = client
         .fetch_events(vec![filter], None)
@@ -222,14 +278,14 @@ pub async fn nostr_events(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     let client = get_or_create_client(relay_url).await?;
 
-    // Fetch all deposits protocol events
+    // Fetch all deposits protocol events (high limit to ensure we get everything)
     let filter = Filter::new().kinds([
         Kind::Custom(KIND_LEDGER_UPDATE),
         Kind::Custom(KIND_LEDGER_REQUEST),
         Kind::Custom(KIND_LEDGER_RESPONSE),
         Kind::Custom(KIND_LEDGER_DISPUTE),
         Kind::Custom(KIND_RECOVERY_AGREE),
-    ]);
+    ]).limit(50000);
 
     let events = client
         .fetch_events(vec![filter], None)
@@ -474,7 +530,7 @@ pub async fn nostr_events(args: &[String]) -> Result<(), Box<dyn std::error::Err
 pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut ledger_id: Option<String> = None;
     let mut config_args = Vec::new();
-    let mut limit: usize = 500;
+    let mut limit: usize = 10000;  // High default to ensure we get all events including LedgerOpen
     let mut dry_run = false;
     let mut color_by_pk = false;
 
@@ -483,7 +539,7 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
         if args[i] == "--limit" {
             i += 1;
             if i < args.len() {
-                limit = args[i].parse().unwrap_or(500);
+                limit = args[i].parse().unwrap_or(10000);
             }
         } else if args[i] == "--dry-run" {
             dry_run = true;
@@ -518,20 +574,16 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     let client = get_or_create_client(relay_url).await?;
 
-    // Build filter
+    // Build base filter (without limit - pagination handles it)
     let mut filter = Filter::new()
-        .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .limit(limit);
+        .kind(Kind::Custom(KIND_LEDGER_UPDATE));
 
     if let Some(ref lid) = ledger_id {
         filter = filter.custom_tag(SingleLetterTag::lowercase(Alphabet::D), [lid.as_str()]);
     }
 
-    // Fetch events
-    let events = client
-        .fetch_events(vec![filter], None)
-        .await
-        .map_err(|e| format!("Failed to fetch events: {}", e))?;
+    // Fetch all events using pagination to work around relay limits
+    let events = fetch_all_events_paginated(&client, filter).await?;
 
     client.disconnect().await.ok();
 
@@ -539,6 +591,8 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
         println!("No ledger updates found.");
         return Ok(());
     }
+
+    println!("Fetched {} events from relay", events.len());
 
     // Group updates by ledger_id, sorted by sequence number
     let mut ledgers: BTreeMap<String, Vec<SignedLedgerUpdate>> = BTreeMap::new();
@@ -702,29 +756,37 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
             let invalid_style = "\x1b[1;5;7;91m";
             let invalid_reset = "\x1b[0m"; // Always reset after invalid style
 
-            // Helper to extract deposit_pubkey from an operation
-            fn get_deposit_pubkey(op: &LedgerOperation) -> Option<[u8; 33]> {
-                match op {
-                    LedgerOperation::DepositOpen { pubkey, .. } => Some(pubkey.serialize()),
-                    LedgerOperation::DepositClose { pubkey, .. } => Some(pubkey.serialize()),
-                    LedgerOperation::CollateralLock { deposit_pubkey, .. } => Some(deposit_pubkey.serialize()),
-                    LedgerOperation::OnchainCredit { deposit_pubkey, .. } => Some(deposit_pubkey.serialize()),
-                    LedgerOperation::OnchainLock { deposit_pubkey, .. } => Some(deposit_pubkey.serialize()),
-                    LedgerOperation::OnchainFail { deposit_pubkey, .. } => Some(deposit_pubkey.serialize()),
-                    LedgerOperation::OnchainFulfill { deposit_pubkey, .. } => Some(deposit_pubkey.serialize()),
-                    LedgerOperation::InvoiceCredit { deposit_pubkey, .. } => Some(deposit_pubkey.serialize()),
-                    LedgerOperation::InvoiceLock { pubkey, .. } => Some(pubkey.serialize()),
-                    LedgerOperation::InvoiceFail { pubkey, .. } => Some(pubkey.serialize()),
-                    LedgerOperation::InvoiceFulfill { pubkey, .. } => Some(pubkey.serialize()),
+            // Helper to extract deposit_id from an operation (16 bytes padded to 33 for color key)
+            fn get_deposit_id_key(op: &LedgerOperation) -> Option<[u8; 33]> {
+                let deposit_id = match op {
+                    LedgerOperation::DepositOpen { deposit_id, .. } => Some(*deposit_id),
+                    LedgerOperation::DepositClose { deposit_id, .. } => Some(*deposit_id),
+                    LedgerOperation::DepositUpdate { deposit_id, .. } => Some(*deposit_id),
+                    LedgerOperation::CollateralLock { deposit_id, .. } => Some(*deposit_id),
+                    LedgerOperation::OnchainCredit { deposit_id, .. } => Some(*deposit_id),
+                    LedgerOperation::OnchainLock { deposit_id, .. } => Some(*deposit_id),
+                    LedgerOperation::OnchainFail { deposit_id, .. } => Some(*deposit_id),
+                    LedgerOperation::OnchainFulfill { deposit_id, .. } => Some(*deposit_id),
+                    LedgerOperation::InvoiceCredit { deposit_id, .. } => Some(*deposit_id),
+                    LedgerOperation::InvoiceLock { deposit_id, .. } => Some(*deposit_id),
+                    LedgerOperation::InvoiceFail { deposit_id, .. } => Some(*deposit_id),
+                    LedgerOperation::InvoiceFulfill { deposit_id, .. } => Some(*deposit_id),
+                    LedgerOperation::FeeCollect { deposit_id, .. } => Some(*deposit_id),
                     _ => None,
-                }
+                };
+                deposit_id.map(|id| {
+                    let mut key = [0u8; 33];
+                    key[0] = 0x02; // Valid compressed pubkey prefix for coloring
+                    key[1..17].copy_from_slice(&id);
+                    key
+                })
             }
 
-            // Helper to get color key for an update (wallet pk or operator)
+            // Helper to get color key for an update (deposit id or operator)
             fn get_color_key(update: &SignedLedgerUpdate) -> [u8; 33] {
                 if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                    if let Some(wallet_pk) = get_deposit_pubkey(&op) {
-                        return wallet_pk;
+                    if let Some(deposit_key) = get_deposit_id_key(&op) {
+                        return deposit_key;
                     }
                 }
                 // Fall back to operator
@@ -1053,7 +1115,7 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
 pub async fn nostr_updates(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut ledger_id: Option<String> = None;
     let mut config_args = Vec::new();
-    let mut limit: usize = 500;
+    let mut limit: usize = 10000;
     let mut dry_run = false;
 
     let mut i = 0;
@@ -1061,7 +1123,7 @@ pub async fn nostr_updates(args: &[String]) -> Result<(), Box<dyn std::error::Er
         if args[i] == "--limit" {
             i += 1;
             if i < args.len() {
-                limit = args[i].parse().unwrap_or(500);
+                limit = args[i].parse().unwrap_or(10000);
             }
         } else if args[i] == "--dry-run" {
             dry_run = true;
@@ -1211,14 +1273,14 @@ pub async fn nostr_updates(args: &[String]) -> Result<(), Box<dyn std::error::Er
 pub async fn nostr_validate(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut ledger_id: Option<String> = None;
     let mut config_args = Vec::new();
-    let mut limit: usize = 200;
+    let mut limit: usize = 10000;
 
     let mut i = 0;
     while i < args.len() {
         if args[i] == "--limit" {
             i += 1;
             if i < args.len() {
-                limit = args[i].parse().unwrap_or(200);
+                limit = args[i].parse().unwrap_or(10000);
             }
         } else if args[i].starts_with("--") {
             config_args.push(args[i].clone());
@@ -2567,33 +2629,39 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                         ),
                     )
                 }
-                LedgerOperation::DepositOpen { pubkey, .. } => {
-                    let pk_bytes = pubkey.serialize();
+                LedgerOperation::DepositOpen { deposit_id, .. } => {
                     (
                         "DepositOpen",
                         format!(
-                            "pk:{:02x}{:02x}{:02x}{:02x}",
-                            pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3]
+                            "id:{:02x}{:02x}{:02x}{:02x}",
+                            deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]
                         ),
                     )
                 }
-                LedgerOperation::DepositClose { pubkey, .. } => {
-                    let pk_bytes = pubkey.serialize();
+                LedgerOperation::DepositClose { deposit_id, .. } => {
                     (
                         "DepositClose",
                         format!(
-                            "pk:{:02x}{:02x}{:02x}{:02x}",
-                            pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3]
+                            "id:{:02x}{:02x}{:02x}{:02x}",
+                            deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]
                         ),
                     )
                 }
-                LedgerOperation::DepositUpdate { pubkey, .. } => {
-                    let pk_bytes = pubkey.serialize();
+                LedgerOperation::DepositUpdate { deposit_id, .. } => {
                     (
                         "DepositUpdate",
                         format!(
-                            "pk:{:02x}{:02x}{:02x}{:02x}",
-                            pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3]
+                            "id:{:02x}{:02x}{:02x}{:02x}",
+                            deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]
+                        ),
+                    )
+                }
+                LedgerOperation::DepositKeyRotate { deposit_id, .. } => {
+                    (
+                        "DepositKeyRotate",
+                        format!(
+                            "id:{:02x}{:02x}{:02x}{:02x}",
+                            deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]
                         ),
                     )
                 }
@@ -2653,29 +2721,27 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                     )
                 }
                 LedgerOperation::CollateralLock {
-                    deposit_pubkey,
+                    deposit_id,
                     amount,
                     lock_until_block,
                     ..
                 } => {
-                    let pk_bytes = deposit_pubkey.serialize();
                     (
                         "CollateralLock",
                         format!(
-                            "pk:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  until_block:{}",
-                            pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3], amount, lock_until_block
+                            "id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  until_block:{}",
+                            deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3], amount, lock_until_block
                         ),
                     )
                 }
                 LedgerOperation::CollateralIncrease { .. } => ("CollateralIncrease", String::new()),
                 LedgerOperation::CollateralDecrease { .. } => ("CollateralDecrease", String::new()),
                 LedgerOperation::OnchainCredit {
-                    deposit_pubkey,
+                    deposit_id,
                     amount,
                     funding_address,
                     ..
                 } => {
-                    let pk_bytes = deposit_pubkey.serialize();
                     let addr_short = if funding_address.len() > 20 {
                         format!(
                             "{}..{}",
@@ -2688,19 +2754,18 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                     (
                         "OnchainCredit",
                         format!(
-                            "pk:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  addr:{}",
-                            pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3], amount, addr_short
+                            "id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  addr:{}",
+                            deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3], amount, addr_short
                         ),
                     )
                 }
                 LedgerOperation::OnchainLock {
-                    deposit_pubkey,
+                    deposit_id,
                     amount,
                     destination_address,
                     withdrawal_id,
                     ..
                 } => {
-                    let pk_bytes = deposit_pubkey.serialize();
                     let addr_short = if destination_address.len() > 20 {
                         format!(
                             "{}..{}",
@@ -2713,11 +2778,11 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                     (
                         "OnchainLock",
                         format!(
-                            "pk:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  wdrl:{}  addr:{}",
-                            pk_bytes[0],
-                            pk_bytes[1],
-                            pk_bytes[2],
-                            pk_bytes[3],
+                            "id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  wdrl:{}  addr:{}",
+                            deposit_id[0],
+                            deposit_id[1],
+                            deposit_id[2],
+                            deposit_id[3],
                             amount,
                             hex::encode(&withdrawal_id[..4]),
                             addr_short
@@ -2725,39 +2790,37 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                     )
                 }
                 LedgerOperation::OnchainFail {
-                    deposit_pubkey,
+                    deposit_id,
                     withdrawal_id,
                     ..
                 } => {
-                    let pk_bytes = deposit_pubkey.serialize();
                     (
                         "OnchainFail",
                         format!(
-                            "pk:{:02x}{:02x}{:02x}{:02x}  wdrl:{}",
-                            pk_bytes[0],
-                            pk_bytes[1],
-                            pk_bytes[2],
-                            pk_bytes[3],
+                            "id:{:02x}{:02x}{:02x}{:02x}  wdrl:{}",
+                            deposit_id[0],
+                            deposit_id[1],
+                            deposit_id[2],
+                            deposit_id[3],
                             hex::encode(&withdrawal_id[..4])
                         ),
                     )
                 }
                 LedgerOperation::OnchainFulfill {
-                    deposit_pubkey,
+                    deposit_id,
                     withdrawal_id,
                     amount,
                     txid,
                     ..
                 } => {
-                    let pk_bytes = deposit_pubkey.serialize();
                     (
                         "OnchainFulfill",
                         format!(
-                            "pk:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  wdrl:{}  txn:{}",
-                            pk_bytes[0],
-                            pk_bytes[1],
-                            pk_bytes[2],
-                            pk_bytes[3],
+                            "id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  wdrl:{}  txn:{}",
+                            deposit_id[0],
+                            deposit_id[1],
+                            deposit_id[2],
+                            deposit_id[3],
                             amount,
                             hex::encode(&withdrawal_id[..4]),
                             hex::encode(&txid[..4])
@@ -2765,28 +2828,26 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                     )
                 }
                 LedgerOperation::InvoiceCredit {
-                    deposit_pubkey,
+                    deposit_id,
                     amount,
                     ..
                 } => {
-                    let pk_bytes = deposit_pubkey.serialize();
                     (
                         "InvoiceCredit",
                         format!(
-                            "pk:{:02x}{:02x}{:02x}{:02x}  amt:{} msat",
-                            pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3], amount
+                            "id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat",
+                            deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3], amount
                         ),
                     )
                 }
                 LedgerOperation::InvoiceLock {
-                    pubkey, amount, ..
+                    deposit_id, amount, ..
                 } => {
-                    let pk_bytes = pubkey.serialize();
                     (
                         "InvoiceLock",
                         format!(
-                            "pk:{:02x}{:02x}{:02x}{:02x}  amt:{} msat",
-                            pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3], amount
+                            "id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat",
+                            deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3], amount
                         ),
                     )
                 }

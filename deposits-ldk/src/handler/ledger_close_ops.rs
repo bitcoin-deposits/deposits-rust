@@ -31,7 +31,7 @@ where
 {
     /// Remove a deposit entirely (when balance is zero)
     /// This sends a LedgerRemoveDeposit message to the partner to create a proper ledger update
-    pub fn remove_deposit(&self, partner_node_id: PublicKey, deposit_pubkey: PublicKey) -> Result<(), DepositsError> {
+    pub fn remove_deposit(&self, partner_node_id: PublicKey, deposit_id: deposits_core::types::DepositId) -> Result<(), DepositsError> {
         // First validate that the deposit exists and has zero balance
         let ledgers = self.ledgers.lock().unwrap();
 
@@ -39,7 +39,7 @@ where
             let ledger = ledger_arc.read().unwrap();
 
             // Ensure deposit balance is zero before removing
-            if let Some(deposit) = ledger.state.deposits.get(&deposit_pubkey) {
+            if let Some(deposit) = ledger.state.deposits.get(&deposit_id) {
                 if deposit.balance > 0 {
                     return Err(DepositsError::ProtocolViolation {
                         violation_type: "non_zero_balance".to_string(),
@@ -69,14 +69,14 @@ where
             let update_msg = LedgerUpdateMsg::new_with_operation(
                 self.our_node_id,    // operator
                 partner_node_id.to_string(),     // partner
-                LedgerOperation::DepositClose { pubkey: deposit_pubkey },
+                LedgerOperation::DepositClose { deposit_id },
             );
             let message = DepositsMessage::LedgerUpdate(update_msg);
 
             let message_hash = self.calculate_message_hash(&message);
             let message_for_broadcast = message.clone();
 
-            log_info!(self.logger, "Sending DepositClose message for deposit {} to partner {}", deposit_pubkey, partner_node_id);
+            log_info!(self.logger, "Sending DepositClose message for deposit {:02x?} to partner {}", &deposit_id[..4], partner_node_id);
 
             // Send message and wait for acknowledgment (with 5 second timeout)
             self.send_message_with_oneshot_ack(partner_node_id, message, 30000)?;
@@ -108,7 +108,7 @@ where
                 log_error!(self.logger, "Failed to broadcast after update: {}", e);
             }
 
-            log_info!(self.logger, "Successfully removed deposit {} from channel with {}", deposit_pubkey, partner_node_id);
+            log_info!(self.logger, "Successfully removed deposit {:02x?} from channel with {}", &deposit_id[..4], partner_node_id);
             Ok(())
         } else {
             Err(DepositsError::DepositNotFound)
@@ -348,16 +348,16 @@ where
         Ok(())
     }
 
-    /// Get all active depositors (depositors with non-zero balances)
-    pub fn get_active_depositors(&self) -> Vec<PublicKey> {
+    /// Get all active deposit IDs (deposits with non-zero balances)
+    pub fn get_active_depositors(&self) -> Vec<deposits_core::types::DepositId> {
         let mut active_depositors = Vec::new();
         let ledgers = self.ledgers.lock().unwrap();
 
         for ledger_arc in ledgers.values() {
             let ledger = ledger_arc.read().unwrap();
-            for (depositor_pubkey, deposit) in &ledger.state.deposits {
+            for (deposit_id, deposit) in &ledger.state.deposits {
                 if deposit.balance > 0 {
-                    active_depositors.push(*depositor_pubkey);
+                    active_depositors.push(*deposit_id);
                 }
             }
         }
@@ -367,16 +367,16 @@ where
 
     /// Credit a deposit balance (production method)
     /// This would typically be called when a Lightning payment is received for a deposit
-    pub fn credit_deposit_balance(&self, partner_node_id: PublicKey, deposit_pubkey: PublicKey, amount: u64) -> Result<(), DepositsError> {
+    pub fn credit_deposit_balance(&self, partner_node_id: PublicKey, deposit_id: deposits_core::types::DepositId, amount: u64) -> Result<(), DepositsError> {
         let ledgers = self.ledgers.lock().unwrap();
 
         if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
             let mut ledger = ledger_arc.write().unwrap();
 
             // Direct balance update (for testing/internal use)
-            if let Some(deposit) = ledger.state.deposits.get_mut(&deposit_pubkey) {
+            if let Some(deposit) = ledger.state.deposits.get_mut(&deposit_id) {
                 deposit.balance += amount;
-                log_info!(self.logger, "Credited {} msat to deposit {} (reserves validated)", amount, deposit_pubkey);
+                log_info!(self.logger, "Credited {} msat to deposit {:02x?} (reserves validated)", amount, &deposit_id[..4]);
                 Ok(())
             } else {
                 Err(DepositsError::DepositNotFound)

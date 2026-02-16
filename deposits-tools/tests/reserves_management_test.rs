@@ -6,10 +6,17 @@ mod tests {
     use deposits_ldk::handler::messages::{DepositsMessage, LedgerUpdateMsg, LedgerOperation, LedgerUpdateMsgExt};
     use deposits_core::DepositsError;
     use deposits_core::constants::MIN_RESERVES_RATIO_PERCENT;
+    use deposits_core::types::compute_deposit_id;
     use ldk_node::bitcoin::secp256k1::{Secp256k1, SecretKey, PublicKey};
     use ldk_node::bitcoin::secp256k1::rand::rngs::OsRng;
-    use ldk_node::bitcoin::{Address, Network};
+    use ldk_node::bitcoin::Address;
     use ldk_node::bitcoin::address::NetworkUnchecked;
+
+    /// Compute deposit_id from pubkey
+    fn deposit_id_from_pubkey(pubkey: &PublicKey) -> [u8; 16] {
+        let descriptor = format!("pk({})", hex::encode(pubkey.serialize()));
+        compute_deposit_id(&descriptor)
+    }
 
     /// Helper to create a unique hash from an integer
     fn hash_from_int(n: u64) -> [u8; 32] {
@@ -67,7 +74,8 @@ mod tests {
         println!("   Required reserves: {} sats ({}% of {})", required_reserves, MIN_RESERVES_RATIO_PERCENT, balance_amount);
         println!("   Current reserves: {} sats", ledger.reserves.amount);
 
-        let result = ledger.add_balance_to_deposit(alice_deposit, balance_amount);
+        let alice_deposit_id = deposit_id_from_pubkey(&alice_deposit);
+        let result = ledger.add_balance_to_deposit(alice_deposit_id, balance_amount);
         assert!(result.is_err(), "Should reject balance increase without adequate reserves");
 
         if let Err(DepositsError::InsufficientReserves { required, available }) = result {
@@ -92,7 +100,7 @@ mod tests {
         ledger.mark_committed_to_channel(hash_from_int(3)); // Allow changes
 
         // Now balance increase should work
-        ledger.add_balance_to_deposit(alice_deposit, balance_amount).expect("Should add balance with adequate reserves");
+        ledger.add_balance_to_deposit(alice_deposit_id, balance_amount).expect("Should add balance with adequate reserves");
 
         let status = ledger.get_reserves_status();
         assert_eq!(status.total_deposit_balances, balance_amount);
@@ -110,7 +118,7 @@ mod tests {
         ledger.mark_committed_to_channel(hash_from_int(4)); // Allow changes
 
         let additional_balance = 50_000; // 50k sats more
-        let result = ledger.add_balance_to_deposit(alice_deposit, additional_balance);
+        let result = ledger.add_balance_to_deposit(alice_deposit_id, additional_balance);
         assert!(result.is_err(), "Should reject additional balance without more reserves");
 
         if let Err(DepositsError::InsufficientReserves { required, available }) = result {
@@ -136,7 +144,7 @@ mod tests {
         ledger.mark_committed_to_channel(hash_from_int(6)); // Allow changes
 
         // Now additional balance should work
-        ledger.add_balance_to_deposit(alice_deposit, additional_balance).expect("Should add balance with excess reserves");
+        ledger.add_balance_to_deposit(alice_deposit_id, additional_balance).expect("Should add balance with excess reserves");
 
         let final_status = ledger.get_reserves_status();
         let final_ratio = (final_status.current_amount * 100) / final_status.total_deposit_balances;
@@ -161,7 +169,8 @@ mod tests {
 
         // Try to add balance to Bob without more reserves
         let bob_balance = 200_000; // 200k sats
-        let result = ledger.add_balance_to_deposit(bob_deposit, bob_balance);
+        let bob_deposit_id = deposit_id_from_pubkey(&bob_deposit);
+        let result = ledger.add_balance_to_deposit(bob_deposit_id, bob_balance);
 
         // Should fail because total reserves need to cover Alice + Bob balances
         assert!(result.is_err(), "Should require more reserves for second deposit balance");
@@ -182,7 +191,7 @@ mod tests {
         ledger.mark_committed_to_channel(hash_from_int(10)); // Allow changes
 
         // Now Bob's balance should work
-        ledger.add_balance_to_deposit(bob_deposit, bob_balance).expect("Should add Bob's balance with adequate reserves");
+        ledger.add_balance_to_deposit(bob_deposit_id, bob_balance).expect("Should add Bob's balance with adequate reserves");
 
         let multi_deposit_status = ledger.get_reserves_status();
         assert_eq!(multi_deposit_status.deposit_count, 2, "Should have two deposits");
@@ -237,7 +246,8 @@ mod tests {
         ))).unwrap();
         ledger.mark_committed_to_channel(hash_from_int(2));
 
-        ledger.add_balance_to_deposit(deposit_key, deposit_balance).unwrap();
+        let deposit_key_id = deposit_id_from_pubkey(&deposit_key);
+        ledger.add_balance_to_deposit(deposit_key_id, deposit_balance).unwrap();
         ledger.mark_committed_to_channel(hash_from_int(3));
 
         println!("   Initial: {} sats deposits, {} sats reserves", deposit_balance, initial_reserves);

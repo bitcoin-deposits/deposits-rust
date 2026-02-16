@@ -1536,6 +1536,7 @@ impl Wallet {
             block_height: Mutex::new(800_000),
             block_hash: Mutex::new([0u8; 32]),
             data_dir,
+            address_index: Mutex::new(0),
         }
     }
 }

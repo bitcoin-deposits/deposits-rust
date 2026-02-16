@@ -364,6 +364,7 @@ fn test_collateral_attestation_signature_roundtrip() {
     let attestation = CollateralAttestationMsg {
         operator,
         quorum_member,
+        collateral_ledger_id: "test_ledger".to_string(),
         amount,
         block_height,
         lock_until_block: 0,
@@ -404,6 +405,7 @@ fn test_collateral_attestation_available_collateral() {
     let attestation1 = CollateralAttestationMsg {
         operator,
         quorum_member,
+        collateral_ledger_id: "test_ledger".to_string(),
         amount: 100_000,
         block_height: 850_000,
         lock_until_block: 0,
@@ -416,6 +418,7 @@ fn test_collateral_attestation_available_collateral() {
     let attestation2 = CollateralAttestationMsg {
         operator,
         quorum_member,
+        collateral_ledger_id: "test_ledger".to_string(),
         amount: 0,
         block_height: 850_000,
         lock_until_block: 0,
@@ -428,6 +431,7 @@ fn test_collateral_attestation_available_collateral() {
     let attestation3 = CollateralAttestationMsg {
         operator,
         quorum_member,
+        collateral_ledger_id: "test_ledger".to_string(),
         amount: 30_000,
         block_height: 850_000,
         lock_until_block: 0,
@@ -532,17 +536,17 @@ fn test_broadcast_uncredited_payment_accusation_with_ledger() {
     );
 
     // Add deposit with cosigned invoice (required for fraud proof validation)
-    let mut deposit = deposits_core::Deposit::new(deposit_pubkey, None);
+    let mut deposit = deposits_core::Deposit::from_pubkey(&deposit_pubkey, None);
     deposit.balance = 100_000;
     deposit.invoices = vec![Invoice {
         id: hex::encode(&payment_hash),
         payment_hash,
         amount: 50_000,
         expires: u64::MAX,
-        assigned_deposit: deposit_pubkey,
+        assigned_deposit: deposit.deposit_id,
         bolt11: "lnbc500n1test".to_string(),
     }.into()];
-    ledger.state.deposits.insert(deposit_pubkey, deposit);
+    ledger.state.deposits.insert(deposit.deposit_id, deposit);
 
     // Add ledger to handler
     {
@@ -619,6 +623,16 @@ fn test_broadcast_uncredited_payment_accusation_broadcasts_to_quorum_members() {
     let collateral2_secret = SecretKey::from_slice(&[5; 32]).unwrap();
     let collateral2 = PublicKey::from_secret_key(&secp, &collateral2_secret);
 
+    // Create QuorumMember structs
+    let quorum_member1 = deposits_core::types::QuorumMember {
+        pubkey: collateral1,
+        ledger_id: "collateral_ledger_1".to_string(),
+    };
+    let quorum_member2 = deposits_core::types::QuorumMember {
+        pubkey: collateral2,
+        ledger_id: "collateral_ledger_2".to_string(),
+    };
+
     // Create valid preimage and payment_hash first (needed for invoice)
     let preimage = [0x42; 32];
     let payment_hash = *sha256::Hash::hash(&preimage).as_byte_array();
@@ -629,23 +643,23 @@ fn test_broadcast_uncredited_payment_accusation_broadcasts_to_quorum_members() {
         operator,
         our_node_id.to_string(),
         LedgerRole::Operator,
-        vec![collateral1, collateral2],
+        vec![quorum_member1, quorum_member2],
         "test_address".to_string(),
         0, // genesis_block: test value
     );
 
     // Add deposit with cosigned invoice (required for fraud proof validation)
-    let mut deposit = deposits_core::Deposit::new(deposit_pubkey, None);
+    let mut deposit = deposits_core::Deposit::from_pubkey(&deposit_pubkey, None);
     deposit.balance = 100_000;
     deposit.invoices = vec![Invoice {
         id: hex::encode(&payment_hash),
         payment_hash,
         amount: 100_000,
         expires: u64::MAX,
-        assigned_deposit: deposit_pubkey,
+        assigned_deposit: deposit.deposit_id,
         bolt11: "lnbc1m1test".to_string(),
     }.into()];
-    ledger.state.deposits.insert(deposit_pubkey, deposit);
+    ledger.state.deposits.insert(deposit.deposit_id, deposit);
 
     // Add ledger to handler
     {
@@ -721,10 +735,10 @@ fn test_fraud_proof_rejected_without_cosigned_invoice() {
     );
 
     // Add deposit without any invoices
-    let mut deposit = deposits_core::Deposit::new(deposit_pubkey, None);
+    let mut deposit = deposits_core::Deposit::from_pubkey(&deposit_pubkey, None);
     deposit.balance = 100_000;
     // No cosigned invoices!
-    ledger.state.deposits.insert(deposit_pubkey, deposit);
+    ledger.state.deposits.insert(deposit.deposit_id, deposit);
 
     // Add ledger to handler
     {
@@ -785,17 +799,18 @@ fn test_fraud_proof_rejected_when_already_credited() {
     );
 
     // Add deposit with a cosigned invoice
-    let mut deposit = deposits_core::Deposit::new(deposit_pubkey, None);
+    let mut deposit = deposits_core::Deposit::from_pubkey(&deposit_pubkey, None);
+    let deposit_id = deposit.deposit_id; // Save before move
     deposit.balance = 100_000;
     deposit.invoices = vec![Invoice {
         id: hex::encode(&payment_hash),
         payment_hash,
         amount: 50_000,
         expires: u64::MAX,
-        assigned_deposit: deposit_pubkey,
+        assigned_deposit: deposit_id,
         bolt11: "lnbc500n1test".to_string(),
     }.into()];
-    ledger.state.deposits.insert(deposit_pubkey, deposit);
+    ledger.state.deposits.insert(deposit_id, deposit);
 
     // Add a InvoiceCredit to the ledger updates (simulating payment was credited)
     // sequence_number must be 0 (first update in empty ledger)
@@ -805,7 +820,7 @@ fn test_fraud_proof_rejected_when_already_credited() {
         LedgerOperation::InvoiceCredit {
             payment_hash,
             amount: 50_000,
-            deposit_pubkey,
+            deposit_id,
             invoice_id: hex::encode(&payment_hash),
             sequence_number: 0, // Must match ledger.history.len()
         },
@@ -902,17 +917,17 @@ fn test_fraud_proof_accepted_with_valid_cosigned_invoice() {
     );
 
     // Add deposit with a cosigned invoice
-    let mut deposit = deposits_core::Deposit::new(deposit_pubkey, None);
+    let mut deposit = deposits_core::Deposit::from_pubkey(&deposit_pubkey, None);
     deposit.balance = 100_000;
     deposit.invoices = vec![Invoice {
         id: hex::encode(&payment_hash),
         payment_hash,
         amount: 50_000,
         expires: u64::MAX,
-        assigned_deposit: deposit_pubkey,
+        assigned_deposit: deposit.deposit_id,
         bolt11: "lnbc500n1test".to_string(),
     }.into()];
-    ledger.state.deposits.insert(deposit_pubkey, deposit);
+    ledger.state.deposits.insert(deposit.deposit_id, deposit);
 
     // Add ledger to handler (no credit payment added)
     {
@@ -990,6 +1005,16 @@ fn test_received_fraud_proof_forwards_to_quorum_members() {
     let collateral2_secret = SecretKey::from_slice(&[5; 32]).unwrap();
     let collateral2 = PublicKey::from_secret_key(&secp, &collateral2_secret);
 
+    // Create QuorumMember structs
+    let quorum_member1 = deposits_core::types::QuorumMember {
+        pubkey: collateral1,
+        ledger_id: "collateral_ledger_1".to_string(),
+    };
+    let quorum_member2 = deposits_core::types::QuorumMember {
+        pubkey: collateral2,
+        ledger_id: "collateral_ledger_2".to_string(),
+    };
+
     // Deposit pubkey from original accusation
     let deposit_secret = SecretKey::from_slice(&[6; 32]).unwrap();
     let deposit_pubkey = PublicKey::from_secret_key(&secp, &deposit_secret);
@@ -1004,7 +1029,7 @@ fn test_received_fraud_proof_forwards_to_quorum_members() {
         operator,
         our_node_id.to_string(),
         LedgerRole::Operator,
-        vec![collateral1, collateral2], // Our quorum members
+        vec![quorum_member1, quorum_member2], // Our quorum members
         "test_address".to_string(),
         0, // genesis_block: test value
     );
@@ -1091,9 +1116,9 @@ fn test_credit_payment_within_reserves_succeeds() {
     ledger.state.received_collateral_amount = 100_000; // 100k sats collateral
 
     // Add deposit with 50k balance
-    let mut deposit = deposits_core::Deposit::new(deposit_pubkey, None);
+    let mut deposit = deposits_core::Deposit::from_pubkey(&deposit_pubkey, None);
     deposit.balance = 50_000;
-    ledger.state.deposits.insert(deposit_pubkey, deposit);
+    ledger.state.deposits.insert(deposit.deposit_id, deposit);
 
     // Add ledger to handler
     {
@@ -1147,9 +1172,9 @@ fn test_credit_payment_exceeds_reserves_fails() {
     ledger.state.reserves.amount =50_000; // Only 50k sats reserves
 
     // Add deposit with 30k balance
-    let mut deposit = deposits_core::Deposit::new(deposit_pubkey, None);
+    let mut deposit = deposits_core::Deposit::from_pubkey(&deposit_pubkey, None);
     deposit.balance = 30_000;
-    ledger.state.deposits.insert(deposit_pubkey, deposit);
+    ledger.state.deposits.insert(deposit.deposit_id, deposit);
 
     // Add ledger to handler
     {
@@ -1194,7 +1219,11 @@ fn test_credit_payment_exceeds_collateral_fails() {
     let deposit_secret = SecretKey::from_slice(&[3; 32]).unwrap();
     let deposit_pubkey = PublicKey::from_secret_key(&secp, &deposit_secret);
     let quorum_secret = SecretKey::from_slice(&[4; 32]).unwrap();
-    let quorum_member = PublicKey::from_secret_key(&secp, &quorum_secret);
+    let quorum_member_pubkey = PublicKey::from_secret_key(&secp, &quorum_secret);
+    let quorum_member = deposits_core::types::QuorumMember {
+        pubkey: quorum_member_pubkey,
+        ledger_id: "collateral_ledger".to_string(),
+    };
 
     // Create ledger with high reserves but low collateral
     // Note: Must have quorum members for collateral check to apply
@@ -1210,9 +1239,9 @@ fn test_credit_payment_exceeds_collateral_fails() {
     ledger.state.received_collateral_amount = 20_000; // But only 20k collateral
 
     // Add deposit with 10k balance
-    let mut deposit = deposits_core::Deposit::new(deposit_pubkey, None);
+    let mut deposit = deposits_core::Deposit::from_pubkey(&deposit_pubkey, None);
     deposit.balance = 10_000;
-    ledger.state.deposits.insert(deposit_pubkey, deposit);
+    ledger.state.deposits.insert(deposit.deposit_id, deposit);
 
     // Add ledger to handler
     {
@@ -1258,7 +1287,11 @@ fn test_credit_payment_within_collateral_succeeds() {
     let deposit_secret = SecretKey::from_slice(&[3; 32]).unwrap();
     let deposit_pubkey = PublicKey::from_secret_key(&secp, &deposit_secret);
     let quorum_secret = SecretKey::from_slice(&[4; 32]).unwrap();
-    let quorum_member = PublicKey::from_secret_key(&secp, &quorum_secret);
+    let quorum_member_pubkey = PublicKey::from_secret_key(&secp, &quorum_secret);
+    let quorum_member = deposits_core::types::QuorumMember {
+        pubkey: quorum_member_pubkey,
+        ledger_id: "collateral_ledger".to_string(),
+    };
 
     // Create ledger with sufficient reserves AND collateral
     // Note: Include quorum member to ensure collateral check is performed
@@ -1274,9 +1307,9 @@ fn test_credit_payment_within_collateral_succeeds() {
     ledger.state.received_collateral_amount = 100_000; // Full collateral backing
 
     // Add deposit with 10k balance
-    let mut deposit = deposits_core::Deposit::new(deposit_pubkey, None);
+    let mut deposit = deposits_core::Deposit::from_pubkey(&deposit_pubkey, None);
     deposit.balance = 10_000;
-    ledger.state.deposits.insert(deposit_pubkey, deposit);
+    ledger.state.deposits.insert(deposit.deposit_id, deposit);
 
     // Add ledger to handler
     {
@@ -1330,10 +1363,10 @@ fn test_fee_collect_on_schedule_succeeds() {
     );
 
     // Add deposit with fee schedule
-    let mut deposit = deposits_core::Deposit::new(deposit_pubkey, Some(FeeStructure::new(1000, 10, 144).into())); // Fee collection every 144 blocks (~1 day)
+    let mut deposit = deposits_core::Deposit::from_pubkey(&deposit_pubkey, Some(FeeStructure::new(1000, 10, 144))); // Fee collection every 144 blocks (~1 day)
     deposit.balance = 100_000;
     deposit.last_fee_assessment = 1000; // Last assessed at block 1000
-    ledger.state.deposits.insert(deposit_pubkey, deposit);
+    ledger.state.deposits.insert(deposit.deposit_id, deposit);
 
     // Add ledger to handler
     {
@@ -1379,10 +1412,10 @@ fn test_fee_collect_too_early_fails() {
     );
 
     // Add deposit with fee schedule
-    let mut deposit = deposits_core::Deposit::new(deposit_pubkey, Some(FeeStructure::new(1000, 10, 144).into()));
+    let mut deposit = deposits_core::Deposit::from_pubkey(&deposit_pubkey, Some(FeeStructure::new(1000, 10, 144)));
     deposit.balance = 100_000;
     deposit.last_fee_assessment = 1000; // Last assessed at block 1000
-    ledger.state.deposits.insert(deposit_pubkey, deposit);
+    ledger.state.deposits.insert(deposit.deposit_id, deposit);
 
     // Add ledger to handler
     {
@@ -1429,10 +1462,10 @@ fn test_fee_collect_after_schedule_succeeds() {
     );
 
     // Add deposit with fee schedule
-    let mut deposit = deposits_core::Deposit::new(deposit_pubkey, Some(FeeStructure::new(1000, 10, 144).into()));
+    let mut deposit = deposits_core::Deposit::from_pubkey(&deposit_pubkey, Some(FeeStructure::new(1000, 10, 144)));
     deposit.balance = 100_000;
     deposit.last_fee_assessment = 1000;
-    ledger.state.deposits.insert(deposit_pubkey, deposit);
+    ledger.state.deposits.insert(deposit.deposit_id, deposit);
 
     // Add ledger to handler
     {

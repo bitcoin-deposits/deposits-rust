@@ -136,8 +136,8 @@ where
     /// Outbound message queue (messages to send to peers)
     pub(crate) outbound_messages: Mutex<HashMap<PublicKey, Vec<DepositsMessage>>>,
 
-    /// Track individual payment locks (payment_id -> (deposit_pubkey, amount))
-    pub(super) payment_locks: Mutex<HashMap<[u8; 32], (PublicKey, u64)>>,
+    /// Track individual payment locks (payment_id -> (deposit_id, amount))
+    pub(super) payment_locks: Mutex<HashMap<[u8; 32], (deposits_core::types::DepositId, u64)>>,
 
     /// Store ledger private keys (reserves_id -> secret_key) for operator-created ledgers
     /// Only the operator stores the private key for their ledgers

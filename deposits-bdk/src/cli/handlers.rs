@@ -91,11 +91,15 @@ pub async fn process_deposit_open_request(
         return (false, None, Some(format!("Fee validation failed: {}", e)));
     }
 
+    // Convert deposit_pubkey to descriptor
+    let descriptor = format!("pk({})", deposit_pubkey_str);
+
     // Open the deposit with co-signing
-    match node.open_deposit(ledger_id, deposit_pubkey, Some(fees)).await {
+    match node.open_deposit(ledger_id, &descriptor, Some(fees)).await {
         Ok(deposit) => {
             let result = serde_json::json!({
                 "deposit_pubkey": deposit_pubkey_str,
+                "deposit_id": hex::encode(deposit.deposit_id),
                 "balance": deposit.balance,
                 "fees": {
                     "fixed": deposit.fees.annualized_fixed,
@@ -276,9 +280,10 @@ pub async fn process_collateral_lock_request(
         Err(e) => return (false, None, Some(format!("Invalid deposit_secret: {}", e))),
     };
 
-    // Derive the deposit pubkey from the secret
+    // Derive the deposit pubkey from the secret and create descriptor
     let secp = Secp256k1::new();
     let deposit_pubkey = PublicKey::from_secret_key(&secp, &deposit_secret);
+    let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
 
     // Extract required parameters
     let amount_msats = match request.params.get("amount_msats").and_then(|v| v.as_u64()) {
@@ -312,7 +317,7 @@ pub async fn process_collateral_lock_request(
     // Lock the collateral (now includes co-signing and broadcast)
     match node.lock_collateral(
         ledger_id,
-        deposit_pubkey,
+        &descriptor,
         &deposit_secret,
         amount_msats,
         lock_until_block,
@@ -409,28 +414,38 @@ pub async fn process_deposit_withdraw_request(
         *sha256::Hash::hash(&data).as_byte_array()
     };
 
-    // Create the withdrawal signature (same as withdraw_request CLI)
-    let signature = match deposits_core::create_withdrawal_signature(
-        &deposit_secret,
+    // Compute deposit_id from descriptor
+    let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
+    let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
+
+    // Create the withdrawal signature
+    use bitcoin::secp256k1::Message;
+    use bitcoin::hashes::{sha256, Hash};
+    let signing_message = deposits_core::types::OnChainWithdrawal::signing_message(
         &nonce,
-        &deposit_pubkey,
+        &deposit_id,
         &destination_address,
         amount_sats,
         fee_sats,
-    ) {
-        Ok(sig) => sig,
-        Err(e) => return (false, None, Some(format!("Failed to create signature: {:?}", e))),
-    };
+    );
+    let msg_hash = sha256::Hash::hash(signing_message.as_bytes());
+    let msg = Message::from_digest(*msg_hash.as_byte_array());
+    let secp = Secp256k1::signing_only();
+    let sig = secp.sign_ecdsa(&msg, &deposit_secret);
+    let signature: [u8; 64] = sig.serialize_compact();
+
+    // Create witness from signature
+    let depositor_witness = deposits_core::types::DescriptorWitness { stack: vec![signature.to_vec()] };
 
     // Lock the withdrawal with co-signing
     match node.lock_withdrawal(
         ledger_id,
-        deposit_pubkey,
+        deposit_id,
         destination_address.clone(),
         amount_sats,
         fee_sats,
         nonce,
-        signature,
+        depositor_witness,
         None, // memo
     ).await {
         Ok(result) => {

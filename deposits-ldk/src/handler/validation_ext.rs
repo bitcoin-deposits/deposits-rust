@@ -243,10 +243,10 @@ fn apply_update_to_replay_state(
 /// Minimal ledger state for replay validation
 /// Only tracks what's needed for conformance checking
 struct ReplayLedgerState {
-    /// Map of deposit pubkey -> balance
-    deposits: HashMap<PublicKey, u64>,
-    /// Map of deposit pubkey -> locked balance
-    locked_balances: HashMap<PublicKey, u64>,
+    /// Map of deposit_id -> balance
+    deposits: HashMap<deposits_core::types::DepositId, u64>,
+    /// Map of deposit_id -> locked balance
+    locked_balances: HashMap<deposits_core::types::DepositId, u64>,
     /// Current reserves amount
     reserves: u64,
 }
@@ -269,35 +269,35 @@ impl ReplayLedgerState {
         // Handle messages via to_operation() to extract the operation from LedgerUpdate
         if let Some(operation) = msg.to_operation() {
             match operation {
-                LedgerOperation::DepositOpen { pubkey, .. } => {
-                    self.deposits.insert(pubkey, 0);
-                    self.locked_balances.insert(pubkey, 0);
+                LedgerOperation::DepositOpen { deposit_id, .. } => {
+                    self.deposits.insert(deposit_id, 0);
+                    self.locked_balances.insert(deposit_id, 0);
                 }
-                LedgerOperation::DepositClose { pubkey } => {
-                    self.deposits.remove(&pubkey);
-                    self.locked_balances.remove(&pubkey);
+                LedgerOperation::DepositClose { deposit_id } => {
+                    self.deposits.remove(&deposit_id);
+                    self.locked_balances.remove(&deposit_id);
                 }
-                LedgerOperation::InvoiceCredit { deposit_pubkey, amount, .. } => {
-                    let balance = self.deposits.get_mut(&deposit_pubkey)
+                LedgerOperation::InvoiceCredit { deposit_id, amount, .. } => {
+                    let balance = self.deposits.get_mut(&deposit_id)
                         .ok_or("Deposit not found")?;
                     *balance += amount;
                 }
-                LedgerOperation::InvoiceLock { pubkey, amount, .. } => {
-                    let locked = self.locked_balances.get_mut(&pubkey)
+                LedgerOperation::InvoiceLock { deposit_id, amount, .. } => {
+                    let locked = self.locked_balances.get_mut(&deposit_id)
                         .ok_or("Deposit not found")?;
                     *locked += amount;
                 }
-                LedgerOperation::InvoiceFail { pubkey, amount, .. } => {
-                    let locked = self.locked_balances.get_mut(&pubkey)
+                LedgerOperation::InvoiceFail { deposit_id, amount, .. } => {
+                    let locked = self.locked_balances.get_mut(&deposit_id)
                         .ok_or("Deposit not found")?;
                     *locked = locked.saturating_sub(amount);
                 }
-                LedgerOperation::InvoiceFulfill { pubkey, amount, .. } => {
-                    let balance = self.deposits.get_mut(&pubkey)
+                LedgerOperation::InvoiceFulfill { deposit_id, amount, .. } => {
+                    let balance = self.deposits.get_mut(&deposit_id)
                         .ok_or("Deposit not found")?;
                     *balance = balance.saturating_sub(amount);
 
-                    let locked = self.locked_balances.get_mut(&pubkey)
+                    let locked = self.locked_balances.get_mut(&deposit_id)
                         .ok_or("Deposit not found")?;
                     *locked = locked.saturating_sub(amount);
                 }
@@ -376,25 +376,29 @@ mod tests {
 
     #[test]
     fn test_replay_state_deposit_operations() {
+        use deposits_core::types::compute_deposit_id;
+
         let mut state = ReplayLedgerState::new();
         let pubkey = create_test_pubkey();
+        let descriptor = format!("pk({})", hex::encode(pubkey.serialize()));
+        let deposit_id = compute_deposit_id(&descriptor);
 
         // Add deposit
-        state.deposits.insert(pubkey, 0);
-        state.locked_balances.insert(pubkey, 0);
+        state.deposits.insert(deposit_id, 0);
+        state.locked_balances.insert(deposit_id, 0);
         assert_eq!(state.total_deposit_balance(), 0);
 
         // Credit payment
-        *state.deposits.get_mut(&pubkey).unwrap() += 1000;
+        *state.deposits.get_mut(&deposit_id).unwrap() += 1000;
         assert_eq!(state.total_deposit_balance(), 1000);
 
         // Lock balance
-        *state.locked_balances.get_mut(&pubkey).unwrap() += 500;
+        *state.locked_balances.get_mut(&deposit_id).unwrap() += 500;
 
         // Fulfill payment (deducts from both)
-        let balance = state.deposits.get_mut(&pubkey).unwrap();
+        let balance = state.deposits.get_mut(&deposit_id).unwrap();
         *balance = balance.saturating_sub(500);
-        let locked = state.locked_balances.get_mut(&pubkey).unwrap();
+        let locked = state.locked_balances.get_mut(&deposit_id).unwrap();
         *locked = locked.saturating_sub(500);
 
         assert_eq!(state.total_deposit_balance(), 500);

@@ -865,14 +865,17 @@ where
                         }
 
                         // Add invoice to partner's ledger (deposit.invoices)
-                        if let Some(deposit) = ledger.state.deposits.get_mut(&assigned_deposit) {
+                        // Compute deposit_id from pubkey for lookup
+                        let descriptor = format!("pk({})", hex::encode(assigned_deposit.serialize()));
+                        let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
+                        if let Some(deposit) = ledger.state.deposits.get_mut(&deposit_id) {
                             // Create invoice directly as core type for storage
                             let invoice = deposits_core::Invoice {
                                 id: invoice_id.clone(),
                                 payment_hash,
                                 amount,
                                 expires,
-                                assigned_deposit,
+                                assigned_deposit: deposit_id,
                                 bolt11: bolt11.clone(),
                             };
                             deposit.invoices.push(invoice);

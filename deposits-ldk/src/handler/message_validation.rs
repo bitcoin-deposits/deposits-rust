@@ -887,9 +887,9 @@ mod tests {
             ledger.state.reserves.amount =100_000;
 
             // Add a deposit with 80k balance - this requires reserves backing
-            let mut deposit = deposits_core::Deposit::new(deposit_pubkey, None);
+            let mut deposit = deposits_core::Deposit::from_pubkey(&deposit_pubkey, None);
             deposit.balance = 80_000;
-            ledger.state.deposits.insert(deposit_pubkey, deposit);
+            ledger.state.deposits.insert(deposit.deposit_id, deposit);
 
             ledgers.insert((operator, partner.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
         }
@@ -926,9 +926,9 @@ mod tests {
             ledger.state.reserves.amount =100_000;
 
             // Add a deposit with 50k balance
-            let mut deposit = deposits_core::Deposit::new(deposit_pubkey, None);
+            let mut deposit = deposits_core::Deposit::from_pubkey(&deposit_pubkey, None);
             deposit.balance = 50_000;
-            ledger.state.deposits.insert(deposit_pubkey, deposit);
+            ledger.state.deposits.insert(deposit.deposit_id, deposit);
 
             ledgers.insert((operator, partner.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
         }
@@ -964,9 +964,9 @@ mod tests {
             ledger.state.reserves.amount =100_000;
 
             // Add a deposit with 50k balance
-            let mut deposit = deposits_core::Deposit::new(deposit_pubkey, None);
+            let mut deposit = deposits_core::Deposit::from_pubkey(&deposit_pubkey, None);
             deposit.balance = 50_000;
-            ledger.state.deposits.insert(deposit_pubkey, deposit);
+            ledger.state.deposits.insert(deposit.deposit_id, deposit);
 
             ledgers.insert((operator, partner.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
         }
@@ -1089,8 +1089,8 @@ mod tests {
             );
             ledger.state.reserves.amount =100_000;
             ledger.state.received_collateral_amount = 100_000;
-            let deposit = deposits_core::Deposit::new(deposit_pubkey, None);
-            ledger.state.deposits.insert(deposit_pubkey, deposit);
+            let deposit = deposits_core::Deposit::from_pubkey(&deposit_pubkey, None);
+            ledger.state.deposits.insert(deposit.deposit_id, deposit);
             ledgers.insert((operator, partner.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
         }
 
@@ -1128,9 +1128,9 @@ mod tests {
             );
             ledger.state.reserves.amount =50_000; // Only 50k reserves
             ledger.state.received_collateral_amount = 100_000; // Plenty of collateral
-            let mut deposit = deposits_core::Deposit::new(deposit_pubkey, None);
+            let mut deposit = deposits_core::Deposit::from_pubkey(&deposit_pubkey, None);
             deposit.balance = 30_000; // Already has 30k
-            ledger.state.deposits.insert(deposit_pubkey, deposit);
+            ledger.state.deposits.insert(deposit.deposit_id, deposit);
             ledgers.insert((operator, partner.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
         }
 
@@ -1160,7 +1160,11 @@ mod tests {
         let operator = create_test_pubkey(178);
         let partner = handler.our_node_id;
         let deposit_pubkey = create_test_pubkey(179);
-        let quorum_member = create_test_pubkey(180);
+        let quorum_member_pubkey = create_test_pubkey(180);
+        let quorum_member = deposits_core::types::QuorumMember {
+            pubkey: quorum_member_pubkey,
+            ledger_id: "test_collateral_ledger".to_string(),
+        };
 
         // Set up ledger with plenty of reserves but limited collateral
         // Note: Must have quorum members for collateral check to apply
@@ -1176,9 +1180,9 @@ mod tests {
             );
             ledger.state.reserves.amount = 100_000; // Plenty of reserves
             ledger.state.received_collateral_amount = 50_000; // Only 50k collateral
-            let mut deposit = deposits_core::Deposit::new(deposit_pubkey, None);
+            let mut deposit = deposits_core::Deposit::from_pubkey(&deposit_pubkey, None);
             deposit.balance = 30_000;
-            ledger.state.deposits.insert(deposit_pubkey, deposit);
+            ledger.state.deposits.insert(deposit.deposit_id, deposit);
             ledgers.insert((operator, partner.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
         }
 
@@ -1222,8 +1226,8 @@ mod tests {
             );
             ledger.state.reserves.amount =100_000;
             ledger.state.received_collateral_amount = 100_000;
-            let deposit = deposits_core::Deposit::new(deposit_pubkey, None);
-            ledger.state.deposits.insert(deposit_pubkey, deposit);
+            let deposit = deposits_core::Deposit::from_pubkey(&deposit_pubkey, None);
+            ledger.state.deposits.insert(deposit.deposit_id, deposit);
             ledgers.insert((operator, partner.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
         }
 
@@ -1261,8 +1265,8 @@ mod tests {
             );
             ledger.state.reserves.amount =100_000;
             ledger.state.received_collateral_amount = 100_000;
-            let deposit = deposits_core::Deposit::new(deposit_pubkey, None);
-            ledger.state.deposits.insert(deposit_pubkey, deposit);
+            let deposit = deposits_core::Deposit::from_pubkey(&deposit_pubkey, None);
+            ledger.state.deposits.insert(deposit.deposit_id, deposit);
             ledgers.insert((operator, partner.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
         }
 
@@ -1300,9 +1304,9 @@ mod tests {
             );
             ledger.state.reserves.amount =100_000;
             ledger.state.received_collateral_amount = 100_000;
-            let mut deposit = deposits_core::Deposit::new(deposit_pubkey, None);
+            let mut deposit = deposits_core::Deposit::from_pubkey(&deposit_pubkey, None);
             deposit.balance = 20_000;
-            ledger.state.deposits.insert(deposit_pubkey, deposit);
+            ledger.state.deposits.insert(deposit.deposit_id, deposit);
             ledgers.insert((operator, partner.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
         }
 
@@ -1388,9 +1392,9 @@ mod tests {
                 "tb1qtest".to_string(),
                 0,
             );
-            let mut deposit = deposits_core::Deposit::new(deposit_pubkey, None);
+            let mut deposit = deposits_core::Deposit::from_pubkey(&deposit_pubkey, None);
             deposit.balance = 50_000; // Has balance
-            ledger.state.deposits.insert(deposit_pubkey, deposit);
+            ledger.state.deposits.insert(deposit.deposit_id, deposit);
             ledgers.insert((operator, partner.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
         }
 
@@ -1421,9 +1425,9 @@ mod tests {
                 "tb1qtest".to_string(),
                 0,
             );
-            let mut deposit = deposits_core::Deposit::new(deposit_pubkey, None);
+            let mut deposit = deposits_core::Deposit::from_pubkey(&deposit_pubkey, None);
             deposit.locked_balance = 10_000; // Has locked payments
-            ledger.state.deposits.insert(deposit_pubkey, deposit);
+            ledger.state.deposits.insert(deposit.deposit_id, deposit);
             ledgers.insert((operator, partner.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
         }
 
@@ -1482,8 +1486,8 @@ mod tests {
                 "tb1qtest".to_string(),
                 0,
             );
-            let deposit = deposits_core::Deposit::new(deposit_pubkey, None);
-            ledger.state.deposits.insert(deposit_pubkey, deposit);
+            let deposit = deposits_core::Deposit::from_pubkey(&deposit_pubkey, None);
+            ledger.state.deposits.insert(deposit.deposit_id, deposit);
             ledgers.insert((operator, partner.to_string()), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
         }
 

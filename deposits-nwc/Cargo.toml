@@ -12,6 +12,7 @@ bitcoin-deposits = ["ldk-node/bitcoin-deposits"]
 # Local dependencies
 ldk-node = { path = "../../ldk-node" }
 deposits-ldk = { path = "../deposits-ldk" }
+deposits-core = { path = "../deposits-core" }
 
 # Lightning (via rust-lightning fork)
 lightning-invoice = { path = "../../rust-lightning/lightning-invoice" }

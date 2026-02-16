@@ -14,9 +14,24 @@
 
 use bitcoin::secp256k1::{Secp256k1, SecretKey};
 use chrono::Utc;
-use deposits_bdk::nostr::NostrTransportBuilder;
+use deposits_bdk::nostr::{NostrTransportBuilder, KIND_LEDGER_UPDATE};
+use std::collections::{BTreeMap, HashSet};
 use std::io::Write;
 use std::path::PathBuf;
+
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use nostr_sdk::prelude::*;
+use deposits_core::tlv::TlvDecode;
+use deposits_core::SignedLedgerUpdate;
+use deposits_core::messages::LedgerOperation;
+
+// ANSI color codes for --color-by-pk
+const COLORS: &[&str] = &[
+    "\x1b[31m", "\x1b[32m", "\x1b[33m", "\x1b[34m", "\x1b[35m", "\x1b[36m",
+    "\x1b[91m", "\x1b[92m", "\x1b[93m", "\x1b[94m", "\x1b[95m", "\x1b[96m",
+    "\x1b[38;5;208m", "\x1b[38;5;205m", "\x1b[38;5;118m", "\x1b[38;5;39m",
+];
+const RESET: &str = "\x1b[0m";
 
 #[derive(Debug, Clone)]
 struct WalletConfig {
@@ -43,6 +58,11 @@ fn print_usage(program: &str) {
     eprintln!("  pay_invoice <alias> <bolt11> Pay Lightning invoice from deposit");
     eprintln!("  history <alias>             Show transaction history");
     eprintln!("  list                        List all your deposits with aliases");
+    eprintln!();
+    eprintln!("Ledger inspection (read-only from Nostr):");
+    eprintln!("  ledger list                 List all ledgers on the relay");
+    eprintln!("  ledger show <id>            Show all updates for a ledger");
+    eprintln!("  ledger validate <id>        Validate ledger hash chain");
     eprintln!();
     eprintln!("Options:");
     eprintln!("  --relay <url>       Nostr relay URL (required)");
@@ -205,6 +225,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "pay_invoice" => pay_invoice(&args[2..]).await,
         "history" => show_history(&args[2..]).await,
         "list" => list_deposits(&args[2..]).await,
+        "ledger" => ledger_command(&args[2..]).await,
         "help" | "--help" | "-h" => {
             print_usage(&args[0]);
             Ok(())
@@ -955,13 +976,30 @@ async fn list_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         let amount = deposit.get("amount_sats").and_then(|v| v.as_u64()).unwrap_or(0);
         let status = deposit.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
         let created_at = deposit.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
+        let deposit_pubkey = deposit.get("deposit_pubkey").and_then(|v| v.as_str()).unwrap_or("");
+
+        // Compute descriptor and deposit_id from pubkey
+        let descriptor = if !deposit_pubkey.is_empty() {
+            format!("pk({})", deposit_pubkey)
+        } else {
+            "unknown".to_string()
+        };
+        let deposit_id = if !deposit_pubkey.is_empty() {
+            use bitcoin::hashes::{sha256, Hash};
+            let hash = sha256::Hash::hash(descriptor.as_bytes());
+            hex::encode(&hash[..16])
+        } else {
+            "unknown".to_string()
+        };
 
         println!("  {} ", alias);
-        println!("    Ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
-        println!("    Amount: {} sats", amount);
-        println!("    Status: {}", status);
+        println!("    Deposit ID:  {}", deposit_id);
+        println!("    Descriptor:  {}", descriptor);
+        println!("    Ledger:      {}...", &ledger_id[..16.min(ledger_id.len())]);
+        println!("    Amount:      {} sats", amount);
+        println!("    Status:      {}", status);
         if !created_at.is_empty() {
-            println!("    Created: {}", created_at);
+            println!("    Created:     {}", created_at);
         }
         println!();
     }
@@ -1515,9 +1553,6 @@ async fn make_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 /// Pay a Lightning invoice from a deposit
 /// The operator's LDK sidecar pays the invoice, debiting the deposit
 async fn pay_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    use bitcoin::hashes::{sha256, Hash};
-    use bitcoin::secp256k1::rand::rngs::OsRng;
-    use bitcoin::secp256k1::rand::RngCore;
 
     let mut alias: Option<String> = None;
     let mut invoice: Option<String> = None;
@@ -1582,16 +1617,31 @@ async fn pay_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     // Use nostr identity key for transport
     let nostr_key = derive_secret_key(&config.seed, config.network)?;
 
-    // Generate nonce
-    let mut rng = OsRng;
-    let mut nonce = [0u8; 32];
-    rng.fill_bytes(&mut nonce);
-    let nonce_hex = hex::encode(&nonce);
+    // Parse the bolt11 invoice to extract payment_hash and amount
+    use lightning_invoice::Bolt11Invoice;
+    use std::str::FromStr;
 
-    // Sign the pay request
-    let msg_str = format!("pay_invoice:{}:{}", invoice, nonce_hex);
-    let msg_hash = sha256::Hash::hash(msg_str.as_bytes());
-    let msg = bitcoin::secp256k1::Message::from_digest(*msg_hash.as_byte_array());
+    let parsed_invoice = Bolt11Invoice::from_str(&invoice)
+        .map_err(|e| format!("Invalid bolt11 invoice: {:?}", e))?;
+
+    let payment_hash = parsed_invoice.payment_hash();
+    let mut payment_hash_bytes = [0u8; 32];
+    payment_hash_bytes.copy_from_slice(payment_hash.as_ref());
+
+    let amount_msats = parsed_invoice.amount_milli_satoshis()
+        .ok_or("Invoice has no amount")?;
+
+    // Compute deposit_id from descriptor
+    let descriptor = format!("pk({})", hex::encode(our_pubkey.serialize()));
+    let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
+
+    // Sign the INVOICE_LOCK message (deposit_id, payment_hash, amount)
+    let msg_hash = deposits_core::signature_utils::invoice_lock_signing_message(
+        &deposit_id,
+        &payment_hash_bytes,
+        amount_msats,
+    );
+    let msg = bitcoin::secp256k1::Message::from_digest(msg_hash);
     let signature = secp.sign_schnorr(&msg, &keypair);
 
     let transport = NostrTransportBuilder::new(nostr_key)
@@ -1602,13 +1652,15 @@ async fn pay_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     let request_params = serde_json::json!({
         "deposit_pubkey": hex::encode(our_pubkey.serialize()),
         "invoice": invoice,
-        "nonce": nonce_hex,
+        "payment_hash": hex::encode(payment_hash_bytes),
+        "amount_msats": amount_msats,
         "signature": hex::encode(signature.serialize()),
     });
 
     println!("Paying Lightning invoice...");
     println!("  Alias: {}", alias);
     println!("  Invoice: {}...", &invoice[..40.min(invoice.len())]);
+    println!("  Amount: {} msats", amount_msats);
 
     let request_id = transport.send_ledger_request(
         ledger_id,
@@ -1694,6 +1746,430 @@ async fn show_history(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     println!("  Ledger: {}", ledger_id);
     println!();
     println!("(History implementation pending - use deposits-bdk for now)");
+
+    Ok(())
+}
+
+// ============================================================================
+// Ledger inspection commands (read-only Nostr queries)
+// ============================================================================
+
+/// Relay's max events per request (strfry default)
+const RELAY_PAGE_SIZE: usize = 500;
+
+/// Fetch all events matching a filter using pagination.
+async fn fetch_all_events_paginated(
+    client: &Client,
+    base_filter: Filter,
+) -> Result<Vec<Event>, Box<dyn std::error::Error>> {
+    let mut all_events = Vec::new();
+    let mut until: Option<Timestamp> = None;
+    let mut seen_ids: HashSet<EventId> = HashSet::new();
+    let mut last_count = 0usize;
+    let mut stall_count = 0usize;
+
+    loop {
+        let mut filter = base_filter.clone().limit(RELAY_PAGE_SIZE);
+        if let Some(ts) = until {
+            filter = filter.until(ts);
+        }
+
+        let events = client
+            .fetch_events(vec![filter], None)
+            .await
+            .map_err(|e| format!("Failed to fetch events: {}", e))?;
+
+        let batch_size = events.len();
+        let mut oldest_ts: Option<Timestamp> = None;
+        let mut new_events = 0usize;
+
+        for event in events {
+            if oldest_ts.is_none() || event.created_at < oldest_ts.unwrap() {
+                oldest_ts = Some(event.created_at);
+            }
+            if seen_ids.insert(event.id) {
+                all_events.push(event);
+                new_events += 1;
+            }
+        }
+
+        // Stop if we got fewer events than page size (end of data)
+        if batch_size < RELAY_PAGE_SIZE {
+            break;
+        }
+
+        // Stop if we're not making progress (no new events)
+        if new_events == 0 {
+            stall_count += 1;
+            if stall_count > 3 {
+                break; // Give up after 3 stalls
+            }
+        } else {
+            stall_count = 0;
+        }
+
+        // Stop if total count hasn't changed (safety valve)
+        if all_events.len() == last_count {
+            break;
+        }
+        last_count = all_events.len();
+
+        // Use the oldest timestamp for next page (don't subtract 1 - rely on dedup)
+        if let Some(ts) = oldest_ts {
+            until = Some(ts);
+        } else {
+            break;
+        }
+    }
+
+    Ok(all_events)
+}
+
+/// Handle ledger subcommands
+async fn ledger_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    if args.is_empty() {
+        eprintln!("Usage: deposits-wallet ledger <list|show|validate> [args...] --relay <url>");
+        return Ok(());
+    }
+
+    match args[0].as_str() {
+        "list" | "ls" => ledger_list(&args[1..]).await,
+        "show" => ledger_show(&args[1..]).await,
+        "validate" => ledger_validate(&args[1..]).await,
+        cmd => {
+            eprintln!("Unknown ledger subcommand: {}", cmd);
+            eprintln!("Usage: deposits-wallet ledger <list|show|validate> [args...] --relay <url>");
+            Ok(())
+        }
+    }
+}
+
+/// Parse relay URL from args
+fn get_relay_url(args: &[String]) -> Option<String> {
+    for (i, arg) in args.iter().enumerate() {
+        if arg == "--relay" && i + 1 < args.len() {
+            return Some(args[i + 1].clone());
+        }
+    }
+    None
+}
+
+/// List all ledgers on the relay
+async fn ledger_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let relay_url = get_relay_url(args)
+        .ok_or("Missing --relay <url>")?;
+
+    println!("Fetching ledgers from {}...", relay_url);
+    println!();
+
+    let keys = Keys::generate();
+    let client = Client::new(keys);
+    client.add_relay(&relay_url).await?;
+    client.connect().await;
+
+    let filter = Filter::new().kind(Kind::Custom(KIND_LEDGER_UPDATE));
+    let events = fetch_all_events_paginated(&client, filter).await?;
+
+    client.disconnect().await.ok();
+
+    if events.is_empty() {
+        println!("No ledgers found.");
+        return Ok(());
+    }
+
+    // Group by ledger_id and count
+    let mut ledgers: std::collections::HashMap<String, (u64, usize)> = std::collections::HashMap::new();
+
+    for event in &events {
+        let ledger_id = event.tags.iter().find_map(|tag| {
+            if tag.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::D)) {
+                tag.content().map(|s| s.to_string())
+            } else {
+                None
+            }
+        });
+
+        if let Some(lid) = ledger_id {
+            // Get sequence from tag
+            let seq = event.tags.iter().find_map(|tag| {
+                if tag.kind() == TagKind::Custom(std::borrow::Cow::Borrowed("seq")) {
+                    tag.content().and_then(|s| s.parse::<u64>().ok())
+                } else {
+                    None
+                }
+            }).unwrap_or(0);
+
+            let entry = ledgers.entry(lid).or_insert((0, 0));
+            if seq > entry.0 {
+                entry.0 = seq;
+            }
+            entry.1 += 1;
+        }
+    }
+
+    println!("Found {} ledger(s) ({} total events):", ledgers.len(), events.len());
+    println!();
+
+    let mut sorted: Vec<_> = ledgers.into_iter().collect();
+    sorted.sort_by(|a, b| b.1.0.cmp(&a.1.0)); // Sort by max sequence desc
+
+    for (lid, (max_seq, count)) in sorted {
+        println!("  {}  seq={:<4} updates={}", lid, max_seq, count);
+    }
+
+    Ok(())
+}
+
+/// Find full ledger ID from partial prefix
+async fn find_ledger_id(client: &Client, prefix: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    // Fetch all updates to find matching ledger_id
+    let filter = Filter::new().kind(Kind::Custom(KIND_LEDGER_UPDATE));
+    let events = fetch_all_events_paginated(client, filter).await?;
+
+    for event in events {
+        if let Some(lid) = event.tags.iter().find_map(|tag| {
+            if tag.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::D)) {
+                tag.content().map(|s| s.to_string())
+            } else {
+                None
+            }
+        }) {
+            if lid.starts_with(prefix) {
+                return Ok(Some(lid));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Show all updates for a specific ledger
+async fn ledger_show(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let relay_url = get_relay_url(args)
+        .ok_or("Missing --relay <url>")?;
+
+    // Check for --color-by-pk flag
+    let color_by_pk = args.iter().any(|a| a == "--color-by-pk" || a == "--color");
+
+    // Get ledger_id prefix (first non-flag arg that isn't after --relay)
+    let ledger_prefix = args.iter()
+        .enumerate()
+        .find(|(i, a)| {
+            !a.starts_with("--") &&
+            (*i == 0 || args[i - 1] != "--relay")
+        })
+        .map(|(_, a)| a)
+        .ok_or("Missing ledger_id")?;
+
+    println!("Fetching ledger {}... from {}...", &ledger_prefix[..16.min(ledger_prefix.len())], relay_url);
+
+    let keys = Keys::generate();
+    let client = Client::new(keys);
+    client.add_relay(&relay_url).await?;
+    client.connect().await;
+
+    // Find full ledger ID from prefix
+    let ledger_id = match find_ledger_id(&client, ledger_prefix).await? {
+        Some(id) => id,
+        None => {
+            println!("No ledger found with prefix {}", ledger_prefix);
+            client.disconnect().await.ok();
+            return Ok(());
+        }
+    };
+
+    println!("Found: {}", ledger_id);
+    println!();
+    let filter = Filter::new()
+        .kind(Kind::Custom(KIND_LEDGER_UPDATE))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()]);
+
+    let events = fetch_all_events_paginated(&client, filter).await?;
+    client.disconnect().await.ok();
+
+    if events.is_empty() {
+        println!("No updates found for ledger {}", ledger_id);
+        return Ok(());
+    }
+
+    // Decode and sort updates
+    let mut updates: Vec<SignedLedgerUpdate> = Vec::new();
+    for event in &events {
+        if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
+            if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
+                updates.push(update);
+            }
+        }
+    }
+
+    updates.sort_by_key(|u| u.sequence_number);
+    updates.dedup_by_key(|u| (u.sequence_number, u.current_hash));
+
+    println!("=== Ledger {} ({} updates) ===", &ledger_id[..16.min(ledger_id.len())], updates.len());
+    println!();
+
+    // Track deposit_id -> color mapping
+    let mut id_colors: std::collections::HashMap<[u8; 16], usize> = std::collections::HashMap::new();
+    let mut next_color = 0usize;
+
+    for update in &updates {
+        let (op_type, deposit_id) = match LedgerOperation::tlv_decode(&update.message) {
+            Ok(op) => format_operation(&op),
+            Err(_) => (format!("type=0x{:04X}", update.message_type), None),
+        };
+
+        let hash_short = &hex::encode(update.current_hash)[..8];
+
+        // Show deposit_id if present, otherwise operator
+        let (id_label, id_short) = if let Some(did) = deposit_id {
+            ("id", hex::encode(&did[..4]))
+        } else {
+            let op_bytes = update.operator_id.serialize();
+            ("op", hex::encode(&op_bytes[..4]))
+        };
+
+        if color_by_pk {
+            // For coloring, use deposit_id if present, otherwise hash of operator
+            let color_key: [u8; 16] = if let Some(did) = deposit_id {
+                did
+            } else {
+                let op_bytes = update.operator_id.serialize();
+                let mut key = [0u8; 16];
+                key.copy_from_slice(&op_bytes[..16]);
+                key
+            };
+            let color_idx = *id_colors.entry(color_key).or_insert_with(|| {
+                let idx = next_color;
+                next_color = (next_color + 1) % COLORS.len();
+                idx
+            });
+            let color = COLORS[color_idx];
+            println!("{}  [{:>4}] {:<16} {}={} hash={}{}",
+                color, update.sequence_number, op_type, id_label, id_short, hash_short, RESET);
+        } else {
+            println!("  [{:>4}] {:<16} {}={} hash={}",
+                update.sequence_number, op_type, id_label, id_short, hash_short);
+        }
+    }
+
+    Ok(())
+}
+
+/// Format operation type for display and extract deposit_id if present
+fn format_operation(op: &LedgerOperation) -> (String, Option<deposits_core::types::DepositId>) {
+    match op {
+        LedgerOperation::LedgerOpen { .. } => ("LedgerOpen".to_string(), None),
+        LedgerOperation::QuorumAddMember { .. } => ("QuorumAdd".to_string(), None),
+        LedgerOperation::QuorumRemoveMember { .. } => ("QuorumRemove".to_string(), None),
+        LedgerOperation::QuorumJoin { .. } => ("QuorumJoin".to_string(), None),
+        LedgerOperation::DepositOpen { deposit_id, .. } => ("DepositOpen".to_string(), Some(*deposit_id)),
+        LedgerOperation::DepositClose { deposit_id, .. } => ("DepositClose".to_string(), Some(*deposit_id)),
+        LedgerOperation::DepositUpdate { deposit_id, .. } => ("DepositUpdate".to_string(), Some(*deposit_id)),
+        LedgerOperation::OnchainLock { deposit_id, .. } => ("OnchainLock".to_string(), Some(*deposit_id)),
+        LedgerOperation::OnchainFulfill { deposit_id, .. } => ("OnchainFulfill".to_string(), Some(*deposit_id)),
+        LedgerOperation::OnchainFail { deposit_id, .. } => ("OnchainFail".to_string(), Some(*deposit_id)),
+        LedgerOperation::OnchainCredit { deposit_id, .. } => ("OnchainCredit".to_string(), Some(*deposit_id)),
+        LedgerOperation::InvoiceLock { deposit_id, .. } => ("InvoiceLock".to_string(), Some(*deposit_id)),
+        LedgerOperation::InvoiceFulfill { deposit_id, .. } => ("InvoiceFulfill".to_string(), Some(*deposit_id)),
+        LedgerOperation::InvoiceFail { deposit_id, .. } => ("InvoiceFail".to_string(), Some(*deposit_id)),
+        LedgerOperation::InvoiceCredit { deposit_id, .. } => ("InvoiceCredit".to_string(), Some(*deposit_id)),
+        LedgerOperation::FeeCollect { deposit_id, .. } => ("FeeCollect".to_string(), Some(*deposit_id)),
+        LedgerOperation::CollateralLock { deposit_id, .. } => ("CollateralLock".to_string(), Some(*deposit_id)),
+        LedgerOperation::CollateralAttestation { .. } => ("CollateralAttest".to_string(), None),
+        LedgerOperation::ReservesRotate { .. } => ("ReservesRotate".to_string(), None),
+        LedgerOperation::ReservesIncrease { .. } => ("ReservesIncrease".to_string(), None),
+        LedgerOperation::ReservesDecrease { .. } => ("ReservesDecrease".to_string(), None),
+        _ => ("Unknown".to_string(), None),
+    }
+}
+
+/// Validate ledger hash chain
+async fn ledger_validate(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let relay_url = get_relay_url(args)
+        .ok_or("Missing --relay <url>")?;
+
+    let ledger_prefix = args.iter()
+        .find(|a| !a.starts_with("--") && args.iter().position(|x| x == *a).map(|i| i == 0 || args[i-1] != "--relay").unwrap_or(true))
+        .ok_or("Missing ledger_id")?;
+
+    println!("Validating ledger {}... from {}...", &ledger_prefix[..16.min(ledger_prefix.len())], relay_url);
+
+    let keys = Keys::generate();
+    let client = Client::new(keys);
+    client.add_relay(&relay_url).await?;
+    client.connect().await;
+
+    // Find full ledger ID from prefix
+    let ledger_id = match find_ledger_id(&client, ledger_prefix).await? {
+        Some(id) => id,
+        None => {
+            println!("No ledger found with prefix {}", ledger_prefix);
+            client.disconnect().await.ok();
+            return Ok(());
+        }
+    };
+
+    println!("Found: {}", ledger_id);
+    println!();
+
+    let filter = Filter::new()
+        .kind(Kind::Custom(KIND_LEDGER_UPDATE))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()]);
+
+    let events = fetch_all_events_paginated(&client, filter).await?;
+    client.disconnect().await.ok();
+
+    if events.is_empty() {
+        println!("No updates found for ledger {}", ledger_id);
+        return Ok(());
+    }
+
+    // Decode and sort updates
+    let mut updates: Vec<SignedLedgerUpdate> = Vec::new();
+    for event in &events {
+        if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
+            if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
+                updates.push(update);
+            }
+        }
+    }
+
+    updates.sort_by_key(|u| u.sequence_number);
+
+    // Check for LedgerOpen at seq 0
+    let has_genesis = updates.iter().any(|u| u.sequence_number == 0);
+    if !has_genesis {
+        println!("ERROR: No LedgerOpen found at sequence 0");
+        println!("  Fetched {} updates, min seq = {}",
+            updates.len(),
+            updates.first().map(|u| u.sequence_number).unwrap_or(0));
+        return Ok(());
+    }
+
+    // Validate hash chain
+    let mut errors = 0;
+    let mut prev_hash = [0u8; 32];
+
+    for update in &updates {
+        if update.sequence_number == 0 {
+            prev_hash = update.current_hash;
+            continue;
+        }
+
+        if update.previous_hash != prev_hash {
+            println!("  ERROR at seq {}: prev_hash mismatch", update.sequence_number);
+            println!("    expected: {}", hex::encode(prev_hash));
+            println!("    got:      {}", hex::encode(update.previous_hash));
+            errors += 1;
+        }
+        prev_hash = update.current_hash;
+    }
+
+    if errors == 0 {
+        println!("Hash chain valid: {} updates, final hash {}",
+            updates.len(), &hex::encode(prev_hash)[..16]);
+    } else {
+        println!("Hash chain INVALID: {} errors in {} updates", errors, updates.len());
+    }
 
     Ok(())
 }

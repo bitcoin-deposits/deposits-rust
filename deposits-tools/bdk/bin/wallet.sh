@@ -236,10 +236,11 @@ case "$1" in
         faucet_send "$2" "$3"
         exit 0
         ;;
-    list|ls)
-        list_deposits
-        exit 0
-        ;;
+    # list command now uses deposits-wallet binary
+    # list|ls)
+    #     list_deposits
+    #     exit 0
+    #     ;;
 esac
 
 # Build args array

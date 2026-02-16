@@ -25,6 +25,7 @@ use deposits_core::Invoice;
 use deposits_core::LedgerValidator;
 use deposits_core::CommitmentExtraOutput;
 use deposits_core::{log_debug, log_error, log_info, log_warn};
+use deposits_core::types::compute_deposit_id;
 use lightning::util::logger::Logger as LdkLogger;
 
 use std::ops::Deref;
@@ -234,13 +235,17 @@ where
 
         let invoice_id = hex::encode(&payment_hash);
 
+        // Convert pubkey to deposit_id for lookups
+        let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
+        let deposit_id = compute_deposit_id(&descriptor);
+
         // Keep a copy of invoice data for adding to ledger after cosign succeeds
         let invoice_for_ledger = Invoice {
             id: invoice_id.clone(),
             payment_hash,
             amount,
             expires,
-            assigned_deposit: deposit_pubkey,
+            assigned_deposit: deposit_id,
             bolt11: bolt11.clone(),
         };
 
@@ -291,11 +296,11 @@ where
                     let ledgers = self.ledgers.lock().unwrap();
                     if let Some(ledger_arc) = ledgers.get(&(self.our_node_id, partner_node_id.to_string())) {
                         let mut ledger = ledger_arc.write().unwrap();
-                        if let Some(deposit) = ledger.state.deposits.get_mut(&deposit_pubkey) {
+                        if let Some(deposit) = ledger.state.deposits.get_mut(&deposit_id) {
                             // Convert wrapper to core type for storage
                             deposit.invoices.push(invoice_for_ledger.into());
-                            log_info!(self.logger, "📋 Added invoice to deposit {} (payment_hash: {:02x?})",
-                                     deposit_pubkey, &payment_hash[0..4]);
+                            log_info!(self.logger, "📋 Added invoice to deposit {:02x?} (payment_hash: {:02x?})",
+                                     &deposit_id[0..4], &payment_hash[0..4]);
                         }
                     }
                 }

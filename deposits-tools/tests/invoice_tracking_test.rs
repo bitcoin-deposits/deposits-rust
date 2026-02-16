@@ -11,9 +11,9 @@ use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::{Secp256k1, SecretKey, PublicKey};
 
 // Use core types for Invoice/PendingInvoice since Deposit.invoices is Vec<deposits_core::Invoice>
-use deposits_core::{Invoice, PendingInvoice};
-// Use wrapper types for FeeStructure and Deposit (they have convenient constructors)
-use deposits_ldk::wire::types::{FeeStructure, Deposit};
+use deposits_core::{Invoice, PendingInvoice, FeeStructure};
+// Use wrapper types for Deposit (they have convenient constructors)
+use deposits_ldk::wire::types::Deposit;
 
 /// Generate a test public key from a seed byte
 fn generate_test_pubkey(seed: u8) -> PublicKey {
@@ -29,25 +29,33 @@ fn generate_payment_hash(preimage: &[u8; 32]) -> [u8; 32] {
     *sha256::Hash::hash(preimage).as_byte_array()
 }
 
+/// Compute deposit_id from pubkey
+fn deposit_id_from_pubkey(pubkey: &PublicKey) -> deposits_core::types::DepositId {
+    let descriptor = format!("pk({})", hex::encode(pubkey.serialize()));
+    deposits_core::types::compute_deposit_id(&descriptor)
+}
+
 /// Create a test invoice
 fn create_test_invoice(deposit_pubkey: PublicKey, payment_hash: [u8; 32], amount: u64) -> Invoice {
+    let deposit_id = deposit_id_from_pubkey(&deposit_pubkey);
     Invoice {
         id: hex::encode(&payment_hash),
         payment_hash,
         amount,
         expires: 1700000000 + 3600, // 1 hour from some timestamp
-        assigned_deposit: deposit_pubkey,
+        assigned_deposit: deposit_id,
         bolt11: format!("lnbc{}n1test", amount / 1000),
     }
 }
 
 /// Create a test pending invoice
 fn create_test_pending_invoice(deposit_pubkey: PublicKey, payment_hash: [u8; 32], amount: u64) -> PendingInvoice {
+    let deposit_id = deposit_id_from_pubkey(&deposit_pubkey);
     PendingInvoice {
         amount,
         payment_hash,
         expires: 1700000000 + 3600,
-        assigned_deposit: deposit_pubkey,
+        assigned_deposit: deposit_id,
         invoice_id: hex::encode(&payment_hash),
         bolt11: format!("lnbc{}n1test", amount / 1000),
     }
@@ -60,7 +68,7 @@ fn default_fee_structure() -> FeeStructure {
 
 /// Create a test deposit
 fn create_test_deposit(pubkey: PublicKey, balance: u64) -> Deposit {
-    let mut deposit = Deposit::new(pubkey, Some(default_fee_structure().into()));
+    let mut deposit = Deposit::from_pubkey(pubkey, Some(default_fee_structure()));
     deposit.balance = balance;
     deposit
 }
@@ -198,7 +206,7 @@ fn test_pending_invoice_conversion() {
 
     assert_eq!(invoice.payment_hash, payment_hash);
     assert_eq!(invoice.amount, amount);
-    assert_eq!(invoice.assigned_deposit, deposit_pubkey);
+    assert_eq!(invoice.assigned_deposit, deposit_id_from_pubkey(&deposit_pubkey));
 }
 
 // =============================================================================
@@ -216,7 +224,7 @@ fn test_invoice_stores_bolt11() {
         payment_hash,
         amount: 10_000,
         expires: 1700000000,
-        assigned_deposit: deposit_pubkey,
+        assigned_deposit: deposit_id_from_pubkey(&deposit_pubkey),
         bolt11: bolt11.clone(),
     };
 
@@ -231,12 +239,13 @@ fn test_find_bolt11_by_payment_hash() {
 
     let mut deposit = create_test_deposit(deposit_pubkey, 100_000_000);
 
+    let deposit_id = deposit_id_from_pubkey(&deposit_pubkey);
     deposit.invoices.push(Invoice {
         id: "inv1".to_string(),
         payment_hash: payment_hash1,
         amount: 10_000,
         expires: 1700000000,
-        assigned_deposit: deposit_pubkey,
+        assigned_deposit: deposit_id,
         bolt11: "lnbc100n1first".to_string(),
     });
     deposit.invoices.push(Invoice {
@@ -244,7 +253,7 @@ fn test_find_bolt11_by_payment_hash() {
         payment_hash: payment_hash2,
         amount: 20_000,
         expires: 1700000000,
-        assigned_deposit: deposit_pubkey,
+        assigned_deposit: deposit_id,
         bolt11: "lnbc200n1second".to_string(),
     });
 
@@ -373,7 +382,7 @@ fn test_invoice_has_expiry() {
         payment_hash,
         amount: 10_000,
         expires,
-        assigned_deposit: deposit_pubkey,
+        assigned_deposit: deposit_id_from_pubkey(&deposit_pubkey),
         bolt11: "lnbc100n1test".to_string(),
     };
 
@@ -386,6 +395,7 @@ fn test_filter_expired_invoices() {
     let now = 1700000100u64; // Current timestamp
 
     let mut deposit = create_test_deposit(deposit_pubkey, 100_000_000);
+    let deposit_id = deposit_id_from_pubkey(&deposit_pubkey);
 
     // Add expired invoice (expires before now)
     deposit.invoices.push(Invoice {
@@ -393,7 +403,7 @@ fn test_filter_expired_invoices() {
         payment_hash: [0x11; 32],
         amount: 5_000,
         expires: 1700000000, // Before 'now'
-        assigned_deposit: deposit_pubkey,
+        assigned_deposit: deposit_id,
         bolt11: "lnbc50n1expired".to_string(),
     });
 
@@ -403,7 +413,7 @@ fn test_filter_expired_invoices() {
         payment_hash: [0x22; 32],
         amount: 10_000,
         expires: 1700000200, // After 'now'
-        assigned_deposit: deposit_pubkey,
+        assigned_deposit: deposit_id,
         bolt11: "lnbc100n1valid".to_string(),
     });
 

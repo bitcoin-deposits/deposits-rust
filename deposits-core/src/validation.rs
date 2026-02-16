@@ -140,14 +140,14 @@ impl ValidationRules {
     /// Validate that deposit exists and is in correct state
     pub fn validate_deposit_exists<'a>(
         state: &'a LedgerState,
-        pubkey: &PublicKey,
+        deposit_id: &crate::types::DepositId,
     ) -> DepositsResult<&'a Deposit> {
-        state.deposits.get(pubkey).ok_or(DepositsError::DepositNotFound)
+        state.deposits.get(deposit_id).ok_or(DepositsError::DepositNotFound)
     }
 
     /// Validate that deposit does not already exist
-    pub fn validate_deposit_not_exists(state: &LedgerState, pubkey: &PublicKey) -> DepositsResult<()> {
-        if state.deposits.contains_key(pubkey) {
+    pub fn validate_deposit_not_exists(state: &LedgerState, deposit_id: &crate::types::DepositId) -> DepositsResult<()> {
+        if state.deposits.contains_key(deposit_id) {
             return Err(DepositsError::DepositAlreadyExists);
         }
         Ok(())
@@ -243,9 +243,9 @@ pub struct OperationValidator;
 
 impl OperationValidator {
     /// Validate complete add deposit operation
-    pub fn validate_add_deposit(state: &LedgerState, pubkey: &PublicKey) -> DepositsResult<()> {
+    pub fn validate_add_deposit(state: &LedgerState, deposit_id: &crate::types::DepositId) -> DepositsResult<()> {
         // Check deposit doesn't already exist
-        ValidationRules::validate_deposit_not_exists(state, pubkey)?;
+        ValidationRules::validate_deposit_not_exists(state, deposit_id)?;
 
         // Note: Adding deposit with zero balance doesn't require reserve validation
         // since deposits start at zero and only increase from external payments
@@ -256,11 +256,11 @@ impl OperationValidator {
     /// Validate complete remove deposit operation
     pub fn validate_remove_deposit(
         state: &LedgerState,
-        pubkey: &PublicKey,
+        deposit_id: &crate::types::DepositId,
         current_time: u64,
     ) -> DepositsResult<()> {
         // Check deposit exists
-        let deposit = ValidationRules::validate_deposit_exists(state, pubkey)?;
+        let deposit = ValidationRules::validate_deposit_exists(state, deposit_id)?;
 
         // Check removal conditions
         ValidationRules::validate_deposit_removal(deposit, current_time)?;
@@ -277,7 +277,7 @@ impl OperationValidator {
         // Check pending invoice hasn't expired
         ValidationRules::validate_pending_invoice_not_expired(pending_invoice, current_time)?;
 
-        // Check assigned deposit exists
+        // Check assigned deposit exists (assigned_deposit is now DepositId)
         ValidationRules::validate_deposit_exists(state, &pending_invoice.assigned_deposit)?;
 
         // Check reserves are sufficient for this invoice
@@ -289,11 +289,11 @@ impl OperationValidator {
     /// Validate payment locking operation
     pub fn validate_lock_payment(
         state: &LedgerState,
-        pubkey: &PublicKey,
+        deposit_id: &crate::types::DepositId,
         amount: u64,
     ) -> DepositsResult<()> {
         // Check deposit exists
-        let deposit = ValidationRules::validate_deposit_exists(state, pubkey)?;
+        let deposit = ValidationRules::validate_deposit_exists(state, deposit_id)?;
 
         // Check sufficient balance for payment
         ValidationRules::validate_outgoing_payment(deposit, amount)?;
@@ -330,18 +330,18 @@ impl OperationValidator {
     /// Validate credit payment operation
     pub fn validate_credit_payment(
         state: &LedgerState,
-        deposit_pubkey: &PublicKey,
+        deposit_id: &crate::types::DepositId,
         payment_hash: &[u8; 32],
         amount: u64,
         current_time: u64,
     ) -> DepositsResult<()> {
         // Check deposit exists
-        ValidationRules::validate_deposit_exists(state, deposit_pubkey)?;
+        ValidationRules::validate_deposit_exists(state, deposit_id)?;
 
         // Verify there's a pending invoice matching this payment
         if let Some(ref pending) = state.pending_invoice {
             if pending.payment_hash == *payment_hash
-                && pending.assigned_deposit == *deposit_pubkey
+                && pending.assigned_deposit == *deposit_id
                 && pending.amount == amount
             {
                 return Ok(());
@@ -349,7 +349,7 @@ impl OperationValidator {
         }
 
         // Check if there's a matching outstanding invoice in the deposit
-        let deposit = ValidationRules::validate_deposit_exists(state, deposit_pubkey)?;
+        let deposit = ValidationRules::validate_deposit_exists(state, deposit_id)?;
         for invoice in &deposit.invoices {
             if invoice.payment_hash == *payment_hash
                 && invoice.amount == amount
@@ -994,7 +994,7 @@ mod tests {
     }
 
     fn create_test_deposit(balance: u64) -> Deposit {
-        let mut deposit = Deposit::new(test_pubkey(), None);
+        let mut deposit = Deposit::from_pubkey(&test_pubkey(), None);
         deposit.balance = balance;
         deposit
     }
@@ -1003,8 +1003,8 @@ mod tests {
         let mut state = LedgerState::new(test_pubkey(), test_pubkey_2().to_string(), "tb1q...".to_string(), 0);
 
         let deposit = create_test_deposit(deposit_balance);
-        let pubkey = deposit.pubkey;
-        state.deposits.insert(pubkey, deposit);
+        let deposit_id = deposit.deposit_id;
+        state.deposits.insert(deposit_id, deposit);
 
         state.reserves = ReservesOutput::new([0u8; 32], reserves, test_pubkey());
 
@@ -1116,28 +1116,36 @@ mod tests {
 
     #[test]
     fn test_validate_deposit_exists() {
+        use crate::types::compute_deposit_id;
         let state = create_test_state(1000, 1000);
-        let existing_pubkey = test_pubkey();
+        let pk = test_pubkey();
+        let descriptor = format!("pk({})", hex::encode(pk.serialize()));
+        let existing_id = compute_deposit_id(&descriptor);
 
         // Should find existing deposit
-        let result = ValidationRules::validate_deposit_exists(&state, &existing_pubkey);
+        let result = ValidationRules::validate_deposit_exists(&state, &existing_id);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().balance, 1000);
 
         // Should fail for non-existent deposit (different pubkey)
-        let other_pubkey = test_pubkey_2();
-        let result = ValidationRules::validate_deposit_exists(&state, &other_pubkey);
+        let other_pk = test_pubkey_2();
+        let other_descriptor = format!("pk({})", hex::encode(other_pk.serialize()));
+        let other_id = compute_deposit_id(&other_descriptor);
+        let result = ValidationRules::validate_deposit_exists(&state, &other_id);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), DepositsError::DepositNotFound));
     }
 
     #[test]
     fn test_validate_deposit_not_exists() {
+        use crate::types::compute_deposit_id;
         let state = create_test_state(1000, 1000);
-        let existing_pubkey = test_pubkey();
+        let pk = test_pubkey();
+        let descriptor = format!("pk({})", hex::encode(pk.serialize()));
+        let existing_id = compute_deposit_id(&descriptor);
 
         // Should fail for existing deposit
-        let result = ValidationRules::validate_deposit_not_exists(&state, &existing_pubkey);
+        let result = ValidationRules::validate_deposit_not_exists(&state, &existing_id);
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -1145,8 +1153,10 @@ mod tests {
         ));
 
         // Should succeed for non-existent deposit
-        let other_pubkey = test_pubkey_2();
-        let result = ValidationRules::validate_deposit_not_exists(&state, &other_pubkey);
+        let other_pk = test_pubkey_2();
+        let other_descriptor = format!("pk({})", hex::encode(other_pk.serialize()));
+        let other_id = compute_deposit_id(&other_descriptor);
+        let result = ValidationRules::validate_deposit_not_exists(&state, &other_id);
         assert!(result.is_ok());
     }
 

@@ -461,12 +461,12 @@ pub trait DepositsStorage: Send + Sync {
     // Deposits
     // ========================================================================
 
-    /// Get a deposit by pubkey within a ledger.
+    /// Get a deposit by deposit_id within a ledger.
     fn get_deposit(
         &self,
         operator: &PublicKey,
         reserves_id: &str,
-        deposit_pubkey: &PublicKey,
+        deposit_id: &crate::types::DepositId,
     ) -> Result<Option<Deposit>, StorageError>;
 
     /// Store a deposit.
@@ -482,7 +482,7 @@ pub trait DepositsStorage: Send + Sync {
         &self,
         operator: &PublicKey,
         reserves_id: &str,
-        deposit_pubkey: &PublicKey,
+        deposit_id: &crate::types::DepositId,
     ) -> Result<(), StorageError>;
 
     /// List all deposits for a ledger.
@@ -556,13 +556,13 @@ impl<S: Storage> DefaultStorageProvider<S> {
     }
 
     /// Build a key for a deposit.
-    fn deposit_key(operator: &PublicKey, reserves_id: &str, deposit_pubkey: &PublicKey) -> Vec<u8> {
+    fn deposit_key(operator: &PublicKey, reserves_id: &str, deposit_id: &crate::types::DepositId) -> Vec<u8> {
         let mut key = b"deposits/deposit/".to_vec();
         key.extend_from_slice(&operator.serialize());
         key.push(b'/');
         key.extend_from_slice(reserves_id.as_bytes());
         key.push(b'/');
-        key.extend_from_slice(&deposit_pubkey.serialize());
+        key.extend_from_slice(deposit_id);
         key
     }
 
@@ -661,9 +661,9 @@ impl<S: Storage> DepositsStorage for DefaultStorageProvider<S> {
         &self,
         operator: &PublicKey,
         reserves_id: &str,
-        deposit_pubkey: &PublicKey,
+        deposit_id: &crate::types::DepositId,
     ) -> Result<Option<Deposit>, StorageError> {
-        let key = Self::deposit_key(operator, reserves_id, deposit_pubkey);
+        let key = Self::deposit_key(operator, reserves_id, deposit_id);
         match self.storage.get(&key)? {
             Some(bytes) => {
                 let deposit = Deposit::tlv_decode(&bytes)
@@ -680,7 +680,7 @@ impl<S: Storage> DepositsStorage for DefaultStorageProvider<S> {
         reserves_id: &str,
         deposit: &Deposit,
     ) -> Result<(), StorageError> {
-        let key = Self::deposit_key(operator, reserves_id, &deposit.pubkey);
+        let key = Self::deposit_key(operator, reserves_id, &deposit.deposit_id);
         let bytes = deposit.tlv_encode();
         self.storage.put(&key, &bytes)
     }
@@ -689,9 +689,9 @@ impl<S: Storage> DepositsStorage for DefaultStorageProvider<S> {
         &self,
         operator: &PublicKey,
         reserves_id: &str,
-        deposit_pubkey: &PublicKey,
+        deposit_id: &crate::types::DepositId,
     ) -> Result<(), StorageError> {
-        let key = Self::deposit_key(operator, reserves_id, deposit_pubkey);
+        let key = Self::deposit_key(operator, reserves_id, deposit_id);
         self.storage.delete(&key)
     }
 

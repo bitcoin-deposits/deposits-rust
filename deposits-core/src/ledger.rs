@@ -933,16 +933,16 @@ impl Ledger {
                     });
                 }
             }
-            LedgerOperation::DepositOpen { pubkey, .. } => {
-                if self.state.deposits.contains_key(pubkey) {
+            LedgerOperation::DepositOpen { deposit_id, .. } => {
+                if self.state.deposits.contains_key(deposit_id) {
                     return Err(DepositsError::DepositAlreadyExists);
                 }
             }
-            LedgerOperation::DepositClose { pubkey } => {
+            LedgerOperation::DepositClose { deposit_id } => {
                 let deposit = self
                     .state
                     .deposits
-                    .get(pubkey)
+                    .get(deposit_id)
                     .ok_or(DepositsError::DepositNotFound)?;
                 if deposit.balance > 0 {
                     return Err(DepositsError::NonZeroBalance {
@@ -950,12 +950,12 @@ impl Ledger {
                     });
                 }
             }
-            LedgerOperation::InvoiceLock { pubkey, amount, .. } |
-            LedgerOperation::OnchainLock { deposit_pubkey: pubkey, amount, .. } => {
+            LedgerOperation::InvoiceLock { deposit_id, amount, .. } |
+            LedgerOperation::OnchainLock { deposit_id, amount, .. } => {
                 let deposit = self
                     .state
                     .deposits
-                    .get(pubkey)
+                    .get(deposit_id)
                     .ok_or(DepositsError::DepositNotFound)?;
                 if deposit.available_balance() < *amount {
                     return Err(DepositsError::InsufficientDepositBalance {
@@ -965,33 +965,21 @@ impl Ledger {
                 }
             }
             LedgerOperation::CollateralLock {
-                deposit_pubkey,
+                deposit_id,
                 amount,
                 lock_until_block,
                 operator_id,
-                deposit_holder_signature,
+                witness: _,
             } => {
                 // 1. Deposit must exist
                 let deposit = self
                     .state
                     .deposits
-                    .get(deposit_pubkey)
+                    .get(deposit_id)
                     .ok_or(DepositsError::DepositNotFound)?;
 
-                // 2. Verify deposit_holder_signature
-                let sig_valid = crate::signature_utils::verify_collateral_lock_signature(
-                    deposit_holder_signature,
-                    deposit_pubkey,
-                    *amount,
-                    *lock_until_block,
-                    operator_id,
-                )?;
-                if !sig_valid {
-                    return Err(DepositsError::ProtocolViolation {
-                        violation_type: "invalid_collateral_lock_signature".to_string(),
-                        details: "Deposit holder signature verification failed".to_string(),
-                    });
-                }
+                // 2. Witness verification is done at the message handler level
+                // where the descriptor can be evaluated against the witness
 
                 // 3. amount <= deposit.balance
                 if *amount > deposit.balance {
@@ -1152,75 +1140,82 @@ impl Ledger {
                 self.state.reserves_key = reserves_id.clone();
                 self.state.reserves.amount = *amount;
             }
-            LedgerOperation::DepositOpen { pubkey, fees, .. } => {
-                let deposit = Deposit::new(*pubkey, fees.clone());
-                self.state.deposits.insert(*pubkey, deposit);
+            LedgerOperation::DepositOpen { deposit_id, descriptor, fees, .. } => {
+                let deposit = Deposit::new(descriptor.clone(), fees.clone());
+                self.state.deposits.insert(*deposit_id, deposit);
             }
-            LedgerOperation::DepositClose { pubkey } => {
-                self.state.deposits.remove(pubkey);
+            LedgerOperation::DepositClose { deposit_id } => {
+                self.state.deposits.remove(deposit_id);
             }
-            LedgerOperation::DepositUpdate { pubkey, new_fees } => {
-                if let Some(deposit) = self.state.deposits.get_mut(pubkey) {
+            LedgerOperation::DepositUpdate { deposit_id, new_fees } => {
+                if let Some(deposit) = self.state.deposits.get_mut(deposit_id) {
                     deposit.fees = new_fees.clone();
                 }
             }
+            LedgerOperation::DepositKeyRotate { deposit_id, new_descriptor, .. } => {
+                // Key rotation: update the descriptor while keeping the same deposit_id
+                // Note: Witness verification should be done before this operation is applied
+                if let Some(deposit) = self.state.deposits.get_mut(deposit_id) {
+                    deposit.descriptor = new_descriptor.clone();
+                }
+            }
             LedgerOperation::InvoiceCredit {
-                deposit_pubkey,
+                deposit_id,
                 amount,
                 ..
             } => {
-                if let Some(deposit) = self.state.deposits.get_mut(deposit_pubkey) {
+                if let Some(deposit) = self.state.deposits.get_mut(deposit_id) {
                     deposit.credit(*amount);
                 }
             }
-            LedgerOperation::InvoiceLock { pubkey, amount, .. } => {
-                if let Some(deposit) = self.state.deposits.get_mut(pubkey) {
+            LedgerOperation::InvoiceLock { deposit_id, amount, .. } => {
+                if let Some(deposit) = self.state.deposits.get_mut(deposit_id) {
                     deposit.lock(*amount)?;
                 }
             }
-            LedgerOperation::InvoiceFail { pubkey, amount, .. } => {
-                if let Some(deposit) = self.state.deposits.get_mut(pubkey) {
+            LedgerOperation::InvoiceFail { deposit_id, amount, .. } => {
+                if let Some(deposit) = self.state.deposits.get_mut(deposit_id) {
                     deposit.unlock(*amount);
                 }
             }
-            LedgerOperation::InvoiceFulfill { pubkey, amount, .. } => {
-                if let Some(deposit) = self.state.deposits.get_mut(pubkey) {
+            LedgerOperation::InvoiceFulfill { deposit_id, amount, .. } => {
+                if let Some(deposit) = self.state.deposits.get_mut(deposit_id) {
                     deposit.fulfill(*amount);
                 }
             }
             LedgerOperation::OnchainCredit {
-                deposit_pubkey,
+                deposit_id,
                 amount,
                 ..
             } => {
-                if let Some(deposit) = self.state.deposits.get_mut(deposit_pubkey) {
+                if let Some(deposit) = self.state.deposits.get_mut(deposit_id) {
                     deposit.credit(*amount);
                 }
             }
-            LedgerOperation::OnchainLock { deposit_pubkey, amount, .. } => {
-                if let Some(deposit) = self.state.deposits.get_mut(deposit_pubkey) {
+            LedgerOperation::OnchainLock { deposit_id, amount, .. } => {
+                if let Some(deposit) = self.state.deposits.get_mut(deposit_id) {
                     deposit.lock(*amount)?;
                 }
             }
-            LedgerOperation::OnchainFail { deposit_pubkey, withdrawal_id: _ } => {
+            LedgerOperation::OnchainFail { deposit_id, withdrawal_id: _ } => {
                 // Onchain fail needs to unlock the amount, but we don't track it here
                 // The withdrawal tracking should handle this
-                if let Some(_deposit) = self.state.deposits.get_mut(deposit_pubkey) {
+                if let Some(_deposit) = self.state.deposits.get_mut(deposit_id) {
                     // TODO: Need to look up the withdrawal amount from withdrawal_id
                 }
             }
-            LedgerOperation::OnchainFulfill { deposit_pubkey, amount, .. } => {
+            LedgerOperation::OnchainFulfill { deposit_id, amount, .. } => {
                 // On fulfillment, deduct the locked funds from balance
-                if let Some(deposit) = self.state.deposits.get_mut(deposit_pubkey) {
+                if let Some(deposit) = self.state.deposits.get_mut(deposit_id) {
                     deposit.fulfill(*amount);
                 }
             }
             LedgerOperation::FeeCollect {
-                pubkey,
+                deposit_id,
                 amount,
                 block_height,
             } => {
-                if let Some(deposit) = self.state.deposits.get_mut(pubkey) {
+                if let Some(deposit) = self.state.deposits.get_mut(deposit_id) {
                     deposit.balance = deposit.balance.saturating_sub(*amount);
                     deposit.last_fee_assessment = *block_height;
                 }
@@ -1253,12 +1248,12 @@ impl Ledger {
                 self.state.collateral_attestations.remove(quorum_member);
             }
             LedgerOperation::CollateralLock {
-                deposit_pubkey,
+                deposit_id,
                 amount,
                 lock_until_block,
                 ..
             } => {
-                if let Some(deposit) = self.state.deposits.get_mut(deposit_pubkey) {
+                if let Some(deposit) = self.state.deposits.get_mut(deposit_id) {
                     deposit.collateral_lock_amount = *amount;
                     deposit.collateral_lock_expires = *lock_until_block;
                 }
@@ -1434,18 +1429,18 @@ impl LedgerValidator {
         operation: &LedgerOperation,
     ) -> DepositsResult<()> {
         match operation {
-            LedgerOperation::DepositOpen { pubkey, .. } => {
+            LedgerOperation::DepositOpen { deposit_id, .. } => {
                 // Validate: deposit must not already exist
-                if ledger.state.deposits.contains_key(pubkey) {
+                if ledger.state.deposits.contains_key(deposit_id) {
                     return Err(DepositsError::ProtocolViolation {
                         violation_type: "duplicate_deposit".to_string(),
-                        details: format!("Deposit already exists for pubkey {}", pubkey),
+                        details: format!("Deposit already exists for id {}", hex::encode(deposit_id)),
                     });
                 }
             }
-            LedgerOperation::DepositClose { pubkey, .. } => {
+            LedgerOperation::DepositClose { deposit_id, .. } => {
                 // Validate: deposit must exist and have zero balance
-                if let Some(deposit) = ledger.state.deposits.get(pubkey) {
+                if let Some(deposit) = ledger.state.deposits.get(deposit_id) {
                     if deposit.balance != 0 {
                         return Err(DepositsError::NonZeroBalance {
                             balance: deposit.balance,
@@ -2047,9 +2042,12 @@ mod tests {
 
         // Open deposit
         let user = test_pubkey_2();
+        let descriptor = format!("pk({})", hex::encode(user.serialize()));
+        let deposit_id = crate::types::compute_deposit_id(&descriptor);
         ledger
             .apply_operation(&LedgerOperation::DepositOpen {
-                pubkey: user,
+                deposit_id,
+                descriptor: descriptor.clone(),
                 fees: Some(FeeStructure::default()),
                 payment_hash: None,
                 invoice: None,
@@ -2063,14 +2061,14 @@ mod tests {
         ledger
             .apply_operation(&LedgerOperation::InvoiceCredit {
                 payment_hash: [0u8; 32],
-                deposit_pubkey: user,
+                deposit_id,
                 amount: 50_000,
                 invoice_id: "inv1".to_string(),
                 sequence_number: 1,
             })
             .unwrap();
 
-        assert_eq!(ledger.state.deposits.get(&user).unwrap().balance, 50_000);
+        assert_eq!(ledger.state.deposits.get(&deposit_id).unwrap().balance, 50_000);
     }
 
     #[test]

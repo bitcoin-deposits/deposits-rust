@@ -16,6 +16,7 @@ use deposits_core::DepositsError;
 use deposits_core::Ledger;
 use deposits_core::SignedLedgerUpdate;
 use deposits_core::{log_debug, log_info};
+use deposits_core::types::compute_deposit_id;
 use lightning::util::logger::Logger as LdkLogger;
 
 use super::core::DepositsHandler;
@@ -64,6 +65,9 @@ pub trait LedgerOperationsExt {
 
     /// Find the partner ID for a deposit pubkey
     fn find_partner_for_deposit(&self, deposit_pubkey: PublicKey) -> Option<PublicKey>;
+
+    /// Find the partner ID for a deposit by deposit_id
+    fn find_partner_for_deposit_id(&self, deposit_id: deposits_core::DepositId) -> Option<PublicKey>;
 
     /// Drop all ledgers (for testing)
     fn drop_all_ledgers(&self) -> usize;
@@ -188,12 +192,17 @@ where
 
     fn get_next_sequence_number_for_deposit(&self, deposit_pubkey: PublicKey) -> Result<(u64, PublicKey), DepositsError> {
         use std::str::FromStr;
+
+        // Convert pubkey to deposit_id for lookup
+        let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
+        let deposit_id = compute_deposit_id(&descriptor);
+
         let ledgers = self.ledgers.lock().unwrap();
 
         for ((operator, partner), ledger_arc) in ledgers.iter() {
             if *operator == self.our_node_id {
                 let ledger = ledger_arc.read().unwrap();
-                if ledger.state.deposits.contains_key(&deposit_pubkey) {
+                if ledger.state.deposits.contains_key(&deposit_id) {
                     let next_sequence = ledger.history.len() as u64;
                     // In LDK, partner (reserves_id) is a string form of pubkey
                     let partner_pubkey = PublicKey::from_str(partner)
@@ -346,12 +355,34 @@ where
 
     fn find_partner_for_deposit(&self, deposit_pubkey: PublicKey) -> Option<PublicKey> {
         use std::str::FromStr;
+
+        // Convert pubkey to deposit_id for lookup
+        let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
+        let deposit_id = compute_deposit_id(&descriptor);
+
         let ledgers = self.ledgers.lock().unwrap();
 
         for ((operator, partner), ledger_arc) in ledgers.iter() {
             if *operator == self.our_node_id {
                 let ledger = ledger_arc.read().unwrap();
-                if ledger.state.deposits.contains_key(&deposit_pubkey) {
+                if ledger.state.deposits.contains_key(&deposit_id) {
+                    return PublicKey::from_str(partner).ok();
+                }
+            }
+        }
+
+        None
+    }
+
+    fn find_partner_for_deposit_id(&self, deposit_id: deposits_core::DepositId) -> Option<PublicKey> {
+        use std::str::FromStr;
+
+        let ledgers = self.ledgers.lock().unwrap();
+
+        for ((operator, partner), ledger_arc) in ledgers.iter() {
+            if *operator == self.our_node_id {
+                let ledger = ledger_arc.read().unwrap();
+                if ledger.state.deposits.contains_key(&deposit_id) {
                     return PublicKey::from_str(partner).ok();
                 }
             }
@@ -563,13 +594,17 @@ mod tests {
         partner: PublicKey,
         deposit_pubkey: PublicKey,
     ) {
+        // Create descriptor and compute deposit_id from pubkey
+        let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
+        let deposit_id = compute_deposit_id(&descriptor);
+
         let ledgers = handler.ledgers.lock().unwrap();
         if let Some(ledger_arc) = ledgers.get(&(handler.our_node_id, partner.to_string())) {
             let mut ledger = ledger_arc.write().unwrap();
-            // Use deposits-core Deposit type
-            let mut deposit = deposits_core::Deposit::new(deposit_pubkey, None);
+            // Use deposits-core Deposit type - new() takes descriptor and computes deposit_id
+            let mut deposit = deposits_core::Deposit::new(descriptor, None);
             deposit.balance = 100_000;
-            ledger.state.deposits.insert(deposit_pubkey, deposit);
+            ledger.state.deposits.insert(deposit_id, deposit);
         }
     }
 

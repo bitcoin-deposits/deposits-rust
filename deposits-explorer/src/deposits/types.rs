@@ -74,7 +74,7 @@ impl LedgerInfo {
     }
 
     /// Get all deposits
-    pub fn deposits(&self) -> Vec<(&PublicKey, &Deposit)> {
+    pub fn deposits(&self) -> Vec<(&deposits_core::DepositId, &Deposit)> {
         self.ledger.state.deposits.iter().collect()
     }
 }

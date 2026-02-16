@@ -19,6 +19,7 @@ use deposits_core::DepositsError;
 use super::messages::{DepositsMessage, LedgerUpdateMsg, LedgerUpdateMsgExt, LedgerOperation};
 use super::ledger_ext::LedgerExt;
 use deposits_core::{log_debug, log_error, log_info, log_warn};
+use deposits_core::types::{DepositId, compute_deposit_id};
 use lightning::util::logger::Logger as LdkLogger;
 
 use std::ops::Deref;
@@ -83,13 +84,18 @@ where
             }
         }
 
+        // Convert pubkey to deposit_id and descriptor
+        let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
+        let deposit_id = compute_deposit_id(&descriptor);
+
         // STAGE 2: Send message and wait for ACK (ledger unchanged)
         // NOTE: prev_hash will be captured atomically at append time to avoid race conditions
         let update_msg = LedgerUpdateMsg::new_with_operation(
             self.our_node_id,    // operator
             partner_node_id.to_string(),     // partner
             LedgerOperation::DepositOpen {
-                pubkey: deposit_pubkey,
+                deposit_id,
+                descriptor,
                 fees: fees.clone(),
                 payment_hash: None,
                 invoice: None,
@@ -219,7 +225,7 @@ where
     }
 
     /// List all deposits in the shared ledger
-    pub fn list_deposits(&self) -> Result<Vec<PublicKey>, DepositsError> {
+    pub fn list_deposits(&self) -> Result<Vec<DepositId>, DepositsError> {
         let mut all_deposits = Vec::new();
 
         // Get deposits from new ChannelLedger architecture
@@ -227,7 +233,7 @@ where
         for ledger_arc in ledgers.values() {
             let ledger = ledger_arc.read().unwrap();
             for deposit in ledger.state.deposits.values() {
-                all_deposits.push(deposit.pubkey);
+                all_deposits.push(deposit.deposit_id);
             }
         }
 
@@ -237,18 +243,23 @@ where
     }
 
     /// List deposits owned by a specific depositor in the shared ledger
+    /// Note: depositor_pubkey is converted to deposit_id for lookup
     pub fn list_deposits_for_depositor(
         &self,
         depositor_pubkey: PublicKey,
-    ) -> Result<Vec<PublicKey>, DepositsError> {
+    ) -> Result<Vec<DepositId>, DepositsError> {
+        // Convert pubkey to deposit_id for lookup
+        let descriptor = format!("pk({})", hex::encode(depositor_pubkey.serialize()));
+        let deposit_id = compute_deposit_id(&descriptor);
+
         let mut depositor_deposits = Vec::new();
 
         // Search new ChannelLedger architecture
         let ledgers = self.ledgers.lock().unwrap();
         for ledger_arc in ledgers.values() {
             let ledger = ledger_arc.read().unwrap();
-            if let Some(deposit) = ledger.state.deposits.get(&depositor_pubkey) {
-                depositor_deposits.push(deposit.pubkey);
+            if let Some(deposit) = ledger.state.deposits.get(&deposit_id) {
+                depositor_deposits.push(deposit.deposit_id);
             }
         }
 
@@ -257,21 +268,19 @@ where
         Ok(depositor_deposits)
     }
 
-    /// List deposits with a specific deposit key in the shared ledger
-    pub fn list_deposits_for_pubkey(
+    /// List deposits with a specific deposit_id in the shared ledger
+    pub fn list_deposits_for_deposit_id(
         &self,
-        deposit_pubkey: PublicKey,
-    ) -> Result<Vec<PublicKey>, DepositsError> {
+        deposit_id: DepositId,
+    ) -> Result<Vec<DepositId>, DepositsError> {
         let mut matching_deposits = Vec::new();
 
         // Search new ChannelLedger architecture
         let ledgers = self.ledgers.lock().unwrap();
         for ledger_arc in ledgers.values() {
             let ledger = ledger_arc.read().unwrap();
-            for deposit in ledger.state.deposits.values() {
-                if deposit.pubkey == deposit_pubkey {
-                    matching_deposits.push(deposit.pubkey);
-                }
+            if let Some(deposit) = ledger.state.deposits.get(&deposit_id) {
+                matching_deposits.push(deposit.deposit_id);
             }
         }
 

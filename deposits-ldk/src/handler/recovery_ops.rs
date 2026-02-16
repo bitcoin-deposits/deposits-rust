@@ -1528,11 +1528,15 @@ mod tests {
 
         // Add ledger and set up quorum members
         {
+            let quorum_member = deposits_core::types::QuorumMember {
+                pubkey: auditor,
+                ledger_id: "auditor_collateral_ledger".to_string(),
+            };
             let ledger = Ledger::new(
                 operator,
                 partner.to_string(),
                 LedgerRole::Operator,
-                vec![auditor], // Add auditor as quorum member
+                vec![quorum_member], // Add auditor as quorum member
                 "tb1qtest".to_string(),
                 0, // genesis_block: test value
             );

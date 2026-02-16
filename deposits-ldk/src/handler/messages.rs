@@ -91,6 +91,7 @@ impl LedgerOperationExt for LedgerOperation {
             LedgerOperation::DepositOpen { .. } => "DepositOpen",
             LedgerOperation::DepositClose { .. } => "DepositClose",
             LedgerOperation::DepositUpdate { .. } => "DepositUpdate",
+            LedgerOperation::DepositKeyRotate { .. } => "DepositKeyRotate",
             LedgerOperation::InvoiceCredit { .. } => "InvoiceCredit",
             LedgerOperation::InvoiceLock { .. } => "InvoiceLock",
             LedgerOperation::InvoiceFail { .. } => "InvoiceFail",
@@ -258,7 +259,8 @@ impl DepositsMessage {
     pub fn new_deposit_open(
         operator: PublicKey,
         partner: PublicKey,
-        pubkey: PublicKey,
+        deposit_id: deposits_core::types::DepositId,
+        descriptor: String,
         fees: Option<deposits_core::FeeStructure>,
         payment_hash: Option<[u8; 32]>,
         invoice: Option<String>,
@@ -268,7 +270,8 @@ impl DepositsMessage {
             operator,
             partner.to_string(),
             LedgerOperation::DepositOpen {
-                pubkey,
+                deposit_id,
+                descriptor,
                 fees: fees.map(|f| f.into()),
                 payment_hash,
                 invoice,
@@ -278,11 +281,11 @@ impl DepositsMessage {
     }
 
     /// Create a DepositClose operation message
-    pub fn new_deposit_close(operator: PublicKey, partner: PublicKey, pubkey: PublicKey) -> Self {
+    pub fn new_deposit_close(operator: PublicKey, partner: PublicKey, deposit_id: deposits_core::types::DepositId) -> Self {
         Self::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             operator,
             partner.to_string(),
-            LedgerOperation::DepositClose { pubkey },
+            LedgerOperation::DepositClose { deposit_id },
         ))
     }
 
@@ -308,13 +311,13 @@ impl DepositsMessage {
     pub fn new_deposit_update(
         operator: PublicKey,
         partner: PublicKey,
-        pubkey: PublicKey,
+        deposit_id: deposits_core::types::DepositId,
         new_fees: deposits_core::FeeStructure,
     ) -> Self {
         Self::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             operator,
             partner.to_string(),
-            LedgerOperation::DepositUpdate { pubkey, new_fees: new_fees.into() },
+            LedgerOperation::DepositUpdate { deposit_id, new_fees: new_fees.into() },
         ))
     }
 
@@ -323,7 +326,7 @@ impl DepositsMessage {
         operator: PublicKey,
         partner: PublicKey,
         payment_hash: [u8; 32],
-        deposit_pubkey: PublicKey,
+        deposit_id: deposits_core::types::DepositId,
         amount: u64,
         invoice_id: String,
         sequence_number: u64,
@@ -331,7 +334,7 @@ impl DepositsMessage {
         Self::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             operator,
             partner.to_string(),
-            LedgerOperation::InvoiceCredit { payment_hash, deposit_pubkey, amount, invoice_id, sequence_number },
+            LedgerOperation::InvoiceCredit { payment_hash, deposit_id, amount, invoice_id, sequence_number },
         ))
     }
 
@@ -339,16 +342,16 @@ impl DepositsMessage {
     pub fn new_payment_lock(
         operator: PublicKey,
         partner: PublicKey,
-        pubkey: PublicKey,
+        deposit_id: deposits_core::types::DepositId,
         amount: u64,
         payment_id: [u8; 32],
         sequence_number: u64,
-        scriptpubkey_signature: [u8; 64],
+        witness: deposits_core::types::DescriptorWitness,
     ) -> Self {
         Self::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             operator,
             partner.to_string(),
-            LedgerOperation::InvoiceLock { pubkey, amount, payment_id, sequence_number, scriptpubkey_signature },
+            LedgerOperation::InvoiceLock { deposit_id, amount, payment_id, sequence_number, witness },
         ))
     }
 
@@ -356,17 +359,17 @@ impl DepositsMessage {
     pub fn new_payment_fulfill(
         operator: PublicKey,
         partner: PublicKey,
-        pubkey: PublicKey,
+        deposit_id: deposits_core::types::DepositId,
         amount: u64,
         payment_id: [u8; 32],
         sequence_number: u64,
-        scriptpubkey_signature: [u8; 64],
+        witness: deposits_core::types::DescriptorWitness,
         preimage: [u8; 32],
     ) -> Self {
         Self::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             operator,
             partner.to_string(),
-            LedgerOperation::InvoiceFulfill { pubkey, amount, payment_id, sequence_number, scriptpubkey_signature, preimage },
+            LedgerOperation::InvoiceFulfill { deposit_id, amount, payment_id, sequence_number, witness, preimage },
         ))
     }
 
@@ -374,7 +377,7 @@ impl DepositsMessage {
     pub fn new_payment_fail(
         operator: PublicKey,
         partner: PublicKey,
-        pubkey: PublicKey,
+        deposit_id: deposits_core::types::DepositId,
         amount: u64,
         payment_id: [u8; 32],
         sequence_number: u64,
@@ -382,7 +385,7 @@ impl DepositsMessage {
         Self::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             operator,
             partner.to_string(),
-            LedgerOperation::InvoiceFail { pubkey, amount, payment_id, sequence_number },
+            LedgerOperation::InvoiceFail { deposit_id, amount, payment_id, sequence_number },
         ))
     }
 
@@ -474,14 +477,14 @@ impl DepositsMessage {
     pub fn new_fee_collect(
         operator: PublicKey,
         partner: PublicKey,
-        pubkey: PublicKey,
+        deposit_id: deposits_core::types::DepositId,
         amount: u64,
         block_height: u32,
     ) -> Self {
         Self::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             operator,
             partner.to_string(),
-            LedgerOperation::FeeCollect { pubkey, amount, block_height },
+            LedgerOperation::FeeCollect { deposit_id, amount, block_height },
         ))
     }
 

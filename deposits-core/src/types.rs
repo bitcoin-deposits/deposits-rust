@@ -9,6 +9,7 @@
 //!
 //! These types are Lightning-implementation agnostic and use serde for serialization.
 
+use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::PublicKey;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -204,6 +205,141 @@ pub mod serde_pubkey_vec {
 }
 
 // ============================================================================
+// Deposit Identifier
+// ============================================================================
+
+/// Unique deposit identifier derived from descriptor.
+/// This is the first 16 bytes of SHA256(descriptor_string).
+pub type DepositId = [u8; 16];
+
+/// Compute a DepositId from a descriptor string.
+/// deposit_id = SHA256(descriptor_string)[0..16]
+pub fn compute_deposit_id(descriptor: &str) -> DepositId {
+    let hash = sha256::Hash::hash(descriptor.as_bytes());
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&hash[0..16]);
+    id
+}
+
+/// Serde helper for DepositId (16-byte array)
+pub mod serde_deposit_id {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    /// Serialize a DepositId as hex string
+    pub fn serialize<S>(id: &[u8; 16], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        hex::encode(id).serialize(serializer)
+    }
+
+    /// Deserialize a DepositId from hex string
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 16], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let hex_str: String = String::deserialize(deserializer)?;
+        let bytes = hex::decode(&hex_str).map_err(serde::de::Error::custom)?;
+        if bytes.len() != 16 {
+            return Err(serde::de::Error::custom(format!(
+                "Expected 16 bytes for DepositId, got {}",
+                bytes.len()
+            )));
+        }
+        let mut arr = [0u8; 16];
+        arr.copy_from_slice(&bytes);
+        Ok(arr)
+    }
+}
+
+/// Serde helper for HashMap<DepositId, V> - serializes as Vec of tuples with hex keys
+pub mod serde_deposit_id_map {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::HashMap;
+
+    /// Entry for serialization
+    #[derive(Serialize, Deserialize)]
+    struct Entry<V> {
+        #[serde(with = "super::serde_deposit_id")]
+        key: [u8; 16],
+        value: V,
+    }
+
+    /// Serialize a HashMap<DepositId, V>
+    pub fn serialize<S, V>(map: &HashMap<[u8; 16], V>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        V: Serialize,
+    {
+        let entries: Vec<Entry<&V>> = map
+            .iter()
+            .map(|(k, v)| Entry { key: *k, value: v })
+            .collect();
+        entries.serialize(serializer)
+    }
+
+    /// Deserialize a HashMap<DepositId, V>
+    pub fn deserialize<'de, D, V>(deserializer: D) -> Result<HashMap<[u8; 16], V>, D::Error>
+    where
+        D: Deserializer<'de>,
+        V: Deserialize<'de>,
+    {
+        let entries: Vec<Entry<V>> = Vec::deserialize(deserializer)?;
+        Ok(entries.into_iter().map(|e| (e.key, e.value)).collect())
+    }
+}
+
+// ============================================================================
+// Descriptor Witness
+// ============================================================================
+
+/// Witness data satisfying a miniscript descriptor.
+///
+/// Contains a stack of elements (signatures, preimages, etc.) that together
+/// satisfy the spending conditions of a descriptor.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DescriptorWitness {
+    /// Stack elements (signatures, preimages, etc.)
+    /// Order matches witness stack order: index 0 is bottom of stack
+    pub stack: Vec<Vec<u8>>,
+}
+
+impl DescriptorWitness {
+    /// Create a new empty witness
+    pub fn new() -> Self {
+        Self { stack: Vec::new() }
+    }
+
+    /// Create a witness with a single signature (for single-key descriptors)
+    pub fn from_signature(signature: &[u8; 64]) -> Self {
+        Self {
+            stack: vec![signature.to_vec()],
+        }
+    }
+
+    /// Create a witness from multiple stack elements
+    pub fn from_stack(stack: Vec<Vec<u8>>) -> Self {
+        Self { stack }
+    }
+
+    /// Check if the witness is empty
+    pub fn is_empty(&self) -> bool {
+        self.stack.is_empty()
+    }
+
+    /// Get the number of stack elements
+    pub fn len(&self) -> usize {
+        self.stack.len()
+    }
+}
+
+impl Default for DescriptorWitness {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ============================================================================
 // Serde Default Helpers
 // ============================================================================
 
@@ -288,8 +424,8 @@ pub struct Invoice {
     /// Expiration timestamp (Unix timestamp).
     pub expires: u64,
     /// Which deposit this invoice is assigned to.
-    #[serde(with = "serde_pubkey")]
-    pub assigned_deposit: PublicKey,
+    #[serde(with = "serde_deposit_id")]
+    pub assigned_deposit: DepositId,
     /// BOLT11 invoice string.
     pub bolt11: String,
 }
@@ -316,8 +452,8 @@ pub struct PendingInvoice {
     /// Expiration timestamp (Unix timestamp).
     pub expires: u64,
     /// Deposit that will receive payment.
-    #[serde(with = "serde_pubkey")]
-    pub assigned_deposit: PublicKey,
+    #[serde(with = "serde_deposit_id")]
+    pub assigned_deposit: DepositId,
     /// Invoice ID.
     pub invoice_id: String,
     /// BOLT11 invoice string.
@@ -338,9 +474,16 @@ impl PendingInvoice {
 /// A user deposit in the protocol.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Deposit {
-    /// User's public key (deposit identifier).
-    #[serde(with = "serde_pubkey")]
-    pub pubkey: PublicKey,
+    /// Unique identifier (hash of descriptor).
+    #[serde(with = "serde_deposit_id")]
+    pub deposit_id: DepositId,
+    /// Miniscript descriptor controlling this deposit.
+    /// Examples:
+    ///   "pk(02abc...)"                           - single key (current behavior)
+    ///   "multi(2,pk1,pk2,pk3)"                   - 2-of-3 multisig
+    ///   "and(pk(A),after(100))"                  - key + timelock
+    ///   "or(pk(A),and(pk(B),sha256(H)))"         - key OR (key + hashlock)
+    pub descriptor: String,
     /// Current balance in millisatoshis.
     pub balance: u64,
     /// Locked balance for pending payments (millisatoshis).
@@ -362,10 +505,14 @@ pub struct Deposit {
 }
 
 impl Deposit {
-    /// Create a new deposit.
-    pub fn new(pubkey: PublicKey, fees: Option<FeeStructure>) -> Self {
+    /// Create a new deposit with a miniscript descriptor.
+    ///
+    /// The deposit_id is automatically computed from the descriptor.
+    pub fn new(descriptor: String, fees: Option<FeeStructure>) -> Self {
+        let deposit_id = compute_deposit_id(&descriptor);
         Self {
-            pubkey,
+            deposit_id,
+            descriptor,
             balance: 0,
             locked_balance: 0,
             invoices: Vec::new(),
@@ -374,6 +521,19 @@ impl Deposit {
             collateral_lock_amount: 0,
             collateral_lock_expires: 0,
         }
+    }
+
+    /// Create a new deposit from a single public key.
+    ///
+    /// This is a convenience method that creates a pk() descriptor.
+    pub fn from_pubkey(pubkey: &PublicKey, fees: Option<FeeStructure>) -> Self {
+        let descriptor = format!("pk({})", hex::encode(pubkey.serialize()));
+        Self::new(descriptor, fees)
+    }
+
+    /// Get the deposit_id as a hex string
+    pub fn deposit_id_hex(&self) -> String {
+        hex::encode(self.deposit_id)
     }
 
     /// Get available (unlocked) balance.
@@ -746,9 +906,9 @@ pub struct LedgerState {
     pub reserves_key: String,
     /// Ledger address (as string).
     pub ledger_address: String,
-    /// All deposits in this ledger, keyed by depositor's public key.
-    #[serde(with = "serde_pubkey_map")]
-    pub deposits: HashMap<PublicKey, Deposit>,
+    /// All deposits in this ledger, keyed by deposit_id.
+    #[serde(with = "serde_deposit_id_map")]
+    pub deposits: HashMap<DepositId, Deposit>,
     /// Current reserves output.
     pub reserves: ReservesOutput,
     /// Pending invoice awaiting payment.
@@ -1293,8 +1453,10 @@ impl SignedLedgerUpdate {
 /// Deposit information for API responses.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DepositInfo {
-    /// Deposit public key (hex).
-    pub pubkey: String,
+    /// Deposit identifier (hex).
+    pub deposit_id: String,
+    /// Miniscript descriptor.
+    pub descriptor: String,
     /// Current balance (millisatoshis).
     pub balance: u64,
     /// Locked balance (millisatoshis).
@@ -1310,7 +1472,8 @@ pub struct DepositInfo {
 impl From<&Deposit> for DepositInfo {
     fn from(d: &Deposit) -> Self {
         Self {
-            pubkey: hex::encode(d.pubkey.serialize()),
+            deposit_id: hex::encode(d.deposit_id),
+            descriptor: d.descriptor.clone(),
             balance: d.balance,
             locked_balance: d.locked_balance,
             available_balance: d.available_balance(),
@@ -1621,8 +1784,8 @@ pub enum Violation {
     InvalidReserveCalculation { expected: u64, actual: u64, timestamp: u64 },
     /// Fee assessment violation.
     InvalidFeeAssessment {
-        #[serde(with = "serde_pubkey")]
-        deposit_pubkey: PublicKey,
+        #[serde(with = "serde_deposit_id")]
+        deposit_id: DepositId,
         timestamp: u64,
     },
 }
@@ -1743,7 +1906,7 @@ impl TlvEncode for Invoice {
             .bytes_field(invoice_fields::PAYMENT_HASH, &self.payment_hash)
             .u64_field(invoice_fields::AMOUNT, self.amount)
             .u64_field(invoice_fields::EXPIRES, self.expires)
-            .pubkey_field(invoice_fields::ASSIGNED_DEPOSIT, &self.assigned_deposit)
+            .deposit_id_field(invoice_fields::ASSIGNED_DEPOSIT, &self.assigned_deposit)
             .string_field(invoice_fields::BOLT11, &self.bolt11)
             .build()
     }
@@ -1757,7 +1920,7 @@ impl TlvDecode for Invoice {
             payment_hash: reader.read_bytes(invoice_fields::PAYMENT_HASH)?,
             amount: reader.read_u64(invoice_fields::AMOUNT)?,
             expires: reader.read_u64(invoice_fields::EXPIRES)?,
-            assigned_deposit: reader.read_pubkey(invoice_fields::ASSIGNED_DEPOSIT)?,
+            assigned_deposit: reader.read_deposit_id(invoice_fields::ASSIGNED_DEPOSIT)?,
             bolt11: reader.read_string(invoice_fields::BOLT11)?,
         })
     }
@@ -1779,7 +1942,7 @@ impl TlvEncode for PendingInvoice {
             .u64_field(pending_invoice_fields::AMOUNT, self.amount)
             .bytes_field(pending_invoice_fields::PAYMENT_HASH, &self.payment_hash)
             .u64_field(pending_invoice_fields::EXPIRES, self.expires)
-            .pubkey_field(pending_invoice_fields::ASSIGNED_DEPOSIT, &self.assigned_deposit)
+            .deposit_id_field(pending_invoice_fields::ASSIGNED_DEPOSIT, &self.assigned_deposit)
             .string_field(pending_invoice_fields::INVOICE_ID, &self.invoice_id)
             .string_field(pending_invoice_fields::BOLT11, &self.bolt11)
             .build()
@@ -1793,7 +1956,7 @@ impl TlvDecode for PendingInvoice {
             amount: reader.read_u64(pending_invoice_fields::AMOUNT)?,
             payment_hash: reader.read_bytes(pending_invoice_fields::PAYMENT_HASH)?,
             expires: reader.read_u64(pending_invoice_fields::EXPIRES)?,
-            assigned_deposit: reader.read_pubkey(pending_invoice_fields::ASSIGNED_DEPOSIT)?,
+            assigned_deposit: reader.read_deposit_id(pending_invoice_fields::ASSIGNED_DEPOSIT)?,
             invoice_id: reader.read_string(pending_invoice_fields::INVOICE_ID)?,
             bolt11: reader.read_string(pending_invoice_fields::BOLT11)?,
         })
@@ -1802,7 +1965,8 @@ impl TlvDecode for PendingInvoice {
 
 // Field type constants for Deposit
 mod deposit_fields {
-    pub const PUBKEY: u64 = 0;
+    pub const DEPOSIT_ID: u64 = 0;
+    pub const DESCRIPTOR: u64 = 1;
     pub const BALANCE: u64 = 2;
     pub const LOCKED_BALANCE: u64 = 4;
     pub const COLLATERAL_PLEDGE_AMOUNT: u64 = 12;
@@ -1815,7 +1979,8 @@ mod deposit_fields {
 impl TlvEncode for Deposit {
     fn tlv_encode(&self) -> Vec<u8> {
         TlvBuilder::new()
-            .pubkey_field(deposit_fields::PUBKEY, &self.pubkey)
+            .deposit_id_field(deposit_fields::DEPOSIT_ID, &self.deposit_id)
+            .string_field(deposit_fields::DESCRIPTOR, &self.descriptor)
             .u64_field(deposit_fields::BALANCE, self.balance)
             .u64_field(deposit_fields::LOCKED_BALANCE, self.locked_balance)
             .vec_field(deposit_fields::INVOICES, &self.invoices)
@@ -1831,7 +1996,8 @@ impl TlvDecode for Deposit {
     fn tlv_decode(data: &[u8]) -> TlvResult<Self> {
         let reader = TlvReader::new(data)?;
         Ok(Self {
-            pubkey: reader.read_pubkey(deposit_fields::PUBKEY)?,
+            deposit_id: reader.read_deposit_id(deposit_fields::DEPOSIT_ID)?,
+            descriptor: reader.read_string(deposit_fields::DESCRIPTOR)?,
             balance: reader.read_u64(deposit_fields::BALANCE)?,
             locked_balance: reader.read_u64(deposit_fields::LOCKED_BALANCE)?,
             invoices: reader.read_vec(deposit_fields::INVOICES)?,
@@ -2043,9 +2209,12 @@ pub struct DepositOffer {
     /// The ledger ID (64-char hex hash stable across custody transfers).
     pub ledger_id: String,
 
-    /// The deposit pubkey (identifier for the deposit).
-    #[serde(with = "serde_pubkey")]
-    pub deposit_pubkey: PublicKey,
+    /// The deposit_id (identifier for the deposit).
+    #[serde(with = "serde_deposit_id")]
+    pub deposit_id: DepositId,
+
+    /// The descriptor controlling this deposit.
+    pub descriptor: String,
 
     /// Bitcoin address to receive funds (bech32 or other address format).
     pub funding_address: String,
@@ -2067,7 +2236,7 @@ pub struct DepositOffer {
     pub offer_id: [u8; 32],
 
     /// Operator's signature over the offer commitment.
-    /// Signs: "DEPOSIT_OFFER:{offer_id}:{operator}:{partner}:{deposit}:{address}:{max}:{min}:{deadline}"
+    /// Signs: "DEPOSIT_OFFER:{offer_id}:{operator}:{ledger}:{deposit_id}:{address}:{max}:{min}:{deadline}"
     #[serde(with = "serde_64")]
     pub operator_signature: [u8; 64],
 
@@ -2083,7 +2252,7 @@ impl DepositOffer {
     pub fn signing_message(
         operator_id: &PublicKey,
         ledger_id: &str,
-        deposit_pubkey: &PublicKey,
+        deposit_id: &DepositId,
         funding_address: &str,
         max_amount_sats: u64,
         min_amount_sats: u64,
@@ -2094,7 +2263,7 @@ impl DepositOffer {
             "DEPOSIT_OFFER:{}:{}:{}:{}:{}:{}:{}",
             hex::encode(operator_id.serialize()),
             ledger_id,
-            hex::encode(deposit_pubkey.serialize()),
+            hex::encode(deposit_id),
             funding_address,
             max_amount_sats,
             min_amount_sats,
@@ -2104,7 +2273,6 @@ impl DepositOffer {
 
     /// Compute the offer ID from the signing message.
     pub fn compute_offer_id(signing_message: &str) -> [u8; 32] {
-        use bitcoin::hashes::{sha256, Hash};
         let hash = sha256::Hash::hash(signing_message.as_bytes());
         hash.to_byte_array()
     }
@@ -2124,7 +2292,7 @@ impl DepositOffer {
         Self::signing_message(
             &self.operator_id,
             &self.ledger_id,
-            &self.deposit_pubkey,
+            &self.deposit_id,
             &self.funding_address,
             self.max_amount_sats,
             self.min_amount_sats,
@@ -2194,9 +2362,9 @@ pub struct OnChainWithdrawal {
     #[serde(with = "serde_32")]
     pub nonce: [u8; 32],
 
-    /// The deposit pubkey withdrawing funds.
-    #[serde(with = "serde_pubkey")]
-    pub deposit_pubkey: PublicKey,
+    /// The deposit_id withdrawing funds.
+    #[serde(with = "serde_deposit_id")]
+    pub deposit_id: DepositId,
 
     /// Bitcoin address to send funds to.
     pub destination_address: String,
@@ -2213,10 +2381,8 @@ pub struct OnChainWithdrawal {
     /// Optional memo/description.
     pub memo: Option<String>,
 
-    /// Depositor's signature authorizing the withdrawal.
-    /// Signs: "WITHDRAWAL:{nonce}:{deposit}:{address}:{amount}:{fee}"
-    #[serde(with = "serde_64")]
-    pub depositor_signature: [u8; 64],
+    /// Witness satisfying the deposit descriptor to authorize withdrawal.
+    pub depositor_witness: DescriptorWitness,
 }
 
 impl OnChainWithdrawal {
@@ -2226,7 +2392,7 @@ impl OnChainWithdrawal {
     /// same depositor requests the same amount to the same address twice.
     pub fn signing_message(
         nonce: &[u8; 32],
-        deposit_pubkey: &PublicKey,
+        deposit_id: &DepositId,
         destination_address: &str,
         amount_sats: u64,
         fee_sats: u64,
@@ -2234,7 +2400,7 @@ impl OnChainWithdrawal {
         format!(
             "WITHDRAWAL:{}:{}:{}:{}:{}",
             hex::encode(nonce),
-            hex::encode(deposit_pubkey.serialize()),
+            hex::encode(deposit_id),
             destination_address,
             amount_sats,
             fee_sats,
@@ -2246,7 +2412,6 @@ impl OnChainWithdrawal {
     /// The withdrawal_id uniquely identifies this withdrawal request and
     /// MUST be included in an OP_RETURN output of the fulfilling transaction.
     pub fn compute_withdrawal_id(signing_message: &str) -> [u8; 32] {
-        use bitcoin::hashes::{sha256, Hash};
         let hash = sha256::Hash::hash(signing_message.as_bytes());
         hash.to_byte_array()
     }
@@ -2255,7 +2420,7 @@ impl OnChainWithdrawal {
     pub fn get_signing_message(&self) -> String {
         Self::signing_message(
             &self.nonce,
-            &self.deposit_pubkey,
+            &self.deposit_id,
             &self.destination_address,
             self.amount_sats,
             self.fee_sats,
@@ -2381,7 +2546,7 @@ mod tests {
     #[test]
     fn test_deposit_operations() {
         let pk = test_pubkey();
-        let mut deposit = Deposit::new(pk, None);
+        let mut deposit = Deposit::from_pubkey(&pk, None);
 
         // Credit
         deposit.credit(100_000);
@@ -2502,12 +2667,15 @@ mod tests {
 
     #[test]
     fn test_invoice_tlv_roundtrip() {
+        let pk = test_pubkey();
+        let descriptor = format!("pk({})", hex::encode(pk.serialize()));
+        let deposit_id = compute_deposit_id(&descriptor);
         let original = Invoice {
             id: "test-invoice-123".to_string(),
             payment_hash: [0xab; 32],
             amount: 100_000,
             expires: 1700000000,
-            assigned_deposit: test_pubkey(),
+            assigned_deposit: deposit_id,
             bolt11: "lnbc100n1...".to_string(),
         };
         let encoded = original.tlv_encode();
@@ -2517,11 +2685,14 @@ mod tests {
 
     #[test]
     fn test_pending_invoice_tlv_roundtrip() {
+        let pk = test_pubkey();
+        let descriptor = format!("pk({})", hex::encode(pk.serialize()));
+        let deposit_id = compute_deposit_id(&descriptor);
         let original = PendingInvoice {
             amount: 50_000,
             payment_hash: [0xcd; 32],
             expires: 1700001000,
-            assigned_deposit: test_pubkey(),
+            assigned_deposit: deposit_id,
             invoice_id: "pending-456".to_string(),
             bolt11: "lnbc1...".to_string(),
         };
@@ -2533,8 +2704,11 @@ mod tests {
     #[test]
     fn test_deposit_tlv_roundtrip() {
         let pk = test_pubkey();
+        let descriptor = format!("pk({})", hex::encode(pk.serialize()));
+        let deposit_id = compute_deposit_id(&descriptor);
         let original = Deposit {
-            pubkey: pk,
+            deposit_id,
+            descriptor,
             balance: 1_000_000,
             locked_balance: 50_000,
             invoices: vec![
@@ -2543,7 +2717,7 @@ mod tests {
                     payment_hash: [0x11; 32],
                     amount: 10_000,
                     expires: 1700000000,
-                    assigned_deposit: pk,
+                    assigned_deposit: deposit_id,
                     bolt11: "lnbc10n1...".to_string(),
                 },
             ],

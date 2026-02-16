@@ -23,7 +23,7 @@ use bitcoin::secp256k1::PublicKey;
 
 use crate::error::DepositsError;
 use crate::handler_types::CollateralInfo;
-use crate::types::ReservesStatus;
+use crate::types::{DepositId, ReservesStatus};
 
 // ============================================================================
 // Collateral Operations
@@ -50,31 +50,31 @@ pub trait CollateralOperations {
 
 /// Extension trait for deposit CRUD operations
 pub trait DepositOperations {
-    /// List all deposit public keys across all ledgers
-    fn list_deposits(&self) -> Result<Vec<PublicKey>, DepositsError>;
+    /// List all deposit IDs across all ledgers
+    fn list_deposits(&self) -> Result<Vec<DepositId>, DepositsError>;
 
-    /// List deposits owned by a specific depositor
-    fn list_deposits_for_depositor(&self, depositor_pubkey: PublicKey) -> Result<Vec<PublicKey>, DepositsError>;
-
-    /// List deposits with a specific deposit key
-    fn list_deposits_for_pubkey(&self, deposit_pubkey: PublicKey) -> Result<Vec<PublicKey>, DepositsError>;
+    /// List deposits matching a specific deposit_id
+    fn list_deposits_for_deposit_id(&self, deposit_id: DepositId) -> Result<Vec<DepositId>, DepositsError>;
 
     /// Get the available balance for a deposit (balance - locked)
-    fn get_deposit_balance(&self, deposit_pubkey: PublicKey) -> Result<u64, DepositsError>;
+    fn get_deposit_balance(&self, deposit_id: DepositId) -> Result<u64, DepositsError>;
+
+    /// Get the descriptor for a deposit by deposit_id
+    fn get_deposit_descriptor(&self, deposit_id: DepositId) -> Result<String, DepositsError>;
 
     /// Find a deposit by payment_hash (from an invoice)
-    /// Returns (reserves_id, deposit_pubkey, invoice_amount) if found
-    fn find_deposit_by_payment_hash(&self, payment_hash: &[u8; 32]) -> Option<(String, PublicKey, u64)>;
+    /// Returns (reserves_id, deposit_id, invoice_amount) if found
+    fn find_deposit_by_payment_hash(&self, payment_hash: &[u8; 32]) -> Option<(String, DepositId, u64)>;
 
-    /// Get all depositors with positive balances
-    fn get_active_depositors(&self) -> Vec<PublicKey>;
+    /// Get all deposit_ids with positive balances
+    fn get_active_depositors(&self) -> Vec<DepositId>;
 
     /// Get total deposit balances for a partner
     fn get_total_deposit_balances(&self, partner_node_id: PublicKey) -> Option<u64>;
 
     /// Get detailed deposit info for a partner
-    /// Returns Vec of (deposit_pubkey, balance, locked_balance)
-    fn get_deposits_for_partner(&self, partner_node_id: PublicKey) -> Option<Vec<(PublicKey, u64, u64)>>;
+    /// Returns Vec of (deposit_id, balance, locked_balance)
+    fn get_deposits_for_partner(&self, partner_node_id: PublicKey) -> Option<Vec<(DepositId, u64, u64)>>;
 
     /// Get max outstanding invoice amount for a channel
     fn get_max_outstanding_invoice_amount(&self, partner_node_id: PublicKey) -> Option<u64>;
