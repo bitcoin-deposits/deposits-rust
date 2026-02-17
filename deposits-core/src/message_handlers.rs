@@ -537,6 +537,9 @@ pub fn handle_ledger_update<C: HandlerContext>(
                 LedgerOperation::CustodyAcquire { .. } |
                 LedgerOperation::CustodyYield |
                 LedgerOperation::Tombstone { .. } |
+                LedgerOperation::TransferLock { .. } |
+                LedgerOperation::TransferComplete { .. } |
+                LedgerOperation::TransferTimeout { .. } |
                 LedgerOperation::LedgerOpen { .. } => {}
             }
 

@@ -378,6 +378,115 @@ pub fn verify_invoice_lock_witness(
     )
 }
 
+/// Create the signing message hash for a transfer lock.
+///
+/// Format: SHA256("TRANSFER:{nonce}:{source}:{dest}:{amount}:{fee}:{script}:{timeout}")
+///
+/// The source deposit holder signs this to authorize locking funds for conditional transfer.
+pub fn transfer_lock_signing_message(
+    nonce: &[u8; 32],
+    source_deposit_id: &crate::types::DepositId,
+    destination_deposit_id: &crate::types::DepositId,
+    amount_sats: u64,
+    fee_sats: u64,
+    completion_script: &str,
+    timeout_height: u32,
+) -> [u8; 32] {
+    let message = format!(
+        "TRANSFER:{}:{}:{}:{}:{}:{}:{}",
+        hex::encode(nonce),
+        hex::encode(source_deposit_id),
+        hex::encode(destination_deposit_id),
+        amount_sats,
+        fee_sats,
+        completion_script,
+        timeout_height
+    );
+    sha256::Hash::hash(message.as_bytes()).to_byte_array()
+}
+
+/// Compute the transfer_id from the signing message.
+pub fn compute_transfer_id(signing_message: &[u8; 32]) -> [u8; 32] {
+    sha256::Hash::hash(signing_message).to_byte_array()
+}
+
+/// Verify a witness satisfies the source deposit's descriptor for a transfer lock.
+///
+/// This verifies that the witness authorizes locking funds from the source deposit
+/// for a conditional transfer.
+pub fn verify_transfer_lock_witness(
+    source_descriptor: &str,
+    source_deposit_id: &crate::types::DepositId,
+    destination_deposit_id: &crate::types::DepositId,
+    nonce: &[u8; 32],
+    amount: u64,
+    fee: u64,
+    completion_script: &str,
+    timeout_height: u32,
+    witness: &crate::types::DescriptorWitness,
+) -> Result<bool, DepositsError> {
+    let message_hash = transfer_lock_signing_message(
+        nonce,
+        source_deposit_id,
+        destination_deposit_id,
+        amount,
+        fee,
+        completion_script,
+        timeout_height,
+    );
+    verify_descriptor_witness(
+        source_descriptor,
+        source_deposit_id,
+        &message_hash,
+        amount + fee,
+        witness,
+        0, // Block height not relevant for transfer locks
+    )
+}
+
+/// Verify a witness satisfies the completion_script for a transfer completion.
+///
+/// This verifies that the witness satisfies the completion condition (e.g., revealing
+/// a preimage for sha256(H) or providing a valid signature for pk(X)).
+pub fn verify_transfer_complete_witness(
+    completion_script: &str,
+    transfer_id: &[u8; 32],
+    nonce: &[u8; 32],
+    source_deposit_id: &crate::types::DepositId,
+    destination_deposit_id: &crate::types::DepositId,
+    amount: u64,
+    fee: u64,
+    timeout_height: u32,
+    script_witness: &crate::types::DescriptorWitness,
+) -> Result<bool, DepositsError> {
+    // The signing message is the same as for the lock - both parties commit to same terms
+    let message_hash = transfer_lock_signing_message(
+        nonce,
+        source_deposit_id,
+        destination_deposit_id,
+        amount,
+        fee,
+        completion_script,
+        timeout_height,
+    );
+
+    // Verify the computed transfer_id matches
+    let computed_id = compute_transfer_id(&message_hash);
+    if computed_id != *transfer_id {
+        return Err(DepositsError::InvalidSignature);
+    }
+
+    // Verify the witness satisfies the completion_script
+    verify_descriptor_witness(
+        completion_script,
+        source_deposit_id, // Use source as context (arbitrary but consistent)
+        &message_hash,
+        amount,
+        script_witness,
+        0, // Block height checked separately for timelocks
+    )
+}
+
 /// Verify a descriptor witness satisfies a miniscript descriptor.
 ///
 /// This is the core verification function for all descriptor-based authorization.
@@ -956,5 +1065,124 @@ mod tests {
             800_000,
         ).unwrap();
         assert!(!valid, "Signature should be invalid for modified amount");
+    }
+
+    #[test]
+    fn test_transfer_lock_signing_message() {
+        use crate::types::compute_deposit_id;
+
+        let nonce = [0x01u8; 32];
+        let source_id = compute_deposit_id("pk(source)");
+        let dest_id = compute_deposit_id("pk(dest)");
+        let amount = 100_000u64;
+        let fee = 1_000u64;
+        let completion_script = "sha256(0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef)";
+        let timeout_height = 850_000u32;
+
+        // Generate signing message
+        let msg1 = transfer_lock_signing_message(
+            &nonce,
+            &source_id,
+            &dest_id,
+            amount,
+            fee,
+            completion_script,
+            timeout_height,
+        );
+
+        // Same inputs should produce same output
+        let msg2 = transfer_lock_signing_message(
+            &nonce,
+            &source_id,
+            &dest_id,
+            amount,
+            fee,
+            completion_script,
+            timeout_height,
+        );
+        assert_eq!(msg1, msg2, "Same inputs should produce same signing message");
+
+        // Different nonce should produce different message
+        let different_nonce = [0x02u8; 32];
+        let msg3 = transfer_lock_signing_message(
+            &different_nonce,
+            &source_id,
+            &dest_id,
+            amount,
+            fee,
+            completion_script,
+            timeout_height,
+        );
+        assert_ne!(msg1, msg3, "Different nonce should produce different message");
+
+        // Different amount should produce different message
+        let msg4 = transfer_lock_signing_message(
+            &nonce,
+            &source_id,
+            &dest_id,
+            amount + 1,
+            fee,
+            completion_script,
+            timeout_height,
+        );
+        assert_ne!(msg1, msg4, "Different amount should produce different message");
+
+        // Different fee should produce different message
+        let msg5 = transfer_lock_signing_message(
+            &nonce,
+            &source_id,
+            &dest_id,
+            amount,
+            fee + 1,
+            completion_script,
+            timeout_height,
+        );
+        assert_ne!(msg1, msg5, "Different fee should produce different message");
+    }
+
+    #[test]
+    fn test_compute_transfer_id() {
+        use crate::types::compute_deposit_id;
+
+        let nonce = [0x42u8; 32];
+        let source_id = compute_deposit_id("pk(alice)");
+        let dest_id = compute_deposit_id("pk(bob)");
+        let amount = 50_000u64;
+        let fee = 500u64;
+        let completion_script = "sha256(deadbeef)";
+        let timeout_height = 900_000u32;
+
+        let signing_msg = transfer_lock_signing_message(
+            &nonce,
+            &source_id,
+            &dest_id,
+            amount,
+            fee,
+            completion_script,
+            timeout_height,
+        );
+
+        let transfer_id = compute_transfer_id(&signing_msg);
+
+        // transfer_id should be 32 bytes
+        assert_eq!(transfer_id.len(), 32);
+
+        // Same signing message should produce same transfer_id
+        let transfer_id2 = compute_transfer_id(&signing_msg);
+        assert_eq!(transfer_id, transfer_id2);
+
+        // Different signing message should produce different transfer_id
+        let different_nonce = [0x43u8; 32];
+        let different_signing_msg = transfer_lock_signing_message(
+            &different_nonce,
+            &source_id,
+            &dest_id,
+            amount,
+            fee,
+            completion_script,
+            timeout_height,
+        );
+        let different_transfer_id = compute_transfer_id(&different_signing_msg);
+        assert_ne!(transfer_id, different_transfer_id);
     }
 }

@@ -63,6 +63,8 @@ use crate::operation_validation::{
     validate_deposit_add_by_id, validate_deposit_close_by_id, validate_deposit_update_by_id,
     validate_payment_lock_by_id, validate_payment_fulfill_by_id, validate_credit_payment_by_id,
     validate_fee_collect_by_id, validate_deposit_key_rotate, validate_onchain_lock_by_id,
+    // Transfer validation functions
+    validate_transfer_lock, validate_transfer_complete,
     ValidationResult,
 };
 use crate::wire_messages::{
@@ -641,6 +643,50 @@ pub fn validate_ledger_operation<C: ValidationContext>(
                 reserves_id: partner_pubkey.to_string(),
             };
             validate_ledger_close_msg(ctx, &msg, sender)
+        }
+        LedgerOperation::TransferLock {
+            nonce, source_deposit_id, destination_deposit_id, amount, fee,
+            completion_script, timeout_height, transfer_id, witness
+        } => {
+            if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
+                let ledger = ledger_arc.read().unwrap();
+                validate_transfer_lock(
+                    &ledger,
+                    source_deposit_id,
+                    destination_deposit_id,
+                    nonce,
+                    *amount,
+                    *fee,
+                    completion_script,
+                    *timeout_height,
+                    transfer_id,
+                    witness,
+                )
+            } else {
+                Err(format!("No channel ledger found for sender {}", sender))
+            }
+        }
+        LedgerOperation::TransferComplete { transfer_id, script_witness } => {
+            if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
+                let ledger = ledger_arc.read().unwrap();
+                validate_transfer_complete(&ledger, transfer_id, script_witness)
+            } else {
+                Err(format!("No channel ledger found for sender {}", sender))
+            }
+        }
+        LedgerOperation::TransferTimeout { transfer_id, block_hash: _ } => {
+            // For timeout, we need current block height - use 0 as placeholder
+            // Real validation happens in the handler with actual block context
+            if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
+                let ledger = ledger_arc.read().unwrap();
+                // Check pending transfer exists (block height check done elsewhere)
+                if !ledger.state.pending_transfers.contains_key(transfer_id) {
+                    return Err(format!("Pending transfer {} does not exist", hex::encode(transfer_id)));
+                }
+                Ok(())
+            } else {
+                Err(format!("No channel ledger found for sender {}", sender))
+            }
         }
         // Operations without specific validation (validated in ledger.rs or by construction)
         LedgerOperation::CollateralAttestation { .. } |

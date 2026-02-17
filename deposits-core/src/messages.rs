@@ -669,6 +669,31 @@ pub enum LedgerOperation {
         destination_address: String,
     },
 
+    // ========== Transfer Operations (3) ==========
+    /// Lock funds for a conditional transfer between deposits
+    /// The transfer completes if completion_script is satisfied, or times out after timeout_height
+    TransferLock {
+        nonce: [u8; 32],
+        source_deposit_id: DepositId,
+        destination_deposit_id: DepositId,
+        amount: u64,
+        fee: u64,
+        completion_script: String,
+        timeout_height: u32,
+        transfer_id: [u8; 32],
+        witness: DescriptorWitness,
+    },
+    /// Complete a transfer by satisfying the completion_script
+    TransferComplete {
+        transfer_id: [u8; 32],
+        script_witness: DescriptorWitness,
+    },
+    /// Timeout a transfer after the deadline (returns funds to source)
+    TransferTimeout {
+        transfer_id: [u8; 32],
+        block_hash: [u8; 32],
+    },
+
     // ========== Collateral Operations (3) ==========
     /// Increase collateral commitment
     CollateralIncrease {
@@ -854,6 +879,9 @@ impl LedgerOperation {
             Self::OnchainLock { .. } => 36,
             Self::OnchainFail { .. } => 37,
             Self::OnchainFulfill { .. } => 38,
+            Self::TransferLock { .. } => 70,
+            Self::TransferComplete { .. } => 71,
+            Self::TransferTimeout { .. } => 72,
             Self::CollateralIncrease { .. } => 40,
             Self::CollateralDecrease { .. } => 41,
             Self::CollateralAttestation { .. } => 42,
@@ -1645,6 +1673,39 @@ impl BinaryCodec for LedgerOperation {
                 write_32(w, txid)?;
                 write_string(w, destination_address)?;
             }
+            Self::TransferLock { nonce, source_deposit_id, destination_deposit_id, amount, fee, completion_script, timeout_height, transfer_id, witness } => {
+                write_32(w, nonce)?;
+                let mut src_bytes = [0u8; 33];
+                src_bytes[0] = 0x02;
+                src_bytes[1..17].copy_from_slice(source_deposit_id);
+                w.write_all(&src_bytes)?;
+                let mut dst_bytes = [0u8; 33];
+                dst_bytes[0] = 0x02;
+                dst_bytes[1..17].copy_from_slice(destination_deposit_id);
+                w.write_all(&dst_bytes)?;
+                write_u64(w, *amount)?;
+                write_u64(w, *fee)?;
+                write_string(w, completion_script)?;
+                write_u32(w, *timeout_height)?;
+                write_32(w, transfer_id)?;
+                let sig_bytes: [u8; 64] = witness.stack.first()
+                    .and_then(|s| if s.len() >= 64 { s[..64].try_into().ok() } else { None })
+                    .unwrap_or([0u8; 64]);
+                w.write_all(&sig_bytes)?;
+            }
+            Self::TransferComplete { transfer_id, script_witness } => {
+                write_32(w, transfer_id)?;
+                // Write witness stack length and elements
+                write_u16(w, script_witness.stack.len() as u16)?;
+                for element in &script_witness.stack {
+                    write_u16(w, element.len() as u16)?;
+                    w.write_all(element)?;
+                }
+            }
+            Self::TransferTimeout { transfer_id, block_hash } => {
+                write_32(w, transfer_id)?;
+                write_32(w, block_hash)?;
+            }
             Self::CollateralIncrease { new_amount, block_height } => {
                 write_u64(w, *new_amount)?;
                 write_u32(w, *block_height)?;
@@ -1914,6 +1975,52 @@ impl BinaryCodec for LedgerOperation {
                     destination_address: read_string(r)?,
                 })
             }
+            // Transfer operations (70-72)
+            70 => {
+                let nonce = read_32(r)?;
+                let src_bytes = read_33(r)?;
+                let mut source_deposit_id = [0u8; 16];
+                source_deposit_id.copy_from_slice(&src_bytes[1..17]);
+                let dst_bytes = read_33(r)?;
+                let mut destination_deposit_id = [0u8; 16];
+                destination_deposit_id.copy_from_slice(&dst_bytes[1..17]);
+                let amount = read_u64(r)?;
+                let fee = read_u64(r)?;
+                let completion_script = read_string(r)?;
+                let timeout_height = read_u32(r)?;
+                let transfer_id = read_32(r)?;
+                let sig_bytes = read_64(r)?;
+                Ok(Self::TransferLock {
+                    nonce,
+                    source_deposit_id,
+                    destination_deposit_id,
+                    amount,
+                    fee,
+                    completion_script,
+                    timeout_height,
+                    transfer_id,
+                    witness: DescriptorWitness { stack: vec![sig_bytes.to_vec()] },
+                })
+            }
+            71 => {
+                let transfer_id = read_32(r)?;
+                let stack_len = read_u16(r)? as usize;
+                let mut stack = Vec::with_capacity(stack_len);
+                for _ in 0..stack_len {
+                    let elem_len = read_u16(r)? as usize;
+                    let mut elem = vec![0u8; elem_len];
+                    r.read_exact(&mut elem)?;
+                    stack.push(elem);
+                }
+                Ok(Self::TransferComplete {
+                    transfer_id,
+                    script_witness: DescriptorWitness { stack },
+                })
+            }
+            72 => Ok(Self::TransferTimeout {
+                transfer_id: read_32(r)?,
+                block_hash: read_32(r)?,
+            }),
             // Collateral operations (40-44)
             40 => Ok(Self::CollateralIncrease {
                 new_amount: read_u64(r)?,
@@ -2782,6 +2889,16 @@ mod ledger_op_tlv {
     pub const WITNESS: u64 = 204;          // Nested TLV with stack elements
     pub const WITNESS_ELEMENT: u64 = 206;  // Single stack element (bytes)
     pub const NEW_DESCRIPTOR: u64 = 208;   // New descriptor for key rotation
+
+    // Transfer operation fields
+    pub const NONCE: u64 = 210;
+    pub const SOURCE_DEPOSIT_ID: u64 = 212;
+    pub const DESTINATION_DEPOSIT_ID: u64 = 214;
+    pub const COMPLETION_SCRIPT: u64 = 216;
+    pub const TIMEOUT_HEIGHT: u64 = 218;
+    pub const TRANSFER_ID: u64 = 220;
+    pub const BLOCK_HASH: u64 = 222;
+    pub const SCRIPT_WITNESS: u64 = 224;
 }
 
 impl TlvEncode for LedgerOperation {
@@ -2913,6 +3030,28 @@ impl TlvEncode for LedgerOperation {
                     .u64_field(AMOUNT, *amount)
                     .bytes_field(TXID, txid)
                     .string_field(DESTINATION_ADDRESS, destination_address);
+            }
+            Self::TransferLock { nonce, source_deposit_id, destination_deposit_id, amount, fee, completion_script, timeout_height, transfer_id, witness } => {
+                builder = builder
+                    .bytes_field(NONCE, nonce)
+                    .deposit_id_field(SOURCE_DEPOSIT_ID, source_deposit_id)
+                    .deposit_id_field(DESTINATION_DEPOSIT_ID, destination_deposit_id)
+                    .u64_field(AMOUNT, *amount)
+                    .u64_field(FEES, *fee)
+                    .string_field(COMPLETION_SCRIPT, completion_script)
+                    .u32_field(TIMEOUT_HEIGHT, *timeout_height)
+                    .bytes_field(TRANSFER_ID, transfer_id)
+                    .witness_field(WITNESS, witness);
+            }
+            Self::TransferComplete { transfer_id, script_witness } => {
+                builder = builder
+                    .bytes_field(TRANSFER_ID, transfer_id)
+                    .witness_field(SCRIPT_WITNESS, script_witness);
+            }
+            Self::TransferTimeout { transfer_id, block_hash } => {
+                builder = builder
+                    .bytes_field(TRANSFER_ID, transfer_id)
+                    .bytes_field(BLOCK_HASH, block_hash);
             }
             Self::CollateralIncrease { new_amount, block_height } => {
                 builder = builder
@@ -3108,6 +3247,25 @@ impl TlvDecode for LedgerOperation {
                 amount: reader.read_u64(AMOUNT)?,
                 txid: reader.read_bytes(TXID)?,
                 destination_address: reader.read_string(DESTINATION_ADDRESS)?,
+            }),
+            70 => Ok(Self::TransferLock {
+                nonce: reader.read_bytes(NONCE)?,
+                source_deposit_id: reader.read_deposit_id(SOURCE_DEPOSIT_ID)?,
+                destination_deposit_id: reader.read_deposit_id(DESTINATION_DEPOSIT_ID)?,
+                amount: reader.read_u64(AMOUNT)?,
+                fee: reader.read_u64(FEES)?,
+                completion_script: reader.read_string(COMPLETION_SCRIPT)?,
+                timeout_height: reader.read_u32(TIMEOUT_HEIGHT)?,
+                transfer_id: reader.read_bytes(TRANSFER_ID)?,
+                witness: reader.read_witness(WITNESS)?,
+            }),
+            71 => Ok(Self::TransferComplete {
+                transfer_id: reader.read_bytes(TRANSFER_ID)?,
+                script_witness: reader.read_witness(SCRIPT_WITNESS)?,
+            }),
+            72 => Ok(Self::TransferTimeout {
+                transfer_id: reader.read_bytes(TRANSFER_ID)?,
+                block_hash: reader.read_bytes(BLOCK_HASH)?,
             }),
             40 => Ok(Self::CollateralIncrease {
                 new_amount: reader.read_u64(NEW_AMOUNT)?,
@@ -4923,5 +5081,192 @@ mod tests {
             let decoded = DepositsMessage::tlv_decode(&encoded).unwrap();
             assert_eq!(msg, decoded);
         }
+    }
+
+    #[test]
+    fn test_transfer_lock_wire_roundtrip() {
+        let source_id = crate::types::compute_deposit_id("pk(alice)");
+        let dest_id = crate::types::compute_deposit_id("pk(bob)");
+
+        let op = LedgerOperation::TransferLock {
+            nonce: [0x42u8; 32],
+            source_deposit_id: source_id,
+            destination_deposit_id: dest_id,
+            amount: 100_000,
+            fee: 1_000,
+            completion_script: "sha256(deadbeef0123456789abcdef0123456789abcdef0123456789abcdef01234567)".to_string(),
+            timeout_height: 850_000,
+            transfer_id: [0xABu8; 32],
+            witness: DescriptorWitness { stack: vec![[0x11u8; 64].to_vec()] },
+        };
+
+        let mut bytes = Vec::new();
+        op.write_to(&mut bytes).unwrap();
+        let decoded = LedgerOperation::read_from(&mut &bytes[..]).unwrap();
+
+        // Wire encoding preserves source and dest deposit IDs
+        if let LedgerOperation::TransferLock {
+            nonce, source_deposit_id, destination_deposit_id, amount, fee,
+            completion_script, timeout_height, transfer_id, witness
+        } = decoded {
+            assert_eq!(nonce, [0x42u8; 32]);
+            assert_eq!(source_deposit_id, source_id);
+            assert_eq!(destination_deposit_id, dest_id);
+            assert_eq!(amount, 100_000);
+            assert_eq!(fee, 1_000);
+            assert_eq!(completion_script, "sha256(deadbeef0123456789abcdef0123456789abcdef0123456789abcdef01234567)");
+            assert_eq!(timeout_height, 850_000);
+            assert_eq!(transfer_id, [0xABu8; 32]);
+            assert_eq!(witness.stack.len(), 1);
+            assert_eq!(witness.stack[0].len(), 64);
+        } else {
+            panic!("Expected TransferLock");
+        }
+    }
+
+    #[test]
+    fn test_transfer_complete_wire_roundtrip() {
+        let op = LedgerOperation::TransferComplete {
+            transfer_id: [0xCDu8; 32],
+            script_witness: DescriptorWitness {
+                stack: vec![
+                    [0x11u8; 32].to_vec(),  // preimage
+                ],
+            },
+        };
+
+        let mut bytes = Vec::new();
+        op.write_to(&mut bytes).unwrap();
+        let decoded = LedgerOperation::read_from(&mut &bytes[..]).unwrap();
+
+        if let LedgerOperation::TransferComplete { transfer_id, script_witness } = decoded {
+            assert_eq!(transfer_id, [0xCDu8; 32]);
+            assert_eq!(script_witness.stack.len(), 1);
+            assert_eq!(script_witness.stack[0], [0x11u8; 32].to_vec());
+        } else {
+            panic!("Expected TransferComplete");
+        }
+    }
+
+    #[test]
+    fn test_transfer_timeout_wire_roundtrip() {
+        let op = LedgerOperation::TransferTimeout {
+            transfer_id: [0xEFu8; 32],
+            block_hash: [0x99u8; 32],
+        };
+
+        let mut bytes = Vec::new();
+        op.write_to(&mut bytes).unwrap();
+        let decoded = LedgerOperation::read_from(&mut &bytes[..]).unwrap();
+
+        assert_eq!(op, decoded);
+    }
+
+    #[test]
+    fn test_transfer_lock_tlv_roundtrip() {
+        let source_id = crate::types::compute_deposit_id("pk(source_key)");
+        let dest_id = crate::types::compute_deposit_id("pk(dest_key)");
+
+        let op = LedgerOperation::TransferLock {
+            nonce: [0x55u8; 32],
+            source_deposit_id: source_id,
+            destination_deposit_id: dest_id,
+            amount: 250_000,
+            fee: 2_500,
+            completion_script: "sha256(cafebabe)".to_string(),
+            timeout_height: 900_000,
+            transfer_id: [0x77u8; 32],
+            witness: DescriptorWitness { stack: vec![[0x88u8; 64].to_vec()] },
+        };
+
+        let encoded = op.tlv_encode();
+        let decoded = LedgerOperation::tlv_decode(&encoded).unwrap();
+
+        if let LedgerOperation::TransferLock {
+            nonce, source_deposit_id, destination_deposit_id, amount, fee,
+            completion_script, timeout_height, transfer_id, witness
+        } = decoded {
+            assert_eq!(nonce, [0x55u8; 32]);
+            assert_eq!(source_deposit_id, source_id);
+            assert_eq!(destination_deposit_id, dest_id);
+            assert_eq!(amount, 250_000);
+            assert_eq!(fee, 2_500);
+            assert_eq!(completion_script, "sha256(cafebabe)");
+            assert_eq!(timeout_height, 900_000);
+            assert_eq!(transfer_id, [0x77u8; 32]);
+            assert_eq!(witness.stack.len(), 1);
+        } else {
+            panic!("Expected TransferLock");
+        }
+    }
+
+    #[test]
+    fn test_transfer_complete_tlv_roundtrip() {
+        let op = LedgerOperation::TransferComplete {
+            transfer_id: [0xAAu8; 32],
+            script_witness: DescriptorWitness {
+                stack: vec![
+                    vec![1, 2, 3, 4],  // arbitrary witness data
+                    vec![5, 6, 7, 8],
+                ],
+            },
+        };
+
+        let encoded = op.tlv_encode();
+        let decoded = LedgerOperation::tlv_decode(&encoded).unwrap();
+
+        if let LedgerOperation::TransferComplete { transfer_id, script_witness } = decoded {
+            assert_eq!(transfer_id, [0xAAu8; 32]);
+            assert_eq!(script_witness.stack.len(), 2);
+            assert_eq!(script_witness.stack[0], vec![1, 2, 3, 4]);
+            assert_eq!(script_witness.stack[1], vec![5, 6, 7, 8]);
+        } else {
+            panic!("Expected TransferComplete");
+        }
+    }
+
+    #[test]
+    fn test_transfer_timeout_tlv_roundtrip() {
+        let op = LedgerOperation::TransferTimeout {
+            transfer_id: [0xBBu8; 32],
+            block_hash: [0xCCu8; 32],
+        };
+
+        let encoded = op.tlv_encode();
+        let decoded = LedgerOperation::tlv_decode(&encoded).unwrap();
+
+        assert_eq!(op, decoded);
+    }
+
+    #[test]
+    fn test_transfer_discriminants() {
+        let source_id = crate::types::compute_deposit_id("pk(test)");
+        let dest_id = crate::types::compute_deposit_id("pk(test2)");
+
+        let lock = LedgerOperation::TransferLock {
+            nonce: [0u8; 32],
+            source_deposit_id: source_id,
+            destination_deposit_id: dest_id,
+            amount: 1000,
+            fee: 10,
+            completion_script: "sha256(00)".to_string(),
+            timeout_height: 100,
+            transfer_id: [0u8; 32],
+            witness: DescriptorWitness { stack: vec![] },
+        };
+
+        let complete = LedgerOperation::TransferComplete {
+            transfer_id: [0u8; 32],
+            script_witness: DescriptorWitness { stack: vec![] },
+        };
+
+        let timeout = LedgerOperation::TransferTimeout {
+            transfer_id: [0u8; 32],
+            block_hash: [0u8; 32],
+        };
+
+        assert_eq!(lock.discriminant(), 70);
+        assert_eq!(complete.discriminant(), 71);
+        assert_eq!(timeout.discriminant(), 72);
     }
 }

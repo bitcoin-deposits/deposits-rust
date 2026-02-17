@@ -1348,6 +1348,55 @@ impl Ledger {
                 // Loser yields: tombstone this branch
                 self.state.dispute_state = DisputeState::Tombstoned;
             }
+            LedgerOperation::TransferLock {
+                nonce, source_deposit_id, destination_deposit_id, amount, fee,
+                completion_script, timeout_height, transfer_id, ..
+            } => {
+                // Lock funds from source deposit
+                if let Some(deposit) = self.state.deposits.get_mut(source_deposit_id) {
+                    let total = amount + fee;
+                    deposit.balance = deposit.balance.saturating_sub(total);
+                    deposit.locked_balance = deposit.locked_balance.saturating_add(total);
+                }
+                // Track pending transfer
+                let pending = crate::types::PendingTransfer {
+                    transfer_id: *transfer_id,
+                    nonce: *nonce,
+                    source_deposit_id: *source_deposit_id,
+                    destination_deposit_id: *destination_deposit_id,
+                    amount: *amount,
+                    fee: *fee,
+                    completion_script: completion_script.clone(),
+                    timeout_height: *timeout_height,
+                };
+                self.state.pending_transfers.insert(*transfer_id, pending);
+            }
+            LedgerOperation::TransferComplete { transfer_id, .. } => {
+                // Look up and remove pending transfer
+                if let Some(pending) = self.state.pending_transfers.remove(transfer_id) {
+                    let total = pending.total_locked();
+                    // Unlock from source
+                    if let Some(source) = self.state.deposits.get_mut(&pending.source_deposit_id) {
+                        source.locked_balance = source.locked_balance.saturating_sub(total);
+                    }
+                    // Credit amount to destination (fee goes to custodian/reserves)
+                    if let Some(dest) = self.state.deposits.get_mut(&pending.destination_deposit_id) {
+                        dest.balance = dest.balance.saturating_add(pending.amount);
+                    }
+                    // Fee is implicitly collected (removed from circulation)
+                }
+            }
+            LedgerOperation::TransferTimeout { transfer_id, .. } => {
+                // Look up and remove pending transfer
+                if let Some(pending) = self.state.pending_transfers.remove(transfer_id) {
+                    let total = pending.total_locked();
+                    // Return locked funds to source
+                    if let Some(source) = self.state.deposits.get_mut(&pending.source_deposit_id) {
+                        source.locked_balance = source.locked_balance.saturating_sub(total);
+                        source.balance = source.balance.saturating_add(total);
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -2136,5 +2185,162 @@ mod tests {
         let binary = ledger.export_binary(1000);
 
         assert!(!binary.is_empty());
+    }
+
+    #[test]
+    fn test_transfer_lock_complete_flow() {
+        use crate::types::{compute_deposit_id, DescriptorWitness, Deposit};
+
+        let op_key = test_pubkey();
+        let partner = test_pubkey_2();
+        let mut ledger = Ledger::new_as_operator(op_key, partner.to_string(), "tb1q...".to_string(), 0);
+
+        // Create source and destination deposits
+        let source_id = compute_deposit_id("pk(alice)");
+        let dest_id = compute_deposit_id("pk(bob)");
+
+        let source_deposit = Deposit {
+            deposit_id: source_id,
+            descriptor: "pk(alice)".to_string(),
+            balance: 100_000,
+            locked_balance: 0,
+            invoices: Vec::new(),
+            fees: FeeStructure::default(),
+            last_fee_assessment: 0,
+            collateral_lock_amount: 0,
+            collateral_lock_expires: 0,
+        };
+        let dest_deposit = Deposit {
+            deposit_id: dest_id,
+            descriptor: "pk(bob)".to_string(),
+            balance: 50_000,
+            locked_balance: 0,
+            invoices: Vec::new(),
+            fees: FeeStructure::default(),
+            last_fee_assessment: 0,
+            collateral_lock_amount: 0,
+            collateral_lock_expires: 0,
+        };
+        ledger.state.deposits.insert(source_id, source_deposit);
+        ledger.state.deposits.insert(dest_id, dest_deposit);
+
+        // Create transfer lock
+        let nonce = [0x42u8; 32];
+        let transfer_id = [0xAAu8; 32];
+        let amount = 30_000u64;
+        let fee = 500u64;
+
+        let lock_op = LedgerOperation::TransferLock {
+            nonce,
+            source_deposit_id: source_id,
+            destination_deposit_id: dest_id,
+            amount,
+            fee,
+            completion_script: "sha256(deadbeef)".to_string(),
+            timeout_height: 900_000,
+            transfer_id,
+            witness: DescriptorWitness { stack: vec![[0x11u8; 64].to_vec()] },
+        };
+
+        ledger.apply_operation(&lock_op).unwrap();
+
+        // Verify source balance decreased and locked increased
+        let source = ledger.state.deposits.get(&source_id).unwrap();
+        assert_eq!(source.balance, 100_000 - 30_000 - 500); // 69,500
+        assert_eq!(source.locked_balance, 30_500); // amount + fee
+
+        // Verify pending transfer was created
+        assert_eq!(ledger.state.pending_transfers.len(), 1);
+        let pending = ledger.state.pending_transfers.get(&transfer_id).unwrap();
+        assert_eq!(pending.amount, amount);
+        assert_eq!(pending.fee, fee);
+        assert_eq!(pending.source_deposit_id, source_id);
+        assert_eq!(pending.destination_deposit_id, dest_id);
+
+        // Complete the transfer
+        let complete_op = LedgerOperation::TransferComplete {
+            transfer_id,
+            script_witness: DescriptorWitness { stack: vec![[0x22u8; 32].to_vec()] }, // preimage
+        };
+
+        ledger.apply_operation(&complete_op).unwrap();
+
+        // Verify pending transfer was removed
+        assert!(ledger.state.pending_transfers.is_empty());
+
+        // Verify source locked balance is now 0
+        let source = ledger.state.deposits.get(&source_id).unwrap();
+        assert_eq!(source.locked_balance, 0);
+        assert_eq!(source.balance, 69_500); // unchanged from before
+
+        // Verify destination received the amount (not the fee)
+        let dest = ledger.state.deposits.get(&dest_id).unwrap();
+        assert_eq!(dest.balance, 50_000 + 30_000); // 80,000
+    }
+
+    #[test]
+    fn test_transfer_lock_timeout_flow() {
+        use crate::types::{compute_deposit_id, DescriptorWitness, Deposit};
+
+        let op_key = test_pubkey();
+        let partner = test_pubkey_2();
+        let mut ledger = Ledger::new_as_operator(op_key, partner.to_string(), "tb1q...".to_string(), 0);
+
+        // Create source deposit
+        let source_id = compute_deposit_id("pk(alice)");
+        let dest_id = compute_deposit_id("pk(bob)");
+
+        let source_deposit = Deposit {
+            deposit_id: source_id,
+            descriptor: "pk(alice)".to_string(),
+            balance: 100_000,
+            locked_balance: 0,
+            invoices: Vec::new(),
+            fees: FeeStructure::default(),
+            last_fee_assessment: 0,
+            collateral_lock_amount: 0,
+            collateral_lock_expires: 0,
+        };
+        ledger.state.deposits.insert(source_id, source_deposit);
+
+        // Create transfer lock
+        let transfer_id = [0xBBu8; 32];
+        let amount = 25_000u64;
+        let fee = 250u64;
+
+        let lock_op = LedgerOperation::TransferLock {
+            nonce: [0x11u8; 32],
+            source_deposit_id: source_id,
+            destination_deposit_id: dest_id,
+            amount,
+            fee,
+            completion_script: "sha256(cafebabe)".to_string(),
+            timeout_height: 850_000,
+            transfer_id,
+            witness: DescriptorWitness { stack: vec![[0x33u8; 64].to_vec()] },
+        };
+
+        ledger.apply_operation(&lock_op).unwrap();
+
+        // Verify funds locked
+        let source = ledger.state.deposits.get(&source_id).unwrap();
+        assert_eq!(source.balance, 100_000 - 25_250);
+        assert_eq!(source.locked_balance, 25_250);
+
+        // Timeout the transfer (deadline passed, preimage not revealed)
+        let timeout_op = LedgerOperation::TransferTimeout {
+            transfer_id,
+            block_hash: [0x99u8; 32],
+        };
+
+        ledger.apply_operation(&timeout_op).unwrap();
+
+        // Verify pending transfer was removed
+        assert!(ledger.state.pending_transfers.is_empty());
+
+        // Verify source got all funds back (amount + fee)
+        let source = ledger.state.deposits.get(&source_id).unwrap();
+        assert_eq!(source.locked_balance, 0);
+        assert_eq!(source.balance, 100_000); // fully restored
     }
 }

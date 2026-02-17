@@ -289,6 +289,43 @@ pub mod serde_deposit_id_map {
     }
 }
 
+/// Serde helper for HashMap<[u8; 32], V> (transfer_id maps)
+pub mod serde_transfer_id_map {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::HashMap;
+
+    /// Entry for serialization
+    #[derive(Serialize, Deserialize)]
+    struct Entry<V> {
+        #[serde(with = "super::serde_32")]
+        key: [u8; 32],
+        value: V,
+    }
+
+    /// Serialize a HashMap<[u8; 32], V>
+    pub fn serialize<S, V>(map: &HashMap<[u8; 32], V>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        V: Serialize,
+    {
+        let entries: Vec<Entry<&V>> = map
+            .iter()
+            .map(|(k, v)| Entry { key: *k, value: v })
+            .collect();
+        entries.serialize(serializer)
+    }
+
+    /// Deserialize a HashMap<[u8; 32], V>
+    pub fn deserialize<'de, D, V>(deserializer: D) -> Result<HashMap<[u8; 32], V>, D::Error>
+    where
+        D: Deserializer<'de>,
+        V: Deserialize<'de>,
+    {
+        let entries: Vec<Entry<V>> = Vec::deserialize(deserializer)?;
+        Ok(entries.into_iter().map(|e| (e.key, e.value)).collect())
+    }
+}
+
 // ============================================================================
 // Descriptor Witness
 // ============================================================================
@@ -464,6 +501,46 @@ impl PendingInvoice {
     /// Check if pending invoice is expired.
     pub fn is_expired(&self, current_time: u64) -> bool {
         current_time > self.expires
+    }
+}
+
+// ============================================================================
+// Pending Transfer
+// ============================================================================
+
+/// A pending conditional transfer between deposits.
+///
+/// Created by TransferLock, resolved by TransferComplete (funds to destination)
+/// or TransferTimeout (funds returned to source).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingTransfer {
+    /// Unique transfer identifier (hash of signing message).
+    #[serde(with = "serde_32")]
+    pub transfer_id: [u8; 32],
+    /// Nonce used to prevent collisions.
+    #[serde(with = "serde_32")]
+    pub nonce: [u8; 32],
+    /// Source deposit that funds are locked from.
+    #[serde(with = "serde_deposit_id")]
+    pub source_deposit_id: DepositId,
+    /// Destination deposit that will receive funds on completion.
+    #[serde(with = "serde_deposit_id")]
+    pub destination_deposit_id: DepositId,
+    /// Amount being transferred (excluding fee).
+    pub amount: u64,
+    /// Fee for the custodian.
+    pub fee: u64,
+    /// Miniscript descriptor that must be satisfied to complete.
+    /// Usually "sha256(H)" for hash-locked transfers.
+    pub completion_script: String,
+    /// Absolute block height after which the transfer can be timed out.
+    pub timeout_height: u32,
+}
+
+impl PendingTransfer {
+    /// Total locked amount (amount + fee).
+    pub fn total_locked(&self) -> u64 {
+        self.amount.saturating_add(self.fee)
     }
 }
 
@@ -972,6 +1049,10 @@ pub struct LedgerState {
     /// When an update arrives that fills a gap, we flush all consecutive pending updates.
     #[serde(default)]
     pub pending_updates: HashMap<u64, SignedLedgerUpdate>,
+    /// Pending conditional transfers between deposits.
+    /// Key is the transfer_id (hash of the signing message).
+    #[serde(with = "serde_transfer_id_map", default)]
+    pub pending_transfers: HashMap<[u8; 32], PendingTransfer>,
     /// Current sequence number.
     pub sequence: u64,
     /// Current ledger hash.
@@ -1054,6 +1135,7 @@ impl LedgerState {
             channel_deepest_commitment_hash: [0u8; 32],
             last_updated: 0,
             pending_updates: HashMap::new(),
+            pending_transfers: HashMap::new(),
             sequence: 0,
             hash: [0u8; 32],
             joined_quorums: Vec::new(),

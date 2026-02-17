@@ -1031,6 +1031,145 @@ pub fn validate_fee_collect_by_id(
     Ok(())
 }
 
+// ============================================================================
+// Transfer Validation
+// ============================================================================
+
+/// Validate a TransferLock operation.
+///
+/// Checks:
+/// - Source deposit exists
+/// - Source deposit has sufficient available balance
+/// - Destination deposit exists (optional - could be created later)
+/// - Witness satisfies source deposit's descriptor
+/// - Amount and fee are positive
+pub fn validate_transfer_lock(
+    ledger: &Ledger,
+    source_deposit_id: &DepositId,
+    destination_deposit_id: &DepositId,
+    nonce: &[u8; 32],
+    amount: u64,
+    fee: u64,
+    completion_script: &str,
+    timeout_height: u32,
+    transfer_id: &[u8; 32],
+    witness: &DescriptorWitness,
+) -> ValidationResult {
+    // Check source deposit exists
+    let source_deposit = ledger.state.deposits.get(source_deposit_id)
+        .ok_or_else(|| format!("Source deposit {} does not exist", hex::encode(source_deposit_id)))?;
+
+    // Check amount is positive
+    if amount == 0 {
+        return Err("Transfer amount must be greater than zero".to_string());
+    }
+
+    // Calculate total to lock (amount + fee)
+    let total = amount.saturating_add(fee);
+
+    // Check sufficient available balance
+    let available = source_deposit.balance.saturating_sub(source_deposit.locked_balance);
+    if available < total {
+        return Err(format!(
+            "Insufficient available balance: {} < {} (amount {} + fee {})",
+            available, total, amount, fee
+        ));
+    }
+
+    // Verify transfer_id matches the signing message
+    let signing_message = crate::signature_utils::transfer_lock_signing_message(
+        nonce,
+        source_deposit_id,
+        destination_deposit_id,
+        amount,
+        fee,
+        completion_script,
+        timeout_height,
+    );
+    let computed_id = crate::signature_utils::compute_transfer_id(&signing_message);
+    if computed_id != *transfer_id {
+        return Err("Transfer ID does not match signing message parameters".to_string());
+    }
+
+    // Verify witness satisfies source deposit's descriptor
+    match crate::signature_utils::verify_transfer_lock_witness(
+        &source_deposit.descriptor,
+        source_deposit_id,
+        destination_deposit_id,
+        nonce,
+        amount,
+        fee,
+        completion_script,
+        timeout_height,
+        witness,
+    ) {
+        Ok(true) => {}
+        Ok(false) => return Err("Witness does not satisfy source deposit descriptor".to_string()),
+        Err(e) => return Err(format!("Failed to verify witness: {:?}", e)),
+    }
+
+    Ok(())
+}
+
+/// Validate a TransferComplete operation.
+///
+/// Checks:
+/// - Pending transfer exists
+/// - Script witness satisfies the completion_script
+pub fn validate_transfer_complete(
+    ledger: &Ledger,
+    transfer_id: &[u8; 32],
+    script_witness: &DescriptorWitness,
+) -> ValidationResult {
+    // Check pending transfer exists
+    let pending = ledger.state.pending_transfers.get(transfer_id)
+        .ok_or_else(|| format!("Pending transfer {} does not exist", hex::encode(transfer_id)))?;
+
+    // Verify script_witness satisfies completion_script
+    match crate::signature_utils::verify_transfer_complete_witness(
+        &pending.completion_script,
+        transfer_id,
+        &pending.nonce,
+        &pending.source_deposit_id,
+        &pending.destination_deposit_id,
+        pending.amount,
+        pending.fee,
+        pending.timeout_height,
+        script_witness,
+    ) {
+        Ok(true) => {}
+        Ok(false) => return Err("Witness does not satisfy completion script".to_string()),
+        Err(e) => return Err(format!("Failed to verify completion witness: {:?}", e)),
+    }
+
+    Ok(())
+}
+
+/// Validate a TransferTimeout operation.
+///
+/// Checks:
+/// - Pending transfer exists
+/// - Current block height is >= timeout_height
+pub fn validate_transfer_timeout(
+    ledger: &Ledger,
+    transfer_id: &[u8; 32],
+    current_block_height: u32,
+) -> ValidationResult {
+    // Check pending transfer exists
+    let pending = ledger.state.pending_transfers.get(transfer_id)
+        .ok_or_else(|| format!("Pending transfer {} does not exist", hex::encode(transfer_id)))?;
+
+    // Check we're past the timeout height
+    if current_block_height < pending.timeout_height {
+        return Err(format!(
+            "Transfer timeout not reached: current block {} < timeout {}",
+            current_block_height, pending.timeout_height
+        ));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1138,5 +1277,210 @@ mod tests {
 
         // Timing constraint: after reporting period
         assert!(validate_collateral_decrease(2000, 1000, 1000, Some(50)).is_ok());
+    }
+
+    #[test]
+    fn test_validate_transfer_lock_insufficient_balance() {
+        use crate::types::{compute_deposit_id, Deposit, FeeStructure, PendingTransfer};
+
+        let mut ledger = create_test_ledger();
+
+        // Create source deposit with limited balance
+        let source_id = compute_deposit_id("pk(alice)");
+        let dest_id = compute_deposit_id("pk(bob)");
+
+        let source_deposit = Deposit {
+            deposit_id: source_id,
+            descriptor: "pk(alice)".to_string(),
+            balance: 10_000,  // Only 10k
+            locked_balance: 0,
+            invoices: Vec::new(),
+            fees: FeeStructure::default(),
+            last_fee_assessment: 0,
+            collateral_lock_amount: 0,
+            collateral_lock_expires: 0,
+        };
+        ledger.state.deposits.insert(source_id, source_deposit);
+
+        let nonce = [0x42u8; 32];
+        let amount = 50_000u64;  // 50k - more than balance
+        let fee = 500u64;
+        let completion_script = "sha256(deadbeef)";
+        let timeout_height = 900_000u32;
+
+        let signing_msg = crate::signature_utils::transfer_lock_signing_message(
+            &nonce, &source_id, &dest_id, amount, fee, completion_script, timeout_height
+        );
+        let transfer_id = crate::signature_utils::compute_transfer_id(&signing_msg);
+
+        let result = validate_transfer_lock(
+            &ledger,
+            &source_id,
+            &dest_id,
+            &nonce,
+            amount,
+            fee,
+            completion_script,
+            timeout_height,
+            &transfer_id,
+            &DescriptorWitness { stack: vec![] },
+        );
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Insufficient"));
+    }
+
+    #[test]
+    fn test_validate_transfer_lock_nonexistent_source() {
+        use crate::types::compute_deposit_id;
+
+        let ledger = create_test_ledger();
+
+        let source_id = compute_deposit_id("pk(nonexistent)");
+        let dest_id = compute_deposit_id("pk(bob)");
+        let nonce = [0x42u8; 32];
+
+        let signing_msg = crate::signature_utils::transfer_lock_signing_message(
+            &nonce, &source_id, &dest_id, 1000, 10, "sha256(aa)", 100
+        );
+        let transfer_id = crate::signature_utils::compute_transfer_id(&signing_msg);
+
+        let result = validate_transfer_lock(
+            &ledger,
+            &source_id,
+            &dest_id,
+            &nonce,
+            1000,
+            10,
+            "sha256(aa)",
+            100,
+            &transfer_id,
+            &DescriptorWitness { stack: vec![] },
+        );
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("does not exist"));
+    }
+
+    #[test]
+    fn test_validate_transfer_lock_zero_amount() {
+        use crate::types::{compute_deposit_id, Deposit, FeeStructure};
+
+        let mut ledger = create_test_ledger();
+
+        let source_id = compute_deposit_id("pk(alice)");
+        let dest_id = compute_deposit_id("pk(bob)");
+
+        let source_deposit = Deposit {
+            deposit_id: source_id,
+            descriptor: "pk(alice)".to_string(),
+            balance: 100_000,
+            locked_balance: 0,
+            invoices: Vec::new(),
+            fees: FeeStructure::default(),
+            last_fee_assessment: 0,
+            collateral_lock_amount: 0,
+            collateral_lock_expires: 0,
+        };
+        ledger.state.deposits.insert(source_id, source_deposit);
+
+        let nonce = [0x42u8; 32];
+        let signing_msg = crate::signature_utils::transfer_lock_signing_message(
+            &nonce, &source_id, &dest_id, 0, 100, "sha256(aa)", 100
+        );
+        let transfer_id = crate::signature_utils::compute_transfer_id(&signing_msg);
+
+        let result = validate_transfer_lock(
+            &ledger,
+            &source_id,
+            &dest_id,
+            &nonce,
+            0,  // Zero amount
+            100,
+            "sha256(aa)",
+            100,
+            &transfer_id,
+            &DescriptorWitness { stack: vec![] },
+        );
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("greater than zero"));
+    }
+
+    #[test]
+    fn test_validate_transfer_complete_nonexistent() {
+        let ledger = create_test_ledger();
+
+        let transfer_id = [0xAAu8; 32];
+
+        let result = validate_transfer_complete(
+            &ledger,
+            &transfer_id,
+            &DescriptorWitness { stack: vec![] },
+        );
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("does not exist"));
+    }
+
+    #[test]
+    fn test_validate_transfer_timeout_not_reached() {
+        use crate::types::{compute_deposit_id, PendingTransfer};
+
+        let mut ledger = create_test_ledger();
+
+        let source_id = compute_deposit_id("pk(alice)");
+        let dest_id = compute_deposit_id("pk(bob)");
+        let transfer_id = [0xBBu8; 32];
+
+        // Create pending transfer with high timeout
+        let pending = PendingTransfer {
+            transfer_id,
+            nonce: [0x11u8; 32],
+            source_deposit_id: source_id,
+            destination_deposit_id: dest_id,
+            amount: 10_000,
+            fee: 100,
+            completion_script: "sha256(cc)".to_string(),
+            timeout_height: 1_000_000,  // Very high timeout
+        };
+        ledger.state.pending_transfers.insert(transfer_id, pending);
+
+        // Try to timeout at a lower block
+        let result = validate_transfer_timeout(&ledger, &transfer_id, 500_000);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not reached"));
+    }
+
+    #[test]
+    fn test_validate_transfer_timeout_reached() {
+        use crate::types::{compute_deposit_id, PendingTransfer};
+
+        let mut ledger = create_test_ledger();
+
+        let source_id = compute_deposit_id("pk(alice)");
+        let dest_id = compute_deposit_id("pk(bob)");
+        let transfer_id = [0xCCu8; 32];
+
+        // Create pending transfer
+        let pending = PendingTransfer {
+            transfer_id,
+            nonce: [0x22u8; 32],
+            source_deposit_id: source_id,
+            destination_deposit_id: dest_id,
+            amount: 10_000,
+            fee: 100,
+            completion_script: "sha256(dd)".to_string(),
+            timeout_height: 800_000,
+        };
+        ledger.state.pending_transfers.insert(transfer_id, pending);
+
+        // Timeout at or after the timeout height should succeed
+        let result = validate_transfer_timeout(&ledger, &transfer_id, 800_000);
+        assert!(result.is_ok());
+
+        let result = validate_transfer_timeout(&ledger, &transfer_id, 900_000);
+        assert!(result.is_ok());
     }
 }

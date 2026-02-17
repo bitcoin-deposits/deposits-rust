@@ -2913,6 +2913,25 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                 LedgerOperation::CustodyYield => ("CustodyYield", String::new()),
                 LedgerOperation::LedgerClose => ("LedgerClose", String::new()),
                 LedgerOperation::Tombstone { .. } => ("Tombstone", String::new()),
+                LedgerOperation::TransferLock { source_deposit_id, destination_deposit_id, amount, fee, timeout_height, .. } => (
+                    "TransferLock",
+                    format!(
+                        "{}→{} amt={} fee={} timeout={}",
+                        hex::encode(&source_deposit_id[..4]),
+                        hex::encode(&destination_deposit_id[..4]),
+                        amount,
+                        fee,
+                        timeout_height
+                    ),
+                ),
+                LedgerOperation::TransferComplete { transfer_id, .. } => (
+                    "TransferComplete",
+                    format!("id={}", hex::encode(&transfer_id[..8])),
+                ),
+                LedgerOperation::TransferTimeout { transfer_id, .. } => (
+                    "TransferTimeout",
+                    format!("id={}", hex::encode(&transfer_id[..8])),
+                ),
             };
             return (name.to_string(), details);
         }
