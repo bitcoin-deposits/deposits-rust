@@ -54,6 +54,8 @@ fn print_usage(program: &str) {
     eprintln!("  balance                     Show balances across all deposits");
     eprintln!("  sync                        Sync deposit statuses from daemon");
     eprintln!("  withdraw <alias> <amt>      Withdraw from a deposit (on-chain)");
+    eprintln!("  transfer <alias> <amt>      Lock funds for conditional transfer (HTLC)");
+    eprintln!("  transfer_complete <id>      Complete a transfer with preimage");
     eprintln!("  make_invoice <alias> <amt>  Create Lightning invoice for deposit");
     eprintln!("  pay_invoice <alias> <bolt11> Pay Lightning invoice from deposit");
     eprintln!("  history <alias>             Show transaction history");
@@ -221,6 +223,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "balance" => show_balance(&args[2..]).await,
         "sync" => sync_deposits(&args[2..]).await,
         "withdraw" => withdraw(&args[2..]).await,
+        "transfer" => transfer_lock(&args[2..]).await,
+        "transfer_complete" => transfer_complete(&args[2..]).await,
         "make_invoice" => make_invoice(&args[2..]).await,
         "pay_invoice" => pay_invoice(&args[2..]).await,
         "history" => show_history(&args[2..]).await,
@@ -1420,6 +1424,341 @@ async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     let error = response.error.as_deref().unwrap_or("Unknown error");
                     return Err(format!("Withdrawal failed: {}", error).into());
+                }
+            }
+        }
+
+        print!(".");
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+    }
+
+    println!();
+    Err("Timeout waiting for operator response".into())
+}
+
+/// Lock funds for a conditional transfer (HTLC-style)
+///
+/// Creates a TransferLock with a hash-lock completion script.
+/// The recipient can complete the transfer by revealing the preimage.
+async fn transfer_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use bitcoin::secp256k1::rand::rngs::OsRng;
+    use bitcoin::secp256k1::rand::RngCore;
+
+    let mut alias: Option<String> = None;
+    let mut amount_sats: Option<u64> = None;
+    let mut dest_deposit_id: Option<String> = None;
+    let mut hash_hex: Option<String> = None;
+    let mut timeout_height: Option<u32> = None;
+    let mut fee_sats: u64 = 100; // Default fee
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--to" if i + 1 < args.len() => {
+                dest_deposit_id = Some(args[i + 1].clone());
+                i += 1;
+            }
+            "--hash" if i + 1 < args.len() => {
+                hash_hex = Some(args[i + 1].clone());
+                i += 1;
+            }
+            "--timeout" if i + 1 < args.len() => {
+                timeout_height = Some(args[i + 1].parse()?);
+                i += 1;
+            }
+            "--fee" if i + 1 < args.len() => {
+                fee_sats = args[i + 1].parse()?;
+                i += 1;
+            }
+            s if s.starts_with("--") => {
+                config_args.push(args[i].clone());
+                if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                    config_args.push(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            _ => {
+                if alias.is_none() {
+                    alias = Some(args[i].clone());
+                } else if amount_sats.is_none() {
+                    amount_sats = Some(args[i].parse()?);
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let alias = alias.ok_or(
+        "Usage: deposits-wallet transfer <alias> <amount> --to <dest_id> --hash <sha256> --timeout <block> --relay <url>"
+    )?;
+    let amount_sats = amount_sats.ok_or("Missing amount")?;
+    let dest_deposit_id_hex = dest_deposit_id.ok_or("Missing destination. Use --to <deposit_id>")?;
+    let hash_hex = hash_hex.ok_or("Missing hash lock. Use --hash <sha256_hex>")?;
+    let timeout_height = timeout_height.ok_or("Missing timeout. Use --timeout <block_height>")?;
+    let config = parse_config(&config_args)?;
+
+    if config.relays.is_empty() {
+        return Err("No relay specified. Use --relay <url>".into());
+    }
+
+    // Parse destination deposit_id
+    let dest_bytes = hex::decode(&dest_deposit_id_hex)?;
+    if dest_bytes.len() != 16 {
+        return Err("Destination deposit_id must be 32 hex chars (16 bytes)".into());
+    }
+    let mut dest_id = [0u8; 16];
+    dest_id.copy_from_slice(&dest_bytes);
+
+    // Parse hash lock
+    let hash_bytes = hex::decode(&hash_hex)?;
+    if hash_bytes.len() != 32 {
+        return Err("Hash must be 64 hex chars (32 bytes)".into());
+    }
+    let completion_script = format!("sha256({})", hash_hex);
+
+    // Look up deposit by alias
+    let deposits_file = config.data_dir.join("deposits.json");
+    if !deposits_file.exists() {
+        return Err("No deposits found. Use 'open' to create a deposit first.".into());
+    }
+
+    let data = std::fs::read_to_string(&deposits_file)?;
+    let deposits: Vec<serde_json::Value> = serde_json::from_str(&data)?;
+
+    let deposit = deposits.iter()
+        .find(|d| d.get("alias").and_then(|v| v.as_str()) == Some(&alias))
+        .ok_or_else(|| format!("No deposit found with alias '{}'. Use 'list' to see your deposits.", alias))?;
+
+    let ledger_id = deposit.get("ledger_id")
+        .and_then(|v| v.as_str())
+        .ok_or("Invalid deposit record: missing ledger_id")?;
+
+    let key_index = deposit.get("key_index")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+
+    let secret_key = derive_secret_key_at_index(&config.seed, config.network, key_index)?;
+    let secp = Secp256k1::new();
+    let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &secret_key);
+    let our_pubkey = keypair.public_key();
+
+    let nostr_key = derive_secret_key(&config.seed, config.network)?;
+
+    // Compute source deposit_id
+    let descriptor = format!("pk({})", hex::encode(our_pubkey.serialize()));
+    let source_id = deposits_core::types::compute_deposit_id(&descriptor);
+
+    // Generate nonce
+    let mut rng = OsRng;
+    let mut nonce = [0u8; 32];
+    rng.fill_bytes(&mut nonce);
+
+    // Compute signing message and transfer_id
+    let msg_hash = deposits_core::signature_utils::transfer_lock_signing_message(
+        &nonce,
+        &source_id,
+        &dest_id,
+        amount_sats,
+        fee_sats,
+        &completion_script,
+        timeout_height,
+    );
+    let transfer_id = deposits_core::signature_utils::compute_transfer_id(&msg_hash);
+
+    // Sign
+    let msg = bitcoin::secp256k1::Message::from_digest(msg_hash);
+    let signature = secp.sign_schnorr(&msg, &keypair);
+
+    println!("Transfer Lock Request");
+    println!("=====================");
+    println!("  Source:      {} ({})", alias, hex::encode(&source_id[..4]));
+    println!("  Destination: {}", dest_deposit_id_hex);
+    println!("  Amount:      {} sats", amount_sats);
+    println!("  Fee:         {} sats", fee_sats);
+    println!("  Hash Lock:   {}...{}", &hash_hex[..8], &hash_hex[hash_hex.len()-8..]);
+    println!("  Timeout:     block {}", timeout_height);
+    println!("  Transfer ID: {}", hex::encode(&transfer_id[..16]));
+    println!();
+
+    // Connect to relay
+    let transport = NostrTransportBuilder::new(nostr_key)
+        .relay(&config.relays[0])
+        .build()
+        .await?;
+
+    let request_params = serde_json::json!({
+        "nonce": hex::encode(nonce),
+        "source_deposit_id": hex::encode(source_id),
+        "destination_deposit_id": hex::encode(dest_id),
+        "amount": amount_sats,
+        "fee": fee_sats,
+        "completion_script": completion_script,
+        "timeout_height": timeout_height,
+        "transfer_id": hex::encode(transfer_id),
+        "signature": hex::encode(signature.serialize()),
+    });
+
+    println!("Sending transfer lock request...");
+
+    let request_id = transport.send_ledger_request(
+        ledger_id,
+        "transfer_lock",
+        request_params,
+    ).await?;
+
+    println!("  Request ID: {}...", &request_id[..16]);
+    println!();
+
+    // Poll for response
+    println!("Waiting for operator response...");
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let max_attempts = 30;
+    let poll_interval = std::time::Duration::from_secs(2);
+
+    for _attempt in 1..=max_attempts {
+        tokio::time::sleep(poll_interval).await;
+
+        let responses = transport.fetch_responses_since(
+            nostr_sdk::Timestamp::now() - 120
+        ).await?;
+
+        for response in responses {
+            if response.request_id == request_id {
+                if response.success {
+                    println!("Transfer locked!");
+                    println!("  Transfer ID: {}", hex::encode(transfer_id));
+                    println!("  Recipient needs preimage to complete before block {}", timeout_height);
+                    return Ok(());
+                } else {
+                    let error = response.error.as_deref().unwrap_or("Unknown error");
+                    return Err(format!("Transfer lock failed: {}", error).into());
+                }
+            }
+        }
+
+        print!(".");
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+    }
+
+    println!();
+    Err("Timeout waiting for operator response".into())
+}
+
+/// Complete a transfer by revealing the preimage
+async fn transfer_complete(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut transfer_id_hex: Option<String> = None;
+    let mut preimage_hex: Option<String> = None;
+    let mut ledger_id: Option<String> = None;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--preimage" if i + 1 < args.len() => {
+                preimage_hex = Some(args[i + 1].clone());
+                i += 1;
+            }
+            "--ledger" if i + 1 < args.len() => {
+                ledger_id = Some(args[i + 1].clone());
+                i += 1;
+            }
+            s if s.starts_with("--") => {
+                config_args.push(args[i].clone());
+                if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                    config_args.push(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            _ => {
+                if transfer_id_hex.is_none() {
+                    transfer_id_hex = Some(args[i].clone());
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let transfer_id_hex = transfer_id_hex.ok_or(
+        "Usage: deposits-wallet transfer_complete <transfer_id> --preimage <hex> --ledger <id> --relay <url>"
+    )?;
+    let preimage_hex = preimage_hex.ok_or("Missing preimage. Use --preimage <hex>")?;
+    let ledger_id = ledger_id.ok_or("Missing ledger. Use --ledger <ledger_id>")?;
+    let config = parse_config(&config_args)?;
+
+    if config.relays.is_empty() {
+        return Err("No relay specified. Use --relay <url>".into());
+    }
+
+    // Parse transfer_id
+    let transfer_bytes = hex::decode(&transfer_id_hex)?;
+    if transfer_bytes.len() != 32 {
+        return Err("Transfer ID must be 64 hex chars (32 bytes)".into());
+    }
+    let mut transfer_id = [0u8; 32];
+    transfer_id.copy_from_slice(&transfer_bytes);
+
+    // Parse preimage
+    let preimage_bytes = hex::decode(&preimage_hex)?;
+    if preimage_bytes.len() != 32 {
+        return Err("Preimage must be 64 hex chars (32 bytes)".into());
+    }
+
+    println!("Transfer Complete Request");
+    println!("=========================");
+    println!("  Transfer ID: {}...", &transfer_id_hex[..16]);
+    println!("  Preimage:    {}...", &preimage_hex[..16]);
+    println!();
+
+    // Connect to relay
+    let nostr_key = derive_secret_key(&config.seed, config.network)?;
+    let transport = NostrTransportBuilder::new(nostr_key)
+        .relay(&config.relays[0])
+        .build()
+        .await?;
+
+    let request_params = serde_json::json!({
+        "transfer_id": transfer_id_hex,
+        "preimage": preimage_hex,
+    });
+
+    println!("Sending transfer complete request...");
+
+    let request_id = transport.send_ledger_request(
+        &ledger_id,
+        "transfer_complete",
+        request_params,
+    ).await?;
+
+    println!("  Request ID: {}...", &request_id[..16]);
+    println!();
+
+    // Poll for response
+    println!("Waiting for operator response...");
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let max_attempts = 30;
+    let poll_interval = std::time::Duration::from_secs(2);
+
+    for _attempt in 1..=max_attempts {
+        tokio::time::sleep(poll_interval).await;
+
+        let responses = transport.fetch_responses_since(
+            nostr_sdk::Timestamp::now() - 120
+        ).await?;
+
+        for response in responses {
+            if response.request_id == request_id {
+                if response.success {
+                    println!("Transfer completed!");
+                    println!("  Funds transferred to destination deposit");
+                    return Ok(());
+                } else {
+                    let error = response.error.as_deref().unwrap_or("Unknown error");
+                    return Err(format!("Transfer complete failed: {}", error).into());
                 }
             }
         }

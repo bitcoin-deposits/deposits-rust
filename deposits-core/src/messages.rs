@@ -93,6 +93,11 @@ pub mod consts {
     pub const ONCHAIN_FAIL: u16 = 0x80E5;
     pub const ONCHAIN_FULFILL: u16 = 0x80E7;
 
+    // Transfer operations (conditional transfers between deposits)
+    pub const TRANSFER_LOCK: u16 = 0x80F1;
+    pub const TRANSFER_COMPLETE: u16 = 0x80F3;
+    pub const TRANSFER_TIMEOUT: u16 = 0x80F5;
+
     // Ledger lifecycle
     pub const LEDGER_CLOSE: u16 = 0x801D;
     pub const CHANNEL_CLOSE_TOMBSTONE: u16 = 0x8051;

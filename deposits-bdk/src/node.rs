@@ -594,6 +594,8 @@ impl Node {
             "deposit_open" => self.process_deposit_open_request(&request).await,
             "make_offer" => self.process_make_offer_request(&request).await,
             "withdraw" => self.process_withdraw_request(&request).await,
+            "transfer_lock" => self.process_transfer_lock_request(&request).await,
+            "transfer_complete" => self.process_transfer_complete_request(&request).await,
             "collateral_lock" => self.process_collateral_lock_request(&request).await,
             "custody_transfer_sign" => self.process_custody_transfer_sign_request(&request).await,
             "confiscation_sign" => self.process_confiscation_sign_request(&request).await,
@@ -3526,6 +3528,287 @@ impl Node {
                 (false, None, Some(format!("Withdrawal failed: {}", e)))
             }
         }
+    }
+
+    /// Process a transfer_lock request - lock funds for conditional transfer
+    async fn process_transfer_lock_request(&mut self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+        use bitcoin::secp256k1::{Secp256k1, schnorr::Signature, Message};
+        use deposits_core::types::{compute_deposit_id, DescriptorWitness};
+        use deposits_core::messages::LedgerOperation;
+
+        tracing::info!("Processing transfer_lock request for ledger {}...",
+            &request.ledger_id[..16.min(request.ledger_id.len())]);
+
+        // Extract parameters
+        let nonce_hex = match request.params.get("nonce").and_then(|v| v.as_str()) {
+            Some(n) => n,
+            None => return (false, None, Some("Missing nonce".to_string())),
+        };
+        let source_id_hex = match request.params.get("source_deposit_id").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => return (false, None, Some("Missing source_deposit_id".to_string())),
+        };
+        let dest_id_hex = match request.params.get("destination_deposit_id").and_then(|v| v.as_str()) {
+            Some(d) => d,
+            None => return (false, None, Some("Missing destination_deposit_id".to_string())),
+        };
+        let amount = match request.params.get("amount").and_then(|v| v.as_u64()) {
+            Some(a) => a,
+            None => return (false, None, Some("Missing amount".to_string())),
+        };
+        let fee = match request.params.get("fee").and_then(|v| v.as_u64()) {
+            Some(f) => f,
+            None => return (false, None, Some("Missing fee".to_string())),
+        };
+        let completion_script = match request.params.get("completion_script").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => return (false, None, Some("Missing completion_script".to_string())),
+        };
+        let timeout_height = match request.params.get("timeout_height").and_then(|v| v.as_u64()) {
+            Some(t) => t as u32,
+            None => return (false, None, Some("Missing timeout_height".to_string())),
+        };
+        let transfer_id_hex = match request.params.get("transfer_id").and_then(|v| v.as_str()) {
+            Some(t) => t,
+            None => return (false, None, Some("Missing transfer_id".to_string())),
+        };
+        let signature_hex = match request.params.get("signature").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => return (false, None, Some("Missing signature".to_string())),
+        };
+
+        // Parse nonce
+        let nonce: [u8; 32] = match hex::decode(nonce_hex) {
+            Ok(bytes) if bytes.len() == 32 => bytes.try_into().unwrap(),
+            _ => return (false, None, Some("Invalid nonce".to_string())),
+        };
+
+        // Parse deposit IDs
+        let mut source_deposit_id = [0u8; 16];
+        match hex::decode(source_id_hex) {
+            Ok(bytes) if bytes.len() == 16 => source_deposit_id.copy_from_slice(&bytes),
+            _ => return (false, None, Some("Invalid source_deposit_id".to_string())),
+        }
+
+        let mut destination_deposit_id = [0u8; 16];
+        match hex::decode(dest_id_hex) {
+            Ok(bytes) if bytes.len() == 16 => destination_deposit_id.copy_from_slice(&bytes),
+            _ => return (false, None, Some("Invalid destination_deposit_id".to_string())),
+        }
+
+        // Parse transfer_id
+        let transfer_id: [u8; 32] = match hex::decode(transfer_id_hex) {
+            Ok(bytes) if bytes.len() == 32 => bytes.try_into().unwrap(),
+            _ => return (false, None, Some("Invalid transfer_id".to_string())),
+        };
+
+        // Parse signature
+        let signature = match hex::decode(signature_hex)
+            .ok()
+            .and_then(|bytes| Signature::from_slice(&bytes).ok())
+        {
+            Some(sig) => sig,
+            None => return (false, None, Some("Invalid signature".to_string())),
+        };
+
+        // Get ledger and verify source deposit exists
+        let ledger_id = &request.ledger_id;
+        let (deposit_descriptor, deposit_pubkey) = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let ledger_arc = match ledgers.get(ledger_id) {
+                Some(l) => l.clone(),
+                None => return (false, None, Some(format!("Ledger not found: {}", ledger_id))),
+            };
+            let ledger = ledger_arc.read().unwrap();
+
+            let deposit = match ledger.state.deposits.get(&source_deposit_id) {
+                Some(d) => d,
+                None => return (false, None, Some("Source deposit not found".to_string())),
+            };
+
+            // Check sufficient balance
+            let total = (amount + fee) * 1000; // Convert to msats
+            if deposit.balance < total {
+                return (false, None, Some(format!(
+                    "Insufficient balance: {} msats available, {} msats needed",
+                    deposit.balance, total
+                )));
+            }
+
+            (deposit.descriptor.clone(), deposit.descriptor.clone())
+        };
+
+        // Verify signature
+        let secp = Secp256k1::new();
+        let msg_hash = deposits_core::signature_utils::transfer_lock_signing_message(
+            &nonce,
+            &source_deposit_id,
+            &destination_deposit_id,
+            amount,
+            fee,
+            completion_script,
+            timeout_height,
+        );
+
+        // Extract pubkey from descriptor for verification
+        let pubkey = if deposit_descriptor.starts_with("pk(") {
+            let pk_hex = &deposit_descriptor[3..deposit_descriptor.len()-1];
+            match hex::decode(pk_hex).ok().and_then(|b| bitcoin::secp256k1::PublicKey::from_slice(&b).ok()) {
+                Some(pk) => pk.x_only_public_key().0,
+                None => return (false, None, Some("Invalid pubkey in descriptor".to_string())),
+            }
+        } else {
+            return (false, None, Some("Only pk() descriptors supported for transfers".to_string()));
+        };
+
+        let msg = Message::from_digest(msg_hash);
+        if secp.verify_schnorr(&signature, &msg, &pubkey).is_err() {
+            return (false, None, Some("Invalid signature".to_string()));
+        }
+
+        // Create and append the operation
+        let witness = DescriptorWitness { stack: vec![signature.serialize().to_vec()] };
+        let operation = LedgerOperation::TransferLock {
+            nonce,
+            source_deposit_id,
+            destination_deposit_id,
+            amount: amount * 1000, // Convert to msats
+            fee: fee * 1000,
+            completion_script: completion_script.to_string(),
+            timeout_height,
+            transfer_id,
+            witness,
+        };
+
+        // Append operation
+        {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let ledger_arc = ledgers.get(ledger_id).unwrap().clone();
+            let mut ledger = ledger_arc.write().unwrap();
+
+            let block_height = self.wallet.get_block_height().unwrap_or(0);
+            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
+            if let Err(e) = ledger.append_operation_with_block(
+                operation,
+                deposits_core::messages::consts::TRANSFER_LOCK,
+                block_height,
+                block_hash,
+            ) {
+                return (false, None, Some(format!("Failed to append operation: {:?}", e)));
+            }
+        }
+
+        // Sign and broadcast
+        if let Err(e) = self.sign_last_update(ledger_id) {
+            return (false, None, Some(format!("Failed to sign: {:?}", e)));
+        }
+
+        tracing::info!("Transfer locked: {}", hex::encode(&transfer_id[..8]));
+        (true, Some(serde_json::json!({
+            "transfer_id": transfer_id_hex,
+            "message": "Transfer locked successfully"
+        }).to_string()), None)
+    }
+
+    /// Process a transfer_complete request - complete a transfer by revealing preimage
+    async fn process_transfer_complete_request(&mut self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+        use deposits_core::types::DescriptorWitness;
+        use deposits_core::messages::LedgerOperation;
+
+        tracing::info!("Processing transfer_complete request for ledger {}...",
+            &request.ledger_id[..16.min(request.ledger_id.len())]);
+
+        // Extract parameters
+        let transfer_id_hex = match request.params.get("transfer_id").and_then(|v| v.as_str()) {
+            Some(t) => t,
+            None => return (false, None, Some("Missing transfer_id".to_string())),
+        };
+        let preimage_hex = match request.params.get("preimage").and_then(|v| v.as_str()) {
+            Some(p) => p,
+            None => return (false, None, Some("Missing preimage".to_string())),
+        };
+
+        // Parse transfer_id
+        let transfer_id: [u8; 32] = match hex::decode(transfer_id_hex) {
+            Ok(bytes) if bytes.len() == 32 => bytes.try_into().unwrap(),
+            _ => return (false, None, Some("Invalid transfer_id".to_string())),
+        };
+
+        // Parse preimage
+        let preimage: Vec<u8> = match hex::decode(preimage_hex) {
+            Ok(bytes) if bytes.len() == 32 => bytes,
+            _ => return (false, None, Some("Invalid preimage (must be 32 bytes)".to_string())),
+        };
+
+        // Verify the preimage matches the hash in the pending transfer
+        let ledger_id = &request.ledger_id;
+        {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let ledger_arc = match ledgers.get(ledger_id) {
+                Some(l) => l.clone(),
+                None => return (false, None, Some(format!("Ledger not found: {}", ledger_id))),
+            };
+            let ledger = ledger_arc.read().unwrap();
+
+            let pending = match ledger.state.pending_transfers.get(&transfer_id) {
+                Some(p) => p,
+                None => return (false, None, Some("Pending transfer not found".to_string())),
+            };
+
+            // Verify preimage: hash it and check against completion_script
+            // completion_script is like "sha256(abc123...)"
+            if pending.completion_script.starts_with("sha256(") {
+                let expected_hash_hex = &pending.completion_script[7..pending.completion_script.len()-1];
+                let expected_hash = match hex::decode(expected_hash_hex) {
+                    Ok(h) => h,
+                    Err(_) => return (false, None, Some("Invalid hash in completion_script".to_string())),
+                };
+
+                use bitcoin::hashes::{sha256, Hash};
+                let actual_hash = sha256::Hash::hash(&preimage);
+                if actual_hash.as_byte_array()[..] != expected_hash[..] {
+                    return (false, None, Some("Preimage does not match hash".to_string()));
+                }
+            } else {
+                return (false, None, Some("Only sha256() completion scripts supported".to_string()));
+            }
+        }
+
+        // Create and append the operation
+        let script_witness = DescriptorWitness { stack: vec![preimage] };
+        let operation = LedgerOperation::TransferComplete {
+            transfer_id,
+            script_witness,
+        };
+
+        // Append operation
+        {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let ledger_arc = ledgers.get(ledger_id).unwrap().clone();
+            let mut ledger = ledger_arc.write().unwrap();
+
+            let block_height = self.wallet.get_block_height().unwrap_or(0);
+            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
+            if let Err(e) = ledger.append_operation_with_block(
+                operation,
+                deposits_core::messages::consts::TRANSFER_COMPLETE,
+                block_height,
+                block_hash,
+            ) {
+                return (false, None, Some(format!("Failed to append operation: {:?}", e)));
+            }
+        }
+
+        // Sign and broadcast
+        if let Err(e) = self.sign_last_update(ledger_id) {
+            return (false, None, Some(format!("Failed to sign: {:?}", e)));
+        }
+
+        tracing::info!("Transfer completed: {}", hex::encode(&transfer_id[..8]));
+        (true, Some(serde_json::json!({
+            "transfer_id": transfer_id_hex,
+            "message": "Transfer completed successfully"
+        }).to_string()), None)
     }
 
     async fn process_collateral_lock_request(&mut self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
