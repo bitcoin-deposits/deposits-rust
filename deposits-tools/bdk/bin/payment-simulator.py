@@ -8,16 +8,18 @@ Drives wallet.sh to create real ledger activity:
 3. Funds them via faucet
 4. Makes withdrawals between deposits (actual ledger operations)
 
-With --lightning flag, uses Lightning invoices instead of on-chain withdrawals:
-- Creates invoices via operator's LDK sidecar
-- Pays invoices via sender's operator's LDK sidecar
+Modes:
+  --lightning  Use Lightning invoices instead of on-chain withdrawals
+  --transfers  Use same-ledger HTLC transfers (requires same ledger)
 
 Usage:
     python3 payment-simulator.py [--wallets N] [--payment-interval SECS]
-    python3 payment-simulator.py --lightning  # Use Lightning instead of on-chain
+    python3 payment-simulator.py --lightning  # Lightning payments
+    python3 payment-simulator.py --transfers  # Same-ledger transfers
 """
 
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -56,6 +58,9 @@ VOLUME_SATS = 0
 FUNDING_SUCCESS = 0
 FUNDING_FAILED = 0
 FUNDING_VOLUME_SATS = 0
+TRANSFERS_SUCCESS = 0
+TRANSFERS_FAILED = 0
+TRANSFERS_VOLUME_SATS = 0
 
 # Prometheus metrics (if available)
 if PROMETHEUS_AVAILABLE:
@@ -90,6 +95,15 @@ if PROMETHEUS_AVAILABLE:
         'simulator_ledgers_count',
         'Number of discovered ledgers'
     )
+    PROM_TRANSFERS_TOTAL = Counter(
+        'simulator_transfers_total',
+        'Total number of same-ledger transfers attempted',
+        ['status']  # 'success' or 'failed'
+    )
+    PROM_TRANSFERS_SATS = Counter(
+        'simulator_transfers_sats_total',
+        'Total sats transferred via same-ledger transfers'
+    )
 
 
 @dataclass
@@ -102,6 +116,8 @@ class Deposit:
     max_sats: int
     status: str = "pending"
     balance_sats: int = 0  # Actual confirmed balance from ledger
+    deposit_pubkey: str = ""  # 33-byte compressed pubkey in hex
+    deposit_id: str = ""  # 16-byte ID in hex (first 16 bytes of SHA256(descriptor))
 
 
 def run_wallet(*args, capture: bool = True) -> tuple[int, str, str]:
@@ -139,6 +155,15 @@ def discover_ledgers() -> list[str]:
     return ledgers
 
 
+def compute_deposit_id(pubkey_hex: str) -> str:
+    """Compute deposit_id from pubkey (same as Rust implementation)"""
+    if not pubkey_hex:
+        return ""
+    descriptor = f"pk({pubkey_hex})"
+    hash_bytes = hashlib.sha256(descriptor.encode()).digest()
+    return hash_bytes[:16].hex()  # First 16 bytes
+
+
 def load_deposits() -> list[Deposit]:
     """Load deposits from wallet.sh's data file"""
     deposits_file = DATA_DIR / "deposits.json"
@@ -152,6 +177,7 @@ def load_deposits() -> list[Deposit]:
 
         deposits = []
         for item in data:
+            pubkey = item.get("deposit_pubkey", "")
             deposits.append(Deposit(
                 alias=item.get("alias", "unknown"),
                 ledger_id=item.get("ledger_id", ""),
@@ -159,6 +185,8 @@ def load_deposits() -> list[Deposit]:
                 min_sats=item.get("min_sats", 0),
                 max_sats=item.get("max_sats", 0),
                 status=item.get("status", "unknown"),
+                deposit_pubkey=pubkey,
+                deposit_id=compute_deposit_id(pubkey),
             ))
         return deposits
     except (json.JSONDecodeError, KeyError) as e:
@@ -187,13 +215,17 @@ def open_deposit(ledger_id: str, alias: str, amount_sats: int = 100000) -> Optio
             funding_address = line
             break
 
-    if not funding_address:
-        # Try to load from deposits.json
-        deposits = load_deposits()
-        for d in deposits:
-            if d.alias == alias:
+    # Always load from deposits.json to get deposit_pubkey and deposit_id
+    deposit_pubkey = ""
+    deposit_id = ""
+    deposits = load_deposits()
+    for d in deposits:
+        if d.alias == alias:
+            if not funding_address:
                 funding_address = d.funding_address
-                break
+            deposit_pubkey = d.deposit_pubkey
+            deposit_id = d.deposit_id
+            break
 
     if funding_address:
         print(f"  Created: {alias} -> {funding_address[:25]}...")
@@ -203,7 +235,9 @@ def open_deposit(ledger_id: str, alias: str, amount_sats: int = 100000) -> Optio
             funding_address=funding_address,
             min_sats=1000,
             max_sats=amount_sats,
-            status="pending"
+            status="pending",
+            deposit_pubkey=deposit_pubkey,
+            deposit_id=deposit_id,
         )
     else:
         print(f"  Warning: No funding address found for {alias}")
@@ -423,6 +457,147 @@ def fund_deposit_lightning(funder: Deposit, recipient_alias: str, amount_sats: i
     return False
 
 
+# Same-ledger transfer functions
+# These use HTLC-style hash-locked transfers
+
+
+def get_current_block_height() -> int:
+    """Get current block height from bitcoind"""
+    try:
+        result = subprocess.run([
+            "docker", "exec", "bdk-bitcoind",
+            "bitcoin-cli", "-regtest",
+            "-rpcuser=user", "-rpcpassword=pass",
+            "getblockcount"
+        ], capture_output=True, text=True)
+        return int(result.stdout.strip())
+    except:
+        return 100  # Fallback
+
+
+def transfer_lock(sender_alias: str, dest_deposit_id: str, amount_sats: int,
+                  hash_hex: str, timeout_height: int) -> Optional[str]:
+    """
+    Create a transfer lock (HTLC) from sender to destination deposit.
+    Returns the transfer_id on success, None on failure.
+    """
+    code, stdout, stderr = run_wallet(
+        "transfer", sender_alias, str(amount_sats),
+        "--to", dest_deposit_id,
+        "--hash", hash_hex,
+        "--timeout", str(timeout_height)
+    )
+
+    if code != 0:
+        print(f"  Warning: Transfer lock failed: {stderr}")
+        return None
+
+    # Parse transfer_id from output
+    # Format: "  Transfer ID: <hex>"
+    for line in stdout.split("\n"):
+        if "Transfer ID:" in line:
+            parts = line.split(":")
+            if len(parts) >= 2:
+                transfer_id = parts[-1].strip()
+                if len(transfer_id) >= 32:
+                    return transfer_id
+
+    print(f"  Warning: Could not parse transfer_id from output")
+    return None
+
+
+def transfer_complete(transfer_id: str, preimage_hex: str, ledger_id: str) -> bool:
+    """
+    Complete a transfer by revealing the preimage.
+    """
+    code, stdout, stderr = run_wallet(
+        "transfer_complete", transfer_id,
+        "--preimage", preimage_hex,
+        "--ledger", ledger_id
+    )
+
+    if code != 0:
+        print(f"  Warning: Transfer complete failed: {stderr}")
+        return False
+
+    if "completed" in stdout.lower() or "success" in stdout.lower():
+        return True
+
+    return False
+
+
+def same_ledger_transfer(sender: Deposit, receiver: Deposit, amount_sats: int) -> Optional[int]:
+    """
+    Make a same-ledger HTLC transfer between two deposits.
+    1. Generate preimage and hash
+    2. Create TransferLock
+    3. Complete with preimage
+
+    Returns actual amount transferred on success, None on failure.
+    """
+    global TRANSFERS_SUCCESS, TRANSFERS_FAILED, TRANSFERS_VOLUME_SATS
+
+    if sender.ledger_id != receiver.ledger_id:
+        print(f"  Warning: Transfers require same ledger (sender: {sender.ledger_id[:8]}, receiver: {receiver.ledger_id[:8]})")
+        TRANSFERS_FAILED += 1
+        if PROMETHEUS_AVAILABLE:
+            PROM_TRANSFERS_TOTAL.labels(status='failed').inc()
+        return None
+
+    if not receiver.deposit_id:
+        print(f"  Warning: Receiver {receiver.alias} has no deposit_id")
+        TRANSFERS_FAILED += 1
+        if PROMETHEUS_AVAILABLE:
+            PROM_TRANSFERS_TOTAL.labels(status='failed').inc()
+        return None
+
+    # Generate preimage and hash
+    preimage = secrets.token_bytes(32)
+    preimage_hex = preimage.hex()
+    hash_hex = hashlib.sha256(preimage).hexdigest()
+
+    # Set timeout 10 blocks in future
+    current_height = get_current_block_height()
+    timeout_height = current_height + 10
+
+    print(f"  Creating transfer: {sender.alias} -> {receiver.alias} ({amount_sats} sats)")
+    print(f"    Hash: {hash_hex[:16]}...")
+    print(f"    Timeout: block {timeout_height}")
+
+    # Create the lock
+    transfer_id = transfer_lock(
+        sender.alias,
+        receiver.deposit_id,
+        amount_sats,
+        hash_hex,
+        timeout_height
+    )
+
+    if not transfer_id:
+        TRANSFERS_FAILED += 1
+        if PROMETHEUS_AVAILABLE:
+            PROM_TRANSFERS_TOTAL.labels(status='failed').inc()
+        return None
+
+    print(f"  Transfer locked: {transfer_id[:16]}...")
+    print(f"  Completing with preimage...")
+
+    # Complete immediately with preimage
+    if transfer_complete(transfer_id, preimage_hex, sender.ledger_id):
+        print(f"  Transfer completed!")
+        TRANSFERS_SUCCESS += 1
+        TRANSFERS_VOLUME_SATS += amount_sats
+        if PROMETHEUS_AVAILABLE:
+            PROM_TRANSFERS_TOTAL.labels(status='success').inc()
+            PROM_TRANSFERS_SATS.inc(amount_sats)
+        return amount_sats
+
+    TRANSFERS_FAILED += 1
+    if PROMETHEUS_AVAILABLE:
+        PROM_TRANSFERS_TOTAL.labels(status='failed').inc()
+    return None
+
+
 def mine_block(network: str = "regtest"):
     """Mine a block to confirm transactions (regtest only)"""
     if network != "regtest":
@@ -445,6 +620,7 @@ def run_simulation(
     rediscover_interval: float = 60.0,
     network: str = "signet",
     lightning: bool = False,
+    transfers: bool = False,
 ):
     """Run the payment simulation
 
@@ -458,14 +634,15 @@ def run_simulation(
         rediscover_interval: Seconds between ledger re-discovery
         network: Bitcoin network (regtest, signet, mainnet)
         lightning: Use Lightning invoices instead of on-chain withdrawals
+        transfers: Use same-ledger HTLC transfers
     """
 
-    # Lightning payments are instant, so we can run 10x faster
-    if lightning and payment_interval == 2.0:
+    # Lightning and transfers are instant, so we can run 10x faster
+    if (lightning or transfers) and payment_interval == 2.0:
         payment_interval = 0.2
 
-    # Start Prometheus metrics server for Lightning mode
-    if lightning and PROMETHEUS_AVAILABLE:
+    # Start Prometheus metrics server for Lightning or transfers mode
+    if (lightning or transfers) and PROMETHEUS_AVAILABLE:
         start_http_server(METRICS_PORT)
         print(f"Prometheus metrics available at http://localhost:{METRICS_PORT}/metrics")
 
@@ -509,7 +686,8 @@ def run_simulation(
 
     print("Starting simulation...")
     print(f"  - Network: {network}")
-    print(f"  - Payment mode: {'Lightning' if lightning else 'On-chain'}")
+    mode = "Transfers" if transfers else ("Lightning" if lightning else "On-chain")
+    print(f"  - Payment mode: {mode}")
     print(f"  - Target wallets: {num_wallets} ({wallets_per_ledger:.1f} per ledger)")
     print(f"  - New wallet every {wallet_creation_interval:.1f}s")
     print(f"  - Payment every {payment_interval}s")
@@ -601,16 +779,34 @@ def run_simulation(
                     funded = [d for d in our_deposits if d.balance_sats >= min_balance_needed]
 
                 if len(funded) >= 2:
-                    # Pick sender and receiver
+                    # Pick sender
                     sender = random.choice(funded)
-                    receiver = random.choice([d for d in our_deposits if d != sender and d.funding_address])
+
+                    # For transfers, receiver must be on same ledger
+                    if transfers:
+                        same_ledger = [d for d in our_deposits if d != sender and d.ledger_id == sender.ledger_id and d.deposit_id]
+                        if not same_ledger:
+                            print(f"\n[{time.strftime('%H:%M:%S')}] No same-ledger receivers for {sender.alias}")
+                            last_payment_time = now
+                            time.sleep(0.1)
+                            continue
+                        receiver = random.choice(same_ledger)
+                    else:
+                        receiver = random.choice([d for d in our_deposits if d != sender and d.funding_address])
 
                     # Random payment amount, but don't exceed sender's balance
                     max_amount = min(max_payment_sats, sender.balance_sats - 1000)  # Leave 1000 for fee
                     if max_amount >= min_payment_sats:
                         amount = random.randint(min_payment_sats, max_amount)
 
-                        if lightning:
+                        if transfers:
+                            print(f"\n[{time.strftime('%H:%M:%S')}] Transfer: {sender.alias} ({sender.balance_sats} sats) -> {receiver.alias}")
+                            transferred = same_ledger_transfer(sender, receiver, amount)
+                            if transferred:
+                                # Transfers are instant, update both balances
+                                sender.balance_sats -= transferred
+                                receiver.balance_sats += transferred
+                        elif lightning:
                             print(f"\n[{time.strftime('%H:%M:%S')}] Lightning: {sender.alias} ({sender.balance_sats} sats) -> {receiver.alias}")
                             paid_amount = lightning_payment(sender, receiver, amount)
                             if paid_amount:
@@ -650,7 +846,16 @@ def run_simulation(
                 funded_count = len([d for d in our_deposits if d.balance_sats > 0])
                 total_balance = sum(d.balance_sats for d in our_deposits)
                 print(f"\n[{time.strftime('%H:%M:%S')}] Status: {len(ledgers)} ledgers, {len(our_deposits)}/{num_wallets} wallets, {funded_count} funded, {total_balance} sats")
-                if lightning:
+                if transfers:
+                    total_transfers = TRANSFERS_SUCCESS + TRANSFERS_FAILED
+                    print(f"  Transfers: {TRANSFERS_SUCCESS}/{total_transfers} ({TRANSFERS_VOLUME_SATS:,} sats)")
+                    # Update Prometheus gauges
+                    if PROMETHEUS_AVAILABLE:
+                        PROM_DEPOSITS_COUNT.labels(status='total').set(len(our_deposits))
+                        PROM_DEPOSITS_COUNT.labels(status='funded').set(funded_count)
+                        PROM_DEPOSITS_BALANCE.set(total_balance)
+                        PROM_LEDGERS_COUNT.set(len(ledgers))
+                elif lightning:
                     total_payments = PAYMENTS_SUCCESS + PAYMENTS_FAILED
                     total_funding = FUNDING_SUCCESS + FUNDING_FAILED
                     print(f"  Payments: {PAYMENTS_SUCCESS}/{total_payments} ({VOLUME_SATS:,} sats) | Funding: {FUNDING_SUCCESS}/{total_funding} ({FUNDING_VOLUME_SATS:,} sats)")
@@ -666,7 +871,10 @@ def run_simulation(
     except KeyboardInterrupt:
         print("\n\nSimulation stopped by user")
         print(f"Final state: {len(our_deposits)} deposits")
-        if lightning:
+        if transfers:
+            print(f"\nTransfer Metrics:")
+            print(f"  Transfers: {TRANSFERS_SUCCESS} success, {TRANSFERS_FAILED} failed, {TRANSFERS_VOLUME_SATS:,} sats volume")
+        elif lightning:
             print(f"\nLightning Metrics:")
             print(f"  Payments: {PAYMENTS_SUCCESS} success, {PAYMENTS_FAILED} failed, {VOLUME_SATS:,} sats volume")
             print(f"  Funding:  {FUNDING_SUCCESS} success, {FUNDING_FAILED} failed, {FUNDING_VOLUME_SATS:,} sats volume")
@@ -682,6 +890,8 @@ def main():
                         help="Bitcoin network (default: signet)")
     parser.add_argument("--lightning", action="store_true",
                         help="Use Lightning invoices instead of on-chain withdrawals")
+    parser.add_argument("--transfers", action="store_true",
+                        help="Use same-ledger HTLC transfers")
     parser.add_argument("--wallets-per-ledger", type=float, default=2.0,
                         help="Target wallets per discovered ledger (default: 2.0)")
     parser.add_argument("--base-interval", type=float, default=3.0,
@@ -709,6 +919,7 @@ def main():
         rediscover_interval=args.rediscover_interval,
         network=args.network,
         lightning=args.lightning,
+        transfers=args.transfers,
     )
 
 
