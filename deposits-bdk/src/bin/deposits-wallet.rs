@@ -1643,7 +1643,7 @@ async fn pay_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     let descriptor = format!("pk({})", hex::encode(our_pubkey.serialize()));
     let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
 
-    // Sign the INVOICE_LOCK message (deposit_id, payment_hash, amount)
+    // Sign the INVOICE message (deposit_id, payment_hash, amount)
     let msg_hash = deposits_core::signature_utils::invoice_lock_signing_message(
         &deposit_id,
         &payment_hash_bytes,

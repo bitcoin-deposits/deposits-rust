@@ -3161,7 +3161,7 @@ impl Node {
             None => return (false, None, Some("Invalid deposit_pubkey".to_string())),
         };
 
-        // Verify INVOICE_LOCK signature (deposit_id, payment_hash, amount)
+        // Verify INVOICE signature (deposit_id, payment_hash, amount)
         let secp = Secp256k1::verification_only();
         let msg_hash = deposits_core::signature_utils::invoice_lock_signing_message(
             &deposit_id,

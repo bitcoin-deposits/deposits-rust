@@ -333,7 +333,7 @@ pub fn collateral_lock_signing_message(
 
 /// Create the signing message hash for an invoice lock (Lightning payment).
 ///
-/// Format: SHA256("INVOICE_LOCK:{deposit_id}:{payment_hash}:{amount_with_fees}")
+/// Format: SHA256("INVOICE:{deposit_id}:{payment_hash}:{amount_with_fees}")
 ///
 /// The depositor signs this message to authorize the custodian to deduct up to
 /// `amount_with_fees` from their deposit when the payment preimage is revealed.
@@ -348,7 +348,7 @@ pub fn invoice_lock_signing_message(
     amount_with_fees: u64,
 ) -> [u8; 32] {
     let message = format!(
-        "INVOICE_LOCK:{}:{}:{}",
+        "INVOICE:{}:{}:{}",
         hex::encode(deposit_id),
         hex::encode(payment_hash),
         amount_with_fees
