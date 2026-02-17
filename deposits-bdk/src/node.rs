@@ -427,6 +427,9 @@ impl Node {
                 // Auto-collect fees from deposits when due
                 self.auto_collect_fees().await;
 
+                // Auto-timeout expired transfers
+                self.auto_timeout_transfers().await;
+
                 // Auto-claim/yield for any pending lottery disputes
                 self.auto_lottery_claim_or_yield().await;
 
@@ -4600,6 +4603,98 @@ impl Node {
                 if let Err(e) = self.handler.persist_ledger(&ledger_id) {
                     tracing::warn!("Failed to save ledger after fee collection: {}", e);
                 }
+            }
+        }
+    }
+
+    /// Automatically timeout expired transfers.
+    ///
+    /// Scans all operated ledgers for pending transfers that have passed their
+    /// timeout_height and issues TransferTimeout operations to return funds
+    /// to the source deposits.
+    pub async fn auto_timeout_transfers(&self) {
+        use deposits_core::messages::LedgerOperation;
+
+        let current_block = match self.wallet.get_block_height() {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::debug!("Failed to get block height for transfer timeout: {}", e);
+                return;
+            }
+        };
+
+        let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
+
+        // Get operated ledgers (where we are the operator)
+        let ledgers = self.handler.ledgers.lock().unwrap().clone();
+        let operated: Vec<_> = ledgers.into_iter()
+            .filter(|(_, arc)| arc.read().unwrap().operator_key() == self.node_id)
+            .collect();
+
+        for (ledger_id, ledger_arc) in operated {
+            // Find expired transfers
+            let expired_transfers: Vec<[u8; 32]> = {
+                let ledger = ledger_arc.read().unwrap();
+                ledger.state.pending_transfers.iter()
+                    .filter(|(_, pending)| current_block >= pending.timeout_height)
+                    .map(|(id, _)| *id)
+                    .collect()
+            };
+
+            if expired_transfers.is_empty() {
+                continue;
+            }
+
+            // Timeout each expired transfer
+            for transfer_id in expired_transfers {
+                tracing::info!(
+                    "Timing out expired transfer: {}... (block {} >= timeout)",
+                    hex::encode(&transfer_id[..8]),
+                    current_block
+                );
+
+                let operation = LedgerOperation::TransferTimeout {
+                    transfer_id,
+                    block_hash,
+                };
+
+                {
+                    let mut ledger = ledger_arc.write().unwrap();
+                    if let Err(e) = ledger.append_operation_with_block(
+                        operation,
+                        deposits_core::messages::consts::TRANSFER_TIMEOUT,
+                        current_block,
+                        block_hash,
+                    ) {
+                        tracing::warn!(
+                            "Failed to timeout transfer {}...: {:?}",
+                            hex::encode(&transfer_id[..8]),
+                            e
+                        );
+                        continue;
+                    }
+                }
+
+                // Sign the update
+                if let Err(e) = self.sign_last_update(&ledger_id) {
+                    tracing::warn!("Failed to sign transfer timeout update: {}", e);
+                    continue;
+                }
+
+                // Broadcast to Nostr
+                if let Err(e) = self.broadcast_last_update(&ledger_id).await {
+                    tracing::warn!("Failed to broadcast transfer timeout: {}", e);
+                }
+
+                // Save ledger to disk
+                if let Err(e) = self.handler.persist_ledger(&ledger_id) {
+                    tracing::warn!("Failed to save ledger after transfer timeout: {}", e);
+                }
+
+                tracing::info!(
+                    "Transfer {} timed out, funds returned to source",
+                    hex::encode(&transfer_id[..8])
+                );
             }
         }
     }
