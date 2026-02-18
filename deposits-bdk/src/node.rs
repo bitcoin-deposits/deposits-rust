@@ -97,6 +97,9 @@ pub struct CoSignResult {
     /// The partner's ECDSA signature over (partner_signing_data || member_ledger_hash)
     pub partner_signature: [u8; 64],
 
+    /// The public key of the quorum member who co-signed
+    pub cosigner_pubkey: PublicKey,
+
     /// The current hash of the quorum member's own ledger at time of signing
     /// This binds the co-signature to the member's ledger state
     pub member_ledger_hash: [u8; 32],
@@ -1501,6 +1504,8 @@ impl Node {
             message: message_bytes,
             message_type: 0x8001,
             operator_signature: operator_sig_bytes,
+            cosigner_pubkey: None,
+            member_ledger_hash: None,
             partner_signature: [0u8; 64],
             operator_id: our_pubkey,
             ledger_id: ledger_id_bytes,
@@ -1571,6 +1576,8 @@ impl Node {
             message: message_bytes,
             message_type: 0x8001,
             operator_signature: operator_sig_bytes,
+            cosigner_pubkey: None,
+            member_ledger_hash: None,
             partner_signature: [0u8; 64],
             operator_id: our_pubkey,
             ledger_id: ledger_id_bytes,
@@ -2536,6 +2543,8 @@ impl Node {
             message: message_bytes,
             message_type: deposits_core::messages::consts::RESERVES_ROTATE,
             operator_signature: operator_sig_bytes,
+            cosigner_pubkey: None,
+            member_ledger_hash: None,
             partner_signature: [0u8; 64],
             operator_id: our_pubkey,
             ledger_id: ledger_id_bytes,
@@ -2660,6 +2669,8 @@ impl Node {
                 message: message_bytes,
                 message_type: deposits_core::messages::consts::DEPOSIT_OPEN,
                 operator_signature: operator_sig_bytes,
+                cosigner_pubkey: None,
+                member_ledger_hash: None,
                 partner_signature: [0u8; 64],
                 operator_id: our_pubkey,
                 ledger_id: ledger_id_bytes,
@@ -3785,9 +3796,19 @@ impl Node {
             }
         }
 
-        // Sign and broadcast
+        // Sign the update
         if let Err(e) = self.sign_last_update(ledger_id) {
             return (false, None, Some(format!("Failed to sign: {:?}", e)));
+        }
+
+        // Persist to disk
+        if let Err(e) = self.handler.persist_ledger(ledger_id) {
+            tracing::warn!("Failed to persist ledger after transfer_lock: {}", e);
+        }
+
+        // Broadcast to Nostr
+        if let Err(e) = self.broadcast_last_update(ledger_id).await {
+            tracing::warn!("Failed to broadcast transfer_lock: {}", e);
         }
 
         tracing::info!("Transfer locked: {}", hex::encode(&transfer_id[..8]));
@@ -3886,9 +3907,19 @@ impl Node {
             }
         }
 
-        // Sign and broadcast
+        // Sign the update
         if let Err(e) = self.sign_last_update(ledger_id) {
             return (false, None, Some(format!("Failed to sign: {:?}", e)));
+        }
+
+        // Persist to disk
+        if let Err(e) = self.handler.persist_ledger(ledger_id) {
+            tracing::warn!("Failed to persist ledger after transfer_complete: {}", e);
+        }
+
+        // Broadcast to Nostr
+        if let Err(e) = self.broadcast_last_update(ledger_id).await {
+            tracing::warn!("Failed to broadcast transfer_complete: {}", e);
         }
 
         tracing::info!("Transfer completed: {}", hex::encode(&transfer_id[..8]));
@@ -4187,9 +4218,10 @@ impl Node {
         tracing::info!("Co-signed update seq={} for ledger {}... (member_ledger_hash: {}...)",
             sequence_number, &request.ledger_id[..16], &hex::encode(&member_ledger_hash[..4]));
 
-        // Return the signature and our ledger hash
+        // Return the signature, our pubkey, and our ledger hash
         let result = serde_json::json!({
             "partner_signature_hex": hex::encode(sig_bytes),
+            "cosigner_pubkey": self.node_id.to_string(),
             "sequence_number": sequence_number,
             "member_ledger_hash_hex": hex::encode(member_ledger_hash),
         });
@@ -5074,6 +5106,7 @@ impl Node {
     /// co-sign responses. Used inside request_cosign to avoid the recursive call:
     /// request_cosign -> handle_ledger_response -> record_collateral_attestation -> sign_and_broadcast -> request_cosign
     fn handle_cosign_response_only(&self, response: crate::nostr::LedgerResponse) {
+        use std::str::FromStr;
         // For error responses, don't remove the pending request - keep waiting for success.
         // This is important because co-sign requests are multicast and non-quorum-members
         // will respond with errors before the actual quorum member responds.
@@ -5115,6 +5148,7 @@ impl Node {
 
                 let sig_hex = result_obj.get("partner_signature_hex").and_then(|v| v.as_str());
                 let hash_hex = result_obj.get("member_ledger_hash_hex").and_then(|v| v.as_str());
+                let cosigner_str = result_obj.get("cosigner_pubkey").and_then(|v| v.as_str());
 
                 if let (Some(sig_hex), Some(hash_hex)) = (sig_hex, hash_hex) {
                     if let (Ok(sig_vec), Ok(hash_vec)) = (hex::decode(sig_hex), hex::decode(hash_hex)) {
@@ -5124,8 +5158,13 @@ impl Node {
                             let mut hash = [0u8; 32];
                             hash.copy_from_slice(&hash_vec);
 
+                            let cosigner_pubkey = cosigner_str
+                                .and_then(|s| PublicKey::from_str(s).ok())
+                                .unwrap_or(self.node_id); // fallback for old responders
+
                             let cosign_result = CoSignResult {
                                 partner_signature: sig,
+                                cosigner_pubkey,
                                 member_ledger_hash: hash,
                             };
                             let _ = tx.send(cosign_result);
@@ -5192,6 +5231,8 @@ impl Node {
                     let sig_hex = result_obj.get("partner_signature_hex").and_then(|v| v.as_str());
                     // Extract member_ledger_hash_hex
                     let hash_hex = result_obj.get("member_ledger_hash_hex").and_then(|v| v.as_str());
+                    // Extract cosigner_pubkey
+                    let cosigner_str = result_obj.get("cosigner_pubkey").and_then(|v| v.as_str());
 
                     if let (Some(sig_hex), Some(hash_hex)) = (sig_hex, hash_hex) {
                         let sig_bytes = hex::decode(sig_hex);
@@ -5204,8 +5245,16 @@ impl Node {
                                 let mut hash = [0u8; 32];
                                 hash.copy_from_slice(&hash_vec);
 
+                                let cosigner_pubkey = cosigner_str
+                                    .and_then(|s| {
+                                        use std::str::FromStr;
+                                        PublicKey::from_str(s).ok()
+                                    })
+                                    .unwrap_or(self.node_id); // fallback for old responders
+
                                 let cosign_result = CoSignResult {
                                     partner_signature: sig,
+                                    cosigner_pubkey,
                                     member_ledger_hash: hash,
                                 };
                                 let _ = tx.send(cosign_result);
@@ -5757,9 +5806,12 @@ impl Node {
 
                     if let Some(last) = ledger.history.last_mut() {
                         last.partner_signature = result.partner_signature;
+                        last.cosigner_pubkey = Some(result.cosigner_pubkey);
+                        last.member_ledger_hash = Some(result.member_ledger_hash);
                     }
 
-                    tracing::info!("Applied partner signature (member_ledger_hash: {}...)",
+                    tracing::info!("Applied partner signature from {} (member_ledger_hash: {}...)",
+                        &result.cosigner_pubkey.to_string()[..8],
                         &hex::encode(&result.member_ledger_hash[..4]));
                     last_error = None;
                     break;
