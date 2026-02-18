@@ -139,6 +139,7 @@ services:
       - "/data"
       - "--metrics-port"
       - "9100"
+      - "--fast-poll"
     environment:
       - RUST_LOG=info,deposits_bdk=debug
     volumes:
@@ -172,6 +173,7 @@ services:
       - "/data"
       - "--metrics-port"
       - "9100"
+      - "--fast-poll"
     environment:
       - RUST_LOG=info,deposits_bdk=debug
     volumes:
@@ -205,6 +207,7 @@ services:
       - "/data"
       - "--metrics-port"
       - "9100"
+      - "--fast-poll"
     environment:
       - RUST_LOG=info,deposits_bdk=debug
     volumes:
@@ -238,6 +241,7 @@ services:
       - "/data"
       - "--metrics-port"
       - "9100"
+      - "--fast-poll"
     environment:
       - RUST_LOG=info,deposits_bdk=debug
     volumes:
@@ -273,6 +277,7 @@ services:
       - "/data"
       - "--metrics-port"
       - "9100"
+      - "--fast-poll"
     environment:
       - RUST_LOG=info,deposits_bdk=debug
     volumes:

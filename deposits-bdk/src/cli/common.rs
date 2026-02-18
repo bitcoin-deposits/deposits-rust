@@ -35,6 +35,7 @@ pub fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
     let mut relays = Vec::new();
     let mut nwc_uri = None;
     let mut operator_name = None;
+    let mut fast_poll = false;
     let mut data_dir = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".deposits-bdk");
@@ -104,6 +105,9 @@ pub fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
                 }
                 data_dir = PathBuf::from(&args[i]);
             }
+            "--fast-poll" => {
+                fast_poll = true;
+            }
             arg => {
                 return Err(format!("Unknown argument: {}", arg));
             }
@@ -137,6 +141,7 @@ pub fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
         nwc_uri,
         data_dir,
         operator_name,
+        fast_poll,
     })
 }
 

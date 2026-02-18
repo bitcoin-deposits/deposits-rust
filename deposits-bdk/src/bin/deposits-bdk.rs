@@ -277,6 +277,7 @@ fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
     let mut relays = Vec::new();
     let mut nwc_uri = None;
     let mut operator_name = None;
+    let mut fast_poll = false;
     let mut data_dir = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".deposits-bdk");
@@ -346,6 +347,9 @@ fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
                 }
                 data_dir = PathBuf::from(&args[i]);
             }
+            "--fast-poll" => {
+                fast_poll = true;
+            }
             arg => {
                 return Err(format!("Unknown argument: {}", arg));
             }
@@ -379,6 +383,7 @@ fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
         nwc_uri,
         data_dir,
         operator_name,
+        fast_poll,
     })
 }
 
@@ -683,7 +688,7 @@ async fn reserves_rotate(args: &[String]) -> Result<(), Box<dyn std::error::Erro
             if id.len() == 64 && id.chars().all(|c| c.is_ascii_hexdigit()) {
                 id
             } else {
-                node.get_ledger_by_reserves_key(&id)
+                node.get_ledger_with_id(&id)
                     .map(|(lid, _)| lid)
                     .ok_or_else(|| format!("Ledger not found for: {}", id))?
             }
@@ -846,18 +851,9 @@ async fn auto_advertise_ledger(
     };
 
     // Resolve identifier to ledger (supports both ledger_id and reserves_key)
-    let ledger = if identifier.len() == 64 && identifier.chars().all(|c| c.is_ascii_hexdigit()) {
-        // It's a ledger_id
-        match node.get_ledger(identifier) {
-            Some(l) => l,
-            None => return,
-        }
-    } else {
-        // It's a reserves_key
-        match node.get_ledger_by_reserves_key(identifier) {
-            Some((_, l)) => l,
-            None => return,
-        }
+    let ledger = match node.get_ledger_with_id(identifier) {
+        Some((_, l)) => l,
+        None => return,
     };
 
     let ledger_id_hex = ledger.ledger_id_hex();
@@ -1076,8 +1072,8 @@ async fn ledger_history(args: &[String]) -> Result<(), Box<dyn std::error::Error
     // Get the ledger - either by reserves_id or primary ledger
     let (_reserves_id, ledger) = if let Some(id_str) = reserves_id_str {
         // Look up ledger by reserves_id (Bitcoin address string)
-        node.get_ledger_by_reserves_key(&id_str)
-            .ok_or_else(|| format!("Ledger not found for reserves_id: {}", id_str))?
+        node.get_ledger_with_id(&id_str)
+            .ok_or_else(|| format!("Ledger not found: {}", id_str))?
     } else {
         // No argument - get primary ledger
         node.get_primary_ledger()
@@ -1163,8 +1159,8 @@ async fn ledger_validate(args: &[String]) -> Result<(), Box<dyn std::error::Erro
 
     // Get the ledger
     let (reserves_id, ledger) = if let Some(id_str) = reserves_id_str {
-        node.get_ledger_by_reserves_key(&id_str)
-            .ok_or_else(|| format!("Ledger not found for reserves_id: {}", id_str))?
+        node.get_ledger_with_id(&id_str)
+            .ok_or_else(|| format!("Ledger not found: {}", id_str))?
     } else {
         node.get_primary_ledger()
             .ok_or("No ledger found. Run 'ledger open' first.")?
@@ -1291,8 +1287,8 @@ async fn ledger_export(args: &[String]) -> Result<(), Box<dyn std::error::Error>
 
     // Get the ledger
     let (reserves_id, ledger) = if let Some(id_str) = reserves_id_str {
-        node.get_ledger_by_reserves_key(&id_str)
-            .ok_or_else(|| format!("Ledger not found for reserves_id: {}", id_str))?
+        node.get_ledger_with_id(&id_str)
+            .ok_or_else(|| format!("Ledger not found: {}", id_str))?
     } else {
         node.get_primary_ledger()
             .ok_or("No ledger found. Run 'ledger open' first.")?
@@ -1505,7 +1501,7 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
     let node = Node::new(config.clone()).await?;
 
     // Find the ledger
-    let (_, ledger) = node.get_ledger_by_reserves_key(&reserves_id)
+    let (_, ledger) = node.get_ledger_with_id(&reserves_id)
         .ok_or_else(|| format!("Ledger not found for reserves: {}", reserves_id))?;
 
     let ledger_id = ledger.ledger_id_hex();
@@ -1988,7 +1984,7 @@ async fn partner_add(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         reserves_id.clone()
     } else {
         // Try to find by reserves_key
-        node.get_ledger_by_reserves_key(&reserves_id)
+        node.get_ledger_with_id(&reserves_id)
             .map(|(lid, _)| lid)
             .ok_or_else(|| format!("Ledger not found for reserves: {}", reserves_id))?
     };
@@ -2059,7 +2055,7 @@ async fn partner_join(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     let our_ledger_id = if our_id.len() == 64 && our_id.chars().all(|c| c.is_ascii_hexdigit()) {
         our_id.clone()
     } else {
-        node.get_ledger_by_reserves_key(&our_id)
+        node.get_ledger_with_id(&our_id)
             .map(|(lid, _)| lid)
             .ok_or_else(|| format!("Ledger not found for reserves: {}", our_id))?
     };
@@ -2293,7 +2289,7 @@ async fn collateral_record(args: &[String]) -> Result<(), Box<dyn std::error::Er
     let ledger_id = if reserves_id_arg.len() == 64 && reserves_id_arg.chars().all(|c| c.is_ascii_hexdigit()) {
         reserves_id_arg.clone()
     } else {
-        node.get_ledger_by_reserves_key(&reserves_id_arg)
+        node.get_ledger_with_id(&reserves_id_arg)
             .map(|(lid, _)| lid)
             .ok_or_else(|| format!("Ledger not found for reserves: {}", reserves_id_arg))?
     };
@@ -2547,7 +2543,7 @@ async fn deposit_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     let ledger_id = if reserves_id_arg.len() == 64 && reserves_id_arg.chars().all(|c| c.is_ascii_hexdigit()) {
         reserves_id_arg.clone()
     } else {
-        node.get_ledger_by_reserves_key(reserves_id_arg)
+        node.get_ledger_with_id(reserves_id_arg)
             .map(|(lid, _)| lid)
             .ok_or_else(|| format!("Ledger not found for reserves: {}", reserves_id_arg))?
     };
@@ -2618,7 +2614,7 @@ async fn deposit_ls(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let ledger_id = if reserves_id_arg.len() == 64 && reserves_id_arg.chars().all(|c| c.is_ascii_hexdigit()) {
         reserves_id_arg.clone()
     } else {
-        node.get_ledger_by_reserves_key(&reserves_id_arg)
+        node.get_ledger_with_id(&reserves_id_arg)
             .map(|(lid, _)| lid)
             .ok_or_else(|| format!("Ledger not found for reserves: {}", reserves_id_arg))?
     };
@@ -2698,7 +2694,7 @@ async fn deposit_credit(args: &[String]) -> Result<(), Box<dyn std::error::Error
     let ledger_id = if reserves_id_arg.len() == 64 && reserves_id_arg.chars().all(|c| c.is_ascii_hexdigit()) {
         reserves_id_arg.clone()
     } else {
-        node.get_ledger_by_reserves_key(reserves_id_arg)
+        node.get_ledger_with_id(reserves_id_arg)
             .map(|(lid, _)| lid)
             .ok_or_else(|| format!("Ledger not found for reserves: {}", reserves_id_arg))?
     };
@@ -2762,6 +2758,17 @@ async fn deposit_check(args: &[String]) -> Result<(), Box<dyn std::error::Error>
 
     // Sync wallet first
     node.sync_wallet()?;
+
+    // First check if already completed
+    if let Some((_, status)) = node.get_deposit_offer(&offer_id) {
+        use deposits_core::types::DepositOfferStatus;
+        if let DepositOfferStatus::Completed { txid, amount_sats, .. } = status {
+            println!("\nFunding detected! (already completed)");
+            println!("  Transaction: {}", txid);
+            println!("  Amount: {} sats", amount_sats);
+            return Ok(());
+        }
+    }
 
     // Check for funding
     match node.check_deposit_offer_funding(&offer_id)? {
@@ -2896,12 +2903,13 @@ async fn deposit_verify_custodian(args: &[String]) -> Result<(), Box<dyn std::er
         "params": params,
     });
 
-    // Publish request
+    // Publish request (use "l" tag for ledger_id and "action" tag like other requests)
     let request_event = EventBuilder::new(
         Kind::Custom(deposits_bdk::nostr::KIND_LEDGER_REQUEST),
         request_content.to_string(),
     )
-    .tag(Tag::custom(TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::D)), [ledger_id.as_str()]))
+    .tag(Tag::custom(TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)), [ledger_id.as_str()]))
+    .tag(Tag::custom(TagKind::custom("action"), ["custodian_query"]))
     .sign_with_keys(&keys)?;
 
     let request_event_id = request_event.id.to_hex();
@@ -2925,9 +2933,11 @@ async fn deposit_verify_custodian(args: &[String]) -> Result<(), Box<dyn std::er
 
     for event in events {
         if let Ok(response) = serde_json::from_str::<serde_json::Value>(&event.content) {
+            // Response is wrapped in LedgerResponse with "result" field
+            let result = response.get("result").unwrap_or(&response);
             if let (Some(custodian), Some(attester)) = (
-                response.get("custodian").and_then(|v| v.as_str()),
-                response.get("attester").and_then(|v| v.as_str()),
+                result.get("custodian").and_then(|v| v.as_str()),
+                result.get("attester").and_then(|v| v.as_str()),
             ) {
                 attestations.entry(custodian.to_string())
                     .or_default()
@@ -3135,7 +3145,7 @@ async fn withdraw_request(args: &[String]) -> Result<(), Box<dyn std::error::Err
     let ledger_id = if reserves_id_arg.len() == 64 && reserves_id_arg.chars().all(|c| c.is_ascii_hexdigit()) {
         reserves_id_arg.clone()
     } else {
-        node.get_ledger_by_reserves_key(reserves_id_arg)
+        node.get_ledger_with_id(reserves_id_arg)
             .map(|(lid, _)| lid)
             .ok_or_else(|| format!("Ledger not found for reserves: {}", reserves_id_arg))?
     };
@@ -3257,7 +3267,7 @@ async fn withdraw_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     let ledger_id = if reserves_id_arg.len() == 64 && reserves_id_arg.chars().all(|c| c.is_ascii_hexdigit()) {
         reserves_id_arg.clone()
     } else {
-        node.get_ledger_by_reserves_key(reserves_id_arg)
+        node.get_ledger_with_id(reserves_id_arg)
             .map(|(lid, _)| lid)
             .ok_or_else(|| format!("Ledger not found for reserves: {}", reserves_id_arg))?
     };
@@ -3347,7 +3357,7 @@ async fn withdraw_complete(args: &[String]) -> Result<(), Box<dyn std::error::Er
     let ledger_id = if reserves_id_arg.len() == 64 && reserves_id_arg.chars().all(|c| c.is_ascii_hexdigit()) {
         reserves_id_arg.clone()
     } else {
-        node.get_ledger_by_reserves_key(reserves_id_arg)
+        node.get_ledger_with_id(reserves_id_arg)
             .map(|(lid, _)| lid)
             .ok_or_else(|| format!("Ledger not found for reserves: {}", reserves_id_arg))?
     };
@@ -4131,16 +4141,8 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
     let node = Node::new(config).await?;
 
     // Resolve reserves_id to ledger_id
-    let (ledger_id, ledger) = if reserves_id_arg.len() == 64 && reserves_id_arg.chars().all(|c| c.is_ascii_hexdigit()) {
-        // Provided a ledger_id
-        let ledger = node.get_ledger(reserves_id_arg)
-            .ok_or_else(|| format!("Ledger not found: {}", reserves_id_arg))?;
-        (reserves_id_arg.clone(), ledger)
-    } else {
-        // Provided a reserves_key
-        node.get_ledger_by_reserves_key(reserves_id_arg)
-            .ok_or_else(|| format!("Ledger not found for reserves: {}", reserves_id_arg))?
-    };
+    let (ledger_id, ledger) = node.get_ledger_with_id(reserves_id_arg)
+        .ok_or_else(|| format!("Ledger not found: {}", reserves_id_arg))?;
 
     if ledger.history.is_empty() {
         return Err("Ledger has no history - cannot create invalid update".into());
