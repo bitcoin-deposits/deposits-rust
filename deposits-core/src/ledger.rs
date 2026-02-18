@@ -1074,9 +1074,10 @@ impl Ledger {
                 // Winner validation is done via validate_custody_resolution()
                 // which requires knowing all candidates (from Nostr observation)
             }
-            LedgerOperation::CollateralAttestation { quorum_member, collateral_ledger_id, .. } => {
-                // Verify the attestation's collateral_ledger_id matches the member's registered ledger
-                let member = self.state.quorum_members.iter().find(|m| m.pubkey == *quorum_member);
+            LedgerOperation::CollateralAttestation { collateral_operator, collateral_ledger_id, .. } => {
+                // Verify the collateral_operator is a quorum member and their ledger_id matches
+                // The collateral_operator is the one providing collateral backing (must be a quorum member)
+                let member = self.state.quorum_members.iter().find(|m| m.pubkey == *collateral_operator);
                 match member {
                     Some(m) => {
                         if &m.ledger_id != collateral_ledger_id {
@@ -1094,7 +1095,7 @@ impl Ledger {
                             violation_type: "collateral_attestation_from_non_member".to_string(),
                             details: format!(
                                 "Attestation from {} who is not a quorum member",
-                                quorum_member
+                                collateral_operator
                             ),
                         });
                     }

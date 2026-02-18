@@ -1255,20 +1255,43 @@ impl Wallet {
         &self,
         address: &Address<bitcoin::address::NetworkUnchecked>,
     ) -> Result<Option<(String, u64)>, Error> {
-        let client = EsploraBuilder::new(&self.electrum_url)
-            .build_blocking();
+        use bitcoin::hashes::{sha256, Hash};
 
         // Get the script pubkey for this address
-        let address_checked = address.clone()
-            .require_network(self.network)
-            .map_err(|e| Error::Wallet(format!("Address network mismatch: {}", e)))?;
-
+        // Use assume_checked() since we trust addresses from our deposit offers
+        let address_checked = address.clone().assume_checked();
         let script_pubkey = address_checked.script_pubkey();
 
-        // Query the esplora API for transactions to this script
-        let txs = client
-            .scripthash_txs(&script_pubkey, None)
-            .map_err(|e| Error::Wallet(format!("Failed to query address: {}", e)))?;
+        // Compute the scripthash in non-reversed format for esplora API
+        // Note: The esplora-client library uses bitcoin's {:x} format which is byte-reversed,
+        // but electrs expects the non-reversed SHA256 hash.
+        let script_hash = sha256::Hash::hash(script_pubkey.as_bytes());
+        let hash_bytes = script_hash.to_byte_array();
+        let script_hash_hex = hex::encode(hash_bytes);
+
+        // Query esplora directly with correct hash format
+        let url = format!("{}/scripthash/{}/txs", self.electrum_url, script_hash_hex);
+
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| Error::Wallet(format!("Failed to create HTTP client: {}", e)))?;
+
+        let response = client.get(&url)
+            .send()
+            .map_err(|e| Error::Wallet(format!("Failed to query esplora: {}", e)))?;
+
+        if !response.status().is_success() {
+            return Err(Error::Wallet(format!(
+                "Esplora returned status {}: {}",
+                response.status(),
+                response.text().unwrap_or_else(|_| "unknown error".to_string())
+            )));
+        }
+
+        // Parse the JSON response
+        let txs: Vec<bdk_esplora::esplora_client::Tx> = response.json()
+            .map_err(|e| Error::Wallet(format!("Failed to parse esplora response: {}", e)))?;
 
         // Look for confirmed transactions that have outputs to this address
         for tx in txs {

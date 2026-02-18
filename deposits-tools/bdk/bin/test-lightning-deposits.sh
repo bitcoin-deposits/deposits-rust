@@ -692,7 +692,7 @@ test_fee_rejection() {
     # Test 1: Try with fees BELOW minimum (should fail)
     log_info "Test 1: Sending request with fees below minimum..."
     log_info "  (50 bps < min 100 bps, 500 fixed < min 1000)"
-    local low_fee_result=$(run_bdk_cmd bdk-bob nostr request "$alice_ledger" deposit_offer \
+    local low_fee_result=$(run_bdk_cmd bdk-bob nostr request "$alice_ledger" make_offer \
         "$pubkey" 50000 5000 144 50 500 10 2>&1)
     sleep 1
 
@@ -709,7 +709,7 @@ test_fee_rejection() {
     log_info "Test 2: Sending request with fees at minimum..."
     log_info "  (100 bps = min, 1000 fixed = min)"
     # annualized_fixed for 1000/period at 10 blocks = 1000 * (52560/10) = 5256000
-    local ok_fee_result=$(run_bdk_cmd bdk-bob nostr request "$alice_ledger" deposit_offer \
+    local ok_fee_result=$(run_bdk_cmd bdk-bob nostr request "$alice_ledger" make_offer \
         "$pubkey" 50000 5000 144 100 5256000 10 2>&1)
     sleep 1
 
