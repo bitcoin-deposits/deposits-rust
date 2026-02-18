@@ -1364,6 +1364,43 @@ impl NostrTransport {
         Ok(disputes)
     }
 
+    /// Fetch ledger updates for a specific ledger
+    ///
+    /// Used by clients to verify quorum membership by checking for QuorumAddMember operations.
+    pub async fn fetch_ledger_updates(
+        &self,
+        ledger_id: &str,
+    ) -> Result<Vec<deposits_core::SignedLedgerUpdate>, Error> {
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+
+        let filter = Filter::new()
+            .kind(Kind::Custom(KIND_LEDGER_UPDATE))
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::L),
+                [ledger_id],
+            );
+
+        let events = self.client
+            .fetch_events(vec![filter], Some(std::time::Duration::from_secs(10)))
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to fetch ledger updates: {}", e)))?;
+
+        let mut updates = Vec::new();
+        for event in events.iter() {
+            // Updates are base64-encoded SignedLedgerUpdate
+            if let Ok(bytes) = BASE64.decode(&event.content) {
+                if let Ok(update) = deposits_core::SignedLedgerUpdate::tlv_decode(&bytes) {
+                    updates.push(update);
+                }
+            }
+        }
+
+        // Sort by sequence number
+        updates.sort_by_key(|u| u.sequence_number);
+
+        Ok(updates)
+    }
+
     /// Subscribe to ledger requests for a specific ledger (for operators)
     pub async fn subscribe_to_requests(&self, ledger_id: &str) -> Result<(), Error> {
         // Check if already subscribed to requests (global subscription, filter by ledger in handler)

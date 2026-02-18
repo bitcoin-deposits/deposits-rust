@@ -234,6 +234,12 @@ pub async fn process_make_offer_request(
     // Include fees so they're stored with the offer and applied when deposit is completed
     match node.create_deposit_offer(&resolved_ledger_id, deposit_pubkey, max_sats, min_sats, blocks_valid, Some(fees)) {
         Ok(offer) => {
+            // Check if we need a co-signature (post-rotation)
+            // Note: CLI handlers use their own transport, but can still check has_quorum_reserves
+            // For the CLI handler, we simply return the offer without co-signature
+            // since the Node.run() flow handles requests, not the CLI `nostr watch` flow.
+            // The daemon (Node) handles make_offer requests and will add co-signatures.
+            // CLI handlers are for development/testing where co-signing may not be needed.
             let result = serde_json::json!({
                 "offer_id": hex::encode(&offer.offer_id),
                 "operator_id": offer.operator_id.to_string(),
@@ -242,6 +248,7 @@ pub async fn process_make_offer_request(
                 "created_at_block": offer.created_at_block,
                 "max_sats": max_sats,
                 "min_sats": min_sats,
+                "cosign_required": false,
             });
             (true, Some(result), None)
         }

@@ -62,6 +62,11 @@ pub struct NodeConfig {
 
     /// Operator name for advertisements (optional)
     pub operator_name: Option<String>,
+
+    /// Use fast polling intervals (for regtest/testing)
+    /// When enabled: periodic=5s, poll=5s, reload=2s
+    /// When disabled: periodic=60s, poll=30s, reload=5s
+    pub fast_poll: bool,
 }
 
 /// Result of rotating reserves to quorum-based Taproot spending
@@ -91,6 +96,20 @@ pub struct RotateReservesResult {
 pub struct CoSignResult {
     /// The partner's ECDSA signature over (partner_signing_data || member_ledger_hash)
     pub partner_signature: [u8; 64],
+
+    /// The current hash of the quorum member's own ledger at time of signing
+    /// This binds the co-signature to the member's ledger state
+    pub member_ledger_hash: [u8; 32],
+}
+
+/// Result of a deposit offer co-sign request from a quorum member
+#[derive(Debug, Clone)]
+pub struct OfferCoSignResult {
+    /// The ECDSA signature over the offer signing data
+    pub signature: [u8; 64],
+
+    /// The public key of the quorum member who co-signed
+    pub cosigner_pubkey: PublicKey,
 
     /// The current hash of the quorum member's own ledger at time of signing
     /// This binds the co-signature to the member's ledger state
@@ -160,6 +179,9 @@ pub struct Node {
 
     /// Primary relay URL for Nostr
     relay_url: String,
+
+    /// Use fast polling intervals (for regtest/testing)
+    fast_poll: bool,
 }
 
 impl Node {
@@ -224,6 +246,7 @@ impl Node {
             processed_requests: Mutex::new(std::collections::HashSet::new()),
             data_dir: config.data_dir,
             relay_url,
+            fast_poll: config.fast_poll,
         })
     }
 
@@ -397,15 +420,31 @@ impl Node {
     pub async fn run(&mut self) -> Result<(), Error> {
         // Track last ledger reload time
         let mut last_reload = tokio::time::Instant::now();
-        let reload_interval = tokio::time::Duration::from_secs(5);
+        let reload_interval = if self.fast_poll {
+            tokio::time::Duration::from_secs(2)
+        } else {
+            tokio::time::Duration::from_secs(5)
+        };
 
         // Track last request poll time (fallback for missed subscription events)
         let mut last_poll = tokio::time::Instant::now();
-        let poll_interval = tokio::time::Duration::from_secs(30);
+        let poll_interval = if self.fast_poll {
+            tokio::time::Duration::from_secs(5)
+        } else {
+            tokio::time::Duration::from_secs(30)
+        };
 
         // Track last periodic tasks time (wallet sync, auto-complete deposits, etc.)
         let mut last_periodic = tokio::time::Instant::now();
-        let periodic_interval = tokio::time::Duration::from_secs(60);
+        let periodic_interval = if self.fast_poll {
+            tokio::time::Duration::from_secs(5)
+        } else {
+            tokio::time::Duration::from_secs(60)
+        };
+
+        if self.fast_poll {
+            tracing::info!("Fast poll mode enabled: periodic=5s, poll=5s, reload=2s");
+        }
 
         loop {
             // Periodic tasks (every 60 seconds) - moved outside select! to avoid reset on each iteration
@@ -622,6 +661,19 @@ impl Node {
                 }
 
                 self.process_cosign_request(&request).await
+            }
+            "cosign_offer" => {
+                // Reload ledgers to ensure we have the latest QuorumJoin state
+                self.handler.reload_ledgers();
+
+                // Silently ignore if we're not a quorum member for this ledger
+                if !self.is_quorum_member_of_ledger(&request.ledger_id) {
+                    tracing::debug!("Ignoring cosign_offer for {} - not a quorum member",
+                        &request.ledger_id[..16.min(request.ledger_id.len())]);
+                    return;
+                }
+
+                self.process_cosign_offer_request(&request).await
             }
             "offer_status" => self.process_offer_status_request(&request).await,
             "balance_query" => self.process_balance_query_request(&request).await,
@@ -2743,7 +2795,7 @@ impl Node {
         }
     }
 
-    async fn process_make_offer_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_make_offer_request(&mut self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
         use std::str::FromStr;
 
         tracing::info!("Processing make_offer request for ledger {}...",
@@ -2859,17 +2911,49 @@ impl Node {
         // Create the offer using ledger_id (stable across custody transfers)
         match self.create_deposit_offer(&resolved_ledger_id, deposit_pubkey, max_sats, min_sats, blocks_valid, Some(fees)) {
             Ok(offer) => {
-                let result = serde_json::json!({
-                    "offer_id": hex::encode(&offer.offer_id),
-                    "operator_id": offer.operator_id.to_string(),
-                    "funding_address": offer.funding_address,
-                    "deadline_block": offer.deadline_block,
-                    "created_at_block": offer.created_at_block,
-                    "max_sats": max_sats,
-                    "min_sats": min_sats,
-                });
-                tracing::info!("Deposit offer created: {}...", &hex::encode(&offer.offer_id[..8]));
-                (true, Some(result.to_string()), None)
+                // Check if we need a co-signature (post-rotation)
+                let requires_cosign = self.has_quorum_reserves(&resolved_ledger_id);
+
+                if requires_cosign {
+                    // Request co-signature from quorum members
+                    match self.request_offer_cosign(&resolved_ledger_id, &offer).await {
+                        Ok(cosign_result) => {
+                            let result = serde_json::json!({
+                                "offer_id": hex::encode(&offer.offer_id),
+                                "operator_id": offer.operator_id.to_string(),
+                                "funding_address": offer.funding_address,
+                                "deadline_block": offer.deadline_block,
+                                "created_at_block": offer.created_at_block,
+                                "max_sats": max_sats,
+                                "min_sats": min_sats,
+                                "cosign_required": true,
+                                "cosigner_pubkey": cosign_result.cosigner_pubkey.to_string(),
+                                "cosigner_ledger_hash": hex::encode(cosign_result.member_ledger_hash),
+                                "cosign_signature": hex::encode(cosign_result.signature),
+                            });
+                            tracing::info!("Deposit offer created with co-signature: {}...", &hex::encode(&offer.offer_id[..8]));
+                            (true, Some(result.to_string()), None)
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to get co-signature for offer: {}", e);
+                            (false, None, Some(format!("Co-signature required but failed: {}", e)))
+                        }
+                    }
+                } else {
+                    // Pre-rotation: no co-signature required
+                    let result = serde_json::json!({
+                        "offer_id": hex::encode(&offer.offer_id),
+                        "operator_id": offer.operator_id.to_string(),
+                        "funding_address": offer.funding_address,
+                        "deadline_block": offer.deadline_block,
+                        "created_at_block": offer.created_at_block,
+                        "max_sats": max_sats,
+                        "min_sats": min_sats,
+                        "cosign_required": false,
+                    });
+                    tracing::info!("Deposit offer created: {}...", &hex::encode(&offer.offer_id[..8]));
+                    (true, Some(result.to_string()), None)
+                }
             }
             Err(e) => {
                 tracing::warn!("Failed to create deposit offer: {}", e);
@@ -4113,6 +4197,171 @@ impl Node {
         (true, Some(result.to_string()), None)
     }
 
+    /// Process a cosign_offer request from an operator.
+    ///
+    /// This is called by quorum members when an operator needs a co-signature
+    /// on a deposit offer. The co-signature proves the operator has valid
+    /// quorum backing, preventing rogue former operators from creating offers
+    /// after custody recovery.
+    ///
+    /// Params:
+    /// - offer_id: hex-encoded 32-byte offer ID
+    /// - operator_id: hex-encoded compressed public key of the operator
+    /// - funding_address: the Bitcoin address for the deposit
+    /// - deadline_block: block height when offer expires
+    async fn process_cosign_offer_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+        use bitcoin::hashes::{sha256, Hash};
+        use bitcoin::secp256k1::{Message, Secp256k1};
+        use std::str::FromStr;
+
+        tracing::info!("Processing cosign_offer request for ledger {}...",
+            &request.ledger_id[..16.min(request.ledger_id.len())]);
+
+        // Extract required parameters
+        let offer_id_hex = match request.params.get("offer_id").and_then(|v| v.as_str()) {
+            Some(id) => id.to_string(),
+            None => return (false, None, Some("Missing offer_id parameter".to_string())),
+        };
+
+        let offer_id: [u8; 32] = match hex::decode(&offer_id_hex) {
+            Ok(bytes) if bytes.len() == 32 => {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                arr
+            }
+            Ok(_) => return (false, None, Some("offer_id must be 32 bytes".to_string())),
+            Err(e) => return (false, None, Some(format!("Invalid offer_id hex: {}", e))),
+        };
+
+        let operator_id_hex = match request.params.get("operator_id").and_then(|v| v.as_str()) {
+            Some(id) => id.to_string(),
+            None => return (false, None, Some("Missing operator_id parameter".to_string())),
+        };
+
+        let operator_id = match PublicKey::from_str(&operator_id_hex) {
+            Ok(pk) => pk,
+            Err(e) => return (false, None, Some(format!("Invalid operator_id: {}", e))),
+        };
+
+        let funding_address = match request.params.get("funding_address").and_then(|v| v.as_str()) {
+            Some(addr) => addr.to_string(),
+            None => return (false, None, Some("Missing funding_address parameter".to_string())),
+        };
+
+        let deadline_block = match request.params.get("deadline_block").and_then(|v| v.as_u64()) {
+            Some(b) => b as u32,
+            None => return (false, None, Some("Missing deadline_block parameter".to_string())),
+        };
+
+        // Get the target operator from the request sender
+        let target_operator_id = match hex::decode(&request.sender) {
+            Ok(x_only_bytes) if x_only_bytes.len() == 32 => {
+                // Convert x-only to compressed pubkey (assume even y-coordinate)
+                let mut compressed = [0u8; 33];
+                compressed[0] = 0x02;
+                compressed[1..].copy_from_slice(&x_only_bytes);
+                match PublicKey::from_slice(&compressed) {
+                    Ok(sender_key) => Some(sender_key),
+                    Err(_) => None,
+                }
+            }
+            _ => None,
+        };
+
+        // Auto-detect which of OUR ledgers is bound to the requesting ledger.
+        // We look for a ledger where we are the operator AND we have a QuorumJoin
+        // pointing to the target operator.
+        let member_ledger_hash: [u8; 32] = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let mut found_hash = None;
+
+            for (_ledger_id, arc) in ledgers.iter() {
+                let ledger = arc.read().unwrap();
+
+                // Only look at ledgers where we are the operator
+                if ledger.operator_key() != self.node_id {
+                    continue;
+                }
+
+                // Check if this ledger has a QuorumJoin pointing to the target operator
+                let has_join = ledger.history.iter().any(|update| {
+                    if update.message_type != deposits_core::messages::consts::QUORUM_JOIN {
+                        return false;
+                    }
+                    if let Ok(LedgerOperation::QuorumJoin { operator_id: join_op, .. }) =
+                        LedgerOperation::tlv_decode(&update.message)
+                    {
+                        if let Some(target_op) = &target_operator_id {
+                            // Compare the x-coordinate (bytes 1-32 of compressed pubkey)
+                            let jq_x = &join_op.serialize()[1..];
+                            let target_x = &target_op.serialize()[1..];
+                            if jq_x == target_x {
+                                return true;
+                            }
+                        }
+                    }
+                    false
+                });
+
+                if has_join {
+                    found_hash = Some(
+                        ledger.history.last()
+                            .map(|u| u.current_hash)
+                            .unwrap_or([0u8; 32])
+                    );
+                    break;
+                }
+            }
+
+            match found_hash {
+                Some(h) => h,
+                None => return (false, None, Some(
+                    "No ledger found with QuorumJoin to target - not a quorum member".to_string()
+                )),
+            }
+        };
+
+        // Build the offer signing data
+        let signing_data = Self::build_offer_signing_data(
+            &request.ledger_id,
+            &offer_id,
+            &operator_id,
+            &funding_address,
+            deadline_block,
+        );
+
+        // Build tagged hash following BIP-340 convention
+        let tag = b"deposits/offer_cosign";
+        let tag_hash = sha256::Hash::hash(tag);
+
+        let mut tagged_input = Vec::new();
+        tagged_input.extend_from_slice(tag_hash.as_byte_array());
+        tagged_input.extend_from_slice(tag_hash.as_byte_array());
+        tagged_input.extend_from_slice(&signing_data);
+        tagged_input.extend_from_slice(&member_ledger_hash);
+
+        let hash = sha256::Hash::hash(&tagged_input);
+
+        // Sign with ECDSA
+        let secp = Secp256k1::new();
+        let msg = Message::from_digest(hash.to_byte_array());
+        let secret = self.wallet.operator_secret();
+        let sig = secp.sign_ecdsa(&msg, &secret);
+        let sig_bytes = sig.serialize_compact();
+
+        tracing::info!("Co-signed offer {} for ledger {}... (member_ledger_hash: {}...)",
+            &offer_id_hex[..16], &request.ledger_id[..16], &hex::encode(&member_ledger_hash[..4]));
+
+        // Return the signature, our pubkey, and our ledger hash
+        let result = serde_json::json!({
+            "signature_hex": hex::encode(sig_bytes),
+            "cosigner_pubkey": self.node_id.to_string(),
+            "member_ledger_hash_hex": hex::encode(member_ledger_hash),
+        });
+
+        (true, Some(result.to_string()), None)
+    }
+
     async fn process_custody_transfer_sign_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
         use bitcoin::secp256k1::{Keypair, Message};
         use deposits_core::SignedLedgerUpdate;
@@ -4365,10 +4614,12 @@ impl Node {
         };
 
         let custodian_hex = hex::encode(ledger.operator_key().serialize());
+        let attester_hex = hex::encode(self.node_id.serialize());
 
         let result = serde_json::json!({
             "status": "SUCCESS",
             "custodian": custodian_hex,
+            "attester": attester_hex,
             "reserves_id": reserves_id,
             "ledger_id": ledger.ledger_id_hex(),
         });
@@ -5235,6 +5486,155 @@ impl Node {
         }
     }
 
+    /// Request a co-signature on a deposit offer from quorum members.
+    ///
+    /// This sends a cosign_offer request via Nostr and waits for the first valid response.
+    /// The co-signature proves the operator has valid quorum backing, preventing rogue
+    /// former operators from creating valid offers after custody recovery.
+    ///
+    /// # Arguments
+    /// * `ledger_id` - The 64-char hex ledger_id hash
+    /// * `offer` - The deposit offer that needs co-signing
+    ///
+    /// # Returns
+    /// An OfferCoSignResult containing the signature, co-signer pubkey, and their ledger hash
+    pub async fn request_offer_cosign(
+        &mut self,
+        ledger_id: &str,
+        offer: &DepositOffer,
+    ) -> Result<OfferCoSignResult, Error> {
+        use tokio::time::Duration;
+        use std::str::FromStr;
+
+        // Create request parameters
+        let params = serde_json::json!({
+            "offer_id": hex::encode(&offer.offer_id),
+            "operator_id": offer.operator_id.to_string(),
+            "funding_address": offer.funding_address,
+            "deadline_block": offer.deadline_block,
+        });
+
+        // Send the multicast request to quorum members
+        let request_id = self.nostr.send_ledger_request(ledger_id, "cosign_offer", params)
+            .await
+            .map_err(|e| Error::Protocol(format!("Failed to send cosign_offer request: {:?}", e)))?;
+
+        // Subscribe to response for this request
+        if let Err(e) = self.nostr.subscribe_to_response(&request_id).await {
+            tracing::warn!("Failed to subscribe to cosign_offer response: {}", e);
+        }
+
+        tracing::info!(
+            "Sent cosign_offer request {} for offer {}... (waiting for first responder)",
+            &request_id[..16.min(request_id.len())],
+            &hex::encode(&offer.offer_id[..4]),
+        );
+
+        // Poll for response - use 10 second timeout
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+
+        loop {
+            tokio::select! {
+                // Process Nostr events to receive the response
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                    // Poll for new events
+                    if let Err(e) = self.nostr.poll_events().await {
+                        tracing::debug!("Poll error: {}", e);
+                    }
+
+                    // Check for responses
+                    while let Some(response) = self.nostr.try_recv_response() {
+                        if response.request_id == request_id {
+                            if response.success {
+                                if let Some(result) = &response.result {
+                                    // Parse response fields
+                                    let sig_hex = result.get("signature_hex")
+                                        .and_then(|v| v.as_str())
+                                        .ok_or_else(|| Error::Protocol("Missing signature_hex".to_string()))?;
+
+                                    let cosigner_pubkey_str = result.get("cosigner_pubkey")
+                                        .and_then(|v| v.as_str())
+                                        .ok_or_else(|| Error::Protocol("Missing cosigner_pubkey".to_string()))?;
+
+                                    let member_hash_hex = result.get("member_ledger_hash_hex")
+                                        .and_then(|v| v.as_str())
+                                        .ok_or_else(|| Error::Protocol("Missing member_ledger_hash_hex".to_string()))?;
+
+                                    // Decode signature
+                                    let sig_bytes = hex::decode(sig_hex)
+                                        .map_err(|e| Error::Protocol(format!("Invalid signature hex: {}", e)))?;
+                                    if sig_bytes.len() != 64 {
+                                        return Err(Error::Protocol("Signature must be 64 bytes".to_string()));
+                                    }
+                                    let mut signature = [0u8; 64];
+                                    signature.copy_from_slice(&sig_bytes);
+
+                                    // Decode cosigner pubkey
+                                    let cosigner_pubkey = PublicKey::from_str(cosigner_pubkey_str)
+                                        .map_err(|e| Error::Protocol(format!("Invalid cosigner_pubkey: {}", e)))?;
+
+                                    // Decode member ledger hash
+                                    let hash_bytes = hex::decode(member_hash_hex)
+                                        .map_err(|e| Error::Protocol(format!("Invalid member_ledger_hash_hex: {}", e)))?;
+                                    if hash_bytes.len() != 32 {
+                                        return Err(Error::Protocol("member_ledger_hash must be 32 bytes".to_string()));
+                                    }
+                                    let mut member_ledger_hash = [0u8; 32];
+                                    member_ledger_hash.copy_from_slice(&hash_bytes);
+
+                                    tracing::info!("Received offer co-signature from {} (member_hash: {}...)",
+                                        &cosigner_pubkey_str[..16.min(cosigner_pubkey_str.len())],
+                                        &member_hash_hex[..8]);
+
+                                    return Ok(OfferCoSignResult {
+                                        signature,
+                                        cosigner_pubkey,
+                                        member_ledger_hash,
+                                    });
+                                }
+                            } else {
+                                let error = response.error.unwrap_or_else(|| "Unknown error".to_string());
+                                tracing::warn!("Cosign_offer request failed: {}", error);
+                                // Continue waiting for other responses
+                            }
+                        }
+                    }
+
+                    // Also handle incoming cosign_offer requests from others
+                    // (in case we're also a quorum member of another ledger)
+                    while let Some(request) = self.nostr.try_recv_request() {
+                        if request.action == "cosign_offer" {
+                            let our_x_only = hex::encode(&self.node_id.serialize()[1..]);
+                            if request.sender != our_x_only {
+                                self.handler.reload_ledgers();
+
+                                if self.is_quorum_member_of_ledger(&request.ledger_id) {
+                                    let (success, result, error) = self.process_cosign_offer_request(&request).await;
+                                    let result_json = result.map(|s| serde_json::Value::String(s));
+                                    if let Err(e) = self.nostr.send_ledger_response(
+                                        &request.event_id,
+                                        &request.ledger_id,
+                                        &request.action,
+                                        success,
+                                        result_json,
+                                        error,
+                                    ).await {
+                                        tracing::debug!("Failed to send cosign_offer response: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Timeout check
+                _ = tokio::time::sleep_until(deadline) => {
+                    return Err(Error::Protocol("Co-signature required but failed: timeout after 10 seconds".to_string()));
+                }
+            }
+        }
+    }
+
     /// Check if this ledger has had a reserves rotation to quorum-based Taproot.
     ///
     /// After the first ReservesRotate operation, co-signatures are required for all updates.
@@ -5252,6 +5652,42 @@ impl Node {
             }
         }
         false
+    }
+
+    /// Build canonical signing data for deposit offer co-signatures.
+    ///
+    /// The signing data format is:
+    /// `ledger_id || offer_id || operator_id_x || len(funding_address) || funding_address || deadline_block`
+    ///
+    /// This data is then hashed using BIP-340 tagged hashing with tag "deposits/offer_cosign"
+    /// and combined with the member's ledger hash before signing.
+    fn build_offer_signing_data(
+        ledger_id: &str,
+        offer_id: &[u8; 32],
+        operator_id: &PublicKey,
+        funding_address: &str,
+        deadline_block: u32,
+    ) -> Vec<u8> {
+        let mut data = Vec::new();
+
+        // ledger_id (64 hex chars = 32 bytes when decoded, but we use raw hex bytes for simplicity)
+        data.extend_from_slice(ledger_id.as_bytes());
+
+        // offer_id (32 bytes)
+        data.extend_from_slice(offer_id);
+
+        // operator_id x-coordinate only (32 bytes - excludes the 02/03 prefix)
+        data.extend_from_slice(&operator_id.serialize()[1..]);
+
+        // funding_address length (1 byte) + address bytes
+        let addr_bytes = funding_address.as_bytes();
+        data.push(addr_bytes.len() as u8);
+        data.extend_from_slice(addr_bytes);
+
+        // deadline_block (4 bytes, little-endian)
+        data.extend_from_slice(&deadline_block.to_le_bytes());
+
+        data
     }
 
     /// Sign an update with co-signature from a quorum member, then broadcast.
@@ -7358,8 +7794,21 @@ impl Node {
         let (offer, status) = self.get_deposit_offer(offer_id)
             .ok_or(Error::OfferNotFound)?;
 
+        tracing::debug!(
+            "check_deposit_offer_funding: offer {} status {:?}",
+            hex::encode(&offer_id[..8]),
+            status
+        );
+
+        // If already completed, return the completed info
+        if let DepositOfferStatus::Completed { txid, amount_sats, .. } = &status {
+            tracing::debug!("check_deposit_offer_funding: already completed");
+            return Ok(Some((txid.clone(), *amount_sats)));
+        }
+
         // Only check pending offers
         if !matches!(status, DepositOfferStatus::Pending) {
+            tracing::debug!("check_deposit_offer_funding: skipping non-pending offer");
             return Ok(None);
         }
 
@@ -7446,6 +7895,18 @@ impl Node {
             return Some((ledger_id_hex.to_string(), ledger.clone()));
         }
         None
+    }
+
+    /// Get a ledger by either ledger_id (64-char hex hash) or reserves_key (Bitcoin address)
+    /// Returns (ledger_id, ledger) tuple
+    /// Tries ledger_id first, then falls back to reserves_key lookup
+    pub fn get_ledger_with_id(&self, identifier: &str) -> Option<(String, Ledger)> {
+        // First try by ledger_id (more common after rotation)
+        if let Some(result) = self.get_ledger_by_ledger_id(identifier) {
+            return Some(result);
+        }
+        // Fall back to reserves_key (Bitcoin address)
+        self.get_ledger_by_reserves_key(identifier)
     }
 
     /// Resolve a ledger_id or reserves_key to ledger_id

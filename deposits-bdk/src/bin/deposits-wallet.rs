@@ -12,7 +12,8 @@
 //!   deposits-wallet make_invoice <alias> <amt> - Create Lightning invoice
 //!   deposits-wallet pay_invoice <alias> <bolt11> - Pay Lightning invoice
 
-use bitcoin::secp256k1::{Secp256k1, SecretKey};
+use bitcoin::secp256k1::{ecdsa, Message, PublicKey, Secp256k1, SecretKey};
+use bitcoin::hashes::{sha256, Hash};
 use chrono::Utc;
 use deposits_bdk::nostr::{NostrTransportBuilder, KIND_LEDGER_UPDATE};
 use std::collections::{BTreeMap, HashSet};
@@ -32,6 +33,101 @@ const COLORS: &[&str] = &[
     "\x1b[38;5;208m", "\x1b[38;5;205m", "\x1b[38;5;118m", "\x1b[38;5;39m",
 ];
 const RESET: &str = "\x1b[0m";
+
+/// Build canonical signing data for deposit offer co-signatures (must match server-side)
+fn build_offer_signing_data(
+    ledger_id: &str,
+    offer_id: &[u8; 32],
+    operator_id: &PublicKey,
+    funding_address: &str,
+    deadline_block: u32,
+) -> Vec<u8> {
+    let mut data = Vec::new();
+    data.extend_from_slice(ledger_id.as_bytes());
+    data.extend_from_slice(offer_id);
+    data.extend_from_slice(&operator_id.serialize()[1..]);
+    let addr_bytes = funding_address.as_bytes();
+    data.push(addr_bytes.len() as u8);
+    data.extend_from_slice(addr_bytes);
+    data.extend_from_slice(&deadline_block.to_le_bytes());
+    data
+}
+
+/// Verify an offer co-signature from a quorum member
+fn verify_offer_cosignature(
+    ledger_id: &str,
+    offer_id: &[u8; 32],
+    operator_id: &PublicKey,
+    funding_address: &str,
+    deadline_block: u32,
+    cosigner_pubkey: &PublicKey,
+    member_ledger_hash: &[u8; 32],
+    signature: &[u8; 64],
+) -> bool {
+    // Build the offer signing data
+    let signing_data = build_offer_signing_data(
+        ledger_id,
+        offer_id,
+        operator_id,
+        funding_address,
+        deadline_block,
+    );
+
+    // Build tagged hash following BIP-340 convention
+    let tag = b"deposits/offer_cosign";
+    let tag_hash = sha256::Hash::hash(tag);
+
+    let mut tagged_input = Vec::new();
+    tagged_input.extend_from_slice(tag_hash.as_byte_array());
+    tagged_input.extend_from_slice(tag_hash.as_byte_array());
+    tagged_input.extend_from_slice(&signing_data);
+    tagged_input.extend_from_slice(member_ledger_hash);
+
+    let hash = sha256::Hash::hash(&tagged_input);
+
+    // Verify ECDSA signature
+    let secp = Secp256k1::verification_only();
+    let msg = match Message::from_digest(hash.to_byte_array()) {
+        m => m,
+    };
+
+    match ecdsa::Signature::from_compact(signature) {
+        Ok(sig) => secp.verify_ecdsa(&msg, &sig, cosigner_pubkey).is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// Verify that a public key is a quorum member for a ledger by checking ledger history
+async fn verify_quorum_membership(
+    transport: &deposits_bdk::nostr::NostrTransport,
+    ledger_id: &str,
+    cosigner_pubkey: &PublicKey,
+) -> bool {
+    // Fetch ledger updates to check for QuorumAddMember operations
+    let updates = match transport.fetch_ledger_updates(ledger_id).await {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("Warning: Failed to fetch ledger updates for verification: {}", e);
+            return false;
+        }
+    };
+
+    // Look for a QuorumAddMember operation that added this cosigner
+    for update in &updates {
+        if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+            if let LedgerOperation::QuorumAddMember { quorum_member, .. } = op {
+                // Compare x-coordinates (pubkeys may have different y-parity)
+                let cosigner_x = &cosigner_pubkey.serialize()[1..];
+                let member_x = &quorum_member.serialize()[1..];
+                if cosigner_x == member_x {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
 
 #[derive(Debug, Clone)]
 struct WalletConfig {
@@ -65,6 +161,7 @@ fn print_usage(program: &str) {
     eprintln!("  ledger list                 List all ledgers on the relay");
     eprintln!("  ledger show <id>            Show all updates for a ledger");
     eprintln!("  ledger validate <id>        Validate ledger hash chain");
+    eprintln!("  ledger custody <id>         Trace custody chain (rotations, disputes, acquisitions)");
     eprintln!();
     eprintln!("Options:");
     eprintln!("  --relay <url>       Nostr relay URL (required)");
@@ -495,6 +592,8 @@ async fn ledger_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
 
 /// Open a new deposit on a ledger
 async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use std::str::FromStr;
+
     let mut ledger_id: Option<String> = None;
     let mut amount_sats: Option<u64> = None;
     let mut alias: Option<String> = None;
@@ -725,11 +824,109 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
                 if response.success {
                     if let Some(result) = &response.result {
                         let address = result.get("funding_address").and_then(|v| v.as_str());
-                        let offer_id = result.get("offer_id").and_then(|v| v.as_str());
+                        let offer_id_hex = result.get("offer_id").and_then(|v| v.as_str());
                         let min_sats = result.get("min_sats").and_then(|v| v.as_u64()).unwrap_or(1);
                         let max_sats = result.get("max_sats").and_then(|v| v.as_u64()).unwrap_or(amount_sats);
+                        let operator_id_str = result.get("operator_id").and_then(|v| v.as_str());
+                        let deadline_block = result.get("deadline_block").and_then(|v| v.as_u64());
 
-                        if let (Some(address), Some(offer_id)) = (address, offer_id) {
+                        // Check if co-signature is required
+                        let cosign_required = result.get("cosign_required")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+
+                        if let (Some(address), Some(offer_id_hex)) = (address, offer_id_hex) {
+                            // Verify co-signature if required
+                            if cosign_required {
+                                // Extract co-signature fields
+                                let cosigner_pubkey_str = result.get("cosigner_pubkey").and_then(|v| v.as_str());
+                                let cosigner_ledger_hash_hex = result.get("cosigner_ledger_hash").and_then(|v| v.as_str());
+                                let cosign_signature_hex = result.get("cosign_signature").and_then(|v| v.as_str());
+
+                                if let (Some(cosigner_str), Some(hash_hex), Some(sig_hex), Some(op_str), Some(deadline)) =
+                                    (cosigner_pubkey_str, cosigner_ledger_hash_hex, cosign_signature_hex, operator_id_str, deadline_block)
+                                {
+                                    // Parse the co-signature data
+                                    let offer_id_bytes = match hex::decode(offer_id_hex) {
+                                        Ok(b) if b.len() == 32 => {
+                                            let mut arr = [0u8; 32];
+                                            arr.copy_from_slice(&b);
+                                            arr
+                                        }
+                                        _ => {
+                                            eprintln!("Warning: Invalid offer_id format, rejecting response");
+                                            continue;
+                                        }
+                                    };
+
+                                    let cosigner_pubkey = match PublicKey::from_str(cosigner_str) {
+                                        Ok(pk) => pk,
+                                        Err(_) => {
+                                            eprintln!("Warning: Invalid cosigner_pubkey, rejecting response");
+                                            continue;
+                                        }
+                                    };
+
+                                    let operator_id = match PublicKey::from_str(op_str) {
+                                        Ok(pk) => pk,
+                                        Err(_) => {
+                                            eprintln!("Warning: Invalid operator_id, rejecting response");
+                                            continue;
+                                        }
+                                    };
+
+                                    let member_ledger_hash: [u8; 32] = match hex::decode(hash_hex) {
+                                        Ok(b) if b.len() == 32 => {
+                                            let mut arr = [0u8; 32];
+                                            arr.copy_from_slice(&b);
+                                            arr
+                                        }
+                                        _ => {
+                                            eprintln!("Warning: Invalid cosigner_ledger_hash, rejecting response");
+                                            continue;
+                                        }
+                                    };
+
+                                    let signature: [u8; 64] = match hex::decode(sig_hex) {
+                                        Ok(b) if b.len() == 64 => {
+                                            let mut arr = [0u8; 64];
+                                            arr.copy_from_slice(&b);
+                                            arr
+                                        }
+                                        _ => {
+                                            eprintln!("Warning: Invalid cosign_signature, rejecting response");
+                                            continue;
+                                        }
+                                    };
+
+                                    // Verify the signature
+                                    if !verify_offer_cosignature(
+                                        &ledger_id,
+                                        &offer_id_bytes,
+                                        &operator_id,
+                                        address,
+                                        deadline as u32,
+                                        &cosigner_pubkey,
+                                        &member_ledger_hash,
+                                        &signature,
+                                    ) {
+                                        eprintln!("Warning: Invalid co-signature, rejecting response from rogue operator");
+                                        continue;
+                                    }
+
+                                    // Verify the cosigner is a quorum member
+                                    if !verify_quorum_membership(&transport, &ledger_id, &cosigner_pubkey).await {
+                                        eprintln!("Warning: Cosigner is not a quorum member, rejecting response");
+                                        continue;
+                                    }
+
+                                    println!("  Co-signature verified from quorum member {}...", &cosigner_str[..16.min(cosigner_str.len())]);
+                                } else {
+                                    eprintln!("Warning: Response requires co-signature but missing fields, rejecting");
+                                    continue;
+                                }
+                            }
+
                             // Save deposit to local storage with alias
                             let deposits_file = config.data_dir.join("deposits.json");
                             let mut deposits: Vec<serde_json::Value> = if deposits_file.exists() {
@@ -746,7 +943,7 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
                             deposits.push(serde_json::json!({
                                 "alias": final_alias,
-                                "offer_id": offer_id,
+                                "offer_id": offer_id_hex,
                                 "ledger_id": ledger_id,
                                 "funding_address": address,
                                 "deposit_pubkey": hex::encode(our_pubkey.serialize()),
@@ -2175,7 +2372,7 @@ async fn fetch_all_events_paginated(
 /// Handle ledger subcommands
 async fn ledger_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {
-        eprintln!("Usage: deposits-wallet ledger <list|show|validate> [args...] --relay <url>");
+        eprintln!("Usage: deposits-wallet ledger <list|show|validate|custody> [args...] --relay <url>");
         return Ok(());
     }
 
@@ -2183,9 +2380,10 @@ async fn ledger_command(args: &[String]) -> Result<(), Box<dyn std::error::Error
         "list" | "ls" => ledger_list(&args[1..]).await,
         "show" => ledger_show(&args[1..]).await,
         "validate" => ledger_validate(&args[1..]).await,
+        "custody" => ledger_custody(&args[1..]).await,
         cmd => {
             eprintln!("Unknown ledger subcommand: {}", cmd);
-            eprintln!("Usage: deposits-wallet ledger <list|show|validate> [args...] --relay <url>");
+            eprintln!("Usage: deposits-wallet ledger <list|show|validate|custody> [args...] --relay <url>");
             Ok(())
         }
     }
@@ -2516,6 +2714,262 @@ async fn ledger_validate(args: &[String]) -> Result<(), Box<dyn std::error::Erro
             updates.len(), &hex::encode(prev_hash)[..16]);
     } else {
         println!("Hash chain INVALID: {} errors in {} updates", errors, updates.len());
+    }
+
+    Ok(())
+}
+
+/// Custody chain event types
+#[derive(Debug, Clone)]
+enum CustodyEvent {
+    /// Ledger opened by original operator
+    LedgerOpened {
+        operator: bitcoin::secp256k1::PublicKey,
+        reserves_address: String,
+        genesis_block: u32,
+        enforcement_block: u64,
+    },
+    /// Quorum member added
+    QuorumMemberAdded {
+        member: bitcoin::secp256k1::PublicKey,
+        member_ledger_id: String,
+    },
+    /// Reserves rotated to new address
+    ReservesRotated {
+        new_address: String,
+        amount: u64,
+        quorum_threshold: u8,
+        quorum_size: u8,
+        first_expiry_block: u32,
+    },
+    /// Custody dispute initiated
+    DisputeStarted {
+        last_valid_sequence: u64,
+        reason: String,
+    },
+    /// Candidate armed for dispute resolution
+    CandidateArmed {
+        armed_block: u32,
+        target_reserves: String,
+    },
+    /// New custodian acquired custody
+    CustodyAcquired {
+        new_custodian: bitcoin::secp256k1::PublicKey,
+        entropy_block: u32,
+        new_reserves_address: String,
+    },
+}
+
+/// Trace custody chain for a ledger
+async fn ledger_custody(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let relay_url = get_relay_url(args)
+        .ok_or("Missing --relay <url>")?;
+
+    let ledger_prefix = args.iter()
+        .find(|a| !a.starts_with("--") && args.iter().position(|x| x == *a).map(|i| i == 0 || args[i-1] != "--relay").unwrap_or(true))
+        .ok_or("Missing ledger_id")?;
+
+    println!("Tracing custody chain for {}...", &ledger_prefix[..16.min(ledger_prefix.len())]);
+    println!();
+
+    let keys = Keys::generate();
+    let client = Client::new(keys);
+    client.add_relay(&relay_url).await?;
+    client.connect().await;
+
+    // Find full ledger ID from prefix
+    let ledger_id = match find_ledger_id(&client, ledger_prefix).await? {
+        Some(id) => id,
+        None => {
+            println!("No ledger found with prefix {}", ledger_prefix);
+            client.disconnect().await.ok();
+            return Ok(());
+        }
+    };
+
+    println!("Ledger: {}", ledger_id);
+    println!();
+
+    let filter = Filter::new()
+        .kind(Kind::Custom(KIND_LEDGER_UPDATE))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()]);
+
+    let events = fetch_all_events_paginated(&client, filter).await?;
+    client.disconnect().await.ok();
+
+    if events.is_empty() {
+        println!("No updates found for ledger");
+        return Ok(());
+    }
+
+    // Decode and sort updates
+    let mut updates: Vec<SignedLedgerUpdate> = Vec::new();
+    for event in &events {
+        if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
+            if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
+                updates.push(update);
+            }
+        }
+    }
+    updates.sort_by_key(|u| u.sequence_number);
+
+    // Track custody state
+    let mut current_operator: Option<bitcoin::secp256k1::PublicKey> = None;
+    let mut quorum_members: Vec<(bitcoin::secp256k1::PublicKey, String)> = Vec::new();  // (pubkey, ledger_id)
+    let mut custody_events: Vec<(u64, u32, CustodyEvent)> = Vec::new();  // (seq, block, event)
+    let mut in_dispute = false;
+    let mut processed_seqs: std::collections::HashSet<u64> = std::collections::HashSet::new();
+
+    println!("=== Custody Chain ===");
+    println!();
+
+    for update in &updates {
+        // Skip duplicates (same sequence number from different publishers)
+        if processed_seqs.contains(&update.sequence_number) {
+            continue;
+        }
+        processed_seqs.insert(update.sequence_number);
+
+        let seq = update.sequence_number;
+        let block = update.block_height;
+        let signer = update.operator_id;
+
+        // Parse the operation
+        if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+            match op {
+                LedgerOperation::LedgerOpen { operator_id, reserves_id, genesis_block, collateral_enforcement_block, .. } => {
+                    current_operator = Some(operator_id);
+                    println!("seq {:>4} | block {:>6} | LEDGER OPENED", seq, block);
+                    println!("         |              |   Operator: {}", hex::encode(operator_id.serialize())[..16].to_string() + "...");
+                    println!("         |              |   Reserves: {}...", &reserves_id[..20.min(reserves_id.len())]);
+                    println!("         |              |   Enforcement block: {}", collateral_enforcement_block);
+                    custody_events.push((seq, block, CustodyEvent::LedgerOpened {
+                        operator: operator_id,
+                        reserves_address: reserves_id,
+                        genesis_block,
+                        enforcement_block: collateral_enforcement_block,
+                    }));
+                }
+                LedgerOperation::QuorumAddMember { quorum_member, member_ledger_id, .. } => {
+                    // Check if already a member
+                    if !quorum_members.iter().any(|(pk, _)| pk == &quorum_member) {
+                        quorum_members.push((quorum_member, member_ledger_id.clone()));
+                        println!("seq {:>4} | block {:>6} | QUORUM MEMBER ADDED", seq, block);
+                        println!("         |              |   Member: {}...", &hex::encode(quorum_member.serialize())[..16]);
+                        println!("         |              |   Member's ledger: {}...", &member_ledger_id[..16.min(member_ledger_id.len())]);
+                        custody_events.push((seq, block, CustodyEvent::QuorumMemberAdded {
+                            member: quorum_member,
+                            member_ledger_id,
+                        }));
+                    }
+                }
+                LedgerOperation::ReservesRotate { reserves_id, amount, quorum_threshold, quorum_size, first_expiry_block, .. } => {
+                    // Verify signer is current operator
+                    let signer_valid = current_operator.map(|op| op == signer).unwrap_or(false);
+                    let signer_status = if signer_valid { "✓" } else { "⚠" };
+
+                    println!("seq {:>4} | block {:>6} | RESERVES ROTATED {}", seq, block, signer_status);
+                    println!("         |              |   New address: {}...", &reserves_id[..24.min(reserves_id.len())]);
+                    println!("         |              |   Amount: {} sats", amount);
+                    if quorum_size > 0 {
+                        println!("         |              |   Quorum: {}-of-{}, expires block {}", quorum_threshold, quorum_size, first_expiry_block);
+                    }
+                    if !signer_valid {
+                        println!("         |              |   ⚠ Signer {}... != expected operator", &hex::encode(signer.serialize())[..12]);
+                    }
+                    custody_events.push((seq, block, CustodyEvent::ReservesRotated {
+                        new_address: reserves_id,
+                        amount,
+                        quorum_threshold,
+                        quorum_size,
+                        first_expiry_block,
+                    }));
+                }
+                LedgerOperation::CustodyDispute { last_valid_sequence, reason } => {
+                    in_dispute = true;
+                    // Check if signer was a quorum member
+                    let is_quorum_member = quorum_members.iter().any(|(pk, _)| pk == &signer);
+                    let signer_status = if is_quorum_member { "✓ quorum member" } else { "⚠ unknown" };
+
+                    println!("seq {:>4} | block {:>6} | ⚡ CUSTODY DISPUTE ({})", seq, block, signer_status);
+                    println!("         |              |   Last valid seq: {}", last_valid_sequence);
+                    println!("         |              |   Reason: {}", reason);
+                    println!("         |              |   Initiated by: {}...", &hex::encode(signer.serialize())[..16]);
+                    custody_events.push((seq, block, CustodyEvent::DisputeStarted {
+                        last_valid_sequence,
+                        reason,
+                    }));
+                }
+                LedgerOperation::CustodyArmed { armed_block, target_reserves, .. } => {
+                    let is_quorum_member = quorum_members.iter().any(|(pk, _)| pk == &signer);
+                    let signer_status = if is_quorum_member { "✓" } else { "⚠" };
+
+                    println!("seq {:>4} | block {:>6} | 🎯 CANDIDATE ARMED {}", seq, block, signer_status);
+                    println!("         |              |   Candidate: {}...", &hex::encode(signer.serialize())[..16]);
+                    println!("         |              |   Armed at block: {}", armed_block);
+                    println!("         |              |   Target: {}...", &target_reserves[..20.min(target_reserves.len())]);
+                    custody_events.push((seq, block, CustodyEvent::CandidateArmed {
+                        armed_block,
+                        target_reserves,
+                    }));
+                }
+                LedgerOperation::CustodyAcquire { new_custodian, entropy_block_height, new_reserves_address, .. } => {
+                    let is_quorum_member = quorum_members.iter().any(|(pk, _)| pk == &new_custodian);
+                    let valid = if is_quorum_member { "✓" } else { "⚠" };
+
+                    println!("seq {:>4} | block {:>6} | 👑 CUSTODY ACQUIRED {}", seq, block, valid);
+                    println!("         |              |   New custodian: {}...", &hex::encode(new_custodian.serialize())[..16]);
+                    println!("         |              |   Entropy block: {}", entropy_block_height);
+                    println!("         |              |   New reserves: {}...", &new_reserves_address[..24.min(new_reserves_address.len())]);
+
+                    // Update current operator
+                    current_operator = Some(new_custodian);
+                    in_dispute = false;
+
+                    custody_events.push((seq, block, CustodyEvent::CustodyAcquired {
+                        new_custodian,
+                        entropy_block: entropy_block_height,
+                        new_reserves_address,
+                    }));
+                }
+                LedgerOperation::CustodyYield => {
+                    println!("seq {:>4} | block {:>6} | 🏳️ CUSTODY YIELDED", seq, block);
+                    println!("         |              |   Candidate: {}...", &hex::encode(signer.serialize())[..16]);
+                }
+                _ => {
+                    // Skip non-custody operations
+                }
+            }
+        }
+    }
+
+    // Summary
+    println!();
+    println!("=== Summary ===");
+    println!();
+
+    if let Some(op) = current_operator {
+        println!("Current custodian: {}...", &hex::encode(op.serialize())[..16]);
+    }
+
+    println!("Quorum members ({}):", quorum_members.len());
+    for (i, (pk, lid)) in quorum_members.iter().enumerate() {
+        println!("  {}. {}... (ledger: {}...)", i + 1, &hex::encode(pk.serialize())[..16], &lid[..12.min(lid.len())]);
+    }
+
+    if in_dispute {
+        println!();
+        println!("⚠ LEDGER IS IN DISPUTED STATE");
+    }
+
+    // Count custody transitions
+    let transitions: Vec<_> = custody_events.iter()
+        .filter(|(_, _, e)| matches!(e, CustodyEvent::CustodyAcquired { .. }))
+        .collect();
+
+    if !transitions.is_empty() {
+        println!();
+        println!("Custody transitions: {}", transitions.len());
     }
 
     Ok(())
