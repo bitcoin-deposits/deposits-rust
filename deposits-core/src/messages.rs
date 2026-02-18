@@ -2161,23 +2161,42 @@ impl BinaryCodec for StorageSignedLedgerUpdate {
         write_32(w, &self.block_hash)?;
         write_64(w, &self.partner_signature)?;
         write_64(w, &self.operator_signature)?;
+        write_option(w, &self.cosigner_pubkey, |w, pk| write_pubkey(w, pk))?;
+        write_option(w, &self.member_ledger_hash, |w, h| write_32(w, h))?;
         Ok(())
     }
 
     fn read_from<R: Read>(r: &mut R) -> Result<Self, CodecError> {
+        let message = read_bytes(r)?;
+        let message_type = read_u16(r)?;
+        let operator_id = read_pubkey(r)?;
+        let ledger_id = read_32(r)?;
+        let sequence_number = read_u64(r)?;
+        let previous_hash = read_32(r)?;
+        let current_hash = read_32(r)?;
+        let timestamp = read_u64(r)?;
+        let block_height = read_u32(r)?;
+        let block_hash = read_32(r)?;
+        let partner_signature = read_64(r)?;
+        let operator_signature = read_64(r)?;
+        // Optional fields (backward compatible - not present in old format)
+        let cosigner_pubkey = read_option(r, read_pubkey).unwrap_or(None);
+        let member_ledger_hash = read_option(r, |r| Ok(read_32(r)?)).unwrap_or(None);
         Ok(Self {
-            message: read_bytes(r)?,
-            message_type: read_u16(r)?,
-            operator_id: read_pubkey(r)?,
-            ledger_id: read_32(r)?,
-            sequence_number: read_u64(r)?,
-            previous_hash: read_32(r)?,
-            current_hash: read_32(r)?,
-            timestamp: read_u64(r)?,
-            block_height: read_u32(r)?,
-            block_hash: read_32(r)?,
-            partner_signature: read_64(r)?,
-            operator_signature: read_64(r)?,
+            message,
+            message_type,
+            operator_id,
+            ledger_id,
+            sequence_number,
+            previous_hash,
+            current_hash,
+            timestamp,
+            block_height,
+            block_hash,
+            partner_signature,
+            operator_signature,
+            cosigner_pubkey,
+            member_ledger_hash,
         })
     }
 }
@@ -4867,6 +4886,8 @@ mod tests {
             block_hash: [0x11; 32],
             partner_signature: [0xFF; 64],
             operator_signature: [0xEE; 64],
+            cosigner_pubkey: None,
+            member_ledger_hash: None,
         };
 
         let msg = SyncResponseMsg {

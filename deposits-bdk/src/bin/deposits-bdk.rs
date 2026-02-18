@@ -1113,17 +1113,34 @@ async fn ledger_history(args: &[String]) -> Result<(), Box<dyn std::error::Error
             "····".to_string()
         };
 
+        // Show cosigner pubkey (4 hex chars or dashes if no co-signature)
+        let cosigner = if let Some(ref pk) = update.cosigner_pubkey {
+            let pk_bytes = pk.serialize();
+            format!("{:02x}{:02x}", pk_bytes[1], pk_bytes[2])
+        } else {
+            "----".to_string()
+        };
+
+        // Show member ledger hash (4 hex chars or dashes if no co-signature)
+        let member_hash = if let Some(ref h) = update.member_ledger_hash {
+            format!("{:02x}{:02x}", h[0], h[1])
+        } else {
+            "----".to_string()
+        };
+
         // Get operation name and details
         let (op_name, op_details) = format_operation(update.message_type, &update.message);
 
         // Truncated hash: last 2 bytes of prev, last 2 bytes of curr
-        println!("{:>4} ↑{:<6} [{:02x}{:02x}~{:02x}{:02x}] {} {} {}{}",
+        println!("{:>4} ↑{:<6} [{:02x}{:02x}~{:02x}{:02x}] {} {} {} {} {}{}",
             seq,
             update.block_height,
             prev[30], prev[31],
             curr[30], curr[31],
             sig_status,
             signer,
+            cosigner,
+            member_hash,
             op_name,
             if op_details.is_empty() { String::new() } else { format!("  {}", op_details) }
         );
@@ -4228,6 +4245,8 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
                 block_hash: [0u8; 32],
                 partner_signature: [0u8; 64],
                 operator_signature,
+                cosigner_pubkey: None,
+                member_ledger_hash: None,
             }
         }
 
@@ -4284,6 +4303,8 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
                 block_hash: [0u8; 32],
                 partner_signature: [0u8; 64],
                 operator_signature,
+                cosigner_pubkey: None,
+                member_ledger_hash: None,
             }
         }
 

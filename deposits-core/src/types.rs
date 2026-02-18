@@ -1402,6 +1402,12 @@ pub struct SignedLedgerUpdate {
     /// Operator's final signature covering partner's signature.
     #[serde(with = "serde_64")]
     pub operator_signature: [u8; 64],
+    /// Public key of the quorum member who co-signed this update (if co-signed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cosigner_pubkey: Option<PublicKey>,
+    /// Current hash of the cosigner's own ledger at time of co-signing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_ledger_hash: Option<[u8; 32]>,
 }
 
 impl SignedLedgerUpdate {
@@ -2133,11 +2139,13 @@ mod signed_update_fields {
     pub const OPERATOR_SIGNATURE: u64 = 18;
     pub const BLOCK_HEIGHT: u64 = 20;
     pub const BLOCK_HASH: u64 = 22;
+    pub const COSIGNER_PUBKEY: u64 = 24;
+    pub const MEMBER_LEDGER_HASH: u64 = 26;
 }
 
 impl TlvEncode for SignedLedgerUpdate {
     fn tlv_encode(&self) -> Vec<u8> {
-        TlvBuilder::new()
+        let mut builder = TlvBuilder::new()
             .bytes_field(signed_update_fields::MESSAGE, &self.message)
             .u16_field(signed_update_fields::MESSAGE_TYPE, self.message_type)
             .pubkey_field(signed_update_fields::OPERATOR_ID, &self.operator_id)
@@ -2149,8 +2157,14 @@ impl TlvEncode for SignedLedgerUpdate {
             .u32_field(signed_update_fields::BLOCK_HEIGHT, self.block_height)
             .bytes_field(signed_update_fields::BLOCK_HASH, &self.block_hash)
             .bytes_field(signed_update_fields::PARTNER_SIGNATURE, &self.partner_signature)
-            .bytes_field(signed_update_fields::OPERATOR_SIGNATURE, &self.operator_signature)
-            .build()
+            .bytes_field(signed_update_fields::OPERATOR_SIGNATURE, &self.operator_signature);
+        if let Some(ref pk) = self.cosigner_pubkey {
+            builder = builder.pubkey_field(signed_update_fields::COSIGNER_PUBKEY, pk);
+        }
+        if let Some(ref hash) = self.member_ledger_hash {
+            builder = builder.bytes_field(signed_update_fields::MEMBER_LEDGER_HASH, hash);
+        }
+        builder.build()
     }
 }
 
@@ -2170,6 +2184,8 @@ impl TlvDecode for SignedLedgerUpdate {
             block_hash: reader.read_bytes_opt(signed_update_fields::BLOCK_HASH)?.unwrap_or([0u8; 32]),
             partner_signature: reader.read_bytes(signed_update_fields::PARTNER_SIGNATURE)?,
             operator_signature: reader.read_bytes(signed_update_fields::OPERATOR_SIGNATURE)?,
+            cosigner_pubkey: reader.read_pubkey_opt(signed_update_fields::COSIGNER_PUBKEY)?,
+            member_ledger_hash: reader.read_bytes_opt(signed_update_fields::MEMBER_LEDGER_HASH)?,
         })
     }
 }
@@ -2682,6 +2698,8 @@ mod tests {
             block_hash: [0u8; 32],
             partner_signature: [0u8; 64],
             operator_signature: [0u8; 64],
+            cosigner_pubkey: None,
+            member_ledger_hash: None,
         };
 
         let hash = update.compute_hash();
@@ -2704,6 +2722,8 @@ mod tests {
             block_hash: [0u8; 32],
             partner_signature: [0u8; 64],
             operator_signature: [0u8; 64],
+            cosigner_pubkey: None,
+            member_ledger_hash: None,
         };
 
         // Test signing data generation

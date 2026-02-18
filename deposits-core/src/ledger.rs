@@ -419,6 +419,28 @@ impl Ledger {
             });
         }
 
+        // 5. After ReservesRotate, all updates must have valid co-signatures
+        // Check if we've already seen a ReservesRotate in history
+        let has_reserves_rotated = self.history.iter().any(|u| {
+            u.message_type == crate::messages::consts::RESERVES_ROTATE
+        });
+
+        if has_reserves_rotated {
+            // After rotation, co-signature is required
+            // Exception: CustodyDispute can be signed by any quorum member
+            if !matches!(operation, LedgerOperation::CustodyDispute { .. }) {
+                if !update.has_partner_signature() {
+                    return Err(DepositsError::ProtocolViolation {
+                        violation_type: "missing_cosignature".to_string(),
+                        details: format!(
+                            "Co-signature required after ReservesRotate (seq {})",
+                            update.sequence_number
+                        ),
+                    });
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -856,6 +878,8 @@ impl Ledger {
             message: message_bytes,
             message_type,
             operator_signature: [0u8; 64],
+            cosigner_pubkey: None,
+            member_ledger_hash: None,
             partner_signature: [0u8; 64],
             operator_id: self.state.operator_key,
             ledger_id: self.state.ledger_id,
