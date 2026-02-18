@@ -707,14 +707,87 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
             0
         };
 
-        // Create LedgerExport
+        // Extract the best chain from updates (handles branches)
+        // Preference: chains with CustodyAcquire > longest chain
+        // Build a map from previous_hash to updates
+        let mut by_prev: std::collections::HashMap<[u8; 32], Vec<&SignedLedgerUpdate>> =
+            std::collections::HashMap::new();
+        for update in updates {
+            by_prev.entry(update.previous_hash).or_default().push(update);
+        }
+
+        // Check if a chain contains CustodyAcquire
+        fn chain_has_custody_acquire(chain: &[&SignedLedgerUpdate]) -> bool {
+            for update in chain {
+                if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+                    if matches!(op, LedgerOperation::CustodyAcquire { .. }) {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+
+        // Find all chains starting from genesis, prefer ones with CustodyAcquire
+        fn find_best_chain<'a>(
+            by_prev: &std::collections::HashMap<[u8; 32], Vec<&'a SignedLedgerUpdate>>,
+            start_hash: [u8; 32],
+        ) -> Vec<&'a SignedLedgerUpdate> {
+            let Some(children) = by_prev.get(&start_hash) else {
+                return Vec::new();
+            };
+
+            let mut best: Vec<&SignedLedgerUpdate> = Vec::new();
+            let mut best_has_acquire = false;
+
+            for child in children {
+                let mut chain = vec![*child];
+                chain.extend(find_best_chain(by_prev, child.current_hash));
+
+                let has_acquire = chain_has_custody_acquire(&chain);
+
+                // Prefer chain with CustodyAcquire, otherwise prefer longer chain
+                let is_better = if has_acquire && !best_has_acquire {
+                    true // New chain has CustodyAcquire, best doesn't
+                } else if !has_acquire && best_has_acquire {
+                    false // Best has CustodyAcquire, new doesn't
+                } else {
+                    chain.len() > best.len() // Both have or both don't - prefer longer
+                };
+
+                if is_better {
+                    best = chain;
+                    best_has_acquire = has_acquire;
+                }
+            }
+
+            best
+        }
+
+        let longest_chain = find_best_chain(&by_prev, [0u8; 32]);
+        let filtered_updates: Vec<SignedLedgerUpdate> = longest_chain.iter().map(|u| (*u).clone()).collect();
+
+        if filtered_updates.len() < updates.len() {
+            let has_acquire = chain_has_custody_acquire(&longest_chain);
+            println!("  Note: Filtered {} updates to {} (branches detected, has CustodyAcquire: {})",
+                updates.len(), filtered_updates.len(), has_acquire);
+
+            // Show final operation type
+            if let Some(last) = longest_chain.last() {
+                if let Ok(op) = LedgerOperation::tlv_decode(&last.message) {
+                    println!("  Last operation: {:?}", std::mem::discriminant(&op));
+                }
+            }
+        }
+
+        // Create LedgerExport with filtered updates
         let export = LedgerExport::new(
             ledger_id_bytes,
             genesis_block,
             operator_id,
             reserves_id.clone(),
             ledger_address.clone(),
-            updates.clone(),
+            filtered_updates,
             block_height,
         );
 
@@ -1428,20 +1501,150 @@ pub async fn nostr_validate(args: &[String]) -> Result<(), Box<dyn std::error::E
     Ok(())
 }
 
+/// Check dispute status for a ledger - whether it's safe to deposit
+///
+/// CustodyDispute is a LedgerOperation (published as KIND_LEDGER_UPDATE), not KIND_LEDGER_DISPUTE.
+/// We look for CustodyDispute operations in the ledger updates, then check for CustodyAcquire resolution.
+///
+/// Returns:
+/// - SAFE: No custody disputes found
+/// - DISPUTED: Active custody dispute, no CustodyAcquire yet (DO NOT DEPOSIT)
+/// - RESOLVED: Custody dispute resolved with CustodyAcquire (safe to deposit)
+pub async fn nostr_dispute_status(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut ledger_id: Option<String> = None;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else if ledger_id.is_none() {
+            ledger_id = Some(args[i].clone());
+        }
+        i += 1;
+    }
+
+    let ledger_id = ledger_id.ok_or("Ledger ID required")?;
+    let config = parse_config(&config_args)?;
+
+    let relay_url = config
+        .relays
+        .first()
+        .ok_or("No relay configured. Use --relay <url>")?
+        .clone();
+
+    println!("Checking dispute status for ledger...");
+    println!("  Relay: {}", relay_url);
+    println!("  Ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
+    println!();
+
+    let client = get_or_create_client(&relay_url).await?;
+
+    // CustodyDispute is a LedgerOperation, so look in KIND_LEDGER_UPDATE events
+    let update_filter = Filter::new()
+        .kind(Kind::Custom(KIND_LEDGER_UPDATE))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::L), [ledger_id.as_str()]);
+
+    let update_events = client
+        .fetch_events(vec![update_filter], Some(std::time::Duration::from_secs(5)))
+        .await
+        .map_err(|e| format!("Failed to fetch updates: {}", e))?;
+
+    let mut has_custody_dispute = false;
+    let mut has_custody_acquire = false;
+    let mut new_custodian: Option<String> = None;
+    let mut disputers: Vec<String> = Vec::new();
+
+    for event in update_events.iter() {
+        if let Ok(update) = serde_json::from_str::<serde_json::Value>(&event.content) {
+            if let Some(message_hex) = update.get("message").and_then(|v| v.as_str()) {
+                if let Ok(message_bytes) = hex::decode(message_hex) {
+                    if message_bytes.len() >= 2 {
+                        let msg_type = (message_bytes[0] as u16) << 8 | message_bytes[1] as u16;
+
+                        // CustodyDispute = 0x0036 (54)
+                        if msg_type == 0x0036 {
+                            has_custody_dispute = true;
+                            // The disputer is who signed the update, extract from event pubkey
+                            let author = event.pubkey.to_string();
+                            if !disputers.contains(&author) {
+                                disputers.push(author);
+                            }
+                        }
+
+                        // CustodyAcquire = 0x0037 (55)
+                        if msg_type == 0x0037 {
+                            has_custody_acquire = true;
+                            if let Ok(op) = LedgerOperation::tlv_decode(&message_bytes) {
+                                if let LedgerOperation::CustodyAcquire { new_custodian: nc, .. } = op {
+                                    new_custodian = Some(hex::encode(nc.serialize()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if !has_custody_dispute {
+        println!("DISPUTE_STATUS: SAFE");
+        println!("  No custody disputes found for this ledger.");
+        println!("  It is safe to create deposits.");
+        return Ok(());
+    }
+
+    // Found CustodyDispute - check if resolved
+    println!("  Found CustodyDispute from {} quorum member(s):", disputers.len());
+    for d in &disputers {
+        println!("    - {}...", &d[..16.min(d.len())]);
+    }
+
+    if has_custody_acquire {
+        println!();
+        println!("DISPUTE_STATUS: RESOLVED");
+        println!("  Custody dispute has been resolved via CustodyAcquire.");
+        if let Some(nc) = new_custodian {
+            println!("  New custodian: {}...", &nc[..16.min(nc.len())]);
+        }
+        println!("  It is safe to create deposits.");
+    } else {
+        println!();
+        println!("DISPUTE_STATUS: DISPUTED");
+        println!("  WARNING: Active custody dispute with NO resolution!");
+        println!("  Found {} CustodyDispute(s) but no CustodyAcquire.", disputers.len());
+        println!();
+        println!("  DO NOT DEPOSIT until custody is resolved.");
+        println!("  Wait for CustodyAcquire from the winning candidate.");
+    }
+
+    Ok(())
+}
+
 /// Publish or listen for ledger disputes on Nostr
 pub async fn nostr_dispute(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {
-        eprintln!("Usage: deposits-bdk nostr dispute <publish|listen> [args...]");
+        eprintln!("Usage: deposits-bdk nostr dispute <publish|listen|status> [args...]");
         eprintln!();
         eprintln!("  publish <ledger_id> <reason> <details> [--last-hash <hex>] [--last-seq <n>] [--violation-seq <n>]");
         eprintln!("          Publish a dispute for a non-conforming ledger");
         eprintln!();
         eprintln!("  listen [--ledger <ledger_id>]");
         eprintln!("          Listen for disputes (all or specific ledger)");
+        eprintln!();
+        eprintln!("  status <ledger_id>");
+        eprintln!("          Check if ledger has active disputes (SAFE to deposit or not)");
         return Ok(());
     }
 
     match args[0].as_str() {
+        "status" => {
+            return nostr_dispute_status(&args[1..]).await;
+        }
         "publish" | "pub" => {
             // Parse arguments
             let mut ledger_id: Option<String> = None;
@@ -1744,8 +1947,8 @@ pub async fn nostr_export(args: &[String]) -> Result<(), Box<dyn std::error::Err
                     )
                     .into());
                 }
-            } else if let Some((ledger_id, ledger)) = node.get_ledger_by_reserves_key(lid) {
-                // Might be a reserves_key
+            } else if let Some((ledger_id, ledger)) = node.get_ledger_with_id(lid) {
+                // Try by reserves_key (Bitcoin address)
                 vec![(ledger_id, ledger)]
             } else {
                 return Err(format!(
@@ -2379,16 +2582,26 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
                 "deposit_open" | "make_offer" | "deposit_withdraw" | "collateral_lock"
             );
 
-            // For operator-only actions, only process if this is our ledger
-            // Quorum members should NOT respond to these (they don't have the ledger data)
-            if is_operator_only && !is_our_ledger {
-                tracing::debug!(
-                    "Skipping operator-only request {} for different ledger: {} (ours: {})",
-                    request.action,
-                    request.ledger_id,
-                    ledger_id
-                );
-                continue;
+            // For operator-only actions, verify we are actually the operator
+            // This check is critical after custody transfers - only the new custodian
+            // should respond to requests. Check ledger.operator_key() which is updated
+            // by CustodyAcquire.
+            if is_operator_only {
+                let is_operator = if let Some((_, ledger)) = node.get_ledger_with_id(&request.ledger_id) {
+                    ledger.operator_key() == node.node_id
+                } else {
+                    // If we don't have the ledger, we're definitely not the operator
+                    false
+                };
+
+                if !is_operator {
+                    tracing::debug!(
+                        "Skipping operator-only request {} - we are not the operator of ledger {}",
+                        request.action,
+                        &request.ledger_id[..16.min(request.ledger_id.len())]
+                    );
+                    continue;
+                }
             }
 
             if !is_our_ledger && !is_joined_ledger && !is_cross_ledger_sign {
@@ -2421,22 +2634,12 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
 
             if requires_ledger {
                 // Just verify we have the ledger locally
-                let has_ledger = node.get_ledger_by_ledger_id(&request.ledger_id).is_some()
-                    || node.get_ledger_by_reserves_key(&request.ledger_id).is_some();
+                // If we don't have it, silently skip - don't send error response
+                // (only the actual custodian should respond)
+                let has_ledger = node.get_ledger_with_id(&request.ledger_id).is_some();
 
                 if !has_ledger {
-                    let error_msg = "Ledger not found locally".to_string();
-                    let _ = transport
-                        .send_ledger_response(
-                            &request.event_id,
-                            &request.ledger_id,
-                            &request.action,
-                            false,
-                            None,
-                            Some(error_msg.clone()),
-                        )
-                        .await;
-                    println!("  Response: REJECTED - {}", error_msg);
+                    tracing::debug!("Skipping request for ledger we don't have: {}", &request.ledger_id[..16.min(request.ledger_id.len())]);
                     continue;
                 }
             }

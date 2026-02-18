@@ -376,6 +376,11 @@ impl DepositsHandler {
     ///
     /// This validates the ledger using LedgerConformanceValidator before storing it.
     /// The ledger will be stored with the Partner role since it's from another operator.
+    ///
+    /// If the ledger already exists locally, this will apply any newer updates
+    /// from the export instead of failing. This is essential for custody recovery
+    /// scenarios where a quorum member already has the ledger but needs the
+    /// CustodyAcquire updates to become the new operator.
     pub fn import_ledger(&self, export: LedgerExport) -> Result<(ValidationReport, Arc<RwLock<Ledger>>), String> {
         // Check if this is our own ledger (not allowed to import our own)
         if export.operator_id == self.our_node_id {
@@ -391,15 +396,10 @@ impl DepositsHandler {
         let ledger_id = hex::encode(ledger_id_bytes);
 
         // Check if ledger already exists
-        {
+        let existing_ledger = {
             let ledgers = self.ledgers.lock().unwrap();
-            if ledgers.contains_key(&ledger_id) {
-                return Err(format!(
-                    "Ledger already exists for operator {} with reserves {}",
-                    export.operator_id, export.reserves_id
-                ));
-            }
-        }
+            ledgers.get(&ledger_id).cloned()
+        };
 
         // Validate the export
         let report = LedgerConformanceValidator::validate(&export)
@@ -414,6 +414,62 @@ impl DepositsHandler {
                 report.warnings.len(),
                 report.signatures.invalid_signatures.len()
             );
+        }
+
+        // If ledger exists, apply newer updates instead of creating new
+        if let Some(ledger_arc) = existing_ledger {
+            let local_seq = {
+                let ledger = ledger_arc.read().unwrap();
+                ledger.sequence()
+            };
+
+            // Find updates that are newer than our local copy
+            let new_updates: Vec<_> = export.updates.iter()
+                .filter(|u| u.sequence_number > local_seq)
+                .cloned()
+                .collect();
+
+            if new_updates.is_empty() {
+                tracing::info!(
+                    "Ledger {} already up to date (seq {})",
+                    &ledger_id[..16],
+                    local_seq
+                );
+                return Ok((report, ledger_arc));
+            }
+
+            // Sort by sequence number
+            let mut sorted_updates = new_updates;
+            sorted_updates.sort_by_key(|u| u.sequence_number);
+
+            tracing::info!(
+                "Ledger {} exists with {} entries, applying {} new updates",
+                &ledger_id[..16],
+                local_seq,
+                sorted_updates.len()
+            );
+
+            // Apply each new update in order
+            {
+                let mut ledger = ledger_arc.write().unwrap();
+                for update in sorted_updates {
+                    // Verify chain continuity
+                    if update.previous_hash != ledger.tail_hash() {
+                        // This can happen if there are branches - skip non-matching updates
+                        tracing::debug!(
+                            "Skipping update {} with wrong previous_hash",
+                            update.sequence_number
+                        );
+                        continue;
+                    }
+                    ledger.append_signed_update(update);
+                }
+            }
+
+            // Persist to disk
+            self.save_ledgers_to_disk()?;
+
+            return Ok((report, ledger_arc));
         }
 
         // Create the ledger from the validated export
