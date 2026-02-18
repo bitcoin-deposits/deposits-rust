@@ -749,10 +749,9 @@ pub async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error:
 }
 
 /// Execute the on-chain spend to transfer reserves to the selected candidate.
+/// This is the final step after all participants have revealed their preimages.
 pub async fn recovery_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Running on-chain spend (delegating to recovery complete)...");
-    println!();
-    recovery_complete(args).await
+    recovery_lottery_claim(args).await
 }
 
 /// Publish CustodyYield to close a candidate branch after not being selected.
