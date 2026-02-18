@@ -1776,7 +1776,7 @@ async fn transfer_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     println!("  Fee:         {} sats", fee_sats);
     println!("  Hash Lock:   {}...{}", &hash_hex[..8], &hash_hex[hash_hex.len()-8..]);
     println!("  Timeout:     block {}", timeout_height);
-    println!("  Transfer ID: {}", hex::encode(&transfer_id[..16]));
+    println!("  Transfer ID: {}", hex::encode(transfer_id));
     println!();
 
     // Connect to relay
