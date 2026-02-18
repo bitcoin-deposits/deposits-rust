@@ -622,6 +622,7 @@ def run_simulation(
     lightning: bool = False,
     transfers: bool = False,
     max_transfers: int = 0,
+    single_fund: bool = False,
 ):
     """Run the payment simulation
 
@@ -685,10 +686,15 @@ def run_simulation(
     last_payment_time = 0.0
     last_rediscover_time = time.time()
 
+    # Track ledgers that have been funded on-chain (for --single-fund mode)
+    onchain_funded_ledgers: set[str] = set()
+
     print("Starting simulation...")
     print(f"  - Network: {network}")
     mode = "Transfers" if transfers else ("Lightning" if lightning else "On-chain")
     print(f"  - Payment mode: {mode}")
+    if single_fund:
+        print(f"  - Single-fund mode: only first deposit per ledger funded on-chain")
     print(f"  - Target wallets: {num_wallets} ({wallets_per_ledger:.1f} per ledger)")
     print(f"  - New wallet every {wallet_creation_interval:.1f}s")
     print(f"  - Payment every {payment_interval}s")
@@ -710,55 +716,157 @@ def run_simulation(
                     alias = f"sim-{ts}-{wallet_counter:02d}"
                     ledger_id = random.choice(ledgers)
 
+                    # In single-fund mode, first deposit on ledger needs larger max_sats
+                    is_first_on_ledger = ledger_id not in onchain_funded_ledgers
+                    if single_fund and is_first_on_ledger:
+                        open_amount = int(funding_amount_sats * wallets_per_ledger * 1.2)
+                    else:
+                        open_amount = funding_amount_sats
+
                     print(f"\n[{time.strftime('%H:%M:%S')}] Creating deposit {alias}...")
-                    deposit = open_deposit(ledger_id, alias, funding_amount_sats)
+                    deposit = open_deposit(ledger_id, alias, open_amount)
 
                     if deposit:
                         our_deposits.append(deposit)
 
-                        # Fund it - use Lightning if enabled and we have a funded deposit
+                        # Fund it - use Lightning/transfers if enabled and we have a funded deposit
                         print(f"[{time.strftime('%H:%M:%S')}] Funding {alias}...")
 
-                        # Find a deposit with enough balance to fund via Lightning
-                        # Require 10% buffer to account for fees and balance drift
-                        min_funder_balance = int(funding_amount_sats * 1.1) + 5000
-                        funded_deposits = [d for d in our_deposits if d.balance_sats >= min_funder_balance and d.alias != alias]
+                        # In single-fund mode: only fund first deposit on each ledger via faucet
+                        is_first_on_ledger = ledger_id not in onchain_funded_ledgers
 
-                        if lightning and funded_deposits:
-                            # Sync balances first to get accurate ledger state
+                        if single_fund and not is_first_on_ledger:
+                            # Must fund via transfer/lightning - wait for a funder
+                            min_funder_balance = int(funding_amount_sats * 1.1) + 5000
+
+                            # Sync balances first
                             balances = sync_and_get_balances()
                             for d in our_deposits:
                                 if d.alias in balances:
                                     d.balance_sats = balances[d.alias]
 
-                            # Re-check with fresh balances
-                            funded_deposits = [d for d in our_deposits if d.balance_sats >= min_funder_balance and d.alias != alias]
-                            if not funded_deposits:
-                                print(f"  No deposits with sufficient balance after sync, using faucet...")
+                            same_ledger_funders = [d for d in our_deposits
+                                                   if d.ledger_id == ledger_id
+                                                   and d.balance_sats >= min_funder_balance
+                                                   and d.alias != alias]
 
-                        if lightning and funded_deposits:
-                            # Fund via Lightning from existing deposit
-                            funder = random.choice(funded_deposits)
-                            print(f"  Funding via Lightning from {funder.alias} ({funder.balance_sats} sats)...")
-                            if fund_deposit_lightning(funder, alias, funding_amount_sats):
-                                deposit.status = "funded"
-                                deposit.balance_sats = funding_amount_sats  # Update recipient balance
-                                print(f"  Deposit funded via Lightning")
-                            else:
-                                # Fall back to faucet
-                                print(f"  Lightning funding failed, falling back to faucet...")
-                                if fund_deposit(alias):
-                                    mine_block(network)
+                            if same_ledger_funders:
+                                funder = random.choice(same_ledger_funders)
+                                print(f"  Funding via transfer from {funder.alias} ({funder.balance_sats} sats)...")
+                                transferred = same_ledger_transfer(funder, deposit, funding_amount_sats)
+                                if transferred:
                                     deposit.status = "funded"
-                                    print(f"  Deposit funded via faucet")
+                                    deposit.balance_sats = transferred
+                                    funder.balance_sats -= transferred
+                                    print(f"  Deposit funded via transfer")
+                                else:
+                                    print(f"  Transfer funding failed (single-fund mode, not falling back)")
+                            else:
+                                print(f"  No same-ledger funders yet, will retry later...")
+                                # Keep deposit but don't fund yet
                         else:
-                            # Fund via faucet (on-chain)
-                            if fund_deposit(alias):
-                                mine_block(network)
-                                deposit.status = "funded"
-                                print(f"  Deposit funded, waiting for balance sync")
+                            # Find a deposit with enough balance to fund via Lightning/transfers
+                            # Require 10% buffer to account for fees and balance drift
+                            min_funder_balance = int(funding_amount_sats * 1.1) + 5000
+                            funded_deposits = [d for d in our_deposits if d.balance_sats >= min_funder_balance and d.alias != alias]
+
+                            if (lightning or transfers) and funded_deposits and not (single_fund and is_first_on_ledger):
+                                # Sync balances first to get accurate ledger state
+                                balances = sync_and_get_balances()
+                                for d in our_deposits:
+                                    if d.alias in balances:
+                                        d.balance_sats = balances[d.alias]
+
+                                # Re-check with fresh balances
+                                funded_deposits = [d for d in our_deposits if d.balance_sats >= min_funder_balance and d.alias != alias]
+                                if not funded_deposits:
+                                    print(f"  No deposits with sufficient balance after sync, using faucet...")
+
+                            if transfers and funded_deposits and not (single_fund and is_first_on_ledger):
+                                # For transfers, funder must be on same ledger
+                                same_ledger_funders = [d for d in funded_deposits if d.ledger_id == ledger_id]
+                                if same_ledger_funders:
+                                    funder = random.choice(same_ledger_funders)
+                                    print(f"  Funding via transfer from {funder.alias} ({funder.balance_sats} sats)...")
+                                    transferred = same_ledger_transfer(funder, deposit, funding_amount_sats)
+                                    if transferred:
+                                        deposit.status = "funded"
+                                        deposit.balance_sats = transferred
+                                        funder.balance_sats -= transferred
+                                        print(f"  Deposit funded via transfer")
+                                    else:
+                                        # Fall back to faucet
+                                        print(f"  Transfer funding failed, falling back to faucet...")
+                                        if fund_deposit(alias):
+                                            mine_block(network)
+                                            deposit.status = "funded"
+                                            onchain_funded_ledgers.add(ledger_id)
+                                            print(f"  Deposit funded via faucet")
+                                else:
+                                    # No same-ledger funders, use faucet
+                                    print(f"  No same-ledger funders, using faucet...")
+                                    if fund_deposit(alias):
+                                        mine_block(network)
+                                        deposit.status = "funded"
+                                        onchain_funded_ledgers.add(ledger_id)
+                                        print(f"  Deposit funded via faucet")
+                            elif lightning and funded_deposits and not (single_fund and is_first_on_ledger):
+                                # Fund via Lightning from existing deposit
+                                funder = random.choice(funded_deposits)
+                                print(f"  Funding via Lightning from {funder.alias} ({funder.balance_sats} sats)...")
+                                if fund_deposit_lightning(funder, alias, funding_amount_sats):
+                                    deposit.status = "funded"
+                                    deposit.balance_sats = funding_amount_sats  # Update recipient balance
+                                    print(f"  Deposit funded via Lightning")
+                                else:
+                                    # Fall back to faucet
+                                    print(f"  Lightning funding failed, falling back to faucet...")
+                                    if fund_deposit(alias):
+                                        mine_block(network)
+                                        deposit.status = "funded"
+                                        onchain_funded_ledgers.add(ledger_id)
+                                        print(f"  Deposit funded via faucet")
+                            else:
+                                # Fund via faucet (on-chain)
+                                # In single-fund mode with multiple wallets, fund first with larger amount
+                                faucet_amount = funding_amount_sats
+                                if single_fund and is_first_on_ledger:
+                                    # Fund with enough for all wallets on this ledger
+                                    faucet_amount = int(funding_amount_sats * wallets_per_ledger * 1.2)
+                                    print(f"  First deposit on ledger, funding with {faucet_amount} sats (for splits)...")
+                                if fund_deposit(alias, faucet_amount if single_fund else None):
+                                    mine_block(network)
+                                    onchain_funded_ledgers.add(ledger_id)
+                                    deposit.status = "funded"
+                                    print(f"  Deposit funded, waiting for balance sync")
 
                 last_wallet_time = now
+
+            # In single-fund mode, try to fund unfunded deposits via transfers
+            if single_fund and transfers:
+                unfunded = [d for d in our_deposits if d.status == "pending"]
+                if unfunded:
+                    # Sync balances
+                    balances = sync_and_get_balances()
+                    for d in our_deposits:
+                        if d.alias in balances:
+                            d.balance_sats = balances[d.alias]
+
+                    for deposit in unfunded:
+                        min_funder_balance = int(funding_amount_sats * 1.1) + 5000
+                        same_ledger_funders = [d for d in our_deposits
+                                               if d.ledger_id == deposit.ledger_id
+                                               and d.balance_sats >= min_funder_balance
+                                               and d.alias != deposit.alias]
+                        if same_ledger_funders:
+                            funder = random.choice(same_ledger_funders)
+                            print(f"\n[{time.strftime('%H:%M:%S')}] Retrying funding {deposit.alias} via transfer from {funder.alias}...")
+                            transferred = same_ledger_transfer(funder, deposit, funding_amount_sats)
+                            if transferred:
+                                deposit.status = "funded"
+                                deposit.balance_sats = transferred
+                                funder.balance_sats -= transferred
+                                print(f"  Deposit funded via transfer")
 
             # Make payments (withdrawals) periodically
             if now - last_payment_time >= payment_interval and len(our_deposits) >= 2:
@@ -921,6 +1029,8 @@ def main():
                         help="Seconds between ledger re-discovery (default: 60)")
     parser.add_argument("--max-transfers", type=int, default=0,
                         help="Stop after this many successful transfers (0 = unlimited)")
+    parser.add_argument("--single-fund", action="store_true",
+                        help="Fund only first deposit per ledger on-chain, then use transfers/lightning for others")
 
     args = parser.parse_args()
 
@@ -936,6 +1046,7 @@ def main():
         lightning=args.lightning,
         transfers=args.transfers,
         max_transfers=args.max_transfers,
+        single_fund=args.single_fund,
     )
 
 
