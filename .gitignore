@@ -1,3 +1,4 @@
 /target
 Cargo.lock
 deposits-tools/certs/
+__pycache__/
