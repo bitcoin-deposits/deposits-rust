@@ -621,6 +621,7 @@ def run_simulation(
     network: str = "signet",
     lightning: bool = False,
     transfers: bool = False,
+    max_transfers: int = 0,
 ):
     """Run the payment simulation
 
@@ -806,6 +807,12 @@ def run_simulation(
                                 # Transfers are instant, update both balances
                                 sender.balance_sats -= transferred
                                 receiver.balance_sats += transferred
+                                # Check if we've reached the target
+                                if max_transfers > 0 and TRANSFERS_SUCCESS >= max_transfers:
+                                    print(f"\n[{time.strftime('%H:%M:%S')}] Reached target of {max_transfers} successful transfers!")
+                                    print(f"\nFinal Metrics:")
+                                    print(f"  Transfers: {TRANSFERS_SUCCESS} success, {TRANSFERS_FAILED} failed, {TRANSFERS_VOLUME_SATS:,} sats volume")
+                                    return
                         elif lightning:
                             print(f"\n[{time.strftime('%H:%M:%S')}] Lightning: {sender.alias} ({sender.balance_sats} sats) -> {receiver.alias}")
                             paid_amount = lightning_payment(sender, receiver, amount)
@@ -849,6 +856,12 @@ def run_simulation(
                 if transfers:
                     total_transfers = TRANSFERS_SUCCESS + TRANSFERS_FAILED
                     print(f"  Transfers: {TRANSFERS_SUCCESS}/{total_transfers} ({TRANSFERS_VOLUME_SATS:,} sats)")
+                    # Check if we've reached the target
+                    if max_transfers > 0 and TRANSFERS_SUCCESS >= max_transfers:
+                        print(f"\n[{time.strftime('%H:%M:%S')}] Reached target of {max_transfers} successful transfers!")
+                        print(f"\nFinal Metrics:")
+                        print(f"  Transfers: {TRANSFERS_SUCCESS} success, {TRANSFERS_FAILED} failed, {TRANSFERS_VOLUME_SATS:,} sats volume")
+                        return
                     # Update Prometheus gauges
                     if PROMETHEUS_AVAILABLE:
                         PROM_DEPOSITS_COUNT.labels(status='total').set(len(our_deposits))
@@ -906,6 +919,8 @@ def main():
                         help="Maximum payment in sats (default: 5000)")
     parser.add_argument("--rediscover-interval", type=float, default=60.0,
                         help="Seconds between ledger re-discovery (default: 60)")
+    parser.add_argument("--max-transfers", type=int, default=0,
+                        help="Stop after this many successful transfers (0 = unlimited)")
 
     args = parser.parse_args()
 
@@ -920,6 +935,7 @@ def main():
         network=args.network,
         lightning=args.lightning,
         transfers=args.transfers,
+        max_transfers=args.max_transfers,
     )
 
 
