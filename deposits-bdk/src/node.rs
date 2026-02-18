@@ -639,8 +639,16 @@ impl Node {
             "deposit_open" => self.process_deposit_open_request(&request).await,
             "make_offer" => self.process_make_offer_request(&request).await,
             "withdraw" => self.process_withdraw_request(&request).await,
-            "transfer_lock" => self.process_transfer_lock_request(&request).await,
-            "transfer_complete" => self.process_transfer_complete_request(&request).await,
+            "transfer_lock" => {
+                // Reload ledgers to ensure we have latest deposits
+                self.handler.reload_ledgers();
+                self.process_transfer_lock_request(&request).await
+            }
+            "transfer_complete" => {
+                // Reload ledgers to ensure we have latest state
+                self.handler.reload_ledgers();
+                self.process_transfer_complete_request(&request).await
+            }
             "collateral_lock" => self.process_collateral_lock_request(&request).await,
             "custody_transfer_sign" => self.process_custody_transfer_sign_request(&request).await,
             "confiscation_sign" => self.process_confiscation_sign_request(&request).await,
