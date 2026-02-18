@@ -18,6 +18,9 @@ bdk_file_store = "0.18"
 # Nostr for peer messaging
 nostr-sdk = { version = "0.37", features = ["nip04", "nip47"] }
 
+# TLS - pin to fix build on Rust 1.85+
+native-tls = "0.2.17"
+
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 

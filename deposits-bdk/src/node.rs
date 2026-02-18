@@ -3796,19 +3796,14 @@ impl Node {
             }
         }
 
-        // Sign the update
-        if let Err(e) = self.sign_last_update(ledger_id) {
-            return (false, None, Some(format!("Failed to sign: {:?}", e)));
+        // Sign (with co-signature if quorum active) and broadcast
+        if let Err(e) = self.sign_and_broadcast(ledger_id).await {
+            return (false, None, Some(format!("Failed to sign/broadcast: {:?}", e)));
         }
 
         // Persist to disk
         if let Err(e) = self.handler.persist_ledger(ledger_id) {
             tracing::warn!("Failed to persist ledger after transfer_lock: {}", e);
-        }
-
-        // Broadcast to Nostr
-        if let Err(e) = self.broadcast_last_update(ledger_id).await {
-            tracing::warn!("Failed to broadcast transfer_lock: {}", e);
         }
 
         tracing::info!("Transfer locked: {}", hex::encode(&transfer_id[..8]));
@@ -3907,19 +3902,14 @@ impl Node {
             }
         }
 
-        // Sign the update
-        if let Err(e) = self.sign_last_update(ledger_id) {
-            return (false, None, Some(format!("Failed to sign: {:?}", e)));
+        // Sign (with co-signature if quorum active) and broadcast
+        if let Err(e) = self.sign_and_broadcast(ledger_id).await {
+            return (false, None, Some(format!("Failed to sign/broadcast: {:?}", e)));
         }
 
         // Persist to disk
         if let Err(e) = self.handler.persist_ledger(ledger_id) {
             tracing::warn!("Failed to persist ledger after transfer_complete: {}", e);
-        }
-
-        // Broadcast to Nostr
-        if let Err(e) = self.broadcast_last_update(ledger_id).await {
-            tracing::warn!("Failed to broadcast transfer_complete: {}", e);
         }
 
         tracing::info!("Transfer completed: {}", hex::encode(&transfer_id[..8]));
