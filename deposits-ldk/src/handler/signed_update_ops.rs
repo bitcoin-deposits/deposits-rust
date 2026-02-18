@@ -359,7 +359,7 @@ where
 
         drop(logs); // Release lock before sending
 
-        // Send response - SignedLedgerUpdate is the same as StorageSignedLedgerUpdate
+        // Send response
         use super::messages::{SyncResponseMsg, DepositsMessage};
         let current_sequence = updates_to_send.last().map(|u| u.sequence_number).unwrap_or(0);
         let current_hash = updates_to_send.last().map(|u| u.current_hash).unwrap_or([0u8; 32]);

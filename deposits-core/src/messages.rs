@@ -25,7 +25,7 @@ use bitcoin::secp256k1::PublicKey;
 use std::io::{self, Read, Write};
 
 use crate::types::{DepositId, DescriptorWitness, FeeStructure};
-use crate::types::SignedLedgerUpdate as StorageSignedLedgerUpdate;
+use crate::types::SignedLedgerUpdate;
 
 // ============================================================================
 // Protocol Version
@@ -970,14 +970,11 @@ pub struct SyncMsg {
 pub struct SyncResponseMsg {
     pub ledger_id: [u8; 32],
     pub request_hash: [u8; 32],
-    /// Signed updates since last_known_sequence (uses storage format - bytes are bytes)
-    pub updates: Vec<StorageSignedLedgerUpdate>,
+    /// Signed updates since last_known_sequence
+    pub updates: Vec<SignedLedgerUpdate>,
     pub current_sequence: u64,
     pub current_hash: [u8; 32],
 }
-
-// NOTE: SignedLedgerUpdate is now unified - use crate::types::SignedLedgerUpdate everywhere.
-// The storage format (with message bytes) is used for both wire and storage.
 
 // ============================================================================
 // Recovery Messages (0x800D / 0x800F)
@@ -1189,7 +1186,7 @@ pub enum CoordinationResponseMsg {
         request_hash: [u8; 32],
         operator_id: PublicKey,
         reserves_id: String,
-        updates: Vec<StorageSignedLedgerUpdate>,
+        updates: Vec<SignedLedgerUpdate>,
         start_sequence: u64,
         is_final: bool,
     },
@@ -2146,8 +2143,7 @@ impl BinaryCodec for LedgerUpdateMsg {
     }
 }
 
-// SignedLedgerUpdate codec (uses storage format - bytes are bytes)
-impl BinaryCodec for StorageSignedLedgerUpdate {
+impl BinaryCodec for SignedLedgerUpdate {
     fn write_to<W: Write>(&self, w: &mut W) -> Result<(), CodecError> {
         write_bytes(w, &self.message)?;
         write_u16(w, self.message_type)?;
@@ -2322,7 +2318,7 @@ impl DepositsMessage {
             SYNC_RESPONSE => Ok(Self::SyncResponse(SyncResponseMsg {
                 ledger_id: read_32(r)?,
                 request_hash: read_32(r)?,
-                updates: read_vec(r, StorageSignedLedgerUpdate::read_from)?,
+                updates: read_vec(r, SignedLedgerUpdate::read_from)?,
                 current_sequence: read_u64(r)?,
                 current_hash: read_32(r)?,
             })),
@@ -2720,7 +2716,7 @@ impl BinaryCodec for CoordinationResponseMsg {
                 request_hash: read_32(r)?,
                 operator_id: read_pubkey(r)?,
                 reserves_id: read_string(r)?,
-                updates: read_vec(r, StorageSignedLedgerUpdate::read_from)?,
+                updates: read_vec(r, SignedLedgerUpdate::read_from)?,
                 start_sequence: read_u64(r)?,
                 is_final: read_bool(r)?,
             }),
@@ -3546,8 +3542,7 @@ impl TlvDecode for HandshakeResponseMsg {
     }
 }
 
-// NOTE: TlvEncode/TlvDecode for StorageSignedLedgerUpdate are implemented in types.rs
-// since StorageSignedLedgerUpdate is just an alias for types::SignedLedgerUpdate.
+// NOTE: TlvEncode/TlvDecode for SignedLedgerUpdate are implemented in types.rs
 
 /// TLV for SyncMsg
 mod sync_msg_tlv {
@@ -4872,8 +4867,7 @@ mod tests {
     fn test_sync_response_msg_tlv_roundtrip() {
         use crate::tlv::{TlvEncode, TlvDecode};
 
-        // Use unified storage format (bytes are bytes)
-        let update = StorageSignedLedgerUpdate {
+        let update = SignedLedgerUpdate {
             message: vec![0x80, 0x01, 0xAA, 0xBB], // Sample message bytes
             message_type: 0x8001,
             operator_id: test_pubkey(),
