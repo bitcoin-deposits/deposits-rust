@@ -926,6 +926,7 @@ def run_simulation(
                                         if fund_deposit(alias):
                                             mine_block(network)
                                             deposit.status = "funded"
+                                            deposit.balance_sats = funding_amount_sats
                                             onchain_funded_ledgers.add(ledger_id)
                                             print(f"  Deposit funded via faucet")
                                 else:
@@ -934,6 +935,7 @@ def run_simulation(
                                     if fund_deposit(alias):
                                         mine_block(network)
                                         deposit.status = "funded"
+                                        deposit.balance_sats = funding_amount_sats
                                         onchain_funded_ledgers.add(ledger_id)
                                         print(f"  Deposit funded via faucet")
                             elif lightning and funded_deposits and not (single_fund and is_first_on_ledger):
@@ -950,6 +952,7 @@ def run_simulation(
                                     if fund_deposit(alias):
                                         mine_block(network)
                                         deposit.status = "funded"
+                                        deposit.balance_sats = funding_amount_sats
                                         onchain_funded_ledgers.add(ledger_id)
                                         print(f"  Deposit funded via faucet")
                             else:
@@ -964,7 +967,8 @@ def run_simulation(
                                     mine_block(network)
                                     onchain_funded_ledgers.add(ledger_id)
                                     deposit.status = "funded"
-                                    print(f"  Deposit funded, waiting for balance sync")
+                                    deposit.balance_sats = faucet_amount
+                                    print(f"  Funded sim-{alias} with {faucet_amount} sats")
 
                 last_wallet_time = now
 
