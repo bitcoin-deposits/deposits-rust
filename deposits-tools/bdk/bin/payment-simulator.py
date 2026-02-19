@@ -1072,12 +1072,13 @@ def run_simulation(
                                 funder.balance_sats -= transferred
                                 print(f"  Deposit funded via transfer")
 
-            # Make payments (withdrawals) periodically
-            # Check if we have capacity for more async operations
+            # Make payments (withdrawals) - submit multiple if we have capacity
+            # Check how many slots are available for more async operations
             inflight_count = len([f for f in inflight_futures if not f.done()])
-            can_submit = inflight_count < DYNAMIC_CONFIG.max_concurrent
+            available_slots = DYNAMIC_CONFIG.max_concurrent - inflight_count
 
-            if now - last_payment_time >= payment_interval and len(our_deposits) >= 2 and can_submit:
+            # Rate limit: only submit new transfers after payment_interval has passed
+            if now - last_payment_time >= payment_interval and len(our_deposits) >= 2 and available_slots > 0:
                 # Find deposits with sufficient balance (need balance > payment + fee)
                 min_balance_needed = max_payment_sats + 1000  # payment + fee buffer
                 funded = [d for d in our_deposits if d.balance_sats >= min_balance_needed]
@@ -1095,95 +1096,97 @@ def run_simulation(
                     # Recalculate funded list after sync
                     funded = [d for d in our_deposits if d.balance_sats >= min_balance_needed]
 
-                # For transfers: need 1 funded sender + 1 receiver on same ledger
-                # For other modes: need 2 funded deposits
-                can_transfer = False
-                sender = None
-                receiver = None
+                # Submit up to available_slots transfers
+                submitted_this_round = 0
+                for _ in range(available_slots):
+                    # Refresh funded list each iteration (balances change)
+                    funded = [d for d in our_deposits if d.balance_sats >= min_balance_needed]
 
-                if transfers and len(funded) >= 1:
-                    # Pick sender from funded deposits
-                    sender = random.choice(funded)
-                    # Find any receiver on same ledger (doesn't need balance)
-                    same_ledger = [d for d in our_deposits if d != sender and d.ledger_id == sender.ledger_id and d.deposit_id]
-                    if same_ledger:
-                        receiver = random.choice(same_ledger)
+                    # For transfers: need 1 funded sender + 1 receiver on same ledger
+                    can_transfer = False
+                    sender = None
+                    receiver = None
+
+                    if transfers and len(funded) >= 1:
+                        # Pick sender from funded deposits
+                        sender = random.choice(funded)
+                        # Find any receiver on same ledger (doesn't need balance)
+                        same_ledger = [d for d in our_deposits if d != sender and d.ledger_id == sender.ledger_id and d.deposit_id]
+                        if same_ledger:
+                            receiver = random.choice(same_ledger)
+                            can_transfer = True
+                        else:
+                            if submitted_this_round == 0:
+                                print(f"\n[{time.strftime('%H:%M:%S')}] No same-ledger receivers for {sender.alias}")
+                            break
+                    elif transfers and len(funded) == 0:
+                        # No funded deposits yet for transfers
+                        if submitted_this_round == 0:
+                            print(f"\n[{time.strftime('%H:%M:%S')}] Waiting for funded deposits (need {min_balance_needed}+ sats)")
+                        break
+                    elif len(funded) >= 2:
+                        # Non-transfer modes need 2 funded deposits
+                        sender = random.choice(funded)
+                        receiver = random.choice([d for d in our_deposits if d != sender and d.funding_address])
                         can_transfer = True
-                    else:
-                        print(f"\n[{time.strftime('%H:%M:%S')}] No same-ledger receivers for {sender.alias}")
-                        last_payment_time = now
-                        time.sleep(0.1)
-                        continue
-                elif transfers and len(funded) == 0:
-                    # No funded deposits yet for transfers
-                    print(f"\n[{time.strftime('%H:%M:%S')}] Waiting for funded deposits (need {min_balance_needed}+ sats, have: {[f'{d.alias}:{d.balance_sats}' for d in our_deposits]})")
-                    last_payment_time = now
-                    time.sleep(0.1)
-                    continue
-                elif len(funded) >= 2:
-                    # Non-transfer modes need 2 funded deposits
-                    sender = random.choice(funded)
-                    receiver = random.choice([d for d in our_deposits if d != sender and d.funding_address])
-                    can_transfer = True
 
-                if can_transfer and sender and receiver:
+                    if can_transfer and sender and receiver:
+                        # Random payment amount, but don't exceed sender's balance
+                        max_amount = min(max_payment_sats, sender.balance_sats - 1000)  # Leave 1000 for fee
+                        if max_amount >= min_payment_sats:
+                            amount = random.randint(min_payment_sats, max_amount)
 
-                    # Random payment amount, but don't exceed sender's balance
-                    max_amount = min(max_payment_sats, sender.balance_sats - 1000)  # Leave 1000 for fee
-                    if max_amount >= min_payment_sats:
-                        amount = random.randint(min_payment_sats, max_amount)
+                            if transfers:
+                                # Optimistically update balances before async operation
+                                # (prevents double-spending the same funds)
+                                sender.balance_sats -= amount
+                                print(f"\n[{time.strftime('%H:%M:%S')}] Transfer[async]: {sender.alias} -> {receiver.alias} ({amount} sats) [inflight: {inflight_count + submitted_this_round + 1}]", flush=True)
 
-                        if transfers:
-                            # Optimistically update balances before async operation
-                            # (prevents double-spending the same funds)
-                            sender.balance_sats -= amount
-                            print(f"\n[{time.strftime('%H:%M:%S')}] Transfer[async]: {sender.alias} -> {receiver.alias} ({amount} sats) [inflight: {inflight_count + 1}]", flush=True)
+                                # Validate before submitting
+                                if not sender.deposit_id or not receiver.deposit_id:
+                                    print(f"  Warning: Missing deposit_id (sender={sender.deposit_id}, receiver={receiver.deposit_id})", flush=True)
+                                    sender.balance_sats += amount  # Restore
+                                    continue
 
-                            # Validate before submitting
-                            if not sender.deposit_id or not receiver.deposit_id:
-                                print(f"  Warning: Missing deposit_id (sender={sender.deposit_id}, receiver={receiver.deposit_id})", flush=True)
-                                sender.balance_sats += amount  # Restore
-                                continue
-
-                            # Submit async transfer
-                            future = executor.submit(
-                                do_async_transfer,
-                                sender.alias, sender.ledger_id, sender.deposit_id,
-                                receiver.alias, receiver.deposit_id, amount
-                            )
-                            inflight_futures.append(future)
-
-                            # Check if we've reached the target
-                            if max_transfers > 0 and TRANSFERS_SUCCESS >= max_transfers:
-                                # Wait for in-flight to complete
-                                for f in inflight_futures:
-                                    try:
-                                        f.result(timeout=30)
-                                    except:
-                                        pass
-                                print(f"\n[{time.strftime('%H:%M:%S')}] Reached target of {max_transfers} successful transfers!")
-                                print(f"\nFinal Metrics:")
-                                print(f"  Transfers: {TRANSFERS_SUCCESS} success, {TRANSFERS_FAILED} failed, {TRANSFERS_VOLUME_SATS:,} sats volume")
-                                executor.shutdown(wait=False)
-                                return
+                                # Submit async transfer
+                                future = executor.submit(
+                                    do_async_transfer,
+                                    sender.alias, sender.ledger_id, sender.deposit_id,
+                                    receiver.alias, receiver.deposit_id, amount
+                                )
+                                inflight_futures.append(future)
+                                submitted_this_round += 1
                         elif lightning:
                             print(f"\n[{time.strftime('%H:%M:%S')}] Lightning: {sender.alias} ({sender.balance_sats} sats) -> {receiver.alias}")
                             paid_amount = lightning_payment(sender, receiver, amount)
                             if paid_amount:
-                                # Lightning is instant, update both balances with actual amount
                                 sender.balance_sats -= paid_amount
                                 receiver.balance_sats += paid_amount
+                            submitted_this_round += 1
                         else:
                             print(f"\n[{time.strftime('%H:%M:%S')}] Payment: {sender.alias} ({sender.balance_sats} sats) -> {receiver.alias}")
                             if withdraw_to(sender.alias, receiver.funding_address, amount):
-                                # Mine to confirm (regtest only)
                                 mine_block(network)
                                 if network == "regtest":
                                     print(f"  Mined block to confirm")
-                                # Update sender balance estimate
                                 sender.balance_sats -= (amount + 500)
-                else:
-                    print(f"\n[{time.strftime('%H:%M:%S')}] Waiting for funded deposits (need {min_balance_needed}+ sats, have: {[f'{d.alias}:{d.balance_sats}' for d in our_deposits]})")
+                            submitted_this_round += 1
+                    else:
+                        # Not enough balance for transfer
+                        break
+
+                # Check if we've reached the target
+                if transfers and max_transfers > 0 and TRANSFERS_SUCCESS >= max_transfers:
+                    for f in inflight_futures:
+                        try:
+                            f.result(timeout=30)
+                        except:
+                            pass
+                    print(f"\n[{time.strftime('%H:%M:%S')}] Reached target of {max_transfers} successful transfers!")
+                    print(f"\nFinal Metrics:")
+                    print(f"  Transfers: {TRANSFERS_SUCCESS} success, {TRANSFERS_FAILED} failed, {TRANSFERS_VOLUME_SATS:,} sats volume")
+                    executor.shutdown(wait=False)
+                    return
 
                 last_payment_time = now
 

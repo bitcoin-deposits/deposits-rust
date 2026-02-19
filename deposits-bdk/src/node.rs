@@ -432,7 +432,7 @@ impl Node {
         // Track last request poll time (fallback for missed subscription events)
         let mut last_poll = tokio::time::Instant::now();
         let poll_interval = if self.fast_poll {
-            tokio::time::Duration::from_millis(500)  // Fast polling for low latency transfers
+            tokio::time::Duration::from_secs(2)  // Balance between latency and CPU usage
         } else {
             tokio::time::Duration::from_secs(30)
         };
@@ -471,6 +471,13 @@ impl Node {
 
                 // Auto-timeout expired transfers
                 self.auto_timeout_transfers().await;
+
+                // Auto-expire old deposit offers
+                if let Ok(expired) = self.check_expired_offers() {
+                    if !expired.is_empty() {
+                        tracing::info!("Expired {} deposit offers", expired.len());
+                    }
+                }
 
                 // Auto-claim/yield for any pending lottery disputes
                 self.auto_lottery_claim_or_yield().await;
