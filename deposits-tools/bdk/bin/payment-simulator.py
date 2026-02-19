@@ -837,7 +837,10 @@ def run_simulation(
                     # Use timestamp-based alias to avoid conflicts with old deposits
                     ts = int(time.time()) % 100000
                     alias = f"sim-{ts}-{wallet_counter:02d}"
-                    ledger_id = random.choice(ledgers)
+
+                    # Cycle through ledgers to ensure even distribution
+                    # This ensures we get pairs on each ledger before spreading further
+                    ledger_id = ledgers[(wallet_counter - 1) % len(ledgers)]
 
                     # In single-fund mode, first deposit on ledger needs larger max_sats
                     is_first_on_ledger = ledger_id not in onchain_funded_ledgers
