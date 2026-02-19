@@ -967,8 +967,20 @@ def run_simulation(
                                     mine_block(network)
                                     onchain_funded_ledgers.add(ledger_id)
                                     deposit.status = "funded"
-                                    deposit.balance_sats = faucet_amount
-                                    print(f"  Funded sim-{alias} with {faucet_amount} sats")
+
+                                    # Wait for balance to appear (operator needs to process)
+                                    print(f"  Waiting for balance confirmation...")
+                                    for _ in range(30):  # Up to 30 seconds
+                                        time.sleep(1)
+                                        balances = sync_and_get_balances()
+                                        if alias in balances and balances[alias] > 0:
+                                            deposit.balance_sats = balances[alias]
+                                            print(f"  Confirmed: {alias} has {deposit.balance_sats} sats")
+                                            break
+                                    else:
+                                        # Fallback to expected amount if sync doesn't work
+                                        deposit.balance_sats = faucet_amount
+                                        print(f"  Timeout waiting for sync, assuming {faucet_amount} sats")
 
                 last_wallet_time = now
 
