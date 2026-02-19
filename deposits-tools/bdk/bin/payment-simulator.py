@@ -808,13 +808,17 @@ def run_simulation(
                     try:
                         result = future.result()
                         if result:
-                            sender_alias, receiver_alias, amount = result
+                            sender_alias, receiver_alias, amount, success = result
                             with deposits_lock:
                                 for d in our_deposits:
-                                    if d.alias == sender_alias:
-                                        d.balance_sats -= amount
-                                    elif d.alias == receiver_alias:
-                                        d.balance_sats += amount
+                                    if success:
+                                        # Transfer succeeded: credit receiver (sender already debited)
+                                        if d.alias == receiver_alias:
+                                            d.balance_sats += amount
+                                    else:
+                                        # Transfer failed: restore sender balance
+                                        if d.alias == sender_alias:
+                                            d.balance_sats += amount
                     except Exception as e:
                         pass  # Error already logged in the worker
                 else:
@@ -1039,16 +1043,18 @@ def run_simulation(
 
                             # Submit async transfer
                             def do_transfer(s_alias, s_ledger, s_deposit_id, r_alias, r_deposit_id, amt):
-                                """Worker function for async transfer."""
+                                """Worker function for async transfer.
+                                Returns (sender, receiver, amount, success) tuple.
+                                """
                                 # Create minimal deposit objects for the transfer
                                 s = Deposit(alias=s_alias, ledger_id=s_ledger, deposit_id=s_deposit_id)
                                 r = Deposit(alias=r_alias, ledger_id=s_ledger, deposit_id=r_deposit_id)
                                 transferred = same_ledger_transfer(s, r, amt)
                                 if transferred:
-                                    return (s_alias, r_alias, transferred)
+                                    return (s_alias, r_alias, transferred, True)
                                 else:
-                                    # Transfer failed, return negative to restore balance
-                                    return (s_alias, r_alias, -amt)
+                                    # Transfer failed, return amount to restore
+                                    return (s_alias, r_alias, amt, False)
 
                             future = executor.submit(
                                 do_transfer,
