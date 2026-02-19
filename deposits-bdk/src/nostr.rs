@@ -1505,10 +1505,17 @@ impl NostrTransport {
             .kind(Kind::Custom(KIND_LEDGER_RESPONSE))
             .since(since);
 
-        let events = self.client
-            .fetch_events(vec![filter], Some(tokio::time::Duration::from_secs(5)))
+        // Use shorter timeout (1s) to allow more polling attempts within outer timeout
+        let events = match self.client
+            .fetch_events(vec![filter], Some(tokio::time::Duration::from_secs(1)))
             .await
-            .map_err(|e| Error::Nostr(format!("Failed to fetch events: {}", e)))?;
+        {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::debug!("fetch_events error (will retry): {}", e);
+                return Ok(None);
+            }
+        };
 
         tracing::debug!("Fetched {} response events, looking for request {}",
             events.len(), &request_id[..16]);
@@ -1537,8 +1544,9 @@ impl NostrTransport {
             .kind(Kind::Custom(KIND_LEDGER_RESPONSE))
             .since(since);
 
+        // Use 200ms timeout - relay should respond almost instantly with stored events
         let events = self.client
-            .fetch_events(vec![filter], Some(tokio::time::Duration::from_secs(5)))
+            .fetch_events(vec![filter], Some(tokio::time::Duration::from_millis(200)))
             .await
             .map_err(|e| Error::Nostr(format!("Failed to fetch events: {}", e)))?;
 

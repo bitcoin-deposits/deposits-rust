@@ -71,7 +71,7 @@ services:
       timeout: 10s
       retries: 5
 
-  # Electrs for blockchain indexing
+  # Shared Electrs for external access (wallet, block explorer)
   electrs:
     image: mempool/electrs:v3.2.0
     platform: linux/amd64
@@ -98,6 +98,91 @@ services:
     networks:
       bdk_network:
         ipv4_address: 172.21.0.11
+
+  # Per-node Electrs instances to distribute load
+  electrs-alice:
+    image: mempool/electrs:v3.2.0
+    platform: linux/amd64
+    container_name: bdk-electrs-alice
+    depends_on:
+      bitcoin:
+        condition: service_healthy
+    command:
+      [
+        "--jsonrpc-import",
+        "--cookie=user:pass",
+        "--network=regtest",
+        "--daemon-rpc-addr=bitcoin:18443",
+        "--http-addr=0.0.0.0:3002"
+      ]
+    volumes:
+      - bdk_electrs_alice:/data
+    networks:
+      bdk_network:
+        ipv4_address: 172.21.0.111
+
+  electrs-bob:
+    image: mempool/electrs:v3.2.0
+    platform: linux/amd64
+    container_name: bdk-electrs-bob
+    depends_on:
+      bitcoin:
+        condition: service_healthy
+    command:
+      [
+        "--jsonrpc-import",
+        "--cookie=user:pass",
+        "--network=regtest",
+        "--daemon-rpc-addr=bitcoin:18443",
+        "--http-addr=0.0.0.0:3002"
+      ]
+    volumes:
+      - bdk_electrs_bob:/data
+    networks:
+      bdk_network:
+        ipv4_address: 172.21.0.112
+
+  electrs-charlie:
+    image: mempool/electrs:v3.2.0
+    platform: linux/amd64
+    container_name: bdk-electrs-charlie
+    depends_on:
+      bitcoin:
+        condition: service_healthy
+    command:
+      [
+        "--jsonrpc-import",
+        "--cookie=user:pass",
+        "--network=regtest",
+        "--daemon-rpc-addr=bitcoin:18443",
+        "--http-addr=0.0.0.0:3002"
+      ]
+    volumes:
+      - bdk_electrs_charlie:/data
+    networks:
+      bdk_network:
+        ipv4_address: 172.21.0.113
+
+  electrs-diana:
+    image: mempool/electrs:v3.2.0
+    platform: linux/amd64
+    container_name: bdk-electrs-diana
+    depends_on:
+      bitcoin:
+        condition: service_healthy
+    command:
+      [
+        "--jsonrpc-import",
+        "--cookie=user:pass",
+        "--network=regtest",
+        "--daemon-rpc-addr=bitcoin:18443",
+        "--http-addr=0.0.0.0:3002"
+      ]
+    volumes:
+      - bdk_electrs_diana:/data
+    networks:
+      bdk_network:
+        ipv4_address: 172.21.0.114
 
   # Bitcoin Prometheus exporter
   bitcoin-exporter:
@@ -132,7 +217,7 @@ services:
       - "--network"
       - "regtest"
       - "--electrum"
-      - "http://electrs:3002"
+      - "http://electrs-alice:3002"
       - "--relay"
       - "ws://nostr-relay:7777"
       - "--data-dir"
@@ -147,7 +232,7 @@ services:
     depends_on:
       bitcoin:
         condition: service_healthy
-      electrs:
+      electrs-alice:
         condition: service_started
       nostr-relay:
         condition: service_healthy
@@ -166,7 +251,7 @@ services:
       - "--network"
       - "regtest"
       - "--electrum"
-      - "http://electrs:3002"
+      - "http://electrs-bob:3002"
       - "--relay"
       - "ws://nostr-relay:7777"
       - "--data-dir"
@@ -181,7 +266,7 @@ services:
     depends_on:
       bitcoin:
         condition: service_healthy
-      electrs:
+      electrs-bob:
         condition: service_started
       nostr-relay:
         condition: service_healthy
@@ -200,7 +285,7 @@ services:
       - "--network"
       - "regtest"
       - "--electrum"
-      - "http://electrs:3002"
+      - "http://electrs-charlie:3002"
       - "--relay"
       - "ws://nostr-relay:7777"
       - "--data-dir"
@@ -215,7 +300,7 @@ services:
     depends_on:
       bitcoin:
         condition: service_healthy
-      electrs:
+      electrs-charlie:
         condition: service_started
       nostr-relay:
         condition: service_healthy
@@ -234,7 +319,7 @@ services:
       - "--network"
       - "regtest"
       - "--electrum"
-      - "http://electrs:3002"
+      - "http://electrs-diana:3002"
       - "--relay"
       - "ws://nostr-relay:7777"
       - "--data-dir"
@@ -249,7 +334,7 @@ services:
     depends_on:
       bitcoin:
         condition: service_healthy
-      electrs:
+      electrs-diana:
         condition: service_started
       nostr-relay:
         condition: service_healthy
@@ -257,7 +342,7 @@ services:
       bdk_network:
         ipv4_address: 172.21.0.23
 
-  # deposits-bdk Node 5 - Eve (Partner)
+  # deposits-bdk Node 5 - Eve (Partner) - uses shared electrs
   bdk-eve:
     profiles:
       - dev
@@ -390,6 +475,10 @@ volumes:
   bdk_nostr_data:
   bdk_bitcoin_data:
   bdk_electrs_data:
+  bdk_electrs_alice:
+  bdk_electrs_bob:
+  bdk_electrs_charlie:
+  bdk_electrs_diana:
   bdk_alice_data:
   bdk_bob_data:
   bdk_charlie_data:

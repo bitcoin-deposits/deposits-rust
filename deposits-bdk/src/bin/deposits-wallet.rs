@@ -1321,32 +1321,46 @@ async fn sync_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         .build()
         .await?;
 
+    // Subscribe to responses before sending requests
+    if let Err(e) = transport.subscribe_to_response("").await {
+        eprintln!("Warning: failed to subscribe to responses: {}", e);
+    }
+
+    // Brief delay to let subscription propagate
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
     println!("Syncing deposit statuses...");
 
     let mut updated = false;
 
     for deposit in &mut deposits {
-        let alias = deposit.get("alias").and_then(|v| v.as_str()).unwrap_or("unknown");
-        let offer_id = deposit.get("offer_id").and_then(|v| v.as_str());
-        let ledger_id = deposit.get("ledger_id").and_then(|v| v.as_str());
-        let deposit_pubkey = deposit.get("deposit_pubkey").and_then(|v| v.as_str());
-        let current_status = deposit.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let alias = deposit.get("alias").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
+        let offer_id = deposit.get("offer_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let ledger_id = deposit.get("ledger_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let deposit_pubkey = deposit.get("deposit_pubkey").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let current_status = deposit.get("status").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
 
-        // For funded/completed deposits, query the actual balance
-        if current_status == "completed" || current_status == "funded" {
-            if let (Some(ledger_id), Some(deposit_pubkey)) = (ledger_id, deposit_pubkey) {
+        // If we have deposit_pubkey, use balance_query (works for all funded deposits)
+        // This is more reliable than offer_status since the daemon may have cleaned up offers
+        if let (Some(ref ledger_id), Some(ref deposit_pubkey)) = (ledger_id.as_ref(), deposit_pubkey.as_ref()) {
+            if !deposit_pubkey.is_empty() {
                 let params = serde_json::json!({
                     "deposit_pubkey": deposit_pubkey,
                 });
 
                 let request_id = transport.send_ledger_request(ledger_id, "balance_query", params).await?;
+                eprintln!("  {} sent balance_query ({}...)", alias, &request_id[..16]);
+
+                // Give daemon a moment to process
+                tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
                 // Wait for response (with timeout)
                 let start = std::time::Instant::now();
-                let timeout = std::time::Duration::from_secs(10);
+                let timeout = std::time::Duration::from_secs(8);
+                let mut attempts = 0;
 
                 while start.elapsed() < timeout {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    attempts += 1;
                     match transport.fetch_response(&request_id).await {
                         Ok(Some(response)) => {
                             if response.success {
@@ -1371,26 +1385,41 @@ async fn sync_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Error>
                                         updated = true;
                                     }
                                 }
+                            } else {
+                                eprintln!("  {} query failed: {:?}", alias, response.error);
                             }
                             break;
                         }
                         Ok(None) => {
                             // No response yet, keep polling
+                            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
                         }
-                        Err(_) => {
+                        Err(e) => {
+                            eprintln!("  {} fetch error: {}", alias, e);
                             break;
                         }
                     }
+                }
+                if start.elapsed() >= timeout {
+                    eprintln!("  {} timeout after {} attempts", alias, attempts);
                 }
             }
             continue;
         }
 
-        if let (Some(offer_id), Some(ledger_id)) = (offer_id, ledger_id) {
+        if let (Some(ref offer_id), Some(ref ledger_id)) = (offer_id.as_ref(), ledger_id.as_ref()) {
             // Query daemon for offer status
-            let params = serde_json::json!({
-                "offer_id": offer_id,
-            });
+            // Include deposit_pubkey so daemon can check ledger if offer not found
+            let params = if let Some(ref pubkey) = deposit_pubkey {
+                serde_json::json!({
+                    "offer_id": offer_id,
+                    "deposit_pubkey": pubkey,
+                })
+            } else {
+                serde_json::json!({
+                    "offer_id": offer_id,
+                })
+            };
 
             let request_id = transport.send_ledger_request(ledger_id, "offer_status", params).await?;
 
@@ -1410,7 +1439,7 @@ async fn sync_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Error>
                                     let amount = status_obj.get("amount_sats").and_then(|v| v.as_u64());
 
                                     if let Some(status_str) = status_str {
-                                        if status_str != current_status {
+                                        if status_str != current_status.as_str() {
                                             println!("  {} {} -> {}", alias, current_status, status_str);
 
                                             // Update status
@@ -1808,12 +1837,9 @@ async fn transfer_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     println!("  Request ID: {}...", &request_id[..16]);
     println!();
 
-    // Poll for response
-    println!("Waiting for operator response...");
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-    let max_attempts = 30;
-    let poll_interval = std::time::Duration::from_secs(2);
+    // Poll for response (fast polling for low latency)
+    let max_attempts = 50;
+    let poll_interval = std::time::Duration::from_millis(100);
 
     for _attempt in 1..=max_attempts {
         tokio::time::sleep(poll_interval).await;
@@ -1825,9 +1851,7 @@ async fn transfer_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         for response in responses {
             if response.request_id == request_id {
                 if response.success {
-                    println!("Transfer locked!");
                     println!("  Transfer ID: {}", hex::encode(transfer_id));
-                    println!("  Recipient needs preimage to complete before block {}", timeout_height);
                     return Ok(());
                 } else {
                     let error = response.error.as_deref().unwrap_or("Unknown error");
@@ -1835,13 +1859,8 @@ async fn transfer_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
                 }
             }
         }
-
-        print!(".");
-        use std::io::Write;
-        let _ = std::io::stdout().flush();
     }
 
-    println!();
     Err("Timeout waiting for operator response".into())
 }
 
@@ -1933,12 +1952,9 @@ async fn transfer_complete(args: &[String]) -> Result<(), Box<dyn std::error::Er
     println!("  Request ID: {}...", &request_id[..16]);
     println!();
 
-    // Poll for response
-    println!("Waiting for operator response...");
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-    let max_attempts = 30;
-    let poll_interval = std::time::Duration::from_secs(2);
+    // Poll for response (fast polling for low latency)
+    let max_attempts = 50;
+    let poll_interval = std::time::Duration::from_millis(100);
 
     for _attempt in 1..=max_attempts {
         tokio::time::sleep(poll_interval).await;
@@ -1951,7 +1967,6 @@ async fn transfer_complete(args: &[String]) -> Result<(), Box<dyn std::error::Er
             if response.request_id == request_id {
                 if response.success {
                     println!("Transfer completed!");
-                    println!("  Funds transferred to destination deposit");
                     return Ok(());
                 } else {
                     let error = response.error.as_deref().unwrap_or("Unknown error");
@@ -1959,13 +1974,8 @@ async fn transfer_complete(args: &[String]) -> Result<(), Box<dyn std::error::Er
                 }
             }
         }
-
-        print!(".");
-        use std::io::Write;
-        let _ = std::io::stdout().flush();
     }
 
-    println!();
     Err("Timeout waiting for operator response".into())
 }
 

@@ -182,9 +182,9 @@ class Deposit:
     """Represents a deposit opened via wallet.sh"""
     alias: str
     ledger_id: str
-    funding_address: str
-    min_sats: int
-    max_sats: int
+    funding_address: str = ""  # Optional for transfer-only operations
+    min_sats: int = 0
+    max_sats: int = 0
     status: str = "pending"
     balance_sats: int = 0  # Actual confirmed balance from ledger
     deposit_pubkey: str = ""  # 33-byte compressed pubkey in hex
@@ -617,6 +617,35 @@ def transfer_complete(transfer_id: str, preimage_hex: str, ledger_id: str) -> bo
     return False
 
 
+def do_async_transfer(s_alias: str, s_ledger: str, s_deposit_id: str,
+                      r_alias: str, r_deposit_id: str, amt: int) -> tuple:
+    """
+    Worker function for async transfers (runs in thread pool).
+    Returns (sender_alias, receiver_alias, amount, success) tuple.
+    """
+    try:
+        # Validate inputs before creating deposits
+        if not s_deposit_id:
+            print(f"  [async] Warning: Sender {s_alias} has no deposit_id", flush=True)
+            return (s_alias, r_alias, amt, False)
+        if not r_deposit_id:
+            print(f"  [async] Warning: Receiver {r_alias} has no deposit_id", flush=True)
+            return (s_alias, r_alias, amt, False)
+
+        # Create minimal deposit objects for the transfer
+        sender = Deposit(alias=s_alias, ledger_id=s_ledger, deposit_id=s_deposit_id)
+        receiver = Deposit(alias=r_alias, ledger_id=s_ledger, deposit_id=r_deposit_id)
+
+        transferred = same_ledger_transfer(sender, receiver, amt)
+        if transferred:
+            return (s_alias, r_alias, transferred, True)
+        else:
+            return (s_alias, r_alias, amt, False)
+    except Exception as e:
+        print(f"  [async] Error in transfer {s_alias} -> {r_alias}: {e}", flush=True)
+        return (s_alias, r_alias, amt, False)
+
+
 def same_ledger_transfer(sender: Deposit, receiver: Deposit, amount_sats: int) -> Optional[int]:
     """
     Make a same-ledger HTLC transfer between two deposits.
@@ -629,14 +658,14 @@ def same_ledger_transfer(sender: Deposit, receiver: Deposit, amount_sats: int) -
     global TRANSFERS_SUCCESS, TRANSFERS_FAILED, TRANSFERS_VOLUME_SATS
 
     if sender.ledger_id != receiver.ledger_id:
-        print(f"  Warning: Transfers require same ledger (sender: {sender.ledger_id[:8]}, receiver: {receiver.ledger_id[:8]})")
+        print(f"  Warning: Transfers require same ledger (sender: {sender.ledger_id[:8]}, receiver: {receiver.ledger_id[:8]})", flush=True)
         TRANSFERS_FAILED += 1
         if PROMETHEUS_AVAILABLE:
             PROM_TRANSFERS_TOTAL.labels(status='failed').inc()
         return None
 
     if not receiver.deposit_id:
-        print(f"  Warning: Receiver {receiver.alias} has no deposit_id")
+        print(f"  Warning: Receiver {receiver.alias} has no deposit_id", flush=True)
         TRANSFERS_FAILED += 1
         if PROMETHEUS_AVAILABLE:
             PROM_TRANSFERS_TOTAL.labels(status='failed').inc()
@@ -651,9 +680,9 @@ def same_ledger_transfer(sender: Deposit, receiver: Deposit, amount_sats: int) -
     current_height = get_current_block_height()
     timeout_height = current_height + 10
 
-    print(f"  Creating transfer: {sender.alias} -> {receiver.alias} ({amount_sats} sats)")
-    print(f"    Hash: {hash_hex[:16]}...")
-    print(f"    Timeout: block {timeout_height}")
+    print(f"  [async] Creating transfer: {sender.alias} -> {receiver.alias} ({amount_sats} sats)", flush=True)
+    print(f"    Hash: {hash_hex[:16]}...", flush=True)
+    print(f"    Timeout: block {timeout_height}", flush=True)
 
     # Create the lock
     transfer_id = transfer_lock(
@@ -670,12 +699,12 @@ def same_ledger_transfer(sender: Deposit, receiver: Deposit, amount_sats: int) -
             PROM_TRANSFERS_TOTAL.labels(status='failed').inc()
         return None
 
-    print(f"  Transfer locked: {transfer_id[:16]}...")
-    print(f"  Completing with preimage...")
+    print(f"  [async] Transfer locked: {transfer_id[:16]}...", flush=True)
+    print(f"  [async] Completing with preimage...", flush=True)
 
     # Complete immediately with preimage
     if transfer_complete(transfer_id, preimage_hex, sender.ledger_id):
-        print(f"  Transfer completed!")
+        print(f"  [async] Transfer completed!", flush=True)
         TRANSFERS_SUCCESS += 1
         TRANSFERS_VOLUME_SATS += amount_sats
         if PROMETHEUS_AVAILABLE:
@@ -765,6 +794,13 @@ def run_simulation(
     print(f"Found {len(ledgers)} ledgers:")
     for lid in ledgers:
         print(f"  {lid[:16]}...")
+    print()
+
+    # Warm up the wallet connection with a sync attempt
+    # This establishes the Nostr subscription so subsequent syncs are faster
+    print("Warming up wallet connection...")
+    run_wallet("sync")
+    time.sleep(0.5)
     print()
 
     # Scale wallet count and creation rate based on ledger count
@@ -990,18 +1026,20 @@ def run_simulation(
 
                                     # Wait for balance to appear (daemon auto-completes)
                                     print(f"  Waiting for balance confirmation...")
-                                    for i in range(15):  # Up to 15 seconds
-                                        time.sleep(1)
-                                        # Read local deposits.json for faster check
+                                    confirmed = False
+                                    for i in range(20):  # Up to 10 seconds (0.5s intervals)
+                                        # Check first, then sleep
                                         balances = get_balances_local()
                                         if alias in balances and balances[alias] > 0:
                                             deposit.balance_sats = balances[alias]
                                             print(f"  Confirmed: {alias} has {deposit.balance_sats} sats")
+                                            confirmed = True
                                             break
-                                        if i == 5:
-                                            # Trigger a sync attempt after 5 seconds
+                                        if i == 4:
+                                            # Trigger a sync attempt after 2 seconds
                                             run_wallet("sync")
-                                    else:
+                                        time.sleep(0.5)
+                                    if not confirmed:
                                         # Fallback to expected amount
                                         deposit.balance_sats = faucet_amount
                                         print(f"  Using expected amount: {faucet_amount} sats")
@@ -1099,25 +1137,17 @@ def run_simulation(
                             # Optimistically update balances before async operation
                             # (prevents double-spending the same funds)
                             sender.balance_sats -= amount
-                            print(f"\n[{time.strftime('%H:%M:%S')}] Transfer[async]: {sender.alias} -> {receiver.alias} ({amount} sats) [inflight: {inflight_count + 1}]")
+                            print(f"\n[{time.strftime('%H:%M:%S')}] Transfer[async]: {sender.alias} -> {receiver.alias} ({amount} sats) [inflight: {inflight_count + 1}]", flush=True)
+
+                            # Validate before submitting
+                            if not sender.deposit_id or not receiver.deposit_id:
+                                print(f"  Warning: Missing deposit_id (sender={sender.deposit_id}, receiver={receiver.deposit_id})", flush=True)
+                                sender.balance_sats += amount  # Restore
+                                continue
 
                             # Submit async transfer
-                            def do_transfer(s_alias, s_ledger, s_deposit_id, r_alias, r_deposit_id, amt):
-                                """Worker function for async transfer.
-                                Returns (sender, receiver, amount, success) tuple.
-                                """
-                                # Create minimal deposit objects for the transfer
-                                s = Deposit(alias=s_alias, ledger_id=s_ledger, deposit_id=s_deposit_id)
-                                r = Deposit(alias=r_alias, ledger_id=s_ledger, deposit_id=r_deposit_id)
-                                transferred = same_ledger_transfer(s, r, amt)
-                                if transferred:
-                                    return (s_alias, r_alias, transferred, True)
-                                else:
-                                    # Transfer failed, return amount to restore
-                                    return (s_alias, r_alias, amt, False)
-
                             future = executor.submit(
-                                do_transfer,
+                                do_async_transfer,
                                 sender.alias, sender.ledger_id, sender.deposit_id,
                                 receiver.alias, receiver.deposit_id, amount
                             )

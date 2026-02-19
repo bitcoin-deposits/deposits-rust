@@ -432,7 +432,7 @@ impl Node {
         // Track last request poll time (fallback for missed subscription events)
         let mut last_poll = tokio::time::Instant::now();
         let poll_interval = if self.fast_poll {
-            tokio::time::Duration::from_secs(5)
+            tokio::time::Duration::from_millis(500)  // Fast polling for low latency transfers
         } else {
             tokio::time::Duration::from_secs(30)
         };
@@ -2984,7 +2984,12 @@ impl Node {
     /// Process an offer status query request
     ///
     /// Params:
-    /// - offer_id: hex-encoded 32-byte offer ID
+    /// - offer_id: hex-encoded 32-byte offer ID (optional)
+    /// - deposit_pubkey: hex-encoded depositor pubkey (optional, used if offer_id not found)
+    ///
+    /// If offer_id is found, returns the offer status.
+    /// If offer_id is not found but deposit_pubkey is provided, checks if the deposit
+    /// exists in the ledger (meaning the offer was completed).
     async fn process_offer_status_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
         use deposits_core::types::DepositOfferStatus;
 
@@ -2993,6 +2998,9 @@ impl Node {
             Some(id) => id,
             None => return (false, None, Some("Missing offer_id parameter".to_string())),
         };
+
+        // Also extract deposit_pubkey if provided (for fallback lookup)
+        let deposit_pubkey_hex = request.params.get("deposit_pubkey").and_then(|v| v.as_str());
 
         // Parse hex offer_id
         let offer_id_bytes = match hex::decode(offer_id_hex) {
@@ -3047,7 +3055,41 @@ impl Node {
                 (true, Some(result.to_string()), None)
             }
             None => {
-                (false, None, Some(format!("Offer not found: {}...", &offer_id_hex[..16])))
+                // Offer not in our tracking. If we have deposit_pubkey, check if the deposit
+                // exists in the ledger (meaning it was funded and completed).
+                if let Some(pubkey_hex) = deposit_pubkey_hex {
+                    // Convert pubkey to deposit_id
+                    let descriptor = format!("pk({})", pubkey_hex);
+                    let deposit_id = compute_deposit_id(&descriptor);
+
+                    // Check if deposit exists in the ledger
+                    if let Some((_, ledger)) = self.get_ledger_by_ledger_id(&request.ledger_id)
+                        .or_else(|| self.get_ledger_by_reserves_key(&request.ledger_id))
+                    {
+                        if let Some(deposit) = ledger.state.deposits.get(&deposit_id) {
+                            // Deposit exists - offer must have completed
+                            let result = serde_json::json!({
+                                "offer_id": offer_id_hex,
+                                "status": {
+                                    "status": "completed",
+                                    "amount_sats": deposit.balance / 1000,
+                                },
+                            });
+                            tracing::debug!("Offer status query: {}... -> completed (from ledger)", &offer_id_hex[..16]);
+                            return (true, Some(result.to_string()), None);
+                        }
+                    }
+                }
+
+                // No offer and no deposit found
+                let result = serde_json::json!({
+                    "offer_id": offer_id_hex,
+                    "status": {
+                        "status": "not_found",
+                    },
+                });
+                tracing::debug!("Offer status query: {}... -> not found", &offer_id_hex[..16]);
+                (true, Some(result.to_string()), None)
             }
         }
     }
@@ -4673,11 +4715,17 @@ impl Node {
             return;
         }
 
+        // Sync wallet ONCE before checking all offers (not per-offer)
+        if let Err(e) = self.wallet.sync() {
+            tracing::warn!("Wallet sync failed in auto_complete_deposits: {}", e);
+            return;
+        }
+
         for (offer, _) in pending {
             let offer_id = offer.offer_id;
 
-            // Check if funded
-            match self.check_deposit_offer_funding(&offer_id) {
+            // Check if funded (skip_sync=true since we synced above)
+            match self.check_deposit_offer_funding_inner(&offer_id, true) {
                 Ok(Some((txid, amount_sats))) => {
                     tracing::info!(
                         "Auto-completing funded deposit: offer={}... txid={}... amount={} sats",
@@ -7840,7 +7888,17 @@ impl Node {
     /// Check if a deposit offer's funding address has received funds
     ///
     /// Returns Some((txid, amount_sats)) if funds are detected, None otherwise.
+    /// This version syncs the wallet before checking - use for single-call CLI usage.
     pub fn check_deposit_offer_funding(&self, offer_id: &[u8; 32]) -> Result<Option<(String, u64)>, Error> {
+        // Sync wallet first for CLI/single-call usage
+        self.wallet.sync()?;
+        self.check_deposit_offer_funding_inner(offer_id, true)
+    }
+
+    /// Inner implementation of check_deposit_offer_funding
+    ///
+    /// If skip_sync is true, assumes wallet is already synced (for batch operations).
+    fn check_deposit_offer_funding_inner(&self, offer_id: &[u8; 32], skip_sync: bool) -> Result<Option<(String, u64)>, Error> {
         let (offer, status) = self.get_deposit_offer(offer_id)
             .ok_or(Error::OfferNotFound)?;
 
@@ -7866,9 +7924,10 @@ impl Node {
         let address = offer.funding_address.parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>()
             .map_err(|e| Error::Protocol(format!("Invalid funding address: {}", e)))?;
 
-        // Check wallet for received funds to this address
-        // This requires syncing the wallet first
-        self.wallet.sync()?;
+        // Sync wallet if not already synced
+        if !skip_sync {
+            self.wallet.sync()?;
+        }
 
         // Check if any transactions have been received to this address
         if let Some((txid, amount)) = self.wallet.check_address_received(&address)? {
