@@ -1014,21 +1014,38 @@ def run_simulation(
                     # Recalculate funded list after sync
                     funded = [d for d in our_deposits if d.balance_sats >= min_balance_needed]
 
-                if len(funded) >= 2:
-                    # Pick sender
-                    sender = random.choice(funded)
+                # For transfers: need 1 funded sender + 1 receiver on same ledger
+                # For other modes: need 2 funded deposits
+                can_transfer = False
+                sender = None
+                receiver = None
 
-                    # For transfers, receiver must be on same ledger
-                    if transfers:
-                        same_ledger = [d for d in our_deposits if d != sender and d.ledger_id == sender.ledger_id and d.deposit_id]
-                        if not same_ledger:
-                            print(f"\n[{time.strftime('%H:%M:%S')}] No same-ledger receivers for {sender.alias}")
-                            last_payment_time = now
-                            time.sleep(0.1)
-                            continue
+                if transfers and len(funded) >= 1:
+                    # Pick sender from funded deposits
+                    sender = random.choice(funded)
+                    # Find any receiver on same ledger (doesn't need balance)
+                    same_ledger = [d for d in our_deposits if d != sender and d.ledger_id == sender.ledger_id and d.deposit_id]
+                    if same_ledger:
                         receiver = random.choice(same_ledger)
+                        can_transfer = True
                     else:
-                        receiver = random.choice([d for d in our_deposits if d != sender and d.funding_address])
+                        print(f"\n[{time.strftime('%H:%M:%S')}] No same-ledger receivers for {sender.alias}")
+                        last_payment_time = now
+                        time.sleep(0.1)
+                        continue
+                elif transfers and len(funded) == 0:
+                    # No funded deposits yet for transfers
+                    print(f"\n[{time.strftime('%H:%M:%S')}] Waiting for funded deposits (need {min_balance_needed}+ sats, have: {[f'{d.alias}:{d.balance_sats}' for d in our_deposits]})")
+                    last_payment_time = now
+                    time.sleep(0.1)
+                    continue
+                elif len(funded) >= 2:
+                    # Non-transfer modes need 2 funded deposits
+                    sender = random.choice(funded)
+                    receiver = random.choice([d for d in our_deposits if d != sender and d.funding_address])
+                    can_transfer = True
+
+                if can_transfer and sender and receiver:
 
                     # Random payment amount, but don't exceed sender's balance
                     max_amount = min(max_payment_sats, sender.balance_sats - 1000)  # Leave 1000 for fee
