@@ -335,8 +335,24 @@ def fund_deposit(alias: str, amount_sats: Optional[int] = None) -> bool:
     return False
 
 
+def get_balances_local() -> dict[str, int]:
+    """Read balances from local deposits.json without network sync. Returns alias -> sats."""
+    deposits_file = DATA_DIR / "deposits.json"
+    if not deposits_file.exists():
+        return {}
+
+    try:
+        with open(deposits_file) as f:
+            deposits = json.load(f)
+        return {d.get("alias", ""): d.get("amount_sats", 0) for d in deposits if d.get("alias")}
+    except (json.JSONDecodeError, IOError):
+        return {}
+
+
 def sync_and_get_balances() -> dict[str, int]:
-    """Sync deposits and get balances from the ledger. Returns alias -> sats."""
+    """Sync deposits and get balances from the ledger. Returns alias -> sats.
+    This does a network sync which can be slow - prefer get_balances_local() for fast reads.
+    """
     # First sync to get latest balances from ledger
     run_wallet("sync")
 
@@ -344,7 +360,7 @@ def sync_and_get_balances() -> dict[str, int]:
     code, stdout, stderr = run_wallet("balance")
 
     if code != 0:
-        return {}
+        return get_balances_local()  # Fallback to local data
 
     # Parse balance output
     # Format: "  + alias     12345 sats  (pubkey)"
@@ -357,6 +373,10 @@ def sync_and_get_balances() -> dict[str, int]:
             alias = match.group(1)
             sats = int(match.group(2))
             balances[alias] = sats
+
+    # If parsing failed, fallback to local
+    if not balances:
+        balances = get_balances_local()
 
     return balances
 
@@ -968,19 +988,23 @@ def run_simulation(
                                     onchain_funded_ledgers.add(ledger_id)
                                     deposit.status = "funded"
 
-                                    # Wait for balance to appear (operator needs to process)
+                                    # Wait for balance to appear (daemon auto-completes)
                                     print(f"  Waiting for balance confirmation...")
-                                    for _ in range(30):  # Up to 30 seconds
+                                    for i in range(15):  # Up to 15 seconds
                                         time.sleep(1)
-                                        balances = sync_and_get_balances()
+                                        # Read local deposits.json for faster check
+                                        balances = get_balances_local()
                                         if alias in balances and balances[alias] > 0:
                                             deposit.balance_sats = balances[alias]
                                             print(f"  Confirmed: {alias} has {deposit.balance_sats} sats")
                                             break
+                                        if i == 5:
+                                            # Trigger a sync attempt after 5 seconds
+                                            run_wallet("sync")
                                     else:
-                                        # Fallback to expected amount if sync doesn't work
+                                        # Fallback to expected amount
                                         deposit.balance_sats = faucet_amount
-                                        print(f"  Timeout waiting for sync, assuming {faucet_amount} sats")
+                                        print(f"  Using expected amount: {faucet_amount} sats")
 
                 last_wallet_time = now
 
