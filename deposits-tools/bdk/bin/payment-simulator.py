@@ -28,6 +28,7 @@ import subprocess
 import sys
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor, Future
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -47,6 +48,68 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 WALLET_SH = SCRIPT_DIR / "wallet.sh"
 DATA_DIR = Path.home() / ".deposits-wallet"
 METRICS_PORT = 9200  # Prometheus metrics port
+CONFIG_FILE = SCRIPT_DIR / "simulator-config.json"  # Runtime config file
+
+# Dynamic configuration (can be changed at runtime via config file)
+class DynamicConfig:
+    """Configuration that can be reloaded at runtime."""
+    def __init__(self):
+        self.payment_interval = 0.2  # seconds between payments
+        self.max_concurrent = 10  # max concurrent payment operations
+        self.paused = False  # pause payments
+        self._last_load_time = 0.0
+        self._last_mtime = 0.0
+
+    def maybe_reload(self):
+        """Reload config from file if it changed (check at most once per second)."""
+        now = time.time()
+        if now - self._last_load_time < 1.0:
+            return
+        self._last_load_time = now
+
+        if not CONFIG_FILE.exists():
+            return
+
+        try:
+            mtime = CONFIG_FILE.stat().st_mtime
+            if mtime <= self._last_mtime:
+                return
+            self._last_mtime = mtime
+
+            with open(CONFIG_FILE) as f:
+                data = json.load(f)
+
+            old_interval = self.payment_interval
+            old_concurrent = self.max_concurrent
+            old_paused = self.paused
+
+            self.payment_interval = float(data.get("payment_interval", self.payment_interval))
+            self.max_concurrent = int(data.get("max_concurrent", self.max_concurrent))
+            self.paused = bool(data.get("paused", self.paused))
+
+            # Log changes
+            if self.payment_interval != old_interval:
+                print(f"\n[CONFIG] Payment interval: {old_interval}s -> {self.payment_interval}s")
+            if self.max_concurrent != old_concurrent:
+                print(f"\n[CONFIG] Max concurrent: {old_concurrent} -> {self.max_concurrent}")
+            if self.paused != old_paused:
+                print(f"\n[CONFIG] Paused: {old_paused} -> {self.paused}")
+
+        except (json.JSONDecodeError, IOError) as e:
+            pass  # Silently ignore config errors
+
+    def write_default(self):
+        """Write default config file if it doesn't exist."""
+        if not CONFIG_FILE.exists():
+            with open(CONFIG_FILE, 'w') as f:
+                json.dump({
+                    "payment_interval": self.payment_interval,
+                    "max_concurrent": self.max_concurrent,
+                    "paused": self.paused,
+                }, f, indent=2)
+            print(f"  Config file: {CONFIG_FILE}")
+
+DYNAMIC_CONFIG = DynamicConfig()
 
 # Global payment counter - used to make each invoice unique by adding msat offset
 PAYMENT_COUNTER = 0
@@ -103,6 +166,14 @@ if PROMETHEUS_AVAILABLE:
     PROM_TRANSFERS_SATS = Counter(
         'simulator_transfers_sats_total',
         'Total sats transferred via same-ledger transfers'
+    )
+    PROM_INFLIGHT = Gauge(
+        'simulator_inflight_count',
+        'Number of in-flight async operations'
+    )
+    PROM_PAYMENT_INTERVAL = Gauge(
+        'simulator_payment_interval_seconds',
+        'Current payment interval in seconds'
     )
 
 
@@ -643,6 +714,10 @@ def run_simulation(
     if (lightning or transfers) and payment_interval == 2.0:
         payment_interval = 0.2
 
+    # Initialize dynamic config
+    DYNAMIC_CONFIG.payment_interval = payment_interval
+    DYNAMIC_CONFIG.write_default()
+
     # Start Prometheus metrics server for Lightning or transfers mode
     if (lightning or transfers) and PROMETHEUS_AVAILABLE:
         start_http_server(METRICS_PORT)
@@ -697,15 +772,59 @@ def run_simulation(
         print(f"  - Single-fund mode: only first deposit per ledger funded on-chain")
     print(f"  - Target wallets: {num_wallets} ({wallets_per_ledger:.1f} per ledger)")
     print(f"  - New wallet every {wallet_creation_interval:.1f}s")
-    print(f"  - Payment every {payment_interval}s")
+    print(f"  - Payment every {payment_interval}s (adjustable via config file)")
+    print(f"  - Max concurrent: {DYNAMIC_CONFIG.max_concurrent}")
     print(f"  - Re-discover ledgers every {rediscover_interval}s")
     if network != "regtest":
         print(f"  - Note: No block mining on {network}")
     print()
+    print(f"  To adjust rate at runtime, edit: {CONFIG_FILE}")
+    print()
+
+    # Thread pool for async payments
+    executor = ThreadPoolExecutor(max_workers=DYNAMIC_CONFIG.max_concurrent)
+    inflight_futures: list[Future] = []
+
+    # Lock for deposit balance updates from async operations
+    deposits_lock = threading.Lock()
 
     try:
         while True:
             now = time.time()
+
+            # Check for config changes
+            DYNAMIC_CONFIG.maybe_reload()
+            payment_interval = DYNAMIC_CONFIG.payment_interval
+
+            # Update Prometheus metrics
+            if PROMETHEUS_AVAILABLE:
+                PROM_PAYMENT_INTERVAL.set(payment_interval)
+                PROM_INFLIGHT.set(len([f for f in inflight_futures if not f.done()]))
+
+            # Clean up completed futures and process results
+            still_pending = []
+            for future in inflight_futures:
+                if future.done():
+                    try:
+                        result = future.result()
+                        if result:
+                            sender_alias, receiver_alias, amount = result
+                            with deposits_lock:
+                                for d in our_deposits:
+                                    if d.alias == sender_alias:
+                                        d.balance_sats -= amount
+                                    elif d.alias == receiver_alias:
+                                        d.balance_sats += amount
+                    except Exception as e:
+                        pass  # Error already logged in the worker
+                else:
+                    still_pending.append(future)
+            inflight_futures = still_pending
+
+            # Skip payments if paused
+            if DYNAMIC_CONFIG.paused:
+                time.sleep(0.1)
+                continue
 
             # Create new deposits periodically
             if now - last_wallet_time >= wallet_creation_interval:
@@ -869,7 +988,11 @@ def run_simulation(
                                 print(f"  Deposit funded via transfer")
 
             # Make payments (withdrawals) periodically
-            if now - last_payment_time >= payment_interval and len(our_deposits) >= 2:
+            # Check if we have capacity for more async operations
+            inflight_count = len([f for f in inflight_futures if not f.done()])
+            can_submit = inflight_count < DYNAMIC_CONFIG.max_concurrent
+
+            if now - last_payment_time >= payment_interval and len(our_deposits) >= 2 and can_submit:
                 # Find deposits with sufficient balance (need balance > payment + fee)
                 min_balance_needed = max_payment_sats + 1000  # payment + fee buffer
                 funded = [d for d in our_deposits if d.balance_sats >= min_balance_needed]
@@ -909,18 +1032,44 @@ def run_simulation(
                         amount = random.randint(min_payment_sats, max_amount)
 
                         if transfers:
-                            print(f"\n[{time.strftime('%H:%M:%S')}] Transfer: {sender.alias} ({sender.balance_sats} sats) -> {receiver.alias}")
-                            transferred = same_ledger_transfer(sender, receiver, amount)
-                            if transferred:
-                                # Transfers are instant, update both balances
-                                sender.balance_sats -= transferred
-                                receiver.balance_sats += transferred
-                                # Check if we've reached the target
-                                if max_transfers > 0 and TRANSFERS_SUCCESS >= max_transfers:
-                                    print(f"\n[{time.strftime('%H:%M:%S')}] Reached target of {max_transfers} successful transfers!")
-                                    print(f"\nFinal Metrics:")
-                                    print(f"  Transfers: {TRANSFERS_SUCCESS} success, {TRANSFERS_FAILED} failed, {TRANSFERS_VOLUME_SATS:,} sats volume")
-                                    return
+                            # Optimistically update balances before async operation
+                            # (prevents double-spending the same funds)
+                            sender.balance_sats -= amount
+                            print(f"\n[{time.strftime('%H:%M:%S')}] Transfer[async]: {sender.alias} -> {receiver.alias} ({amount} sats) [inflight: {inflight_count + 1}]")
+
+                            # Submit async transfer
+                            def do_transfer(s_alias, s_ledger, s_deposit_id, r_alias, r_deposit_id, amt):
+                                """Worker function for async transfer."""
+                                # Create minimal deposit objects for the transfer
+                                s = Deposit(alias=s_alias, ledger_id=s_ledger, deposit_id=s_deposit_id)
+                                r = Deposit(alias=r_alias, ledger_id=s_ledger, deposit_id=r_deposit_id)
+                                transferred = same_ledger_transfer(s, r, amt)
+                                if transferred:
+                                    return (s_alias, r_alias, transferred)
+                                else:
+                                    # Transfer failed, return negative to restore balance
+                                    return (s_alias, r_alias, -amt)
+
+                            future = executor.submit(
+                                do_transfer,
+                                sender.alias, sender.ledger_id, sender.deposit_id,
+                                receiver.alias, receiver.deposit_id, amount
+                            )
+                            inflight_futures.append(future)
+
+                            # Check if we've reached the target
+                            if max_transfers > 0 and TRANSFERS_SUCCESS >= max_transfers:
+                                # Wait for in-flight to complete
+                                for f in inflight_futures:
+                                    try:
+                                        f.result(timeout=30)
+                                    except:
+                                        pass
+                                print(f"\n[{time.strftime('%H:%M:%S')}] Reached target of {max_transfers} successful transfers!")
+                                print(f"\nFinal Metrics:")
+                                print(f"  Transfers: {TRANSFERS_SUCCESS} success, {TRANSFERS_FAILED} failed, {TRANSFERS_VOLUME_SATS:,} sats volume")
+                                executor.shutdown(wait=False)
+                                return
                         elif lightning:
                             print(f"\n[{time.strftime('%H:%M:%S')}] Lightning: {sender.alias} ({sender.balance_sats} sats) -> {receiver.alias}")
                             paid_amount = lightning_payment(sender, receiver, amount)
@@ -960,10 +1109,11 @@ def run_simulation(
             if int(now) % 30 == 0:
                 funded_count = len([d for d in our_deposits if d.balance_sats > 0])
                 total_balance = sum(d.balance_sats for d in our_deposits)
+                inflight_count = len([f for f in inflight_futures if not f.done()])
                 print(f"\n[{time.strftime('%H:%M:%S')}] Status: {len(ledgers)} ledgers, {len(our_deposits)}/{num_wallets} wallets, {funded_count} funded, {total_balance} sats")
                 if transfers:
                     total_transfers = TRANSFERS_SUCCESS + TRANSFERS_FAILED
-                    print(f"  Transfers: {TRANSFERS_SUCCESS}/{total_transfers} ({TRANSFERS_VOLUME_SATS:,} sats)")
+                    print(f"  Transfers: {TRANSFERS_SUCCESS}/{total_transfers} ({TRANSFERS_VOLUME_SATS:,} sats) | interval: {payment_interval}s | inflight: {inflight_count}")
                     # Check if we've reached the target
                     if max_transfers > 0 and TRANSFERS_SUCCESS >= max_transfers:
                         print(f"\n[{time.strftime('%H:%M:%S')}] Reached target of {max_transfers} successful transfers!")
@@ -991,6 +1141,8 @@ def run_simulation(
 
     except KeyboardInterrupt:
         print("\n\nSimulation stopped by user")
+        print("Waiting for in-flight operations to complete...")
+        executor.shutdown(wait=True, cancel_futures=True)
         print(f"Final state: {len(our_deposits)} deposits")
         if transfers:
             print(f"\nTransfer Metrics:")
@@ -1029,10 +1181,15 @@ def main():
                         help="Seconds between ledger re-discovery (default: 60)")
     parser.add_argument("--max-transfers", type=int, default=0,
                         help="Stop after this many successful transfers (0 = unlimited)")
+    parser.add_argument("--max-concurrent", type=int, default=10,
+                        help="Maximum concurrent async operations (default: 10)")
     parser.add_argument("--single-fund", action="store_true",
                         help="Fund only first deposit per ledger on-chain, then use transfers/lightning for others")
 
     args = parser.parse_args()
+
+    # Set initial config from args
+    DYNAMIC_CONFIG.max_concurrent = args.max_concurrent
 
     run_simulation(
         wallets_per_ledger=args.wallets_per_ledger,
