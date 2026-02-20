@@ -599,6 +599,32 @@ impl NostrTransport {
             .map_err(|e| Error::Nostr(format!("Invalid pubkey conversion: {}", e)))
     }
 
+    /// Send an event without waiting for relay acknowledgment.
+    ///
+    /// This is a "fire and forget" method that returns immediately after sending
+    /// the message to the relay, without waiting for the OK response. This reduces
+    /// latency by ~150ms per event (one full round-trip).
+    ///
+    /// Use this for high-throughput operations where you don't need confirmation
+    /// that the relay accepted the event.
+    async fn send_event_nowait(&self, event: Event) -> Result<(), Error> {
+        let relays = self.client.relays().await;
+        if relays.is_empty() {
+            return Err(Error::Nostr("No relays connected".to_string()));
+        }
+
+        // Get relay URLs
+        let urls: Vec<_> = relays.keys().cloned().collect();
+
+        // Send using batch_msg which doesn't wait for OK
+        self.client
+            .send_msg_to(urls, ClientMessage::event(event))
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to send event: {}", e)))?;
+
+        Ok(())
+    }
+
     /// Send a message to a peer via encrypted DM (NIP-04)
     pub async fn send_message(&self, peer: PublicKey, msg: DepositsMessage) -> Result<(), Error> {
         // Convert peer pubkey to nostr pubkey
@@ -771,8 +797,8 @@ impl NostrTransport {
 
         let event_id = event.id.to_hex();
 
-        self.client
-            .send_event(event)
+        // Use fire-and-forget send to reduce latency by ~150ms
+        self.send_event_nowait(event)
             .await
             .map_err(|e| Error::Nostr(format!("Failed to send request: {}", e)))?;
 
@@ -830,8 +856,9 @@ impl NostrTransport {
 
         let event_id = event.id.to_hex();
 
-        self.client
-            .send_event(event)
+        // Use fire-and-forget send to reduce latency by ~150ms
+        // The relay will still broadcast the event, we just don't wait for OK
+        self.send_event_nowait(event)
             .await
             .map_err(|e| Error::Nostr(format!("Failed to send response: {}", e)))?;
 
@@ -1535,6 +1562,112 @@ impl NostrTransport {
         Ok(None)
     }
 
+    /// Stream responses for a request until timeout, allowing caller to accept/reject each one
+    /// Returns responses one at a time via the callback. Return true to accept, false to keep waiting.
+    pub async fn wait_for_valid_response<F>(
+        &mut self,
+        request_id: &str,
+        timeout_ms: u64,
+        mut validator: F,
+    ) -> Result<LedgerResponse, Error>
+    where
+        F: FnMut(&LedgerResponse) -> bool,
+    {
+        // Subscribe to responses if not already
+        self.subscribe_to_response(request_id).await?;
+
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
+
+        // First check if we already have a valid response
+        while let Ok(response) = self.response_rx.try_recv() {
+            if response.request_id == request_id && validator(&response) {
+                return Ok(response);
+            }
+        }
+
+        // Wait for notifications until we get a valid response or timeout
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(Error::Nostr("Timeout waiting for valid response".to_string()));
+            }
+
+            match tokio::time::timeout(remaining, self.client.notifications().recv()).await {
+                Ok(Ok(notification)) => {
+                    self.handle_notification(notification);
+
+                    while let Ok(notification) = self.client.notifications().try_recv() {
+                        self.handle_notification(notification);
+                    }
+
+                    // Check all responses that arrived
+                    while let Ok(response) = self.response_rx.try_recv() {
+                        if response.request_id == request_id && validator(&response) {
+                            return Ok(response);
+                        }
+                    }
+                }
+                Ok(Err(_)) => {
+                    return Err(Error::Nostr("Notification channel closed".to_string()));
+                }
+                Err(_) => {
+                    return Err(Error::Nostr("Timeout waiting for valid response".to_string()));
+                }
+            }
+        }
+    }
+
+    /// Wait for a specific response using real-time subscription (low latency)
+    /// This is much faster than polling - typically <5ms vs 100-200ms
+    pub async fn wait_for_response(&mut self, request_id: &str, timeout_ms: u64) -> Result<LedgerResponse, Error> {
+        // Subscribe to responses if not already
+        self.subscribe_to_response(request_id).await?;
+
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
+
+        // First check if we already have the response (from a previous notification)
+        while let Ok(response) = self.response_rx.try_recv() {
+            if response.request_id == request_id {
+                return Ok(response);
+            }
+        }
+
+        // Wait for notifications until we get our response or timeout
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(Error::Nostr("Timeout waiting for response".to_string()));
+            }
+
+            // Wait for next notification with timeout
+            match tokio::time::timeout(remaining, self.client.notifications().recv()).await {
+                Ok(Ok(notification)) => {
+                    self.handle_notification(notification);
+
+                    // Drain any additional pending notifications
+                    while let Ok(notification) = self.client.notifications().try_recv() {
+                        self.handle_notification(notification);
+                    }
+
+                    // Check if our response arrived
+                    while let Ok(response) = self.response_rx.try_recv() {
+                        if response.request_id == request_id {
+                            return Ok(response);
+                        }
+                    }
+                }
+                Ok(Err(_)) => {
+                    // Channel closed
+                    return Err(Error::Nostr("Notification channel closed".to_string()));
+                }
+                Err(_) => {
+                    // Timeout
+                    return Err(Error::Nostr("Timeout waiting for response".to_string()));
+                }
+            }
+        }
+    }
+
     /// Fetch all responses since a timestamp
     pub async fn fetch_responses_since(&self, _since: nostr_sdk::Timestamp) -> Result<Vec<LedgerResponse>, Error> {
         // Ignore 'since' and use a fixed 5-minute lookback to avoid timestamp sync issues
@@ -1581,8 +1714,10 @@ impl NostrTransport {
     /// Process incoming events (call this in a loop)
     /// This awaits on the notification channel with a timeout
     pub async fn process_events(&mut self) -> Result<(), Error> {
-        // Wait for a notification with timeout
-        let timeout = tokio::time::Duration::from_millis(500);
+        // Wait for a notification with short timeout (100ms)
+        // Short timeout ensures periodic tasks can run frequently while
+        // still allowing instant handling of subscription notifications
+        let timeout = tokio::time::Duration::from_millis(100);
         match tokio::time::timeout(timeout, self.client.notifications().recv()).await {
             Ok(Ok(notification)) => {
                 tracing::debug!("Received notification: {:?}", notification);

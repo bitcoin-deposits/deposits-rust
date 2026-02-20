@@ -72,3 +72,11 @@ path = "src/bin/deposits-bdk.rs"
 [[bin]]
 name = "deposits-wallet"
 path = "src/bin/deposits-wallet.rs"
+
+[[bin]]
+name = "nostr-ping"
+path = "src/bin/nostr-ping.rs"
+
+[[bin]]
+name = "nostr-bench"
+path = "src/bin/nostr-bench.rs"

@@ -432,7 +432,7 @@ impl Node {
         // Track last request poll time (fallback for missed subscription events)
         let mut last_poll = tokio::time::Instant::now();
         let poll_interval = if self.fast_poll {
-            tokio::time::Duration::from_secs(2)  // Balance between latency and CPU usage
+            tokio::time::Duration::from_millis(500)  // Fast polling for low latency
         } else {
             tokio::time::Duration::from_secs(30)
         };
@@ -446,7 +446,7 @@ impl Node {
         };
 
         if self.fast_poll {
-            tracing::info!("Fast poll mode enabled: periodic=5s, poll=5s, reload=2s");
+            tracing::info!("Fast poll mode enabled: periodic=5s, poll=500ms, reload=2s");
         }
 
         loop {
@@ -530,7 +530,7 @@ impl Node {
 
             // Poll for recent requests (every 2 seconds) - fallback for missed subscription events
             if last_poll.elapsed() >= poll_interval {
-                if let Ok(requests) = self.nostr.fetch_recent_requests(30).await {
+                if let Ok(requests) = self.nostr.fetch_recent_requests(5).await {
                     for request in requests {
                         // Check if already processed
                         let already_processed = {
@@ -538,6 +538,8 @@ impl Node {
                             processed.contains(&request.event_id)
                         };
                         if !already_processed {
+                            tracing::debug!("Request via polling: action={}, event={}...",
+                                request.action, &request.event_id[..16.min(request.event_id.len())]);
                             // Mark as processed before handling
                             self.processed_requests.lock().unwrap().insert(request.event_id.clone());
                             self.handle_ledger_request(request).await;
@@ -547,53 +549,49 @@ impl Node {
                 last_poll = tokio::time::Instant::now();
             }
 
-            tokio::select! {
-                // Process inbound messages from nostr (P2P + ledger events)
-                _ = self.nostr.process_events() => {
-                    // Handle P2P messages
-                    while let Some(inbound) = self.nostr.try_recv() {
-                        self.handle_inbound(inbound);
-                    }
+            // Process subscription notifications - this has a 100ms internal timeout
+            // so periodic tasks will still run frequently even if no notifications arrive
+            let _ = self.nostr.process_events().await;
 
-                    // Handle ledger requests
-                    while let Some(request) = self.nostr.try_recv_request() {
-                        // Check if already processed (from polling)
-                        let already_processed = {
-                            let processed = self.processed_requests.lock().unwrap();
-                            processed.contains(&request.event_id)
-                        };
-                        if !already_processed {
-                            self.processed_requests.lock().unwrap().insert(request.event_id.clone());
-                            self.handle_ledger_request(request).await;
-                        }
-                    }
+            // Handle P2P messages
+            while let Some(inbound) = self.nostr.try_recv() {
+                self.handle_inbound(inbound);
+            }
 
-                    // Handle disputes
-                    while let Some(dispute) = self.nostr.try_recv_dispute() {
-                        self.handle_dispute(dispute).await;
-                    }
-
-                    // Handle responses (for auto-recording attestations)
-                    while let Some(response) = self.nostr.try_recv_response() {
-                        self.handle_ledger_response(response).await;
-                    }
-
-                    // Handle ledger updates (validate and auto-dispute on invalid)
-                    while let Some(update) = self.nostr.try_recv_ledger_update() {
-                        self.handle_ledger_update(update).await;
-                    }
+            // Handle ledger requests from subscription
+            while let Some(request) = self.nostr.try_recv_request() {
+                // Check if already processed (from polling)
+                let already_processed = {
+                    let processed = self.processed_requests.lock().unwrap();
+                    processed.contains(&request.event_id)
+                };
+                if !already_processed {
+                    tracing::debug!("Request via subscription: action={}, event={}...",
+                        request.action, &request.event_id[..16.min(request.event_id.len())]);
+                    self.processed_requests.lock().unwrap().insert(request.event_id.clone());
+                    self.handle_ledger_request(request).await;
                 }
+            }
 
-                // Send outbound messages via nostr
-                Some(outbound) = self.outbound_rx.recv() => {
-                    if let Err(e) = self.nostr.send_message(outbound.peer, outbound.message).await {
-                        tracing::error!("Failed to send message: {}", e);
-                    }
-                }
+            // Handle disputes
+            while let Some(dispute) = self.nostr.try_recv_dispute() {
+                self.handle_dispute(dispute).await;
+            }
 
-                // Short timeout to allow periodic tasks to run
-                _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
-                    // Just a short sleep to yield control and allow periodic checks
+            // Handle responses (for auto-recording attestations)
+            while let Some(response) = self.nostr.try_recv_response() {
+                self.handle_ledger_response(response).await;
+            }
+
+            // Handle ledger updates (validate and auto-dispute on invalid)
+            while let Some(update) = self.nostr.try_recv_ledger_update() {
+                self.handle_ledger_update(update).await;
+            }
+
+            // Check for outbound messages (non-blocking)
+            while let Ok(outbound) = self.outbound_rx.try_recv() {
+                if let Err(e) = self.nostr.send_message(outbound.peer, outbound.message).await {
+                    tracing::error!("Failed to send message: {}", e);
                 }
             }
         }
@@ -646,16 +644,8 @@ impl Node {
             "deposit_open" => self.process_deposit_open_request(&request).await,
             "make_offer" => self.process_make_offer_request(&request).await,
             "withdraw" => self.process_withdraw_request(&request).await,
-            "transfer_lock" => {
-                // Reload ledgers to ensure we have latest deposits
-                self.handler.reload_ledgers();
-                self.process_transfer_lock_request(&request).await
-            }
-            "transfer_complete" => {
-                // Reload ledgers to ensure we have latest state
-                self.handler.reload_ledgers();
-                self.process_transfer_complete_request(&request).await
-            }
+            "transfer_lock" => self.process_transfer_lock_request(&request).await,
+            "transfer_complete" => self.process_transfer_complete_request(&request).await,
             "collateral_lock" => self.process_collateral_lock_request(&request).await,
             "custody_transfer_sign" => self.process_custody_transfer_sign_request(&request).await,
             "confiscation_sign" => self.process_confiscation_sign_request(&request).await,
@@ -5508,8 +5498,8 @@ impl Node {
 
         // Poll for response while processing Nostr events
         // We need to run a mini event loop to receive the response
-        // Use 15 second timeout to allow for network delays
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        // Use 3 second timeout for fast operations (regtest/testing)
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
         let mut rx = rx;
 
         loop {
@@ -5547,6 +5537,11 @@ impl Node {
                     // This prevents deadlock where A waits for B while B waits for A
                     // Safe because processing a co-sign request just signs and responds,
                     // it doesn't trigger another sign_and_broadcast
+                    //
+                    // Non-cosign requests (e.g. transfer_lock, transfer_complete) that
+                    // arrive while we wait are collected and re-queued so the main loop
+                    // processes them after cosign completes — not silently dropped.
+                    let mut deferred_requests = Vec::new();
                     while let Some(request) = self.nostr.try_recv_request() {
                         if request.action == "cosign_update" {
                             // Skip our own requests
@@ -5572,8 +5567,14 @@ impl Node {
                                     tracing::debug!("Failed to send co-sign response: {}", e);
                                 }
                             }
+                        } else {
+                            // Defer non-cosign requests so the main loop can process them
+                            deferred_requests.push(request);
                         }
-                        // Non-cosign requests will be processed after we exit this loop
+                    }
+                    // Re-queue deferred requests for the main run loop to process
+                    for req in deferred_requests {
+                        self.nostr.queue_request(req);
                     }
                 }
 
@@ -5582,7 +5583,7 @@ impl Node {
                     let mut pending = self.pending_cosign_requests.lock().unwrap();
                     pending.remove(&request_id);
                     metrics::set_pending_cosign_requests(pending.len());
-                    return Err(Error::Protocol("Co-sign request timed out after 15 seconds".to_string()));
+                    return Err(Error::Protocol("Co-sign request timed out after 3 seconds".to_string()));
                 }
             }
         }
@@ -5632,8 +5633,8 @@ impl Node {
             &hex::encode(&offer.offer_id[..4]),
         );
 
-        // Poll for response - use 10 second timeout
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        // Poll for response - use 3 second timeout for fast operations
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
 
         loop {
             tokio::select! {
@@ -5731,7 +5732,7 @@ impl Node {
 
                 // Timeout check
                 _ = tokio::time::sleep_until(deadline) => {
-                    return Err(Error::Protocol("Co-signature required but failed: timeout after 10 seconds".to_string()));
+                    return Err(Error::Protocol("Co-signature required but failed: timeout after 3 seconds".to_string()));
                 }
             }
         }

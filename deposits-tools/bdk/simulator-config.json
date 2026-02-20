@@ -1,0 +1,5 @@
+{
+  "payment_interval": 0.5,
+  "max_concurrent": 4,
+  "paused": false
+}

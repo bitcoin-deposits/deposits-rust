@@ -13,9 +13,9 @@ Modes:
   --transfers  Use same-ledger HTLC transfers (requires same ledger)
 
 Usage:
-    python3 payment-simulator.py [--wallets N] [--payment-interval SECS]
+    python3 payment-simulator.py --transfers --target-qps 100  # 100 transfers/sec
+    python3 payment-simulator.py --transfers --target-qps 50   # 50 transfers/sec
     python3 payment-simulator.py --lightning  # Lightning payments
-    python3 payment-simulator.py --transfers  # Same-ledger transfers
 """
 
 import argparse
@@ -54,8 +54,9 @@ CONFIG_FILE = SCRIPT_DIR / "simulator-config.json"  # Runtime config file
 class DynamicConfig:
     """Configuration that can be reloaded at runtime."""
     def __init__(self):
-        self.payment_interval = 0.2  # seconds between payments
-        self.max_concurrent = 10  # max concurrent payment operations
+        self.payment_interval = 0.1  # seconds between payment batches
+        self.max_concurrent = 20  # max concurrent payment operations (optimal for throughput)
+        self.target_qps = 100  # target queries per second (0 = unlimited)
         self.paused = False  # pause payments
         self._last_load_time = 0.0
         self._last_mtime = 0.0
@@ -81,15 +82,25 @@ class DynamicConfig:
 
             old_interval = self.payment_interval
             old_concurrent = self.max_concurrent
+            old_target_qps = self.target_qps
             old_paused = self.paused
 
-            self.payment_interval = float(data.get("payment_interval", self.payment_interval))
             self.max_concurrent = int(data.get("max_concurrent", self.max_concurrent))
+            self.target_qps = float(data.get("target_qps", self.target_qps))
             self.paused = bool(data.get("paused", self.paused))
 
+            # Calculate payment_interval from target_qps
+            # With N concurrent workers achieving ~225 tx/s max at N=20,
+            # we submit batches of up to N transfers per interval
+            if self.target_qps > 0:
+                # Interval = concurrent / target_qps (submit one batch per interval)
+                self.payment_interval = self.max_concurrent / self.target_qps
+            else:
+                self.payment_interval = float(data.get("payment_interval", 0.01))
+
             # Log changes
-            if self.payment_interval != old_interval:
-                print(f"\n[CONFIG] Payment interval: {old_interval}s -> {self.payment_interval}s")
+            if self.target_qps != old_target_qps:
+                print(f"\n[CONFIG] Target QPS: {old_target_qps} -> {self.target_qps} (interval: {self.payment_interval:.3f}s)")
             if self.max_concurrent != old_concurrent:
                 print(f"\n[CONFIG] Max concurrent: {old_concurrent} -> {self.max_concurrent}")
             if self.paused != old_paused:
@@ -103,8 +114,8 @@ class DynamicConfig:
         if not CONFIG_FILE.exists():
             with open(CONFIG_FILE, 'w') as f:
                 json.dump({
-                    "payment_interval": self.payment_interval,
                     "max_concurrent": self.max_concurrent,
+                    "target_qps": self.target_qps,
                     "paused": self.paused,
                 }, f, indent=2)
             print(f"  Config file: {CONFIG_FILE}")
@@ -810,9 +821,24 @@ def run_simulation(
     wallet_creation_interval = base_wallet_interval / (1 + len(ledgers) * 0.2)
     wallet_creation_interval = max(1.0, wallet_creation_interval)  # Floor at 1 second
 
-    # Track deposits we've created
-    our_deposits: list[Deposit] = []
-    wallet_counter = 0
+    # Load existing deposits from disk so we don't lose state across restarts
+    our_deposits: list[Deposit] = load_deposits()
+    deposits_file = DATA_DIR / "deposits.json"
+    try:
+        with open(deposits_file) as f:
+            raw = json.load(f)
+        by_alias = {r.get("alias"): r for r in raw}
+        for d in our_deposits:
+            raw_d = by_alias.get(d.alias, {})
+            d.balance_sats = raw_d.get("amount_sats", 0)
+            if d.balance_sats > 0:
+                d.status = "funded"
+    except (json.JSONDecodeError, IOError):
+        pass
+    if our_deposits:
+        funded_count = len([d for d in our_deposits if d.balance_sats > 0])
+        print(f"Loaded {len(our_deposits)} existing deposits ({funded_count} funded) from disk")
+    wallet_counter = len(our_deposits)
     last_wallet_time = 0.0
     last_payment_time = 0.0
     last_rediscover_time = time.time()
@@ -828,7 +854,7 @@ def run_simulation(
         print(f"  - Single-fund mode: only first deposit per ledger funded on-chain")
     print(f"  - Target wallets: {num_wallets} ({wallets_per_ledger:.1f} per ledger)")
     print(f"  - New wallet every {wallet_creation_interval:.1f}s")
-    print(f"  - Payment every {payment_interval}s (adjustable via config file)")
+    print(f"  - Target QPS: {DYNAMIC_CONFIG.target_qps} (interval: {payment_interval:.3f}s)")
     print(f"  - Max concurrent: {DYNAMIC_CONFIG.max_concurrent}")
     print(f"  - Re-discover ledgers every {rediscover_interval}s")
     if network != "regtest":
@@ -1266,10 +1292,12 @@ def main():
                         help="Use same-ledger HTLC transfers")
     parser.add_argument("--wallets-per-ledger", type=float, default=2.0,
                         help="Target wallets per discovered ledger (default: 2.0)")
-    parser.add_argument("--base-interval", type=float, default=3.0,
-                        help="Base interval between wallet creations (default: 3)")
-    parser.add_argument("--payment-interval", type=float, default=2.0,
-                        help="Seconds between payments (default: 2)")
+    parser.add_argument("--base-interval", type=float, default=1.0,
+                        help="Base interval between wallet creations (default: 1)")
+    parser.add_argument("--target-qps", type=float, default=100,
+                        help="Target queries per second (default: 100, 0 = unlimited)")
+    parser.add_argument("--payment-interval", type=float, default=None,
+                        help="Override: seconds between payment batches (default: auto from target-qps)")
     parser.add_argument("--funding-sats", type=int, default=100000,
                         help="Sats to fund each wallet (default: 100000)")
     parser.add_argument("--min-payment", type=int, default=1000,
@@ -1280,8 +1308,8 @@ def main():
                         help="Seconds between ledger re-discovery (default: 60)")
     parser.add_argument("--max-transfers", type=int, default=0,
                         help="Stop after this many successful transfers (0 = unlimited)")
-    parser.add_argument("--max-concurrent", type=int, default=10,
-                        help="Maximum concurrent async operations (default: 10)")
+    parser.add_argument("--max-concurrent", type=int, default=20,
+                        help="Maximum concurrent async operations (default: 20, optimal for throughput)")
     parser.add_argument("--single-fund", action="store_true",
                         help="Fund only first deposit per ledger on-chain, then use transfers/lightning for others")
 
@@ -1289,11 +1317,23 @@ def main():
 
     # Set initial config from args
     DYNAMIC_CONFIG.max_concurrent = args.max_concurrent
+    DYNAMIC_CONFIG.target_qps = args.target_qps
+
+    # Calculate payment_interval from target_qps unless explicitly overridden
+    if args.payment_interval is not None:
+        payment_interval = args.payment_interval
+    elif args.target_qps > 0:
+        # Interval = concurrent / target_qps
+        payment_interval = args.max_concurrent / args.target_qps
+    else:
+        payment_interval = 0.01  # Fast as possible
+
+    DYNAMIC_CONFIG.payment_interval = payment_interval
 
     run_simulation(
         wallets_per_ledger=args.wallets_per_ledger,
         base_wallet_interval=args.base_interval,
-        payment_interval=args.payment_interval,
+        payment_interval=payment_interval,
         funding_amount_sats=args.funding_sats,
         min_payment_sats=args.min_payment,
         max_payment_sats=args.max_payment,

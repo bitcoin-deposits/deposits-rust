@@ -23,6 +23,9 @@ lightning-transaction-sync = { path = "../rust-lightning/lightning-transaction-s
 lightning-liquidity = { path = "../rust-lightning/lightning-liquidity" }
 lightning-macros = { path = "../rust-lightning/lightning-macros" }
 
+# Use nostr-sdk-performance fork with skip-verification and skip-database by default
+nostr-relay-pool = { path = "nostr-sdk-performance/nostr-relay-pool" }
+
 [patch."https://github.com/lightningdevkit/rust-lightning"]
 lightning = { path = "../rust-lightning/lightning" }
 lightning-types = { path = "../rust-lightning/lightning-types" }

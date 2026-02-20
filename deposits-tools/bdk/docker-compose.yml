@@ -20,21 +20,23 @@
 #   Grafana:    http://localhost:3010 (admin/admin)
 
 services:
-  # Strfry Nostr relay for peer messaging
+  # Strfry Nostr relay for peer messaging (low-latency fork with 1ms debounce)
   nostr-relay:
-    image: dockurr/strfry:latest
+    image: strfry-performance:latest
     container_name: bdk-nostr-relay
+    command: ["relay", "--config", "/app/strfry.conf"]
     ports:
       - "7778:7777"
     volumes:
       - bdk_nostr_data:/app/strfry-db
+      - ../../strfry-performance/strfry.conf:/app/strfry.conf:ro
       - ../permissive-write-policy.py:/app/write-policy.py:ro
     environment:
       - STRFRY_BIND=0.0.0.0:7777
     networks:
       - bdk_network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:7777"]
+      test: ["CMD", "curl", "-sf", "http://localhost:7777"]
       interval: 10s
       timeout: 5s
       retries: 3

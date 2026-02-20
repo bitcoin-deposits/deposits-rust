@@ -359,7 +359,7 @@ async fn discover(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     let secret_key = derive_secret_key(&config.seed, config.network)?;
-    let transport = NostrTransportBuilder::new(secret_key)
+    let mut transport = NostrTransportBuilder::new(secret_key)
         .relay(&config.relays[0])
         .build()
         .await?;
@@ -482,7 +482,7 @@ async fn ledger_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     }
 
     let secret_key = derive_secret_key(&config.seed, config.network)?;
-    let transport = NostrTransportBuilder::new(secret_key)
+    let mut transport = NostrTransportBuilder::new(secret_key)
         .relay(&config.relays[0])
         .build()
         .await?;
@@ -653,7 +653,7 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
     // Also derive the nostr identity key at index 0 for signing requests
     let nostr_key = derive_secret_key(&config.seed, config.network)?;
 
-    let transport = NostrTransportBuilder::new(nostr_key)
+    let mut transport = NostrTransportBuilder::new(nostr_key)
         .relay(&config.relays[0])
         .build()
         .await?;
@@ -719,53 +719,22 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     println!("  Request ID: {}...", &open_request_id[..16]);
 
-    // Wait for deposit_open response
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-    let max_attempts = 15;
-    let poll_interval = std::time::Duration::from_secs(2);
-    let mut deposit_opened = false;
-
-    for _attempt in 1..=max_attempts {
-        tokio::time::sleep(poll_interval).await;
-
-        let responses = match transport.fetch_responses_since(
-            nostr_sdk::Timestamp::now() - 60
-        ).await {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-
-        print!(".");
-        std::io::stdout().flush().ok();
-
-        for response in responses {
-            if response.request_id == open_request_id {
-                println!();
-                if response.success {
-                    println!("  Deposit account created!");
-                    deposit_opened = true;
+    // Wait for deposit_open response using real-time subscription
+    match transport.wait_for_response(&open_request_id, 30000).await {
+        Ok(response) => {
+            if response.success {
+                println!("  Deposit account created!");
+            } else {
+                let error = response.error.as_deref().unwrap_or("Unknown error");
+                // If deposit already exists, that's fine - continue to create offer
+                if error.contains("already exists") || error.contains("Deposit already") {
+                    println!("  Deposit account already exists, continuing...");
                 } else {
-                    let error = response.error.as_deref().unwrap_or("Unknown error");
-                    // If deposit already exists, that's fine - continue to create offer
-                    if error.contains("already exists") || error.contains("Deposit already") {
-                        println!("  Deposit account already exists, continuing...");
-                        deposit_opened = true;
-                    } else {
-                        return Err(format!("Failed to open deposit: {}", error).into());
-                    }
+                    return Err(format!("Failed to open deposit: {}", error).into());
                 }
-                break;
             }
         }
-
-        if deposit_opened {
-            break;
-        }
-    }
-
-    if !deposit_opened {
-        return Err("Timeout waiting for deposit_open response".into());
+        Err(e) => return Err(format!("Timeout waiting for deposit_open response: {}", e).into()),
     }
 
     // Step 2: Send make_offer request to get a funding address
@@ -792,198 +761,184 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
     println!("  Request ID: {}...", &request_id[..16]);
     println!();
 
-    // Poll for response
+    // Wait for a valid response using real-time subscription
+    // For co-signature validation, we may reject invalid responses and wait for valid ones
     println!("Waiting for operator response...");
 
-    // Give the relay a moment to store and propagate the request
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-    let max_attempts = 30;
-    let poll_interval = std::time::Duration::from_secs(2);
-
-    for attempt in 1..=max_attempts {
-        tokio::time::sleep(poll_interval).await;
-
-        let responses = match transport.fetch_responses_since(
-            nostr_sdk::Timestamp::now() - 120
-        ).await {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("  [Poll {}] Fetch error: {}", attempt, e);
-                continue;
-            }
-        };
-
-        // Show progress
-        print!(".");
-        std::io::stdout().flush().ok();
-
-        for response in responses {
-            if response.request_id == request_id {
-                println!(); // newline after dots
-                if response.success {
-                    if let Some(result) = &response.result {
-                        let address = result.get("funding_address").and_then(|v| v.as_str());
-                        let offer_id_hex = result.get("offer_id").and_then(|v| v.as_str());
-                        let min_sats = result.get("min_sats").and_then(|v| v.as_u64()).unwrap_or(1);
-                        let max_sats = result.get("max_sats").and_then(|v| v.as_u64()).unwrap_or(amount_sats);
-                        let operator_id_str = result.get("operator_id").and_then(|v| v.as_str());
-                        let deadline_block = result.get("deadline_block").and_then(|v| v.as_u64());
-
-                        // Check if co-signature is required
-                        let cosign_required = result.get("cosign_required")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false);
-
-                        if let (Some(address), Some(offer_id_hex)) = (address, offer_id_hex) {
-                            // Verify co-signature if required
-                            if cosign_required {
-                                // Extract co-signature fields
-                                let cosigner_pubkey_str = result.get("cosigner_pubkey").and_then(|v| v.as_str());
-                                let cosigner_ledger_hash_hex = result.get("cosigner_ledger_hash").and_then(|v| v.as_str());
-                                let cosign_signature_hex = result.get("cosign_signature").and_then(|v| v.as_str());
-
-                                if let (Some(cosigner_str), Some(hash_hex), Some(sig_hex), Some(op_str), Some(deadline)) =
-                                    (cosigner_pubkey_str, cosigner_ledger_hash_hex, cosign_signature_hex, operator_id_str, deadline_block)
-                                {
-                                    // Parse the co-signature data
-                                    let offer_id_bytes = match hex::decode(offer_id_hex) {
-                                        Ok(b) if b.len() == 32 => {
-                                            let mut arr = [0u8; 32];
-                                            arr.copy_from_slice(&b);
-                                            arr
-                                        }
-                                        _ => {
-                                            eprintln!("Warning: Invalid offer_id format, rejecting response");
-                                            continue;
-                                        }
-                                    };
-
-                                    let cosigner_pubkey = match PublicKey::from_str(cosigner_str) {
-                                        Ok(pk) => pk,
-                                        Err(_) => {
-                                            eprintln!("Warning: Invalid cosigner_pubkey, rejecting response");
-                                            continue;
-                                        }
-                                    };
-
-                                    let operator_id = match PublicKey::from_str(op_str) {
-                                        Ok(pk) => pk,
-                                        Err(_) => {
-                                            eprintln!("Warning: Invalid operator_id, rejecting response");
-                                            continue;
-                                        }
-                                    };
-
-                                    let member_ledger_hash: [u8; 32] = match hex::decode(hash_hex) {
-                                        Ok(b) if b.len() == 32 => {
-                                            let mut arr = [0u8; 32];
-                                            arr.copy_from_slice(&b);
-                                            arr
-                                        }
-                                        _ => {
-                                            eprintln!("Warning: Invalid cosigner_ledger_hash, rejecting response");
-                                            continue;
-                                        }
-                                    };
-
-                                    let signature: [u8; 64] = match hex::decode(sig_hex) {
-                                        Ok(b) if b.len() == 64 => {
-                                            let mut arr = [0u8; 64];
-                                            arr.copy_from_slice(&b);
-                                            arr
-                                        }
-                                        _ => {
-                                            eprintln!("Warning: Invalid cosign_signature, rejecting response");
-                                            continue;
-                                        }
-                                    };
-
-                                    // Verify the signature
-                                    if !verify_offer_cosignature(
-                                        &ledger_id,
-                                        &offer_id_bytes,
-                                        &operator_id,
-                                        address,
-                                        deadline as u32,
-                                        &cosigner_pubkey,
-                                        &member_ledger_hash,
-                                        &signature,
-                                    ) {
-                                        eprintln!("Warning: Invalid co-signature, rejecting response from rogue operator");
-                                        continue;
-                                    }
-
-                                    // Verify the cosigner is a quorum member
-                                    if !verify_quorum_membership(&transport, &ledger_id, &cosigner_pubkey).await {
-                                        eprintln!("Warning: Cosigner is not a quorum member, rejecting response");
-                                        continue;
-                                    }
-
-                                    println!("  Co-signature verified from quorum member {}...", &cosigner_str[..16.min(cosigner_str.len())]);
-                                } else {
-                                    eprintln!("Warning: Response requires co-signature but missing fields, rejecting");
-                                    continue;
-                                }
-                            }
-
-                            // Save deposit to local storage with alias
-                            let deposits_file = config.data_dir.join("deposits.json");
-                            let mut deposits: Vec<serde_json::Value> = if deposits_file.exists() {
-                                let data = std::fs::read_to_string(&deposits_file)?;
-                                serde_json::from_str(&data).unwrap_or_default()
-                            } else {
-                                Vec::new()
-                            };
-
-                            // Generate auto-alias if none provided
-                            let final_alias = alias.clone().unwrap_or_else(|| {
-                                format!("deposit-{}", deposits.len() + 1)
-                            });
-
-                            deposits.push(serde_json::json!({
-                                "alias": final_alias,
-                                "offer_id": offer_id_hex,
-                                "ledger_id": ledger_id,
-                                "funding_address": address,
-                                "deposit_pubkey": hex::encode(our_pubkey.serialize()),
-                                "key_index": key_index,
-                                "min_sats": min_sats,
-                                "max_sats": max_sats,
-                                "status": "pending",
-                                "created_at": Utc::now().to_rfc3339(),
-                            }));
-                            std::fs::write(&deposits_file, serde_json::to_string_pretty(&deposits)?)?;
-
-                            // Increment and save the key index for next deposit
-                            save_deposit_key_index(&config.data_dir, key_index + 1)?;
-
-                            println!("Deposit '{}' created!", final_alias);
-                            println!();
-                            println!("Fund with {}-{} sats:", min_sats, max_sats);
-                            println!("  {}", address);
-                            return Ok(());
-                        } else {
-                            // Response missing required fields
-                            return Err(format!("Response missing funding_address or offer_id: {:?}", result).into());
-                        }
-                    } else {
-                        return Err("Response missing result data".into());
-                    }
-                } else {
-                    let error = response.error.as_deref().unwrap_or("Unknown error");
-                    return Err(format!("Deposit request failed: {}", error).into());
-                }
-            }
+    let ledger_id_clone = ledger_id.clone();
+    let response = transport.wait_for_valid_response(&request_id, 60000, |response| {
+        // Accept failures immediately (don't wait for more responses)
+        if !response.success {
+            return true;
         }
 
-        print!(".");
-        use std::io::Write;
-        let _ = std::io::stdout().flush();
+        // Check if co-signature validation is needed
+        if let Some(result) = &response.result {
+            let cosign_required = result.get("cosign_required")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            if !cosign_required {
+                return true; // No co-signature needed, accept
+            }
+
+            // Validate co-signature fields
+            let address = result.get("funding_address").and_then(|v| v.as_str());
+            let offer_id_hex = result.get("offer_id").and_then(|v| v.as_str());
+            let operator_id_str = result.get("operator_id").and_then(|v| v.as_str());
+            let deadline_block = result.get("deadline_block").and_then(|v| v.as_u64());
+            let cosigner_pubkey_str = result.get("cosigner_pubkey").and_then(|v| v.as_str());
+            let cosigner_ledger_hash_hex = result.get("cosigner_ledger_hash").and_then(|v| v.as_str());
+            let cosign_signature_hex = result.get("cosign_signature").and_then(|v| v.as_str());
+
+            if let (Some(addr), Some(offer_hex), Some(op_str), Some(deadline),
+                    Some(cosigner_str), Some(hash_hex), Some(sig_hex)) =
+                (address, offer_id_hex, operator_id_str, deadline_block,
+                 cosigner_pubkey_str, cosigner_ledger_hash_hex, cosign_signature_hex)
+            {
+                // Parse and verify co-signature
+                let offer_id_bytes: [u8; 32] = match hex::decode(offer_hex) {
+                    Ok(b) if b.len() == 32 => {
+                        let mut arr = [0u8; 32];
+                        arr.copy_from_slice(&b);
+                        arr
+                    }
+                    _ => {
+                        eprintln!("Warning: Invalid offer_id format, rejecting response");
+                        return false;
+                    }
+                };
+
+                let cosigner_pubkey = match PublicKey::from_str(cosigner_str) {
+                    Ok(pk) => pk,
+                    Err(_) => {
+                        eprintln!("Warning: Invalid cosigner_pubkey, rejecting response");
+                        return false;
+                    }
+                };
+
+                let operator_id = match PublicKey::from_str(op_str) {
+                    Ok(pk) => pk,
+                    Err(_) => {
+                        eprintln!("Warning: Invalid operator_id, rejecting response");
+                        return false;
+                    }
+                };
+
+                let member_ledger_hash: [u8; 32] = match hex::decode(hash_hex) {
+                    Ok(b) if b.len() == 32 => {
+                        let mut arr = [0u8; 32];
+                        arr.copy_from_slice(&b);
+                        arr
+                    }
+                    _ => {
+                        eprintln!("Warning: Invalid cosigner_ledger_hash, rejecting response");
+                        return false;
+                    }
+                };
+
+                let signature: [u8; 64] = match hex::decode(sig_hex) {
+                    Ok(b) if b.len() == 64 => {
+                        let mut arr = [0u8; 64];
+                        arr.copy_from_slice(&b);
+                        arr
+                    }
+                    _ => {
+                        eprintln!("Warning: Invalid cosign_signature, rejecting response");
+                        return false;
+                    }
+                };
+
+                // Verify the signature
+                if !verify_offer_cosignature(
+                    &ledger_id_clone,
+                    &offer_id_bytes,
+                    &operator_id,
+                    addr,
+                    deadline as u32,
+                    &cosigner_pubkey,
+                    &member_ledger_hash,
+                    &signature,
+                ) {
+                    eprintln!("Warning: Invalid co-signature, rejecting response from rogue operator");
+                    return false;
+                }
+
+                // Note: quorum membership check happens after we accept the response
+                // since it requires async call which we can't do in the validator
+                true
+            } else {
+                eprintln!("Warning: Response requires co-signature but missing fields, rejecting");
+                false
+            }
+        } else {
+            true // Accept responses without result (will be handled as error below)
+        }
+    }).await?;
+
+    // Process the accepted response
+    if !response.success {
+        let error = response.error.as_deref().unwrap_or("Unknown error");
+        return Err(format!("Deposit request failed: {}", error).into());
     }
 
+    let result = response.result.as_ref()
+        .ok_or("Response missing result data")?;
+
+    let address = result.get("funding_address").and_then(|v| v.as_str())
+        .ok_or("Response missing funding_address")?;
+    let offer_id_hex = result.get("offer_id").and_then(|v| v.as_str())
+        .ok_or("Response missing offer_id")?;
+    let min_sats = result.get("min_sats").and_then(|v| v.as_u64()).unwrap_or(1);
+    let max_sats = result.get("max_sats").and_then(|v| v.as_u64()).unwrap_or(amount_sats);
+
+    // Verify quorum membership for co-signed responses (async check)
+    let cosign_required = result.get("cosign_required").and_then(|v| v.as_bool()).unwrap_or(false);
+    if cosign_required {
+        if let Some(cosigner_str) = result.get("cosigner_pubkey").and_then(|v| v.as_str()) {
+            if let Ok(cosigner_pubkey) = PublicKey::from_str(cosigner_str) {
+                if !verify_quorum_membership(&transport, &ledger_id, &cosigner_pubkey).await {
+                    return Err("Cosigner is not a quorum member".into());
+                }
+                println!("  Co-signature verified from quorum member {}...", &cosigner_str[..16.min(cosigner_str.len())]);
+            }
+        }
+    }
+
+    // Save deposit to local storage with alias
+    let deposits_file = config.data_dir.join("deposits.json");
+    let mut deposits: Vec<serde_json::Value> = if deposits_file.exists() {
+        let data = std::fs::read_to_string(&deposits_file)?;
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    let final_alias = alias.clone().unwrap_or_else(|| {
+        format!("deposit-{}", deposits.len() + 1)
+    });
+
+    deposits.push(serde_json::json!({
+        "alias": final_alias,
+        "offer_id": offer_id_hex,
+        "ledger_id": ledger_id,
+        "funding_address": address,
+        "deposit_pubkey": hex::encode(our_pubkey.serialize()),
+        "key_index": key_index,
+        "min_sats": min_sats,
+        "max_sats": max_sats,
+        "status": "pending",
+        "created_at": Utc::now().to_rfc3339(),
+    }));
+    std::fs::write(&deposits_file, serde_json::to_string_pretty(&deposits)?)?;
+
+    save_deposit_key_index(&config.data_dir, key_index + 1)?;
+
+    println!("Deposit '{}' created!", final_alias);
     println!();
-    Err("Timeout waiting for operator response".into())
+    println!("Fund with {}-{} sats:", min_sats, max_sats);
+    println!("  {}", address);
+    Ok(())
 }
 
 /// Add funds to an existing deposit
@@ -1059,7 +1014,7 @@ async fn add_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // Use nostr identity key (index 0) for transport signing
     let nostr_key = derive_secret_key(&config.seed, config.network)?;
 
-    let transport = NostrTransportBuilder::new(nostr_key)
+    let mut transport = NostrTransportBuilder::new(nostr_key)
         .relay(&config.relays[0])
         .build()
         .await?;
@@ -1099,50 +1054,31 @@ async fn add_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // Poll for response
     println!("Waiting for operator response...");
 
-    // Give the relay a moment to store and propagate the request
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-    let max_attempts = 30;
-    let poll_interval = std::time::Duration::from_secs(2);
-
-    for _attempt in 1..=max_attempts {
-        tokio::time::sleep(poll_interval).await;
-
-        let responses = transport.fetch_responses_since(
-            nostr_sdk::Timestamp::now() - 120
-        ).await?;
-
-        for response in responses {
-            if response.request_id == request_id {
-                if response.success {
-                    println!("Offer accepted!");
-                    if let Some(result) = &response.result {
-                        if let Some(address) = result.get("funding_address").and_then(|v| v.as_str()) {
-                            println!();
-                            println!("Send {} sats to:", amount_sats);
-                            println!("  {}", address);
-                            println!();
-                            println!("After funding, the deposit will be automatically completed.");
-                        }
-                        if let Some(offer_id) = result.get("offer_id").and_then(|v| v.as_str()) {
-                            println!("Offer ID: {}", offer_id);
-                        }
+    // Wait for response using real-time subscription
+    match transport.wait_for_response(&request_id, 60000).await {
+        Ok(response) => {
+            if response.success {
+                println!("Offer accepted!");
+                if let Some(result) = &response.result {
+                    if let Some(address) = result.get("funding_address").and_then(|v| v.as_str()) {
+                        println!();
+                        println!("Send {} sats to:", amount_sats);
+                        println!("  {}", address);
+                        println!();
+                        println!("After funding, the deposit will be automatically completed.");
                     }
-                    return Ok(());
-                } else {
-                    let error = response.error.as_deref().unwrap_or("Unknown error");
-                    return Err(format!("Offer request failed: {}", error).into());
+                    if let Some(offer_id) = result.get("offer_id").and_then(|v| v.as_str()) {
+                        println!("Offer ID: {}", offer_id);
+                    }
                 }
+                Ok(())
+            } else {
+                let error = response.error.as_deref().unwrap_or("Unknown error");
+                Err(format!("Offer request failed: {}", error).into())
             }
         }
-
-        print!(".");
-        use std::io::Write;
-        let _ = std::io::stdout().flush();
+        Err(e) => Err(format!("Timeout waiting for operator response: {}", e).into())
     }
-
-    println!();
-    Err("Timeout waiting for operator response".into())
 }
 
 /// List all deposits with aliases
@@ -1316,7 +1252,7 @@ async fn sync_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     let secret_key = SecretKey::from_slice(&config.seed)?;
 
     // Connect to relay
-    let transport = NostrTransportBuilder::new(secret_key)
+    let mut transport = NostrTransportBuilder::new(secret_key)
         .relay(&config.relays[0])
         .build()
         .await?;
@@ -1592,7 +1528,7 @@ async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     println!("  To: {}", destination);
     println!();
 
-    let transport = NostrTransportBuilder::new(nostr_key)
+    let mut transport = NostrTransportBuilder::new(nostr_key)
         .relay(&config.relays[0])
         .build()
         .await?;
@@ -1618,49 +1554,29 @@ async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     println!("  Request ID: {}...", &request_id[..16]);
     println!();
 
-    // Poll for response
+    // Wait for response using real-time subscription
     println!("Waiting for operator response...");
 
-    // Give the relay a moment to store and propagate the request
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-    let max_attempts = 30;
-    let poll_interval = std::time::Duration::from_secs(2);
-
-    for _attempt in 1..=max_attempts {
-        tokio::time::sleep(poll_interval).await;
-
-        let responses = transport.fetch_responses_since(
-            nostr_sdk::Timestamp::now() - 120
-        ).await?;
-
-        for response in responses {
-            if response.request_id == request_id {
-                if response.success {
-                    println!("Withdrawal accepted!");
-                    if let Some(result) = &response.result {
-                        if let Some(withdrawal_id) = result.get("withdrawal_id").and_then(|v| v.as_str()) {
-                            println!("  Withdrawal ID: {}", withdrawal_id);
-                        }
-                        if let Some(message) = result.get("message").and_then(|v| v.as_str()) {
-                            println!("  {}", message);
-                        }
+    match transport.wait_for_response(&request_id, 60000).await {
+        Ok(response) => {
+            if response.success {
+                println!("Withdrawal accepted!");
+                if let Some(result) = &response.result {
+                    if let Some(withdrawal_id) = result.get("withdrawal_id").and_then(|v| v.as_str()) {
+                        println!("  Withdrawal ID: {}", withdrawal_id);
                     }
-                    return Ok(());
-                } else {
-                    let error = response.error.as_deref().unwrap_or("Unknown error");
-                    return Err(format!("Withdrawal failed: {}", error).into());
+                    if let Some(message) = result.get("message").and_then(|v| v.as_str()) {
+                        println!("  {}", message);
+                    }
                 }
+                Ok(())
+            } else {
+                let error = response.error.as_deref().unwrap_or("Unknown error");
+                Err(format!("Withdrawal failed: {}", error).into())
             }
         }
-
-        print!(".");
-        use std::io::Write;
-        let _ = std::io::stdout().flush();
+        Err(e) => Err(format!("Timeout waiting for operator response: {}", e).into())
     }
-
-    println!();
-    Err("Timeout waiting for operator response".into())
 }
 
 /// Lock funds for a conditional transfer (HTLC-style)
@@ -1809,7 +1725,7 @@ async fn transfer_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     println!();
 
     // Connect to relay
-    let transport = NostrTransportBuilder::new(nostr_key)
+    let mut transport = NostrTransportBuilder::new(nostr_key)
         .relay(&config.relays[0])
         .build()
         .await?;
@@ -1837,31 +1753,19 @@ async fn transfer_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     println!("  Request ID: {}...", &request_id[..16]);
     println!();
 
-    // Poll for response (fast polling for low latency)
-    let max_attempts = 50;
-    let poll_interval = std::time::Duration::from_millis(100);
-
-    for _attempt in 1..=max_attempts {
-        tokio::time::sleep(poll_interval).await;
-
-        let responses = transport.fetch_responses_since(
-            nostr_sdk::Timestamp::now() - 120
-        ).await?;
-
-        for response in responses {
-            if response.request_id == request_id {
-                if response.success {
-                    println!("  Transfer ID: {}", hex::encode(transfer_id));
-                    return Ok(());
-                } else {
-                    let error = response.error.as_deref().unwrap_or("Unknown error");
-                    return Err(format!("Transfer lock failed: {}", error).into());
-                }
+    // Wait for response using real-time subscription (much faster than polling)
+    match transport.wait_for_response(&request_id, 10000).await {
+        Ok(response) => {
+            if response.success {
+                println!("  Transfer ID: {}", hex::encode(transfer_id));
+                Ok(())
+            } else {
+                let error = response.error.as_deref().unwrap_or("Unknown error");
+                Err(format!("Transfer lock failed: {}", error).into())
             }
         }
+        Err(e) => Err(format!("Timeout waiting for operator response: {}", e).into())
     }
-
-    Err("Timeout waiting for operator response".into())
 }
 
 /// Complete a transfer by revealing the preimage
@@ -1931,7 +1835,7 @@ async fn transfer_complete(args: &[String]) -> Result<(), Box<dyn std::error::Er
 
     // Connect to relay
     let nostr_key = derive_secret_key(&config.seed, config.network)?;
-    let transport = NostrTransportBuilder::new(nostr_key)
+    let mut transport = NostrTransportBuilder::new(nostr_key)
         .relay(&config.relays[0])
         .build()
         .await?;
@@ -1952,31 +1856,19 @@ async fn transfer_complete(args: &[String]) -> Result<(), Box<dyn std::error::Er
     println!("  Request ID: {}...", &request_id[..16]);
     println!();
 
-    // Poll for response (fast polling for low latency)
-    let max_attempts = 50;
-    let poll_interval = std::time::Duration::from_millis(100);
-
-    for _attempt in 1..=max_attempts {
-        tokio::time::sleep(poll_interval).await;
-
-        let responses = transport.fetch_responses_since(
-            nostr_sdk::Timestamp::now() - 120
-        ).await?;
-
-        for response in responses {
-            if response.request_id == request_id {
-                if response.success {
-                    println!("Transfer completed!");
-                    return Ok(());
-                } else {
-                    let error = response.error.as_deref().unwrap_or("Unknown error");
-                    return Err(format!("Transfer complete failed: {}", error).into());
-                }
+    // Wait for response using real-time subscription (much faster than polling)
+    match transport.wait_for_response(&request_id, 10000).await {
+        Ok(response) => {
+            if response.success {
+                println!("Transfer completed!");
+                Ok(())
+            } else {
+                let error = response.error.as_deref().unwrap_or("Unknown error");
+                Err(format!("Transfer complete failed: {}", error).into())
             }
         }
+        Err(e) => Err(format!("Timeout waiting for operator response: {}", e).into())
     }
-
-    Err("Timeout waiting for operator response".into())
 }
 
 /// Create a Lightning invoice for a deposit
@@ -2044,7 +1936,7 @@ async fn make_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     // Use nostr identity key for transport
     let nostr_key = derive_secret_key(&config.seed, config.network)?;
 
-    let transport = NostrTransportBuilder::new(nostr_key)
+    let mut transport = NostrTransportBuilder::new(nostr_key)
         .relay(&config.relays[0])
         .build()
         .await?;
@@ -2065,43 +1957,25 @@ async fn make_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         request_params,
     ).await?;
 
-    // Poll for response
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-    let max_attempts = 30;
-    let poll_interval = std::time::Duration::from_secs(2);
-
-    for _attempt in 1..=max_attempts {
-        tokio::time::sleep(poll_interval).await;
-
-        let responses = transport.fetch_responses_since(
-            nostr_sdk::Timestamp::now() - 120
-        ).await?;
-
-        for response in responses {
-            if response.request_id == request_id {
-                if response.success {
-                    if let Some(result) = &response.result {
-                        if let Some(invoice) = result.get("invoice").and_then(|v| v.as_str()) {
-                            println!();
-                            println!("{}", invoice);
-                            return Ok(());
-                        }
+    // Wait for response using real-time subscription
+    match transport.wait_for_response(&request_id, 60000).await {
+        Ok(response) => {
+            if response.success {
+                if let Some(result) = &response.result {
+                    if let Some(invoice) = result.get("invoice").and_then(|v| v.as_str()) {
+                        println!();
+                        println!("{}", invoice);
+                        return Ok(());
                     }
-                    return Err("Response missing invoice".into());
-                } else {
-                    let error = response.error.as_deref().unwrap_or("Unknown error");
-                    return Err(format!("Invoice request failed: {}", error).into());
                 }
+                Err("Response missing invoice".into())
+            } else {
+                let error = response.error.as_deref().unwrap_or("Unknown error");
+                Err(format!("Invoice request failed: {}", error).into())
             }
         }
-
-        print!(".");
-        std::io::stdout().flush().ok();
+        Err(e) => Err(format!("Timeout waiting for operator response: {}", e).into())
     }
-
-    println!();
-    Err("Timeout waiting for operator response".into())
 }
 
 /// Pay a Lightning invoice from a deposit
@@ -2198,7 +2072,7 @@ async fn pay_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     let msg = bitcoin::secp256k1::Message::from_digest(msg_hash);
     let signature = secp.sign_schnorr(&msg, &keypair);
 
-    let transport = NostrTransportBuilder::new(nostr_key)
+    let mut transport = NostrTransportBuilder::new(nostr_key)
         .relay(&config.relays[0])
         .build()
         .await?;
@@ -2222,43 +2096,25 @@ async fn pay_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         request_params,
     ).await?;
 
-    // Poll for response
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-    let max_attempts = 60; // Longer timeout for LN payments
-    let poll_interval = std::time::Duration::from_secs(2);
-
-    for _attempt in 1..=max_attempts {
-        tokio::time::sleep(poll_interval).await;
-
-        let responses = transport.fetch_responses_since(
-            nostr_sdk::Timestamp::now() - 180
-        ).await?;
-
-        for response in responses {
-            if response.request_id == request_id {
-                if response.success {
-                    println!();
-                    println!("Payment successful!");
-                    if let Some(result) = &response.result {
-                        if let Some(preimage) = result.get("preimage").and_then(|v| v.as_str()) {
-                            println!("  Preimage: {}", preimage);
-                        }
+    // Wait for response using real-time subscription (longer timeout for LN payments)
+    match transport.wait_for_response(&request_id, 120000).await {
+        Ok(response) => {
+            if response.success {
+                println!();
+                println!("Payment successful!");
+                if let Some(result) = &response.result {
+                    if let Some(preimage) = result.get("preimage").and_then(|v| v.as_str()) {
+                        println!("  Preimage: {}", preimage);
                     }
-                    return Ok(());
-                } else {
-                    let error = response.error.as_deref().unwrap_or("Unknown error");
-                    return Err(format!("Payment failed: {}", error).into());
                 }
+                Ok(())
+            } else {
+                let error = response.error.as_deref().unwrap_or("Unknown error");
+                Err(format!("Payment failed: {}", error).into())
             }
         }
-
-        print!(".");
-        std::io::stdout().flush().ok();
+        Err(e) => Err(format!("Timeout waiting for payment confirmation: {}", e).into())
     }
-
-    println!();
-    Err("Timeout waiting for payment confirmation".into())
 }
 
 /// Show transaction history for a deposit
