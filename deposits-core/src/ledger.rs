@@ -1482,6 +1482,42 @@ impl Ledger {
         let export = crate::validation::LedgerExport::from_binary(data)?;
         Self::from_export(export)
     }
+
+    /// Reconstruct a Ledger from a persisted state and update history.
+    ///
+    /// This is used when loading from the append-only JSONL format:
+    /// - First row: LedgerState (the initial/current state)
+    /// - Subsequent rows: SignedLedgerUpdate (each update that was applied)
+    ///
+    /// The state should be the CURRENT state after all updates have been applied.
+    /// This method rebuilds the ledger by verifying the chain and storing history.
+    pub fn reconstruct(
+        initial_state: LedgerState,
+        updates: Vec<SignedLedgerUpdate>,
+    ) -> Self {
+        // Validate and apply each update to reconstruct the state chain
+        // The stored state should already be the final state, but we verify continuity
+        let mut current_hash = initial_state.hash;
+        
+        for update in &updates {
+            // Verify this update continues the chain
+            if update.previous_hash != current_hash {
+                tracing::warn!(
+                    "Update {} has mismatched previous_hash, chain may be corrupted",
+                    update.sequence_number
+                );
+            }
+            // Update current_hash to this update's hash for next iteration
+            current_hash = update.current_hash;
+        }
+        
+        // Return ledger with the final state and all history
+        Self {
+            state: initial_state,
+            role: LedgerRole::Partner, // Default role for reconstructed ledgers
+            history: updates,
+        }
+    }
 }
 
 // ============================================================================

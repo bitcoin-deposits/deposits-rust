@@ -13,6 +13,7 @@ use bitcoin::secp256k1::{PublicKey, SecretKey};
 use deposits_core::error::HandlerError;
 use deposits_core::ledger::Ledger;
 use deposits_core::types::{SignedLedgerUpdate, LedgerState};
+use deposits_core::ledger::LedgerRole;
 use deposits_core::message_validation::{HandlerContext, ValidationContext};
 use deposits_core::validation::{LedgerConformanceValidator, LedgerExport, ValidationReport};
 use deposits_core::messages::DepositsMessage;
@@ -34,11 +35,24 @@ pub struct OutboundMessage {
     pub message: DepositsMessage,
 }
 
-/// Serializable ledger entry for persistence
+/// Serializable ledger entry for persistence (legacy format)
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 struct LedgerEntry {
     ledger_id: String,
     ledger: Ledger,
+}
+
+/// JSONL row for append-only ledger log format
+/// - First line: Role variant (LedgerRole)
+/// - Second line: State variant (current LedgerState)
+/// - Subsequent lines: Update variant (each SignedLedgerUpdate)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+enum LedgerLogRow {
+    Role { role: LedgerRole },
+    State(LedgerState),
+    Update(SignedLedgerUpdate),
 }
 
 /// The main handler for deposits-bdk
@@ -99,8 +113,17 @@ impl DepositsHandler {
         (handler, outbound_rx)
     }
 
-    /// Load ledgers from disk
+    /// Load ledgers from disk (supports both legacy JSON and new JSONL format)
     fn load_ledgers_from_disk(data_dir: &PathBuf) -> HashMap<String, Arc<RwLock<Ledger>>> {
+        // First, check for new JSONL format directory
+        let ledgers_dir = data_dir.join("ledgers");
+        
+        if ledgers_dir.exists() && ledgers_dir.is_dir() {
+            // Load from new JSONL format
+            return Self::load_ledgers_from_jsonl(&ledgers_dir);
+        }
+        
+        // Fall back to legacy JSON format
         let ledgers_file = data_dir.join("ledgers.json");
         if !ledgers_file.exists() {
             return HashMap::new();
@@ -127,38 +150,154 @@ impl DepositsHandler {
             ledgers.insert(entry.ledger_id, Arc::new(RwLock::new(entry.ledger)));
         }
 
-        tracing::debug!("Loaded {} ledgers from disk", ledgers.len());
+        tracing::debug!("Loaded {} ledgers from legacy JSON", ledgers.len());
         ledgers
     }
 
-    /// Save all ledgers to disk
+    /// Load ledgers from new append-only JSONL format
+    /// File: {ledger_id}.jsonl where:
+    /// - First line: LedgerState (type: "State")
+    /// - Subsequent lines: SignedLedgerUpdate (type: "Update")
+    fn load_ledgers_from_jsonl(ledgers_dir: &PathBuf) -> HashMap<String, Arc<RwLock<Ledger>>> {
+        let mut ledgers = HashMap::new();
+        
+        let entries = match fs::read_dir(ledgers_dir) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("Failed to read ledgers directory: {}", e);
+                return ledgers;
+            }
+        };
+        
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+            
+            let Some(ledger_id) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            
+            // Read all lines from the JSONL file
+            let contents = match fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!("Failed to read ledger {}: {}", ledger_id, e);
+                    continue;
+                }
+            };
+            
+            let mut role: Option<LedgerRole> = None;
+            let mut state: Option<LedgerState> = None;
+            let mut updates: Vec<SignedLedgerUpdate> = Vec::new();
+            
+            for line in contents.lines() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                
+                match serde_json::from_str::<LedgerLogRow>(line) {
+                    Ok(LedgerLogRow::Role { role: r }) => {
+                        role = Some(r);
+                    }
+                    Ok(LedgerLogRow::State(s)) => {
+                        state = Some(s);
+                    }
+                    Ok(LedgerLogRow::Update(u)) => {
+                        updates.push(u);
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to parse line in {}: {}", ledger_id, e);
+                    }
+                }
+            }
+            
+            // Reconstruct the Ledger from role + state + updates
+            // Handle backward compatibility: old JSONL files don't have Role line
+            let ledger_role = role.unwrap_or_else(|| {
+                tracing::warn!("Ledger {} missing role in JSONL, defaulting to Partner", ledger_id);
+                LedgerRole::Partner
+            });
+            
+            if let Some(ledger_state) = state {
+                // Create Ledger directly from state (it's already the final state)
+                // History is preserved for audit purposes
+                let ledger = Ledger {
+                    state: ledger_state,
+                    role: ledger_role,
+                    history: updates.clone(),
+                };
+                let update_count = updates.len();
+                ledgers.insert(ledger_id.to_string(), Arc::new(RwLock::new(ledger)));
+                tracing::debug!("Loaded ledger {} with {} updates", ledger_id, update_count);
+            } else {
+                tracing::warn!("Ledger {} missing state", ledger_id);
+            }
+        }
+        
+        tracing::debug!("Loaded {} ledgers from JSONL", ledgers.len());
+        ledgers
+    }
+
+    /// Save all ledgers to disk in append-only JSONL format
+    /// Each ledger gets its own file: {ledger_id}.jsonl
+    /// - First line: LedgerState (current state)
+    /// - Subsequent lines: SignedLedgerUpdate (each update appended)
     fn save_ledgers_to_disk(&self) -> Result<(), String> {
         // Ensure data directory exists
         if !self.data_dir.exists() {
             fs::create_dir_all(&self.data_dir)
                 .map_err(|e| format!("Failed to create data dir: {}", e))?;
         }
+        
+        // Create ledgers subdirectory for JSONL files
+        let ledgers_dir = self.data_dir.join("ledgers");
+        if !ledgers_dir.exists() {
+            fs::create_dir_all(&ledgers_dir)
+                .map_err(|e| format!("Failed to create ledgers dir: {}", e))?;
+        }
 
         let ledgers = self.ledgers.lock().unwrap();
-        let entries: Vec<LedgerEntry> = ledgers
-            .iter()
-            .map(|(ledger_id, ledger_arc)| {
-                let ledger = ledger_arc.read().unwrap();
-                LedgerEntry {
-                    ledger_id: ledger_id.clone(),
-                    ledger: ledger.clone(),
-                }
-            })
-            .collect();
+        let mut saved_count = 0;
 
-        let contents = serde_json::to_string_pretty(&entries)
-            .map_err(|e| format!("Failed to serialize ledgers: {}", e))?;
+        for (ledger_id, ledger_arc) in ledgers.iter() {
+            let ledger = ledger_arc.read().unwrap();
+            
+            // Serialize to JSONL: first line is role, second is state, rest are updates
+            let mut lines = Vec::with_capacity(2 + ledger.history.len());
+            
+            // First line: role
+            let role_row = LedgerLogRow::Role { role: ledger.role };
+            lines.push(serde_json::to_string(&role_row)
+                .map_err(|e| format!("Failed to serialize role: {}", e))?);
+            
+            // Second line: current state
+            let state_row = LedgerLogRow::State(ledger.state.clone());
+            lines.push(serde_json::to_string(&state_row)
+                .map_err(|e| format!("Failed to serialize state: {}", e))?);
+            
+            // Subsequent lines: each update
+            for update in &ledger.history {
+                let update_row = LedgerLogRow::Update(update.clone());
+                lines.push(serde_json::to_string(&update_row)
+                    .map_err(|e| format!("Failed to serialize update: {}", e))?);
+            }
+            
+            // Write to file (append-only in concept, but we rewrite to keep it simple)
+            let ledger_file = ledgers_dir.join(format!("{}.jsonl", ledger_id));
+            let contents = lines.join("\n");
+            fs::write(&ledger_file, contents)
+                .map_err(|e| format!("Failed to write ledger file: {}", e))?;
+            
+            saved_count += 1;
+        }
 
-        let ledgers_file = self.data_dir.join("ledgers.json");
-        fs::write(&ledgers_file, contents)
-            .map_err(|e| format!("Failed to write ledgers file: {}", e))?;
-
-        tracing::info!("Saved {} ledgers to disk", entries.len());
+        if saved_count > 0 {
+            tracing::info!("Saved {} ledgers to JSONL", saved_count);
+        } else {
+            tracing::debug!("No ledgers to save");
+        }
         Ok(())
     }
 
