@@ -1244,7 +1244,9 @@ test_post_recovery_payment() {
 
     # Use deposits-wallet open which includes co-signature verification
     # This will reject Alice's responses (no valid co-signature) and accept Bob/Charlie's
-    local offer_output=$(run_wallet_cmd "bdk-bob" open "$alice_ledger_id" "$fund_amount" \
+    # IMPORTANT: Use bdk-diana (not bdk-bob) as the depositor, because the operator's
+    # watcher filters self-requests by pubkey. The depositor must be a different entity.
+    local offer_output=$(run_wallet_cmd "bdk-diana" open "$alice_ledger_id" "$fund_amount" \
         --alias "deposit_s_recovery" 2>&1)
 
     local funding_address=""
@@ -1297,35 +1299,41 @@ test_post_recovery_payment() {
     mine_blocks 1
     test_pass "Funded deposit_s's offer on-chain"
 
-    # Wait for electrs to index and daemon to auto-complete
+    # Wait for electrs to index, then bump operator to trigger immediate wallet sync
     log_info ""
     log_info "Waiting for daemon to auto-complete deposit..."
-    sleep 8
+    sleep 5
+
+    # Bump the operator to trigger immediate wallet sync and deposit completion
+    bump_operator "$new_custodian" "$alice_ledger_id" >/dev/null 2>&1 || true
+    sleep 5
 
     # The daemon should auto-complete the deposit when it detects funding.
-    # Check the ledger history for DepositAdd operation to verify completion.
+    # Check the ledger history for OnchainCredit operation to verify completion.
+    # Note: The operation is called "OnchainCredit" in ledger history, not "DepositAdd".
     local deposit_completed=false
-    for retry in 1 2 3; do
-        local history_output=$(run_bdk_cmd "$new_custodian" ledger history "$alice_reserves_id" 2>&1)
-        if echo "$history_output" | grep -q "DepositAdd"; then
+    for retry in 1 2 3 4 5; do
+        local history_output=$(run_bdk_cmd "$new_custodian" ledger history "$alice_ledger_id" 2>&1)
+        if echo "$history_output" | grep -q "OnchainCredit.*${fund_amount}000 msat"; then
             deposit_completed=true
             break
         fi
-        sleep 3
+        # Bump again on each retry to trigger sync
+        bump_operator "$new_custodian" "$alice_ledger_id" >/dev/null 2>&1 || true
+        sleep 5
     done
 
     if [ "$deposit_completed" = true ]; then
-        test_pass "deposit_s funded under new custody! (DepositAdd in ledger)"
+        test_pass "deposit_s funded under new custody! (OnchainCredit in ledger)"
     else
-        # Try syncing deposits to check
-        log_info "Checking deposit status via sync..."
-        local sync_output=$(run_wallet_cmd "bdk-bob" sync 2>&1) || true
-        if echo "$sync_output" | grep -q "deposit_s_recovery\|funded\|completed"; then
-            test_pass "deposit_s funded under new custody! (confirmed via sync)"
+        # Check if DepositOpen at least was recorded (offer was created)
+        if echo "$history_output" | grep -q "CustodyAcquire"; then
+            test_fail "deposit_s funding not auto-completed (CustodyAcquire exists but no OnchainCredit)"
         else
             test_fail "deposit_s funding not confirmed in ledger"
-            echo "  History output: $history_output" | head -10
         fi
+        echo "  History output (last 10 entries):"
+        echo "$history_output" | grep "↑" | tail -10
     fi
 
     # Verify the operations in ledger history
@@ -1333,16 +1341,16 @@ test_post_recovery_payment() {
     log_info "Verifying operations in ledger history..."
     local history_output=$(run_bdk_cmd "$new_custodian" ledger history "$alice_reserves_id" 2>&1)
 
-    if echo "$history_output" | grep -q "DepositOffer"; then
-        test_pass "DepositOffer recorded in ledger"
+    if echo "$history_output" | grep -q "DepositOpen"; then
+        test_pass "DepositOpen recorded in ledger"
     else
-        log_warn "DepositOffer not found in history"
+        log_warn "DepositOpen not found in history"
     fi
 
-    if echo "$history_output" | grep -q "OnchainCredit\|DepositCredit"; then
-        test_pass "Deposit credit recorded in ledger"
+    if echo "$history_output" | grep -q "OnchainCredit"; then
+        test_pass "OnchainCredit recorded in ledger"
     else
-        log_warn "Deposit credit not found in history"
+        log_warn "OnchainCredit not found in history"
     fi
 
     log_info ""

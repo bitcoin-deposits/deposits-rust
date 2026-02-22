@@ -720,18 +720,26 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
     println!("  Request ID: {}...", &open_request_id[..16]);
 
     // Wait for deposit_open response using real-time subscription
-    match transport.wait_for_response(&open_request_id, 30000).await {
+    // Use wait_for_valid_response to skip error responses from rogue operators
+    // (they may fail co-signing and return errors before the legitimate operator responds)
+    match transport.wait_for_valid_response(&open_request_id, 30000, |response| {
+        if response.success {
+            return true; // Accept success
+        }
+        let error = response.error.as_deref().unwrap_or("");
+        // Accept "already exists" errors (they're fine to continue with)
+        if error.contains("already exists") || error.contains("Deposit already") {
+            return true;
+        }
+        // Reject other errors and keep waiting for a valid response
+        eprintln!("Warning: Rejecting error response: {}", error);
+        false
+    }).await {
         Ok(response) => {
             if response.success {
                 println!("  Deposit account created!");
             } else {
-                let error = response.error.as_deref().unwrap_or("Unknown error");
-                // If deposit already exists, that's fine - continue to create offer
-                if error.contains("already exists") || error.contains("Deposit already") {
-                    println!("  Deposit account already exists, continuing...");
-                } else {
-                    return Err(format!("Failed to open deposit: {}", error).into());
-                }
+                println!("  Deposit account already exists, continuing...");
             }
         }
         Err(e) => return Err(format!("Timeout waiting for deposit_open response: {}", e).into()),
@@ -767,9 +775,11 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     let ledger_id_clone = ledger_id.clone();
     let response = transport.wait_for_valid_response(&request_id, 60000, |response| {
-        // Accept failures immediately (don't wait for more responses)
+        // Reject error responses from rogue operators and wait for a valid one
         if !response.success {
-            return true;
+            let error = response.error.as_deref().unwrap_or("");
+            eprintln!("Warning: Rejecting error response: {}", error);
+            return false;
         }
 
         // Check if co-signature validation is needed

@@ -218,7 +218,17 @@ impl Node {
 
         // Create handler with data_dir for ledger persistence
         let handler_data_dir = config.data_dir.join("wallet");
-        let (handler, outbound_rx) = DepositsHandler::new(secret_key, wallet.clone(), handler_data_dir);
+        let enable_metrics_emitter = std::env::var("DEPOSITS_ENABLE_METRICS_EMITTER").as_deref() == Ok("1");
+        let (handler, outbound_rx) = DepositsHandler::new(
+            secret_key,
+            wallet.clone(),
+            handler_data_dir,
+            enable_metrics_emitter,
+        );
+
+        // Start periodic deposit metrics emitter if enabled
+        let handler_arc = Arc::new(handler);
+        handler_arc.start_metrics_emitter();
 
         // Load existing deposit offers from disk
         let deposit_offers = Self::load_deposit_offers(&config.data_dir)?;
@@ -239,7 +249,7 @@ impl Node {
             wallet,
             nostr,
             lightning,
-            handler: Arc::new(handler),
+            handler: handler_arc,
             outbound_rx,
             deposit_offers: Mutex::new(deposit_offers),
             withdrawals: Mutex::new(withdrawals),
@@ -617,7 +627,7 @@ impl Node {
 
         // Silently drop operator-only actions if we're not the operator
         // (these are broadcast but only the operator should respond)
-        let operator_only_actions = ["deposit_open", "make_offer", "withdraw", "collateral_lock", "offer_status", "balance_query", "make_invoice", "pay_invoice"];
+        let operator_only_actions = ["deposit_open", "make_offer", "withdraw", "collateral_lock", "offer_status", "balance_query", "make_invoice", "pay_invoice", "transfer_lock", "transfer_complete"];
         if operator_only_actions.contains(&request.action.as_str()) && !self.is_operator_of_ledger(&request.ledger_id) {
             return; // Silent drop - the actual operator will respond
         }
@@ -2931,9 +2941,24 @@ impl Node {
                 let requires_cosign = self.has_quorum_reserves(&resolved_ledger_id);
 
                 if requires_cosign {
-                    // Request co-signature from quorum members
-                    match self.request_offer_cosign(&resolved_ledger_id, &offer).await {
-                        Ok(cosign_result) => {
+                    // Request co-signature from quorum members (retry up to 3 times)
+                    let max_attempts = 3;
+                    let mut cosign_ok = None;
+                    let mut last_err = String::new();
+                    for attempt in 1..=max_attempts {
+                        match self.request_offer_cosign(&resolved_ledger_id, &offer).await {
+                            Ok(result) => { cosign_ok = Some(result); break; }
+                            Err(e) => {
+                                tracing::warn!("Offer cosign attempt {}/{} failed: {}", attempt, max_attempts, e);
+                                last_err = e.to_string();
+                                if attempt < max_attempts {
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                                }
+                            }
+                        }
+                    }
+                    match cosign_ok {
+                        Some(cosign_result) => {
                             let result = serde_json::json!({
                                 "offer_id": hex::encode(&offer.offer_id),
                                 "operator_id": offer.operator_id.to_string(),
@@ -2950,9 +2975,9 @@ impl Node {
                             tracing::info!("Deposit offer created with co-signature: {}...", &hex::encode(&offer.offer_id[..8]));
                             (true, Some(result.to_string()), None)
                         }
-                        Err(e) => {
-                            tracing::warn!("Failed to get co-signature for offer: {}", e);
-                            (false, None, Some(format!("Co-signature required but failed: {}", e)))
+                        None => {
+                            tracing::warn!("Failed to get co-signature for offer after {} attempts: {}", max_attempts, last_err);
+                            (false, None, Some(format!("Co-signature required but failed: {}", last_err)))
                         }
                     }
                 } else {
@@ -4721,6 +4746,17 @@ impl Node {
         for (offer, _) in pending {
             let offer_id = offer.offer_id;
 
+            // Skip offers for ledgers we don't have (e.g., daemon seeing CLI watcher's offers
+            // for imported ledgers in the shared data directory)
+            if self.get_ledger_by_ledger_id(&offer.ledger_id).is_none() {
+                tracing::debug!(
+                    "Skipping offer {}... for unknown ledger {}...",
+                    hex::encode(&offer_id[..8]),
+                    &offer.ledger_id[..16.min(offer.ledger_id.len())]
+                );
+                continue;
+            }
+
             // Check if funded (skip_sync=true since we synced above)
             match self.check_deposit_offer_funding_inner(&offer_id, true) {
                 Ok(Some((txid, amount_sats))) => {
@@ -5470,6 +5506,11 @@ impl Node {
             "message_type": update.message_type,
         });
 
+        // Create notification receiver BEFORE sending the request so we don't miss
+        // any early responses. Each call to create_notification_receiver() creates a
+        // new broadcast::Receiver that only sees events from that point forward.
+        let mut notification_rx = self.nostr.create_notification_receiver();
+
         // Create oneshot channel for response (first responder wins)
         let (tx, rx) = tokio::sync::oneshot::channel();
 
@@ -5521,11 +5562,33 @@ impl Node {
                     }
                 }
 
-                // Process Nostr events to receive the response (fast poll for testing)
-                _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                    // Poll for new events
-                    if let Err(e) = self.nostr.poll_events().await {
-                        tracing::debug!("Poll error: {}", e);
+                // Await the next notification from nostr-sdk's background task.
+                // This replaces the old sleep+drain_notifications approach which was broken:
+                // each call to client.notifications() creates a NEW broadcast::Receiver
+                // starting empty, so try_recv() always returned nothing.
+                //
+                // By creating notification_rx ONCE (before sending the request) and
+                // awaiting recv() here, we properly receive events as they arrive.
+                notif = notification_rx.recv() => {
+                    // Route notification to internal channels
+                    match notif {
+                        Ok(notification) => {
+                            self.nostr.dispatch_notification(notification);
+                            // Drain any additional notifications that arrived
+                            while let Ok(n) = notification_rx.try_recv() {
+                                self.nostr.dispatch_notification(n);
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            // Receiver lagged - some events missed, drain what's available
+                            tracing::warn!("Cosign mini loop notification receiver lagged by {} events", n);
+                            while let Ok(n) = notification_rx.try_recv() {
+                                self.nostr.dispatch_notification(n);
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            tracing::warn!("Cosign mini loop notification channel closed");
+                        }
                     }
 
                     // Process co-sign responses (for our pending request)
@@ -5617,6 +5680,11 @@ impl Node {
             "deadline_block": offer.deadline_block,
         });
 
+        // Create notification receiver BEFORE sending the request so we don't miss
+        // any early responses. Each call to create_notification_receiver() creates a
+        // new broadcast::Receiver that only sees events from that point forward.
+        let mut notification_rx = self.nostr.create_notification_receiver();
+
         // Send the multicast request to quorum members
         let request_id = self.nostr.send_ledger_request(ledger_id, "cosign_offer", params)
             .await
@@ -5638,11 +5706,28 @@ impl Node {
 
         loop {
             tokio::select! {
-                // Process Nostr events to receive the response
-                _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                    // Poll for new events
-                    if let Err(e) = self.nostr.poll_events().await {
-                        tracing::debug!("Poll error: {}", e);
+                // Await the next notification from nostr-sdk's background task.
+                // By creating notification_rx ONCE (before sending the request) and
+                // awaiting recv() here, we properly receive events as they arrive,
+                // unlike poll_events() which creates a new empty receiver each call.
+                notif = notification_rx.recv() => {
+                    match notif {
+                        Ok(notification) => {
+                            self.nostr.dispatch_notification(notification);
+                            // Drain any additional notifications that arrived
+                            while let Ok(n) = notification_rx.try_recv() {
+                                self.nostr.dispatch_notification(n);
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!("Offer cosign mini loop notification receiver lagged by {} events", n);
+                            while let Ok(n) = notification_rx.try_recv() {
+                                self.nostr.dispatch_notification(n);
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            return Err(Error::Protocol("Notification channel closed during offer cosign".to_string()));
+                        }
                     }
 
                     // Check for responses
@@ -5727,6 +5812,7 @@ impl Node {
                                 }
                             }
                         }
+                        // Defer non-cosign_offer requests (will be processed after we exit)
                     }
                 }
 
@@ -7790,7 +7876,102 @@ impl Node {
     /// Complete a deposit offer with co-signing and broadcast.
     ///
     /// This is the async version that handles the full co-signing flow.
+    /// Uses a per-offer lock file to prevent concurrent completion by daemon and CLI.
     pub async fn complete_deposit_offer(
+        &mut self,
+        offer_id: &[u8; 32],
+        funding_txid: String,
+        funding_amount_sats: u64,
+    ) -> Result<u64, Error> {
+        use deposits_core::types::DepositOfferStatus;
+
+        // Per-offer lock to prevent concurrent completion by daemon and CLI.
+        // O_CREAT | O_EXCL is atomic on POSIX filesystems - safe as cross-process advisory lock.
+        let wallet_dir = self.data_dir.join("wallet");
+        let lock_path = wallet_dir.join(format!("completing_{}.lock", hex::encode(offer_id)));
+
+        let got_lock = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)
+        {
+            Ok(_) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Check if the lock is stale (process crashed while holding it)
+                let is_stale = std::fs::metadata(&lock_path)
+                    .and_then(|m| m.modified())
+                    .map(|t| t.elapsed().unwrap_or_default().as_secs() > 60)
+                    .unwrap_or(false);
+
+                if is_stale {
+                    // Remove stale lock and try again
+                    tracing::warn!(
+                        "Removing stale completion lock for deposit {}...",
+                        &hex::encode(offer_id)[..16]
+                    );
+                    let _ = std::fs::remove_file(&lock_path);
+                    match std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&lock_path)
+                    {
+                        Ok(_) => true,
+                        Err(_) => false, // Another process grabbed it immediately
+                    }
+                } else {
+                    // Another process is actively completing this - wait for it to finish
+                    tracing::info!(
+                        "Deposit {}... completion already in progress, waiting up to 15s",
+                        &hex::encode(offer_id)[..16]
+                    );
+                    for _ in 0..30 {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                        if !lock_path.exists() {
+                            break;
+                        }
+                    }
+                    // Reload and return the other process's result
+                    self.reload_deposit_offers();
+                    let offers = self.deposit_offers.lock().unwrap();
+                    return match offers.get(offer_id) {
+                        Some((_, DepositOfferStatus::Completed { amount_sats, .. })) => {
+                            tracing::info!(
+                                "Deposit completed by concurrent process: {} sats",
+                                amount_sats
+                            );
+                            Ok(*amount_sats * 1000)
+                        }
+                        Some((_, status)) => Err(Error::Protocol(format!(
+                            "Waited for concurrent deposit completion but status is {:?}",
+                            status
+                        ))),
+                        None => Err(Error::OfferNotFound),
+                    };
+                }
+            }
+            Err(e) => {
+                // Lock creation failed for unexpected reason - proceed without lock
+                tracing::warn!("Failed to create deposit completion lock: {}", e);
+                false
+            }
+        };
+
+        // Reload offer status from disk to catch any completions just before we got the lock
+        self.reload_deposit_offers();
+
+        // Run the actual completion logic
+        let result = self.do_complete_deposit_offer(offer_id, funding_txid, funding_amount_sats).await;
+
+        // Release lock regardless of result
+        if got_lock {
+            let _ = std::fs::remove_file(&lock_path);
+        }
+
+        result
+    }
+
+    /// Inner completion logic, called with the per-offer lock held.
+    async fn do_complete_deposit_offer(
         &mut self,
         offer_id: &[u8; 32],
         funding_txid: String,
@@ -7802,7 +7983,12 @@ impl Node {
         let (offer, status) = self.get_deposit_offer(offer_id)
             .ok_or(Error::OfferNotFound)?;
 
-        // Check offer is in correct state
+        // Check offer is in correct state.
+        // If already Completed (another process finished just before we got the lock), return its result.
+        if let DepositOfferStatus::Completed { amount_sats, .. } = &status {
+            tracing::info!("Deposit already completed (detected after reload): {} sats", amount_sats);
+            return Ok(*amount_sats * 1000);
+        }
         if !matches!(status, DepositOfferStatus::Pending) {
             return Err(Error::Protocol(format!(
                 "Deposit offer not in Pending state: {:?}",

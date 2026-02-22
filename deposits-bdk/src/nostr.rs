@@ -1400,10 +1400,11 @@ impl NostrTransport {
     ) -> Result<Vec<deposits_core::SignedLedgerUpdate>, Error> {
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
+        // Use tag `d` to match broadcast_ledger_update which publishes with tag `d`
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_UPDATE))
             .custom_tag(
-                SingleLetterTag::lowercase(Alphabet::L),
+                SingleLetterTag::lowercase(Alphabet::D),
                 [ledger_id],
             );
 
@@ -1585,6 +1586,10 @@ impl NostrTransport {
             }
         }
 
+        // Create notification receiver ONCE before the loop to avoid missing events
+        // (each call to client.notifications() creates a new empty receiver)
+        let mut notification_rx = self.client.notifications();
+
         // Wait for notifications until we get a valid response or timeout
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -1592,11 +1597,11 @@ impl NostrTransport {
                 return Err(Error::Nostr("Timeout waiting for valid response".to_string()));
             }
 
-            match tokio::time::timeout(remaining, self.client.notifications().recv()).await {
+            match tokio::time::timeout(remaining, notification_rx.recv()).await {
                 Ok(Ok(notification)) => {
                     self.handle_notification(notification);
 
-                    while let Ok(notification) = self.client.notifications().try_recv() {
+                    while let Ok(notification) = notification_rx.try_recv() {
                         self.handle_notification(notification);
                     }
 
@@ -1606,6 +1611,9 @@ impl NostrTransport {
                             return Ok(response);
                         }
                     }
+                }
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
+                    tracing::warn!("Notification receiver lagged by {} events", n);
                 }
                 Ok(Err(_)) => {
                     return Err(Error::Nostr("Notification channel closed".to_string()));
@@ -1632,6 +1640,9 @@ impl NostrTransport {
             }
         }
 
+        // Create notification receiver ONCE before the loop to avoid missing events
+        let mut notification_rx = self.client.notifications();
+
         // Wait for notifications until we get our response or timeout
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -1640,12 +1651,12 @@ impl NostrTransport {
             }
 
             // Wait for next notification with timeout
-            match tokio::time::timeout(remaining, self.client.notifications().recv()).await {
+            match tokio::time::timeout(remaining, notification_rx.recv()).await {
                 Ok(Ok(notification)) => {
                     self.handle_notification(notification);
 
                     // Drain any additional pending notifications
-                    while let Ok(notification) = self.client.notifications().try_recv() {
+                    while let Ok(notification) = notification_rx.try_recv() {
                         self.handle_notification(notification);
                     }
 
@@ -1655,6 +1666,9 @@ impl NostrTransport {
                             return Ok(response);
                         }
                     }
+                }
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
+                    tracing::warn!("Notification receiver lagged by {} events", n);
                 }
                 Ok(Err(_)) => {
                     // Channel closed
@@ -1712,24 +1726,19 @@ impl NostrTransport {
     }
 
     /// Process incoming events (call this in a loop)
-    /// This awaits on the notification channel with a timeout
+    /// This awaits on the notification channel with a timeout.
+    ///
+    /// Note: Each call creates a fresh notification receiver, so events between
+    /// calls may be missed. Callers should use polling as a fallback (e.g.,
+    /// fetch_recent_requests) to catch any missed events.
     pub async fn process_events(&mut self) -> Result<(), Error> {
-        // Wait for a notification with short timeout (100ms)
-        // Short timeout ensures periodic tasks can run frequently while
-        // still allowing instant handling of subscription notifications
         let timeout = tokio::time::Duration::from_millis(100);
         match tokio::time::timeout(timeout, self.client.notifications().recv()).await {
             Ok(Ok(notification)) => {
-                tracing::debug!("Received notification: {:?}", notification);
                 self.handle_notification(notification);
-                // Drain any additional pending notifications without blocking
-                while let Ok(notification) = self.client.notifications().try_recv() {
-                    self.handle_notification(notification);
-                }
             }
             Ok(Err(_)) => {
                 // Channel closed or lagged
-                tracing::debug!("Notification channel error");
             }
             Err(_) => {
                 // Timeout - no notification received, that's ok
@@ -1766,6 +1775,20 @@ impl NostrTransport {
         }
 
         Ok(())
+    }
+
+    /// Create a new broadcast notification receiver.
+    /// Call this BEFORE sending a request to ensure events aren't missed.
+    /// Each call to client.notifications() creates a new receiver that only
+    /// sees events from that point forward — so create once and reuse.
+    pub fn create_notification_receiver(&self) -> tokio::sync::broadcast::Receiver<RelayPoolNotification> {
+        self.client.notifications()
+    }
+
+    /// Route a notification to the appropriate internal channel.
+    /// Use in the cosign mini loop after receiving from a notification_receiver.
+    pub fn dispatch_notification(&self, notification: RelayPoolNotification) {
+        self.handle_notification(notification);
     }
 
     /// Handle a single notification

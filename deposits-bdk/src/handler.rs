@@ -26,6 +26,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::mpsc;
 
 use crate::wallet::Wallet;
+use crate::metrics;
 use crate::Error;
 
 /// Outbound message to be sent via Nostr
@@ -55,6 +56,17 @@ enum LedgerLogRow {
     Update(SignedLedgerUpdate),
 }
 
+/// Request to persist ledgers (sent from handler to persistence thread)
+#[derive(Debug, Clone)]
+enum PersistRequest {
+    /// Request to save all ledgers to disk
+    SaveAll,
+    /// Request to save a specific ledger
+    SaveOne(String),
+    /// Request to shut down persistence thread
+    Shutdown,
+}
+
 /// The main handler for deposits-bdk
 ///
 /// This implements `HandlerContext` to enable all core protocol logic.
@@ -79,6 +91,10 @@ pub struct DepositsHandler {
 
     /// Data directory for persistence
     data_dir: PathBuf,
+
+    /// Enable periodic deposit metrics emission (every 60 seconds)
+    /// Controlled by DEPOSITS_ENABLE_METRICS_EMITTER env var
+    enable_metrics_emitter: bool,
 }
 
 impl DepositsHandler {
@@ -90,6 +106,7 @@ impl DepositsHandler {
         secret_key: SecretKey,
         wallet: Arc<Wallet>,
         data_dir: PathBuf,
+        enable_metrics_emitter: bool,
     ) -> (Self, mpsc::UnboundedReceiver<OutboundMessage>) {
         use bitcoin::secp256k1::Secp256k1;
         let secp = Secp256k1::new();
@@ -108,9 +125,173 @@ impl DepositsHandler {
             outbound_tx,
             wallet,
             data_dir,
+            enable_metrics_emitter,
         };
 
         (handler, outbound_rx)
+    }
+
+    /// Emit deposit balance metrics for monitoring
+    ///
+    /// Computes and emits the following metrics:
+    /// - Total reserves balance across all ledgers (satoshis)
+    /// - Total deposit balance under management (satoshis)
+    /// - Per-ledger balance (satoshis)
+    pub fn emit_deposit_metrics(&self) {
+        let mut reserves_total: u64 = 0;
+        let mut deposits_total: u64 = 0;
+
+        let ledgers = self.ledgers.lock().unwrap();
+
+        for (ledger_id, ledger_arc) in ledgers.iter() {
+            let ledger = ledger_arc.read().unwrap();
+
+            // Get reserves amount from the ledger state (in millisatoshis)
+            let reserves_msats = ledger.state.reserves.amount;
+            // Convert to satoshis (divide by 1000)
+            let reserves_sats = reserves_msats / 1000;
+            reserves_total += reserves_sats;
+
+            // Get deposits amount from the ledger state (HashMap<DepositId, Deposit>)
+            let deposits_msats = ledger.state.deposits.values()
+                .map(|d| d.balance)
+                .sum::<u64>();
+            // Convert to satoshis (divide by 1000)
+            let deposits_sats = deposits_msats / 1000;
+            deposits_total += deposits_sats;
+
+            // Emit per-ledger balance metric
+            let ledger_total = reserves_sats + deposits_sats;
+            metrics::set_ledger_deposit_balance_sats(ledger_id, ledger_total);
+
+            // Emit per-deposit balances
+            for (deposit_id, deposit) in ledger.state.deposits.iter() {
+                let deposit_id_str = hex::encode(deposit_id);
+                let deposit_sats = deposit.balance / 1000;
+                metrics::set_deposit_balance_sats(&deposit_id_str, deposit_sats);
+            }
+        }
+
+        // Emit totals
+        metrics::set_reserves_balance_sats(reserves_total);
+        metrics::set_total_deposit_balance_sats(deposits_total);
+
+        tracing::debug!(
+            "Deposit metrics: reserves={} sats, deposits={} sats",
+            reserves_total,
+            deposits_total
+        );
+    }
+
+    /// Start periodic deposit metrics emission (every 60 seconds)
+    ///
+    /// Only runs if `DEPOSITS_ENABLE_METRICS_EMITTER=1` is set.
+    /// This is a background thread that emits metrics without blocking.
+    pub fn start_metrics_emitter(self: &Arc<Self>) {
+        if !self.enable_metrics_emitter {
+            tracing::debug!("Deposit metrics emitter is disabled");
+            return;
+        }
+
+        tracing::info!("Starting deposit metrics emitter (every 60s)");
+
+        let handler = self.clone();
+
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(60));
+
+                // Emit metrics
+                handler.emit_deposit_metrics();
+            }
+        });
+    }
+
+    /// Save all ledgers to disk.
+    /// Takes a snapshot under the mutex (fast), then writes synchronously.
+    fn save_ledgers_to_disk(&self) -> Result<(), String> {
+        // Take a snapshot while holding the mutex (fast - just clones the data)
+        let ledgers_snapshot = {
+            let ledgers = self.ledgers.lock().unwrap();
+            ledgers.iter()
+                .map(|(id, arc)| {
+                    let ledger = arc.read().unwrap();
+                    (id.clone(), ledger.clone())
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // Perform disk I/O synchronously after releasing the mutex.
+        // This ensures the data is on disk before returning, which is critical
+        // for CLI processes (the caller must not exit before the write completes).
+        Self::save_ledgers_to_disk_impl(ledgers_snapshot, &self.data_dir);
+
+        Ok(())
+    }
+
+    /// Implementation of save_ledgers_to_disk (runs in blocking thread)
+    fn save_ledgers_to_disk_impl(
+        ledgers: Vec<(String, Ledger)>,
+        data_dir: &PathBuf,
+    ) {
+        // Ensure data directory exists
+        if !data_dir.exists() {
+            if let Err(e) = fs::create_dir_all(data_dir) {
+                tracing::error!("Failed to create data dir: {}", e);
+                return;
+            }
+        }
+        
+        // Create ledgers subdirectory for JSONL files
+        let ledgers_dir = data_dir.join("ledgers");
+        if !ledgers_dir.exists() {
+            if let Err(e) = fs::create_dir_all(&ledgers_dir) {
+                tracing::error!("Failed to create ledgers dir: {}", e);
+                return;
+            }
+        }
+
+        let mut saved_count = 0;
+
+        for (ledger_id, ledger) in ledgers.iter() {
+            
+            // Serialize to JSONL: first line is role, second is state, rest are updates
+            let mut lines = Vec::with_capacity(2 + ledger.history.len());
+            
+            // First line: role
+            let role_row = LedgerLogRow::Role { role: ledger.role };
+            if let Ok(line) = serde_json::to_string(&role_row) {
+                lines.push(line);
+            }
+            
+            // Second line: current state
+            let state_row = LedgerLogRow::State(ledger.state.clone());
+            if let Ok(line) = serde_json::to_string(&state_row) {
+                lines.push(line);
+            }
+            
+            // Subsequent lines: each update
+            for update in &ledger.history {
+                let update_row = LedgerLogRow::Update(update.clone());
+                if let Ok(line) = serde_json::to_string(&update_row) {
+                    lines.push(line);
+                }
+            }
+            
+            // Write to file
+            let ledger_file = ledgers_dir.join(format!("{}.jsonl", ledger_id));
+            let contents = lines.join("\n");
+            if let Err(e) = fs::write(&ledger_file, contents) {
+                tracing::error!("Failed to write ledger file {}: {}", ledger_id, e);
+                continue;
+            }
+            
+            saved_count += 1;
+        }
+
+        if saved_count > 0 {
+            tracing::debug!("Persisted {} ledgers", saved_count);
+        }
     }
 
     /// Load ledgers from disk (supports both legacy JSON and new JSONL format)
@@ -238,67 +419,6 @@ impl DepositsHandler {
         
         tracing::debug!("Loaded {} ledgers from JSONL", ledgers.len());
         ledgers
-    }
-
-    /// Save all ledgers to disk in append-only JSONL format
-    /// Each ledger gets its own file: {ledger_id}.jsonl
-    /// - First line: LedgerState (current state)
-    /// - Subsequent lines: SignedLedgerUpdate (each update appended)
-    fn save_ledgers_to_disk(&self) -> Result<(), String> {
-        // Ensure data directory exists
-        if !self.data_dir.exists() {
-            fs::create_dir_all(&self.data_dir)
-                .map_err(|e| format!("Failed to create data dir: {}", e))?;
-        }
-        
-        // Create ledgers subdirectory for JSONL files
-        let ledgers_dir = self.data_dir.join("ledgers");
-        if !ledgers_dir.exists() {
-            fs::create_dir_all(&ledgers_dir)
-                .map_err(|e| format!("Failed to create ledgers dir: {}", e))?;
-        }
-
-        let ledgers = self.ledgers.lock().unwrap();
-        let mut saved_count = 0;
-
-        for (ledger_id, ledger_arc) in ledgers.iter() {
-            let ledger = ledger_arc.read().unwrap();
-            
-            // Serialize to JSONL: first line is role, second is state, rest are updates
-            let mut lines = Vec::with_capacity(2 + ledger.history.len());
-            
-            // First line: role
-            let role_row = LedgerLogRow::Role { role: ledger.role };
-            lines.push(serde_json::to_string(&role_row)
-                .map_err(|e| format!("Failed to serialize role: {}", e))?);
-            
-            // Second line: current state
-            let state_row = LedgerLogRow::State(ledger.state.clone());
-            lines.push(serde_json::to_string(&state_row)
-                .map_err(|e| format!("Failed to serialize state: {}", e))?);
-            
-            // Subsequent lines: each update
-            for update in &ledger.history {
-                let update_row = LedgerLogRow::Update(update.clone());
-                lines.push(serde_json::to_string(&update_row)
-                    .map_err(|e| format!("Failed to serialize update: {}", e))?);
-            }
-            
-            // Write to file (append-only in concept, but we rewrite to keep it simple)
-            let ledger_file = ledgers_dir.join(format!("{}.jsonl", ledger_id));
-            let contents = lines.join("\n");
-            fs::write(&ledger_file, contents)
-                .map_err(|e| format!("Failed to write ledger file: {}", e))?;
-            
-            saved_count += 1;
-        }
-
-        if saved_count > 0 {
-            tracing::info!("Saved {} ledgers to JSONL", saved_count);
-        } else {
-            tracing::debug!("No ledgers to save");
-        }
-        Ok(())
     }
 
     /// Reload ledgers from disk, merging with in-memory state.
@@ -482,9 +602,55 @@ impl DepositsHandler {
 
     /// Persist a specific ledger to disk
     pub fn persist_ledger(&self, ledger_id: &str) -> Result<(), String> {
-        // Save all ledgers to disk (could optimize to save just the specific one)
-        let _ = ledger_id; // TODO: optimize to save just this ledger
-        self.save_ledgers_to_disk()
+        let ledger_clone = {
+            let ledgers = self.ledgers.lock().unwrap();
+            let ledger_arc = ledgers.get(ledger_id)
+                .ok_or_else(|| format!("Ledger not found: {}", ledger_id))?;
+            let ledger = ledger_arc.read().unwrap();
+            (ledger_id.to_string(), ledger.clone())
+        };
+
+        Self::save_single_ledger_to_disk(ledger_clone, &self.data_dir);
+        Ok(())
+    }
+
+    /// Save a single ledger to its JSONL file
+    fn save_single_ledger_to_disk(
+        (ledger_id, ledger): (String, Ledger),
+        data_dir: &PathBuf,
+    ) {
+        let ledgers_dir = data_dir.join("ledgers");
+        if !ledgers_dir.exists() {
+            if let Err(e) = fs::create_dir_all(&ledgers_dir) {
+                tracing::error!("Failed to create ledgers dir: {}", e);
+                return;
+            }
+        }
+
+        let mut lines = Vec::with_capacity(2 + ledger.history.len());
+
+        let role_row = LedgerLogRow::Role { role: ledger.role };
+        if let Ok(line) = serde_json::to_string(&role_row) {
+            lines.push(line);
+        }
+
+        let state_row = LedgerLogRow::State(ledger.state.clone());
+        if let Ok(line) = serde_json::to_string(&state_row) {
+            lines.push(line);
+        }
+
+        for update in &ledger.history {
+            let update_row = LedgerLogRow::Update(update.clone());
+            if let Ok(line) = serde_json::to_string(&update_row) {
+                lines.push(line);
+            }
+        }
+
+        let ledger_file = ledgers_dir.join(format!("{}.jsonl", ledger_id));
+        let contents = lines.join("\n");
+        if let Err(e) = fs::write(&ledger_file, contents) {
+            tracing::error!("Failed to write ledger file {}: {}", ledger_id, e);
+        }
     }
 
     /// Sign the last update in a ledger with our operator key
@@ -767,7 +933,7 @@ mod tests {
         let wallet = create_mock_wallet(&temp_dir);
         let data_dir = temp_dir.path().to_path_buf();
 
-        let (handler, _rx) = DepositsHandler::new(test_secret_key(), wallet, data_dir);
+        let (handler, _rx) = DepositsHandler::new(test_secret_key(), wallet, data_dir, false);
 
         assert_eq!(handler.our_node_id, test_pubkey());
         assert!(handler.ledgers.lock().unwrap().is_empty());
@@ -787,6 +953,7 @@ mod tests {
                 test_secret_key(),
                 wallet.clone(),
                 data_dir.clone(),
+                false,
             );
 
             // Create a ledger (as partner, so we control when it's created)
@@ -809,6 +976,7 @@ mod tests {
                 test_secret_key(),
                 wallet,
                 data_dir,
+                false,
             );
 
             let ledgers = handler.ledgers.lock().unwrap();
@@ -822,7 +990,7 @@ mod tests {
         let wallet = create_mock_wallet(&temp_dir);
         let data_dir = temp_dir.path().to_path_buf();
 
-        let (handler, _rx) = DepositsHandler::new(test_secret_key(), wallet, data_dir);
+        let (handler, _rx) = DepositsHandler::new(test_secret_key(), wallet, data_dir, false);
 
         // our_node_id should return our pubkey
         assert_eq!(handler.our_node_id(), test_pubkey());
@@ -847,7 +1015,7 @@ mod tests {
         let wallet = create_mock_wallet(&temp_dir);
         let data_dir = temp_dir.path().to_path_buf();
 
-        let (handler, _rx) = DepositsHandler::new(test_secret_key(), wallet, data_dir);
+        let (handler, _rx) = DepositsHandler::new(test_secret_key(), wallet, data_dir, false);
 
         // Initially empty
         assert!(handler.drain_events().is_empty());
