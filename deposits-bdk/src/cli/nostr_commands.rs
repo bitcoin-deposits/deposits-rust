@@ -2457,73 +2457,13 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     }
 
     let mut transport = transport;
-    let mut last_poll = std::time::Instant::now();
     let mut last_join_scan = std::time::Instant::now();
-    let mut seen_events: HashSet<String> = HashSet::new();
 
     loop {
-        // Process events from subscription
+        // Process events from subscription (100ms timeout inside process_events)
         if let Err(e) = transport.process_events().await {
             tracing::warn!("Error processing events: {}", e);
         }
-
-        // Poll as fallback for missed subscription events
-        // Use 1 second to balance responsiveness and relay load (subscriptions may not be reliable)
-        if last_poll.elapsed() > std::time::Duration::from_secs(1) {
-            if let Ok(requests) = transport.fetch_recent_requests(60).await {
-                for request in requests {
-                    // Queue requests for our ledger, joined ledgers, or cross-ledger signing requests
-                    let is_our_ledger = request.ledger_id == ledger_id;
-                    let is_joined_ledger = joined_ledger_ids.contains(&request.ledger_id);
-                    let is_cross_ledger_sign = request.action == "custody_transfer_sign"
-                        || request.action == "confiscation_sign";
-                    let should_queue = is_our_ledger || is_joined_ledger || is_cross_ledger_sign;
-
-                    if should_queue && !seen_events.contains(&request.event_id) {
-                        if is_cross_ledger_sign && !is_our_ledger {
-                            println!(
-                                "[{}] Received {} for {}ledger: {}...",
-                                chrono::Utc::now().format("%H:%M:%S"),
-                                request.action,
-                                if is_joined_ledger {
-                                    "joined "
-                                } else {
-                                    "external "
-                                },
-                                &request.ledger_id[..16.min(request.ledger_id.len())]
-                            );
-                        }
-                        // Log queued deposit_open for debugging
-                        if request.action == "deposit_open" {
-                            println!(
-                                "[{}] Queued deposit_open for ledger: {}...",
-                                chrono::Utc::now().format("%H:%M:%S"),
-                                &request.ledger_id[..16.min(request.ledger_id.len())]
-                            );
-                        }
-                        seen_events.insert(request.event_id.clone());
-                        transport.queue_request(request);
-                    } else if !should_queue && !seen_events.contains(&request.event_id) {
-                        // Log filtered requests - use eprintln for visibility since tests run with RUST_LOG=error
-                        if request.action == "deposit_open" || request.action == "collateral_lock" {
-                            eprintln!(
-                                "[WARN] Filtered {}: req_ledger={}..., our_ledger={}..., is_joined={}",
-                                request.action,
-                                &request.ledger_id[..16.min(request.ledger_id.len())],
-                                &ledger_id[..16.min(ledger_id.len())],
-                                is_joined_ledger
-                            );
-                        }
-                    }
-                }
-            }
-            last_poll = std::time::Instant::now();
-        }
-
-        // Note: auto_complete_deposits() is NOT called here.
-        // The daemon (deposits-bdk run) handles deposit auto-completion.
-        // Running it in both processes causes lock file contention, sequence
-        // mismatches, and cosign failures.
 
         // Periodically rescan for new QuorumJoin operations (every 30 seconds)
         if last_join_scan.elapsed() > std::time::Duration::from_secs(30) {
@@ -2553,20 +2493,10 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
             last_join_scan = std::time::Instant::now();
         }
 
-        // Check for requests
-        // Reload ledgers first to pick up changes from CLI (e.g., QuorumJoin)
-        node.handler.reload_ledgers();
-        while let Some(request) = transport.try_recv_request() {
-            // All request handling is done by the daemon (deposits-bdk run).
-            // nostr watch no longer processes requests to avoid dual-writer races
-            // that cause hash chain breaks when two processes independently append
-            // operations with different co-sign nonces at the same sequence number.
-            println!(
-                "[{}] Skipping action '{}' - handled by daemon",
-                chrono::Utc::now().format("%H:%M:%S"),
-                request.action
-            );
-            continue;
+        // Drain requests - all handling is done by the daemon (deposits-bdk run).
+        // nostr watch no longer processes requests to avoid dual-writer races.
+        while let Some(_request) = transport.try_recv_request() {
+            // Silently consumed - daemon handles these
         }
 
         // Check for disputes
