@@ -3846,29 +3846,6 @@ impl Node {
             return (false, None, Some("Invalid signature".to_string()));
         }
 
-        // Pre-check: ensure we can sign before modifying ledger state.
-        // Without this, append_operation_with_block applies state changes (deducting balance)
-        // that are NOT rolled back if sign_and_broadcast fails, silently draining deposit balances.
-        {
-            let quorum_reserves = self.has_quorum_reserves(ledger_id);
-            if quorum_reserves {
-                let has_members = {
-                    let ledgers = self.handler.ledgers.lock().unwrap();
-                    if let Some(ledger_arc) = ledgers.get(ledger_id) {
-                        let ledger = ledger_arc.read().unwrap();
-                        !ledger.state.quorum_members.is_empty()
-                    } else {
-                        false
-                    }
-                };
-                if !has_members {
-                    return (false, None, Some(
-                        "Reserves have been rotated but no quorum members available - cannot sign".to_string()
-                    ));
-                }
-            }
-        }
-
         // Create and append the operation
         let amount_msats = amount * 1000;
         let fee_msats = fee * 1000;
@@ -4007,27 +3984,6 @@ impl Node {
                 }
             } else {
                 return (false, None, Some("Only sha256() completion scripts supported".to_string()));
-            }
-        }
-
-        // Pre-check: ensure we can sign before modifying ledger state
-        {
-            let quorum_reserves = self.has_quorum_reserves(ledger_id);
-            if quorum_reserves {
-                let has_members = {
-                    let ledgers = self.handler.ledgers.lock().unwrap();
-                    if let Some(ledger_arc) = ledgers.get(ledger_id) {
-                        let ledger = ledger_arc.read().unwrap();
-                        !ledger.state.quorum_members.is_empty()
-                    } else {
-                        false
-                    }
-                };
-                if !has_members {
-                    return (false, None, Some(
-                        "Reserves have been rotated but no quorum members available - cannot sign".to_string()
-                    ));
-                }
             }
         }
 
