@@ -126,6 +126,9 @@ DYNAMIC_CONFIG = DynamicConfig()
 # Global payment counter - used to make each invoice unique by adding msat offset
 PAYMENT_COUNTER = 0
 
+# Transfer fee in sats (must match deposits-wallet default: --fee 100)
+TRANSFER_FEE_SATS = 100
+
 # Payment metrics (local counters)
 PAYMENTS_SUCCESS = 0
 PAYMENTS_FAILED = 0
@@ -715,7 +718,7 @@ def transfer_producer(work_queue, our_deposits, deposits_lock, config,
         # Pick sender and receiver under lock
         picked = False
         with deposits_lock:
-            min_balance_needed = max_payment_sats + 1000
+            min_balance_needed = max_payment_sats + TRANSFER_FEE_SATS + 1000
             funded = [d for d in our_deposits if d.balance_sats >= min_balance_needed]
             if funded:
                 sender = random.choice(funded)
@@ -723,10 +726,10 @@ def transfer_producer(work_queue, our_deposits, deposits_lock, config,
                                if d != sender and d.ledger_id == sender.ledger_id and d.deposit_id]
                 if same_ledger:
                     receiver = random.choice(same_ledger)
-                    max_amount = min(max_payment_sats, sender.balance_sats - 1000)
+                    max_amount = min(max_payment_sats, sender.balance_sats - TRANSFER_FEE_SATS - 1000)
                     if max_amount >= min_payment_sats and sender.deposit_id and receiver.deposit_id:
                         amount = random.randint(min_payment_sats, max_amount)
-                        sender.balance_sats -= amount  # Optimistic debit
+                        sender.balance_sats -= (amount + TRANSFER_FEE_SATS)  # Optimistic debit (amount + fee)
                         picked = True
 
         if not picked:
@@ -746,11 +749,11 @@ def transfer_producer(work_queue, our_deposits, deposits_lock, config,
         try:
             work_queue.put(item, timeout=1.0)
         except queue.Full:
-            # Queue full, restore sender balance
+            # Queue full, restore sender balance (amount + fee)
             with deposits_lock:
                 for d in our_deposits:
                     if d.alias == item.sender_alias:
-                        d.balance_sats += item.amount
+                        d.balance_sats += item.amount + TRANSFER_FEE_SATS
                         break
 
 
@@ -1047,13 +1050,13 @@ def run_simulation(
                         with deposits_lock:
                             for d in our_deposits:
                                 if result.success:
-                                    # Transfer succeeded - credit receiver
+                                    # Transfer succeeded - credit receiver (amount only, fee goes to operator)
                                     if d.alias == result.receiver_alias:
                                         d.balance_sats += result.amount
                                 elif not result.locked:
-                                    # Lock failed - safe to restore sender balance
+                                    # Lock failed - safe to restore sender balance (amount + fee)
                                     if d.alias == result.sender_alias:
-                                        d.balance_sats += result.amount
+                                        d.balance_sats += result.amount + TRANSFER_FEE_SATS
                                 # If locked but not success: funds are locked on daemon
                                 # until timeout - don't restore sender balance
                     except queue.Empty:
@@ -1141,10 +1144,10 @@ def run_simulation(
                                                        and d.alias != alias]
                                 if same_ledger_funders:
                                     funder = random.choice(same_ledger_funders)
-                                    funder.balance_sats -= funding_amount_sats  # optimistic debit
+                                    funder.balance_sats -= (funding_amount_sats + TRANSFER_FEE_SATS)  # optimistic debit (amount + fee)
 
                             if funder:
-                                print(f"  Funding via transfer from {funder.alias} ({funder.balance_sats + funding_amount_sats} sats)...")
+                                print(f"  Funding via transfer from {funder.alias} ({funder.balance_sats + funding_amount_sats + TRANSFER_FEE_SATS} sats)...")
                                 transferred, locked = same_ledger_transfer(funder, deposit, funding_amount_sats)
                                 if transferred is not None and transferred > 0:
                                     with deposits_lock:
@@ -1153,9 +1156,9 @@ def run_simulation(
                                         funder.balance_sats += funding_amount_sats - transferred
                                     print(f"  Deposit funded via transfer")
                                 elif not locked:
-                                    # Lock failed - safe to restore optimistic debit
+                                    # Lock failed - safe to restore optimistic debit (amount + fee)
                                     with deposits_lock:
-                                        funder.balance_sats += funding_amount_sats
+                                        funder.balance_sats += funding_amount_sats + TRANSFER_FEE_SATS
                                     print(f"  Transfer funding failed (single-fund mode, not falling back)")
                                 else:
                                     # Lock succeeded but complete failed - funds locked, don't restore
@@ -1180,10 +1183,10 @@ def run_simulation(
                                                            and d.alias != alias]
                                     if same_ledger_funders:
                                         funder = random.choice(same_ledger_funders)
-                                        funder.balance_sats -= funding_amount_sats  # optimistic debit
+                                        funder.balance_sats -= (funding_amount_sats + TRANSFER_FEE_SATS)  # optimistic debit (amount + fee)
 
                                 if funder:
-                                    print(f"  Funding via transfer from {funder.alias} ({funder.balance_sats + funding_amount_sats} sats)...")
+                                    print(f"  Funding via transfer from {funder.alias} ({funder.balance_sats + funding_amount_sats + TRANSFER_FEE_SATS} sats)...")
                                     transferred, locked = same_ledger_transfer(funder, deposit, funding_amount_sats)
                                     if transferred is not None and transferred > 0:
                                         with deposits_lock:
@@ -1194,7 +1197,7 @@ def run_simulation(
                                     elif not locked:
                                         # Lock failed - safe to restore and fall back to faucet
                                         with deposits_lock:
-                                            funder.balance_sats += funding_amount_sats
+                                            funder.balance_sats += funding_amount_sats + TRANSFER_FEE_SATS
                                         print(f"  Transfer funding failed, falling back to faucet...")
                                         if fund_deposit(alias):
                                             mine_block(network)
@@ -1266,7 +1269,7 @@ def run_simulation(
                                                    and d.alias != deposit.alias]
                             if same_ledger_funders:
                                 funder = random.choice(same_ledger_funders)
-                                funder.balance_sats -= funding_amount_sats  # optimistic debit
+                                funder.balance_sats -= (funding_amount_sats + TRANSFER_FEE_SATS)  # optimistic debit (amount + fee)
                         if funder:
                             print(f"\n[{time.strftime('%H:%M:%S')}] Retrying funding {deposit.alias} via transfer from {funder.alias}...")
                             transferred, locked = same_ledger_transfer(funder, deposit, funding_amount_sats)
@@ -1278,7 +1281,7 @@ def run_simulation(
                                 print(f"  Deposit funded via transfer")
                             elif not locked:
                                 with deposits_lock:
-                                    funder.balance_sats += funding_amount_sats  # restore on failure
+                                    funder.balance_sats += funding_amount_sats + TRANSFER_FEE_SATS  # restore on failure
                             else:
                                 print(f"  Transfer funding partially failed (funds locked on daemon)")
 
@@ -1443,7 +1446,7 @@ def run_simulation(
                                     d.balance_sats += result.amount
                             elif not result.locked:
                                 if d.alias == result.sender_alias:
-                                    d.balance_sats += result.amount
+                                    d.balance_sats += result.amount + TRANSFER_FEE_SATS
                 except queue.Empty:
                     break
         else:
