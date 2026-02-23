@@ -1,0 +1,3 @@
+[submodule "strfry-performance"]
+	path = strfry-performance
+	url = https://github.com/hoytech/strfry.git
