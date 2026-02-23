@@ -3940,6 +3940,8 @@ impl Node {
         tracing::info!("Transfer locked: {}", hex::encode(&transfer_id[..8]));
         (true, Some(serde_json::json!({
             "transfer_id": transfer_id_hex,
+            "amount": amount,
+            "fee": fee,
             "message": "Transfer locked successfully"
         }).to_string()), None)
     }
@@ -4098,8 +4100,14 @@ impl Node {
         }
 
         tracing::info!("Transfer completed: {}", hex::encode(&transfer_id[..8]));
+        let (completed_amount, completed_fee) = pending_transfer_backup
+            .as_ref()
+            .map(|p| (p.amount, p.fee))
+            .unwrap_or((0, 0));
         (true, Some(serde_json::json!({
             "transfer_id": transfer_id_hex,
+            "amount": completed_amount,
+            "fee": completed_fee,
             "message": "Transfer completed successfully"
         }).to_string()), None)
     }
