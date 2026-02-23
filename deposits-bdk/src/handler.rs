@@ -431,21 +431,71 @@ impl DepositsHandler {
             });
 
             if let Some(mut ledger_state) = state {
-                // With append-only writes, the State line may be stale.
+                // Sort updates by sequence number (should already be ordered,
+                // but belt-and-suspenders for append-only races).
+                updates.sort_by_key(|u| u.sequence_number);
+
+                // With append-only writes, the State line may be stale — it
+                // captures the full state at the time it was written, but new
+                // operations appended afterwards only have Update lines.
+                // We need to replay those newer operations through
+                // apply_state_changes() so derived fields (quorum_members,
+                // deposits, joined_quorums, etc.) are up to date.
+                let state_sequence = ledger_state.sequence;
+
                 // Update sequence and hash from the last update in history.
                 if let Some(last_update) = updates.last() {
                     ledger_state.sequence = last_update.sequence_number as u64;
                     ledger_state.hash = last_update.current_hash;
                 }
 
-                let ledger = Ledger {
+                let mut ledger = Ledger {
                     state: ledger_state,
                     role: ledger_role,
                     history: updates,
                 };
+
+                // Replay operations that came after the State line.
+                // Collect first to avoid borrow conflict (history is part of ledger).
+                use deposits_core::tlv::TlvDecode;
+                let ops_to_replay: Vec<_> = ledger.history.iter()
+                    .filter(|u| (u.sequence_number as u64) > state_sequence)
+                    .filter_map(|u| {
+                        match deposits_core::messages::LedgerOperation::tlv_decode(&u.message) {
+                            Ok(op) => Some((u.sequence_number, op)),
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Ledger {} seq {}: failed to decode operation for replay: {}",
+                                    ledger_id, u.sequence_number, e
+                                );
+                                None
+                            }
+                        }
+                    })
+                    .collect();
+
+                let mut replayed = 0u64;
+                for (seq, operation) in &ops_to_replay {
+                    if let Err(e) = ledger.apply_state_changes(operation) {
+                        tracing::warn!(
+                            "Ledger {} seq {}: failed to replay state change: {}",
+                            ledger_id, seq, e
+                        );
+                    } else {
+                        replayed += 1;
+                    }
+                }
+
                 let update_count = ledger.history.len();
+                if replayed > 0 {
+                    tracing::info!(
+                        "Loaded ledger {} with {} updates ({} state changes replayed)",
+                        ledger_id, update_count, replayed
+                    );
+                } else {
+                    tracing::debug!("Loaded ledger {} with {} updates", ledger_id, update_count);
+                }
                 ledgers.insert(ledger_id.to_string(), Arc::new(RwLock::new(ledger)));
-                tracing::debug!("Loaded ledger {} with {} updates", ledger_id, update_count);
             } else {
                 tracing::warn!("Ledger {} missing state", ledger_id);
             }
