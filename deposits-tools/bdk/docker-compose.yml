@@ -228,7 +228,10 @@ services:
       - "9100"
       - "--fast-poll"
     environment:
+      # Logs: info level, debug for deposits-bdk
       - RUST_LOG=info,deposits_bdk=debug
+      # Enable periodic deposit balance metrics (every 60s)
+      - DEPOSITS_ENABLE_METRICS_EMITTER=1
     volumes:
       - bdk_alice_data:/data
     depends_on:

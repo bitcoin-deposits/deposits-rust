@@ -22,6 +22,7 @@ import argparse
 import hashlib
 import json
 import os
+import queue
 import random
 import secrets
 import subprocess
@@ -200,6 +201,27 @@ class Deposit:
     balance_sats: int = 0  # Actual confirmed balance from ledger
     deposit_pubkey: str = ""  # 33-byte compressed pubkey in hex
     deposit_id: str = ""  # 16-byte ID in hex (first 16 bytes of SHA256(descriptor))
+
+
+@dataclass
+class TransferWorkItem:
+    """Work item for the transfer producer -> worker queue."""
+    sender_alias: str
+    sender_ledger: str
+    sender_deposit_id: str
+    receiver_alias: str
+    receiver_deposit_id: str
+    amount: int
+
+
+@dataclass
+class TransferResult:
+    """Result from a completed transfer worker."""
+    sender_alias: str
+    receiver_alias: str
+    amount: int
+    success: bool
+    locked: bool = False  # True if daemon locked funds (even if complete failed)
 
 
 def run_wallet(*args, capture: bool = True) -> tuple[int, str, str]:
@@ -632,39 +654,142 @@ def do_async_transfer(s_alias: str, s_ledger: str, s_deposit_id: str,
                       r_alias: str, r_deposit_id: str, amt: int) -> tuple:
     """
     Worker function for async transfers (runs in thread pool).
-    Returns (sender_alias, receiver_alias, amount, success) tuple.
+    Returns (sender_alias, receiver_alias, amount, success, locked) tuple.
+    locked=True means daemon has the funds locked (don't restore sender balance on failure).
     """
     try:
         # Validate inputs before creating deposits
         if not s_deposit_id:
             print(f"  [async] Warning: Sender {s_alias} has no deposit_id", flush=True)
-            return (s_alias, r_alias, amt, False)
+            return (s_alias, r_alias, amt, False, False)
         if not r_deposit_id:
             print(f"  [async] Warning: Receiver {r_alias} has no deposit_id", flush=True)
-            return (s_alias, r_alias, amt, False)
+            return (s_alias, r_alias, amt, False, False)
 
         # Create minimal deposit objects for the transfer
         sender = Deposit(alias=s_alias, ledger_id=s_ledger, deposit_id=s_deposit_id)
         receiver = Deposit(alias=r_alias, ledger_id=s_ledger, deposit_id=r_deposit_id)
 
-        transferred = same_ledger_transfer(sender, receiver, amt)
-        if transferred:
-            return (s_alias, r_alias, transferred, True)
+        transferred, locked = same_ledger_transfer(sender, receiver, amt)
+        if transferred is not None and transferred > 0:
+            return (s_alias, r_alias, transferred, True, True)
         else:
-            return (s_alias, r_alias, amt, False)
+            return (s_alias, r_alias, amt, False, locked)
     except Exception as e:
         print(f"  [async] Error in transfer {s_alias} -> {r_alias}: {e}", flush=True)
-        return (s_alias, r_alias, amt, False)
+        return (s_alias, r_alias, amt, False, False)
 
 
-def same_ledger_transfer(sender: Deposit, receiver: Deposit, amount_sats: int) -> Optional[int]:
+def transfer_producer(work_queue, our_deposits, deposits_lock, config,
+                      min_payment_sats, max_payment_sats, shutdown_event,
+                      consecutive_failures):
+    """
+    Producer thread: generates transfer work items at target QPS rate.
+    Acquires deposits_lock to pick sender/receiver and optimistically debit sender.
+    Puts TransferWorkItem on work_queue (blocks if full = backpressure).
+    Backs off exponentially when consecutive failures are detected.
+    """
+    while not shutdown_event.is_set():
+        # Check pause
+        if config.paused:
+            time.sleep(0.1)
+            continue
+
+        # Failure backoff: when transfers keep failing, slow down to avoid flooding
+        failures = consecutive_failures[0]
+        if failures >= 5:
+            # Exponential backoff: 1s, 2s, 4s, 8s, capped at 15s
+            backoff = min(15.0, 2 ** (failures // 5 - 1))
+            time.sleep(backoff)
+            if shutdown_event.is_set():
+                break
+
+        # Rate control
+        target_qps = config.target_qps
+        if target_qps > 0:
+            time.sleep(1.0 / target_qps)
+
+        if shutdown_event.is_set():
+            break
+
+        # Pick sender and receiver under lock
+        picked = False
+        with deposits_lock:
+            min_balance_needed = max_payment_sats + 1000
+            funded = [d for d in our_deposits if d.balance_sats >= min_balance_needed]
+            if funded:
+                sender = random.choice(funded)
+                same_ledger = [d for d in our_deposits
+                               if d != sender and d.ledger_id == sender.ledger_id and d.deposit_id]
+                if same_ledger:
+                    receiver = random.choice(same_ledger)
+                    max_amount = min(max_payment_sats, sender.balance_sats - 1000)
+                    if max_amount >= min_payment_sats and sender.deposit_id and receiver.deposit_id:
+                        amount = random.randint(min_payment_sats, max_amount)
+                        sender.balance_sats -= amount  # Optimistic debit
+                        picked = True
+
+        if not picked:
+            time.sleep(0.5)  # No valid pair found - avoid tight spin
+            continue
+
+        item = TransferWorkItem(
+            sender_alias=sender.alias,
+            sender_ledger=sender.ledger_id,
+            sender_deposit_id=sender.deposit_id,
+            receiver_alias=receiver.alias,
+            receiver_deposit_id=receiver.deposit_id,
+            amount=amount,
+        )
+
+        # Put on queue (blocks if full - backpressure)
+        try:
+            work_queue.put(item, timeout=1.0)
+        except queue.Full:
+            # Queue full, restore sender balance
+            with deposits_lock:
+                for d in our_deposits:
+                    if d.alias == item.sender_alias:
+                        d.balance_sats += item.amount
+                        break
+
+
+def transfer_worker(work_queue, result_queue):
+    """
+    Worker thread: pulls TransferWorkItems from work_queue, executes transfers,
+    puts TransferResults on result_queue.
+    """
+    while True:
+        item = work_queue.get()
+        if item is None:
+            break  # Shutdown sentinel
+
+        result = do_async_transfer(
+            item.sender_alias, item.sender_ledger, item.sender_deposit_id,
+            item.receiver_alias, item.receiver_deposit_id, item.amount
+        )
+
+        _, _, _, success, locked = result
+        result_queue.put(TransferResult(
+            sender_alias=item.sender_alias,
+            receiver_alias=item.receiver_alias,
+            amount=item.amount,
+            success=success,
+            locked=locked,
+        ))
+
+
+def same_ledger_transfer(sender: Deposit, receiver: Deposit, amount_sats: int) -> tuple[Optional[int], bool]:
     """
     Make a same-ledger HTLC transfer between two deposits.
     1. Generate preimage and hash
     2. Create TransferLock
     3. Complete with preimage
 
-    Returns actual amount transferred on success, None on failure.
+    Returns (amount_transferred, was_locked):
+      (amount, True)  - success: both lock and complete succeeded
+      (None, True)    - lock succeeded but complete failed; funds locked on daemon
+      (None, False)   - lock failed; no funds consumed on daemon
     """
     global TRANSFERS_SUCCESS, TRANSFERS_FAILED, TRANSFERS_VOLUME_SATS
 
@@ -673,14 +798,14 @@ def same_ledger_transfer(sender: Deposit, receiver: Deposit, amount_sats: int) -
         TRANSFERS_FAILED += 1
         if PROMETHEUS_AVAILABLE:
             PROM_TRANSFERS_TOTAL.labels(status='failed').inc()
-        return None
+        return (None, False)
 
     if not receiver.deposit_id:
         print(f"  Warning: Receiver {receiver.alias} has no deposit_id", flush=True)
         TRANSFERS_FAILED += 1
         if PROMETHEUS_AVAILABLE:
             PROM_TRANSFERS_TOTAL.labels(status='failed').inc()
-        return None
+        return (None, False)
 
     # Generate preimage and hash
     preimage = secrets.token_bytes(32)
@@ -708,7 +833,7 @@ def same_ledger_transfer(sender: Deposit, receiver: Deposit, amount_sats: int) -
         TRANSFERS_FAILED += 1
         if PROMETHEUS_AVAILABLE:
             PROM_TRANSFERS_TOTAL.labels(status='failed').inc()
-        return None
+        return (None, False)
 
     print(f"  [async] Transfer locked: {transfer_id[:16]}...", flush=True)
     print(f"  [async] Completing with preimage...", flush=True)
@@ -721,12 +846,14 @@ def same_ledger_transfer(sender: Deposit, receiver: Deposit, amount_sats: int) -
         if PROMETHEUS_AVAILABLE:
             PROM_TRANSFERS_TOTAL.labels(status='success').inc()
             PROM_TRANSFERS_SATS.inc(amount_sats)
-        return amount_sats
+        return (amount_sats, True)
 
+    # Lock succeeded but complete failed - funds are locked on daemon until timeout
+    print(f"  [async] Warning: Transfer lock succeeded but complete failed (funds locked until block {timeout_height})", flush=True)
     TRANSFERS_FAILED += 1
     if PROMETHEUS_AVAILABLE:
         PROM_TRANSFERS_TOTAL.labels(status='failed').inc()
-    return None
+    return (None, True)
 
 
 def mine_block(network: str = "regtest"):
@@ -823,25 +950,27 @@ def run_simulation(
 
     # Load existing deposits from disk so we don't lose state across restarts
     our_deposits: list[Deposit] = load_deposits()
-    deposits_file = DATA_DIR / "deposits.json"
-    try:
-        with open(deposits_file) as f:
-            raw = json.load(f)
-        by_alias = {r.get("alias"): r for r in raw}
-        for d in our_deposits:
-            raw_d = by_alias.get(d.alias, {})
-            d.balance_sats = raw_d.get("amount_sats", 0)
-            if d.balance_sats > 0:
-                d.status = "funded"
-    except (json.JSONDecodeError, IOError):
-        pass
     if our_deposits:
+        # Sync actual balances from ledger for loaded deposits
+        print(f"Loaded {len(our_deposits)} existing deposits, syncing balances...")
+        balances = sync_and_get_balances()
+        for d in our_deposits:
+            if d.alias in balances:
+                d.balance_sats = balances[d.alias]
+                if d.balance_sats > 0:
+                    d.status = "funded"
         funded_count = len([d for d in our_deposits if d.balance_sats > 0])
-        print(f"Loaded {len(our_deposits)} existing deposits ({funded_count} funded) from disk")
+        # Drop deposits that no longer exist in the ledger (balance never returned)
+        missing = [d.alias for d in our_deposits if d.alias not in balances]
+        our_deposits = [d for d in our_deposits if d.alias in balances]
+        print(f"  {funded_count} funded, {len(our_deposits) - funded_count} empty"
+              + (f", {len(missing)} stale (dropped)" if missing else ""))
     wallet_counter = len(our_deposits)
     last_wallet_time = 0.0
     last_payment_time = 0.0
     last_rediscover_time = time.time()
+    last_balance_sync_time = time.time()  # Don't sync immediately on startup
+    last_status_time = 0.0
 
     # Track ledgers that have been funded on-chain (for --single-fund mode)
     onchain_funded_ledgers: set[str] = set()
@@ -854,8 +983,12 @@ def run_simulation(
         print(f"  - Single-fund mode: only first deposit per ledger funded on-chain")
     print(f"  - Target wallets: {num_wallets} ({wallets_per_ledger:.1f} per ledger)")
     print(f"  - New wallet every {wallet_creation_interval:.1f}s")
-    print(f"  - Target QPS: {DYNAMIC_CONFIG.target_qps} (interval: {payment_interval:.3f}s)")
-    print(f"  - Max concurrent: {DYNAMIC_CONFIG.max_concurrent}")
+    if transfers:
+        print(f"  - Target QPS: {DYNAMIC_CONFIG.target_qps} (work queue model)")
+        print(f"  - Worker threads: {DYNAMIC_CONFIG.max_concurrent}")
+    else:
+        print(f"  - Target QPS: {DYNAMIC_CONFIG.target_qps} (interval: {payment_interval:.3f}s)")
+        print(f"  - Max concurrent: {DYNAMIC_CONFIG.max_concurrent}")
     print(f"  - Re-discover ledgers every {rediscover_interval}s")
     if network != "regtest":
         print(f"  - Note: No block mining on {network}")
@@ -863,12 +996,37 @@ def run_simulation(
     print(f"  To adjust rate at runtime, edit: {CONFIG_FILE}")
     print()
 
-    # Thread pool for async payments
-    executor = ThreadPoolExecutor(max_workers=DYNAMIC_CONFIG.max_concurrent)
-    inflight_futures: list[Future] = []
-
     # Lock for deposit balance updates from async operations
     deposits_lock = threading.Lock()
+
+    if transfers:
+        # Work queue model: producer generates work, worker threads execute
+        work_queue = queue.Queue(maxsize=DYNAMIC_CONFIG.max_concurrent * 2)
+        result_queue: queue.Queue[TransferResult] = queue.Queue()
+        shutdown_event = threading.Event()
+        # Shared failure counter: [consecutive_failures]. List used as mutable ref across threads.
+        consecutive_failures = [0]
+
+        # Start worker threads
+        worker_threads = []
+        for i in range(DYNAMIC_CONFIG.max_concurrent):
+            t = threading.Thread(target=transfer_worker, args=(work_queue, result_queue), daemon=True)
+            t.start()
+            worker_threads.append(t)
+
+        # Start producer thread
+        producer_thread = threading.Thread(
+            target=transfer_producer,
+            args=(work_queue, our_deposits, deposits_lock, DYNAMIC_CONFIG,
+                  min_payment_sats, max_payment_sats, shutdown_event,
+                  consecutive_failures),
+            daemon=True,
+        )
+        producer_thread.start()
+    else:
+        # Batch model for lightning/onchain modes
+        executor = ThreadPoolExecutor(max_workers=DYNAMIC_CONFIG.max_concurrent)
+        inflight_futures: list[Future] = []
 
     try:
         while True:
@@ -876,39 +1034,66 @@ def run_simulation(
 
             # Check for config changes
             DYNAMIC_CONFIG.maybe_reload()
-            payment_interval = DYNAMIC_CONFIG.payment_interval
 
-            # Update Prometheus metrics
-            if PROMETHEUS_AVAILABLE:
-                PROM_PAYMENT_INTERVAL.set(payment_interval)
-                PROM_INFLIGHT.set(len([f for f in inflight_futures if not f.done()]))
-
-            # Clean up completed futures and process results
-            still_pending = []
-            for future in inflight_futures:
-                if future.done():
+            if transfers:
+                # Drain result queue and process completed transfers
+                while True:
                     try:
-                        result = future.result()
-                        if result:
-                            sender_alias, receiver_alias, amount, success = result
-                            with deposits_lock:
-                                for d in our_deposits:
-                                    if success:
-                                        # Transfer succeeded: credit receiver (sender already debited)
-                                        if d.alias == receiver_alias:
-                                            d.balance_sats += amount
-                                    else:
-                                        # Transfer failed: restore sender balance
-                                        if d.alias == sender_alias:
-                                            d.balance_sats += amount
-                    except Exception as e:
-                        pass  # Error already logged in the worker
-                else:
-                    still_pending.append(future)
-            inflight_futures = still_pending
+                        result = result_queue.get_nowait()
+                        if result.success:
+                            consecutive_failures[0] = 0  # Reset on any success
+                        else:
+                            consecutive_failures[0] += 1
+                        with deposits_lock:
+                            for d in our_deposits:
+                                if result.success:
+                                    # Transfer succeeded - credit receiver
+                                    if d.alias == result.receiver_alias:
+                                        d.balance_sats += result.amount
+                                elif not result.locked:
+                                    # Lock failed - safe to restore sender balance
+                                    if d.alias == result.sender_alias:
+                                        d.balance_sats += result.amount
+                                # If locked but not success: funds are locked on daemon
+                                # until timeout - don't restore sender balance
+                    except queue.Empty:
+                        break
 
-            # Skip payments if paused
-            if DYNAMIC_CONFIG.paused:
+                # Update Prometheus metrics
+                if PROMETHEUS_AVAILABLE:
+                    PROM_INFLIGHT.set(work_queue.qsize())
+            else:
+                payment_interval = DYNAMIC_CONFIG.payment_interval
+
+                # Update Prometheus metrics
+                if PROMETHEUS_AVAILABLE:
+                    PROM_PAYMENT_INTERVAL.set(payment_interval)
+                    PROM_INFLIGHT.set(len([f for f in inflight_futures if not f.done()]))
+
+                # Clean up completed futures and process results
+                still_pending = []
+                for future in inflight_futures:
+                    if future.done():
+                        try:
+                            result = future.result()
+                            if result:
+                                sender_alias, receiver_alias, amount, success = result
+                                with deposits_lock:
+                                    for d in our_deposits:
+                                        if success:
+                                            if d.alias == receiver_alias:
+                                                d.balance_sats += amount
+                                        else:
+                                            if d.alias == sender_alias:
+                                                d.balance_sats += amount
+                        except Exception as e:
+                            pass  # Error already logged in the worker
+                    else:
+                        still_pending.append(future)
+                inflight_futures = still_pending
+
+            # Skip payments if paused (transfers mode handles pause in producer thread)
+            if not transfers and DYNAMIC_CONFIG.paused:
                 time.sleep(0.1)
                 continue
 
@@ -945,30 +1130,36 @@ def run_simulation(
 
                         if single_fund and not is_first_on_ledger:
                             # Must fund via transfer/lightning - wait for a funder
-                            min_funder_balance = int(funding_amount_sats * 1.1) + 5000
+                            # Optimistically debit funder under lock to prevent producer from
+                            # racing on the same balance
+                            funder = None
+                            with deposits_lock:
+                                min_funder_balance = int(funding_amount_sats * 1.1) + 5000
+                                same_ledger_funders = [d for d in our_deposits
+                                                       if d.ledger_id == ledger_id
+                                                       and d.balance_sats >= min_funder_balance
+                                                       and d.alias != alias]
+                                if same_ledger_funders:
+                                    funder = random.choice(same_ledger_funders)
+                                    funder.balance_sats -= funding_amount_sats  # optimistic debit
 
-                            # Sync balances first
-                            balances = sync_and_get_balances()
-                            for d in our_deposits:
-                                if d.alias in balances:
-                                    d.balance_sats = balances[d.alias]
-
-                            same_ledger_funders = [d for d in our_deposits
-                                                   if d.ledger_id == ledger_id
-                                                   and d.balance_sats >= min_funder_balance
-                                                   and d.alias != alias]
-
-                            if same_ledger_funders:
-                                funder = random.choice(same_ledger_funders)
-                                print(f"  Funding via transfer from {funder.alias} ({funder.balance_sats} sats)...")
-                                transferred = same_ledger_transfer(funder, deposit, funding_amount_sats)
-                                if transferred:
-                                    deposit.status = "funded"
-                                    deposit.balance_sats = transferred
-                                    funder.balance_sats -= transferred
+                            if funder:
+                                print(f"  Funding via transfer from {funder.alias} ({funder.balance_sats + funding_amount_sats} sats)...")
+                                transferred, locked = same_ledger_transfer(funder, deposit, funding_amount_sats)
+                                if transferred is not None and transferred > 0:
+                                    with deposits_lock:
+                                        deposit.status = "funded"
+                                        deposit.balance_sats = transferred
+                                        funder.balance_sats += funding_amount_sats - transferred
                                     print(f"  Deposit funded via transfer")
-                                else:
+                                elif not locked:
+                                    # Lock failed - safe to restore optimistic debit
+                                    with deposits_lock:
+                                        funder.balance_sats += funding_amount_sats
                                     print(f"  Transfer funding failed (single-fund mode, not falling back)")
+                                else:
+                                    # Lock succeeded but complete failed - funds locked, don't restore
+                                    print(f"  Transfer funding partially failed (funds locked on daemon)")
                             else:
                                 print(f"  No same-ledger funders yet, will retry later...")
                                 # Keep deposit but don't fund yet
@@ -978,48 +1169,51 @@ def run_simulation(
                             min_funder_balance = int(funding_amount_sats * 1.1) + 5000
                             funded_deposits = [d for d in our_deposits if d.balance_sats >= min_funder_balance and d.alias != alias]
 
-                            if (lightning or transfers) and funded_deposits and not (single_fund and is_first_on_ledger):
-                                # Sync balances first to get accurate ledger state
-                                balances = sync_and_get_balances()
-                                for d in our_deposits:
-                                    if d.alias in balances:
-                                        d.balance_sats = balances[d.alias]
-
-                                # Re-check with fresh balances
-                                funded_deposits = [d for d in our_deposits if d.balance_sats >= min_funder_balance and d.alias != alias]
-                                if not funded_deposits:
-                                    print(f"  No deposits with sufficient balance after sync, using faucet...")
-
-                            if transfers and funded_deposits and not (single_fund and is_first_on_ledger):
+                            if transfers and not (single_fund and is_first_on_ledger):
                                 # For transfers, funder must be on same ledger
-                                same_ledger_funders = [d for d in funded_deposits if d.ledger_id == ledger_id]
-                                if same_ledger_funders:
-                                    funder = random.choice(same_ledger_funders)
-                                    print(f"  Funding via transfer from {funder.alias} ({funder.balance_sats} sats)...")
-                                    transferred = same_ledger_transfer(funder, deposit, funding_amount_sats)
-                                    if transferred:
-                                        deposit.status = "funded"
-                                        deposit.balance_sats = transferred
-                                        funder.balance_sats -= transferred
+                                # Optimistically debit under lock to prevent producer racing
+                                funder = None
+                                with deposits_lock:
+                                    same_ledger_funders = [d for d in our_deposits
+                                                           if d.ledger_id == ledger_id
+                                                           and d.balance_sats >= min_funder_balance
+                                                           and d.alias != alias]
+                                    if same_ledger_funders:
+                                        funder = random.choice(same_ledger_funders)
+                                        funder.balance_sats -= funding_amount_sats  # optimistic debit
+
+                                if funder:
+                                    print(f"  Funding via transfer from {funder.alias} ({funder.balance_sats + funding_amount_sats} sats)...")
+                                    transferred, locked = same_ledger_transfer(funder, deposit, funding_amount_sats)
+                                    if transferred is not None and transferred > 0:
+                                        with deposits_lock:
+                                            deposit.status = "funded"
+                                            deposit.balance_sats = transferred
+                                            funder.balance_sats += funding_amount_sats - transferred
                                         print(f"  Deposit funded via transfer")
-                                    else:
-                                        # Fall back to faucet
+                                    elif not locked:
+                                        # Lock failed - safe to restore and fall back to faucet
+                                        with deposits_lock:
+                                            funder.balance_sats += funding_amount_sats
                                         print(f"  Transfer funding failed, falling back to faucet...")
                                         if fund_deposit(alias):
                                             mine_block(network)
-                                            deposit.status = "funded"
-                                            deposit.balance_sats = funding_amount_sats
                                             onchain_funded_ledgers.add(ledger_id)
-                                            print(f"  Deposit funded via faucet")
+                                            deposit.status = "confirming"
+                                            deposit.balance_sats = 0
+                                            print(f"  Faucet sent, awaiting daemon confirmation...")
+                                    else:
+                                        # Lock succeeded but complete failed - funds locked, don't restore
+                                        print(f"  Transfer funding partially failed (funds locked on daemon)")
                                 else:
                                     # No same-ledger funders, use faucet
                                     print(f"  No same-ledger funders, using faucet...")
                                     if fund_deposit(alias):
                                         mine_block(network)
-                                        deposit.status = "funded"
-                                        deposit.balance_sats = funding_amount_sats
                                         onchain_funded_ledgers.add(ledger_id)
-                                        print(f"  Deposit funded via faucet")
+                                        deposit.status = "confirming"
+                                        deposit.balance_sats = 0
+                                        print(f"  Faucet sent, awaiting daemon confirmation...")
                             elif lightning and funded_deposits and not (single_fund and is_first_on_ledger):
                                 # Fund via Lightning from existing deposit
                                 funder = random.choice(funded_deposits)
@@ -1033,10 +1227,10 @@ def run_simulation(
                                     print(f"  Lightning funding failed, falling back to faucet...")
                                     if fund_deposit(alias):
                                         mine_block(network)
-                                        deposit.status = "funded"
-                                        deposit.balance_sats = funding_amount_sats
                                         onchain_funded_ledgers.add(ledger_id)
-                                        print(f"  Deposit funded via faucet")
+                                        deposit.status = "confirming"
+                                        deposit.balance_sats = 0
+                                        print(f"  Faucet sent, awaiting daemon confirmation...")
                             else:
                                 # Fund via faucet (on-chain)
                                 # In single-fund mode with multiple wallets, fund first with larger amount
@@ -1048,173 +1242,131 @@ def run_simulation(
                                 if fund_deposit(alias, faucet_amount if single_fund else None):
                                     mine_block(network)
                                     onchain_funded_ledgers.add(ledger_id)
-                                    deposit.status = "funded"
-
-                                    # Wait for balance to appear (daemon auto-completes)
-                                    print(f"  Waiting for balance confirmation...")
-                                    confirmed = False
-                                    for i in range(20):  # Up to 10 seconds (0.5s intervals)
-                                        # Check first, then sleep
-                                        balances = get_balances_local()
-                                        if alias in balances and balances[alias] > 0:
-                                            deposit.balance_sats = balances[alias]
-                                            print(f"  Confirmed: {alias} has {deposit.balance_sats} sats")
-                                            confirmed = True
-                                            break
-                                        if i == 4:
-                                            # Trigger a sync attempt after 2 seconds
-                                            run_wallet("sync")
-                                        time.sleep(0.5)
-                                    if not confirmed:
-                                        # Fallback to expected amount
-                                        deposit.balance_sats = faucet_amount
-                                        print(f"  Using expected amount: {faucet_amount} sats")
+                                    # Don't assume balance - mark as awaiting on-chain confirmation.
+                                    # The periodic confirmation check will set balance_sats and
+                                    # promote to "funded" once the daemon auto-completes the deposit.
+                                    deposit.status = "confirming"
+                                    deposit.balance_sats = 0
+                                    print(f"  Faucet sent, awaiting daemon confirmation...")
 
                 last_wallet_time = now
 
             # In single-fund mode, try to fund unfunded deposits via transfers
             if single_fund and transfers:
-                unfunded = [d for d in our_deposits if d.status == "pending"]
+                with deposits_lock:
+                    unfunded = [d for d in our_deposits if d.status == "pending"]
                 if unfunded:
-                    # Sync balances
-                    balances = sync_and_get_balances()
-                    for d in our_deposits:
-                        if d.alias in balances:
-                            d.balance_sats = balances[d.alias]
-
                     for deposit in unfunded:
-                        min_funder_balance = int(funding_amount_sats * 1.1) + 5000
-                        same_ledger_funders = [d for d in our_deposits
-                                               if d.ledger_id == deposit.ledger_id
-                                               and d.balance_sats >= min_funder_balance
-                                               and d.alias != deposit.alias]
-                        if same_ledger_funders:
-                            funder = random.choice(same_ledger_funders)
+                        funder = None
+                        with deposits_lock:
+                            min_funder_balance = int(funding_amount_sats * 1.1) + 5000
+                            same_ledger_funders = [d for d in our_deposits
+                                                   if d.ledger_id == deposit.ledger_id
+                                                   and d.balance_sats >= min_funder_balance
+                                                   and d.alias != deposit.alias]
+                            if same_ledger_funders:
+                                funder = random.choice(same_ledger_funders)
+                                funder.balance_sats -= funding_amount_sats  # optimistic debit
+                        if funder:
                             print(f"\n[{time.strftime('%H:%M:%S')}] Retrying funding {deposit.alias} via transfer from {funder.alias}...")
-                            transferred = same_ledger_transfer(funder, deposit, funding_amount_sats)
-                            if transferred:
-                                deposit.status = "funded"
-                                deposit.balance_sats = transferred
-                                funder.balance_sats -= transferred
+                            transferred, locked = same_ledger_transfer(funder, deposit, funding_amount_sats)
+                            if transferred is not None and transferred > 0:
+                                with deposits_lock:
+                                    deposit.status = "funded"
+                                    deposit.balance_sats = transferred
+                                    funder.balance_sats += funding_amount_sats - transferred
                                 print(f"  Deposit funded via transfer")
+                            elif not locked:
+                                with deposits_lock:
+                                    funder.balance_sats += funding_amount_sats  # restore on failure
+                            else:
+                                print(f"  Transfer funding partially failed (funds locked on daemon)")
 
-            # Make payments (withdrawals) - submit multiple if we have capacity
-            # Check how many slots are available for more async operations
-            inflight_count = len([f for f in inflight_futures if not f.done()])
-            available_slots = DYNAMIC_CONFIG.max_concurrent - inflight_count
-
-            # Rate limit: only submit new transfers after payment_interval has passed
-            if now - last_payment_time >= payment_interval and len(our_deposits) >= 2 and available_slots > 0:
-                # Find deposits with sufficient balance (need balance > payment + fee)
-                min_balance_needed = max_payment_sats + 1000  # payment + fee buffer
-                funded = [d for d in our_deposits if d.balance_sats >= min_balance_needed]
-
-                # Only sync if we don't have enough funded deposits yet
-                # (avoids constant syncing once Lightning funding is working)
-                if len(funded) < 2:
-                    balances = sync_and_get_balances()
-                    # Update deposit balances from ledger
-                    for d in our_deposits:
-                        if d.alias in balances:
-                            d.balance_sats = balances[d.alias]
-                            if d.balance_sats > 0:
-                                d.status = "credited"
-                    # Recalculate funded list after sync
-                    funded = [d for d in our_deposits if d.balance_sats >= min_balance_needed]
-
-                # Submit up to available_slots transfers
-                submitted_this_round = 0
-                for _ in range(available_slots):
-                    # Refresh funded list each iteration (balances change)
-                    funded = [d for d in our_deposits if d.balance_sats >= min_balance_needed]
-
-                    # For transfers: need 1 funded sender + 1 receiver on same ledger
-                    can_transfer = False
-                    sender = None
-                    receiver = None
-
-                    if transfers and len(funded) >= 1:
-                        # Pick sender from funded deposits
-                        sender = random.choice(funded)
-                        # Find any receiver on same ledger (doesn't need balance)
-                        same_ledger = [d for d in our_deposits if d != sender and d.ledger_id == sender.ledger_id and d.deposit_id]
-                        if same_ledger:
-                            receiver = random.choice(same_ledger)
-                            can_transfer = True
-                        else:
-                            if submitted_this_round == 0:
-                                print(f"\n[{time.strftime('%H:%M:%S')}] No same-ledger receivers for {sender.alias}")
-                            break
-                    elif transfers and len(funded) == 0:
-                        # No funded deposits yet for transfers
-                        if submitted_this_round == 0:
-                            print(f"\n[{time.strftime('%H:%M:%S')}] Waiting for funded deposits (need {min_balance_needed}+ sats)")
-                        break
-                    elif len(funded) >= 2:
-                        # Non-transfer modes need 2 funded deposits
-                        sender = random.choice(funded)
-                        receiver = random.choice([d for d in our_deposits if d != sender and d.funding_address])
-                        can_transfer = True
-
-                    if can_transfer and sender and receiver:
-                        # Random payment amount, but don't exceed sender's balance
-                        max_amount = min(max_payment_sats, sender.balance_sats - 1000)  # Leave 1000 for fee
-                        if max_amount >= min_payment_sats:
-                            amount = random.randint(min_payment_sats, max_amount)
-
-                            if transfers:
-                                # Optimistically update balances before async operation
-                                # (prevents double-spending the same funds)
-                                sender.balance_sats -= amount
-                                print(f"\n[{time.strftime('%H:%M:%S')}] Transfer[async]: {sender.alias} -> {receiver.alias} ({amount} sats) [inflight: {inflight_count + submitted_this_round + 1}]", flush=True)
-
-                                # Validate before submitting
-                                if not sender.deposit_id or not receiver.deposit_id:
-                                    print(f"  Warning: Missing deposit_id (sender={sender.deposit_id}, receiver={receiver.deposit_id})", flush=True)
-                                    sender.balance_sats += amount  # Restore
-                                    continue
-
-                                # Submit async transfer
-                                future = executor.submit(
-                                    do_async_transfer,
-                                    sender.alias, sender.ledger_id, sender.deposit_id,
-                                    receiver.alias, receiver.deposit_id, amount
-                                )
-                                inflight_futures.append(future)
-                                submitted_this_round += 1
-                        elif lightning:
-                            print(f"\n[{time.strftime('%H:%M:%S')}] Lightning: {sender.alias} ({sender.balance_sats} sats) -> {receiver.alias}")
-                            paid_amount = lightning_payment(sender, receiver, amount)
-                            if paid_amount:
-                                sender.balance_sats -= paid_amount
-                                receiver.balance_sats += paid_amount
-                            submitted_this_round += 1
-                        else:
-                            print(f"\n[{time.strftime('%H:%M:%S')}] Payment: {sender.alias} ({sender.balance_sats} sats) -> {receiver.alias}")
-                            if withdraw_to(sender.alias, receiver.funding_address, amount):
-                                mine_block(network)
-                                if network == "regtest":
-                                    print(f"  Mined block to confirm")
-                                sender.balance_sats -= (amount + 500)
-                            submitted_this_round += 1
-                    else:
-                        # Not enough balance for transfer
-                        break
-
-                # Check if we've reached the target
-                if transfers and max_transfers > 0 and TRANSFERS_SUCCESS >= max_transfers:
-                    for f in inflight_futures:
-                        try:
-                            f.result(timeout=30)
-                        except:
-                            pass
+            if transfers:
+                # Transfers handled by producer + worker threads
+                # Just check if we've reached the target
+                if max_transfers > 0 and TRANSFERS_SUCCESS >= max_transfers:
                     print(f"\n[{time.strftime('%H:%M:%S')}] Reached target of {max_transfers} successful transfers!")
                     print(f"\nFinal Metrics:")
                     print(f"  Transfers: {TRANSFERS_SUCCESS} success, {TRANSFERS_FAILED} failed, {TRANSFERS_VOLUME_SATS:,} sats volume")
-                    executor.shutdown(wait=False)
                     return
+            else:
+                # Batch submission for lightning/onchain modes
+                inflight_count = len([f for f in inflight_futures if not f.done()])
+                available_slots = DYNAMIC_CONFIG.max_concurrent - inflight_count
 
-                last_payment_time = now
+                if now - last_payment_time >= payment_interval and len(our_deposits) >= 2 and available_slots > 0:
+                    min_balance_needed = max_payment_sats + 1000
+                    funded = [d for d in our_deposits if d.balance_sats >= min_balance_needed]
+
+                    if len(funded) < 2:
+                        balances = sync_and_get_balances()
+                        for d in our_deposits:
+                            if d.alias in balances:
+                                d.balance_sats = balances[d.alias]
+                                if d.balance_sats > 0:
+                                    d.status = "credited"
+                        funded = [d for d in our_deposits if d.balance_sats >= min_balance_needed]
+
+                    submitted_this_round = 0
+                    for _ in range(available_slots):
+                        funded = [d for d in our_deposits if d.balance_sats >= min_balance_needed]
+
+                        can_transfer = False
+                        sender = None
+                        receiver = None
+
+                        if len(funded) >= 2:
+                            sender = random.choice(funded)
+                            receiver = random.choice([d for d in our_deposits if d != sender and d.funding_address])
+                            can_transfer = True
+
+                        if can_transfer and sender and receiver:
+                            max_amount = min(max_payment_sats, sender.balance_sats - 1000)
+                            if max_amount >= min_payment_sats:
+                                amount = random.randint(min_payment_sats, max_amount)
+
+                                if lightning:
+                                    print(f"\n[{time.strftime('%H:%M:%S')}] Lightning: {sender.alias} ({sender.balance_sats} sats) -> {receiver.alias}")
+                                    paid_amount = lightning_payment(sender, receiver, amount)
+                                    if paid_amount:
+                                        sender.balance_sats -= paid_amount
+                                        receiver.balance_sats += paid_amount
+                                    submitted_this_round += 1
+                                else:
+                                    print(f"\n[{time.strftime('%H:%M:%S')}] Payment: {sender.alias} ({sender.balance_sats} sats) -> {receiver.alias}")
+                                    if withdraw_to(sender.alias, receiver.funding_address, amount):
+                                        mine_block(network)
+                                        if network == "regtest":
+                                            print(f"  Mined block to confirm")
+                                        sender.balance_sats -= (amount + 500)
+                                    submitted_this_round += 1
+                        else:
+                            break
+
+                    last_payment_time = now
+
+            # Confirm on-chain funded deposits that are awaiting daemon completion
+            if now - last_balance_sync_time >= 5:
+                with deposits_lock:
+                    confirming = [d for d in our_deposits if d.status == "confirming"]
+                if confirming:
+                    balances = sync_and_get_balances()
+                    with deposits_lock:
+                        for d in our_deposits:
+                            if d.status == "confirming" and d.alias in balances and balances[d.alias] > 0:
+                                d.balance_sats = balances[d.alias]
+                                d.status = "funded"
+                                print(f"  Confirmed: {d.alias} has {d.balance_sats:,} sats")
+                # Update Prometheus metrics
+                if transfers:
+                    with deposits_lock:
+                        total_balance = sum(d.balance_sats for d in our_deposits)
+                        funded_count = len([d for d in our_deposits if d.balance_sats > 0])
+                    if PROMETHEUS_AVAILABLE:
+                        PROM_DEPOSITS_BALANCE.set(total_balance)
+                        PROM_DEPOSITS_COUNT.labels(status='funded').set(funded_count)
+                last_balance_sync_time = now
 
             # Periodically re-discover ledgers to find new operators
             if now - last_rediscover_time >= rediscover_interval:
@@ -1230,21 +1382,23 @@ def run_simulation(
                     print(f"  Adjusted: target {num_wallets} wallets, interval {wallet_creation_interval:.1f}s")
                 last_rediscover_time = now
 
-            # Print status periodically
-            if int(now) % 30 == 0:
+            # Print status periodically (every 30s)
+            if now - last_status_time >= 30:
+                last_status_time = now
                 funded_count = len([d for d in our_deposits if d.balance_sats > 0])
+                confirming_count = len([d for d in our_deposits if d.status == "confirming"])
                 total_balance = sum(d.balance_sats for d in our_deposits)
-                inflight_count = len([f for f in inflight_futures if not f.done()])
-                print(f"\n[{time.strftime('%H:%M:%S')}] Status: {len(ledgers)} ledgers, {len(our_deposits)}/{num_wallets} wallets, {funded_count} funded, {total_balance} sats")
+                status_parts = [f"{len(ledgers)} ledgers", f"{len(our_deposits)}/{num_wallets} wallets", f"{funded_count} funded"]
+                if confirming_count > 0:
+                    status_parts.append(f"{confirming_count} confirming")
+                status_parts.append(f"{total_balance} sats")
+                print(f"\n[{time.strftime('%H:%M:%S')}] Status: {', '.join(status_parts)}")
                 if transfers:
                     total_transfers = TRANSFERS_SUCCESS + TRANSFERS_FAILED
-                    print(f"  Transfers: {TRANSFERS_SUCCESS}/{total_transfers} ({TRANSFERS_VOLUME_SATS:,} sats) | interval: {payment_interval}s | inflight: {inflight_count}")
-                    # Check if we've reached the target
-                    if max_transfers > 0 and TRANSFERS_SUCCESS >= max_transfers:
-                        print(f"\n[{time.strftime('%H:%M:%S')}] Reached target of {max_transfers} successful transfers!")
-                        print(f"\nFinal Metrics:")
-                        print(f"  Transfers: {TRANSFERS_SUCCESS} success, {TRANSFERS_FAILED} failed, {TRANSFERS_VOLUME_SATS:,} sats volume")
-                        return
+                    queued = work_queue.qsize()
+                    failures = consecutive_failures[0]
+                    backoff_info = f" | backoff: {min(15, 2 ** (failures // 5 - 1)):.0f}s" if failures >= 5 else ""
+                    print(f"  Transfers: {TRANSFERS_SUCCESS}/{total_transfers} ({TRANSFERS_VOLUME_SATS:,} sats) | target_qps: {DYNAMIC_CONFIG.target_qps} | queued: {queued}{backoff_info}")
                     # Update Prometheus gauges
                     if PROMETHEUS_AVAILABLE:
                         PROM_DEPOSITS_COUNT.labels(status='total').set(len(our_deposits))
@@ -1266,8 +1420,35 @@ def run_simulation(
 
     except KeyboardInterrupt:
         print("\n\nSimulation stopped by user")
-        print("Waiting for in-flight operations to complete...")
-        executor.shutdown(wait=True, cancel_futures=True)
+        if transfers:
+            print("Shutting down producer and workers...")
+            shutdown_event.set()
+            # Send sentinel values to workers
+            for _ in worker_threads:
+                try:
+                    work_queue.put(None, timeout=1)
+                except queue.Full:
+                    pass
+            # Join workers
+            for t in worker_threads:
+                t.join(timeout=5)
+            # Drain remaining results
+            while True:
+                try:
+                    result = result_queue.get_nowait()
+                    with deposits_lock:
+                        for d in our_deposits:
+                            if result.success:
+                                if d.alias == result.receiver_alias:
+                                    d.balance_sats += result.amount
+                            elif not result.locked:
+                                if d.alias == result.sender_alias:
+                                    d.balance_sats += result.amount
+                except queue.Empty:
+                    break
+        else:
+            print("Waiting for in-flight operations to complete...")
+            executor.shutdown(wait=True, cancel_futures=True)
         print(f"Final state: {len(our_deposits)} deposits")
         if transfers:
             print(f"\nTransfer Metrics:")

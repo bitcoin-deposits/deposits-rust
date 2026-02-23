@@ -1,5 +1,5 @@
 {
-  "max_concurrent": 20,
-  "target_qps": 100,
+  "max_concurrent": 16,
+  "target_qps": 50,
   "paused": false
 }
