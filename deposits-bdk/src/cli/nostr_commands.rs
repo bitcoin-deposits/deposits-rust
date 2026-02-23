@@ -22,7 +22,6 @@ use crate::nostr::{
 use crate::Node;
 
 use super::common::{derive_operator_secret, parse_config};
-use super::handlers;
 
 /// Cached nostr client for CLI commands
 static NOSTR_CLIENT: OnceLock<Mutex<Option<(String, Client)>>> = OnceLock::new();
@@ -2331,11 +2330,9 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
 
     let secret_key = derive_operator_secret(&config.seed, config.network)?;
 
-    // Clone config for later use (collateral_lock needs to reload node)
-    let config_for_reload = config.clone();
-
-    // Get the node to process requests (mutable for auto_complete_deposits)
-    let mut node = Node::new(config).await?;
+    // Get the node (used for QuorumJoin rescanning only; all request
+    // handling is done by the daemon to avoid dual-writer races)
+    let node = Node::new(config).await?;
 
     // Determine ledger_id - use from args or find our primary ledger
     // The ledger_id for Nostr events is the hex hash from ledger.ledger_id_hex()
@@ -2462,7 +2459,6 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     let mut transport = transport;
     let mut last_poll = std::time::Instant::now();
     let mut last_join_scan = std::time::Instant::now();
-    let mut last_auto_complete = std::time::Instant::now();
     let mut seen_events: HashSet<String> = HashSet::new();
 
     loop {
@@ -2524,16 +2520,10 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
             last_poll = std::time::Instant::now();
         }
 
-        // Periodically check for funded deposits to auto-complete (every 3 seconds)
-        if last_auto_complete.elapsed() > std::time::Duration::from_secs(3) {
-            // Sync wallet first to detect new transactions
-            if let Err(e) = node.sync_wallet() {
-                tracing::debug!("Wallet sync error during auto-complete: {}", e);
-            }
-            // Check and complete any funded deposits
-            node.auto_complete_deposits().await;
-            last_auto_complete = std::time::Instant::now();
-        }
+        // Note: auto_complete_deposits() is NOT called here.
+        // The daemon (deposits-bdk run) handles deposit auto-completion.
+        // Running it in both processes causes lock file contention, sequence
+        // mismatches, and cosign failures.
 
         // Periodically rescan for new QuorumJoin operations (every 30 seconds)
         if last_join_scan.elapsed() > std::time::Duration::from_secs(30) {
@@ -2567,192 +2557,16 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         // Reload ledgers first to pick up changes from CLI (e.g., QuorumJoin)
         node.handler.reload_ledgers();
         while let Some(request) = transport.try_recv_request() {
-            // Note: seen_events is already checked when queuing, so no need to check here
-            // Requests in the queue have already been validated for relevance
-
-            // Skip requests not for our ledger or joined ledgers (except cross-ledger signing)
-            let is_our_ledger = request.ledger_id == ledger_id;
-            let is_joined_ledger = joined_ledger_ids.contains(&request.ledger_id);
-            let is_cross_ledger_sign =
-                request.action == "custody_transfer_sign" || request.action == "confiscation_sign";
-
-            // Operator-only actions: only the ledger operator should handle these
-            let is_operator_only = matches!(
-                request.action.as_str(),
-                "deposit_open" | "make_offer" | "deposit_withdraw" | "collateral_lock"
-            );
-
-            // For operator-only actions, verify we are actually the operator
-            // This check is critical after custody transfers - only the new custodian
-            // should respond to requests. Check ledger.operator_key() which is updated
-            // by CustodyAcquire.
-            if is_operator_only {
-                let is_operator = if let Some((_, ledger)) = node.get_ledger_with_id(&request.ledger_id) {
-                    ledger.operator_key() == node.node_id
-                } else {
-                    // If we don't have the ledger, we're definitely not the operator
-                    false
-                };
-
-                if !is_operator {
-                    tracing::debug!(
-                        "Skipping operator-only request {} - we are not the operator of ledger {}",
-                        request.action,
-                        &request.ledger_id[..16.min(request.ledger_id.len())]
-                    );
-                    continue;
-                }
-            }
-
-            if !is_our_ledger && !is_joined_ledger && !is_cross_ledger_sign {
-                tracing::debug!(
-                    "Skipping request for different ledger: {} (ours: {})",
-                    request.ledger_id,
-                    ledger_id
-                );
-                continue;
-            }
-
+            // All request handling is done by the daemon (deposits-bdk run).
+            // nostr watch no longer processes requests to avoid dual-writer races
+            // that cause hash chain breaks when two processes independently append
+            // operations with different co-sign nonces at the same sequence number.
             println!(
-                "[{}] Request: action={}",
+                "[{}] Skipping action '{}' - handled by daemon",
                 chrono::Utc::now().format("%H:%M:%S"),
                 request.action
             );
-            println!("  Event: {}", &request.event_id[..16]);
-            println!("  Params: {}", request.params);
-
-            // For operations that require custodianship, verify we have the ledger locally
-            // The real protection against fraudulent offers is client-side verification:
-            // - Client checks offer's funding_address matches ledger's current reserves
-            // - Client verifies offer signature is from current custodian
-            //
-            // TODO: Add proper custody verification once CustodyTransfer operation exists
-            let requires_ledger = matches!(
-                request.action.as_str(),
-                "deposit_open" | "make_offer" | "deposit_withdraw" | "collateral_lock"
-            );
-
-            if requires_ledger {
-                // Just verify we have the ledger locally
-                // If we don't have it, silently skip - don't send error response
-                // (only the actual custodian should respond)
-                let has_ledger = node.get_ledger_with_id(&request.ledger_id).is_some();
-
-                if !has_ledger {
-                    tracing::debug!("Skipping request for ledger we don't have: {}", &request.ledger_id[..16.min(request.ledger_id.len())]);
-                    continue;
-                }
-            }
-
-            // Process the request
-            let (success, result, error) = match request.action.as_str() {
-                "deposit_open" => {
-                    handlers::process_deposit_open_request(
-                        &mut node,
-                        &ledger_id,
-                        &request,
-                        &transport,
-                    )
-                    .await
-                }
-                "make_offer" => {
-                    handlers::process_make_offer_request(
-                        &node,
-                        &ledger_id,
-                        &request,
-                        &transport,
-                    )
-                    .await
-                }
-                "deposit_withdraw" => {
-                    handlers::process_deposit_withdraw_request(&mut node, &ledger_id, &request)
-                        .await
-                }
-                "collateral_lock" => {
-                    handlers::process_collateral_lock_request(&mut node, &ledger_id, &request)
-                        .await
-                }
-                "custody_transfer_sign" => {
-                    handlers::process_custody_transfer_sign_request(
-                        &node,
-                        &config_for_reload,
-                        &request,
-                    )
-                    .await
-                }
-                "confiscation_sign" => {
-                    handlers::process_confiscation_sign_request(
-                        &node,
-                        &config_for_reload,
-                        &request,
-                    )
-                    .await
-                }
-                "custodian_query" => {
-                    handlers::process_custodian_query_request(&node, &ledger_id, &request)
-                        .await
-                }
-                "bump" => {
-                    // Trigger immediate wallet sync and auto-completion
-                    println!("  Bump requested - syncing wallet and checking deposits...");
-                    if let Err(e) = node.sync_wallet() {
-                        (false, None, Some(format!("Wallet sync failed: {}", e)))
-                    } else {
-                        node.auto_complete_deposits().await;
-                        (
-                            true,
-                            Some(serde_json::json!({"message": "Wallet synced and deposits checked"})),
-                            None,
-                        )
-                    }
-                }
-                _ => {
-                    // Skip actions we don't handle - the daemon will respond
-                    println!(
-                        "  Skipping action '{}' - handled by daemon",
-                        request.action
-                    );
-                    continue;
-                }
-            };
-
-            // Send response - always use the request's ledger_id so requester receives it
-            println!(
-                "  Sending response for request: {}",
-                &request.event_id[..16]
-            );
-            match transport
-                .send_ledger_response(
-                    &request.event_id,
-                    &request.ledger_id,
-                    &request.action,
-                    success,
-                    result.clone(),
-                    error.clone(),
-                )
-                .await
-            {
-                Ok(resp_id) => {
-                    if success {
-                        println!(
-                            "  Response: SUCCESS (resp_id={}, req_id={})",
-                            &resp_id[..16],
-                            &request.event_id[..16]
-                        );
-                    } else {
-                        println!(
-                            "  Response: ERROR - {} (resp_id={}, req_id={})",
-                            error.unwrap_or_default(),
-                            &resp_id[..16],
-                            &request.event_id[..16]
-                        );
-                    }
-                }
-                Err(e) => {
-                    println!("  Failed to send response: {}", e);
-                }
-            }
-            println!();
+            continue;
         }
 
         // Check for disputes

@@ -621,13 +621,14 @@ impl Node {
             || self.get_ledger_by_reserves_key(&request.ledger_id).is_some();
         let is_cross_ledger_sign = request.action == "custody_transfer_sign"
             || request.action == "confiscation_sign";
-        // cosign_update requests can come from ledgers where we're a quorum member
+        // cosign requests can come from ledgers where we're a quorum member
         // (we may not have the full ledger locally, just a QuorumJoin record)
-        let is_cosign_request = request.action == "cosign_update";
+        let is_cosign_request = request.action == "cosign_update"
+            || request.action == "cosign_offer";
 
         // Silently drop operator-only actions if we're not the operator
         // (these are broadcast but only the operator should respond)
-        let operator_only_actions = ["deposit_open", "make_offer", "withdraw", "collateral_lock", "offer_status", "balance_query", "make_invoice", "pay_invoice", "transfer_lock", "transfer_complete"];
+        let operator_only_actions = ["deposit_open", "make_offer", "withdraw", "collateral_lock", "offer_status", "balance_query", "make_invoice", "pay_invoice", "transfer_lock", "transfer_complete", "bump"];
         if operator_only_actions.contains(&request.action.as_str()) && !self.is_operator_of_ledger(&request.ledger_id) {
             return; // Silent drop - the actual operator will respond
         }
@@ -697,6 +698,15 @@ impl Node {
             "balance_query" => self.process_balance_query_request(&request).await,
             "make_invoice" => self.process_make_invoice_request(&request).await,
             "pay_invoice" => self.process_pay_invoice_request(&request).await,
+            "bump" => {
+                tracing::info!("Bump requested - syncing wallet and checking deposits...");
+                if let Err(e) = self.sync_wallet() {
+                    (false, None, Some(format!("Wallet sync failed: {}", e)))
+                } else {
+                    self.auto_complete_deposits().await;
+                    (true, Some(serde_json::json!({"message": "Wallet synced and deposits checked"}).to_string()), None)
+                }
+            }
             _ => {
                 tracing::warn!("Unknown request action: {}", request.action);
                 (false, None, Some(format!("Unknown action: {}", request.action)))
@@ -1056,7 +1066,7 @@ impl Node {
         self.sign_last_update(&our_ledger_id)?;
 
         // Persist
-        if let Err(e) = self.handler.persist_ledger(&our_ledger_id) {
+        if let Err(e) = self.handler.persist_ledger_to_disk(&our_ledger_id) {
             tracing::error!("Failed to persist ledger: {}", e);
         }
 
@@ -3836,21 +3846,46 @@ impl Node {
             return (false, None, Some("Invalid signature".to_string()));
         }
 
+        // Pre-check: ensure we can sign before modifying ledger state.
+        // Without this, append_operation_with_block applies state changes (deducting balance)
+        // that are NOT rolled back if sign_and_broadcast fails, silently draining deposit balances.
+        {
+            let quorum_reserves = self.has_quorum_reserves(ledger_id);
+            if quorum_reserves {
+                let has_members = {
+                    let ledgers = self.handler.ledgers.lock().unwrap();
+                    if let Some(ledger_arc) = ledgers.get(ledger_id) {
+                        let ledger = ledger_arc.read().unwrap();
+                        !ledger.state.quorum_members.is_empty()
+                    } else {
+                        false
+                    }
+                };
+                if !has_members {
+                    return (false, None, Some(
+                        "Reserves have been rotated but no quorum members available - cannot sign".to_string()
+                    ));
+                }
+            }
+        }
+
         // Create and append the operation
+        let amount_msats = amount * 1000;
+        let fee_msats = fee * 1000;
         let witness = DescriptorWitness { stack: vec![signature.serialize().to_vec()] };
         let operation = LedgerOperation::TransferLock {
             nonce,
             source_deposit_id,
             destination_deposit_id,
-            amount: amount * 1000, // Convert to msats
-            fee: fee * 1000,
+            amount: amount_msats,
+            fee: fee_msats,
             completion_script: completion_script.to_string(),
             timeout_height,
             transfer_id,
             witness,
         };
 
-        // Append operation
+        // Append operation (applies state changes: deducts balance, adds to locked)
         {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let ledger_arc = ledgers.get(ledger_id).unwrap().clone();
@@ -3870,11 +3905,35 @@ impl Node {
 
         // Sign (with co-signature if quorum active) and broadcast
         if let Err(e) = self.sign_and_broadcast(ledger_id).await {
+            // Rollback: undo the state changes from the failed operation.
+            // The operation was appended and state modified (balance deducted, locked increased)
+            // but signing failed, so we must restore the previous state.
+            tracing::warn!("sign_and_broadcast failed for transfer_lock, rolling back state: {}", e);
+            {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                let ledger_arc = ledgers.get(ledger_id).unwrap().clone();
+                let mut ledger = ledger_arc.write().unwrap();
+                // Pop the unsigned operation from history
+                ledger.history.pop();
+                // Undo TransferLock state changes
+                let total_msats = amount_msats + fee_msats;
+                if let Some(deposit) = ledger.state.deposits.get_mut(&source_deposit_id) {
+                    deposit.balance = deposit.balance.saturating_add(total_msats);
+                    deposit.locked_balance = deposit.locked_balance.saturating_sub(total_msats);
+                }
+                ledger.state.pending_transfers.remove(&transfer_id);
+                // Restore sequence and hash from the last remaining entry
+                let (seq, hash) = ledger.history.last()
+                    .map(|l| (l.sequence_number, l.current_hash))
+                    .unwrap_or((0, [0u8; 32]));
+                ledger.state.sequence = seq;
+                ledger.state.hash = hash;
+            }
             return (false, None, Some(format!("Failed to sign/broadcast: {:?}", e)));
         }
 
         // Persist to disk
-        if let Err(e) = self.handler.persist_ledger(ledger_id) {
+        if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
             tracing::warn!("Failed to persist ledger after transfer_lock: {}", e);
         }
 
@@ -3949,6 +4008,35 @@ impl Node {
             }
         }
 
+        // Pre-check: ensure we can sign before modifying ledger state
+        {
+            let quorum_reserves = self.has_quorum_reserves(ledger_id);
+            if quorum_reserves {
+                let has_members = {
+                    let ledgers = self.handler.ledgers.lock().unwrap();
+                    if let Some(ledger_arc) = ledgers.get(ledger_id) {
+                        let ledger = ledger_arc.read().unwrap();
+                        !ledger.state.quorum_members.is_empty()
+                    } else {
+                        false
+                    }
+                };
+                if !has_members {
+                    return (false, None, Some(
+                        "Reserves have been rotated but no quorum members available - cannot sign".to_string()
+                    ));
+                }
+            }
+        }
+
+        // Capture pending transfer info before appending (needed for rollback)
+        let pending_transfer_backup = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let ledger_arc = ledgers.get(ledger_id).unwrap().clone();
+            let ledger = ledger_arc.read().unwrap();
+            ledger.state.pending_transfers.get(&transfer_id).cloned()
+        };
+
         // Create and append the operation
         let script_witness = DescriptorWitness { stack: vec![preimage] };
         let operation = LedgerOperation::TransferComplete {
@@ -3956,7 +4044,7 @@ impl Node {
             script_witness,
         };
 
-        // Append operation
+        // Append operation (applies state changes: unlocks source, credits destination)
         {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let ledger_arc = ledgers.get(ledger_id).unwrap().clone();
@@ -3976,11 +4064,36 @@ impl Node {
 
         // Sign (with co-signature if quorum active) and broadcast
         if let Err(e) = self.sign_and_broadcast(ledger_id).await {
+            // Rollback: undo TransferComplete state changes
+            tracing::warn!("sign_and_broadcast failed for transfer_complete, rolling back state: {}", e);
+            if let Some(pending) = pending_transfer_backup {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                let ledger_arc = ledgers.get(ledger_id).unwrap().clone();
+                let mut ledger = ledger_arc.write().unwrap();
+                // Pop the unsigned operation from history
+                ledger.history.pop();
+                // Undo TransferComplete state changes: re-lock source, debit destination
+                let total = pending.total_locked();
+                if let Some(source) = ledger.state.deposits.get_mut(&pending.source_deposit_id) {
+                    source.locked_balance = source.locked_balance.saturating_add(total);
+                }
+                if let Some(dest) = ledger.state.deposits.get_mut(&pending.destination_deposit_id) {
+                    dest.balance = dest.balance.saturating_sub(pending.amount);
+                }
+                // Re-insert the pending transfer
+                ledger.state.pending_transfers.insert(transfer_id, pending);
+                // Restore sequence and hash
+                let (seq, hash) = ledger.history.last()
+                    .map(|l| (l.sequence_number, l.current_hash))
+                    .unwrap_or((0, [0u8; 32]));
+                ledger.state.sequence = seq;
+                ledger.state.hash = hash;
+            }
             return (false, None, Some(format!("Failed to sign/broadcast: {:?}", e)));
         }
 
         // Persist to disk
-        if let Err(e) = self.handler.persist_ledger(ledger_id) {
+        if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
             tracing::warn!("Failed to persist ledger after transfer_complete: {}", e);
         }
 
@@ -4962,7 +5075,7 @@ impl Node {
                 }
 
                 // Save ledger to disk
-                if let Err(e) = self.handler.persist_ledger(&ledger_id) {
+                if let Err(e) = self.handler.persist_ledger_to_disk(&ledger_id) {
                     tracing::warn!("Failed to save ledger after fee collection: {}", e);
                 }
             }
@@ -5049,7 +5162,7 @@ impl Node {
                 }
 
                 // Save ledger to disk
-                if let Err(e) = self.handler.persist_ledger(&ledger_id) {
+                if let Err(e) = self.handler.persist_ledger_to_disk(&ledger_id) {
                     tracing::warn!("Failed to save ledger after transfer timeout: {}", e);
                 }
 
@@ -5983,7 +6096,7 @@ impl Node {
         self.sign_last_update(ledger_id)?;
 
         // Persist the ledger
-        if let Err(e) = self.handler.persist_ledger(ledger_id) {
+        if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
             tracing::warn!("Failed to persist ledger after signing: {}", e);
         }
 
@@ -6062,7 +6175,7 @@ impl Node {
         } else {
             // No existing quorum, use operator-only signature
             self.sign_last_update(ledger_id)?;
-            if let Err(e) = self.handler.persist_ledger(ledger_id) {
+            if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
                 tracing::warn!("Failed to persist ledger: {}", e);
             }
             self.broadcast_last_update(ledger_id).await
@@ -6149,7 +6262,7 @@ impl Node {
             self.sign_and_broadcast(our_ledger_id).await
         } else {
             self.sign_last_update(our_ledger_id)?;
-            if let Err(e) = self.handler.persist_ledger(our_ledger_id) {
+            if let Err(e) = self.handler.persist_ledger_to_disk(our_ledger_id) {
                 tracing::warn!("Failed to persist ledger: {}", e);
             }
             self.broadcast_last_update(our_ledger_id).await
@@ -6306,7 +6419,7 @@ impl Node {
             self.sign_and_broadcast(ledger_id).await?;
         } else {
             self.sign_last_update(ledger_id)?;
-            if let Err(e) = self.handler.persist_ledger(ledger_id) {
+            if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
                 tracing::warn!("Failed to persist ledger: {}", e);
             }
             self.broadcast_last_update(ledger_id).await?;
@@ -6383,7 +6496,7 @@ impl Node {
             self.sign_and_broadcast(ledger_id).await
         } else {
             self.sign_last_update(ledger_id)?;
-            if let Err(e) = self.handler.persist_ledger(ledger_id) {
+            if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
                 tracing::warn!("Failed to persist ledger: {}", e);
             }
             self.broadcast_last_update(ledger_id).await
@@ -6453,14 +6566,35 @@ impl Node {
         };
 
         // Sign and broadcast
-        if has_quorum {
-            self.sign_and_broadcast(ledger_id).await?;
+        let sign_result = if has_quorum {
+            self.sign_and_broadcast(ledger_id).await
         } else {
             self.sign_last_update(ledger_id)?;
-            if let Err(e) = self.handler.persist_ledger(ledger_id) {
+            if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
                 tracing::warn!("Failed to persist ledger: {}", e);
             }
-            self.broadcast_last_update(ledger_id).await?;
+            self.broadcast_last_update(ledger_id).await
+        };
+
+        if let Err(e) = sign_result {
+            // Rollback: undo the DepositOpen state changes.
+            tracing::warn!("sign_and_broadcast failed for open_deposit, rolling back state: {}", e);
+            {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                let ledger_arc = ledgers.get(ledger_id).unwrap().clone();
+                let mut ledger = ledger_arc.write().unwrap();
+                // Pop the unsigned operation from history
+                ledger.history.pop();
+                // Undo DepositOpen state change: remove the deposit
+                ledger.state.deposits.remove(&deposit_id);
+                // Restore sequence and hash from the last remaining entry
+                let (seq, hash) = ledger.history.last()
+                    .map(|l| (l.sequence_number, l.current_hash))
+                    .unwrap_or((0, [0u8; 32]));
+                ledger.state.sequence = seq;
+                ledger.state.hash = hash;
+            }
+            return Err(e);
         }
 
         tracing::info!("Opened deposit {} in ledger {}", hex::encode(deposit_id), ledger_id);
@@ -6529,14 +6663,40 @@ impl Node {
         };
 
         // Sign and broadcast
-        if has_quorum {
-            self.sign_and_broadcast(ledger_id).await?;
+        let sign_result = if has_quorum {
+            self.sign_and_broadcast(ledger_id).await
         } else {
             self.sign_last_update(ledger_id)?;
-            if let Err(e) = self.handler.persist_ledger(ledger_id) {
+            if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
                 tracing::warn!("Failed to persist ledger: {}", e);
             }
-            self.broadcast_last_update(ledger_id).await?;
+            self.broadcast_last_update(ledger_id).await
+        };
+
+        if let Err(e) = sign_result {
+            // Rollback: undo the OnchainCredit state changes.
+            // The operation was appended and balance credited but signing failed,
+            // so we must restore the previous state to prevent duplicate credits
+            // on the next auto_complete_deposits cycle.
+            tracing::warn!("sign_and_broadcast failed for credit_deposit_onchain, rolling back state: {}", e);
+            {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                let ledger_arc = ledgers.get(ledger_id).unwrap().clone();
+                let mut ledger = ledger_arc.write().unwrap();
+                // Pop the unsigned operation from history
+                ledger.history.pop();
+                // Undo OnchainCredit state change: subtract the credited amount
+                if let Some(deposit) = ledger.state.deposits.get_mut(&deposit_id) {
+                    deposit.balance = deposit.balance.saturating_sub(amount_msats);
+                }
+                // Restore sequence and hash from the last remaining entry
+                let (seq, hash) = ledger.history.last()
+                    .map(|l| (l.sequence_number, l.current_hash))
+                    .unwrap_or((0, [0u8; 32]));
+                ledger.state.sequence = seq;
+                ledger.state.hash = hash;
+            }
+            return Err(e);
         }
 
         tracing::info!(
@@ -6611,7 +6771,7 @@ impl Node {
             self.sign_and_broadcast(ledger_id).await?;
         } else {
             self.sign_last_update(ledger_id)?;
-            if let Err(e) = self.handler.persist_ledger(ledger_id) {
+            if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
                 tracing::warn!("Failed to persist ledger: {}", e);
             }
             self.broadcast_last_update(ledger_id).await?;
@@ -6695,7 +6855,7 @@ impl Node {
             self.sign_and_broadcast(ledger_id).await?;
         } else {
             self.sign_last_update(ledger_id)?;
-            if let Err(e) = self.handler.persist_ledger(ledger_id) {
+            if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
                 tracing::warn!("Failed to persist ledger: {}", e);
             }
             self.broadcast_last_update(ledger_id).await?;
@@ -6777,7 +6937,7 @@ impl Node {
             self.sign_and_broadcast(ledger_id).await?;
         } else {
             self.sign_last_update(ledger_id)?;
-            if let Err(e) = self.handler.persist_ledger(ledger_id) {
+            if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
                 tracing::warn!("Failed to persist ledger: {}", e);
             }
             self.broadcast_last_update(ledger_id).await?;
@@ -6863,7 +7023,7 @@ impl Node {
             self.sign_and_broadcast(ledger_id).await?;
         } else {
             self.sign_last_update(ledger_id)?;
-            if let Err(e) = self.handler.persist_ledger(ledger_id) {
+            if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
                 tracing::warn!("Failed to persist ledger: {}", e);
             }
             self.broadcast_last_update(ledger_id).await?;
@@ -6987,7 +7147,7 @@ impl Node {
             self.sign_and_broadcast(ledger_id).await?;
         } else {
             self.sign_last_update(ledger_id)?;
-            if let Err(e) = self.handler.persist_ledger(ledger_id) {
+            if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
                 tracing::warn!("Failed to persist ledger: {}", e);
             }
             self.broadcast_last_update(ledger_id).await?;
@@ -7109,7 +7269,7 @@ impl Node {
             self.sign_and_broadcast(ledger_id).await?;
         } else {
             self.sign_last_update(ledger_id)?;
-            if let Err(e) = self.handler.persist_ledger(ledger_id) {
+            if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
                 tracing::warn!("Failed to persist ledger: {}", e);
             }
             self.broadcast_last_update(ledger_id).await?;
@@ -7238,7 +7398,7 @@ impl Node {
         };
 
         // Persist the ledger
-        if let Err(e) = self.handler.persist_ledger(&ledger_id) {
+        if let Err(e) = self.handler.persist_ledger_to_disk(&ledger_id) {
             tracing::error!("Failed to persist ledger: {}", e);
         }
 
@@ -7464,7 +7624,7 @@ impl Node {
         self.sign_last_update(ledger_id)?;
 
         // Persist the ledger with the new operation
-        if let Err(e) = self.handler.persist_ledger(ledger_id) {
+        if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
             tracing::error!("Failed to persist ledger after rotation: {}", e);
         }
 
@@ -7890,17 +8050,17 @@ impl Node {
         let wallet_dir = self.data_dir.join("wallet");
         let lock_path = wallet_dir.join(format!("completing_{}.lock", hex::encode(offer_id)));
 
-        let got_lock = match std::fs::OpenOptions::new()
+        match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&lock_path)
         {
-            Ok(_) => true,
+            Ok(_) => {},
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 // Check if the lock is stale (process crashed while holding it)
                 let is_stale = std::fs::metadata(&lock_path)
                     .and_then(|m| m.modified())
-                    .map(|t| t.elapsed().unwrap_or_default().as_secs() > 60)
+                    .map(|t| t.elapsed().unwrap_or_default().as_secs() > 20)
                     .unwrap_or(false);
 
                 if is_stale {
@@ -7915,8 +8075,13 @@ impl Node {
                         .create_new(true)
                         .open(&lock_path)
                     {
-                        Ok(_) => true,
-                        Err(_) => false, // Another process grabbed it immediately
+                        Ok(_) => {},
+                        Err(_) => {
+                            return Err(Error::Protocol(format!(
+                                "Could not acquire completion lock for deposit {}...",
+                                &hex::encode(offer_id)[..16]
+                            )));
+                        }
                     }
                 } else {
                     // Another process is actively completing this - wait for it to finish
@@ -7930,42 +8095,68 @@ impl Node {
                             break;
                         }
                     }
-                    // Reload and return the other process's result
+                    // Reload and check the other process's result
                     self.reload_deposit_offers();
                     let offers = self.deposit_offers.lock().unwrap();
-                    return match offers.get(offer_id) {
+                    match offers.get(offer_id) {
                         Some((_, DepositOfferStatus::Completed { amount_sats, .. })) => {
                             tracing::info!(
                                 "Deposit completed by concurrent process: {} sats",
                                 amount_sats
                             );
-                            Ok(*amount_sats * 1000)
+                            return Ok(*amount_sats * 1000);
                         }
-                        Some((_, status)) => Err(Error::Protocol(format!(
-                            "Waited for concurrent deposit completion but status is {:?}",
-                            status
-                        ))),
-                        None => Err(Error::OfferNotFound),
-                    };
+                        _ => {
+                            drop(offers);
+                            if lock_path.exists() {
+                                // Lock still held - other process is still running.
+                                // Do NOT remove it or proceed - that would cause concurrent
+                                // completion and hash chain breaks.
+                                return Err(Error::Protocol(format!(
+                                    "Deposit {}... completion still in progress by another process",
+                                    &hex::encode(offer_id)[..16]
+                                )));
+                            }
+                            // Lock was released but process failed - safe to retry ourselves
+                            tracing::info!(
+                                "Concurrent completion failed for {}..., retrying",
+                                &hex::encode(offer_id)[..16]
+                            );
+                            match std::fs::OpenOptions::new()
+                                .write(true)
+                                .create_new(true)
+                                .open(&lock_path)
+                            {
+                                Ok(_) => {},
+                                Err(_) => {
+                                    return Err(Error::Protocol(format!(
+                                        "Could not acquire completion lock for deposit {}...",
+                                        &hex::encode(offer_id)[..16]
+                                    )));
+                                }
+                            }
+                        }
+                    }
                 }
             }
             Err(e) => {
-                // Lock creation failed for unexpected reason - proceed without lock
-                tracing::warn!("Failed to create deposit completion lock: {}", e);
-                false
+                // Lock creation failed for unexpected reason - don't proceed without lock
+                return Err(Error::Protocol(format!(
+                    "Failed to create deposit completion lock: {}",
+                    e
+                )));
             }
         };
 
-        // Reload offer status from disk to catch any completions just before we got the lock
+        // Lock acquired. Reload offer status from disk to catch any completions
+        // that happened just before we got the lock.
         self.reload_deposit_offers();
 
         // Run the actual completion logic
         let result = self.do_complete_deposit_offer(offer_id, funding_txid, funding_amount_sats).await;
 
-        // Release lock regardless of result
-        if got_lock {
-            let _ = std::fs::remove_file(&lock_path);
-        }
+        // Release lock
+        let _ = std::fs::remove_file(&lock_path);
 
         result
     }
