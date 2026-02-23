@@ -95,6 +95,10 @@ pub struct DepositsHandler {
     /// Enable periodic deposit metrics emission (every 60 seconds)
     /// Controlled by DEPOSITS_ENABLE_METRICS_EMITTER env var
     enable_metrics_emitter: bool,
+
+    /// Tracks how many updates have been persisted to disk per ledger.
+    /// Used for append-only writes: only new updates beyond this count are appended.
+    persisted_update_counts: Mutex<HashMap<String, usize>>,
 }
 
 impl DepositsHandler {
@@ -117,6 +121,16 @@ impl DepositsHandler {
         // Load existing ledgers from disk
         let ledgers = Self::load_ledgers_from_disk(&data_dir);
 
+        // Initialize persisted counts from loaded ledger history lengths
+        let persisted_update_counts = {
+            let mut counts = HashMap::new();
+            for (id, arc) in &ledgers {
+                let ledger = arc.read().unwrap();
+                counts.insert(id.clone(), ledger.history.len());
+            }
+            Mutex::new(counts)
+        };
+
         let handler = Self {
             our_node_id,
             secret_key,
@@ -126,6 +140,7 @@ impl DepositsHandler {
             wallet,
             data_dir,
             enable_metrics_emitter,
+            persisted_update_counts,
         };
 
         (handler, outbound_rx)
@@ -207,8 +222,9 @@ impl DepositsHandler {
         });
     }
 
-    /// Save all ledgers to disk.
+    /// Save all ledgers to disk (full rewrite / compaction).
     /// Takes a snapshot under the mutex (fast), then writes synchronously.
+    /// Resets persisted_update_counts so subsequent appends start from the new baseline.
     fn save_ledgers_to_disk(&self) -> Result<(), String> {
         // Take a snapshot while holding the mutex (fast - just clones the data)
         let ledgers_snapshot = {
@@ -224,14 +240,20 @@ impl DepositsHandler {
         // Perform disk I/O synchronously after releasing the mutex.
         // This ensures the data is on disk before returning, which is critical
         // for CLI processes (the caller must not exit before the write completes).
-        Self::save_ledgers_to_disk_impl(ledgers_snapshot, &self.data_dir);
+        Self::save_ledgers_to_disk_impl(&ledgers_snapshot, &self.data_dir);
+
+        // Reset persisted counts to match what we just wrote
+        let mut counts = self.persisted_update_counts.lock().unwrap();
+        for (id, ledger) in &ledgers_snapshot {
+            counts.insert(id.clone(), ledger.history.len());
+        }
 
         Ok(())
     }
 
-    /// Implementation of save_ledgers_to_disk (runs in blocking thread)
+    /// Implementation of save_ledgers_to_disk (full rewrite / compaction)
     fn save_ledgers_to_disk_impl(
-        ledgers: Vec<(String, Ledger)>,
+        ledgers: &[(String, Ledger)],
         data_dir: &PathBuf,
     ) {
         // Ensure data directory exists
@@ -372,12 +394,13 @@ impl DepositsHandler {
             let mut role: Option<LedgerRole> = None;
             let mut state: Option<LedgerState> = None;
             let mut updates: Vec<SignedLedgerUpdate> = Vec::new();
-            
+            let mut seen_sequences = std::collections::HashSet::new();
+
             for line in contents.lines() {
                 if line.trim().is_empty() {
                     continue;
                 }
-                
+
                 match serde_json::from_str::<LedgerLogRow>(line) {
                     Ok(LedgerLogRow::Role { role: r }) => {
                         role = Some(r);
@@ -386,30 +409,41 @@ impl DepositsHandler {
                         state = Some(s);
                     }
                     Ok(LedgerLogRow::Update(u)) => {
-                        updates.push(u);
+                        // Deduplicate by sequence number. Append-only writes can
+                        // produce duplicates when daemon and CLI both persist the
+                        // same updates (daemon appends with stale tracking while
+                        // CLI already wrote them via full rewrite).
+                        if seen_sequences.insert(u.sequence_number) {
+                            updates.push(u);
+                        }
                     }
                     Err(e) => {
                         tracing::warn!("Failed to parse line in {}: {}", ledger_id, e);
                     }
                 }
             }
-            
+
             // Reconstruct the Ledger from role + state + updates
             // Handle backward compatibility: old JSONL files don't have Role line
             let ledger_role = role.unwrap_or_else(|| {
                 tracing::warn!("Ledger {} missing role in JSONL, defaulting to Partner", ledger_id);
                 LedgerRole::Partner
             });
-            
-            if let Some(ledger_state) = state {
-                // Create Ledger directly from state (it's already the final state)
-                // History is preserved for audit purposes
+
+            if let Some(mut ledger_state) = state {
+                // With append-only writes, the State line may be stale.
+                // Update sequence and hash from the last update in history.
+                if let Some(last_update) = updates.last() {
+                    ledger_state.sequence = last_update.sequence_number as u64;
+                    ledger_state.hash = last_update.current_hash;
+                }
+
                 let ledger = Ledger {
                     state: ledger_state,
                     role: ledger_role,
-                    history: updates.clone(),
+                    history: updates,
                 };
-                let update_count = updates.len();
+                let update_count = ledger.history.len();
                 ledgers.insert(ledger_id.to_string(), Arc::new(RwLock::new(ledger)));
                 tracing::debug!("Loaded ledger {} with {} updates", ledger_id, update_count);
             } else {
@@ -435,6 +469,7 @@ impl DepositsHandler {
         let mut updated = 0;
 
         let mut ledgers = self.ledgers.lock().unwrap();
+        let mut counts = self.persisted_update_counts.lock().unwrap();
 
         for (ledger_id, disk_arc) in disk_ledgers {
             let disk_ledger = disk_arc.read().unwrap();
@@ -449,6 +484,8 @@ impl DepositsHandler {
                     drop(memory_ledger);
                     let mut memory_ledger = memory_arc.write().unwrap();
                     *memory_ledger = disk_ledger.clone();
+                    // Reset persisted count to disk state (disk was written by another process)
+                    counts.insert(ledger_id.clone(), disk_len);
                     updated += 1;
                     tracing::debug!(
                         "Reloaded ledger {}... ({} -> {} entries)",
@@ -460,6 +497,8 @@ impl DepositsHandler {
             } else {
                 // New ledger on disk, add to in-memory
                 ledgers.insert(ledger_id.clone(), Arc::new(RwLock::new(disk_ledger.clone())));
+                // Track what's already on disk
+                counts.insert(ledger_id.clone(), disk_len);
                 updated += 1;
                 tracing::debug!(
                     "Loaded new ledger {}... ({} entries)",
@@ -600,17 +639,38 @@ impl DepositsHandler {
         ledger
     }
 
-    /// Persist a specific ledger to disk
-    pub fn persist_ledger(&self, ledger_id: &str) -> Result<(), String> {
-        let ledger_clone = {
+    /// Persist a specific ledger to disk using append-only strategy.
+    ///
+    /// On first save (or when no tracking exists), does a full rewrite.
+    /// On subsequent saves, only appends new Update lines to the JSONL file.
+    pub fn persist_ledger_to_disk(&self, ledger_id: &str) -> Result<(), String> {
+        let (ledger_clone, history_len) = {
             let ledgers = self.ledgers.lock().unwrap();
             let ledger_arc = ledgers.get(ledger_id)
                 .ok_or_else(|| format!("Ledger not found: {}", ledger_id))?;
             let ledger = ledger_arc.read().unwrap();
-            (ledger_id.to_string(), ledger.clone())
+            ((ledger_id.to_string(), ledger.clone()), ledger.history.len())
         };
 
-        Self::save_single_ledger_to_disk(ledger_clone, &self.data_dir);
+        let mut counts = self.persisted_update_counts.lock().unwrap();
+        let previously_saved = counts.get(ledger_id).copied().unwrap_or(0);
+
+        if previously_saved == 0 {
+            // First save or no tracking - full write
+            Self::save_single_ledger_to_disk(ledger_clone, &self.data_dir);
+            counts.insert(ledger_id.to_string(), history_len);
+        } else if history_len > previously_saved {
+            // Append fresh state snapshot + only new updates
+            Self::append_updates_to_disk(
+                ledger_id,
+                &ledger_clone.1.state,
+                &ledger_clone.1.history[previously_saved..],
+                &self.data_dir,
+            );
+            counts.insert(ledger_id.to_string(), history_len);
+        }
+        // If history_len == previously_saved, nothing new to write
+
         Ok(())
     }
 
@@ -650,6 +710,50 @@ impl DepositsHandler {
         let contents = lines.join("\n");
         if let Err(e) = fs::write(&ledger_file, contents) {
             tracing::error!("Failed to write ledger file {}: {}", ledger_id, e);
+        }
+    }
+
+    /// Append a fresh State snapshot and new updates to an existing ledger JSONL file.
+    ///
+    /// Writes a State line first (so reloads see current state including quorum_members,
+    /// deposits, etc.), then appends the new Update lines. The loader takes the last-seen
+    /// State line, so this keeps the file self-consistent for crash recovery.
+    fn append_updates_to_disk(
+        ledger_id: &str,
+        current_state: &LedgerState,
+        new_updates: &[SignedLedgerUpdate],
+        data_dir: &PathBuf,
+    ) {
+        let ledgers_dir = data_dir.join("ledgers");
+        let ledger_file = ledgers_dir.join(format!("{}.jsonl", ledger_id));
+
+        let mut file = match fs::OpenOptions::new().append(true).open(&ledger_file) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::error!("Failed to open ledger file for append {}: {}", ledger_id, e);
+                return;
+            }
+        };
+
+        use std::io::Write;
+
+        // Write fresh State line so reloads get current state (quorum_members, deposits, etc.)
+        let state_row = LedgerLogRow::State(current_state.clone());
+        if let Ok(line) = serde_json::to_string(&state_row) {
+            if let Err(e) = write!(file, "\n{}", line) {
+                tracing::error!("Failed to append state to ledger {}: {}", ledger_id, e);
+                return;
+            }
+        }
+
+        for update in new_updates {
+            let update_row = LedgerLogRow::Update(update.clone());
+            if let Ok(line) = serde_json::to_string(&update_row) {
+                if let Err(e) = write!(file, "\n{}", line) {
+                    tracing::error!("Failed to append to ledger {}: {}", ledger_id, e);
+                    return;
+                }
+            }
         }
     }
 
@@ -897,9 +1001,23 @@ impl HandlerContext for DepositsHandler {
         self.wallet.get_block_height().unwrap_or(0)
     }
 
-    fn persist_ledger(&self, _operator: &PublicKey, _reserves_id: &str) -> Result<(), String> {
-        // Save all ledgers to disk (could optimize to save just the specific one)
-        self.save_ledgers_to_disk()
+    fn persist_ledger(&self, operator: &PublicKey, reserves_id: &str) -> Result<(), String> {
+        // Find the ledger_id for this operator/reserves_id pair
+        let ledger_id = {
+            let ledgers = self.ledgers.lock().unwrap();
+            ledgers.iter()
+                .find(|(_, arc)| {
+                    let l = arc.read().unwrap();
+                    l.operator_key() == *operator && l.reserves_key() == reserves_id
+                })
+                .map(|(id, _)| id.clone())
+        };
+
+        if let Some(id) = ledger_id {
+            self.persist_ledger_to_disk(&id)
+        } else {
+            Err(format!("Ledger not found for operator/reserves_id"))
+        }
     }
 }
 
