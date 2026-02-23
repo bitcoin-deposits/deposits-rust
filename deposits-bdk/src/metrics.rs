@@ -131,6 +131,32 @@ fn describe_metrics() {
         "ledger_history_length",
         "Number of history entries (sequence number) per ledger"
     );
+
+    // Deposit balance metrics
+    describe_gauge!(
+        "deposit_reserves_balance_sats",
+        "Current reserves balance in satoshis"
+    );
+    describe_gauge!(
+        "deposit_total_balance_sats",
+        "Total deposits under management in satoshis"
+    );
+    describe_gauge!(
+        "deposit_ledger_balance_sats",
+        "Balance for a specific ledger in satoshis, labeled by ledger_id"
+    );
+    describe_gauge!(
+        "deposit_balance_sats",
+        "Balance for a specific deposit in satoshis, labeled by deposit_id"
+    );
+    describe_counter!(
+        "deposit_accepted_total",
+        "Total number of deposits accepted"
+    );
+    describe_counter!(
+        "deposit_rejected_total",
+        "Total number of deposits rejected"
+    );
 }
 
 // ============================================================================
@@ -246,6 +272,44 @@ pub fn set_ledger_history_length(ledger_id: &str, length: usize) {
     // Use first 16 chars of ledger_id as label to keep cardinality reasonable
     let short_id = if ledger_id.len() > 16 { &ledger_id[..16] } else { ledger_id };
     gauge!("ledger_history_length", "ledger_id" => short_id.to_string()).set(length as f64);
+}
+
+// ============================================================================
+// Deposit balance metrics
+// ============================================================================
+
+/// Set the total reserves balance across all ledgers in satoshis.
+pub fn set_reserves_balance_sats(amount: u64) {
+    gauge!("deposit_reserves_balance_sats").set(amount as f64);
+}
+
+/// Set the total deposits under management in satoshis.
+pub fn set_total_deposit_balance_sats(amount: u64) {
+    gauge!("deposit_total_balance_sats").set(amount as f64);
+}
+
+/// Set the balance for a specific ledger in satoshis.
+pub fn set_ledger_deposit_balance_sats(ledger_id: &str, amount: u64) {
+    // Use first 16 chars of ledger_id as label to keep cardinality reasonable
+    let short_id = if ledger_id.len() > 16 { &ledger_id[..16] } else { ledger_id };
+    gauge!("deposit_ledger_balance_sats", "ledger_id" => short_id.to_string()).set(amount as f64);
+}
+
+/// Set the balance for a specific deposit in satoshis.
+pub fn set_deposit_balance_sats(deposit_id: &str, amount: u64) {
+    // Use first 16 chars of deposit_id as label to keep cardinality reasonable
+    let short_id = if deposit_id.len() > 16 { &deposit_id[..16] } else { deposit_id };
+    gauge!("deposit_balance_sats", "deposit_id" => short_id.to_string()).set(amount as f64);
+}
+
+/// Record a deposit acceptance.
+pub fn record_deposit_accepted() {
+    counter!("deposit_accepted_total").increment(1);
+}
+
+/// Record a deposit rejection.
+pub fn record_deposit_rejected() {
+    counter!("deposit_rejected_total").increment(1);
 }
 
 // ============================================================================
