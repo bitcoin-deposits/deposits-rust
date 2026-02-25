@@ -2,3 +2,6 @@
 Cargo.lock
 deposits-tools/certs/
 __pycache__/
+simulator-ledger.db
+simulator-ledger.db-wal
+simulator-ledger.db-shm

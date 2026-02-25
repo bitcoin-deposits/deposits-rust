@@ -13,8 +13,8 @@ Modes:
   --transfers  Use same-ledger HTLC transfers (requires same ledger)
 
 Usage:
-    python3 payment-simulator.py --transfers --target-qps 100  # 100 transfers/sec
-    python3 payment-simulator.py --transfers --target-qps 50   # 50 transfers/sec
+    python3 payment-simulator.py --transfers --target-tps 100  # 100 transfers/sec
+    python3 payment-simulator.py --transfers --target-tps 50   # 50 transfers/sec
     python3 payment-simulator.py --lightning  # Lightning payments
 """
 
@@ -25,6 +25,7 @@ import os
 import queue
 import random
 import secrets
+import sqlite3
 import subprocess
 import sys
 import time
@@ -47,6 +48,8 @@ except ImportError:
 # Configuration
 SCRIPT_DIR = Path(__file__).parent.resolve()
 WALLET_SH = SCRIPT_DIR / "wallet.sh"
+REPO_ROOT = SCRIPT_DIR.parent.parent.parent  # deposits-rust root
+WALLET_BINARY = REPO_ROOT / "target" / "release" / "deposits-wallet"
 DATA_DIR = Path.home() / ".deposits-wallet"
 METRICS_PORT = 9200  # Prometheus metrics port
 CONFIG_FILE = SCRIPT_DIR / "simulator-config.json"  # Runtime config file
@@ -56,8 +59,8 @@ class DynamicConfig:
     """Configuration that can be reloaded at runtime."""
     def __init__(self):
         self.payment_interval = 0.1  # seconds between payment batches
-        self.max_concurrent = 20  # max concurrent payment operations (optimal for throughput)
-        self.target_qps = 100  # target queries per second (0 = unlimited)
+        self.max_concurrent = 40  # max concurrent payment operations
+        self.target_tps = 100  # target transactions per second (0 = unlimited)
         self.paused = False  # pause payments
         self._last_load_time = 0.0
         self._last_mtime = 0.0
@@ -83,25 +86,25 @@ class DynamicConfig:
 
             old_interval = self.payment_interval
             old_concurrent = self.max_concurrent
-            old_target_qps = self.target_qps
+            old_target_tps = self.target_tps
             old_paused = self.paused
 
             self.max_concurrent = int(data.get("max_concurrent", self.max_concurrent))
-            self.target_qps = float(data.get("target_qps", self.target_qps))
+            self.target_tps = float(data.get("target_tps", data.get("target_qps", self.target_tps)))
             self.paused = bool(data.get("paused", self.paused))
 
-            # Calculate payment_interval from target_qps
+            # Calculate payment_interval from target_tps
             # With N concurrent workers achieving ~225 tx/s max at N=20,
             # we submit batches of up to N transfers per interval
-            if self.target_qps > 0:
-                # Interval = concurrent / target_qps (submit one batch per interval)
-                self.payment_interval = self.max_concurrent / self.target_qps
+            if self.target_tps > 0:
+                # Interval = concurrent / target_tps (submit one batch per interval)
+                self.payment_interval = self.max_concurrent / self.target_tps
             else:
                 self.payment_interval = float(data.get("payment_interval", 0.01))
 
             # Log changes
-            if self.target_qps != old_target_qps:
-                print(f"\n[CONFIG] Target QPS: {old_target_qps} -> {self.target_qps} (interval: {self.payment_interval:.3f}s)")
+            if self.target_tps != old_target_tps:
+                print(f"\n[CONFIG] Target TPS: {old_target_tps} -> {self.target_tps} (interval: {self.payment_interval:.3f}s)")
             if self.max_concurrent != old_concurrent:
                 print(f"\n[CONFIG] Max concurrent: {old_concurrent} -> {self.max_concurrent}")
             if self.paused != old_paused:
@@ -116,18 +119,109 @@ class DynamicConfig:
             with open(CONFIG_FILE, 'w') as f:
                 json.dump({
                     "max_concurrent": self.max_concurrent,
-                    "target_qps": self.target_qps,
+                    "target_tps": self.target_tps,
                     "paused": self.paused,
                 }, f, indent=2)
             print(f"  Config file: {CONFIG_FILE}")
 
 DYNAMIC_CONFIG = DynamicConfig()
 
+
+class WalletBatchProcess:
+    """Persistent subprocess wrapper for deposits-wallet batch mode.
+
+    Keeps a single WebSocket connection to the Nostr relay and accepts
+    JSON commands on stdin, returning JSON responses on stdout.
+    One instance per worker thread (not shared across threads).
+    """
+
+    def __init__(self, relay: str, network: str, data_dir: str, seed: Optional[str] = None):
+        cmd = [str(WALLET_BINARY), "batch", "--relay", relay, "--network", network, "--data-dir", data_dir]
+        if seed:
+            cmd.extend(["--seed", seed])
+        self._proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,  # Line buffered
+        )
+        self._counter = 0
+        # Wait for ready signal
+        ready_line = self._proc.stdout.readline()
+        if not ready_line:
+            raise RuntimeError(f"Batch process exited immediately: {self._proc.stderr.read()}")
+        ready = json.loads(ready_line)
+        if not ready.get("ready"):
+            raise RuntimeError(f"Unexpected ready response: {ready_line}")
+
+    def _next_id(self) -> str:
+        self._counter += 1
+        return str(self._counter)
+
+    def send_command(self, cmd: dict) -> dict:
+        """Send a JSON command and return the parsed response."""
+        if self._proc.poll() is not None:
+            return {"success": False, "error": "Batch process has exited"}
+        cmd_id = self._next_id()
+        cmd["id"] = cmd_id
+        line = json.dumps(cmd, separators=(',', ':'))
+        try:
+            self._proc.stdin.write(line + "\n")
+            self._proc.stdin.flush()
+        except BrokenPipeError:
+            return {"success": False, "error": "Batch process pipe broken"}
+        resp_line = self._proc.stdout.readline()
+        if not resp_line:
+            return {"success": False, "error": "Batch process closed stdout"}
+        return json.loads(resp_line)
+
+    def transfer_lock(self, alias: str, amount: int, dest_id: str,
+                      hash_hex: str, timeout: int, fee: Optional[int] = None) -> dict:
+        if fee is None:
+            fee = calculate_transfer_fee(amount)
+        return self.send_command({
+            "cmd": "transfer_lock",
+            "alias": alias,
+            "amount": amount,
+            "to": dest_id,
+            "hash": hash_hex,
+            "timeout": timeout,
+            "fee": fee,
+        })
+
+    def transfer_complete(self, transfer_id: str, preimage: str, ledger: str) -> dict:
+        return self.send_command({
+            "cmd": "transfer_complete",
+            "transfer_id": transfer_id,
+            "preimage": preimage,
+            "ledger": ledger,
+        })
+
+    def close(self):
+        if self._proc.poll() is None:
+            self._proc.stdin.close()
+            self._proc.wait(timeout=5)
+
+    def is_alive(self) -> bool:
+        return self._proc.poll() is None
+
+
 # Global payment counter - used to make each invoice unique by adding msat offset
 PAYMENT_COUNTER = 0
 
-# Transfer fee in sats (must match deposits-wallet default: --fee 100)
-TRANSFER_FEE_SATS = 100
+# Transfer fee schedule: fee = TRANSFER_FEE_FIXED + (amount * TRANSFER_FEE_RATE_BPS / 10000)
+# Must match the deposit's TransferFeeSchedule (set at deposit open time).
+# Default: 2 sats fixed + 20 bps (matches TransferFeeSchedule::default())
+TRANSFER_FEE_FIXED = 2   # Fixed fee per transfer in sats
+TRANSFER_FEE_RATE_BPS = 20  # Proportional fee in basis points (1 bps = 0.01%)
+
+
+def calculate_transfer_fee(amount_sats: int) -> int:
+    """Calculate transfer fee for a given amount using the fee schedule."""
+    proportional = (amount_sats * TRANSFER_FEE_RATE_BPS) // 10000
+    return TRANSFER_FEE_FIXED + proportional
 
 # Payment metrics (local counters)
 PAYMENTS_SUCCESS = 0
@@ -139,6 +233,9 @@ FUNDING_VOLUME_SATS = 0
 TRANSFERS_SUCCESS = 0
 TRANSFERS_FAILED = 0
 TRANSFERS_VOLUME_SATS = 0
+
+# Accounting is now tracked in SimulatorLedger (SQLite)
+# ACCT_FUNDED, ACCT_FEES, ACCT_LOCKED, ACCT_LOCK_COUNT are derived from ledger queries
 
 # Prometheus metrics (if available)
 if PROMETHEUS_AVAILABLE:
@@ -215,6 +312,7 @@ class TransferWorkItem:
     receiver_alias: str
     receiver_deposit_id: str
     amount: int
+    fee: int
 
 
 @dataclass
@@ -225,6 +323,205 @@ class TransferResult:
     amount: int
     success: bool
     locked: bool = False  # True if daemon locked funds (even if complete failed)
+    sender_daemon_balance_sats: Optional[int] = None  # Daemon-reported balance on lock failure
+    fee: int = 0  # Transfer fee in sats
+
+
+class SimulatorLedger:
+    """SQLite-backed transaction ledger for precise msat-level balance tracking.
+
+    Every balance-changing event is a row. Balance for a deposit = SUM(amount_msats).
+    Thread-safe: each thread gets its own connection via thread-local storage.
+    """
+
+    def __init__(self, db_path: Optional[str] = None):
+        self._db_path = db_path or str(SCRIPT_DIR / "simulator-ledger.db")
+        self._local = threading.local()
+        self._create_tables(self._get_conn())
+
+    def _get_conn(self) -> sqlite3.Connection:
+        if not hasattr(self._local, 'conn') or self._local.conn is None:
+            conn = sqlite3.connect(self._db_path, timeout=10.0)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.row_factory = sqlite3.Row
+            self._local.conn = conn
+        return self._local.conn
+
+    def _create_tables(self, conn):
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS ledger_events (
+                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp            REAL    NOT NULL,
+                deposit_alias        TEXT    NOT NULL,
+                event_type           TEXT    NOT NULL,
+                amount_msats         INTEGER NOT NULL,
+                transfer_id          TEXT,
+                counterparty_alias   TEXT,
+                daemon_balance_msats INTEGER,
+                detail               TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_ledger_deposit ON ledger_events(deposit_alias);
+            CREATE INDEX IF NOT EXISTS idx_ledger_event_type ON ledger_events(event_type);
+            CREATE INDEX IF NOT EXISTS idx_ledger_transfer_id ON ledger_events(transfer_id);
+        """)
+
+    def _insert(self, deposit_alias: str, event_type: str, amount_msats: int,
+                transfer_id: str = None, counterparty: str = None,
+                daemon_balance_msats: int = None, detail: dict = None):
+        conn = self._get_conn()
+        conn.execute(
+            """INSERT INTO ledger_events
+               (timestamp, deposit_alias, event_type, amount_msats,
+                transfer_id, counterparty_alias, daemon_balance_msats, detail)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (time.time(), deposit_alias, event_type, amount_msats,
+             transfer_id, counterparty, daemon_balance_msats,
+             json.dumps(detail) if detail else None)
+        )
+        conn.commit()
+
+    # --- Event recording ---
+
+    def record_fund_confirmed(self, alias: str, balance_msats: int):
+        self._insert(alias, 'fund_confirmed', balance_msats,
+                     daemon_balance_msats=balance_msats)
+
+    def record_transfer_debit(self, sender: str, receiver: str,
+                              amount_sats: int, fee_sats: int):
+        total_msats = (amount_sats + fee_sats) * 1000
+        self._insert(sender, 'transfer_debit', -total_msats,
+                     counterparty=receiver,
+                     detail={'amount_sats': amount_sats, 'fee_sats': fee_sats})
+
+    def record_transfer_debit_restore(self, sender: str,
+                                      amount_sats: int, fee_sats: int,
+                                      daemon_balance_msats: int = None):
+        total_msats = (amount_sats + fee_sats) * 1000
+        self._insert(sender, 'transfer_debit_restore', total_msats,
+                     daemon_balance_msats=daemon_balance_msats)
+
+    def record_transfer_credit(self, receiver: str, sender: str,
+                               amount_sats: int, transfer_id: str = None):
+        self._insert(receiver, 'transfer_credit', amount_sats * 1000,
+                     transfer_id=transfer_id, counterparty=sender)
+
+    def record_transfer_fee(self, sender: str, fee_sats: int, transfer_id: str = None):
+        """Marker event (amount=0). Fee already included in transfer_debit."""
+        self._insert(sender, 'transfer_fee', 0,
+                     transfer_id=transfer_id,
+                     detail={'fee_msats': fee_sats * 1000})
+
+    def record_transfer_stuck(self, sender: str, amount_sats: int, fee_sats: int,
+                              transfer_id: str = None):
+        """Marker event (amount=0). Lock succeeded, complete failed."""
+        stuck_msats = (amount_sats + fee_sats) * 1000
+        self._insert(sender, 'transfer_stuck', 0,
+                     transfer_id=transfer_id,
+                     detail={'stuck_msats': stuck_msats,
+                             'amount_sats': amount_sats, 'fee_sats': fee_sats})
+
+    def record_daemon_correction(self, alias: str, daemon_balance_msats: int) -> int:
+        """Record delta to align with daemon-reported balance. Returns delta in msats."""
+        ledger_msats = self.get_balance_msats(alias)
+        delta = daemon_balance_msats - ledger_msats
+        if delta != 0:
+            self._insert(alias, 'daemon_correction', delta,
+                         daemon_balance_msats=daemon_balance_msats,
+                         detail={'ledger_before_msats': ledger_msats})
+        return delta
+
+    def record_resync_adjustment(self, alias: str, daemon_balance_msats: int) -> int:
+        """Record delta during periodic resync. Returns delta in msats."""
+        ledger_msats = self.get_balance_msats(alias)
+        delta = daemon_balance_msats - ledger_msats
+        if delta != 0:
+            self._insert(alias, 'resync_adjustment', delta,
+                         daemon_balance_msats=daemon_balance_msats,
+                         detail={'ledger_before_msats': ledger_msats})
+        return delta
+
+    # --- Balance queries ---
+
+    def get_balance_msats(self, alias: str) -> int:
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT COALESCE(SUM(amount_msats), 0) FROM ledger_events WHERE deposit_alias = ?",
+            (alias,)
+        ).fetchone()
+        return row[0]
+
+    def get_balance_sats(self, alias: str) -> int:
+        return self.get_balance_msats(alias) // 1000
+
+    def get_all_balances_sats(self) -> dict:
+        conn = self._get_conn()
+        rows = conn.execute(
+            "SELECT deposit_alias, SUM(amount_msats) FROM ledger_events GROUP BY deposit_alias"
+        ).fetchall()
+        return {row[0]: row[1] // 1000 for row in rows}
+
+    def get_total_balance_msats(self) -> int:
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT COALESCE(SUM(amount_msats), 0) FROM ledger_events"
+        ).fetchone()
+        return row[0]
+
+    # --- Accounting queries (replace ACCT_* globals) ---
+
+    def get_total_funded_msats(self) -> int:
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT COALESCE(SUM(amount_msats), 0) FROM ledger_events "
+            "WHERE event_type = 'fund_confirmed'"
+        ).fetchone()
+        return row[0]
+
+    def get_total_fees_msats(self) -> int:
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT COALESCE(SUM(CAST(json_extract(detail, '$.fee_msats') AS INTEGER)), 0) "
+            "FROM ledger_events WHERE event_type = 'transfer_fee'"
+        ).fetchone()
+        return row[0]
+
+    def get_total_locked_msats(self) -> int:
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT COALESCE(SUM(CAST(json_extract(detail, '$.stuck_msats') AS INTEGER)), 0) "
+            "FROM ledger_events WHERE event_type = 'transfer_stuck'"
+        ).fetchone()
+        return row[0]
+
+    def get_lock_stuck_count(self) -> int:
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT COUNT(*) FROM ledger_events WHERE event_type = 'transfer_stuck'"
+        ).fetchone()
+        return row[0]
+
+    def get_total_corrections_msats(self) -> int:
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT COALESCE(SUM(amount_msats), 0) FROM ledger_events "
+            "WHERE event_type IN ('daemon_correction', 'resync_adjustment')"
+        ).fetchone()
+        return row[0]
+
+    def has_events(self, alias: str) -> bool:
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT 1 FROM ledger_events WHERE deposit_alias = ? LIMIT 1",
+            (alias,)
+        ).fetchone()
+        return row is not None
+
+    def reset(self):
+        conn = self._get_conn()
+        conn.execute("DELETE FROM ledger_events")
+        conn.commit()
 
 
 def run_wallet(*args, capture: bool = True) -> tuple[int, str, str]:
@@ -588,36 +885,62 @@ def fund_deposit_lightning(funder: Deposit, recipient_alias: str, amount_sats: i
 # These use HTLC-style hash-locked transfers
 
 
+_cached_block_height = 100
+_cached_block_height_time = 0.0
+_cached_block_height_lock = threading.Lock()
+
 def get_current_block_height() -> int:
-    """Get current block height from bitcoind"""
-    try:
-        result = subprocess.run([
-            "docker", "exec", "bdk-bitcoind",
-            "bitcoin-cli", "-regtest",
-            "-rpcuser=user", "-rpcpassword=pass",
-            "getblockcount"
-        ], capture_output=True, text=True)
-        return int(result.stdout.strip())
-    except:
-        return 100  # Fallback
+    """Get current block height from bitcoind (cached for 5s to avoid docker exec per transfer)"""
+    global _cached_block_height, _cached_block_height_time
+    now = time.monotonic()
+    if now - _cached_block_height_time < 5.0:
+        return _cached_block_height
+    with _cached_block_height_lock:
+        # Double-check after acquiring lock
+        if now - _cached_block_height_time < 5.0:
+            return _cached_block_height
+        try:
+            result = subprocess.run([
+                "docker", "exec", "bdk-bitcoind",
+                "bitcoin-cli", "-regtest",
+                "-rpcuser=user", "-rpcpassword=pass",
+                "getblockcount"
+            ], capture_output=True, text=True, timeout=5)
+            _cached_block_height = int(result.stdout.strip())
+            _cached_block_height_time = time.monotonic()
+        except:
+            pass  # Keep using cached value
+        return _cached_block_height
 
 
 def transfer_lock(sender_alias: str, dest_deposit_id: str, amount_sats: int,
-                  hash_hex: str, timeout_height: int) -> Optional[str]:
+                  hash_hex: str, timeout_height: int, fee: Optional[int] = None) -> tuple[Optional[str], Optional[int]]:
     """
     Create a transfer lock (HTLC) from sender to destination deposit.
-    Returns the transfer_id on success, None on failure.
+    Returns (transfer_id, daemon_balance_sats):
+      - (transfer_id, None) on success
+      - (None, balance_sats) on insufficient balance (daemon-reported)
+      - (None, None) on other failures
     """
+    if fee is None:
+        fee = calculate_transfer_fee(amount_sats)
     code, stdout, stderr = run_wallet(
         "transfer", sender_alias, str(amount_sats),
         "--to", dest_deposit_id,
         "--hash", hash_hex,
-        "--timeout", str(timeout_height)
+        "--timeout", str(timeout_height),
+        "--fee", str(fee),
     )
 
     if code != 0:
         print(f"  Warning: Transfer lock failed: {stderr}")
-        return None
+        # Parse daemon-reported balance from "Insufficient balance: N msats available"
+        daemon_balance_sats = None
+        import re
+        match = re.search(r'Insufficient balance: (\d+) msats available', stderr)
+        if match:
+            daemon_balance_sats = int(match.group(1)) // 1000
+        return (None, daemon_balance_sats)
 
     # Parse transfer_id from output
     # Format: "  Transfer ID: <hex>"
@@ -627,10 +950,10 @@ def transfer_lock(sender_alias: str, dest_deposit_id: str, amount_sats: int,
             if len(parts) >= 2:
                 transfer_id = parts[-1].strip()
                 if len(transfer_id) >= 32:
-                    return transfer_id
+                    return (transfer_id, None)
 
     print(f"  Warning: Could not parse transfer_id from output")
-    return None
+    return (None, None)
 
 
 def transfer_complete(transfer_id: str, preimage_hex: str, ledger_id: str) -> bool:
@@ -654,44 +977,52 @@ def transfer_complete(transfer_id: str, preimage_hex: str, ledger_id: str) -> bo
 
 
 def do_async_transfer(s_alias: str, s_ledger: str, s_deposit_id: str,
-                      r_alias: str, r_deposit_id: str, amt: int) -> tuple:
+                      r_alias: str, r_deposit_id: str, amt: int,
+                      batch_process=None) -> tuple:
     """
     Worker function for async transfers (runs in thread pool).
-    Returns (sender_alias, receiver_alias, amount, success, locked) tuple.
+    Returns (sender_alias, receiver_alias, amount, success, locked, daemon_balance_sats) tuple.
     locked=True means daemon has the funds locked (don't restore sender balance on failure).
+    daemon_balance_sats: daemon-reported sender balance on insufficient balance failure.
     """
     try:
         # Validate inputs before creating deposits
         if not s_deposit_id:
             print(f"  [async] Warning: Sender {s_alias} has no deposit_id", flush=True)
-            return (s_alias, r_alias, amt, False, False)
+            return (s_alias, r_alias, amt, False, False, None)
         if not r_deposit_id:
             print(f"  [async] Warning: Receiver {r_alias} has no deposit_id", flush=True)
-            return (s_alias, r_alias, amt, False, False)
+            return (s_alias, r_alias, amt, False, False, None)
 
         # Create minimal deposit objects for the transfer
         sender = Deposit(alias=s_alias, ledger_id=s_ledger, deposit_id=s_deposit_id)
         receiver = Deposit(alias=r_alias, ledger_id=s_ledger, deposit_id=r_deposit_id)
 
-        transferred, locked = same_ledger_transfer(sender, receiver, amt)
+        transferred, locked, daemon_balance = same_ledger_transfer(
+            sender, receiver, amt, batch_process=batch_process)
         if transferred is not None and transferred > 0:
-            return (s_alias, r_alias, transferred, True, True)
+            return (s_alias, r_alias, transferred, True, True, None)
         else:
-            return (s_alias, r_alias, amt, False, locked)
+            return (s_alias, r_alias, amt, False, locked, daemon_balance)
     except Exception as e:
         print(f"  [async] Error in transfer {s_alias} -> {r_alias}: {e}", flush=True)
-        return (s_alias, r_alias, amt, False, False)
+        return (s_alias, r_alias, amt, False, False, None)
 
 
 def transfer_producer(work_queue, our_deposits, deposits_lock, config,
                       min_payment_sats, max_payment_sats, shutdown_event,
-                      consecutive_failures):
+                      consecutive_failures, ledger=None):
     """
-    Producer thread: generates transfer work items at target QPS rate.
+    Producer thread: generates transfer work items at target TPS rate.
     Acquires deposits_lock to pick sender/receiver and optimistically debit sender.
     Puts TransferWorkItem on work_queue (blocks if full = backpressure).
     Backs off exponentially when consecutive failures are detected.
     """
+    # Burst rate limiter: emit up to `burst_size` items, then sleep for the batch interval.
+    # This avoids per-item sleep overhead which caps throughput at ~50 TPS.
+    last_burst_time = time.monotonic()
+    items_this_burst = 0
+
     while not shutdown_event.is_set():
         # Check pause
         if config.paused:
@@ -707,10 +1038,19 @@ def transfer_producer(work_queue, our_deposits, deposits_lock, config,
             if shutdown_event.is_set():
                 break
 
-        # Rate control
-        target_qps = config.target_qps
-        if target_qps > 0:
-            time.sleep(1.0 / target_qps)
+        # Rate control: burst-based instead of per-item sleep
+        target_tps = config.target_tps
+        if target_tps > 0:
+            burst_interval = 0.05  # 50ms burst windows
+            burst_size = max(1, int(target_tps * burst_interval))
+            now = time.monotonic()
+            if items_this_burst >= burst_size:
+                elapsed = now - last_burst_time
+                remaining = burst_interval - elapsed
+                if remaining > 0:
+                    time.sleep(remaining)
+                last_burst_time = time.monotonic()
+                items_this_burst = 0
 
         if shutdown_event.is_set():
             break
@@ -718,18 +1058,26 @@ def transfer_producer(work_queue, our_deposits, deposits_lock, config,
         # Pick sender and receiver under lock
         picked = False
         with deposits_lock:
-            min_balance_needed = max_payment_sats + TRANSFER_FEE_SATS + 1000
-            funded = [d for d in our_deposits if d.balance_sats >= min_balance_needed]
+            max_fee = calculate_transfer_fee(max_payment_sats)
+            min_balance_needed = max_payment_sats + max_fee + 1000
+            funded = [d for d in our_deposits
+                      if d.balance_sats >= min_balance_needed and d.status == "funded"]
             if funded:
                 sender = random.choice(funded)
                 same_ledger = [d for d in our_deposits
-                               if d != sender and d.ledger_id == sender.ledger_id and d.deposit_id]
+                               if d != sender and d.ledger_id == sender.ledger_id
+                               and d.deposit_id and d.status == "funded"]
                 if same_ledger:
                     receiver = random.choice(same_ledger)
-                    max_amount = min(max_payment_sats, sender.balance_sats - TRANSFER_FEE_SATS - 1000)
+                    max_amount = min(max_payment_sats, sender.balance_sats - calculate_transfer_fee(max_payment_sats) - 1000)
                     if max_amount >= min_payment_sats and sender.deposit_id and receiver.deposit_id:
                         amount = random.randint(min_payment_sats, max_amount)
-                        sender.balance_sats -= (amount + TRANSFER_FEE_SATS)  # Optimistic debit (amount + fee)
+                        fee = calculate_transfer_fee(amount)
+                        if ledger:
+                            ledger.record_transfer_debit(sender.alias, receiver.alias, amount, fee)
+                            sender.balance_sats = ledger.get_balance_sats(sender.alias)
+                        else:
+                            sender.balance_sats -= (amount + fee)
                         picked = True
 
         if not picked:
@@ -743,24 +1091,31 @@ def transfer_producer(work_queue, our_deposits, deposits_lock, config,
             receiver_alias=receiver.alias,
             receiver_deposit_id=receiver.deposit_id,
             amount=amount,
+            fee=fee,
         )
 
         # Put on queue (blocks if full - backpressure)
         try:
             work_queue.put(item, timeout=1.0)
+            items_this_burst += 1
         except queue.Full:
             # Queue full, restore sender balance (amount + fee)
             with deposits_lock:
                 for d in our_deposits:
                     if d.alias == item.sender_alias:
-                        d.balance_sats += item.amount + TRANSFER_FEE_SATS
+                        if ledger:
+                            ledger.record_transfer_debit_restore(d.alias, item.amount, item.fee)
+                            d.balance_sats = ledger.get_balance_sats(d.alias)
+                        else:
+                            d.balance_sats += item.amount + item.fee
                         break
 
 
-def transfer_worker(work_queue, result_queue):
+def transfer_worker(work_queue, result_queue, batch_process=None):
     """
     Worker thread: pulls TransferWorkItems from work_queue, executes transfers,
     puts TransferResults on result_queue.
+    Uses batch_process (persistent WebSocket) if provided, otherwise falls back to subprocess.
     """
     while True:
         item = work_queue.get()
@@ -769,30 +1124,37 @@ def transfer_worker(work_queue, result_queue):
 
         result = do_async_transfer(
             item.sender_alias, item.sender_ledger, item.sender_deposit_id,
-            item.receiver_alias, item.receiver_deposit_id, item.amount
+            item.receiver_alias, item.receiver_deposit_id, item.amount,
+            batch_process=batch_process,
         )
 
-        _, _, _, success, locked = result
+        _, _, _, success, locked, daemon_balance = result
         result_queue.put(TransferResult(
             sender_alias=item.sender_alias,
             receiver_alias=item.receiver_alias,
             amount=item.amount,
             success=success,
             locked=locked,
+            sender_daemon_balance_sats=daemon_balance,
+            fee=item.fee,
         ))
 
 
-def same_ledger_transfer(sender: Deposit, receiver: Deposit, amount_sats: int) -> tuple[Optional[int], bool]:
+def same_ledger_transfer(sender: Deposit, receiver: Deposit, amount_sats: int,
+                         batch_process=None) -> tuple[Optional[int], bool, Optional[int]]:
     """
     Make a same-ledger HTLC transfer between two deposits.
     1. Generate preimage and hash
     2. Create TransferLock
     3. Complete with preimage
 
-    Returns (amount_transferred, was_locked):
-      (amount, True)  - success: both lock and complete succeeded
-      (None, True)    - lock succeeded but complete failed; funds locked on daemon
-      (None, False)   - lock failed; no funds consumed on daemon
+    If batch_process is provided, uses persistent WebSocket connection.
+    Otherwise falls back to subprocess per operation.
+
+    Returns (amount_transferred, was_locked, daemon_balance_sats):
+      (amount, True, None)     - success: both lock and complete succeeded
+      (None, True, None)       - lock succeeded but complete failed; funds locked on daemon
+      (None, False, balance)   - lock failed; daemon-reported sender balance (or None)
     """
     global TRANSFERS_SUCCESS, TRANSFERS_FAILED, TRANSFERS_VOLUME_SATS
 
@@ -801,74 +1163,133 @@ def same_ledger_transfer(sender: Deposit, receiver: Deposit, amount_sats: int) -
         TRANSFERS_FAILED += 1
         if PROMETHEUS_AVAILABLE:
             PROM_TRANSFERS_TOTAL.labels(status='failed').inc()
-        return (None, False)
+        return (None, False, None)
 
     if not receiver.deposit_id:
         print(f"  Warning: Receiver {receiver.alias} has no deposit_id", flush=True)
         TRANSFERS_FAILED += 1
         if PROMETHEUS_AVAILABLE:
             PROM_TRANSFERS_TOTAL.labels(status='failed').inc()
-        return (None, False)
+        return (None, False, None)
 
     # Generate preimage and hash
     preimage = secrets.token_bytes(32)
     preimage_hex = preimage.hex()
     hash_hex = hashlib.sha256(preimage).hexdigest()
 
-    # Set timeout 10 blocks in future
+    # Set timeout far enough that transfers complete before expiry.
+    # With regtest mining 1 block/sec, +1000 gives ~16 minutes.
     current_height = get_current_block_height()
-    timeout_height = current_height + 10
+    timeout_height = current_height + 1000
 
-    print(f"  [async] Creating transfer: {sender.alias} -> {receiver.alias} ({amount_sats} sats)", flush=True)
-    print(f"    Hash: {hash_hex[:16]}...", flush=True)
-    print(f"    Timeout: block {timeout_height}", flush=True)
+    # Verbose per-transfer logging disabled for performance (uncomment to debug)
+    # print(f"  [async] Creating transfer: {sender.alias} -> {receiver.alias} ({amount_sats} sats)", flush=True)
 
-    # Create the lock
-    transfer_id = transfer_lock(
-        sender.alias,
-        receiver.deposit_id,
-        amount_sats,
-        hash_hex,
-        timeout_height
-    )
+    # Compute fee from schedule (must match daemon's TransferFeeSchedule on the deposit)
+    lock_fee = calculate_transfer_fee(amount_sats)
+
+    t_lock_start = time.monotonic()
+
+    # Create the lock — use batch process if available
+    if batch_process and batch_process.is_alive():
+        resp = batch_process.transfer_lock(
+            sender.alias, amount_sats, receiver.deposit_id,
+            hash_hex, timeout_height, fee=lock_fee)
+        if resp.get("success"):
+            transfer_id = resp.get("transfer_id")
+            daemon_balance_sats = None
+        else:
+            print(f"  Warning: Transfer lock failed: {resp.get('error', 'Unknown')}", flush=True)
+            transfer_id = None
+            balance_msats = resp.get("balance_msats")
+            daemon_balance_sats = balance_msats // 1000 if balance_msats is not None else None
+    else:
+        transfer_id, daemon_balance_sats = transfer_lock(
+            sender.alias,
+            receiver.deposit_id,
+            amount_sats,
+            hash_hex,
+            timeout_height,
+            fee=lock_fee,
+        )
+
+    t_lock_end = time.monotonic()
+    lock_ms = (t_lock_end - t_lock_start) * 1000
 
     if not transfer_id:
         TRANSFERS_FAILED += 1
         if PROMETHEUS_AVAILABLE:
             PROM_TRANSFERS_TOTAL.labels(status='failed').inc()
-        return (None, False)
+        return (None, False, daemon_balance_sats)
 
-    print(f"  [async] Transfer locked: {transfer_id[:16]}...", flush=True)
-    print(f"  [async] Completing with preimage...", flush=True)
+    # Complete immediately with preimage — use batch process if available
+    if batch_process and batch_process.is_alive():
+        resp = batch_process.transfer_complete(transfer_id, preimage_hex, sender.ledger_id)
+        complete_ok = resp.get("success", False)
+        if not complete_ok:
+            print(f"  Warning: Transfer complete failed: {resp.get('error', 'Unknown')}", flush=True)
+    else:
+        complete_ok = transfer_complete(transfer_id, preimage_hex, sender.ledger_id)
 
-    # Complete immediately with preimage
-    if transfer_complete(transfer_id, preimage_hex, sender.ledger_id):
-        print(f"  [async] Transfer completed!", flush=True)
+    t_complete_end = time.monotonic()
+    complete_ms = (t_complete_end - t_lock_end) * 1000
+    total_ms = (t_complete_end - t_lock_start) * 1000
+    # Periodic e2e timing sample (every ~50th transfer to avoid log spam)
+    if TRANSFERS_SUCCESS % 50 == 0:
+        print(f"  [TIMING] e2e={total_ms:.0f}ms lock={lock_ms:.0f}ms complete={complete_ms:.0f}ms", flush=True)
+
+    fee_sats = calculate_transfer_fee(amount_sats)
+
+    if complete_ok:
         TRANSFERS_SUCCESS += 1
         TRANSFERS_VOLUME_SATS += amount_sats
+        # Fee tracking now happens in the main loop via ledger.record_transfer_fee()
         if PROMETHEUS_AVAILABLE:
             PROM_TRANSFERS_TOTAL.labels(status='success').inc()
             PROM_TRANSFERS_SATS.inc(amount_sats)
-        return (amount_sats, True)
+        return (amount_sats, True, None)
 
     # Lock succeeded but complete failed - funds are locked on daemon until timeout
-    print(f"  [async] Warning: Transfer lock succeeded but complete failed (funds locked until block {timeout_height})", flush=True)
+    # Stuck tracking now happens in the main loop via ledger.record_transfer_stuck()
     TRANSFERS_FAILED += 1
+    print(f"  [ACCT] Lock stuck: {amount_sats + fee_sats:,} sats locked on daemon", flush=True)
     if PROMETHEUS_AVAILABLE:
         PROM_TRANSFERS_TOTAL.labels(status='failed').inc()
-    return (None, True)
+    return (None, True, None)
 
 
-def mine_block(network: str = "regtest"):
-    """Mine a block to confirm transactions (regtest only)"""
-    if network != "regtest":
-        return  # Can't mine on signet/mainnet
+def _mine_one_block():
+    """Mine a single regtest block (internal helper)."""
+    global _cached_block_height, _cached_block_height_time
     subprocess.run([
         "docker", "exec", "bdk-bitcoind",
         "bitcoin-cli", "-regtest",
         "-rpcuser=user", "-rpcpassword=pass",
         "-rpcwallet=faucet", "-generate", "1"
     ], capture_output=True)
+    _cached_block_height += 1
+    _cached_block_height_time = time.monotonic()
+
+
+def start_background_miner(network: str = "regtest", interval: float = 1.0) -> Optional[threading.Event]:
+    """Start a background thread that mines a block every `interval` seconds.
+
+    Returns a shutdown Event (set it to stop the miner), or None if not regtest.
+    """
+    if network != "regtest":
+        return None
+
+    stop_event = threading.Event()
+
+    def miner_loop():
+        while not stop_event.is_set():
+            _mine_one_block()
+            stop_event.wait(interval)
+
+    t = threading.Thread(target=miner_loop, daemon=True, name="background-miner")
+    t.start()
+    print(f"  Background miner: 1 block every {interval}s")
+    return stop_event
 
 
 def run_simulation(
@@ -899,6 +1320,8 @@ def run_simulation(
         lightning: Use Lightning invoices instead of on-chain withdrawals
         transfers: Use same-ledger HTLC transfers
     """
+    # Initialize SQLite transaction ledger
+    ledger = SimulatorLedger()
 
     # Lightning and transfers are instant, so we can run 10x faster
     if (lightning or transfers) and payment_interval == 2.0:
@@ -937,6 +1360,10 @@ def run_simulation(
         print(f"  {lid[:16]}...")
     print()
 
+    # Start background miner (regtest only) — mines a block every second
+    # so on-chain transactions confirm without explicit mine_block() calls.
+    miner_stop = start_background_miner(network, interval=1.0)
+
     # Warm up the wallet connection with a sync attempt
     # This establishes the Nostr subscription so subsequent syncs are faster
     print("Warming up wallet connection...")
@@ -959,7 +1386,15 @@ def run_simulation(
         balances = sync_and_get_balances()
         for d in our_deposits:
             if d.alias in balances:
-                d.balance_sats = balances[d.alias]
+                daemon_msats = balances[d.alias] * 1000
+                if not ledger.has_events(d.alias):
+                    # First run with this DB — seed from daemon
+                    if daemon_msats > 0:
+                        ledger.record_fund_confirmed(d.alias, daemon_msats)
+                else:
+                    # DB exists — reconcile with daemon
+                    ledger.record_resync_adjustment(d.alias, daemon_msats)
+                d.balance_sats = ledger.get_balance_sats(d.alias)
                 if d.balance_sats > 0:
                     d.status = "funded"
         funded_count = len([d for d in our_deposits if d.balance_sats > 0])
@@ -969,14 +1404,100 @@ def run_simulation(
         print(f"  {funded_count} funded, {len(our_deposits) - funded_count} empty"
               + (f", {len(missing)} stale (dropped)" if missing else ""))
     wallet_counter = len(our_deposits)
-    last_wallet_time = 0.0
-    last_payment_time = 0.0
-    last_rediscover_time = time.time()
-    last_balance_sync_time = time.time()  # Don't sync immediately on startup
-    last_status_time = 0.0
 
     # Track ledgers that have been funded on-chain (for --single-fund mode)
     onchain_funded_ledgers: set[str] = set()
+
+    # Create and fund all deposits upfront (batch mode)
+    # This ensures all deposits confirm at roughly the same time
+    needed = num_wallets - len(our_deposits)
+    if needed > 0:
+        print(f"Creating {needed} deposits (batch)...")
+        ts = int(time.time()) % 100000
+        created = []
+        for i in range(needed):
+            wallet_counter += 1
+            alias = f"sim-{ts}-{wallet_counter:02d}"
+            ledger_id = ledgers[(wallet_counter - 1) % len(ledgers)]
+
+            if single_fund:
+                is_first_on_ledger = ledger_id not in onchain_funded_ledgers
+                if is_first_on_ledger:
+                    open_amount = int(funding_amount_sats * wallets_per_ledger * 1.2)
+                else:
+                    open_amount = funding_amount_sats
+            else:
+                open_amount = funding_amount_sats
+
+            deposit = open_deposit(ledger_id, alias, open_amount)
+            if deposit:
+                our_deposits.append(deposit)
+                created.append(deposit)
+            else:
+                print(f"  Warning: Failed to create {alias}, skipping")
+
+        # Fund all newly created deposits
+        print(f"\nFunding {len(created)} deposits...")
+        for deposit in created:
+            ledger_id = deposit.ledger_id
+            is_first_on_ledger = ledger_id not in onchain_funded_ledgers
+
+            if single_fund and is_first_on_ledger:
+                faucet_amount = int(funding_amount_sats * wallets_per_ledger * 1.2)
+                print(f"  {deposit.alias}: faucet {faucet_amount} sats (first on ledger, for splits)...")
+            else:
+                faucet_amount = funding_amount_sats
+                print(f"  {deposit.alias}: faucet {faucet_amount} sats...")
+
+            if fund_deposit(deposit.alias, faucet_amount if single_fund else None):
+                onchain_funded_ledgers.add(ledger_id)
+                deposit.status = "confirming"
+                deposit.balance_sats = 0
+            else:
+                print(f"  Warning: Failed to fund {deposit.alias}")
+
+        # Wait for all deposits to confirm
+        confirming = [d for d in our_deposits if d.status == "confirming"]
+        if confirming:
+            print(f"\nWaiting for {len(confirming)} deposits to confirm...")
+            max_wait = 120  # seconds
+            start_wait = time.time()
+            while confirming and (time.time() - start_wait) < max_wait:
+                time.sleep(3)
+                balances = sync_and_get_balances()
+                still_confirming = []
+                for d in confirming:
+                    if d.alias in balances and balances[d.alias] > 0:
+                        daemon_msats = balances[d.alias] * 1000
+                        d.status = "funded"
+                        ledger.record_fund_confirmed(d.alias, daemon_msats)
+                        d.balance_sats = ledger.get_balance_sats(d.alias)
+                        print(f"  Confirmed: {d.alias} has {d.balance_sats:,} sats")
+                    else:
+                        still_confirming.append(d)
+                confirming = still_confirming
+                if confirming:
+                    elapsed = int(time.time() - start_wait)
+                    print(f"  Still waiting on {len(confirming)} deposits... ({elapsed}s)")
+
+            if confirming:
+                print(f"  Warning: {len(confirming)} deposits did not confirm within {max_wait}s")
+                print(f"  They will be picked up by the confirmation check in the main loop.")
+
+        funded_count = len([d for d in our_deposits if d.balance_sats > 0])
+        acct_funded = ledger.get_total_funded_msats() // 1000
+        print(f"\nAll deposits ready: {funded_count} funded, {acct_funded:,} sats total")
+    print()
+
+    last_wallet_time = time.time()  # All wallets created, no more needed
+    last_payment_time = 0.0
+    last_rediscover_time = time.time()
+    last_balance_sync_time = time.time()  # Don't sync immediately on startup
+    last_full_resync_time = time.time()  # Full balance resync every 10s
+    last_status_time = 0.0
+    last_tps_snapshot_time = time.time()
+    last_tps_snapshot_count = 0  # TRANSFERS_SUCCESS at last snapshot
+    last_unfunded_retry_time = 0.0  # Rate-limit unfunded deposit retries
 
     print("Starting simulation...")
     print(f"  - Network: {network}")
@@ -984,13 +1505,12 @@ def run_simulation(
     print(f"  - Payment mode: {mode}")
     if single_fund:
         print(f"  - Single-fund mode: only first deposit per ledger funded on-chain")
-    print(f"  - Target wallets: {num_wallets} ({wallets_per_ledger:.1f} per ledger)")
-    print(f"  - New wallet every {wallet_creation_interval:.1f}s")
+    print(f"  - Target wallets: {num_wallets} ({wallets_per_ledger:.1f} per ledger, batch-funded upfront)")
     if transfers:
-        print(f"  - Target QPS: {DYNAMIC_CONFIG.target_qps} (work queue model)")
+        print(f"  - Target TPS: {DYNAMIC_CONFIG.target_tps} (work queue model)")
         print(f"  - Worker threads: {DYNAMIC_CONFIG.max_concurrent}")
     else:
-        print(f"  - Target QPS: {DYNAMIC_CONFIG.target_qps} (interval: {payment_interval:.3f}s)")
+        print(f"  - Target TPS: {DYNAMIC_CONFIG.target_tps} (interval: {payment_interval:.3f}s)")
         print(f"  - Max concurrent: {DYNAMIC_CONFIG.max_concurrent}")
     print(f"  - Re-discover ledgers every {rediscover_interval}s")
     if network != "regtest":
@@ -1010,10 +1530,30 @@ def run_simulation(
         # Shared failure counter: [consecutive_failures]. List used as mutable ref across threads.
         consecutive_failures = [0]
 
+        # Create batch processes (persistent WebSocket connections) for workers
+        relay = os.environ.get("WALLET_RELAY", "ws://localhost:7778")
+        data_dir = os.environ.get("WALLET_DATA_DIR", str(Path.home() / ".deposits-wallet"))
+        seed = os.environ.get("WALLET_SEED")
+        batch_processes = []
+        for i in range(DYNAMIC_CONFIG.max_concurrent):
+            try:
+                bp = WalletBatchProcess(relay, network, data_dir, seed)
+                batch_processes.append(bp)
+            except Exception as e:
+                print(f"  Warning: batch process {i} failed to start: {e}")
+                batch_processes.append(None)
+        alive_count = sum(1 for bp in batch_processes if bp is not None)
+        print(f"  Started {alive_count}/{DYNAMIC_CONFIG.max_concurrent} batch processes (persistent WebSocket)")
+
         # Start worker threads
         worker_threads = []
         for i in range(DYNAMIC_CONFIG.max_concurrent):
-            t = threading.Thread(target=transfer_worker, args=(work_queue, result_queue), daemon=True)
+            t = threading.Thread(
+                target=transfer_worker,
+                args=(work_queue, result_queue),
+                kwargs={"batch_process": batch_processes[i]},
+                daemon=True,
+            )
             t.start()
             worker_threads.append(t)
 
@@ -1022,7 +1562,7 @@ def run_simulation(
             target=transfer_producer,
             args=(work_queue, our_deposits, deposits_lock, DYNAMIC_CONFIG,
                   min_payment_sats, max_payment_sats, shutdown_event,
-                  consecutive_failures),
+                  consecutive_failures, ledger),
             daemon=True,
         )
         producer_thread.start()
@@ -1048,17 +1588,28 @@ def run_simulation(
                         else:
                             consecutive_failures[0] += 1
                         with deposits_lock:
-                            for d in our_deposits:
-                                if result.success:
-                                    # Transfer succeeded - credit receiver (amount only, fee goes to operator)
+                            fee_sats = result.fee or calculate_transfer_fee(result.amount)
+                            if result.success:
+                                # Transfer succeeded - credit receiver, record fee
+                                ledger.record_transfer_credit(result.receiver_alias, result.sender_alias, result.amount)
+                                ledger.record_transfer_fee(result.sender_alias, fee_sats)
+                                for d in our_deposits:
                                     if d.alias == result.receiver_alias:
-                                        d.balance_sats += result.amount
-                                elif not result.locked:
-                                    # Lock failed - safe to restore sender balance (amount + fee)
+                                        d.balance_sats = ledger.get_balance_sats(d.alias)
+                            elif not result.locked:
+                                # Lock failed - restore sender balance
+                                daemon_msats = result.sender_daemon_balance_sats * 1000 if result.sender_daemon_balance_sats is not None else None
+                                ledger.record_transfer_debit_restore(result.sender_alias, result.amount, fee_sats, daemon_balance_msats=daemon_msats)
+                                if daemon_msats is not None:
+                                    delta = ledger.record_daemon_correction(result.sender_alias, daemon_msats)
+                                    if delta != 0:
+                                        print(f"  [ledger] {result.sender_alias}: daemon correction {delta:+,} msats ({delta // 1000:+,} sats)", flush=True)
+                                for d in our_deposits:
                                     if d.alias == result.sender_alias:
-                                        d.balance_sats += result.amount + TRANSFER_FEE_SATS
-                                # If locked but not success: funds are locked on daemon
-                                # until timeout - don't restore sender balance
+                                        d.balance_sats = ledger.get_balance_sats(d.alias)
+                            else:
+                                # Lock succeeded but complete failed - funds stuck on daemon
+                                ledger.record_transfer_stuck(result.sender_alias, result.amount, fee_sats)
                     except queue.Empty:
                         break
 
@@ -1132,40 +1683,18 @@ def run_simulation(
                         is_first_on_ledger = ledger_id not in onchain_funded_ledgers
 
                         if single_fund and not is_first_on_ledger:
-                            # Must fund via transfer/lightning - wait for a funder
-                            # Optimistically debit funder under lock to prevent producer from
-                            # racing on the same balance
-                            funder = None
-                            with deposits_lock:
-                                min_funder_balance = int(funding_amount_sats * 1.1) + 5000
-                                same_ledger_funders = [d for d in our_deposits
-                                                       if d.ledger_id == ledger_id
-                                                       and d.balance_sats >= min_funder_balance
-                                                       and d.alias != alias]
-                                if same_ledger_funders:
-                                    funder = random.choice(same_ledger_funders)
-                                    funder.balance_sats -= (funding_amount_sats + TRANSFER_FEE_SATS)  # optimistic debit (amount + fee)
-
-                            if funder:
-                                print(f"  Funding via transfer from {funder.alias} ({funder.balance_sats + funding_amount_sats + TRANSFER_FEE_SATS} sats)...")
-                                transferred, locked = same_ledger_transfer(funder, deposit, funding_amount_sats)
-                                if transferred is not None and transferred > 0:
-                                    with deposits_lock:
-                                        deposit.status = "funded"
-                                        deposit.balance_sats = transferred
-                                        funder.balance_sats += funding_amount_sats - transferred
-                                    print(f"  Deposit funded via transfer")
-                                elif not locked:
-                                    # Lock failed - safe to restore optimistic debit (amount + fee)
-                                    with deposits_lock:
-                                        funder.balance_sats += funding_amount_sats + TRANSFER_FEE_SATS
-                                    print(f"  Transfer funding failed (single-fund mode, not falling back)")
-                                else:
-                                    # Lock succeeded but complete failed - funds locked, don't restore
-                                    print(f"  Transfer funding partially failed (funds locked on daemon)")
+                            # In single-fund mode, second+ deposits still need on-chain funding
+                            # to trigger daemon's DepositOpen + DepositCredit. Without it, the
+                            # deposit exists as an offer but not on the ledger, so transfers fail.
+                            # Fund with the standard amount via faucet.
+                            print(f"  Funding via faucet (deposit must be completed on-chain)...")
+                            if fund_deposit(alias):
+                                onchain_funded_ledgers.add(ledger_id)
+                                deposit.status = "confirming"
+                                deposit.balance_sats = 0
+                                print(f"  Faucet sent, awaiting next block for confirmation...")
                             else:
-                                print(f"  No same-ledger funders yet, will retry later...")
-                                # Keep deposit but don't fund yet
+                                print(f"  Faucet funding failed, will retry later...")
                         else:
                             # Find a deposit with enough balance to fund via Lightning/transfers
                             # Require 10% buffer to account for fees and balance drift
@@ -1173,50 +1702,16 @@ def run_simulation(
                             funded_deposits = [d for d in our_deposits if d.balance_sats >= min_funder_balance and d.alias != alias]
 
                             if transfers and not (single_fund and is_first_on_ledger):
-                                # For transfers, funder must be on same ledger
-                                # Optimistically debit under lock to prevent producer racing
-                                funder = None
-                                with deposits_lock:
-                                    same_ledger_funders = [d for d in our_deposits
-                                                           if d.ledger_id == ledger_id
-                                                           and d.balance_sats >= min_funder_balance
-                                                           and d.alias != alias]
-                                    if same_ledger_funders:
-                                        funder = random.choice(same_ledger_funders)
-                                        funder.balance_sats -= (funding_amount_sats + TRANSFER_FEE_SATS)  # optimistic debit (amount + fee)
-
-                                if funder:
-                                    print(f"  Funding via transfer from {funder.alias} ({funder.balance_sats + funding_amount_sats + TRANSFER_FEE_SATS} sats)...")
-                                    transferred, locked = same_ledger_transfer(funder, deposit, funding_amount_sats)
-                                    if transferred is not None and transferred > 0:
-                                        with deposits_lock:
-                                            deposit.status = "funded"
-                                            deposit.balance_sats = transferred
-                                            funder.balance_sats += funding_amount_sats - transferred
-                                        print(f"  Deposit funded via transfer")
-                                    elif not locked:
-                                        # Lock failed - safe to restore and fall back to faucet
-                                        with deposits_lock:
-                                            funder.balance_sats += funding_amount_sats + TRANSFER_FEE_SATS
-                                        print(f"  Transfer funding failed, falling back to faucet...")
-                                        if fund_deposit(alias):
-                                            mine_block(network)
-                                            onchain_funded_ledgers.add(ledger_id)
-                                            deposit.status = "confirming"
-                                            deposit.balance_sats = 0
-                                            print(f"  Faucet sent, awaiting daemon confirmation...")
-                                    else:
-                                        # Lock succeeded but complete failed - funds locked, don't restore
-                                        print(f"  Transfer funding partially failed (funds locked on daemon)")
-                                else:
-                                    # No same-ledger funders, use faucet
-                                    print(f"  No same-ledger funders, using faucet...")
-                                    if fund_deposit(alias):
-                                        mine_block(network)
-                                        onchain_funded_ledgers.add(ledger_id)
-                                        deposit.status = "confirming"
-                                        deposit.balance_sats = 0
-                                        print(f"  Faucet sent, awaiting daemon confirmation...")
+                                # New deposits must be funded on-chain first so the daemon
+                                # completes them (DepositOpen + DepositCredit). Without on-chain
+                                # funding, the deposit exists as an offer but not on the ledger,
+                                # so transfers to/from it will fail.
+                                print(f"  Funding via faucet (deposit must be completed on-chain)...")
+                                if fund_deposit(alias):
+                                    onchain_funded_ledgers.add(ledger_id)
+                                    deposit.status = "confirming"
+                                    deposit.balance_sats = 0
+                                    print(f"  Faucet sent, awaiting next block for confirmation...")
                             elif lightning and funded_deposits and not (single_fund and is_first_on_ledger):
                                 # Fund via Lightning from existing deposit
                                 funder = random.choice(funded_deposits)
@@ -1229,11 +1724,10 @@ def run_simulation(
                                     # Fall back to faucet
                                     print(f"  Lightning funding failed, falling back to faucet...")
                                     if fund_deposit(alias):
-                                        mine_block(network)
                                         onchain_funded_ledgers.add(ledger_id)
                                         deposit.status = "confirming"
                                         deposit.balance_sats = 0
-                                        print(f"  Faucet sent, awaiting daemon confirmation...")
+                                        print(f"  Faucet sent, awaiting next block for confirmation...")
                             else:
                                 # Fund via faucet (on-chain)
                                 # In single-fund mode with multiple wallets, fund first with larger amount
@@ -1243,47 +1737,28 @@ def run_simulation(
                                     faucet_amount = int(funding_amount_sats * wallets_per_ledger * 1.2)
                                     print(f"  First deposit on ledger, funding with {faucet_amount} sats (for splits)...")
                                 if fund_deposit(alias, faucet_amount if single_fund else None):
-                                    mine_block(network)
                                     onchain_funded_ledgers.add(ledger_id)
                                     # Don't assume balance - mark as awaiting on-chain confirmation.
                                     # The periodic confirmation check will set balance_sats and
                                     # promote to "funded" once the daemon auto-completes the deposit.
                                     deposit.status = "confirming"
                                     deposit.balance_sats = 0
-                                    print(f"  Faucet sent, awaiting daemon confirmation...")
+                                    print(f"  Faucet sent, awaiting next block for confirmation...")
 
                 last_wallet_time = now
 
-            # In single-fund mode, try to fund unfunded deposits via transfers
-            if single_fund and transfers:
+            # In single-fund mode, retry unfunded deposits via faucet (rate-limited to every 10s)
+            if single_fund and transfers and now - last_unfunded_retry_time >= 10:
                 with deposits_lock:
                     unfunded = [d for d in our_deposits if d.status == "pending"]
                 if unfunded:
+                    last_unfunded_retry_time = now
                     for deposit in unfunded:
-                        funder = None
-                        with deposits_lock:
-                            min_funder_balance = int(funding_amount_sats * 1.1) + 5000
-                            same_ledger_funders = [d for d in our_deposits
-                                                   if d.ledger_id == deposit.ledger_id
-                                                   and d.balance_sats >= min_funder_balance
-                                                   and d.alias != deposit.alias]
-                            if same_ledger_funders:
-                                funder = random.choice(same_ledger_funders)
-                                funder.balance_sats -= (funding_amount_sats + TRANSFER_FEE_SATS)  # optimistic debit (amount + fee)
-                        if funder:
-                            print(f"\n[{time.strftime('%H:%M:%S')}] Retrying funding {deposit.alias} via transfer from {funder.alias}...")
-                            transferred, locked = same_ledger_transfer(funder, deposit, funding_amount_sats)
-                            if transferred is not None and transferred > 0:
-                                with deposits_lock:
-                                    deposit.status = "funded"
-                                    deposit.balance_sats = transferred
-                                    funder.balance_sats += funding_amount_sats - transferred
-                                print(f"  Deposit funded via transfer")
-                            elif not locked:
-                                with deposits_lock:
-                                    funder.balance_sats += funding_amount_sats + TRANSFER_FEE_SATS  # restore on failure
-                            else:
-                                print(f"  Transfer funding partially failed (funds locked on daemon)")
+                        print(f"\n[{time.strftime('%H:%M:%S')}] Retrying funding {deposit.alias} via faucet...")
+                        if fund_deposit(deposit.alias):
+                            with deposits_lock:
+                                deposit.status = "confirming"
+                            print(f"  Faucet sent, awaiting next block for confirmation...")
 
             if transfers:
                 # Transfers handled by producer + worker threads
@@ -1339,9 +1814,6 @@ def run_simulation(
                                 else:
                                     print(f"\n[{time.strftime('%H:%M:%S')}] Payment: {sender.alias} ({sender.balance_sats} sats) -> {receiver.alias}")
                                     if withdraw_to(sender.alias, receiver.funding_address, amount):
-                                        mine_block(network)
-                                        if network == "regtest":
-                                            print(f"  Mined block to confirm")
                                         sender.balance_sats -= (amount + 500)
                                     submitted_this_round += 1
                         else:
@@ -1349,18 +1821,38 @@ def run_simulation(
 
                     last_payment_time = now
 
-            # Confirm on-chain funded deposits that are awaiting daemon completion
+            # Confirm on-chain funded deposits and periodically resync all balances
             if now - last_balance_sync_time >= 5:
                 with deposits_lock:
                     confirming = [d for d in our_deposits if d.status == "confirming"]
-                if confirming:
+                    needs_full_resync = (now - last_full_resync_time >= 10)
+                if confirming or needs_full_resync:
                     balances = sync_and_get_balances()
                     with deposits_lock:
                         for d in our_deposits:
-                            if d.status == "confirming" and d.alias in balances and balances[d.alias] > 0:
-                                d.balance_sats = balances[d.alias]
-                                d.status = "funded"
-                                print(f"  Confirmed: {d.alias} has {d.balance_sats:,} sats")
+                            if d.alias in balances and balances[d.alias] > 0:
+                                daemon_msats = balances[d.alias] * 1000
+                                if d.status == "confirming":
+                                    d.status = "funded"
+                                    ledger.record_fund_confirmed(d.alias, daemon_msats)
+                                    d.balance_sats = ledger.get_balance_sats(d.alias)
+                                    acct_funded = ledger.get_total_funded_msats() // 1000
+                                    print(f"  Confirmed: {d.alias} has {d.balance_sats:,} sats (total funded: {acct_funded:,})")
+                                elif needs_full_resync and d.status == "funded":
+                                    old_bal = d.balance_sats
+                                    delta = ledger.record_resync_adjustment(d.alias, daemon_msats)
+                                    d.balance_sats = ledger.get_balance_sats(d.alias)
+                                    if abs(delta) > 1_000_000:  # > 1000 sats in msats
+                                        print(f"  Resync: {d.alias} drift {delta // 1000:+,} sats (ledger {old_bal:,} -> {d.balance_sats:,})")
+                    if needs_full_resync:
+                        last_full_resync_time = now
+                        daemon_total = sum(balances.get(d.alias, 0) for d in our_deposits)
+                        acct_funded = ledger.get_total_funded_msats() // 1000
+                        acct_fees = ledger.get_total_fees_msats() // 1000
+                        acct_locked = ledger.get_total_locked_msats() // 1000
+                        expected = acct_funded - acct_fees - acct_locked
+                        corrections = ledger.get_total_corrections_msats() // 1000
+                        print(f"  [ACCT] Daemon total: {daemon_total:,} | expected: {expected:,} | gap: {daemon_total - expected:+,} | corrections: {corrections:+,}")
                 # Update Prometheus metrics
                 if transfers:
                     with deposits_lock:
@@ -1401,7 +1893,27 @@ def run_simulation(
                     queued = work_queue.qsize()
                     failures = consecutive_failures[0]
                     backoff_info = f" | backoff: {min(15, 2 ** (failures // 5 - 1)):.0f}s" if failures >= 5 else ""
-                    print(f"  Transfers: {TRANSFERS_SUCCESS}/{total_transfers} ({TRANSFERS_VOLUME_SATS:,} sats) | target_qps: {DYNAMIC_CONFIG.target_qps} | queued: {queued}{backoff_info}")
+                    pct = f"{100*TRANSFERS_SUCCESS/total_transfers:.0f}%" if total_transfers > 0 else "n/a"
+                    pending_count = len([d for d in our_deposits if d.status == "pending"])
+                    pending_info = f" | {pending_count} unfunded" if pending_count > 0 else ""
+                    # Compute actual TPS since last status
+                    elapsed_since_snap = now - last_tps_snapshot_time
+                    actual_tps = (TRANSFERS_SUCCESS - last_tps_snapshot_count) / elapsed_since_snap if elapsed_since_snap > 0 else 0
+                    last_tps_snapshot_time = now
+                    last_tps_snapshot_count = TRANSFERS_SUCCESS
+                    print(f"  Transfers: {TRANSFERS_SUCCESS}/{total_transfers} ({pct}) ({TRANSFERS_VOLUME_SATS:,} sats) | tps: {actual_tps:.1f}/{DYNAMIC_CONFIG.target_tps:.0f} | queued: {queued}{backoff_info}{pending_info}")
+                    # Accounting: where did the money go? (all from sqlite ledger)
+                    acct_funded = ledger.get_total_funded_msats() // 1000
+                    acct_fees = ledger.get_total_fees_msats() // 1000
+                    acct_locked = ledger.get_total_locked_msats() // 1000
+                    acct_lock_count = ledger.get_lock_stuck_count()
+                    corrections = ledger.get_total_corrections_msats() // 1000
+                    expected_balance = acct_funded - acct_fees - acct_locked
+                    ledger_balance = ledger.get_total_balance_msats() // 1000
+                    discrepancy = ledger_balance - expected_balance
+                    lock_info = f" | locked: {acct_locked:,} ({acct_lock_count})" if acct_lock_count > 0 else ""
+                    corr_info = f" | corrections: {corrections:+,}" if corrections != 0 else ""
+                    print(f"  Accounting: funded={acct_funded:,} - fees={acct_fees:,}{lock_info} = expected {expected_balance:,} | ledger {ledger_balance:,} | gap {discrepancy:+,}{corr_info}")
                     # Update Prometheus gauges
                     if PROMETHEUS_AVAILABLE:
                         PROM_DEPOSITS_COUNT.labels(status='total').set(len(our_deposits))
@@ -1419,10 +1931,12 @@ def run_simulation(
                         PROM_DEPOSITS_BALANCE.set(total_balance)
                         PROM_LEDGERS_COUNT.set(len(ledgers))
 
-            time.sleep(0.1)
+            time.sleep(0.01)  # 10ms main loop (was 100ms)
 
     except KeyboardInterrupt:
         print("\n\nSimulation stopped by user")
+        if miner_stop:
+            miner_stop.set()
         if transfers:
             print("Shutting down producer and workers...")
             shutdown_event.set()
@@ -1435,18 +1949,28 @@ def run_simulation(
             # Join workers
             for t in worker_threads:
                 t.join(timeout=5)
+            # Close batch processes
+            for bp in batch_processes:
+                if bp is not None:
+                    try:
+                        bp.close()
+                    except Exception:
+                        pass
             # Drain remaining results
             while True:
                 try:
                     result = result_queue.get_nowait()
+                    fee_sats = result.fee or calculate_transfer_fee(result.amount)
                     with deposits_lock:
+                        if result.success:
+                            ledger.record_transfer_credit(result.receiver_alias, result.sender_alias, result.amount)
+                            ledger.record_transfer_fee(result.sender_alias, fee_sats)
+                        elif not result.locked:
+                            ledger.record_transfer_debit_restore(result.sender_alias, result.amount, fee_sats)
+                        else:
+                            ledger.record_transfer_stuck(result.sender_alias, result.amount, fee_sats)
                         for d in our_deposits:
-                            if result.success:
-                                if d.alias == result.receiver_alias:
-                                    d.balance_sats += result.amount
-                            elif not result.locked:
-                                if d.alias == result.sender_alias:
-                                    d.balance_sats += result.amount + TRANSFER_FEE_SATS
+                            d.balance_sats = ledger.get_balance_sats(d.alias)
                 except queue.Empty:
                     break
         else:
@@ -1478,10 +2002,10 @@ def main():
                         help="Target wallets per discovered ledger (default: 2.0)")
     parser.add_argument("--base-interval", type=float, default=1.0,
                         help="Base interval between wallet creations (default: 1)")
-    parser.add_argument("--target-qps", type=float, default=100,
-                        help="Target queries per second (default: 100, 0 = unlimited)")
+    parser.add_argument("--target-tps", type=float, default=100,
+                        help="Target transactions per second (default: 100, 0 = unlimited)")
     parser.add_argument("--payment-interval", type=float, default=None,
-                        help="Override: seconds between payment batches (default: auto from target-qps)")
+                        help="Override: seconds between payment batches (default: auto from target-tps)")
     parser.add_argument("--funding-sats", type=int, default=100000,
                         help="Sats to fund each wallet (default: 100000)")
     parser.add_argument("--min-payment", type=int, default=1000,
@@ -1496,19 +2020,28 @@ def main():
                         help="Maximum concurrent async operations (default: 20, optimal for throughput)")
     parser.add_argument("--single-fund", action="store_true",
                         help="Fund only first deposit per ledger on-chain, then use transfers/lightning for others")
+    parser.add_argument("--transfer-fee-fixed", type=int, default=2,
+                        help="Fixed fee per transfer in sats (default: 2)")
+    parser.add_argument("--transfer-fee-rate-bps", type=int, default=20,
+                        help="Proportional transfer fee in basis points (default: 20, 1 bps = 0.01%%)")
 
     args = parser.parse_args()
 
     # Set initial config from args
     DYNAMIC_CONFIG.max_concurrent = args.max_concurrent
-    DYNAMIC_CONFIG.target_qps = args.target_qps
+    DYNAMIC_CONFIG.target_tps = args.target_tps
 
-    # Calculate payment_interval from target_qps unless explicitly overridden
+    # Set transfer fee schedule from args
+    global TRANSFER_FEE_FIXED, TRANSFER_FEE_RATE_BPS
+    TRANSFER_FEE_FIXED = args.transfer_fee_fixed
+    TRANSFER_FEE_RATE_BPS = args.transfer_fee_rate_bps
+
+    # Calculate payment_interval from target_tps unless explicitly overridden
     if args.payment_interval is not None:
         payment_interval = args.payment_interval
-    elif args.target_qps > 0:
-        # Interval = concurrent / target_qps
-        payment_interval = args.max_concurrent / args.target_qps
+    elif args.target_tps > 0:
+        # Interval = concurrent / target_tps
+        payment_interval = args.max_concurrent / args.target_tps
     else:
         payment_interval = 0.01  # Fast as possible
 
