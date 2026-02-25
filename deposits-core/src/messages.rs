@@ -149,11 +149,6 @@ pub mod consts {
     pub const RELAY_NWC_RESPONSE: u16 = 0x80A3;
     pub const RELAY_NWC_DELIVERY_PROOF: u16 = 0x80A5;
 
-    // Custody dispute operations
-    pub const CUSTODY_DISPUTE: u16 = 0x80F1;
-    pub const CUSTODY_ACQUIRE: u16 = 0x80F3;
-    pub const CUSTODY_YIELD: u16 = 0x80F5;
-    pub const CUSTODY_ARMED: u16 = 0x80F7;
 }
 
 pub use consts::*;

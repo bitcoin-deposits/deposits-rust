@@ -21,58 +21,11 @@ pub use deposits_core::messages::{
     RELAY, RELAY_RESPONSE,
 
     // Operation Message Types (used in SignedLedgerUpdate.message_type)
-    // Reserves operations
-    RESERVES_ADD_OUTPUT, RESERVES_REMOVE_OUTPUT, RESERVES_INCREASE,
-    RESERVES_DECREASE, RESERVES_UPDATE_OUTPUT,
-    UPDATE_RESERVES, ACCEPT_RESERVES,
-
-    // Collateral operations
-    COLLATERAL_INCREASE, COLLATERAL_DECREASE,
-    COLLATERAL_ATTESTATION, QUORUM_ADD_MEMBER, QUORUM_REMOVE_MEMBER,
-    COLLATERAL_CONSENT_REQUEST, COLLATERAL_CONSENT_RESPONSE,
-
-    // Deposit operations
-    DEPOSIT_OPEN, DEPOSIT_CLOSE, DEPOSIT_UPDATE,
-
-    // Onchain operations
-    ONCHAIN_CREDIT, ONCHAIN_LOCK, ONCHAIN_FAIL, ONCHAIN_FULFILL,
-
-    // Ledger lifecycle
+    RESERVES_ADD_OUTPUT, RESERVES_REMOVE_OUTPUT,
+    RESERVES_ROTATE,
+    QUORUM_JOIN,
+    DEPOSIT_OPEN,
     LEDGER_CLOSE, CHANNEL_CLOSE_TOMBSTONE,
-
-    // Maintenance
-    MAINTENANCE_FEE_COLLECT,
-
-    // Receiving (incoming payments)
-    RECEIVING_COSIGN_INVOICE, RECEIVING_CREDIT_PAYMENT, UNCREDITED_PAYMENT,
-
-    // Sending (outgoing payments)
-    SENDING_LOCK_PAYMENT, SENDING_FAIL_PAYMENT, SENDING_FULFILL_PAYMENT,
-
-    // Signed updates and sync
-    SIGNED_UPDATE, SYNC_REQUEST,
-
-    // Ledger establishment
-    LEDGER_OPEN_REQUEST, LEDGER_OPEN_RESPONSE,
-
-    // Acknowledgment
-    ACK,
-
-    // Quorum operations
-    QUORUM_JOIN_REQUEST, QUORUM_JOIN_RESPONSE, QUORUM_STATE_SYNC,
-    QUORUM_VOTE_REQUEST, QUORUM_VOTE, QUORUM_MEMBERSHIP_CHANGE,
-
-    // Recovery operations
-    RECOVERY_VOTE, RECOVERY_CLAIM_REQUEST, RECOVERY_CLAIM_SIGNATURE, RECOVERY_CLAIM_COMPLETE,
-
-    // Relay (NWC)
-    RELAY_NWC_REQUEST, RELAY_NWC_RESPONSE, RELAY_NWC_DELIVERY_PROOF,
-
-    // Collections
-    ALL_OPERATION_MESSAGE_TYPES, ALL_ENVELOPE_MESSAGE_TYPES, MESSAGES_REQUIRING_ACK,
-
-    // Utility functions
-    is_deposits_message_type, requires_acknowledgment, get_message_category,
 };
 
 #[cfg(test)]
@@ -82,45 +35,19 @@ mod tests {
     #[test]
     fn test_all_message_types_are_odd() {
         // Per BOLT 1: odd types MAY be ignored if not understood
-        for &t in ALL_OPERATION_MESSAGE_TYPES {
-            assert!(t & 1 == 1, "Operation message type 0x{:04X} is not odd", t);
+        let all_types: &[u16] = &[
+            LEDGER_UPDATE, LEDGER_UPDATE_RESPONSE,
+            HANDSHAKE, HANDSHAKE_RESPONSE,
+            SYNC, SYNC_RESPONSE,
+            RECOVERY, RECOVERY_RESPONSE,
+            COORDINATION, COORDINATION_RESPONSE,
+            RELAY, RELAY_RESPONSE,
+            RESERVES_ADD_OUTPUT, RESERVES_REMOVE_OUTPUT,
+            RESERVES_ROTATE, QUORUM_JOIN,
+            DEPOSIT_OPEN, LEDGER_CLOSE, CHANNEL_CLOSE_TOMBSTONE,
+        ];
+        for &t in all_types {
+            assert!(t & 1 == 1, "Message type 0x{:04X} is not odd", t);
         }
-        for &t in ALL_ENVELOPE_MESSAGE_TYPES {
-            assert!(t & 1 == 1, "Envelope message type 0x{:04X} is not odd", t);
-        }
-    }
-
-    #[test]
-    fn test_is_deposits_message_type() {
-        // Envelope types
-        assert!(is_deposits_message_type(LEDGER_UPDATE));
-        assert!(is_deposits_message_type(HANDSHAKE));
-
-        // Operation types
-        assert!(is_deposits_message_type(DEPOSIT_OPEN));
-        assert!(is_deposits_message_type(RESERVES_ADD_OUTPUT));
-
-        // Not a deposits type
-        assert!(!is_deposits_message_type(0x0001));
-        assert!(!is_deposits_message_type(0xFFFF));
-    }
-
-    #[test]
-    fn test_requires_acknowledgment() {
-        assert!(requires_acknowledgment(DEPOSIT_OPEN));
-        assert!(requires_acknowledgment(LEDGER_UPDATE));
-        assert!(requires_acknowledgment(HANDSHAKE));
-
-        assert!(!requires_acknowledgment(ACK));
-        assert!(!requires_acknowledgment(LEDGER_UPDATE_RESPONSE));
-    }
-
-    #[test]
-    fn test_get_message_category() {
-        assert_eq!(get_message_category(DEPOSIT_OPEN), Some("deposit"));
-        assert_eq!(get_message_category(RESERVES_ADD_OUTPUT), Some("reserves"));
-        assert_eq!(get_message_category(COLLATERAL_INCREASE), Some("collateral"));
-        assert_eq!(get_message_category(LEDGER_UPDATE), Some("ledger"));
-        assert_eq!(get_message_category(0xFFFF), None);
     }
 }

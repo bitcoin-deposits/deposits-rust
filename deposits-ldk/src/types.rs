@@ -6,13 +6,8 @@
 // accordance with one or both of these licenses.
 
 //! Type aliases for common types used in deposits-ldk.
-//!
-//! Re-exports `HashStrategy` from deposits-core for backwards compatibility.
 
 use lightning::util::persist::KVStoreSync;
 
 /// Dynamic storage type - wraps LDK's KVStoreSync trait object
 pub type DynStore = dyn KVStoreSync + Sync + Send;
-
-// Re-export HashStrategy from deposits-core
-pub use deposits_core::HashStrategy;

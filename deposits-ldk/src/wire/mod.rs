@@ -29,9 +29,9 @@
 //! // Create a message reader for LDK integration
 //! let reader = DepositsMessageReader;
 //!
-//! // Check if a message type is a deposits message
-//! if message_types::is_deposits_message_type(0x80D1) {
-//!     // Handle deposits message
+//! // Use message type constants for protocol handling
+//! if msg_type == message_types::DEPOSIT_OPEN {
+//!     // Handle deposit open message
 //! }
 //! ```
 

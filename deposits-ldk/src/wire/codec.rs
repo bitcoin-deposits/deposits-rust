@@ -118,12 +118,18 @@ impl MessageCodec {
     
     /// Check if message type is a valid Bitcoin Deposits message type
     pub fn is_valid_message_type(message_type: u16) -> bool {
-        super::message_types::is_deposits_message_type(message_type)
-    }
-
-    /// Get message category from message type
-    pub fn get_message_category(message_type: u16) -> Option<&'static str> {
-        super::message_types::get_message_category(message_type)
+        use super::message_types::*;
+        matches!(message_type,
+            LEDGER_UPDATE | LEDGER_UPDATE_RESPONSE |
+            HANDSHAKE | HANDSHAKE_RESPONSE |
+            SYNC | SYNC_RESPONSE |
+            RECOVERY | RECOVERY_RESPONSE |
+            COORDINATION | COORDINATION_RESPONSE |
+            RELAY | RELAY_RESPONSE |
+            RESERVES_ROTATE | QUORUM_JOIN | DEPOSIT_OPEN |
+            LEDGER_CLOSE | CHANNEL_CLOSE_TOMBSTONE |
+            RESERVES_ADD_OUTPUT | RESERVES_REMOVE_OUTPUT
+        )
     }
 }
 
@@ -227,29 +233,16 @@ mod tests {
         // Valid message types
         assert!(MessageCodec::is_valid_message_type(RESERVES_ADD_OUTPUT));
         assert!(MessageCodec::is_valid_message_type(DEPOSIT_OPEN));
-        assert!(MessageCodec::is_valid_message_type(MAINTENANCE_FEE_COLLECT));
-        assert!(MessageCodec::is_valid_message_type(RECEIVING_COSIGN_INVOICE));
-        assert!(MessageCodec::is_valid_message_type(RECEIVING_CREDIT_PAYMENT));
-        assert!(MessageCodec::is_valid_message_type(UNCREDITED_PAYMENT));
-        assert!(MessageCodec::is_valid_message_type(SENDING_LOCK_PAYMENT));
+        assert!(MessageCodec::is_valid_message_type(LEDGER_UPDATE));
+        assert!(MessageCodec::is_valid_message_type(HANDSHAKE));
+        assert!(MessageCodec::is_valid_message_type(SYNC));
+        assert!(MessageCodec::is_valid_message_type(RESERVES_ROTATE));
+        assert!(MessageCodec::is_valid_message_type(QUORUM_JOIN));
 
         // Invalid message types
         assert!(!MessageCodec::is_valid_message_type(0x0999)); // Too low
         assert!(!MessageCodec::is_valid_message_type(0x1500)); // Too high
         assert!(!MessageCodec::is_valid_message_type(0x1050)); // Gap in range
-    }
-    
-    #[test]
-    fn test_message_categories() {
-        // Now using deposits-core's get_message_category via message_types re-export
-        assert_eq!(MessageCodec::get_message_category(RESERVES_ADD_OUTPUT), Some("reserves"));
-        assert_eq!(MessageCodec::get_message_category(DEPOSIT_OPEN), Some("deposit"));
-        assert_eq!(MessageCodec::get_message_category(MAINTENANCE_FEE_COLLECT), Some("maintenance"));
-        assert_eq!(MessageCodec::get_message_category(RECEIVING_COSIGN_INVOICE), Some("receiving"));
-        assert_eq!(MessageCodec::get_message_category(RECEIVING_CREDIT_PAYMENT), Some("receiving"));
-        assert_eq!(MessageCodec::get_message_category(UNCREDITED_PAYMENT), Some("receiving"));
-        assert_eq!(MessageCodec::get_message_category(SENDING_LOCK_PAYMENT), Some("sending"));
-        assert_eq!(MessageCodec::get_message_category(0x9999), None);
     }
     
     #[test]
