@@ -764,7 +764,7 @@ impl Node {
 
         // Silently drop operator-only actions if we're not the operator
         // (these are broadcast but only the operator should respond)
-        let operator_only_actions = ["deposit_open", "make_offer", "withdraw", "collateral_lock", "offer_status", "balance_query", "make_invoice", "pay_invoice", "transfer_lock", "transfer_complete", "bump"];
+        let operator_only_actions = ["deposit_open", "make_offer", "withdraw", "collateral_lock", "offer_status", "balance_query", "make_invoice", "pay_invoice", "transfer_lock", "transfer_complete", "bump", "complete_offer", "partner_add", "partner_join", "collateral_record", "reserves_rotate"];
         if operator_only_actions.contains(&request.action.as_str()) && !self.is_operator_of_ledger(&request.ledger_id) {
             return; // Silent drop - the actual operator will respond
         }
@@ -836,6 +836,11 @@ impl Node {
                     (true, Some(serde_json::json!({"message": "Wallet synced and deposits checked"}).to_string()), None)
                 }
             }
+            "complete_offer" => self.process_complete_offer_request(&request).await,
+            "partner_add" => self.process_partner_add_request(&request).await,
+            "partner_join" => self.process_partner_join_request(&request).await,
+            "collateral_record" => self.process_collateral_record_request(&request).await,
+            "reserves_rotate" => self.process_reserves_rotate_request(&request).await,
             _ => {
                 tracing::warn!("Unknown request action: {}", request.action);
                 (false, None, Some(format!("Unknown action: {}", request.action)))
@@ -5174,6 +5179,255 @@ impl Node {
     }
 
     // ========================================================================
+    // Daemon-mediated CLI request handlers
+    // ========================================================================
+
+    async fn process_complete_offer_request(&mut self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+        tracing::info!("Processing complete_offer request for ledger {}...",
+            &request.ledger_id[..16.min(request.ledger_id.len())]);
+
+        let offer_id_hex = match request.params.get("offer_id").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => return (false, None, Some("Missing offer_id parameter".to_string())),
+        };
+        let txid = match request.params.get("txid").and_then(|v| v.as_str()) {
+            Some(s) => s.to_string(),
+            None => return (false, None, Some("Missing txid parameter".to_string())),
+        };
+        let amount_sats = match request.params.get("amount_sats").and_then(|v| v.as_u64()) {
+            Some(v) => v,
+            None => return (false, None, Some("Missing amount_sats parameter".to_string())),
+        };
+
+        let offer_id_bytes = match hex::decode(offer_id_hex) {
+            Ok(bytes) if bytes.len() == 32 => bytes,
+            _ => return (false, None, Some("Invalid offer_id (must be 64 hex chars)".to_string())),
+        };
+        let mut offer_id = [0u8; 32];
+        offer_id.copy_from_slice(&offer_id_bytes);
+
+        // Sync wallet to see on-chain funding
+        if let Err(e) = self.wallet.sync() {
+            tracing::warn!("Wallet sync failed before complete_offer: {}", e);
+        }
+
+        match self.complete_deposit_offer(&offer_id, txid, amount_sats).await {
+            Ok(new_balance) => {
+                let result = serde_json::json!({
+                    "status": "SUCCESS",
+                    "new_balance_msats": new_balance,
+                    "new_balance_sats": new_balance / 1000,
+                });
+                (true, Some(result.to_string()), None)
+            }
+            Err(e) => {
+                tracing::error!("complete_offer failed: {}", e);
+                (false, None, Some(e.to_string()))
+            }
+        }
+    }
+
+    async fn process_partner_add_request(&mut self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+        use std::str::FromStr;
+
+        tracing::info!("Processing partner_add request for ledger {}...",
+            &request.ledger_id[..16.min(request.ledger_id.len())]);
+
+        let member_pubkey_hex = match request.params.get("member_pubkey").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => return (false, None, Some("Missing member_pubkey parameter".to_string())),
+        };
+        let member_ledger_id = match request.params.get("member_ledger_id").and_then(|v| v.as_str()) {
+            Some(s) => s.to_string(),
+            None => return (false, None, Some("Missing member_ledger_id parameter".to_string())),
+        };
+
+        let quorum_member = match PublicKey::from_str(member_pubkey_hex) {
+            Ok(pk) => pk,
+            Err(e) => return (false, None, Some(format!("Invalid member_pubkey: {}", e))),
+        };
+
+        if member_ledger_id.len() != 64 || !member_ledger_id.chars().all(|c| c.is_ascii_hexdigit()) {
+            return (false, None, Some("member_ledger_id must be 64 hex chars".to_string()));
+        }
+
+        // Resolve ledger_id
+        let ledger_id = if request.ledger_id.len() == 64 && request.ledger_id.chars().all(|c| c.is_ascii_hexdigit()) {
+            request.ledger_id.clone()
+        } else {
+            match self.get_ledger_by_reserves_key(&request.ledger_id) {
+                Some((_, ledger)) => ledger.ledger_id_hex(),
+                None => return (false, None, Some(format!("Ledger not found: {}", &request.ledger_id[..16]))),
+            }
+        };
+
+        let placeholder_sig = [0u8; 64];
+
+        match self.add_quorum_member(&ledger_id, quorum_member, &member_ledger_id, placeholder_sig).await {
+            Ok(event_id) => {
+                let result = serde_json::json!({
+                    "status": "SUCCESS",
+                    "event_id": event_id,
+                    "member": member_pubkey_hex,
+                    "member_ledger_id": member_ledger_id,
+                });
+                (true, Some(result.to_string()), None)
+            }
+            Err(e) => {
+                tracing::error!("partner_add failed: {}", e);
+                (false, None, Some(e.to_string()))
+            }
+        }
+    }
+
+    async fn process_partner_join_request(&mut self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+        use std::str::FromStr;
+
+        tracing::info!("Processing partner_join request for ledger {}...",
+            &request.ledger_id[..16.min(request.ledger_id.len())]);
+
+        let target_operator_hex = match request.params.get("target_operator").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => return (false, None, Some("Missing target_operator parameter".to_string())),
+        };
+        let target_ledger_id = match request.params.get("target_ledger_id").and_then(|v| v.as_str()) {
+            Some(s) => s.to_string(),
+            None => return (false, None, Some("Missing target_ledger_id parameter".to_string())),
+        };
+        let membership_expires = match request.params.get("membership_expires").and_then(|v| v.as_u64()) {
+            Some(v) => v as u32,
+            None => return (false, None, Some("Missing membership_expires parameter".to_string())),
+        };
+
+        let target_operator = match PublicKey::from_str(target_operator_hex) {
+            Ok(pk) => pk,
+            Err(e) => return (false, None, Some(format!("Invalid target_operator: {}", e))),
+        };
+
+        if target_ledger_id.len() != 64 || !target_ledger_id.chars().all(|c| c.is_ascii_hexdigit()) {
+            return (false, None, Some("target_ledger_id must be 64 hex chars".to_string()));
+        }
+
+        // Resolve our ledger_id
+        let our_ledger_id = if request.ledger_id.len() == 64 && request.ledger_id.chars().all(|c| c.is_ascii_hexdigit()) {
+            request.ledger_id.clone()
+        } else {
+            match self.get_ledger_by_reserves_key(&request.ledger_id) {
+                Some((_, ledger)) => ledger.ledger_id_hex(),
+                None => return (false, None, Some(format!("Ledger not found: {}", &request.ledger_id[..16]))),
+            }
+        };
+
+        let placeholder_sig = [0u8; 64];
+
+        match self.record_quorum_join(&our_ledger_id, target_operator, &target_ledger_id, membership_expires, placeholder_sig).await {
+            Ok(event_id) => {
+                let result = serde_json::json!({
+                    "status": "SUCCESS",
+                    "event_id": event_id,
+                    "target_operator": target_operator_hex,
+                    "target_ledger_id": target_ledger_id,
+                    "membership_expires": membership_expires,
+                });
+                (true, Some(result.to_string()), None)
+            }
+            Err(e) => {
+                tracing::error!("partner_join failed: {}", e);
+                (false, None, Some(e.to_string()))
+            }
+        }
+    }
+
+    async fn process_collateral_record_request(&mut self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+        tracing::info!("Processing collateral_record request for ledger {}...",
+            &request.ledger_id[..16.min(request.ledger_id.len())]);
+
+        let attestation_json = match request.params.get("attestation").and_then(|v| v.as_str()) {
+            Some(s) => s.to_string(),
+            None => {
+                // Try the whole params object as the attestation (if passed as object)
+                match request.params.get("attestation") {
+                    Some(v) => v.to_string(),
+                    None => return (false, None, Some("Missing attestation parameter".to_string())),
+                }
+            }
+        };
+
+        let attestation: deposits_core::CollateralAttestationMsg = match serde_json::from_str(&attestation_json) {
+            Ok(a) => a,
+            Err(e) => return (false, None, Some(format!("Invalid attestation JSON: {}", e))),
+        };
+
+        // Resolve ledger_id
+        let ledger_id = if request.ledger_id.len() == 64 && request.ledger_id.chars().all(|c| c.is_ascii_hexdigit()) {
+            request.ledger_id.clone()
+        } else {
+            match self.get_ledger_by_reserves_key(&request.ledger_id) {
+                Some((_, ledger)) => ledger.ledger_id_hex(),
+                None => return (false, None, Some(format!("Ledger not found: {}", &request.ledger_id[..16]))),
+            }
+        };
+
+        match self.record_collateral_attestation(&ledger_id, attestation).await {
+            Ok(event_id) => {
+                let result = serde_json::json!({
+                    "status": "SUCCESS",
+                    "event_id": event_id,
+                });
+                (true, Some(result.to_string()), None)
+            }
+            Err(e) => {
+                tracing::error!("collateral_record failed: {}", e);
+                (false, None, Some(e.to_string()))
+            }
+        }
+    }
+
+    async fn process_reserves_rotate_request(&mut self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+        tracing::info!("Processing reserves_rotate request for ledger {}...",
+            &request.ledger_id[..16.min(request.ledger_id.len())]);
+
+        // Resolve ledger_id
+        let ledger_id = if request.ledger_id.len() == 64 && request.ledger_id.chars().all(|c| c.is_ascii_hexdigit()) {
+            request.ledger_id.clone()
+        } else {
+            match self.get_ledger_by_reserves_key(&request.ledger_id) {
+                Some((_, ledger)) => ledger.ledger_id_hex(),
+                None => return (false, None, Some(format!("Ledger not found: {}", &request.ledger_id[..16]))),
+            }
+        };
+
+        // Sync wallet to see current UTXOs
+        if let Err(e) = self.wallet.sync() {
+            tracing::warn!("Wallet sync failed before reserves_rotate: {}", e);
+        }
+
+        match self.rotate_reserves_to_quorum(&ledger_id) {
+            Ok(result) => {
+                // Broadcast the update to Nostr
+                if let Err(e) = self.broadcast_last_update(&ledger_id).await {
+                    tracing::warn!("Failed to broadcast reserves rotation: {}", e);
+                }
+
+                let response = serde_json::json!({
+                    "status": "SUCCESS",
+                    "txid": result.txid,
+                    "new_address": result.new_address,
+                    "amount_sats": result.amount_sats,
+                    "quorum_member_count": result.quorum_member_count,
+                    "first_expiry_block": result.first_expiry_block,
+                    "ledger_hash": hex::encode(&result.ledger_hash[..8]),
+                });
+                (true, Some(response.to_string()), None)
+            }
+            Err(e) => {
+                tracing::error!("reserves_rotate failed: {}", e);
+                (false, None, Some(e.to_string()))
+            }
+        }
+    }
+
+    // ========================================================================
     // Auto-Response Tasks
     // ========================================================================
 
@@ -8391,131 +8645,6 @@ impl Node {
     /// This is the async version that handles the full co-signing flow.
     /// Uses a per-offer lock file to prevent concurrent completion by daemon and CLI.
     pub async fn complete_deposit_offer(
-        &mut self,
-        offer_id: &[u8; 32],
-        funding_txid: String,
-        funding_amount_sats: u64,
-    ) -> Result<u64, Error> {
-        use deposits_core::types::DepositOfferStatus;
-
-        // Per-offer lock to prevent concurrent completion by daemon and CLI.
-        // O_CREAT | O_EXCL is atomic on POSIX filesystems - safe as cross-process advisory lock.
-        let wallet_dir = self.data_dir.join("wallet");
-        let lock_path = wallet_dir.join(format!("completing_{}.lock", hex::encode(offer_id)));
-
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock_path)
-        {
-            Ok(_) => {},
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                // Check if the lock is stale (process crashed while holding it)
-                let is_stale = std::fs::metadata(&lock_path)
-                    .and_then(|m| m.modified())
-                    .map(|t| t.elapsed().unwrap_or_default().as_secs() > 20)
-                    .unwrap_or(false);
-
-                if is_stale {
-                    // Remove stale lock and try again
-                    tracing::warn!(
-                        "Removing stale completion lock for deposit {}...",
-                        &hex::encode(offer_id)[..16]
-                    );
-                    let _ = std::fs::remove_file(&lock_path);
-                    match std::fs::OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(&lock_path)
-                    {
-                        Ok(_) => {},
-                        Err(_) => {
-                            return Err(Error::Protocol(format!(
-                                "Could not acquire completion lock for deposit {}...",
-                                &hex::encode(offer_id)[..16]
-                            )));
-                        }
-                    }
-                } else {
-                    // Another process is actively completing this - wait for it to finish
-                    tracing::info!(
-                        "Deposit {}... completion already in progress, waiting up to 15s",
-                        &hex::encode(offer_id)[..16]
-                    );
-                    for _ in 0..30 {
-                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                        if !lock_path.exists() {
-                            break;
-                        }
-                    }
-                    // Reload and check the other process's result
-                    self.reload_deposit_offers();
-                    let offers = self.deposit_offers.lock().unwrap();
-                    match offers.get(offer_id) {
-                        Some((_, DepositOfferStatus::Completed { amount_sats, .. })) => {
-                            tracing::info!(
-                                "Deposit completed by concurrent process: {} sats",
-                                amount_sats
-                            );
-                            return Ok(*amount_sats * 1000);
-                        }
-                        _ => {
-                            drop(offers);
-                            if lock_path.exists() {
-                                // Lock still held - other process is still running.
-                                // Do NOT remove it or proceed - that would cause concurrent
-                                // completion and hash chain breaks.
-                                return Err(Error::Protocol(format!(
-                                    "Deposit {}... completion still in progress by another process",
-                                    &hex::encode(offer_id)[..16]
-                                )));
-                            }
-                            // Lock was released but process failed - safe to retry ourselves
-                            tracing::info!(
-                                "Concurrent completion failed for {}..., retrying",
-                                &hex::encode(offer_id)[..16]
-                            );
-                            match std::fs::OpenOptions::new()
-                                .write(true)
-                                .create_new(true)
-                                .open(&lock_path)
-                            {
-                                Ok(_) => {},
-                                Err(_) => {
-                                    return Err(Error::Protocol(format!(
-                                        "Could not acquire completion lock for deposit {}...",
-                                        &hex::encode(offer_id)[..16]
-                                    )));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                // Lock creation failed for unexpected reason - don't proceed without lock
-                return Err(Error::Protocol(format!(
-                    "Failed to create deposit completion lock: {}",
-                    e
-                )));
-            }
-        };
-
-        // Lock acquired. Reload offer status from disk to catch any completions
-        // that happened just before we got the lock.
-        self.reload_deposit_offers();
-
-        // Run the actual completion logic
-        let result = self.do_complete_deposit_offer(offer_id, funding_txid, funding_amount_sats).await;
-
-        // Release lock
-        let _ = std::fs::remove_file(&lock_path);
-
-        result
-    }
-
-    /// Inner completion logic, called with the per-offer lock held.
-    async fn do_complete_deposit_offer(
         &mut self,
         offer_id: &[u8; 32],
         funding_txid: String,

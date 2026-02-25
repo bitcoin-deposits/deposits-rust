@@ -387,6 +387,89 @@ fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
     })
 }
 
+/// Send a Nostr request to the daemon and wait for a response.
+///
+/// This is used by CLI commands that delegate ledger mutations to the running daemon.
+/// Returns the response result JSON on success, or an error string on failure.
+async fn send_daemon_request(
+    config: &NodeConfig,
+    ledger_id: &str,
+    action: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    use deposits_bdk::nostr::NostrTransportBuilder;
+
+    let relay_url = config.relays.first()
+        .ok_or("No relay configured. Use --relay <url>")?
+        .clone();
+
+    let secret_key = derive_operator_secret(&config.seed, config.network)?;
+
+    let transport = NostrTransportBuilder::new(secret_key)
+        .relay(&relay_url)
+        .build()
+        .await?;
+
+    let event_id = transport
+        .send_ledger_request(ledger_id, action, params)
+        .await?;
+
+    transport.subscribe_to_response(&event_id).await?;
+
+    let mut transport = transport;
+    let timeout = tokio::time::Duration::from_secs(30);
+    let start = std::time::Instant::now();
+    let mut last_poll = std::time::Instant::now();
+    let mut poll_count = 0;
+
+    loop {
+        if start.elapsed() > timeout {
+            return Err("No response from daemon. Ensure 'deposits-bdk run' is running.".into());
+        }
+
+        tokio::select! {
+            _ = transport.process_events() => {}
+            _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {}
+        }
+
+        if let Some(response) = transport.try_recv_response() {
+            if response.request_id == event_id {
+                if response.success {
+                    return Ok(response.result.unwrap_or(serde_json::Value::Null));
+                } else {
+                    let err_msg = response.error.unwrap_or_else(|| "Unknown error".to_string());
+                    return Err(err_msg.into());
+                }
+            }
+        }
+
+        let poll_interval = if poll_count < 5 {
+            std::time::Duration::from_millis(500)
+        } else {
+            std::time::Duration::from_secs(2)
+        };
+
+        if last_poll.elapsed() > poll_interval {
+            match transport.fetch_response(&event_id).await {
+                Ok(Some(response)) => {
+                    if response.success {
+                        return Ok(response.result.unwrap_or(serde_json::Value::Null));
+                    } else {
+                        let err_msg = response.error.unwrap_or_else(|| "Unknown error".to_string());
+                        return Err(err_msg.into());
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::debug!("Poll error: {}", e);
+                }
+            }
+            last_poll = std::time::Instant::now();
+            poll_count += 1;
+        }
+    }
+}
+
 async fn run_node(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // Parse --metrics-port separately (before parse_config since it's run-specific)
     let mut metrics_port: Option<u16> = None;
@@ -676,15 +759,11 @@ async fn reserves_rotate(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     }
 
     let config = parse_config(&config_args)?;
-    let node = Node::new(config).await?;
 
-    // Sync wallet first
-    node.sync_wallet()?;
-
-    // Resolve to ledger_id
+    // Load state from disk to resolve ledger_id
+    let node = Node::new(config.clone()).await?;
     let ledger_id = match reserves_id {
         Some(id) => {
-            // Resolve identifier (could be ledger_id or reserves_key)
             if id.len() == 64 && id.chars().all(|c| c.is_ascii_hexdigit()) {
                 id
             } else {
@@ -694,35 +773,40 @@ async fn reserves_rotate(args: &[String]) -> Result<(), Box<dyn std::error::Erro
             }
         }
         None => {
-            // Get the primary ledger's ledger_id
             match node.get_primary_ledger() {
                 Some((lid, _)) => lid,
                 None => return Err("No ledger found. Open a ledger first with 'ledger open'.".into()),
             }
         }
     };
+    drop(node);
 
-    println!("Rotating reserves to quorum-based Taproot spending...");
-    println!("  Ledger: {}", ledger_id);
+    println!("Rotating reserves via daemon...");
+    println!("  Ledger: {}...", &ledger_id[..16]);
 
-    let result = node.rotate_reserves_to_quorum(&ledger_id)?;
-
-    // Broadcast to Nostr
-    if let Err(e) = node.broadcast_last_update(&ledger_id).await {
-        eprintln!("Warning: Failed to broadcast to Nostr: {}", e);
-    }
+    let params = serde_json::json!({});
+    let result = send_daemon_request(&config, &ledger_id, "reserves_rotate", params).await?;
 
     println!("\nReserves rotated successfully!");
-    println!("  TXID: {}", result.txid);
-    println!("  New Address: {}", result.new_address);
-    println!("  Amount: {} sats", result.amount_sats);
-    println!("  Quorum Members: {}", result.quorum_member_count);
-    println!("  First Expiry Block: {}", result.first_expiry_block);
-    println!("  Ledger Hash: {}", hex::encode(&result.ledger_hash[..8]));
-    println!("\nSpending tiers:");
-    println!("  Tier 0: Majority of quorum + operator (immediate)");
-    println!("  Tier 1: Operator only (after block {})", result.first_expiry_block);
-    println!("  Tier 2: Emergency recovery (extended timeout)");
+    if let Some(txid) = result.get("txid").and_then(|v| v.as_str()) {
+        println!("  TXID: {}", txid);
+    }
+    if let Some(addr) = result.get("new_address").and_then(|v| v.as_str()) {
+        println!("  New Address: {}", addr);
+    }
+    if let Some(amt) = result.get("amount_sats").and_then(|v| v.as_u64()) {
+        println!("  Amount: {} sats", amt);
+    }
+    if let Some(count) = result.get("quorum_member_count").and_then(|v| v.as_u64()) {
+        println!("  Quorum Members: {}", count);
+    }
+    if let Some(expiry) = result.get("first_expiry_block").and_then(|v| v.as_u64()) {
+        println!("  First Expiry Block: {}", expiry);
+        println!("\nSpending tiers:");
+        println!("  Tier 0: Majority of quorum + operator (immediate)");
+        println!("  Tier 1: Operator only (after block {})", expiry);
+        println!("  Tier 2: Emergency recovery (extended timeout)");
+    }
 
     Ok(())
 }
@@ -812,7 +896,7 @@ async fn reserves_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>
 /// Handle ledger subcommands
 async fn ledger_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {
-        eprintln!("Usage: deposits-bdk ledger <open|list|history|validate|export|import|advertise|discover> [args...]");
+        eprintln!("Usage: deposits-bdk ledger <open|list|history|validate|health|export|import|advertise|discover> [args...]");
         return Ok(());
     }
 
@@ -821,13 +905,14 @@ async fn ledger_command(args: &[String]) -> Result<(), Box<dyn std::error::Error
         "list" => ledger_list(&args[1..]).await,
         "history" => ledger_history(&args[1..]).await,
         "validate" => ledger_validate(&args[1..]).await,
+        "health" => ledger_health(&args[1..]).await,
         "export" => ledger_export(&args[1..]).await,
         "import" => ledger_import(&args[1..]).await,
         "advertise" => ledger_advertise(&args[1..]).await,
         "discover" => ledger_discover(&args[1..]).await,
         cmd => {
             eprintln!("Unknown ledger subcommand: {}", cmd);
-            eprintln!("Usage: deposits-bdk ledger <open|list|history|validate|export|import|advertise|discover> [args...]");
+            eprintln!("Usage: deposits-bdk ledger <open|list|history|validate|health|export|import|advertise|discover> [args...]");
             Ok(())
         }
     }
@@ -1263,6 +1348,199 @@ async fn ledger_validate(args: &[String]) -> Result<(), Box<dyn std::error::Erro
             println!("Validation FAILED: {}", e);
             return Err(Box::new(e));
         }
+    }
+
+    Ok(())
+}
+
+/// Check the health of ledgers: reserves, quorum, co-sign readiness, conformance
+async fn ledger_health(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use deposits_core::messages::consts;
+    use deposits_core::validation::LedgerConformanceValidator;
+
+    // Parse positional arguments: [ledger_id]
+    let mut ledger_id_str: Option<String> = None;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else if ledger_id_str.is_none() {
+            ledger_id_str = Some(args[i].clone());
+        }
+        i += 1;
+    }
+
+    if config_args.is_empty() {
+        eprintln!("Usage: deposits-bdk ledger health [ledger_id] --seed <hex> --data-dir <path> [--network <net>] [--esplora <url>] [--relay <url>]");
+        return Err("--seed and --data-dir are required".into());
+    }
+
+    let config = parse_config(&config_args)?;
+    let node = Node::new(config).await?;
+
+    // Sync wallet for on-chain state
+    if let Err(e) = node.sync_wallet() {
+        eprintln!("Warning: wallet sync failed: {}", e);
+    }
+    let block_height = node.wallet.get_block_height().unwrap_or(0);
+    let wallet_balance = node.wallet_balance().unwrap_or(0);
+
+    // Relay connectivity
+    let (connected, total, relay_details) = node.nostr.relay_status().await;
+
+    // Print node-level header
+    let node_id_hex = hex::encode(node.node_id.serialize());
+    println!("Node Health Report");
+    println!("==================");
+    println!("  Node ID:       {}", node_id_hex);
+    println!("  Block height:  {}", block_height);
+    println!("  Wallet:        {} sats", wallet_balance);
+    println!("  Relays:        {}/{} connected", connected, total);
+    for (url, status) in &relay_details {
+        println!("    - {} ({})", url, status);
+    }
+    println!();
+
+    // Collect ledgers to report on
+    let ledger_snapshots: Vec<(String, deposits_core::ledger::Ledger)> = if let Some(id_str) = ledger_id_str {
+        let (lid, ledger) = node.get_ledger_with_id(&id_str)
+            .ok_or_else(|| format!("Ledger not found: {}", id_str))?;
+        vec![(lid, ledger)]
+    } else {
+        let all = node.list_ledgers();
+        if all.is_empty() {
+            println!("No ledgers found.");
+            return Ok(());
+        }
+        let mut result = Vec::new();
+        for (lid, arc) in &all {
+            let ledger = arc.read().unwrap().clone();
+            result.push((lid.clone(), ledger));
+        }
+        result.sort_by(|a, b| a.0.cmp(&b.0));
+        result
+    };
+
+    for (ledger_id, ledger) in &ledger_snapshots {
+        let short_id = &ledger_id[..16.min(ledger_id.len())];
+
+        let is_operator = ledger.operator_key() == node.node_id;
+        let role = if is_operator { "Operator" } else { "Partner" };
+
+        println!("Ledger {}... ({})", short_id, role);
+        println!("------");
+
+        if !is_operator {
+            let op_hex = hex::encode(ledger.operator_key().serialize());
+            println!("  Operator:      {}", op_hex);
+        }
+
+        // Reserves status - scan history for rotation (inline to avoid deadlock)
+        let has_rotation = ledger.history.iter()
+            .any(|u| u.message_type == consts::RESERVES_ROTATE);
+        let reserves_sats = ledger.reserves_amount();
+        println!("  Reserves:      {} sats (rotated: {})",
+            reserves_sats, if has_rotation { "yes" } else { "no" });
+
+        // Deposits
+        let total_balance_msat = ledger.total_deposit_balance();
+        let deposit_count = ledger.state.deposits.len();
+        println!("  Deposits:      {} msat across {} accounts",
+            total_balance_msat, deposit_count);
+
+        // Quorum members (partners backing this ledger)
+        let quorum_count = ledger.state.quorum_members.len();
+        println!("  Quorum:        {} members", quorum_count);
+        for member in &ledger.state.quorum_members {
+            let pubkey_hex = hex::encode(member.pubkey.serialize());
+            let short_pubkey = &pubkey_hex[..16];
+            let short_lid = if member.ledger_id.len() >= 12 {
+                &member.ledger_id[..12]
+            } else {
+                &member.ledger_id
+            };
+            // Check attestation status
+            let attestation = ledger.state.collateral_attestations.get(&member.pubkey);
+            let attest_info = match attestation {
+                Some(a) => format!("attested {} sats, expires block {}", a.amount / 1000, a.lock_until_block),
+                None => "no attestation".to_string(),
+            };
+            println!("    - {} (ledger: {}..., {})", short_pubkey, short_lid, attest_info);
+        }
+
+        // Joined quorums (ledgers we are backing as partner)
+        if !ledger.state.joined_quorums.is_empty() {
+            println!("  Backing:       {} operator ledgers", ledger.state.joined_quorums.len());
+            for membership in &ledger.state.joined_quorums {
+                let op_hex = hex::encode(membership.operator_id.serialize());
+                let short_lid = if membership.ledger_id.len() >= 12 {
+                    &membership.ledger_id[..12]
+                } else {
+                    &membership.ledger_id
+                };
+                println!("    - operator {}... (ledger: {}..., expires block {})",
+                    &op_hex[..16], short_lid, membership.membership_expires);
+            }
+        }
+
+        // Co-sign readiness
+        if has_rotation && quorum_count == 0 {
+            println!("  Co-sign:       BLOCKED - reserves rotated but no quorum members!");
+        } else if has_rotation {
+            println!("  Co-sign:       OK (quorum co-signature required)");
+        } else {
+            println!("  Co-sign:       OK (operator-only signing)");
+        }
+
+        // Dispute state
+        println!("  Dispute:       {:?}", ledger.state.dispute_state);
+
+        // Pending transfers
+        let pending_count = ledger.state.pending_transfers.len();
+        if pending_count > 0 {
+            println!("  Transfers:     {} pending", pending_count);
+        }
+
+        // Conformance
+        if ledger.history.is_empty() {
+            println!("  Conformance:   N/A (no history)");
+        } else {
+            let export = ledger.export(block_height);
+            match LedgerConformanceValidator::validate(&export) {
+                Ok(report) => {
+                    if report.is_valid {
+                        println!("  Conformance:   PASS");
+                    } else {
+                        println!("  Conformance:   FAIL");
+                        if report.hash_chain.valid_length < report.hash_chain.total_length {
+                            println!("    - Hash chain: {}/{} valid",
+                                report.hash_chain.valid_length, report.hash_chain.total_length);
+                        }
+                        for rule in &report.business_rules {
+                            if !rule.passed {
+                                let details = rule.details.as_ref()
+                                    .map(|d| format!(" ({})", d)).unwrap_or_default();
+                                println!("    - {}{}", rule.rule, details);
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("  Conformance:   ERROR ({})", e);
+                }
+            }
+        }
+
+        // Sequence/hash
+        let hash_hex = hex::encode(&ledger.state.hash[..8]);
+        println!("  Sequence:      {} (hash: {}...)", ledger.state.sequence, hash_hex);
+        println!();
     }
 
     Ok(())
@@ -1989,37 +2267,34 @@ async fn partner_add(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     }
 
     let config = parse_config(&config_args)?;
-    let seed = config.seed.clone();
-    let network = config.network;
-    let relays = config.relays.clone();
-    let operator_name = config.operator_name.clone();
-    let mut node = Node::new(config).await?;
 
-    // Resolve identifier to ledger_id (accepts both reserves_key and ledger_id formats)
+    // Load state from disk to resolve ledger_id
+    let node = Node::new(config.clone()).await?;
     let ledger_id = if reserves_id.len() == 64 && reserves_id.chars().all(|c| c.is_ascii_hexdigit()) {
-        // Already a ledger_id
         reserves_id.clone()
     } else {
-        // Try to find by reserves_key
         node.get_ledger_with_id(&reserves_id)
             .map(|(lid, _)| lid)
             .ok_or_else(|| format!("Ledger not found for reserves: {}", reserves_id))?
     };
+    drop(node);
 
-    println!("Adding quorum member {} to ledger {}...", quorum_member, &ledger_id[..16]);
+    println!("Adding quorum member via daemon...");
+    println!("  Ledger:   {}...", &ledger_id[..16]);
+    println!("  Member:   {}", quorum_member);
     println!("  Member's collateral ledger: {}...", &member_ledger_id[..16]);
 
-    // For testing, use a placeholder signature (in production this would come from the member)
-    let placeholder_sig = [0u8; 64];
+    let params = serde_json::json!({
+        "member_pubkey": quorum_member_str,
+        "member_ledger_id": member_ledger_id,
+    });
 
-    // Use async version with co-signing support (falls back to operator-only if co-sign unavailable)
-    let event_id = node.add_quorum_member(&ledger_id, quorum_member, &member_ledger_id, placeholder_sig).await?;
-    println!("Broadcast to Nostr: {}...", &event_id[..16.min(event_id.len())]);
-
-    // Re-advertise with updated quorum info
-    auto_advertise_ledger(&node, &ledger_id, &seed, network, &relays, operator_name.as_deref()).await;
+    let result = send_daemon_request(&config, &ledger_id, "partner_add", params).await?;
 
     println!("Quorum member added!");
+    if let Some(event_id) = result.get("event_id").and_then(|v| v.as_str()) {
+        println!("  Broadcast: {}...", &event_id[..16.min(event_id.len())]);
+    }
     println!("  Member: {}", quorum_member);
     println!("  Ledger: {}", ledger_id);
     println!("  Member's collateral ledger: {}", member_ledger_id);
@@ -2066,9 +2341,9 @@ async fn partner_join(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         .map_err(|e| format!("Invalid target operator pubkey: {}", e))?;
 
     let config = parse_config(&config_args)?;
-    let mut node = Node::new(config).await?;
 
-    // Resolve our identifier to ledger_id (accepts both ledger_id hash and reserves address)
+    // Load state from disk to resolve our ledger_id
+    let node = Node::new(config.clone()).await?;
     let our_ledger_id = if our_id.len() == 64 && our_id.chars().all(|c| c.is_ascii_hexdigit()) {
         our_id.clone()
     } else {
@@ -2076,6 +2351,7 @@ async fn partner_join(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
             .map(|(lid, _)| lid)
             .ok_or_else(|| format!("Ledger not found for reserves: {}", our_id))?
     };
+    drop(node);
 
     // Target must be a ledger_id hash (64 hex chars)
     let target_ledger_id = if target_id.len() == 64 && target_id.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -2084,22 +2360,24 @@ async fn partner_join(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         return Err(format!("Target ledger ID must be a 64-char hex hash, got: {}", target_id).into());
     };
 
-    println!("Recording quorum join for operator {}...", target_operator);
+    println!("Recording quorum join via daemon...");
+    println!("  Our ledger:       {}...", &our_ledger_id[..16]);
+    println!("  Target operator:  {}", target_operator);
+    println!("  Target ledger:    {}...", &target_ledger_id[..16]);
+    println!("  Expires at block: {}", expires_block);
 
-    // For testing, use a placeholder signature
-    let placeholder_sig = [0u8; 64];
+    let params = serde_json::json!({
+        "target_operator": target_operator_str,
+        "target_ledger_id": target_ledger_id,
+        "membership_expires": expires_block,
+    });
 
-    // Use async version with co-signing support (falls back to operator-only if co-sign unavailable)
-    let event_id = node.record_quorum_join(
-        &our_ledger_id,
-        target_operator,
-        &target_ledger_id,
-        expires_block,
-        placeholder_sig,
-    ).await?;
-    println!("Broadcast to Nostr: {}...", &event_id[..16.min(event_id.len())]);
+    let result = send_daemon_request(&config, &our_ledger_id, "partner_join", params).await?;
 
     println!("Quorum join recorded!");
+    if let Some(event_id) = result.get("event_id").and_then(|v| v.as_str()) {
+        println!("  Broadcast: {}...", &event_id[..16.min(event_id.len())]);
+    }
     println!("  Target operator: {}", target_operator);
     println!("  Target ledger: {}", target_ledger_id);
     println!("  Expires at block: {}", expires_block);
@@ -2300,9 +2578,9 @@ async fn collateral_record(args: &[String]) -> Result<(), Box<dyn std::error::Er
         .map_err(|e| format!("Invalid attestation JSON: {}", e))?;
 
     let config = parse_config(&config_args)?;
-    let mut node = Node::new(config).await?;
 
-    // Resolve reserves_id to ledger_id
+    // Load state from disk to resolve ledger_id
+    let node = Node::new(config.clone()).await?;
     let ledger_id = if reserves_id_arg.len() == 64 && reserves_id_arg.chars().all(|c| c.is_ascii_hexdigit()) {
         reserves_id_arg.clone()
     } else {
@@ -2310,14 +2588,19 @@ async fn collateral_record(args: &[String]) -> Result<(), Box<dyn std::error::Er
             .map(|(lid, _)| lid)
             .ok_or_else(|| format!("Ledger not found for reserves: {}", reserves_id_arg))?
     };
+    drop(node);
 
-    println!("Recording collateral attestation...");
-    println!("  Ledger ID: {}", ledger_id);
+    println!("Recording collateral attestation via daemon...");
+    println!("  Ledger ID: {}...", &ledger_id[..16]);
     println!("  From operator: {}", attestation.operator);
     println!("  Amount: {} msats", attestation.amount);
     println!("  Lock until: block {}", attestation.lock_until_block);
 
-    node.record_collateral_attestation(&ledger_id, attestation.clone()).await?;
+    let params = serde_json::json!({
+        "attestation": attestation_json,
+    });
+
+    send_daemon_request(&config, &ledger_id, "collateral_record", params).await?;
 
     println!("\nCollateral attestation recorded!");
     println!("  Operator: {}", attestation.operator);
@@ -2593,7 +2876,7 @@ async fn deposit_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
             f.annualized_bps, f.annualized_fixed, f.frequency_blocks);
     }
 
-    let deposit = node.open_deposit(&ledger_id, &descriptor, fees).await?;
+    let deposit = node.open_deposit(&ledger_id, &descriptor, fees, None).await?;
 
     println!("\nDeposit opened!");
     println!("  Deposit ID: {}", hex::encode(deposit.deposit_id));
@@ -2835,7 +3118,8 @@ async fn deposit_complete(args: &[String]) -> Result<(), Box<dyn std::error::Err
         return Ok(());
     }
 
-    let offer_id_bytes = hex::decode(&positional[0])
+    let offer_id_hex = &positional[0];
+    let offer_id_bytes = hex::decode(offer_id_hex)
         .map_err(|e| format!("Invalid offer ID hex: {}", e))?;
 
     if offer_id_bytes.len() != 32 {
@@ -2851,17 +3135,34 @@ async fn deposit_complete(args: &[String]) -> Result<(), Box<dyn std::error::Err
         .map_err(|_| format!("Invalid amount_sats: {}", positional[2]))?;
 
     let config = parse_config(&config_args)?;
-    let mut node = Node::new(config).await?;
 
-    println!("Completing deposit offer...");
-    println!("  Offer ID: {}", hex::encode(&offer_id[..8]));
+    // Load state from disk to resolve the offer's ledger_id
+    let node = Node::new(config.clone()).await?;
+    let ledger_id = match node.get_deposit_offer(&offer_id) {
+        Some((offer, _)) => offer.ledger_id.clone(),
+        None => return Err(format!("Deposit offer not found: {}...", &offer_id_hex[..16]).into()),
+    };
+    drop(node);
+
+    println!("Completing deposit offer via daemon...");
+    println!("  Offer ID: {}", &offer_id_hex[..16]);
+    println!("  Ledger:   {}...", &ledger_id[..16]);
     println!("  Transaction: {}", txid);
     println!("  Amount: {} sats", amount_sats);
 
-    let new_balance = node.complete_deposit_offer(&offer_id, txid, amount_sats).await?;
+    let params = serde_json::json!({
+        "offer_id": offer_id_hex,
+        "txid": txid,
+        "amount_sats": amount_sats,
+    });
+
+    let result = send_daemon_request(&config, &ledger_id, "complete_offer", params).await?;
+
+    let new_balance_msats = result.get("new_balance_msats").and_then(|v| v.as_u64()).unwrap_or(0);
+    let new_balance_sats = result.get("new_balance_sats").and_then(|v| v.as_u64()).unwrap_or(0);
 
     println!("\nDeposit offer completed!");
-    println!("  New balance: {} msats ({} sats)", new_balance, new_balance / 1000);
+    println!("  New balance: {} msats ({} sats)", new_balance_msats, new_balance_sats);
 
     Ok(())
 }
