@@ -684,11 +684,10 @@ pub struct RuleCheck {
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ValidationError {
     /// Hash chain is broken at the given sequence.
-    #[error("Hash chain broken at sequence {sequence}: expected {expected}, got {actual}")]
+    #[error("Hash chain broken at sequence {sequence}: {reason}")]
     HashChainBroken {
         sequence: u64,
-        expected: String,
-        actual: String,
+        reason: String,
     },
 
     /// Signature verification failed.
@@ -800,8 +799,10 @@ impl LedgerConformanceValidator {
             if update.sequence_number != i as u64 {
                 return Err(ValidationError::HashChainBroken {
                     sequence: i as u64,
-                    expected: format!("sequence {}", i),
-                    actual: format!("sequence {}", update.sequence_number),
+                    reason: format!(
+                        "sequence gap: update at position {} claims sequence {}",
+                        i, update.sequence_number
+                    ),
                 });
             }
 
@@ -809,8 +810,11 @@ impl LedgerConformanceValidator {
             if update.previous_hash != expected_prev {
                 return Err(ValidationError::HashChainBroken {
                     sequence: update.sequence_number,
-                    expected: hex::encode(expected_prev),
-                    actual: hex::encode(update.previous_hash),
+                    reason: format!(
+                        "prev_hash mismatch: update claims prev_hash {}..., but preceding entry has hash {}...",
+                        &hex::encode(update.previous_hash)[..16],
+                        &hex::encode(expected_prev)[..16]
+                    ),
                 });
             }
 
@@ -819,8 +823,11 @@ impl LedgerConformanceValidator {
             if computed != update.current_hash {
                 return Err(ValidationError::HashChainBroken {
                     sequence: update.sequence_number,
-                    expected: hex::encode(computed),
-                    actual: hex::encode(update.current_hash),
+                    reason: format!(
+                        "hash mismatch: update claims hash {}..., but recomputed hash is {}... (message content may have been altered)",
+                        &hex::encode(update.current_hash)[..16],
+                        &hex::encode(computed)[..16]
+                    ),
                 });
             }
 
@@ -1388,8 +1395,7 @@ mod tests {
     fn test_validation_error_display() {
         let e1 = ValidationError::HashChainBroken {
             sequence: 5,
-            expected: "abc".to_string(),
-            actual: "def".to_string(),
+            reason: "prev_hash mismatch".to_string(),
         };
         assert!(e1.to_string().contains("sequence 5"));
 
