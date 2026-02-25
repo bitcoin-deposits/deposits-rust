@@ -1267,6 +1267,18 @@ async fn sync_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         .build()
         .await?;
 
+    // Set response filter for relay-side #l tag filtering (reduces fan-out)
+    {
+        let ledger_ids: Vec<String> = deposits.iter()
+            .filter_map(|d| d.get("ledger_id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        if !ledger_ids.is_empty() {
+            transport.set_response_ledger_filter(ledger_ids);
+        }
+    }
+
     // Subscribe to responses before sending requests
     if let Err(e) = transport.subscribe_to_response("").await {
         eprintln!("Warning: failed to subscribe to responses: {}", e);
@@ -1740,6 +1752,9 @@ async fn transfer_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         .build()
         .await?;
 
+    // Set response filter for relay-side #l tag filtering (reduces fan-out)
+    transport.set_response_ledger_filter(vec![ledger_id.to_string()]);
+
     let request_params = serde_json::json!({
         "nonce": hex::encode(nonce),
         "source_deposit_id": hex::encode(source_id),
@@ -1849,6 +1864,9 @@ async fn transfer_complete(args: &[String]) -> Result<(), Box<dyn std::error::Er
         .relay(&config.relays[0])
         .build()
         .await?;
+
+    // Set response filter for relay-side #l tag filtering (reduces fan-out)
+    transport.set_response_ledger_filter(vec![ledger_id.clone()]);
 
     let request_params = serde_json::json!({
         "transfer_id": transfer_id_hex,

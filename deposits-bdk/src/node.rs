@@ -177,6 +177,10 @@ pub struct Node {
     /// Processed request event IDs (to avoid duplicate processing from polling)
     processed_requests: Mutex<std::collections::HashSet<String>>,
 
+    /// Event IDs of requests sent by THIS daemon process.
+    /// Used to filter out our own requests (Nostr broadcasts to all subscribers).
+    sent_events: Mutex<std::collections::HashSet<String>>,
+
     /// Data directory for persistence
     data_dir: PathBuf,
 
@@ -185,6 +189,10 @@ pub struct Node {
 
     /// Use fast polling intervals (for regtest/testing)
     fast_poll: bool,
+
+    /// Cached joined ledger IDs (from QuorumJoin history scan).
+    /// Populated on first access, invalidated when new ledgers are discovered.
+    joined_ledger_cache: Mutex<Option<Vec<String>>>,
 }
 
 impl Node {
@@ -236,6 +244,19 @@ impl Node {
         // Load existing withdrawals from disk
         let withdrawals = Self::load_withdrawals(&config.data_dir)?;
 
+        // Set response filter for relay-side #l tag filtering (reduces fan-out ~75%)
+        // Collect owned ledger IDs from already-loaded handler ledgers
+        {
+            let ledgers = handler_arc.ledgers.lock().unwrap();
+            let owned_ids: Vec<String> = ledgers.iter()
+                .filter(|(_, larc)| larc.read().unwrap().operator_key() == node_id)
+                .map(|(_, larc)| larc.read().unwrap().ledger_id_hex())
+                .collect();
+            if !owned_ids.is_empty() {
+                nostr.set_response_ledger_filter(owned_ids);
+            }
+        }
+
         // Subscribe to responses early (needed for co-sign response handling in CLI commands)
         // CLI commands don't call start(), so we need this here
         if let Err(e) = nostr.subscribe_to_response("").await {
@@ -257,9 +278,11 @@ impl Node {
             pending_cosign_requests: Arc::new(Mutex::new(HashMap::new())),
             pending_invoices: Arc::new(Mutex::new(HashMap::new())),
             processed_requests: Mutex::new(std::collections::HashSet::new()),
+            sent_events: Mutex::new(std::collections::HashSet::new()),
             data_dir: config.data_dir,
             relay_url,
             fast_poll: config.fast_poll,
+            joined_ledger_cache: Mutex::new(None),
         })
     }
 
@@ -385,8 +408,24 @@ impl Node {
             }
         }
 
-        // Subscribe to all responses early (needed for co-sign response handling)
-        // This ensures we receive responses even if they arrive before request_cosign runs
+        // Set up per-ledger filters for polling and response subscriptions
+        if !ledger_ids.is_empty() {
+            // Request poll filter uses all ledger IDs (owned + joined)
+            self.nostr.set_request_ledger_filter(ledger_ids.clone());
+
+            // Response filter uses only owned ledger IDs
+            let owned_ids: Vec<String> = {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                ledgers.iter()
+                    .filter(|(_, larc)| larc.read().unwrap().operator_key() == self.node_id)
+                    .map(|(_, larc)| larc.read().unwrap().ledger_id_hex())
+                    .collect()
+            };
+            if !owned_ids.is_empty() {
+                self.nostr.clear_response_subscription();
+                self.nostr.set_response_ledger_filter(owned_ids);
+            }
+        }
         if let Err(e) = self.nostr.subscribe_to_response("").await {
             tracing::warn!("Failed to subscribe to responses: {}", e);
         }
@@ -408,12 +447,23 @@ impl Node {
 
     /// Get ledger IDs of ledgers we've joined as a quorum member
     fn get_joined_ledger_ids(&self) -> Vec<String> {
+        // Check cache first
+        {
+            let cache = self.joined_ledger_cache.lock().unwrap();
+            if let Some(ref cached) = *cache {
+                return cached.clone();
+            }
+        }
+
+        // Cache miss — do the full scan
+        let t0 = std::time::Instant::now();
         let mut joined = Vec::new();
         let ledgers = self.handler.ledgers.lock().unwrap();
 
         for (_ledger_id, ledger_arc) in ledgers.iter() {
             let ledger = ledger_arc.read().unwrap();
             if ledger.operator_key() == self.node_id {
+                let history_len = ledger.history.len();
                 for update in &ledger.history {
                     if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
                         if let LedgerOperation::QuorumJoin { ledger_id, .. } = op {
@@ -423,10 +473,25 @@ impl Node {
                         }
                     }
                 }
+                let elapsed = t0.elapsed();
+                if elapsed.as_millis() > 1 {
+                    tracing::info!("[PROFILE] get_joined_ledger_ids: scanned {} history entries in {:?} (cache miss)", history_len, elapsed);
+                }
             }
         }
+        drop(ledgers);
+
+        // Store in cache
+        let mut cache = self.joined_ledger_cache.lock().unwrap();
+        *cache = Some(joined.clone());
 
         joined
+    }
+
+    /// Invalidate the joined ledger cache (call after discovering new ledgers)
+    fn invalidate_joined_ledger_cache(&self) {
+        let mut cache = self.joined_ledger_cache.lock().unwrap();
+        *cache = None;
     }
 
     /// Run the main event loop
@@ -442,7 +507,7 @@ impl Node {
         // Track last request poll time (fallback for missed subscription events)
         let mut last_poll = tokio::time::Instant::now();
         let poll_interval = if self.fast_poll {
-            tokio::time::Duration::from_millis(500)  // Fast polling for low latency
+            tokio::time::Duration::from_secs(5)  // Safety net only — subscriptions handle real-time delivery
         } else {
             tokio::time::Duration::from_secs(30)
         };
@@ -456,7 +521,7 @@ impl Node {
         };
 
         if self.fast_poll {
-            tracing::info!("Fast poll mode enabled: periodic=5s, poll=500ms, reload=2s");
+            tracing::info!("Fast poll mode enabled: periodic=5s, poll=5s, reload=2s");
         }
 
         loop {
@@ -510,37 +575,52 @@ impl Node {
                 last_periodic = tokio::time::Instant::now();
             }
 
-            // Fast ledger reload check (every 5 seconds)
-            // This ensures daemon picks up changes made by CLI processes (like QuorumJoin)
+            // Discover new/updated ledger files and refresh quorum membership cache
             if last_reload.elapsed() >= reload_interval {
-                let updated = self.handler.reload_ledgers();
-                if updated > 0 {
-                    // Re-subscribe to new joined ledgers
-                    let joined_ledgers = self.get_joined_ledger_ids();
-                    for ledger_id in joined_ledgers {
-                        if let Err(e) = self.nostr.subscribe_to_requests(&ledger_id).await {
-                            tracing::debug!("Re-subscribe to requests failed: {}", e);
-                        }
-                    }
-                }
-                // Also reload deposit offers (for status changes from CLI)
-                self.reload_deposit_offers();
+                self.invalidate_joined_ledger_cache();
+                let discovered = self.handler.discover_new_ledgers();
 
-                // Update ledger history length metrics
+                // Collect all ledger IDs (owned + joined) for subscriptions and poll filter
+                let mut all_ledger_ids = self.get_joined_ledger_ids();
+                let mut owned_ids = Vec::new();
                 {
                     let ledgers = self.handler.ledgers.lock().unwrap();
                     for (ledger_id, ledger_arc) in ledgers.iter() {
                         let ledger = ledger_arc.read().unwrap();
+                        if ledger.operator_key() == self.node_id {
+                            all_ledger_ids.push(ledger_id.clone());
+                            owned_ids.push(ledger.ledger_id_hex());
+                        }
                         metrics::set_ledger_history_length(ledger_id, ledger.history.len());
+                    }
+                }
+
+                // Update poll filter (always, since joined ledgers change without new files)
+                self.nostr.set_request_ledger_filter(all_ledger_ids.clone());
+
+                if discovered > 0 {
+                    // Subscribe to new ledgers' requests
+                    for ledger_id in &all_ledger_ids {
+                        if let Err(e) = self.nostr.subscribe_to_requests(ledger_id).await {
+                            tracing::debug!("Subscribe to ledger {} failed: {}", &ledger_id[..16.min(ledger_id.len())], e);
+                        }
+                    }
+                    // Refresh response subscription filter (owned ledgers only)
+                    if !owned_ids.is_empty() {
+                        self.nostr.clear_response_subscription();
+                        self.nostr.set_response_ledger_filter(owned_ids);
+                        if let Err(e) = self.nostr.subscribe_to_response("").await {
+                            tracing::warn!("Failed to resubscribe to responses: {}", e);
+                        }
                     }
                 }
 
                 last_reload = tokio::time::Instant::now();
             }
 
-            // Poll for recent requests (every 2 seconds) - fallback for missed subscription events
+            // Poll for recent requests — safety net for missed subscription events
             if last_poll.elapsed() >= poll_interval {
-                if let Ok(requests) = self.nostr.fetch_recent_requests(5).await {
+                if let Ok(requests) = self.nostr.fetch_recent_requests(7).await {
                     for request in requests {
                         // Check if already processed
                         let already_processed = {
@@ -609,9 +689,10 @@ impl Node {
 
     /// Handle a ledger request from Nostr
     async fn handle_ledger_request(&mut self, request: crate::nostr::LedgerRequest) {
-        // Skip requests that we sent ourselves (Nostr broadcasts to all subscribers)
-        let our_x_only = hex::encode(&self.node_id.serialize()[1..]);  // x-coordinate only
-        if request.sender == our_x_only {
+        // Skip requests that THIS daemon process sent (Nostr broadcasts to all subscribers).
+        // We track sent event IDs rather than filtering by pubkey, because CLI commands
+        // use the same operator key and we want the daemon to process those.
+        if self.sent_events.lock().unwrap().contains(&request.event_id) {
             tracing::debug!("Skipping our own request: {}", &request.event_id[..16.min(request.event_id.len())]);
             return;
         }
@@ -667,10 +748,6 @@ impl Node {
                 (true, None, None) // No response needed
             }
             "cosign_update" => {
-                // Reload ledgers to ensure we have the latest QuorumJoin state
-                // (CLI may have recorded a QuorumJoin that we haven't seen yet)
-                self.handler.reload_ledgers();
-
                 // Silently ignore if we're not a quorum member for this ledger
                 // (co-sign requests are broadcast, only quorum members should respond)
                 if !self.is_quorum_member_of_ledger(&request.ledger_id) {
@@ -682,9 +759,6 @@ impl Node {
                 self.process_cosign_request(&request).await
             }
             "cosign_offer" => {
-                // Reload ledgers to ensure we have the latest QuorumJoin state
-                self.handler.reload_ledgers();
-
                 // Silently ignore if we're not a quorum member for this ledger
                 if !self.is_quorum_member_of_ledger(&request.ledger_id) {
                     tracing::debug!("Ignoring cosign_offer for {} - not a quorum member",
@@ -715,6 +789,10 @@ impl Node {
 
         // Record request processing time
         let processing_time = start_time.elapsed();
+        if processing_time.as_millis() > 1 {
+            tracing::info!("[PROFILE] handle_ledger_request action={} took {:?} (success={})",
+                request.action, processing_time, success);
+        }
         crate::metrics::record_request_processing(&request.action, success, processing_time);
         crate::metrics::record_response_sent(&request.action, success);
 
@@ -831,6 +909,7 @@ impl Node {
 
     /// Check if we're a quorum member of a ledger (by ledger_id hash)
     fn is_quorum_member_of_ledger(&self, ledger_id: &str) -> bool {
+        let t0 = std::time::Instant::now();
         // Check if we have this ledger and are the operator
         let ledgers = self.handler.ledgers.lock().unwrap();
         if let Some(ledger_arc) = ledgers.get(ledger_id) {
@@ -1134,6 +1213,7 @@ impl Node {
             reveal_params,
         ).await {
             Ok(request_id) => {
+                self.track_sent_event(&request_id);
                 tracing::info!("Lottery preimage revealed! Request ID: {}...", &request_id[..16.min(request_id.len())]);
 
                 // Create marker file to prevent double-reveal
@@ -1939,6 +2019,7 @@ impl Node {
                         continue;
                     }
                 };
+                self.track_sent_event(&request_id);
 
                 tracing::info!("  Request ID: {}...", &request_id[..16.min(request_id.len())]);
 
@@ -3893,6 +3974,7 @@ impl Node {
         };
 
         // Append operation (applies state changes: deducts balance, adds to locked)
+        let t_append = std::time::Instant::now();
         {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let ledger_arc = ledgers.get(ledger_id).unwrap().clone();
@@ -3909,8 +3991,10 @@ impl Node {
                 return (false, None, Some(format!("Failed to append operation: {:?}", e)));
             }
         }
+        let append_elapsed = t_append.elapsed();
 
         // Sign (with co-signature if quorum active) and broadcast
+        let t_sign = std::time::Instant::now();
         if let Err(e) = self.sign_and_broadcast(ledger_id).await {
             // Rollback: undo the state changes from the failed operation.
             // The operation was appended and state modified (balance deducted, locked increased)
@@ -3939,12 +4023,18 @@ impl Node {
             return (false, None, Some(format!("Failed to sign/broadcast: {:?}", e)));
         }
 
+        let sign_elapsed = t_sign.elapsed();
+
         // Persist to disk
+        let t_persist = std::time::Instant::now();
         if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
             tracing::warn!("Failed to persist ledger after transfer_lock: {}", e);
         }
+        let persist_elapsed = t_persist.elapsed();
 
         tracing::info!("Transfer locked: {}", hex::encode(&transfer_id[..8]));
+        tracing::info!("[PROFILE] transfer_lock breakdown: append={:?}, sign_broadcast={:?}, persist={:?}",
+            append_elapsed, sign_elapsed, persist_elapsed);
         (true, Some(serde_json::json!({
             "transfer_id": transfer_id_hex,
             "amount": amount,
@@ -4307,6 +4397,7 @@ impl Node {
         // We look for a ledger where we are the operator AND we have a QuorumJoin
         // pointing to the target operator/reserves_key.
         let member_ledger_hash: [u8; 32] = {
+            let t_scan = std::time::Instant::now();
             let ledgers = self.handler.ledgers.lock().unwrap();
             let mut found_hash = None;
 
@@ -4321,6 +4412,7 @@ impl Node {
                 // Check if this ledger has a QuorumJoin pointing to the target operator
                 // Scan history because state.joined_quorums may not be populated after deserialization
                 // Compare x-coordinates only (Nostr uses x-only pubkeys, so we can't know the y parity)
+                let history_len = ledger.history.len();
                 let has_join = ledger.history.iter().any(|update| {
                     if update.message_type != deposits_core::messages::consts::QUORUM_JOIN {
                         return false;
@@ -4340,6 +4432,11 @@ impl Node {
                     }
                     false
                 });
+
+                let scan_elapsed = t_scan.elapsed();
+                if scan_elapsed.as_millis() > 0 {
+                    tracing::info!("[PROFILE] cosign QuorumJoin scan: {} entries in {:?}", history_len, scan_elapsed);
+                }
 
                 if has_join {
                     // Get current hash from the last update, or all zeros if no updates
@@ -5562,6 +5659,7 @@ impl Node {
         let request_id = self.nostr.send_ledger_request(target_ledger_id, "collateral_lock", params)
             .await
             .map_err(|e| Error::Protocol(format!("Failed to send collateral_lock request: {:?}", e)))?;
+        self.track_sent_event(&request_id);
 
         // Track for auto-recording
         {
@@ -5625,6 +5723,7 @@ impl Node {
         let request_id = self.nostr.send_ledger_request(ledger_id, "cosign_update", params)
             .await
             .map_err(|e| Error::Protocol(format!("Failed to send co_sign request: {:?}", e)))?;
+        self.track_sent_event(&request_id);
 
         // Subscribe to response for this request
         if let Err(e) = self.nostr.subscribe_to_response(&request_id).await {
@@ -5717,8 +5816,6 @@ impl Node {
                             // Skip our own requests
                             let our_x_only = hex::encode(&self.node_id.serialize()[1..]);
                             if request.sender != our_x_only {
-                                self.handler.reload_ledgers();
-
                                 // Silently ignore if we're not a quorum member
                                 if !self.is_quorum_member_of_ledger(&request.ledger_id) {
                                     continue;
@@ -5796,6 +5893,7 @@ impl Node {
         let request_id = self.nostr.send_ledger_request(ledger_id, "cosign_offer", params)
             .await
             .map_err(|e| Error::Protocol(format!("Failed to send cosign_offer request: {:?}", e)))?;
+        self.track_sent_event(&request_id);
 
         // Subscribe to response for this request
         if let Err(e) = self.nostr.subscribe_to_response(&request_id).await {
@@ -5901,8 +5999,6 @@ impl Node {
                         if request.action == "cosign_offer" {
                             let our_x_only = hex::encode(&self.node_id.serialize()[1..]);
                             if request.sender != our_x_only {
-                                self.handler.reload_ledgers();
-
                                 if self.is_quorum_member_of_ledger(&request.ledger_id) {
                                     let (success, result, error) = self.process_cosign_offer_request(&request).await;
                                     let result_json = result.map(|s| serde_json::Value::String(s));
@@ -5929,6 +6025,17 @@ impl Node {
                 }
             }
         }
+    }
+
+    /// Track a Nostr event sent by this daemon process so we can filter it
+    /// when it comes back via the relay broadcast.
+    fn track_sent_event(&self, event_id: &str) {
+        let mut sent = self.sent_events.lock().unwrap();
+        // Cap the set to prevent unbounded growth
+        if sent.len() > 1000 {
+            sent.clear();
+        }
+        sent.insert(event_id.to_string());
     }
 
     /// Check if this ledger has had a reserves rotation to quorum-based Taproot.

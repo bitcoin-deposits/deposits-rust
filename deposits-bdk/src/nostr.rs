@@ -140,6 +140,22 @@ pub struct NostrTransport {
     /// Active subscriptions to prevent duplicates
     /// Key format: "type:id" e.g. "requests:abc123" or "disputes:abc123"
     active_subscriptions: RwLock<std::collections::HashSet<String>>,
+
+    /// Ledger IDs to filter response subscriptions by (relay-side #l tag filtering).
+    /// If non-empty, subscribe_to_response uses these to reduce relay fan-out.
+    /// Set via set_response_ledger_filter() before calling subscribe_to_response().
+    response_ledger_filter: RwLock<Vec<String>>,
+
+    /// Ledger IDs to filter polling requests by (relay-side #l tag filtering).
+    /// If non-empty, fetch_recent_requests uses per-ledger filters.
+    /// Set via set_request_ledger_filter().
+    request_ledger_filter: RwLock<Vec<String>>,
+
+    /// Persistent notification receiver for the daemon run loop.
+    /// Created once at start_listening() and reused by process_events()
+    /// to avoid missing events between calls (broadcast::Receiver is
+    /// per-instance — each notifications() call creates a new empty receiver).
+    daemon_notification_rx: Option<tokio::sync::broadcast::Receiver<RelayPoolNotification>>,
 }
 
 /// An inbound message from a peer
@@ -566,12 +582,39 @@ impl NostrTransport {
             dispute_tx,
             peer_keys: RwLock::new(HashMap::new()),
             active_subscriptions: RwLock::new(std::collections::HashSet::new()),
+            response_ledger_filter: RwLock::new(Vec::new()),
+            request_ledger_filter: RwLock::new(Vec::new()),
+            daemon_notification_rx: None,
         })
     }
 
     /// Get our secp256k1 public key (node ID)
     pub fn our_pubkey(&self) -> PublicKey {
         self.our_pubkey
+    }
+
+    /// Set ledger IDs for response subscription filtering.
+    /// When set, subscribe_to_response will use relay-side #l tag filtering
+    /// to only receive responses for these ledgers, reducing fan-out.
+    pub fn set_response_ledger_filter(&self, ledger_ids: Vec<String>) {
+        tracing::info!("Response filter set for {} ledgers", ledger_ids.len());
+        *self.response_ledger_filter.write().unwrap() = ledger_ids;
+    }
+
+    /// Set ledger IDs for request polling filter.
+    /// When set, fetch_recent_requests uses per-ledger #l tag filters.
+    pub fn set_request_ledger_filter(&self, ledger_ids: Vec<String>) {
+        let old_len = self.request_ledger_filter.read().unwrap().len();
+        if ledger_ids.len() != old_len {
+            tracing::info!("Request poll filter set for {} ledgers (was {})", ledger_ids.len(), old_len);
+        }
+        *self.request_ledger_filter.write().unwrap() = ledger_ids;
+    }
+
+    /// Clear the response subscription tracking flag so the next subscribe_to_response
+    /// call will create a new subscription (e.g. with updated ledger filter).
+    pub fn clear_response_subscription(&self) {
+        self.active_subscriptions.write().unwrap().remove("responses:all");
     }
 
     /// Get a reference to the underlying Nostr client
@@ -1034,35 +1077,43 @@ impl NostrTransport {
             return Ok(());
         }
 
-        // Check which ledgers we haven't subscribed to disputes yet
-        // (requests use a single global subscription, disputes are per-ledger)
+        // Check which ledgers need new subscriptions (both requests and disputes are per-ledger)
+        let mut new_request_ledgers: Vec<&String> = Vec::new();
         let mut new_dispute_ledgers: Vec<&String> = Vec::new();
-        let needs_request_sub: bool;
         {
             let subs = self.active_subscriptions.read().unwrap();
-            needs_request_sub = !subs.contains("requests:global");
             for lid in ledger_ids {
+                let prefix = &lid[..16.min(lid.len())];
+                let req_key = format!("requests:{}", prefix);
                 let dis_key = format!("disputes:{}", lid);
+                if !subs.contains(&req_key) {
+                    new_request_ledgers.push(lid);
+                }
                 if !subs.contains(&dis_key) {
                     new_dispute_ledgers.push(lid);
                 }
             }
         }
 
-        if !needs_request_sub && new_dispute_ledgers.is_empty() {
+        if new_request_ledgers.is_empty() && new_dispute_ledgers.is_empty() {
             tracing::debug!("All {} ledgers already subscribed", ledger_ids.len());
             return Ok(());
         }
 
         // Build filters for new subscriptions
-        let since = nostr_sdk::Timestamp::now() - 30;
+        // Short lookback to minimize historical dump on reconnect (reduces EAGAIN disconnects)
+        let since = nostr_sdk::Timestamp::now() - 5;
         let mut filters = Vec::new();
 
-        // Add global request filter if not already subscribed
-        if needs_request_sub {
+        // Per-ledger request filters with #l tag for relay-side filtering
+        for lid in &new_request_ledgers {
             filters.push(
                 Filter::new()
                     .kind(Kind::Custom(KIND_LEDGER_REQUEST))
+                    .custom_tag(
+                        SingleLetterTag::lowercase(Alphabet::L),
+                        [lid.as_str()],
+                    )
                     .since(since)
             );
         }
@@ -1096,15 +1147,16 @@ impl NostrTransport {
         // Mark all as subscribed
         {
             let mut subs = self.active_subscriptions.write().unwrap();
-            if needs_request_sub {
-                subs.insert("requests:global".to_string());
+            for lid in &new_request_ledgers {
+                subs.insert(format!("requests:{}", &lid[..16.min(lid.len())]));
             }
             for lid in &new_dispute_ledgers {
                 subs.insert(format!("disputes:{}", lid));
             }
         }
 
-        tracing::info!("Batch subscribed to {} ledgers ({} filters)", new_dispute_ledgers.len(), filter_count);
+        tracing::info!("Batch subscribed: {} request + {} dispute filters ({} total)",
+            new_request_ledgers.len(), new_dispute_ledgers.len(), filter_count);
         Ok(())
     }
 
@@ -1430,23 +1482,24 @@ impl NostrTransport {
     }
 
     /// Subscribe to ledger requests for a specific ledger (for operators)
+    /// Uses relay-side #l tag filtering to only receive events for this ledger,
+    /// dramatically reducing bandwidth (from ALL requests to just ~25% per ledger).
     pub async fn subscribe_to_requests(&self, ledger_id: &str) -> Result<(), Error> {
-        // Check if already subscribed to requests (global subscription, filter by ledger in handler)
-        let sub_key = "requests:global".to_string();
+        // Per-ledger subscription to leverage relay-side filtering
+        let sub_key = format!("requests:{}", &ledger_id[..16.min(ledger_id.len())]);
         {
             let subs = self.active_subscriptions.read().unwrap();
             if subs.contains(&sub_key) {
-                tracing::debug!("Already subscribed to requests, skipping (for ledger {})", ledger_id);
+                tracing::debug!("Already subscribed to requests for ledger {}", &ledger_id[..16.min(ledger_id.len())]);
                 return Ok(());
             }
         }
 
-        // Subscribe to ALL requests of this kind (filter by ledger_id in handler)
-        // This avoids potential issues with custom tag filters on some relays
-        // Include a 30-second lookback to catch any events sent before subscription was established
-        let since = nostr_sdk::Timestamp::now() - 30;
+        // Short lookback to minimize historical dump on reconnect (reduces EAGAIN disconnects)
+        let since = nostr_sdk::Timestamp::now() - 5;
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_REQUEST))
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::L), [ledger_id])
             .since(since);
 
         self.client
@@ -1457,21 +1510,32 @@ impl NostrTransport {
         // Mark as subscribed
         self.active_subscriptions.write().unwrap().insert(sub_key);
 
-        tracing::info!("Subscribed to ledger requests (kind {}), filtering for: {}", KIND_LEDGER_REQUEST, ledger_id);
+        tracing::info!("Subscribed to ledger requests (kind {}) for ledger: {}", KIND_LEDGER_REQUEST, &ledger_id[..16.min(ledger_id.len())]);
         Ok(())
     }
 
-    /// Fetch recent ledger requests (polling fallback)
+    /// Fetch recent ledger requests (polling fallback).
+    /// Uses per-ledger #l tag filtering when request_ledger_filter is set.
     pub async fn fetch_recent_requests(&self, since_secs: u64) -> Result<Vec<LedgerRequest>, Error> {
         use nostr_sdk::Timestamp;
 
         let since = Timestamp::now() - since_secs;
-        let filter = Filter::new()
-            .kind(Kind::Custom(KIND_LEDGER_REQUEST))
-            .since(since);
+        let ledger_ids = self.request_ledger_filter.read().unwrap().clone();
+        let filters = if !ledger_ids.is_empty() {
+            ledger_ids.iter().map(|lid| {
+                Filter::new()
+                    .kind(Kind::Custom(KIND_LEDGER_REQUEST))
+                    .custom_tag(SingleLetterTag::lowercase(Alphabet::L), [lid.as_str()])
+                    .since(since)
+            }).collect::<Vec<_>>()
+        } else {
+            vec![Filter::new()
+                .kind(Kind::Custom(KIND_LEDGER_REQUEST))
+                .since(since)]
+        };
 
         let events = self.client
-            .fetch_events(vec![filter], Some(tokio::time::Duration::from_secs(5)))
+            .fetch_events(filters, Some(tokio::time::Duration::from_secs(5)))
             .await
             .map_err(|e| Error::Nostr(format!("Failed to fetch events: {}", e)))?;
 
@@ -1488,12 +1552,11 @@ impl NostrTransport {
         Ok(requests)
     }
 
-    /// Subscribe to responses for a specific request (for requesters)
-    /// Note: strfry doesn't support #e tag filtering on custom kinds well,
-    /// so we subscribe to ALL responses and filter locally in handle_notification
+    /// Subscribe to responses (for requesters).
+    /// If response_ledger_filter is set, uses relay-side #l tag filtering
+    /// to only receive responses for specific ledgers (reduces fan-out ~75%).
+    /// Otherwise falls back to global subscription.
     pub async fn subscribe_to_response(&self, _request_id: &str) -> Result<(), Error> {
-        // Use a single global subscription for all responses
-        // (strfry has issues with custom tag filtering on non-standard kinds)
         let sub_key = "responses:all".to_string();
         {
             let subs = self.active_subscriptions.read().unwrap();
@@ -1502,22 +1565,41 @@ impl NostrTransport {
             }
         }
 
-        // Include lookback to catch responses sent before subscription was active
-        let since = nostr_sdk::Timestamp::now() - 30;
+        // Short lookback to minimize historical dump on reconnect (reduces EAGAIN disconnects)
+        let since = nostr_sdk::Timestamp::now() - 5;
 
-        let filter = Filter::new()
-            .kind(Kind::Custom(KIND_LEDGER_RESPONSE))
-            .since(since);
+        // Check if we have a ledger filter configured
+        let ledger_ids = self.response_ledger_filter.read().unwrap().clone();
 
+        let filters = if !ledger_ids.is_empty() {
+            // Per-ledger response filters for relay-side filtering
+            ledger_ids.iter().map(|lid| {
+                Filter::new()
+                    .kind(Kind::Custom(KIND_LEDGER_RESPONSE))
+                    .custom_tag(SingleLetterTag::lowercase(Alphabet::L), [lid.as_str()])
+                    .since(since)
+            }).collect::<Vec<_>>()
+        } else {
+            // Global fallback (no filter configured)
+            vec![Filter::new()
+                .kind(Kind::Custom(KIND_LEDGER_RESPONSE))
+                .since(since)]
+        };
+
+        let filter_count = filters.len();
         self.client
-            .subscribe(vec![filter], None)
+            .subscribe(filters, None)
             .await
             .map_err(|e| Error::Nostr(format!("Failed to subscribe to responses: {}", e)))?;
 
         // Mark as subscribed
         self.active_subscriptions.write().unwrap().insert(sub_key);
 
-        tracing::info!("Subscribed to all ledger responses (kind {})", KIND_LEDGER_RESPONSE);
+        if !ledger_ids.is_empty() {
+            tracing::info!("Subscribed to ledger responses (kind {}) for {} ledgers", KIND_LEDGER_RESPONSE, filter_count);
+        } else {
+            tracing::info!("Subscribed to all ledger responses (kind {}) - no filter", KIND_LEDGER_RESPONSE);
+        }
         Ok(())
     }
 
@@ -1711,7 +1793,7 @@ impl NostrTransport {
     }
 
     /// Start listening for inbound messages
-    pub async fn start_listening(&self) -> Result<(), Error> {
+    pub async fn start_listening(&mut self) -> Result<(), Error> {
         // Subscribe to DMs addressed to us
         let filter = Filter::new()
             .kind(Kind::EncryptedDirectMessage)
@@ -1722,28 +1804,76 @@ impl NostrTransport {
             .await
             .map_err(|e| Error::Nostr(format!("Subscribe failed: {}", e)))?;
 
+        // Create persistent notification receiver for the daemon run loop.
+        // Must be created AFTER subscriptions are set up, BEFORE any events arrive.
+        self.daemon_notification_rx = Some(self.client.notifications());
+
         Ok(())
     }
 
-    /// Process incoming events (call this in a loop)
-    /// This awaits on the notification channel with a timeout.
-    ///
-    /// Note: Each call creates a fresh notification receiver, so events between
-    /// calls may be missed. Callers should use polling as a fallback (e.g.,
-    /// fetch_recent_requests) to catch any missed events.
+    /// Process incoming events (call this in a loop).
+    /// Uses the persistent notification receiver created in start_listening()
+    /// to avoid missing events between calls.
     pub async fn process_events(&mut self) -> Result<(), Error> {
+        // Take the receiver out to avoid borrow conflicts with self.handle_notification()
+        let mut rx = match self.daemon_notification_rx.take() {
+            Some(rx) => rx,
+            None => {
+                // Fallback: create ephemeral receiver (for non-daemon callers)
+                let timeout = tokio::time::Duration::from_millis(100);
+                let mut rx = self.client.notifications();
+                match tokio::time::timeout(timeout, rx.recv()).await {
+                    Ok(Ok(notification)) => self.handle_notification(notification),
+                    _ => {}
+                }
+                return Ok(());
+            }
+        };
+
+        let mut recreate = false;
+
+        // Wait for first event with 100ms timeout
         let timeout = tokio::time::Duration::from_millis(100);
-        match tokio::time::timeout(timeout, self.client.notifications().recv()).await {
+        match tokio::time::timeout(timeout, rx.recv()).await {
             Ok(Ok(notification)) => {
                 self.handle_notification(notification);
+                // Drain all pending notifications without waiting
+                loop {
+                    match rx.try_recv() {
+                        Ok(notification) => self.handle_notification(notification),
+                        Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
+                            tracing::warn!("Daemon notification receiver lagged by {} events", n);
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
+                tracing::warn!("Daemon notification receiver lagged by {} events, re-syncing", n);
+                // After lag, drain what we can
+                loop {
+                    match rx.try_recv() {
+                        Ok(notification) => self.handle_notification(notification),
+                        Err(_) => break,
+                    }
+                }
             }
             Ok(Err(_)) => {
-                // Channel closed or lagged
+                // Channel closed — re-create receiver
+                tracing::warn!("Daemon notification channel closed, re-creating receiver");
+                recreate = true;
             }
             Err(_) => {
                 // Timeout - no notification received, that's ok
             }
         }
+
+        // Put the receiver back (or create a new one if channel was closed)
+        self.daemon_notification_rx = Some(if recreate {
+            self.client.notifications()
+        } else {
+            rx
+        });
         Ok(())
     }
 
@@ -2090,6 +2220,19 @@ impl NostrTransport {
     /// Disconnect from all relays
     pub async fn disconnect(&self) {
         self.client.disconnect().await.ok();
+    }
+
+    /// Get relay connection status: (connected_count, total_count, details)
+    pub async fn relay_status(&self) -> (usize, usize, Vec<(String, String)>) {
+        let relays = self.client.relays().await;
+        let total = relays.len();
+        let connected = relays.values()
+            .filter(|r| r.status() == nostr_sdk::RelayStatus::Connected)
+            .count();
+        let details: Vec<_> = relays.iter()
+            .map(|(url, r)| (url.to_string(), format!("{:?}", r.status())))
+            .collect();
+        (connected, total, details)
     }
 }
 

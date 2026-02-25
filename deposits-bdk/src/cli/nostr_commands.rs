@@ -2467,8 +2467,8 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
 
         // Periodically rescan for new QuorumJoin operations (every 30 seconds)
         if last_join_scan.elapsed() > std::time::Duration::from_secs(30) {
-            // Reload ledgers first to see new QuorumJoins from CLI
-            node.handler.reload_ledgers();
+            // Discover new ledger files from CLI
+            node.handler.discover_new_ledgers();
 
             // Get current joined ledger_ids directly from QuorumJoin records
             let current_joined = scan_joined_ledger_ids(&node);
