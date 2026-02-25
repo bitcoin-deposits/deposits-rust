@@ -67,22 +67,39 @@ setup_operators() {
     log_info "=== Phase 1: Setup Operators ==="
     echo ""
 
+    # Gather info and addresses in parallel
+    local tmpdir=$(mktemp -d)
+    local pids=()
     for op in $OPERATORS; do
-        log_info "Setting up $op..."
+        (
+            run_bdk_cmd "$op" info 2>&1 > "$tmpdir/info_$op"
+            get_node_address "$op" > "$tmpdir/addr_$op" 2>/dev/null
+        ) &
+        pids+=($!)
+    done
+    for pid in "${pids[@]}"; do wait "$pid" || true; done
 
-        # Fund if needed
-        local info_output=$(run_bdk_cmd "$op" info 2>&1)
+    # Fund underfunded nodes (batch send, single mine)
+    local need_mine=false
+    for op in $OPERATORS; do
+        local info_output=$(cat "$tmpdir/info_$op")
         local balance=$(echo "$info_output" | grep "Wallet balance:" | awk '{print $3}')
-
         if [ -z "$balance" ] || [ "$balance" -lt 200000000 ]; then
-            local address=$(get_node_address "$op")
-            bitcoin_cli -rpcwallet=faucet sendtoaddress "$address" 10 >/dev/null 2>&1
-            mine_blocks 1
-            log_info "  Funded $op with 10 BTC"
+            local address=$(cat "$tmpdir/addr_$op" 2>/dev/null)
+            if [ -n "$address" ]; then
+                bitcoin_cli -rpcwallet=faucet sendtoaddress "$address" 10 >/dev/null 2>&1
+                need_mine=true
+                log_info "  Funded $op with 10 BTC"
+            fi
         fi
+    done
+    if $need_mine; then
+        mine_blocks 1
+    fi
 
-        # Get node info
-        info_output=$(run_bdk_cmd "$op" info 2>&1)
+    # Store node IDs (from first info call — node_id doesn't change with funding)
+    for op in $OPERATORS; do
+        local info_output=$(cat "$tmpdir/info_$op")
         local node_id=$(echo "$info_output" | grep "Node ID:" | awk '{print $3}')
         store_value "node_id_$op" "$node_id"
 
@@ -90,9 +107,11 @@ setup_operators() {
             test_pass "$op ready: ${node_id:0:16}..."
         else
             test_fail "Could not get node ID for $op"
+            rm -rf "$tmpdir"
             return 1
         fi
     done
+    rm -rf "$tmpdir"
 }
 
 # ============================================================================
@@ -104,11 +123,19 @@ create_reserves() {
     log_info "=== Phase 2: Create Reserves ($RESERVES_AMOUNT sats each) ==="
     echo ""
 
+    # Create reserves in parallel (each node has its own wallet)
+    local tmpdir=$(mktemp -d)
+    local pids=()
     for op in $OPERATORS; do
         log_info "Creating reserves for $op..."
+        (run_bdk_cmd "$op" reserves "$RESERVES_AMOUNT" 2>&1 > "$tmpdir/$op") &
+        pids+=($!)
+    done
+    for pid in "${pids[@]}"; do wait "$pid" || true; done
 
-        local reserves_output=$(run_bdk_cmd "$op" reserves "$RESERVES_AMOUNT" 2>&1)
-
+    # Check results
+    for op in $OPERATORS; do
+        local reserves_output=$(cat "$tmpdir/$op")
         if echo "$reserves_output" | grep -q "Reserves created"; then
             test_pass "$op created reserves"
         elif echo "$reserves_output" | grep -q "already have reserves"; then
@@ -118,8 +145,9 @@ create_reserves() {
             echo "    Output: $reserves_output"
         fi
     done
+    rm -rf "$tmpdir"
 
-    # Mine to confirm
+    # Mine to confirm all reserves transactions
     mine_blocks 1
 }
 
@@ -314,26 +342,36 @@ generate_deposit_keys() {
     log_info "(Format: deposit_{depositor}_{operator}.json)"
     echo ""
 
-    # Generate one keypair for each (depositor, operator) pair
+    # Generate all keypairs in parallel (keygen is local, no cross-node deps)
+    local tmpdir=$(mktemp -d)
+    local pids=()
     for depositor in $OPERATORS; do
         for operator in $OPERATORS; do
             if [ "$depositor" != "$operator" ]; then
-                # Extract short names (e.g., bdk-alice -> alice)
+                (run_bdk_cmd "$depositor" keygen 2>&1 > "$tmpdir/key_${depositor}_${operator}") &
+                pids+=($!)
+            fi
+        done
+    done
+    for pid in "${pids[@]}"; do wait "$pid" || true; done
+
+    # Store results
+    for depositor in $OPERATORS; do
+        for operator in $OPERATORS; do
+            if [ "$depositor" != "$operator" ]; then
                 local dep_short=$(echo "$depositor" | sed 's/bdk-//')
                 local op_short=$(echo "$operator" | sed 's/bdk-//')
-                local keyfile="deposit_${dep_short}_${op_short}"
-
-                # Generate keypair
-                local keypair=$(run_bdk_cmd "$depositor" keygen 2>&1)
+                local keypair=$(cat "$tmpdir/key_${depositor}_${operator}")
                 local secret=$(echo "$keypair" | awk '{print $1}')
                 local pubkey=$(echo "$keypair" | awk '{print $2}')
 
                 store_value "pubkey_${depositor}_${operator}" "$pubkey"
                 store_value "secret_${depositor}_${operator}" "$secret"
-                log_info "$keyfile: ${pubkey:0:16}..."
+                log_info "deposit_${dep_short}_${op_short}: ${pubkey:0:16}..."
             fi
         done
     done
+    rm -rf "$tmpdir"
 }
 
 open_cross_deposits() {
@@ -385,12 +423,16 @@ fund_deposits() {
     sleep 15  # Give electrs more time to sync
 
     local deposit_amount=$((RESERVES_AMOUNT * DEPOSIT_PERCENT / 100))
+    local btc_amount=$(awk "BEGIN {printf \"%.8f\", $deposit_amount / 100000000}")
+
+    # --- Phase 5a: Request all deposit offers ---
+    log_info "Requesting all deposit offers..."
+    local funded_pairs=""
 
     for depositor in $OPERATORS; do
         for operator in $OPERATORS; do
             local has_deposit=$(get_value "deposit_${depositor}_on_${operator}")
             if [ "$depositor" != "$operator" ] && [ "$has_deposit" = "1" ]; then
-                # Get the specific pubkey for this (depositor, operator) pair
                 local pubkey=$(get_value "pubkey_${depositor}_${operator}")
                 local ledger_id=$(get_value "ledger_id_$operator")
                 local dep_short=$(echo "$depositor" | sed 's/bdk-//')
@@ -398,76 +440,19 @@ fund_deposits() {
 
                 log_info "$dep_short requesting deposit offer from $op_short..."
 
-                # Request deposit offer via Nostr
-                # make_offer params: <pubkey> <max_sats> <min_sats> <blocks_valid>
                 local offer_output=$(run_nostr_request "$depositor" "$ledger_id" make_offer "$pubkey" "$deposit_amount" "10000" "144" 2>&1)
 
                 if echo "$offer_output" | grep -q "SUCCESS\|offer_id"; then
-                    # Parse JSON response for offer_id and funding_address
                     local offer_id=$(echo "$offer_output" | grep -o '"offer_id"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*: *"//' | sed 's/"$//')
                     local funding_address=$(echo "$offer_output" | grep -o '"funding_address"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*: *"//' | sed 's/"$//')
 
                     if [ -n "$funding_address" ]; then
-                        log_info "  Got offer, funding address: ${funding_address:0:20}..."
-
-                        # Delay to ensure offer is persisted to disk (daemon async processing + docker volume sync)
-                        sleep 3
-
-                        # Fund from faucet (simulating depositor funding)
-                        local btc_amount=$(awk "BEGIN {printf \"%.8f\", $deposit_amount / 100000000}")
-                        local send_output=$(bitcoin_cli -rpcwallet=faucet sendtoaddress "$funding_address" "$btc_amount" 2>&1)
-                        local send_status=$?
-
-                        if [ $send_status -eq 0 ]; then
-                            log_info "  TX sent: ${send_output:0:16}..."
-                            mine_blocks 1
-                            # Initial delay for electrs to index the block
-                            sleep 8
-
-                            # Retry funding check up to 5 times with longer delays
-                            local funding_detected=false
-                            local check_output=""
-                            for retry in 1 2 3 4 5; do
-                                check_output=$(run_bdk_cmd "$operator" deposit check "$offer_id" 2>&1) || true
-                                if echo "$check_output" | grep -q "Funding detected"; then
-                                    funding_detected=true
-                                    break
-                                fi
-                                sleep 5  # Wait before retry
-                            done
-
-                            if [ "$funding_detected" = true ]; then
-                                local txid=$(echo "$check_output" | grep "Transaction:" | awk '{print $2}')
-                                local detected_amount=$(echo "$check_output" | grep "Amount:" | awk '{print $2}')
-
-                                # Check if already completed by daemon
-                                if echo "$check_output" | grep -q "already completed"; then
-                                    test_pass "$dep_short's deposit on $op_short funded via Nostr ($detected_amount sats, auto-completed)"
-                                else
-                                    # Operator completes the deposit (local CLI)
-                                    local complete_output=$(run_bdk_cmd "$operator" deposit complete "$offer_id" "$txid" "$detected_amount" 2>&1)
-
-                                    if echo "$complete_output" | grep -q "completed\|credited"; then
-                                        test_pass "$dep_short's deposit on $op_short funded via Nostr ($detected_amount sats)"
-                                    else
-                                        test_fail "Failed to complete $dep_short's deposit on $op_short"
-                                        echo "    Output: $complete_output"
-                                    fi
-                                fi
-                            elif echo "$check_output" | grep -q "OfferNotFound"; then
-                                # Offer file was deleted - this typically means daemon auto-completed it
-                                # Since we confirmed TX was sent and block was mined, assume success
-                                # (Collateral lock phase will fail if deposit wasn't actually created)
-                                test_pass "$dep_short's deposit on $op_short funded via Nostr (daemon auto-completed, offer cleaned up)"
-                            else
-                                test_fail "Funding not detected for $dep_short's deposit on $op_short"
-                                echo "    Output: $check_output"
-                            fi
-                        else
-                            test_fail "Failed to fund $dep_short's deposit on $op_short"
-                        fi
+                        store_value "offer_id_${depositor}_${operator}" "$offer_id"
+                        store_value "funding_addr_${depositor}_${operator}" "$funding_address"
+                        funded_pairs="$funded_pairs ${depositor}:${operator}"
+                        log_info "  Got offer: ${funding_address:0:20}..."
                     else
-                        test_fail "No funding_address in offer response"
+                        test_fail "No funding_address in offer response for $dep_short on $op_short"
                         echo "    Output: $offer_output"
                     fi
                 else
@@ -476,6 +461,82 @@ fund_deposits() {
                 fi
             fi
         done
+    done
+
+    # Wait for all offers to be persisted to disk
+    sleep 3
+
+    # --- Phase 5b: Send all funding transactions (fast RPC calls, no mining) ---
+    log_info ""
+    log_info "Sending all funding transactions..."
+    local sent_count=0
+
+    for pair in $funded_pairs; do
+        local depositor="${pair%%:*}"
+        local operator="${pair##*:}"
+        local funding_address=$(get_value "funding_addr_${depositor}_${operator}")
+        local dep_short=$(echo "$depositor" | sed 's/bdk-//')
+        local op_short=$(echo "$operator" | sed 's/bdk-//')
+
+        local send_output=$(bitcoin_cli -rpcwallet=faucet sendtoaddress "$funding_address" "$btc_amount" 2>&1)
+        if [ $? -eq 0 ]; then
+            log_info "  Sent to $dep_short@$op_short: ${send_output:0:16}..."
+            sent_count=$((sent_count + 1))
+        else
+            test_fail "Failed to fund $dep_short's deposit on $op_short"
+        fi
+    done
+
+    # --- Phase 5c: Mine ONCE and wait for electrs to index all transactions ---
+    log_info ""
+    log_info "Mining to confirm all $sent_count funding transactions..."
+    mine_blocks 1
+    sleep 15
+
+    # --- Phase 5d: Check and complete all deposits ---
+    log_info ""
+    log_info "Checking deposit funding..."
+
+    for pair in $funded_pairs; do
+        local depositor="${pair%%:*}"
+        local operator="${pair##*:}"
+        local offer_id=$(get_value "offer_id_${depositor}_${operator}")
+        local dep_short=$(echo "$depositor" | sed 's/bdk-//')
+        local op_short=$(echo "$operator" | sed 's/bdk-//')
+
+        local funding_detected=false
+        local check_output=""
+        for retry in 1 2 3 4 5; do
+            check_output=$(run_bdk_cmd "$operator" deposit check "$offer_id" 2>&1) || true
+            if echo "$check_output" | grep -q "Funding detected"; then
+                funding_detected=true
+                break
+            fi
+            sleep 5
+        done
+
+        if [ "$funding_detected" = true ]; then
+            local txid=$(echo "$check_output" | grep "Transaction:" | awk '{print $2}')
+            local detected_amount=$(echo "$check_output" | grep "Amount:" | awk '{print $2}')
+
+            if echo "$check_output" | grep -q "already completed"; then
+                test_pass "$dep_short's deposit on $op_short funded via Nostr ($detected_amount sats, auto-completed)"
+            else
+                local complete_output=$(run_bdk_cmd "$operator" deposit complete "$offer_id" "$txid" "$detected_amount" 2>&1)
+
+                if echo "$complete_output" | grep -q "completed\|credited"; then
+                    test_pass "$dep_short's deposit on $op_short funded via Nostr ($detected_amount sats)"
+                else
+                    test_fail "Failed to complete $dep_short's deposit on $op_short"
+                    echo "    Output: $complete_output"
+                fi
+            fi
+        elif echo "$check_output" | grep -q "OfferNotFound"; then
+            test_pass "$dep_short's deposit on $op_short funded via Nostr (daemon auto-completed, offer cleaned up)"
+        else
+            test_fail "Funding not detected for $dep_short's deposit on $op_short"
+            echo "    Output: $check_output"
+        fi
     done
 }
 
@@ -571,30 +632,28 @@ validate_ledgers() {
     log_info "=== Phase 8: Validate Ledgers ==="
     echo ""
 
+    # Fetch all ledger histories in parallel (read-only)
+    local tmpdir=$(mktemp -d)
+    local pids=()
     for op in $OPERATORS; do
-        # Use ledger_id (stable across rotations) as the ledger identifier
         local ledger_id=$(get_value "ledger_id_$op")
         log_info "Checking $op's ledger (${ledger_id:0:16}...)..."
+        (run_bdk_cmd "$op" ledger history "$ledger_id" 2>&1 > "$tmpdir/$op") &
+        pids+=($!)
+    done
+    for pid in "${pids[@]}"; do wait "$pid" || true; done
 
-        local history_output=$(run_bdk_cmd "$op" ledger history "$ledger_id" 2>&1)
+    # Analyze results
+    for op in $OPERATORS; do
+        local history_output=$(cat "$tmpdir/$op")
 
         # Count operations (use grep with || true to avoid errors)
         local op_count=$(echo "$history_output" | grep -c "↑" 2>/dev/null || echo "0")
-
-        # Check for CollateralLock operations (collateral locked TO this operator)
         local lock_count=$(echo "$history_output" | grep -c "CollateralLock" 2>/dev/null || echo "0")
-
-        # Check for CollateralAttestation operations (collateral received FROM other operators)
         local attestation_count=$(echo "$history_output" | grep -c "CollateralAttestation" 2>/dev/null || echo "0")
-
-        # Check for deposits
         local deposit_count=$(echo "$history_output" | grep -c "DepositOpen" 2>/dev/null || echo "0")
-
-        # Check for quorum operations
         local quorum_add_count=$(echo "$history_output" | grep -c "QuorumAddMember" 2>/dev/null || echo "0")
         local quorum_join_count=$(echo "$history_output" | grep -c "QuorumJoin" 2>/dev/null || echo "0")
-
-        # Check for reserves operations
         local reserves_rotate_count=$(echo "$history_output" | grep -c "ReservesRotate" 2>/dev/null || echo "0")
 
         if [ "$op_count" -gt 0 ]; then
@@ -603,6 +662,7 @@ validate_ledgers() {
             test_fail "$op has no operations"
         fi
     done
+    rm -rf "$tmpdir"
 }
 
 # ============================================================================
@@ -614,23 +674,27 @@ full_validate_ledgers() {
     log_info "=== Phase 8b: Full Ledger Validation (Conformance Check) ==="
     echo ""
 
-    # Each operator validates their own ledger
+    # Run all validations in parallel (read-only)
+    local tmpdir=$(mktemp -d)
+    local pids=()
     for op in $OPERATORS; do
         local ledger_id=$(get_value "ledger_id_$op")
         local op_short=$(echo "$op" | sed 's/bdk-//')
         log_info "$op_short validating own ledger..."
+        (run_bdk_cmd "$op" ledger validate "$ledger_id" 2>&1 > "$tmpdir/$op") &
+        pids+=($!)
+    done
+    for pid in "${pids[@]}"; do wait "$pid" || true; done
 
-        local validate_output=$(run_bdk_cmd "$op" ledger validate "$ledger_id" 2>&1)
+    # Analyze results
+    for op in $OPERATORS; do
+        local validate_output=$(cat "$tmpdir/$op")
+        local op_short=$(echo "$op" | sed 's/bdk-//')
 
-        # Check if validation passed
         if echo "$validate_output" | grep -q "Valid: YES"; then
-            # Extract key metrics (remove newlines/whitespace)
             local hash_valid=$(echo "$validate_output" | grep "Valid length" | sed 's/.*: //' | tr -d '\n\r')
             local reserves_coverage=$(echo "$validate_output" | grep "reserves_coverage" | grep -o "([^)]*)" | tail -1 | tr -d '\n\r')
-
-            # Check all business rules passed (use tr to ensure clean number)
             local rules_failed=$(echo "$validate_output" | grep -c "\[FAIL\]" 2>/dev/null | tr -d '\n\r' || echo "0")
-            # Default to 0 if empty
             rules_failed=${rules_failed:-0}
 
             if [ "$rules_failed" -eq 0 ]; then
@@ -644,6 +708,7 @@ full_validate_ledgers() {
             echo "$validate_output" | grep -E "Error|FAIL|Invalid" | head -5
         fi
     done
+    rm -rf "$tmpdir"
 }
 
 # ============================================================================
@@ -1372,12 +1437,23 @@ show_final_state() {
     log_info "=== Final State ==="
     echo ""
 
+    # Fetch all histories in parallel
+    local tmpdir=$(mktemp -d)
+    local pids=()
+    for op in $OPERATORS; do
+        local ledger_id=$(get_value "ledger_id_$op")
+        (run_bdk_cmd "$op" ledger history "$ledger_id" 2>&1 > "$tmpdir/$op") &
+        pids+=($!)
+    done
+    for pid in "${pids[@]}"; do wait "$pid" || true; done
+
     for op in $OPERATORS; do
         local ledger_id=$(get_value "ledger_id_$op")
         echo "=== $op (${ledger_id:0:16}...) ==="
-        run_bdk_cmd "$op" ledger history "$ledger_id" 2>&1 | grep -v "^$"
+        cat "$tmpdir/$op" | grep -v "^$"
         echo ""
     done
+    rm -rf "$tmpdir"
 }
 
 # ============================================================================
@@ -1399,12 +1475,12 @@ reset_nostr_data() {
     $DC stop nostr-relay >/dev/null 2>&1 || true
     $DC rm -f nostr-relay >/dev/null 2>&1 || true
     docker volume rm bdk_bdk_nostr_data >/dev/null 2>&1 || true
-    # Also clear BDK node data to avoid stale ledgers
-    $DC stop bdk-alice bdk-bob bdk-charlie >/dev/null 2>&1 || true
-    $DC rm -f bdk-alice bdk-bob bdk-charlie >/dev/null 2>&1 || true
-    docker volume rm bdk_bdk_alice_data bdk_bdk_bob_data bdk_bdk_charlie_data >/dev/null 2>&1 || true
+    # Also clear BDK node data to avoid stale ledgers (include diana — used as depositor in Phase 11)
+    $DC stop bdk-alice bdk-bob bdk-charlie bdk-diana >/dev/null 2>&1 || true
+    $DC rm -f bdk-alice bdk-bob bdk-charlie bdk-diana >/dev/null 2>&1 || true
+    docker volume rm bdk_bdk_alice_data bdk_bdk_bob_data bdk_bdk_charlie_data bdk_bdk_diana_data >/dev/null 2>&1 || true
     # Restart services
-    $DC up -d nostr-relay bdk-alice bdk-bob bdk-charlie >/dev/null 2>&1
+    $DC up -d nostr-relay bdk-alice bdk-bob bdk-charlie bdk-diana >/dev/null 2>&1
     sleep 5  # Wait for services to be ready
     log_success "Nostr relay and BDK nodes reset"
 }

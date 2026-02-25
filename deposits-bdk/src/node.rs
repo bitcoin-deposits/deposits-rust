@@ -1182,6 +1182,9 @@ impl Node {
         let current_block = self.wallet.get_block_height().unwrap_or(0);
         let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
 
+        // Track whether we actually added new operations (to avoid re-broadcast loops)
+        let mut added_new_operations = false;
+
         // 1. Publish CustodyDispute on the fork
         {
             let mut fork_ledger = fork_arc.write().unwrap();
@@ -1220,6 +1223,7 @@ impl Node {
                 }
 
                 tracing::info!("Published CustodyDispute on fork (parent_pubkey set to us)");
+                added_new_operations = true;
             }
         }
 
@@ -1298,6 +1302,7 @@ impl Node {
                                 update.operator_id = our_pubkey;
                             }
                             tracing::info!("Added quorum member to fork: {}...", &hex::encode(member.serialize())[..16]);
+                            added_new_operations = true;
                         }
                     }
 
@@ -1317,6 +1322,7 @@ impl Node {
                                 update.operator_id = our_pubkey;
                             }
                             tracing::info!("Copied attestation to dispute fork");
+                            added_new_operations = true;
                         }
                     }
 
@@ -1384,6 +1390,7 @@ impl Node {
                 }
 
                 tracing::info!("Published CustodyArmed on fork");
+                added_new_operations = true;
             }
         }
 
@@ -1404,9 +1411,15 @@ impl Node {
             tracing::info!("Created custody_armed marker: {:?}", armed_marker);
         }
 
-        // Broadcast all fork updates (they use the original ledger_id for Nostr routing)
-        if let Err(e) = self.broadcast_all_updates(&fork_key).await {
-            tracing::warn!("Failed to broadcast dispute fork updates: {}", e);
+        // Only broadcast if we actually added new operations to the fork.
+        // Without this guard, incoming fork events re-trigger auto_arm_for_dispute,
+        // which re-broadcasts all updates, creating an infinite feedback loop.
+        if added_new_operations {
+            if let Err(e) = self.broadcast_all_updates(&fork_key).await {
+                tracing::warn!("Failed to broadcast dispute fork updates: {}", e);
+            }
+        } else {
+            tracing::debug!("Fork already fully armed, skipping re-broadcast");
         }
 
         Ok(())

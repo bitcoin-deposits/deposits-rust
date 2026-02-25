@@ -53,10 +53,7 @@ if $FUND_ONLY; then
     wait_for_bitcoin
     wait_for_electrs
 
-    for node in "${NODES[@]}"; do
-        fund_node "$node" 10 || log_warn "Could not fund $node"
-    done
-
+    fund_nodes_batch 10
     mine_blocks 6
     log_success "All nodes funded"
     exit 0
@@ -125,13 +122,9 @@ $DC up -d prometheus grafana
 log_info "Waiting for nodes to initialize..."
 sleep 10
 
-# Fund each node
+# Fund all nodes in parallel, then mine to confirm
 log_info "Funding BDK nodes..."
-for node in "${NODES[@]}"; do
-    fund_node "$node" 10 || log_warn "Could not fund $node (may need address command)"
-done
-
-# Mine some blocks to confirm
+fund_nodes_batch 10
 mine_blocks 6
 
 # Show status

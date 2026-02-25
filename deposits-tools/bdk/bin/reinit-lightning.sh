@@ -140,10 +140,8 @@ done
 # Setup faucet
 setup_faucet
 
-# Fund BDK nodes
-for node in "${NODES[@]}"; do
-    fund_node "$node" 10 || log_warn "Could not fund $node"
-done
+# Fund BDK nodes (parallel address lookup, batch send)
+fund_nodes_batch 10
 
 # Fund LDK nodes - they need on-chain funds for channel opening
 log_info "Funding LDK nodes..."

@@ -288,7 +288,7 @@ create_node_reserves() {
     fi
 }
 
-# Fund a BDK node
+# Fund a BDK node (sends BTC but does NOT mine — caller must mine to confirm)
 fund_node() {
     local container=$1
     local amount=${2:-1}
@@ -302,9 +302,56 @@ fund_node() {
     fi
 
     send_btc "$address" "$amount"
-    mine_blocks 1
 
     log_success "Funded $container"
+}
+
+# Fund multiple BDK nodes in batch (parallel address lookup, single mine pass)
+# Usage: fund_nodes_batch <amount> [node1 node2 ...]
+# If no nodes specified, uses NODES array
+fund_nodes_batch() {
+    local amount=${1:-1}
+    shift || true
+    local nodes=("$@")
+    if [ ${#nodes[@]} -eq 0 ]; then
+        nodes=("${NODES[@]}")
+    fi
+
+    local count=${#nodes[@]}
+    log_info "Funding $count node(s) with $amount BTC each..."
+
+    # Get all addresses in parallel
+    local tmpdir=$(mktemp -d)
+    local pids=()
+
+    for node in "${nodes[@]}"; do
+        get_node_address "$node" > "$tmpdir/$node" &
+        pids+=($!)
+    done
+
+    # Wait for all address lookups
+    for pid in "${pids[@]}"; do
+        wait "$pid" || true
+    done
+
+    # Send all transactions (fast RPC calls, no mining yet)
+    local funded=0
+    for node in "${nodes[@]}"; do
+        local address=$(cat "$tmpdir/$node" 2>/dev/null)
+        if [ -z "$address" ]; then
+            log_warn "Could not get address for $node"
+            continue
+        fi
+        send_btc "$address" "$amount"
+        funded=$((funded + 1))
+    done
+
+    rm -rf "$tmpdir"
+
+    # Single mine pass to confirm all transactions
+    mine_blocks 1
+
+    log_success "Funded $funded/$count node(s)"
 }
 
 # Get block height
