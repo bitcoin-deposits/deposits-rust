@@ -891,6 +891,29 @@ impl Node {
             return; // Ledger not found locally
         };
 
+        // Drop updates from non-operators (except CustodyDispute, which any
+        // quorum member may publish).  Non-operator writes are never legitimate
+        // and must not trigger a dispute — they're just noise.
+        {
+            let ledger = ledger_arc.read().unwrap();
+            let is_from_operator = inbound.update.operator_id == ledger.state.parent_pubkey;
+            if !is_from_operator {
+                use deposits_core::tlv::TlvDecode;
+                let is_dispute = deposits_core::messages::LedgerOperation::tlv_decode(&inbound.update.message)
+                    .map(|op| matches!(op, deposits_core::messages::LedgerOperation::CustodyDispute { .. }))
+                    .unwrap_or(false);
+                if !is_dispute {
+                    tracing::debug!(
+                        "Dropping update seq {} on ledger {}... from non-operator {}...",
+                        inbound.update.sequence_number,
+                        &inbound.ledger_id[..16.min(inbound.ledger_id.len())],
+                        hex::encode(&inbound.update.operator_id.serialize()[..8]),
+                    );
+                    return;
+                }
+            }
+        }
+
         // Validate the update
         let validation_result = {
             let ledger = ledger_arc.read().unwrap();
@@ -5453,14 +5476,11 @@ impl Node {
         for (offer, _) in pending {
             let offer_id = offer.offer_id;
 
-            // Skip offers for ledgers we don't have (e.g., daemon seeing CLI watcher's offers
-            // for imported ledgers in the shared data directory)
-            if self.get_ledger_by_ledger_id(&offer.ledger_id).is_none() {
-                tracing::debug!(
-                    "Skipping offer {}... for unknown ledger {}...",
-                    hex::encode(&offer_id[..8]),
-                    &offer.ledger_id[..16.min(offer.ledger_id.len())]
-                );
+            // Skip offers for ledgers we don't operate.
+            // Quorum members also load the ledger, but only the operator should
+            // auto-complete deposits — otherwise multiple daemons race to write
+            // the same sequence number and cause hash chain breaks.
+            if !self.is_operator_of_ledger(&offer.ledger_id) {
                 continue;
             }
 
@@ -8655,6 +8675,13 @@ impl Node {
         // Get the offer
         let (offer, status) = self.get_deposit_offer(offer_id)
             .ok_or(Error::OfferNotFound)?;
+
+        // Only the ledger operator may complete deposits
+        if !self.is_operator_of_ledger(&offer.ledger_id) {
+            return Err(Error::Protocol(
+                "Cannot complete deposit: not the operator of this ledger".to_string()
+            ));
+        }
 
         // Check offer is in correct state.
         // If already Completed (another process finished just before we got the lock), return its result.
