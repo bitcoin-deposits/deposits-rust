@@ -1598,6 +1598,7 @@ pub fn handle_deposit_open<C: HandlerContext>(
         deposit_id,
         descriptor: descriptor.clone(),
         fees: msg.fees.clone(),
+        transfer_fees: None,
         payment_hash: msg.payment_hash,
         invoice: msg.invoice.clone(),
         cosigner_guarantee_signature: msg.cosigner_guarantee_signature,

@@ -24,7 +24,7 @@
 use bitcoin::secp256k1::PublicKey;
 use std::io::{self, Read, Write};
 
-use crate::types::{DepositId, DescriptorWitness, FeeStructure};
+use crate::types::{DepositId, DescriptorWitness, FeeStructure, TransferFeeSchedule};
 use crate::types::SignedLedgerUpdate;
 
 // ============================================================================
@@ -580,6 +580,8 @@ pub enum LedgerOperation {
         /// Miniscript descriptor controlling this deposit
         descriptor: String,
         fees: Option<FeeStructure>,
+        /// Per-transfer fee schedule (fixed + proportional)
+        transfer_fees: Option<TransferFeeSchedule>,
         payment_hash: Option<[u8; 32]>,
         invoice: Option<String>,
         cosigner_guarantee_signature: Option<[u8; 64]>,
@@ -1824,6 +1826,7 @@ impl BinaryCodec for LedgerOperation {
                     deposit_id,
                     descriptor: format!("legacy({})", hex::encode(&deposit_id)),
                     fees: read_option(r, FeeStructure::read_from)?,
+                    transfer_fees: None,
                     payment_hash: read_option(r, read_32)?,
                     invoice: read_option(r, read_string)?,
                     cosigner_guarantee_signature: read_option(r, read_64)?,
@@ -2914,6 +2917,7 @@ mod ledger_op_tlv {
     pub const TRANSFER_ID: u64 = 220;
     pub const BLOCK_HASH: u64 = 222;
     pub const SCRIPT_WITNESS: u64 = 224;
+    pub const TRANSFER_FEES: u64 = 226;
 }
 
 impl TlvEncode for LedgerOperation {
@@ -2953,12 +2957,15 @@ impl TlvEncode for LedgerOperation {
                     .u32_field(FIRST_EXPIRY_BLOCK, *first_expiry_block)
                     .bytes_field(LEDGER_HASH, ledger_hash);
             }
-            Self::DepositOpen { deposit_id, descriptor, fees, payment_hash, invoice, cosigner_guarantee_signature } => {
+            Self::DepositOpen { deposit_id, descriptor, fees, transfer_fees, payment_hash, invoice, cosigner_guarantee_signature } => {
                 builder = builder
                     .deposit_id_field(DEPOSIT_ID, deposit_id)
                     .string_field(DESCRIPTOR, descriptor);
                 if let Some(f) = fees {
                     builder = builder.nested(FEES, f);
+                }
+                if let Some(tf) = transfer_fees {
+                    builder = builder.nested(TRANSFER_FEES, tf);
                 }
                 if let Some(h) = payment_hash {
                     builder = builder.bytes_field(PAYMENT_HASH, h);
@@ -3195,6 +3202,7 @@ impl TlvDecode for LedgerOperation {
                 deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
                 descriptor: reader.read_string(DESCRIPTOR)?,
                 fees: reader.read_nested_opt(FEES)?,
+                transfer_fees: reader.read_nested_opt(TRANSFER_FEES)?,
                 payment_hash: reader.read_bytes_opt(PAYMENT_HASH)?,
                 invoice: reader.read_string_opt(INVOICE)?,
                 cosigner_guarantee_signature: reader.read_bytes_opt(COSIGNER_SIG)?,
@@ -4614,6 +4622,7 @@ mod tests {
                 annualized_bps: 50,
                 frequency_blocks: 144,
             }),
+            transfer_fees: None,
             payment_hash: Some([0xAB; 32]),
             invoice: Some("lnbc...".to_string()),
             cosigner_guarantee_signature: None,
@@ -4736,6 +4745,7 @@ mod tests {
                 deposit_id: crate::types::compute_deposit_id("pk(test)"),
                 descriptor: "pk(test)".to_string(),
                 fees: Some(FeeStructure::new(100, 10, 144)),
+                transfer_fees: None,
                 payment_hash: Some([0xAA; 32]),
                 invoice: Some("lnbc...".to_string()),
                 cosigner_guarantee_signature: None,

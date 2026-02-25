@@ -814,6 +814,7 @@ mod tests {
             offer_id,
             operator_signature: sig,
             fees: None,
+            transfer_fees: None,
         };
 
         // Verify signature
@@ -877,6 +878,7 @@ mod tests {
             offer_id,
             operator_signature: sig, // Signed with original amount
             fees: None,
+            transfer_fees: None,
         };
 
         // Verify should fail - signature doesn't match modified amount

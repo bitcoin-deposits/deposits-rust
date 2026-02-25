@@ -273,6 +273,7 @@ impl DepositsMessage {
                 deposit_id,
                 descriptor,
                 fees: fees.map(|f| f.into()),
+                transfer_fees: None,
                 payment_hash,
                 invoice,
                 cosigner_guarantee_signature: cosigner_signature,

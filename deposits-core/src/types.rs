@@ -445,6 +445,44 @@ impl FeeStructure {
 }
 
 // ============================================================================
+// Transfer Fee Schedule
+// ============================================================================
+
+/// Per-transfer fee schedule for a deposit.
+///
+/// Unlike `FeeStructure` (which defines periodic custody fees),
+/// this defines the fee charged on each transfer out of the deposit.
+/// Fee = `fixed_sats` + (`amount_sats` * `rate_bps` / 10_000).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferFeeSchedule {
+    /// Fixed fee per transfer in satoshis.
+    pub fixed_sats: u64,
+    /// Proportional fee in basis points (1 bps = 0.01%).
+    pub rate_bps: u16,
+}
+
+impl Default for TransferFeeSchedule {
+    fn default() -> Self {
+        Self {
+            fixed_sats: 2,
+            rate_bps: 20,
+        }
+    }
+}
+
+impl TransferFeeSchedule {
+    pub fn new(fixed_sats: u64, rate_bps: u16) -> Self {
+        Self { fixed_sats, rate_bps }
+    }
+
+    /// Calculate the transfer fee for a given amount in satoshis.
+    pub fn calculate_fee(&self, amount_sats: u64) -> u64 {
+        let proportional = (amount_sats * self.rate_bps as u64) / 10_000;
+        self.fixed_sats.saturating_add(proportional)
+    }
+}
+
+// ============================================================================
 // Invoice
 // ============================================================================
 
@@ -579,6 +617,9 @@ pub struct Deposit {
     /// After this block, the pledged funds can be withdrawn.
     #[serde(default)]
     pub collateral_lock_expires: u32,
+    /// Per-transfer fee schedule (fixed + proportional).
+    #[serde(default)]
+    pub transfer_fees: TransferFeeSchedule,
 }
 
 impl Deposit {
@@ -597,6 +638,7 @@ impl Deposit {
             last_fee_assessment: 0,
             collateral_lock_amount: 0,
             collateral_lock_expires: 0,
+            transfer_fees: TransferFeeSchedule::default(),
         }
     }
 
@@ -1977,6 +2019,31 @@ impl TlvDecode for FeeStructure {
     }
 }
 
+// Field type constants for TransferFeeSchedule
+mod transfer_fee_fields {
+    pub const FIXED_SATS: u64 = 0;
+    pub const RATE_BPS: u64 = 2;
+}
+
+impl TlvEncode for TransferFeeSchedule {
+    fn tlv_encode(&self) -> Vec<u8> {
+        TlvBuilder::new()
+            .u64_field(transfer_fee_fields::FIXED_SATS, self.fixed_sats)
+            .u16_field(transfer_fee_fields::RATE_BPS, self.rate_bps)
+            .build()
+    }
+}
+
+impl TlvDecode for TransferFeeSchedule {
+    fn tlv_decode(data: &[u8]) -> TlvResult<Self> {
+        let reader = TlvReader::new(data)?;
+        Ok(Self {
+            fixed_sats: reader.read_u64(transfer_fee_fields::FIXED_SATS)?,
+            rate_bps: reader.read_u16(transfer_fee_fields::RATE_BPS)?,
+        })
+    }
+}
+
 // Field type constants for Invoice
 mod invoice_fields {
     pub const ID: u64 = 0;
@@ -2062,6 +2129,7 @@ mod deposit_fields {
     pub const INVOICES: u64 = 6;
     pub const FEES: u64 = 8;
     pub const LAST_FEE_ASSESSMENT: u64 = 10;
+    pub const TRANSFER_FEES: u64 = 16;
 }
 
 impl TlvEncode for Deposit {
@@ -2076,6 +2144,7 @@ impl TlvEncode for Deposit {
             .u32_field(deposit_fields::LAST_FEE_ASSESSMENT, self.last_fee_assessment)
             .u64_field(deposit_fields::COLLATERAL_PLEDGE_AMOUNT, self.collateral_lock_amount)
             .u32_field(deposit_fields::COLLATERAL_PLEDGE_EXPIRES, self.collateral_lock_expires)
+            .nested(deposit_fields::TRANSFER_FEES, &self.transfer_fees)
             .build()
     }
 }
@@ -2093,6 +2162,7 @@ impl TlvDecode for Deposit {
             last_fee_assessment: reader.read_u32(deposit_fields::LAST_FEE_ASSESSMENT)?,
             collateral_lock_amount: reader.read_u64_opt(deposit_fields::COLLATERAL_PLEDGE_AMOUNT)?.unwrap_or(0),
             collateral_lock_expires: reader.read_u32_opt(deposit_fields::COLLATERAL_PLEDGE_EXPIRES)?.unwrap_or(0),
+            transfer_fees: reader.read_nested_opt(deposit_fields::TRANSFER_FEES)?.unwrap_or_default(),
         })
     }
 }
@@ -2341,6 +2411,10 @@ pub struct DepositOffer {
     /// Fee structure for the deposit (established at offer creation).
     #[serde(default)]
     pub fees: Option<FeeStructure>,
+
+    /// Per-transfer fee schedule (established at offer creation).
+    #[serde(default)]
+    pub transfer_fees: Option<TransferFeeSchedule>,
 }
 
 impl DepositOffer {
@@ -2827,6 +2901,7 @@ mod tests {
             last_fee_assessment: 800_000,
             collateral_lock_amount: 500_000,
             collateral_lock_expires: 850_000,
+            transfer_fees: TransferFeeSchedule::default(),
         };
         let encoded = original.tlv_encode();
         let decoded = Deposit::tlv_decode(&encoded).unwrap();

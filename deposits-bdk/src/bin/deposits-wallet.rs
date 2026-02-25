@@ -1602,7 +1602,7 @@ async fn transfer_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     let mut dest_deposit_id: Option<String> = None;
     let mut hash_hex: Option<String> = None;
     let mut timeout_height: Option<u32> = None;
-    let mut fee_sats: u64 = 100; // Default fee
+    let mut fee_sats: u64 = 2; // Default fixed fee (matches TransferFeeSchedule::default())
     let mut config_args = Vec::new();
 
     let mut i = 0;

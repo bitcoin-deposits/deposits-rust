@@ -1165,8 +1165,11 @@ impl Ledger {
                 self.state.reserves_key = reserves_id.clone();
                 self.state.reserves.amount = *amount;
             }
-            LedgerOperation::DepositOpen { deposit_id, descriptor, fees, .. } => {
-                let deposit = Deposit::new(descriptor.clone(), fees.clone());
+            LedgerOperation::DepositOpen { deposit_id, descriptor, fees, transfer_fees, .. } => {
+                let mut deposit = Deposit::new(descriptor.clone(), fees.clone());
+                if let Some(tf) = transfer_fees {
+                    deposit.transfer_fees = tf.clone();
+                }
                 self.state.deposits.insert(*deposit_id, deposit);
             }
             LedgerOperation::DepositClose { deposit_id } => {
@@ -2159,6 +2162,7 @@ mod tests {
                 deposit_id,
                 descriptor: descriptor.clone(),
                 fees: Some(FeeStructure::default()),
+                transfer_fees: None,
                 payment_hash: None,
                 invoice: None,
                 cosigner_guarantee_signature: None,
@@ -2250,7 +2254,7 @@ mod tests {
 
     #[test]
     fn test_transfer_lock_complete_flow() {
-        use crate::types::{compute_deposit_id, DescriptorWitness, Deposit};
+        use crate::types::{compute_deposit_id, DescriptorWitness, Deposit, TransferFeeSchedule};
 
         let op_key = test_pubkey();
         let partner = test_pubkey_2();
@@ -2270,6 +2274,7 @@ mod tests {
             last_fee_assessment: 0,
             collateral_lock_amount: 0,
             collateral_lock_expires: 0,
+            transfer_fees: TransferFeeSchedule::default(),
         };
         let dest_deposit = Deposit {
             deposit_id: dest_id,
@@ -2281,6 +2286,7 @@ mod tests {
             last_fee_assessment: 0,
             collateral_lock_amount: 0,
             collateral_lock_expires: 0,
+            transfer_fees: TransferFeeSchedule::default(),
         };
         ledger.state.deposits.insert(source_id, source_deposit);
         ledger.state.deposits.insert(dest_id, dest_deposit);
@@ -2341,7 +2347,7 @@ mod tests {
 
     #[test]
     fn test_transfer_lock_timeout_flow() {
-        use crate::types::{compute_deposit_id, DescriptorWitness, Deposit};
+        use crate::types::{compute_deposit_id, DescriptorWitness, Deposit, TransferFeeSchedule};
 
         let op_key = test_pubkey();
         let partner = test_pubkey_2();
@@ -2361,6 +2367,7 @@ mod tests {
             last_fee_assessment: 0,
             collateral_lock_amount: 0,
             collateral_lock_expires: 0,
+            transfer_fees: TransferFeeSchedule::default(),
         };
         ledger.state.deposits.insert(source_id, source_deposit);
 

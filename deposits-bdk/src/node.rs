@@ -2660,6 +2660,7 @@ impl Node {
                 deposit_id,
                 descriptor: descriptor.clone(),
                 fees: None,
+                transfer_fees: None,
                 payment_hash: None,
                 invoice: None,
                 cosigner_guarantee_signature: None,
@@ -2806,11 +2807,25 @@ impl Node {
             return (false, None, Some(format!("Fee validation failed: {}", e)));
         }
 
+        // Extract per-transfer fee schedule (optional, defaults to 2 sats fixed + 20 bps)
+        let transfer_fees = {
+            let fixed = request.params.get("transfer_fee_fixed").and_then(|v| v.as_u64());
+            let rate = request.params.get("transfer_fee_rate_bps").and_then(|v| v.as_u64());
+            if fixed.is_some() || rate.is_some() {
+                Some(deposits_core::TransferFeeSchedule::new(
+                    fixed.unwrap_or(2),
+                    rate.unwrap_or(20) as u16,
+                ))
+            } else {
+                None // will use default (100 sats, 0 bps)
+            }
+        };
+
         // Create descriptor from pubkey (single-key deposit)
         let descriptor = format!("pk({})", deposit_pubkey_str);
 
         // Open the deposit with co-signing
-        match self.open_deposit(&ledger_id, &descriptor, Some(fees)).await {
+        match self.open_deposit(&ledger_id, &descriptor, Some(fees), transfer_fees).await {
             Ok(deposit) => {
                 let result = serde_json::json!({
                     "deposit_pubkey": deposit_pubkey_str,
@@ -2819,6 +2834,10 @@ impl Node {
                         "fixed": deposit.fees.annualized_fixed,
                         "bps": deposit.fees.annualized_bps,
                         "frequency": deposit.fees.frequency_blocks,
+                    },
+                    "transfer_fees": {
+                        "fixed_sats": deposit.transfer_fees.fixed_sats,
+                        "rate_bps": deposit.transfer_fees.rate_bps,
                     }
                 });
                 tracing::info!("Deposit opened for {}...", &deposit_pubkey_str[..16]);
@@ -3806,10 +3825,21 @@ impl Node {
                 None => return (false, None, Some("Source deposit not found".to_string())),
             };
 
+            // Validate fee against deposit's transfer fee schedule
+            let expected_fee = deposit.transfer_fees.calculate_fee(amount);
+            if fee != expected_fee {
+                return (false, None, Some(format!(
+                    "Fee mismatch: expected {} sats (fixed={} + {}bps on {}), got {}",
+                    expected_fee, deposit.transfer_fees.fixed_sats,
+                    deposit.transfer_fees.rate_bps, amount, fee
+                )));
+            }
+
             // Check sufficient balance
             let total = (amount + fee) * 1000; // Convert to msats
             if deposit.balance < total {
-                return (false, None, Some(format!(
+                let balance_json = format!("{{\"balance_msats\":{}}}", deposit.balance);
+                return (false, Some(balance_json), Some(format!(
                     "Insufficient balance: {} msats available, {} msats needed",
                     deposit.balance, total
                 )));
@@ -6475,6 +6505,7 @@ impl Node {
         ledger_id: &str,
         descriptor: &str,
         fees: Option<FeeStructure>,
+        transfer_fees: Option<deposits_core::TransferFeeSchedule>,
     ) -> Result<Deposit, Error> {
         let deposit_id = compute_deposit_id(descriptor);
 
@@ -6510,6 +6541,7 @@ impl Node {
                 deposit_id,
                 descriptor: descriptor.to_string(),
                 fees: fees.clone(),
+                transfer_fees: transfer_fees.clone(),
                 payment_hash: None,
                 invoice: None,
                 cosigner_guarantee_signature: None,
@@ -7673,6 +7705,7 @@ impl Node {
             offer_id,
             operator_signature: signature,
             fees,
+            transfer_fees: None,
         };
 
         // Store the offer
@@ -8183,7 +8216,7 @@ impl Node {
             )))?;
 
         // First, open the deposit if it doesn't already exist (with co-signing)
-        match self.open_deposit(&reserves_id, &offer.descriptor, offer.fees.clone()).await {
+        match self.open_deposit(&reserves_id, &offer.descriptor, offer.fees.clone(), offer.transfer_fees.clone()).await {
             Ok(_) => {
                 tracing::info!(
                     "Opened deposit for {} in ledger {}",

@@ -97,6 +97,7 @@ where
                 deposit_id,
                 descriptor,
                 fees: fees.clone(),
+                transfer_fees: None,
                 payment_hash: None,
                 invoice: None,
                 cosigner_guarantee_signature: None,

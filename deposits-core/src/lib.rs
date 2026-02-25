@@ -109,7 +109,7 @@ pub use tapscript_reserves::{
     ReservesSpendBuilder, SpendTxParams,
 };
 pub use types::{
-    Deposit, FeeStructure, PendingInvoice, ReservesOutput, Invoice,
+    Deposit, FeeStructure, TransferFeeSchedule, PendingInvoice, ReservesOutput, Invoice,
     LedgerState, LedgerUpdate, SignedLedgerUpdate, SignedLedgerUpdateLog,
     // Deposit identifier types
     DepositId, DescriptorWitness, compute_deposit_id,

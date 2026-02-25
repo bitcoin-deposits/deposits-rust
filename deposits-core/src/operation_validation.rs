@@ -1281,7 +1281,7 @@ mod tests {
 
     #[test]
     fn test_validate_transfer_lock_insufficient_balance() {
-        use crate::types::{compute_deposit_id, Deposit, FeeStructure, PendingTransfer};
+        use crate::types::{compute_deposit_id, Deposit, FeeStructure, PendingTransfer, TransferFeeSchedule};
 
         let mut ledger = create_test_ledger();
 
@@ -1299,6 +1299,7 @@ mod tests {
             last_fee_assessment: 0,
             collateral_lock_amount: 0,
             collateral_lock_expires: 0,
+            transfer_fees: TransferFeeSchedule::default(),
         };
         ledger.state.deposits.insert(source_id, source_deposit);
 
@@ -1364,7 +1365,7 @@ mod tests {
 
     #[test]
     fn test_validate_transfer_lock_zero_amount() {
-        use crate::types::{compute_deposit_id, Deposit, FeeStructure};
+        use crate::types::{compute_deposit_id, Deposit, FeeStructure, TransferFeeSchedule};
 
         let mut ledger = create_test_ledger();
 
@@ -1381,6 +1382,7 @@ mod tests {
             last_fee_assessment: 0,
             collateral_lock_amount: 0,
             collateral_lock_expires: 0,
+            transfer_fees: TransferFeeSchedule::default(),
         };
         ledger.state.deposits.insert(source_id, source_deposit);
 
