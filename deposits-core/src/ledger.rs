@@ -444,6 +444,43 @@ impl Ledger {
         Ok(())
     }
 
+    /// Validate only the hash chain of an incoming update (no signature check).
+    ///
+    /// Used by the daemon to detect fraudulent hash-chain breaks without
+    /// relying on operator signature verification (which has a format
+    /// mismatch across the codebase).
+    pub fn validate_incoming_update_hash_chain(
+        &self,
+        update: &SignedLedgerUpdate,
+    ) -> DepositsResult<()> {
+        // Validate hash chain
+        if update.sequence_number > 0 {
+            let expected_prev_hash = if update.sequence_number as usize <= self.history.len() {
+                // We have the previous update
+                self.history.get(update.sequence_number as usize - 1)
+                    .map(|u| u.current_hash)
+                    .unwrap_or(self.state.hash)
+            } else {
+                // Future update - can't validate yet
+                return Ok(());
+            };
+
+            if update.previous_hash != expected_prev_hash {
+                return Err(DepositsError::ProtocolViolation {
+                    violation_type: "hash_chain_break".to_string(),
+                    details: format!(
+                        "Previous hash mismatch at seq {}: expected {:02x?}, got {:02x?}",
+                        update.sequence_number,
+                        &expected_prev_hash[..8],
+                        &update.previous_hash[..8]
+                    ),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
     /// Validate CustodyAcquire or CustodyYield against the entropy selection.
     ///
     /// This validates that:

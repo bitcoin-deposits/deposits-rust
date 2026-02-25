@@ -340,6 +340,18 @@ impl Wallet {
         Ok(reserves)
     }
 
+    /// Reload reserves from disk (picks up reserves created by CLI while daemon was running)
+    pub fn reload_reserves_from_disk(&self) -> Result<(), Error> {
+        let loaded = Self::load_reserves_from_disk(&self.data_dir)?;
+        if !loaded.is_empty() {
+            let mut reserves = self.reserves.write().unwrap();
+            for (outpoint, info) in loaded {
+                reserves.entry(outpoint).or_insert(info);
+            }
+        }
+        Ok(())
+    }
+
     /// Save reserves to disk
     fn save_reserves_to_disk(&self) -> Result<(), Error> {
         // Save legacy P2WSH reserves

@@ -529,3 +529,28 @@ check_health() {
 
     return $unhealthy
 }
+
+# Wait for a marker file to appear inside any of the specified Docker containers.
+# Usage: wait_for_docker_marker <glob_pattern> <timeout_secs> <node1> [node2 ...]
+# Prints the name of the node where the marker was found.
+# Returns 0 on success, 1 on timeout.
+wait_for_docker_marker() {
+    local pattern=$1
+    local timeout=$2
+    shift 2
+    local nodes=("$@")
+
+    local elapsed=0
+    while [ $elapsed -lt $timeout ]; do
+        for node in "${nodes[@]}"; do
+            local found=$(docker exec "$node" sh -c "ls /data/${pattern} 2>/dev/null | head -1" 2>/dev/null)
+            if [ -n "$found" ]; then
+                echo "$node"
+                return 0
+            fi
+        done
+        sleep 5
+        elapsed=$((elapsed + 5))
+    done
+    return 1
+}

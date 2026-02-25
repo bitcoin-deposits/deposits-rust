@@ -1077,25 +1077,30 @@ impl NostrTransport {
             return Ok(());
         }
 
-        // Check which ledgers need new subscriptions (both requests and disputes are per-ledger)
+        // Check which ledgers need new subscriptions (requests, disputes, and updates are per-ledger)
         let mut new_request_ledgers: Vec<&String> = Vec::new();
         let mut new_dispute_ledgers: Vec<&String> = Vec::new();
+        let mut new_update_ledgers: Vec<&String> = Vec::new();
         {
             let subs = self.active_subscriptions.read().unwrap();
             for lid in ledger_ids {
                 let prefix = &lid[..16.min(lid.len())];
                 let req_key = format!("requests:{}", prefix);
                 let dis_key = format!("disputes:{}", lid);
+                let upd_key = format!("updates:{}", prefix);
                 if !subs.contains(&req_key) {
                     new_request_ledgers.push(lid);
                 }
                 if !subs.contains(&dis_key) {
                     new_dispute_ledgers.push(lid);
                 }
+                if !subs.contains(&upd_key) {
+                    new_update_ledgers.push(lid);
+                }
             }
         }
 
-        if new_request_ledgers.is_empty() && new_dispute_ledgers.is_empty() {
+        if new_request_ledgers.is_empty() && new_dispute_ledgers.is_empty() && new_update_ledgers.is_empty() {
             tracing::debug!("All {} ledgers already subscribed", ledger_ids.len());
             return Ok(());
         }
@@ -1131,6 +1136,19 @@ impl NostrTransport {
             );
         }
 
+        // Per-ledger update filters with #d tag (for validating joined ledgers)
+        for lid in &new_update_ledgers {
+            filters.push(
+                Filter::new()
+                    .kind(Kind::Custom(KIND_LEDGER_UPDATE))
+                    .custom_tag(
+                        SingleLetterTag::lowercase(Alphabet::D),
+                        [lid.as_str()],
+                    )
+                    .since(since)
+            );
+        }
+
         // Only subscribe if we have filters to add
         if filters.is_empty() {
             return Ok(());
@@ -1153,10 +1171,13 @@ impl NostrTransport {
             for lid in &new_dispute_ledgers {
                 subs.insert(format!("disputes:{}", lid));
             }
+            for lid in &new_update_ledgers {
+                subs.insert(format!("updates:{}", &lid[..16.min(lid.len())]));
+            }
         }
 
-        tracing::info!("Batch subscribed: {} request + {} dispute filters ({} total)",
-            new_request_ledgers.len(), new_dispute_ledgers.len(), filter_count);
+        tracing::info!("Batch subscribed: {} request + {} dispute + {} update filters ({} total)",
+            new_request_ledgers.len(), new_dispute_ledgers.len(), new_update_ledgers.len(), filter_count);
         Ok(())
     }
 

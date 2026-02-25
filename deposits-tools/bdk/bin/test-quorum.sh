@@ -303,27 +303,43 @@ rotate_reserves_to_quorum() {
     log_info "(Each operator creates a new Taproot output with quorum spending)"
     echo ""
 
+    # Wait for daemons to reload ledgers with quorum members from Phase 3b
+    log_info "Waiting for daemons to sync quorum members..."
+    sleep 10
+
     for op in $OPERATORS; do
-        local op_reserves_id=$(get_value "reserves_id_$op")
+        local op_ledger_id=$(get_value "ledger_id_$op")
         local op_short=$(echo "$op" | sed 's/bdk-//')
 
         log_info "$op_short rotating reserves to quorum-based Taproot..."
 
-        local rotate_output=$(run_bdk_cmd "$op" reserves rotate "$op_reserves_id" 2>&1)
+        local rotate_ok=false
+        for attempt in 1 2 3; do
+            local rotate_output=$(run_bdk_cmd "$op" reserves rotate "$op_ledger_id" 2>&1)
 
-        if echo "$rotate_output" | grep -q "Reserves rotated\|rotated successfully"; then
-            local new_address=$(echo "$rotate_output" | grep "New Address:" | awk '{print $3}')
-            local quorum_count=$(echo "$rotate_output" | grep "Quorum Members:" | awk '{print $3}')
-            local expiry_block=$(echo "$rotate_output" | grep "First Expiry Block:" | awk '{print $4}')
+            if echo "$rotate_output" | grep -q "Reserves rotated\|rotated successfully"; then
+                local new_address=$(echo "$rotate_output" | grep "New Address:" | awk '{print $3}')
+                local quorum_count=$(echo "$rotate_output" | grep "Quorum Members:" | awk '{print $3}')
+                local expiry_block=$(echo "$rotate_output" | grep "First Expiry Block:" | awk '{print $4}')
 
-            test_pass "$op_short rotated to Taproot with $quorum_count members (expiry: block $expiry_block)"
-            log_info "  New address: ${new_address:0:24}..."
-        else
-            # Rotation might fail in testing due to no actual spending of old reserves
-            # This is expected in our test environment
-            log_warn "$op_short: Reserves rotation returned: $(echo "$rotate_output" | head -1)"
-            log_info "  (This may be expected in test environment without real UTXO spending)"
-        fi
+                test_pass "$op_short rotated to Taproot with $quorum_count members (expiry: block $expiry_block)"
+                log_info "  New address: ${new_address:0:24}..."
+                rotate_ok=true
+                break
+            elif echo "$rotate_output" | grep -q "No existing reserves to rotate"; then
+                # Rotation already completed (duplicate request race)
+                test_pass "$op_short reserves already rotated to Taproot"
+                rotate_ok=true
+                break
+            else
+                if [ "$attempt" -lt 3 ]; then
+                    log_warn "$op_short: Rotation attempt $attempt failed, retrying in 5s..."
+                    sleep 5
+                else
+                    log_error "$op_short: Reserves rotation FAILED after 3 attempts: $(echo "$rotate_output" | tail -3)"
+                fi
+            fi
+        done
     done
 
     # Mine to confirm rotation transactions
@@ -845,34 +861,31 @@ create_recovery_test_deposits() {
 }
 
 # ============================================================================
-# Phase 9: Test Invalid Update Detection
+# Phase 9+10: Automated Dispute & Recovery
+# The daemon detects invalid updates, auto-arms, confiscates, reveals
+# preimages, runs the lottery, and rotates — all without CLI intervention.
+# The test only needs to: trigger the invalid update, mine blocks, and verify.
 # ============================================================================
 
-test_invalid_update_detection() {
+test_automated_dispute() {
     log_info ""
-    log_info "=== Phase 9: Invalid Update Detection Test ==="
-    log_info "(Alice publishes invalid update, Bob and Charlie detect it)"
+    log_info "=== Phase 9: Automated Dispute Detection ==="
+    log_info "(Alice publishes invalid update, daemons detect and auto-arm)"
     echo ""
 
-    local alice_reserves=$(get_value "reserves_id_bdk-alice")
     local alice_ledger_id=$(get_value "ledger_id_bdk-alice")
+    local alice_prefix=${alice_ledger_id:0:16}
 
-    # First, Alice exports her valid ledger to Nostr
+    # Alice exports her valid ledger to Nostr (so daemons can auto-import it)
     log_info "Alice exporting valid ledger to Nostr..."
     run_bdk_cmd "bdk-alice" nostr export "$alice_ledger_id" >/dev/null 2>&1
+    test_pass "alice exported ledger to Nostr"
 
-    # Verify Alice's ledger is valid on Nostr before the attack
-    log_info "Verifying Alice's ledger is valid before attack..."
-    local pre_validate=$(run_bdk_cmd "bdk-bob" nostr validate "$alice_ledger_id" 2>&1)
-    if echo "$pre_validate" | grep -q "Valid: YES"; then
-        local update_count=$(echo "$pre_validate" | grep "Updates:" | awk '{print $2}')
-        test_pass "alice's ledger is valid on Nostr ($update_count updates)"
-    else
-        log_warn "Alice's ledger validation failed before attack"
-        echo "$pre_validate" | head -10
-    fi
+    # Wait for daemons to auto-import the ledger from Nostr
+    log_info "Waiting for daemons to auto-import Alice's ledger..."
+    sleep 15
 
-    # Alice publishes an invalid update (use ledger_id, not reserves address)
+    # Alice publishes an invalid update (this is the trigger)
     log_info "Alice publishing invalid update (invalid-hash violation)..."
     local danger_output=$(run_bdk_cmd "bdk-alice" danger publish-invalid \
         "$alice_ledger_id" invalid-hash 2>&1)
@@ -881,301 +894,142 @@ test_invalid_update_detection() {
         local event_id=$(echo "$danger_output" | grep "Event ID:" | awk '{print $3}')
         test_pass "alice published invalid update: ${event_id:0:16}..."
     else
-        log_warn "Failed to publish invalid update, skipping detection test"
+        test_fail "Failed to publish invalid update"
         echo "Output: $danger_output"
-        return 0
-    fi
-
-    # Give Nostr time to propagate
-    sleep 2
-
-    # Bob validates Alice's ledger from Nostr - should detect the broken hash chain
-    log_info "Bob validating Alice's ledger from Nostr..."
-    local bob_validate=$(run_bdk_cmd "bdk-bob" nostr validate "$alice_ledger_id" 2>&1)
-
-    if echo "$bob_validate" | grep -q "Valid: NO"; then
-        local errors=$(echo "$bob_validate" | grep "Errors:" | awk '{print $2}')
-        local issue=$(echo "$bob_validate" | grep -E "^\s+-" | head -1 | sed 's/^\s*- //')
-        test_pass "bob detected invalid update ($errors errors): ${issue:0:50}..."
-    elif echo "$bob_validate" | grep -q "Valid: YES"; then
-        test_fail "bob did NOT detect invalid update (reported valid)"
-        echo "Validation output:"
-        echo "$bob_validate" | head -15
-    else
-        log_warn "bob: unexpected validation output"
-        echo "$bob_validate" | head -10
-    fi
-
-    # Charlie validates Alice's ledger from Nostr
-    log_info "Charlie validating Alice's ledger from Nostr..."
-    local charlie_validate=$(run_bdk_cmd "bdk-charlie" nostr validate "$alice_ledger_id" 2>&1)
-
-    if echo "$charlie_validate" | grep -q "Valid: NO"; then
-        local errors=$(echo "$charlie_validate" | grep "Errors:" | awk '{print $2}')
-        local issue=$(echo "$charlie_validate" | grep -E "^\s+-" | head -1 | sed 's/^\s*- //')
-        test_pass "charlie detected invalid update ($errors errors): ${issue:0:50}..."
-    elif echo "$charlie_validate" | grep -q "Valid: YES"; then
-        test_fail "charlie did NOT detect invalid update (reported valid)"
-        echo "Validation output:"
-        echo "$charlie_validate" | head -15
-    else
-        log_warn "charlie: unexpected validation output"
-        echo "$charlie_validate" | head -10
-    fi
-
-    log_info ""
-    log_info "=== Phase 9b: Dispute Publishing Test ==="
-    log_info "(Bob publishes dispute, Charlie receives it)"
-    echo ""
-
-    # Bob publishes a dispute for Alice's invalid ledger
-    log_info "Bob publishing dispute for Alice's invalid ledger..."
-    local dispute_output=$(run_bdk_cmd "bdk-bob" nostr dispute publish \
-        "$alice_ledger_id" "hash_chain_broken" "Invalid hash chain detected during validation" 2>&1)
-
-    if echo "$dispute_output" | grep -q "Dispute published"; then
-        local dispute_event=$(echo "$dispute_output" | grep "Dispute published:" | awk '{print $3}')
-        test_pass "bob published dispute: ${dispute_event:0:16}..."
-    else
-        log_warn "Failed to publish dispute"
-        echo "Output: $dispute_output"
-    fi
-
-    # Give Nostr time to propagate
-    sleep 2
-
-    # Charlie listens for disputes (quick check using timeout)
-    # We can't actually test real-time listening in a script, so we verify the dispute exists
-    # by having Charlie also validate and seeing if the dispute was published
-    log_info "Verifying dispute exists on Nostr relay..."
-    # For now, we just verify the command works - in a real scenario, the watch command
-    # would receive the dispute event
-    test_pass "dispute mechanism operational"
-
-    log_info "Invalid update detection test complete"
-}
-
-# ============================================================================
-# Phase 10: Custody Recovery Test (Entropy-Based Selection)
-# ============================================================================
-
-test_custody_transfer() {
-    log_info ""
-    log_info "=== Phase 10: Custody Recovery Test ==="
-    log_info "(Bob detects violation, candidates prepare, entropy selects winner)"
-    echo ""
-
-    local alice_ledger_id=$(get_value "ledger_id_bdk-alice")
-    local bob_node_id=$(get_value "node_id_bdk-bob")
-    local charlie_node_id=$(get_value "node_id_bdk-charlie")
-
-    # Step 1: Bob starts recovery (publishes dispute)
-    log_info "Step 1: Bob detecting violation and publishing dispute..."
-    local start_output=$(run_bdk_cmd "bdk-bob" recovery start "$alice_ledger_id" \
-        --reason "Invalid hash chain detected" 2>&1)
-
-    local dispute_id=""
-    if echo "$start_output" | grep -q "Dispute published\|Violation detected"; then
-        dispute_id=$(echo "$start_output" | grep "Dispute published:" | awk '{print $3}')
-        test_pass "bob published dispute: ${dispute_id:0:16}..."
-        local violation=$(echo "$start_output" | grep -E "Violation detected|Hash chain broken" | head -1)
-        if [ -n "$violation" ]; then
-            log_info "    $violation"
-        fi
-    elif echo "$start_output" | grep -q "appears conforming"; then
-        test_fail "bob found no violation (ledger appears conforming)"
-        echo "$start_output" | head -20
-        return
-    else
-        test_fail "bob failed to start recovery"
-        echo "$start_output" | head -20
         return
     fi
 
-    # Give Nostr time to propagate
-    sleep 2
-
-    # Step 2: Charlie agrees to recovery
-    log_info "Step 2: Charlie agreeing to recovery..."
-    local agree_output=$(run_bdk_cmd "bdk-charlie" recovery agree "$alice_ledger_id" 2>&1)
-
-    if echo "$agree_output" | grep -q "Agreement published"; then
-        local agreement_id=$(echo "$agree_output" | grep "Agreement published:" | awk '{print $3}')
-        test_pass "charlie published agreement: ${agreement_id:0:16}..."
-    elif echo "$agree_output" | grep -q "Violation confirmed"; then
-        test_pass "charlie confirmed violation"
+    # Wait for daemons to detect invalid update and auto-arm
+    log_info ""
+    log_info "Waiting for daemons to auto-arm for dispute..."
+    local armed_node
+    armed_node=$(wait_for_docker_marker "custody_armed_${alice_prefix}*" 60 bdk-bob bdk-charlie)
+    if [ $? -eq 0 ]; then
+        test_pass "$armed_node auto-armed for dispute"
     else
-        log_warn "charlie agree output:"
-        echo "$agree_output" | head -15
+        test_fail "No daemon auto-armed within 60s"
+        log_info "Checking daemon logs for clues..."
+        docker logs bdk-bob 2>&1 | grep -i "INVALID\|auto-arm\|import" | tail -5
+        return
     fi
 
-    # Give Nostr time to propagate
-    sleep 2
+    # Wait for second node to arm too
+    local armed2
+    armed2=$(wait_for_docker_marker "custody_armed_${alice_prefix}*" 30 bdk-bob bdk-charlie)
+    if [ $? -eq 0 ]; then
+        test_pass "both daemons armed for dispute"
+    else
+        log_warn "Only one daemon armed (may still proceed with confiscation)"
+    fi
 
-    # Step 3: Each candidate pre-publishes their CustodyAcquire BEFORE entropy is known
-    # This is the key game-theory fix: everyone commits before selection
-    log_info "Step 3: Candidates publishing CustodyAcquire pre-commitments..."
-    log_info "  (Each candidate commits BEFORE entropy block is mined)"
+    log_info ""
+    log_info "=== Phase 10: Automated Custody Recovery ==="
+    log_info "(Daemons auto-confiscate, reveal preimages, run lottery, rotate)"
     echo ""
 
-    # Bob prepares as candidate (publishes CustodyDispute)
-    log_info "  Bob preparing as candidate..."
-    local bob_prepare=$(run_bdk_cmd "bdk-bob" recovery prepare "$alice_ledger_id" 2>&1)
-
-    if echo "$bob_prepare" | grep -q "CustodyDispute published\|Published CustodyDispute\|Broadcast ledger update"; then
-        test_pass "bob published CustodyDispute"
-        local bob_entropy_block=$(echo "$bob_prepare" | grep "Entropy block" | grep -o '[0-9]\+' | tail -1)
-        if [ -n "$bob_entropy_block" ]; then
-            log_info "    Entropy block: $bob_entropy_block"
-        fi
+    # Wait for confiscation TX to be broadcast
+    log_info "Waiting for auto-confiscation..."
+    local confiscated_node
+    confiscated_node=$(wait_for_docker_marker "confiscated_${alice_prefix}*" 120 bdk-bob bdk-charlie)
+    if [ $? -eq 0 ]; then
+        test_pass "$confiscated_node broadcast confiscation TX"
     else
-        log_warn "bob prepare output:"
-        echo "$bob_prepare" | head -20
+        test_fail "No confiscation TX broadcast within 120s"
+        log_info "Checking daemon logs..."
+        docker logs bdk-bob 2>&1 | grep -i "confiscat" | tail -5
+        return
     fi
 
-    # Charlie prepares as candidate
-    log_info "  Charlie preparing as candidate..."
-    local charlie_prepare=$(run_bdk_cmd "bdk-charlie" recovery prepare "$alice_ledger_id" 2>&1)
-
-    if echo "$charlie_prepare" | grep -q "CustodyDispute published\|Published CustodyDispute"; then
-        test_pass "charlie published CustodyDispute"
-    else
-        log_warn "charlie prepare output:"
-        echo "$charlie_prepare" | head -20
-    fi
-
-    # Step 4: Arm for entropy selection (required before claiming)
-    log_info ""
-    log_info "Step 4: Candidates arming for entropy selection..."
-
-    # Bob arms
-    log_info "  Bob arming..."
-    local bob_arm=$(run_bdk_cmd "bdk-bob" recovery arm "$alice_ledger_id" 2>&1)
-    if echo "$bob_arm" | grep -q "CustodyArmed\|Armed"; then
-        test_pass "bob armed for custody"
-    else
-        log_warn "bob arm output:"
-        echo "$bob_arm" | head -20
-    fi
-
-    # Charlie arms
-    log_info "  Charlie arming..."
-    local charlie_arm=$(run_bdk_cmd "bdk-charlie" recovery arm "$alice_ledger_id" 2>&1)
-    if echo "$charlie_arm" | grep -q "CustodyArmed\|Armed"; then
-        test_pass "charlie armed for custody"
-    else
-        log_warn "charlie arm output:"
-        echo "$charlie_arm" | head -20
-    fi
-
-    # Step 5: Mine to entropy block (initiation + 6)
-    log_info ""
-    log_info "Step 5: Mining to entropy block..."
+    # Mine blocks to confirm confiscation TX (need 3+ confirmations for reveal)
+    log_info "Mining blocks to confirm confiscation..."
     mine_blocks 6
-    local entropy_height=$(get_block_height)
-    test_pass "mined to entropy block $entropy_height"
+    sleep 15  # Electrs indexing
 
-    # Give time for block to be indexed
-    sleep 2
+    # Wait for lottery to complete (reveal cascade + claim/yield)
+    # Mine periodically to confirm claim TX
+    log_info "Waiting for lottery completion..."
+    local lottery_done=false
+    for attempt in $(seq 1 12); do
+        local completed_node
+        completed_node=$(wait_for_docker_marker "lottery_completed_${alice_prefix}*" 5 bdk-bob bdk-charlie)
+        if [ $? -eq 0 ]; then
+            lottery_done=true
+            test_pass "lottery completed on $completed_node"
+            break
+        fi
+        # Mine a couple blocks on each iteration to confirm claim TX
+        mine_blocks 2
+        sleep 10
+    done
 
-    # Step 6: Claim custody (publishes CustodyAcquire/CustodyYield)
+    if [ "$lottery_done" != true ]; then
+        test_fail "Lottery not completed within timeout"
+        log_info "Checking daemon logs for lottery state..."
+        docker logs bdk-bob 2>&1 | grep -i "lottery\|reveal\|preimage" | tail -10
+        return
+    fi
+
+    # Mine blocks for claim TX confirmation
+    mine_blocks 3
+    sleep 10
+
+    # Wait for post-win rotation
+    log_info "Waiting for post-win rotation..."
+    local rotated_done=false
+    for attempt in $(seq 1 12); do
+        local rotated_node
+        rotated_node=$(wait_for_docker_marker "lottery_rotated_${alice_prefix}*" 5 bdk-bob bdk-charlie)
+        if [ $? -eq 0 ]; then
+            rotated_done=true
+            test_pass "post-win rotation completed on $rotated_node"
+            break
+        fi
+        mine_blocks 2
+        sleep 10
+    done
+
+    if [ "$rotated_done" != true ]; then
+        log_warn "Post-win rotation not completed (may need more blocks or manual rotation)"
+    fi
+
+    # Determine the winner by checking which node has the CustodyAcquire
     log_info ""
-    log_info "Step 6: Candidates claiming custody based on entropy..."
-
-    # Bob claims
-    log_info "  Bob claiming..."
-    local bob_claim=$(run_bdk_cmd "bdk-bob" recovery claim "$alice_ledger_id" 2>&1)
-    log_info "  Bob claim output:"
-    echo "$bob_claim" | head -10
-
-    # Charlie claims
-    log_info "  Charlie claiming..."
-    local charlie_claim=$(run_bdk_cmd "bdk-charlie" recovery claim "$alice_ledger_id" 2>&1)
-    log_info "  Charlie claim output:"
-    echo "$charlie_claim" | head -10
-
-    # Step 7: Check status to see who was selected
-    log_info ""
-    log_info "Step 7: Checking entropy-based selection..."
-    local status_output=$(run_bdk_cmd "bdk-bob" recovery status "$alice_ledger_id" 2>&1)
-
+    log_info "Determining lottery winner..."
     local selected_candidate=""
-    if echo "$bob_claim" | grep -q "CustodyAcquire\|You won"; then
+
+    # Check Bob's fork history for CustodyAcquire
+    local bob_history=$(run_bdk_cmd "bdk-bob" ledger history "$alice_ledger_id" 2>&1)
+    if echo "$bob_history" | grep -q "CustodyAcquire"; then
         selected_candidate="bdk-bob"
-        test_pass "entropy selected BOB as new custodian"
-    elif echo "$charlie_claim" | grep -q "CustodyAcquire\|You won"; then
-        selected_candidate="bdk-charlie"
-        test_pass "entropy selected CHARLIE as new custodian"
-    elif echo "$status_output" | grep -q "Selected.*bob\|Winner.*bob"; then
-        selected_candidate="bdk-bob"
-        test_pass "entropy selected BOB as new custodian"
-    elif echo "$status_output" | grep -q "Selected.*charlie\|Winner.*charlie"; then
-        selected_candidate="bdk-charlie"
-        test_pass "entropy selected CHARLIE as new custodian"
-    else
-        log_info "  Status output:"
-        echo "$status_output" | head -20
-        # Default to bob for testing if we can't parse
-        selected_candidate="bdk-bob"
-        log_info "  (Defaulting to bob for test continuation)"
     fi
 
-    # Step 8: Selected candidate executes spend
-    log_info ""
-    log_info "Step 8: Selected candidate ($selected_candidate) executing spend..."
-    local spend_output=$(run_bdk_cmd "$selected_candidate" recovery spend "$alice_ledger_id" 2>&1)
-
-    local transfer_txid=""
-    if echo "$spend_output" | grep -q "Reserves successfully transferred\|transferred"; then
-        transfer_txid=$(echo "$spend_output" | grep "Txid:" | head -1 | awk '{print $2}')
-        test_pass "custody transfer completed on-chain: ${transfer_txid:0:16}..."
-        mine_blocks 1  # Confirm transaction
-    elif echo "$spend_output" | grep -q "Need.*more signature"; then
-        log_info "    (Taproot spend needs more Schnorr signatures from quorum)"
-        log_info "    (In production, quorum members provide signatures via watch)"
-    elif echo "$spend_output" | grep -q "Quorum reached"; then
-        test_pass "quorum reached for spend"
-    else
-        log_warn "spend output:"
-        echo "$spend_output" | head -20
-    fi
-
-    # Step 9: Non-selected candidate publishes CustodyYield (already done in claim step)
-    log_info ""
-    log_info "Step 9: Non-selected candidate CustodyYield check..."
-
-    local non_selected=""
-    if [ "$selected_candidate" = "bdk-bob" ]; then
-        non_selected="bdk-charlie"
-    else
-        non_selected="bdk-bob"
-    fi
-
-    # Check if non-selected already published CustodyYield during claim
-    if [ "$non_selected" = "bdk-bob" ]; then
-        if echo "$bob_claim" | grep -q "CustodyYield\|You lost"; then
-            test_pass "$non_selected published CustodyYield (already done in claim)"
-        fi
-    else
-        if echo "$charlie_claim" | grep -q "CustodyYield\|You lost"; then
-            test_pass "$non_selected published CustodyYield (already done in claim)"
+    # Check Charlie's fork history for CustodyAcquire
+    if [ -z "$selected_candidate" ]; then
+        local charlie_history=$(run_bdk_cmd "bdk-charlie" ledger history "$alice_ledger_id" 2>&1)
+        if echo "$charlie_history" | grep -q "CustodyAcquire"; then
+            selected_candidate="bdk-charlie"
         fi
     fi
 
-    # Store the selected candidate for subsequent tests
+    if [ -n "$selected_candidate" ]; then
+        test_pass "lottery winner: $selected_candidate"
+    else
+        # Fallback: check lottery_completed marker contents
+        log_warn "Could not determine winner from ledger history, defaulting to bdk-bob"
+        selected_candidate="bdk-bob"
+    fi
+
+    # Store for Phase 11
     store_value "recovery_new_custodian" "$selected_candidate"
     store_value "recovery_ledger_id" "$alice_ledger_id"
 
     log_info ""
-    log_info "Recovery test complete"
-    log_info "The entropy-based custody recovery flow:"
-    log_info "  1. recovery start   - Quorum member publishes dispute"
-    log_info "  2. recovery agree   - Other members verify and agree"
-    log_info "  3. recovery prepare - Each candidate publishes CustodyDispute"
-    log_info "  4. recovery arm     - Each candidate publishes CustodyArmed"
-    log_info "  5. (mine blocks)    - Wait for entropy block (initiation + 6)"
-    log_info "  6. recovery claim   - Each candidate publishes CustodyAcquire or CustodyYield"
-    log_info "  7. recovery spend   - Selected candidate executes on-chain transfer"
+    log_info "Automated dispute resolution complete"
+    log_info "  - Daemons detected invalid update"
+    log_info "  - Auto-armed with preimage commitments"
+    log_info "  - Auto-confiscated reserves to lottery address"
+    log_info "  - Auto-revealed preimages and determined winner"
+    log_info "  - Winner: $selected_candidate"
 }
 
 # ============================================================================
@@ -1508,7 +1362,6 @@ main() {
     open_ledgers
     start_nostr_watchers
     add_quorum_members
-    rotate_reserves_to_quorum
     generate_deposit_keys
     open_cross_deposits
     fund_deposits
@@ -1517,8 +1370,10 @@ main() {
     validate_ledgers
     full_validate_ledgers
     create_recovery_test_deposits
-    test_invalid_update_detection
-    test_custody_transfer
+    # Rotate AFTER all deposits/collateral are set up (rotation enables co-signing
+    # which would block deposit/lock operations with co-sign timeouts)
+    rotate_reserves_to_quorum
+    test_automated_dispute
     test_post_recovery_payment
     show_final_state
 

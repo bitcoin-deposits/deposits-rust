@@ -136,6 +136,36 @@ pub struct PendingInvoice {
     pub created_at: u64,
 }
 
+/// State for a non-blocking confiscation request awaiting co-signatures.
+struct PendingConfiscation {
+    /// Nostr event ID of our confiscation_sign request
+    request_id: String,
+    /// The unsigned confiscation transaction
+    confiscation_tx: bitcoin::Transaction,
+    /// Sighash bytes that all signers sign
+    sighash_bytes: [u8; 32],
+    /// Signatures collected so far (signer pubkey -> 64-byte Schnorr sig)
+    signatures: std::collections::HashMap<bitcoin::secp256k1::PublicKey, [u8; 64]>,
+    /// Number of signatures required
+    required_sigs: usize,
+    /// The VoterSet for building the witness
+    voter_set: deposits_core::VoterSet,
+    /// Tier index in threshold config for the control block
+    tier_index: usize,
+    /// The leaf script for the Taproot spend
+    leaf_script: bitcoin::ScriptBuf,
+    /// The TaprootReservesOutput (for control block)
+    taproot_output: deposits_core::TaprootReservesOutput,
+    /// Confiscated marker path
+    confiscated_marker: PathBuf,
+    /// Lottery address (for logging)
+    lottery_address: String,
+    /// Ledger prefix (for logging)
+    ledger_prefix: String,
+    /// When we sent the request (for timeout)
+    created_at: std::time::Instant,
+}
+
 /// A deposits-bdk node
 pub struct Node {
     /// Our node ID (secp256k1 pubkey)
@@ -193,6 +223,14 @@ pub struct Node {
     /// Cached joined ledger IDs (from QuorumJoin history scan).
     /// Populated on first access, invalidated when new ledgers are discovered.
     joined_ledger_cache: Mutex<Option<Vec<String>>>,
+
+    /// Joined ledger IDs that have been imported from Nostr (or attempted).
+    /// Prevents re-importing on every reload cycle.
+    imported_joined_ledgers: Mutex<std::collections::HashSet<String>>,
+
+    /// Pending confiscation requests awaiting co-signatures from quorum members.
+    /// Key is the ledger prefix (from custody_armed marker).
+    pending_confiscations: Mutex<HashMap<String, PendingConfiscation>>,
 }
 
 impl Node {
@@ -283,6 +321,8 @@ impl Node {
             relay_url,
             fast_poll: config.fast_poll,
             joined_ledger_cache: Mutex::new(None),
+            imported_joined_ledgers: Mutex::new(std::collections::HashSet::new()),
+            pending_confiscations: Mutex::new(HashMap::new()),
         })
     }
 
@@ -549,6 +589,315 @@ impl Node {
         *cache = None;
     }
 
+    /// Auto-import joined ledgers from Nostr so we can validate their updates.
+    /// Called from the reload cycle when we discover joined ledger IDs not in our local map.
+    async fn auto_import_joined_ledgers(&self, joined_ids: &[String]) {
+        use deposits_core::validation::LedgerExport;
+        use deposits_core::messages::LedgerOperation;
+        use deposits_core::TlvDecode;
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+        use nostr_sdk::{Filter, Kind};
+        use nostr_sdk::prelude::{SingleLetterTag, Alphabet};
+
+        for ledger_id in joined_ids {
+            // Skip if already in local map
+            {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                if ledgers.contains_key(ledger_id) {
+                    // Mark as imported so we don't check again
+                    self.imported_joined_ledgers.lock().unwrap().insert(ledger_id.clone());
+                    continue;
+                }
+            }
+
+            // Skip if already attempted import
+            {
+                let imported = self.imported_joined_ledgers.lock().unwrap();
+                if imported.contains(ledger_id) {
+                    continue;
+                }
+            }
+
+            tracing::info!("Auto-importing joined ledger {}...", &ledger_id[..16.min(ledger_id.len())]);
+
+            // Fetch ledger updates from Nostr
+            let filter = Filter::new()
+                .kind(Kind::Custom(crate::nostr::KIND_LEDGER_UPDATE))
+                .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()]);
+
+            let events = match self.nostr.client().fetch_events(vec![filter], None).await {
+                Ok(events) => events,
+                Err(e) => {
+                    tracing::warn!("Failed to fetch ledger {} from Nostr: {}", &ledger_id[..16], e);
+                    // Mark as attempted so we don't retry every cycle
+                    self.imported_joined_ledgers.lock().unwrap().insert(ledger_id.clone());
+                    continue;
+                }
+            };
+
+            if events.is_empty() {
+                tracing::debug!("No updates found on Nostr for ledger {}", &ledger_id[..16]);
+                // Don't mark as imported — operator may not have exported yet
+                continue;
+            }
+
+            // Decode events into SignedLedgerUpdate
+            let mut updates: Vec<deposits_core::SignedLedgerUpdate> = Vec::new();
+            for event in events.iter() {
+                if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
+                    if let Ok(update) = deposits_core::SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
+                        updates.push(update);
+                    }
+                }
+            }
+
+            if updates.is_empty() {
+                tracing::debug!("No valid updates decoded for ledger {}", &ledger_id[..16]);
+                continue;
+            }
+
+            // Sort by sequence, dedup exact copies
+            updates.sort_by_key(|u| (u.sequence_number, u.operator_id.serialize(), u.current_hash));
+            updates.dedup_by(|a, b| {
+                a.sequence_number == b.sequence_number
+                    && a.operator_id == b.operator_id
+                    && a.current_hash == b.current_hash
+            });
+
+            // Find LedgerOpen to get metadata
+            let ledger_open = updates.iter().find_map(|u| {
+                if let Ok(op) = LedgerOperation::tlv_decode(&u.message) {
+                    if let LedgerOperation::LedgerOpen { operator_id, reserves_id, ledger_address, genesis_block, .. } = op {
+                        return Some((operator_id, reserves_id, ledger_address, genesis_block));
+                    }
+                }
+                None
+            });
+
+            let Some((operator_id, reserves_id, ledger_address, genesis_block)) = ledger_open else {
+                tracing::warn!("No LedgerOpen found for ledger {} — cannot import", &ledger_id[..16]);
+                self.imported_joined_ledgers.lock().unwrap().insert(ledger_id.clone());
+                continue;
+            };
+
+            // Build best chain (handle branches: prefer chains with CustodyAcquire, then longest)
+            let by_prev: std::collections::HashMap<[u8; 32], Vec<&deposits_core::SignedLedgerUpdate>> = {
+                let mut map = std::collections::HashMap::new();
+                for u in &updates {
+                    map.entry(u.previous_hash).or_insert_with(Vec::new).push(u);
+                }
+                map
+            };
+
+            fn find_best_chain<'a>(
+                by_prev: &std::collections::HashMap<[u8; 32], Vec<&'a deposits_core::SignedLedgerUpdate>>,
+                start_hash: [u8; 32],
+            ) -> Vec<&'a deposits_core::SignedLedgerUpdate> {
+                let Some(children) = by_prev.get(&start_hash) else { return Vec::new(); };
+                let mut best: Vec<&deposits_core::SignedLedgerUpdate> = Vec::new();
+                let mut best_has_acquire = false;
+                for child in children {
+                    let mut chain = vec![*child];
+                    chain.extend(find_best_chain(by_prev, child.current_hash));
+                    let has_acquire = chain.iter().any(|u| {
+                        LedgerOperation::tlv_decode(&u.message)
+                            .map(|op| matches!(op, LedgerOperation::CustodyAcquire { .. }))
+                            .unwrap_or(false)
+                    });
+                    let is_better = if has_acquire && !best_has_acquire {
+                        true
+                    } else if !has_acquire && best_has_acquire {
+                        false
+                    } else {
+                        chain.len() > best.len()
+                    };
+                    if is_better {
+                        best = chain;
+                        best_has_acquire = has_acquire;
+                    }
+                }
+                best
+            }
+
+            let best_chain = find_best_chain(&by_prev, [0u8; 32]);
+            let filtered: Vec<deposits_core::SignedLedgerUpdate> = best_chain.iter().map(|u| (*u).clone()).collect();
+
+            if filtered.is_empty() {
+                tracing::warn!("No valid chain found for ledger {}", &ledger_id[..16]);
+                self.imported_joined_ledgers.lock().unwrap().insert(ledger_id.clone());
+                continue;
+            }
+
+            // Parse ledger_id bytes
+            let ledger_id_bytes: [u8; 32] = match hex::decode(ledger_id) {
+                Ok(bytes) if bytes.len() == 32 => {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&bytes);
+                    arr
+                }
+                _ => {
+                    tracing::warn!("Invalid ledger_id hex: {}", &ledger_id[..16]);
+                    self.imported_joined_ledgers.lock().unwrap().insert(ledger_id.clone());
+                    continue;
+                }
+            };
+
+            let block_height = self.wallet.get_block_height().unwrap_or(0);
+
+            let export = LedgerExport::new(
+                ledger_id_bytes,
+                genesis_block,
+                operator_id,
+                reserves_id,
+                ledger_address,
+                filtered.clone(),
+                block_height,
+            );
+
+            match self.handler.import_ledger(export) {
+                Ok((_report, _ledger_arc)) => {
+                    tracing::info!(
+                        "Auto-imported joined ledger {} ({} updates)",
+                        &ledger_id[..16],
+                        filtered.len()
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to import ledger {}: {}", &ledger_id[..16], e);
+                }
+            }
+
+            self.imported_joined_ledgers.lock().unwrap().insert(ledger_id.clone());
+        }
+    }
+
+    /// Re-import a joined ledger from Nostr, replacing any stale local copy.
+    ///
+    /// Called when `handle_ledger_update` detects a gap between the local
+    /// history and an incoming update sequence number.
+    async fn reimport_joined_ledger(&self, ledger_id: &str) -> Result<(), Error> {
+        use deposits_core::validation::LedgerExport;
+        use deposits_core::messages::LedgerOperation;
+        use deposits_core::TlvDecode;
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+        use nostr_sdk::{Filter, Kind};
+        use nostr_sdk::prelude::{SingleLetterTag, Alphabet};
+
+        let filter = Filter::new()
+            .kind(Kind::Custom(crate::nostr::KIND_LEDGER_UPDATE))
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id]);
+
+        let events = self.nostr.client().fetch_events(vec![filter], None).await
+            .map_err(|e| Error::Protocol(format!("Failed to fetch: {}", e)))?;
+
+        if events.is_empty() {
+            return Err(Error::Protocol("No events on Nostr".into()));
+        }
+
+        let mut updates: Vec<deposits_core::SignedLedgerUpdate> = Vec::new();
+        for event in events.iter() {
+            if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
+                if let Ok(update) = deposits_core::SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
+                    updates.push(update);
+                }
+            }
+        }
+
+        if updates.is_empty() {
+            return Err(Error::Protocol("No valid updates decoded".into()));
+        }
+
+        // Sort by sequence, dedup
+        updates.sort_by_key(|u| (u.sequence_number, u.operator_id.serialize(), u.current_hash));
+        updates.dedup_by(|a, b| {
+            a.sequence_number == b.sequence_number
+                && a.operator_id == b.operator_id
+                && a.current_hash == b.current_hash
+        });
+
+        let ledger_open = updates.iter().find_map(|u| {
+            if let Ok(op) = LedgerOperation::tlv_decode(&u.message) {
+                if let LedgerOperation::LedgerOpen { operator_id, reserves_id, ledger_address, genesis_block, .. } = op {
+                    return Some((operator_id, reserves_id, ledger_address, genesis_block));
+                }
+            }
+            None
+        });
+
+        let Some((operator_id, reserves_id, ledger_address, genesis_block)) = ledger_open else {
+            return Err(Error::Protocol("No LedgerOpen in fetched events".into()));
+        };
+
+        // Build best chain (same logic as auto_import)
+        let by_prev: std::collections::HashMap<[u8; 32], Vec<&deposits_core::SignedLedgerUpdate>> = {
+            let mut map = std::collections::HashMap::new();
+            for u in &updates { map.entry(u.previous_hash).or_insert_with(Vec::new).push(u); }
+            map
+        };
+
+        fn find_best_chain<'a>(
+            by_prev: &std::collections::HashMap<[u8; 32], Vec<&'a deposits_core::SignedLedgerUpdate>>,
+            start_hash: [u8; 32],
+        ) -> Vec<&'a deposits_core::SignedLedgerUpdate> {
+            let Some(children) = by_prev.get(&start_hash) else { return Vec::new(); };
+            let mut best: Vec<&deposits_core::SignedLedgerUpdate> = Vec::new();
+            for child in children {
+                let mut chain = vec![*child];
+                chain.extend(find_best_chain(by_prev, child.current_hash));
+                if chain.len() > best.len() { best = chain; }
+            }
+            best
+        }
+
+        let best_chain = find_best_chain(&by_prev, [0u8; 32]);
+        let filtered: Vec<deposits_core::SignedLedgerUpdate> = best_chain.iter().map(|u| (*u).clone()).collect();
+
+        if filtered.is_empty() {
+            return Err(Error::Protocol("No valid chain found".into()));
+        }
+
+        // Check if re-import actually has more data
+        {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            if let Some(existing) = ledgers.get(ledger_id) {
+                let existing = existing.read().unwrap();
+                if filtered.len() <= existing.history.len() {
+                    tracing::debug!("Re-import has {} updates vs local {} — no improvement",
+                        filtered.len(), existing.history.len());
+                    return Ok(());
+                }
+            }
+        }
+
+        let ledger_id_bytes: [u8; 32] = hex::decode(ledger_id)
+            .map_err(|e| Error::Protocol(format!("Bad hex: {}", e)))
+            .and_then(|bytes| {
+                if bytes.len() == 32 {
+                    let mut arr = [0u8; 32]; arr.copy_from_slice(&bytes); Ok(arr)
+                } else {
+                    Err(Error::Protocol("Wrong length".into()))
+                }
+            })?;
+
+        let block_height = self.wallet.get_block_height().unwrap_or(0);
+
+        let export = LedgerExport::new(
+            ledger_id_bytes, genesis_block, operator_id,
+            reserves_id, ledger_address, filtered.clone(), block_height,
+        );
+
+        match self.handler.import_ledger(export) {
+            Ok(_) => {
+                tracing::info!("Re-imported joined ledger {} ({} updates)", &ledger_id[..16], filtered.len());
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!("Failed to re-import ledger {}: {}", &ledger_id[..16], e);
+                Err(Error::Protocol(format!("Re-import failed: {}", e)))
+            }
+        }
+    }
+
     /// Run the main event loop
     pub async fn run(&mut self) -> Result<(), Error> {
         // Track last ledger reload time
@@ -653,8 +1002,20 @@ impl Node {
                 // Update poll filter (always, since joined ledgers change without new files)
                 self.nostr.set_request_ledger_filter(all_ledger_ids.clone());
 
+                // Auto-import joined ledgers from Nostr (so we can validate their updates)
+                let joined_ids = self.get_joined_ledger_ids();
+                if !joined_ids.is_empty() {
+                    self.auto_import_joined_ledgers(&joined_ids).await;
+                }
+
+                // Subscribe to all ledgers (requests + disputes + updates)
+                // Called every reload to pick up new joined ledgers for update subscriptions
+                if let Err(e) = self.nostr.subscribe_to_ledgers_batch(&all_ledger_ids).await {
+                    tracing::debug!("Batch subscribe failed: {}", e);
+                }
+
                 if discovered > 0 {
-                    // Subscribe to new ledgers' requests
+                    // Subscribe to new ledgers' requests (individual subscribe for per-ledger filtering)
                     for ledger_id in &all_ledger_ids {
                         if let Err(e) = self.nostr.subscribe_to_requests(ledger_id).await {
                             tracing::debug!("Subscribe to ledger {} failed: {}", &ledger_id[..16.min(ledger_id.len())], e);
@@ -891,6 +1252,15 @@ impl Node {
             return; // Ledger not found locally
         };
 
+        // Don't validate updates on our own ledger — we're the operator, not a monitor.
+        // Without this, stale in-memory state causes the daemon to dispute itself.
+        {
+            let ledger = ledger_arc.read().unwrap();
+            if ledger.operator_key() == self.node_id {
+                return;
+            }
+        }
+
         // Drop updates from non-operators (except CustodyDispute, which any
         // quorum member may publish).  Non-operator writes are never legitimate
         // and must not trigger a dispute — they're just noise.
@@ -914,8 +1284,35 @@ impl Node {
             }
         }
 
-        // Validate the update
+        // If the incoming update is ahead of our local copy, re-import the
+        // full ledger from Nostr so we have enough history to detect breaks.
+        {
+            let ledger = ledger_arc.read().unwrap();
+            let local_len = ledger.history.len() as u64;
+            if inbound.update.sequence_number > local_len {
+                tracing::info!(
+                    "Ledger {}... has gap: local={}, incoming seq={}. Re-importing from Nostr.",
+                    &inbound.ledger_id[..16.min(inbound.ledger_id.len())],
+                    local_len,
+                    inbound.update.sequence_number,
+                );
+                drop(ledger); // release read lock before re-import
+                if let Err(e) = self.reimport_joined_ledger(&inbound.ledger_id).await {
+                    tracing::warn!("Re-import failed for {}: {}", &inbound.ledger_id[..16], e);
+                }
+            }
+        }
+
+        // Validate the update (hash chain only — signature format is not yet
+        // standardised across the codebase, so signature failures are dropped
+        // rather than treated as disputes)
         let validation_result = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let Some(ledger_arc) = ledgers.get(&inbound.ledger_id).cloned() else {
+                return;
+            };
+            drop(ledgers);
+
             let ledger = ledger_arc.read().unwrap();
 
             // Skip if already in dispute state
@@ -923,7 +1320,7 @@ impl Node {
                 return;
             }
 
-            ledger.validate_incoming_update(&inbound.update, None)
+            ledger.validate_incoming_update_hash_chain(&inbound.update)
         };
 
         if let Err(e) = validation_result {
@@ -1973,12 +2370,190 @@ impl Node {
     /// check if all participants have armed. If so, build the confiscation TX,
     /// request signatures from quorum members, and broadcast.
     async fn auto_confiscate(&self) {
+        // Phase 1: Check for pending confiscations that need signature collection
+        self.collect_confiscation_signatures().await;
+
+        // Phase 2: Initiate new confiscations for armed ledgers that don't have one pending
+        self.initiate_confiscations().await;
+    }
+
+    /// Non-blocking: collect signatures for pending confiscation requests and broadcast when ready.
+    async fn collect_confiscation_signatures(&self) {
+        use bitcoin::secp256k1::PublicKey;
+        use nostr_sdk::{Filter, Kind};
+        use nostr_sdk::prelude::{SingleLetterTag, Alphabet};
+        use bitcoin::Witness;
+
+        let prefixes: Vec<String> = {
+            let pending = self.pending_confiscations.lock().unwrap();
+            pending.keys().cloned().collect()
+        };
+
+        for prefix in prefixes {
+            // Check timeout (120s) — drop stale requests so we can re-initiate
+            {
+                let pending = self.pending_confiscations.lock().unwrap();
+                if let Some(pc) = pending.get(&prefix) {
+                    if pc.created_at.elapsed() > std::time::Duration::from_secs(120) {
+                        tracing::warn!("Confiscation request for {} timed out, will re-initiate", prefix);
+                        drop(pending);
+                        self.pending_confiscations.lock().unwrap().remove(&prefix);
+                        continue;
+                    }
+                }
+            }
+
+            // Fetch recent response events (non-blocking, single fetch)
+            let (request_id, required_sigs) = {
+                let pending = self.pending_confiscations.lock().unwrap();
+                match pending.get(&prefix) {
+                    Some(pc) => (pc.request_id.clone(), pc.required_sigs),
+                    None => continue,
+                }
+            };
+
+            let since = nostr_sdk::Timestamp::now() - 120;
+            let filter = Filter::new()
+                .kind(Kind::Custom(crate::nostr::KIND_LEDGER_RESPONSE))
+                .since(since);
+
+            let response_events = match self.nostr.client()
+                .fetch_events(vec![filter], Some(std::time::Duration::from_secs(5)))
+                .await
+            {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+
+            // Process responses and add signatures
+            let mut ready_to_broadcast = false;
+            {
+                let mut pending = self.pending_confiscations.lock().unwrap();
+                let pc = match pending.get_mut(&prefix) {
+                    Some(pc) => pc,
+                    None => continue,
+                };
+
+                for event in response_events.iter() {
+                    let mut is_our_request = false;
+                    for tag in event.tags.iter() {
+                        if tag.kind() == nostr_sdk::TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::E)) {
+                            if let Some(val) = tag.content() {
+                                if val == request_id {
+                                    is_our_request = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if !is_our_request { continue; }
+
+                    if let Ok(response) = serde_json::from_str::<crate::nostr::LedgerResponse>(&event.content) {
+                        if response.success {
+                            if let Some(result) = &response.result {
+                                if let (Some(signer_hex), Some(sig_hex)) = (
+                                    result.get("signer").and_then(|v| v.as_str()),
+                                    result.get("signature").and_then(|v| v.as_str())
+                                ) {
+                                    if let (Ok(signer), Ok(sig_bytes)) = (
+                                        signer_hex.parse::<PublicKey>(),
+                                        hex::decode(sig_hex)
+                                    ) {
+                                        if sig_bytes.len() == 64 && !pc.signatures.contains_key(&signer) {
+                                            let mut sig_arr = [0u8; 64];
+                                            sig_arr.copy_from_slice(&sig_bytes);
+                                            pc.signatures.insert(signer, sig_arr);
+                                            tracing::info!("  Confiscation {}: received signature from {}... ({}/{})",
+                                                &prefix, &signer.to_string()[..16], pc.signatures.len(), required_sigs);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if pc.signatures.len() >= required_sigs {
+                    ready_to_broadcast = true;
+                }
+            }
+
+            if ready_to_broadcast {
+                self.broadcast_confiscation(&prefix).await;
+            }
+        }
+    }
+
+    /// Build witness and broadcast a confiscation transaction that has enough signatures.
+    async fn broadcast_confiscation(&self, prefix: &str) {
+        use bitcoin::Witness;
+
+        let pc = match self.pending_confiscations.lock().unwrap().remove(prefix) {
+            Some(pc) => pc,
+            None => return,
+        };
+
+        tracing::info!("  Building witness with {} signatures for {}...", pc.signatures.len(), prefix);
+
+        let control_block = match pc.taproot_output.control_block_for_tier(pc.tier_index) {
+            Some(cb) => cb,
+            None => {
+                tracing::error!("Failed to get control block for tier");
+                return;
+            }
+        };
+
+        let mut witness = Witness::new();
+        let sorted_keys = pc.voter_set.sorted_x_only_pubkeys();
+
+        for x_only in sorted_keys.iter().rev() {
+            for voter in pc.voter_set.all_voters() {
+                if voter.x_only_public_key().0 == *x_only {
+                    if let Some(sig) = pc.signatures.get(&voter) {
+                        witness.push(sig);
+                    } else {
+                        witness.push(&[] as &[u8]);
+                    }
+                    break;
+                }
+            }
+        }
+
+        witness.push(pc.leaf_script.as_bytes());
+        witness.push(control_block.serialize());
+
+        let mut confiscation_tx = pc.confiscation_tx;
+        confiscation_tx.input[0].witness = witness;
+
+        // Broadcast
+        tracing::info!("  Broadcasting confiscation transaction...");
+
+        match self.wallet.broadcast(&confiscation_tx) {
+            Ok(_) => {
+                let confiscation_txid = confiscation_tx.compute_txid();
+                tracing::info!("Confiscation transaction broadcast! Txid: {}", confiscation_txid);
+                tracing::info!("  Lottery address: {}", pc.lottery_address);
+
+                // Write confiscated marker
+                if let Err(e) = std::fs::write(&pc.confiscated_marker, confiscation_txid.to_string()) {
+                    tracing::warn!("Failed to write confiscated marker: {}", e);
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to broadcast confiscation TX: {}", e);
+            }
+        }
+    }
+
+    /// Non-blocking: initiate confiscation for armed ledgers that don't already have a pending request.
+    async fn initiate_confiscations(&self) {
         use bitcoin::secp256k1::{Secp256k1, Keypair, Message, PublicKey, XOnlyPublicKey};
         use deposits_core::{TlvDecode, TlvEncode, SignedLedgerUpdate, VoterSet, ThresholdConfig, TapscriptReservesBuilder};
         use deposits_core::messages::LedgerOperation;
         use deposits_core::tapscript_reserves::{LotteryScriptBuilder, LotteryParticipant};
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-        use nostr_sdk::{Client, Keys, Filter, Kind};
+        use nostr_sdk::{Filter, Kind};
         use nostr_sdk::prelude::{SingleLetterTag, Alphabet};
         use bitcoin::{Transaction, TxIn, TxOut, Witness, Amount};
         use bitcoin::sighash::{SighashCache, TapSighashType};
@@ -2010,6 +2585,14 @@ impl Node {
             let revealed_marker = self.data_dir.join(format!("lottery_revealed_{}.marker", ledger_prefix));
             if confiscated_marker.exists() || revealed_marker.exists() {
                 continue;
+            }
+
+            // Skip if we already have a pending confiscation for this ledger
+            {
+                let pending = self.pending_confiscations.lock().unwrap();
+                if pending.contains_key(ledger_prefix) {
+                    continue;
+                }
             }
 
             tracing::debug!("Checking if confiscation ready for ledger {}...", ledger_prefix);
@@ -2052,11 +2635,21 @@ impl Node {
                     if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
                         if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
                             match op {
-                                LedgerOperation::LedgerOpen { operator_id, .. } => {
+                                LedgerOperation::LedgerOpen { operator_id, reserves_id, .. } => {
                                     original_operator = Some(operator_id);
+                                    // Use LedgerOpen reserves_id as fallback if no ReservesRotate
+                                    if reserves_address.is_none() {
+                                        reserves_address = Some(reserves_id);
+                                    }
                                 }
                                 LedgerOperation::QuorumAddMember { quorum_member, .. } => {
-                                    if !quorum_members.contains(&quorum_member) {
+                                    // Only use QuorumAddMember from the original operator's updates
+                                    // (fork updates also contain QuorumAddMember for dispute bookkeeping,
+                                    // but those inflate the voter count and break Taproot address matching)
+                                    let is_from_original = original_operator
+                                        .map(|op| update.operator_id == op)
+                                        .unwrap_or(true);
+                                    if is_from_original && !quorum_members.contains(&quorum_member) {
                                         quorum_members.push(quorum_member);
                                     }
                                 }
@@ -2090,19 +2683,39 @@ impl Node {
 
             let original_operator = match original_operator {
                 Some(op) => op,
-                None => continue,
+                None => {
+                    tracing::debug!("Could not find original operator (LedgerOpen) for {}", ledger_prefix);
+                    continue;
+                }
             };
             let reserves_address_str = match reserves_address {
                 Some(addr) => addr,
-                None => continue,
+                None => {
+                    tracing::debug!("Could not find reserves address for {}", ledger_prefix);
+                    continue;
+                }
             };
+            // ledger_hash comes from ReservesRotate; fall back to fork's current hash
             let ledger_hash_val = match ledger_hash {
                 Some(lh) => lh,
-                None => continue,
+                None => {
+                    // No ReservesRotate found — use the fork ledger's current hash
+                    let ledgers = self.handler.ledgers.lock().unwrap();
+                    if let Some(fork_arc) = ledgers.get(&ledger_key) {
+                        let fork = fork_arc.read().unwrap();
+                        fork.state.hash
+                    } else {
+                        tracing::debug!("Could not find ledger hash for {}", ledger_prefix);
+                        continue;
+                    }
+                }
             };
 
-            tracing::info!("All {} participants armed for ledger {}..., initiating confiscation",
-                participants.len(), ledger_prefix);
+            // Filter out original operator from quorum_members (VoterSet adds operator as tie_breaker)
+            quorum_members.retain(|pk| *pk != original_operator);
+
+            tracing::info!("All {} participants armed for ledger {}..., initiating confiscation ({} quorum members)",
+                participants.len(), ledger_prefix, quorum_members.len());
 
             // Sort participants by pubkey for deterministic order
             participants.sort_by(|a, b| a.pubkey.serialize().cmp(&b.pubkey.serialize()));
@@ -2228,7 +2841,7 @@ impl Node {
                 script_pubkey: reserves_addr.script_pubkey(),
             }];
 
-            let mut confiscation_tx = confiscation_tx;
+            let confiscation_tx = confiscation_tx;
             let mut sighash_cache = SighashCache::new(&confiscation_tx);
             let sighash = match sighash_cache.taproot_script_spend_signature_hash(
                 0,
@@ -2256,156 +2869,100 @@ impl Node {
 
             // Request signatures from other quorum members via Nostr
             let required_sigs = tier.threshold;
-            tracing::info!("  Need {}/{} signatures", required_sigs, voter_count);
+            tracing::info!("  Need {}/{} signatures, requesting co-signatures...", required_sigs, voter_count);
 
-            if signatures.len() < required_sigs {
-                let unsigned_tx_bytes = bitcoin::consensus::encode::serialize(&confiscation_tx);
-                let unsigned_tx_hex = hex::encode(&unsigned_tx_bytes);
-
-                let request_params = serde_json::json!({
-                    "ledger_id": ledger_id,
-                    "sighash": hex::encode(sighash_bytes),
-                    "unsigned_tx": unsigned_tx_hex,
-                    "lottery_address": lottery_output.address.to_string(),
-                    "violation_details": "Confiscation to lottery for dispute resolution",
-                });
-
-                let request_id = match self.nostr.send_ledger_request(
-                    &ledger_id,
-                    "confiscation_sign",
-                    request_params,
-                ).await {
-                    Ok(id) => id,
-                    Err(e) => {
-                        tracing::error!("Failed to send sign request: {:?}", e);
+            // If we already have enough signatures (e.g., threshold=1), broadcast immediately
+            if signatures.len() >= required_sigs {
+                let control_block = match taproot_output.control_block_for_tier(tier_index) {
+                    Some(cb) => cb,
+                    None => {
+                        tracing::error!("Failed to get control block for tier");
                         continue;
                     }
                 };
-                self.track_sent_event(&request_id);
 
-                tracing::info!("  Request ID: {}...", &request_id[..16.min(request_id.len())]);
+                let mut witness = bitcoin::Witness::new();
+                let sorted_keys = voter_set.sorted_x_only_pubkeys();
 
-                // Poll for signatures
-                let max_attempts = 20;
-                let poll_interval = std::time::Duration::from_secs(3);
-
-                for attempt in 1..=max_attempts {
-                    tokio::time::sleep(poll_interval).await;
-
-                    let since = nostr_sdk::Timestamp::now() - 120;
-                    let filter = Filter::new()
-                        .kind(Kind::Custom(crate::nostr::KIND_LEDGER_RESPONSE))
-                        .since(since);
-
-                    let response_events = match self.nostr.client()
-                        .fetch_events(vec![filter], Some(std::time::Duration::from_secs(5)))
-                        .await
-                    {
-                        Ok(e) => e,
-                        Err(_) => continue,
-                    };
-
-                    for event in response_events.iter() {
-                        let mut is_our_request = false;
-                        for tag in event.tags.iter() {
-                            if tag.kind() == nostr_sdk::TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::E)) {
-                                if let Some(val) = tag.content() {
-                                    if val == request_id {
-                                        is_our_request = true;
-                                        break;
-                                    }
-                                }
+                for x_only in sorted_keys.iter().rev() {
+                    for voter in voter_set.all_voters() {
+                        if voter.x_only_public_key().0 == *x_only {
+                            if let Some(sig) = signatures.get(&voter) {
+                                witness.push(sig);
+                            } else {
+                                witness.push(&[] as &[u8]);
                             }
-                        }
-
-                        if !is_our_request { continue; }
-
-                        if let Ok(response) = serde_json::from_str::<crate::nostr::LedgerResponse>(&event.content) {
-                            if response.success {
-                                if let Some(result) = &response.result {
-                                    if let (Some(signer_hex), Some(sig_hex)) = (
-                                        result.get("signer").and_then(|v| v.as_str()),
-                                        result.get("signature").and_then(|v| v.as_str())
-                                    ) {
-                                        if let (Ok(signer), Ok(sig_bytes)) = (
-                                            signer_hex.parse::<PublicKey>(),
-                                            hex::decode(sig_hex)
-                                        ) {
-                                            if sig_bytes.len() == 64 && !signatures.contains_key(&signer) {
-                                                let mut sig_arr = [0u8; 64];
-                                                sig_arr.copy_from_slice(&sig_bytes);
-                                                signatures.insert(signer, sig_arr);
-                                                tracing::info!("    Received signature from {}...", &signer.to_string()[..16]);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                            break;
                         }
                     }
-
-                    tracing::debug!("    Poll {}/{}: {}/{} signatures", attempt, max_attempts, signatures.len(), required_sigs);
-
-                    if signatures.len() >= required_sigs { break; }
                 }
-            }
 
-            if signatures.len() < required_sigs {
-                tracing::warn!("Could not collect enough signatures ({}/{}), will retry later",
-                    signatures.len(), required_sigs);
+                witness.push(leaf_script.as_bytes());
+                witness.push(control_block.serialize());
+
+                let mut confiscation_tx = confiscation_tx;
+                confiscation_tx.input[0].witness = witness;
+
+                tracing::info!("  Broadcasting confiscation transaction (enough sigs locally)...");
+                match self.wallet.broadcast(&confiscation_tx) {
+                    Ok(_) => {
+                        let txid = confiscation_tx.compute_txid();
+                        tracing::info!("Confiscation transaction broadcast! Txid: {}", txid);
+                        if let Err(e) = std::fs::write(&confiscated_marker, txid.to_string()) {
+                            tracing::warn!("Failed to write confiscated marker: {}", e);
+                        }
+                    }
+                    Err(e) => tracing::error!("Failed to broadcast confiscation TX: {}", e),
+                }
                 continue;
             }
 
-            // Build witness
-            tracing::info!("  Building witness with {} signatures...", signatures.len());
+            // Send the request and store pending state (non-blocking)
+            let unsigned_tx_bytes = bitcoin::consensus::encode::serialize(&confiscation_tx);
+            let unsigned_tx_hex = hex::encode(&unsigned_tx_bytes);
 
-            let control_block = match taproot_output.control_block_for_tier(tier_index) {
-                Some(cb) => cb,
-                None => {
-                    tracing::error!("Failed to get control block for tier");
+            let request_params = serde_json::json!({
+                "ledger_id": ledger_id,
+                "sighash": hex::encode(sighash_bytes),
+                "unsigned_tx": unsigned_tx_hex,
+                "lottery_address": lottery_output.address.to_string(),
+                "violation_details": "Confiscation to lottery for dispute resolution",
+            });
+
+            let request_id = match self.nostr.send_ledger_request(
+                &ledger_id,
+                "confiscation_sign",
+                request_params,
+            ).await {
+                Ok(id) => id,
+                Err(e) => {
+                    tracing::error!("Failed to send sign request: {:?}", e);
                     continue;
                 }
             };
+            self.track_sent_event(&request_id);
 
-            let mut witness = Witness::new();
-            let sorted_keys = voter_set.sorted_x_only_pubkeys();
+            tracing::info!("  Sent confiscation_sign request {}..., will collect signatures on next cycle",
+                &request_id[..16.min(request_id.len())]);
 
-            for x_only in sorted_keys.iter().rev() {
-                for voter in voter_set.all_voters() {
-                    if voter.x_only_public_key().0 == *x_only {
-                        if let Some(sig) = signatures.get(&voter) {
-                            witness.push(sig);
-                        } else {
-                            witness.push(&[] as &[u8]);
-                        }
-                        break;
-                    }
-                }
-            }
+            // Store pending state — signatures will be collected on subsequent periodic cycles
+            let pending = PendingConfiscation {
+                request_id,
+                confiscation_tx,
+                sighash_bytes,
+                signatures,
+                required_sigs,
+                voter_set,
+                tier_index,
+                leaf_script,
+                taproot_output,
+                confiscated_marker,
+                lottery_address: lottery_output.address.to_string(),
+                ledger_prefix: ledger_prefix.to_string(),
+                created_at: std::time::Instant::now(),
+            };
 
-            witness.push(leaf_script.as_bytes());
-            witness.push(control_block.serialize());
-
-            confiscation_tx.input[0].witness = witness;
-
-            // Broadcast
-            tracing::info!("  Broadcasting confiscation transaction...");
-
-            match self.wallet.broadcast(&confiscation_tx) {
-                Ok(_) => {
-                    let confiscation_txid = confiscation_tx.compute_txid();
-                    tracing::info!("Confiscation transaction broadcast! Txid: {}", confiscation_txid);
-                    tracing::info!("  Lottery address: {}", lottery_output.address);
-
-                    // Write confiscated marker
-                    if let Err(e) = std::fs::write(&confiscated_marker, confiscation_txid.to_string()) {
-                        tracing::warn!("Failed to write confiscated marker: {}", e);
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("Failed to broadcast confiscation TX: {}", e);
-                }
-            }
+            self.pending_confiscations.lock().unwrap().insert(ledger_prefix.to_string(), pending);
         }
     }
 
@@ -2480,6 +3037,7 @@ impl Node {
 
     /// Check if the confiscation TX for a ledger has enough confirmations
     async fn check_confiscation_confirmed(&self, ledger_id: &str, min_confirmations: u32) -> Result<bool, Error> {
+        use bitcoin::secp256k1::PublicKey;
         use deposits_core::TlvDecode;
         use deposits_core::messages::LedgerOperation;
         use deposits_core::tapscript_reserves::{LotteryScriptBuilder, LotteryParticipant};
@@ -2501,16 +3059,36 @@ impl Node {
             .await
             .map_err(|e| Error::Protocol(format!("Failed to fetch: {}", e)))?;
 
-        // Extract CustodyArmed participants
+        // Extract CustodyArmed participants AND quorum members (must match auto_confiscate)
         let mut participants: Vec<LotteryParticipant> = Vec::new();
+        let mut quorum_members: Vec<PublicKey> = Vec::new();
+        let mut original_operator: Option<PublicKey> = None;
 
         for event in events.iter() {
             if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
                 if let Ok(update) = deposits_core::SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
                     if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                        if let LedgerOperation::CustodyArmed { commitment_hash, target_reserves, .. } = op {
-                            let x_only = update.operator_id.x_only_public_key().0;
-                            participants.push(LotteryParticipant::new(x_only, commitment_hash, target_reserves));
+                        match op {
+                            LedgerOperation::LedgerOpen { operator_id, .. } => {
+                                original_operator = Some(operator_id);
+                            }
+                            LedgerOperation::QuorumAddMember { quorum_member, .. } => {
+                                // Only use QuorumAddMember from original operator's updates
+                                // (must match auto_confiscate's filtering)
+                                let is_from_original = original_operator
+                                    .map(|op| update.operator_id == op)
+                                    .unwrap_or(true);
+                                if is_from_original && !quorum_members.contains(&quorum_member) {
+                                    quorum_members.push(quorum_member);
+                                }
+                            }
+                            LedgerOperation::CustodyArmed { commitment_hash, target_reserves, .. } => {
+                                let x_only = update.operator_id.x_only_public_key().0;
+                                if !participants.iter().any(|p| p.pubkey == x_only) {
+                                    participants.push(LotteryParticipant::new(x_only, commitment_hash, target_reserves));
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -2521,14 +3099,19 @@ impl Node {
             return Err(Error::Protocol("Not enough participants for lottery".to_string()));
         }
 
-        // Sort by x-only pubkey for deterministic order
+        // Sort participants by x-only pubkey for deterministic order
         participants.sort_by(|a, b| a.pubkey.serialize().cmp(&b.pubkey.serialize()));
 
-        // Build lottery output to get the address
-        let recovery_voters: Vec<bitcoin::secp256k1::XOnlyPublicKey> = participants.iter()
-            .map(|p| p.pubkey)
+        // Build recovery voters from quorum_members (must match auto_confiscate)
+        if let Some(orig_op) = original_operator {
+            quorum_members.retain(|pk| *pk != orig_op);
+        }
+
+        let recovery_voters: Vec<bitcoin::secp256k1::XOnlyPublicKey> = quorum_members.iter()
+            .filter(|pk| original_operator.map_or(true, |op| **pk != op))
+            .map(|pk| pk.x_only_public_key().0)
             .collect();
-        let recovery_threshold = (recovery_voters.len() + 1) / 2;
+        let recovery_threshold = (recovery_voters.len() / 2) + 1;
 
         let lottery_builder = LotteryScriptBuilder::new(
             participants,
@@ -2539,6 +3122,8 @@ impl Node {
 
         let lottery_output = lottery_builder.build()
             .map_err(|e| Error::Protocol(format!("Failed to build lottery output: {:?}", e)))?;
+
+        tracing::debug!("check_confiscation_confirmed: lottery address = {}", lottery_output.address);
 
         // Check if lottery address has a UTXO with enough confirmations
         let lottery_script = lottery_output.address.script_pubkey();
@@ -2552,23 +3137,18 @@ impl Node {
         // Check confirmations
         let current_height = self.wallet.get_block_height().unwrap_or(0);
 
-        // We need to find the TX and its confirmation height
-        // For simplicity, if UTXO exists and we're 3+ blocks past our armed height, consider it confirmed
-        // In practice, we'd check the TX's block height
-
-        // For now, use a simple heuristic: if UTXO exists, check if we have an armed marker with block height
+        // Use armed height heuristic: if UTXO exists and 3+ blocks since we first saw it, confirmed
         let armed_height_file = self.data_dir.join(format!("lottery_armed_height_{}.txt", &ledger_id[..16.min(ledger_id.len())]));
 
         if let Ok(height_str) = std::fs::read_to_string(&armed_height_file) {
             if let Ok(armed_height) = height_str.trim().parse::<u32>() {
-                // Check if current height is at least armed_height + 3 (confiscation happens after arming)
-                if current_height >= armed_height + 3 {
+                if current_height >= armed_height + min_confirmations {
                     return Ok(true);
                 }
             }
         }
 
-        // If no armed height file, create one
+        // If no armed height file, create one (first time seeing the UTXO)
         if !armed_height_file.exists() {
             let _ = std::fs::write(&armed_height_file, current_height.to_string());
         }
@@ -5432,6 +6012,11 @@ impl Node {
                 None => return (false, None, Some(format!("Ledger not found: {}", &request.ledger_id[..16]))),
             }
         };
+
+        // Reload reserves from disk (CLI may have created them after daemon started)
+        if let Err(e) = self.wallet.reload_reserves_from_disk() {
+            tracing::warn!("Failed to reload reserves from disk: {}", e);
+        }
 
         // Sync wallet to see current UTXOs
         if let Err(e) = self.wallet.sync() {
