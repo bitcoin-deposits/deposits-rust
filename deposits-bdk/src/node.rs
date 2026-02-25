@@ -973,20 +973,162 @@ impl Node {
                 return true;
             }
         }
+
+        // Also check for dispute forks where we're the parent (dispute opener)
+        for (key, arc) in ledgers.iter() {
+            if key.starts_with(ledger_id) && key.len() > ledger_id.len() {
+                let ledger = arc.read().unwrap();
+                if ledger.state.parent_pubkey == self.node_id {
+                    return true;
+                }
+            }
+        }
         drop(ledgers);
 
         // Check our joined ledgers (QuorumJoin records in our ledger history)
         let joined = self.get_joined_ledger_ids();
         for jid in joined {
             if jid == ledger_id {
+                let elapsed = t0.elapsed();
+                if elapsed.as_millis() > 1 {
+                    tracing::info!("[PROFILE] is_quorum_member_of_ledger (found via history scan): {:?}", elapsed);
+                }
                 return true;
             }
         }
 
+        let elapsed = t0.elapsed();
+        if elapsed.as_millis() > 1 {
+            tracing::info!("[PROFILE] is_quorum_member_of_ledger (not found, full scan): {:?}", elapsed);
+        }
         false
     }
 
-    /// Auto-arm for a dispute by publishing CustodyDispute and CustodyArmed
+    /// Find the tracking key for a ledger, preferring dispute forks over originals.
+    ///
+    /// When a dispute is active, we want to operate on the fork (compound key),
+    /// not the original Partner copy. This scans ledgers by prefix and returns
+    /// the fork key if one exists, otherwise the original key.
+    fn find_fork_or_original_by_prefix(&self, ledger_prefix: &str) -> Option<String> {
+        let ledgers = self.handler.ledgers.lock().unwrap();
+        let mut original: Option<String> = None;
+        let mut fork: Option<String> = None;
+
+        for key in ledgers.keys() {
+            if key.starts_with(ledger_prefix) {
+                if key.len() > 64 {
+                    // Fork key (compound format with seq + operator prefix)
+                    fork = Some(key.clone());
+                } else {
+                    // Original key (plain ledger_id, 64 hex chars)
+                    original = Some(key.clone());
+                }
+            }
+        }
+
+        // Prefer fork over original for dispute operations
+        fork.or(original)
+    }
+
+    /// Create a dispute fork of a ledger at the given divergence point.
+    ///
+    /// Clones the Partner copy of the disputed ledger, truncates its history
+    /// to `last_valid_seq`, rebuilds state by replaying operations, and stores
+    /// the fork under a compound tracking key. The original Partner copy stays
+    /// untouched for evidence/auditing.
+    ///
+    /// Returns the compound tracking key for the fork.
+    fn create_dispute_fork(&self, ledger_id: &str, last_valid_seq: u64) -> Result<String, Error> {
+        use deposits_core::TlvDecode;
+        use deposits_core::messages::LedgerOperation;
+        use crate::handler::DepositsHandler;
+
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let our_pubkey = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &self.wallet.operator_secret());
+
+        // Check if we already have a fork for this ledger
+        if let Some(existing_fork) = self.handler.find_our_fork(ledger_id) {
+            tracing::info!("Already have fork for ledger {}: {}", &ledger_id[..16], &existing_fork[..32.min(existing_fork.len())]);
+            return Ok(existing_fork);
+        }
+
+        // Clone the Partner copy of the disputed ledger
+        let original_arc = self.handler.ledgers.lock().unwrap()
+            .get(ledger_id)
+            .cloned()
+            .ok_or_else(|| Error::Protocol(format!("Don't have disputed ledger: {}", &ledger_id[..16])))?;
+        let original = original_arc.read().unwrap();
+
+        // Truncate history to last_valid_seq
+        let truncated_history: Vec<_> = original.history.iter()
+            .filter(|u| u.sequence_number <= last_valid_seq)
+            .cloned()
+            .collect();
+
+        // Rebuild state from genesis by replaying truncated history.
+        // Start with a fresh state based on the original's genesis parameters.
+        let mut fork_state = original.state.clone();
+
+        // Reset derived state fields that will be rebuilt by replay
+        fork_state.deposits.clear();
+        fork_state.quorum_members.clear();
+        fork_state.collateral_attestations.clear();
+        fork_state.joined_quorums.clear();
+        fork_state.pending_transfers.clear();
+        fork_state.quorum_at_fork.clear();
+        fork_state.dispute_fork_sequence = 0;
+        fork_state.dispute_state = deposits_core::types::DisputeState::Normal;
+        fork_state.reserves.amount = 0;
+        fork_state.sequence = 0;
+        fork_state.hash = [0u8; 32];
+
+        // Create a temporary ledger for replay
+        let mut fork = Ledger {
+            state: fork_state,
+            role: deposits_core::ledger::LedgerRole::Operator, // We operate the fork
+            history: truncated_history.clone(),
+        };
+
+        // Replay all truncated operations to rebuild state
+        for update in &truncated_history {
+            if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+                if let Err(e) = fork.apply_state_changes(&op) {
+                    tracing::warn!(
+                        "Fork replay seq {}: failed to apply state change: {}",
+                        update.sequence_number, e
+                    );
+                }
+            }
+        }
+
+        // Update sequence/hash from last valid update
+        if let Some(last) = truncated_history.last() {
+            fork.state.sequence = last.sequence_number as u64;
+            fork.state.hash = last.current_hash;
+        }
+
+        // Store under compound key
+        let fork_key = DepositsHandler::fork_tracking_key(ledger_id, last_valid_seq, &our_pubkey);
+
+        tracing::info!(
+            "Created dispute fork: {} (diverged at seq {}, {} updates)",
+            &fork_key[..32.min(fork_key.len())],
+            last_valid_seq,
+            fork.history.len(),
+        );
+
+        self.handler.ledgers.lock().unwrap()
+            .insert(fork_key.clone(), Arc::new(RwLock::new(fork)));
+
+        Ok(fork_key)
+    }
+
+    /// Auto-arm for a dispute by creating a fork of the disputed ledger,
+    /// then publishing CustodyDispute and CustodyArmed on the fork.
+    ///
+    /// This ensures the operator's own ledger stays in Normal state and is
+    /// not affected by the dispute. The fork is stored under a compound
+    /// tracking key and persisted as a separate JSONL file.
     async fn auto_arm_for_dispute(&self, ledger_id: &str, last_valid_seq: u64) -> Result<(), Error> {
         use bitcoin::hashes::{Hash, hash160};
         use bitcoin::secp256k1::Secp256k1;
@@ -1001,34 +1143,23 @@ impl Node {
         let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
         let our_pubkey = keypair.public_key();
 
-        // Find our ledger_id (our ledger where we'll record the dispute/arm)
-        let our_ledger_id = {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            let mut found = None;
-            for (ledger_id, arc) in ledgers.iter() {
-                let ledger = arc.read().unwrap();
-                if ledger.operator_key() == self.node_id {
-                    found = Some(ledger_id.clone());
-                    break;
-                }
-            }
-            found.ok_or_else(|| Error::Protocol("No ledger found for our operator".to_string()))?
-        };
+        // 0. Create a fork of the disputed ledger (or reuse existing one)
+        let fork_key = self.create_dispute_fork(ledger_id, last_valid_seq)?;
 
-        // Get our ledger's current state
-        let ledger_arc = self.handler.ledgers.lock().unwrap()
-            .get(&our_ledger_id)
+        // Get the fork ledger's arc
+        let fork_arc = self.handler.ledgers.lock().unwrap()
+            .get(&fork_key)
             .cloned()
-            .ok_or_else(|| Error::Protocol("Ledger not found".to_string()))?;
+            .ok_or_else(|| Error::Protocol("Fork ledger not found after creation".to_string()))?;
         let current_block = self.wallet.get_block_height().unwrap_or(0);
         let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
 
-        // 1. First publish CustodyDispute on our branch
+        // 1. Publish CustodyDispute on the fork
         {
-            let mut ledger = ledger_arc.write().unwrap();
+            let mut fork_ledger = fork_arc.write().unwrap();
 
-            // Check if we've already published a CustodyDispute for this ledger
-            let already_disputed = ledger.history.iter().any(|u| {
+            // Check if we've already published a CustodyDispute on this fork
+            let already_disputed = fork_ledger.history.iter().any(|u| {
                 if let Ok(op) = LedgerOperation::tlv_decode(&u.message) {
                     matches!(op, LedgerOperation::CustodyDispute { .. })
                 } else {
@@ -1037,114 +1168,141 @@ impl Node {
             });
 
             if already_disputed {
-                tracing::info!("Already have CustodyDispute on our ledger");
+                tracing::info!("Already have CustodyDispute on fork");
             } else {
                 let dispute_op = LedgerOperation::CustodyDispute {
                     last_valid_sequence: last_valid_seq,
                     reason: "auto_dispute".to_string(),
                 };
 
-                ledger.append_operation_with_block(
+                fork_ledger.append_operation_with_block(
                     dispute_op,
-                    deposits_core::messages::consts::CUSTODY_DISPUTE,
+                    deposits_core::messages::consts::LEDGER_UPDATE,
                     current_block,
                     block_hash,
-                ).map_err(|e| Error::Protocol(format!("Failed to append CustodyDispute: {:?}", e)))?;
+                ).map_err(|e| Error::Protocol(format!("Failed to append CustodyDispute to fork: {:?}", e)))?;
 
-                tracing::info!("Published CustodyDispute on our ledger");
+                // Set parent_pubkey to our key (we now operate this fork branch)
+                // This must be done AFTER CustodyDispute clears the quorum
+                fork_ledger.state.parent_pubkey = our_pubkey;
+
+                // Patch operator_id on the appended update to our pubkey
+                if let Some(update) = fork_ledger.history.last_mut() {
+                    update.operator_id = our_pubkey;
+                }
+
+                tracing::info!("Published CustodyDispute on fork (parent_pubkey set to us)");
             }
         }
 
-        // Sign the dispute update
-        self.sign_last_update(&our_ledger_id)?;
+        // Sign the dispute update on the fork
+        self.sign_last_update(&fork_key)?;
 
-        // 2. Copy our existing attestations from our own ledger history
-        // These are attestations we received (proving we have collateral backing)
+        // 2. Copy our existing attestations from our OWN operator ledger history
+        // (not from the fork - those prove we have collateral backing)
         {
-            let ledger = ledger_arc.read().unwrap();
+            // Find our operator ledger
+            let our_ledger_id = {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                let mut found = None;
+                for (lid, arc) in ledgers.iter() {
+                    let l = arc.read().unwrap();
+                    if l.operator_key() == self.node_id && lid.len() <= 64 {
+                        found = Some(lid.clone());
+                        break;
+                    }
+                }
+                found
+            };
 
-            // Find all CollateralAttestation operations in our history
-            let mut attestations_to_copy: Vec<LedgerOperation> = Vec::new();
-            // Track quorum members with their collateral ledger IDs
-            let mut quorum_members_to_add: Vec<(bitcoin::secp256k1::PublicKey, String)> = Vec::new();
+            if let Some(our_ledger_id) = our_ledger_id {
+                let our_ledger_arc = self.handler.ledgers.lock().unwrap()
+                    .get(&our_ledger_id)
+                    .cloned();
 
-            for update in ledger.history.iter() {
-                if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                    match &op {
-                        LedgerOperation::CollateralAttestation { collateral_operator, quorum_member, collateral_ledger_id, .. } => {
-                            // We want attestations where WE are the quorum_member
-                            // (proving we locked collateral on other operators' ledgers)
-                            if quorum_member == &our_pubkey {
-                                attestations_to_copy.push(op.clone());
-                                // Also need to add the collateral_operator as a quorum member with their ledger ID
-                                if !quorum_members_to_add.iter().any(|(pk, _)| pk == collateral_operator) {
-                                    quorum_members_to_add.push((*collateral_operator, collateral_ledger_id.clone()));
+                if let Some(our_ledger_arc) = our_ledger_arc {
+                    let our_ledger = our_ledger_arc.read().unwrap();
+
+                    // Find all CollateralAttestation operations in our operator ledger
+                    let mut attestations_to_copy: Vec<LedgerOperation> = Vec::new();
+                    let mut quorum_members_to_add: Vec<(bitcoin::secp256k1::PublicKey, String)> = Vec::new();
+
+                    for update in our_ledger.history.iter() {
+                        if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+                            if let LedgerOperation::CollateralAttestation { collateral_operator, quorum_member, collateral_ledger_id, .. } = &op {
+                                // We want attestations where WE are the quorum_member
+                                if quorum_member == &our_pubkey {
+                                    attestations_to_copy.push(op.clone());
+                                    if !quorum_members_to_add.iter().any(|(pk, _)| pk == collateral_operator) {
+                                        quorum_members_to_add.push((*collateral_operator, collateral_ledger_id.clone()));
+                                    }
                                 }
                             }
                         }
-                        _ => {}
                     }
+
+                    drop(our_ledger);
+
+                    // Add quorum members to the fork
+                    for (member, member_ledger_id) in quorum_members_to_add {
+                        let mut fork_ledger = fork_arc.write().unwrap();
+
+                        if fork_ledger.state.quorum_members.iter().any(|m| m.pubkey == member) {
+                            continue;
+                        }
+
+                        let add_op = LedgerOperation::QuorumAddMember {
+                            quorum_member: member,
+                            quorum_member_signature: [0u8; 64],
+                            member_ledger_id: member_ledger_id.clone(),
+                        };
+
+                        if let Err(e) = fork_ledger.append_operation_with_block(
+                            add_op,
+                            deposits_core::messages::consts::QUORUM_ADD_MEMBER,
+                            current_block,
+                            block_hash,
+                        ) {
+                            tracing::warn!("Failed to add quorum member to fork: {:?}", e);
+                        } else {
+                            // Patch operator_id
+                            if let Some(update) = fork_ledger.history.last_mut() {
+                                update.operator_id = our_pubkey;
+                            }
+                            tracing::info!("Added quorum member to fork: {}...", &hex::encode(member.serialize())[..16]);
+                        }
+                    }
+
+                    // Copy attestations to the fork
+                    for attestation in attestations_to_copy {
+                        let mut fork_ledger = fork_arc.write().unwrap();
+
+                        if let Err(e) = fork_ledger.append_operation_with_block(
+                            attestation,
+                            deposits_core::messages::consts::COLLATERAL_ATTESTATION,
+                            current_block,
+                            block_hash,
+                        ) {
+                            tracing::warn!("Failed to copy attestation to fork: {:?}", e);
+                        } else {
+                            if let Some(update) = fork_ledger.history.last_mut() {
+                                update.operator_id = our_pubkey;
+                            }
+                            tracing::info!("Copied attestation to dispute fork");
+                        }
+                    }
+
+                    // Sign after adding members and attestations
+                    self.sign_last_update(&fork_key)?;
                 }
             }
-
-            drop(ledger);
-
-            // First add quorum members, then attestations
-            for (member, member_ledger_id) in quorum_members_to_add {
-                let mut ledger = ledger_arc.write().unwrap();
-
-                // Check if already added
-                if ledger.state.quorum_members.iter().any(|m| m.pubkey == member) {
-                    continue;
-                }
-
-                // Create QuorumAddMember operation
-                // Note: The signature should come from the member, but for auto-arm
-                // we use a placeholder since the member will broadcast their own version
-                let add_op = LedgerOperation::QuorumAddMember {
-                    quorum_member: member,
-                    quorum_member_signature: [0u8; 64], // Placeholder
-                    member_ledger_id: member_ledger_id.clone(),
-                };
-
-                if let Err(e) = ledger.append_operation_with_block(
-                    add_op,
-                    deposits_core::messages::consts::QUORUM_ADD_MEMBER,
-                    current_block,
-                    block_hash,
-                ) {
-                    tracing::warn!("Failed to add quorum member: {:?}", e);
-                } else {
-                    tracing::info!("Added quorum member: {}... (ledger: {}...)", &hex::encode(member.serialize())[..16], &member_ledger_id[..16.min(member_ledger_id.len())]);
-                }
-            }
-
-            // Now copy attestations
-            for attestation in attestations_to_copy {
-                let mut ledger = ledger_arc.write().unwrap();
-
-                if let Err(e) = ledger.append_operation_with_block(
-                    attestation,
-                    deposits_core::messages::consts::COLLATERAL_ATTESTATION,
-                    current_block,
-                    block_hash,
-                ) {
-                    tracing::warn!("Failed to copy attestation: {:?}", e);
-                } else {
-                    tracing::info!("Copied existing attestation to dispute branch");
-                }
-            }
-
-            // Sign after adding members and attestations
-            self.sign_last_update(&our_ledger_id)?;
         }
 
-        // 3. Now publish CustodyArmed with preimage commitment
+        // 3. Publish CustodyArmed with preimage commitment on the fork
         {
-            let mut ledger = ledger_arc.write().unwrap();
+            let mut fork_ledger = fork_arc.write().unwrap();
 
-            // Check if we've already armed
-            let already_armed = ledger.history.iter().any(|u| {
+            let already_armed = fork_ledger.history.iter().any(|u| {
                 if let Ok(op) = LedgerOperation::tlv_decode(&u.message) {
                     matches!(op, LedgerOperation::CustodyArmed { .. })
                 } else {
@@ -1153,7 +1311,7 @@ impl Node {
             });
 
             if already_armed {
-                tracing::info!("Already have CustodyArmed on our ledger");
+                tracing::info!("Already have CustodyArmed on fork");
             } else {
                 // Generate random preimage (17-20 bytes for lottery entropy)
                 let mut rng = OsRng;
@@ -1164,7 +1322,7 @@ impl Node {
                 // Compute commitment_hash = HASH160(preimage)
                 let commitment_hash: [u8; 20] = *hash160::Hash::hash(&preimage).as_byte_array();
 
-                // Store preimage for later reveal
+                // Store preimage for later reveal (keyed by disputed ledger_id prefix)
                 let preimage_file = self.data_dir.join(format!("lottery_preimage_{}.hex",
                     &ledger_id[..16.min(ledger_id.len())]));
                 if let Err(e) = std::fs::write(&preimage_file, hex::encode(&preimage)) {
@@ -1185,28 +1343,42 @@ impl Node {
                     target_reserves,
                 };
 
-                ledger.append_operation_with_block(
+                fork_ledger.append_operation_with_block(
                     armed_op,
-                    deposits_core::messages::consts::CUSTODY_ARMED,
+                    deposits_core::messages::consts::LEDGER_UPDATE,
                     current_block,
                     block_hash,
-                ).map_err(|e| Error::Protocol(format!("Failed to append CustodyArmed: {:?}", e)))?;
+                ).map_err(|e| Error::Protocol(format!("Failed to append CustodyArmed to fork: {:?}", e)))?;
 
-                tracing::info!("Published CustodyArmed on our ledger");
+                // Patch operator_id
+                if let Some(update) = fork_ledger.history.last_mut() {
+                    update.operator_id = our_pubkey;
+                }
+
+                tracing::info!("Published CustodyArmed on fork");
             }
         }
 
-        // Sign the armed update
-        self.sign_last_update(&our_ledger_id)?;
+        // Sign the armed update on the fork
+        self.sign_last_update(&fork_key)?;
 
-        // Persist
-        if let Err(e) = self.handler.persist_ledger_to_disk(&our_ledger_id) {
-            tracing::error!("Failed to persist ledger: {}", e);
+        // Persist the fork (new JSONL file with compound key as filename)
+        if let Err(e) = self.handler.persist_ledger_to_disk(&fork_key) {
+            tracing::error!("Failed to persist fork ledger: {}", e);
         }
 
-        // Broadcast all updates
-        if let Err(e) = self.broadcast_all_updates(&our_ledger_id).await {
-            tracing::warn!("Failed to broadcast dispute updates: {}", e);
+        // Create custody_armed marker (needed by auto_confiscate)
+        let armed_marker = self.data_dir.join(format!("custody_armed_{}.marker",
+            &ledger_id[..16.min(ledger_id.len())]));
+        if let Err(e) = std::fs::write(&armed_marker, "armed") {
+            tracing::warn!("Failed to write armed marker: {}", e);
+        } else {
+            tracing::info!("Created custody_armed marker: {:?}", armed_marker);
+        }
+
+        // Broadcast all fork updates (they use the original ledger_id for Nostr routing)
+        if let Err(e) = self.broadcast_all_updates(&fork_key).await {
+            tracing::warn!("Failed to broadcast dispute fork updates: {}", e);
         }
 
         Ok(())
@@ -1333,20 +1505,17 @@ impl Node {
                 continue;
             }
 
-            // Find the full ledger_id
-            let ledger_id = {
-                let ledgers = self.handler.ledgers.lock().unwrap();
-                let mut found = None;
-                for (lid, _arc) in ledgers.iter() {
-                    if lid.starts_with(ledger_prefix) {
-                        found = Some(lid.clone());
-                        break;
-                    }
-                }
-                match found {
-                    Some(id) => id,
-                    None => continue,
-                }
+            // Find the fork or original ledger key (prefer fork for dispute operations)
+            let ledger_key = match self.find_fork_or_original_by_prefix(ledger_prefix) {
+                Some(key) => key,
+                None => continue,
+            };
+
+            // Extract the base ledger_id (first 64 chars) for Nostr queries
+            let ledger_id = if ledger_key.len() > 64 {
+                ledger_key[..64].to_string()
+            } else {
+                ledger_key.clone()
             };
 
             // Try to claim or yield
@@ -1804,20 +1973,17 @@ impl Node {
 
             tracing::debug!("Checking if confiscation ready for ledger {}...", ledger_prefix);
 
-            // Find the full ledger_id by looking at our ledgers
-            let ledger_id = {
-                let ledgers = self.handler.ledgers.lock().unwrap();
-                let mut found = None;
-                for (lid, _arc) in ledgers.iter() {
-                    if lid.starts_with(ledger_prefix) {
-                        found = Some(lid.clone());
-                        break;
-                    }
-                }
-                match found {
-                    Some(id) => id,
-                    None => continue,
-                }
+            // Find the fork or original ledger key (prefer fork for dispute operations)
+            let ledger_key = match self.find_fork_or_original_by_prefix(ledger_prefix) {
+                Some(key) => key,
+                None => continue,
+            };
+
+            // Extract the base ledger_id (first 64 chars) for Nostr queries
+            let ledger_id = if ledger_key.len() > 64 {
+                ledger_key[..64].to_string()
+            } else {
+                ledger_key.clone()
             };
 
             // Use the existing nostr client
@@ -2242,20 +2408,17 @@ impl Node {
                 continue;
             }
 
-            // Find the full ledger_id
-            let ledger_id = {
-                let ledgers = self.handler.ledgers.lock().unwrap();
-                let mut found = None;
-                for (lid, _arc) in ledgers.iter() {
-                    if lid.starts_with(ledger_prefix) {
-                        found = Some(lid.clone());
-                        break;
-                    }
-                }
-                match found {
-                    Some(id) => id,
-                    None => continue,
-                }
+            // Find the fork or original ledger key (prefer fork for dispute operations)
+            let ledger_key = match self.find_fork_or_original_by_prefix(ledger_prefix) {
+                Some(key) => key,
+                None => continue,
+            };
+
+            // Extract the base ledger_id (first 64 chars) for Nostr queries
+            let ledger_id = if ledger_key.len() > 64 {
+                ledger_key[..64].to_string()
+            } else {
+                ledger_key.clone()
             };
 
             // Check if confiscation TX is confirmed with 3+ blocks
@@ -2405,20 +2568,17 @@ impl Node {
                 continue;
             }
 
-            // Find the full ledger_id
-            let ledger_id = {
-                let ledgers = self.handler.ledgers.lock().unwrap();
-                let mut found = None;
-                for (lid, _arc) in ledgers.iter() {
-                    if lid.starts_with(ledger_prefix) {
-                        found = Some(lid.clone());
-                        break;
-                    }
-                }
-                match found {
-                    Some(id) => id,
-                    None => continue,
-                }
+            // Find the fork or original ledger key (prefer fork for dispute operations)
+            let ledger_key = match self.find_fork_or_original_by_prefix(ledger_prefix) {
+                Some(key) => key,
+                None => continue,
+            };
+
+            // Extract the base ledger_id (first 64 chars) for Nostr queries
+            let ledger_id = if ledger_key.len() > 64 {
+                ledger_key[..64].to_string()
+            } else {
+                ledger_key.clone()
             };
 
             // Check if we won (we published CustodyAcquire)
@@ -4351,6 +4511,23 @@ impl Node {
         tracing::info!("Processing cosign_update request for ledger {}...",
             &request.ledger_id[..16.min(request.ledger_id.len())]);
 
+        // Refuse to co-sign if the ledger is in a disputed state
+        {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            if let Some(ledger_arc) = ledgers.get(&request.ledger_id) {
+                let ledger = ledger_arc.read().unwrap();
+                if ledger.state.dispute_state != deposits_core::types::DisputeState::Normal {
+                    tracing::warn!("Refusing to cosign update for ledger {} - dispute state: {:?}",
+                        &request.ledger_id[..16.min(request.ledger_id.len())],
+                        ledger.state.dispute_state);
+                    return (false, None, Some(format!(
+                        "Ledger is in {:?} state - cannot co-sign updates",
+                        ledger.state.dispute_state
+                    )));
+                }
+            }
+        }
+
         // Extract required parameters
         let sequence_number = match request.params.get("sequence_number").and_then(|v| v.as_u64()) {
             Some(seq) => seq,
@@ -4569,6 +4746,23 @@ impl Node {
 
         tracing::info!("Processing cosign_offer request for ledger {}...",
             &request.ledger_id[..16.min(request.ledger_id.len())]);
+
+        // Refuse to co-sign if the ledger is in a disputed state
+        {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            if let Some(ledger_arc) = ledgers.get(&request.ledger_id) {
+                let ledger = ledger_arc.read().unwrap();
+                if ledger.state.dispute_state != deposits_core::types::DisputeState::Normal {
+                    tracing::warn!("Refusing to cosign offer for ledger {} - dispute state: {:?}",
+                        &request.ledger_id[..16.min(request.ledger_id.len())],
+                        ledger.state.dispute_state);
+                    return (false, None, Some(format!(
+                        "Ledger is in {:?} state - cannot co-sign offers",
+                        ledger.state.dispute_state
+                    )));
+                }
+            }
+        }
 
         // Extract required parameters
         let offer_id_hex = match request.params.get("offer_id").and_then(|v| v.as_str()) {
