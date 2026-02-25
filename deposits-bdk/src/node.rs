@@ -327,6 +327,61 @@ impl Node {
         Ok(())
     }
 
+    /// Validate that the last in-memory update chains correctly from what's on disk.
+    ///
+    /// Call this after signing but before persisting + broadcasting. If the in-memory
+    /// chain doesn't extend the disk state correctly (e.g., another process wrote a
+    /// conflicting entry), returns an error to trigger rollback and retry.
+    fn validate_chain_before_persist(&self, ledger_id: &str) -> Result<(), Error> {
+        // The daemon is the sole writer — validate in-memory chain consistency
+        // instead of re-reading the entire JSONL from disk.
+        let ledgers = self.handler.ledgers.lock().unwrap();
+        let ledger_arc = ledgers.get(ledger_id)
+            .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?;
+        let ledger = ledger_arc.read().unwrap();
+
+        let len = ledger.history.len();
+        if len < 2 {
+            return Ok(());
+        }
+
+        // Check that the last entry chains from its predecessor
+        let prev = &ledger.history[len - 2];
+        let last = &ledger.history[len - 1];
+
+        if last.sequence_number != prev.sequence_number + 1 {
+            return Err(Error::Protocol(format!(
+                "Sequence gap before persist: prev_seq={}, last_seq={}",
+                prev.sequence_number, last.sequence_number,
+            )));
+        }
+
+        if last.previous_hash != prev.current_hash {
+            return Err(Error::Protocol(format!(
+                "Hash chain break before persist: seq={} prev_hash={}... but seq={} hash={}...",
+                last.sequence_number,
+                hex::encode(&last.previous_hash[..8]),
+                prev.sequence_number,
+                hex::encode(&prev.current_hash[..8]),
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Sign with operator-only signature, validate chain, persist, and broadcast.
+    ///
+    /// Convenience method for paths where no co-signing is needed (no quorum members).
+    /// Performs the full validate → persist → broadcast sequence.
+    async fn operator_sign_persist_broadcast(&self, ledger_id: &str) -> Result<String, Error> {
+        self.sign_last_update(ledger_id)?;
+        self.validate_chain_before_persist(ledger_id)?;
+        if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
+            tracing::warn!("Failed to persist ledger: {}", e);
+        }
+        self.broadcast_last_update(ledger_id).await
+    }
+
     /// Broadcast the most recent ledger update to Nostr
     ///
     /// Call this after appending an operation to a ledger to ensure the update
@@ -5160,14 +5215,20 @@ impl Node {
                     continue;
                 }
 
-                // Broadcast to Nostr
-                if let Err(e) = self.broadcast_last_update(&ledger_id).await {
-                    tracing::warn!("Failed to broadcast fee collection: {}", e);
+                // Validate chain before persisting
+                if let Err(e) = self.validate_chain_before_persist(&ledger_id) {
+                    tracing::warn!("Chain validation failed for fee collection: {}", e);
+                    continue;
                 }
 
                 // Save ledger to disk
                 if let Err(e) = self.handler.persist_ledger_to_disk(&ledger_id) {
                     tracing::warn!("Failed to save ledger after fee collection: {}", e);
+                }
+
+                // Broadcast to Nostr
+                if let Err(e) = self.broadcast_last_update(&ledger_id).await {
+                    tracing::warn!("Failed to broadcast fee collection: {}", e);
                 }
             }
         }
@@ -5211,8 +5272,27 @@ impl Node {
                 continue;
             }
 
-            // Timeout each expired transfer
-            for transfer_id in expired_transfers {
+            // Process only ONE timeout per periodic cycle. Timeouts are low priority
+            // and each is a full ledger operation (append + sign + persist + broadcast).
+            // Processing them in a batch starves transfer_lock/transfer_complete handling.
+            // The next periodic cycle (5s) will pick up more.
+            if let Some(&transfer_id) = expired_transfers.first() {
+                // Re-check that the transfer is still pending (a complete may
+                // have arrived since we collected the list)
+                {
+                    let ledger = ledger_arc.read().unwrap();
+                    if !ledger.state.pending_transfers.contains_key(&transfer_id) {
+                        continue;
+                    }
+                }
+
+                if expired_transfers.len() > 1 {
+                    tracing::info!(
+                        "Processing 1 of {} expired transfers (rest deferred to next cycle)",
+                        expired_transfers.len()
+                    );
+                }
+
                 tracing::info!(
                     "Timing out expired transfer: {}... (block {} >= timeout)",
                     hex::encode(&transfer_id[..8]),
@@ -5247,14 +5327,20 @@ impl Node {
                     continue;
                 }
 
-                // Broadcast to Nostr
-                if let Err(e) = self.broadcast_last_update(&ledger_id).await {
-                    tracing::warn!("Failed to broadcast transfer timeout: {}", e);
+                // Validate chain before persisting
+                if let Err(e) = self.validate_chain_before_persist(&ledger_id) {
+                    tracing::warn!("Chain validation failed for transfer timeout: {}", e);
+                    continue;
                 }
 
                 // Save ledger to disk
                 if let Err(e) = self.handler.persist_ledger_to_disk(&ledger_id) {
                     tracing::warn!("Failed to save ledger after transfer timeout: {}", e);
+                }
+
+                // Broadcast to Nostr
+                if let Err(e) = self.broadcast_last_update(&ledger_id).await {
+                    tracing::warn!("Failed to broadcast transfer timeout: {}", e);
                 }
 
                 tracing::info!(
@@ -6139,8 +6225,7 @@ impl Node {
                 ));
             }
             tracing::debug!("No quorum members yet, using operator-only signature");
-            self.sign_last_update(ledger_id)?;
-            return self.broadcast_last_update(ledger_id).await;
+            return self.operator_sign_persist_broadcast(ledger_id).await;
         }
 
         // Send multicast co-sign request - first responder wins
@@ -6194,15 +6279,31 @@ impl Node {
         }
 
         // Sign as operator
+        let t_sign_op = std::time::Instant::now();
         self.sign_last_update(ledger_id)?;
+        let sign_op_elapsed = t_sign_op.elapsed();
+
+        // Validate chain consistency before persisting
+        let t_validate = std::time::Instant::now();
+        self.validate_chain_before_persist(ledger_id)?;
+        let validate_elapsed = t_validate.elapsed();
 
         // Persist the ledger
+        let t_persist2 = std::time::Instant::now();
         if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
             tracing::warn!("Failed to persist ledger after signing: {}", e);
         }
+        let persist2_elapsed = t_persist2.elapsed();
 
         // Broadcast
-        self.broadcast_last_update(ledger_id).await
+        let t_broadcast = std::time::Instant::now();
+        let result = self.broadcast_last_update(ledger_id).await;
+        let broadcast_elapsed = t_broadcast.elapsed();
+
+        tracing::info!("[PROFILE] sign_and_broadcast inner: cosign_wait=included_above, sign_op={:?}, validate={:?}, persist={:?}, broadcast={:?}",
+            sign_op_elapsed, validate_elapsed, persist2_elapsed, broadcast_elapsed);
+
+        result
     }
 
     /// Add a quorum member with co-signing and broadcast.
@@ -6274,12 +6375,7 @@ impl Node {
         if has_quorum {
             self.sign_and_broadcast(ledger_id).await
         } else {
-            // No existing quorum, use operator-only signature
-            self.sign_last_update(ledger_id)?;
-            if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
-                tracing::warn!("Failed to persist ledger: {}", e);
-            }
-            self.broadcast_last_update(ledger_id).await
+            self.operator_sign_persist_broadcast(ledger_id).await
         }
     }
 
@@ -6362,11 +6458,7 @@ impl Node {
         if has_quorum {
             self.sign_and_broadcast(our_ledger_id).await
         } else {
-            self.sign_last_update(our_ledger_id)?;
-            if let Err(e) = self.handler.persist_ledger_to_disk(our_ledger_id) {
-                tracing::warn!("Failed to persist ledger: {}", e);
-            }
-            self.broadcast_last_update(our_ledger_id).await
+            self.operator_sign_persist_broadcast(our_ledger_id).await
         }
     }
 
@@ -6519,11 +6611,7 @@ impl Node {
         if has_quorum {
             self.sign_and_broadcast(ledger_id).await?;
         } else {
-            self.sign_last_update(ledger_id)?;
-            if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
-                tracing::warn!("Failed to persist ledger: {}", e);
-            }
-            self.broadcast_last_update(ledger_id).await?;
+            self.operator_sign_persist_broadcast(ledger_id).await?;
         }
 
         tracing::info!(
@@ -6596,11 +6684,7 @@ impl Node {
         if has_quorum {
             self.sign_and_broadcast(ledger_id).await
         } else {
-            self.sign_last_update(ledger_id)?;
-            if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
-                tracing::warn!("Failed to persist ledger: {}", e);
-            }
-            self.broadcast_last_update(ledger_id).await
+            self.operator_sign_persist_broadcast(ledger_id).await
         }
     }
 
@@ -6672,11 +6756,7 @@ impl Node {
         let sign_result = if has_quorum {
             self.sign_and_broadcast(ledger_id).await
         } else {
-            self.sign_last_update(ledger_id)?;
-            if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
-                tracing::warn!("Failed to persist ledger: {}", e);
-            }
-            self.broadcast_last_update(ledger_id).await
+            self.operator_sign_persist_broadcast(ledger_id).await
         };
 
         if let Err(e) = sign_result {
@@ -6769,11 +6849,7 @@ impl Node {
         let sign_result = if has_quorum {
             self.sign_and_broadcast(ledger_id).await
         } else {
-            self.sign_last_update(ledger_id)?;
-            if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
-                tracing::warn!("Failed to persist ledger: {}", e);
-            }
-            self.broadcast_last_update(ledger_id).await
+            self.operator_sign_persist_broadcast(ledger_id).await
         };
 
         if let Err(e) = sign_result {
@@ -6873,11 +6949,7 @@ impl Node {
         if has_quorum {
             self.sign_and_broadcast(ledger_id).await?;
         } else {
-            self.sign_last_update(ledger_id)?;
-            if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
-                tracing::warn!("Failed to persist ledger: {}", e);
-            }
-            self.broadcast_last_update(ledger_id).await?;
+            self.operator_sign_persist_broadcast(ledger_id).await?;
         }
 
         tracing::info!(
@@ -6957,11 +7029,7 @@ impl Node {
         if has_quorum {
             self.sign_and_broadcast(ledger_id).await?;
         } else {
-            self.sign_last_update(ledger_id)?;
-            if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
-                tracing::warn!("Failed to persist ledger: {}", e);
-            }
-            self.broadcast_last_update(ledger_id).await?;
+            self.operator_sign_persist_broadcast(ledger_id).await?;
         }
 
         tracing::info!(
@@ -7039,11 +7107,7 @@ impl Node {
         if has_quorum {
             self.sign_and_broadcast(ledger_id).await?;
         } else {
-            self.sign_last_update(ledger_id)?;
-            if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
-                tracing::warn!("Failed to persist ledger: {}", e);
-            }
-            self.broadcast_last_update(ledger_id).await?;
+            self.operator_sign_persist_broadcast(ledger_id).await?;
         }
 
         tracing::info!(
@@ -7125,11 +7189,7 @@ impl Node {
         if has_quorum {
             self.sign_and_broadcast(ledger_id).await?;
         } else {
-            self.sign_last_update(ledger_id)?;
-            if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
-                tracing::warn!("Failed to persist ledger: {}", e);
-            }
-            self.broadcast_last_update(ledger_id).await?;
+            self.operator_sign_persist_broadcast(ledger_id).await?;
         }
 
         tracing::info!(
@@ -7249,11 +7309,7 @@ impl Node {
         if has_quorum {
             self.sign_and_broadcast(ledger_id).await?;
         } else {
-            self.sign_last_update(ledger_id)?;
-            if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
-                tracing::warn!("Failed to persist ledger: {}", e);
-            }
-            self.broadcast_last_update(ledger_id).await?;
+            self.operator_sign_persist_broadcast(ledger_id).await?;
         }
 
         // Store the withdrawal as locked
@@ -7371,11 +7427,7 @@ impl Node {
         if has_quorum {
             self.sign_and_broadcast(ledger_id).await?;
         } else {
-            self.sign_last_update(ledger_id)?;
-            if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
-                tracing::warn!("Failed to persist ledger: {}", e);
-            }
-            self.broadcast_last_update(ledger_id).await?;
+            self.operator_sign_persist_broadcast(ledger_id).await?;
         }
 
         // Update status
@@ -7725,6 +7777,9 @@ impl Node {
 
         // Sign the update
         self.sign_last_update(ledger_id)?;
+
+        // Validate chain before persisting
+        self.validate_chain_before_persist(ledger_id)?;
 
         // Persist the ledger with the new operation
         if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
