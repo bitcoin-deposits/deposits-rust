@@ -841,10 +841,26 @@ impl Node {
         ) -> Vec<&'a deposits_core::SignedLedgerUpdate> {
             let Some(children) = by_prev.get(&start_hash) else { return Vec::new(); };
             let mut best: Vec<&deposits_core::SignedLedgerUpdate> = Vec::new();
+            let mut best_has_acquire = false;
             for child in children {
                 let mut chain = vec![*child];
                 chain.extend(find_best_chain(by_prev, child.current_hash));
-                if chain.len() > best.len() { best = chain; }
+                let has_acquire = chain.iter().any(|u| {
+                    LedgerOperation::tlv_decode(&u.message)
+                        .map(|op| matches!(op, LedgerOperation::CustodyAcquire { .. }))
+                        .unwrap_or(false)
+                });
+                let is_better = if has_acquire && !best_has_acquire {
+                    true
+                } else if !has_acquire && best_has_acquire {
+                    false
+                } else {
+                    chain.len() > best.len()
+                };
+                if is_better {
+                    best = chain;
+                    best_has_acquire = has_acquire;
+                }
             }
             best
         }
@@ -1264,6 +1280,11 @@ impl Node {
         // Drop updates from non-operators (except CustodyDispute, which any
         // quorum member may publish).  Non-operator writes are never legitimate
         // and must not trigger a dispute — they're just noise.
+        //
+        // Exception: if the ledger is in a non-Normal dispute state and we see
+        // an update from a different key, the operator may have changed via
+        // CustodyAcquire.  Re-import the ledger to pick up the custody transfer,
+        // then re-check.
         {
             let ledger = ledger_arc.read().unwrap();
             let is_from_operator = inbound.update.operator_id == ledger.state.parent_pubkey;
@@ -1273,13 +1294,46 @@ impl Node {
                     .map(|op| matches!(op, deposits_core::messages::LedgerOperation::CustodyDispute { .. }))
                     .unwrap_or(false);
                 if !is_dispute {
-                    tracing::debug!(
-                        "Dropping update seq {} on ledger {}... from non-operator {}...",
-                        inbound.update.sequence_number,
-                        &inbound.ledger_id[..16.min(inbound.ledger_id.len())],
-                        hex::encode(&inbound.update.operator_id.serialize()[..8]),
-                    );
-                    return;
+                    // If the ledger is in a dispute state, the operator may have
+                    // changed (CustodyAcquire).  Re-import and re-check.
+                    let in_dispute = ledger.state.dispute_state
+                        != deposits_core::types::DisputeState::Normal;
+                    drop(ledger);
+
+                    if in_dispute {
+                        tracing::info!(
+                            "Non-operator update on disputed ledger {}... — re-importing to check for custody transfer",
+                            &inbound.ledger_id[..16.min(inbound.ledger_id.len())],
+                        );
+                        let _ = self.reimport_joined_ledger(&inbound.ledger_id).await;
+
+                        // Re-check operator after reimport (re-fetch arc since import may replace it)
+                        let ledgers = self.handler.ledgers.lock().unwrap();
+                        let Some(fresh_arc) = ledgers.get(&inbound.ledger_id) else {
+                            return;
+                        };
+                        let fresh_ledger = fresh_arc.read().unwrap();
+                        let now_from_operator = inbound.update.operator_id == fresh_ledger.state.parent_pubkey;
+                        drop(fresh_ledger);
+                        drop(ledgers);
+                        if !now_from_operator {
+                            tracing::debug!(
+                                "Still non-operator after reimport — dropping update seq {} on ledger {}...",
+                                inbound.update.sequence_number,
+                                &inbound.ledger_id[..16.min(inbound.ledger_id.len())],
+                            );
+                            return;
+                        }
+                        // Operator changed — fall through to continue processing
+                    } else {
+                        tracing::debug!(
+                            "Dropping update seq {} on ledger {}... from non-operator {}...",
+                            inbound.update.sequence_number,
+                            &inbound.ledger_id[..16.min(inbound.ledger_id.len())],
+                            hex::encode(&inbound.update.operator_id.serialize()[..8]),
+                        );
+                        return;
+                    }
                 }
             }
         }
@@ -1611,7 +1665,6 @@ impl Node {
                 ).map_err(|e| Error::Protocol(format!("Failed to append CustodyDispute to fork: {:?}", e)))?;
 
                 // Set parent_pubkey to our key (we now operate this fork branch)
-                // This must be done AFTER CustodyDispute clears the quorum
                 fork_ledger.state.parent_pubkey = our_pubkey;
 
                 // Patch operator_id on the appended update to our pubkey
@@ -2142,7 +2195,7 @@ impl Node {
             .map(|(pk, _)| pk.x_only_public_key().0)
             .collect();
 
-        let recovery_threshold = (recovery_voters.len() + 1) / 2;
+        let recovery_threshold = (recovery_voters.len() / 2) + 1;
 
         // Build the lottery output
         let lottery_builder = LotteryScriptBuilder::new(
@@ -5132,7 +5185,40 @@ impl Node {
         tracing::info!("Processing cosign_update request for ledger {}...",
             &request.ledger_id[..16.min(request.ledger_id.len())]);
 
-        // Refuse to co-sign if the ledger is in a disputed state
+        // Extract sequence_number early — we need it for the freshness check.
+        let sequence_number = match request.params.get("sequence_number").and_then(|v| v.as_u64()) {
+            Some(seq) => seq,
+            None => return (false, None, Some("Missing sequence_number parameter".to_string())),
+        };
+
+        // Freshness check: if our local copy of the operator's ledger is stale
+        // (dispute_state != Normal, or behind the requested sequence), re-import
+        // from Nostr.  This handles custody transfers where the operator changed
+        // via CustodyAcquire and our copy was never updated.
+        {
+            let needs_reimport = {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                if let Some(ledger_arc) = ledgers.get(&request.ledger_id) {
+                    let ledger = ledger_arc.read().unwrap();
+                    let stale_dispute = ledger.state.dispute_state
+                        != deposits_core::types::DisputeState::Normal;
+                    let stale_seq = (ledger.history.len() as u64) < sequence_number;
+                    stale_dispute || stale_seq
+                } else {
+                    false
+                }
+            };
+
+            if needs_reimport {
+                tracing::info!(
+                    "Local copy of ledger {}... is stale — re-importing from Nostr before cosign",
+                    &request.ledger_id[..16.min(request.ledger_id.len())]
+                );
+                let _ = self.reimport_joined_ledger(&request.ledger_id).await;
+            }
+        }
+
+        // Refuse to co-sign if the ledger is (still) in a disputed state
         {
             let ledgers = self.handler.ledgers.lock().unwrap();
             if let Some(ledger_arc) = ledgers.get(&request.ledger_id) {
@@ -5148,12 +5234,6 @@ impl Node {
                 }
             }
         }
-
-        // Extract required parameters
-        let sequence_number = match request.params.get("sequence_number").and_then(|v| v.as_u64()) {
-            Some(seq) => seq,
-            None => return (false, None, Some("Missing sequence_number parameter".to_string())),
-        };
 
         let partner_signing_data_hex = match request.params.get("partner_signing_data_hex").and_then(|v| v.as_str()) {
             Some(hex) => hex.to_string(),
@@ -5262,19 +5342,25 @@ impl Node {
                     continue;
                 }
 
-                // Check if this ledger has a QuorumJoin pointing to the target operator
-                // Scan history because state.joined_quorums may not be populated after deserialization
-                // Compare x-coordinates only (Nostr uses x-only pubkeys, so we can't know the y parity)
+                // Check if this ledger has a QuorumJoin pointing to the target ledger.
+                // Match on ledger_id (stable across custody transfers) rather than
+                // operator pubkey (which changes after CustodyAcquire).
+                // Falls back to operator x-coord match for older QuorumJoin entries.
                 let history_len = ledger.history.len();
                 let has_join = ledger.history.iter().any(|update| {
                     if update.message_type != deposits_core::messages::consts::QUORUM_JOIN {
                         return false;
                     }
-                    if let Ok(LedgerOperation::QuorumJoin { operator_id, .. }) =
+                    if let Ok(LedgerOperation::QuorumJoin { operator_id, ledger_id, .. }) =
                         LedgerOperation::tlv_decode(&update.message)
                     {
+                        // Primary match: ledger_id (stable across custody transfers)
+                        if ledger_id == request.ledger_id {
+                            tracing::debug!("Found QuorumJoin in history matching ledger_id");
+                            return true;
+                        }
+                        // Fallback: operator x-coord match (for pre-custody-transfer joins)
                         if let Some(target_op) = &target_operator_id {
-                            // Compare the x-coordinate (bytes 1-32 of compressed pubkey)
                             let jq_x = &operator_id.serialize()[1..];
                             let target_x = &target_op.serialize()[1..];
                             if jq_x == target_x {
@@ -5368,7 +5454,30 @@ impl Node {
         tracing::info!("Processing cosign_offer request for ledger {}...",
             &request.ledger_id[..16.min(request.ledger_id.len())]);
 
-        // Refuse to co-sign if the ledger is in a disputed state
+        // Freshness check: if our local copy is stale (dispute not resolved),
+        // re-import from Nostr to pick up CustodyAcquire and restore Normal state.
+        {
+            let needs_reimport = {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                if let Some(ledger_arc) = ledgers.get(&request.ledger_id) {
+                    let ledger = ledger_arc.read().unwrap();
+                    ledger.state.dispute_state
+                        != deposits_core::types::DisputeState::Normal
+                } else {
+                    false
+                }
+            };
+
+            if needs_reimport {
+                tracing::info!(
+                    "Local copy of ledger {}... is stale (non-Normal dispute state) — re-importing before cosign_offer",
+                    &request.ledger_id[..16.min(request.ledger_id.len())]
+                );
+                let _ = self.reimport_joined_ledger(&request.ledger_id).await;
+            }
+        }
+
+        // Refuse to co-sign if the ledger is (still) in a disputed state
         {
             let ledgers = self.handler.ledgers.lock().unwrap();
             if let Some(ledger_arc) = ledgers.get(&request.ledger_id) {
@@ -5437,8 +5546,8 @@ impl Node {
         };
 
         // Auto-detect which of OUR ledgers is bound to the requesting ledger.
-        // We look for a ledger where we are the operator AND we have a QuorumJoin
-        // pointing to the target operator.
+        // Match on ledger_id (stable across custody transfers) with fallback
+        // to operator x-coord match.
         let member_ledger_hash: [u8; 32] = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let mut found_hash = None;
@@ -5451,16 +5560,20 @@ impl Node {
                     continue;
                 }
 
-                // Check if this ledger has a QuorumJoin pointing to the target operator
+                // Check if this ledger has a QuorumJoin pointing to the target ledger
                 let has_join = ledger.history.iter().any(|update| {
                     if update.message_type != deposits_core::messages::consts::QUORUM_JOIN {
                         return false;
                     }
-                    if let Ok(LedgerOperation::QuorumJoin { operator_id: join_op, .. }) =
+                    if let Ok(LedgerOperation::QuorumJoin { operator_id: join_op, ledger_id: join_ledger, .. }) =
                         LedgerOperation::tlv_decode(&update.message)
                     {
+                        // Primary match: ledger_id (stable across custody transfers)
+                        if join_ledger == request.ledger_id {
+                            return true;
+                        }
+                        // Fallback: operator x-coord match
                         if let Some(target_op) = &target_operator_id {
-                            // Compare the x-coordinate (bytes 1-32 of compressed pubkey)
                             let jq_x = &join_op.serialize()[1..];
                             let target_x = &target_op.serialize()[1..];
                             if jq_x == target_x {
@@ -7193,6 +7306,8 @@ impl Node {
     /// Check if this ledger has had a reserves rotation to quorum-based Taproot.
     ///
     /// After the first ReservesRotate operation, co-signatures are required for all updates.
+    /// This persists through disputes and custody transfers — the quorum co-signing
+    /// requirement is permanent once rotation occurs.
     fn has_quorum_reserves(&self, ledger_id: &str) -> bool {
         use deposits_core::messages::consts;
 

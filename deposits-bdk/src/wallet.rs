@@ -1087,18 +1087,45 @@ impl Wallet {
     ///
     /// Returns (OutPoint, amount) if found, None if no unspent output exists.
     pub fn find_utxo_for_script(&self, script: &bitcoin::ScriptBuf) -> Result<Option<(OutPoint, u64)>, Error> {
-        let client = EsploraBuilder::new(&self.electrum_url)
-            .build_blocking();
+        use bitcoin::hashes::{sha256, Hash};
 
-        let txs = client
-            .scripthash_txs(script, None)
-            .map_err(|e| Error::Wallet(format!("Failed to query script: {:?}", e)))?;
+        // Compute the scripthash in non-reversed format for esplora API.
+        // The esplora-client library's scripthash_txs uses bitcoin's {:x}
+        // format which is byte-reversed, but electrs expects the non-reversed
+        // SHA256 hash.  Query the API directly instead.
+        let script_hash = sha256::Hash::hash(script.as_bytes());
+        let script_hash_hex = hex::encode(script_hash.to_byte_array());
+
+        let url = format!("{}/scripthash/{}/txs", self.electrum_url, script_hash_hex);
+
+        let http = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| Error::Wallet(format!("Failed to create HTTP client: {}", e)))?;
+
+        let response = http.get(&url)
+            .send()
+            .map_err(|e| Error::Wallet(format!("Failed to query esplora: {}", e)))?;
+
+        if !response.status().is_success() {
+            return Err(Error::Wallet(format!(
+                "Esplora returned status {}: {}",
+                response.status(),
+                response.text().unwrap_or_else(|_| "unknown error".to_string())
+            )));
+        }
+
+        let txs: Vec<bdk_esplora::esplora_client::Tx> = response.json()
+            .map_err(|e| Error::Wallet(format!("Failed to parse esplora response: {}", e)))?;
+
+        let esplora = EsploraBuilder::new(&self.electrum_url)
+            .build_blocking();
 
         for tx in &txs {
             for (vout, output) in tx.vout.iter().enumerate() {
                 if &output.scriptpubkey == script {
                     let outpoint = OutPoint::new(tx.txid, vout as u32);
-                    let status = client
+                    let status = esplora
                         .get_output_status(&tx.txid, vout as u64)
                         .map_err(|e| Error::Wallet(format!("Failed to check output: {:?}", e)))?;
                     if status.map(|s| !s.spent).unwrap_or(true) {

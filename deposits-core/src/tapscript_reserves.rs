@@ -764,20 +764,28 @@ impl LotteryScriptBuilder {
         // For n=2: mod 2 = AND 1
         // For n=3: use conditional subtraction
         // For n=4: mod 4 = AND 3
+        // NOTE: OP_AND (0x84) and OP_OR (0x85) are OP_SUCCESS in Tapscript,
+        // so we CANNOT use bitwise AND for mod 2/4.  Use conditional
+        // subtraction (same approach as mod 3) for all cases.
         match n {
             2 => {
-                // mod 2 = value & 1
-                builder = builder.push_int(1);
-                builder = builder.push_opcode(OP_AND);
+                // mod 2 via conditional subtraction.
+                // Sum range for 2 participants: 2..8.  Repeatedly subtract 2.
+                // Max iterations: 8/2 = 4 (sum 8 → 6 → 4 → 2 → 0).
+                for _ in 0..4 {
+                    builder = builder.push_opcode(OP_DUP);
+                    builder = builder.push_int(2);
+                    builder = builder.push_opcode(OP_GREATERTHANOREQUAL);
+                    builder = builder.push_opcode(OP_IF);
+                    builder = builder.push_int(2);
+                    builder = builder.push_opcode(OP_SUB);
+                    builder = builder.push_opcode(OP_ENDIF);
+                }
             }
             3 => {
-                // mod 3: if sum >= 9, subtract 9; if sum >= 6, subtract 6; if sum >= 3, subtract 3
-                // Sum range for 3 participants with contributions 1-4: 3 to 12
-                // We repeatedly subtract 3 until result < 3
-                // DUP 9 GREATERTHANOREQUAL IF 9 SUB ENDIF
-                // DUP 6 GREATERTHANOREQUAL IF 6 SUB ENDIF  (but value might now be < 6)
-                // Actually simpler: DUP 3 >= IF 3 - DUP 3 >= IF 3 - DUP 3 >= IF 3 - ENDIF ENDIF ENDIF
-                // Max value is 12, so we need at most 4 subtractions
+                // mod 3 via conditional subtraction.
+                // Sum range for 3 participants: 3..12.  Repeatedly subtract 3.
+                // Max iterations: 12/3 = 4.
                 for _ in 0..4 {
                     builder = builder.push_opcode(OP_DUP);
                     builder = builder.push_int(3);
@@ -789,9 +797,18 @@ impl LotteryScriptBuilder {
                 }
             }
             4 => {
-                // mod 4 = value & 3
-                builder = builder.push_int(3);
-                builder = builder.push_opcode(OP_AND);
+                // mod 4 via conditional subtraction.
+                // Sum range for 4 participants: 4..16.  Repeatedly subtract 4.
+                // Max iterations: 16/4 = 4.
+                for _ in 0..4 {
+                    builder = builder.push_opcode(OP_DUP);
+                    builder = builder.push_int(4);
+                    builder = builder.push_opcode(OP_GREATERTHANOREQUAL);
+                    builder = builder.push_opcode(OP_IF);
+                    builder = builder.push_int(4);
+                    builder = builder.push_opcode(OP_SUB);
+                    builder = builder.push_opcode(OP_ENDIF);
+                }
             }
             _ => {
                 return Err(DepositsError::InvalidState(

@@ -1378,17 +1378,21 @@ impl Ledger {
             }
             LedgerOperation::CustodyDispute { last_valid_sequence, .. } => {
                 // Opening a custody dispute:
-                // 1. Snapshot the current quorum for later verification
-                // 2. Disband the quorum (clear memberships)
-                // 3. Void all collateral attestations
-                // 4. Record the fork point
-                // 5. Transition to DISPUTED state
+                // 1. Snapshot the current quorum for reference
+                // 2. Void collateral attestations (must be re-attested before arming)
+                // 3. Record the fork point
+                // 4. Transition to DISPUTED state
+                //
+                // The quorum is NOT disbanded — existing members continue
+                // co-signing updates throughout the dispute process and
+                // persist through CustodyAcquire for the new custodian.
+                // Attestations are cleared because the new custodian must
+                // collect fresh proofs before publishing CustodyArmed.
                 //
                 // Note: The parent_pubkey (dispute opener) is set by the caller
                 // after signature verification.
                 self.state.quorum_at_fork = self.state.quorum_members.clone();
                 self.state.dispute_fork_sequence = *last_valid_sequence;
-                self.state.quorum_members.clear();
                 self.state.collateral_attestations.clear();
                 self.state.dispute_state = DisputeState::Disputed;
             }

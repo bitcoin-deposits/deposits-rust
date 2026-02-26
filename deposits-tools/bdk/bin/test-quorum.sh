@@ -393,14 +393,14 @@ generate_deposit_keys() {
 open_cross_deposits() {
     log_info ""
     log_info "=== Phase 4b: Open Cross-Deposits via Nostr ==="
-    log_info "(Each depositor requests a deposit on each operator's ledger)"
+    log_info "(Each depositor requests a deposit on each operator's ledger — parallel)"
     echo ""
 
-    # For each depositor, request deposits on OTHER operators' ledgers
+    # Fire all 6 deposit_open requests in parallel (all independent)
+    local pids=()
     for depositor in $OPERATORS; do
         for operator in $OPERATORS; do
             if [ "$depositor" != "$operator" ]; then
-                # Get depositor's pubkey for this specific (depositor, operator) pair
                 local pubkey=$(get_value "pubkey_${depositor}_${operator}")
                 local ledger_id=$(get_value "ledger_id_$operator")
                 local dep_short=$(echo "$depositor" | sed 's/bdk-//')
@@ -408,15 +408,37 @@ open_cross_deposits() {
 
                 log_info "$dep_short requesting deposit on $op_short's ledger (${pubkey:0:12}...)"
 
-                # DEPOSITOR sends request to OPERATOR's ledger via Nostr
-                local open_output=$(run_nostr_request "$depositor" "$ledger_id" deposit_open "$pubkey" 2>&1)
+                (
+                    local result_file="$STATE_DIR/open_${depositor}_${operator}.result"
+                    local open_output=$(run_nostr_request "$depositor" "$ledger_id" deposit_open "$pubkey" 2>&1)
+                    if echo "$open_output" | grep -q "SUCCESS\|deposit_pubkey"; then
+                        echo "PASS" > "$result_file"
+                    else
+                        echo "FAIL" > "$result_file"
+                        echo "$open_output" > "${result_file}.output"
+                    fi
+                ) &
+                pids+=($!)
+            fi
+        done
+    done
 
-                if echo "$open_output" | grep -q "SUCCESS\|deposit_pubkey"; then
+    # Wait for all background deposit_open requests
+    for pid in "${pids[@]}"; do
+        wait "$pid" 2>/dev/null
+    done
+
+    # Collect results
+    for depositor in $OPERATORS; do
+        for operator in $OPERATORS; do
+            if [ "$depositor" != "$operator" ]; then
+                local result_file="$STATE_DIR/open_${depositor}_${operator}.result"
+                if [ -f "$result_file" ] && [ "$(cat "$result_file")" = "PASS" ]; then
                     test_pass "$depositor opened deposit on $operator via Nostr"
                     store_value "deposit_${depositor}_on_${operator}" "1"
                 else
                     test_fail "$depositor failed to open deposit on $operator"
-                    echo "    Output: $open_output"
+                    [ -f "${result_file}.output" ] && echo "    Output: $(cat "${result_file}.output")"
                 fi
             fi
         done
@@ -570,51 +592,77 @@ lock_collateral() {
     local deposit_amount=$((RESERVES_AMOUNT * DEPOSIT_PERCENT / 100))
     local deposit_amount_msats=$((deposit_amount * 1000))
 
+    # Run each depositor's locks in parallel (3-way), but sequential within
+    # each depositor to avoid concurrent writes to the same local ledger.
+    local pids=()
     for depositor in $OPERATORS; do
-        for operator in $OPERATORS; do
-            local has_deposit=$(get_value "deposit_${depositor}_on_${operator}")
-            if [ "$depositor" != "$operator" ] && [ "$has_deposit" = "1" ]; then
-                # Get the specific secret for this (depositor, operator) pair
-                local secret=$(get_value "secret_${depositor}_${operator}")
-                local ledger_id=$(get_value "ledger_id_$operator")
-                local depositor_ledger_id=$(get_value "ledger_id_$depositor")
-                local depositor_node_id=$(get_value "node_id_$depositor")
-                local dep_short=$(echo "$depositor" | sed 's/bdk-//')
-                local op_short=$(echo "$operator" | sed 's/bdk-//')
+        (
+            for operator in $OPERATORS; do
+                local has_deposit=$(get_value "deposit_${depositor}_on_${operator}")
+                if [ "$depositor" != "$operator" ] && [ "$has_deposit" = "1" ]; then
+                    local secret=$(get_value "secret_${depositor}_${operator}")
+                    local ledger_id=$(get_value "ledger_id_$operator")
+                    local depositor_ledger_id=$(get_value "ledger_id_$depositor")
+                    local depositor_node_id=$(get_value "node_id_$depositor")
+                    local dep_short=$(echo "$depositor" | sed 's/bdk-//')
+                    local op_short=$(echo "$operator" | sed 's/bdk-//')
+                    local result_file="$STATE_DIR/lock_${depositor}_${operator}.result"
 
-                log_info "$dep_short requesting collateral lock on $op_short's ledger..."
+                    log_info "$dep_short requesting collateral lock on $op_short's ledger..."
 
-                # Depositor requests collateral lock via Nostr
-                # collateral_lock params: <secret> <amount_msats> <lock_blocks> [requesting_operator]
-                local lock_output=$(run_nostr_request "$depositor" "$ledger_id" collateral_lock "$secret" "$deposit_amount_msats" "$COLLATERAL_LOCK_BLOCKS" "$depositor_node_id" 2>&1)
+                    local lock_output=$(run_nostr_request "$depositor" "$ledger_id" collateral_lock "$secret" "$deposit_amount_msats" "$COLLATERAL_LOCK_BLOCKS" "$depositor_node_id" 2>&1)
 
-                if echo "$lock_output" | grep -q "SUCCESS\|attestation"; then
-                    # Extract base64-encoded attestation from response
-                    # The response contains "attestation_b64": "base64string"
-                    local attestation_b64=$(echo "$lock_output" | grep -o '"attestation_b64"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/"attestation_b64"[[:space:]]*:[[:space:]]*"//' | sed 's/"$//')
+                    if echo "$lock_output" | grep -q "SUCCESS\|attestation"; then
+                        local attestation_b64=$(echo "$lock_output" | grep -o '"attestation_b64"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/"attestation_b64"[[:space:]]*:[[:space:]]*"//' | sed 's/"$//')
 
-                    if [ -n "$attestation_b64" ]; then
-                        # Decode base64 to get the JSON
-                        local attestation_json=$(echo "$attestation_b64" | base64 -d 2>/dev/null)
+                        if [ -n "$attestation_b64" ]; then
+                            local attestation_json=$(echo "$attestation_b64" | base64 -d 2>/dev/null)
 
-                        # Depositor records the attestation on their own ledger (local CLI)
-                        # Use ledger_id instead of reserves_id since reserves_key changes after rotation
-                        log_info "  $dep_short recording attestation from $op_short..."
-                        local record_output=$(run_bdk_cmd "$depositor" collateral record "$depositor_ledger_id" "$attestation_json" 2>&1)
+                            log_info "  $dep_short recording attestation from $op_short..."
+                            local record_output=$(run_bdk_cmd "$depositor" collateral record "$depositor_ledger_id" "$attestation_json" 2>&1)
 
-                        if echo "$record_output" | grep -q "recorded\|Collateral attestation"; then
-                            test_pass "$dep_short: locked on $op_short via Nostr, attestation recorded"
+                            if echo "$record_output" | grep -q "recorded\|Collateral attestation"; then
+                                echo "PASS:locked and recorded" > "$result_file"
+                            else
+                                echo "FAIL:locked but attestation not recorded" > "$result_file"
+                                echo "$record_output" > "${result_file}.output"
+                            fi
                         else
-                            test_fail "$dep_short: locked but attestation not recorded"
-                            log_warn "    Record output: $record_output"
+                            echo "FAIL:locked but no attestation in response" > "$result_file"
+                            echo "$lock_output" > "${result_file}.output"
                         fi
                     else
-                        test_fail "$dep_short: locked but no attestation in response"
-                        echo "    Lock output: $lock_output"
+                        echo "FAIL:failed to lock" > "$result_file"
+                        echo "$lock_output" > "${result_file}.output"
                     fi
-                else
-                    test_fail "$dep_short failed to lock on $op_short via Nostr"
-                    echo "    Output: $lock_output"
+                fi
+            done
+        ) &
+        pids+=($!)
+    done
+
+    # Wait for all depositors
+    for pid in "${pids[@]}"; do
+        wait "$pid" 2>/dev/null
+    done
+
+    # Collect results
+    for depositor in $OPERATORS; do
+        for operator in $OPERATORS; do
+            if [ "$depositor" != "$operator" ]; then
+                local dep_short=$(echo "$depositor" | sed 's/bdk-//')
+                local op_short=$(echo "$operator" | sed 's/bdk-//')
+                local result_file="$STATE_DIR/lock_${depositor}_${operator}.result"
+
+                if [ -f "$result_file" ]; then
+                    local result=$(cat "$result_file")
+                    if echo "$result" | grep -q "^PASS"; then
+                        test_pass "$dep_short: locked on $op_short via Nostr, attestation recorded"
+                    else
+                        local reason=$(echo "$result" | sed 's/^FAIL://')
+                        test_fail "$dep_short: $reason"
+                        [ -f "${result_file}.output" ] && log_warn "    Output: $(cat "${result_file}.output")"
+                    fi
                 fi
             fi
         done
@@ -992,31 +1040,41 @@ test_automated_dispute() {
         log_warn "Post-win rotation not completed (may need more blocks or manual rotation)"
     fi
 
-    # Determine the winner by checking which node has the CustodyAcquire
+    # Determine the winner by checking which node's rotation marker says "rotated"
+    # (Winners write "rotated", losers write "not_winner")
     log_info ""
     log_info "Determining lottery winner..."
     local selected_candidate=""
 
-    # Check Bob's fork history for CustodyAcquire
-    local bob_history=$(run_bdk_cmd "bdk-bob" ledger history "$alice_ledger_id" 2>&1)
-    if echo "$bob_history" | grep -q "CustodyAcquire"; then
-        selected_candidate="bdk-bob"
-    fi
+    local bob_rotated_content=$(docker exec bdk-bob sh -c "cat /data/lottery_rotated_${alice_prefix}*.marker 2>/dev/null" 2>/dev/null)
+    local charlie_rotated_content=$(docker exec bdk-charlie sh -c "cat /data/lottery_rotated_${alice_prefix}*.marker 2>/dev/null" 2>/dev/null)
 
-    # Check Charlie's fork history for CustodyAcquire
-    if [ -z "$selected_candidate" ]; then
-        local charlie_history=$(run_bdk_cmd "bdk-charlie" ledger history "$alice_ledger_id" 2>&1)
-        if echo "$charlie_history" | grep -q "CustodyAcquire"; then
-            selected_candidate="bdk-charlie"
-        fi
+    if [ "$bob_rotated_content" = "rotated" ]; then
+        selected_candidate="bdk-bob"
+    elif [ "$charlie_rotated_content" = "rotated" ]; then
+        selected_candidate="bdk-charlie"
     fi
 
     if [ -n "$selected_candidate" ]; then
         test_pass "lottery winner: $selected_candidate"
     else
-        # Fallback: check lottery_completed marker contents
-        log_warn "Could not determine winner from ledger history, defaulting to bdk-bob"
-        selected_candidate="bdk-bob"
+        # Fallback: check ledger history for CustodyAcquire
+        local bob_history=$(run_bdk_cmd "bdk-bob" ledger history "$alice_ledger_id" 2>&1)
+        if echo "$bob_history" | grep -q "CustodyAcquire"; then
+            selected_candidate="bdk-bob"
+        fi
+        if [ -z "$selected_candidate" ]; then
+            local charlie_history=$(run_bdk_cmd "bdk-charlie" ledger history "$alice_ledger_id" 2>&1)
+            if echo "$charlie_history" | grep -q "CustodyAcquire"; then
+                selected_candidate="bdk-charlie"
+            fi
+        fi
+        if [ -n "$selected_candidate" ]; then
+            test_pass "lottery winner (from history): $selected_candidate"
+        else
+            log_warn "Could not determine winner, defaulting to bdk-bob"
+            selected_candidate="bdk-bob"
+        fi
     fi
 
     # Store for Phase 11
@@ -1322,21 +1380,14 @@ cleanup_nostr_watchers() {
     done
 }
 
-# Reset Nostr relay data to avoid conflicts with previous test runs
-reset_nostr_data() {
-    log_info "Resetting Nostr relay data..."
-    # Stop and remove Nostr relay container and volume
-    $DC stop nostr-relay >/dev/null 2>&1 || true
-    $DC rm -f nostr-relay >/dev/null 2>&1 || true
-    docker volume rm bdk_bdk_nostr_data >/dev/null 2>&1 || true
-    # Also clear BDK node data to avoid stale ledgers (include diana — used as depositor in Phase 11)
-    $DC stop bdk-alice bdk-bob bdk-charlie bdk-diana >/dev/null 2>&1 || true
-    $DC rm -f bdk-alice bdk-bob bdk-charlie bdk-diana >/dev/null 2>&1 || true
-    docker volume rm bdk_bdk_alice_data bdk_bdk_bob_data bdk_bdk_charlie_data bdk_bdk_diana_data >/dev/null 2>&1 || true
-    # Restart services
-    $DC up -d nostr-relay bdk-alice bdk-bob bdk-charlie bdk-diana >/dev/null 2>&1
-    sleep 5  # Wait for services to be ready
-    log_success "Nostr relay and BDK nodes reset"
+# Clear deposits-wallet alias data from previous test runs.
+# Keeps nodes, ledgers, BDK wallet, and relay intact.
+reset_wallet_aliases() {
+    log_info "Clearing deposits-wallet aliases..."
+    for container in bdk-alice bdk-bob bdk-charlie bdk-diana; do
+        docker exec "$container" sh -c 'rm -f /data/wallet/deposits.json /data/wallet/deposit_key_index.txt ~/.deposits-wallet/deposits.json ~/.deposits-wallet/deposit_key_index.txt' 2>/dev/null || true
+    done
+    log_success "Wallet aliases cleared"
 }
 
 main() {
@@ -1354,8 +1405,8 @@ main() {
     # Ensure watchers are stopped on exit
     trap cleanup_nostr_watchers EXIT
 
-    # Reset data from previous runs
-    reset_nostr_data
+    # Clear stale wallet aliases from previous runs
+    reset_wallet_aliases
 
     setup_operators
     create_reserves
