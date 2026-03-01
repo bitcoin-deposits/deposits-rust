@@ -56,6 +56,7 @@
 pub mod channel_manager_ops;
 pub mod constants;
 pub mod error;
+pub mod event_store;
 pub mod handler;
 pub mod handler_traits;
 pub mod handler_types;

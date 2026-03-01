@@ -69,3 +69,12 @@ scrape_configs:
           - 'host.docker.internal:9200'
         labels:
           cluster: 'bdk-regtest'
+
+  # strfry Nostr relay exporter (runs on host, exposes metrics on port 9201)
+  - job_name: 'strfry-relay'
+    scrape_interval: 10s
+    static_configs:
+      - targets:
+          - 'host.docker.internal:9201'
+        labels:
+          cluster: 'bdk-regtest'

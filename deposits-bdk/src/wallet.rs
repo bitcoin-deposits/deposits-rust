@@ -672,7 +672,11 @@ impl Wallet {
         threshold: usize,
     ) -> Result<ReservesOutput, Error> {
         let current_height = self.get_block_height()?;
-        let timeout_height = current_height + RESERVES_TIMEOUT_BLOCKS;
+        // Offset timeout by number of existing reserves so each has a unique
+        // redeem script (and thus unique P2WSH address) even when created at the
+        // same block height.
+        let existing_count = self.reserves.read().unwrap().len() as u32;
+        let timeout_height = current_height + RESERVES_TIMEOUT_BLOCKS + existing_count;
 
         // Build the redeem script
         let redeem_script = Self::build_reserves_script(

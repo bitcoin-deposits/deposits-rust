@@ -1023,6 +1023,10 @@ pub struct LedgerState {
     pub operator_key: PublicKey,
     /// Reserves identifier (UTXO address for BDK, partner pubkey string for LDK).
     pub reserves_key: String,
+    /// Reserves outpoint ("txid:vout") that backs this ledger.
+    /// Used to distinguish reserves when multiple share the same P2WSH address.
+    #[serde(default)]
+    pub reserves_outpoint: Option<String>,
     /// Ledger address (as string).
     pub ledger_address: String,
     /// All deposits in this ledger, keyed by deposit_id.
@@ -1163,6 +1167,7 @@ impl LedgerState {
             genesis_block,
             operator_key,
             reserves_key,
+            reserves_outpoint: None,
             ledger_address,
             deposits: HashMap::new(),
             reserves: ReservesOutput::default(),

@@ -1502,6 +1502,78 @@ impl NostrTransport {
         Ok(updates)
     }
 
+    /// Fetch a single ledger update by sequence number from the relay.
+    /// Filters by `#d` (ledger_id) relay-side, then by seq client-side
+    /// (multi-char tags like "seq" aren't filterable in standard NIP-01).
+    pub async fn fetch_ledger_update_by_seq(
+        &self,
+        ledger_id: &str,
+        seq: u64,
+    ) -> Result<Option<deposits_core::SignedLedgerUpdate>, Error> {
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+
+        let filter = Filter::new()
+            .kind(Kind::Custom(KIND_LEDGER_UPDATE))
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::D),
+                [ledger_id],
+            );
+
+        let events = self.client
+            .fetch_events(vec![filter], Some(std::time::Duration::from_secs(5)))
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to fetch update seq {}: {}", seq, e)))?;
+
+        for event in events.iter() {
+            if let Ok(bytes) = BASE64.decode(&event.content) {
+                if let Ok(update) = deposits_core::SignedLedgerUpdate::tlv_decode(&bytes) {
+                    if update.sequence_number == seq {
+                        return Ok(Some(update));
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Fetch a range of ledger updates [from_seq, to_seq] from the relay.
+    /// Filters by `#d` (ledger_id) relay-side, then by seq range client-side.
+    pub async fn fetch_ledger_updates_range(
+        &self,
+        ledger_id: &str,
+        from_seq: u64,
+        to_seq: u64,
+    ) -> Result<Vec<deposits_core::SignedLedgerUpdate>, Error> {
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+
+        let filter = Filter::new()
+            .kind(Kind::Custom(KIND_LEDGER_UPDATE))
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::D),
+                [ledger_id],
+            );
+
+        let events = self.client
+            .fetch_events(vec![filter], Some(std::time::Duration::from_secs(10)))
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to fetch updates range: {}", e)))?;
+
+        let mut updates = Vec::new();
+        for event in events.iter() {
+            if let Ok(bytes) = BASE64.decode(&event.content) {
+                if let Ok(update) = deposits_core::SignedLedgerUpdate::tlv_decode(&bytes) {
+                    if update.sequence_number >= from_seq && update.sequence_number <= to_seq {
+                        updates.push(update);
+                    }
+                }
+            }
+        }
+
+        updates.sort_by_key(|u| u.sequence_number);
+        Ok(updates)
+    }
+
     /// Subscribe to ledger requests for a specific ledger (for operators)
     /// Uses relay-side #l tag filtering to only receive events for this ledger,
     /// dramatically reducing bandwidth (from ALL requests to just ~25% per ledger).
@@ -1863,6 +1935,7 @@ impl NostrTransport {
                     match rx.try_recv() {
                         Ok(notification) => self.handle_notification(notification),
                         Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
+                            crate::metrics::record_broadcast_lag("daemon_drain", n);
                             tracing::warn!("Daemon notification receiver lagged by {} events", n);
                         }
                         Err(_) => break,
@@ -1870,6 +1943,7 @@ impl NostrTransport {
                 }
             }
             Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
+                crate::metrics::record_broadcast_lag("daemon_recv", n);
                 tracing::warn!("Daemon notification receiver lagged by {} events, re-syncing", n);
                 // After lag, drain what we can
                 loop {
@@ -1940,6 +2014,35 @@ impl NostrTransport {
     /// Use in the cosign mini loop after receiving from a notification_receiver.
     pub fn dispatch_notification(&self, notification: RelayPoolNotification) {
         self.handle_notification(notification);
+    }
+
+    /// Dispatch a notification but intercept Kind 9101 requests matching `extract_action`.
+    ///
+    /// If the notification is a request with the given action, it is parsed and
+    /// returned directly (never enters request_rx). All other notifications —
+    /// including non-matching requests — are dispatched to channels normally.
+    ///
+    /// This lets cosign mini loops handle requests inline from the notification
+    /// stream, eliminating the re-queue amplification problem where cosign
+    /// requests get buried behind non-cosign requests in request_rx.
+    pub fn dispatch_or_extract_request(&self, notification: RelayPoolNotification, extract_action: &str) -> Option<LedgerRequest> {
+        if let RelayPoolNotification::Event { ref event, .. } = &notification {
+            let kind_num = event.kind.as_u16();
+            if kind_num == KIND_LEDGER_REQUEST {
+                if let Ok(request) = self.process_ledger_request(event) {
+                    if request.action == extract_action {
+                        // Return directly — never enters request_rx
+                        return Some(request);
+                    }
+                    // Non-matching request: route to channel as normal
+                    let _ = self.request_tx.send(request);
+                }
+                return None;
+            }
+        }
+        // Everything else (updates, responses, disputes, DMs): normal dispatch
+        self.handle_notification(notification);
+        None
     }
 
     /// Handle a single notification

@@ -11,6 +11,7 @@
 
 use bitcoin::secp256k1::{PublicKey, SecretKey};
 use deposits_core::error::HandlerError;
+use deposits_core::event_store::EventStore;
 use deposits_core::ledger::Ledger;
 use deposits_core::types::{SignedLedgerUpdate, LedgerState};
 use deposits_core::ledger::LedgerRole;
@@ -103,6 +104,10 @@ pub struct DepositsHandler {
     /// Tracks last-seen modification times for ledger JSONL files.
     /// Used to avoid re-parsing files that haven't changed.
     last_file_modtimes: Mutex<HashMap<String, std::time::SystemTime>>,
+
+    /// Content-addressed event store for ledger sync.
+    /// Events are indexed by current_hash with memoized validation.
+    pub event_store: Mutex<EventStore>,
 }
 
 impl DepositsHandler {
@@ -135,6 +140,25 @@ impl DepositsHandler {
             Mutex::new(counts)
         };
 
+        // Populate event store from loaded ledger histories
+        let event_store = {
+            let mut store = EventStore::new();
+            for (_id, arc) in &ledgers {
+                let ledger = arc.read().unwrap();
+                for update in &ledger.history {
+                    store.insert(update.clone());
+                }
+            }
+            if !store.is_empty() {
+                tracing::info!(
+                    "Event store initialized: {} events, {} unknown",
+                    store.len(),
+                    store.unknown_count(),
+                );
+            }
+            Mutex::new(store)
+        };
+
         let handler = Self {
             our_node_id,
             secret_key,
@@ -146,6 +170,7 @@ impl DepositsHandler {
             enable_metrics_emitter,
             persisted_update_counts,
             last_file_modtimes: Mutex::new(HashMap::new()),
+            event_store,
         };
 
         (handler, outbound_rx)
@@ -612,6 +637,7 @@ impl DepositsHandler {
 
         let mut ledgers = self.ledgers.lock().unwrap();
         let mut counts = self.persisted_update_counts.lock().unwrap();
+        let mut new_updates: Vec<SignedLedgerUpdate> = Vec::new();
 
         for (ledger_id, disk_arc) in disk_ledgers {
             let disk_ledger = disk_arc.read().unwrap();
@@ -626,20 +652,47 @@ impl DepositsHandler {
                         mem_len,
                         disk_len
                     );
+                    // Collect new updates for event store (only those beyond mem_len)
+                    for update in disk_ledger.history.iter().skip(mem_len) {
+                        new_updates.push(update.clone());
+                    }
                     ledgers.insert(ledger_id.clone(), Arc::new(RwLock::new(disk_ledger.clone())));
                     counts.insert(ledger_id.clone(), disk_len);
                     changes += 1;
                 }
             } else {
-                // New ledger
+                // New ledger — all updates are new
                 tracing::info!(
                     "Discovered new ledger {}... ({} entries)",
                     &ledger_id[..16.min(ledger_id.len())],
                     disk_len
                 );
+                for update in &disk_ledger.history {
+                    new_updates.push(update.clone());
+                }
                 ledgers.insert(ledger_id.clone(), Arc::new(RwLock::new(disk_ledger.clone())));
                 counts.insert(ledger_id.clone(), disk_len);
                 changes += 1;
+            }
+        }
+
+        drop(counts);
+        drop(ledgers);
+
+        // Insert discovered updates into event store (outside ledgers lock)
+        if !new_updates.is_empty() {
+            let mut store = self.event_store.lock().unwrap();
+            let mut inserted = 0usize;
+            for update in new_updates {
+                if store.insert(update) {
+                    inserted += 1;
+                }
+            }
+            if inserted > 0 {
+                tracing::debug!(
+                    "Event store: +{} events from disk (total {}, {} unknown)",
+                    inserted, store.len(), store.unknown_count(),
+                );
             }
         }
 
@@ -707,14 +760,39 @@ impl DepositsHandler {
         operator: PublicKey,
         reserves_address: String,
     ) -> Arc<RwLock<Ledger>> {
+        self.get_or_create_ledger_with_outpoint(operator, reserves_address, None, None)
+    }
+
+    /// Get or create a ledger with a specific reserves balance and outpoint.
+    ///
+    /// If `reserves_balance` is Some, use that for the ReservesIncrease operation
+    /// instead of the total wallet reserves balance.
+    ///
+    /// If `outpoint` is Some, include it in the ledger_id computation so multiple
+    /// reserves with the same address produce distinct ledger IDs.
+    pub fn get_or_create_ledger_with_outpoint(
+        &self,
+        operator: PublicKey,
+        reserves_address: String,
+        specific_reserves_balance: Option<u64>,
+        outpoint: Option<String>,
+    ) -> Arc<RwLock<Ledger>> {
         use deposits_core::types::LedgerState;
 
         // Get current block height for genesis_block
         let genesis_block = self.wallet.get_block_height().unwrap_or(0);
 
-        // Compute ledger_id from genesis parameters
-        let ledger_id_bytes = LedgerState::compute_ledger_id(&operator, &reserves_address, genesis_block);
-        let ledger_id = hex::encode(ledger_id_bytes);
+        // Compute ledger_id from genesis parameters.
+        // When an outpoint is provided, include it in the computation so that
+        // multiple reserves with the same address produce distinct ledger IDs.
+        let ledger_id = if let Some(ref op) = outpoint {
+            let combined = format!("{}#{}", reserves_address, op);
+            let id_bytes = LedgerState::compute_ledger_id(&operator, &combined, genesis_block);
+            hex::encode(id_bytes)
+        } else {
+            let id_bytes = LedgerState::compute_ledger_id(&operator, &reserves_address, genesis_block);
+            hex::encode(id_bytes)
+        };
 
         let mut ledgers = self.ledgers.lock().unwrap();
         let is_new = !ledgers.contains_key(&ledger_id);
@@ -739,8 +817,9 @@ impl DepositsHandler {
 
         // If we created a new ledger for ourselves, add initial operations
         if is_new && operator == self.our_node_id {
-            // Get reserves balance from wallet
-            let reserves_balance = self.wallet.get_reserves_balance().unwrap_or(0);
+            // Get reserves balance — use specific amount if provided, else total wallet balance
+            let reserves_balance = specific_reserves_balance
+                .unwrap_or_else(|| self.wallet.get_reserves_balance().unwrap_or(0));
 
             // Add LedgerOpen operation
             {
@@ -825,6 +904,13 @@ impl DepositsHandler {
         }
 
         best_seq.map(|s| (s, best_hash))
+    }
+
+    /// Insert a signed ledger update into the event store.
+    /// Returns true if the event was new (not a duplicate).
+    pub fn insert_event(&self, update: &SignedLedgerUpdate) -> bool {
+        let mut store = self.event_store.lock().unwrap();
+        store.insert(update.clone())
     }
 
     /// Persist a specific ledger to disk using append-only strategy.

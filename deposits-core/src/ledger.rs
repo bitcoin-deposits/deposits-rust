@@ -1135,31 +1135,19 @@ impl Ledger {
                 // Winner validation is done via validate_custody_resolution()
                 // which requires knowing all candidates (from Nostr observation)
             }
-            LedgerOperation::CollateralAttestation { collateral_operator, collateral_ledger_id, .. } => {
-                // Verify the collateral_operator is a quorum member and their ledger_id matches
-                // The collateral_operator is the one providing collateral backing (must be a quorum member)
-                let member = self.state.quorum_members.iter().find(|m| m.pubkey == *collateral_operator);
-                match member {
-                    Some(m) => {
-                        if &m.ledger_id != collateral_ledger_id {
-                            return Err(DepositsError::ProtocolViolation {
-                                violation_type: "collateral_ledger_mismatch".to_string(),
-                                details: format!(
-                                    "Attestation collateral_ledger_id {} doesn't match member's registered ledger {}",
-                                    collateral_ledger_id, m.ledger_id
-                                ),
-                            });
-                        }
-                    }
-                    None => {
-                        return Err(DepositsError::ProtocolViolation {
-                            violation_type: "collateral_attestation_from_non_member".to_string(),
-                            details: format!(
-                                "Attestation from {} who is not a quorum member",
-                                collateral_operator
-                            ),
-                        });
-                    }
+            LedgerOperation::CollateralAttestation { collateral_operator, .. } => {
+                // Verify the collateral_operator is a quorum member.
+                // Collateral ties two operators across any number of ledgers,
+                // so we only check membership — not which specific ledger the
+                // collateral was locked on.
+                if !self.state.quorum_members.iter().any(|m| m.pubkey == *collateral_operator) {
+                    return Err(DepositsError::ProtocolViolation {
+                        violation_type: "collateral_attestation_from_non_member".to_string(),
+                        details: format!(
+                            "Attestation from {} who is not a quorum member",
+                            collateral_operator
+                        ),
+                    });
                 }
             }
             _ => {

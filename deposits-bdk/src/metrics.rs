@@ -132,6 +132,44 @@ fn describe_metrics() {
         "Number of history entries (sequence number) per ledger"
     );
 
+    // Event store metrics
+    describe_gauge!(
+        "event_store_events_total",
+        "Total events in the content-addressed event store"
+    );
+    describe_gauge!(
+        "event_store_unknown_events",
+        "Events with Unknown validity (parent missing or unvalidated)"
+    );
+    describe_counter!(
+        "event_store_inserts_total",
+        "Total events inserted into event store, labeled by validity outcome"
+    );
+    describe_counter!(
+        "event_store_gap_fills_total",
+        "Total gap-fill attempts, labeled by outcome (success/partial/failed)"
+    );
+    describe_histogram!(
+        "event_store_gap_fill_duration_seconds",
+        "Time to complete a gap-fill fetch from relay"
+    );
+    describe_counter!(
+        "ledger_update_received_total",
+        "Total ledger updates received via Nostr, labeled by result (valid/unknown/duplicate)"
+    );
+    describe_counter!(
+        "cosign_freshness_recovery_total",
+        "Cosign freshness recovery attempts, labeled by outcome (recovered/stale/gap_filled)"
+    );
+    describe_gauge!(
+        "event_store_validated_tip",
+        "Highest validated sequence number per ledger in event store"
+    );
+    describe_gauge!(
+        "stale_joined_ledgers",
+        "Number of joined ledgers with detected gaps awaiting background fill"
+    );
+
     // Deposit balance metrics
     describe_gauge!(
         "deposit_reserves_balance_sats",
@@ -156,6 +194,56 @@ fn describe_metrics() {
     describe_counter!(
         "deposit_rejected_total",
         "Total number of deposits rejected"
+    );
+
+    // Run loop & cosign pipeline diagnostics
+    describe_histogram!(
+        "run_loop_iteration_seconds",
+        "Duration of a full run loop iteration"
+    );
+    describe_histogram!(
+        "request_drain_batch_size",
+        "Number of requests drained in a single batch"
+    );
+    describe_histogram!(
+        "sign_and_broadcast_seconds",
+        "Duration of sign_and_broadcast labeled by outcome (success/timeout/error)"
+    );
+    describe_histogram!(
+        "cosign_attempt_seconds",
+        "Duration of a single cosign attempt labeled by outcome (success/timeout/error)"
+    );
+    describe_counter!(
+        "mini_loop_updates_drained_total",
+        "Total ledger updates drained inside the cosign mini loop"
+    );
+    describe_counter!(
+        "mini_loop_cosign_requests_handled_total",
+        "Total cross-cosign requests handled inside the cosign mini loop"
+    );
+    describe_counter!(
+        "mini_loop_deferred_requests_total",
+        "Total non-cosign requests deferred (re-queued) from the cosign mini loop"
+    );
+    describe_counter!(
+        "broadcast_channel_lag_total",
+        "Total broadcast channel lag events by receiver"
+    );
+    describe_counter!(
+        "broadcast_channel_lag_events_total",
+        "Total events dropped due to broadcast channel lag"
+    );
+    describe_histogram!(
+        "pre_cosign_drain_count",
+        "Number of updates drained in pre-cosign drain"
+    );
+    describe_counter!(
+        "pre_cosign_drain_caught_up_total",
+        "Pre-cosign drains that successfully caught up"
+    );
+    describe_counter!(
+        "pre_cosign_drain_still_stale_total",
+        "Pre-cosign drains that did not catch up"
     );
 }
 
@@ -310,6 +398,105 @@ pub fn record_deposit_accepted() {
 /// Record a deposit rejection.
 pub fn record_deposit_rejected() {
     counter!("deposit_rejected_total").increment(1);
+}
+
+// ============================================================================
+// Event store metrics
+// ============================================================================
+
+/// Set the total number of events in the event store.
+pub fn set_event_store_total(count: usize) {
+    gauge!("event_store_events_total").set(count as f64);
+}
+
+/// Set the number of Unknown-validity events in the event store.
+pub fn set_event_store_unknown(count: usize) {
+    gauge!("event_store_unknown_events").set(count as f64);
+}
+
+/// Record an event store insert with its validity outcome.
+pub fn record_event_store_insert(validity: &str) {
+    counter!("event_store_inserts_total", "validity" => validity.to_string()).increment(1);
+}
+
+/// Record a gap-fill attempt with its outcome.
+pub fn record_gap_fill(outcome: &str) {
+    counter!("event_store_gap_fills_total", "outcome" => outcome.to_string()).increment(1);
+}
+
+/// Record gap-fill fetch duration.
+pub fn record_gap_fill_duration(duration: Duration) {
+    histogram!("event_store_gap_fill_duration_seconds").record(duration.as_secs_f64());
+}
+
+/// Record a ledger update received via Nostr.
+pub fn record_ledger_update_received(result: &str) {
+    counter!("ledger_update_received_total", "result" => result.to_string()).increment(1);
+}
+
+/// Record a cosign freshness recovery attempt.
+pub fn record_cosign_freshness_recovery(outcome: &str) {
+    counter!("cosign_freshness_recovery_total", "outcome" => outcome.to_string()).increment(1);
+}
+
+/// Set the validated tip (highest validated seq) for a ledger in the event store.
+pub fn set_event_store_validated_tip(ledger_id: &str, tip: u64) {
+    let short_id = if ledger_id.len() > 16 { &ledger_id[..16] } else { ledger_id };
+    gauge!("event_store_validated_tip", "ledger_id" => short_id.to_string()).set(tip as f64);
+}
+
+/// Set the number of stale joined ledgers awaiting gap-fill.
+pub fn set_stale_joined_ledgers(count: usize) {
+    gauge!("stale_joined_ledgers").set(count as f64);
+}
+
+// ============================================================================
+// Run loop & cosign pipeline diagnostics
+// ============================================================================
+
+/// Record the duration of a full run loop iteration.
+pub fn record_run_loop_iteration(duration: Duration) {
+    histogram!("run_loop_iteration_seconds").record(duration.as_secs_f64());
+}
+
+/// Record the number of requests drained in a single batch.
+pub fn record_request_drain_batch_size(count: usize) {
+    histogram!("request_drain_batch_size").record(count as f64);
+}
+
+/// Record sign_and_broadcast duration labeled by outcome.
+pub fn record_sign_and_broadcast(outcome: &str, duration: Duration) {
+    histogram!("sign_and_broadcast_seconds", "outcome" => outcome.to_string())
+        .record(duration.as_secs_f64());
+}
+
+/// Record a single cosign attempt duration labeled by outcome.
+pub fn record_cosign_attempt(outcome: &str, duration: Duration) {
+    histogram!("cosign_attempt_seconds", "outcome" => outcome.to_string())
+        .record(duration.as_secs_f64());
+}
+
+/// Record events processed inside the cosign mini loop per attempt.
+pub fn record_mini_loop_activity(updates_drained: usize, cosign_requests_handled: usize, deferred_requests: usize) {
+    counter!("mini_loop_updates_drained_total").increment(updates_drained as u64);
+    counter!("mini_loop_cosign_requests_handled_total").increment(cosign_requests_handled as u64);
+    counter!("mini_loop_deferred_requests_total").increment(deferred_requests as u64);
+}
+
+/// Record a broadcast channel lag event.
+pub fn record_broadcast_lag(receiver: &str, dropped: u64) {
+    counter!("broadcast_channel_lag_total", "receiver" => receiver.to_string()).increment(1);
+    counter!("broadcast_channel_lag_events_total", "receiver" => receiver.to_string()).increment(dropped);
+}
+
+/// Record pre-cosign drain results.
+pub fn record_pre_cosign_drain(updates_drained: usize, caught_up: bool) {
+    histogram!("pre_cosign_drain_count").record(updates_drained as f64);
+    if caught_up {
+        counter!("pre_cosign_drain_caught_up_total").increment(1);
+    } else if updates_drained > 0 {
+        counter!("pre_cosign_drain_still_stale_total").increment(1);
+    }
 }
 
 // ============================================================================

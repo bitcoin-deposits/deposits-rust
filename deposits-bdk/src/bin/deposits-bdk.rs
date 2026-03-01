@@ -829,7 +829,9 @@ async fn reserves_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>
 
     println!("=== Legacy Reserves (P2WSH) ===");
     for info in &reserves {
+        let addr = bitcoin::Address::p2wsh(&info.redeem_script, node.wallet.network());
         println!("  Outpoint: {}", info.outpoint);
+        println!("    Address: {}", addr);
         println!("    Amount: {} sats", info.amount);
         println!("    Operator: {}", info.operator);
         println!("    Partners: {}", info.partners.len());

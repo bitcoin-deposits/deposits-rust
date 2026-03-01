@@ -7,4 +7,4 @@
 pub(super) const MAX_CONNECTING_CHUNK: usize = 100;
 
 /// Relay Pool default notification channel size
-pub const DEFAULT_NOTIFICATION_CHANNEL_SIZE: usize = 4096;
+pub const DEFAULT_NOTIFICATION_CHANNEL_SIZE: usize = 65536;

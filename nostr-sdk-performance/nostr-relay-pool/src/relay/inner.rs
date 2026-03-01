@@ -181,7 +181,7 @@ impl InnerRelay {
         filtering: RelayFiltering,
         opts: RelayOptions,
     ) -> Self {
-        let (relay_notification_sender, ..) = broadcast::channel::<RelayNotification>(2048);
+        let (relay_notification_sender, ..) = broadcast::channel::<RelayNotification>(65536);
 
         Self {
             url,
