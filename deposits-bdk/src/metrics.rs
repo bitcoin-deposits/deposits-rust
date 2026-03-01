@@ -169,6 +169,10 @@ fn describe_metrics() {
         "stale_joined_ledgers",
         "Number of joined ledgers with detected gaps awaiting background fill"
     );
+    describe_gauge!(
+        "event_store_evictions_total",
+        "Cumulative number of events evicted from the event store"
+    );
 
     // Deposit balance metrics
     describe_gauge!(
@@ -244,6 +248,28 @@ fn describe_metrics() {
     describe_counter!(
         "pre_cosign_drain_still_stale_total",
         "Pre-cosign drains that did not catch up"
+    );
+
+    // Diagnostic gauges
+    describe_gauge!(
+        "processed_requests_current",
+        "Size of current-generation processed requests dedup set"
+    );
+    describe_gauge!(
+        "processed_requests_prev",
+        "Size of previous-generation processed requests dedup set"
+    );
+    describe_gauge!(
+        "event_store_by_parent_size",
+        "Number of entries in event store reverse (by_parent) index"
+    );
+    describe_histogram!(
+        "insert_event_seconds",
+        "Time to insert an event into the event store (includes clone + hash verify)"
+    );
+    describe_histogram!(
+        "persist_ledger_seconds",
+        "Time to persist a ledger to disk"
     );
 }
 
@@ -450,6 +476,11 @@ pub fn set_stale_joined_ledgers(count: usize) {
     gauge!("stale_joined_ledgers").set(count as f64);
 }
 
+/// Set the cumulative number of events evicted from the event store.
+pub fn set_event_store_evictions(count: u64) {
+    gauge!("event_store_evictions_total").set(count as f64);
+}
+
 // ============================================================================
 // Run loop & cosign pipeline diagnostics
 // ============================================================================
@@ -497,6 +528,35 @@ pub fn record_pre_cosign_drain(updates_drained: usize, caught_up: bool) {
     } else if updates_drained > 0 {
         counter!("pre_cosign_drain_still_stale_total").increment(1);
     }
+}
+
+// ============================================================================
+// Diagnostic gauges & histograms
+// ============================================================================
+
+/// Set the current-generation processed requests set size.
+pub fn set_processed_requests_current(count: usize) {
+    gauge!("processed_requests_current").set(count as f64);
+}
+
+/// Set the previous-generation processed requests set size.
+pub fn set_processed_requests_prev(count: usize) {
+    gauge!("processed_requests_prev").set(count as f64);
+}
+
+/// Set the event store by_parent reverse index size.
+pub fn set_event_store_by_parent_size(count: usize) {
+    gauge!("event_store_by_parent_size").set(count as f64);
+}
+
+/// Record event store insert duration.
+pub fn record_insert_event_duration(duration: Duration) {
+    histogram!("insert_event_seconds").record(duration.as_secs_f64());
+}
+
+/// Record ledger persist-to-disk duration.
+pub fn record_persist_ledger_duration(duration: Duration) {
+    histogram!("persist_ledger_seconds").record(duration.as_secs_f64());
 }
 
 // ============================================================================

@@ -141,8 +141,13 @@ impl DepositsHandler {
         };
 
         // Populate event store from loaded ledger histories
+        let max_events: usize = std::env::var("DEPOSITS_EVENT_STORE_MAX")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(50_000);
         let event_store = {
-            let mut store = EventStore::new();
+            let mut store = EventStore::with_max_events(max_events);
+            tracing::info!("Event store max capacity: {}", if max_events == 0 { "unlimited".to_string() } else { max_events.to_string() });
             for (_id, arc) in &ledgers {
                 let ledger = arc.read().unwrap();
                 for update in &ledger.history {
@@ -313,6 +318,16 @@ impl DepositsHandler {
             counts.insert(id.clone(), ledger.history.len());
         }
 
+        // Update modtimes so discover_new_ledgers() doesn't re-read our own writes
+        let ledgers_dir = self.data_dir.join("ledgers");
+        let mut modtimes = self.last_file_modtimes.lock().unwrap();
+        for (id, _) in &ledgers_snapshot {
+            let path = ledgers_dir.join(format!("{}.jsonl", id));
+            if let Ok(mtime) = path.metadata().and_then(|m| m.modified()) {
+                modtimes.insert(id.clone(), mtime);
+            }
+        }
+
         Ok(())
     }
 
@@ -426,6 +441,113 @@ impl DepositsHandler {
     /// File: {ledger_id}.jsonl where:
     /// - First line: LedgerState (type: "State")
     /// - Subsequent lines: SignedLedgerUpdate (type: "Update")
+    /// Parse a single JSONL file into a Ledger.
+    fn load_single_ledger_from_jsonl(ledger_id: &str, path: &std::path::Path) -> Option<Ledger> {
+        let contents = match fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("Failed to read ledger {}: {}", ledger_id, e);
+                return None;
+            }
+        };
+
+        let mut role: Option<LedgerRole> = None;
+        let mut state: Option<LedgerState> = None;
+        let mut updates: Vec<SignedLedgerUpdate> = Vec::new();
+        let mut seen_sequences = std::collections::HashSet::new();
+
+        for line in contents.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            match serde_json::from_str::<LedgerLogRow>(line) {
+                Ok(LedgerLogRow::Role { role: r }) => {
+                    role = Some(r);
+                }
+                Ok(LedgerLogRow::State(s)) => {
+                    state = Some(s);
+                }
+                Ok(LedgerLogRow::Update(u)) => {
+                    if seen_sequences.insert(u.sequence_number) {
+                        updates.push(u);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to parse line in {}: {}", ledger_id, e);
+                }
+            }
+        }
+
+        let ledger_role = role.unwrap_or_else(|| {
+            tracing::warn!("Ledger {} missing role in JSONL, defaulting to Partner", ledger_id);
+            LedgerRole::Partner
+        });
+
+        let mut ledger_state = match state {
+            Some(s) => s,
+            None => {
+                tracing::warn!("Ledger {} missing state", ledger_id);
+                return None;
+            }
+        };
+
+        updates.sort_by_key(|u| u.sequence_number);
+        let state_sequence = ledger_state.sequence;
+
+        if let Some(last_update) = updates.last() {
+            ledger_state.sequence = last_update.sequence_number as u64;
+            ledger_state.hash = last_update.current_hash;
+        }
+
+        let mut ledger = Ledger {
+            state: ledger_state,
+            role: ledger_role,
+            history: updates,
+        };
+
+        // Replay operations that came after the State line.
+        use deposits_core::tlv::TlvDecode;
+        let ops_to_replay: Vec<_> = ledger.history.iter()
+            .filter(|u| (u.sequence_number as u64) > state_sequence)
+            .filter_map(|u| {
+                match deposits_core::messages::LedgerOperation::tlv_decode(&u.message) {
+                    Ok(op) => Some((u.sequence_number, op)),
+                    Err(e) => {
+                        tracing::warn!(
+                            "Ledger {} seq {}: failed to decode operation for replay: {}",
+                            ledger_id, u.sequence_number, e
+                        );
+                        None
+                    }
+                }
+            })
+            .collect();
+
+        let mut replayed = 0u64;
+        for (seq, operation) in &ops_to_replay {
+            if let Err(e) = ledger.apply_state_changes(operation) {
+                tracing::warn!(
+                    "Ledger {} seq {}: failed to replay state change: {}",
+                    ledger_id, seq, e
+                );
+            } else {
+                replayed += 1;
+            }
+        }
+
+        if replayed > 0 {
+            tracing::info!(
+                "Loaded ledger {} with {} updates ({} state changes replayed)",
+                ledger_id, ledger.history.len(), replayed
+            );
+        } else {
+            tracing::debug!("Loaded ledger {} with {} updates", ledger_id, ledger.history.len());
+        }
+
+        Some(ledger)
+    }
+
     fn load_ledgers_from_jsonl(ledgers_dir: &PathBuf) -> HashMap<String, Arc<RwLock<Ledger>>> {
         let t0 = std::time::Instant::now();
         let mut ledgers = HashMap::new();
@@ -437,136 +559,22 @@ impl DepositsHandler {
                 return ledgers;
             }
         };
-        
+
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
                 continue;
             }
-            
+
             let Some(ledger_id) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
-            
-            // Read all lines from the JSONL file
-            let contents = match fs::read_to_string(&path) {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!("Failed to read ledger {}: {}", ledger_id, e);
-                    continue;
-                }
-            };
-            
-            let mut role: Option<LedgerRole> = None;
-            let mut state: Option<LedgerState> = None;
-            let mut updates: Vec<SignedLedgerUpdate> = Vec::new();
-            let mut seen_sequences = std::collections::HashSet::new();
 
-            for line in contents.lines() {
-                if line.trim().is_empty() {
-                    continue;
-                }
-
-                match serde_json::from_str::<LedgerLogRow>(line) {
-                    Ok(LedgerLogRow::Role { role: r }) => {
-                        role = Some(r);
-                    }
-                    Ok(LedgerLogRow::State(s)) => {
-                        state = Some(s);
-                    }
-                    Ok(LedgerLogRow::Update(u)) => {
-                        // Deduplicate by sequence number. Append-only writes can
-                        // produce duplicates when daemon and CLI both persist the
-                        // same updates (daemon appends with stale tracking while
-                        // CLI already wrote them via full rewrite).
-                        if seen_sequences.insert(u.sequence_number) {
-                            updates.push(u);
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to parse line in {}: {}", ledger_id, e);
-                    }
-                }
-            }
-
-            // Reconstruct the Ledger from role + state + updates
-            // Handle backward compatibility: old JSONL files don't have Role line
-            let ledger_role = role.unwrap_or_else(|| {
-                tracing::warn!("Ledger {} missing role in JSONL, defaulting to Partner", ledger_id);
-                LedgerRole::Partner
-            });
-
-            if let Some(mut ledger_state) = state {
-                // Sort updates by sequence number (should already be ordered,
-                // but belt-and-suspenders for append-only races).
-                updates.sort_by_key(|u| u.sequence_number);
-
-                // With append-only writes, the State line may be stale — it
-                // captures the full state at the time it was written, but new
-                // operations appended afterwards only have Update lines.
-                // We need to replay those newer operations through
-                // apply_state_changes() so derived fields (quorum_members,
-                // deposits, joined_quorums, etc.) are up to date.
-                let state_sequence = ledger_state.sequence;
-
-                // Update sequence and hash from the last update in history.
-                if let Some(last_update) = updates.last() {
-                    ledger_state.sequence = last_update.sequence_number as u64;
-                    ledger_state.hash = last_update.current_hash;
-                }
-
-                let mut ledger = Ledger {
-                    state: ledger_state,
-                    role: ledger_role,
-                    history: updates,
-                };
-
-                // Replay operations that came after the State line.
-                // Collect first to avoid borrow conflict (history is part of ledger).
-                use deposits_core::tlv::TlvDecode;
-                let ops_to_replay: Vec<_> = ledger.history.iter()
-                    .filter(|u| (u.sequence_number as u64) > state_sequence)
-                    .filter_map(|u| {
-                        match deposits_core::messages::LedgerOperation::tlv_decode(&u.message) {
-                            Ok(op) => Some((u.sequence_number, op)),
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Ledger {} seq {}: failed to decode operation for replay: {}",
-                                    ledger_id, u.sequence_number, e
-                                );
-                                None
-                            }
-                        }
-                    })
-                    .collect();
-
-                let mut replayed = 0u64;
-                for (seq, operation) in &ops_to_replay {
-                    if let Err(e) = ledger.apply_state_changes(operation) {
-                        tracing::warn!(
-                            "Ledger {} seq {}: failed to replay state change: {}",
-                            ledger_id, seq, e
-                        );
-                    } else {
-                        replayed += 1;
-                    }
-                }
-
-                let update_count = ledger.history.len();
-                if replayed > 0 {
-                    tracing::info!(
-                        "Loaded ledger {} with {} updates ({} state changes replayed)",
-                        ledger_id, update_count, replayed
-                    );
-                } else {
-                    tracing::debug!("Loaded ledger {} with {} updates", ledger_id, update_count);
-                }
+            if let Some(ledger) = Self::load_single_ledger_from_jsonl(ledger_id, &path) {
                 ledgers.insert(ledger_id.to_string(), Arc::new(RwLock::new(ledger)));
-            } else {
-                tracing::warn!("Ledger {} missing state", ledger_id);
             }
         }
-        
+
         let total_elapsed = t0.elapsed();
         if total_elapsed.as_millis() > 5 {
             tracing::info!("[PROFILE] load_ledgers_from_jsonl: {} ledgers in {:?}", ledgers.len(), total_elapsed);
@@ -594,10 +602,12 @@ impl DepositsHandler {
             return 0;
         }
 
-        // Quick check: has any .jsonl file been modified since last scan?
-        let mut any_modified = false;
-        {
+        // Collect only files whose modtime has changed (instead of all-or-nothing).
+        // persist_ledger_to_disk() updates modtimes after writing, so our own writes
+        // are excluded — only files modified by external processes (CLI) appear here.
+        let changed_files: Vec<(String, PathBuf)> = {
             let modtimes = self.last_file_modtimes.lock().unwrap();
+            let mut changed = Vec::new();
             if let Ok(entries) = fs::read_dir(&ledgers_dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
@@ -612,38 +622,46 @@ impl DepositsHandler {
                         .and_then(|m| m.modified().ok());
                     match (modtimes.get(&stem), current_mtime) {
                         (Some(prev), Some(curr)) if *prev == curr => {}
-                        _ => { any_modified = true; break; }
+                        _ => { changed.push((stem, path)); }
                     }
                 }
             }
-        }
+            changed
+        };
 
-        if !any_modified {
+        if changed_files.is_empty() {
             return 0;
         }
 
-        // Collect current in-memory history lengths
+        // Collect current in-memory history lengths for changed ledgers only
         let known: std::collections::HashMap<String, usize> = {
             let ledgers = self.ledgers.lock().unwrap();
-            ledgers.iter().map(|(id, arc)| {
-                let l = arc.read().unwrap();
-                (id.clone(), l.history.len())
-            }).collect()
+            changed_files.iter()
+                .filter_map(|(stem, _)| {
+                    ledgers.get(stem).map(|arc| {
+                        let l = arc.read().unwrap();
+                        (stem.clone(), l.history.len())
+                    })
+                })
+                .collect()
         };
 
         let t0 = std::time::Instant::now();
-        let disk_ledgers = Self::load_ledgers_from_jsonl(&ledgers_dir);
         let mut changes = 0;
+        let mut new_updates: Vec<SignedLedgerUpdate> = Vec::new();
 
         let mut ledgers = self.ledgers.lock().unwrap();
         let mut counts = self.persisted_update_counts.lock().unwrap();
-        let mut new_updates: Vec<SignedLedgerUpdate> = Vec::new();
 
-        for (ledger_id, disk_arc) in disk_ledgers {
-            let disk_ledger = disk_arc.read().unwrap();
+        // Read and parse ONLY the changed files (not all files)
+        for (ledger_id, path) in &changed_files {
+            let disk_ledger = match Self::load_single_ledger_from_jsonl(ledger_id, path) {
+                Some(l) => l,
+                None => continue,
+            };
             let disk_len = disk_ledger.history.len();
 
-            if let Some(&mem_len) = known.get(&ledger_id) {
+            if let Some(&mem_len) = known.get(ledger_id) {
                 // Existing ledger — update if disk has more history
                 if disk_len > mem_len {
                     tracing::info!(
@@ -652,11 +670,10 @@ impl DepositsHandler {
                         mem_len,
                         disk_len
                     );
-                    // Collect new updates for event store (only those beyond mem_len)
                     for update in disk_ledger.history.iter().skip(mem_len) {
                         new_updates.push(update.clone());
                     }
-                    ledgers.insert(ledger_id.clone(), Arc::new(RwLock::new(disk_ledger.clone())));
+                    ledgers.insert(ledger_id.clone(), Arc::new(RwLock::new(disk_ledger)));
                     counts.insert(ledger_id.clone(), disk_len);
                     changes += 1;
                 }
@@ -670,7 +687,7 @@ impl DepositsHandler {
                 for update in &disk_ledger.history {
                     new_updates.push(update.clone());
                 }
-                ledgers.insert(ledger_id.clone(), Arc::new(RwLock::new(disk_ledger.clone())));
+                ledgers.insert(ledger_id.clone(), Arc::new(RwLock::new(disk_ledger)));
                 counts.insert(ledger_id.clone(), disk_len);
                 changes += 1;
             }
@@ -696,29 +713,21 @@ impl DepositsHandler {
             }
         }
 
-        // Update modification times for all scanned files
+        // Update modification times for changed files
         {
             let mut modtimes = self.last_file_modtimes.lock().unwrap();
-            if let Ok(entries) = fs::read_dir(&ledgers_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-                        continue;
-                    }
-                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        if let Ok(mtime) = path.metadata().and_then(|m| m.modified()) {
-                            modtimes.insert(stem.to_string(), mtime);
-                        }
-                    }
+            for (stem, path) in &changed_files {
+                if let Ok(mtime) = path.metadata().and_then(|m| m.modified()) {
+                    modtimes.insert(stem.clone(), mtime);
                 }
             }
         }
 
         let elapsed = t0.elapsed();
         if changes > 0 {
-            tracing::info!("[PROFILE] discover_new_ledgers: {} changes in {:?}", changes, elapsed);
+            tracing::info!("[PROFILE] discover_new_ledgers: {} changes in {:?} ({} files re-read)", changes, elapsed, changed_files.len());
         } else if elapsed.as_millis() > 10 {
-            tracing::debug!("[PROFILE] discover_new_ledgers: no changes, scan took {:?}", elapsed);
+            tracing::debug!("[PROFILE] discover_new_ledgers: no changes from {} files in {:?}", changed_files.len(), elapsed);
         }
 
         changes
@@ -909,8 +918,12 @@ impl DepositsHandler {
     /// Insert a signed ledger update into the event store.
     /// Returns true if the event was new (not a duplicate).
     pub fn insert_event(&self, update: &SignedLedgerUpdate) -> bool {
+        let t0 = std::time::Instant::now();
         let mut store = self.event_store.lock().unwrap();
-        store.insert(update.clone())
+        let is_new = store.insert(update.clone());
+        let elapsed = t0.elapsed();
+        crate::metrics::record_insert_event_duration(elapsed);
+        is_new
     }
 
     /// Persist a specific ledger to disk using append-only strategy.
@@ -970,6 +983,13 @@ impl DepositsHandler {
             }
         }
 
+        // Update modtime so discover_new_ledgers() doesn't re-read our own writes
+        let ledger_file = self.data_dir.join("ledgers").join(format!("{}.jsonl", ledger_id));
+        if let Ok(mtime) = ledger_file.metadata().and_then(|m| m.modified()) {
+            self.last_file_modtimes.lock().unwrap().insert(ledger_id.to_string(), mtime);
+        }
+
+        crate::metrics::record_persist_ledger_duration(t0.elapsed());
         Ok(())
     }
 

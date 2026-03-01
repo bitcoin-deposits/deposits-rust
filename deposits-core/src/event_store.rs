@@ -4,7 +4,7 @@
 //! memoized hash-chain verification, and gaps are normal/recoverable.
 //! Ledger state is derived from validated chains.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use bitcoin::secp256k1::PublicKey;
 
@@ -44,8 +44,19 @@ pub struct EventStore {
     events: HashMap<[u8; 32], StoredEvent>,
     /// Secondary index: (ledger_id, operator_id_bytes, seq) → current_hash.
     by_seq: HashMap<SeqKey, [u8; 32]>,
+    /// Reverse index: previous_hash → list of child current_hashes.
+    /// Used by propagate_forward for O(1) child lookup instead of O(N) full scan.
+    by_parent: HashMap<[u8; 32], Vec<[u8; 32]>>,
     /// Tip: (ledger_id, operator_id_bytes) → highest validated sequence number.
     validated_tips: HashMap<TipKey, u64>,
+    /// Running count of events with Unknown validity (avoids O(N) filter scan).
+    unknown_count: usize,
+    /// FIFO insertion order for eviction (front = oldest).
+    insertion_order: VecDeque<[u8; 32]>,
+    /// Maximum number of events before eviction (0 = unlimited).
+    max_events: usize,
+    /// Cumulative count of evicted events (for metrics).
+    evicted_total: u64,
 }
 
 impl EventStore {
@@ -53,7 +64,27 @@ impl EventStore {
         Self {
             events: HashMap::new(),
             by_seq: HashMap::new(),
+            by_parent: HashMap::new(),
             validated_tips: HashMap::new(),
+            unknown_count: 0,
+            insertion_order: VecDeque::new(),
+            max_events: 0,
+            evicted_total: 0,
+        }
+    }
+
+    /// Create an event store with a maximum capacity. Once full, the oldest
+    /// events are evicted in FIFO order to stay at or below `max_events`.
+    pub fn with_max_events(max_events: usize) -> Self {
+        Self {
+            events: HashMap::new(),
+            by_seq: HashMap::new(),
+            by_parent: HashMap::new(),
+            validated_tips: HashMap::new(),
+            unknown_count: 0,
+            insertion_order: VecDeque::new(),
+            max_events,
+            evicted_total: 0,
         }
     }
 
@@ -64,6 +95,11 @@ impl EventStore {
 
     pub fn is_empty(&self) -> bool {
         self.events.is_empty()
+    }
+
+    /// Number of entries in the by_parent reverse index.
+    pub fn by_parent_len(&self) -> usize {
+        self.by_parent.len()
     }
 
     /// Insert an event. Returns `true` if the event is new (not a duplicate).
@@ -82,15 +118,29 @@ impl EventStore {
 
         // Build index keys
         let seq_key = Self::seq_key(&update);
+        let parent_hash = update.previous_hash;
 
         // Determine validity based on parent
         let validity = self.determine_validity(&update);
+
+        if validity == Validity::Unknown {
+            self.unknown_count += 1;
+        }
 
         self.events.insert(hash, StoredEvent {
             update,
             validity,
         });
         self.by_seq.insert(seq_key, hash);
+        self.by_parent.entry(parent_hash).or_default().push(hash);
+        self.insertion_order.push_back(hash);
+
+        // Evict oldest events if over capacity
+        if self.max_events > 0 {
+            while self.events.len() > self.max_events {
+                self.evict_oldest();
+            }
+        }
 
         // Update tip if valid
         if validity == Validity::Valid {
@@ -197,10 +247,52 @@ impl EventStore {
 
     /// Count of events with Unknown validity (potential gap-fill targets).
     pub fn unknown_count(&self) -> usize {
-        self.events.values().filter(|e| e.validity == Validity::Unknown).count()
+        self.unknown_count
+    }
+
+    /// Cumulative count of events evicted since creation.
+    pub fn evicted_total(&self) -> u64 {
+        self.evicted_total
     }
 
     // ── private helpers ──
+
+    /// Evict the oldest event (front of insertion_order).
+    /// Removes from events, by_seq, and by_parent (as a child of its parent).
+    fn evict_oldest(&mut self) {
+        let hash = loop {
+            match self.insertion_order.pop_front() {
+                Some(h) => {
+                    // Skip if already removed (e.g. duplicate hash from re-insert path)
+                    if self.events.contains_key(&h) {
+                        break h;
+                    }
+                }
+                None => return, // Nothing left to evict
+            }
+        };
+
+        if let Some(stored) = self.events.remove(&hash) {
+            // Remove from by_seq
+            let seq_key = Self::seq_key(&stored.update);
+            self.by_seq.remove(&seq_key);
+
+            // Remove from parent's children list in by_parent
+            let parent_hash = stored.update.previous_hash;
+            if let Some(children) = self.by_parent.get_mut(&parent_hash) {
+                children.retain(|h| h != &hash);
+                if children.is_empty() {
+                    self.by_parent.remove(&parent_hash);
+                }
+            }
+
+            if stored.validity == Validity::Unknown {
+                self.unknown_count = self.unknown_count.saturating_sub(1);
+            }
+
+            self.evicted_total += 1;
+        }
+    }
 
     /// Build the secondary index key from an update.
     fn seq_key(update: &SignedLedgerUpdate) -> SeqKey {
@@ -286,14 +378,18 @@ impl EventStore {
     /// After marking an event Valid, find any Unknown children waiting on it
     /// and recursively validate them.
     fn propagate_forward(&mut self, parent_hash: [u8; 32]) {
-        // Collect children whose previous_hash == parent_hash and are Unknown
-        let children: Vec<[u8; 32]> = self.events.iter()
-            .filter(|(_, stored)| {
-                stored.validity == Validity::Unknown
-                    && stored.update.previous_hash == parent_hash
-            })
-            .map(|(hash, _)| *hash)
-            .collect();
+        // O(1) child lookup via reverse index instead of O(N) full scan
+        let children: Vec<[u8; 32]> = match self.by_parent.get(&parent_hash) {
+            Some(kids) => kids.iter()
+                .filter(|hash| {
+                    self.events.get(*hash)
+                        .map(|s| s.validity == Validity::Unknown)
+                        .unwrap_or(false)
+                })
+                .copied()
+                .collect(),
+            None => return,
+        };
 
         for child_hash in children {
             // Re-validate the child
@@ -307,6 +403,8 @@ impl EventStore {
             if let Some(stored) = self.events.get_mut(&child_hash) {
                 stored.validity = new_validity;
             }
+            // Transitioned out of Unknown
+            self.unknown_count = self.unknown_count.saturating_sub(1);
 
             if new_validity == Validity::Valid {
                 self.update_tip(&child_hash);
@@ -625,5 +723,106 @@ mod tests {
         store.insert(chain[0].clone());
         store.insert(chain[1].clone());
         assert_eq!(store.unknown_count(), 0);
+    }
+
+    #[test]
+    fn test_eviction_basic() {
+        let (_, pk) = test_keypair();
+        let lid = [0x99; 32];
+        let chain = make_chain(lid, pk, 10);
+
+        let mut store = EventStore::with_max_events(5);
+        for u in &chain {
+            store.insert(u.clone());
+        }
+
+        // Should have evicted down to 5
+        assert_eq!(store.len(), 5);
+        assert_eq!(store.evicted_total(), 5);
+
+        // Oldest events (seq 0-4) should be gone
+        for u in &chain[..5] {
+            assert!(store.get(&u.current_hash).is_none());
+        }
+        // Newest events (seq 5-9) should remain
+        for u in &chain[5..] {
+            assert!(store.get(&u.current_hash).is_some());
+        }
+    }
+
+    #[test]
+    fn test_eviction_cleans_by_seq() {
+        let (_, pk) = test_keypair();
+        let lid = [0xA1; 32];
+        let chain = make_chain(lid, pk, 6);
+
+        let mut store = EventStore::with_max_events(3);
+        for u in &chain {
+            store.insert(u.clone());
+        }
+
+        // Evicted seq 0-2 should not be findable by seq
+        assert!(store.get_by_seq(&lid, &pk, 0).is_none());
+        assert!(store.get_by_seq(&lid, &pk, 1).is_none());
+        assert!(store.get_by_seq(&lid, &pk, 2).is_none());
+
+        // Remaining seq 3-5 should still be findable
+        assert!(store.get_by_seq(&lid, &pk, 3).is_some());
+        assert!(store.get_by_seq(&lid, &pk, 5).is_some());
+    }
+
+    #[test]
+    fn test_eviction_decrements_unknown_count() {
+        let (_, pk) = test_keypair();
+        let lid_a = [0xA2; 32];
+        let lid_b = [0xA4; 32];
+        let chain_a = make_chain(lid_a, pk, 4);
+        let chain_b = make_chain(lid_b, pk, 4);
+
+        // Start with max 4 events. Insert 2 valid + 2 unknown.
+        let mut store = EventStore::with_max_events(4);
+        // Two valid events (seq 0-1 of chain_a)
+        store.insert(chain_a[0].clone());
+        store.insert(chain_a[1].clone());
+        assert_eq!(store.unknown_count(), 0);
+
+        // Two unknown events (seq 2-3 of chain_b, parents missing)
+        store.insert(chain_b[2].clone());
+        store.insert(chain_b[3].clone());
+        assert_eq!(store.unknown_count(), 2);
+        assert_eq!(store.len(), 4);
+
+        // Insert one more valid event — evicts chain_a[0] (Valid), unknown stays 2
+        store.insert(chain_a[2].clone());
+        assert_eq!(store.len(), 4);
+        assert_eq!(store.unknown_count(), 2);
+        assert_eq!(store.evicted_total(), 1);
+
+        // Insert another — evicts chain_a[1] (Valid), unknown still 2
+        store.insert(chain_a[3].clone());
+        assert_eq!(store.unknown_count(), 2);
+        assert_eq!(store.evicted_total(), 2);
+
+        // Insert one more (new ledger seq 0) — evicts chain_b[2] (Unknown), unknown drops to 1
+        let chain_c = make_chain([0xA5; 32], pk, 1);
+        store.insert(chain_c[0].clone());
+        assert_eq!(store.len(), 4);
+        assert_eq!(store.unknown_count(), 1); // chain_b[2] evicted (was Unknown)
+        assert_eq!(store.evicted_total(), 3);
+    }
+
+    #[test]
+    fn test_unlimited_mode_no_eviction() {
+        let (_, pk) = test_keypair();
+        let lid = [0xA3; 32];
+        let chain = make_chain(lid, pk, 100);
+
+        let mut store = EventStore::new(); // unlimited
+        for u in &chain {
+            store.insert(u.clone());
+        }
+
+        assert_eq!(store.len(), 100);
+        assert_eq!(store.evicted_total(), 0);
     }
 }
