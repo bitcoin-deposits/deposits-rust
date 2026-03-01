@@ -174,6 +174,16 @@ fn describe_metrics() {
         "Cumulative number of events evicted from the event store"
     );
 
+    // Request freshness metrics
+    describe_histogram!(
+        "request_age_seconds",
+        "Age of incoming requests (now - created_at) labeled by action"
+    );
+    describe_counter!(
+        "cosign_stale_discarded_total",
+        "Cosign requests discarded because created_at was too old"
+    );
+
     // Deposit balance metrics
     describe_gauge!(
         "deposit_reserves_balance_sats",
@@ -479,6 +489,16 @@ pub fn set_stale_joined_ledgers(count: usize) {
 /// Set the cumulative number of events evicted from the event store.
 pub fn set_event_store_evictions(count: u64) {
     gauge!("event_store_evictions_total").set(count as f64);
+}
+
+/// Record the age of an incoming request (now - created_at).
+pub fn record_request_age(action: &str, age_secs: f64) {
+    histogram!("request_age_seconds", "action" => action.to_string()).record(age_secs);
+}
+
+/// Record a cosign request discarded due to staleness.
+pub fn record_cosign_stale_discarded() {
+    counter!("cosign_stale_discarded_total").increment(1);
 }
 
 // ============================================================================

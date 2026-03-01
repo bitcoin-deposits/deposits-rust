@@ -1381,6 +1381,30 @@ impl Node {
             return; // Silent drop - not our concern
         }
 
+        // Record request age (now - created_at) for all incoming requests.
+        // Cosign requests older than 2 seconds are definitely past all retry
+        // windows (3 × 500ms timeout + 200ms sleep = 1.9s max) and can be
+        // discarded immediately. The 2s threshold accounts for second-precision
+        // timestamps and network latency.
+        let request_age_secs = {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            now.saturating_sub(request.timestamp) as f64
+        };
+        metrics::record_request_age(&request.action, request_age_secs);
+
+        if is_cosign_request && request_age_secs >= 2.0 {
+            metrics::record_cosign_stale_discarded();
+            tracing::debug!(
+                "Discarding stale cosign request: age={:.0}s, event={}...",
+                request_age_secs,
+                &request.event_id[..16.min(request.event_id.len())]
+            );
+            return;
+        }
+
         // For cosign requests: drain any buffered ledger updates into the event store
         // BEFORE checking freshness.  Updates arrive through the same Nostr subscription
         // but are queued in a separate channel — they may already be buffered but not yet
@@ -7896,7 +7920,8 @@ impl Node {
             let attempt_start = std::time::Instant::now();
             match self.request_cosign(ledger_id, &update_clone).await {
                 Ok(result) => {
-                    metrics::record_cosign_attempt("success", attempt_start.elapsed());
+                    let label = format!("success_attempt_{}", attempt);
+                    metrics::record_cosign_attempt(&label, attempt_start.elapsed());
                     // Apply partner signature
                     let ledgers = self.handler.ledgers.lock().unwrap();
                     let ledger_arc = ledgers
@@ -7917,7 +7942,8 @@ impl Node {
                     break;
                 }
                 Err(e) => {
-                    metrics::record_cosign_attempt("timeout", attempt_start.elapsed());
+                    let label = format!("timeout_attempt_{}", attempt);
+                    metrics::record_cosign_attempt(&label, attempt_start.elapsed());
                     tracing::warn!("Co-sign attempt {}/{} failed: {}", attempt, max_attempts, e);
                     last_error = Some(e);
                     if attempt < max_attempts {
