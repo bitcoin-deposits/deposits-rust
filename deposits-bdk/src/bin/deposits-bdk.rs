@@ -9,6 +9,13 @@
 //!
 //! A deposits protocol node using BDK for on-chain reserves and Nostr for messaging.
 
+#[cfg(not(target_env = "msvc"))]
+use tikv_jemallocator::Jemalloc;
+
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
+
 use base64::Engine;
 use bitcoin::secp256k1::{PublicKey, SecretKey, Secp256k1};
 use bitcoin::bip32::{DerivationPath, Xpriv};
@@ -37,8 +44,19 @@ fn derive_operator_secret(seed: &[u8; 32], network: Network) -> Result<SecretKey
     Ok(operator_xpriv.private_key)
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name_fn(|| {
+            static ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let id = ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            format!("dep-worker-{}", id)
+        })
+        .build()?;
+    runtime.block_on(async_main())
+}
+
+async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -529,6 +547,63 @@ async fn run_node(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     // Start the node
     node.start().await?;
+
+    // Install SIGUSR1 handler for on-demand CPU flamegraph capture
+    #[cfg(unix)]
+    {
+        let data_dir = node.data_dir().to_path_buf();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sig = signal(SignalKind::user_defined1())
+                .expect("Failed to register SIGUSR1 handler");
+            loop {
+                sig.recv().await;
+                let dir = data_dir.clone();
+                // Re-read env each time so it can be changed at runtime
+                let secs: u64 = std::env::var("DEPOSITS_PROFILE_SECONDS")
+                    .ok().and_then(|v| v.parse().ok()).unwrap_or(30);
+                tracing::info!("SIGUSR1 received — starting {}s CPU profile...", secs);
+                tokio::task::spawn_blocking(move || {
+                    match pprof::ProfilerGuardBuilder::default()
+                        .frequency(99)
+                        .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+                        .build()
+                    {
+                        Ok(guard) => {
+                            std::thread::sleep(std::time::Duration::from_secs(secs));
+                            match guard.report().build() {
+                                Ok(report) => {
+                                    let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+                                    // Write flamegraph SVG
+                                    let svg_path = dir.join(format!("flamegraph-{}.svg", ts));
+                                    if let Ok(file) = std::fs::File::create(&svg_path) {
+                                        if let Err(e) = report.flamegraph(file) {
+                                            tracing::error!("Failed to write flamegraph: {}", e);
+                                        } else {
+                                            tracing::info!("Flamegraph written to {}", svg_path.display());
+                                        }
+                                    }
+                                    // Write protobuf (for go tool pprof / speedscope)
+                                    let pb_path = dir.join(format!("profile-{}.pb", ts));
+                                    if let Ok(mut file) = std::fs::File::create(&pb_path) {
+                                        use pprof::protos::Message;
+                                        let profile = report.pprof().unwrap();
+                                        let mut content = Vec::new();
+                                        profile.encode(&mut content).unwrap();
+                                        use std::io::Write;
+                                        let _ = file.write_all(&content);
+                                        tracing::info!("Profile protobuf written to {}", pb_path.display());
+                                    }
+                                }
+                                Err(e) => tracing::error!("Failed to build profile report: {}", e),
+                            }
+                        }
+                        Err(e) => tracing::error!("Failed to start profiler: {}", e),
+                    }
+                });
+            }
+        });
+    }
 
     tracing::info!("Node running. Press Ctrl+C to stop.");
 

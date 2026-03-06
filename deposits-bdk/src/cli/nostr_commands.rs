@@ -727,43 +727,50 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
             false
         }
 
-        // Find all chains starting from genesis, prefer ones with CustodyAcquire
-        fn find_best_chain<'a>(
-            by_prev: &std::collections::HashMap<[u8; 32], Vec<&'a SignedLedgerUpdate>>,
-            start_hash: [u8; 32],
-        ) -> Vec<&'a SignedLedgerUpdate> {
-            let Some(children) = by_prev.get(&start_hash) else {
-                return Vec::new();
-            };
-
-            let mut best: Vec<&SignedLedgerUpdate> = Vec::new();
-            let mut best_has_acquire = false;
-
-            for child in children {
-                let mut chain = vec![*child];
-                chain.extend(find_best_chain(by_prev, child.current_hash));
-
-                let has_acquire = chain_has_custody_acquire(&chain);
-
-                // Prefer chain with CustodyAcquire, otherwise prefer longer chain
-                let is_better = if has_acquire && !best_has_acquire {
-                    true // New chain has CustodyAcquire, best doesn't
-                } else if !has_acquire && best_has_acquire {
-                    false // Best has CustodyAcquire, new doesn't
+        // Walk the chain iteratively from genesis. At forks, pick the
+        // branch that contains CustodyAcquire (or the longest if tied).
+        let longest_chain = {
+            let mut chain: Vec<&SignedLedgerUpdate> = Vec::new();
+            let mut current_hash = [0u8; 32];
+            loop {
+                let Some(children) = by_prev.get(&current_hash) else { break; };
+                let next = if children.len() == 1 {
+                    children[0]
                 } else {
-                    chain.len() > best.len() // Both have or both don't - prefer longer
+                    let mut best_child: Option<&SignedLedgerUpdate> = None;
+                    let mut best_has_acquire = false;
+                    let mut best_depth = 0usize;
+                    for &child in children {
+                        let has_acquire = chain_has_custody_acquire(&[child]);
+                        let mut depth = 1usize;
+                        let mut h = child.current_hash;
+                        while let Some(next_children) = by_prev.get(&h) {
+                            if let Some(first) = next_children.first() {
+                                h = first.current_hash;
+                                depth += 1;
+                            } else {
+                                break;
+                            }
+                        }
+                        let is_better = best_child.is_none()
+                            || (has_acquire && !best_has_acquire)
+                            || (has_acquire == best_has_acquire && depth > best_depth);
+                        if is_better {
+                            best_child = Some(child);
+                            best_has_acquire = has_acquire;
+                            best_depth = depth;
+                        }
+                    }
+                    match best_child {
+                        Some(c) => c,
+                        None => break,
+                    }
                 };
-
-                if is_better {
-                    best = chain;
-                    best_has_acquire = has_acquire;
-                }
+                current_hash = next.current_hash;
+                chain.push(next);
             }
-
-            best
-        }
-
-        let longest_chain = find_best_chain(&by_prev, [0u8; 32]);
+            chain
+        };
         let filtered_updates: Vec<SignedLedgerUpdate> = longest_chain.iter().map(|u| (*u).clone()).collect();
 
         if filtered_updates.len() < updates.len() {

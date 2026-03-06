@@ -131,6 +131,10 @@ fn describe_metrics() {
         "ledger_history_length",
         "Number of history entries (sequence number) per ledger"
     );
+    describe_gauge!(
+        "history_memory_estimate_bytes",
+        "Estimated total bytes used by in-memory ledger history"
+    );
 
     // Event store metrics
     describe_gauge!(
@@ -172,6 +176,10 @@ fn describe_metrics() {
     describe_gauge!(
         "event_store_evictions_total",
         "Cumulative number of events evicted from the event store"
+    );
+    describe_counter!(
+        "ledger_compaction_total",
+        "Number of JSONL file compactions (full rewrites)"
     );
 
     // Request freshness metrics
@@ -260,6 +268,32 @@ fn describe_metrics() {
         "Pre-cosign drains that did not catch up"
     );
 
+    // Run loop phase breakdown
+    describe_histogram!(
+        "run_loop_phase_seconds",
+        "Duration of individual run loop phases, labeled by phase"
+    );
+    describe_histogram!(
+        "notification_drain_count",
+        "Number of nostr notifications parsed per process_events call"
+    );
+    describe_counter!(
+        "notification_dedup_skipped_total",
+        "Notifications skipped by early event-ID dedup (avoided full parse)"
+    );
+
+    // Per-thread CPU profiling
+    describe_gauge!(
+        "thread_cpu_seconds",
+        "CPU seconds per thread, labeled by thread name and mode (user/system)"
+    );
+
+    // Nostr publish latency
+    describe_histogram!(
+        "nostr_publish_seconds",
+        "Time to publish an event to the relay"
+    );
+
     // Diagnostic gauges
     describe_gauge!(
         "processed_requests_current",
@@ -280,6 +314,40 @@ fn describe_metrics() {
     describe_histogram!(
         "persist_ledger_seconds",
         "Time to persist a ledger to disk"
+    );
+
+    // Process metrics (Linux /proc)
+    describe_gauge!(
+        "process_cpu_seconds_total",
+        "Total user+system CPU seconds consumed by this process"
+    );
+    describe_gauge!(
+        "process_cpu_user_seconds",
+        "User CPU seconds consumed by this process"
+    );
+    describe_gauge!(
+        "process_cpu_system_seconds",
+        "System CPU seconds consumed by this process"
+    );
+    describe_gauge!(
+        "process_resident_memory_bytes",
+        "Resident set size (RSS) in bytes"
+    );
+    describe_gauge!(
+        "process_threads",
+        "Number of threads in this process"
+    );
+    describe_gauge!(
+        "process_io_write_bytes_total",
+        "Total bytes written to disk (from /proc/self/io)"
+    );
+    describe_gauge!(
+        "process_io_read_bytes_total",
+        "Total bytes read from disk (from /proc/self/io)"
+    );
+    describe_gauge!(
+        "process_io_write_syscalls_total",
+        "Total write syscalls (from /proc/self/io)"
     );
 }
 
@@ -398,6 +466,11 @@ pub fn set_ledger_history_length(ledger_id: &str, length: usize) {
     gauge!("ledger_history_length", "ledger_id" => short_id.to_string()).set(length as f64);
 }
 
+/// Set estimated total in-memory history bytes across all ledgers.
+pub fn set_history_memory_estimate_bytes(bytes: u64) {
+    gauge!("history_memory_estimate_bytes").set(bytes as f64);
+}
+
 // ============================================================================
 // Deposit balance metrics
 // ============================================================================
@@ -510,6 +583,11 @@ pub fn record_run_loop_iteration(duration: Duration) {
     histogram!("run_loop_iteration_seconds").record(duration.as_secs_f64());
 }
 
+/// Record process_events timeout used (1ms=busy, 100ms=idle).
+pub fn record_events_timeout_ms(ms: u64) {
+    gauge!("events_timeout_ms").set(ms as f64);
+}
+
 /// Record the number of requests drained in a single batch.
 pub fn record_request_drain_batch_size(count: usize) {
     histogram!("request_drain_batch_size").record(count as f64);
@@ -551,6 +629,90 @@ pub fn record_pre_cosign_drain(updates_drained: usize, caught_up: bool) {
 }
 
 // ============================================================================
+// Run loop phase breakdown
+// ============================================================================
+
+/// Record the duration of a run loop phase.
+pub fn record_run_loop_phase(phase: &str, duration: Duration) {
+    histogram!("run_loop_phase_seconds", "phase" => phase.to_string())
+        .record(duration.as_secs_f64());
+}
+
+/// Record number of notifications drained per process_events call.
+pub fn record_notification_drain_count(count: u32) {
+    histogram!("notification_drain_count").record(count as f64);
+}
+
+/// Record notifications skipped by early event-ID dedup.
+pub fn record_notification_dedup_skipped(count: u32) {
+    counter!("notification_dedup_skipped_total").increment(count as u64);
+}
+
+/// Record Nostr event publish latency.
+pub fn record_nostr_publish(duration: Duration) {
+    histogram!("nostr_publish_seconds").record(duration.as_secs_f64());
+}
+
+// ============================================================================
+// Per-thread CPU profiling (Linux /proc/self/task)
+// ============================================================================
+
+/// Emit per-thread CPU metrics from /proc/self/task/*/stat.
+/// Each thread gets a gauge labeled by its comm name and TID.
+/// Call periodically (e.g., every 5s) alongside emit_process_metrics().
+/// No-op on non-Linux platforms.
+pub fn emit_thread_cpu_metrics() {
+    #[cfg(target_os = "linux")]
+    {
+        let task_dir = match std::fs::read_dir("/proc/self/task") {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let clk_tck = 100.0_f64;
+        for entry in task_dir.flatten() {
+            let tid = entry.file_name();
+            let tid_str = tid.to_string_lossy();
+
+            // Read thread name from comm
+            let comm_path = format!("/proc/self/task/{}/comm", tid_str);
+            let thread_name = std::fs::read_to_string(&comm_path)
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|_| tid_str.to_string());
+
+            // Read stat for CPU times
+            let stat_path = format!("/proc/self/task/{}/stat", tid_str);
+            let stat = match std::fs::read_to_string(&stat_path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+
+            // Parse: skip past comm field (in parens), then fields after
+            if let Some(comm_end) = stat.find(')') {
+                let after_comm = &stat[comm_end + 2..];
+                let fields: Vec<&str> = after_comm.split_whitespace().collect();
+                // utime=field[11], stime=field[12] (0-indexed after comm)
+                if fields.len() > 12 {
+                    if let Ok(utime) = fields[11].parse::<u64>() {
+                        gauge!("thread_cpu_seconds",
+                            "thread" => thread_name.clone(),
+                            "tid" => tid_str.to_string(),
+                            "mode" => "user"
+                        ).set(utime as f64 / clk_tck);
+                    }
+                    if let Ok(stime) = fields[12].parse::<u64>() {
+                        gauge!("thread_cpu_seconds",
+                            "thread" => thread_name.clone(),
+                            "tid" => tid_str.to_string(),
+                            "mode" => "system"
+                        ).set(stime as f64 / clk_tck);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
 // Diagnostic gauges & histograms
 // ============================================================================
 
@@ -577,6 +739,86 @@ pub fn record_insert_event_duration(duration: Duration) {
 /// Record ledger persist-to-disk duration.
 pub fn record_persist_ledger_duration(duration: Duration) {
     histogram!("persist_ledger_seconds").record(duration.as_secs_f64());
+}
+
+/// Record a JSONL file compaction (full rewrite).
+pub fn record_ledger_compaction() {
+    counter!("ledger_compaction_total").increment(1);
+}
+
+// ============================================================================
+// Process metrics (Linux /proc/self)
+// ============================================================================
+
+/// Emit process-level metrics from /proc/self.
+/// Call this periodically (e.g., every 5s) from the run loop.
+/// No-op on non-Linux platforms (macOS dev builds).
+pub fn emit_process_metrics() {
+    #[cfg(target_os = "linux")]
+    {
+        // CPU time from /proc/self/stat
+        // Fields: pid comm state ppid ... utime(14) stime(15) ... num_threads(20) ...
+        if let Ok(stat) = std::fs::read_to_string("/proc/self/stat") {
+            let fields: Vec<&str> = stat.split_whitespace().collect();
+            // Find end of comm field (enclosed in parens) to handle spaces in process name
+            if let Some(comm_end) = stat.find(')') {
+                let after_comm = &stat[comm_end + 2..]; // skip ") "
+                let fields: Vec<&str> = after_comm.split_whitespace().collect();
+                // After comm: state(0) ppid(1) ... utime(11) stime(12) ... num_threads(17)
+                if fields.len() > 17 {
+                    let clk_tck = 100.0_f64; // sysconf(_SC_CLK_TCK), 100 on Linux
+                    if let Ok(utime) = fields[11].parse::<u64>() {
+                        let user_secs = utime as f64 / clk_tck;
+                        gauge!("process_cpu_user_seconds").set(user_secs);
+                    }
+                    if let Ok(stime) = fields[12].parse::<u64>() {
+                        let sys_secs = stime as f64 / clk_tck;
+                        gauge!("process_cpu_system_seconds").set(sys_secs);
+                    }
+                    if let (Ok(utime), Ok(stime)) = (fields[11].parse::<u64>(), fields[12].parse::<u64>()) {
+                        let total_secs = (utime + stime) as f64 / clk_tck;
+                        gauge!("process_cpu_seconds_total").set(total_secs);
+                    }
+                    if let Ok(threads) = fields[17].parse::<u64>() {
+                        gauge!("process_threads").set(threads as f64);
+                    }
+                }
+            }
+        }
+
+        // RSS from /proc/self/status
+        if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+            for line in status.lines() {
+                if let Some(val) = line.strip_prefix("VmRSS:") {
+                    // Value is in kB
+                    if let Ok(kb) = val.trim().trim_end_matches(" kB").trim().parse::<u64>() {
+                        gauge!("process_resident_memory_bytes").set((kb * 1024) as f64);
+                    }
+                }
+            }
+        }
+
+        // I/O from /proc/self/io
+        if let Ok(io) = std::fs::read_to_string("/proc/self/io") {
+            for line in io.lines() {
+                if let Some(val) = line.strip_prefix("write_bytes: ") {
+                    if let Ok(bytes) = val.trim().parse::<u64>() {
+                        gauge!("process_io_write_bytes_total").set(bytes as f64);
+                    }
+                }
+                if let Some(val) = line.strip_prefix("read_bytes: ") {
+                    if let Ok(bytes) = val.trim().parse::<u64>() {
+                        gauge!("process_io_read_bytes_total").set(bytes as f64);
+                    }
+                }
+                if let Some(val) = line.strip_prefix("syscw: ") {
+                    if let Ok(count) = val.trim().parse::<u64>() {
+                        gauge!("process_io_write_syscalls_total").set(count as f64);
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ============================================================================

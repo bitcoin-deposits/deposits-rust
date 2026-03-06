@@ -228,8 +228,11 @@ pub struct Node {
     fast_poll: bool,
 
     /// Cached joined ledger IDs (from QuorumJoin history scan).
-    /// Populated on first access, invalidated when new ledgers are discovered.
+    /// Self-validates by checking history lengths — only rescans when history grows.
     joined_ledger_cache: Mutex<Option<Vec<String>>>,
+    /// History lengths at last cache fill. Used to detect when rescan is needed
+    /// without doing the full O(history_len) scan every cycle.
+    joined_ledger_cache_versions: Mutex<HashMap<String, usize>>,
 
     /// Joined ledger IDs that have been imported from Nostr (or attempted).
     /// Prevents re-importing on every reload cycle.
@@ -243,13 +246,44 @@ pub struct Node {
     /// Drained and re-imported in the run loop to avoid blocking request handlers.
     stale_joined_ledgers: Mutex<std::collections::HashSet<String>>,
 
+    /// Rate-limiter for background relay fetches of stale joined ledgers.
+    /// Tracks when each ledger was last fetched from relay (30s cooldown per ledger).
+    last_relay_fetch_times: Mutex<HashMap<String, std::time::Instant>>,
+
     /// Cache mapping target_ledger_id → our member ledger key (in the ledgers HashMap).
     /// Populated on first cosign request per target, invalidated with joined_ledger_cache.
     /// Eliminates the O(N) full history TLV-decode scan in process_cosign_request.
     cosign_member_cache: Mutex<HashMap<String, String>>,
+
+    /// Ledger IDs that have been modified but not yet persisted to disk.
+    /// Flushed at the end of each request drain batch to reduce write syscalls.
+    dirty_ledgers: Mutex<std::collections::HashSet<String>>,
+
+    /// Cache for has_quorum_reserves: ledger_id → (result, history_len_when_scanned).
+    /// Once a ReservesRotate is found, the result is permanently true (never reverts).
+    /// For false results, the history_len is stored so we only rescan when history grows.
+    quorum_reserves_cache: Mutex<HashMap<String, (bool, usize)>>,
+
+    /// Cache for is_operator_of_ledger: ledger_id → (result, history_len_when_scanned).
+    /// Once true (operator found), the result is permanent.
+    /// For false results, we rescan when history grows.
+    operator_of_cache: Mutex<HashMap<String, (bool, usize)>>,
 }
 
 impl Node {
+    /// Clock-skew buffer (seconds) when computing `since` for relay fetches.
+    const RELAY_FETCH_CLOCK_SKEW_SECS: u64 = 30;
+    /// Events requested per relay page during joined-ledger reimport.
+    const RELAY_FETCH_PAGE_LIMIT: usize = 5000;
+    /// Stop paginating if a page returns fewer than this many events.
+    const RELAY_FETCH_MIN_PAGE: usize = 1000;
+    /// Maximum pages before giving up (safety cap).
+    const RELAY_FETCH_MAX_PAGES: u32 = 50;
+    /// Per-ledger cooldown between background relay fetches.
+    const RELAY_FETCH_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
+    /// Maximum updates re-broadcast per resync request.
+    const RESYNC_BATCH_CAP: usize = 500;
+
     /// Create a new node
     pub async fn new(config: NodeConfig) -> Result<Self, Error> {
         let secp = Secp256k1::new();
@@ -339,10 +373,15 @@ impl Node {
             relay_url,
             fast_poll: config.fast_poll,
             joined_ledger_cache: Mutex::new(None),
+            joined_ledger_cache_versions: Mutex::new(HashMap::new()),
             imported_joined_ledgers: Mutex::new(std::collections::HashSet::new()),
             pending_confiscations: Mutex::new(HashMap::new()),
             stale_joined_ledgers: Mutex::new(std::collections::HashSet::new()),
+            last_relay_fetch_times: Mutex::new(HashMap::new()),
             cosign_member_cache: Mutex::new(HashMap::new()),
+            dirty_ledgers: Mutex::new(std::collections::HashSet::new()),
+            quorum_reserves_cache: Mutex::new(HashMap::new()),
+            operator_of_cache: Mutex::new(HashMap::new()),
         })
     }
 
@@ -442,6 +481,27 @@ impl Node {
         self.broadcast_last_update(ledger_id).await
     }
 
+    /// Mark a ledger as dirty (modified but not yet persisted).
+    /// Deferred persistence reduces write syscalls by batching multiple
+    /// modifications into a single persist at the end of request processing.
+    fn mark_ledger_dirty(&self, ledger_id: &str) {
+        self.dirty_ledgers.lock().unwrap().insert(ledger_id.to_string());
+    }
+
+    /// Flush all dirty ledgers to disk.
+    /// Called at the end of each request drain batch.
+    fn flush_dirty_ledgers(&self) {
+        let dirty: Vec<String> = self.dirty_ledgers.lock().unwrap().drain().collect();
+        if dirty.is_empty() {
+            return;
+        }
+        for ledger_id in &dirty {
+            if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
+                tracing::warn!("Failed to persist dirty ledger {}: {}", &ledger_id[..16.min(ledger_id.len())], e);
+            }
+        }
+    }
+
     /// Broadcast the most recent ledger update to Nostr
     ///
     /// Call this after appending an operation to a ledger to ensure the update
@@ -512,7 +572,24 @@ impl Node {
         }
 
         // Add joined ledgers
-        ledger_ids.extend(self.get_joined_ledger_ids());
+        let joined_ids = self.get_joined_ledger_ids();
+        ledger_ids.extend(joined_ids.clone());
+
+        // Seed ALL locally-loaded ledgers (owned + joined) into stale_joined_ledgers
+        // so the background gap-fill loop catches up from the relay after restart.
+        // This recovers any updates that were deferred (mark_ledger_dirty) but not
+        // flushed before the previous shutdown. Safe because reimport_joined_ledger()
+        // already checks if fetched data is newer than local tip.
+        {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let mut stale = self.stale_joined_ledgers.lock().unwrap();
+            for lid in ledgers.keys() {
+                stale.insert(lid.clone());
+            }
+            if !stale.is_empty() {
+                tracing::info!("Seeded {} ledgers for background catch-up", stale.len());
+            }
+        }
 
         // Subscribe to requests and disputes for all ledgers in one batched call
         if !ledger_ids.is_empty() {
@@ -560,28 +637,65 @@ impl Node {
         Ok(())
     }
 
-    /// Get ledger IDs of ledgers we've joined as a quorum member
+    /// Get ledger IDs of ledgers we've joined as a quorum member.
+    ///
+    /// Uses an incremental scan: on the first call, scans all history. On subsequent
+    /// calls, only scans new entries since the last scan. This avoids the O(full_history)
+    /// scan that was triggered every 2s reload when history grows during sustained load.
     fn get_joined_ledger_ids(&self) -> Vec<String> {
-        // Check cache first
+        // Fast path: check if cache is populated AND history hasn't grown.
         {
             let cache = self.joined_ledger_cache.lock().unwrap();
             if let Some(ref cached) = *cache {
-                return cached.clone();
+                let versions = self.joined_ledger_cache_versions.lock().unwrap();
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                let mut stale = false;
+
+                if ledgers.len() != versions.len() {
+                    stale = true;
+                } else {
+                    for (lid, arc) in ledgers.iter() {
+                        let l = arc.read().unwrap();
+                        if l.operator_key() == self.node_id {
+                            match versions.get(lid) {
+                                Some(&v) if v == l.history.len() => {}
+                                _ => { stale = true; break; }
+                            }
+                        }
+                    }
+                }
+
+                if !stale {
+                    return cached.clone();
+                }
             }
         }
 
-        // Cache miss — do the full scan
+        // Cache miss — incremental scan: only check entries we haven't seen yet.
+        // QuorumJoin entries are rare and only appear early in history, so after
+        // the first full scan, incremental scans process near-zero new entries.
         let t0 = std::time::Instant::now();
-        let mut joined = Vec::new();
+        let mut new_versions = HashMap::new();
         let ledgers = self.handler.ledgers.lock().unwrap();
 
-        for (_ledger_id, ledger_arc) in ledgers.iter() {
+        // Start from previous cached result + scan offsets
+        let prev_cache = self.joined_ledger_cache.lock().unwrap().clone();
+        let prev_versions = self.joined_ledger_cache_versions.lock().unwrap().clone();
+        let mut joined = prev_cache.unwrap_or_default();
+        let mut scanned_new = 0usize;
+
+        for (ledger_id, ledger_arc) in ledgers.iter() {
             let ledger = ledger_arc.read().unwrap();
             if ledger.operator_key() == self.node_id {
                 let history_len = ledger.history.len();
-                for update in &ledger.history {
-                    // Pre-filter by message_type — skip TLV decode for non-QuorumJoin
-                    // entries (~99% of history). Makes the scan near-instant.
+                new_versions.insert(ledger_id.clone(), history_len);
+
+                // Only scan entries beyond what we've already scanned.
+                // Cap at history_len in case history was truncated.
+                let prev_len = prev_versions.get(ledger_id).copied().unwrap_or(0)
+                    .min(ledger.history.len());
+                for update in ledger.history.iter().skip(prev_len) {
+                    scanned_new += 1;
                     if update.message_type != deposits_core::messages::consts::QUORUM_JOIN {
                         continue;
                     }
@@ -593,25 +707,30 @@ impl Node {
                         }
                     }
                 }
-                let elapsed = t0.elapsed();
-                if elapsed.as_millis() > 1 {
-                    tracing::info!("[PROFILE] get_joined_ledger_ids: scanned {} entries ({} total) in {:?} (cache miss)", joined.len(), history_len, elapsed);
-                }
             }
         }
         drop(ledgers);
 
-        // Store in cache
+        let elapsed = t0.elapsed();
+        if elapsed.as_millis() > 1 || scanned_new > 100 {
+            let total: usize = new_versions.values().sum();
+            tracing::info!("[PROFILE] get_joined_ledger_ids: scanned {} new entries ({} total) in {:?}",
+                scanned_new, total, elapsed);
+        }
+
         let mut cache = self.joined_ledger_cache.lock().unwrap();
         *cache = Some(joined.clone());
+        *self.joined_ledger_cache_versions.lock().unwrap() = new_versions;
 
         joined
     }
 
-    /// Invalidate the joined ledger cache (call after discovering new ledgers)
+    /// Force-invalidate the joined ledger cache.
+    /// Only needed when ledger data changes externally (e.g., discover_new_ledgers).
     fn invalidate_joined_ledger_cache(&self) {
         let mut cache = self.joined_ledger_cache.lock().unwrap();
         *cache = None;
+        self.joined_ledger_cache_versions.lock().unwrap().clear();
         // Also invalidate cosign member cache since QuorumJoin mappings may have changed
         self.cosign_member_cache.lock().unwrap().clear();
     }
@@ -716,37 +835,55 @@ impl Node {
                 map
             };
 
-            fn find_best_chain<'a>(
-                by_prev: &std::collections::HashMap<[u8; 32], Vec<&'a deposits_core::SignedLedgerUpdate>>,
-                start_hash: [u8; 32],
-            ) -> Vec<&'a deposits_core::SignedLedgerUpdate> {
-                let Some(children) = by_prev.get(&start_hash) else { return Vec::new(); };
-                let mut best: Vec<&deposits_core::SignedLedgerUpdate> = Vec::new();
-                let mut best_has_acquire = false;
-                for child in children {
-                    let mut chain = vec![*child];
-                    chain.extend(find_best_chain(by_prev, child.current_hash));
-                    let has_acquire = chain.iter().any(|u| {
-                        LedgerOperation::tlv_decode(&u.message)
-                            .map(|op| matches!(op, LedgerOperation::CustodyAcquire { .. }))
-                            .unwrap_or(false)
-                    });
-                    let is_better = if has_acquire && !best_has_acquire {
-                        true
-                    } else if !has_acquire && best_has_acquire {
-                        false
+            // Walk the chain iteratively from genesis. At forks, pick the
+            // branch that contains CustodyAcquire (or the longest if tied).
+            let best_chain = {
+                let mut chain: Vec<&deposits_core::SignedLedgerUpdate> = Vec::new();
+                let mut current_hash = [0u8; 32];
+                loop {
+                    let Some(children) = by_prev.get(&current_hash) else { break; };
+                    // Single child (common case): just follow it
+                    let next = if children.len() == 1 {
+                        children[0]
                     } else {
-                        chain.len() > best.len()
+                        // Fork: peek one step ahead and pick best branch
+                        let mut best_child: Option<&deposits_core::SignedLedgerUpdate> = None;
+                        let mut best_has_acquire = false;
+                        let mut best_depth = 0usize;
+                        for &child in children {
+                            let has_acquire = LedgerOperation::tlv_decode(&child.message)
+                                .map(|op| matches!(op, LedgerOperation::CustodyAcquire { .. }))
+                                .unwrap_or(false);
+                            // Count chain length from this child (iterative peek)
+                            let mut depth = 1usize;
+                            let mut h = child.current_hash;
+                            while let Some(next_children) = by_prev.get(&h) {
+                                if let Some(first) = next_children.first() {
+                                    h = first.current_hash;
+                                    depth += 1;
+                                } else {
+                                    break;
+                                }
+                            }
+                            let is_better = best_child.is_none()
+                                || (has_acquire && !best_has_acquire)
+                                || (has_acquire == best_has_acquire && depth > best_depth);
+                            if is_better {
+                                best_child = Some(child);
+                                best_has_acquire = has_acquire;
+                                best_depth = depth;
+                            }
+                        }
+                        match best_child {
+                            Some(c) => c,
+                            None => break,
+                        }
                     };
-                    if is_better {
-                        best = chain;
-                        best_has_acquire = has_acquire;
-                    }
+                    current_hash = next.current_hash;
+                    chain.push(next);
                 }
-                best
-            }
-
-            let best_chain = find_best_chain(&by_prev, [0u8; 32]);
+                chain
+            };
             let filtered: Vec<deposits_core::SignedLedgerUpdate> = best_chain.iter().map(|u| (*u).clone()).collect();
 
             if filtered.is_empty() {
@@ -807,136 +944,263 @@ impl Node {
         use deposits_core::messages::LedgerOperation;
         use deposits_core::TlvDecode;
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-        use nostr_sdk::{Filter, Kind};
+        use nostr_sdk::{Filter, Kind, Timestamp};
         use nostr_sdk::prelude::{SingleLetterTag, Alphabet};
 
-        let filter = Filter::new()
-            .kind(Kind::Custom(crate::nostr::KIND_LEDGER_UPDATE))
-            .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id]);
+        let local_tip_seq = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers.get(ledger_id)
+                .map(|arc| arc.read().unwrap().next_sequence())
+                .unwrap_or(0)
+        };
 
-        let events = self.nostr.client().fetch_events(vec![filter], None).await
-            .map_err(|e| Error::Protocol(format!("Failed to fetch: {}", e)))?;
+        // Paginate forward from our last known timestamp. The relay returns
+        // newest-first capped by maxFilterLimit per query, so we advance
+        // `since` after each page to walk forward through the history.
+        let mut cursor_ts: u64 = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers.get(ledger_id)
+                .and_then(|arc| arc.read().unwrap().history.last().map(|u| u.timestamp.saturating_sub(Self::RELAY_FETCH_CLOCK_SKEW_SECS)))
+                .unwrap_or(0)
+        };
 
-        if events.is_empty() {
+        let mut all_fetched: Vec<deposits_core::SignedLedgerUpdate> = Vec::new();
+        let mut pages = 0u32;
+        let max_pages = Self::RELAY_FETCH_MAX_PAGES;
+
+        loop {
+            let mut filter = Filter::new()
+                .kind(Kind::Custom(crate::nostr::KIND_LEDGER_UPDATE))
+                .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id])
+                .limit(Self::RELAY_FETCH_PAGE_LIMIT);
+
+            if cursor_ts > 0 {
+                filter = filter.since(Timestamp::from(cursor_ts));
+            }
+
+            let events = self.nostr.client()
+                .fetch_events(vec![filter], Some(std::time::Duration::from_secs(15)))
+                .await
+                .map_err(|e| Error::Protocol(format!("Failed to fetch: {}", e)))?;
+
+            if events.is_empty() {
+                break;
+            }
+
+            let mut page_max_ts = cursor_ts;
+            let mut page_count = 0usize;
+            for event in events.iter() {
+                if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
+                    if let Ok(update) = deposits_core::SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
+                        if update.timestamp > page_max_ts {
+                            page_max_ts = update.timestamp;
+                        }
+                        all_fetched.push(update);
+                        page_count += 1;
+                    }
+                }
+            }
+
+            pages += 1;
+            tracing::debug!(
+                "reimport_joined_ledger {}...: page {} fetched {} updates (cursor_ts={}, max_ts={})",
+                &ledger_id[..16.min(ledger_id.len())], pages, page_count, cursor_ts, page_max_ts,
+            );
+
+            // If the max timestamp didn't advance or we got fewer events than
+            // our page size, we've reached the end.
+            if page_max_ts <= cursor_ts || page_count < Self::RELAY_FETCH_MIN_PAGE || pages >= max_pages {
+                break;
+            }
+
+            // Advance cursor past the newest event in this page (no overlap buffer
+            // needed — dedup below handles any duplicates from boundary events).
+            cursor_ts = page_max_ts;
+            tokio::task::yield_now().await;
+        }
+
+        if all_fetched.is_empty() {
+            // If the ledger already exists locally, relay having no events is fine
+            // (fast relay expires all events). Not an error — we're already caught up.
+            let exists = self.handler.ledgers.lock().unwrap().contains_key(ledger_id);
+            if exists {
+                tracing::debug!(
+                    "Relay has no events for {}... but ledger exists locally — already caught up",
+                    &ledger_id[..16.min(ledger_id.len())],
+                );
+                return Ok(());
+            }
             return Err(Error::Protocol("No events on Nostr".into()));
         }
 
-        let mut updates: Vec<deposits_core::SignedLedgerUpdate> = Vec::new();
-        for event in events.iter() {
-            if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
-                if let Ok(update) = deposits_core::SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
-                    updates.push(update);
-                }
-            }
-        }
-
-        if updates.is_empty() {
-            return Err(Error::Protocol("No valid updates decoded".into()));
-        }
-
-        // Sort by sequence, dedup
-        updates.sort_by_key(|u| (u.sequence_number, u.operator_id.serialize(), u.current_hash));
-        updates.dedup_by(|a, b| {
-            a.sequence_number == b.sequence_number
-                && a.operator_id == b.operator_id
-                && a.current_hash == b.current_hash
-        });
-
-        let ledger_open = updates.iter().find_map(|u| {
-            if let Ok(op) = LedgerOperation::tlv_decode(&u.message) {
-                if let LedgerOperation::LedgerOpen { operator_id, reserves_id, ledger_address, genesis_block, .. } = op {
-                    return Some((operator_id, reserves_id, ledger_address, genesis_block));
-                }
-            }
-            None
-        });
-
-        let Some((operator_id, reserves_id, ledger_address, genesis_block)) = ledger_open else {
-            return Err(Error::Protocol("No LedgerOpen in fetched events".into()));
-        };
-
-        // Build best chain (same logic as auto_import)
-        let by_prev: std::collections::HashMap<[u8; 32], Vec<&deposits_core::SignedLedgerUpdate>> = {
-            let mut map = std::collections::HashMap::new();
-            for u in &updates { map.entry(u.previous_hash).or_insert_with(Vec::new).push(u); }
-            map
-        };
-
-        fn find_best_chain<'a>(
-            by_prev: &std::collections::HashMap<[u8; 32], Vec<&'a deposits_core::SignedLedgerUpdate>>,
-            start_hash: [u8; 32],
-        ) -> Vec<&'a deposits_core::SignedLedgerUpdate> {
-            let Some(children) = by_prev.get(&start_hash) else { return Vec::new(); };
-            let mut best: Vec<&deposits_core::SignedLedgerUpdate> = Vec::new();
-            let mut best_has_acquire = false;
-            for child in children {
-                let mut chain = vec![*child];
-                chain.extend(find_best_chain(by_prev, child.current_hash));
-                let has_acquire = chain.iter().any(|u| {
-                    LedgerOperation::tlv_decode(&u.message)
-                        .map(|op| matches!(op, LedgerOperation::CustodyAcquire { .. }))
-                        .unwrap_or(false)
-                });
-                let is_better = if has_acquire && !best_has_acquire {
-                    true
-                } else if !has_acquire && best_has_acquire {
-                    false
-                } else {
-                    chain.len() > best.len()
-                };
-                if is_better {
-                    best = chain;
-                    best_has_acquire = has_acquire;
-                }
-            }
-            best
-        }
-
-        let best_chain = find_best_chain(&by_prev, [0u8; 32]);
-        let filtered: Vec<deposits_core::SignedLedgerUpdate> = best_chain.iter().map(|u| (*u).clone()).collect();
-
-        if filtered.is_empty() {
-            return Err(Error::Protocol("No valid chain found".into()));
-        }
-
-        // Check if re-import actually has more data
-        {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            if let Some(existing) = ledgers.get(ledger_id) {
-                let existing = existing.read().unwrap();
-                if filtered.len() <= existing.history.len() {
-                    tracing::debug!("Re-import has {} updates vs local {} — no improvement",
-                        filtered.len(), existing.history.len());
-                    return Ok(());
-                }
-            }
-        }
-
-        let ledger_id_bytes: [u8; 32] = hex::decode(ledger_id)
-            .map_err(|e| Error::Protocol(format!("Bad hex: {}", e)))
-            .and_then(|bytes| {
-                if bytes.len() == 32 {
-                    let mut arr = [0u8; 32]; arr.copy_from_slice(&bytes); Ok(arr)
-                } else {
-                    Err(Error::Protocol("Wrong length".into()))
-                }
-            })?;
-
-        let block_height = self.wallet.get_block_height().unwrap_or(0);
-
-        let export = LedgerExport::new(
-            ledger_id_bytes, genesis_block, operator_id,
-            reserves_id, ledger_address, filtered.clone(), block_height,
+        tracing::info!(
+            "reimport_joined_ledger {}...: fetched {} updates in {} pages (local_tip_seq={})",
+            &ledger_id[..16.min(ledger_id.len())], all_fetched.len(), pages, local_tip_seq,
         );
 
-        match self.handler.import_ledger(export) {
-            Ok(_) => {
-                tracing::info!("Re-imported joined ledger {} ({} updates)", &ledger_id[..16], filtered.len());
-                Ok(())
+        // For existing ledgers (the common case — stale set only contains known
+        // ledgers), skip the expensive LedgerOpen search and chain walk. After
+        // history truncation, LedgerOpen (seq 0) is gone from memory, so the old
+        // genesis-based chain walk always fails. Instead, filter the relay events
+        // for updates beyond our tip and append directly.
+        let existing = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers.get(ledger_id).cloned()
+        };
+
+        if let Some(ledger_arc) = existing {
+            // --- Fast path: existing ledger, incremental update ---
+            let (local_tip_hash, local_next_seq) = {
+                let ledger = ledger_arc.read().unwrap();
+                (ledger.tail_hash(), ledger.next_sequence())
+            };
+
+            // Filter, sort, dedup relay events to those beyond our tip
+            let mut new_updates: Vec<_> = all_fetched.into_iter()
+                .filter(|u| u.sequence_number >= local_next_seq)
+                .collect();
+            new_updates.sort_by_key(|u| u.sequence_number);
+            new_updates.dedup_by_key(|u| u.sequence_number);
+
+            if new_updates.is_empty() {
+                tracing::debug!(
+                    "Ledger {}... already up to date (tip seq={})",
+                    &ledger_id[..16.min(ledger_id.len())], local_next_seq,
+                );
+                return Ok(()); // Already caught up — not an error
             }
-            Err(e) => {
-                tracing::warn!("Failed to re-import ledger {}: {}", &ledger_id[..16], e);
-                Err(Error::Protocol(format!("Re-import failed: {}", e)))
+
+            // Verify the first new update chains from our tip
+            if new_updates[0].sequence_number == local_next_seq
+                && new_updates[0].previous_hash != local_tip_hash
+            {
+                return Err(Error::Protocol(format!(
+                    "Chain break: update {} previous_hash doesn't match local tip",
+                    local_next_seq,
+                )));
+            }
+
+            match self.handler.apply_updates_to_ledger(ledger_id, new_updates.clone()) {
+                Ok(applied) => {
+                    tracing::info!(
+                        "Re-imported joined ledger {} (+{} updates from relay, tip_seq {})",
+                        &ledger_id[..16], applied,
+                        new_updates.last().map(|u| u.sequence_number).unwrap_or(0),
+                    );
+                    Ok(())
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to apply relay updates to ledger {}: {}", &ledger_id[..16], e);
+                    Err(Error::Protocol(format!("Apply updates failed: {}", e)))
+                }
+            }
+        } else {
+            // --- Slow path: new ledger, full import from genesis ---
+            let mut updates: Vec<deposits_core::SignedLedgerUpdate> = all_fetched;
+            updates.sort_by_key(|u| (u.sequence_number, u.operator_id.serialize(), u.current_hash));
+            updates.dedup_by(|a, b| {
+                a.sequence_number == b.sequence_number
+                    && a.operator_id == b.operator_id
+                    && a.current_hash == b.current_hash
+            });
+
+            let ledger_open = updates.iter().find_map(|u| {
+                if let Ok(op) = LedgerOperation::tlv_decode(&u.message) {
+                    if let LedgerOperation::LedgerOpen { operator_id, reserves_id, ledger_address, genesis_block, .. } = op {
+                        return Some((operator_id, reserves_id, ledger_address, genesis_block));
+                    }
+                }
+                None
+            });
+
+            let Some((operator_id, reserves_id, ledger_address, genesis_block)) = ledger_open else {
+                return Err(Error::Protocol("No LedgerOpen in fetched events".into()));
+            };
+
+            // Build best chain from genesis
+            let by_prev: std::collections::HashMap<[u8; 32], Vec<&deposits_core::SignedLedgerUpdate>> = {
+                let mut map = std::collections::HashMap::new();
+                for u in &updates { map.entry(u.previous_hash).or_insert_with(Vec::new).push(u); }
+                map
+            };
+
+            let best_chain = {
+                let mut chain: Vec<&deposits_core::SignedLedgerUpdate> = Vec::new();
+                let mut current_hash = [0u8; 32];
+                loop {
+                    let Some(children) = by_prev.get(&current_hash) else { break; };
+                    let next = if children.len() == 1 {
+                        children[0]
+                    } else {
+                        let mut best_child: Option<&deposits_core::SignedLedgerUpdate> = None;
+                        let mut best_has_acquire = false;
+                        let mut best_depth = 0usize;
+                        for &child in children {
+                            let has_acquire = LedgerOperation::tlv_decode(&child.message)
+                                .map(|op| matches!(op, LedgerOperation::CustodyAcquire { .. }))
+                                .unwrap_or(false);
+                            let mut depth = 1usize;
+                            let mut h = child.current_hash;
+                            while let Some(next_children) = by_prev.get(&h) {
+                                if let Some(first) = next_children.first() {
+                                    h = first.current_hash;
+                                    depth += 1;
+                                } else {
+                                    break;
+                                }
+                            }
+                            let is_better = best_child.is_none()
+                                || (has_acquire && !best_has_acquire)
+                                || (has_acquire == best_has_acquire && depth > best_depth);
+                            if is_better {
+                                best_child = Some(child);
+                                best_has_acquire = has_acquire;
+                                best_depth = depth;
+                            }
+                        }
+                        match best_child {
+                            Some(c) => c,
+                            None => break,
+                        }
+                    };
+                    current_hash = next.current_hash;
+                    chain.push(next);
+                }
+                chain
+            };
+            let filtered: Vec<deposits_core::SignedLedgerUpdate> = best_chain.iter().map(|u| (*u).clone()).collect();
+
+            if filtered.is_empty() {
+                return Err(Error::Protocol("No valid chain found".into()));
+            }
+
+            let ledger_id_bytes: [u8; 32] = hex::decode(ledger_id)
+                .map_err(|e| Error::Protocol(format!("Bad hex: {}", e)))
+                .and_then(|bytes| {
+                    if bytes.len() == 32 {
+                        let mut arr = [0u8; 32]; arr.copy_from_slice(&bytes); Ok(arr)
+                    } else {
+                        Err(Error::Protocol("Wrong length".into()))
+                    }
+                })?;
+
+            let block_height = self.wallet.get_block_height().unwrap_or(0);
+
+            let export = LedgerExport::new(
+                ledger_id_bytes, genesis_block, operator_id,
+                reserves_id, ledger_address, filtered.clone(), block_height,
+            );
+
+            match self.handler.import_ledger(export) {
+                Ok(_) => {
+                    tracing::info!("Imported new joined ledger {} ({} updates, tip_seq {} from relay)",
+                        &ledger_id[..16], filtered.len(), filtered.last().map(|u| u.sequence_number).unwrap_or(0));
+                    Ok(())
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to import ledger {}: {}", &ledger_id[..16], e);
+                    Err(Error::Protocol(format!("Import failed: {}", e)))
+                }
             }
         }
     }
@@ -955,9 +1219,9 @@ impl Node {
             }
         };
 
-        let (ledger_id_bytes, operator_id, local_len) = {
+        let (ledger_id_bytes, operator_id, local_next_seq) = {
             let ledger = ledger_arc.read().unwrap();
-            (ledger.state.ledger_id, ledger.state.parent_pubkey, ledger.history.len())
+            (ledger.state.ledger_id, ledger.state.parent_pubkey, ledger.next_sequence())
         };
 
         let store = self.handler.event_store.lock().unwrap();
@@ -967,13 +1231,13 @@ impl Node {
         };
 
         // Event store has nothing beyond what the ledger already has
-        if tip < local_len as u64 {
+        if tip < local_next_seq {
             return 0;
         }
 
-        // Collect updates from local_len..=tip
+        // Collect updates from local_next_seq..=tip
         let mut to_append = Vec::new();
-        for seq in (local_len as u64)..=tip {
+        for seq in local_next_seq..=tip {
             if let Some(stored) = store.get_by_seq(&ledger_id_bytes, &operator_id, seq) {
                 if stored.validity == deposits_core::event_store::Validity::Valid {
                     to_append.push(stored.update.clone());
@@ -994,10 +1258,10 @@ impl Node {
         let mut ledger = ledger_arc.write().unwrap();
 
         // Re-check after acquiring write lock (another thread may have caught up)
-        let current_len = ledger.history.len();
-        let mut appended = 0;
+        let next_seq = ledger.next_sequence();
+        let mut appended = 0u64;
         for update in to_append {
-            if update.sequence_number == current_len as u64 + appended as u64 {
+            if update.sequence_number == next_seq + appended {
                 ledger.history.push(update);
                 appended += 1;
             } else {
@@ -1014,14 +1278,64 @@ impl Node {
                 ledger.state.hash = hash;
             }
             tracing::info!(
-                "Caught up ledger {}... from event store: {} -> {} entries",
+                "Caught up ledger {}... from event store: seq {} -> {} (+{} entries)",
                 &ledger_id[..16.min(ledger_id.len())],
-                current_len,
-                current_len + appended,
+                next_seq,
+                next_seq + appended,
+                appended,
             );
         }
 
-        appended
+        appended as usize
+    }
+
+    /// Send a resync request to the operator of a joined ledger asking them
+    /// to re-broadcast updates from our local sequence onward. Fire-and-forget.
+    async fn send_resync_request_if_needed(&self, ledger_id: &str) {
+        // Find the operator pubkey for this ledger
+        let operator_pubkey = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            match ledgers.get(ledger_id) {
+                Some(arc) => {
+                    let ledger = arc.read().unwrap();
+                    hex::encode(ledger.operator_key().serialize())
+                }
+                None => return,
+            }
+        };
+
+        // Get our local sequence
+        let from_seq = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            match ledgers.get(ledger_id) {
+                Some(arc) => arc.read().unwrap().next_sequence(),
+                None => return,
+            }
+        };
+
+        let params = serde_json::json!({
+            "from_seq": from_seq,
+            "requester": hex::encode(self.node_id.serialize()),
+        });
+
+        match self.nostr.send_ledger_request(ledger_id, "resync", params).await {
+            Ok(event_id) => {
+                tracing::info!(
+                    "Sent resync request for ledger {}... from_seq={} to operator {}...",
+                    &ledger_id[..16.min(ledger_id.len())],
+                    from_seq,
+                    &operator_pubkey[..16.min(operator_pubkey.len())],
+                );
+                self.sent_events.lock().unwrap().insert(event_id);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to send resync request for ledger {}...: {}",
+                    &ledger_id[..16.min(ledger_id.len())],
+                    e,
+                );
+            }
+        }
     }
 
     /// Run the main event loop
@@ -1054,11 +1368,16 @@ impl Node {
             tracing::info!("Fast poll mode enabled: periodic=5s, poll=5s, reload=2s");
         }
 
+        // Adaptive timeout: short when busy (more requests likely coming),
+        // longer when idle (save CPU). Starts idle.
+        let mut had_requests_last_iteration = false;
+
         loop {
             let loop_start = std::time::Instant::now();
 
             // Periodic tasks (every 60 seconds) - moved outside select! to avoid reset on each iteration
             if last_periodic.elapsed() >= periodic_interval {
+                let periodic_start = std::time::Instant::now();
                 // Sync wallet periodically
                 if let Err(e) = self.sync_wallet() {
                     tracing::warn!("Wallet sync failed: {}", e);
@@ -1138,13 +1457,22 @@ impl Node {
                     }
                 }
 
+                // Rotate notification-level dedup set
+                self.nostr.rotate_seen_events();
+
+                metrics::record_run_loop_phase("periodic", periodic_start.elapsed());
                 last_periodic = tokio::time::Instant::now();
             }
 
             // Discover new/updated ledger files and refresh quorum membership cache
             if last_reload.elapsed() >= reload_interval {
-                self.invalidate_joined_ledger_cache();
+                let reload_start = std::time::Instant::now();
                 let discovered = self.handler.discover_new_ledgers();
+                if discovered > 0 {
+                    // Force-invalidate: external process changed ledger files
+                    self.invalidate_joined_ledger_cache();
+                }
+                // Otherwise, get_joined_ledger_ids() self-validates via version check
 
                 // Single pass over ledgers: collect IDs, emit metrics, gather event store keys.
                 // This avoids two separate iterations and eliminates the nested
@@ -1156,13 +1484,17 @@ impl Node {
                     let ledgers = self.handler.ledgers.lock().unwrap();
                     metrics::set_ledger_count(ledgers.len());
                     let mut total_balance_sats: u64 = 0;
+                    let mut total_history_bytes: u64 = 0;
                     for (ledger_id, ledger_arc) in ledgers.iter() {
                         let ledger = ledger_arc.read().unwrap();
                         if ledger.operator_key() == self.node_id {
                             all_ledger_ids.push(ledger_id.clone());
                             owned_ids.push(ledger.ledger_id_hex());
                         }
-                        metrics::set_ledger_history_length(ledger_id, ledger.history.len());
+                        let hist_len = ledger.history.len();
+                        metrics::set_ledger_history_length(ledger_id, hist_len);
+                        // ~570 bytes per entry (370 struct + ~200 avg message Vec)
+                        total_history_bytes += hist_len as u64 * 570;
                         // Emit per-ledger and per-deposit balance metrics
                         let mut ledger_balance_sats: u64 = 0;
                         for (dep_id_bytes, deposit) in &ledger.state.deposits {
@@ -1176,6 +1508,7 @@ impl Node {
                         tip_queries.push((ledger_id.clone(), ledger.state.ledger_id, ledger.state.parent_pubkey));
                     }
                     metrics::set_total_deposit_balance_sats(total_balance_sats);
+                    metrics::set_history_memory_estimate_bytes(total_history_bytes);
                 }
 
                 // Emit event store validated tips — separate lock, no nesting
@@ -1220,28 +1553,101 @@ impl Node {
                     }
                 }
 
-                // Background gap-fill for stale joined ledgers — event store only (no relay I/O).
-                // Relay fetches for missing events happen on-demand in process_cosign_request
-                // where they directly serve the pending cosign, rather than here where they
-                // would block the entire run loop and prevent cosign request processing.
+                // Background gap-fill for stale joined ledgers.
+                // Try event store first (free, in-memory), then fall back to relay fetch
+                // (one per cycle, 30s cooldown per ledger) for post-restart recovery.
                 {
                     let stale_ids: Vec<String> = {
                         let mut stale = self.stale_joined_ledgers.lock().unwrap();
                         stale.drain().collect()
                     };
 
+                    let mut relay_fetched_this_cycle = false;
+                    let relay_cooldown = Self::RELAY_FETCH_COOLDOWN;
+
                     for stale_id in &stale_ids {
+                        // Try event store first (free, in-memory)
                         let caught_up = self.catch_up_ledger_from_event_store(stale_id);
                         if caught_up > 0 {
                             tracing::info!(
-                                "Background catch-up: ledger {}... +{} events from event store",
+                                "Background gap-fill: ledger {}... +{} events from event store",
                                 &stale_id[..16.min(stale_id.len())], caught_up,
                             );
                             metrics::record_gap_fill("from_store");
-                        } else {
-                            // Still behind — re-queue, will be filled on next cosign or update
-                            self.stale_joined_ledgers.lock().unwrap().insert(stale_id.clone());
+                            continue; // Resolved — don't re-queue
                         }
+
+                        // Event store empty (typical after restart). Try relay fetch
+                        // — one per cycle to avoid blocking the run loop.
+                        if !relay_fetched_this_cycle {
+                            let should_fetch = {
+                                let times = self.last_relay_fetch_times.lock().unwrap();
+                                match times.get(stale_id) {
+                                    Some(last) => last.elapsed() >= relay_cooldown,
+                                    None => true,
+                                }
+                            };
+
+                            if should_fetch {
+                                relay_fetched_this_cycle = true;
+                                self.last_relay_fetch_times.lock().unwrap()
+                                    .insert(stale_id.clone(), std::time::Instant::now());
+
+                                let local_seq = {
+                                    let ledgers = self.handler.ledgers.lock().unwrap();
+                                    ledgers.get(stale_id)
+                                        .map(|arc| arc.read().unwrap().next_sequence())
+                                        .unwrap_or(0)
+                                };
+
+                                tracing::info!(
+                                    "Background gap-fill: fetching ledger {}... from relay (local_seq={})",
+                                    &stale_id[..16.min(stale_id.len())], local_seq,
+                                );
+
+                                match self.reimport_joined_ledger(stale_id).await {
+                                    Ok(()) => {
+                                        let new_seq = {
+                                            let ledgers = self.handler.ledgers.lock().unwrap();
+                                            ledgers.get(stale_id)
+                                                .map(|arc| arc.read().unwrap().next_sequence())
+                                                .unwrap_or(0)
+                                        };
+                                        tracing::info!(
+                                            "Background gap-fill: relay fetch succeeded for {}... (seq {} -> {})",
+                                            &stale_id[..16.min(stale_id.len())], local_seq, new_seq,
+                                        );
+                                        metrics::record_gap_fill("from_relay");
+                                        // Persist the updated ledger
+                                        self.dirty_ledgers.lock().unwrap().insert(stale_id.clone());
+                                        continue; // Resolved — don't re-queue
+                                    }
+                                    Err(e) => {
+                                        let err_str = format!("{}", e);
+                                        // Chain break = unbridgeable gap (operator history truncated).
+                                        // Don't resync — it will just repeat the same failure.
+                                        if err_str.contains("wrong previous_hash") || err_str.contains("Chain break") {
+                                            tracing::info!(
+                                                "Background gap-fill: chain break for {}... — dropping from stale queue (gap is unbridgeable)",
+                                                &stale_id[..16.min(stale_id.len())],
+                                            );
+                                            metrics::record_gap_fill("chain_break");
+                                            continue; // Don't re-queue
+                                        }
+                                        tracing::warn!(
+                                            "Background gap-fill: relay fetch failed for {}...: {}",
+                                            &stale_id[..16.min(stale_id.len())], e,
+                                        );
+                                        metrics::record_gap_fill("relay_failed");
+                                        // Relay doesn't have the events — ask operator to re-broadcast
+                                        self.send_resync_request_if_needed(stale_id).await;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Still behind — re-queue for next cycle
+                        self.stale_joined_ledgers.lock().unwrap().insert(stale_id.clone());
                     }
 
                     let remaining = self.stale_joined_ledgers.lock().unwrap().len();
@@ -1257,11 +1663,18 @@ impl Node {
                     metrics::set_event_store_evictions(store.evicted_total());
                 }
 
+                // Emit process-level metrics (CPU, memory, I/O) + per-thread CPU
+                metrics::emit_process_metrics();
+                metrics::emit_thread_cpu_metrics();
+
+                metrics::record_run_loop_phase("reload", reload_start.elapsed());
                 last_reload = tokio::time::Instant::now();
             }
 
             // Poll for recent requests — safety net for missed subscription events
             if last_poll.elapsed() >= poll_interval {
+                let poll_start = std::time::Instant::now();
+                let mut poll_processed = 0usize;
                 if let Ok(requests) = self.nostr.fetch_recent_requests(7).await {
                     for request in requests {
                         // Check if already processed (current or previous generation)
@@ -1276,24 +1689,41 @@ impl Node {
                             // Mark as processed before handling
                             self.processed_requests.lock().unwrap().insert(request.event_id.clone());
                             self.handle_ledger_request(request).await;
+                            poll_processed += 1;
                         }
                     }
                 }
+                if poll_processed > 0 {
+                    had_requests_last_iteration = true;
+                }
+                // Flush any ledgers modified during polling-path requests
+                self.flush_dirty_ledgers();
+                metrics::record_run_loop_phase("polling", poll_start.elapsed());
                 last_poll = tokio::time::Instant::now();
             }
 
-            // Process subscription notifications - this has a 100ms internal timeout
-            // so periodic tasks will still run frequently even if no notifications arrive
-            let _ = self.nostr.process_events().await;
+            // Process subscription notifications — adaptive timeout:
+            // 1ms when busy (previous iteration processed requests, more likely coming)
+            // 100ms when idle (save CPU, still responsive to new events)
+            let events_timeout_ms: u64 = if had_requests_last_iteration { 1 } else { 100 };
+            metrics::record_events_timeout_ms(events_timeout_ms);
+            let process_events_start = std::time::Instant::now();
+            let _ = self.nostr.process_events_with_timeout(events_timeout_ms).await;
+            metrics::record_run_loop_phase("process_events", process_events_start.elapsed());
 
             // Handle P2P messages
             while let Some(inbound) = self.nostr.try_recv() {
                 self.handle_inbound(inbound);
             }
 
-            // Handle ledger requests from subscription
-            {
+            // Handle ledger requests from subscription.
+            // Time-boxed drain: process requests for up to 30ms, then yield.
+            // This breaks the feedback loop where large batches → long drain →
+            // more requests pile up → even larger batches → collapse.
+            let subscription_batch_size = {
                 let mut batch_size = 0usize;
+                let drain_start = std::time::Instant::now();
+                let drain_budget = std::time::Duration::from_millis(30);
                 while let Some(request) = self.nostr.try_recv_request() {
                     // Check if already processed (from polling) — check both generations
                     let already_processed = {
@@ -1308,25 +1738,49 @@ impl Node {
                         self.handle_ledger_request(request).await;
                         batch_size += 1;
                     }
+                    // Yield after 30ms to prevent batch accumulation feedback loop.
+                    // Remaining requests stay in the channel for the next iteration.
+                    if drain_start.elapsed() >= drain_budget {
+                        break;
+                    }
                 }
                 if batch_size > 0 {
                     metrics::record_request_drain_batch_size(batch_size);
                 }
-            }
+                metrics::record_run_loop_phase("drain_requests", drain_start.elapsed());
+                batch_size
+            };
+
+            // Flush any ledgers modified during request processing
+            let flush_start = std::time::Instant::now();
+            self.flush_dirty_ledgers();
+            metrics::record_run_loop_phase("flush", flush_start.elapsed());
 
             // Handle disputes
-            while let Some(dispute) = self.nostr.try_recv_dispute() {
-                self.handle_dispute(dispute).await;
+            {
+                let phase_start = std::time::Instant::now();
+                while let Some(dispute) = self.nostr.try_recv_dispute() {
+                    self.handle_dispute(dispute).await;
+                }
+                metrics::record_run_loop_phase("drain_disputes", phase_start.elapsed());
             }
 
             // Handle responses (for auto-recording attestations)
-            while let Some(response) = self.nostr.try_recv_response() {
-                self.handle_ledger_response(response).await;
+            {
+                let phase_start = std::time::Instant::now();
+                while let Some(response) = self.nostr.try_recv_response() {
+                    self.handle_ledger_response(response).await;
+                }
+                metrics::record_run_loop_phase("drain_responses", phase_start.elapsed());
             }
 
             // Handle ledger updates (validate and auto-dispute on invalid)
-            while let Some(update) = self.nostr.try_recv_ledger_update() {
-                self.handle_ledger_update(update).await;
+            {
+                let phase_start = std::time::Instant::now();
+                while let Some(update) = self.nostr.try_recv_ledger_update() {
+                    self.handle_ledger_update(update).await;
+                }
+                metrics::record_run_loop_phase("drain_updates", phase_start.elapsed());
             }
 
             // Check for outbound messages (non-blocking)
@@ -1335,6 +1789,10 @@ impl Node {
                     tracing::error!("Failed to send message: {}", e);
                 }
             }
+
+            // Update adaptive timeout: use short timeout next iteration if we
+            // processed any requests (more likely coming soon)
+            had_requests_last_iteration = subscription_batch_size > 0;
 
             // Record run loop iteration duration
             let loop_elapsed = loop_start.elapsed();
@@ -1361,8 +1819,8 @@ impl Node {
         }
 
         // Check if this request is for a ledger we own or have joined
-        let is_our_ledger = self.get_ledger_by_ledger_id(&request.ledger_id).is_some()
-            || self.get_ledger_by_reserves_key(&request.ledger_id).is_some();
+        let is_our_ledger = self.has_ledger(&request.ledger_id)
+            || self.has_ledger_by_reserves_key(&request.ledger_id);
         let is_cross_ledger_sign = request.action == "custody_transfer_sign"
             || request.action == "confiscation_sign";
         // cosign requests can come from ledgers where we're a quorum member
@@ -1372,7 +1830,7 @@ impl Node {
 
         // Silently drop operator-only actions if we're not the operator
         // (these are broadcast but only the operator should respond)
-        let operator_only_actions = ["deposit_open", "make_offer", "withdraw", "collateral_lock", "offer_status", "balance_query", "make_invoice", "pay_invoice", "transfer_lock", "transfer_complete", "bump", "complete_offer", "partner_add", "partner_join", "collateral_record", "reserves_rotate"];
+        let operator_only_actions = ["deposit_open", "make_offer", "withdraw", "collateral_lock", "offer_status", "balance_query", "make_invoice", "pay_invoice", "transfer_lock", "transfer_complete", "bump", "complete_offer", "partner_add", "partner_join", "collateral_record", "reserves_rotate", "resync"];
         if operator_only_actions.contains(&request.action.as_str()) && !self.is_operator_of_ledger(&request.ledger_id) {
             return; // Silent drop - the actual operator will respond
         }
@@ -1419,7 +1877,7 @@ impl Node {
                 let ledgers = self.handler.ledgers.lock().unwrap();
                 if let Some(ledger_arc) = ledgers.get(&update.ledger_id) {
                     let mut ledger = ledger_arc.write().unwrap();
-                    let expected = ledger.history.len() as u64;
+                    let expected = ledger.next_sequence();
                     if update.update.sequence_number == expected {
                         ledger.history.push(update.update);
                     }
@@ -1509,6 +1967,7 @@ impl Node {
             "partner_join" => self.process_partner_join_request(&request).await,
             "collateral_record" => self.process_collateral_record_request(&request).await,
             "reserves_rotate" => self.process_reserves_rotate_request(&request).await,
+            "resync" => self.process_resync_request(&request).await,
             _ => {
                 tracing::warn!("Unknown request action: {}", request.action);
                 (false, None, Some(format!("Unknown action: {}", request.action)))
@@ -1661,12 +2120,12 @@ impl Node {
         // as stale for background gap-fill if event store can't bridge the gap.
         {
             let ledger = ledger_arc.read().unwrap();
-            let local_len = ledger.history.len() as u64;
-            if inbound.update.sequence_number > local_len {
+            let local_seq = ledger.next_sequence();
+            if inbound.update.sequence_number > local_seq {
                 tracing::info!(
                     "Ledger {}... has gap: local={}, incoming seq={}. Attempting event store catch-up.",
                     &inbound.ledger_id[..16.min(inbound.ledger_id.len())],
-                    local_len,
+                    local_seq,
                     inbound.update.sequence_number,
                 );
                 drop(ledger); // release read lock before catch-up
@@ -1680,7 +2139,7 @@ impl Node {
                     ledgers.get(&inbound.ledger_id)
                         .map(|arc| {
                             let l = arc.read().unwrap();
-                            (l.history.len() as u64) < inbound.update.sequence_number
+                            l.next_sequence() < inbound.update.sequence_number
                         })
                         .unwrap_or(true)
                 };
@@ -1762,7 +2221,7 @@ impl Node {
             let ledgers = self.handler.ledgers.lock().unwrap();
             if let Some(ledger_arc) = ledgers.get(&inbound.ledger_id) {
                 let mut ledger = ledger_arc.write().unwrap();
-                let expected_seq = ledger.history.len() as u64;
+                let expected_seq = ledger.next_sequence();
                 if inbound.update.sequence_number == expected_seq {
                     ledger.history.push(inbound.update.clone());
                 }
@@ -4733,7 +5192,7 @@ impl Node {
                 )));
             }
 
-            ledger.history.len() as u64
+            ledger.next_sequence()
         };
 
         // Create witness from signature
@@ -4823,7 +5282,7 @@ impl Node {
         // Create fulfill or fail operation
         let final_sequence = {
             let ledger = ledger_arc.read().unwrap();
-            ledger.history.len() as u64
+            ledger.next_sequence()
         };
 
         if payment_succeeded {
@@ -5269,16 +5728,15 @@ impl Node {
 
         let sign_elapsed = t_sign.elapsed();
 
-        // Persist to disk
-        let t_persist = std::time::Instant::now();
+        // Persist immediately — transfer_lock creates pending_transfer state
+        // that must survive bounces so transfer_complete can find it.
         if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
-            tracing::warn!("Failed to persist ledger after transfer_lock: {}", e);
+            tracing::warn!("Failed to persist after transfer_lock: {}", e);
         }
-        let persist_elapsed = t_persist.elapsed();
 
         tracing::info!("Transfer locked: {}", hex::encode(&transfer_id[..8]));
-        tracing::info!("[PROFILE] transfer_lock breakdown: append={:?}, sign_broadcast={:?}, persist={:?}",
-            append_elapsed, sign_elapsed, persist_elapsed);
+        tracing::info!("[PROFILE] transfer_lock breakdown: append={:?}, sign_broadcast={:?}",
+            append_elapsed, sign_elapsed);
         (true, Some(serde_json::json!({
             "transfer_id": transfer_id_hex,
             "amount": amount,
@@ -5414,9 +5872,10 @@ impl Node {
             return (false, None, Some(format!("Failed to sign/broadcast: {:?}", e)));
         }
 
-        // Persist to disk
+        // Persist immediately — transfer_complete consumes pending_transfer
+        // and credits the destination; must survive bounces.
         if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
-            tracing::warn!("Failed to persist ledger after transfer_complete: {}", e);
+            tracing::warn!("Failed to persist after transfer_complete: {}", e);
         }
 
         tracing::info!("Transfer completed: {}", hex::encode(&transfer_id[..8]));
@@ -5560,7 +6019,7 @@ impl Node {
                             let ledgers = self.handler.ledgers.lock().unwrap();
                             if let Some(arc) = ledgers.get(&request.ledger_id) {
                                 let mut ledger = arc.write().unwrap();
-                                if update.sequence_number == ledger.history.len() as u64 {
+                                if update.sequence_number == ledger.next_sequence() {
                                     ledger.history.push(update);
                                     applied += 1;
                                 }
@@ -5593,8 +6052,8 @@ impl Node {
                         ledger.state.dispute_state
                     )));
                 }
-                let local_len = ledger.history.len() as u64;
-                if local_len < sequence_number {
+                let local_seq = ledger.next_sequence();
+                if local_seq < sequence_number {
                     // Release locks before attempting recovery
                     drop(ledger);
                     drop(ledgers);
@@ -5615,26 +6074,26 @@ impl Node {
                         ledgers.get(&request.ledger_id)
                             .map(|arc| {
                                 let l = arc.read().unwrap();
-                                (l.history.len() as u64) < sequence_number
+                                l.next_sequence() < sequence_number
                             })
                             .unwrap_or(true)
                     };
 
                     if still_stale {
                         // Still behind after event store catch-up + pre-cosign channel drain.
-                        // Do NOT do relay I/O here — it blocks the run loop and prevents
-                        // processing of other cosign requests, causing cascade failures.
-                        // The operator will retry (3 attempts), giving the subscription
-                        // and polling paths time to deliver the missing updates.
-                        // Silent return — error responses are ignored by requester anyway
-                        // and just waste Nostr bandwidth under load.
+                        // Queue for background relay fetch; clear the per-ledger cooldown so
+                        // the next reload-loop iteration (2-3s) fires immediately instead of
+                        // waiting up to 30s. The operator will retry (3 attempts × 500ms),
+                        // giving the background fetch time to catch up.
                         metrics::record_cosign_freshness_recovery("stale");
                         metrics::record_pre_cosign_drain(0, false);
                         self.stale_joined_ledgers.lock().unwrap().insert(request.ledger_id.clone());
+                        // Reset relay-fetch cooldown so next reload cycle fetches immediately.
+                        self.last_relay_fetch_times.lock().unwrap().remove(&request.ledger_id);
                         let current_len = {
                             let ledgers = self.handler.ledgers.lock().unwrap();
                             ledgers.get(&request.ledger_id)
-                                .map(|arc| arc.read().unwrap().history.len() as u64)
+                                .map(|arc| arc.read().unwrap().next_sequence())
                                 .unwrap_or(0)
                         };
                         tracing::debug!(
@@ -5725,10 +6184,16 @@ impl Node {
         // sequence_number = operator's history.len() BEFORE pushing the new update
         // (0-indexed: first entry = seq 0).  Our local copy should have the same
         // number of entries as the operator had before appending.
+        //
+        // Only reject if we're BEHIND the operator (we're missing history they already
+        // have). Being AHEAD is fine — Nostr broadcasts arrive at quorum members faster
+        // than cosign requests, so at high TPS members are typically 1-2 seqs ahead.
+        // The stale recovery block above handles the "we're behind" case; this block
+        // is a safety net for exact-match validation only.
         if let Some(ref arc) = operator_ledger_arc {
             let ledger = arc.read().unwrap();
-            let expected_seq = ledger.history.len() as u64;
-            if sequence_number != expected_seq {
+            let expected_seq = ledger.next_sequence();
+            if sequence_number > expected_seq {
                 tracing::debug!(
                     "Cosign seq mismatch: expected {}, got {} for {}...",
                     expected_seq, sequence_number,
@@ -6575,6 +7040,92 @@ impl Node {
         }
     }
 
+    /// Process a resync request from a quorum member asking us to re-broadcast
+    /// ledger updates from a given sequence number. This enables post-restart
+    /// recovery when the relay has evicted old events.
+    async fn process_resync_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+        let from_seq = request.params.get("from_seq")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        tracing::info!(
+            "Processing resync request for ledger {}... from_seq={}",
+            &request.ledger_id[..16.min(request.ledger_id.len())],
+            from_seq,
+        );
+
+        // Get the ledger history
+        let updates: Vec<deposits_core::SignedLedgerUpdate> = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            match ledgers.get(&request.ledger_id) {
+                Some(arc) => {
+                    let ledger = arc.read().unwrap();
+                    ledger.history.iter()
+                        .filter(|u| u.sequence_number >= from_seq)
+                        .cloned()
+                        .collect()
+                }
+                None => {
+                    return (false, None, Some(format!(
+                        "Ledger not found: {}...",
+                        &request.ledger_id[..16.min(request.ledger_id.len())]
+                    )));
+                }
+            }
+        };
+
+        if updates.is_empty() {
+            let response = serde_json::json!({
+                "rebroadcast_count": 0,
+                "from_seq": from_seq,
+                "through_seq": from_seq,
+                "total_available": 0,
+                "has_more": false,
+            });
+            return (true, Some(response.to_string()), None);
+        }
+
+        let total_available = updates.len();
+        let batch: Vec<_> = updates.into_iter().take(Self::RESYNC_BATCH_CAP).collect();
+        let first_seq = batch.first().map(|u| u.sequence_number).unwrap_or(from_seq);
+        let last_seq = batch.last().map(|u| u.sequence_number).unwrap_or(from_seq);
+
+        let mut rebroadcast_count = 0usize;
+        for (i, update) in batch.iter().enumerate() {
+            match self.nostr.broadcast_ledger_update(update).await {
+                Ok(_) => rebroadcast_count += 1,
+                Err(e) => {
+                    tracing::warn!(
+                        "Resync broadcast failed at seq {}: {}",
+                        update.sequence_number, e,
+                    );
+                    break;
+                }
+            }
+            // Yield every 10 broadcasts to avoid starving other tasks
+            if (i + 1) % 10 == 0 {
+                tokio::task::yield_now().await;
+            }
+        }
+
+        let has_more = total_available > Self::RESYNC_BATCH_CAP;
+        tracing::info!(
+            "Resync: re-broadcast {} updates (seq {}..{}) for ledger {}... ({} total available, has_more={})",
+            rebroadcast_count, first_seq, last_seq,
+            &request.ledger_id[..16.min(request.ledger_id.len())],
+            total_available, has_more,
+        );
+
+        let response = serde_json::json!({
+            "rebroadcast_count": rebroadcast_count,
+            "from_seq": first_seq,
+            "through_seq": last_seq,
+            "total_available": total_available,
+            "has_more": has_more,
+        });
+        (true, Some(response.to_string()), None)
+    }
+
     // ========================================================================
     // Auto-Response Tasks
     // ========================================================================
@@ -7390,20 +7941,29 @@ impl Node {
             "message_type": update.message_type,
         });
 
-        // Piggyback previous update so quorum members can apply inline before
-        // freshness check — eliminates "stale by one" failures under load.
+        // Piggyback previous updates so quorum members can apply them inline
+        // before the freshness check — eliminates "stale by N" failures under
+        // load where Nostr latency causes members to fall behind.  Each update
+        // is ~200-500 bytes base64, so 100 × 400 ≈ 40 KB — well within the
+        // relay's 131 KB max websocket payload.
         {
             use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
             use deposits_core::TlvEncode;
+
+            const MAX_PIGGYBACK: usize = 100;
 
             let ledgers = self.handler.ledgers.lock().unwrap();
             if let Some(arc) = ledgers.get(ledger_id) {
                 let ledger = arc.read().unwrap();
                 let len = ledger.history.len();
+                // history[len-1] is the new update; we piggyback the N entries before it
                 if len >= 2 {
-                    let prev = &ledger.history[len - 2];
-                    let b64 = BASE64.encode(&prev.tlv_encode());
-                    params["previous_updates"] = serde_json::json!([b64]);
+                    let num = (len - 1).min(MAX_PIGGYBACK);
+                    let prev_updates: Vec<String> = ledger.history[len - 1 - num..len - 1]
+                        .iter()
+                        .map(|u| BASE64.encode(&u.tlv_encode()))
+                        .collect();
+                    params["previous_updates"] = serde_json::json!(prev_updates);
                 }
             }
         }
@@ -7546,23 +8106,36 @@ impl Node {
                     // Drain buffered ledger updates into event store + ledger history.
                     // Without this, updates dispatched above sit in ledger_rx and are
                     // never applied — so process_cosign_request below sees stale ledgers.
+                    //
+                    // IMPORTANT: We must NOT push updates to `ledger_id` (the ledger
+                    // currently being cosigned) during this drain. Doing so would advance
+                    // history[-1] to a new entry, causing sign_last_update and partner-sig
+                    // application to target the wrong entry → "Sequence gap before persist".
+                    // We still insert into the event store so catch_up can run after the
+                    // cosign completes.
                     {
                         let mut updated_ledgers = std::collections::HashSet::new();
                         while let Some(update) = self.nostr.try_recv_ledger_update() {
                             self.handler.insert_event(&update.update);
-                            let ledgers = self.handler.ledgers.lock().unwrap();
-                            if let Some(ledger_arc) = ledgers.get(&update.ledger_id) {
-                                let mut ledger = ledger_arc.write().unwrap();
-                                let expected = ledger.history.len() as u64;
-                                if update.update.sequence_number == expected {
-                                    ledger.history.push(update.update);
+                            // Skip history push for the ledger currently being cosigned.
+                            if update.ledger_id != ledger_id {
+                                let ledgers = self.handler.ledgers.lock().unwrap();
+                                if let Some(ledger_arc) = ledgers.get(&update.ledger_id) {
+                                    let mut ledger = ledger_arc.write().unwrap();
+                                    let expected = ledger.next_sequence();
+                                    if update.update.sequence_number == expected {
+                                        ledger.history.push(update.update);
+                                    }
                                 }
                             }
                             updated_ledgers.insert(update.ledger_id);
                             ml_updates_drained += 1;
                         }
                         for lid in &updated_ledgers {
-                            self.catch_up_ledger_from_event_store(lid);
+                            // Skip catch-up for the ledger currently being cosigned.
+                            if lid != ledger_id {
+                                self.catch_up_ledger_from_event_store(lid);
+                            }
                         }
                     }
 
@@ -7808,17 +8381,43 @@ impl Node {
     fn has_quorum_reserves(&self, ledger_id: &str) -> bool {
         use deposits_core::messages::consts;
 
-        let ledgers = self.handler.ledgers.lock().unwrap();
-        if let Some(ledger_arc) = ledgers.get(ledger_id) {
-            let ledger = ledger_arc.read().unwrap();
-            // Check if any ReservesRotate operation exists in history
-            for update in &ledger.history {
-                if update.message_type == consts::RESERVES_ROTATE {
+        // Fast path: check cache
+        let current_len = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            if let Some(ledger_arc) = ledgers.get(ledger_id) {
+                ledger_arc.read().unwrap().history.len()
+            } else {
+                return false;
+            }
+        };
+        {
+            let cache = self.quorum_reserves_cache.lock().unwrap();
+            if let Some(&(cached_result, cached_len)) = cache.get(ledger_id) {
+                // True is permanent (ReservesRotate never reverts)
+                if cached_result {
                     return true;
+                }
+                // False is valid until history grows (or is truncated)
+                if cached_len == current_len || cached_len > current_len {
+                    return false;
                 }
             }
         }
-        false
+
+        // Cache miss or stale false: scan history
+        let result = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            if let Some(ledger_arc) = ledgers.get(ledger_id) {
+                let ledger = ledger_arc.read().unwrap();
+                ledger.history.iter().any(|u| u.message_type == consts::RESERVES_ROTATE)
+            } else {
+                false
+            }
+        };
+
+        self.quorum_reserves_cache.lock().unwrap()
+            .insert(ledger_id.to_string(), (result, current_len));
+        result
     }
 
     /// Build canonical signing data for deposit offer co-signatures.
@@ -7907,6 +8506,16 @@ impl Node {
             tracing::debug!("No quorum members yet, using operator-only signature");
             let result = self.operator_sign_persist_broadcast(ledger_id).await;
             metrics::record_sign_and_broadcast("success_no_cosign", sab_start.elapsed());
+            return result;
+        }
+
+        // Before reserves rotation, co-signatures are optional — skip the cosign
+        // round-trip entirely to avoid blocking the event loop (each attempt holds
+        // the run loop for 500ms, causing cascading timeouts under load).
+        if !quorum_reserves {
+            tracing::debug!("Pre-rotation: skipping optional co-sign, using operator-only signature");
+            let result = self.operator_sign_persist_broadcast(ledger_id).await;
+            metrics::record_sign_and_broadcast("success_skip_cosign", sab_start.elapsed());
             return result;
         }
 
@@ -9173,6 +9782,11 @@ impl Node {
         }
     }
 
+    /// Get the data directory path.
+    pub fn data_dir(&self) -> &std::path::Path {
+        &self.data_dir
+    }
+
     /// Get the wallet balance
     pub fn wallet_balance(&self) -> Result<u64, Error> {
         self.wallet.get_wallet_balance()
@@ -10185,29 +10799,89 @@ impl Node {
         Err(format!("Ledger not found: {}", &identifier[..16.min(identifier.len())]))
     }
 
+    /// Check if a ledger exists by ledger_id (no clone).
+    fn has_ledger(&self, ledger_id: &str) -> bool {
+        self.handler.ledgers.lock().unwrap().contains_key(ledger_id)
+    }
+
+    /// Check if a ledger exists by reserves_key (no clone).
+    fn has_ledger_by_reserves_key(&self, reserves_key: &str) -> bool {
+        let ledgers = self.handler.ledgers.lock().unwrap();
+        ledgers.values().any(|arc| arc.read().unwrap().reserves_key() == reserves_key)
+    }
+
     /// Check if we are the operator of the given ledger.
     ///
     /// Returns true when either:
     /// - The ledger's original operator_key matches our node_id, OR
     /// - A CustodyAcquire operation transferred custody to our node_id.
+    ///
+    /// Results are cached by (ledger_id, history_len). Once true, the cache
+    /// entry is permanent. False entries use incremental scanning — only new
+    /// history entries since the last check are scanned for CustodyAcquire.
     fn is_operator_of_ledger(&self, ledger_id: &str) -> bool {
-        let ledger_opt = self.get_ledger_by_ledger_id(ledger_id)
-            .or_else(|| self.get_ledger_by_reserves_key(ledger_id));
-        if let Some((_, ledger)) = ledger_opt {
-            if ledger.operator_key() == self.node_id {
-                return true;
-            }
-            // Check for CustodyAcquire that transferred custody to us
-            for update in ledger.history.iter().rev() {
-                if update.message_type == 55 { // CustodyAcquire discriminant
-                    if let Ok(deposits_core::messages::LedgerOperation::CustodyAcquire { new_custodian, .. }) =
-                        deposits_core::messages::LedgerOperation::tlv_decode(&update.message)
-                    {
-                        return new_custodian == self.node_id;
-                    }
+        // Single lock: resolve canonical_id + get Arc clone
+        let (canonical_id, arc) = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            if let Some(arc) = ledgers.get(ledger_id) {
+                (ledger_id.to_string(), arc.clone())
+            } else {
+                // Try reserves_key lookup
+                match ledgers.iter().find(|(_, a)| a.read().unwrap().reserves_key() == ledger_id) {
+                    Some((lid, arc)) => (lid.clone(), arc.clone()),
+                    None => return false,
                 }
             }
-        }
-        false
+        };
+
+        let ledger = arc.read().unwrap();
+        let history_len = ledger.history.len();
+
+        // Check cache — determine if we can return early or need incremental scan
+        let scan_from = {
+            let cache = self.operator_of_cache.lock().unwrap();
+            if let Some(&(result, cached_len)) = cache.get(&canonical_id) {
+                if result {
+                    return true; // Permanent: we are the operator
+                }
+                if cached_len == history_len {
+                    return false; // No new entries since last check
+                }
+                // Stale false — only scan new entries [cached_len..]
+                // Cap at history_len in case history was truncated
+                cached_len.min(history_len)
+            } else {
+                0 // First check — full scan needed
+            }
+        };
+
+        // Compute result: full check on first call, incremental on subsequent
+        let result = if scan_from == 0 {
+            // First check: test operator_key, then scan entire history
+            if ledger.operator_key() == self.node_id {
+                true
+            } else {
+                ledger.history.iter().rev().any(|u| {
+                    u.message_type == 55
+                        && deposits_core::messages::LedgerOperation::tlv_decode(&u.message)
+                            .map(|op| matches!(op, deposits_core::messages::LedgerOperation::CustodyAcquire { new_custodian, .. } if new_custodian == self.node_id))
+                            .unwrap_or(false)
+                })
+            }
+        } else {
+            // Incremental: only scan entries [scan_from..] for CustodyAcquire
+            ledger.history[scan_from..].iter().rev().any(|u| {
+                u.message_type == 55
+                    && deposits_core::messages::LedgerOperation::tlv_decode(&u.message)
+                        .map(|op| matches!(op, deposits_core::messages::LedgerOperation::CustodyAcquire { new_custodian, .. } if new_custodian == self.node_id))
+                        .unwrap_or(false)
+            })
+        };
+
+        drop(ledger);
+
+        // Store in cache
+        self.operator_of_cache.lock().unwrap().insert(canonical_id, (result, history_len));
+        result
     }
 }

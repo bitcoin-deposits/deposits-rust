@@ -110,6 +110,9 @@ wait_for_electrs
 # Setup faucet
 setup_faucet
 
+# Start block miner (1 block/sec for regtest)
+$DC up -d miner
+
 # Start BDK nodes
 log_info "Starting BDK nodes..."
 $DC up -d bdk-alice bdk-bob bdk-charlie bdk-diana

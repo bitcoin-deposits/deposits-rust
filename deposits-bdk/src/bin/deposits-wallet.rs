@@ -12,6 +12,13 @@
 //!   deposits-wallet make_invoice <alias> <amt> - Create Lightning invoice
 //!   deposits-wallet pay_invoice <alias> <bolt11> - Pay Lightning invoice
 
+#[cfg(not(target_env = "msvc"))]
+use tikv_jemallocator::Jemalloc;
+
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
+
 use bitcoin::secp256k1::{ecdsa, Message, PublicKey, Secp256k1, SecretKey};
 use bitcoin::hashes::{sha256, Hash};
 use chrono::Utc;
@@ -598,6 +605,7 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
     let mut ledger_id: Option<String> = None;
     let mut amount_sats: Option<u64> = None;
     let mut alias: Option<String> = None;
+    let mut skip_cosign_verify = false;
     let mut config_args = Vec::new();
 
     let mut i = 0;
@@ -606,6 +614,9 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
             "--alias" if i + 1 < args.len() => {
                 alias = Some(args[i + 1].clone());
                 i += 1;
+            }
+            "--skip-cosign-verify" => {
+                skip_cosign_verify = true;
             }
             s if s.starts_with("--") => {
                 config_args.push(args[i].clone());
@@ -905,7 +916,7 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     // Verify quorum membership for co-signed responses (async check)
     let cosign_required = result.get("cosign_required").and_then(|v| v.as_bool()).unwrap_or(false);
-    if cosign_required {
+    if cosign_required && !skip_cosign_verify {
         if let Some(cosigner_str) = result.get("cosigner_pubkey").and_then(|v| v.as_str()) {
             if let Ok(cosigner_pubkey) = PublicKey::from_str(cosigner_str) {
                 if !verify_quorum_membership(&transport, &ledger_id, &cosigner_pubkey).await {
@@ -914,6 +925,8 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
                 println!("  Co-signature verified from quorum member {}...", &cosigner_str[..16.min(cosigner_str.len())]);
             }
         }
+    } else if cosign_required && skip_cosign_verify {
+        println!("  Skipping co-signature verification (--skip-cosign-verify)");
     }
 
     // Save deposit to local storage with alias
@@ -1341,6 +1354,12 @@ async fn sync_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Error>
                                         }
                                         deposit["amount_sats"] = serde_json::json!(available_sats);
                                         deposit["locked_sats"] = serde_json::json!(locked_sats);
+                                        updated = true;
+                                    }
+
+                                    // Promote status to "funded" if daemon reports a balance
+                                    if balance_msats > 0 && current_status == "pending" {
+                                        deposit["status"] = serde_json::json!("funded");
                                         updated = true;
                                     }
                                 }

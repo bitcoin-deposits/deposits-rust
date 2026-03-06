@@ -41,6 +41,32 @@ services:
       timeout: 5s
       retries: 3
 
+  # Slow (durable) Nostr relay — persists non-ephemeral events, drops kinds 20000-29999.
+  # Also streams from the fast relay as backup. Nodes query this for historical data.
+  nostr-relay-slow:
+    image: strfry-performance:latest
+    container_name: bdk-nostr-relay-slow
+    entrypoint: ["/bin/sh", "/app/slow-relay-entrypoint.sh"]
+    ports:
+      - "7779:7777"
+    volumes:
+      - bdk_nostr_slow_data:/app/strfry-db
+      - ../../strfry-performance/strfry-slow.conf:/app/strfry-slow.conf:ro
+      - ../../deposits-tools/drop-ephemeral-policy.sh:/app/drop-ephemeral-policy.sh:ro
+      - ./bin/slow-relay-entrypoint.sh:/app/slow-relay-entrypoint.sh:ro
+    environment:
+      - FAST_RELAY_URL=ws://nostr-relay:7777
+    depends_on:
+      nostr-relay:
+        condition: service_healthy
+    networks:
+      - bdk_network
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:7777"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
   # Bitcoin Core regtest node
   bitcoin:
     image: blockstream/bitcoind:27.2
@@ -383,33 +409,34 @@ services:
       bdk_network:
         ipv4_address: 172.21.0.24
 
-  # Bitcoin faucet helper - mines blocks and sends to nodes
-  faucet:
-    image: blockstream/bitcoind:27.2
-    platform: linux/amd64
-    container_name: bdk-faucet
-    profiles:
-      - faucet
+  # Lightweight regtest block miner (~5MB alpine+curl container)
+  # Mines 1 block/sec so transfer timeouts resolve promptly after restarts.
+  # Uses JSON-RPC directly — no bitcoind binary needed.
+  miner:
+    image: alpine:3.21
+    container_name: bdk-miner
     depends_on:
       bitcoin:
         condition: service_healthy
-    entrypoint: ["/bin/bash", "-c"]
+    entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        # Wait for electrs to be ready
-        sleep 10
+        apk add --no-cache curl >/dev/null 2>&1
+        RPC="http://user:pass@bitcoin:18443/wallet/faucet"
 
-        # Create wallet if it doesn't exist
-        bitcoin-cli -regtest -rpcconnect=bitcoin -rpcuser=user -rpcpassword=pass createwallet "faucet" 2>/dev/null || true
+        # Wait for faucet wallet (created by reinit.sh)
+        echo "Waiting for faucet wallet..."
+        until curl -sf -d '{"method":"getbalance"}' $$RPC >/dev/null 2>&1; do
+          sleep 2
+        done
 
-        # Generate initial blocks
-        echo "Mining 101 blocks..."
-        bitcoin-cli -regtest -rpcconnect=bitcoin -rpcuser=user -rpcpassword=pass -rpcwallet=faucet -generate 101
+        # Get a mining address (reused for all blocks)
+        ADDR=$(curl -sf -d '{"method":"getnewaddress"}' $$RPC | sed 's/.*"result":"\([^"]*\)".*/\1/')
+        echo "Mining to $$ADDR (1 block/sec)"
 
-        echo "Faucet ready. Mining a block every 30 seconds..."
         while true; do
-          sleep 30
-          bitcoin-cli -regtest -rpcconnect=bitcoin -rpcuser=user -rpcpassword=pass -rpcwallet=faucet -generate 1
+          curl -sf -d "{\"method\":\"generatetoaddress\",\"params\":[1,\"$$ADDR\"]}" $$RPC >/dev/null
+          sleep 1
         done
     networks:
       - bdk_network
@@ -479,6 +506,7 @@ services:
 
 volumes:
   bdk_nostr_data:
+  bdk_nostr_slow_data:
   bdk_bitcoin_data:
   bdk_electrs_data:
   bdk_electrs_alice:

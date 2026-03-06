@@ -26,6 +26,10 @@ lightning-macros = { path = "../rust-lightning/lightning-macros" }
 # Use nostr-sdk-performance fork with skip-verification and skip-database by default
 nostr-relay-pool = { path = "nostr-sdk-performance/nostr-relay-pool" }
 
+# Release profile with debug info for flamegraphs
+[profile.release]
+debug = 1              # line tables only (minimal size increase, good flamegraph symbols)
+
 [patch."https://github.com/lightningdevkit/rust-lightning"]
 lightning = { path = "../rust-lightning/lightning" }
 lightning-types = { path = "../rust-lightning/lightning-types" }

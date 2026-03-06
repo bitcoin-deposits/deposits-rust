@@ -105,6 +105,11 @@ pub struct DepositsHandler {
     /// Used to avoid re-parsing files that haven't changed.
     last_file_modtimes: Mutex<HashMap<String, std::time::SystemTime>>,
 
+    /// Tracks appends since last compaction per ledger.
+    /// Used to decide when to write a State line (every 100 appends)
+    /// and when to do a full file rewrite (every 1000 appends).
+    appends_since_compaction: Mutex<HashMap<String, usize>>,
+
     /// Content-addressed event store for ledger sync.
     /// Events are indexed by current_hash with memoized validation.
     pub event_store: Mutex<EventStore>,
@@ -175,6 +180,7 @@ impl DepositsHandler {
             enable_metrics_emitter,
             persisted_update_counts,
             last_file_modtimes: Mutex::new(HashMap::new()),
+            appends_since_compaction: Mutex::new(HashMap::new()),
             event_store,
         };
 
@@ -314,8 +320,10 @@ impl DepositsHandler {
 
         // Reset persisted counts to match what we just wrote
         let mut counts = self.persisted_update_counts.lock().unwrap();
+        let mut compaction = self.appends_since_compaction.lock().unwrap();
         for (id, ledger) in &ledgers_snapshot {
             counts.insert(id.clone(), ledger.history.len());
+            compaction.insert(id.clone(), 0);
         }
 
         // Update modtimes so discover_new_ledgers() doesn't re-read our own writes
@@ -633,14 +641,16 @@ impl DepositsHandler {
             return 0;
         }
 
-        // Collect current in-memory history lengths for changed ledgers only
-        let known: std::collections::HashMap<String, usize> = {
+        // Collect current in-memory tip sequences for changed ledgers only.
+        // Use next_sequence() instead of history.len() because in-memory history
+        // may be truncated (history.len()=2000 but actual tip=50000).
+        let known: std::collections::HashMap<String, u64> = {
             let ledgers = self.ledgers.lock().unwrap();
             changed_files.iter()
                 .filter_map(|(stem, _)| {
                     ledgers.get(stem).map(|arc| {
                         let l = arc.read().unwrap();
-                        (stem.clone(), l.history.len())
+                        (stem.clone(), l.next_sequence())
                     })
                 })
                 .collect()
@@ -659,19 +669,24 @@ impl DepositsHandler {
                 Some(l) => l,
                 None => continue,
             };
+            let disk_tip = disk_ledger.next_sequence();
             let disk_len = disk_ledger.history.len();
 
-            if let Some(&mem_len) = known.get(ledger_id) {
-                // Existing ledger — update if disk has more history
-                if disk_len > mem_len {
+            if let Some(&mem_tip) = known.get(ledger_id) {
+                // Existing ledger — update if disk has higher tip sequence
+                if disk_tip > mem_tip {
                     tracing::info!(
-                        "Reloaded ledger {}... from disk ({} -> {} entries)",
+                        "Reloaded ledger {}... from disk (seq {} -> {}, {} entries)",
                         &ledger_id[..16.min(ledger_id.len())],
-                        mem_len,
+                        mem_tip,
+                        disk_tip,
                         disk_len
                     );
-                    for update in disk_ledger.history.iter().skip(mem_len) {
-                        new_updates.push(update.clone());
+                    // Add updates that are beyond our current tip
+                    for update in disk_ledger.history.iter() {
+                        if update.sequence_number >= mem_tip {
+                            new_updates.push(update.clone());
+                        }
                     }
                     ledgers.insert(ledger_id.clone(), Arc::new(RwLock::new(disk_ledger)));
                     counts.insert(ledger_id.clone(), disk_len);
@@ -869,13 +884,13 @@ impl DepositsHandler {
 
             // Save to disk
             drop(ledgers); // Release lock before saving
-            if let Err(e) = self.save_ledgers_to_disk() {
+            if let Err(e) = self.persist_ledger_to_disk(&ledger_id) {
                 tracing::error!("Failed to save ledgers after creation: {}", e);
             }
         } else if is_new {
             // New ledger for a partner, just save
             drop(ledgers);
-            if let Err(e) = self.save_ledgers_to_disk() {
+            if let Err(e) = self.persist_ledger_to_disk(&ledger_id) {
                 tracing::error!("Failed to save ledgers after creation: {}", e);
             }
         }
@@ -930,55 +945,101 @@ impl DepositsHandler {
     ///
     /// On first save (or when no tracking exists), does a full rewrite.
     /// On subsequent saves, only appends new Update lines to the JSONL file.
+    /// State line is written every 100 appends (not every time) to reduce file bloat.
+    /// Full compaction (rewrite) triggers every 1000 appends to cap file size.
     pub fn persist_ledger_to_disk(&self, ledger_id: &str) -> Result<(), String> {
         let t0 = std::time::Instant::now();
 
         let mut counts = self.persisted_update_counts.lock().unwrap();
         let previously_saved = counts.get(ledger_id).copied().unwrap_or(0);
 
+        // Get Arc clone so we can release the HashMap lock early
+        let ledger_arc = {
+            let ledgers = self.ledgers.lock().unwrap();
+            ledgers.get(ledger_id)
+                .ok_or_else(|| format!("Ledger not found: {}", ledger_id))?
+                .clone()
+        };
+
         if previously_saved == 0 {
-            // First save or no tracking — full clone + full write
-            let (ledger_clone, history_len) = {
-                let ledgers = self.ledgers.lock().unwrap();
-                let ledger_arc = ledgers.get(ledger_id)
-                    .ok_or_else(|| format!("Ledger not found: {}", ledger_id))?;
-                let ledger = ledger_arc.read().unwrap();
-                ((ledger_id.to_string(), ledger.clone()), ledger.history.len())
-            };
-            Self::save_single_ledger_to_disk(ledger_clone, &self.data_dir);
-            counts.insert(ledger_id.to_string(), history_len);
+            // First save — write State + bounded history tail
+            let ledger = ledger_arc.read().unwrap();
+            let history_len = ledger.history.len();
+            Self::save_ledger_to_disk_streaming(
+                ledger_id, &ledger, &self.data_dir, Some(Self::HISTORY_RETAIN),
+            );
+            drop(ledger);
+
+            // Truncate in-memory history to bound memory usage.
+            // Safe because all sequence checks now use next_sequence()
+            // (derived from last entry) instead of history.len().
+            let final_len = Self::truncate_history(&ledger_arc, Self::HISTORY_RETAIN);
+
+            counts.insert(ledger_id.to_string(), final_len);
+            self.appends_since_compaction.lock().unwrap().insert(ledger_id.to_string(), 0);
 
             let total_elapsed = t0.elapsed();
             if total_elapsed.as_millis() > 1 {
-                tracing::info!("[PROFILE] persist_ledger_to_disk: {} entries, total={:?}, mode=full_write",
-                    history_len, total_elapsed);
+                tracing::info!("[PROFILE] persist_ledger_to_disk: {}/{} entries, total={:?}, mode=full_write",
+                    final_len.min(Self::HISTORY_RETAIN), history_len, total_elapsed);
             }
         } else {
-            // Append mode — only clone state + new updates (not the full history)
-            let ledgers = self.ledgers.lock().unwrap();
-            let ledger_arc = ledgers.get(ledger_id)
-                .ok_or_else(|| format!("Ledger not found: {}", ledger_id))?;
-            let ledger = ledger_arc.read().unwrap();
-            let history_len = ledger.history.len();
+            // Check if there are new entries to persist
+            let (history_len, new_count) = {
+                let ledger = ledger_arc.read().unwrap();
+                let len = ledger.history.len();
+                (len, len.saturating_sub(previously_saved))
+            };
 
-            if history_len > previously_saved {
-                let state_clone = ledger.state.clone();
-                let new_updates: Vec<_> = ledger.history[previously_saved..].to_vec();
-                drop(ledger);
-                drop(ledgers);
+            if new_count > 0 {
+                let appends = self.appends_since_compaction.lock().unwrap()
+                    .get(ledger_id).copied().unwrap_or(0);
 
-                Self::append_updates_to_disk(
-                    ledger_id,
-                    &state_clone,
-                    &new_updates,
-                    &self.data_dir,
-                );
-                counts.insert(ledger_id.to_string(), history_len);
+                if appends + new_count >= 1000 {
+                    // Compaction: write State + bounded history tail (not full history).
+                    // This keeps compaction I/O constant regardless of total history size.
+                    let ledger = ledger_arc.read().unwrap();
+                    Self::save_ledger_to_disk_streaming(
+                        ledger_id, &ledger, &self.data_dir, Some(Self::HISTORY_RETAIN),
+                    );
+                    drop(ledger);
 
-                let total_elapsed = t0.elapsed();
-                if total_elapsed.as_millis() > 1 {
-                    tracing::info!("[PROFILE] persist_ledger_to_disk: {} entries (+{}), total={:?}, mode=append",
-                        history_len, new_updates.len(), total_elapsed);
+                    // Truncate in-memory history to bound memory usage.
+                    // Safe because all sequence checks now use next_sequence()
+                    // (derived from last entry) instead of history.len().
+                    let final_len = Self::truncate_history(&ledger_arc, Self::HISTORY_RETAIN);
+
+                    counts.insert(ledger_id.to_string(), final_len);
+                    self.appends_since_compaction.lock().unwrap().insert(ledger_id.to_string(), 0);
+                    crate::metrics::record_ledger_compaction();
+
+                    let total_elapsed = t0.elapsed();
+                    tracing::info!("[PROFILE] persist_ledger_to_disk: {}/{} entries, total={:?}, mode=compaction (after {} appends)",
+                        final_len.min(Self::HISTORY_RETAIN), history_len, total_elapsed, appends + new_count);
+                } else {
+                    // Normal append — write State line every 100 appends to limit replay window
+                    let ledger = ledger_arc.read().unwrap();
+                    let write_state = appends % 100 == 0;
+                    let state_clone = if write_state { Some(ledger.state.clone()) } else { None };
+                    let new_updates: Vec<_> = ledger.history[previously_saved..].to_vec();
+                    drop(ledger);
+
+                    Self::append_updates_to_disk(
+                        ledger_id,
+                        state_clone.as_ref(),
+                        &new_updates,
+                        &self.data_dir,
+                    );
+                    counts.insert(ledger_id.to_string(), history_len);
+                    *self.appends_since_compaction.lock().unwrap()
+                        .entry(ledger_id.to_string()).or_insert(0) += new_count;
+
+                    let total_elapsed = t0.elapsed();
+                    if total_elapsed.as_millis() > 1 {
+                        tracing::info!("[PROFILE] persist_ledger_to_disk: {} entries (+{}), total={:?}, mode=append{}",
+                            history_len, new_updates.len(), total_elapsed,
+                            if write_state { " (with state)" } else { "" });
+                    }
                 }
             }
         }
@@ -993,10 +1054,30 @@ impl DepositsHandler {
         Ok(())
     }
 
+    /// Truncate in-memory history to at most `retain` entries.
+    /// Returns the new history length.
+    fn truncate_history(ledger_arc: &Arc<RwLock<Ledger>>, retain: usize) -> usize {
+        let mut ledger = ledger_arc.write().unwrap();
+        let len = ledger.history.len();
+        if len > retain {
+            ledger.history.drain(..len - retain);
+        }
+        ledger.history.len()
+    }
+
     /// Save a single ledger to its JSONL file
-    fn save_single_ledger_to_disk(
-        (ledger_id, ledger): (String, Ledger),
+    /// Write a full ledger to disk by streaming directly from a read-locked reference.
+    /// Avoids cloning the entire history Vec (which at 100K+ entries = ~57 MB of allocations).
+    /// Maximum history entries to retain on disk and in memory during compaction.
+    /// State snapshot captures all balances/deposits; history only needed for
+    /// chain continuity and recent audit trail.
+    const HISTORY_RETAIN: usize = 2000;
+
+    fn save_ledger_to_disk_streaming(
+        ledger_id: &str,
+        ledger: &Ledger,
         data_dir: &PathBuf,
+        retain: Option<usize>,
     ) {
         let t0 = std::time::Instant::now();
         let ledgers_dir = data_dir.join("ledgers");
@@ -1008,53 +1089,89 @@ impl DepositsHandler {
         }
 
         let history_len = ledger.history.len();
-        let mut lines = Vec::with_capacity(2 + history_len);
+        let start = match retain {
+            Some(k) => history_len.saturating_sub(k),
+            None => 0,
+        };
+        let written = history_len - start;
+        let ledger_file = ledgers_dir.join(format!("{}.jsonl", ledger_id));
 
+        // Write to a temp file, then rename for atomicity
+        let tmp_file = ledgers_dir.join(format!("{}.jsonl.tmp", ledger_id));
+        let file = match fs::File::create(&tmp_file) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::error!("Failed to create temp ledger file {}: {}", ledger_id, e);
+                return;
+            }
+        };
+
+        use std::io::Write;
+        let mut writer = std::io::BufWriter::new(file);
+
+        // Stream role + state + updates directly to file — no intermediate Vec<String>
         let role_row = LedgerLogRow::Role { role: ledger.role };
         if let Ok(line) = serde_json::to_string(&role_row) {
-            lines.push(line);
+            let _ = writeln!(writer, "{}", line);
         }
 
         let state_row = LedgerLogRow::State(ledger.state.clone());
         if let Ok(line) = serde_json::to_string(&state_row) {
-            lines.push(line);
+            let _ = writeln!(writer, "{}", line);
         }
 
-        for update in &ledger.history {
+        // Write only the retained tail of history (or all if retain is None)
+        for update in &ledger.history[start..] {
             let update_row = LedgerLogRow::Update(update.clone());
             if let Ok(line) = serde_json::to_string(&update_row) {
-                lines.push(line);
+                let _ = writeln!(writer, "{}", line);
             }
         }
 
-        let serialize_elapsed = t0.elapsed();
-        let ledger_file = ledgers_dir.join(format!("{}.jsonl", ledger_id));
-        let contents = lines.join("\n");
-        if let Err(e) = fs::write(&ledger_file, contents) {
-            tracing::error!("Failed to write ledger file {}: {}", ledger_id, e);
+        if let Err(e) = writer.flush() {
+            tracing::error!("Failed to flush ledger file {}: {}", ledger_id, e);
+            let _ = fs::remove_file(&tmp_file);
+            return;
         }
+        drop(writer);
+
+        // Atomic rename
+        if let Err(e) = fs::rename(&tmp_file, &ledger_file) {
+            tracing::error!("Failed to rename ledger file {}: {}", ledger_id, e);
+            let _ = fs::remove_file(&tmp_file);
+            return;
+        }
+
         let total_elapsed = t0.elapsed();
         if total_elapsed.as_millis() > 1 {
-            tracing::info!("[PROFILE] save_single_ledger_to_disk: {} entries, serialize={:?}, write={:?}, total={:?}",
-                history_len, serialize_elapsed, total_elapsed - serialize_elapsed, total_elapsed);
+            tracing::info!("[PROFILE] save_ledger_to_disk_streaming: {}/{} entries, total={:?}",
+                written, history_len, total_elapsed);
         }
     }
 
-    /// Append a fresh State snapshot and new updates to an existing ledger JSONL file.
+    // Keep old signature for callers that pass owned data
+    fn save_single_ledger_to_disk(
+        (ledger_id, ledger): (String, Ledger),
+        data_dir: &PathBuf,
+    ) {
+        Self::save_ledger_to_disk_streaming(&ledger_id, &ledger, data_dir, None);
+    }
+
+    /// Append new updates (and optionally a State snapshot) to an existing ledger JSONL file.
     ///
-    /// Writes a State line first (so reloads see current state including quorum_members,
-    /// deposits, etc.), then appends the new Update lines. The loader takes the last-seen
-    /// State line, so this keeps the file self-consistent for crash recovery.
+    /// When `current_state` is Some, writes a State line first so reloads see current state.
+    /// The loader takes the last-seen State line and replays updates after it, so State lines
+    /// only need to be written periodically (every ~100 appends) rather than on every persist.
     fn append_updates_to_disk(
         ledger_id: &str,
-        current_state: &LedgerState,
+        current_state: Option<&LedgerState>,
         new_updates: &[SignedLedgerUpdate],
         data_dir: &PathBuf,
     ) {
         let ledgers_dir = data_dir.join("ledgers");
         let ledger_file = ledgers_dir.join(format!("{}.jsonl", ledger_id));
 
-        let mut file = match fs::OpenOptions::new().append(true).open(&ledger_file) {
+        let file = match fs::OpenOptions::new().append(true).open(&ledger_file) {
             Ok(f) => f,
             Err(e) => {
                 tracing::error!("Failed to open ledger file for append {}: {}", ledger_id, e);
@@ -1063,24 +1180,31 @@ impl DepositsHandler {
         };
 
         use std::io::Write;
+        let mut writer = std::io::BufWriter::new(file);
 
-        // Write fresh State line so reloads get current state (quorum_members, deposits, etc.)
-        let state_row = LedgerLogRow::State(current_state.clone());
-        if let Ok(line) = serde_json::to_string(&state_row) {
-            if let Err(e) = write!(file, "\n{}", line) {
-                tracing::error!("Failed to append state to ledger {}: {}", ledger_id, e);
-                return;
+        // Optionally write State line (only every ~100 appends to reduce file bloat)
+        if let Some(state) = current_state {
+            let state_row = LedgerLogRow::State(state.clone());
+            if let Ok(line) = serde_json::to_string(&state_row) {
+                if let Err(e) = write!(writer, "\n{}", line) {
+                    tracing::error!("Failed to append state to ledger {}: {}", ledger_id, e);
+                    return;
+                }
             }
         }
 
         for update in new_updates {
             let update_row = LedgerLogRow::Update(update.clone());
             if let Ok(line) = serde_json::to_string(&update_row) {
-                if let Err(e) = write!(file, "\n{}", line) {
+                if let Err(e) = write!(writer, "\n{}", line) {
                     tracing::error!("Failed to append to ledger {}: {}", ledger_id, e);
                     return;
                 }
             }
+        }
+
+        if let Err(e) = writer.flush() {
+            tracing::error!("Failed to flush ledger file {}: {}", ledger_id, e);
         }
     }
 
@@ -1202,8 +1326,8 @@ impl DepositsHandler {
                 }
             }
 
-            // Persist to disk
-            self.save_ledgers_to_disk()?;
+            // Persist only this ledger (append-only)
+            self.persist_ledger_to_disk(&ledger_id)?;
 
             return Ok((report, ledger_arc));
         }
@@ -1214,13 +1338,14 @@ impl DepositsHandler {
 
         // Store the ledger
         let ledger_arc = Arc::new(RwLock::new(ledger));
+        let ledger_id_for_persist = ledger_id.clone();
         {
             let mut ledgers = self.ledgers.lock().unwrap();
             ledgers.insert(ledger_id, ledger_arc.clone());
         }
 
-        // Persist to disk
-        self.save_ledgers_to_disk()?;
+        // Persist only this ledger (append-only)
+        self.persist_ledger_to_disk(&ledger_id_for_persist)?;
 
         Ok((report, ledger_arc))
     }
@@ -1261,8 +1386,8 @@ impl DepositsHandler {
 
         drop(ledger); // Release write lock
 
-        // Persist to disk
-        self.save_ledgers_to_disk()?;
+        // Persist only this ledger (append-only)
+        self.persist_ledger_to_disk(ledger_id)?;
 
         Ok(applied)
     }

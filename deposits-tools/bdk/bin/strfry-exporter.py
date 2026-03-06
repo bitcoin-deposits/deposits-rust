@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """strfry Prometheus exporter.
 
-Periodically runs `docker exec bdk-nostr-relay strfry scan --count` to collect
+Periodically runs `docker exec <container> strfry scan --count` to collect
 event counts by kind and exposes them as Prometheus metrics on an HTTP port.
+
+Supports multiple relay containers (fast + slow) with a relay label.
 
 Usage:
     python3 strfry-exporter.py [--port 9201] [--interval 10]
@@ -22,21 +24,29 @@ _metrics: dict[str, float] = {}
 # Nostr kinds used by the deposits protocol
 KINDS = {
     9100: "ledger_update",
-    9101: "request",
-    9102: "response",
+    20101: "request",
+    20102: "response",
     9103: "dispute",
+    39100: "advertisement",
 }
 
-CONTAINER = os.environ.get("STRFRY_CONTAINER", "bdk-nostr-relay")
+# Relay containers to scrape: (container_name, label, strfry_config_flag)
+RELAYS = [
+    ("bdk-nostr-relay", "fast", ""),
+    ("bdk-nostr-relay-slow", "slow", "--config /app/strfry-slow.conf"),
+]
 
 
-def _run_scan(kind_filter: str) -> int | None:
-    """Run strfry scan --count inside the relay container."""
+def _run_scan(container: str, config_flag: str, kind_filter: str) -> int | None:
+    """Run strfry scan --count inside a relay container."""
     try:
-        result = subprocess.run(
-            ["docker", "exec", CONTAINER, "/app/strfry", "scan", "--count", kind_filter],
-            capture_output=True, text=True, timeout=10,
-        )
+        cmd = ["docker", "exec", container]
+        if config_flag:
+            parts = config_flag.split()
+            cmd.extend(["/app/strfry"] + parts + ["scan", "--count", kind_filter])
+        else:
+            cmd.extend(["/app/strfry", "scan", "--count", kind_filter])
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
         for line in result.stdout.strip().splitlines():
             line = line.strip()
             if line.isdigit():
@@ -46,11 +56,11 @@ def _run_scan(kind_filter: str) -> int | None:
     return None
 
 
-def _db_size_bytes() -> int | None:
+def _db_size_bytes(container: str) -> int | None:
     """Get LMDB data file size."""
     try:
         result = subprocess.run(
-            ["docker", "exec", CONTAINER, "stat", "-c", "%s", "/app/strfry-db/data.mdb"],
+            ["docker", "exec", container, "stat", "-c", "%s", "/app/strfry-db/data.mdb"],
             capture_output=True, text=True, timeout=5,
         )
         val = result.stdout.strip()
@@ -61,11 +71,11 @@ def _db_size_bytes() -> int | None:
     return None
 
 
-def _active_connections() -> int | None:
+def _active_connections(container: str) -> int | None:
     """Estimate active WebSocket connections from open TCP sockets on port 7777."""
     try:
         result = subprocess.run(
-            ["docker", "exec", CONTAINER, "sh", "-c",
+            ["docker", "exec", container, "sh", "-c",
              "cat /proc/net/tcp 2>/dev/null | grep -c ':1E61' || echo 0"],
             capture_output=True, text=True, timeout=5,
         )
@@ -82,28 +92,32 @@ def collect():
     """Collect all metrics (called periodically by background thread)."""
     new_metrics: dict[str, float] = {}
 
-    # Total event count
-    total = _run_scan("{}")
-    if total is not None:
-        new_metrics["strfry_events_total"] = total
+    for container, relay_label, config_flag in RELAYS:
+        pfx = f'relay="{relay_label}"'
 
-    # Events by kind
-    for kind, label in KINDS.items():
-        count = _run_scan(f'{{"kinds":[{kind}]}}')
-        if count is not None:
-            new_metrics[f"strfry_events_by_kind{{kind=\"{kind}\",name=\"{label}\"}}"] = count
+        # Total event count
+        total = _run_scan(container, config_flag, "{}")
+        if total is not None:
+            new_metrics[f"strfry_events_total{{{pfx}}}"] = total
 
-    # DB size
-    db_size = _db_size_bytes()
-    if db_size is not None:
-        new_metrics["strfry_db_size_bytes"] = db_size
+        # Events by kind
+        for kind, label in KINDS.items():
+            count = _run_scan(container, config_flag, f'{{"kinds":[{kind}]}}')
+            if count is not None:
+                new_metrics[f'strfry_events_by_kind{{{pfx},kind="{kind}",name="{label}"}}'] = count
 
-    # Active connections
-    conns = _active_connections()
-    if conns is not None:
-        new_metrics["strfry_connections_active"] = conns
+        # DB size
+        db_size = _db_size_bytes(container)
+        if db_size is not None:
+            new_metrics[f"strfry_db_size_bytes{{{pfx}}}"] = db_size
+
+        # Active connections
+        conns = _active_connections(container)
+        if conns is not None:
+            new_metrics[f"strfry_connections_active{{{pfx}}}"] = conns
 
     with _lock:
+        _metrics.clear()
         _metrics.update(new_metrics)
 
 
@@ -128,7 +142,7 @@ class MetricsHandler(BaseHTTPRequestHandler):
         with _lock:
             lines = []
             for key, val in sorted(_metrics.items()):
-                # Format: metric_name value
+                # Format: metric_name{labels} value
                 lines.append(f"{key} {val}")
             body = "\n".join(lines) + "\n"
 
@@ -147,8 +161,8 @@ def main():
     parser.add_argument("--interval", type=float, default=10, help="Collection interval seconds (default 10)")
     args = parser.parse_args()
 
-    # Initial collection
-    print(f"[strfry-exporter] collecting from container '{CONTAINER}'...")
+    relay_names = ", ".join(f"{c} ({l})" for c, l, _ in RELAYS)
+    print(f"[strfry-exporter] collecting from: {relay_names}")
     collect()
     with _lock:
         print(f"[strfry-exporter] initial metrics: {len(_metrics)} keys")

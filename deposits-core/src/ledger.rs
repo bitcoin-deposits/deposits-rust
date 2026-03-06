@@ -378,28 +378,28 @@ impl Ledger {
         // 2. Validate signer is authorized
         self.validate_update_signer(update)?;
 
-        // 3. Validate hash chain
+        // 3. Validate hash chain (truncation-safe: compare against tip, not by index)
+        // Only validates the expected next update. Past updates were already
+        // validated on first receipt; future updates will be validated when
+        // we catch up to them.
         if update.sequence_number > 0 {
-            let expected_prev_hash = if update.sequence_number as usize <= self.history.len() {
-                // We have the previous update
-                self.history.get(update.sequence_number as usize - 1)
-                    .map(|u| u.current_hash)
-                    .unwrap_or(self.state.hash)
-            } else {
-                // Future update - can't validate yet
-                return Ok(());
-            };
+            let next_seq = self.next_sequence();
 
-            if update.previous_hash != expected_prev_hash {
-                return Err(DepositsError::ProtocolViolation {
-                    violation_type: "hash_chain_break".to_string(),
-                    details: format!(
-                        "Previous hash mismatch at seq {}: expected {:02x?}, got {:02x?}",
-                        update.sequence_number,
-                        &expected_prev_hash[..8],
-                        &update.previous_hash[..8]
-                    ),
-                });
+            if update.sequence_number == next_seq {
+                let tip_hash = self.history.last()
+                    .map(|u| u.current_hash)
+                    .unwrap_or([0u8; 32]);
+                if update.previous_hash != tip_hash {
+                    return Err(DepositsError::ProtocolViolation {
+                        violation_type: "hash_chain_break".to_string(),
+                        details: format!(
+                            "Previous hash mismatch at seq {}: expected {:02x?}, got {:02x?}",
+                            update.sequence_number,
+                            &tip_hash[..8],
+                            &update.previous_hash[..8]
+                        ),
+                    });
+                }
             }
         }
 
@@ -453,28 +453,34 @@ impl Ledger {
         &self,
         update: &SignedLedgerUpdate,
     ) -> DepositsResult<()> {
-        // Validate hash chain
+        // Validate hash chain for the expected next update only.
+        //
+        // Past updates (seq < next_seq) were already validated when first
+        // received — redelivery via Nostr is normal and not a violation.
+        // Future updates (seq > next_seq) can't be validated until we
+        // catch up — the caller handles gap detection separately.
+        //
+        // After history truncation, entries aren't addressable by
+        // sequence_number as an index, so we compare against the tip.
         if update.sequence_number > 0 {
-            let expected_prev_hash = if update.sequence_number as usize <= self.history.len() {
-                // We have the previous update
-                self.history.get(update.sequence_number as usize - 1)
-                    .map(|u| u.current_hash)
-                    .unwrap_or(self.state.hash)
-            } else {
-                // Future update - can't validate yet
-                return Ok(());
-            };
+            let next_seq = self.next_sequence();
 
-            if update.previous_hash != expected_prev_hash {
-                return Err(DepositsError::ProtocolViolation {
-                    violation_type: "hash_chain_break".to_string(),
-                    details: format!(
-                        "Previous hash mismatch at seq {}: expected {:02x?}, got {:02x?}",
-                        update.sequence_number,
-                        &expected_prev_hash[..8],
-                        &update.previous_hash[..8]
-                    ),
-                });
+            if update.sequence_number == next_seq {
+                // Expected next update — previous_hash must match our tip
+                let tip_hash = self.history.last()
+                    .map(|u| u.current_hash)
+                    .unwrap_or([0u8; 32]);
+                if update.previous_hash != tip_hash {
+                    return Err(DepositsError::ProtocolViolation {
+                        violation_type: "hash_chain_break".to_string(),
+                        details: format!(
+                            "Previous hash mismatch at seq {}: expected {:02x?}, got {:02x?}",
+                            update.sequence_number,
+                            &tip_hash[..8],
+                            &update.previous_hash[..8]
+                        ),
+                    });
+                }
             }
         }
 
@@ -667,6 +673,15 @@ impl Ledger {
         self.history.last()
             .map(|u| u.current_hash)
             .unwrap_or([0u8; 32])
+    }
+
+    /// Get the next expected sequence number.
+    /// Derived from the last history entry, not from `history.len()`,
+    /// so it remains correct after history truncation.
+    pub fn next_sequence(&self) -> u64 {
+        self.history.last()
+            .map(|u| u.sequence_number + 1)
+            .unwrap_or(0)
     }
 
     /// Find the sequence number of a hash in the update history.
@@ -902,7 +917,11 @@ impl Ledger {
 
         // Compute hashes
         let prev_hash = self.state.hash;
-        let sequence = self.history.len() as u64;
+        // Use next_sequence() (last_entry.seq + 1) instead of history.len(),
+        // because history can be truncated (compacted) while state.hash still
+        // tracks the true last-entry hash. history.len() would assign a stale
+        // sequence number after compaction → "Sequence gap before persist".
+        let sequence = self.next_sequence();
 
         let mut hash_input = Vec::new();
         hash_input.extend_from_slice(&sequence.to_le_bytes());

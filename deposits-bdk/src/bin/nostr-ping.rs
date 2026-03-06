@@ -1,6 +1,6 @@
 //! Nostr ping test using real Deposits protocol messages.
 //!
-//! Measures round-trip latency for KIND_LEDGER_REQUEST/RESPONSE (9101/9102)
+//! Measures round-trip latency for KIND_LEDGER_REQUEST/RESPONSE (20101/20102)
 //! including full JSON serialization/deserialization.
 //!
 //! Usage:
@@ -19,9 +19,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-// Deposits protocol kinds
-const KIND_LEDGER_REQUEST: u16 = 9101;
-const KIND_LEDGER_RESPONSE: u16 = 9102;
+// Deposits protocol kinds (ephemeral range — relays auto-delete)
+const KIND_LEDGER_REQUEST: u16 = 20101;
+const KIND_LEDGER_RESPONSE: u16 = 20102;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LedgerRequest {
@@ -167,7 +167,7 @@ fn print_help() {
     println!("  --seed <hex>       64-char hex seed for keys");
     println!("  --ledger <id>      Fake ledger ID (default: test0...)");
     println!();
-    println!("Measures KIND_LEDGER_REQUEST (9101) -> KIND_LEDGER_RESPONSE (9102)");
+    println!("Measures KIND_LEDGER_REQUEST (20101) -> KIND_LEDGER_RESPONSE (20102)");
     println!("round-trip time including full JSON serialization.");
 }
 

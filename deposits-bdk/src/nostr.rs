@@ -25,16 +25,18 @@
 //!   - Tag `hash`: current hash (hex)
 //!   - Content: base64-encoded TLV wire format of SignedLedgerUpdate
 //!
-//! - **Kind 9101**: Ledger requests (deposit_open, etc.)
+//! - **Kind 20101** (ephemeral): Ledger requests (transfer_lock, cosign_update, balance_query, etc.)
 //!   - Tag `l`: ledger_id (64-char hex hash)
-//!   - Tag `action`: action name (e.g., "deposit_open")
+//!   - Tag `action`: action name (e.g., "transfer_lock")
 //!   - Content: JSON with action parameters
+//!   - Ephemeral: relays auto-delete after short TTL
 //!
-//! - **Kind 9102**: Ledger responses (replies to requests)
+//! - **Kind 20102** (ephemeral): Ledger responses (replies to requests)
 //!   - Tag `e`: reference to request event ID
 //!   - Tag `l`: ledger_id
 //!   - Tag `status`: "ok" or "error"
 //!   - Content: JSON with result or error message
+//!   - Ephemeral: relays auto-delete after short TTL
 //!
 //! - **Kind 9103**: Ledger disputes (invalid ledger detected)
 //!   - Tag `d`: ledger_id
@@ -65,13 +67,14 @@ static LAST_AD_TIMESTAMP: AtomicU64 = AtomicU64::new(0);
 /// Each update is a separate event that relays should retain.
 pub const KIND_LEDGER_UPDATE: u16 = 9100;
 
-/// Custom Kind for ledger requests (deposit_open, etc.)
-/// Uses range 1000-9999 (regular custom events) for relay storage.
-pub const KIND_LEDGER_REQUEST: u16 = 9101;
+/// Custom Kind for ledger requests (transfer_lock, cosign_update, balance_query, etc.)
+/// Uses ephemeral range 20000-29999 so relays auto-delete after a short TTL.
+/// These are transient peer-to-peer messages, not durable records.
+pub const KIND_LEDGER_REQUEST: u16 = 20101;
 
 /// Custom Kind for ledger responses (replies to requests)
-/// Uses range 1000-9999 (regular custom events) for relay storage.
-pub const KIND_LEDGER_RESPONSE: u16 = 9102;
+/// Uses ephemeral range 20000-29999 so relays auto-delete after a short TTL.
+pub const KIND_LEDGER_RESPONSE: u16 = 20102;
 
 /// Custom Kind for ledger disputes (invalid ledger detected)
 /// Uses range 1000-9999 (regular custom events) for relay storage.
@@ -156,6 +159,13 @@ pub struct NostrTransport {
     /// to avoid missing events between calls (broadcast::Receiver is
     /// per-instance — each notifications() call creates a new empty receiver).
     daemon_notification_rx: Option<tokio::sync::broadcast::Receiver<RelayPoolNotification>>,
+
+    /// Two-generation dedup set for notification event IDs.
+    /// Checked before any parsing to avoid expensive tag extraction / JSON decode
+    /// on events we've already routed to channels. Uses event.id bytes (32 bytes)
+    /// for O(1) lookup without string allocation.
+    seen_events: std::collections::HashSet<[u8; 32]>,
+    seen_events_prev: std::collections::HashSet<[u8; 32]>,
 }
 
 /// An inbound message from a peer
@@ -508,7 +518,8 @@ impl NostrTransport {
 
         // Create nostr client with explicit connection options
         let opts = Options::default()
-            .connection_timeout(Some(std::time::Duration::from_secs(30)));
+            .connection_timeout(Some(std::time::Duration::from_secs(30)))
+            .notification_channel_size(65536);
         let client = Client::builder()
             .signer(keys.clone())
             .opts(opts)
@@ -585,6 +596,8 @@ impl NostrTransport {
             response_ledger_filter: RwLock::new(Vec::new()),
             request_ledger_filter: RwLock::new(Vec::new()),
             daemon_notification_rx: None,
+            seen_events: std::collections::HashSet::new(),
+            seen_events_prev: std::collections::HashSet::new(),
         })
     }
 
@@ -660,10 +673,12 @@ impl NostrTransport {
         let urls: Vec<_> = relays.keys().cloned().collect();
 
         // Send using batch_msg which doesn't wait for OK
+        let publish_start = std::time::Instant::now();
         self.client
             .send_msg_to(urls, ClientMessage::event(event))
             .await
             .map_err(|e| Error::Nostr(format!("Failed to send event: {}", e)))?;
+        crate::metrics::record_nostr_publish(publish_start.elapsed());
 
         Ok(())
     }
@@ -1907,16 +1922,19 @@ impl NostrTransport {
     /// Process incoming events (call this in a loop).
     /// Uses the persistent notification receiver created in start_listening()
     /// to avoid missing events between calls.
-    pub async fn process_events(&mut self) -> Result<(), Error> {
+    ///
+    /// `timeout_ms` controls how long to wait for the first notification.
+    /// Use short timeouts (1ms) when under load, longer (100ms) when idle.
+    pub async fn process_events_with_timeout(&mut self, timeout_ms: u64) -> Result<(), Error> {
         // Take the receiver out to avoid borrow conflicts with self.handle_notification()
         let mut rx = match self.daemon_notification_rx.take() {
             Some(rx) => rx,
             None => {
                 // Fallback: create ephemeral receiver (for non-daemon callers)
-                let timeout = tokio::time::Duration::from_millis(100);
+                let timeout = tokio::time::Duration::from_millis(timeout_ms);
                 let mut rx = self.client.notifications();
                 match tokio::time::timeout(timeout, rx.recv()).await {
-                    Ok(Ok(notification)) => self.handle_notification(notification),
+                    Ok(Ok(notification)) => { self.handle_notification(notification); },
                     _ => {}
                 }
                 return Ok(());
@@ -1925,15 +1943,29 @@ impl NostrTransport {
 
         let mut recreate = false;
 
-        // Wait for first event with 100ms timeout
-        let timeout = tokio::time::Duration::from_millis(100);
+        // Time-boxed drain: parse notifications for up to 10ms, then yield.
+        // This prevents the main thread from spending 60% of wall time parsing
+        // nostr notifications when event volume is high (1M+ events in quorum).
+        // Unparsed notifications stay in the broadcast channel for next call.
+        let drain_budget = std::time::Duration::from_millis(10);
+        let drain_start = std::time::Instant::now();
+        let mut drain_count = 0u32;
+        let mut dedup_count = 0u32;
+
+        // Wait for first event with caller-specified timeout
+        let timeout = tokio::time::Duration::from_millis(timeout_ms);
         match tokio::time::timeout(timeout, rx.recv()).await {
             Ok(Ok(notification)) => {
-                self.handle_notification(notification);
-                // Drain all pending notifications without waiting
+                if self.handle_notification(notification) { drain_count += 1; } else { dedup_count += 1; }
+                // Drain pending notifications with time budget
                 loop {
+                    if drain_start.elapsed() >= drain_budget {
+                        break;
+                    }
                     match rx.try_recv() {
-                        Ok(notification) => self.handle_notification(notification),
+                        Ok(notification) => {
+                            if self.handle_notification(notification) { drain_count += 1; } else { dedup_count += 1; }
+                        }
                         Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
                             crate::metrics::record_broadcast_lag("daemon_drain", n);
                             tracing::warn!("Daemon notification receiver lagged by {} events", n);
@@ -1945,10 +1977,15 @@ impl NostrTransport {
             Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
                 crate::metrics::record_broadcast_lag("daemon_recv", n);
                 tracing::warn!("Daemon notification receiver lagged by {} events, re-syncing", n);
-                // After lag, drain what we can
+                // After lag, drain what we can (with budget)
                 loop {
+                    if drain_start.elapsed() >= drain_budget {
+                        break;
+                    }
                     match rx.try_recv() {
-                        Ok(notification) => self.handle_notification(notification),
+                        Ok(notification) => {
+                            if self.handle_notification(notification) { drain_count += 1; } else { dedup_count += 1; }
+                        }
                         Err(_) => break,
                     }
                 }
@@ -1963,6 +2000,13 @@ impl NostrTransport {
             }
         }
 
+        if drain_count > 0 || dedup_count > 0 {
+            crate::metrics::record_notification_drain_count(drain_count);
+        }
+        if dedup_count > 0 {
+            crate::metrics::record_notification_dedup_skipped(dedup_count);
+        }
+
         // Put the receiver back (or create a new one if channel was closed)
         self.daemon_notification_rx = Some(if recreate {
             self.client.notifications()
@@ -1972,9 +2016,14 @@ impl NostrTransport {
         Ok(())
     }
 
+    /// Process incoming events with the default 100ms timeout.
+    pub async fn process_events(&mut self) -> Result<(), Error> {
+        self.process_events_with_timeout(100).await
+    }
+
     /// Poll for events with a short wait
     /// Fetches recent responses and drains pending notifications
-    pub async fn poll_events(&self) -> Result<(), Error> {
+    pub async fn poll_events(&mut self) -> Result<(), Error> {
         // Fetch recent responses directly (subscriptions may not deliver reliably)
         // Use a short 5-second lookback to avoid fetching too many events
         let since = nostr_sdk::Timestamp::now() - 5;
@@ -2012,11 +2061,11 @@ impl NostrTransport {
 
     /// Route a notification to the appropriate internal channel.
     /// Use in the cosign mini loop after receiving from a notification_receiver.
-    pub fn dispatch_notification(&self, notification: RelayPoolNotification) {
+    pub fn dispatch_notification(&mut self, notification: RelayPoolNotification) {
         self.handle_notification(notification);
     }
 
-    /// Dispatch a notification but intercept Kind 9101 requests matching `extract_action`.
+    /// Dispatch a notification but intercept Kind 20101 requests matching `extract_action`.
     ///
     /// If the notification is a request with the given action, it is parsed and
     /// returned directly (never enters request_rx). All other notifications —
@@ -2025,7 +2074,7 @@ impl NostrTransport {
     /// This lets cosign mini loops handle requests inline from the notification
     /// stream, eliminating the re-queue amplification problem where cosign
     /// requests get buried behind non-cosign requests in request_rx.
-    pub fn dispatch_or_extract_request(&self, notification: RelayPoolNotification, extract_action: &str) -> Option<LedgerRequest> {
+    pub fn dispatch_or_extract_request(&mut self, notification: RelayPoolNotification, extract_action: &str) -> Option<LedgerRequest> {
         if let RelayPoolNotification::Event { ref event, .. } = &notification {
             let kind_num = event.kind.as_u16();
             if kind_num == KIND_LEDGER_REQUEST {
@@ -2045,9 +2094,19 @@ impl NostrTransport {
         None
     }
 
-    /// Handle a single notification
-    fn handle_notification(&self, notification: RelayPoolNotification) {
+    /// Handle a single notification.
+    /// Returns true if the event was new (processed), false if skipped as duplicate.
+    fn handle_notification(&mut self, notification: RelayPoolNotification) -> bool {
         if let RelayPoolNotification::Event { event, .. } = notification {
+            // Early dedup: check event ID before any parsing.
+            // event.id is already computed by nostr-sdk, so this is just a HashSet lookup
+            // on 32 bytes — much cheaper than tag extraction + JSON decode.
+            let event_id_bytes = event.id.to_bytes();
+            if self.seen_events.contains(&event_id_bytes) || self.seen_events_prev.contains(&event_id_bytes) {
+                return false;
+            }
+            self.seen_events.insert(event_id_bytes);
+
             // Use numeric kind value for comparison since Kind::Custom(n) and Kind::Regular(n)
             // are different enum variants but represent the same kind number
             let kind_num = event.kind.as_u16();
@@ -2073,6 +2132,16 @@ impl NostrTransport {
                     let _ = self.dispute_tx.send(dispute);
                 }
             }
+            return true;
+        }
+        false
+    }
+
+    /// Rotate the seen_events dedup set (two-generation cleanup).
+    /// Call periodically from the run loop to cap memory.
+    pub fn rotate_seen_events(&mut self) {
+        if self.seen_events.len() > 10_000 {
+            self.seen_events_prev = std::mem::take(&mut self.seen_events);
         }
     }
 
