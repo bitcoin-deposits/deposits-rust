@@ -1,5 +1,1 @@
-{
-  "max_concurrent": 16,
-  "target_qps": 50,
-  "paused": false
-}
+{"max_concurrent": 20, "target_tps": 200, "paused": false}

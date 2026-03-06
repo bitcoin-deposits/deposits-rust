@@ -238,6 +238,10 @@ services:
       dockerfile: deposits-rust/deposits-tools/bdk/Dockerfile
     image: deposits-bdk:latest
     container_name: bdk-alice
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp:unconfined
     command:
       - "run"
       - "--seed"
@@ -275,6 +279,10 @@ services:
   bdk-bob:
     image: deposits-bdk:latest
     container_name: bdk-bob
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp:unconfined
     command:
       - "run"
       - "--seed"
@@ -309,6 +317,10 @@ services:
   bdk-charlie:
     image: deposits-bdk:latest
     container_name: bdk-charlie
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp:unconfined
     command:
       - "run"
       - "--seed"
@@ -343,6 +355,10 @@ services:
   bdk-diana:
     image: deposits-bdk:latest
     container_name: bdk-diana
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp:unconfined
     command:
       - "run"
       - "--seed"

@@ -1,18 +1,18 @@
 #!/bin/bash
-# Capture a CPU flamegraph from a running deposits-bdk container
+# Capture CPU profile from running deposits-bdk containers
+#
+# The profiler runs continuously at 49 Hz using perf. This script:
+#   1. Sends SIGUSR1 to flush current profile data
+#   2. Waits briefly for the dump
+#   3. Copies the collapsed stacks file
 #
 # Usage:
-#   ./bin/flamegraph.sh [container] [seconds]
-#   ./bin/flamegraph.sh                    # all 4 nodes, 30s each
-#   ./bin/flamegraph.sh bdk-alice          # just Alice, 30s
-#   ./bin/flamegraph.sh bdk-alice 60       # just Alice, 60s
+#   ./bin/flamegraph.sh                    # all 4 nodes
+#   ./bin/flamegraph.sh bdk-alice          # just Alice
 #
-# Output: flamegraph-*.svg and profile-*.pb files in ./flamegraphs/
-#
-# The .svg files can be opened in any browser (interactive — click to zoom).
-# The .pb files can be loaded into:
-#   - speedscope (https://www.speedscope.app) — drag & drop
-#   - go tool pprof: go tool pprof -http=:8080 profile-*.pb
+# Output: flamegraphs/<container>-profile.collapsed
+#   - Load in speedscope (https://www.speedscope.app) — drag & drop
+#   - Or pipe through flamegraph.pl: cat profile.collapsed | flamegraph.pl > out.svg
 
 set -e
 
@@ -21,61 +21,47 @@ BDK_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 OUT_DIR="$BDK_DIR/flamegraphs"
 
 CONTAINER="${1:-all}"
-SECONDS="${2:-30}"
 
 mkdir -p "$OUT_DIR"
 
-capture_flamegraph() {
+capture_profile() {
     local container="$1"
-    local secs="$2"
 
-    echo "[$container] Sending SIGUSR1 — profiling for ${secs}s..."
+    echo "[$container] Sending SIGUSR1 to flush profile..."
+    docker kill -s SIGUSR1 "$container" >/dev/null 2>&1
 
-    # Set profile duration via env if different from default
-    if [ "$secs" != "30" ]; then
-        docker exec "$container" sh -c "export DEPOSITS_PROFILE_SECONDS=$secs" 2>/dev/null || true
+    # Wait for dump to complete
+    sleep 3
+
+    # Check if container is still alive
+    if ! docker ps --format '{{.Names}}' | grep -q "^${container}$"; then
+        echo "[$container] ERROR: Container died after SIGUSR1"
+        return 1
     fi
 
-    # Trigger profiling
-    docker kill -s SIGUSR1 "$container"
-
-    # Wait for profiling to complete (plus a few seconds for file write)
-    echo "[$container] Waiting ${secs}s for profile capture..."
-    sleep $((secs + 3))
-
-    # Copy output files
-    local files_found=0
-    for ext in svg pb; do
-        for f in $(docker exec "$container" sh -c "ls /data/flamegraph-*.${ext} /data/profile-*.${ext} 2>/dev/null" 2>/dev/null); do
-            local basename=$(basename "$f")
-            local outfile="${OUT_DIR}/${container}-${basename}"
-            docker cp "${container}:${f}" "$outfile" 2>/dev/null && {
-                echo "[$container] Saved: $outfile"
-                # Clean up inside container
-                docker exec "$container" rm -f "$f" 2>/dev/null || true
-                files_found=$((files_found + 1))
-            }
-        done
-    done
-
-    if [ "$files_found" -eq 0 ]; then
-        echo "[$container] WARNING: No profile files found. Check container logs."
+    # Copy collapsed stacks
+    local outfile="${OUT_DIR}/${container}-profile.collapsed"
+    if docker cp "${container}:/data/profile-latest.collapsed" "$outfile" 2>/dev/null; then
+        local samples=$(wc -l < "$outfile" 2>/dev/null || echo 0)
+        echo "[$container] Saved: $outfile ($samples stacks)"
+    else
+        echo "[$container] No profile data yet (profiler may still be collecting)"
     fi
 }
 
 if [ "$CONTAINER" = "all" ]; then
     for node in bdk-alice bdk-bob bdk-charlie bdk-diana; do
         if docker ps --format '{{.Names}}' | grep -q "^${node}$"; then
-            capture_flamegraph "$node" "$SECONDS"
+            capture_profile "$node"
         else
             echo "[$node] Not running, skipping"
         fi
     done
 else
-    capture_flamegraph "$CONTAINER" "$SECONDS"
+    capture_profile "$CONTAINER"
 fi
 
 echo ""
-echo "Flamegraphs saved to: $OUT_DIR/"
-echo "  - .svg: Open in browser (interactive, click to zoom)"
-echo "  - .pb:  Load in speedscope.app or 'go tool pprof -http=:8080 file.pb'"
+echo "Profiles saved to: $OUT_DIR/"
+echo "  View: Load .collapsed files in speedscope.app (drag & drop)"
+echo "  CLI:  cat file.collapsed | flamegraph.pl > out.svg"

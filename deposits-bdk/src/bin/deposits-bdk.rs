@@ -24,6 +24,7 @@ use deposits_bdk::{Node, NodeConfig};
 use deposits_bdk::cli::{nostr_commands, recovery};
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::Arc;
 
 /// Derive the operator secret key from a seed using HD derivation.
 /// This matches what the Wallet does, ensuring consistent key usage across the codebase.
@@ -529,7 +530,7 @@ async fn run_node(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         }
     );
 
-    let mut node = Node::new(config).await?;
+    let node = Arc::new(Node::new(config).await?);
 
     tracing::info!("Node ID: {}", node.node_id);
 
@@ -548,59 +549,143 @@ async fn run_node(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // Start the node
     node.start().await?;
 
-    // Install SIGUSR1 handler for on-demand CPU flamegraph capture
+    // Continuous profiler using perf record as a subprocess.
+    // Runs perf at low frequency (~49 Hz) in the background.
+    // SIGUSR1 triggers: stop perf, dump collapsed stacks, restart perf.
+    // Also auto-dumps every 60s.
+    // Requires: perf installed in container, SYS_PTRACE cap, seccomp:unconfined.
     #[cfg(unix)]
     {
         let data_dir = node.data_dir().to_path_buf();
         tokio::spawn(async move {
             use tokio::signal::unix::{signal, SignalKind};
+            use std::process::{Command, Stdio};
+
             let mut sig = signal(SignalKind::user_defined1())
                 .expect("Failed to register SIGUSR1 handler");
-            loop {
-                sig.recv().await;
-                let dir = data_dir.clone();
-                // Re-read env each time so it can be changed at runtime
-                let secs: u64 = std::env::var("DEPOSITS_PROFILE_SECONDS")
-                    .ok().and_then(|v| v.parse().ok()).unwrap_or(30);
-                tracing::info!("SIGUSR1 received — starting {}s CPU profile...", secs);
-                tokio::task::spawn_blocking(move || {
-                    match pprof::ProfilerGuardBuilder::default()
-                        .frequency(99)
-                        .blocklist(&["libc", "libgcc", "pthread", "vdso"])
-                        .build()
-                    {
-                        Ok(guard) => {
-                            std::thread::sleep(std::time::Duration::from_secs(secs));
-                            match guard.report().build() {
-                                Ok(report) => {
-                                    let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-                                    // Write flamegraph SVG
-                                    let svg_path = dir.join(format!("flamegraph-{}.svg", ts));
-                                    if let Ok(file) = std::fs::File::create(&svg_path) {
-                                        if let Err(e) = report.flamegraph(file) {
-                                            tracing::error!("Failed to write flamegraph: {}", e);
-                                        } else {
-                                            tracing::info!("Flamegraph written to {}", svg_path.display());
-                                        }
-                                    }
-                                    // Write protobuf (for go tool pprof / speedscope)
-                                    let pb_path = dir.join(format!("profile-{}.pb", ts));
-                                    if let Ok(mut file) = std::fs::File::create(&pb_path) {
-                                        use pprof::protos::Message;
-                                        let profile = report.pprof().unwrap();
-                                        let mut content = Vec::new();
-                                        profile.encode(&mut content).unwrap();
-                                        use std::io::Write;
-                                        let _ = file.write_all(&content);
-                                        tracing::info!("Profile protobuf written to {}", pb_path.display());
+
+            // Check if perf is available
+            let perf_available = Command::new("perf").arg("version")
+                .stdout(Stdio::null()).stderr(Stdio::null())
+                .status().map(|s| s.success()).unwrap_or(false);
+
+            if !perf_available {
+                tracing::warn!("perf not found — continuous profiling disabled. Install linux-perf in the container.");
+                // Still handle SIGUSR1 to avoid killing the process
+                loop { sig.recv().await; tracing::info!("SIGUSR1 received but profiling unavailable"); }
+            }
+
+            let profile_dir = data_dir.clone();
+            let perf_data = profile_dir.join("perf.data");
+            let mut dump_count = 0u32;
+
+            // Start perf record
+            fn start_perf(perf_data: &std::path::Path) -> Option<std::process::Child> {
+                match std::process::Command::new("perf")
+                    .args(["record", "-F", "49", "-p", "1", "-g",
+                           "-o", &perf_data.to_string_lossy(), "--", "sleep", "86400"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                {
+                    Ok(child) => {
+                        tracing::info!("Started continuous perf profiling (49 Hz)");
+                        Some(child)
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to start perf: {}", e);
+                        None
+                    }
+                }
+            }
+
+            fn dump_perf(perf_data: &std::path::Path, profile_dir: &std::path::Path, dump_count: u32) {
+                // Run perf script to get readable stacks
+                let output = std::process::Command::new("perf")
+                    .args(["script", "-i", &perf_data.to_string_lossy()])
+                    .output();
+                match output {
+                    Ok(out) if !out.stdout.is_empty() => {
+                        // Convert perf script output to collapsed stacks
+                        let script = String::from_utf8_lossy(&out.stdout);
+                        let mut stacks: std::collections::HashMap<String, u64> =
+                            std::collections::HashMap::new();
+                        let mut current_frames: Vec<String> = Vec::new();
+
+                        for line in script.lines() {
+                            if line.is_empty() {
+                                if !current_frames.is_empty() {
+                                    current_frames.reverse();
+                                    let key = current_frames.join(";");
+                                    *stacks.entry(key).or_insert(0) += 1;
+                                    current_frames.clear();
+                                }
+                            } else if line.starts_with('\t') || line.starts_with(' ') {
+                                // Stack frame line: "  addr funcname+offset (module)"
+                                let trimmed = line.trim();
+                                if let Some(func) = trimmed.split_whitespace().nth(1) {
+                                    // Strip +offset
+                                    let name = func.split('+').next().unwrap_or(func);
+                                    if !name.starts_with('[') {
+                                        current_frames.push(name.to_string());
                                     }
                                 }
-                                Err(e) => tracing::error!("Failed to build profile report: {}", e),
                             }
+                            // Skip header lines (process name lines)
                         }
-                        Err(e) => tracing::error!("Failed to start profiler: {}", e),
+                        // Flush last stack
+                        if !current_frames.is_empty() {
+                            current_frames.reverse();
+                            let key = current_frames.join(";");
+                            *stacks.entry(key).or_insert(0) += 1;
+                        }
+
+                        if !stacks.is_empty() {
+                            let total: u64 = stacks.values().sum();
+                            // Write collapsed stacks
+                            let collapsed = profile_dir.join("profile-latest.collapsed");
+                            if let Ok(mut f) = std::fs::File::create(&collapsed) {
+                                use std::io::Write;
+                                let mut sorted: Vec<_> = stacks.into_iter().collect();
+                                sorted.sort_by(|a, b| b.1.cmp(&a.1));
+                                for (stack, count) in &sorted {
+                                    let _ = writeln!(f, "{} {}", stack, count);
+                                }
+                            }
+                            tracing::info!(
+                                "Profile dump #{}: {} samples, {} unique stacks → profile-latest.collapsed",
+                                dump_count, total, total
+                            );
+                        }
                     }
-                });
+                    _ => {
+                        tracing::debug!("No perf data to dump");
+                    }
+                }
+            }
+
+            let mut perf_child = start_perf(&perf_data);
+            let mut dump_interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+
+            loop {
+                tokio::select! {
+                    _ = sig.recv() => {
+                        tracing::info!("SIGUSR1 received — dumping profile");
+                    }
+                    _ = dump_interval.tick() => {}
+                }
+
+                // Stop perf to flush data
+                if let Some(ref mut child) = perf_child {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+
+                dump_count += 1;
+                dump_perf(&perf_data, &profile_dir, dump_count);
+
+                // Restart perf
+                perf_child = start_perf(&perf_data);
             }
         });
     }

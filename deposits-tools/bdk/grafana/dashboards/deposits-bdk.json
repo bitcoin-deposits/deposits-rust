@@ -1329,20 +1329,20 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
+                "color": "red",
                 "value": null
               },
               {
                 "color": "yellow",
-                "value": 5
+                "value": 1
               },
               {
-                "color": "red",
+                "color": "green",
                 "value": 10
               }
             ]
           },
-          "unit": "short"
+          "unit": "ops"
         },
         "overrides": []
       },
@@ -1370,11 +1370,11 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sum(pending_cosign_requests)",
+          "expr": "sum(rate(deposits_transfers_completed_total[1m]))",
           "refId": "A"
         }
       ],
-      "title": "Pending Co-signs",
+      "title": "Transfers/sec",
       "type": "stat"
     },
     {

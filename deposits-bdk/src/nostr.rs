@@ -107,32 +107,37 @@ pub struct NostrTransport {
     /// Our secp256k1 pubkey (same as deposits node ID)
     our_pubkey: PublicKey,
 
-    /// Pending inbound messages (encrypted DMs)
-    inbound_rx: mpsc::UnboundedReceiver<InboundMessage>,
+    /// Pending inbound messages (encrypted DMs).
+    /// Wrapped in Mutex so try_recv can take &self (enables per-ledger parallel dispatch).
+    inbound_rx: std::sync::Mutex<mpsc::UnboundedReceiver<InboundMessage>>,
 
     /// Sender for inbound messages (used by subscription task)
     inbound_tx: mpsc::UnboundedSender<InboundMessage>,
 
-    /// Pending inbound ledger updates (broadcasts)
-    ledger_rx: mpsc::UnboundedReceiver<InboundLedgerUpdate>,
+    /// Pending inbound ledger updates (broadcasts).
+    /// Wrapped in Mutex so try_recv can take &self.
+    ledger_rx: std::sync::Mutex<mpsc::UnboundedReceiver<InboundLedgerUpdate>>,
 
     /// Sender for ledger updates
     ledger_tx: mpsc::UnboundedSender<InboundLedgerUpdate>,
 
-    /// Pending inbound ledger requests
-    request_rx: mpsc::UnboundedReceiver<LedgerRequest>,
+    /// Pending inbound ledger requests.
+    /// Wrapped in Mutex so try_recv can take &self.
+    request_rx: std::sync::Mutex<mpsc::UnboundedReceiver<LedgerRequest>>,
 
     /// Sender for ledger requests
     request_tx: mpsc::UnboundedSender<LedgerRequest>,
 
-    /// Pending inbound ledger responses
-    response_rx: mpsc::UnboundedReceiver<LedgerResponse>,
+    /// Pending inbound ledger responses.
+    /// Wrapped in Mutex so try_recv can take &self.
+    response_rx: std::sync::Mutex<mpsc::UnboundedReceiver<LedgerResponse>>,
 
     /// Sender for ledger responses
     response_tx: mpsc::UnboundedSender<LedgerResponse>,
 
-    /// Pending inbound ledger disputes
-    dispute_rx: mpsc::UnboundedReceiver<LedgerDispute>,
+    /// Pending inbound ledger disputes.
+    /// Wrapped in Mutex so try_recv can take &self.
+    dispute_rx: std::sync::Mutex<mpsc::UnboundedReceiver<LedgerDispute>>,
 
     /// Sender for ledger disputes
     dispute_tx: mpsc::UnboundedSender<LedgerDispute>,
@@ -158,14 +163,16 @@ pub struct NostrTransport {
     /// Created once at start_listening() and reused by process_events()
     /// to avoid missing events between calls (broadcast::Receiver is
     /// per-instance — each notifications() call creates a new empty receiver).
-    daemon_notification_rx: Option<tokio::sync::broadcast::Receiver<RelayPoolNotification>>,
+    /// Wrapped in Mutex for &self access (take/put-back pattern, not held across await).
+    daemon_notification_rx: std::sync::Mutex<Option<tokio::sync::broadcast::Receiver<RelayPoolNotification>>>,
 
     /// Two-generation dedup set for notification event IDs.
     /// Checked before any parsing to avoid expensive tag extraction / JSON decode
     /// on events we've already routed to channels. Uses event.id bytes (32 bytes)
     /// for O(1) lookup without string allocation.
-    seen_events: std::collections::HashSet<[u8; 32]>,
-    seen_events_prev: std::collections::HashSet<[u8; 32]>,
+    /// Wrapped in Mutex for &self access.
+    seen_events: std::sync::Mutex<std::collections::HashSet<[u8; 32]>>,
+    seen_events_prev: std::sync::Mutex<std::collections::HashSet<[u8; 32]>>,
 }
 
 /// An inbound message from a peer
@@ -581,23 +588,23 @@ impl NostrTransport {
             client,
             keys,
             our_pubkey,
-            inbound_rx,
+            inbound_rx: std::sync::Mutex::new(inbound_rx),
             inbound_tx,
-            ledger_rx,
+            ledger_rx: std::sync::Mutex::new(ledger_rx),
             ledger_tx,
-            request_rx,
+            request_rx: std::sync::Mutex::new(request_rx),
             request_tx,
-            response_rx,
+            response_rx: std::sync::Mutex::new(response_rx),
             response_tx,
-            dispute_rx,
+            dispute_rx: std::sync::Mutex::new(dispute_rx),
             dispute_tx,
             peer_keys: RwLock::new(HashMap::new()),
             active_subscriptions: RwLock::new(std::collections::HashSet::new()),
             response_ledger_filter: RwLock::new(Vec::new()),
             request_ledger_filter: RwLock::new(Vec::new()),
-            daemon_notification_rx: None,
-            seen_events: std::collections::HashSet::new(),
-            seen_events_prev: std::collections::HashSet::new(),
+            daemon_notification_rx: std::sync::Mutex::new(None),
+            seen_events: std::sync::Mutex::new(std::collections::HashSet::new()),
+            seen_events_prev: std::sync::Mutex::new(std::collections::HashSet::new()),
         })
     }
 
@@ -1756,7 +1763,7 @@ impl NostrTransport {
     /// Stream responses for a request until timeout, allowing caller to accept/reject each one
     /// Returns responses one at a time via the callback. Return true to accept, false to keep waiting.
     pub async fn wait_for_valid_response<F>(
-        &mut self,
+        &self,
         request_id: &str,
         timeout_ms: u64,
         mut validator: F,
@@ -1770,7 +1777,7 @@ impl NostrTransport {
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
 
         // First check if we already have a valid response
-        while let Ok(response) = self.response_rx.try_recv() {
+        while let Some(response) = self.try_recv_response() {
             if response.request_id == request_id && validator(&response) {
                 return Ok(response);
             }
@@ -1796,7 +1803,7 @@ impl NostrTransport {
                     }
 
                     // Check all responses that arrived
-                    while let Ok(response) = self.response_rx.try_recv() {
+                    while let Some(response) = self.try_recv_response() {
                         if response.request_id == request_id && validator(&response) {
                             return Ok(response);
                         }
@@ -1817,14 +1824,14 @@ impl NostrTransport {
 
     /// Wait for a specific response using real-time subscription (low latency)
     /// This is much faster than polling - typically <5ms vs 100-200ms
-    pub async fn wait_for_response(&mut self, request_id: &str, timeout_ms: u64) -> Result<LedgerResponse, Error> {
+    pub async fn wait_for_response(&self, request_id: &str, timeout_ms: u64) -> Result<LedgerResponse, Error> {
         // Subscribe to responses if not already
         self.subscribe_to_response(request_id).await?;
 
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
 
         // First check if we already have the response (from a previous notification)
-        while let Ok(response) = self.response_rx.try_recv() {
+        while let Some(response) = self.try_recv_response() {
             if response.request_id == request_id {
                 return Ok(response);
             }
@@ -1851,7 +1858,7 @@ impl NostrTransport {
                     }
 
                     // Check if our response arrived
-                    while let Ok(response) = self.response_rx.try_recv() {
+                    while let Some(response) = self.try_recv_response() {
                         if response.request_id == request_id {
                             return Ok(response);
                         }
@@ -1901,7 +1908,7 @@ impl NostrTransport {
     }
 
     /// Start listening for inbound messages
-    pub async fn start_listening(&mut self) -> Result<(), Error> {
+    pub async fn start_listening(&self) -> Result<(), Error> {
         // Subscribe to DMs addressed to us
         let filter = Filter::new()
             .kind(Kind::EncryptedDirectMessage)
@@ -1914,7 +1921,7 @@ impl NostrTransport {
 
         // Create persistent notification receiver for the daemon run loop.
         // Must be created AFTER subscriptions are set up, BEFORE any events arrive.
-        self.daemon_notification_rx = Some(self.client.notifications());
+        *self.daemon_notification_rx.lock().unwrap() = Some(self.client.notifications());
 
         Ok(())
     }
@@ -1925,9 +1932,9 @@ impl NostrTransport {
     ///
     /// `timeout_ms` controls how long to wait for the first notification.
     /// Use short timeouts (1ms) when under load, longer (100ms) when idle.
-    pub async fn process_events_with_timeout(&mut self, timeout_ms: u64) -> Result<(), Error> {
-        // Take the receiver out to avoid borrow conflicts with self.handle_notification()
-        let mut rx = match self.daemon_notification_rx.take() {
+    pub async fn process_events_with_timeout(&self, timeout_ms: u64) -> Result<(), Error> {
+        // Take the receiver out of the Mutex to avoid holding the lock across await.
+        let mut rx = match self.daemon_notification_rx.lock().unwrap().take() {
             Some(rx) => rx,
             None => {
                 // Fallback: create ephemeral receiver (for non-daemon callers)
@@ -2008,7 +2015,7 @@ impl NostrTransport {
         }
 
         // Put the receiver back (or create a new one if channel was closed)
-        self.daemon_notification_rx = Some(if recreate {
+        *self.daemon_notification_rx.lock().unwrap() = Some(if recreate {
             self.client.notifications()
         } else {
             rx
@@ -2017,13 +2024,13 @@ impl NostrTransport {
     }
 
     /// Process incoming events with the default 100ms timeout.
-    pub async fn process_events(&mut self) -> Result<(), Error> {
+    pub async fn process_events(&self) -> Result<(), Error> {
         self.process_events_with_timeout(100).await
     }
 
     /// Poll for events with a short wait
     /// Fetches recent responses and drains pending notifications
-    pub async fn poll_events(&mut self) -> Result<(), Error> {
+    pub async fn poll_events(&self) -> Result<(), Error> {
         // Fetch recent responses directly (subscriptions may not deliver reliably)
         // Use a short 5-second lookback to avoid fetching too many events
         let since = nostr_sdk::Timestamp::now() - 5;
@@ -2061,7 +2068,7 @@ impl NostrTransport {
 
     /// Route a notification to the appropriate internal channel.
     /// Use in the cosign mini loop after receiving from a notification_receiver.
-    pub fn dispatch_notification(&mut self, notification: RelayPoolNotification) {
+    pub fn dispatch_notification(&self, notification: RelayPoolNotification) {
         self.handle_notification(notification);
     }
 
@@ -2074,7 +2081,7 @@ impl NostrTransport {
     /// This lets cosign mini loops handle requests inline from the notification
     /// stream, eliminating the re-queue amplification problem where cosign
     /// requests get buried behind non-cosign requests in request_rx.
-    pub fn dispatch_or_extract_request(&mut self, notification: RelayPoolNotification, extract_action: &str) -> Option<LedgerRequest> {
+    pub fn dispatch_or_extract_request(&self, notification: RelayPoolNotification, extract_action: &str) -> Option<LedgerRequest> {
         if let RelayPoolNotification::Event { ref event, .. } = &notification {
             let kind_num = event.kind.as_u16();
             if kind_num == KIND_LEDGER_REQUEST {
@@ -2096,16 +2103,19 @@ impl NostrTransport {
 
     /// Handle a single notification.
     /// Returns true if the event was new (processed), false if skipped as duplicate.
-    fn handle_notification(&mut self, notification: RelayPoolNotification) -> bool {
+    fn handle_notification(&self, notification: RelayPoolNotification) -> bool {
         if let RelayPoolNotification::Event { event, .. } = notification {
             // Early dedup: check event ID before any parsing.
             // event.id is already computed by nostr-sdk, so this is just a HashSet lookup
             // on 32 bytes — much cheaper than tag extraction + JSON decode.
             let event_id_bytes = event.id.to_bytes();
-            if self.seen_events.contains(&event_id_bytes) || self.seen_events_prev.contains(&event_id_bytes) {
-                return false;
+            {
+                let seen = self.seen_events.lock().unwrap();
+                if seen.contains(&event_id_bytes) || self.seen_events_prev.lock().unwrap().contains(&event_id_bytes) {
+                    return false;
+                }
             }
-            self.seen_events.insert(event_id_bytes);
+            self.seen_events.lock().unwrap().insert(event_id_bytes);
 
             // Use numeric kind value for comparison since Kind::Custom(n) and Kind::Regular(n)
             // are different enum variants but represent the same kind number
@@ -2139,9 +2149,10 @@ impl NostrTransport {
 
     /// Rotate the seen_events dedup set (two-generation cleanup).
     /// Call periodically from the run loop to cap memory.
-    pub fn rotate_seen_events(&mut self) {
-        if self.seen_events.len() > 10_000 {
-            self.seen_events_prev = std::mem::take(&mut self.seen_events);
+    pub fn rotate_seen_events(&self) {
+        let mut seen = self.seen_events.lock().unwrap();
+        if seen.len() > 10_000 {
+            *self.seen_events_prev.lock().unwrap() = std::mem::take(&mut *seen);
         }
     }
 
@@ -2253,7 +2264,6 @@ impl NostrTransport {
             action,
             &event.id.to_hex()[..16]
         );
-        metrics::record_request_received(&action);
 
         Ok(LedgerRequest {
             action,
@@ -2356,28 +2366,18 @@ impl NostrTransport {
     }
 
     /// Receive the next inbound message (non-blocking)
-    pub fn try_recv(&mut self) -> Option<InboundMessage> {
-        self.inbound_rx.try_recv().ok()
-    }
-
-    /// Receive the next inbound message (blocking)
-    pub async fn recv(&mut self) -> Option<InboundMessage> {
-        self.inbound_rx.recv().await
+    pub fn try_recv(&self) -> Option<InboundMessage> {
+        self.inbound_rx.lock().unwrap().try_recv().ok()
     }
 
     /// Receive the next ledger update (non-blocking)
-    pub fn try_recv_ledger_update(&mut self) -> Option<InboundLedgerUpdate> {
-        self.ledger_rx.try_recv().ok()
-    }
-
-    /// Receive the next ledger update (blocking)
-    pub async fn recv_ledger_update(&mut self) -> Option<InboundLedgerUpdate> {
-        self.ledger_rx.recv().await
+    pub fn try_recv_ledger_update(&self) -> Option<InboundLedgerUpdate> {
+        self.ledger_rx.lock().unwrap().try_recv().ok()
     }
 
     /// Receive the next ledger request (non-blocking)
-    pub fn try_recv_request(&mut self) -> Option<LedgerRequest> {
-        self.request_rx.try_recv().ok()
+    pub fn try_recv_request(&self) -> Option<LedgerRequest> {
+        self.request_rx.lock().unwrap().try_recv().ok()
     }
 
     /// Queue a request for processing (used by polling fallback)
@@ -2385,29 +2385,14 @@ impl NostrTransport {
         let _ = self.request_tx.send(request);
     }
 
-    /// Receive the next ledger request (blocking)
-    pub async fn recv_request(&mut self) -> Option<LedgerRequest> {
-        self.request_rx.recv().await
-    }
-
     /// Receive the next ledger response (non-blocking)
-    pub fn try_recv_response(&mut self) -> Option<LedgerResponse> {
-        self.response_rx.try_recv().ok()
-    }
-
-    /// Receive the next ledger response (blocking)
-    pub async fn recv_response(&mut self) -> Option<LedgerResponse> {
-        self.response_rx.recv().await
+    pub fn try_recv_response(&self) -> Option<LedgerResponse> {
+        self.response_rx.lock().unwrap().try_recv().ok()
     }
 
     /// Receive the next ledger dispute (non-blocking)
-    pub fn try_recv_dispute(&mut self) -> Option<LedgerDispute> {
-        self.dispute_rx.try_recv().ok()
-    }
-
-    /// Receive the next ledger dispute (blocking)
-    pub async fn recv_dispute(&mut self) -> Option<LedgerDispute> {
-        self.dispute_rx.recv().await
+    pub fn try_recv_dispute(&self) -> Option<LedgerDispute> {
+        self.dispute_rx.lock().unwrap().try_recv().ok()
     }
 
     /// Disconnect from all relays

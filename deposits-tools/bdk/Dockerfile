@@ -34,6 +34,7 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
     curl \
+    linux-perf \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy binaries from builder

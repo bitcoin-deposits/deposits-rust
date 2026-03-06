@@ -50,6 +50,7 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 WALLET_SH = SCRIPT_DIR / "wallet.sh"
 REPO_ROOT = SCRIPT_DIR.parent.parent.parent  # deposits-rust root
 WALLET_BINARY = REPO_ROOT / "target" / "release" / "deposits-wallet"
+TRANSFER_SIMULATOR_BINARY = REPO_ROOT / "target" / "release" / "transfer-simulator"
 DATA_DIR = Path.home() / ".deposits-wallet"
 METRICS_PORT = 9200  # Prometheus metrics port
 CONFIG_FILE = SCRIPT_DIR / "simulator-config.json"  # Runtime config file
@@ -59,7 +60,7 @@ class DynamicConfig:
     """Configuration that can be reloaded at runtime."""
     def __init__(self):
         self.payment_interval = 0.1  # seconds between payment batches
-        self.max_concurrent = 40  # max concurrent payment operations
+        self.max_concurrent = 20  # max concurrent payment operations
         self.target_tps = 100  # target transactions per second (0 = unlimited)
         self.paused = False  # pause payments
         self._last_load_time = 0.0
@@ -1011,7 +1012,7 @@ def do_async_transfer(s_alias: str, s_ledger: str, s_deposit_id: str,
 
 def transfer_producer(work_queue, our_deposits, deposits_lock, config,
                       min_payment_sats, max_payment_sats, shutdown_event,
-                      consecutive_failures, ledger=None):
+                      consecutive_failures, ledger=None, deposits_by_alias=None):
     """
     Producer thread: generates transfer work items at target TPS rate.
     Acquires deposits_lock to pick sender/receiver and optimistically debit sender.
@@ -1101,14 +1102,13 @@ def transfer_producer(work_queue, our_deposits, deposits_lock, config,
         except queue.Full:
             # Queue full, restore sender balance (amount + fee)
             with deposits_lock:
-                for d in our_deposits:
-                    if d.alias == item.sender_alias:
-                        if ledger:
-                            ledger.record_transfer_debit_restore(d.alias, item.amount, item.fee)
-                            d.balance_sats = ledger.get_balance_sats(d.alias)
-                        else:
-                            d.balance_sats += item.amount + item.fee
-                        break
+                d = deposits_by_alias.get(item.sender_alias)
+                if d:
+                    if ledger:
+                        ledger.record_transfer_debit_restore(d.alias, item.amount, item.fee)
+                        d.balance_sats = ledger.get_balance_sats(d.alias)
+                    else:
+                        d.balance_sats += item.amount + item.fee
 
 
 def transfer_worker(work_queue, result_queue, batch_process=None):
@@ -1258,45 +1258,12 @@ def same_ledger_transfer(sender: Deposit, receiver: Deposit, amount_sats: int,
     return (None, True, None)
 
 
-def _mine_one_block():
-    """Mine a single regtest block (internal helper)."""
-    global _cached_block_height, _cached_block_height_time
-    subprocess.run([
-        "docker", "exec", "bdk-bitcoind",
-        "bitcoin-cli", "-regtest",
-        "-rpcuser=user", "-rpcpassword=pass",
-        "-rpcwallet=faucet", "-generate", "1"
-    ], capture_output=True)
-    _cached_block_height += 1
-    _cached_block_height_time = time.monotonic()
-
-
-def start_background_miner(network: str = "regtest", interval: float = 1.0) -> Optional[threading.Event]:
-    """Start a background thread that mines a block every `interval` seconds.
-
-    Returns a shutdown Event (set it to stop the miner), or None if not regtest.
-    """
-    if network != "regtest":
-        return None
-
-    stop_event = threading.Event()
-
-    def miner_loop():
-        while not stop_event.is_set():
-            _mine_one_block()
-            stop_event.wait(interval)
-
-    t = threading.Thread(target=miner_loop, daemon=True, name="background-miner")
-    t.start()
-    print(f"  Background miner: 1 block every {interval}s")
-    return stop_event
-
 
 def run_simulation(
     wallets_per_ledger: float = 2.0,
     base_wallet_interval: float = 3.0,
     payment_interval: float = 2.0,
-    funding_amount_sats: int = 100000,
+    funding_amount_sats: int = 1000000,
     min_payment_sats: int = 1000,
     max_payment_sats: int = 5000,
     rediscover_interval: float = 60.0,
@@ -1305,6 +1272,7 @@ def run_simulation(
     transfers: bool = False,
     max_transfers: int = 0,
     single_fund: bool = False,
+    auto_topoff: bool = False,
 ):
     """Run the payment simulation
 
@@ -1351,18 +1319,135 @@ def run_simulation(
     ledgers = discover_ledgers()
 
     if not ledgers:
-        print("Error: No ledgers found. Make sure operators are running.")
-        print("Try: ./bin/wallet.sh discover")
-        sys.exit(1)
+        # Fall back to ledger IDs from existing deposits
+        existing = load_deposits()
+        ledger_set = set(d.ledger_id for d in existing if d.ledger_id)
+        if ledger_set:
+            ledgers = list(ledger_set)
+            print(f"  Discovery returned nothing, but found {len(ledgers)} ledgers from existing deposits")
+        else:
+            print("Error: No ledgers found. Make sure operators are running.")
+            print("Try: ./bin/wallet.sh discover")
+            sys.exit(1)
 
     print(f"Found {len(ledgers)} ledgers:")
     for lid in ledgers:
         print(f"  {lid[:16]}...")
     print()
 
-    # Start background miner (regtest only) — mines a block every second
-    # so on-chain transactions confirm without explicit mine_block() calls.
-    miner_stop = start_background_miner(network, interval=1.0)
+    # Fast path: if using Rust transfer simulator, skip wallet warmup/sync/deposit creation
+    # The Rust binary handles its own deposit loading and balance tracking
+    if transfers and TRANSFER_SIMULATOR_BINARY.exists():
+        data_dir = os.environ.get("WALLET_DATA_DIR", str(Path.home() / ".deposits-wallet"))
+        seed = os.environ.get("WALLET_SEED")
+        if not seed:
+            seed_file = Path(data_dir) / "seed.hex"
+            if seed_file.exists():
+                seed = seed_file.read_text().strip()
+
+        if seed:
+            relay = os.environ.get("WALLET_RELAY", "ws://localhost:7778")
+            sim_cmd = [
+                str(TRANSFER_SIMULATOR_BINARY),
+                "--relay", relay,
+                "--node", f"sim:{seed}:{data_dir}",
+                "--target-tps", str(int(DYNAMIC_CONFIG.target_tps)),
+                "--workers", str(DYNAMIC_CONFIG.max_concurrent),
+                "--min-amount", str(min_payment_sats),
+                "--max-amount", str(max_payment_sats),
+                "--fee-fixed", str(TRANSFER_FEE_FIXED),
+                "--fee-rate-bps", str(TRANSFER_FEE_RATE_BPS),
+                "--config", str(CONFIG_FILE),
+            ]
+            print(f"Starting Rust transfer simulator...")
+            print(f"  {' '.join(sim_cmd[-8:])}")
+            rust_sim_proc = subprocess.Popen(
+                sim_cmd,
+                stderr=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                text=True,
+            )
+
+            def rust_sim_reader(proc):
+                global TRANSFERS_SUCCESS, TRANSFERS_FAILED, TRANSFERS_VOLUME_SATS
+                import re
+                status_re = re.compile(
+                    r'\[(\d+)s\] TPS: ([\d.]+) \| ok: (\d+) fail: (\d+) timeout: (\d+) \| vol: (\d+) sats')
+                for line in proc.stderr:
+                    line = line.rstrip()
+                    m = status_re.search(line)
+                    if m:
+                        TRANSFERS_SUCCESS = int(m.group(3))
+                        TRANSFERS_FAILED = int(m.group(4))
+                        TRANSFERS_VOLUME_SATS = int(m.group(6))
+                    print(f"  [rust-sim] {line}", flush=True)
+
+            sim_reader_thread = threading.Thread(
+                target=rust_sim_reader,
+                args=(rust_sim_proc,),
+                daemon=True,
+            )
+            sim_reader_thread.start()
+            print(f"  PID {rust_sim_proc.pid}")
+            print()
+
+            # Simple main loop for Rust simulator path
+            last_status_time = 0.0
+            last_tps_snapshot_time = time.time()
+            last_tps_snapshot_count = 0
+            last_topoff_time = 0.0
+            topoff_deposits: list[Deposit] = []
+            if auto_topoff:
+                topoff_deposits = load_deposits()
+                topoff_threshold = funding_amount_sats // 5  # 20% of funding amount
+                if topoff_deposits:
+                    print(f"  Auto top-off enabled for {len(topoff_deposits)} deposits (threshold: {topoff_threshold:,} sats)")
+            try:
+                while True:
+                    now = time.time()
+                    DYNAMIC_CONFIG.maybe_reload()
+
+                    if rust_sim_proc.poll() is not None:
+                        print(f"\n  Rust simulator exited (code {rust_sim_proc.returncode})")
+                        break
+
+                    if now - last_status_time >= 30:
+                        last_status_time = now
+                        total_transfers = TRANSFERS_SUCCESS + TRANSFERS_FAILED
+                        elapsed_since_snap = now - last_tps_snapshot_time
+                        actual_tps = (TRANSFERS_SUCCESS - last_tps_snapshot_count) / elapsed_since_snap if elapsed_since_snap > 0 else 0
+                        last_tps_snapshot_time = now
+                        last_tps_snapshot_count = TRANSFERS_SUCCESS
+                        pct = f"{100*TRANSFERS_SUCCESS/total_transfers:.0f}%" if total_transfers > 0 else "n/a"
+                        print(f"\n[{time.strftime('%H:%M:%S')}] Transfers: {TRANSFERS_SUCCESS}/{total_transfers} ({pct}) ({TRANSFERS_VOLUME_SATS:,} sats) | tps: {actual_tps:.1f}/{DYNAMIC_CONFIG.target_tps:.0f}")
+
+                    # Auto top-off: check balances every 60s, refund low deposits
+                    if auto_topoff and topoff_deposits and now - last_topoff_time >= 60:
+                        last_topoff_time = now
+                        balances = sync_and_get_balances()
+                        topped_off = 0
+                        for d in topoff_deposits:
+                            bal = balances.get(d.alias, 0)
+                            if 0 < bal < topoff_threshold:
+                                amount = funding_amount_sats - bal
+                                print(f"  Top-off: {d.alias} has {bal:,} sats, adding {amount:,}")
+                                if fund_deposit(d.alias, amount):
+                                    topped_off += 1
+                        if topped_off:
+                            print(f"  Topped off {topped_off} deposit(s)")
+
+                    time.sleep(0.1)
+
+            except KeyboardInterrupt:
+                print("\n\nStopping Rust transfer simulator...")
+                rust_sim_proc.terminate()
+                try:
+                    rust_sim_proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    rust_sim_proc.kill()
+                print(f"Final: {TRANSFERS_SUCCESS} successes, {TRANSFERS_FAILED} failures, {TRANSFERS_VOLUME_SATS:,} sats volume")
+
+            return  # Exit run_simulation — no need for the rest
 
     # Warm up the wallet connection with a sync attempt
     # This establishes the Nostr subscription so subsequent syncs are faster
@@ -1405,6 +1490,9 @@ def run_simulation(
               + (f", {len(missing)} stale (dropped)" if missing else ""))
     wallet_counter = len(our_deposits)
 
+    # Dict index for O(1) deposit lookup by alias (hot path optimization)
+    deposits_by_alias: dict[str, Deposit] = {d.alias: d for d in our_deposits}
+
     # Track ledgers that have been funded on-chain (for --single-fund mode)
     onchain_funded_ledgers: set[str] = set()
 
@@ -1432,6 +1520,7 @@ def run_simulation(
             deposit = open_deposit(ledger_id, alias, open_amount)
             if deposit:
                 our_deposits.append(deposit)
+                deposits_by_alias[deposit.alias] = deposit
                 created.append(deposit)
             else:
                 print(f"  Warning: Failed to create {alias}, skipping")
@@ -1498,6 +1587,8 @@ def run_simulation(
     last_tps_snapshot_time = time.time()
     last_tps_snapshot_count = 0  # TRANSFERS_SUCCESS at last snapshot
     last_unfunded_retry_time = 0.0  # Rate-limit unfunded deposit retries
+    last_topoff_time = 0.0  # Auto top-off check interval
+    topoff_threshold = funding_amount_sats // 5  # 20% of funding amount
 
     print("Starting simulation...")
     print(f"  - Network: {network}")
@@ -1523,17 +1614,23 @@ def run_simulation(
     deposits_lock = threading.Lock()
 
     if transfers:
-        # Work queue model: producer generates work, worker threads execute
-        work_queue = queue.Queue(maxsize=DYNAMIC_CONFIG.max_concurrent * 2)
-        result_queue: queue.Queue[TransferResult] = queue.Queue()
+        # Python fallback transfer loop (Rust simulator path returns early above)
         shutdown_event = threading.Event()
-        # Shared failure counter: [consecutive_failures]. List used as mutable ref across threads.
         consecutive_failures = [0]
 
-        # Create batch processes (persistent WebSocket connections) for workers
         relay = os.environ.get("WALLET_RELAY", "ws://localhost:7778")
         data_dir = os.environ.get("WALLET_DATA_DIR", str(Path.home() / ".deposits-wallet"))
         seed = os.environ.get("WALLET_SEED")
+        if not seed:
+            seed_file = Path(data_dir) / "seed.hex"
+            if seed_file.exists():
+                seed = seed_file.read_text().strip()
+
+        rust_sim_proc = None  # Always None here (Rust path returned early)
+
+        work_queue = queue.Queue(maxsize=DYNAMIC_CONFIG.max_concurrent * 2)
+        result_queue: queue.Queue[TransferResult] = queue.Queue()
+
         batch_processes = []
         for i in range(DYNAMIC_CONFIG.max_concurrent):
             try:
@@ -1545,7 +1642,6 @@ def run_simulation(
         alive_count = sum(1 for bp in batch_processes if bp is not None)
         print(f"  Started {alive_count}/{DYNAMIC_CONFIG.max_concurrent} batch processes (persistent WebSocket)")
 
-        # Start worker threads
         worker_threads = []
         for i in range(DYNAMIC_CONFIG.max_concurrent):
             t = threading.Thread(
@@ -1557,12 +1653,12 @@ def run_simulation(
             t.start()
             worker_threads.append(t)
 
-        # Start producer thread
         producer_thread = threading.Thread(
             target=transfer_producer,
             args=(work_queue, our_deposits, deposits_lock, DYNAMIC_CONFIG,
                   min_payment_sats, max_payment_sats, shutdown_event,
-                  consecutive_failures, ledger),
+                  consecutive_failures),
+            kwargs={"ledger": ledger, "deposits_by_alias": deposits_by_alias},
             daemon=True,
         )
         producer_thread.start()
@@ -1579,10 +1675,15 @@ def run_simulation(
             DYNAMIC_CONFIG.maybe_reload()
 
             if transfers:
-                # Drain result queue and process completed transfers
+                # Python fallback: drain result queue
+                drain_count = 0
                 while True:
                     try:
-                        result = result_queue.get_nowait()
+                        if drain_count == 0:
+                            result = result_queue.get(timeout=0.01)
+                        else:
+                            result = result_queue.get_nowait()
+                        drain_count += 1
                         if result.success:
                             consecutive_failures[0] = 0  # Reset on any success
                         else:
@@ -1593,9 +1694,9 @@ def run_simulation(
                                 # Transfer succeeded - credit receiver, record fee
                                 ledger.record_transfer_credit(result.receiver_alias, result.sender_alias, result.amount)
                                 ledger.record_transfer_fee(result.sender_alias, fee_sats)
-                                for d in our_deposits:
-                                    if d.alias == result.receiver_alias:
-                                        d.balance_sats = ledger.get_balance_sats(d.alias)
+                                d = deposits_by_alias.get(result.receiver_alias)
+                                if d:
+                                    d.balance_sats = ledger.get_balance_sats(d.alias)
                             elif not result.locked:
                                 # Lock failed - restore sender balance
                                 daemon_msats = result.sender_daemon_balance_sats * 1000 if result.sender_daemon_balance_sats is not None else None
@@ -1604,9 +1705,9 @@ def run_simulation(
                                     delta = ledger.record_daemon_correction(result.sender_alias, daemon_msats)
                                     if delta != 0:
                                         print(f"  [ledger] {result.sender_alias}: daemon correction {delta:+,} msats ({delta // 1000:+,} sats)", flush=True)
-                                for d in our_deposits:
-                                    if d.alias == result.sender_alias:
-                                        d.balance_sats = ledger.get_balance_sats(d.alias)
+                                d = deposits_by_alias.get(result.sender_alias)
+                                if d:
+                                    d.balance_sats = ledger.get_balance_sats(d.alias)
                             else:
                                 # Lock succeeded but complete failed - funds stuck on daemon
                                 ledger.record_transfer_stuck(result.sender_alias, result.amount, fee_sats)
@@ -1675,6 +1776,7 @@ def run_simulation(
 
                     if deposit:
                         our_deposits.append(deposit)
+                        deposits_by_alias[deposit.alias] = deposit
 
                         # Fund it - use Lightning/transfers if enabled and we have a funded deposit
                         print(f"[{time.strftime('%H:%M:%S')}] Funding {alias}...")
@@ -1832,7 +1934,7 @@ def run_simulation(
                         for d in our_deposits:
                             if d.alias in balances and balances[d.alias] > 0:
                                 daemon_msats = balances[d.alias] * 1000
-                                if d.status == "confirming":
+                                if d.status in ("confirming", "pending"):
                                     d.status = "funded"
                                     ledger.record_fund_confirmed(d.alias, daemon_msats)
                                     d.balance_sats = ledger.get_balance_sats(d.alias)
@@ -1863,6 +1965,23 @@ def run_simulation(
                         PROM_DEPOSITS_COUNT.labels(status='funded').set(funded_count)
                 last_balance_sync_time = now
 
+            # Auto top-off: refund deposits that have dropped below threshold
+            if auto_topoff and now - last_topoff_time >= 60:
+                last_topoff_time = now
+                balances = sync_and_get_balances()
+                topped_off = 0
+                with deposits_lock:
+                    for d in our_deposits:
+                        bal = balances.get(d.alias, 0)
+                        if 0 < bal < topoff_threshold:
+                            amount = funding_amount_sats - bal
+                            print(f"  Top-off: {d.alias} has {bal:,} sats, adding {amount:,}")
+                            if fund_deposit(d.alias, amount):
+                                d.status = "confirming"
+                                topped_off += 1
+                if topped_off:
+                    print(f"  Topped off {topped_off} deposit(s)")
+
             # Periodically re-discover ledgers to find new operators
             if now - last_rediscover_time >= rediscover_interval:
                 new_ledgers = discover_ledgers()
@@ -1890,17 +2009,17 @@ def run_simulation(
                 print(f"\n[{time.strftime('%H:%M:%S')}] Status: {', '.join(status_parts)}")
                 if transfers:
                     total_transfers = TRANSFERS_SUCCESS + TRANSFERS_FAILED
-                    queued = work_queue.qsize()
-                    failures = consecutive_failures[0]
-                    backoff_info = f" | backoff: {min(15, 2 ** (failures // 5 - 1)):.0f}s" if failures >= 5 else ""
-                    pct = f"{100*TRANSFERS_SUCCESS/total_transfers:.0f}%" if total_transfers > 0 else "n/a"
-                    pending_count = len([d for d in our_deposits if d.status == "pending"])
-                    pending_info = f" | {pending_count} unfunded" if pending_count > 0 else ""
                     # Compute actual TPS since last status
                     elapsed_since_snap = now - last_tps_snapshot_time
                     actual_tps = (TRANSFERS_SUCCESS - last_tps_snapshot_count) / elapsed_since_snap if elapsed_since_snap > 0 else 0
                     last_tps_snapshot_time = now
                     last_tps_snapshot_count = TRANSFERS_SUCCESS
+                    pct = f"{100*TRANSFERS_SUCCESS/total_transfers:.0f}%" if total_transfers > 0 else "n/a"
+                    queued = work_queue.qsize()
+                    failures = consecutive_failures[0]
+                    backoff_info = f" | backoff: {min(15, 2 ** (failures // 5 - 1)):.0f}s" if failures >= 5 else ""
+                    pending_count = len([d for d in our_deposits if d.status == "pending"])
+                    pending_info = f" | {pending_count} unfunded" if pending_count > 0 else ""
                     print(f"  Transfers: {TRANSFERS_SUCCESS}/{total_transfers} ({pct}) ({TRANSFERS_VOLUME_SATS:,} sats) | tps: {actual_tps:.1f}/{DYNAMIC_CONFIG.target_tps:.0f} | queued: {queued}{backoff_info}{pending_info}")
                     # Accounting: where did the money go? (all from sqlite ledger)
                     acct_funded = ledger.get_total_funded_msats() // 1000
@@ -1931,12 +2050,11 @@ def run_simulation(
                         PROM_DEPOSITS_BALANCE.set(total_balance)
                         PROM_LEDGERS_COUNT.set(len(ledgers))
 
-            time.sleep(0.01)  # 10ms main loop (was 100ms)
+            if not transfers:
+                time.sleep(0.01)  # 10ms main loop for non-transfer modes
 
     except KeyboardInterrupt:
         print("\n\nSimulation stopped by user")
-        if miner_stop:
-            miner_stop.set()
         if transfers:
             print("Shutting down producer and workers...")
             shutdown_event.set()
@@ -2006,12 +2124,12 @@ def main():
                         help="Target transactions per second (default: 100, 0 = unlimited)")
     parser.add_argument("--payment-interval", type=float, default=None,
                         help="Override: seconds between payment batches (default: auto from target-tps)")
-    parser.add_argument("--funding-sats", type=int, default=100000,
-                        help="Sats to fund each wallet (default: 100000)")
-    parser.add_argument("--min-payment", type=int, default=1000,
-                        help="Minimum payment in sats (default: 1000)")
-    parser.add_argument("--max-payment", type=int, default=5000,
-                        help="Maximum payment in sats (default: 5000)")
+    parser.add_argument("--funding-sats", type=int, default=1000000,
+                        help="Sats to fund each wallet (default: 1000000)")
+    parser.add_argument("--min-payment", type=int, default=10,
+                        help="Minimum payment in sats (default: 10)")
+    parser.add_argument("--max-payment", type=int, default=50,
+                        help="Maximum payment in sats (default: 50)")
     parser.add_argument("--rediscover-interval", type=float, default=60.0,
                         help="Seconds between ledger re-discovery (default: 60)")
     parser.add_argument("--max-transfers", type=int, default=0,
@@ -2020,6 +2138,8 @@ def main():
                         help="Maximum concurrent async operations (default: 20, optimal for throughput)")
     parser.add_argument("--single-fund", action="store_true",
                         help="Fund only first deposit per ledger on-chain, then use transfers/lightning for others")
+    parser.add_argument("--auto-topoff", action="store_true",
+                        help="Automatically top off deposits via faucet when balance drops below 20%% of funding amount")
     parser.add_argument("--transfer-fee-fixed", type=int, default=2,
                         help="Fixed fee per transfer in sats (default: 2)")
     parser.add_argument("--transfer-fee-rate-bps", type=int, default=20,
@@ -2060,6 +2180,7 @@ def main():
         transfers=args.transfers,
         max_transfers=args.max_transfers,
         single_fund=args.single_fund,
+        auto_topoff=args.auto_topoff,
     )
 
 

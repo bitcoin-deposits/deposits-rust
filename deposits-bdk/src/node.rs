@@ -183,8 +183,9 @@ pub struct Node {
     /// The protocol handler
     pub handler: Arc<DepositsHandler>,
 
-    /// Outbound message receiver (for async sending via nostr)
-    outbound_rx: mpsc::UnboundedReceiver<OutboundMessage>,
+    /// Outbound message receiver (for async sending via nostr).
+    /// Wrapped in Mutex so run loop can drain with &self.
+    outbound_rx: Mutex<mpsc::UnboundedReceiver<OutboundMessage>>,
 
     /// Pending deposit offers indexed by offer_id
     deposit_offers: Mutex<HashMap<[u8; 32], (DepositOffer, DepositOfferStatus)>>,
@@ -359,7 +360,7 @@ impl Node {
             nostr,
             lightning,
             handler: handler_arc,
-            outbound_rx,
+            outbound_rx: Mutex::new(outbound_rx),
             deposit_offers: Mutex::new(deposit_offers),
             withdrawals: Mutex::new(withdrawals),
             pending_collateral_requests: Mutex::new(HashMap::new()),
@@ -507,21 +508,24 @@ impl Node {
     /// Call this after appending an operation to a ledger to ensure the update
     /// is published to the Nostr relay for other participants to see.
     pub async fn broadcast_last_update(&self, ledger_id: &str) -> Result<String, Error> {
-        // Get the ledger by ledger_id
-        let ledger_arc = self.handler.ledgers.lock().unwrap()
-            .get(ledger_id)
-            .cloned()
-            .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?;
-
-        let ledger = ledger_arc.read().unwrap();
-
-        // Get the last update
-        let update = ledger.history.last()
-            .ok_or_else(|| Error::Protocol("Ledger has no updates".to_string()))?;
+        // Get the ledger by ledger_id and clone the update.
+        // Clone before the await to avoid holding RwLockReadGuard across await (not Send).
+        let (update, seq) = {
+            let ledger_arc = self.handler.ledgers.lock().unwrap()
+                .get(ledger_id)
+                .cloned()
+                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?;
+            let ledger = ledger_arc.read().unwrap();
+            let update = ledger.history.last()
+                .ok_or_else(|| Error::Protocol("Ledger has no updates".to_string()))?
+                .clone();
+            let seq = update.sequence_number;
+            (update, seq)
+        };
 
         // Broadcast to Nostr
-        let event_id = self.nostr.broadcast_ledger_update(update).await?;
-        tracing::info!("Broadcast update seq={} to Nostr: {}", update.sequence_number, &event_id[..16]);
+        let event_id = self.nostr.broadcast_ledger_update(&update).await?;
+        tracing::info!("Broadcast update seq={} to Nostr: {}", seq, &event_id[..16]);
 
         Ok(event_id)
     }
@@ -556,7 +560,7 @@ impl Node {
     }
 
     /// Start listening for messages
-    pub async fn start(&mut self) -> Result<(), Error> {
+    pub async fn start(&self) -> Result<(), Error> {
         self.nostr.start_listening().await?;
 
         // Auto-subscribe to ledger requests/disputes for all our ledgers
@@ -1277,6 +1281,16 @@ impl Node {
                 ledger.state.sequence = seq;
                 ledger.state.hash = hash;
             }
+
+            // Truncate joined ledger history to prevent unbounded memory growth.
+            // Owned ledgers are truncated during persist_ledger_to_disk, but joined
+            // ledgers are never persisted by this operator, so truncate here.
+            const JOINED_HISTORY_RETAIN: usize = 2000;
+            let len = ledger.history.len();
+            if len > JOINED_HISTORY_RETAIN * 2 {
+                ledger.history.drain(..len - JOINED_HISTORY_RETAIN);
+            }
+
             tracing::info!(
                 "Caught up ledger {}... from event store: seq {} -> {} (+{} entries)",
                 &ledger_id[..16.min(ledger_id.len())],
@@ -1338,8 +1352,9 @@ impl Node {
         }
     }
 
-    /// Run the main event loop
-    pub async fn run(&mut self) -> Result<(), Error> {
+    /// Run the main event loop.
+    /// Takes `&Arc<Self>` to enable per-ledger parallel dispatch via `tokio::spawn`.
+    pub async fn run(self: &Arc<Self>) -> Result<(), Error> {
         // Track last ledger reload time
         let mut last_reload = tokio::time::Instant::now();
         let reload_interval = if self.fast_poll {
@@ -1351,7 +1366,7 @@ impl Node {
         // Track last request poll time (fallback for missed subscription events)
         let mut last_poll = tokio::time::Instant::now();
         let poll_interval = if self.fast_poll {
-            tokio::time::Duration::from_secs(5)  // Safety net only — subscriptions handle real-time delivery
+            tokio::time::Duration::from_secs(30)  // Safety net only — subscriptions handle real-time delivery
         } else {
             tokio::time::Duration::from_secs(30)
         };
@@ -1459,6 +1474,24 @@ impl Node {
 
                 // Rotate notification-level dedup set
                 self.nostr.rotate_seen_events();
+
+                // Truncate joined ledger histories to prevent unbounded memory growth.
+                // Owned ledgers are truncated during persist_ledger_to_disk compaction,
+                // but joined ledgers accumulate history from Nostr updates forever.
+                {
+                    const JOINED_HISTORY_RETAIN: usize = 2000;
+                    let ledgers = self.handler.ledgers.lock().unwrap();
+                    for (lid, arc) in ledgers.iter() {
+                        let mut ledger = arc.write().unwrap();
+                        let len = ledger.history.len();
+                        if len > JOINED_HISTORY_RETAIN * 2 {
+                            let before = len;
+                            ledger.history.drain(..len - JOINED_HISTORY_RETAIN);
+                            tracing::debug!("Truncated history for {}: {} -> {} entries",
+                                &lid[..16.min(lid.len())], before, ledger.history.len());
+                        }
+                    }
+                }
 
                 metrics::record_run_loop_phase("periodic", periodic_start.elapsed());
                 last_periodic = tokio::time::Instant::now();
@@ -1671,13 +1704,14 @@ impl Node {
                 last_reload = tokio::time::Instant::now();
             }
 
-            // Poll for recent requests — safety net for missed subscription events
+            // Poll for recent requests — safety net for missed subscription events.
+            // Uses per-ledger parallel dispatch (same as drain_requests).
             if last_poll.elapsed() >= poll_interval {
                 let poll_start = std::time::Instant::now();
                 let mut poll_processed = 0usize;
                 if let Ok(requests) = self.nostr.fetch_recent_requests(7).await {
+                    let mut poll_by_ledger: std::collections::HashMap<String, Vec<crate::nostr::LedgerRequest>> = std::collections::HashMap::new();
                     for request in requests {
-                        // Check if already processed (current or previous generation)
                         let already_processed = {
                             let processed = self.processed_requests.lock().unwrap();
                             if processed.contains(&request.event_id) { true }
@@ -1686,10 +1720,25 @@ impl Node {
                         if !already_processed {
                             tracing::debug!("Request via polling: action={}, event={}...",
                                 request.action, &request.event_id[..16.min(request.event_id.len())]);
-                            // Mark as processed before handling
                             self.processed_requests.lock().unwrap().insert(request.event_id.clone());
-                            self.handle_ledger_request(request).await;
+                            poll_by_ledger
+                                .entry(request.ledger_id.clone())
+                                .or_default()
+                                .push(request);
                             poll_processed += 1;
+                        }
+                    }
+                    if !poll_by_ledger.is_empty() {
+                        let handles: Vec<_> = poll_by_ledger.into_iter().map(|(_lid, reqs)| {
+                            let node = Arc::clone(&self);
+                            tokio::spawn(async move {
+                                for req in reqs {
+                                    node.handle_ledger_request(req).await;
+                                }
+                            })
+                        }).collect();
+                        for handle in handles {
+                            let _ = handle.await;
                         }
                     }
                 }
@@ -1716,16 +1765,18 @@ impl Node {
                 self.handle_inbound(inbound);
             }
 
-            // Handle ledger requests from subscription.
-            // Time-boxed drain: process requests for up to 30ms, then yield.
-            // This breaks the feedback loop where large batches → long drain →
-            // more requests pile up → even larger batches → collapse.
+            // Handle ledger requests from subscription — per-ledger parallel dispatch.
+            // Drain all available requests, group by ledger_id, spawn a tokio task per
+            // ledger group. Requests within a ledger are still processed sequentially
+            // (hash chain ordering), but different ledgers run concurrently.
             let subscription_batch_size = {
-                let mut batch_size = 0usize;
                 let drain_start = std::time::Instant::now();
                 let drain_budget = std::time::Duration::from_millis(30);
+
+                // Step 1: Drain and group by ledger
+                let mut requests_by_ledger: std::collections::HashMap<String, Vec<crate::nostr::LedgerRequest>> = std::collections::HashMap::new();
+                let mut total_drained = 0usize;
                 while let Some(request) = self.nostr.try_recv_request() {
-                    // Check if already processed (from polling) — check both generations
                     let already_processed = {
                         let processed = self.processed_requests.lock().unwrap();
                         if processed.contains(&request.event_id) { true }
@@ -1735,20 +1786,41 @@ impl Node {
                         tracing::debug!("Request via subscription: action={}, event={}...",
                             request.action, &request.event_id[..16.min(request.event_id.len())]);
                         self.processed_requests.lock().unwrap().insert(request.event_id.clone());
-                        self.handle_ledger_request(request).await;
-                        batch_size += 1;
+                        requests_by_ledger
+                            .entry(request.ledger_id.clone())
+                            .or_default()
+                            .push(request);
+                        total_drained += 1;
                     }
-                    // Yield after 30ms to prevent batch accumulation feedback loop.
-                    // Remaining requests stay in the channel for the next iteration.
                     if drain_start.elapsed() >= drain_budget {
                         break;
                     }
                 }
-                if batch_size > 0 {
-                    metrics::record_request_drain_batch_size(batch_size);
+
+                // Step 2: Spawn per-ledger tasks
+                if !requests_by_ledger.is_empty() {
+                    let handles: Vec<_> = requests_by_ledger.into_iter().map(|(_lid, reqs)| {
+                        let node = Arc::clone(&self);
+                        tokio::spawn(async move {
+                            for req in reqs {
+                                node.handle_ledger_request(req).await;
+                            }
+                        })
+                    }).collect();
+
+                    // Step 3: Wait for all ledger groups to complete
+                    for handle in handles {
+                        if let Err(e) = handle.await {
+                            tracing::error!("Per-ledger task panicked: {}", e);
+                        }
+                    }
+                }
+
+                if total_drained > 0 {
+                    metrics::record_request_drain_batch_size(total_drained);
                 }
                 metrics::record_run_loop_phase("drain_requests", drain_start.elapsed());
-                batch_size
+                total_drained
             };
 
             // Flush any ledgers modified during request processing
@@ -1784,7 +1856,7 @@ impl Node {
             }
 
             // Check for outbound messages (non-blocking)
-            while let Ok(outbound) = self.outbound_rx.try_recv() {
+            while let Ok(outbound) = self.outbound_rx.lock().unwrap().try_recv() {
                 if let Err(e) = self.nostr.send_message(outbound.peer, outbound.message).await {
                     tracing::error!("Failed to send message: {}", e);
                 }
@@ -1804,7 +1876,7 @@ impl Node {
     }
 
     /// Handle a ledger request from Nostr
-    async fn handle_ledger_request(&mut self, request: crate::nostr::LedgerRequest) {
+    async fn handle_ledger_request(&self, request: crate::nostr::LedgerRequest) {
         // Skip requests that THIS daemon process sent (Nostr broadcasts to all subscribers).
         // We track sent event IDs rather than filtering by pubkey, because CLI commands
         // use the same operator key and we want the daemon to process those.
@@ -1981,7 +2053,7 @@ impl Node {
                 request.action, processing_time, success);
         }
         crate::metrics::record_request_processing(&request.action, success, processing_time);
-        crate::metrics::record_response_sent(&request.action, success);
+        // Note: record_response_sent is called inside send_ledger_response (nostr.rs)
 
         // Send response - parse result String as JSON Value
         let result_json = result.and_then(|s| serde_json::from_str(&s).ok());
@@ -4510,7 +4582,7 @@ impl Node {
     // These process incoming Nostr requests for ledger operations.
     // ========================================================================
 
-    async fn process_deposit_open_request(&mut self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_deposit_open_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
         use std::str::FromStr;
 
         tracing::info!("Processing deposit_open request for ledger {}...",
@@ -4634,7 +4706,7 @@ impl Node {
         }
     }
 
-    async fn process_make_offer_request(&mut self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_make_offer_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
         use std::str::FromStr;
 
         tracing::info!("Processing make_offer request for ledger {}...",
@@ -5076,7 +5148,7 @@ impl Node {
     /// - invoice: bolt11 invoice string
     /// - nonce: hex-encoded 32-byte nonce
     /// - signature: hex-encoded Schnorr signature over payment message
-    async fn process_pay_invoice_request(&mut self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_pay_invoice_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
         use crate::ldk_cli::LdkCli;
         use bitcoin::secp256k1::{Secp256k1, schnorr::Signature, Message};
         use deposits_core::messages::LedgerOperation;
@@ -5374,7 +5446,7 @@ impl Node {
     /// - fee_sats: fee for the withdrawal transaction
     /// - nonce: hex-encoded 32-byte nonce
     /// - signature: hex-encoded Schnorr signature over WITHDRAWAL message
-    async fn process_withdraw_request(&mut self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_withdraw_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
         use bitcoin::secp256k1::{Secp256k1, schnorr::Signature, Message};
 
         tracing::info!("Processing withdraw request for ledger {}...",
@@ -5514,7 +5586,7 @@ impl Node {
     }
 
     /// Process a transfer_lock request - lock funds for conditional transfer
-    async fn process_transfer_lock_request(&mut self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_transfer_lock_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
         use bitcoin::secp256k1::{Secp256k1, schnorr::Signature, Message};
         use deposits_core::types::{compute_deposit_id, DescriptorWitness};
         use deposits_core::messages::LedgerOperation;
@@ -5746,7 +5818,7 @@ impl Node {
     }
 
     /// Process a transfer_complete request - complete a transfer by revealing preimage
-    async fn process_transfer_complete_request(&mut self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_transfer_complete_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
         use deposits_core::types::DescriptorWitness;
         use deposits_core::messages::LedgerOperation;
 
@@ -5878,6 +5950,7 @@ impl Node {
             tracing::warn!("Failed to persist after transfer_complete: {}", e);
         }
 
+        crate::metrics::record_transfer_completed();
         tracing::info!("Transfer completed: {}", hex::encode(&transfer_id[..8]));
         let (completed_amount, completed_fee) = pending_transfer_backup
             .as_ref()
@@ -5891,7 +5964,7 @@ impl Node {
         }).to_string()), None)
     }
 
-    async fn process_collateral_lock_request(&mut self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_collateral_lock_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
         use bitcoin::secp256k1::SecretKey;
         use std::str::FromStr;
 
@@ -6790,7 +6863,7 @@ impl Node {
     // Daemon-mediated CLI request handlers
     // ========================================================================
 
-    async fn process_complete_offer_request(&mut self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_complete_offer_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
         tracing::info!("Processing complete_offer request for ledger {}...",
             &request.ledger_id[..16.min(request.ledger_id.len())]);
 
@@ -6835,7 +6908,7 @@ impl Node {
         }
     }
 
-    async fn process_partner_add_request(&mut self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_partner_add_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
         use std::str::FromStr;
 
         tracing::info!("Processing partner_add request for ledger {}...",
@@ -6888,7 +6961,7 @@ impl Node {
         }
     }
 
-    async fn process_partner_join_request(&mut self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_partner_join_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
         use std::str::FromStr;
 
         tracing::info!("Processing partner_join request for ledger {}...",
@@ -6946,7 +7019,7 @@ impl Node {
         }
     }
 
-    async fn process_collateral_record_request(&mut self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_collateral_record_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
         tracing::info!("Processing collateral_record request for ledger {}...",
             &request.ledger_id[..16.min(request.ledger_id.len())]);
 
@@ -6991,7 +7064,7 @@ impl Node {
         }
     }
 
-    async fn process_reserves_rotate_request(&mut self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_reserves_rotate_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
         tracing::info!("Processing reserves_rotate request for ledger {}...",
             &request.ledger_id[..16.min(request.ledger_id.len())]);
 
@@ -7131,7 +7204,7 @@ impl Node {
     // ========================================================================
 
     /// Auto-complete deposits that have been funded on-chain
-    pub async fn auto_complete_deposits(&mut self) {
+    pub async fn auto_complete_deposits(&self) {
         use deposits_core::types::DepositOfferStatus;
 
         let offers = self.list_deposit_offers();
@@ -7202,7 +7275,7 @@ impl Node {
     }
 
     /// Auto-complete locked withdrawals by broadcasting their transactions
-    pub async fn auto_complete_withdrawals(&mut self) {
+    pub async fn auto_complete_withdrawals(&self) {
         // Get all locked withdrawals
         let locked_withdrawals: Vec<([u8; 32], OnChainWithdrawal)> = {
             let withdrawals = self.withdrawals.lock().unwrap();
@@ -7499,7 +7572,7 @@ impl Node {
     ///
     /// This polls LDK for payment status and creates InvoiceCredit operations
     /// for any pending invoices that have been successfully paid.
-    pub async fn auto_credit_received_payments(&mut self) {
+    pub async fn auto_credit_received_payments(&self) {
         use crate::ldk_cli::LdkCli;
 
         // Get pending invoices
@@ -7700,7 +7773,7 @@ impl Node {
     }
 
     /// Handle a ledger response (for auto-recording attestations and co-sign responses)
-    async fn handle_ledger_response(&mut self, response: crate::nostr::LedgerResponse) {
+    async fn handle_ledger_response(&self, response: crate::nostr::LedgerResponse) {
         // First, check if this is a response to a pending co-sign request
         // For error responses, don't remove - keep waiting for success from actual quorum member
         let is_cosign_request = {
@@ -7924,7 +7997,7 @@ impl Node {
     /// # Returns
     /// A CoSignResult containing the partner signature and the member's ledger hash
     pub async fn request_cosign(
-        &mut self,
+        &self,
         ledger_id: &str,
         update: &deposits_core::SignedLedgerUpdate,
     ) -> Result<CoSignResult, Error> {
@@ -7950,7 +8023,7 @@ impl Node {
             use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
             use deposits_core::TlvEncode;
 
-            const MAX_PIGGYBACK: usize = 100;
+            const MAX_PIGGYBACK: usize = 20;
 
             let ledgers = self.handler.ledgers.lock().unwrap();
             if let Some(arc) = ledgers.get(ledger_id) {
@@ -8145,6 +8218,8 @@ impl Node {
                     for request in inline_cosign_requests {
                         if request.sender != our_x_only {
                             if self.is_quorum_member_of_ledger(&request.ledger_id) {
+                                // Mark as processed to prevent polling fallback from re-processing
+                                self.processed_requests.lock().unwrap().insert(request.event_id.clone());
                                 let (success, result, error) = self.process_cosign_request(&request).await;
                                 if success {
                                     let result_json = result.map(|s| serde_json::Value::String(s));
@@ -8190,7 +8265,7 @@ impl Node {
     /// # Returns
     /// An OfferCoSignResult containing the signature, co-signer pubkey, and their ledger hash
     pub async fn request_offer_cosign(
-        &mut self,
+        &self,
         ledger_id: &str,
         offer: &DepositOffer,
     ) -> Result<OfferCoSignResult, Error> {
@@ -8342,6 +8417,8 @@ impl Node {
                     for request in inline_offer_requests {
                         if request.sender != our_x_only {
                             if self.is_quorum_member_of_ledger(&request.ledger_id) {
+                                // Mark as processed to prevent polling fallback from re-processing
+                                self.processed_requests.lock().unwrap().insert(request.event_id.clone());
                                 let (success, result, error) = self.process_cosign_offer_request(&request).await;
                                 let result_json = result.map(|s| serde_json::Value::String(s));
                                 if let Err(e) = self.nostr.send_ledger_response(
@@ -8471,7 +8548,7 @@ impl Node {
     ///
     /// # Returns
     /// The Nostr event ID of the broadcast update
-    pub async fn sign_and_broadcast(&mut self, ledger_id: &str) -> Result<String, Error> {
+    pub async fn sign_and_broadcast(&self, ledger_id: &str) -> Result<String, Error> {
         let sab_start = std::time::Instant::now();
 
         // Check if reserves have been rotated to quorum (co-signatures become required)
@@ -8620,7 +8697,7 @@ impl Node {
     ///
     /// If there are no existing quorum members, falls back to operator-only signature.
     pub async fn add_quorum_member(
-        &mut self,
+        &self,
         ledger_id: &str,
         quorum_member: PublicKey,
         member_ledger_id: &str,
@@ -8694,7 +8771,7 @@ impl Node {
     ///
     /// This is the async version that handles the full co-signing flow.
     pub async fn record_quorum_join(
-        &mut self,
+        &self,
         our_ledger_id: &str,
         target_operator: PublicKey,
         target_ledger_id: &str,
@@ -8783,7 +8860,7 @@ impl Node {
     /// Takes a descriptor string (e.g., "pk(02abc...)" for single-key deposits).
     /// Returns the attestation after successfully broadcasting.
     pub async fn lock_collateral(
-        &mut self,
+        &self,
         ledger_id: &str,
         descriptor: &str,
         deposit_secret: &bitcoin::secp256k1::SecretKey,
@@ -8944,7 +9021,7 @@ impl Node {
     ///
     /// This is the async version that handles the full co-signing flow.
     pub async fn record_collateral_attestation(
-        &mut self,
+        &self,
         ledger_id: &str,
         attestation: deposits_core::CollateralAttestationMsg,
     ) -> Result<String, Error> {
@@ -9007,7 +9084,7 @@ impl Node {
     ///
     /// Takes a descriptor string (e.g., "pk(02abc...)" for single-key deposits).
     pub async fn open_deposit(
-        &mut self,
+        &self,
         ledger_id: &str,
         descriptor: &str,
         fees: Option<FeeStructure>,
@@ -9101,7 +9178,7 @@ impl Node {
 
     /// Credit a deposit with on-chain funds, with co-signing and broadcast.
     pub async fn credit_deposit_onchain(
-        &mut self,
+        &self,
         ledger_id: &str,
         descriptor: &str,
         amount_msats: u64,
@@ -9202,7 +9279,7 @@ impl Node {
 
     /// Credit a deposit with Lightning invoice payment, with co-signing and broadcast.
     pub async fn credit_deposit(
-        &mut self,
+        &self,
         ledger_id: &str,
         deposit_id: DepositId,
         amount_msats: u64,
@@ -9276,7 +9353,7 @@ impl Node {
 
     /// Lock funds for an outgoing Lightning invoice payment, with co-signing and broadcast.
     pub async fn lock_invoice_payment(
-        &mut self,
+        &self,
         ledger_id: &str,
         deposit_id: DepositId,
         amount_msats: u64,
@@ -9356,7 +9433,7 @@ impl Node {
 
     /// Fail an outgoing Lightning invoice payment, with co-signing and broadcast.
     pub async fn fail_invoice_payment(
-        &mut self,
+        &self,
         ledger_id: &str,
         deposit_id: DepositId,
         amount_msats: u64,
@@ -9434,7 +9511,7 @@ impl Node {
 
     /// Fulfill an outgoing Lightning invoice payment, with co-signing and broadcast.
     pub async fn fulfill_invoice_payment(
-        &mut self,
+        &self,
         ledger_id: &str,
         deposit_id: DepositId,
         amount_msats: u64,
@@ -9516,7 +9593,7 @@ impl Node {
 
     /// Lock a withdrawal with co-signing and broadcast.
     pub async fn lock_withdrawal(
-        &mut self,
+        &self,
         ledger_id: &str,
         deposit_id: DepositId,
         destination_address: String,
@@ -9658,7 +9735,7 @@ impl Node {
 
     /// Complete a withdrawal with co-signing and broadcast.
     pub async fn complete_withdrawal(
-        &mut self,
+        &self,
         ledger_id: &str,
         withdrawal_id: &[u8; 32],
     ) -> Result<WithdrawalCompleteResult, Error> {
@@ -10538,7 +10615,7 @@ impl Node {
     /// This is the async version that handles the full co-signing flow.
     /// Uses a per-offer lock file to prevent concurrent completion by daemon and CLI.
     pub async fn complete_deposit_offer(
-        &mut self,
+        &self,
         offer_id: &[u8; 32],
         funding_txid: String,
         funding_amount_sats: u64,

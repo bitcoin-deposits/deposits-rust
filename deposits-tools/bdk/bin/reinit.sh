@@ -102,6 +102,7 @@ $DC up -d bitcoin
 wait_for_bitcoin
 
 $DC up -d nostr-relay
+$DC up -d nostr-relay-slow
 wait_for_nostr
 
 $DC up -d electrs

@@ -55,8 +55,6 @@ lightning-invoice = "0.32"
 # HTTP client for LDK server API
 reqwest = { version = "0.12", features = ["json", "blocking", "rustls-tls"], default-features = false }
 
-# CPU profiler — signal-triggered flamegraph capture via SIGUSR1
-pprof = { version = "0.14", features = ["flamegraph", "prost-codec"] }
 
 # Memory allocator — jemalloc reduces fragmentation under sustained alloc/dealloc workloads
 [target.'cfg(not(target_env = "msvc"))'.dependencies]

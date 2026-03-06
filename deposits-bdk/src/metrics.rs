@@ -399,6 +399,17 @@ pub fn record_response_received(action: &str, success: bool) {
 }
 
 // ============================================================================
+// Ledger operation metrics
+// ============================================================================
+
+/// Record a transfer_complete operation successfully appended to a ledger.
+/// This is the definitive "transfer throughput" metric — one increment per
+/// completed transfer on this operator's ledger.
+pub fn record_transfer_completed() {
+    counter!("deposits_transfers_completed_total").increment(1);
+}
+
+// ============================================================================
 // Queue metrics
 // ============================================================================
 
