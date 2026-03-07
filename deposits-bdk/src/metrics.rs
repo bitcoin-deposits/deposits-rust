@@ -86,6 +86,15 @@ fn describe_metrics() {
         "Total Nostr responses received, labeled by status (success/error)"
     );
 
+    describe_counter!(
+        "nostr_responses_by_ledger_total",
+        "Total Nostr responses sent, labeled by action, ledger_id, and status"
+    );
+    describe_counter!(
+        "deposits_transfers_completed_total",
+        "Total transfers completed, labeled by ledger_id"
+    );
+
     // Queue metrics
     describe_gauge!(
         "pending_cosign_requests",
@@ -392,6 +401,16 @@ pub fn record_response_sent(action: &str, success: bool) {
     counter!("nostr_responses_sent_total", "action" => action.to_string(), "status" => status).increment(1);
 }
 
+/// Record a response sent via Nostr, tagged by ledger.
+pub fn record_response_sent_for_ledger(action: &str, ledger_id: &str, success: bool) {
+    let status = if success { "success" } else { "error" };
+    let short_id = if ledger_id.len() > 8 { &ledger_id[..8] } else { ledger_id };
+    counter!("nostr_responses_by_ledger_total",
+        "action" => action.to_string(),
+        "ledger_id" => short_id.to_string(),
+        "status" => status).increment(1);
+}
+
 /// Record a response received via Nostr.
 pub fn record_response_received(action: &str, success: bool) {
     let status = if success { "success" } else { "error" };
@@ -405,8 +424,9 @@ pub fn record_response_received(action: &str, success: bool) {
 /// Record a transfer_complete operation successfully appended to a ledger.
 /// This is the definitive "transfer throughput" metric — one increment per
 /// completed transfer on this operator's ledger.
-pub fn record_transfer_completed() {
-    counter!("deposits_transfers_completed_total").increment(1);
+pub fn record_transfer_completed(ledger_id: &str) {
+    let short_id = if ledger_id.len() > 8 { &ledger_id[..8] } else { ledger_id };
+    counter!("deposits_transfers_completed_total", "ledger_id" => short_id.to_string()).increment(1);
 }
 
 // ============================================================================
@@ -439,9 +459,13 @@ pub fn record_request_duration(action: &str, duration: Duration) {
 }
 
 /// Record request processing time (node-side time to handle a request).
-pub fn record_request_processing(action: &str, success: bool, duration: Duration) {
+pub fn record_request_processing(action: &str, ledger_id: &str, success: bool, duration: Duration) {
     let status = if success { "success" } else { "error" };
-    histogram!("nostr_request_processing_seconds", "action" => action.to_string(), "status" => status)
+    let short_id = if ledger_id.len() > 8 { &ledger_id[..8] } else { ledger_id };
+    histogram!("nostr_request_processing_seconds",
+        "action" => action.to_string(),
+        "ledger_id" => short_id.to_string(),
+        "status" => status)
         .record(duration.as_secs_f64());
 }
 
@@ -473,7 +497,7 @@ pub fn record_ledger_operation(op_type: &str) {
 /// Set the history length (sequence number) for a ledger.
 pub fn set_ledger_history_length(ledger_id: &str, length: usize) {
     // Use first 16 chars of ledger_id as label to keep cardinality reasonable
-    let short_id = if ledger_id.len() > 16 { &ledger_id[..16] } else { ledger_id };
+    let short_id = if ledger_id.len() > 8 { &ledger_id[..8] } else { ledger_id };
     gauge!("ledger_history_length", "ledger_id" => short_id.to_string()).set(length as f64);
 }
 
@@ -499,14 +523,14 @@ pub fn set_total_deposit_balance_sats(amount: u64) {
 /// Set the balance for a specific ledger in satoshis.
 pub fn set_ledger_deposit_balance_sats(ledger_id: &str, amount: u64) {
     // Use first 16 chars of ledger_id as label to keep cardinality reasonable
-    let short_id = if ledger_id.len() > 16 { &ledger_id[..16] } else { ledger_id };
+    let short_id = if ledger_id.len() > 8 { &ledger_id[..8] } else { ledger_id };
     gauge!("deposit_ledger_balance_sats", "ledger_id" => short_id.to_string()).set(amount as f64);
 }
 
 /// Set the balance for a specific deposit in satoshis.
 pub fn set_deposit_balance_sats(deposit_id: &str, amount: u64) {
     // Use first 16 chars of deposit_id as label to keep cardinality reasonable
-    let short_id = if deposit_id.len() > 16 { &deposit_id[..16] } else { deposit_id };
+    let short_id = if deposit_id.len() > 8 { &deposit_id[..8] } else { deposit_id };
     gauge!("deposit_balance_sats", "deposit_id" => short_id.to_string()).set(amount as f64);
 }
 
@@ -561,7 +585,7 @@ pub fn record_cosign_freshness_recovery(outcome: &str) {
 
 /// Set the validated tip (highest validated seq) for a ledger in the event store.
 pub fn set_event_store_validated_tip(ledger_id: &str, tip: u64) {
-    let short_id = if ledger_id.len() > 16 { &ledger_id[..16] } else { ledger_id };
+    let short_id = if ledger_id.len() > 8 { &ledger_id[..8] } else { ledger_id };
     gauge!("event_store_validated_tip", "ledger_id" => short_id.to_string()).set(tip as f64);
 }
 

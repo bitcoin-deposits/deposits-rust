@@ -2148,7 +2148,8 @@ impl Node {
             tracing::info!("[PROFILE] handle_ledger_request action={} took {:?} (success={})",
                 request.action, processing_time, success);
         }
-        crate::metrics::record_request_processing(&request.action, success, processing_time);
+        crate::metrics::record_request_processing(&request.action, &request.ledger_id, success, processing_time);
+        crate::metrics::record_response_sent_for_ledger(&request.action, &request.ledger_id, success);
         // Note: record_response_sent is called inside send_ledger_response (nostr.rs)
 
         // Send response - parse result String as JSON Value
@@ -6046,7 +6047,7 @@ impl Node {
             tracing::warn!("Failed to persist after transfer_complete: {}", e);
         }
 
-        crate::metrics::record_transfer_completed();
+        crate::metrics::record_transfer_completed(&request.ledger_id);
         tracing::info!("Transfer completed: {}", hex::encode(&transfer_id[..8]));
         let (completed_amount, completed_fee) = pending_transfer_backup
             .as_ref()
