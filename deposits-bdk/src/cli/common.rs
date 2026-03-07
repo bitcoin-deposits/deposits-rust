@@ -138,10 +138,14 @@ pub fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
         network,
         electrum_url,
         relays,
+        peer_relays: Vec::new(),
+        ledger_relays: Vec::new(),
+        wallet_relays: Vec::new(),
         nwc_uri,
         data_dir,
         operator_name,
         fast_poll,
+        skip_nostr_verify: false,
     })
 }
 

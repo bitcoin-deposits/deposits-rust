@@ -16,11 +16,13 @@ WORKDIR /app
 # Copy only what deposits-bdk needs (exclude deposits-ldk which requires rust-lightning)
 COPY deposits-rust/deposits-core ./deposits-core
 COPY deposits-rust/deposits-bdk ./deposits-bdk
+COPY deposits-rust/nostr-sdk-performance ./nostr-sdk-performance
 COPY deposits-rust/Cargo.lock ./Cargo.lock
 
 # Create a minimal workspace Cargo.toml for Docker build
 # Patch native-tls to 0.2.17 to fix Rust 1.85 compatibility
-RUN echo '[workspace]\nmembers = ["deposits-core", "deposits-bdk"]\nresolver = "2"\n\n[patch.crates-io]\nnative-tls = { git = "https://github.com/sfackler/rust-native-tls", tag = "v0.2.17" }' > Cargo.toml
+# Patch nostr-relay-pool with our performance fork (skip event verification)
+RUN echo '[workspace]\nmembers = ["deposits-core", "deposits-bdk"]\nresolver = "2"\n\n[patch.crates-io]\nnative-tls = { git = "https://github.com/sfackler/rust-native-tls", tag = "v0.2.17" }\nnostr-relay-pool = { path = "nostr-sdk-performance/nostr-relay-pool" }' > Cargo.toml
 
 # Build deposits-bdk and deposits-wallet with dangerous-testing for test environments
 # WARNING: Do not use this image in production

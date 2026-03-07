@@ -29,6 +29,9 @@ pub struct RelayOptions {
     pub(super) limits: RelayLimits,
     pub(super) max_avg_latency: Option<Duration>,
     pub(super) filtering_mode: RelayFilteringMode,
+    /// Skip Schnorr signature verification of incoming events (default: true).
+    /// Set to false to verify signatures on untrusted relays.
+    pub(super) skip_event_verification: bool,
 }
 
 impl Default for RelayOptions {
@@ -43,6 +46,7 @@ impl Default for RelayOptions {
             limits: RelayLimits::default(),
             max_avg_latency: None,
             filtering_mode: RelayFilteringMode::default(),
+            skip_event_verification: true,
         }
     }
 }
@@ -167,6 +171,17 @@ impl RelayOptions {
     #[inline]
     pub fn filtering_mode(mut self, mode: RelayFilteringMode) -> Self {
         self.filtering_mode = mode;
+        self
+    }
+
+    /// Skip Schnorr signature verification of incoming events (default: true).
+    ///
+    /// When enabled, events received from relays will not have their signatures
+    /// verified. This saves significant CPU (~15% at high throughput) but should
+    /// only be used with trusted relays.
+    #[inline]
+    pub fn skip_event_verification(mut self, skip: bool) -> Self {
+        self.skip_event_verification = skip;
         self
     }
 }

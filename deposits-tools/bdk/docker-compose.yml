@@ -20,15 +20,16 @@
 #   Grafana:    http://localhost:3010 (admin/admin)
 
 services:
-  # Strfry Nostr relay for peer messaging (low-latency fork with 1ms debounce)
-  nostr-relay:
+  # Wallet relay — shared by all wallets for advertisements and client request/response traffic.
+  # Operators also connect here to serve wallet-originated requests.
+  relay-wallets:
     image: strfry-performance:latest
-    container_name: bdk-nostr-relay
+    container_name: bdk-relay-wallets
     command: ["relay", "--config", "/app/strfry.conf"]
     ports:
       - "7778:7777"
     volumes:
-      - bdk_nostr_data:/app/strfry-db
+      - bdk_relay_wallets_data:/app/strfry-db
       - ../../strfry-performance/strfry.conf:/app/strfry.conf:ro
       - ../permissive-write-policy.py:/app/write-policy.py:ro
     environment:
@@ -41,23 +42,103 @@ services:
       timeout: 5s
       retries: 3
 
-  # Slow (durable) Nostr relay — persists non-ephemeral events, drops kinds 20000-29999.
-  # Also streams from the fast relay as backup. Nodes query this for historical data.
-  nostr-relay-slow:
+  # Per-operator relays — each handles only that operator's inter-operator traffic
+  # (cosign requests/responses). This distributes the ~1400 events/sec across N relays.
+  relay-alice:
     image: strfry-performance:latest
-    container_name: bdk-nostr-relay-slow
+    container_name: bdk-relay-alice
+    command: ["relay", "--config", "/app/strfry.conf"]
+    ports:
+      - "7801:7777"
+    volumes:
+      - bdk_relay_alice_data:/app/strfry-db
+      - ../../strfry-performance/strfry.conf:/app/strfry.conf:ro
+      - ../permissive-write-policy.py:/app/write-policy.py:ro
+    networks:
+      - bdk_network
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:7777"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  relay-bob:
+    image: strfry-performance:latest
+    container_name: bdk-relay-bob
+    command: ["relay", "--config", "/app/strfry.conf"]
+    ports:
+      - "7802:7777"
+    volumes:
+      - bdk_relay_bob_data:/app/strfry-db
+      - ../../strfry-performance/strfry.conf:/app/strfry.conf:ro
+      - ../permissive-write-policy.py:/app/write-policy.py:ro
+    networks:
+      - bdk_network
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:7777"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  relay-charlie:
+    image: strfry-performance:latest
+    container_name: bdk-relay-charlie
+    command: ["relay", "--config", "/app/strfry.conf"]
+    ports:
+      - "7803:7777"
+    volumes:
+      - bdk_relay_charlie_data:/app/strfry-db
+      - ../../strfry-performance/strfry.conf:/app/strfry.conf:ro
+      - ../permissive-write-policy.py:/app/write-policy.py:ro
+    networks:
+      - bdk_network
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:7777"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  relay-diana:
+    image: strfry-performance:latest
+    container_name: bdk-relay-diana
+    command: ["relay", "--config", "/app/strfry.conf"]
+    ports:
+      - "7804:7777"
+    volumes:
+      - bdk_relay_diana_data:/app/strfry-db
+      - ../../strfry-performance/strfry.conf:/app/strfry.conf:ro
+      - ../permissive-write-policy.py:/app/write-policy.py:ro
+    networks:
+      - bdk_network
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:7777"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Ledger relay — durable, persists non-ephemeral events (KIND 9100 updates, 9103 disputes).
+  # Drops ephemeral kinds 20000-29999. Streams from per-operator relays for backup.
+  relay-ledgers:
+    image: strfry-performance:latest
+    container_name: bdk-relay-ledgers
     entrypoint: ["/bin/sh", "/app/slow-relay-entrypoint.sh"]
     ports:
       - "7779:7777"
     volumes:
-      - bdk_nostr_slow_data:/app/strfry-db
+      - bdk_relay_ledgers_data:/app/strfry-db
       - ../../strfry-performance/strfry-slow.conf:/app/strfry-slow.conf:ro
       - ../../deposits-tools/drop-ephemeral-policy.sh:/app/drop-ephemeral-policy.sh:ro
       - ./bin/slow-relay-entrypoint.sh:/app/slow-relay-entrypoint.sh:ro
     environment:
-      - FAST_RELAY_URL=ws://nostr-relay:7777
+      - OPERATOR_RELAY_URLS=ws://relay-alice:7777 ws://relay-bob:7777 ws://relay-charlie:7777 ws://relay-diana:7777
     depends_on:
-      nostr-relay:
+      relay-alice:
+        condition: service_healthy
+      relay-bob:
+        condition: service_healthy
+      relay-charlie:
+        condition: service_healthy
+      relay-diana:
         condition: service_healthy
     networks:
       - bdk_network
@@ -251,12 +332,25 @@ services:
       - "--electrum"
       - "http://electrs-alice:3002"
       - "--relay"
-      - "ws://nostr-relay:7777"
+      - "ws://relay-alice:7777"
+      - "--peer-relay"
+      - "ws://relay-bob:7777"
+      - "--peer-relay"
+      - "ws://relay-charlie:7777"
+      - "--peer-relay"
+      - "ws://relay-diana:7777"
+      - "--peer-relay"
+      - "ws://relay-wallets:7777"
+      - "--ledger-relay"
+      - "ws://relay-ledgers:7777"
+      - "--wallet-relay"
+      - "ws://relay-wallets:7777"
       - "--data-dir"
       - "/data"
       - "--metrics-port"
       - "9100"
       - "--fast-poll"
+      - "--skip-nostr-verify"
     environment:
       # Logs: info level, debug for deposits-bdk
       - RUST_LOG=info,deposits_bdk=debug
@@ -269,7 +363,9 @@ services:
         condition: service_healthy
       electrs-alice:
         condition: service_started
-      nostr-relay:
+      relay-alice:
+        condition: service_healthy
+      relay-wallets:
         condition: service_healthy
     networks:
       bdk_network:
@@ -292,12 +388,25 @@ services:
       - "--electrum"
       - "http://electrs-bob:3002"
       - "--relay"
-      - "ws://nostr-relay:7777"
+      - "ws://relay-bob:7777"
+      - "--peer-relay"
+      - "ws://relay-alice:7777"
+      - "--peer-relay"
+      - "ws://relay-charlie:7777"
+      - "--peer-relay"
+      - "ws://relay-diana:7777"
+      - "--peer-relay"
+      - "ws://relay-wallets:7777"
+      - "--ledger-relay"
+      - "ws://relay-ledgers:7777"
+      - "--wallet-relay"
+      - "ws://relay-wallets:7777"
       - "--data-dir"
       - "/data"
       - "--metrics-port"
       - "9100"
       - "--fast-poll"
+      - "--skip-nostr-verify"
     environment:
       - RUST_LOG=info,deposits_bdk=debug
     volumes:
@@ -307,7 +416,9 @@ services:
         condition: service_healthy
       electrs-bob:
         condition: service_started
-      nostr-relay:
+      relay-bob:
+        condition: service_healthy
+      relay-wallets:
         condition: service_healthy
     networks:
       bdk_network:
@@ -330,12 +441,25 @@ services:
       - "--electrum"
       - "http://electrs-charlie:3002"
       - "--relay"
-      - "ws://nostr-relay:7777"
+      - "ws://relay-charlie:7777"
+      - "--peer-relay"
+      - "ws://relay-alice:7777"
+      - "--peer-relay"
+      - "ws://relay-bob:7777"
+      - "--peer-relay"
+      - "ws://relay-diana:7777"
+      - "--peer-relay"
+      - "ws://relay-wallets:7777"
+      - "--ledger-relay"
+      - "ws://relay-ledgers:7777"
+      - "--wallet-relay"
+      - "ws://relay-wallets:7777"
       - "--data-dir"
       - "/data"
       - "--metrics-port"
       - "9100"
       - "--fast-poll"
+      - "--skip-nostr-verify"
     environment:
       - RUST_LOG=info,deposits_bdk=debug
     volumes:
@@ -345,7 +469,9 @@ services:
         condition: service_healthy
       electrs-charlie:
         condition: service_started
-      nostr-relay:
+      relay-charlie:
+        condition: service_healthy
+      relay-wallets:
         condition: service_healthy
     networks:
       bdk_network:
@@ -368,12 +494,25 @@ services:
       - "--electrum"
       - "http://electrs-diana:3002"
       - "--relay"
-      - "ws://nostr-relay:7777"
+      - "ws://relay-diana:7777"
+      - "--peer-relay"
+      - "ws://relay-alice:7777"
+      - "--peer-relay"
+      - "ws://relay-bob:7777"
+      - "--peer-relay"
+      - "ws://relay-charlie:7777"
+      - "--peer-relay"
+      - "ws://relay-wallets:7777"
+      - "--ledger-relay"
+      - "ws://relay-ledgers:7777"
+      - "--wallet-relay"
+      - "ws://relay-wallets:7777"
       - "--data-dir"
       - "/data"
       - "--metrics-port"
       - "9100"
       - "--fast-poll"
+      - "--skip-nostr-verify"
     environment:
       - RUST_LOG=info,deposits_bdk=debug
     volumes:
@@ -383,7 +522,9 @@ services:
         condition: service_healthy
       electrs-diana:
         condition: service_started
-      nostr-relay:
+      relay-diana:
+        condition: service_healthy
+      relay-wallets:
         condition: service_healthy
     networks:
       bdk_network:
@@ -404,12 +545,25 @@ services:
       - "--electrum"
       - "http://electrs:3002"
       - "--relay"
-      - "ws://nostr-relay:7777"
+      - "ws://relay-wallets:7777"
+      - "--peer-relay"
+      - "ws://relay-alice:7777"
+      - "--peer-relay"
+      - "ws://relay-bob:7777"
+      - "--peer-relay"
+      - "ws://relay-charlie:7777"
+      - "--peer-relay"
+      - "ws://relay-diana:7777"
+      - "--ledger-relay"
+      - "ws://relay-ledgers:7777"
+      - "--wallet-relay"
+      - "ws://relay-wallets:7777"
       - "--data-dir"
       - "/data"
       - "--metrics-port"
       - "9100"
       - "--fast-poll"
+      - "--skip-nostr-verify"
     environment:
       - RUST_LOG=info,deposits_bdk=debug
     volumes:
@@ -419,7 +573,7 @@ services:
         condition: service_healthy
       electrs:
         condition: service_started
-      nostr-relay:
+      relay-wallets:
         condition: service_healthy
     networks:
       bdk_network:
@@ -467,7 +621,7 @@ services:
     environment:
       - RUST_LOG=info,deposits_bdk=debug
       - ELECTRUM_URL=http://electrs:3002
-      - NOSTR_RELAY=ws://nostr-relay:7777
+      - NOSTR_RELAY=ws://relay-wallets:7777
     volumes:
       - ../../..:/workspace
     depends_on:
@@ -475,7 +629,7 @@ services:
         condition: service_healthy
       electrs:
         condition: service_started
-      nostr-relay:
+      relay-wallets:
         condition: service_healthy
     networks:
       bdk_network:
@@ -521,8 +675,12 @@ services:
         ipv4_address: 172.21.0.41
 
 volumes:
-  bdk_nostr_data:
-  bdk_nostr_slow_data:
+  bdk_relay_wallets_data:
+  bdk_relay_alice_data:
+  bdk_relay_bob_data:
+  bdk_relay_charlie_data:
+  bdk_relay_diana_data:
+  bdk_relay_ledgers_data:
   bdk_bitcoin_data:
   bdk_electrs_data:
   bdk_electrs_alice:

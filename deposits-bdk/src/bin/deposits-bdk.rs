@@ -294,9 +294,13 @@ fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
     let mut network = Network::Signet;
     let mut electrum_url = "https://mempool.space/signet/api".to_string();
     let mut relays = Vec::new();
+    let mut peer_relays = Vec::new();
+    let mut ledger_relays = Vec::new();
+    let mut wallet_relays = Vec::new();
     let mut nwc_uri = None;
     let mut operator_name = None;
     let mut fast_poll = false;
+    let mut skip_nostr_verify = false;
     let mut data_dir = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".deposits-bdk");
@@ -352,6 +356,27 @@ fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
                 }
                 relays.push(args[i].clone());
             }
+            "--peer-relay" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("--peer-relay requires a value".to_string());
+                }
+                peer_relays.push(args[i].clone());
+            }
+            "--ledger-relay" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("--ledger-relay requires a value".to_string());
+                }
+                ledger_relays.push(args[i].clone());
+            }
+            "--wallet-relay" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("--wallet-relay requires a value".to_string());
+                }
+                wallet_relays.push(args[i].clone());
+            }
             "--nwc" => {
                 i += 1;
                 if i >= args.len() {
@@ -368,6 +393,9 @@ fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
             }
             "--fast-poll" => {
                 fast_poll = true;
+            }
+            "--skip-nostr-verify" => {
+                skip_nostr_verify = true;
             }
             arg => {
                 return Err(format!("Unknown argument: {}", arg));
@@ -399,10 +427,14 @@ fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
         network,
         electrum_url,
         relays,
+        peer_relays,
+        ledger_relays,
+        wallet_relays,
         nwc_uri,
         data_dir,
         operator_name,
         fast_poll,
+        skip_nostr_verify,
     })
 }
 
@@ -529,6 +561,15 @@ async fn run_node(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             config.relays.clone()
         }
     );
+    if !config.peer_relays.is_empty() {
+        tracing::info!("Peer relays: {:?}", config.peer_relays);
+    }
+    if !config.ledger_relays.is_empty() {
+        tracing::info!("Ledger relays: {:?}", config.ledger_relays);
+    }
+    if !config.wallet_relays.is_empty() {
+        tracing::info!("Wallet relays: {:?}", config.wallet_relays);
+    }
 
     let node = Arc::new(Node::new(config).await?);
 

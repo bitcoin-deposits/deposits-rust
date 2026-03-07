@@ -1016,7 +1016,10 @@ impl InnerRelay {
                 }
 
                 if let DatabaseEventStatus::NotExistent = status {
-                    // PERFORMANCE: Skip signature verification (we verify at app layer)
+                    // Verify event unless explicitly skipped for trusted relays
+                    if !self.opts.skip_event_verification {
+                        event.verify()?;
+                    }
                     // PERFORMANCE: Skip database save
 
                     // Send notification

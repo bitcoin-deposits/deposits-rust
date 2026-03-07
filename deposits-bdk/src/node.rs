@@ -51,8 +51,17 @@ pub struct NodeConfig {
     /// Electrum server URL
     pub electrum_url: String,
 
-    /// Nostr relay URLs
+    /// Operator relay URLs — this node publishes requests/responses here.
     pub relays: Vec<String>,
+
+    /// Peer relay URLs — subscribe only, for receiving other operators' cosign traffic.
+    pub peer_relays: Vec<String>,
+
+    /// Ledger relay URLs (durable updates/disputes). Falls back to `relays` if empty.
+    pub ledger_relays: Vec<String>,
+
+    /// Wallet relay URLs (advertisements/discovery). Falls back to `relays` if empty.
+    pub wallet_relays: Vec<String>,
 
     /// NWC connection string (optional - for Lightning operations)
     pub nwc_uri: Option<String>,
@@ -67,6 +76,10 @@ pub struct NodeConfig {
     /// When enabled: periodic=5s, poll=5s, reload=2s
     /// When disabled: periodic=60s, poll=30s, reload=5s
     pub fast_poll: bool,
+
+    /// Skip Schnorr signature verification of incoming Nostr events.
+    /// Only use with trusted relays (e.g., local/private relays).
+    pub skip_nostr_verify: bool,
 }
 
 /// Result of rotating reserves to quorum-based Taproot spending
@@ -201,6 +214,13 @@ pub struct Node {
     /// The result includes the partner signature and the member's ledger hash
     pending_cosign_requests: Arc<Mutex<HashMap<String, (String, tokio::sync::oneshot::Sender<CoSignResult>)>>>,
 
+    /// Semaphore to limit concurrent request_cosign calls.
+    /// Multiple concurrent mini loops compete for shared channels (response_rx,
+    /// ledger_rx) and can deadlock when all operators are in batch-await simultaneously.
+    /// Serializing cosign requests prevents this while still allowing concurrent
+    /// processing of non-cosign requests (cosign_update, partner_join, etc.).
+    cosign_semaphore: Arc<tokio::sync::Semaphore>,
+
     /// Pending Lightning invoices: payment_hash -> (ledger_id, deposit_pubkey, amount_msat)
     /// Used to credit deposits when payments are received
     pending_invoices: Arc<Mutex<HashMap<[u8; 32], PendingInvoice>>>,
@@ -303,8 +323,15 @@ impl Node {
         // Store relay URL for later use
         let relay_url = config.relays.first().cloned().unwrap_or_default();
 
-        // Create nostr transport
-        let nostr = NostrTransport::new(secret_key, config.relays).await?;
+        // Create nostr transport with categorized relay URLs
+        let nostr = NostrTransport::new_with_categories(
+            secret_key,
+            config.relays,
+            config.peer_relays,
+            config.ledger_relays,
+            config.wallet_relays,
+            config.skip_nostr_verify,
+        ).await?;
 
         // Create lightning client if NWC URI provided
         let lightning = if let Some(uri) = &config.nwc_uri {
@@ -365,6 +392,7 @@ impl Node {
             withdrawals: Mutex::new(withdrawals),
             pending_collateral_requests: Mutex::new(HashMap::new()),
             pending_cosign_requests: Arc::new(Mutex::new(HashMap::new())),
+            cosign_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
             pending_invoices: Arc::new(Mutex::new(HashMap::new())),
             processed_requests: Mutex::new(std::collections::HashSet::new()),
             processed_requests_prev: Mutex::new(std::collections::HashSet::new()),
@@ -563,6 +591,9 @@ impl Node {
     pub async fn start(&self) -> Result<(), Error> {
         self.nostr.start_listening().await?;
 
+        // Cache relay URL resolution once — eliminates client.relays().await on every publish
+        self.nostr.resolve_and_cache_relay_urls().await;
+
         // Auto-subscribe to ledger requests/disputes for all our ledgers
         // Collect all ledger IDs we care about (owned + joined)
         let mut ledger_ids: Vec<String> = Vec::new();
@@ -648,20 +679,31 @@ impl Node {
     /// scan that was triggered every 2s reload when history grows during sustained load.
     fn get_joined_ledger_ids(&self) -> Vec<String> {
         // Fast path: check if cache is populated AND history hasn't grown.
+        //
+        // IMPORTANT: Clone cache data BEFORE acquiring handler.ledgers to avoid
+        // ABBA deadlock. The cache-miss path below acquires handler.ledgers first,
+        // then joined_ledger_cache. If we held joined_ledger_cache while waiting
+        // for handler.ledgers here, a concurrent task in the cache-miss path
+        // (holding handler.ledgers, waiting for joined_ledger_cache) would deadlock.
         {
-            let cache = self.joined_ledger_cache.lock().unwrap();
-            if let Some(ref cached) = *cache {
+            let (cached_data, cached_versions) = {
+                let cache = self.joined_ledger_cache.lock().unwrap();
                 let versions = self.joined_ledger_cache_versions.lock().unwrap();
+                (cache.clone(), versions.clone())
+            };
+            // Cache locks released — safe to acquire handler.ledgers
+
+            if let Some(ref cached) = cached_data {
                 let ledgers = self.handler.ledgers.lock().unwrap();
                 let mut stale = false;
 
-                if ledgers.len() != versions.len() {
+                if ledgers.len() != cached_versions.len() {
                     stale = true;
                 } else {
                     for (lid, arc) in ledgers.iter() {
                         let l = arc.read().unwrap();
                         if l.operator_key() == self.node_id {
-                            match versions.get(lid) {
+                            match cached_versions.get(lid) {
                                 Some(&v) if v == l.history.len() => {}
                                 _ => { stale = true; break; }
                             }
@@ -1387,8 +1429,15 @@ impl Node {
         // longer when idle (save CPU). Starts idle.
         let mut had_requests_last_iteration = false;
 
+        let mut loop_iteration: u64 = 0;
         loop {
             let loop_start = std::time::Instant::now();
+            loop_iteration += 1;
+
+            // Watchdog: log every 100th iteration so we can see if the loop is running
+            if loop_iteration % 100 == 0 {
+                tracing::debug!("run loop iteration {}", loop_iteration);
+            }
 
             // Periodic tasks (every 60 seconds) - moved outside select! to avoid reset on each iteration
             if last_periodic.elapsed() >= periodic_interval {
@@ -1745,7 +1794,6 @@ impl Node {
                 if poll_processed > 0 {
                     had_requests_last_iteration = true;
                 }
-                // Flush any ledgers modified during polling-path requests
                 self.flush_dirty_ledgers();
                 metrics::record_run_loop_phase("polling", poll_start.elapsed());
                 last_poll = tokio::time::Instant::now();
@@ -1766,15 +1814,20 @@ impl Node {
             }
 
             // Handle ledger requests from subscription — per-ledger parallel dispatch.
-            // Drain all available requests, group by ledger_id, spawn a tokio task per
-            // ledger group. Requests within a ledger are still processed sequentially
-            // (hash chain ordering), but different ledgers run concurrently.
+            // Drain all available requests, group by ledger_id, dispatch to persistent
+            // per-ledger worker tasks via mpsc channels. Workers process requests
+            // sequentially per ledger (hash chain ordering) without blocking the main loop.
             let subscription_batch_size = {
                 let drain_start = std::time::Instant::now();
                 let drain_budget = std::time::Duration::from_millis(30);
 
-                // Step 1: Drain and group by ledger
+                // Step 1: Drain and group by ledger, max 2 requests per ledger.
+                // Limiting per-ledger batch size prevents long cosign mini-loop
+                // blocking (each transfer_lock/complete blocks up to 500ms for cosign).
+                // Excess requests are re-queued after the drain loop exits.
+                const MAX_PER_LEDGER: usize = 2;
                 let mut requests_by_ledger: std::collections::HashMap<String, Vec<crate::nostr::LedgerRequest>> = std::collections::HashMap::new();
+                let mut excess_requests: Vec<crate::nostr::LedgerRequest> = Vec::new();
                 let mut total_drained = 0usize;
                 while let Some(request) = self.nostr.try_recv_request() {
                     let already_processed = {
@@ -1783,36 +1836,49 @@ impl Node {
                         else { self.processed_requests_prev.lock().unwrap().contains(&request.event_id) }
                     };
                     if !already_processed {
-                        tracing::debug!("Request via subscription: action={}, event={}...",
-                            request.action, &request.event_id[..16.min(request.event_id.len())]);
-                        self.processed_requests.lock().unwrap().insert(request.event_id.clone());
-                        requests_by_ledger
-                            .entry(request.ledger_id.clone())
-                            .or_default()
-                            .push(request);
-                        total_drained += 1;
+                        let ledger_reqs = requests_by_ledger.entry(request.ledger_id.clone()).or_default();
+                        if ledger_reqs.len() >= MAX_PER_LEDGER {
+                            excess_requests.push(request);
+                        } else {
+                            tracing::debug!("Request via subscription: action={}, event={}...",
+                                request.action, &request.event_id[..16.min(request.event_id.len())]);
+                            self.processed_requests.lock().unwrap().insert(request.event_id.clone());
+                            ledger_reqs.push(request);
+                            total_drained += 1;
+                        }
                     }
                     if drain_start.elapsed() >= drain_budget {
                         break;
                     }
                 }
+                // Re-queue excess requests for next iteration (not marked as processed)
+                for req in excess_requests {
+                    self.nostr.queue_request(req);
+                }
 
-                // Step 2: Spawn per-ledger tasks
                 if !requests_by_ledger.is_empty() {
-                    let handles: Vec<_> = requests_by_ledger.into_iter().map(|(_lid, reqs)| {
+                    let batch_count = requests_by_ledger.len();
+                    let batch_start = std::time::Instant::now();
+                    let handles: Vec<_> = requests_by_ledger.into_iter().map(|(lid, reqs)| {
+                        let lid_short = lid[..16.min(lid.len())].to_string();
+                        let req_count = reqs.len();
                         let node = Arc::clone(&self);
                         tokio::spawn(async move {
+                            tracing::debug!("batch task start: ledger={}..., reqs={}", lid_short, req_count);
                             for req in reqs {
                                 node.handle_ledger_request(req).await;
                             }
+                            tracing::debug!("batch task done: ledger={}...", lid_short);
                         })
                     }).collect();
-
-                    // Step 3: Wait for all ledger groups to complete
                     for handle in handles {
                         if let Err(e) = handle.await {
                             tracing::error!("Per-ledger task panicked: {}", e);
                         }
+                    }
+                    let batch_elapsed = batch_start.elapsed();
+                    if batch_elapsed.as_millis() > 1000 {
+                        tracing::warn!("Slow batch-await: {} ledgers, took {:?}", batch_count, batch_elapsed);
                     }
                 }
 
@@ -1929,6 +1995,20 @@ impl Node {
             metrics::record_cosign_stale_discarded();
             tracing::debug!(
                 "Discarding stale cosign request: age={:.0}s, event={}...",
+                request_age_secs,
+                &request.event_id[..16.min(request.event_id.len())]
+            );
+            return;
+        }
+
+        // Discard stale transfer requests. The simulator retries on timeout,
+        // so processing old requests wastes cycles and creates state conflicts.
+        // 15s is well within the client's 30s lock_timeout.
+        let is_transfer = request.action == "transfer_lock" || request.action == "transfer_complete";
+        if is_transfer && request_age_secs >= 15.0 {
+            tracing::debug!(
+                "Discarding stale {} request: age={:.0}s, event={}...",
+                request.action,
                 request_age_secs,
                 &request.event_id[..16.min(request.event_id.len())]
             );
@@ -8002,6 +8082,12 @@ impl Node {
         update: &deposits_core::SignedLedgerUpdate,
     ) -> Result<CoSignResult, Error> {
         use tokio::time::Duration;
+
+        // Acquire semaphore to serialize cosign requests. Multiple concurrent
+        // mini loops compete for shared channels and cause distributed deadlocks
+        // when all operators are in batch-await simultaneously.
+        let _permit = self.cosign_semaphore.acquire().await
+            .map_err(|_| Error::Protocol("Cosign semaphore closed".to_string()))?;
 
         // Compute partner signing data
         let partner_signing_data = update.partner_signing_data();
