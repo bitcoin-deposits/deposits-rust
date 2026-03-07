@@ -78,6 +78,9 @@ pub struct DepositsHandler {
     /// Our secret key for signing
     secret_key: SecretKey,
 
+    /// Shared secp256k1 context
+    pub secp: bitcoin::secp256k1::Secp256k1<bitcoin::secp256k1::All>,
+
     /// Ledgers indexed by ledger_id (the unique hash identifier)
     pub ledgers: Mutex<HashMap<String, Arc<RwLock<Ledger>>>>,
 
@@ -172,6 +175,7 @@ impl DepositsHandler {
         let handler = Self {
             our_node_id,
             secret_key,
+            secp,
             ledgers: Mutex::new(ledgers),
             events: Mutex::new(Vec::new()),
             outbound_tx,
@@ -1210,7 +1214,7 @@ impl DepositsHandler {
 
     /// Sign the last update in a ledger with our operator key
     fn sign_ledger_update(&self, ledger: &mut Ledger) {
-        use bitcoin::secp256k1::{Secp256k1, Message};
+        use bitcoin::secp256k1::Message;
         use bitcoin::hashes::{Hash, sha256};
 
         if let Some(update) = ledger.history.last_mut() {
@@ -1222,9 +1226,9 @@ impl DepositsHandler {
             sig_input.extend_from_slice(&update.message);
 
             let hash = sha256::Hash::hash(&sig_input);
-            let secp = Secp256k1::new();
+            let secp = &self.secp;
             let msg = Message::from_digest(*hash.as_byte_array());
-            let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &self.secret_key);
+            let keypair = bitcoin::secp256k1::Keypair::from_secret_key(secp, &self.secret_key);
             let sig = secp.sign_schnorr(&msg, &keypair);
 
             update.operator_signature = sig.serialize();

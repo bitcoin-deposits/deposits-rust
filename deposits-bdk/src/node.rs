@@ -25,6 +25,12 @@ use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::mpsc;
 
 use crate::handler::{DepositsHandler, OutboundMessage};
+
+/// Fast hex encoding for PublicKey (avoids byte-by-byte fmt::LowerHex overhead).
+#[inline]
+fn pubkey_hex(pk: &PublicKey) -> String {
+    hex::encode(pk.serialize())
+}
 use crate::lightning::LightningClient;
 use crate::metrics;
 use crate::nostr::{InboundMessage, NostrTransport};
@@ -183,6 +189,12 @@ struct PendingConfiscation {
 pub struct Node {
     /// Our node ID (secp256k1 pubkey)
     pub node_id: PublicKey,
+
+    /// Pre-computed hex string of node_id (avoids repeated byte-by-byte formatting)
+    node_id_hex: String,
+
+    /// Shared secp256k1 context (expensive to create — ~1MB allocation + randomization)
+    secp: Secp256k1<bitcoin::secp256k1::All>,
 
     /// The wallet for on-chain operations
     pub wallet: Arc<Wallet>,
@@ -381,8 +393,12 @@ impl Node {
 
         tracing::info!("Node created with ID: {}", node_id);
 
+        let node_id_hex = hex::encode(node_id.serialize());
+
         Ok(Self {
             node_id,
+            node_id_hex,
+            secp,
             wallet,
             nostr,
             lightning,
@@ -443,7 +459,7 @@ impl Node {
             sig_input.extend_from_slice(&update.message);
 
             let hash = sha256::Hash::hash(&sig_input);
-            let secp = Secp256k1::new();
+            let secp = &self.secp;
             let msg = Message::from_digest(*hash.as_byte_array());
             let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
             let sig = secp.sign_schnorr(&msg, &keypair);
@@ -2497,7 +2513,7 @@ impl Node {
         use deposits_core::messages::LedgerOperation;
         use crate::handler::DepositsHandler;
 
-        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let secp = &self.secp;
         let our_pubkey = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &self.wallet.operator_secret());
 
         // Check if we already have a fork for this ledger
@@ -2591,7 +2607,7 @@ impl Node {
         use deposits_core::TlvEncode;
         use deposits_core::messages::LedgerOperation;
 
-        let secp = Secp256k1::new();
+        let secp = &self.secp;
 
         // Get our operator keypair
         let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
@@ -2921,7 +2937,7 @@ impl Node {
     async fn auto_lottery_claim_or_yield(&self) {
         use bitcoin::secp256k1::Secp256k1;
 
-        let secp = Secp256k1::new();
+        let secp = &self.secp;
         let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
 
         // Find revealed marker files in data_dir
@@ -3146,7 +3162,7 @@ impl Node {
         use deposits_core::tapscript_reserves::{LotteryScriptBuilder, LotteryParticipant, LotteryOutput};
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
-        let secp = Secp256k1::new();
+        let secp = &self.secp;
         let our_pubkey = keypair.public_key();
         let (_, winner_participant) = &participants[winner_index];
 
@@ -3323,7 +3339,7 @@ impl Node {
         use deposits_core::{TlvEncode, SignedLedgerUpdate};
         use deposits_core::messages::LedgerOperation;
 
-        let secp = Secp256k1::new();
+        let secp = &self.secp;
         let our_pubkey = keypair.public_key();
 
         let current_block = self.wallet.get_block_height().unwrap_or(0);
@@ -3578,7 +3594,7 @@ impl Node {
         use bitcoin::sighash::{SighashCache, TapSighashType};
         use std::collections::HashMap;
 
-        let secp = Secp256k1::new();
+        let secp = &self.secp;
         let keypair = Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
         let our_pubkey = keypair.public_key();
 
@@ -4264,7 +4280,7 @@ impl Node {
         use nostr_sdk::prelude::{SingleLetterTag, Alphabet};
         use bitcoin::secp256k1::Secp256k1;
 
-        let secp = Secp256k1::new();
+        let secp = &self.secp;
         let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
         let our_pubkey = keypair.public_key();
 
@@ -4311,7 +4327,7 @@ impl Node {
         use nostr_sdk::{Filter, Kind};
         use nostr_sdk::prelude::{SingleLetterTag, Alphabet};
 
-        let secp = Secp256k1::new();
+        let secp = &self.secp;
         let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
         let our_pubkey = keypair.public_key();
 
@@ -4535,7 +4551,7 @@ impl Node {
         use nostr_sdk::{Client, Keys, Filter, Kind};
         use nostr_sdk::prelude::{SingleLetterTag, Alphabet};
 
-        let secp = Secp256k1::new();
+        let secp = &self.secp;
         let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
         let our_pubkey = keypair.public_key();
 
@@ -4926,14 +4942,14 @@ impl Node {
                         Some(cosign_result) => {
                             let result = serde_json::json!({
                                 "offer_id": hex::encode(&offer.offer_id),
-                                "operator_id": offer.operator_id.to_string(),
+                                "operator_id": pubkey_hex(&offer.operator_id),
                                 "funding_address": offer.funding_address,
                                 "deadline_block": offer.deadline_block,
                                 "created_at_block": offer.created_at_block,
                                 "max_sats": max_sats,
                                 "min_sats": min_sats,
                                 "cosign_required": true,
-                                "cosigner_pubkey": cosign_result.cosigner_pubkey.to_string(),
+                                "cosigner_pubkey": pubkey_hex(&cosign_result.cosigner_pubkey),
                                 "cosigner_ledger_hash": hex::encode(cosign_result.member_ledger_hash),
                                 "cosign_signature": hex::encode(cosign_result.signature),
                             });
@@ -4949,7 +4965,7 @@ impl Node {
                     // Pre-rotation: no co-signature required
                     let result = serde_json::json!({
                         "offer_id": hex::encode(&offer.offer_id),
-                        "operator_id": offer.operator_id.to_string(),
+                        "operator_id": pubkey_hex(&offer.operator_id),
                         "funding_address": offer.funding_address,
                         "deadline_block": offer.deadline_block,
                         "created_at_block": offer.created_at_block,
@@ -5612,7 +5628,7 @@ impl Node {
             amount_sats,
             fee_sats,
         );
-        let secp = Secp256k1::new();
+        let secp = &self.secp;
         let msg = Message::from_digest(msg_hash);
         let x_only = deposit_pubkey.x_only_public_key().0;
 
@@ -5785,7 +5801,7 @@ impl Node {
         };
 
         // Verify signature
-        let secp = Secp256k1::new();
+        let secp = &self.secp;
         let msg_hash = deposits_core::signature_utils::transfer_lock_signing_message(
             &nonce,
             &source_deposit_id,
@@ -6074,7 +6090,7 @@ impl Node {
         };
 
         // Derive the deposit pubkey from the secret and create descriptor
-        let secp = Secp256k1::new();
+        let secp = &self.secp;
         let deposit_pubkey = PublicKey::from_secret_key(&secp, &deposit_secret);
         let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
 
@@ -6124,7 +6140,7 @@ impl Node {
                 let result = serde_json::json!({
                     "amount": attestation.amount,
                     "lock_until_block": attestation.lock_until_block,
-                    "quorum_member": attestation.quorum_member.to_string(),
+                    "quorum_member": pubkey_hex(&attestation.quorum_member),
                     "attestation_b64": attestation_b64,
                 });
                 tracing::info!("Collateral locked: {} msats until block {}", amount_msats, lock_until_block);
@@ -6468,7 +6484,7 @@ impl Node {
         let hash = sha256::Hash::hash(&tagged_input);
 
         // Sign with ECDSA
-        let secp = Secp256k1::new();
+        let secp = &self.secp;
         let msg = Message::from_digest(hash.to_byte_array());
         let secret = self.wallet.operator_secret();
         let sig = secp.sign_ecdsa(&msg, &secret);
@@ -6480,7 +6496,7 @@ impl Node {
         // Return the signature, our pubkey, and our ledger hash
         let result = serde_json::json!({
             "partner_signature_hex": hex::encode(sig_bytes),
-            "cosigner_pubkey": self.node_id.to_string(),
+            "cosigner_pubkey": self.node_id_hex.clone(),
             "sequence_number": sequence_number,
             "member_ledger_hash_hex": hex::encode(member_ledger_hash),
         });
@@ -6656,7 +6672,7 @@ impl Node {
         let hash = sha256::Hash::hash(&tagged_input);
 
         // Sign with ECDSA
-        let secp = Secp256k1::new();
+        let secp = &self.secp;
         let msg = Message::from_digest(hash.to_byte_array());
         let secret = self.wallet.operator_secret();
         let sig = secp.sign_ecdsa(&msg, &secret);
@@ -6668,7 +6684,7 @@ impl Node {
         // Return the signature, our pubkey, and our ledger hash
         let result = serde_json::json!({
             "signature_hex": hex::encode(sig_bytes),
-            "cosigner_pubkey": self.node_id.to_string(),
+            "cosigner_pubkey": self.node_id_hex.clone(),
             "member_ledger_hash_hex": hex::encode(member_ledger_hash),
         });
 
@@ -6737,7 +6753,7 @@ impl Node {
         tracing::info!("    Violation: {}", &violation_details[..50.min(violation_details.len())]);
 
         // Use the node's operator key
-        let secp = Secp256k1::new();
+        let secp = &self.secp;
         let secret_key = self.wallet.operator_secret();
         let keypair = Keypair::from_secret_key(&secp, &secret_key);
         let our_pubkey = self.node_id;
@@ -6864,7 +6880,7 @@ impl Node {
 
         // Return the signature
         let result = serde_json::json!({
-            "signer": our_pubkey.to_string(),
+            "signer": self.node_id_hex.clone(),
             "signature": hex::encode(signature_bytes),
             "sighash": sighash_hex,
         });
@@ -6902,14 +6918,14 @@ impl Node {
         }
 
         // Sign the sighash
-        let secp = Secp256k1::new();
+        let secp = &self.secp;
         let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
         let msg = Message::from_digest(sighash_bytes);
         let signature = secp.sign_schnorr(&msg, &keypair);
 
         let our_pubkey = keypair.public_key();
         let result = serde_json::json!({
-            "signer": our_pubkey.to_string(),
+            "signer": self.node_id_hex.clone(),
             "signature": hex::encode(signature.serialize()),
         });
 
@@ -8707,8 +8723,8 @@ impl Node {
                         last.member_ledger_hash = Some(result.member_ledger_hash);
                     }
 
-                    tracing::info!("Applied partner signature from {} (member_ledger_hash: {}...)",
-                        &result.cosigner_pubkey.to_string()[..8],
+                    tracing::info!("Applied partner signature from {}... (member_ledger_hash: {}...)",
+                        &pubkey_hex(&result.cosigner_pubkey)[..8],
                         &hex::encode(&result.member_ledger_hash[..4]));
                     last_error = None;
                     break;
@@ -9068,7 +9084,7 @@ impl Node {
             let hash = sha256::Hash::hash(&sign_content);
             let msg = Message::from_digest(hash.to_byte_array());
 
-            let secp = Secp256k1::new();
+            let secp = &self.secp;
             let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
             let sig = secp.sign_schnorr(&msg, &keypair);
             let attestation_signature: [u8; 64] = *sig.as_ref();
