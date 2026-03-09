@@ -1,18 +1,17 @@
 #!/bin/bash
 # Capture CPU profile from running deposits-bdk containers
 #
-# The profiler runs continuously at 49 Hz using perf. This script:
-#   1. Sends SIGUSR1 to flush current profile data
-#   2. Waits briefly for the dump
-#   3. Copies the collapsed stacks file
+# Uses pprof-rs (timer-based sampling at 99 Hz, works on Docker Desktop).
+# SIGUSR1 triggers an immediate profile dump; auto-dumps also happen every 60s.
 #
 # Usage:
 #   ./bin/flamegraph.sh                    # all 4 nodes
 #   ./bin/flamegraph.sh bdk-alice          # just Alice
 #
-# Output: flamegraphs/<container>-profile.collapsed
-#   - Load in speedscope (https://www.speedscope.app) — drag & drop
-#   - Or pipe through flamegraph.pl: cat profile.collapsed | flamegraph.pl > out.svg
+# Output: flamegraphs/<container>-profile.{collapsed,pb}
+#   - .collapsed: Load in speedscope (https://www.speedscope.app) — drag & drop
+#     Or pipe through flamegraph.pl: cat profile.collapsed | flamegraph.pl > out.svg
+#   - .pb: Load with `go tool pprof` or pprof web UI
 
 set -e
 
@@ -31,7 +30,7 @@ capture_profile() {
     docker kill -s SIGUSR1 "$container" >/dev/null 2>&1
 
     # Wait for dump to complete
-    sleep 3
+    sleep 2
 
     # Check if container is still alive
     if ! docker ps --format '{{.Names}}' | grep -q "^${container}$"; then
@@ -46,6 +45,13 @@ capture_profile() {
         echo "[$container] Saved: $outfile ($samples stacks)"
     else
         echo "[$container] No profile data yet (profiler may still be collecting)"
+    fi
+
+    # Copy protobuf profile
+    local pbfile="${OUT_DIR}/${container}-profile.pb"
+    if docker cp "${container}:/data/profile-latest.pb" "$pbfile" 2>/dev/null; then
+        local size=$(wc -c < "$pbfile" 2>/dev/null || echo 0)
+        echo "[$container] Saved: $pbfile (${size} bytes)"
     fi
 }
 
@@ -65,3 +71,4 @@ echo ""
 echo "Profiles saved to: $OUT_DIR/"
 echo "  View: Load .collapsed files in speedscope.app (drag & drop)"
 echo "  CLI:  cat file.collapsed | flamegraph.pl > out.svg"
+echo "  Go:   go tool pprof -http=:8080 file.pb"

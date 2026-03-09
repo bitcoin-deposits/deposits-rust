@@ -1984,6 +1984,22 @@ impl Node {
             self.flush_dirty_ledgers();
             metrics::record_run_loop_phase("flush", flush_start.elapsed());
 
+            // Background compaction: check if any ledgers need compaction and spawn
+            // a blocking task so the run loop stays free to pump events and cosigns.
+            {
+                let needs_compaction = self.handler.ledgers_needing_compaction();
+                if !needs_compaction.is_empty() {
+                    let handler = self.handler.clone();
+                    tokio::task::spawn_blocking(move || {
+                        for ledger_id in &needs_compaction {
+                            if let Err(e) = handler.compact_ledger(ledger_id) {
+                                tracing::warn!("Background compaction failed for {}: {}", &ledger_id[..16.min(ledger_id.len())], e);
+                            }
+                        }
+                    });
+                }
+            }
+
             // Handle disputes
             tracing::debug!("[PHASE] drain_disputes");
             {

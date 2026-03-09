@@ -22,7 +22,7 @@ COPY deposits-rust/Cargo.lock ./Cargo.lock
 # Create a minimal workspace Cargo.toml for Docker build
 # Patch native-tls to 0.2.17 to fix Rust 1.85 compatibility
 # Patch nostr-relay-pool with our performance fork (skip event verification)
-RUN echo '[workspace]\nmembers = ["deposits-core", "deposits-bdk"]\nresolver = "2"\n\n[patch.crates-io]\nnative-tls = { git = "https://github.com/sfackler/rust-native-tls", tag = "v0.2.17" }\nnostr-relay-pool = { path = "nostr-sdk-performance/nostr-relay-pool" }' > Cargo.toml
+RUN echo '[workspace]\nmembers = ["deposits-core", "deposits-bdk"]\nresolver = "2"\n\n[profile.release]\ndebug = true\n\n[patch.crates-io]\nnative-tls = { git = "https://github.com/sfackler/rust-native-tls", tag = "v0.2.17" }\nnostr-relay-pool = { path = "nostr-sdk-performance/nostr-relay-pool" }' > Cargo.toml
 
 # Build deposits-bdk and deposits-wallet with dangerous-testing for test environments
 # WARNING: Do not use this image in production
@@ -36,7 +36,6 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
     curl \
-    linux-perf \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy binaries from builder

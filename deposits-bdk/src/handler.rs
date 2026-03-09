@@ -954,10 +954,12 @@ impl DepositsHandler {
     pub fn persist_ledger_to_disk(&self, ledger_id: &str) -> Result<(), String> {
         let t0 = std::time::Instant::now();
 
-        let mut counts = self.persisted_update_counts.lock().unwrap();
-        let previously_saved = counts.get(ledger_id).copied().unwrap_or(0);
+        // Read counts snapshot, then release lock immediately to avoid holding
+        // it across I/O (which deadlocks with background compact_ledger).
+        let previously_saved = self.persisted_update_counts.lock().unwrap()
+            .get(ledger_id).copied().unwrap_or(0);
 
-        // Get Arc clone so we can release the HashMap lock early
+        // Get Arc clone
         let ledger_arc = {
             let ledgers = self.ledgers.lock().unwrap();
             ledgers.get(ledger_id)
@@ -974,12 +976,10 @@ impl DepositsHandler {
             );
             drop(ledger);
 
-            // Truncate in-memory history to bound memory usage.
-            // Safe because all sequence checks now use next_sequence()
-            // (derived from last entry) instead of history.len().
             let final_len = Self::truncate_history(&ledger_arc, Self::HISTORY_RETAIN);
 
-            counts.insert(ledger_id.to_string(), final_len);
+            // Re-lock to update counts after I/O
+            self.persisted_update_counts.lock().unwrap().insert(ledger_id.to_string(), final_len);
             self.appends_since_compaction.lock().unwrap().insert(ledger_id.to_string(), 0);
 
             let total_elapsed = t0.elapsed();
@@ -998,52 +998,29 @@ impl DepositsHandler {
             if new_count > 0 {
                 let appends = self.appends_since_compaction.lock().unwrap()
                     .get(ledger_id).copied().unwrap_or(0);
+                let ledger = ledger_arc.read().unwrap();
+                let write_state = appends % 100 == 0;
+                let state_clone = if write_state { Some(ledger.state.clone()) } else { None };
+                let new_updates: Vec<_> = ledger.history[previously_saved..].to_vec();
+                drop(ledger);
 
-                if appends + new_count >= 1000 {
-                    // Compaction: write State + bounded history tail (not full history).
-                    // This keeps compaction I/O constant regardless of total history size.
-                    let ledger = ledger_arc.read().unwrap();
-                    Self::save_ledger_to_disk_streaming(
-                        ledger_id, &ledger, &self.data_dir, Some(Self::HISTORY_RETAIN),
-                    );
-                    drop(ledger);
+                Self::append_updates_to_disk(
+                    ledger_id,
+                    state_clone.as_ref(),
+                    &new_updates,
+                    &self.data_dir,
+                );
 
-                    // Truncate in-memory history to bound memory usage.
-                    // Safe because all sequence checks now use next_sequence()
-                    // (derived from last entry) instead of history.len().
-                    let final_len = Self::truncate_history(&ledger_arc, Self::HISTORY_RETAIN);
+                // Re-lock to update counts after I/O
+                self.persisted_update_counts.lock().unwrap().insert(ledger_id.to_string(), history_len);
+                *self.appends_since_compaction.lock().unwrap()
+                    .entry(ledger_id.to_string()).or_insert(0) += new_count;
 
-                    counts.insert(ledger_id.to_string(), final_len);
-                    self.appends_since_compaction.lock().unwrap().insert(ledger_id.to_string(), 0);
-                    crate::metrics::record_ledger_compaction();
-
-                    let total_elapsed = t0.elapsed();
-                    tracing::info!("[PROFILE] persist_ledger_to_disk: {}/{} entries, total={:?}, mode=compaction (after {} appends)",
-                        final_len.min(Self::HISTORY_RETAIN), history_len, total_elapsed, appends + new_count);
-                } else {
-                    // Normal append — write State line every 100 appends to limit replay window
-                    let ledger = ledger_arc.read().unwrap();
-                    let write_state = appends % 100 == 0;
-                    let state_clone = if write_state { Some(ledger.state.clone()) } else { None };
-                    let new_updates: Vec<_> = ledger.history[previously_saved..].to_vec();
-                    drop(ledger);
-
-                    Self::append_updates_to_disk(
-                        ledger_id,
-                        state_clone.as_ref(),
-                        &new_updates,
-                        &self.data_dir,
-                    );
-                    counts.insert(ledger_id.to_string(), history_len);
-                    *self.appends_since_compaction.lock().unwrap()
-                        .entry(ledger_id.to_string()).or_insert(0) += new_count;
-
-                    let total_elapsed = t0.elapsed();
-                    if total_elapsed.as_millis() > 1 {
-                        tracing::info!("[PROFILE] persist_ledger_to_disk: {} entries (+{}), total={:?}, mode=append{}",
-                            history_len, new_updates.len(), total_elapsed,
-                            if write_state { " (with state)" } else { "" });
-                    }
+                let total_elapsed = t0.elapsed();
+                if total_elapsed.as_millis() > 1 {
+                    tracing::info!("[PROFILE] persist_ledger_to_disk: {} entries (+{}), total={:?}, mode=append{}",
+                        history_len, new_updates.len(), total_elapsed,
+                        if write_state { " (with state)" } else { "" });
                 }
             }
         }
@@ -1055,6 +1032,52 @@ impl DepositsHandler {
         }
 
         crate::metrics::record_persist_ledger_duration(t0.elapsed());
+        Ok(())
+    }
+
+    /// Returns ledger IDs that need compaction (>= 1000 appends since last compaction).
+    pub fn ledgers_needing_compaction(&self) -> Vec<String> {
+        let compaction = self.appends_since_compaction.lock().unwrap();
+        compaction.iter()
+            .filter(|(_, &count)| count >= 1000)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// Run compaction (full rewrite) for a single ledger. Call from background task.
+    pub fn compact_ledger(&self, ledger_id: &str) -> Result<(), String> {
+        let t0 = std::time::Instant::now();
+
+        let ledger_arc = {
+            let ledgers = self.ledgers.lock().unwrap();
+            ledgers.get(ledger_id)
+                .ok_or_else(|| format!("Ledger not found: {}", ledger_id))?
+                .clone()
+        };
+
+        let history_len = {
+            let ledger = ledger_arc.read().unwrap();
+            Self::save_ledger_to_disk_streaming(
+                ledger_id, &ledger, &self.data_dir, Some(Self::HISTORY_RETAIN),
+            );
+            ledger.history.len()
+        };
+
+        let final_len = Self::truncate_history(&ledger_arc, Self::HISTORY_RETAIN);
+
+        self.persisted_update_counts.lock().unwrap().insert(ledger_id.to_string(), final_len);
+        self.appends_since_compaction.lock().unwrap().insert(ledger_id.to_string(), 0);
+        crate::metrics::record_ledger_compaction();
+
+        // Update modtime
+        let ledger_file = self.data_dir.join("ledgers").join(format!("{}.jsonl", ledger_id));
+        if let Ok(mtime) = ledger_file.metadata().and_then(|m| m.modified()) {
+            self.last_file_modtimes.lock().unwrap().insert(ledger_id.to_string(), mtime);
+        }
+
+        tracing::info!("[PROFILE] compact_ledger: {}/{} entries, total={:?}",
+            final_len.min(Self::HISTORY_RETAIN), history_len, t0.elapsed());
+
         Ok(())
     }
 

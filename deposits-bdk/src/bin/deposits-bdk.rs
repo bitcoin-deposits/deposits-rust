@@ -566,122 +566,49 @@ async fn run_node(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // Start the node
     node.start().await?;
 
-    // Continuous profiler using perf record as a subprocess.
-    // Runs perf at low frequency (~49 Hz) in the background.
-    // SIGUSR1 triggers: stop perf, dump collapsed stacks, restart perf.
+    // Continuous CPU profiler using pprof-rs (timer-based sampling via ITIMER_PROF).
+    // Works in Docker on any host OS — no hardware PMU or perf_event support needed.
+    // SIGUSR1 triggers: stop guard, dump collapsed stacks, restart profiling.
     // Also auto-dumps every 60s.
-    // Requires: perf installed in container, SYS_PTRACE cap, seccomp:unconfined.
+    // Opt-in: set ENABLE_PROFILING=1 to activate (ITIMER can conflict with jemalloc).
     #[cfg(unix)]
     {
         let data_dir = node.data_dir().to_path_buf();
+        let profiling_enabled = std::env::var("ENABLE_PROFILING").map(|v| v == "1").unwrap_or(false);
         tokio::spawn(async move {
             use tokio::signal::unix::{signal, SignalKind};
-            use std::process::{Command, Stdio};
 
             let mut sig = signal(SignalKind::user_defined1())
                 .expect("Failed to register SIGUSR1 handler");
 
-            // Check if perf is available
-            let perf_available = Command::new("perf").arg("version")
-                .stdout(Stdio::null()).stderr(Stdio::null())
-                .status().map(|s| s.success()).unwrap_or(false);
-
-            if !perf_available {
-                tracing::warn!("perf not found — continuous profiling disabled. Install linux-perf in the container.");
+            if !profiling_enabled {
+                tracing::info!("CPU profiling disabled (set ENABLE_PROFILING=1 to enable)");
                 // Still handle SIGUSR1 to avoid killing the process
-                loop { sig.recv().await; tracing::info!("SIGUSR1 received but profiling unavailable"); }
+                loop { sig.recv().await; tracing::info!("SIGUSR1 received but profiling disabled"); }
             }
 
+            use pprof::ProfilerGuardBuilder;
             let profile_dir = data_dir.clone();
-            let perf_data = profile_dir.join("perf.data");
             let mut dump_count = 0u32;
 
-            // Start perf record
-            fn start_perf(perf_data: &std::path::Path) -> Option<std::process::Child> {
-                match std::process::Command::new("perf")
-                    .args(["record", "-F", "49", "-p", "1", "-g",
-                           "-o", &perf_data.to_string_lossy(), "--", "sleep", "86400"])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn()
+            let start_profiler = || -> Option<pprof::ProfilerGuard<'static>> {
+                match ProfilerGuardBuilder::default()
+                    .frequency(99)
+                    .blocklist(&["libc", "libgcc", "pthread", "vdso", "jemalloc"])
+                    .build()
                 {
-                    Ok(child) => {
-                        tracing::info!("Started continuous perf profiling (49 Hz)");
-                        Some(child)
+                    Ok(guard) => {
+                        tracing::info!("Started pprof CPU profiling (99 Hz)");
+                        Some(guard)
                     }
                     Err(e) => {
-                        tracing::error!("Failed to start perf: {}", e);
+                        tracing::error!("Failed to start pprof: {}", e);
                         None
                     }
                 }
-            }
+            };
 
-            fn dump_perf(perf_data: &std::path::Path, profile_dir: &std::path::Path, dump_count: u32) {
-                // Run perf script to get readable stacks
-                let output = std::process::Command::new("perf")
-                    .args(["script", "-i", &perf_data.to_string_lossy()])
-                    .output();
-                match output {
-                    Ok(out) if !out.stdout.is_empty() => {
-                        // Convert perf script output to collapsed stacks
-                        let script = String::from_utf8_lossy(&out.stdout);
-                        let mut stacks: std::collections::HashMap<String, u64> =
-                            std::collections::HashMap::new();
-                        let mut current_frames: Vec<String> = Vec::new();
-
-                        for line in script.lines() {
-                            if line.is_empty() {
-                                if !current_frames.is_empty() {
-                                    current_frames.reverse();
-                                    let key = current_frames.join(";");
-                                    *stacks.entry(key).or_insert(0) += 1;
-                                    current_frames.clear();
-                                }
-                            } else if line.starts_with('\t') || line.starts_with(' ') {
-                                // Stack frame line: "  addr funcname+offset (module)"
-                                let trimmed = line.trim();
-                                if let Some(func) = trimmed.split_whitespace().nth(1) {
-                                    // Strip +offset
-                                    let name = func.split('+').next().unwrap_or(func);
-                                    if !name.starts_with('[') {
-                                        current_frames.push(name.to_string());
-                                    }
-                                }
-                            }
-                            // Skip header lines (process name lines)
-                        }
-                        // Flush last stack
-                        if !current_frames.is_empty() {
-                            current_frames.reverse();
-                            let key = current_frames.join(";");
-                            *stacks.entry(key).or_insert(0) += 1;
-                        }
-
-                        if !stacks.is_empty() {
-                            let total: u64 = stacks.values().sum();
-                            // Write collapsed stacks
-                            let collapsed = profile_dir.join("profile-latest.collapsed");
-                            if let Ok(mut f) = std::fs::File::create(&collapsed) {
-                                use std::io::Write;
-                                let mut sorted: Vec<_> = stacks.into_iter().collect();
-                                sorted.sort_by(|a, b| b.1.cmp(&a.1));
-                                for (stack, count) in &sorted {
-                                    let _ = writeln!(f, "{} {}", stack, count);
-                                }
-                            }
-                            tracing::info!(
-                                "Profile dump #{}: {} samples, {} unique stacks → profile-latest.collapsed",
-                                dump_count, total, total
-                            );
-                        }
-                    }
-                    _ => {
-                        tracing::debug!("No perf data to dump");
-                    }
-                }
-            }
-
-            let mut perf_child = start_perf(&perf_data);
+            let mut guard = start_profiler();
             let mut dump_interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
 
             loop {
@@ -692,17 +619,61 @@ async fn run_node(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                     _ = dump_interval.tick() => {}
                 }
 
-                // Stop perf to flush data
-                if let Some(ref mut child) = perf_child {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                dump_count += 1;
+
+                if let Some(g) = guard.take() {
+                    match g.report().build() {
+                        Ok(report) => {
+                            // Write collapsed stacks (compatible with flamegraph.pl and speedscope)
+                            let collapsed_path = profile_dir.join("profile-latest.collapsed");
+                            let mut stacks: std::collections::HashMap<String, isize> =
+                                std::collections::HashMap::new();
+
+                            for (frames, count) in report.data.iter() {
+                                // Frames.frames is Vec<Vec<Symbol>> — flatten inline frames
+                                let names: Vec<String> = frames.frames.iter().rev().flat_map(|syms| {
+                                    syms.iter().map(|s| s.name())
+                                }).collect();
+                                if !names.is_empty() {
+                                    *stacks.entry(names.join(";")).or_insert(0) += *count;
+                                }
+                            }
+
+                            if !stacks.is_empty() {
+                                let total: isize = stacks.values().sum();
+                                let mut sorted: Vec<_> = stacks.into_iter().collect();
+                                sorted.sort_by(|a, b| b.1.cmp(&a.1));
+                                if let Ok(mut f) = std::fs::File::create(&collapsed_path) {
+                                    use std::io::Write;
+                                    for (stack, count) in &sorted {
+                                        let _ = writeln!(f, "{} {}", stack, count);
+                                    }
+                                }
+                                tracing::info!(
+                                    "Profile dump #{}: {} samples, {} unique stacks",
+                                    dump_count, total, sorted.len()
+                                );
+                            } else {
+                                tracing::debug!("Profile dump #{}: no samples", dump_count);
+                            }
+
+                            // Also write protobuf for pprof tooling
+                            let proto_path = profile_dir.join("profile-latest.pb");
+                            if let Ok(mut f) = std::fs::File::create(&proto_path) {
+                                use pprof::protos::Message;
+                                if let Ok(proto) = report.pprof() {
+                                    let _ = proto.write_to_writer(&mut f);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to build profile report: {}", e);
+                        }
+                    }
                 }
 
-                dump_count += 1;
-                dump_perf(&perf_data, &profile_dir, dump_count);
-
-                // Restart perf
-                perf_child = start_perf(&perf_data);
+                // Restart profiler
+                guard = start_profiler();
             }
         });
     }

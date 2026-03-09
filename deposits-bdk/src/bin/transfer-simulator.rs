@@ -901,27 +901,29 @@ async fn run_bootstrap(config: &Config) -> Result<(), Box<dyn std::error::Error>
     }
     eprintln!("Funding: {} sent, {} already funded, {} total", sent_count, already_funded, total_count);
 
-    // 5. Wait for confirmation — sync until all show balance > 0
-    eprintln!("Waiting for deposit confirmations...");
-    let deadline = Instant::now() + Duration::from_secs(120);
-    loop {
-        tokio::time::sleep(Duration::from_secs(5)).await;
-        let balances = wallet.sync_and_get_balances()?;
-        let confirmed = balances.values().filter(|&&v| v > 0).count();
-        let total = balances.len();
-        eprintln!("  {}/{} deposits confirmed", confirmed, total);
-        if confirmed >= total && total > 0 {
-            break;
+    if sent_count > 0 {
+        // 5. Wait for confirmation — sync until all show balance > 0
+        eprintln!("Waiting for deposit confirmations...");
+        let deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let balances = wallet.sync_and_get_balances()?;
+            let confirmed = balances.values().filter(|&&v| v > 0).count();
+            let total = balances.len();
+            eprintln!("  {}/{} deposits confirmed", confirmed, total);
+            if confirmed >= total && total > 0 {
+                break;
+            }
+            if Instant::now() > deadline {
+                eprintln!("  Warning: timeout waiting for confirmations ({}/{} confirmed)", confirmed, total);
+                break;
+            }
         }
-        if Instant::now() > deadline {
-            eprintln!("  Warning: timeout waiting for confirmations ({}/{} confirmed)", confirmed, total);
-            break;
-        }
-    }
 
-    // 6. Settle — let operators finish processing deposit completions
-    eprintln!("Settling (10s for operators to finish co-signing)...");
-    tokio::time::sleep(Duration::from_secs(10)).await;
+        // 6. Settle — let operators finish processing deposit completions
+        eprintln!("Settling (10s for operators to finish co-signing)...");
+        tokio::time::sleep(Duration::from_secs(10)).await;
+    }
 
     eprintln!("Bootstrap complete.\n");
     Ok(())
@@ -1655,13 +1657,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let topoff_funding_sats = config.funding_sats;
 
-    eprintln!("\nStarting transfers (adaptive 5 → {} TPS, {} workers)...\n",
+    eprintln!("\nStarting transfers (ramp 5 → {} TPS, {} workers, no throttle)...\n",
         config.target_tps, config.max_workers);
 
-    // Adaptive rate control: check every 2s, adjust TPS based on success rate + inflight pressure
+    // Ramp-up: increase TPS by 10% every 2s until target, then hold steady
     let mut last_adapt_time = Instant::now();
-    let mut adapt_ok_snapshot = 0u64;
-    let mut adapt_fail_snapshot = 0u64;
 
     loop {
         if shutdown.load(Ordering::Relaxed) {
@@ -1677,62 +1677,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        // Adaptive rate control: every 2s, check success/failure ratio
+        // Ramp-up: every 2s, increase TPS by 10% until target. No throttling back.
         if last_adapt_time.elapsed() >= Duration::from_secs(2) {
             last_adapt_time = Instant::now();
-            let ok_now = metrics.success.load(Ordering::Relaxed);
-            let fail_now = metrics.failed.load(Ordering::Relaxed);
-            let ok_delta = ok_now - adapt_ok_snapshot;
-            let fail_delta = fail_now - adapt_fail_snapshot;
-            adapt_ok_snapshot = ok_now;
-            adapt_fail_snapshot = fail_now;
-
             let current = effective_tps.load(Ordering::Relaxed);
             let target_tps = target_tps_dynamic.load(Ordering::Relaxed);
-            let total_delta = ok_delta + fail_delta;
-            let inflight = metrics.inflight.load(Ordering::Relaxed);
-            let max_w = max_workers_dynamic.load(Ordering::Relaxed) as u64;
 
-            // Inflight-based backpressure thresholds (fraction of max_workers)
-            let high_water = max_w * 3 / 4;  // 75% — back off
-            let low_water = max_w / 3;        // 33% — room to grow
-
-            let new_tps = if fail_delta > 0 && total_delta > 0 {
-                // Failures detected: cut TPS in half (multiplicative decrease)
-                let reduced = (current / 2).max(5);
-                if reduced < current {
-                    eprintln!("[adapt] failures {}/{} — reducing {} → {} TPS",
-                        fail_delta, total_delta, current, reduced);
-                }
-                reduced
-            } else if inflight > high_water {
-                // Too many inflight: operators can't keep up. Reduce by 20%.
-                let reduced = (current * 4 / 5).max(5);
-                if reduced < current {
-                    eprintln!("[adapt] inflight {}/{} > 75% — reducing {} → {} TPS",
-                        inflight, max_w, current, reduced);
-                }
-                reduced
-            } else if ok_delta > 0 && fail_delta == 0 && inflight <= low_water {
-                // All successes with low inflight: room to grow. Increase by 10%.
+            if current < target_tps {
                 let increase = (current / 10).max(2);
-                let raised = (current + increase).min(target_tps);
-                if raised > current && raised == target_tps {
-                    eprintln!("[adapt] reached target {} TPS", target_tps);
-                }
-                raised
-            } else if ok_delta > 0 && fail_delta == 0 {
-                // Succeeding but inflight is moderate — hold steady
-                current.min(target_tps)
-            } else {
-                // No activity — clamp to target if it was lowered via config
-                current.min(target_tps)
-            };
-
-            if new_tps != current {
+                let new_tps = (current + increase).min(target_tps);
                 effective_tps.store(new_tps, Ordering::Relaxed);
                 let new_interval = if new_tps > 0 { 1_000_000 / new_tps } else { 0 };
                 interval_us.store(new_interval, Ordering::Relaxed);
+                if new_tps == target_tps {
+                    eprintln!("[ramp] reached target {} TPS", target_tps);
+                }
             }
         }
 
@@ -1857,9 +1816,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             hash,
         };
 
-        // Respect dynamic max_workers: wait if at capacity
-        let max_w = max_workers_dynamic.load(Ordering::Relaxed);
-        while metrics.inflight.load(Ordering::Relaxed) >= max_w as u64 {
+        // Hard gate at max_workers
+        let max_w = max_workers_dynamic.load(Ordering::Relaxed) as u64;
+        while metrics.inflight.load(Ordering::Relaxed) >= max_w {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
 
