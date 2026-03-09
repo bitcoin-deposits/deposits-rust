@@ -166,7 +166,7 @@ wait_for_nostr() {
     log_info "Waiting for Nostr relay to be ready..."
     local max_attempts=30
     local attempt=0
-    while ! curl -s "http://localhost:7778" >/dev/null 2>&1; do
+    while ! curl -s "http://localhost:7801" >/dev/null 2>&1; do
         attempt=$((attempt + 1))
         if [ $attempt -ge $max_attempts ]; then
             log_error "Nostr relay not ready after $max_attempts attempts"
@@ -235,13 +235,17 @@ run_bdk_cmd() {
     # Run command with positional args first, then config args at the end
     # This supports subcommands like: ledger open <block> --seed ...
     # Use RUST_LOG=error to suppress INFO logs from CLI output
+    # Connect to all operator relays so CLI can reach any daemon's primary relay
     docker exec -e RUST_LOG=error "$container" deposits-bdk "$cmd" \
         "$@" \
         --seed "$seed" \
         --name "$name" \
         --network regtest \
         --esplora http://electrs:3002 \
-        --relay ws://nostr-relay:7777 \
+        --relay ws://relay-alice:7777 \
+        --relay ws://relay-bob:7777 \
+        --relay ws://relay-charlie:7777 \
+        --relay ws://relay-diana:7777 \
         --data-dir /data 2>&1
 }
 
@@ -259,6 +263,7 @@ get_node_address() {
         --seed "$seed" \
         --network regtest \
         --esplora http://electrs:3002 \
+        --relay ws://relay-alice:7777 \
         --data-dir /data 2>&1 | grep -E '^bcrt1' | head -1
 }
 
@@ -416,7 +421,7 @@ run_nostr_request() {
         --seed "$seed" \
         --network regtest \
         --esplora http://electrs:3002 \
-        --relay ws://nostr-relay:7777 \
+        --relay ws://relay-alice:7777 \
         --data-dir /data 2>&1
 }
 
@@ -437,7 +442,7 @@ run_wallet_cmd() {
     docker exec -e RUST_LOG=error "$container" deposits-wallet "$@" \
         --seed "$seed" \
         --network regtest \
-        --relay ws://nostr-relay:7777 \
+        --relay ws://relay-alice:7777 \
         --data-dir /data/wallet 2>&1
 }
 
@@ -468,7 +473,7 @@ start_nostr_watch() {
         --seed "$seed" \
         --network regtest \
         --esplora http://electrs:3002 \
-        --relay ws://nostr-relay:7777 \
+        --relay ws://relay-alice:7777 \
         --data-dir /data
 
     log_info "Started nostr watch on $container for $ledger_id"
@@ -511,7 +516,7 @@ check_health() {
     fi
 
     # Check nostr relay
-    if ! curl -s "http://localhost:7778" >/dev/null 2>&1; then
+    if ! curl -s "http://localhost:7801" >/dev/null 2>&1; then
         log_error "Nostr relay unhealthy"
         unhealthy=1
     else

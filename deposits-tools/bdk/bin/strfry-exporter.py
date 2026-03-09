@@ -32,8 +32,8 @@ KINDS = {
 
 # Relay containers to scrape: (container_name, label, strfry_config_flag)
 RELAYS = [
-    ("bdk-nostr-relay", "fast", ""),
-    ("bdk-nostr-relay-slow", "slow", "--config /app/strfry-slow.conf"),
+    ("bdk-relay-alice", "fast", ""),
+    ("bdk-relay-ledgers", "slow", "--config /app/strfry-slow.conf"),
 ]
 
 

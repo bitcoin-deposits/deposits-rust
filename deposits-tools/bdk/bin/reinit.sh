@@ -101,8 +101,8 @@ log_info "Starting infrastructure services..."
 $DC up -d bitcoin
 wait_for_bitcoin
 
-$DC up -d nostr-relay
-$DC up -d nostr-relay-slow
+$DC up -d relay-alice relay-bob relay-charlie relay-diana
+$DC up -d relay-ledgers
 wait_for_nostr
 
 $DC up -d electrs
@@ -143,7 +143,7 @@ log_info "Useful commands:"
 echo "  Follow logs:    $DC logs -f"
 echo "  Alice logs:     $DC logs -f bdk-alice"
 echo "  Mine blocks:    docker exec bdk-bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass -rpcwallet=faucet -generate 1"
-echo "  Nostr relay:    ws://localhost:7778"
+echo "  Nostr relay:    ws://localhost:7801"
 echo "  Electrs:        http://localhost:3102"
 echo "  Prometheus:     http://localhost:9090"
 echo "  Grafana:        http://localhost:3010 (admin/admin)"

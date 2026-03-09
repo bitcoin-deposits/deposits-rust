@@ -1275,9 +1275,9 @@ async fn sync_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     // Generate our secret key for signing requests
     let secret_key = SecretKey::from_slice(&config.seed)?;
 
-    // Connect to relay
+    // Connect to all relays so we can see responses from any operator's primary relay
     let mut transport = NostrTransportBuilder::new(secret_key)
-        .relay(&config.relays[0])
+        .relays(config.relays.iter().cloned())
         .build()
         .await?;
 

@@ -24,7 +24,7 @@ BDK_DIR="$(dirname "$SCRIPT_DIR")"
 REPO_ROOT="$(dirname "$(dirname "$BDK_DIR")")"
 
 # Default configuration
-RELAY="${WALLET_RELAY:-ws://localhost:7778}"
+RELAY="${WALLET_RELAY:-ws://localhost:7801}"
 NETWORK="${WALLET_NETWORK:-regtest}"
 DATA_DIR="${WALLET_DATA_DIR:-$HOME/.deposits-wallet}"
 

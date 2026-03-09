@@ -20,28 +20,6 @@
 #   Grafana:    http://localhost:3010 (admin/admin)
 
 services:
-  # Wallet relay — shared by all wallets for advertisements and client request/response traffic.
-  # Operators also connect here to serve wallet-originated requests.
-  relay-wallets:
-    image: strfry-performance:latest
-    container_name: bdk-relay-wallets
-    command: ["relay", "--config", "/app/strfry.conf"]
-    ports:
-      - "7778:7777"
-    volumes:
-      - bdk_relay_wallets_data:/app/strfry-db
-      - ../../strfry-performance/strfry.conf:/app/strfry.conf:ro
-      - ../permissive-write-policy.py:/app/write-policy.py:ro
-    environment:
-      - STRFRY_BIND=0.0.0.0:7777
-    networks:
-      - bdk_network
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:7777"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-
   # Per-operator relays — each handles only that operator's inter-operator traffic
   # (cosign requests/responses). This distributes the ~1400 events/sec across N relays.
   relay-alice:
@@ -333,18 +311,14 @@ services:
       - "http://electrs-alice:3002"
       - "--relay"
       - "ws://relay-alice:7777"
-      - "--peer-relay"
+      - "--relay"
       - "ws://relay-bob:7777"
-      - "--peer-relay"
+      - "--relay"
       - "ws://relay-charlie:7777"
-      - "--peer-relay"
+      - "--relay"
       - "ws://relay-diana:7777"
-      - "--peer-relay"
-      - "ws://relay-wallets:7777"
-      - "--ledger-relay"
+      - "--slow-relay"
       - "ws://relay-ledgers:7777"
-      - "--wallet-relay"
-      - "ws://relay-wallets:7777"
       - "--data-dir"
       - "/data"
       - "--metrics-port"
@@ -365,7 +339,11 @@ services:
         condition: service_started
       relay-alice:
         condition: service_healthy
-      relay-wallets:
+      relay-bob:
+        condition: service_healthy
+      relay-charlie:
+        condition: service_healthy
+      relay-diana:
         condition: service_healthy
     networks:
       bdk_network:
@@ -389,18 +367,14 @@ services:
       - "http://electrs-bob:3002"
       - "--relay"
       - "ws://relay-bob:7777"
-      - "--peer-relay"
+      - "--relay"
       - "ws://relay-alice:7777"
-      - "--peer-relay"
+      - "--relay"
       - "ws://relay-charlie:7777"
-      - "--peer-relay"
+      - "--relay"
       - "ws://relay-diana:7777"
-      - "--peer-relay"
-      - "ws://relay-wallets:7777"
-      - "--ledger-relay"
+      - "--slow-relay"
       - "ws://relay-ledgers:7777"
-      - "--wallet-relay"
-      - "ws://relay-wallets:7777"
       - "--data-dir"
       - "/data"
       - "--metrics-port"
@@ -416,9 +390,13 @@ services:
         condition: service_healthy
       electrs-bob:
         condition: service_started
+      relay-alice:
+        condition: service_healthy
       relay-bob:
         condition: service_healthy
-      relay-wallets:
+      relay-charlie:
+        condition: service_healthy
+      relay-diana:
         condition: service_healthy
     networks:
       bdk_network:
@@ -442,18 +420,14 @@ services:
       - "http://electrs-charlie:3002"
       - "--relay"
       - "ws://relay-charlie:7777"
-      - "--peer-relay"
+      - "--relay"
       - "ws://relay-alice:7777"
-      - "--peer-relay"
+      - "--relay"
       - "ws://relay-bob:7777"
-      - "--peer-relay"
+      - "--relay"
       - "ws://relay-diana:7777"
-      - "--peer-relay"
-      - "ws://relay-wallets:7777"
-      - "--ledger-relay"
+      - "--slow-relay"
       - "ws://relay-ledgers:7777"
-      - "--wallet-relay"
-      - "ws://relay-wallets:7777"
       - "--data-dir"
       - "/data"
       - "--metrics-port"
@@ -469,9 +443,13 @@ services:
         condition: service_healthy
       electrs-charlie:
         condition: service_started
+      relay-alice:
+        condition: service_healthy
+      relay-bob:
+        condition: service_healthy
       relay-charlie:
         condition: service_healthy
-      relay-wallets:
+      relay-diana:
         condition: service_healthy
     networks:
       bdk_network:
@@ -495,18 +473,14 @@ services:
       - "http://electrs-diana:3002"
       - "--relay"
       - "ws://relay-diana:7777"
-      - "--peer-relay"
+      - "--relay"
       - "ws://relay-alice:7777"
-      - "--peer-relay"
+      - "--relay"
       - "ws://relay-bob:7777"
-      - "--peer-relay"
+      - "--relay"
       - "ws://relay-charlie:7777"
-      - "--peer-relay"
-      - "ws://relay-wallets:7777"
-      - "--ledger-relay"
+      - "--slow-relay"
       - "ws://relay-ledgers:7777"
-      - "--wallet-relay"
-      - "ws://relay-wallets:7777"
       - "--data-dir"
       - "/data"
       - "--metrics-port"
@@ -522,9 +496,13 @@ services:
         condition: service_healthy
       electrs-diana:
         condition: service_started
-      relay-diana:
+      relay-alice:
         condition: service_healthy
-      relay-wallets:
+      relay-bob:
+        condition: service_healthy
+      relay-charlie:
+        condition: service_healthy
+      relay-diana:
         condition: service_healthy
     networks:
       bdk_network:
@@ -545,19 +523,15 @@ services:
       - "--electrum"
       - "http://electrs:3002"
       - "--relay"
-      - "ws://relay-wallets:7777"
-      - "--peer-relay"
       - "ws://relay-alice:7777"
-      - "--peer-relay"
+      - "--relay"
       - "ws://relay-bob:7777"
-      - "--peer-relay"
+      - "--relay"
       - "ws://relay-charlie:7777"
-      - "--peer-relay"
+      - "--relay"
       - "ws://relay-diana:7777"
-      - "--ledger-relay"
+      - "--slow-relay"
       - "ws://relay-ledgers:7777"
-      - "--wallet-relay"
-      - "ws://relay-wallets:7777"
       - "--data-dir"
       - "/data"
       - "--metrics-port"
@@ -573,8 +547,6 @@ services:
         condition: service_healthy
       electrs:
         condition: service_started
-      relay-wallets:
-        condition: service_healthy
     networks:
       bdk_network:
         ipv4_address: 172.21.0.24
@@ -621,7 +593,7 @@ services:
     environment:
       - RUST_LOG=info,deposits_bdk=debug
       - ELECTRUM_URL=http://electrs:3002
-      - NOSTR_RELAY=ws://relay-wallets:7777
+      - NOSTR_RELAY=ws://relay-alice:7777
     volumes:
       - ../../..:/workspace
     depends_on:
@@ -629,8 +601,6 @@ services:
         condition: service_healthy
       electrs:
         condition: service_started
-      relay-wallets:
-        condition: service_healthy
     networks:
       bdk_network:
         ipv4_address: 172.21.0.30
@@ -675,7 +645,6 @@ services:
         ipv4_address: 172.21.0.41
 
 volumes:
-  bdk_relay_wallets_data:
   bdk_relay_alice_data:
   bdk_relay_bob_data:
   bdk_relay_charlie_data:

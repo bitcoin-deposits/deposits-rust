@@ -100,8 +100,8 @@ if ! $QUICK; then
 fi
 
 # Start infrastructure services first
-log_info "Starting infrastructure (bitcoin, electrs, nostr-relay)..."
-$DC_LIGHTNING up -d bitcoin electrs nostr-relay
+log_info "Starting infrastructure (bitcoin, electrs, relays)..."
+$DC_LIGHTNING up -d bitcoin electrs relay-alice relay-bob relay-charlie relay-diana relay-ledgers
 
 wait_for_bitcoin
 wait_for_electrs
@@ -278,7 +278,7 @@ echo "  Mine blocks:    docker exec bdk-bitcoind bitcoin-cli -regtest -rpcuser=u
 
 echo ""
 log_info "Services:"
-echo "  Nostr relay:    ws://localhost:7778"
+echo "  Nostr relay:    ws://localhost:7801"
 echo "  Electrs:        http://localhost:3102"
 echo "  Prometheus:     http://localhost:9090"
 echo "  Grafana:        http://localhost:3010 (admin/admin)"

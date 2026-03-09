@@ -1346,7 +1346,7 @@ def run_simulation(
                 seed = seed_file.read_text().strip()
 
         if seed:
-            relay = os.environ.get("WALLET_RELAY", "ws://localhost:7778")
+            relay = os.environ.get("WALLET_RELAY", "ws://localhost:7801")
             sim_cmd = [
                 str(TRANSFER_SIMULATOR_BINARY),
                 "--relay", relay,
@@ -1618,7 +1618,7 @@ def run_simulation(
         shutdown_event = threading.Event()
         consecutive_failures = [0]
 
-        relay = os.environ.get("WALLET_RELAY", "ws://localhost:7778")
+        relay = os.environ.get("WALLET_RELAY", "ws://localhost:7801")
         data_dir = os.environ.get("WALLET_DATA_DIR", str(Path.home() / ".deposits-wallet"))
         seed = os.environ.get("WALLET_SEED")
         if not seed:

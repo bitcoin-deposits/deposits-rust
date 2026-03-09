@@ -80,14 +80,14 @@ if [ -n "$LEDGER_ID" ]; then
         --seed "$SEED" \
         --network regtest \
         --esplora http://electrs:3002 \
-        --relay ws://nostr-relay:7777 \
+        --relay ws://relay-alice:7777 \
         --data-dir /data 2>&1 | filter_logs
 else
     docker exec -e RUST_LOG=error "$CONTAINER" deposits-bdk nostr export \
         --seed "$SEED" \
         --network regtest \
         --esplora http://electrs:3002 \
-        --relay ws://nostr-relay:7777 \
+        --relay ws://relay-alice:7777 \
         --data-dir /data 2>&1 | filter_logs
 fi
 

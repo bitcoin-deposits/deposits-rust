@@ -5,7 +5,7 @@
 //!
 //! Usage:
 //!   transfer-simulator \
-//!     --relay ws://localhost:7778 \
+//!     --relay ws://localhost:7801 \
 //!     --node alice:416c696365..01:/data/alice \
 //!     --node bob:426f6200..02:/data/bob \
 //!     --target-tps 500
@@ -40,7 +40,7 @@ struct SimDeposit {
     ledger_id: String,
     deposit_id: [u8; 16],
     keypair: Keypair,
-    node_idx: usize, // index into nodes vec (for transport lookup)
+    node_idx: AtomicUsize, // index into transports vec (for relay lookup)
     balance_msats: AtomicI64,
 }
 
@@ -123,6 +123,10 @@ struct LedgerResponseData {
 
 impl SimTransport {
     async fn new(secret_key: SecretKey, relay_url: &str, ledger_ids: &[String]) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_multi(secret_key, &[relay_url.to_string()], ledger_ids).await
+    }
+
+    async fn new_multi(secret_key: SecretKey, relay_urls: &[String], ledger_ids: &[String]) -> Result<Self, Box<dyn std::error::Error>> {
         let secret_bytes = secret_key.secret_bytes();
         let nostr_secret = nostr_sdk::SecretKey::from_slice(&secret_bytes)
             .map_err(|e| format!("Invalid key: {}", e))?;
@@ -136,8 +140,10 @@ impl SimTransport {
             .opts(opts)
             .build();
 
-        client.add_relay(relay_url).await
-            .map_err(|e| format!("Failed to add relay: {}", e))?;
+        for url in relay_urls {
+            client.add_relay(url.as_str()).await
+                .map_err(|e| format!("Failed to add relay {}: {}", url, e))?;
+        }
         client.connect_with_timeout(Duration::from_secs(10)).await;
 
         // Wait for connection
@@ -298,7 +304,7 @@ fn derive_secret_key_at_index(seed: &[u8; 32], network: bitcoin::Network, index:
 
 struct WalletRunner {
     wallet_bin: PathBuf,
-    relay: String,
+    relays: Vec<String>,
     network: String,
     data_dir: PathBuf,
     seed_hex: String,
@@ -322,9 +328,17 @@ impl WalletRunner {
             bitcoin::Network::Signet => "signet",
             _ => "regtest",
         };
+        // Collect all known relay URLs so wallet can reach any operator's primary relay
+        let mut relays = vec![config.relay.clone()];
+        let (_, relay_map) = scan_docker_for_ledgers();
+        for url in relay_map.values() {
+            if !relays.contains(url) {
+                relays.push(url.clone());
+            }
+        }
         Ok(Self {
             wallet_bin,
-            relay: config.relay.clone(),
+            relays,
             network: network.to_string(),
             data_dir: node.data_dir.clone(),
             seed_hex: hex::encode(node.seed),
@@ -332,18 +346,24 @@ impl WalletRunner {
     }
 
     fn base_args(&self) -> Vec<String> {
-        vec![
-            "--relay".to_string(), self.relay.clone(),
-            "--network".to_string(), self.network.clone(),
-            "--data-dir".to_string(), self.data_dir.to_string_lossy().to_string(),
-            "--seed".to_string(), self.seed_hex.clone(),
-        ]
+        let mut args = Vec::new();
+        for relay in &self.relays {
+            args.push("--relay".to_string());
+            args.push(relay.clone());
+        }
+        args.push("--network".to_string());
+        args.push(self.network.clone());
+        args.push("--data-dir".to_string());
+        args.push(self.data_dir.to_string_lossy().to_string());
+        args.push("--seed".to_string());
+        args.push(self.seed_hex.clone());
+        args
     }
 
-    /// Discover available ledgers, returns list of 64-hex ledger IDs.
+    /// Discover available ledgers, returns (ledger IDs, ledger→relay_url map).
     /// First tries `deposits-wallet discover` (advertisement-based).
     /// Falls back to scanning relay for recent request/response events with #l tags.
-    async fn discover_ledgers(&self, relay_url: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    async fn discover_ledgers(&self, relay_url: &str) -> Result<(Vec<String>, HashMap<String, String>), Box<dyn std::error::Error>> {
         // Try advertisement-based discovery first
         let mut args = vec!["discover".to_string()];
         args.extend(self.base_args());
@@ -380,7 +400,7 @@ impl WalletRunner {
         }
 
         // Also scan Docker operator containers for ledger JSONL files
-        let docker_ids = scan_docker_for_ledgers();
+        let (docker_ids, ledger_relay_map) = scan_docker_for_ledgers();
         if !docker_ids.is_empty() {
             eprintln!("  Found {} ledger(s) from Docker scan", docker_ids.len());
         }
@@ -392,7 +412,7 @@ impl WalletRunner {
 
         ledger_ids.sort();
         eprintln!("  Total: {} unique ledger(s)", ledger_ids.len());
-        Ok(ledger_ids)
+        Ok((ledger_ids, ledger_relay_map))
     }
 
     /// Sync deposits and return balances: alias -> sats.
@@ -567,14 +587,28 @@ async fn scan_relay_for_ledgers(relay_url: &str) -> Result<Vec<String>, Box<dyn 
 
 /// Scan Docker containers named bdk-* for ledger JSONL files.
 /// Returns deduplicated list of 64-hex ledger IDs.
-fn scan_docker_for_ledgers() -> Vec<String> {
+/// Map operator container name to its relay URL.
+/// Convention: bdk-alice → ws://localhost:7801, bdk-bob → 7802, etc.
+fn operator_relay_url(container: &str) -> Option<String> {
+    match container {
+        "bdk-alice"   => Some("ws://localhost:7801".to_string()),
+        "bdk-bob"     => Some("ws://localhost:7802".to_string()),
+        "bdk-charlie" => Some("ws://localhost:7803".to_string()),
+        "bdk-diana"   => Some("ws://localhost:7804".to_string()),
+        _ => None,
+    }
+}
+
+/// Scan Docker containers for ledgers. Returns (ledger_ids, ledger→relay_url mapping).
+/// Only maps ledgers that are OWNED by a container (Role=Operator), not joined ones.
+fn scan_docker_for_ledgers() -> (Vec<String>, HashMap<String, String>) {
     // List running bdk-* containers
     let output = match std::process::Command::new("docker")
         .args(["ps", "--format", "{{.Names}}", "--filter", "name=bdk-"])
         .output()
     {
         Ok(o) => o,
-        Err(_) => return Vec::new(),
+        Err(_) => return (Vec::new(), HashMap::new()),
     };
     let container_names: Vec<String> = String::from_utf8_lossy(&output.stdout)
         .lines()
@@ -588,25 +622,33 @@ fn scan_docker_for_ledgers() -> Vec<String> {
         .collect();
 
     let mut ledger_ids = std::collections::HashSet::new();
+    let mut ledger_relay_map: HashMap<String, String> = HashMap::new();
     for container in &container_names {
+        let relay_url = operator_relay_url(container);
+        // For each ledger file, check if this container is the Operator (not Partner).
+        // The first line of each JSONL file is {"type":"Role","role":"Operator"|"Partner"}.
         let output = match std::process::Command::new("docker")
-            .args(["exec", container, "ls", "/data/wallet/ledgers/"])
+            .args(["exec", container, "sh", "-c",
+                   "for f in /data/wallet/ledgers/*.jsonl; do role=$(head -1 \"$f\"); lid=$(basename \"$f\" .jsonl); if echo \"$role\" | grep -q Operator; then echo \"$lid\"; fi; done"])
             .output()
         {
             Ok(o) if o.status.success() => o,
             _ => continue,
         };
         for line in String::from_utf8_lossy(&output.stdout).lines() {
-            let id = line.trim().trim_end_matches(".jsonl");
+            let id = line.trim();
             if id.len() == 64 && id.chars().all(|c| c.is_ascii_hexdigit()) {
                 ledger_ids.insert(id.to_string());
+                if let Some(ref url) = relay_url {
+                    ledger_relay_map.insert(id.to_string(), url.clone());
+                }
             }
         }
     }
 
     let mut result: Vec<String> = ledger_ids.into_iter().collect();
     result.sort();
-    result
+    (result, ledger_relay_map)
 }
 
 // ─── Bootstrap ──────────────────────────────────────────────────────────────
@@ -630,7 +672,7 @@ fn save_deposit_key_index(data_dir: &PathBuf, index: u32) {
 /// Create deposits directly via Nostr using a single connection.
 /// Much faster than spawning deposits-wallet per deposit.
 async fn batch_open_deposits(
-    relay_url: &str,
+    relay_urls: &[String],
     seed: &[u8; 32],
     network: bitcoin::Network,
     data_dir: &PathBuf,
@@ -641,8 +683,8 @@ async fn batch_open_deposits(
     let secp = Secp256k1::new();
     let nostr_key = derive_secret_key(seed, network)?;
 
-    // Single transport for all deposits
-    let transport = SimTransport::new(nostr_key, relay_url, ledger_ids).await?;
+    // Connect to all relays so we can see responses from any operator's primary relay
+    let transport = SimTransport::new_multi(nostr_key, relay_urls, ledger_ids).await?;
 
     let mut key_index = load_deposit_key_index(data_dir);
     let mut created = Vec::new();
@@ -683,7 +725,7 @@ async fn batch_open_deposits(
             "deposit_pubkey": pubkey_hex,
             "max_sats": amount_sats,
             "min_sats": std::cmp::min(1000_u64, amount_sats.saturating_sub(1).max(1)),
-            "blocks_valid": 144_u64,
+            "blocks_valid": 10000_u64,
             "fee_fixed": 0_u64,
             "fee_bps": 0_u64,
             "fee_frequency": 2016_u64,
@@ -747,16 +789,16 @@ async fn run_bootstrap(config: &Config) -> Result<(), Box<dyn std::error::Error>
     eprintln!("\n=== Bootstrap ===");
 
     // 1. Discover ledgers (explicit --ledger flags take priority)
-    let ledger_ids = if !config.ledger_ids.is_empty() {
+    let (ledger_ids, _relay_map) = if !config.ledger_ids.is_empty() {
         eprintln!("Using {} explicit ledger ID(s)", config.ledger_ids.len());
-        config.ledger_ids.clone()
+        (config.ledger_ids.clone(), HashMap::new())
     } else {
         eprintln!("Discovering ledgers...");
-        let ids = wallet.discover_ledgers(&config.relay).await?;
+        let (ids, relay_map) = wallet.discover_ledgers(&config.relay).await?;
         if ids.is_empty() {
             return Err("No ledgers found. Start operator nodes first, or use --ledger <id>.".into());
         }
-        ids
+        (ids, relay_map)
     };
     for id in &ledger_ids {
         eprintln!("  Ledger: {}...{}", &id[..8], &id[56..]);
@@ -791,8 +833,15 @@ async fn run_bootstrap(config: &Config) -> Result<(), Box<dyn std::error::Error>
             .collect();
 
         eprintln!("Creating {} deposits (have {}, target {})...", to_create, existing_count, target_count);
+        // Collect all unique relay URLs for bootstrap (need to hear responses from all operators)
+        let mut all_relay_urls: Vec<String> = vec![config.relay.clone()];
+        for url in _relay_map.values() {
+            if !all_relay_urls.contains(url) {
+                all_relay_urls.push(url.clone());
+            }
+        }
         let new_deposits = batch_open_deposits(
-            &config.relay, &node.seed, config.network, &node.data_dir,
+            &all_relay_urls, &node.seed, config.network, &node.data_dir,
             &ledger_ids, &aliases, config.funding_sats,
         ).await?;
 
@@ -927,7 +976,7 @@ fn load_deposits(
             ledger_id,
             deposit_id,
             keypair,
-            node_idx,
+            node_idx: AtomicUsize::new(node_idx),
             balance_msats: AtomicI64::new(balance_msats),
         });
     }
@@ -948,7 +997,7 @@ async fn execute_transfer(
 ) -> TransferResult {
     let sender = &deposits[work.sender_idx];
     let receiver = &deposits[work.receiver_idx];
-    let transport = &transports[sender.node_idx];
+    let transport = &transports[sender.node_idx.load(Ordering::Relaxed)];
 
     // Generate nonce
     let mut rng = OsRng;
@@ -1143,7 +1192,7 @@ fn load_or_generate_seed(data_dir: &PathBuf) -> Result<[u8; 32], Box<dyn std::er
 fn parse_args() -> Result<Config, Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let mut config = Config {
-        relay: "ws://localhost:7778".to_string(),
+        relay: "ws://localhost:7801".to_string(),
         network: bitcoin::Network::Regtest,
         target_tps: 500,
         max_workers: 50,
@@ -1234,7 +1283,7 @@ fn parse_args() -> Result<Config, Box<dyn std::error::Error>> {
                 eprintln!("Usage: transfer-simulator [OPTIONS]");
                 eprintln!();
                 eprintln!("Options:");
-                eprintln!("  --relay <url>              Nostr relay (default: ws://localhost:7778)");
+                eprintln!("  --relay <url>              Nostr relay (default: ws://localhost:7801)");
                 eprintln!("  --network <net>             Bitcoin network (default: regtest)");
                 eprintln!("  --target-tps <n>            Target TPS (default: 500)");
                 eprintln!("  --workers <n>               Concurrent workers (default: 50)");
@@ -1362,23 +1411,67 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("{} eligible deposits (on ledgers with >=2 deposits)", eligible_deposit_indices.len());
 
-    // Collect unique ledger IDs per node for transport subscription filters
-    let mut node_ledger_ids: Vec<Vec<String>> = vec![Vec::new(); config.nodes.len()];
+    // Discover ledger→relay mapping (which operator owns which ledger)
+    let (_, ledger_relay_map) = scan_docker_for_ledgers();
+    if !ledger_relay_map.is_empty() {
+        eprintln!("Relay routing: {} ledgers mapped to per-operator relays", ledger_relay_map.len());
+        let mut relay_counts: HashMap<&str, usize> = HashMap::new();
+        for url in ledger_relay_map.values() {
+            *relay_counts.entry(url.as_str()).or_default() += 1;
+        }
+        for (url, count) in &relay_counts {
+            eprintln!("  {} — {} ledgers", url, count);
+        }
+    }
+
+    // Build per-relay ledger groups for transport creation.
+    // Each unique relay URL gets its own SimTransport.
+    // Deposits whose ledger has no relay mapping fall back to config.relay.
+    let mut relay_ledger_groups: HashMap<String, Vec<String>> = HashMap::new();
     for d in &all_deposits {
-        let lids = &mut node_ledger_ids[d.node_idx];
+        let relay = ledger_relay_map.get(&d.ledger_id)
+            .cloned()
+            .unwrap_or_else(|| config.relay.clone());
+        let lids = relay_ledger_groups.entry(relay).or_default();
         if !lids.contains(&d.ledger_id) {
             lids.push(d.ledger_id.clone());
         }
     }
 
-    // Create transports (one per node identity)
-    eprintln!("\nConnecting to relay...");
+    // Create one transport per relay, map relay URL → transport index
+    eprintln!("\nConnecting to relays...");
     let mut transports: Vec<Arc<SimTransport>> = Vec::new();
-    for (idx, node) in config.nodes.iter().enumerate() {
-        let nostr_key = derive_secret_key(&node.seed, config.network)?;
-        let transport = SimTransport::new(nostr_key, &config.relay, &node_ledger_ids[idx]).await?;
-        eprintln!("  {} — connected", node.name);
+    let mut relay_to_transport_idx: HashMap<String, usize> = HashMap::new();
+    let node = &config.nodes[0]; // simulator has one node identity
+    let nostr_key_base = derive_secret_key(&node.seed, config.network)?;
+    for (relay_url, ledger_ids_for_relay) in &relay_ledger_groups {
+        let idx = transports.len();
+        // Derive a unique key per relay to avoid nostr-sdk dedup issues
+        // (same pubkey on multiple relays is fine, but separate clients need separate keys)
+        let nostr_key = if idx == 0 {
+            nostr_key_base.clone()
+        } else {
+            // Derive a child key: hash(base_key || relay_idx)
+            use bitcoin::hashes::{sha256, Hash};
+            let mut preimage = nostr_key_base.secret_bytes().to_vec();
+            preimage.extend_from_slice(&(idx as u64).to_le_bytes());
+            let hash = sha256::Hash::hash(&preimage);
+            SecretKey::from_slice(&hash[..]).unwrap()
+        };
+        let transport = SimTransport::new(nostr_key, relay_url, ledger_ids_for_relay).await?;
+        eprintln!("  relay {} — {} ledgers, connected", relay_url, ledger_ids_for_relay.len());
+        relay_to_transport_idx.insert(relay_url.clone(), idx);
         transports.push(Arc::new(transport));
+    }
+
+    // Re-map each deposit's node_idx to point to the correct transport
+    for d in &all_deposits {
+        let relay = ledger_relay_map.get(&d.ledger_id)
+            .cloned()
+            .unwrap_or_else(|| config.relay.clone());
+        if let Some(&tidx) = relay_to_transport_idx.get(&relay) {
+            d.node_idx.store(tidx, Ordering::Relaxed);
+        }
     }
 
     let metrics = Arc::new(SimMetrics::new());
@@ -1405,6 +1498,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let metrics_clone = metrics.clone();
     let effective_tps_clone = effective_tps.clone();
     let paused_clone = paused.clone();
+    let max_workers_clone = max_workers_dynamic.clone();
     let report_start = Instant::now();
     let reporter = tokio::spawn(async move {
         let mut last_success = 0u64;
@@ -1443,8 +1537,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let uptime = now.duration_since(report_start).as_secs();
             let pause_tag = if is_paused { " PAUSED" } else { "" };
             eprintln!(
-                "[{}s] TPS: {:.1}/{} | ok: {} fail: {} timeout: {} | vol: {} sats | lock: {:.1}ms complete: {:.1}ms | inflight: {}{}",
-                uptime, tps, eff_tps, success, failed, timeouts, volume, avg_lock, avg_complete, inflight, pause_tag,
+                "[{}s] TPS: {:.1}/{} | ok: {} fail: {} timeout: {} | vol: {} sats | lock: {:.1}ms complete: {:.1}ms | inflight: {}/{}{}",
+                uptime, tps, eff_tps, success, failed, timeouts, volume, avg_lock, avg_complete, inflight, max_workers_clone.load(Ordering::Relaxed), pause_tag,
             );
         }
     });
@@ -1564,7 +1658,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("\nStarting transfers (adaptive 5 → {} TPS, {} workers)...\n",
         config.target_tps, config.max_workers);
 
-    // Adaptive rate control: check every 2s, adjust TPS based on success rate
+    // Adaptive rate control: check every 2s, adjust TPS based on success rate + inflight pressure
     let mut last_adapt_time = Instant::now();
     let mut adapt_ok_snapshot = 0u64;
     let mut adapt_fail_snapshot = 0u64;
@@ -1596,6 +1690,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let current = effective_tps.load(Ordering::Relaxed);
             let target_tps = target_tps_dynamic.load(Ordering::Relaxed);
             let total_delta = ok_delta + fail_delta;
+            let inflight = metrics.inflight.load(Ordering::Relaxed);
+            let max_w = max_workers_dynamic.load(Ordering::Relaxed) as u64;
+
+            // Inflight-based backpressure thresholds (fraction of max_workers)
+            let high_water = max_w * 3 / 4;  // 75% — back off
+            let low_water = max_w / 3;        // 33% — room to grow
 
             let new_tps = if fail_delta > 0 && total_delta > 0 {
                 // Failures detected: cut TPS in half (multiplicative decrease)
@@ -1605,14 +1705,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         fail_delta, total_delta, current, reduced);
                 }
                 reduced
-            } else if ok_delta > 0 && fail_delta == 0 {
-                // All successes: increase by 10% (additive increase)
+            } else if inflight > high_water {
+                // Too many inflight: operators can't keep up. Reduce by 20%.
+                let reduced = (current * 4 / 5).max(5);
+                if reduced < current {
+                    eprintln!("[adapt] inflight {}/{} > 75% — reducing {} → {} TPS",
+                        inflight, max_w, current, reduced);
+                }
+                reduced
+            } else if ok_delta > 0 && fail_delta == 0 && inflight <= low_water {
+                // All successes with low inflight: room to grow. Increase by 10%.
                 let increase = (current / 10).max(2);
                 let raised = (current + increase).min(target_tps);
                 if raised > current && raised == target_tps {
                     eprintln!("[adapt] reached target {} TPS", target_tps);
                 }
                 raised
+            } else if ok_delta > 0 && fail_delta == 0 {
+                // Succeeding but inflight is moderate — hold steady
+                current.min(target_tps)
             } else {
                 // No activity — clamp to target if it was lowered via config
                 current.min(target_tps)

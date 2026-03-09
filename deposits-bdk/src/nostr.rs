@@ -98,8 +98,17 @@ pub const DEFAULT_RELAYS: &[&str] = &[];
 
 /// Nostr transport for deposits protocol messages
 pub struct NostrTransport {
-    /// The nostr client
+    /// The nostr client (fast relay only — used for subscriptions and publishing)
     client: Client,
+
+    /// Primary relay URL — used for publishing. When set, events are only sent
+    /// to this relay, not broadcast to all connected relays. This distributes
+    /// write load when operators connect to multiple peer relays for reads.
+    primary_relay_url: Option<RelayUrl>,
+
+    /// Separate client connected to the slow (durable) relay, used only for
+    /// gap-fill `fetch_events` calls. None if no slow relay is configured.
+    slow_client: Option<Client>,
 
     /// Our keypair for signing/decryption
     keys: Keys,
@@ -174,23 +183,10 @@ pub struct NostrTransport {
     seen_events: std::sync::Mutex<std::collections::HashSet<[u8; 32]>>,
     seen_events_prev: std::sync::Mutex<std::collections::HashSet<[u8; 32]>>,
 
-    /// Relay URL strings categorized by traffic type.
-    /// All URLs are added to the single Client (subscriptions work across all),
-    /// but publishing targets only the relevant relay tier.
-    /// If ledger/wallet are empty, all traffic goes to operator relays (backwards compatible).
-    /// Stored as raw strings — resolved against client's relay map at send time to avoid
-    /// URL normalization mismatches.
-    operator_relay_strs: Vec<String>,
-    ledger_relay_strs: Vec<String>,
-    wallet_relay_strs: Vec<String>,
-
-    /// Cached resolved relay URLs by category (resolved once after connection).
-    /// Avoids calling `client.relays().await` on every publish (500+/sec under load).
-    cached_operator_urls: std::sync::Mutex<Vec<RelayUrl>>,
-    cached_ledger_urls: std::sync::Mutex<Vec<RelayUrl>>,
-    cached_wallet_urls: std::sync::Mutex<Vec<RelayUrl>>,
-    cached_all_urls: std::sync::Mutex<Vec<RelayUrl>>,
-    relay_cache_resolved: std::sync::atomic::AtomicBool,
+    /// Set of ledger IDs we're interested in. Events for ledgers NOT in this set
+    /// are dropped in handle_notification() before channel insertion.
+    /// Empty = accept all (backwards-compatible default for CLI callers).
+    interested_ledgers: RwLock<std::collections::HashSet<String>>,
 }
 
 /// An inbound message from a peer
@@ -529,28 +525,16 @@ impl LedgerAdvertisement {
 }
 
 impl NostrTransport {
-    /// Create a new Nostr transport
+    /// Create a new Nostr transport.
+    ///
+    /// `relays` — fast relay URLs (used for subscriptions + publishing).
+    /// `slow_relays` — durable relay URLs (used only for gap-fill `fetch_events`).
     pub async fn new(secret_key: SecretKey, relays: Vec<String>) -> Result<Self, Error> {
-        Self::new_with_categories(secret_key, relays, Vec::new(), Vec::new(), Vec::new(), false).await
+        Self::new_with_slow(secret_key, relays, Vec::new(), false).await
     }
 
-    /// Create a new Nostr transport with categorized relay URLs.
-    ///
-    /// - `relays`: operator relays — this node publishes requests/responses here.
-    /// - `peer_relays`: other operator relays — subscribe only, not used for publishing.
-    /// - `ledger_relays`: relays for durable ledger updates and disputes (KIND 9100, 9103).
-    /// - `wallet_relays`: relays for advertisements and client discovery (KIND 39100).
-    ///
-    /// All relays are connected to (subscriptions work across all).
-    /// If ledger_relays or wallet_relays are empty, falls back to operator relays.
-    pub async fn new_with_categories(
-        secret_key: SecretKey,
-        relays: Vec<String>,
-        peer_relays: Vec<String>,
-        ledger_relays: Vec<String>,
-        wallet_relays: Vec<String>,
-        skip_nostr_verify: bool,
-    ) -> Result<Self, Error> {
+    /// Create a new Nostr transport with explicit slow relay(s).
+    pub async fn new_with_slow(secret_key: SecretKey, relays: Vec<String>, slow_relays: Vec<String>, skip_nostr_verify: bool) -> Result<Self, Error> {
         // Convert secp256k1 key to nostr keys
         let secret_bytes = secret_key.secret_bytes();
         let nostr_secret = nostr_sdk::SecretKey::from_slice(&secret_bytes)
@@ -561,7 +545,7 @@ impl NostrTransport {
         let secp = bitcoin::secp256k1::Secp256k1::new();
         let our_pubkey = PublicKey::from_secret_key(&secp, &secret_key);
 
-        // Create nostr client with explicit connection options
+        // Create main nostr client (fast relay only) with explicit connection options
         let opts = Options::default()
             .connection_timeout(Some(std::time::Duration::from_secs(30)))
             .notification_channel_size(65536);
@@ -570,34 +554,24 @@ impl NostrTransport {
             .opts(opts)
             .build();
 
-        // Add relays — operator relays are the primary set, plus dedicated ledger/wallet relays
+        // Add fast relays only to main client
         let relay_list: Vec<String> = if relays.is_empty() {
             DEFAULT_RELAYS.iter().map(|s| s.to_string()).collect()
         } else {
             relays
         };
 
-        // Collect all unique relay URLs to add to the client (connect to all)
-        let mut all_relay_urls: Vec<String> = relay_list.clone();
-        for url in &peer_relays {
-            if !all_relay_urls.contains(url) {
-                all_relay_urls.push(url.clone());
-            }
-        }
-        for url in &ledger_relays {
-            if !all_relay_urls.contains(url) {
-                all_relay_urls.push(url.clone());
-            }
-        }
-        for url in &wallet_relays {
-            if !all_relay_urls.contains(url) {
-                all_relay_urls.push(url.clone());
-            }
-        }
+        // If multiple relays, the first is "primary" (used for publishing only).
+        // Other relays are for subscriptions/reads (e.g., peer operator relays).
+        let primary_relay_url = if relay_list.len() > 1 {
+            RelayUrl::parse(&relay_list[0]).ok()
+        } else {
+            None // single relay: publish to all (same thing)
+        };
 
         let relay_opts = RelayOptions::default()
             .skip_event_verification(skip_nostr_verify);
-        for relay in &all_relay_urls {
+        for relay in &relay_list {
             client
                 .pool()
                 .add_relay(relay, relay_opts.clone())
@@ -605,12 +579,7 @@ impl NostrTransport {
                 .map_err(|e| Error::Nostr(format!("Failed to add relay {}: {}", relay, e)))?;
         }
 
-        // Store categorized relay strings for targeted publishing
-        let operator_relay_strs = relay_list.clone();
-        let ledger_relay_strs = ledger_relays;
-        let wallet_relay_strs = wallet_relays;
-
-        // Connect to relays with explicit timeout
+        // Connect main client to relays with explicit timeout
         client.connect_with_timeout(std::time::Duration::from_secs(30)).await;
 
         // Wait for at least one relay to be connected (max 10 seconds)
@@ -641,6 +610,26 @@ impl NostrTransport {
             metrics::record_connection();
         }
 
+        // Create separate slow client for gap-fill (if slow relays configured)
+        let slow_client = if !slow_relays.is_empty() {
+            let slow_opts = Options::default()
+                .connection_timeout(Some(std::time::Duration::from_secs(30)));
+            let sc = Client::builder()
+                .signer(keys.clone())
+                .opts(slow_opts)
+                .build();
+            for relay in &slow_relays {
+                sc.add_relay(relay)
+                    .await
+                    .map_err(|e| Error::Nostr(format!("Failed to add slow relay {}: {}", relay, e)))?;
+            }
+            sc.connect_with_timeout(std::time::Duration::from_secs(30)).await;
+            tracing::info!("Slow relay client connected: {:?}", slow_relays);
+            Some(sc)
+        } else {
+            None
+        };
+
         // Create channels for inbound messages, ledger updates, requests, responses, and disputes
         let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
         let (ledger_tx, ledger_rx) = mpsc::unbounded_channel();
@@ -650,6 +639,8 @@ impl NostrTransport {
 
         Ok(Self {
             client,
+            primary_relay_url,
+            slow_client,
             keys,
             our_pubkey,
             inbound_rx: std::sync::Mutex::new(inbound_rx),
@@ -669,96 +660,13 @@ impl NostrTransport {
             daemon_notification_rx: std::sync::Mutex::new(None),
             seen_events: std::sync::Mutex::new(std::collections::HashSet::new()),
             seen_events_prev: std::sync::Mutex::new(std::collections::HashSet::new()),
-            // Relay categories: if dedicated relays are empty, fall back to operator relays
-            operator_relay_strs: operator_relay_strs.clone(),
-            ledger_relay_strs: if ledger_relay_strs.is_empty() {
-                operator_relay_strs.clone()
-            } else {
-                ledger_relay_strs
-            },
-            wallet_relay_strs: if wallet_relay_strs.is_empty() {
-                operator_relay_strs
-            } else {
-                wallet_relay_strs
-            },
-            cached_operator_urls: std::sync::Mutex::new(Vec::new()),
-            cached_ledger_urls: std::sync::Mutex::new(Vec::new()),
-            cached_wallet_urls: std::sync::Mutex::new(Vec::new()),
-            cached_all_urls: std::sync::Mutex::new(Vec::new()),
-            relay_cache_resolved: std::sync::atomic::AtomicBool::new(false),
+            interested_ledgers: RwLock::new(std::collections::HashSet::new()),
         })
     }
 
     /// Get our secp256k1 public key (node ID)
     pub fn our_pubkey(&self) -> PublicKey {
         self.our_pubkey
-    }
-
-    /// Resolve relay URL strings against the client's connected relays and cache the results.
-    /// Called once after connection; the relay set doesn't change at runtime.
-    /// This eliminates `client.relays().await` on every publish (500+/sec under load).
-    pub async fn resolve_and_cache_relay_urls(&self) {
-        let client_relays = self.client.relays().await;
-        let all_urls: Vec<RelayUrl> = client_relays.keys().cloned().collect();
-
-        let resolve = |strs: &[String]| -> Vec<RelayUrl> {
-            all_urls.iter()
-                .filter(|url| {
-                    let url_str = url.to_string();
-                    strs.iter().any(|s| {
-                        url_str.contains(s.trim_end_matches('/'))
-                            || s.trim_end_matches('/').contains(url_str.trim_end_matches('/'))
-                    })
-                })
-                .cloned()
-                .collect()
-        };
-
-        let op = resolve(&self.operator_relay_strs);
-        let lg = resolve(&self.ledger_relay_strs);
-        let wl = resolve(&self.wallet_relay_strs);
-
-        tracing::info!(
-            "Relay URL cache resolved: operator={}, ledger={}, wallet={}, total={}",
-            op.len(), lg.len(), wl.len(), all_urls.len()
-        );
-
-        *self.cached_operator_urls.lock().unwrap() = op;
-        *self.cached_ledger_urls.lock().unwrap() = lg;
-        *self.cached_wallet_urls.lock().unwrap() = wl;
-        *self.cached_all_urls.lock().unwrap() = all_urls;
-        self.relay_cache_resolved.store(true, std::sync::atomic::Ordering::Release);
-    }
-
-    /// Get cached relay URLs for a category, falling back to live resolution if cache not ready.
-    fn get_cached_urls(&self, relay_strs: &[String]) -> Vec<RelayUrl> {
-        if !self.relay_cache_resolved.load(std::sync::atomic::Ordering::Acquire) {
-            return Vec::new(); // Will trigger fallback in send_event_to_relays
-        }
-
-        // Match the relay_strs to the right cached set
-        if std::ptr::eq(relay_strs, self.operator_relay_strs.as_slice()) {
-            return self.cached_operator_urls.lock().unwrap().clone();
-        }
-        if std::ptr::eq(relay_strs, self.ledger_relay_strs.as_slice()) {
-            return self.cached_ledger_urls.lock().unwrap().clone();
-        }
-        if std::ptr::eq(relay_strs, self.wallet_relay_strs.as_slice()) {
-            return self.cached_wallet_urls.lock().unwrap().clone();
-        }
-
-        // For ad-hoc relay lists (e.g. operator+wallet combined), resolve from cache
-        let all = self.cached_all_urls.lock().unwrap();
-        all.iter()
-            .filter(|url| {
-                let url_str = url.to_string();
-                relay_strs.iter().any(|s| {
-                    url_str.contains(s.trim_end_matches('/'))
-                        || s.trim_end_matches('/').contains(url_str.trim_end_matches('/'))
-                })
-            })
-            .cloned()
-            .collect()
     }
 
     /// Set ledger IDs for response subscription filtering.
@@ -785,9 +693,73 @@ impl NostrTransport {
         self.active_subscriptions.write().unwrap().remove("responses:all");
     }
 
-    /// Get a reference to the underlying Nostr client
+    /// Get a reference to the underlying Nostr client (fast relay)
     pub fn client(&self) -> &Client {
         &self.client
+    }
+
+    /// Get the client to use for gap-fill `fetch_events` calls.
+    /// Returns the slow (durable) relay client if configured, otherwise the main client.
+    pub fn fetch_client(&self) -> &Client {
+        self.slow_client.as_ref().unwrap_or(&self.client)
+    }
+
+    /// Add a single ledger ID to the interested set.
+    pub fn add_interested_ledger(&self, ledger_id: String) {
+        self.interested_ledgers.write().unwrap().insert(ledger_id);
+    }
+
+    /// Set the ledger IDs we're interested in receiving events for.
+    /// Events for other ledgers are dropped in handle_notification().
+    /// Empty set = accept all (the default).
+    pub fn set_interested_ledgers(&self, ledger_ids: impl IntoIterator<Item = String>) {
+        let new_set: std::collections::HashSet<String> = ledger_ids.into_iter().collect();
+        let count = new_set.len();
+        *self.interested_ledgers.write().unwrap() = new_set;
+        tracing::info!("Interested ledgers set: {} ledgers", count);
+    }
+
+    /// Subscribe with compacted global filters (3 kind-based filters instead of per-ledger).
+    /// Replaces subscribe_to_ledgers_batch for the daemon. Per-ledger filtering happens
+    /// in-process via interested_ledgers, not at the relay level.
+    pub async fn subscribe_global(&self) -> Result<(), Error> {
+        let sub_key = "global_compacted".to_string();
+        {
+            let subs = self.active_subscriptions.read().unwrap();
+            if subs.contains(&sub_key) {
+                return Ok(());
+            }
+        }
+
+        let since = nostr_sdk::Timestamp::now() - 5;
+
+        let filters = vec![
+            // Requests (ephemeral kind 20101)
+            Filter::new()
+                .kind(Kind::Custom(KIND_LEDGER_REQUEST))
+                .since(since),
+            // Responses (ephemeral kind 20102)
+            Filter::new()
+                .kind(Kind::Custom(KIND_LEDGER_RESPONSE))
+                .since(since),
+            // Updates (durable kind 9100)
+            Filter::new()
+                .kind(Kind::Custom(KIND_LEDGER_UPDATE))
+                .since(since),
+            // Disputes (durable kind 9103)
+            Filter::new()
+                .kind(Kind::Custom(KIND_LEDGER_DISPUTE))
+                .since(since),
+        ];
+
+        self.client
+            .subscribe(filters, None)
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to subscribe (global): {}", e)))?;
+
+        self.active_subscriptions.write().unwrap().insert(sub_key);
+        tracing::info!("Subscribed with 4 global compacted filters (requests, responses, updates, disputes)");
+        Ok(())
     }
 
     /// Get our nostr keys for signing
@@ -818,91 +790,53 @@ impl NostrTransport {
     ///
     /// Use this for high-throughput operations where you don't need confirmation
     /// that the relay accepted the event.
+    /// Maximum time to wait for any Nostr send operation before giving up.
+    /// Prevents a stuck relay WebSocket from freezing the entire node.
+    const SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
     async fn send_event_nowait(&self, event: Event) -> Result<(), Error> {
-        // Use cached URLs to avoid async relay map lookup on every publish
-        let urls = self.cached_all_urls.lock().unwrap().clone();
-        let urls = if urls.is_empty() {
-            // Fallback: cache not yet populated
+        let urls: Vec<RelayUrl> = if let Some(ref primary) = self.primary_relay_url {
+            // Multi-relay mode: publish only to primary relay
+            vec![primary.clone()]
+        } else {
+            // Single-relay mode: publish to all
             let relays = self.client.relays().await;
             if relays.is_empty() {
                 return Err(Error::Nostr("No relays connected".to_string()));
             }
             relays.keys().cloned().collect()
-        } else {
-            urls
         };
 
         // Send using batch_msg which doesn't wait for OK
         let publish_start = std::time::Instant::now();
-        self.client
-            .send_msg_to(urls, ClientMessage::event(event))
+        tokio::time::timeout(Self::SEND_TIMEOUT,
+            self.client.send_msg_to(urls, ClientMessage::event(event))
+        )
             .await
+            .map_err(|_| Error::Nostr("send_event_nowait timed out".to_string()))?
             .map_err(|e| Error::Nostr(format!("Failed to send event: {}", e)))?;
         crate::metrics::record_nostr_publish(publish_start.elapsed());
 
         Ok(())
     }
 
-    /// Send an event to a specific set of relays (fire-and-forget).
-    /// Uses cached relay URLs to avoid async relay map lookup on every publish.
-    async fn send_event_to_relays(&self, event: Event, relay_strs: &[String]) -> Result<(), Error> {
-        if relay_strs.is_empty() {
-            return self.send_event_nowait(event).await;
-        }
-
-        // Use cached URLs (resolved once after connection)
-        let urls = self.get_cached_urls(relay_strs);
-
-        if urls.is_empty() {
-            // Cache miss or not yet resolved — fall back to live resolution
-            let client_relays = self.client.relays().await;
-            let urls: Vec<_> = client_relays.keys()
-                .filter(|url| {
-                    let url_str = url.to_string();
-                    relay_strs.iter().any(|s| {
-                        url_str.contains(s.trim_end_matches('/')) || s.trim_end_matches('/').contains(url_str.trim_end_matches('/'))
-                    })
-                })
-                .cloned()
-                .collect();
-
-            if urls.is_empty() {
-                tracing::warn!("No relay match for {:?}, falling back to all relays", relay_strs);
-                return self.send_event_nowait(event).await;
-            }
-
-            let publish_start = std::time::Instant::now();
-            self.client
-                .send_msg_to(urls, ClientMessage::event(event))
-                .await
-                .map_err(|e| Error::Nostr(format!("Failed to send event: {}", e)))?;
-            crate::metrics::record_nostr_publish(publish_start.elapsed());
-            return Ok(());
-        }
-
-        let publish_start = std::time::Instant::now();
-        self.client
-            .send_msg_to(urls, ClientMessage::event(event))
+    /// Send an event with a timeout to prevent relay hangs from freezing the node.
+    async fn send_event_with_timeout(&self, event: Event) -> Result<(), Error> {
+        let urls: Vec<RelayUrl> = if let Some(ref primary) = self.primary_relay_url {
+            vec![primary.clone()]
+        } else {
+            let relays = self.client.relays().await;
+            relays.keys().cloned().collect()
+        };
+        tokio::time::timeout(Self::SEND_TIMEOUT,
+            self.client.send_msg_to(urls, ClientMessage::event(event))
+        )
             .await
+            .map_err(|_| Error::Nostr("send_event timed out (relay may be stuck)".to_string()))?
             .map_err(|e| Error::Nostr(format!("Failed to send event: {}", e)))?;
-        crate::metrics::record_nostr_publish(publish_start.elapsed());
         Ok(())
     }
 
-    /// Get the operator relay URL strings.
-    pub fn operator_relay_strs(&self) -> &[String] {
-        &self.operator_relay_strs
-    }
-
-    /// Get the wallet relay URL strings.
-    pub fn wallet_relay_strs(&self) -> &[String] {
-        &self.wallet_relay_strs
-    }
-
-    /// Get the ledger relay URL strings.
-    pub fn ledger_relay_strs(&self) -> &[String] {
-        &self.ledger_relay_strs
-    }
 
     /// Send a message to a peer via encrypted DM (NIP-04)
     pub async fn send_message(&self, peer: PublicKey, msg: DepositsMessage) -> Result<(), Error> {
@@ -926,8 +860,7 @@ impl NostrTransport {
             .map_err(|e| Error::Nostr(format!("Failed to sign event: {}", e)))?;
 
         // Send
-        self.client
-            .send_event(event)
+        self.send_event_with_timeout(event)
             .await
             .map_err(|e| Error::Nostr(format!("Failed to send message: {}", e)))?;
 
@@ -970,8 +903,8 @@ impl NostrTransport {
 
         let event_id = event.id.to_hex();
 
-        // Broadcast to ledger relays (durable updates)
-        self.send_event_to_relays(event, &self.ledger_relay_strs)
+        // Broadcast
+        self.send_event_with_timeout(event)
             .await
             .map_err(|e| Error::Nostr(format!("Failed to broadcast ledger update: {}", e)))?;
 
@@ -1075,8 +1008,7 @@ impl NostrTransport {
 
         let event_id = event.id.to_hex();
 
-        // Send to operator relays (ephemeral request traffic)
-        self.send_event_to_relays(event, &self.operator_relay_strs)
+        self.send_event_with_timeout(event)
             .await
             .map_err(|e| Error::Nostr(format!("Failed to send request: {}", e)))?;
 
@@ -1134,21 +1066,7 @@ impl NostrTransport {
 
         let event_id = event.id.to_hex();
 
-        // Route responses to minimize relay fan-out:
-        // - Cosign responses: operator relay only (requesting operator subscribes to our relay)
-        // - All other responses: operator relay + wallet relay (simulator is on wallet relay)
-        let response_relays = if action == "cosign_update" || action == "cosign_offer" {
-            self.operator_relay_strs.clone()
-        } else {
-            let mut relays = self.operator_relay_strs.clone();
-            for url in &self.wallet_relay_strs {
-                if !relays.contains(url) {
-                    relays.push(url.clone());
-                }
-            }
-            relays
-        };
-        self.send_event_to_relays(event, &response_relays)
+        self.send_event_with_timeout(event)
             .await
             .map_err(|e| Error::Nostr(format!("Failed to send response: {}", e)))?;
 
@@ -1236,8 +1154,7 @@ impl NostrTransport {
 
         let event_id = event.id.to_hex();
 
-        // Send to ledger relays (durable disputes)
-        self.send_event_to_relays(event, &self.ledger_relay_strs)
+        self.send_event_with_timeout(event)
             .await
             .map_err(|e| Error::Nostr(format!("Failed to send dispute: {}", e)))?;
 
@@ -1490,8 +1407,7 @@ impl NostrTransport {
 
         let event_id = event.id.to_hex();
 
-        // Send to ledger relays (durable recovery agreement)
-        self.send_event_to_relays(event, &self.ledger_relay_strs)
+        self.send_event_with_timeout(event)
             .await
             .map_err(|e| Error::Nostr(format!("Failed to send agreement: {}", e)))?;
 
@@ -1580,8 +1496,7 @@ impl NostrTransport {
 
         let event_id = event.id.to_hex();
 
-        // Send to wallet relays (discovery/advertisements)
-        self.send_event_to_relays(event, &self.wallet_relay_strs)
+        self.send_event_with_timeout(event)
             .await
             .map_err(|e| Error::Nostr(format!("Failed to send advertisement: {}", e)))?;
 
@@ -2159,7 +2074,9 @@ impl NostrTransport {
     /// Use short timeouts (1ms) when under load, longer (100ms) when idle.
     pub async fn process_events_with_timeout(&self, timeout_ms: u64) -> Result<(), Error> {
         // Take the receiver out of the Mutex to avoid holding the lock across await.
-        let mut rx = match self.daemon_notification_rx.lock().unwrap().take() {
+        // Use a block to ensure the MutexGuard is dropped before any await point.
+        let taken = self.daemon_notification_rx.lock().unwrap().take();
+        let mut rx = match taken {
             Some(rx) => rx,
             None => {
                 // Fallback: create ephemeral receiver (for non-daemon callers)
@@ -2346,6 +2263,20 @@ impl NostrTransport {
             // are different enum variants but represent the same kind number
             let kind_num = event.kind.as_u16();
 
+            // Per-ledger interest filter: extract ledger ID from tags and check
+            // against the interested set. Empty set = accept all.
+            let interested = self.interested_ledgers.read().unwrap();
+            if !interested.is_empty() && kind_num != 4 /* EncryptedDirectMessage */ {
+                let ledger_id = Self::extract_ledger_id_from_event(&event, kind_num);
+                if let Some(lid) = &ledger_id {
+                    if !interested.contains(lid) {
+                        return false; // Not our ledger — drop
+                    }
+                }
+                // If no ledger_id could be extracted, let it through (safety)
+            }
+            drop(interested);
+
             if event.kind == Kind::EncryptedDirectMessage {
                 if let Ok(msg) = self.process_dm(&event) {
                     let _ = self.inbound_tx.send(msg);
@@ -2370,6 +2301,24 @@ impl NostrTransport {
             return true;
         }
         false
+    }
+
+    /// Extract ledger ID from an event's tags without full parsing.
+    /// Updates use `#d` tag, requests/responses/disputes use `#l` tag.
+    fn extract_ledger_id_from_event(event: &Event, kind_num: u16) -> Option<String> {
+        // Updates use #d tag, everything else uses #l tag
+        let tag_letter = if kind_num == KIND_LEDGER_UPDATE {
+            SingleLetterTag::lowercase(Alphabet::D)
+        } else {
+            SingleLetterTag::lowercase(Alphabet::L)
+        };
+        event.tags.iter().find_map(|tag| {
+            if tag.kind() == TagKind::SingleLetter(tag_letter) {
+                tag.content().map(|s| s.to_string())
+            } else {
+                None
+            }
+        })
     }
 
     /// Rotate the seen_events dedup set (two-generation cleanup).
@@ -2643,9 +2592,7 @@ impl NostrTransport {
 pub struct NostrTransportBuilder {
     secret_key: SecretKey,
     relays: Vec<String>,
-    peer_relays: Vec<String>,
-    ledger_relays: Vec<String>,
-    wallet_relays: Vec<String>,
+    slow_relays: Vec<String>,
     skip_nostr_verify: bool,
 }
 
@@ -2654,9 +2601,7 @@ impl NostrTransportBuilder {
         Self {
             secret_key,
             relays: Vec::new(),
-            peer_relays: Vec::new(),
-            ledger_relays: Vec::new(),
-            wallet_relays: Vec::new(),
+            slow_relays: Vec::new(),
             skip_nostr_verify: false,
         }
     }
@@ -2671,18 +2616,8 @@ impl NostrTransportBuilder {
         self
     }
 
-    pub fn peer_relay(mut self, url: impl Into<String>) -> Self {
-        self.peer_relays.push(url.into());
-        self
-    }
-
-    pub fn ledger_relay(mut self, url: impl Into<String>) -> Self {
-        self.ledger_relays.push(url.into());
-        self
-    }
-
-    pub fn wallet_relay(mut self, url: impl Into<String>) -> Self {
-        self.wallet_relays.push(url.into());
+    pub fn slow_relay(mut self, url: impl Into<String>) -> Self {
+        self.slow_relays.push(url.into());
         self
     }
 
@@ -2692,13 +2627,6 @@ impl NostrTransportBuilder {
     }
 
     pub async fn build(self) -> Result<NostrTransport, Error> {
-        NostrTransport::new_with_categories(
-            self.secret_key,
-            self.relays,
-            self.peer_relays,
-            self.ledger_relays,
-            self.wallet_relays,
-            self.skip_nostr_verify,
-        ).await
+        NostrTransport::new_with_slow(self.secret_key, self.relays, self.slow_relays, self.skip_nostr_verify).await
     }
 }

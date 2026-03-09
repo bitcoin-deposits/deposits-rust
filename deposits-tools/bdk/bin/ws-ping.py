@@ -21,7 +21,7 @@ except ImportError:
     import websockets
     from secp256k1 import PrivateKey
 
-RELAY_URL = "ws://localhost:7778"
+RELAY_URL = "ws://localhost:7801"
 KIND_PING = 29999
 
 def sha256(data: bytes) -> bytes:

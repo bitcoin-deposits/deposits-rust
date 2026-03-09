@@ -24,6 +24,7 @@ source "$SCRIPT_DIR/_common.sh"
 # Configuration (can be overridden via args)
 RESERVES_AMOUNT=100000000  # 1 BTC in sats
 ENFORCEMENT_DELAY=200      # Blocks until enforcement
+LEDGERS_PER_OP=3           # Number of ledgers per operator
 SKIP_RESET=false
 
 # Parse arguments
@@ -41,9 +42,13 @@ while [[ $# -gt 0 ]]; do
             RESERVES_AMOUNT="$2"
             shift 2
             ;;
+        --ledgers-per-op)
+            LEDGERS_PER_OP="$2"
+            shift 2
+            ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 [--skip-reset] [--enforcement-delay BLOCKS] [--reserves SATS]"
+            echo "Usage: $0 [--skip-reset] [--enforcement-delay BLOCKS] [--reserves SATS] [--ledgers-per-op N]"
             exit 1
             ;;
     esac
@@ -76,13 +81,13 @@ OPERATORS="bdk-alice bdk-bob bdk-charlie bdk-diana"
 
 reset_nostr_data() {
     log_info "Resetting Nostr relay data..."
-    $DC stop nostr-relay >/dev/null 2>&1 || true
-    $DC rm -f nostr-relay >/dev/null 2>&1 || true
-    docker volume rm bdk_bdk_nostr_data >/dev/null 2>&1 || true
+    $DC stop relay-alice relay-bob relay-charlie relay-diana relay-ledgers >/dev/null 2>&1 || true
+    $DC rm -f relay-alice relay-bob relay-charlie relay-diana relay-ledgers >/dev/null 2>&1 || true
+    docker volume rm bdk_relay_alice_data bdk_relay_bob_data bdk_relay_charlie_data bdk_relay_diana_data bdk_relay_ledgers_data >/dev/null 2>&1 || true
     $DC stop bdk-alice bdk-bob bdk-charlie bdk-diana >/dev/null 2>&1 || true
     $DC rm -f bdk-alice bdk-bob bdk-charlie bdk-diana >/dev/null 2>&1 || true
     docker volume rm bdk_bdk_alice_data bdk_bdk_bob_data bdk_bdk_charlie_data bdk_bdk_diana_data >/dev/null 2>&1 || true
-    $DC up -d nostr-relay bdk-alice bdk-bob bdk-charlie bdk-diana >/dev/null 2>&1
+    $DC up -d relay-alice relay-bob relay-charlie relay-diana relay-ledgers bdk-alice bdk-bob bdk-charlie bdk-diana >/dev/null 2>&1
     sleep 5
     log_success "Nostr relay and BDK nodes reset"
 }
@@ -102,7 +107,8 @@ setup_operators() {
         local info_output=$(run_bdk_cmd "$op" info 2>&1)
         local balance=$(echo "$info_output" | grep "Wallet balance:" | awk '{print $3}')
 
-        if [ -z "$balance" ] || [ "$balance" -lt 200000000 ]; then
+        local min_balance=$((RESERVES_AMOUNT * LEDGERS_PER_OP + 50000000))  # reserves + 0.5 BTC for fees
+        if [ -z "$balance" ] || [ "$balance" -lt "$min_balance" ]; then
             local address=$(get_node_address "$op")
             bitcoin_cli -rpcwallet=faucet sendtoaddress "$address" 10 >/dev/null 2>&1
             mine_blocks 1
@@ -129,34 +135,37 @@ setup_operators() {
 
 create_reserves() {
     log_info ""
-    log_info "=== Phase 2: Create Reserves ($RESERVES_AMOUNT sats each) ==="
+    log_info "=== Phase 2: Create Reserves ($RESERVES_AMOUNT sats each, $LEDGERS_PER_OP per operator) ==="
     echo ""
 
     for op in $OPERATORS; do
         log_info "Creating reserves for $op..."
 
-        # Check if already has reserves
-        local existing=$(run_bdk_cmd "$op" reserves list 2>&1 | grep -c "Reserves:" || true)
-        if [ "$existing" -gt 0 ] && [ "$SKIP_RESET" = true ]; then
-            log_info "  $op already has reserves, skipping"
-            # Get existing reserves info
-            local reserves_output=$(run_bdk_cmd "$op" reserves list 2>&1)
-            local reserves_id=$(echo "$reserves_output" | grep "Address:" | head -1 | awk '{print $2}')
-            store_value "reserves_id_$op" "$reserves_id"
-            continue
-        fi
+        for idx in $(seq 1 $LEDGERS_PER_OP); do
+            local suffix=""
+            [ "$LEDGERS_PER_OP" -gt 1 ] && suffix="_$idx"
 
-        local output=$(run_bdk_cmd "$op" reserves create $RESERVES_AMOUNT 2>&1)
+            # Check if already has reserves
+            if [ "$SKIP_RESET" = true ]; then
+                local existing_id=$(get_value "reserves_id_${op}${suffix}")
+                if [ -n "$existing_id" ]; then
+                    log_info "  $op ledger $idx already has reserves, skipping"
+                    continue
+                fi
+            fi
 
-        if echo "$output" | grep -q "Created reserves\|Reserves created"; then
-            local reserves_id=$(echo "$output" | grep "Address:" | awk '{print $2}')
-            store_value "reserves_id_$op" "$reserves_id"
-            log_success "$op created reserves"
-        else
-            log_error "$op failed to create reserves"
-            echo "    Output: $output"
-            return 1
-        fi
+            local output=$(run_bdk_cmd "$op" reserves create $RESERVES_AMOUNT 2>&1)
+
+            if echo "$output" | grep -q "Created reserves\|Reserves created"; then
+                local reserves_id=$(echo "$output" | grep "Address:" | awk '{print $2}')
+                store_value "reserves_id_${op}${suffix}" "$reserves_id"
+                log_success "$op created reserves $idx"
+            else
+                log_error "$op failed to create reserves $idx"
+                echo "    Output: $output"
+                return 1
+            fi
+        done
     done
 
     mine_blocks 1
@@ -168,7 +177,7 @@ create_reserves() {
 
 open_ledgers() {
     log_info ""
-    log_info "=== Phase 3: Open Ledgers (enforcement +$ENFORCEMENT_DELAY blocks) ==="
+    log_info "=== Phase 3: Open Ledgers (enforcement +$ENFORCEMENT_DELAY blocks, $LEDGERS_PER_OP per operator) ==="
     echo ""
 
     local current_block=$(get_block_height)
@@ -177,31 +186,35 @@ open_ledgers() {
     echo ""
 
     for op in $OPERATORS; do
-        log_info "Opening ledger for $op..."
+        for idx in $(seq 1 $LEDGERS_PER_OP); do
+            local suffix=""
+            [ "$LEDGERS_PER_OP" -gt 1 ] && suffix="_$idx"
 
-        # Check if already has ledger
-        local existing=$(run_bdk_cmd "$op" ledger list 2>&1 | grep -c "Ledger:" || true)
-        if [ "$existing" -gt 0 ] && [ "$SKIP_RESET" = true ]; then
-            log_info "  $op already has ledger, skipping"
-            local ledger_output=$(run_bdk_cmd "$op" ledger list 2>&1)
-            local ledger_id=$(echo "$ledger_output" | grep "Ledger ID:" | head -1 | awk '{print $3}')
-            store_value "ledger_id_$op" "$ledger_id"
-            continue
-        fi
+            log_info "Opening ledger $idx for $op..."
 
-        # Pass enforcement block as positional argument
-        local output=$(run_bdk_cmd "$op" ledger open "$enforcement_block" 2>&1)
+            # Check if already has ledger
+            if [ "$SKIP_RESET" = true ]; then
+                local existing_id=$(get_value "ledger_id_${op}${suffix}")
+                if [ -n "$existing_id" ]; then
+                    log_info "  $op ledger $idx already exists, skipping"
+                    continue
+                fi
+            fi
 
-        if echo "$output" | grep -q "Ledger opened\|opened successfully"; then
-            local ledger_id=$(echo "$output" | grep "Ledger ID:" | awk '{print $3}')
-            store_value "ledger_id_$op" "$ledger_id"
-            log_success "$op opened ledger"
-            log_info "  Ledger ID: ${ledger_id:0:16}..."
-        else
-            log_error "$op failed to open ledger"
-            echo "    Output: $output"
-            return 1
-        fi
+            # Pass enforcement block as positional argument
+            local output=$(run_bdk_cmd "$op" ledger open "$enforcement_block" 2>&1)
+
+            if echo "$output" | grep -q "Ledger opened\|opened successfully"; then
+                local ledger_id=$(echo "$output" | grep "Ledger ID:" | awk '{print $3}')
+                store_value "ledger_id_${op}${suffix}" "$ledger_id"
+                log_success "$op opened ledger $idx"
+                log_info "  Ledger ID: ${ledger_id:0:16}..."
+            else
+                log_error "$op failed to open ledger $idx"
+                echo "    Output: $output"
+                return 1
+            fi
+        done
     done
 }
 
@@ -216,14 +229,19 @@ start_nostr_watchers() {
     echo ""
 
     for op in $OPERATORS; do
-        local ledger_id=$(get_value "ledger_id_$op")
-        if [ -n "$ledger_id" ]; then
-            start_nostr_watch "$op" "$ledger_id"
-            log_info "Started nostr watch on $op for $ledger_id"
-            log_success "$op nostr watcher started"
-        else
-            log_warn "$op has no ledger_id yet"
-        fi
+        for idx in $(seq 1 $LEDGERS_PER_OP); do
+            local suffix=""
+            [ "$LEDGERS_PER_OP" -gt 1 ] && suffix="_$idx"
+
+            local ledger_id=$(get_value "ledger_id_${op}${suffix}")
+            if [ -n "$ledger_id" ]; then
+                start_nostr_watch "$op" "$ledger_id"
+                log_info "Started nostr watch on $op for ledger $idx"
+            else
+                log_warn "$op has no ledger_id for ledger $idx"
+            fi
+        done
+        log_success "$op nostr watcher(s) started"
     done
 
     # Give watchers time to connect
@@ -246,43 +264,50 @@ cleanup_nostr_watchers() {
 add_quorum_members() {
     log_info ""
     log_info "=== Phase 3b: Add Quorum Members ==="
-    log_info "(Each operator adds the other operators as quorum members)"
+    log_info "(Each operator adds the other operators as quorum members for all ledgers)"
     echo ""
 
     local membership_expires=1000000  # Far future block
 
     for op in $OPERATORS; do
-        local op_reserves_id=$(get_value "reserves_id_$op")
         local op_node_id=$(get_value "node_id_$op")
-        local op_ledger_id=$(get_value "ledger_id_$op")
 
-        for member in $OPERATORS; do
-            if [ "$op" != "$member" ]; then
-                local member_node_id=$(get_value "node_id_$member")
-                local member_ledger_id=$(get_value "ledger_id_$member")
-                local member_reserves_id=$(get_value "reserves_id_$member")
-                local op_short=$(echo "$op" | sed 's/bdk-//')
-                local member_short=$(echo "$member" | sed 's/bdk-//')
+        for idx in $(seq 1 $LEDGERS_PER_OP); do
+            local suffix=""
+            [ "$LEDGERS_PER_OP" -gt 1 ] && suffix="_$idx"
 
-                log_info "$op_short adding $member_short as quorum member..."
+            local op_ledger_id=$(get_value "ledger_id_${op}${suffix}")
 
-                # Add member to op's quorum (pass member's ledger ID for collateral binding)
-                local add_output=$(run_bdk_cmd "$op" partner add "$op_ledger_id" "$member_node_id" "$member_ledger_id" 2>&1)
+            for member in $OPERATORS; do
+                if [ "$op" != "$member" ]; then
+                    local member_node_id=$(get_value "node_id_$member")
+                    # Use member's first ledger for collateral binding
+                    local member_suffix=""
+                    [ "$LEDGERS_PER_OP" -gt 1 ] && member_suffix="_1"
+                    local member_ledger_id=$(get_value "ledger_id_${member}${member_suffix}")
+                    local op_short=$(echo "$op" | sed 's/bdk-//')
+                    local member_short=$(echo "$member" | sed 's/bdk-//')
 
-                if echo "$add_output" | grep -q "Quorum member added\|added"; then
-                    # Record the join on member's ledger (use ledger_id for both our ledger and target)
-                    local join_output=$(run_bdk_cmd "$member" partner join "$member_ledger_id" "$op_node_id" "$op_ledger_id" "$membership_expires" 2>&1)
+                    log_info "$op_short ledger $idx: adding $member_short as quorum member..."
 
-                    if echo "$join_output" | grep -q "Quorum join recorded\|recorded"; then
-                        log_success "$member_short joined $op_short's quorum (both sides recorded)"
+                    # Add member to op's quorum (pass member's ledger ID for collateral binding)
+                    local add_output=$(run_bdk_cmd "$op" partner add "$op_ledger_id" "$member_node_id" "$member_ledger_id" 2>&1)
+
+                    if echo "$add_output" | grep -q "Quorum member added\|added"; then
+                        # Record the join on member's first ledger
+                        local join_output=$(run_bdk_cmd "$member" partner join "$member_ledger_id" "$op_node_id" "$op_ledger_id" "$membership_expires" 2>&1)
+
+                        if echo "$join_output" | grep -q "Quorum join recorded\|recorded"; then
+                            log_success "$member_short joined $op_short ledger $idx"
+                        else
+                            log_warn "$op_short added $member_short to ledger $idx (join record issue)"
+                        fi
                     else
-                        log_warn "$op_short added $member_short (join record issue)"
+                        log_error "$op_short failed to add $member_short to ledger $idx"
+                        echo "    Output: $add_output"
                     fi
-                else
-                    log_error "$op_short failed to add $member_short as quorum member"
-                    echo "    Output: $add_output"
                 fi
-            fi
+            done
         done
     done
 }
@@ -297,22 +322,25 @@ rotate_reserves_to_quorum() {
     echo ""
 
     for op in $OPERATORS; do
-        local op_reserves_id=$(get_value "reserves_id_$op")
         local op_short=$(echo "$op" | sed 's/bdk-//')
 
-        log_info "$op_short rotating reserves to quorum-based Taproot..."
+        for idx in $(seq 1 $LEDGERS_PER_OP); do
+            local suffix=""
+            [ "$LEDGERS_PER_OP" -gt 1 ] && suffix="_$idx"
 
-        local rotate_output=$(run_bdk_cmd "$op" reserves rotate "$op_reserves_id" 2>&1)
+            local op_reserves_id=$(get_value "reserves_id_${op}${suffix}")
 
-        if echo "$rotate_output" | grep -q "Reserves rotated\|rotated successfully"; then
-            local new_address=$(echo "$rotate_output" | grep "New Address:" | awk '{print $3}')
-            local quorum_count=$(echo "$rotate_output" | grep "Quorum Members:" | awk '{print $3}')
-            local expiry_block=$(echo "$rotate_output" | grep "First Expiry Block:" | awk '{print $4}')
+            log_info "$op_short rotating reserves $idx to quorum-based Taproot..."
 
-            log_success "$op_short rotated to Taproot with $quorum_count members (expiry: block $expiry_block)"
-        else
-            log_warn "$op_short: Reserves rotation returned: $(echo "$rotate_output" | head -1)"
-        fi
+            local rotate_output=$(run_bdk_cmd "$op" reserves rotate "$op_reserves_id" 2>&1)
+
+            if echo "$rotate_output" | grep -q "Reserves rotated\|rotated successfully"; then
+                local quorum_count=$(echo "$rotate_output" | grep "Quorum Members:" | awk '{print $3}')
+                log_success "$op_short ledger $idx rotated with $quorum_count members"
+            else
+                log_warn "$op_short ledger $idx: $(echo "$rotate_output" | head -1)"
+            fi
+        done
     done
 
     mine_blocks 1
@@ -328,19 +356,24 @@ print_summary() {
     log_info "  Environment Ready!"
     log_info "=========================================="
     echo ""
-    log_info "Operators:"
+    log_info "Operators ($LEDGERS_PER_OP ledgers each):"
     for op in $OPERATORS; do
         local node_id=$(get_value "node_id_$op")
-        local ledger_id=$(get_value "ledger_id_$op")
-        local reserves_id=$(get_value "reserves_id_$op")
-        echo "  $op:"
-        echo "    Node ID:    ${node_id:0:20}..."
-        echo "    Ledger ID:  ${ledger_id:0:20}..."
-        echo "    Reserves:   ${reserves_id:0:30}..."
+        echo "  $op: ${node_id:0:20}..."
+        for idx in $(seq 1 $LEDGERS_PER_OP); do
+            local suffix=""
+            [ "$LEDGERS_PER_OP" -gt 1 ] && suffix="_$idx"
+            local ledger_id=$(get_value "ledger_id_${op}${suffix}")
+            local reserves_id=$(get_value "reserves_id_${op}${suffix}")
+            echo "    Ledger $idx:  ${ledger_id:0:20}..."
+            echo "    Reserves $idx: ${reserves_id:0:30}..."
+        done
         echo ""
     done
 
+    local total_ledgers=$(( $(echo $OPERATORS | wc -w) * LEDGERS_PER_OP ))
     local current_block=$(get_block_height)
+    log_info "Total ledgers: $total_ledgers"
     log_info "Current block height: $current_block"
     log_info "Enforcement delay: $ENFORCEMENT_DELAY blocks"
     echo ""
@@ -348,7 +381,7 @@ print_summary() {
     echo "  Mine blocks:     docker exec bdk-bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass -rpcwallet=faucet -generate 10"
     echo "  Alice CLI:       docker exec bdk-alice deposits-bdk <command>"
     echo "  View ledger:     docker exec bdk-alice deposits-bdk ledger show"
-    echo "  Nostr relay:     ws://localhost:7778"
+    echo "  Nostr relay:     ws://localhost:7801"
     echo ""
     log_info "Nostr watchers are running in background. They will stop when containers restart."
     echo ""
@@ -363,6 +396,7 @@ main() {
     log_info "  Four-Operator Setup"
     log_info "=========================================="
     log_info "Operators: $OPERATORS"
+    log_info "Ledgers per operator: $LEDGERS_PER_OP"
     log_info "Reserves: $RESERVES_AMOUNT sats each"
     log_info "Enforcement delay: $ENFORCEMENT_DELAY blocks"
     echo ""

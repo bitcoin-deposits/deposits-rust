@@ -294,9 +294,7 @@ fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
     let mut network = Network::Signet;
     let mut electrum_url = "https://mempool.space/signet/api".to_string();
     let mut relays = Vec::new();
-    let mut peer_relays = Vec::new();
-    let mut ledger_relays = Vec::new();
-    let mut wallet_relays = Vec::new();
+    let mut slow_relays = Vec::new();
     let mut nwc_uri = None;
     let mut operator_name = None;
     let mut fast_poll = false;
@@ -356,26 +354,12 @@ fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
                 }
                 relays.push(args[i].clone());
             }
-            "--peer-relay" => {
+            "--slow-relay" => {
                 i += 1;
                 if i >= args.len() {
-                    return Err("--peer-relay requires a value".to_string());
+                    return Err("--slow-relay requires a value".to_string());
                 }
-                peer_relays.push(args[i].clone());
-            }
-            "--ledger-relay" => {
-                i += 1;
-                if i >= args.len() {
-                    return Err("--ledger-relay requires a value".to_string());
-                }
-                ledger_relays.push(args[i].clone());
-            }
-            "--wallet-relay" => {
-                i += 1;
-                if i >= args.len() {
-                    return Err("--wallet-relay requires a value".to_string());
-                }
-                wallet_relays.push(args[i].clone());
+                slow_relays.push(args[i].clone());
             }
             "--nwc" => {
                 i += 1;
@@ -427,9 +411,7 @@ fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
         network,
         electrum_url,
         relays,
-        peer_relays,
-        ledger_relays,
-        wallet_relays,
+        slow_relays,
         nwc_uri,
         data_dir,
         operator_name,
@@ -450,14 +432,14 @@ async fn send_daemon_request(
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     use deposits_bdk::nostr::NostrTransportBuilder;
 
-    let relay_url = config.relays.first()
-        .ok_or("No relay configured. Use --relay <url>")?
-        .clone();
+    if config.relays.is_empty() {
+        return Err("No relay configured. Use --relay <url>".into());
+    }
 
     let secret_key = derive_operator_secret(&config.seed, config.network)?;
 
     let transport = NostrTransportBuilder::new(secret_key)
-        .relay(&relay_url)
+        .relays(config.relays.iter().cloned())
         .build()
         .await?;
 
@@ -561,14 +543,8 @@ async fn run_node(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             config.relays.clone()
         }
     );
-    if !config.peer_relays.is_empty() {
-        tracing::info!("Peer relays: {:?}", config.peer_relays);
-    }
-    if !config.ledger_relays.is_empty() {
-        tracing::info!("Ledger relays: {:?}", config.ledger_relays);
-    }
-    if !config.wallet_relays.is_empty() {
-        tracing::info!("Wallet relays: {:?}", config.wallet_relays);
+    if !config.slow_relays.is_empty() {
+        tracing::info!("Slow relays: {:?}", config.slow_relays);
     }
 
     let node = Arc::new(Node::new(config).await?);

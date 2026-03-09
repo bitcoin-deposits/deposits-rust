@@ -6,7 +6,7 @@
 
 set -e
 
-FAST_RELAY_URL="${FAST_RELAY_URL:-ws://nostr-relay:7777}"
+FAST_RELAY_URL="${FAST_RELAY_URL:-ws://relay-alice:7777}"
 CONFIG="/app/strfry-slow.conf"
 
 # Start the relay

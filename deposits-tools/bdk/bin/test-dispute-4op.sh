@@ -1028,13 +1028,13 @@ cleanup_nostr_watchers() {
 
 reset_nostr_data() {
     log_info "Resetting Nostr relay data..."
-    $DC stop nostr-relay >/dev/null 2>&1 || true
-    $DC rm -f nostr-relay >/dev/null 2>&1 || true
-    docker volume rm bdk_bdk_nostr_data >/dev/null 2>&1 || true
+    $DC stop relay-alice relay-bob relay-charlie relay-diana relay-ledgers >/dev/null 2>&1 || true
+    $DC rm -f relay-alice relay-bob relay-charlie relay-diana relay-ledgers >/dev/null 2>&1 || true
+    docker volume rm bdk_relay_alice_data bdk_relay_bob_data bdk_relay_charlie_data bdk_relay_diana_data bdk_relay_ledgers_data >/dev/null 2>&1 || true
     $DC stop bdk-alice bdk-bob bdk-charlie bdk-diana >/dev/null 2>&1 || true
     $DC rm -f bdk-alice bdk-bob bdk-charlie bdk-diana >/dev/null 2>&1 || true
     docker volume rm bdk_bdk_alice_data bdk_bdk_bob_data bdk_bdk_charlie_data bdk_bdk_diana_data >/dev/null 2>&1 || true
-    $DC up -d nostr-relay bdk-alice bdk-bob bdk-charlie bdk-diana >/dev/null 2>&1
+    $DC up -d relay-alice relay-bob relay-charlie relay-diana relay-ledgers bdk-alice bdk-bob bdk-charlie bdk-diana >/dev/null 2>&1
     sleep 5
     log_success "Nostr relay and BDK nodes reset"
 }

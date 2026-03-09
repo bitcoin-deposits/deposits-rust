@@ -14,7 +14,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 WALLET_BIN="$REPO_ROOT/target/release/deposits-wallet"
 
 # Default relay (can be overridden with --relay)
-RELAY_URL="ws://localhost:7778"
+RELAY_URL="ws://localhost:7801"
 
 # Parse arguments
 COMMAND=""
@@ -32,7 +32,7 @@ print_usage() {
     echo "  validate <id>     Validate ledger hash chain"
     echo ""
     echo "Options:"
-    echo "  --relay <url>     Nostr relay URL (default: ws://localhost:7778)"
+    echo "  --relay <url>     Nostr relay URL (default: ws://localhost:7801)"
     echo "  --color-by-pk     Color output by operator pubkey"
     echo "  --color           Alias for --color-by-pk"
     echo ""

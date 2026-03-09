@@ -114,7 +114,7 @@ run_node_cmd() {
         --seed "$seed" \
         --network regtest \
         --electrum http://electrs:3002 \
-        --relay ws://nostr-relay:7777 \
+        --relay ws://relay-alice:7777 \
         --data-dir /data 2>&1
 }
 
@@ -156,9 +156,9 @@ setup_infrastructure() {
 
     # Reset nostr relay and core containers
     log_info "Resetting Nostr relay and core containers..."
-    $DC stop nostr-relay bdk-alice bdk-bob bdk-charlie bdk-diana >/dev/null 2>&1 || true
-    $DC rm -f nostr-relay bdk-alice bdk-bob bdk-charlie bdk-diana >/dev/null 2>&1 || true
-    docker volume rm bdk_bdk_nostr_data 2>/dev/null || true
+    $DC stop relay-alice relay-bob relay-charlie relay-diana relay-ledgers bdk-alice bdk-bob bdk-charlie bdk-diana >/dev/null 2>&1 || true
+    $DC rm -f relay-alice relay-bob relay-charlie relay-diana relay-ledgers bdk-alice bdk-bob bdk-charlie bdk-diana >/dev/null 2>&1 || true
+    docker volume rm bdk_relay_alice_data bdk_relay_bob_data bdk_relay_charlie_data bdk_relay_diana_data bdk_relay_ledgers_data 2>/dev/null || true
     docker volume rm bdk_bdk-alice_data bdk_bdk-bob_data bdk_bdk-charlie_data bdk_bdk-diana_data 2>/dev/null || true
 
     # Stop LDK sidecars for core nodes
@@ -170,7 +170,7 @@ setup_infrastructure() {
 
     # Start core services
     log_info "Starting core services..."
-    $DC up -d bitcoin electrs nostr-relay
+    $DC up -d bitcoin electrs relay-alice relay-bob relay-charlie relay-diana relay-ledgers
 
     log_info "Waiting for services to be ready..."
     sleep 10
@@ -228,7 +228,7 @@ start_bdk_node() {
         --seed "$seed" \
         --network regtest \
         --electrum http://electrs:3002 \
-        --relay ws://nostr-relay:7777 \
+        --relay ws://relay-alice:7777 \
         --data-dir /data \
         --metrics-port 9100 \
         >/dev/null 2>&1
@@ -365,7 +365,7 @@ setup_bdk_node() {
         --seed "$seed" \
         --network regtest \
         --electrum http://electrs:3002 \
-        --relay ws://nostr-relay:7777 \
+        --relay ws://relay-alice:7777 \
         --data-dir /data \
         >/dev/null 2>&1
 
