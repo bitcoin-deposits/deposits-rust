@@ -27,6 +27,13 @@ ENFORCEMENT_DELAY=200      # Blocks until enforcement
 LEDGERS_PER_OP=3           # Number of ledgers per operator
 SKIP_RESET=false
 
+# Fee schedule defaults (advertised minimums)
+ANNUAL_FEE_BPS=50          # 0.5% annual custody fee
+MIN_FEE_SATS=100           # 100 sats minimum per period
+FEE_PERIOD=2016            # ~2 weeks in blocks
+TRANSFER_FEE_FIXED=2       # 2 sats per transfer
+TRANSFER_FEE_RATE_BPS=20   # 0.2% per transfer
+
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -46,9 +53,31 @@ while [[ $# -gt 0 ]]; do
             LEDGERS_PER_OP="$2"
             shift 2
             ;;
+        --annual-fee-bps)
+            ANNUAL_FEE_BPS="$2"
+            shift 2
+            ;;
+        --min-fee-sats)
+            MIN_FEE_SATS="$2"
+            shift 2
+            ;;
+        --fee-period)
+            FEE_PERIOD="$2"
+            shift 2
+            ;;
+        --transfer-fee-fixed)
+            TRANSFER_FEE_FIXED="$2"
+            shift 2
+            ;;
+        --transfer-fee-rate-bps)
+            TRANSFER_FEE_RATE_BPS="$2"
+            shift 2
+            ;;
         *)
             echo "Unknown option: $1"
             echo "Usage: $0 [--skip-reset] [--enforcement-delay BLOCKS] [--reserves SATS] [--ledgers-per-op N]"
+            echo "       [--annual-fee-bps N] [--min-fee-sats N] [--fee-period N]"
+            echo "       [--transfer-fee-fixed N] [--transfer-fee-rate-bps N]"
             exit 1
             ;;
     esac
@@ -201,8 +230,13 @@ open_ledgers() {
                 fi
             fi
 
-            # Pass enforcement block as positional argument
-            local output=$(run_bdk_cmd "$op" ledger open "$enforcement_block" 2>&1)
+            # Pass enforcement block and fee schedule
+            local output=$(run_bdk_cmd "$op" ledger open "$enforcement_block" \
+                --annual-fee-bps "$ANNUAL_FEE_BPS" \
+                --min-fee-sats "$MIN_FEE_SATS" \
+                --fee-period "$FEE_PERIOD" \
+                --transfer-fee-fixed "$TRANSFER_FEE_FIXED" \
+                --transfer-fee-rate-bps "$TRANSFER_FEE_RATE_BPS" 2>&1)
 
             if echo "$output" | grep -q "Ledger opened\|opened successfully"; then
                 local ledger_id=$(echo "$output" | grep "Ledger ID:" | awk '{print $3}')
@@ -376,6 +410,8 @@ print_summary() {
     log_info "Total ledgers: $total_ledgers"
     log_info "Current block height: $current_block"
     log_info "Enforcement delay: $ENFORCEMENT_DELAY blocks"
+    log_info "Custody fees: ${ANNUAL_FEE_BPS} bps annual, ${MIN_FEE_SATS} sats min/${FEE_PERIOD}-block period"
+    log_info "Transfer fees: ${TRANSFER_FEE_FIXED} sats + ${TRANSFER_FEE_RATE_BPS} bps"
     echo ""
     log_info "Useful commands:"
     echo "  Mine blocks:     docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass -rpcwallet=faucet -generate 10"
@@ -399,6 +435,8 @@ main() {
     log_info "Ledgers per operator: $LEDGERS_PER_OP"
     log_info "Reserves: $RESERVES_AMOUNT sats each"
     log_info "Enforcement delay: $ENFORCEMENT_DELAY blocks"
+    log_info "Custody fees: ${ANNUAL_FEE_BPS} bps annual, ${MIN_FEE_SATS} sats min, ${FEE_PERIOD}-block period"
+    log_info "Transfer fees: ${TRANSFER_FEE_FIXED} sats fixed + ${TRANSFER_FEE_RATE_BPS} bps"
     echo ""
 
     # Reset data from previous runs (unless skipped)

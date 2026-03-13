@@ -133,9 +133,15 @@ RESERVES SUBCOMMANDS:
     reserves list   List all reserves outputs
 
 LEDGER SUBCOMMANDS:
-    ledger open [enforcement_block]
+    ledger open [enforcement_block] [fee options]
                     Open a ledger backed by your reserves UTXO. Set enforcement_block to a
                     future block for bootstrap phase, or 0 for immediate enforcement.
+                    Fee options set advertised minimums for deposit negotiation:
+                      --annual-fee-bps <N>        Annual custody fee in basis points
+                      --min-fee-sats <N>          Minimum fee per period in sats
+                      --fee-period <N>            Fee collection period in blocks (default: 2016)
+                      --transfer-fee-fixed <N>    Fixed per-transfer fee in sats
+                      --transfer-fee-rate-bps <N> Proportional per-transfer fee in basis points
     ledger list     List all ledgers
     ledger history [reserves_id]
                     Show hash chain history for a ledger (default: primary ledger)
@@ -1049,6 +1055,26 @@ async fn ledger_command(args: &[String]) -> Result<(), Box<dyn std::error::Error
     }
 }
 
+/// Fee schedule arguments parsed from CLI flags
+#[derive(Default)]
+struct FeeScheduleArgs {
+    annual_fee_bps: Option<u32>,
+    min_fee_sats: Option<u64>,
+    fee_period_blocks: Option<u32>,
+    transfer_fee_fixed: Option<u64>,
+    transfer_fee_rate_bps: Option<u16>,
+}
+
+impl FeeScheduleArgs {
+    fn has_any(&self) -> bool {
+        self.annual_fee_bps.is_some()
+            || self.min_fee_sats.is_some()
+            || self.fee_period_blocks.is_some()
+            || self.transfer_fee_fixed.is_some()
+            || self.transfer_fee_rate_bps.is_some()
+    }
+}
+
 /// Helper to auto-advertise a ledger for wallet discovery
 /// Accepts either reserves_key (bcrt1q...) or ledger_id (64-char hex)
 async fn auto_advertise_ledger(
@@ -1058,6 +1084,7 @@ async fn auto_advertise_ledger(
     network: bitcoin::Network,
     relays: &[String],
     operator_name: Option<&str>,
+    fee_schedule: &FeeScheduleArgs,
 ) {
     use deposits_node::nostr::{NostrTransportBuilder, LedgerAdvertisement};
 
@@ -1094,6 +1121,23 @@ async fn auto_advertise_ledger(
     ad.collateral_enforcement_block = ledger.state.collateral_enforcement_block.unwrap_or(0);
     ad.quorum_size = ledger.state.quorum_members.len() as u8;
     ad.received_collateral_sats = ledger.state.received_collateral_amount / 1000;
+
+    // Apply fee schedule from CLI flags
+    if let Some(bps) = fee_schedule.annual_fee_bps {
+        ad.annual_fee_bps = bps;
+    }
+    if let Some(sats) = fee_schedule.min_fee_sats {
+        ad.min_fee_sats = sats;
+    }
+    if let Some(blocks) = fee_schedule.fee_period_blocks {
+        ad.fee_period_blocks = blocks;
+    }
+    if let Some(fixed) = fee_schedule.transfer_fee_fixed {
+        ad.transfer_fee_fixed_sats = fixed;
+    }
+    if let Some(bps) = fee_schedule.transfer_fee_rate_bps {
+        ad.transfer_fee_rate_bps = bps;
+    }
 
     // Calculate headroom
     let total_obligations_sats = ledger.total_deposit_balance() / 1000;
@@ -1139,17 +1183,54 @@ async fn auto_advertise_ledger(
 /// Open a new ledger backed by our reserves UTXO
 async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // Parse positional arguments: [enforcement_block]
+    // and fee schedule flags
     let mut enforcement_block: u64 = 0; // Default: immediate enforcement
     let mut config_args = Vec::new();
+
+    // Fee schedule (advertised minimums)
+    let mut annual_fee_bps: Option<u32> = None;
+    let mut min_fee_sats: Option<u64> = None;
+    let mut fee_period_blocks: Option<u32> = None;
+    let mut transfer_fee_fixed: Option<u64> = None;
+    let mut transfer_fee_rate_bps: Option<u16> = None;
+
+    let fee_flags = [
+        "--annual-fee-bps", "--min-fee-sats", "--fee-period",
+        "--transfer-fee-fixed", "--transfer-fee-rate-bps",
+    ];
 
     let mut i = 0;
     while i < args.len() {
         if args[i].starts_with("--") {
-            // Config argument - pass through
-            config_args.push(args[i].clone());
-            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
-                config_args.push(args[i + 1].clone());
-                i += 1;
+            match args[i].as_str() {
+                "--annual-fee-bps" if i + 1 < args.len() => {
+                    annual_fee_bps = Some(args[i + 1].parse().map_err(|_| format!("Invalid {}: {}", args[i], args[i + 1]))?);
+                    i += 1;
+                }
+                "--min-fee-sats" if i + 1 < args.len() => {
+                    min_fee_sats = Some(args[i + 1].parse().map_err(|_| format!("Invalid {}: {}", args[i], args[i + 1]))?);
+                    i += 1;
+                }
+                "--fee-period" if i + 1 < args.len() => {
+                    fee_period_blocks = Some(args[i + 1].parse().map_err(|_| format!("Invalid {}: {}", args[i], args[i + 1]))?);
+                    i += 1;
+                }
+                "--transfer-fee-fixed" if i + 1 < args.len() => {
+                    transfer_fee_fixed = Some(args[i + 1].parse().map_err(|_| format!("Invalid {}: {}", args[i], args[i + 1]))?);
+                    i += 1;
+                }
+                "--transfer-fee-rate-bps" if i + 1 < args.len() => {
+                    transfer_fee_rate_bps = Some(args[i + 1].parse().map_err(|_| format!("Invalid {}: {}", args[i], args[i + 1]))?);
+                    i += 1;
+                }
+                _ => {
+                    // Config argument - pass through
+                    config_args.push(args[i].clone());
+                    if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                        config_args.push(args[i + 1].clone());
+                        i += 1;
+                    }
+                }
             }
         } else {
             // First positional argument - enforcement block
@@ -1159,6 +1240,14 @@ async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         }
         i += 1;
     }
+
+    let fee_schedule = FeeScheduleArgs {
+        annual_fee_bps,
+        min_fee_sats,
+        fee_period_blocks,
+        transfer_fee_fixed,
+        transfer_fee_rate_bps,
+    };
 
     let config = parse_config(&config_args)?;
     let seed = config.seed.clone();
@@ -1208,8 +1297,28 @@ async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         Err(e) => eprintln!("  Warning: Failed to broadcast to Nostr: {}", e),
     }
 
+    // Print fee schedule if any flags were set
+    if fee_schedule.has_any() {
+        println!("  Fee schedule:");
+        if let Some(bps) = fee_schedule.annual_fee_bps {
+            println!("    Annual custody fee: {} bps ({:.2}%)", bps, bps as f64 / 100.0);
+        }
+        if let Some(sats) = fee_schedule.min_fee_sats {
+            println!("    Minimum fee per period: {} sats", sats);
+        }
+        if let Some(blocks) = fee_schedule.fee_period_blocks {
+            println!("    Fee collection period: {} blocks", blocks);
+        }
+        if let Some(fixed) = fee_schedule.transfer_fee_fixed {
+            println!("    Transfer fee (fixed): {} sats", fixed);
+        }
+        if let Some(bps) = fee_schedule.transfer_fee_rate_bps {
+            println!("    Transfer fee (rate): {} bps ({:.2}%)", bps, bps as f64 / 100.0);
+        }
+    }
+
     // Auto-advertise ledger for wallet discovery
-    auto_advertise_ledger(&node, &reserves_key, &seed, network, &relays, operator_name.as_deref()).await;
+    auto_advertise_ledger(&node, &reserves_key, &seed, network, &relays, operator_name.as_deref(), &fee_schedule).await;
     if let Err(e) = node.subscribe_to_ledger(&ledger_id).await {
         eprintln!("  Warning: Failed to subscribe to ledger events: {}", e);
     } else {

@@ -397,6 +397,14 @@ pub struct LedgerAdvertisement {
     #[serde(default)]
     pub fee_period_blocks: u32,
 
+    /// Fixed per-transfer fee in sats
+    #[serde(default)]
+    pub transfer_fee_fixed_sats: u64,
+
+    /// Proportional per-transfer fee in basis points
+    #[serde(default)]
+    pub transfer_fee_rate_bps: u16,
+
     // === Deposit Limits ===
 
     /// Maximum single deposit size in sats
@@ -481,6 +489,8 @@ impl LedgerAdvertisement {
             invoice_fee_bps: 0,
             min_fee_sats: 0,
             fee_period_blocks: 0,
+            transfer_fee_fixed_sats: 0,
+            transfer_fee_rate_bps: 0,
             max_deposit_sats: u64::MAX,
             min_deposit_sats: 0,
             max_balance_sats: 0,
