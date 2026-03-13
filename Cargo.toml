@@ -1,27 +1,10 @@
 [workspace]
 members = [
     "deposits-core",
-    "deposits-ldk",
     "deposits-bdk",
-    "deposits-nwc",
     "deposits-tools",
-    "deposits-explorer",
 ]
 resolver = "2"
-
-# Use ldk-node's local rust-lightning fork
-[patch.crates-io]
-lightning = { path = "../rust-lightning/lightning" }
-lightning-types = { path = "../rust-lightning/lightning-types" }
-lightning-invoice = { path = "../rust-lightning/lightning-invoice" }
-lightning-net-tokio = { path = "../rust-lightning/lightning-net-tokio" }
-lightning-persister = { path = "../rust-lightning/lightning-persister", features = ["tokio"] }
-lightning-background-processor = { path = "../rust-lightning/lightning-background-processor" }
-lightning-rapid-gossip-sync = { path = "../rust-lightning/lightning-rapid-gossip-sync" }
-lightning-block-sync = { path = "../rust-lightning/lightning-block-sync" }
-lightning-transaction-sync = { path = "../rust-lightning/lightning-transaction-sync" }
-lightning-liquidity = { path = "../rust-lightning/lightning-liquidity" }
-lightning-macros = { path = "../rust-lightning/lightning-macros" }
 
 # Use nostr-sdk-performance fork with skip-verification and skip-database by default
 nostr-relay-pool = { path = "nostr-sdk-performance/nostr-relay-pool" }
@@ -29,16 +12,3 @@ nostr-relay-pool = { path = "nostr-sdk-performance/nostr-relay-pool" }
 # Release profile with debug info for flamegraphs
 [profile.release]
 debug = 1              # line tables only (minimal size increase, good flamegraph symbols)
-
-[patch."https://github.com/lightningdevkit/rust-lightning"]
-lightning = { path = "../rust-lightning/lightning" }
-lightning-types = { path = "../rust-lightning/lightning-types" }
-lightning-invoice = { path = "../rust-lightning/lightning-invoice" }
-lightning-net-tokio = { path = "../rust-lightning/lightning-net-tokio" }
-lightning-persister = { path = "../rust-lightning/lightning-persister", features = ["tokio"] }
-lightning-background-processor = { path = "../rust-lightning/lightning-background-processor" }
-lightning-rapid-gossip-sync = { path = "../rust-lightning/lightning-rapid-gossip-sync" }
-lightning-block-sync = { path = "../rust-lightning/lightning-block-sync" }
-lightning-transaction-sync = { path = "../rust-lightning/lightning-transaction-sync" }
-lightning-liquidity = { path = "../rust-lightning/lightning-liquidity" }
-lightning-macros = { path = "../rust-lightning/lightning-macros" }

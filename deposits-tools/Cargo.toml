@@ -36,27 +36,10 @@ path = "src/bin/treasury-send.rs"
 name = "standalone-reserves-demo"
 path = "src/bin/standalone_reserves_demo.rs"
 
-[features]
-default = ["bitcoin-deposits"]
-bitcoin-deposits = ["ldk-node/bitcoin-deposits"]
-bitcoin-deposits-non-conforming = ["bitcoin-deposits", "deposits-ldk/bitcoin-deposits-non-conforming"]
-
 [dependencies]
-# Local dependencies
-ldk-node = { path = "../../ldk-node" }
-deposits-core = { path = "../deposits-core" }
-deposits-ldk = { path = "../deposits-ldk" }
-ldk-server = { path = "../../ldk-server/ldk-server" }
-ldk-server-protos = { path = "../../ldk-server/ldk-server-protos" }
-
 # Bitcoin
 bitcoin = { version = "0.32", features = ["serde", "rand-std"] }
 bdk_wallet = { version = "2.2.0", default-features = false, features = ["std", "keys-bip39"] }
-
-# Lightning (via ldk-node's vendor)
-lightning = { path = "../../rust-lightning/lightning", default-features = false, features = ["std"] }
-lightning-invoice = { path = "../../rust-lightning/lightning-invoice" }
-lightning-types = { path = "../../rust-lightning/lightning-types" }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
