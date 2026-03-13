@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Bitcoin Deposits Protocol - Core library (Lightning-implementation agnostic)"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/anthropics/ldk-node"
+repository = "https://github.com/anthropics/deposits-rust"
 keywords = ["bitcoin", "lightning", "custody", "deposits"]
 
 [dependencies]

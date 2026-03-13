@@ -5,15 +5,15 @@
 
 #[cfg(test)]
 mod tests {
-    use ldk_node::bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+    use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 
-    // V2 message types from deposits-ldk
-    use deposits_ldk::handler::messages::{
-        DepositsMessage, LedgerUpdateMsg, LedgerUpdateMsgExt, LedgerUpdateResponseMsg, LedgerOperation,
+    // V2 message types from deposits-core
+    use deposits_core::messages::{
+        DepositsMessage, LedgerUpdateMsg, LedgerUpdateResponseMsg, LedgerOperation,
         HandshakeMsg, HandshakeResponseMsg, CoordinationMsg, CoordinationResponseMsg,
     };
     // Wire message structs from deposits-core for struct construction
-    use deposits_ldk::wire::messages::{
+    use deposits_core::wire_messages::{
         QuorumAddMemberMsg, QuorumRemoveMemberMsg,
         CollateralConsentRequestMsg, CollateralConsentResponseMsg, CollateralAttestationMsg,
     };
@@ -205,7 +205,7 @@ mod tests {
 
     #[test]
     fn test_message_type_constants() {
-        use deposits_ldk::handler::messages::{LEDGER_UPDATE, COORDINATION, COORDINATION_RESPONSE};
+        use deposits_core::messages::{LEDGER_UPDATE, COORDINATION, COORDINATION_RESPONSE};
 
         // V2: Collateral operations go through LedgerUpdate (0x8001) or Coordination (0x800D/0x800F)
         // QuorumAddMember, QuorumRemoveMember, CollateralAttestation -> LedgerUpdate with LedgerOperation

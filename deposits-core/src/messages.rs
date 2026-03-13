@@ -19,7 +19,6 @@
 //! | SYNC (0x8009)          | SYNC_RESPONSE (0x800B)          | State synchronization |
 //! | RECOVERY (0x800D)      | RECOVERY_RESPONSE (0x800F)      | Recovery voting/claims|
 //! | COORDINATION (0x8011)  | COORDINATION_RESPONSE (0x8013)  | Invoice cosigning etc |
-//! | RELAY (0x8015)         | RELAY_RESPONSE (0x8017)         | NWC relay messages    |
 
 use bitcoin::secp256k1::PublicKey;
 use std::io::{self, Read, Write};
@@ -53,8 +52,6 @@ pub mod consts {
     pub const RECOVERY_RESPONSE: u16 = 0x800F;
     pub const COORDINATION: u16 = 0x8011;
     pub const COORDINATION_RESPONSE: u16 = 0x8013;
-    pub const RELAY: u16 = 0x8015;
-    pub const RELAY_RESPONSE: u16 = 0x8017;
 
     // Operation Message Types (used in SignedLedgerUpdate.message_type)
     // Reserves operations
@@ -144,11 +141,6 @@ pub mod consts {
     pub const RECOVERY_CLAIM_SIGNATURE: u16 = 0x8093;
     pub const RECOVERY_CLAIM_COMPLETE: u16 = 0x8095;
 
-    // Relay (NWC)
-    pub const RELAY_NWC_REQUEST: u16 = 0x80A1;
-    pub const RELAY_NWC_RESPONSE: u16 = 0x80A3;
-    pub const RELAY_NWC_DELIVERY_PROOF: u16 = 0x80A5;
-
 }
 
 pub use consts::*;
@@ -164,7 +156,6 @@ pub const ALL_ENVELOPE_MESSAGE_TYPES: &[u16] = &[
     SYNC, SYNC_RESPONSE,
     RECOVERY, RECOVERY_RESPONSE,
     COORDINATION, COORDINATION_RESPONSE,
-    RELAY, RELAY_RESPONSE,
 ];
 
 /// Operation message types - stored in SignedLedgerUpdate.message_type field
@@ -187,7 +178,6 @@ pub const ALL_OPERATION_MESSAGE_TYPES: &[u16] = &[
     QUORUM_JOIN_REQUEST, QUORUM_JOIN_RESPONSE, QUORUM_STATE_SYNC,
     QUORUM_VOTE_REQUEST, QUORUM_VOTE, QUORUM_MEMBERSHIP_CHANGE,
     RECOVERY_VOTE, RECOVERY_CLAIM_REQUEST, RECOVERY_CLAIM_SIGNATURE, RECOVERY_CLAIM_COMPLETE,
-    RELAY_NWC_REQUEST, RELAY_NWC_RESPONSE, RELAY_NWC_DELIVERY_PROOF,
 ];
 
 /// Messages that require acknowledgment
@@ -253,15 +243,12 @@ pub fn get_message_category(message_type: u16) -> Option<&'static str> {
         RECOVERY_VOTE | RECOVERY_CLAIM_REQUEST | RECOVERY_CLAIM_SIGNATURE |
         RECOVERY_CLAIM_COMPLETE => Some("recovery"),
 
-        RELAY_NWC_REQUEST | RELAY_NWC_RESPONSE | RELAY_NWC_DELIVERY_PROOF => Some("relay"),
-
         // V2 types
         LEDGER_UPDATE | LEDGER_UPDATE_RESPONSE => Some("ledger"),
         HANDSHAKE | HANDSHAKE_RESPONSE => Some("handshake"),
         SYNC | SYNC_RESPONSE => Some("sync"),
         RECOVERY | RECOVERY_RESPONSE => Some("recovery"),
         COORDINATION | COORDINATION_RESPONSE => Some("coordination"),
-        RELAY | RELAY_RESPONSE => Some("relay"),
 
         _ => None,
     }
@@ -280,8 +267,6 @@ pub fn type_id_to_const_name(type_id: u16) -> &'static str {
         RECOVERY_RESPONSE => "RECOVERY_RESPONSE",
         COORDINATION => "COORDINATION",
         COORDINATION_RESPONSE => "COORDINATION_RESPONSE",
-        RELAY => "RELAY",
-        RELAY_RESPONSE => "RELAY_RESPONSE",
         _ => "UNKNOWN",
     }
 }
@@ -299,8 +284,6 @@ pub fn type_id_to_variant_name(type_id: u16) -> Option<&'static str> {
         RECOVERY_RESPONSE => Some("RecoveryResponse"),
         COORDINATION => Some("Coordination"),
         COORDINATION_RESPONSE => Some("CoordinationResponse"),
-        RELAY => Some("Relay"),
-        RELAY_RESPONSE => Some("RelayResponse"),
         _ => None,
     }
 }
@@ -369,8 +352,6 @@ pub enum DepositsMessage {
     RecoveryResponse(RecoveryResponseMsg),
     Coordination(CoordinationMsg),
     CoordinationResponse(CoordinationResponseMsg),
-    Relay(RelayMsg),
-    RelayResponse(RelayResponseMsg),
     /// Reserves add output - peer message to add reserves to commitment (not a ledger operation)
     ReservesAddOutput(crate::wire_messages::ReservesAddOutputMsg),
     /// Reserves remove output - peer message to remove reserves from commitment (not a ledger operation)
@@ -390,8 +371,6 @@ impl DepositsMessage {
             Self::RecoveryResponse(_) => RECOVERY_RESPONSE,
             Self::Coordination(_) => COORDINATION,
             Self::CoordinationResponse(_) => COORDINATION_RESPONSE,
-            Self::Relay(_) => RELAY,
-            Self::RelayResponse(_) => RELAY_RESPONSE,
             Self::ReservesAddOutput(_) => RESERVES_ADD_OUTPUT,
             Self::ReservesRemoveOutput(_) => RESERVES_REMOVE_OUTPUT,
         }
@@ -409,8 +388,6 @@ impl DepositsMessage {
             Self::RecoveryResponse(_) => "RecoveryResponse",
             Self::Coordination(_) => "Coordination",
             Self::CoordinationResponse(_) => "CoordinationResponse",
-            Self::Relay(_) => "Relay",
-            Self::RelayResponse(_) => "RelayResponse",
             Self::ReservesAddOutput(_) => "ReservesAddOutput",
             Self::ReservesRemoveOutput(_) => "ReservesRemoveOutput",
         }
@@ -429,8 +406,6 @@ impl DepositsMessage {
             Self::RecoveryResponse(m) => m.reserves_id(),
             Self::Coordination(m) => m.reserves_id(),
             Self::CoordinationResponse(m) => m.reserves_id(),
-            Self::Relay(_) => None,
-            Self::RelayResponse(_) => None,
             Self::ReservesAddOutput(m) => Some(m.reserves_id.clone()),
             Self::ReservesRemoveOutput(m) => Some(m.reserves_id.clone()),
         }
@@ -1214,72 +1189,6 @@ impl CoordinationResponseMsg {
             Self::QuorumStateSync { reserves_id, .. } => Some(reserves_id.clone()),
             Self::QuorumMembershipChange { reserves_id, .. } => Some(reserves_id.clone()),
             Self::AcceptReserves { .. } => None, // Channel-level, not ledger-level
-        }
-    }
-}
-
-// ============================================================================
-// Relay Messages (0x8015 / 0x8017)
-// ============================================================================
-
-/// NWC relay messages
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RelayMsg {
-    /// Forward an NWC request
-    NwcRequest {
-        request_id: [u8; 32],
-        target_operator: PublicKey,
-        deposit_pubkey: PublicKey,
-        nwc_request_content: Vec<u8>,
-        wallet_signature: [u8; 64],
-        wallet_pubkey: PublicKey,
-        timestamp: u64,
-    },
-    /// Provide delivery proof
-    DeliveryProof {
-        request_id: [u8; 32],
-        response_hash: [u8; 32],
-        block_height: u32,
-        attestation_signature: [u8; 64],
-    },
-}
-
-/// Response to relay messages
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RelayResponseMsg {
-    /// NWC response
-    NwcResponse {
-        request_id: [u8; 32],
-        status: RelayStatus,
-        nwc_response_content: Vec<u8>,
-        relay_signature: [u8; 64],
-        relay_pubkey: PublicKey,
-        timestamp: u64,
-    },
-    /// Delivery acknowledgment
-    DeliveryAck {
-        request_id: [u8; 32],
-    },
-}
-
-/// Status of an NWC relay attempt
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u8)]
-pub enum RelayStatus {
-    Success = 0,
-    DeliveredNoResponse = 1,
-    DeliveryFailed = 2,
-    Rejected = 3,
-}
-
-impl RelayStatus {
-    pub fn from_u8(v: u8) -> Option<Self> {
-        match v {
-            0 => Some(Self::Success),
-            1 => Some(Self::DeliveredNoResponse),
-            2 => Some(Self::DeliveryFailed),
-            3 => Some(Self::Rejected),
-            _ => None,
         }
     }
 }
@@ -2251,8 +2160,6 @@ impl DepositsMessage {
             Self::RecoveryResponse(m) => m.write_to(w)?,
             Self::Coordination(m) => m.write_to(w)?,
             Self::CoordinationResponse(m) => m.write_to(w)?,
-            Self::Relay(m) => m.write_to(w)?,
-            Self::RelayResponse(m) => m.write_to(w)?,
             Self::ReservesAddOutput(m) => {
                 write_u64(w, m.initial_amount)?;
                 write_pubkey(w, &m.spend_to)?;
@@ -2324,8 +2231,6 @@ impl DepositsMessage {
             RECOVERY_RESPONSE => Ok(Self::RecoveryResponse(RecoveryResponseMsg::read_from(r)?)),
             COORDINATION => Ok(Self::Coordination(CoordinationMsg::read_from(r)?)),
             COORDINATION_RESPONSE => Ok(Self::CoordinationResponse(CoordinationResponseMsg::read_from(r)?)),
-            RELAY => Ok(Self::Relay(RelayMsg::read_from(r)?)),
-            RELAY_RESPONSE => Ok(Self::RelayResponse(RelayResponseMsg::read_from(r)?)),
             RESERVES_ADD_OUTPUT => {
                 let initial_amount = read_u64(r)?;
                 let spend_to = read_pubkey(r)?;
@@ -2732,90 +2637,6 @@ impl BinaryCodec for CoordinationResponseMsg {
             5 => Ok(Self::AcceptReserves {
                 channel_id: read_32(r)?,
             }),
-            d => Err(CodecError::InvalidDiscriminant(d)),
-        }
-    }
-}
-
-// RelayMsg codec
-impl BinaryCodec for RelayMsg {
-    fn write_to<W: Write>(&self, w: &mut W) -> Result<(), CodecError> {
-        match self {
-            Self::NwcRequest { request_id, target_operator, deposit_pubkey, nwc_request_content, wallet_signature, wallet_pubkey, timestamp } => {
-                write_u8(w, 0)?;
-                write_32(w, request_id)?;
-                write_pubkey(w, target_operator)?;
-                write_pubkey(w, deposit_pubkey)?;
-                write_bytes(w, nwc_request_content)?;
-                write_64(w, wallet_signature)?;
-                write_pubkey(w, wallet_pubkey)?;
-                write_u64(w, *timestamp)?;
-            }
-            Self::DeliveryProof { request_id, response_hash, block_height, attestation_signature } => {
-                write_u8(w, 1)?;
-                write_32(w, request_id)?;
-                write_32(w, response_hash)?;
-                write_u32(w, *block_height)?;
-                write_64(w, attestation_signature)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn read_from<R: Read>(r: &mut R) -> Result<Self, CodecError> {
-        match read_u8(r)? {
-            0 => Ok(Self::NwcRequest {
-                request_id: read_32(r)?,
-                target_operator: read_pubkey(r)?,
-                deposit_pubkey: read_pubkey(r)?,
-                nwc_request_content: read_bytes(r)?,
-                wallet_signature: read_64(r)?,
-                wallet_pubkey: read_pubkey(r)?,
-                timestamp: read_u64(r)?,
-            }),
-            1 => Ok(Self::DeliveryProof {
-                request_id: read_32(r)?,
-                response_hash: read_32(r)?,
-                block_height: read_u32(r)?,
-                attestation_signature: read_64(r)?,
-            }),
-            d => Err(CodecError::InvalidDiscriminant(d)),
-        }
-    }
-}
-
-// RelayResponseMsg codec
-impl BinaryCodec for RelayResponseMsg {
-    fn write_to<W: Write>(&self, w: &mut W) -> Result<(), CodecError> {
-        match self {
-            Self::NwcResponse { request_id, status, nwc_response_content, relay_signature, relay_pubkey, timestamp } => {
-                write_u8(w, 0)?;
-                write_32(w, request_id)?;
-                write_u8(w, *status as u8)?;
-                write_bytes(w, nwc_response_content)?;
-                write_64(w, relay_signature)?;
-                write_pubkey(w, relay_pubkey)?;
-                write_u64(w, *timestamp)?;
-            }
-            Self::DeliveryAck { request_id } => {
-                write_u8(w, 1)?;
-                write_32(w, request_id)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn read_from<R: Read>(r: &mut R) -> Result<Self, CodecError> {
-        match read_u8(r)? {
-            0 => Ok(Self::NwcResponse {
-                request_id: read_32(r)?,
-                status: RelayStatus::from_u8(read_u8(r)?).ok_or(CodecError::InvalidData("invalid relay status".to_string()))?,
-                nwc_response_content: read_bytes(r)?,
-                relay_signature: read_64(r)?,
-                relay_pubkey: read_pubkey(r)?,
-                timestamp: read_u64(r)?,
-            }),
-            1 => Ok(Self::DeliveryAck { request_id: read_32(r)? }),
             d => Err(CodecError::InvalidDiscriminant(d)),
         }
     }
@@ -4260,157 +4081,6 @@ impl TlvDecode for CoordinationResponseMsg {
 }
 
 // ============================================================================
-// TLV Encoding for Relay Messages
-// ============================================================================
-
-mod relay_tlv {
-    pub const DISCRIMINANT: u64 = 0;
-    pub const REQUEST_ID: u64 = 2;
-    pub const TARGET_OPERATOR: u64 = 4;
-    pub const DEPOSIT_PUBKEY: u64 = 6;
-    pub const NWC_REQUEST_CONTENT: u64 = 8;
-    pub const WALLET_SIGNATURE: u64 = 10;
-    pub const WALLET_PUBKEY: u64 = 12;
-    pub const TIMESTAMP: u64 = 14;
-    pub const RESPONSE_HASH: u64 = 16;
-    pub const BLOCK_HEIGHT: u64 = 18;
-    pub const ATTESTATION_SIGNATURE: u64 = 20;
-}
-
-impl TlvEncode for RelayMsg {
-    fn tlv_encode(&self) -> Vec<u8> {
-        use relay_tlv::*;
-        match self {
-            Self::NwcRequest {
-                request_id, target_operator, deposit_pubkey, nwc_request_content,
-                wallet_signature, wallet_pubkey, timestamp,
-            } => {
-                TlvBuilder::new()
-                    .u8_field(DISCRIMINANT, 0)
-                    .bytes_field(REQUEST_ID, request_id)
-                    .pubkey_field(TARGET_OPERATOR, target_operator)
-                    .pubkey_field(DEPOSIT_PUBKEY, deposit_pubkey)
-                    .bytes_field(NWC_REQUEST_CONTENT, nwc_request_content)
-                    .bytes_field(WALLET_SIGNATURE, wallet_signature)
-                    .pubkey_field(WALLET_PUBKEY, wallet_pubkey)
-                    .u64_field(TIMESTAMP, *timestamp)
-                    .build()
-            }
-            Self::DeliveryProof {
-                request_id, response_hash, block_height, attestation_signature,
-            } => {
-                TlvBuilder::new()
-                    .u8_field(DISCRIMINANT, 1)
-                    .bytes_field(REQUEST_ID, request_id)
-                    .bytes_field(RESPONSE_HASH, response_hash)
-                    .u32_field(BLOCK_HEIGHT, *block_height)
-                    .bytes_field(ATTESTATION_SIGNATURE, attestation_signature)
-                    .build()
-            }
-        }
-    }
-}
-
-impl TlvDecode for RelayMsg {
-    fn tlv_decode(data: &[u8]) -> TlvResult<Self> {
-        use relay_tlv::*;
-        let reader = TlvReader::new(data)?;
-        let discriminant = reader.read_u8(DISCRIMINANT)?;
-        match discriminant {
-            0 => Ok(Self::NwcRequest {
-                request_id: reader.read_bytes(REQUEST_ID)?,
-                target_operator: reader.read_pubkey(TARGET_OPERATOR)?,
-                deposit_pubkey: reader.read_pubkey(DEPOSIT_PUBKEY)?,
-                nwc_request_content: reader.read_raw(NWC_REQUEST_CONTENT)?.to_vec(),
-                wallet_signature: reader.read_bytes(WALLET_SIGNATURE)?,
-                wallet_pubkey: reader.read_pubkey(WALLET_PUBKEY)?,
-                timestamp: reader.read_u64(TIMESTAMP)?,
-            }),
-            1 => Ok(Self::DeliveryProof {
-                request_id: reader.read_bytes(REQUEST_ID)?,
-                response_hash: reader.read_bytes(RESPONSE_HASH)?,
-                block_height: reader.read_u32(BLOCK_HEIGHT)?,
-                attestation_signature: reader.read_bytes(ATTESTATION_SIGNATURE)?,
-            }),
-            d => Err(TlvError::InvalidFieldValue {
-                field_type: DISCRIMINANT,
-                reason: format!("unknown RelayMsg discriminant: {}", d),
-            }),
-        }
-    }
-}
-
-mod relay_response_tlv {
-    pub const DISCRIMINANT: u64 = 0;
-    pub const REQUEST_ID: u64 = 2;
-    pub const STATUS: u64 = 4;
-    pub const NWC_RESPONSE_CONTENT: u64 = 6;
-    pub const RELAY_SIGNATURE: u64 = 8;
-    pub const RELAY_PUBKEY: u64 = 10;
-    pub const TIMESTAMP: u64 = 12;
-}
-
-impl TlvEncode for RelayResponseMsg {
-    fn tlv_encode(&self) -> Vec<u8> {
-        use relay_response_tlv::*;
-        match self {
-            Self::NwcResponse {
-                request_id, status, nwc_response_content,
-                relay_signature, relay_pubkey, timestamp,
-            } => {
-                TlvBuilder::new()
-                    .u8_field(DISCRIMINANT, 0)
-                    .bytes_field(REQUEST_ID, request_id)
-                    .u8_field(STATUS, *status as u8)
-                    .bytes_field(NWC_RESPONSE_CONTENT, nwc_response_content)
-                    .bytes_field(RELAY_SIGNATURE, relay_signature)
-                    .pubkey_field(RELAY_PUBKEY, relay_pubkey)
-                    .u64_field(TIMESTAMP, *timestamp)
-                    .build()
-            }
-            Self::DeliveryAck { request_id } => {
-                TlvBuilder::new()
-                    .u8_field(DISCRIMINANT, 1)
-                    .bytes_field(REQUEST_ID, request_id)
-                    .build()
-            }
-        }
-    }
-}
-
-impl TlvDecode for RelayResponseMsg {
-    fn tlv_decode(data: &[u8]) -> TlvResult<Self> {
-        use relay_response_tlv::*;
-        let reader = TlvReader::new(data)?;
-        let discriminant = reader.read_u8(DISCRIMINANT)?;
-        match discriminant {
-            0 => {
-                let status_byte = reader.read_u8(STATUS)?;
-                let status = RelayStatus::from_u8(status_byte).ok_or_else(|| TlvError::InvalidFieldValue {
-                    field_type: STATUS,
-                    reason: format!("unknown RelayStatus: {}", status_byte),
-                })?;
-                Ok(Self::NwcResponse {
-                    request_id: reader.read_bytes(REQUEST_ID)?,
-                    status,
-                    nwc_response_content: reader.read_raw(NWC_RESPONSE_CONTENT)?.to_vec(),
-                    relay_signature: reader.read_bytes(RELAY_SIGNATURE)?,
-                    relay_pubkey: reader.read_pubkey(RELAY_PUBKEY)?,
-                    timestamp: reader.read_u64(TIMESTAMP)?,
-                })
-            }
-            1 => Ok(Self::DeliveryAck {
-                request_id: reader.read_bytes(REQUEST_ID)?,
-            }),
-            d => Err(TlvError::InvalidFieldValue {
-                field_type: DISCRIMINANT,
-                reason: format!("unknown RelayResponseMsg discriminant: {}", d),
-            }),
-        }
-    }
-}
-
-// ============================================================================
 // TLV Encoding for ReservesAddOutputMsg
 // ============================================================================
 
@@ -4514,8 +4184,6 @@ impl DepositsMessage {
             Self::RecoveryResponse(msg) => (RECOVERY_RESPONSE, msg.tlv_encode()),
             Self::Coordination(msg) => (COORDINATION, msg.tlv_encode()),
             Self::CoordinationResponse(msg) => (COORDINATION_RESPONSE, msg.tlv_encode()),
-            Self::Relay(msg) => (RELAY, msg.tlv_encode()),
-            Self::RelayResponse(msg) => (RELAY_RESPONSE, msg.tlv_encode()),
             Self::ReservesAddOutput(msg) => (RESERVES_ADD_OUTPUT, msg.tlv_encode()),
             Self::ReservesRemoveOutput(msg) => (RESERVES_REMOVE_OUTPUT, msg.tlv_encode()),
         };
@@ -4542,8 +4210,6 @@ impl DepositsMessage {
             RECOVERY_RESPONSE => Ok(Self::RecoveryResponse(RecoveryResponseMsg::tlv_decode(&body)?)),
             COORDINATION => Ok(Self::Coordination(CoordinationMsg::tlv_decode(&body)?)),
             COORDINATION_RESPONSE => Ok(Self::CoordinationResponse(CoordinationResponseMsg::tlv_decode(&body)?)),
-            RELAY => Ok(Self::Relay(RelayMsg::tlv_decode(&body)?)),
-            RELAY_RESPONSE => Ok(Self::RelayResponse(RelayResponseMsg::tlv_decode(&body)?)),
             RESERVES_ADD_OUTPUT => Ok(Self::ReservesAddOutput(crate::wire_messages::ReservesAddOutputMsg::tlv_decode(&body)?)),
             RESERVES_REMOVE_OUTPUT => Ok(Self::ReservesRemoveOutput(crate::wire_messages::ReservesRemoveOutputMsg::tlv_decode(&body)?)),
             _ => Err(TlvError::InvalidFieldValue {
@@ -4581,8 +4247,6 @@ mod tests {
         assert_eq!(RECOVERY_RESPONSE & 1, 1);
         assert_eq!(COORDINATION & 1, 1);
         assert_eq!(COORDINATION_RESPONSE & 1, 1);
-        assert_eq!(RELAY & 1, 1);
-        assert_eq!(RELAY_RESPONSE & 1, 1);
     }
 
     #[test]
@@ -4723,7 +4387,6 @@ mod tests {
             SYNC, SYNC_RESPONSE,
             RECOVERY, RECOVERY_RESPONSE,
             COORDINATION, COORDINATION_RESPONSE,
-            RELAY, RELAY_RESPONSE,
         ];
         for t in types {
             assert!(t & 1 == 1, "Message type 0x{:04X} is not odd", t);
@@ -5007,60 +4670,6 @@ mod tests {
     }
 
     #[test]
-    fn test_relay_msg_tlv_roundtrip() {
-        use crate::tlv::{TlvEncode, TlvDecode};
-
-        let msgs = vec![
-            RelayMsg::NwcRequest {
-                request_id: [0xAA; 32],
-                target_operator: test_pubkey(),
-                deposit_pubkey: test_pubkey(),
-                nwc_request_content: vec![0xBB; 100],
-                wallet_signature: [0xCC; 64],
-                wallet_pubkey: test_pubkey(),
-                timestamp: 1234567890,
-            },
-            RelayMsg::DeliveryProof {
-                request_id: [0xDD; 32],
-                response_hash: [0xEE; 32],
-                block_height: 800000,
-                attestation_signature: [0xFF; 64],
-            },
-        ];
-
-        for msg in msgs {
-            let encoded = msg.tlv_encode();
-            let decoded = RelayMsg::tlv_decode(&encoded).unwrap();
-            assert_eq!(msg, decoded);
-        }
-    }
-
-    #[test]
-    fn test_relay_response_msg_tlv_roundtrip() {
-        use crate::tlv::{TlvEncode, TlvDecode};
-
-        let msgs = vec![
-            RelayResponseMsg::NwcResponse {
-                request_id: [0xAA; 32],
-                status: RelayStatus::Success,
-                nwc_response_content: vec![0xBB; 50],
-                relay_signature: [0xCC; 64],
-                relay_pubkey: test_pubkey(),
-                timestamp: 1234567890,
-            },
-            RelayResponseMsg::DeliveryAck {
-                request_id: [0xDD; 32],
-            },
-        ];
-
-        for msg in msgs {
-            let encoded = msg.tlv_encode();
-            let decoded = RelayResponseMsg::tlv_decode(&encoded).unwrap();
-            assert_eq!(msg, decoded);
-        }
-    }
-
-    #[test]
     fn test_deposits_message_v2_tlv_roundtrip() {
         let messages = vec![
             DepositsMessage::LedgerUpdate(LedgerUpdateMsg {
@@ -5092,12 +4701,6 @@ mod tests {
                 ledger_id: [0x12; 32],
                 last_known_sequence: 5,
                 last_known_hash: [0xFF; 32],
-            }),
-            DepositsMessage::Relay(RelayMsg::DeliveryProof {
-                request_id: [0xFF; 32],
-                response_hash: [0x11; 32],
-                block_height: 850000,
-                attestation_signature: [0x22; 64],
             }),
         ];
 

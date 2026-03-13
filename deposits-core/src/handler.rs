@@ -497,12 +497,6 @@ where
             DepositsMessage::CoordinationResponse(msg) => {
                 self.handle_coordination_response(sender, msg)
             }
-            DepositsMessage::Relay(msg) => {
-                self.handle_relay(sender, msg)
-            }
-            DepositsMessage::RelayResponse(msg) => {
-                self.handle_relay_response(sender, msg)
-            }
             DepositsMessage::ReservesAddOutput(msg) => {
                 self.handle_reserves_add_output(sender, msg)
             }
@@ -772,31 +766,6 @@ where
         self.logger.log(
             LogLevel::Debug,
             &format!("Coordination response from {}", sender),
-        );
-        Ok(None)
-    }
-
-    fn handle_relay(
-        &self,
-        sender: PublicKey,
-        _msg: &crate::messages::RelayMsg,
-    ) -> Result<Option<crate::messages::DepositsMessage>, HandleError> {
-        self.logger.log(
-            LogLevel::Debug,
-            &format!("Relay message from {}", sender),
-        );
-        // Relay handling - stub for now
-        Ok(None)
-    }
-
-    fn handle_relay_response(
-        &self,
-        sender: PublicKey,
-        _msg: &crate::messages::RelayResponseMsg,
-    ) -> Result<Option<crate::messages::DepositsMessage>, HandleError> {
-        self.logger.log(
-            LogLevel::Debug,
-            &format!("Relay response from {}", sender),
         );
         Ok(None)
     }

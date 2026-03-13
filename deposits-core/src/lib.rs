@@ -229,8 +229,6 @@ pub use wire_messages::{
     QuorumMembershipChangeMsg, QuorumStateSyncMsg, QuorumVoteRequestMsg,
     // Recovery messages
     RecoveryVoteMsg, RecoveryClaimRequestMsg, RecoveryClaimSignatureMsg, RecoveryClaimCompleteMsg,
-    // Relay messages
-    RelayNwcRequestMsg, RelayNwcResponseMsg, RelayNwcDeliveryProofMsg,
     // Ledger export messages
     LedgerExportRequestMsg, LedgerExportResponseMsg,
 };

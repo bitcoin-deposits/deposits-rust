@@ -10,16 +10,13 @@ mod tests {
     use std::str::FromStr;
     use std::io::Cursor;
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-    // Use re-exports from ldk_node to avoid version conflicts
-    use ldk_node::bitcoin::secp256k1::PublicKey;
-    use ldk_node::lightning::util::ser::Readable;
-    use deposits_ldk::handler::messages::{
+    use bitcoin::secp256k1::PublicKey;
+    use deposits_core::messages::{
         DepositsMessage, LedgerUpdateMsg, LedgerUpdateResponseMsg, LedgerOperation,
         HandshakeMsg, HandshakeResponseMsg, type_id_to_const_name, type_id_to_variant_name,
     };
 
-    #[cfg(feature = "bitcoin-deposits")]
-    use ldk_node::lightning::ln::peer_handler::CustomMessageHandler;
+    // CustomMessageHandler was part of LDK peer handler, no longer available
 
     /// Parse a single PEER_MSG log line
     /// Format: [timestamp INFO module] PEER_MSG|<sender>|0x<type>|<variant>|<base64>
@@ -217,8 +214,8 @@ mod tests {
     #[test]
     #[ignore = "TODO: Update patterns for V2 struct variants"]
     fn test_replay_alice_messages_through_handler() {
-        use deposits_ldk::testing::create_test_handler_with_node_id;
-        use deposits_ldk::handler::LedgerOperations;
+        // TODO: create_test_handler_with_node_id and LedgerOperations were in deposits-ldk, now removed
+        // use deposits_core::handler_traits::LedgerOperations;
 
         // Load Alice's peer messages
         let alice_path = concat!(env!("CARGO_MANIFEST_DIR"), "/example-peer-messages/alice-peer-msg.txt");
@@ -381,8 +378,8 @@ mod tests {
     #[test]
     #[ignore = "TODO: Update patterns for V2 struct variants"]
     fn test_replay_all_nodes_and_compare() {
-        use deposits_ldk::testing::create_test_handler_with_node_id;
-        use deposits_ldk::handler::LedgerOperations;
+        // TODO: create_test_handler_with_node_id and LedgerOperations were in deposits-ldk, now removed
+        // use deposits_core::handler_traits::LedgerOperations;
 
         let node_names = vec!["alice", "bob", "charlie"];
 
@@ -498,7 +495,7 @@ mod tests {
         // The following code is commented out as it uses deprecated API:
         // use ldk_node::deposits::testing::create_test_handler_with_node_id;
         // use ldk_node::deposits::DepositsHandler;
-        // use deposits_ldk::handler::LedgerOperations;
+        // use deposits_core::handler_traits::LedgerOperations;
         // use ldk_node::logger::Logger;
         // use std::sync::Arc;
         // use std::io::Write;

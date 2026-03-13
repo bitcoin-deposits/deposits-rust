@@ -10,7 +10,7 @@
 
 use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 use deposits_core::types::QuorumMember;
-use deposits_ldk::handler::ledger_ext::{Ledger, LedgerRole};
+use deposits_core::ledger::{Ledger, LedgerRole};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 

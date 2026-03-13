@@ -11,10 +11,10 @@
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::{Secp256k1, SecretKey, PublicKey};
 
-use deposits_ldk::handler::messages::{
+use deposits_core::messages::{
     DepositsMessage, RecoveryMsg,
 };
-use deposits_ldk::wire::messages::UncreditedPaymentMsg;
+use deposits_core::wire_messages::UncreditedPaymentMsg;
 
 /// Generate a test public key from a seed byte
 fn generate_test_pubkey(seed: u8) -> PublicKey {
@@ -87,7 +87,7 @@ fn test_uncredited_payment_msg_roundtrip() {
 
 #[test]
 fn test_uncredited_payment_msg_type() {
-    use deposits_ldk::handler::messages::RECOVERY;
+    use deposits_core::messages::RECOVERY;
 
     let msg = DepositsMessage::Recovery(RecoveryMsg::UncreditedPayment {
         operator: generate_test_pubkey(1),

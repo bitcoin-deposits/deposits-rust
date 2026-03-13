@@ -335,7 +335,7 @@ fn test_holding_cell_stress() {
 
 #[test]
 fn test_ledger_role_equality() {
-    use deposits_ldk::handler::ledger_ext::LedgerRole;
+    use deposits_core::ledger::LedgerRole;
 
     assert_eq!(LedgerRole::Operator, LedgerRole::Operator);
     assert_eq!(LedgerRole::Partner, LedgerRole::Partner);
@@ -348,7 +348,7 @@ fn test_ledger_role_equality() {
 
 #[test]
 fn test_ledger_role_debug() {
-    use deposits_ldk::handler::ledger_ext::LedgerRole;
+    use deposits_core::ledger::LedgerRole;
 
     let operator = format!("{:?}", LedgerRole::Operator);
     let partner = format!("{:?}", LedgerRole::Partner);

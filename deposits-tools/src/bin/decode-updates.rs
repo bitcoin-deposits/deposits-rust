@@ -19,11 +19,10 @@
 //   # Hex from command line
 //   decode-updates --hex <hex_string>
 
-use std::io::{self, BufRead, Read, Cursor};
+use std::io::{self, BufRead, Read};
 // Use library types directly
 use deposits_core::{SignedLedgerUpdate, SignedLedgerUpdateLog};
-use deposits_ldk::handler::messages::{DepositsMessage, type_id_to_const_name};
-use lightning::util::ser::Readable;
+use deposits_core::messages::{DepositsMessage, type_id_to_const_name};
 use bitcoin::secp256k1::PublicKey;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
@@ -56,8 +55,7 @@ fn format_timestamp(ts: u64) -> String {
 /// Decode message bytes using DepositsMessage::read (same as SignedLedgerUpdate::get_message)
 /// Returns formatted string describing the message content
 fn decode_message_content(_message_type: u16, message_bytes: &[u8]) -> String {
-    let mut cursor = Cursor::new(message_bytes);
-    match DepositsMessage::read(&mut cursor) {
+    match DepositsMessage::decode(message_bytes) {
         Ok(msg) => format!("{:?}", msg),
         Err(e) => format!("Decode error: {:?}", e),
     }

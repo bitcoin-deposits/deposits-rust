@@ -1,0 +1,80 @@
+# Prometheus configuration for deposits-node cluster
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Bitcoin Core via exporter
+  - job_name: 'bitcoin'
+    static_configs:
+      - targets:
+          - 'bitcoin-exporter:9332'
+        labels:
+          cluster: 'regtest'
+
+  # Electrs metrics (needs fallback protocol as electrs doesn't send Content-Type)
+  - job_name: 'electrs'
+    fallback_scrape_protocol: PrometheusText0.0.4
+    static_configs:
+      - targets:
+          - 'electrs:4224'
+        labels:
+          cluster: 'regtest'
+
+  # Main operator nodes (always running)
+  - job_name: 'deposits-node'
+    static_configs:
+      - targets:
+          - 'alice:9100'
+          - 'bob:9100'
+          - 'charlie:9100'
+          - 'diana:9100'
+        labels:
+          cluster: 'regtest'
+
+  # Dynamic eve nodes (scaled with payment-simulator)
+  # These are discovered via file_sd_configs or can be added manually
+  - job_name: 'deposits-node-eve'
+    static_configs:
+      - targets:
+          - 'eve:9100'
+          - 'eve01:9100'
+          - 'eve02:9100'
+          - 'eve03:9100'
+          - 'eve04:9100'
+          - 'eve05:9100'
+          - 'eve06:9100'
+          - 'eve07:9100'
+          - 'eve08:9100'
+          - 'eve09:9100'
+          - 'eve10:9100'
+          - 'eve11:9100'
+          - 'eve12:9100'
+          - 'eve13:9100'
+          - 'eve14:9100'
+          - 'eve15:9100'
+          - 'eve16:9100'
+          - 'eve17:9100'
+          - 'eve18:9100'
+          - 'eve19:9100'
+          - 'eve20:9100'
+        labels:
+          cluster: 'regtest'
+          node_type: 'eve'
+
+  # Payment simulator (runs on host, exposes metrics on port 9200)
+  - job_name: 'payment-simulator'
+    static_configs:
+      - targets:
+          - 'host.docker.internal:9200'
+        labels:
+          cluster: 'regtest'
+
+  # strfry Nostr relay exporter (runs on host, exposes metrics on port 9201)
+  - job_name: 'strfry-relay'
+    scrape_interval: 10s
+    static_configs:
+      - targets:
+          - 'host.docker.internal:9201'
+        labels:
+          cluster: 'regtest'

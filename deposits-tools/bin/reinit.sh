@@ -1,67 +1,149 @@
 #!/bin/bash
+# Reinitialize the test network
 #
-# Full reinitialization of the test environment
-# Tears down containers, rebuilds, and recreates everything
+# This script:
+# 1. Stops and removes all containers and volumes
+# 2. Rebuilds the deposits-node image
+# 3. Starts all services
+# 4. Sets up the faucet wallet
+# 5. Funds the nodes
 #
-# Usage: ./bin/reinit.sh [network]
+# Usage:
+#   ./bin/reinit.sh           # Full reinit
+#   ./bin/reinit.sh --quick   # Skip rebuild, just restart
+#   ./bin/reinit.sh --fund    # Just fund the nodes (assumes running)
 
-cd "$(dirname "$0")/.."
 set -e
-. ./bin/_common.sh
 
-NETWORK=$(get_network "${1:-}") || exit 1
-validate_network "$NETWORK" || exit 1
-COMPOSE_FILE=$(get_compose_file "$NETWORK")
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/_common.sh"
 
-rm -f wallet/*.json
+# Parse arguments
+QUICK=false
+FUND_ONLY=false
 
-touch log/reinit-time
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --quick|-q)
+            QUICK=true
+            shift
+            ;;
+        --fund|-f)
+            FUND_ONLY=true
+            shift
+            ;;
+        --help|-h)
+            echo "Usage: $0 [OPTIONS]"
+            echo ""
+            echo "Options:"
+            echo "  --quick, -q   Skip rebuild, just restart containers"
+            echo "  --fund, -f    Just fund the nodes (assumes services are running)"
+            echo "  --help, -h    Show this help message"
+            exit 0
+            ;;
+        *)
+            log_error "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+done
 
-if [ "$NETWORK" = "regtest" ]; then
-    # Regtest: wipe volumes since we can mine new funds
-    docker compose -f "$COMPOSE_FILE" down -v
-else
-    # Mutinynet: preserve volumes to keep funds (can't mine, need faucet)
-    docker compose -f "$COMPOSE_FILE" down
+if $FUND_ONLY; then
+    log_info "Funding nodes only..."
+    wait_for_bitcoin
+    wait_for_electrs
+
+    fund_nodes_batch 10
+    mine_blocks 6
+    log_success "All nodes funded"
+    exit 0
 fi
 
-docker compose -f "$COMPOSE_FILE" up --build -d
-cargo run --manifest-path ../Cargo.toml --features bitcoin-deposits --bin network-init -- --network "$NETWORK" 2> /dev/null
+log_info "=== Reinitializing Test Network ==="
 
-# Wait for peer connections to stabilize after network init
-# LDK peers may disconnect/reconnect during channel reestablishment
-echo "⏳ Waiting for peer connections to stabilize (60 seconds)..."
-sleep 60
+# Stop any eve containers from setup-scale.sh (not managed by compose)
+log_info "Cleaning up eve containers..."
+for c in $(docker ps -aq --filter 'name=eve'); do
+    docker stop "$c" 2>/dev/null || true
+    docker rm "$c" 2>/dev/null || true
+done
+# Remove eve volumes
+for v in $(docker volume ls -q --filter 'name=bdk_eve'); do
+    docker volume rm "$v" 2>/dev/null || true
+done
 
-# For mutinynet, drop existing ledgers (regtest volumes were already wiped with -v)
-if [ "$NETWORK" = "mutinynet" ]; then
-    echo "🗑️ Dropping existing ledgers..."
-    # Stop containers, clear deposits data from SQLite, restart
-    docker compose -f "$COMPOSE_FILE" stop ldk-alice ldk-bob ldk-charlie
-    NETWORK="$NETWORK" ./bin/drop-ledgers-offline.sh alice bob charlie
-    docker compose -f "$COMPOSE_FILE" start ldk-alice ldk-bob ldk-charlie
-    # Wait for nodes to restart
-    echo "⏳ Waiting for nodes to restart (30 seconds)..."
-    sleep 30
+# Stop everything
+log_info "Stopping all containers..."
+$DC down -v --remove-orphans 2>/dev/null || true
+
+# Clear wallet data (deposits become invalid after reinit)
+WALLET_DATA_DIR="${WALLET_DATA_DIR:-$HOME/.deposits-wallet}"
+if [ -d "$WALLET_DATA_DIR" ]; then
+    log_info "Clearing wallet data ($WALLET_DATA_DIR)..."
+    rm -rf "$WALLET_DATA_DIR"
 fi
 
-# Create deposit wallets (uses NWC DM flow - no node wallets needed)
-echo "🔑 Creating deposit wallet 'amber' for alice..."
-./bin/make-a-wallet.sh alice charlie bob amber
+# Remove any dangling images
+docker image prune -f 2>/dev/null || true
 
-echo "🔑 Creating deposit wallet 'blue' for bob..."
-./bin/make-a-wallet.sh bob charlie alice blue
+if ! $QUICK; then
+    # Build local wallet binary for ./bin/wallet.sh
+    log_info "Building local deposits-wallet binary..."
+    cargo build --release --manifest-path "$BDK_DIR/../../Cargo.toml" -p deposits-node --bin deposits-wallet 2>&1 | tail -3
 
-# Copy TLS certificates for CLI access
+    # Rebuild deposits-node image (shared by all nodes)
+    log_info "Building deposits-node image..."
+    $DC build --no-cache alice
+fi
+
+# Start infrastructure services first
+log_info "Starting infrastructure services..."
+$DC up -d bitcoin
+wait_for_bitcoin
+
+$DC up -d relay-alice relay-bob relay-charlie relay-diana
+$DC up -d relay-ledgers
+wait_for_nostr
+
+$DC up -d electrs
+wait_for_electrs
+
+# Setup faucet
+setup_faucet
+
+# Start block miner (1 block/sec for regtest)
+$DC up -d miner
+
+# Start nodes
+log_info "Starting nodes..."
+$DC up -d alice bob charlie diana
+
+# Start monitoring stack
+log_info "Starting monitoring (Prometheus + Grafana)..."
+$DC up -d prometheus grafana
+
+# Give nodes time to start
+log_info "Waiting for nodes to initialize..."
+sleep 10
+
+# Fund all nodes in parallel, then mine to confirm
+log_info "Funding nodes..."
+fund_nodes_batch 10
+mine_blocks 6
+
+# Show status
 echo ""
-echo "🔐 Copying TLS certificates..."
-copy_tls_certs alice bob charlie
-
-# Backup seeds for mutinynet so we can recover funds if volumes are wiped
-if [ "$NETWORK" = "mutinynet" ]; then
-    echo ""
-    echo "💾 Backing up node wallet seeds..."
-    ./bin/mutinynet-treasury.sh backup-seeds
-fi
-
-echo "✅ Reinit complete!"
+log_success "=== Test Network Ready ==="
+echo ""
+show_status
+echo ""
+log_info "Block height: $(get_block_height)"
+echo ""
+log_info "Useful commands:"
+echo "  Follow logs:    $DC logs -f"
+echo "  Alice logs:     $DC logs -f alice"
+echo "  Mine blocks:    docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass -rpcwallet=faucet -generate 1"
+echo "  Nostr relay:    ws://localhost:7801"
+echo "  Electrs:        http://localhost:3102"
+echo "  Prometheus:     http://localhost:9090"
+echo "  Grafana:        http://localhost:3010 (admin/admin)"

@@ -1,25 +1,247 @@
 use bitcoin::secp256k1::{Secp256k1, SecretKey, PublicKey};
 use clap::{Arg, ArgMatches, Command, CommandFactory, ValueHint};
 use clap_complete::{generate, Shell};
-use deposits_ldk::service::{
-    endpoints,
-    InitLedgerRequest, InitLedgerResponse,
-    ListLedgersRequest, ListLedgersResponse,
-    CloseLedgerRequest, CloseLedgerResponse,
-    AddDepositRequest, AddDepositResponse,
-    ListDepositsRequest, ListDepositsResponse,
-    RemoveDepositRequest, RemoveDepositResponse,
-    AddReservesRequest, AddReservesResponse,
-    ReduceReservesRequest, ReduceReservesResponse,
-    RemoveReservesRequest, RemoveReservesResponse,
-    GetLedgerUpdatesRequest, GetLedgerUpdatesResponse,
-    QuorumAddMemberRequest, QuorumAddMemberResponse,
-    QuorumRemoveMemberRequest, QuorumRemoveMemberResponse,
-    GetDepositNwcRequest, GetDepositNwcResponse,
-    DepositsError,
-};
-use ldk_server_protos::api::{GetNodeInfoRequest, GetNodeInfoResponse};
-use ldk_server_protos::endpoints::GET_NODE_INFO_PATH;
+// TODO: These service types were protobuf-generated in deposits-ldk, which has been removed.
+// This binary needs to be updated to use the deposits-node API.
+// Stub protobuf types to keep the binary compiling:
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetNodeInfoRequest {}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetNodeInfoResponse {
+    #[prost(string, tag = "1")]
+    pub node_id: String,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DepositsError {
+    #[prost(string, tag = "1")]
+    pub code: String,
+    #[prost(string, tag = "2")]
+    pub message: String,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct InitLedgerRequest {
+    #[prost(string, tag = "1")]
+    pub partner_node_id: String,
+    #[prost(string, tag = "2")]
+    pub ledger_address: String,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct InitLedgerResponse {
+    #[prost(string, tag = "1")]
+    pub ledger_id: String,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CloseLedgerRequest {
+    #[prost(string, tag = "1")]
+    pub ledger_id: String,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CloseLedgerResponse {}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListLedgersRequest {}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListLedgersResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub ledgers: Vec<LedgerInfo>,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct LedgerInfo {
+    #[prost(string, tag = "1")]
+    pub ledger_id: String,
+    #[prost(string, tag = "2")]
+    pub operator_node_id: String,
+    #[prost(string, tag = "3")]
+    pub partner_node_id: String,
+    #[prost(uint64, tag = "4")]
+    pub operator_balance_sat: u64,
+    #[prost(uint64, tag = "5")]
+    pub partner_balance_sat: u64,
+    #[prost(uint64, tag = "6")]
+    pub reserves_sat: u64,
+    #[prost(uint32, tag = "7")]
+    pub deposit_count: u32,
+    #[prost(uint64, tag = "8")]
+    pub sequence_number: u64,
+    #[prost(string, tag = "9")]
+    pub channel_id: String,
+    #[prost(string, tag = "10")]
+    pub status: String,
+    #[prost(uint64, tag = "11")]
+    pub capacity_sat: u64,
+    #[prost(string, tag = "12")]
+    pub local_ledger_hash: String,
+    #[prost(string, tag = "13")]
+    pub remote_ledger_hash: String,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AddDepositRequest {
+    #[prost(string, tag = "1")]
+    pub partner_node_id: String,
+    #[prost(string, tag = "2")]
+    pub deposit_pubkey: String,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AddDepositResponse {
+    #[prost(string, tag = "1")]
+    pub deposit_pubkey: String,
+    #[prost(string, tag = "2")]
+    pub status: String,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListDepositsRequest {
+    #[prost(string, optional, tag = "1")]
+    pub ledger_id: Option<String>,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListDepositsResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub deposits: Vec<DepositInfo>,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DepositInfo {
+    #[prost(string, tag = "1")]
+    pub deposit_pubkey: String,
+    #[prost(string, tag = "2")]
+    pub ledger_id: String,
+    #[prost(uint64, tag = "3")]
+    pub balance_msat: u64,
+    #[prost(uint64, tag = "4")]
+    pub locked_balance_msat: u64,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RemoveDepositRequest {
+    #[prost(string, tag = "1")]
+    pub ledger_id: String,
+    #[prost(string, tag = "2")]
+    pub deposit_pubkey: String,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RemoveDepositResponse {}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AddReservesRequest {
+    #[prost(string, tag = "1")]
+    pub partner_node_id: String,
+    #[prost(uint64, tag = "2")]
+    pub amount_sat: u64,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AddReservesResponse {}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ReduceReservesRequest {
+    #[prost(string, tag = "1")]
+    pub partner_node_id: String,
+    #[prost(uint64, tag = "2")]
+    pub amount_sat: u64,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ReduceReservesResponse {}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RemoveReservesRequest {
+    #[prost(string, tag = "1")]
+    pub partner_node_id: String,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RemoveReservesResponse {}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetLedgerUpdatesRequest {
+    #[prost(string, tag = "1")]
+    pub ledger_id: String,
+    #[prost(uint64, optional, tag = "2")]
+    pub from_sequence: Option<u64>,
+    #[prost(uint64, optional, tag = "3")]
+    pub limit: Option<u64>,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetLedgerUpdatesResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub updates: Vec<LedgerUpdate>,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct LedgerUpdate {
+    #[prost(uint64, tag = "1")]
+    pub sequence_number: u64,
+    #[prost(string, tag = "2")]
+    pub operation_type: String,
+    #[prost(string, optional, tag = "3")]
+    pub description: Option<String>,
+    #[prost(string, optional, tag = "4")]
+    pub deposit_pubkey: Option<String>,
+    #[prost(uint64, optional, tag = "5")]
+    pub amount_sat: Option<u64>,
+    #[prost(string, tag = "6")]
+    pub previous_hash: String,
+    #[prost(string, tag = "7")]
+    pub current_hash: String,
+    #[prost(bool, tag = "8")]
+    pub acknowledged: bool,
+    #[prost(bool, tag = "9")]
+    pub committed: bool,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct QuorumAddMemberRequest {
+    #[prost(string, tag = "1")]
+    pub partner_node_id: String,
+    #[prost(string, tag = "2")]
+    pub quorum_member_id: String,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct QuorumAddMemberResponse {}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct QuorumRemoveMemberRequest {
+    #[prost(string, tag = "1")]
+    pub partner_node_id: String,
+    #[prost(string, tag = "2")]
+    pub quorum_member_id: String,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct QuorumRemoveMemberResponse {}
+
+
+mod endpoints {
+    pub const GET_NODE_INFO_PATH: &str = "/v1/node/info";
+    pub const DEPOSITS_INIT_LEDGER_PATH: &str = "/v1/deposits/init-ledger";
+    pub const DEPOSITS_CLOSE_LEDGER_PATH: &str = "/v1/deposits/close-ledger";
+    pub const DEPOSITS_LIST_LEDGERS_PATH: &str = "/v1/deposits/list-ledgers";
+    pub const DEPOSITS_ADD_DEPOSIT_PATH: &str = "/v1/deposits/add-deposit";
+    pub const DEPOSITS_LIST_DEPOSITS_PATH: &str = "/v1/deposits/list-deposits";
+    pub const DEPOSITS_REMOVE_DEPOSIT_PATH: &str = "/v1/deposits/remove-deposit";
+    pub const DEPOSITS_ADD_RESERVES_PATH: &str = "/v1/deposits/add-reserves";
+    pub const DEPOSITS_REDUCE_RESERVES_PATH: &str = "/v1/deposits/reduce-reserves";
+    pub const DEPOSITS_REMOVE_RESERVES_PATH: &str = "/v1/deposits/remove-reserves";
+    pub const DEPOSITS_GET_LEDGER_UPDATES_PATH: &str = "/v1/deposits/ledger-updates";
+    pub const DEPOSITS_ADD_QUORUM_MEMBER_PATH: &str = "/v1/deposits/add-quorum-member";
+    pub const DEPOSITS_REMOVE_QUORUM_MEMBER_PATH: &str = "/v1/deposits/remove-quorum-member";
+}
 use hmac::{Hmac, Mac};
 use prost::Message;
 use rand::RngCore;
@@ -137,7 +359,7 @@ async fn resolve_node_id(client: &Client, node_id_or_alias: &str) -> Result<Stri
     let response: GetNodeInfoResponse = proto_request(
         client,
         &base_url,
-        &format!("/{}", GET_NODE_INFO_PATH),
+        &format!("/{}", endpoints::GET_NODE_INFO_PATH),
         request,
     ).await.map_err(|e| format!("Failed to resolve node alias '{}': {}", node_id_or_alias, e))?;
 
@@ -163,7 +385,7 @@ async fn build_node_name_map(client: &Client) -> HashMap<String, String> {
         if let Ok(response) = proto_request::<_, GetNodeInfoResponse>(
             client,
             &base_url,
-            &format!("/{}", GET_NODE_INFO_PATH),
+            &format!("/{}", endpoints::GET_NODE_INFO_PATH),
             request,
         ).await {
             map.insert(response.node_id, name.to_string());
@@ -263,17 +485,6 @@ fn build_cli() -> Command {
         .subcommand(
             Command::new("deposit-balance")
                 .about("Get balance for a specific deposit (outputs sats only)")
-                .arg(
-                    Arg::new("deposit-pubkey")
-                        .help("Deposit public key")
-                        .value_hint(ValueHint::Other)
-                        .required(true)
-                        .index(1),
-                ),
-        )
-        .subcommand(
-            Command::new("deposit-nwc")
-                .about("Get NWC credentials for a deposit (outputs JSON for wallet file)")
                 .arg(
                     Arg::new("deposit-pubkey")
                         .help("Deposit public key")
@@ -496,7 +707,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let response: GetNodeInfoResponse = proto_request(
                 &client,
                 &base_url,
-                &format!("/{}", GET_NODE_INFO_PATH),
+                &format!("/{}", endpoints::GET_NODE_INFO_PATH),
                 request,
             ).await?;
             println!("{}", response.node_id);
@@ -535,10 +746,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Some(("deposit-balance", sub_m)) => {
             let deposit_pubkey = sub_m.get_one::<String>("deposit-pubkey").unwrap();
             deposit_balance(&client, &base_url, deposit_pubkey).await?;
-        }
-        Some(("deposit-nwc", sub_m)) => {
-            let deposit_pubkey = sub_m.get_one::<String>("deposit-pubkey").unwrap();
-            deposit_nwc(&client, &base_url, deposit_pubkey).await?;
         }
         Some(("get-updates", sub_m)) => {
             let partner = if let Some(partner_input) = sub_m.get_one::<String>("partner") {
@@ -735,29 +942,6 @@ async fn deposit_balance(client: &Client, base_url: &str, deposit_pubkey: &str) 
 
     // Deposit not found - output 0
     println!("0");
-    Ok(())
-}
-
-async fn deposit_nwc(client: &Client, base_url: &str, deposit_pubkey: &str) -> Result<(), Box<dyn Error>> {
-    let request = GetDepositNwcRequest {
-        deposit_pubkey: deposit_pubkey.to_string(),
-    };
-    let response: GetDepositNwcResponse = proto_request(
-        client,
-        base_url,
-        endpoints::DEPOSITS_DEPOSIT_NWC_PATH,
-        request,
-    ).await?;
-
-    // Output JSON for wallet file creation
-    let wallet_json = serde_json::json!({
-        "nwc_pubkey": response.nwc_pubkey,
-        "nwc_secret": response.nwc_secret,
-        "relay_url": response.relay_url,
-        "connection_string": response.connection_string,
-        "deposit_pubkey": deposit_pubkey
-    });
-    println!("{}", serde_json::to_string_pretty(&wallet_json)?);
     Ok(())
 }
 
@@ -1159,19 +1343,6 @@ async fn show_status(client: &Client, base_url: &str, node_name: &str) -> Result
         } else { 0 }
     } else { 0 };
 
-    // Get NWC/Nostr info
-    let (nwc_pubkey, relay_url) = if let Ok(resp) = client.get(&format!("{}/nwc/pubkey", base_url)).send().await {
-        if let Ok(result) = resp.json::<ApiResponse<Value>>().await {
-            if result.success {
-                if let Some(data) = result.data {
-                    let pk = data["nwc_pubkey"].as_str().map(|s| s.to_string());
-                    let relay = data["relay_url"].as_str().map(|s| s.to_string());
-                    (pk, relay)
-                } else { (None, None) }
-            } else { (None, None) }
-        } else { (None, None) }
-    } else { (None, None) };
-
     // Print node ID
     if let Some(ref id) = node_id {
         println!("Node: {}", id);
@@ -1179,16 +1350,6 @@ async fn show_status(client: &Client, base_url: &str, node_name: &str) -> Result
 
     // Dense line: peers, channels, balance
     println!("Peers: {}  Channels: {}  Balance: {} sat", num_peers, num_channels, balance);
-
-    // Dense line: relay info
-    if let Some(relay) = relay_url {
-        let short_relay = if relay.len() > 40 { &relay[..40] } else { &relay };
-        if let Some(pk) = nwc_pubkey {
-            println!("Relay: {}  NWC: {}...", short_relay, &pk[..16]);
-        } else {
-            println!("Relay: {}", short_relay);
-        }
-    }
 
     // Get channels and ledgers - show one line per channel
     let mut channel_peers: Vec<String> = Vec::new();

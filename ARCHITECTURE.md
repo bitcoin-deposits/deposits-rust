@@ -122,11 +122,10 @@ via `CollateralLock` operations and attested cryptographically back to the opera
 ┌─────────────────────────────────────────────────────────┐
 │                    deposits-tools                       │
 │            (testing, simulation, admin)                 │
-├───────────────┬─────────────────┬───────────────────────┤
-│ deposits-bdk  │  deposits-ldk   │   deposits-nwc        │
-│ (BDK + Nostr) │  (LDK adapter)  │   (Nostr Wallet       │
-│               │                 │    Connect)           │
-├───────────────┴─────────────────┴───────────────────────┤
+├─────────────────────────────────────────────────────────┤
+│                    deposits-node                        │
+│              (BDK wallet + Nostr transport)             │
+├─────────────────────────────────────────────────────────┤
 │                    deposits-core                        │
 │         (types, messages, TLV, validation)              │
 └─────────────────────────────────────────────────────────┘
@@ -135,11 +134,8 @@ via `CollateralLock` operations and attested cryptographically back to the opera
 | Crate | Purpose | I/O |
 |-------|---------|-----|
 | `deposits-core` | Protocol library: types, messages, TLV codec, validation, ledger state machine | None — pure logic |
-| `deposits-bdk` | BDK wallet node: daemon, CLI, Nostr transport, JSONL persistence | Disk, network, Bitcoin RPC |
-| `deposits-ldk` | Lightning adapter: LDK wire codec, channel-based ledger operations | LDK peer connections |
-| `deposits-nwc` | Nostr Wallet Connect service for Lightning payments | WebSocket, Nostr |
+| `deposits-node` | BDK wallet node: daemon, CLI, Nostr transport, JSONL persistence | Disk, network, Bitcoin RPC |
 | `deposits-tools` | Testing harnesses, payment simulator, admin utilities | Various |
-| `deposits-explorer` | Terminal UI for browsing ledgers and Bitcoin state | HTTP (Esplora), TUI |
 
 ### 1.4 Glossary
 
@@ -1322,7 +1318,7 @@ Content: JSON with fees, limits, metadata.
 
 ### 12.4 Request Actions
 
-**Daemon-handled** (processed by `deposits-bdk run`):
+**Daemon-handled** (processed by `deposits-node run`):
 
 | Action | Handler |
 |--------|---------|
@@ -1542,15 +1538,15 @@ All constants from `deposits-core/src/constants.rs`:
 | `apply_state_changes()` | `deposits-core/src/ledger.rs:1136` |
 | `ValidationRules` | `deposits-core/src/validation.rs:25` |
 | `LedgerConformanceValidator` | `deposits-core/src/validation.rs:434` |
-| `sign_last_update()` | `deposits-bdk/src/node.rs:297` |
-| `sign_and_broadcast()` | `deposits-bdk/src/node.rs:6665` |
-| `operator_sign_persist_broadcast()` | `deposits-bdk/src/node.rs:376` |
-| `request_cosign()` | `deposits-bdk/src/node.rs:6250` |
-| Nostr kind constants | `deposits-bdk/src/nostr.rs:63` |
-| `broadcast_ledger_update()` | `deposits-bdk/src/nostr.rs:706` |
-| `send_ledger_request()` | `deposits-bdk/src/nostr.rs:820` |
-| `LedgerLogRow` | `deposits-bdk/src/handler.rs:47` |
-| `load_ledgers_from_jsonl()` | `deposits-bdk/src/handler.rs:404` |
-| `persist_ledger_to_disk()` | `deposits-bdk/src/handler.rs:834` |
+| `sign_last_update()` | `deposits-node/src/node.rs:297` |
+| `sign_and_broadcast()` | `deposits-node/src/node.rs:6665` |
+| `operator_sign_persist_broadcast()` | `deposits-node/src/node.rs:376` |
+| `request_cosign()` | `deposits-node/src/node.rs:6250` |
+| Nostr kind constants | `deposits-node/src/nostr.rs:63` |
+| `broadcast_ledger_update()` | `deposits-node/src/nostr.rs:706` |
+| `send_ledger_request()` | `deposits-node/src/nostr.rs:820` |
+| `LedgerLogRow` | `deposits-node/src/handler.rs:47` |
+| `load_ledgers_from_jsonl()` | `deposits-node/src/handler.rs:404` |
+| `persist_ledger_to_disk()` | `deposits-node/src/handler.rs:834` |
 | Protocol constants | `deposits-core/src/constants.rs:6` |
 | `MAX_FEE_RATE_BPS` | `deposits-core/src/operation_validation.rs:372` |

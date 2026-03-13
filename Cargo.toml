@@ -1,14 +1,15 @@
 [workspace]
 members = [
     "deposits-core",
-    "deposits-bdk",
+    "deposits-node",
     "deposits-tools",
 ]
 resolver = "2"
 
-# Use nostr-sdk-performance fork with skip-verification and skip-database by default
-nostr-relay-pool = { path = "nostr-sdk-performance/nostr-relay-pool" }
-
 # Release profile with debug info for flamegraphs
 [profile.release]
 debug = 1              # line tables only (minimal size increase, good flamegraph symbols)
+
+# Use nostr-sdk-performance fork with skip-verification and skip-database by default
+[patch.crates-io]
+nostr-relay-pool = { path = "nostr-sdk-performance/nostr-relay-pool" }

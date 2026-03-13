@@ -2,15 +2,16 @@
 
 #[cfg(test)]
 mod tests {
-    use deposits_ldk::wire::channel_ledger::ChannelLedger;
-    use deposits_ldk::handler::messages::{DepositsMessage, LedgerUpdateMsg, LedgerOperation, LedgerUpdateMsgExt};
+    // TODO: ChannelLedger was removed with deposits-ldk; these tests need rewriting for deposits-core Ledger
+    // use deposits_core::Ledger;
+    use deposits_core::messages::{DepositsMessage, LedgerUpdateMsg, LedgerOperation};
     use deposits_core::DepositsError;
     use deposits_core::constants::MIN_RESERVES_RATIO_PERCENT;
     use deposits_core::types::compute_deposit_id;
-    use ldk_node::bitcoin::secp256k1::{Secp256k1, SecretKey, PublicKey};
-    use ldk_node::bitcoin::secp256k1::rand::rngs::OsRng;
-    use ldk_node::bitcoin::Address;
-    use ldk_node::bitcoin::address::NetworkUnchecked;
+    use bitcoin::secp256k1::{Secp256k1, SecretKey, PublicKey};
+    use bitcoin::secp256k1::rand::rngs::OsRng;
+    use bitcoin::Address;
+    use bitcoin::address::NetworkUnchecked;
 
     /// Compute deposit_id from pubkey
     fn deposit_id_from_pubkey(pubkey: &PublicKey) -> [u8; 16] {

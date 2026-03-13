@@ -6,12 +6,14 @@ use std::error::Error;
 use std::time::Duration;
 use tokio;
 use deposits_tools::network_config::NetworkConfig;
-use deposits_ldk::service::{
-    endpoints,
-    ListLedgersRequest, ListLedgersResponse,
-    ListDepositsRequest, ListDepositsResponse,
-    GetLedgerUpdatesRequest, GetLedgerUpdatesResponse,
-};
+// TODO: These service types were protobuf-generated in deposits-ldk, which has been removed.
+// This binary needs to be updated to use the deposits-node API.
+// use deposits_node::service::{
+//     endpoints,
+//     ListLedgersRequest, ListLedgersResponse,
+//     ListDepositsRequest, ListDepositsResponse,
+//     GetLedgerUpdatesRequest, GetLedgerUpdatesResponse,
+// };
 use prost::Message;
 
 struct NetworkStatus {
@@ -377,21 +379,12 @@ impl NetworkStatus {
                                 } else {
                                     println!("💎 Bitcoin Deposits: No active deposits");
                                 }
-                                println!("📱 NWC Service: ✅ Available");
-                            } else {
-                                println!("📱 NWC Service: ✅ Available (no ledgers)");
                             }
-                        } else {
-                            println!("📱 NWC Service: ✅ Available");
                         }
-                    } else {
-                        println!("📱 NWC Service: ✅ Available");
                     }
-                } else {
-                    println!("📱 NWC Service: ⚠️  Bitcoin Deposits not available");
                 }
             }
-            Err(_) => println!("📱 NWC Service: ❌ Not available"),
+            Err(_) => println!("💎 Bitcoin Deposits: ❌ Not available"),
         }
 
         println!();

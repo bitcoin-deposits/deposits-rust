@@ -1,12 +1,13 @@
 #!/bin/bash
 #
-# Wrapper for ldk-server-cli with automatic TLS cert and API key
+# Wrapper for ldk-server-cli for BDK Lightning nodes
 #
 # Usage: ./bin/ldk-cli.sh <node> <command> [args...]
 #   e.g.: ./bin/ldk-cli.sh alice get-node-info
 #         ./bin/ldk-cli.sh bob list-channels
 
-cd "$(dirname "$0")/.."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BDK_DIR="$(dirname "$SCRIPT_DIR")"
 
 NODE="$1"
 shift
@@ -18,25 +19,23 @@ if [ -z "$NODE" ]; then
     exit 1
 fi
 
-# Map node name to port
+# Map node name to port (BDK Lightning network ports)
 case "$NODE" in
-    alice)   PORT=3011 ;;
-    bob)     PORT=3012 ;;
-    charlie) PORT=3013 ;;
-    diana)   PORT=3014 ;;
-    eve)     PORT=3015 ;;
-    frank)   PORT=3016 ;;
+    alice)   PORT=3111 ;;
+    bob)     PORT=3112 ;;
+    charlie) PORT=3113 ;;
+    diana)   PORT=3114 ;;
     *)
         echo "Unknown node: $NODE"
-        echo "Valid nodes: alice, bob, charlie, diana, eve, frank"
+        echo "Valid nodes: alice, bob, charlie, diana"
         exit 1
         ;;
 esac
 
-CERT="certs/${NODE}.crt"
+CERT="$BDK_DIR/certs/${NODE}.crt"
 if [ ! -f "$CERT" ]; then
     echo "TLS cert not found: $CERT"
-    echo "Run reinit.sh or: . ./bin/_common.sh && copy_tls_certs $NODE"
+    echo "Run reinit-lightning.sh to set up the environment"
     exit 1
 fi
 

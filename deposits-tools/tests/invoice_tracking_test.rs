@@ -12,8 +12,8 @@ use bitcoin::secp256k1::{Secp256k1, SecretKey, PublicKey};
 
 // Use core types for Invoice/PendingInvoice since Deposit.invoices is Vec<deposits_core::Invoice>
 use deposits_core::{Invoice, PendingInvoice, FeeStructure};
-// Use wrapper types for Deposit (they have convenient constructors)
-use deposits_ldk::wire::types::Deposit;
+// Use Deposit type from deposits-core
+use deposits_core::types::Deposit;
 
 /// Generate a test public key from a seed byte
 fn generate_test_pubkey(seed: u8) -> PublicKey {

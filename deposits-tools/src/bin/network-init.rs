@@ -5,10 +5,30 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::sleep;
 use clap::{Arg, Command};
 use deposits_tools::network_config::{Network, NetworkConfig, NodeConfig};
-use deposits_ldk::service::{
-    endpoints,
-    ListLedgersRequest, ListLedgersResponse,
-};
+// TODO: These service types were protobuf-generated in deposits-ldk, which has been removed.
+// This binary needs to be updated to use the deposits-node API.
+// Stub types to keep the binary compiling:
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListLedgersRequest {}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListLedgersResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub ledgers: Vec<LedgerInfoStub>,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct LedgerInfoStub {
+    #[prost(string, tag = "1")]
+    pub ledger_id: String,
+    #[prost(string, tag = "2")]
+    pub partner_node_id: String,
+}
+
+mod endpoints {
+    pub const DEPOSITS_LIST_LEDGERS_PATH: &str = "/v1/deposits/list-ledgers";
+}
+
 use prost::Message;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -940,13 +960,6 @@ impl NetworkInitializer {
         Ok(())
     }
 
-    async fn setup_nwc_services(&self) -> Result<(), Box<dyn std::error::Error>> {
-        // NWC is not part of upstream ldk-server - it was a custom bitcoin-deposits addition.
-        // Skip NWC setup for now until it's re-implemented as a separate service.
-        self.log("📱 Skipping NWC setup (not available in upstream ldk-server)");
-        Ok(())
-    }
-
     fn print_network_summary(&self) {
         println!();
         println!("================================================================================");
@@ -1012,10 +1025,7 @@ impl NetworkInitializer {
         // Step 5: Initialize Bitcoin Deposits ledgers
         self.initialize_deposits_ledgers().await?;
 
-        // Step 6: Setup NWC services
-        self.setup_nwc_services().await?;
-
-        // Step 7: Print summary
+        // Step 6: Print summary
         self.print_network_summary();
 
         self.log("✅ Network initialization completed successfully!");
