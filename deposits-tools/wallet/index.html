@@ -89,12 +89,24 @@ nav button:hover { color: var(--text); background: transparent; }
 
 #setup-panel { text-align: center; padding: 60px 20px; }
 #setup-panel .card { max-width: 400px; margin: 0 auto; text-align: left; }
+
+.modal-overlay {
+  display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+  z-index: 100; align-items: center; justify-content: center;
+}
+.modal-overlay.visible { display: flex; }
+.modal {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  padding: 20px; max-width: 440px; width: 90%;
+}
+.modal h3 { color: var(--red); margin-bottom: 10px; }
+.modal pre { background: var(--bg); padding: 8px; border-radius: 4px; font-size: 11px; white-space: pre-wrap; word-break: break-all; max-height: 150px; overflow-y: auto; margin-bottom: 12px; }
 </style>
 </head>
 <body>
 <div id="app">
   <!-- Setup screen (shown when no seed) -->
-  <div id="setup-panel">
+  <div id="setup-panel" style="display:none">
     <h1 style="margin-bottom: 8px;">Deposits Wallet</h1>
     <p style="color: var(--muted); margin-bottom: 24px;">Nostr-native bitcoin custody</p>
     <div class="card">
@@ -131,27 +143,118 @@ nav button:hover { color: var(--text); background: transparent; }
 
   <!-- Main wallet UI (shown after setup) -->
   <div id="main-panel" style="display:none">
-    <header>
-      <h1>Deposits Wallet</h1>
-      <div>
-        <span id="conn-status" class="disconnected">disconnected</span>
-      </div>
-    </header>
 
     <nav>
-      <button class="active" data-tab="deposits">Deposits</button>
+      <button class="active" data-tab="wallet">Wallet</button>
+      <button data-tab="deposits">Deposits</button>
       <button data-tab="discover">Discover</button>
       <button data-tab="transfer">Transfer</button>
       <button data-tab="settings">Settings</button>
+      <span style="flex:1"></span>
+      <button style="border:none; color:var(--muted); font-size:11px;" onclick="syncAll()">Sync</button>
+      <span id="conn-status" class="disconnected" style="font-size:11px; padding:3px 8px; border-radius:10px; align-self:center;">disconnected</span>
     </nav>
 
+    <!-- Wallet tab (primary) -->
+    <div id="tab-wallet" class="panel active">
+
+      <!-- Empty state: no deposits -->
+      <div id="wallet-empty" style="display:none; text-align:center; padding:40px 0;">
+        <div style="color:var(--muted); margin-bottom:16px;">No deposits yet</div>
+        <button class="primary" style="padding:10px 28px; font-size:14px;" onclick="showWalletOpen()">Open Deposit</button>
+        <div id="wallet-open-panel" class="card" style="display:none; margin-top:16px; text-align:left;">
+          <h3>Choose a ledger</h3>
+          <div id="wallet-open-list" style="color:var(--muted);">Loading...</div>
+        </div>
+      </div>
+
+      <!-- Active state: has deposits -->
+      <div id="wallet-active" style="display:none;">
+        <!-- Balance display -->
+        <div style="text-align:center; padding:24px 0 16px;" onclick="toggleBalanceVisibility()">
+          <div style="color:var(--muted); font-size:11px; margin-bottom:4px;">
+            <span id="wallet-deposit-count">0</span> deposit(s)
+          </div>
+          <div id="wallet-balance" style="font-size:32px; font-weight:700; color:var(--green); cursor:pointer;">
+            — sats
+          </div>
+          <div id="wallet-locked" style="color:var(--yellow); font-size:12px; display:none;"></div>
+        </div>
+
+        <!-- Action buttons -->
+        <div style="display:flex; gap:10px; justify-content:center; margin-bottom:20px;">
+          <button class="primary" style="padding:10px 28px; font-size:14px;" onclick="showWalletReceive()">Receive</button>
+          <button class="primary" style="padding:10px 28px; font-size:14px;" onclick="showWalletSend()">Send</button>
+        </div>
+      </div>
+
+      <!-- Receive panel -->
+      <div id="wallet-receive" class="card" style="display:none;">
+        <h3>Receive</h3>
+        <div class="row">
+          <div class="form-group">
+            <label>Amount (sats)</label>
+            <input id="wallet-recv-amount" type="number" value="10000">
+          </div>
+          <div class="form-group">
+            <label>To deposit</label>
+            <select id="wallet-recv-deposit"></select>
+          </div>
+        </div>
+        <div style="display:flex; gap:8px; margin-top:8px;">
+          <button onclick="doWalletRecvLightning()">Lightning Invoice</button>
+          <button onclick="doWalletRecvOnchain()">On-Chain Address</button>
+        </div>
+        <div id="wallet-recv-result" style="display:none; margin-top:10px; padding:10px; background:var(--bg); border:1px solid var(--border); border-radius:4px; word-break:break-all; font-size:11px; cursor:pointer;" onclick="copyWalletResult()">
+        </div>
+      </div>
+
+      <!-- Send panel -->
+      <div id="wallet-send" class="card" style="display:none;">
+        <h3>Send</h3>
+        <div class="row">
+          <div class="form-group">
+            <label>Amount (sats)</label>
+            <input id="wallet-send-amount" type="number" value="10000">
+          </div>
+          <div class="form-group">
+            <label>From deposit</label>
+            <select id="wallet-send-deposit"></select>
+          </div>
+        </div>
+        <div style="display:flex; gap:8px; margin-top:8px;">
+          <button onclick="showWalletSendInvoice()">Pay Invoice</button>
+          <button onclick="showWalletSendAddress()">Withdraw to Address</button>
+          <button onclick="showWalletSendTransfer()">Transfer</button>
+        </div>
+        <div id="wallet-send-invoice-input" style="display:none; margin-top:10px;">
+          <div class="form-group">
+            <label>BOLT11 Invoice</label>
+            <input id="wallet-send-bolt11" type="text" placeholder="lnbcrt...">
+          </div>
+          <button class="primary" onclick="doWalletPayInvoice()">Pay</button>
+        </div>
+        <div id="wallet-send-address-input" style="display:none; margin-top:10px;">
+          <div class="form-group">
+            <label>Bitcoin address</label>
+            <input id="wallet-send-address" type="text" placeholder="bc1q...">
+          </div>
+          <button class="primary" onclick="doWalletWithdraw()">Withdraw</button>
+        </div>
+        <div id="wallet-send-transfer-input" style="display:none; margin-top:10px;">
+          <div class="form-group">
+            <label>To deposit</label>
+            <select id="wallet-send-transfer-to"></select>
+          </div>
+          <button class="primary" onclick="doWalletTransfer()">Transfer</button>
+        </div>
+      </div>
+    </div>
+
     <!-- Deposits tab -->
-    <div id="tab-deposits" class="panel active">
+    <div id="tab-deposits" class="panel">
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
         <span style="color:var(--muted)">Your deposits</span>
-        <div style="display:flex; gap:6px;">
-          <button onclick="syncAll()">Sync Balances</button>
-        </div>
       </div>
       <div id="deposits-list"></div>
 
@@ -296,13 +399,22 @@ nav button:hover { color: var(--text); background: transparent; }
       </div>
     </div>
 
-    <!-- Activity log -->
+    <!-- Activity log (collapsed by default) -->
     <div style="margin-top: 16px;">
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
-        <span style="color:var(--muted); font-size:11px;">Activity</span>
-        <button style="font-size:10px; padding:2px 8px;" onclick="document.getElementById('activity-log').innerHTML=''">Clear</button>
+      <div style="display:flex; justify-content:space-between; align-items:center; cursor:pointer;" onclick="toggleActivityLog()">
+        <span style="color:var(--muted); font-size:11px;" id="activity-toggle">Activity &#9654;</span>
+        <button id="activity-clear-btn" style="font-size:10px; padding:2px 8px; display:none;" onclick="event.stopPropagation(); document.getElementById('activity-log').innerHTML=''">Clear</button>
       </div>
-      <div id="activity-log" class="log"></div>
+      <div id="activity-log" class="log" style="display:none;"></div>
+    </div>
+  </div>
+
+  <!-- Error modal -->
+  <div id="error-modal" class="modal-overlay" onclick="if(event.target===this)dismissError()">
+    <div class="modal">
+      <h3>Error</h3>
+      <pre id="error-modal-msg"></pre>
+      <button onclick="dismissError()" style="width:100%">Dismiss</button>
     </div>
   </div>
 </div>
@@ -913,6 +1025,7 @@ window.doOpenDeposit = async function() {
 
 function renderDeposits() {
   const container = document.getElementById('deposits-list');
+  renderWalletTab();
   if (state.deposits.length === 0) {
     container.innerHTML = '<div class="empty">No deposits yet. Go to Discover to find a ledger and open one.</div>';
     return;
@@ -942,25 +1055,467 @@ function renderDeposits() {
   container.innerHTML = html;
 
   // Update transfer dropdowns
+  function depositLabel(d) {
+    return (balanceVisible && d.amount_sats != null) ? `${esc(d.alias)} (${d.amount_sats} sats)` : esc(d.alias);
+  }
   const fromSel = document.getElementById('transfer-from');
   if (fromSel) {
-    fromSel.innerHTML = state.deposits.map(d => {
-      const label = d.amount_sats != null ? `${esc(d.alias)} (${d.amount_sats} sats)` : esc(d.alias);
-      return `<option value="${esc(d.alias)}">${label}</option>`;
-    }).join('');
+    fromSel.innerHTML = state.deposits.map(d =>
+      `<option value="${esc(d.alias)}">${depositLabel(d)}</option>`
+    ).join('');
   }
   const toSel = document.getElementById('transfer-to');
   if (toSel) {
     const fromVal = fromSel ? fromSel.value : '';
     const opts = state.deposits
       .filter(d => d.alias !== fromVal)
-      .map(d => {
-        const label = d.amount_sats != null ? `${esc(d.alias)} (${d.amount_sats} sats)` : esc(d.alias);
-        return `<option value="${esc(d.alias)}">${label}</option>`;
-      }).join('');
+      .map(d => `<option value="${esc(d.alias)}">${depositLabel(d)}</option>`)
+      .join('');
     toSel.innerHTML = opts + '<option value="__other__">Other (enter ID)</option>';
   }
+
+  // Update wallet tab
+  renderWalletTab();
+
+  // Update wallet tab dropdowns, sorted by balance (largest first)
+  const sorted = [...state.deposits].sort((a, b) => (b.amount_sats || 0) - (a.amount_sats || 0));
+  const depositOpts = sorted.map(d => {
+    const label = (balanceVisible && d.amount_sats != null) ? `${esc(d.alias)} (${d.amount_sats} sats)` : esc(d.alias);
+    return `<option value="${esc(d.alias)}">${label}</option>`;
+  }).join('');
+  for (const id of ['wallet-recv-deposit', 'wallet-send-deposit']) {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = depositOpts;
+  }
+  // Transfer-to dropdown excludes the currently selected send deposit
+  updateWalletTransferTo();
 }
+
+let balanceVisible = localStorage.getItem('deposits-balance-visible') !== '0';
+
+function renderWalletTab() {
+  const hasDeposits = state.deposits.length > 0;
+  document.getElementById('wallet-empty').style.display = hasDeposits ? 'none' : 'block';
+  document.getElementById('wallet-active').style.display = hasDeposits ? 'block' : 'none';
+
+  if (!hasDeposits) return;
+
+  const totalSats = state.deposits.reduce((s, d) => s + (d.amount_sats || 0), 0);
+  const totalLocked = state.deposits.reduce((s, d) => s + (d.locked_sats || 0), 0);
+
+  const balEl = document.getElementById('wallet-balance');
+  if (balEl) {
+    balEl.textContent = balanceVisible ? `${totalSats.toLocaleString()} sats` : '****';
+  }
+  const countEl = document.getElementById('wallet-deposit-count');
+  if (countEl) countEl.textContent = state.deposits.length;
+
+  const lockEl = document.getElementById('wallet-locked');
+  if (lockEl) {
+    if (totalLocked > 0 && balanceVisible) {
+      lockEl.textContent = `${totalLocked.toLocaleString()} sats locked`;
+      lockEl.style.display = 'block';
+    } else {
+      lockEl.style.display = 'none';
+    }
+  }
+}
+
+window.toggleBalanceVisibility = function() {
+  balanceVisible = !balanceVisible;
+  localStorage.setItem('deposits-balance-visible', balanceVisible ? '1' : '0');
+  renderDeposits();
+};
+
+window.showWalletOpen = async function() {
+  const panel = document.getElementById('wallet-open-panel');
+  if (panel.style.display !== 'none') { panel.style.display = 'none'; return; }
+  panel.style.display = 'block';
+  document.getElementById('wallet-open-list').innerHTML = '<div style="color:var(--muted)">Discovering ledgers...</div>';
+
+  const filter = { kinds: [39100] };
+  const events = await fetchEvents(filter);
+
+  const ads = [];
+  for (const event of events) {
+    try {
+      const ad = JSON.parse(event.content);
+      if (ad.network && ad.network !== state.network) continue;
+      ads.push(ad);
+    } catch {}
+  }
+
+  if (ads.length === 0) {
+    document.getElementById('wallet-open-list').innerHTML = '<div class="empty">No ledgers found.</div>';
+    return;
+  }
+
+  // Group by fee schedule
+  const groups = new Map();
+  for (const ad of ads) {
+    const key = [
+      ad.annual_fee_bps || 0, ad.min_fee_sats || 0, ad.fee_period_blocks || 2016,
+      ad.transfer_fee_fixed_sats || 0, ad.transfer_fee_rate_bps || 0,
+    ].join(':');
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(ad);
+  }
+
+  let html = '';
+  for (const [, groupAds] of groups) {
+    const s = groupAds[0];
+    const annualBps = s.annual_fee_bps || 0;
+    const minFee = s.min_fee_sats || 0;
+    const feePeriod = s.fee_period_blocks || 2016;
+    const tfFixed = s.transfer_fee_fixed_sats || 0;
+    const tfRate = s.transfer_fee_rate_bps || 0;
+    const totalHeadroom = groupAds.reduce((sum, a) => sum + (a.available_headroom_sats || 0), 0);
+
+    // Pick the ledger with most headroom
+    const best = groupAds.sort((a, b) => (b.available_headroom_sats || 0) - (a.available_headroom_sats || 0))[0];
+    const lid = best.ledger_id;
+    const relay = best.relay_url || '';
+
+    html += `<div style="display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px solid var(--border);">
+      <div style="flex:1">
+        <div style="font-size:12px;">${(annualBps/100).toFixed(2)}%/yr + ${minFee}s/${feePeriod}blk, xfer ${tfFixed}s+${(tfRate/100).toFixed(2)}%</div>
+        <div style="color:var(--muted); font-size:11px;">${groupAds.length} ledger(s), ${totalHeadroom.toLocaleString()} sats available</div>
+      </div>
+      <button class="primary" style="margin-left:10px;" onclick="doWalletQuickOpen('${lid}','${esc(relay)}')">Open</button>
+    </div>`;
+  }
+  document.getElementById('wallet-open-list').innerHTML = html;
+};
+
+window.doWalletQuickOpen = async function(ledgerId, relayUrl) {
+  // Connect to operator relay if needed
+  if (relayUrl && relayUrl.startsWith('ws')) {
+    const already = sockets.find(s => s.url === relayUrl);
+    if (!already) {
+      connectOne(relayUrl, false);
+      if (!state.relays.includes(relayUrl)) { state.relays.push(relayUrl); saveState(); }
+      await new Promise(r => setTimeout(r, 1000)); // wait for connection
+    }
+  }
+
+  const alias = `deposit-${state.deposits.length + 1}`;
+  const keyIndex = state.keyIndex;
+  const depositKey = deriveSecretKey(state.seed, keyIndex);
+  const pubkey = getCompressedPubkey(depositKey);
+  const pubkeyHex = bytesToHex(pubkey);
+
+  // Fetch fee info
+  let feeFixed = 0, feeBps = 0, feeFreq = 2016;
+  try {
+    const adEvents = await fetchEvents({ kinds: [39100], '#d': [ledgerId] }, 5000);
+    if (adEvents.length > 0) {
+      const ad = JSON.parse(adEvents[0].content);
+      const period = ad.fee_period_blocks > 0 ? ad.fee_period_blocks : 2016;
+      feeFixed = (ad.min_fee_sats || 0) * Math.floor(52560 / period);
+      feeBps = ad.annual_fee_bps || 0;
+      feeFreq = period;
+    }
+  } catch {}
+
+  try {
+    log(`Opening deposit on ${ledgerId.slice(0,12)}...`);
+    const resp = await sendRequest(ledgerId, 'deposit_open', {
+      deposit_pubkey: pubkeyHex, fee_fixed: feeFixed, fee_bps: feeBps, fee_frequency: feeFreq,
+    });
+    if (!resp.success && !(resp.error || '').includes('already')) throw new Error(resp.error || 'Failed');
+
+    state.deposits.push({ alias, ledger_id: ledgerId, deposit_pubkey: pubkeyHex, key_index: keyIndex, status: 'pending' });
+    state.keyIndex = keyIndex + 1;
+    saveState();
+    renderDeposits();
+    log(`Deposit '${alias}' created.`, 'success');
+  } catch (e) {
+    log(`Open failed: ${e.message}`, 'error');
+  }
+};
+
+window.showWalletReceive = function() {
+  document.getElementById('wallet-receive').style.display =
+    document.getElementById('wallet-receive').style.display === 'none' ? 'block' : 'none';
+  document.getElementById('wallet-send').style.display = 'none';
+  document.getElementById('wallet-recv-result').style.display = 'none';
+};
+
+window.showWalletSend = function() {
+  document.getElementById('wallet-send').style.display =
+    document.getElementById('wallet-send').style.display === 'none' ? 'block' : 'none';
+  document.getElementById('wallet-receive').style.display = 'none';
+  document.getElementById('wallet-send-invoice-input').style.display = 'none';
+  document.getElementById('wallet-send-address-input').style.display = 'none';
+  document.getElementById('wallet-send-transfer-input').style.display = 'none';
+};
+
+window.showWalletSendInvoice = function() {
+  document.getElementById('wallet-send-invoice-input').style.display = 'block';
+  document.getElementById('wallet-send-address-input').style.display = 'none';
+  document.getElementById('wallet-send-transfer-input').style.display = 'none';
+};
+
+window.showWalletSendAddress = function() {
+  document.getElementById('wallet-send-address-input').style.display = 'block';
+  document.getElementById('wallet-send-invoice-input').style.display = 'none';
+  document.getElementById('wallet-send-transfer-input').style.display = 'none';
+};
+
+window.showWalletSendTransfer = function() {
+  document.getElementById('wallet-send-transfer-input').style.display = 'block';
+  document.getElementById('wallet-send-invoice-input').style.display = 'none';
+  document.getElementById('wallet-send-address-input').style.display = 'none';
+  updateWalletTransferTo();
+};
+
+function updateWalletTransferTo() {
+  const fromAlias = (document.getElementById('wallet-send-deposit') || {}).value || '';
+  const toSel = document.getElementById('wallet-send-transfer-to');
+  if (!toSel) return;
+  const opts = state.deposits
+    .filter(d => d.alias !== fromAlias)
+    .map(d => {
+      const label = d.amount_sats != null ? `${esc(d.alias)} (${d.amount_sats} sats)` : esc(d.alias);
+      return `<option value="${esc(d.alias)}">${label}</option>`;
+    }).join('');
+  toSel.innerHTML = opts;
+}
+
+window.doWalletTransfer = async function() {
+  const fromAlias = document.getElementById('wallet-send-deposit').value;
+  const deposit = state.deposits.find(d => d.alias === fromAlias);
+  if (!deposit) { log('Select a source deposit', 'error'); return; }
+
+  const toAlias = document.getElementById('wallet-send-transfer-to').value;
+  const destDeposit = state.deposits.find(d => d.alias === toAlias);
+  if (!destDeposit) { log('Select a destination deposit', 'error'); return; }
+
+  const amount = parseInt(document.getElementById('wallet-send-amount').value);
+  if (!amount) { log('Missing amount', 'error'); return; }
+
+  // Compute destination deposit ID
+  const destPubkey = hexToBytes(destDeposit.deposit_pubkey);
+  const destId = computeDepositId(destPubkey);
+  const destHex = bytesToHex(destId);
+
+  // Get fee from advertisement
+  let fee = 2;
+  try {
+    const adFilter = { kinds: [39100], '#d': [deposit.ledger_id] };
+    const adEvents = await fetchEvents(adFilter, 5000);
+    if (adEvents.length > 0) {
+      const ad = JSON.parse(adEvents[0].content);
+      const fixed = ad.transfer_fee_fixed_sats || 0;
+      const bps = ad.transfer_fee_rate_bps || 0;
+      fee = fixed + Math.floor(amount * bps / 10000);
+    }
+  } catch {}
+
+  const timeout = 5000;
+  const completionScript_hash = new Uint8Array(32);
+  crypto.getRandomValues(completionScript_hash);
+  const preimage = new Uint8Array(32);
+  crypto.getRandomValues(preimage);
+  const hashBytes = sha256(preimage);
+  const hashHex = bytesToHex(hashBytes);
+  const completionScript = `sha256(${hashHex})`;
+
+  const keyIndex = deposit.key_index || 0;
+  const secretKey = deriveSecretKey(state.seed, keyIndex);
+  const pubkey = getCompressedPubkey(secretKey);
+  const sourceId = computeDepositId(pubkey);
+
+  const nonce = new Uint8Array(32);
+  crypto.getRandomValues(nonce);
+
+  const msgHash = transferLockSigningMessage(nonce, sourceId, destId, amount, fee, completionScript, timeout);
+  const transferId = computeTransferId(msgHash);
+  const sig = schnorr.sign(msgHash, secretKey);
+
+  try {
+    log(`Transferring ${amount} sats to ${toAlias}...`);
+    const lockResponse = await sendRequest(deposit.ledger_id, 'transfer_lock', {
+      nonce: bytesToHex(nonce),
+      source_deposit_id: bytesToHex(sourceId),
+      destination_deposit_id: destHex,
+      amount, fee,
+      completion_script: completionScript,
+      timeout_height: timeout,
+      transfer_id: bytesToHex(transferId),
+      signature: bytesToHex(sig),
+    }, 15000);
+
+    if (!lockResponse.success) {
+      log(`Transfer lock failed: ${lockResponse.error}`, 'error');
+      return;
+    }
+
+    log(`Locked. Completing with preimage...`);
+    const completeResponse = await sendRequest(deposit.ledger_id, 'transfer_complete', {
+      transfer_id: bytesToHex(transferId),
+      preimage: bytesToHex(preimage),
+    }, 15000);
+
+    if (completeResponse.success) {
+      log(`Transferred ${amount} sats to ${toAlias}!`, 'success');
+      syncAll();
+    } else {
+      log(`Transfer complete failed: ${completeResponse.error}`, 'error');
+    }
+  } catch (e) { log(`Transfer error: ${e.message}`, 'error'); }
+};
+
+window.doWalletRecvLightning = async function() {
+  const alias = document.getElementById('wallet-recv-deposit').value;
+  const deposit = state.deposits.find(d => d.alias === alias);
+  if (!deposit) { log('Select a deposit', 'error'); return; }
+  const amount = parseInt(document.getElementById('wallet-recv-amount').value);
+  if (!amount) { log('Missing amount', 'error'); return; }
+
+  try {
+    log(`Creating Lightning invoice for ${amount} sats...`);
+    const response = await sendRequest(deposit.ledger_id, 'make_invoice', {
+      deposit_pubkey: deposit.deposit_pubkey,
+      amount_sats: amount,
+      description: `Fund ${deposit.alias}`,
+    }, 60000);
+
+    if (response.success) {
+      const r = response.result || response;
+      if (r.invoice) {
+        const el = document.getElementById('wallet-recv-result');
+        el.textContent = r.invoice;
+        el.style.display = 'block';
+        try { await navigator.clipboard.writeText(r.invoice); log('Invoice copied to clipboard', 'success'); } catch {}
+      }
+    } else {
+      log(`Invoice failed: ${response.error}`, 'error');
+    }
+  } catch (e) { log(`Invoice error: ${e.message}`, 'error'); }
+};
+
+window.doWalletRecvOnchain = async function() {
+  const alias = document.getElementById('wallet-recv-deposit').value;
+  const deposit = state.deposits.find(d => d.alias === alias);
+  if (!deposit) { log('Select a deposit', 'error'); return; }
+  const amount = parseInt(document.getElementById('wallet-recv-amount').value);
+  if (!amount) { log('Missing amount', 'error'); return; }
+
+  try {
+    const adFilter = { kinds: [39100], '#d': [deposit.ledger_id] };
+    const adEvents = await fetchEvents(adFilter, 5000);
+    let feeFixed = 0, feeBps = 0, feeFreq = 2016;
+    if (adEvents.length > 0) {
+      try {
+        const ad = JSON.parse(adEvents[0].content);
+        const period = ad.fee_period_blocks > 0 ? ad.fee_period_blocks : 2016;
+        feeFixed = (ad.min_fee_sats || 0) * Math.floor(52560 / period);
+        feeBps = ad.annual_fee_bps || 0;
+        feeFreq = period;
+      } catch {}
+    }
+
+    const response = await sendRequest(deposit.ledger_id, 'make_offer', {
+      deposit_pubkey: deposit.deposit_pubkey,
+      max_sats: amount,
+      min_sats: Math.min(1000, Math.max(1, amount - 1)),
+      blocks_valid: 144,
+      fee_fixed: feeFixed, fee_bps: feeBps, fee_frequency: feeFreq,
+    }, 60000);
+
+    if (response.success) {
+      const r = response.result || response;
+      if (r.funding_address) {
+        deposit.funding_address = r.funding_address;
+        if (r.offer_id) deposit.offer_id = r.offer_id;
+        saveState(); renderDeposits();
+        const el = document.getElementById('wallet-recv-result');
+        el.textContent = r.funding_address;
+        el.style.display = 'block';
+        try { await navigator.clipboard.writeText(r.funding_address); log('Address copied to clipboard', 'success'); } catch {}
+      }
+    } else {
+      log(`Offer failed: ${response.error}`, 'error');
+    }
+  } catch (e) { log(`Offer error: ${e.message}`, 'error'); }
+};
+
+window.copyWalletResult = async function() {
+  const text = document.getElementById('wallet-recv-result').textContent;
+  try { await navigator.clipboard.writeText(text); log('Copied to clipboard'); } catch {}
+};
+
+window.doWalletPayInvoice = async function() {
+  const alias = document.getElementById('wallet-send-deposit').value;
+  const deposit = state.deposits.find(d => d.alias === alias);
+  if (!deposit) { log('Select a deposit', 'error'); return; }
+  const bolt11 = document.getElementById('wallet-send-bolt11').value.trim();
+  if (!bolt11) { log('Missing invoice', 'error'); return; }
+
+  try {
+    const { paymentHash, amountMsat } = decodeBolt11(bolt11);
+    const keyIndex = deposit.key_index || 0;
+    const secretKey = deriveSecretKey(state.seed, keyIndex);
+    const pubkey = getCompressedPubkey(secretKey);
+    const depositId = computeDepositId(pubkey);
+    const msgHash = invoiceLockSigningMessage(depositId, paymentHash, amountMsat);
+    const sig = schnorr.sign(msgHash, secretKey);
+
+    log(`Paying ${amountMsat / 1000} sats...`);
+    const response = await sendRequest(deposit.ledger_id, 'pay_invoice', {
+      deposit_pubkey: deposit.deposit_pubkey,
+      invoice: bolt11,
+      payment_hash: bytesToHex(paymentHash),
+      amount_msats: amountMsat,
+      signature: bytesToHex(sig),
+    }, 60000);
+
+    if (response.success) {
+      log('Payment sent!', 'success');
+      document.getElementById('wallet-send-bolt11').value = '';
+      syncAll();
+    } else {
+      log(`Payment failed: ${response.error}`, 'error');
+    }
+  } catch (e) { log(`Payment error: ${e.message}`, 'error'); }
+};
+
+window.doWalletWithdraw = async function() {
+  const alias = document.getElementById('wallet-send-deposit').value;
+  const deposit = state.deposits.find(d => d.alias === alias);
+  if (!deposit) { log('Select a deposit', 'error'); return; }
+  const amount = parseInt(document.getElementById('wallet-send-amount').value);
+  const address = document.getElementById('wallet-send-address').value.trim();
+  if (!amount || !address) { log('Missing amount or address', 'error'); return; }
+
+  try {
+    const keyIndex = deposit.key_index || 0;
+    const secretKey = deriveSecretKey(state.seed, keyIndex);
+    const pubkey = getCompressedPubkey(secretKey);
+    const depositId = computeDepositId(pubkey);
+    const nonce = new Uint8Array(32);
+    crypto.getRandomValues(nonce);
+    const feeSats = 500;
+    const msgHash = withdrawalSigningMessage(nonce, depositId, address, amount, feeSats);
+    const sig = schnorr.sign(msgHash, secretKey);
+
+    log(`Withdrawing ${amount} sats...`);
+    const response = await sendRequest(deposit.ledger_id, 'withdraw', {
+      deposit_pubkey: bytesToHex(pubkey),
+      deposit_id: bytesToHex(depositId),
+      address, amount_sats: amount, fee_sats: feeSats,
+      nonce: bytesToHex(nonce), signature: bytesToHex(sig),
+    }, 60000);
+
+    if (response.success) {
+      log(`Withdrawal accepted! ${amount} sats to ${address}`, 'success');
+      syncAll();
+    } else {
+      log(`Withdrawal failed: ${response.error}`, 'error');
+    }
+  } catch (e) { log(`Withdrawal error: ${e.message}`, 'error'); }
+};
 
 let selectedDeposit = null;
 window.selectDeposit = function(alias) {
@@ -1400,10 +1955,33 @@ function log(msg, cls = '') {
   entry.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
   el.appendChild(entry);
   el.scrollTop = el.scrollHeight;
+  // Show modal on errors
+  if (cls === 'error') {
+    document.getElementById('error-modal-msg').textContent = msg;
+    document.getElementById('error-modal').classList.add('visible');
+  }
 }
 
+window.toggleActivityLog = function() {
+  const el = document.getElementById('activity-log');
+  const toggle = document.getElementById('activity-toggle');
+  const clearBtn = document.getElementById('activity-clear-btn');
+  const show = el.style.display === 'none';
+  el.style.display = show ? 'block' : 'none';
+  clearBtn.style.display = show ? 'inline-block' : 'none';
+  toggle.innerHTML = show ? 'Activity &#9660;' : 'Activity &#9654;';
+};
+
+window.dismissError = function() {
+  document.getElementById('error-modal').classList.remove('visible');
+};
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') dismissError();
+});
+
 // Tab switching
-document.querySelectorAll('nav button').forEach(btn => {
+document.querySelectorAll('nav button[data-tab]').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
     document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
@@ -1500,6 +2078,8 @@ function startMainUI() {
 // Boot
 if (loadState()) {
   startMainUI();
+} else {
+  document.getElementById('setup-panel').style.display = '';
 }
 </script>
 </body>
