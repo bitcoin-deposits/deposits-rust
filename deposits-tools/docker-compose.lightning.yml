@@ -32,6 +32,13 @@ x-ldk-common: &ldk-common
   networks:
     - regtest
 
+x-operator-ln-env: &operator-ln-env
+  RUST_LOG: info,deposits_node=debug
+  LDK_PORT: "3000"
+  LDK_API_KEY: test_api_key
+  LDK_CLI: /ldk-cli/ldk-server-cli
+  LDK_TLS_CERT: /ldk-data/tls.crt
+
 services:
   alice-ln:
     <<: *ldk-common
@@ -46,6 +53,7 @@ services:
       - "3111:3000"
     volumes:
       - ldk_alice_data:/ldk
+      - ldk_cli:/ldk-cli
 
   bob-ln:
     <<: *ldk-common
@@ -60,6 +68,7 @@ services:
       - "3112:3000"
     volumes:
       - ldk_bob_data:/ldk
+      - ldk_cli:/ldk-cli
 
   charlie-ln:
     <<: *ldk-common
@@ -74,6 +83,7 @@ services:
       - "3113:3000"
     volumes:
       - ldk_charlie_data:/ldk
+      - ldk_cli:/ldk-cli
 
   diana-ln:
     <<: *ldk-common
@@ -88,46 +98,43 @@ services:
       - "3114:3000"
     volumes:
       - ldk_diana_data:/ldk
+      - ldk_cli:/ldk-cli
 
   # Override operator nodes to add LDK sidecar connection
   alice:
     environment:
-      - RUST_LOG=info,deposits_node=debug
-      - LDK_HOST=alice-ln
-      - LDK_PORT=3000
-      - LDK_API_KEY=test_api_key
+      <<: *operator-ln-env
+      LDK_HOST: alice-ln
     volumes:
       - alice_data:/data
+      - ldk_cli:/ldk-cli:ro
       - ldk_alice_data:/ldk-data:ro
 
   bob:
     environment:
-      - RUST_LOG=info,deposits_node=debug
-      - LDK_HOST=bob-ln
-      - LDK_PORT=3000
-      - LDK_API_KEY=test_api_key
+      <<: *operator-ln-env
+      LDK_HOST: bob-ln
     volumes:
       - bob_data:/data
+      - ldk_cli:/ldk-cli:ro
       - ldk_bob_data:/ldk-data:ro
 
   charlie:
     environment:
-      - RUST_LOG=info,deposits_node=debug
-      - LDK_HOST=charlie-ln
-      - LDK_PORT=3000
-      - LDK_API_KEY=test_api_key
+      <<: *operator-ln-env
+      LDK_HOST: charlie-ln
     volumes:
       - charlie_data:/data
+      - ldk_cli:/ldk-cli:ro
       - ldk_charlie_data:/ldk-data:ro
 
   diana:
     environment:
-      - RUST_LOG=info,deposits_node=debug
-      - LDK_HOST=diana-ln
-      - LDK_PORT=3000
-      - LDK_API_KEY=test_api_key
+      <<: *operator-ln-env
+      LDK_HOST: diana-ln
     volumes:
       - diana_data:/data
+      - ldk_cli:/ldk-cli:ro
       - ldk_diana_data:/ldk-data:ro
 
 volumes:
@@ -135,3 +142,4 @@ volumes:
   ldk_bob_data:
   ldk_charlie_data:
   ldk_diana_data:
+  ldk_cli:

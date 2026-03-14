@@ -95,10 +95,14 @@ echo ""
 
 log_info "=== Starting Lightning sidecars ==="
 
-# Stop existing LDK containers
+# Stop existing LDK containers and wipe stale data
 for node in $OPERATORS; do
     docker stop "${node}-ln" 2>/dev/null || true
     docker rm "${node}-ln" 2>/dev/null || true
+done
+# Remove old LDK volumes to prevent stale channel state conflicts
+for v in $(docker volume ls -q --filter 'name=ldk_'); do
+    docker volume rm "$v" 2>/dev/null || true
 done
 
 # Start LDK sidecars via compose overlay
@@ -224,10 +228,36 @@ open_channel "bob" "charlie"
 open_channel "charlie" "diana"
 open_channel "diana" "alice"
 
-# Confirm channels
+# Also open reverse channels to force peer reconnection (acceptors need this)
+log_info ""
+log_info "Opening reverse channels (ensures peer connectivity)..."
+ALICE_KEY=$(ldk_cli alice get-node-info | jq -r .node_id)
+BOB_KEY=$(ldk_cli bob get-node-info | jq -r .node_id)
+CHARLIE_KEY=$(ldk_cli charlie get-node-info | jq -r .node_id)
+DIANA_KEY=$(ldk_cli diana get-node-info | jq -r .node_id)
+
+ldk_cli bob open-channel --node-pubkey "$ALICE_KEY" --address alice-ln:9735 --channel-amount-sats 100000 --announce-channel >/dev/null 2>&1 || true
+ldk_cli charlie open-channel --node-pubkey "$BOB_KEY" --address bob-ln:9736 --channel-amount-sats 100000 --announce-channel >/dev/null 2>&1 || true
+ldk_cli diana open-channel --node-pubkey "$CHARLIE_KEY" --address charlie-ln:9737 --channel-amount-sats 100000 --announce-channel >/dev/null 2>&1 || true
+ldk_cli alice open-channel --node-pubkey "$DIANA_KEY" --address diana-ln:9738 --channel-amount-sats 100000 --announce-channel >/dev/null 2>&1 || true
+
+# Confirm all channels
 mine_blocks 6
 log_info "Waiting for channels to confirm..."
-sleep 10
+
+# Wait until all nodes have at least 2 usable channels (or timeout after 60s)
+for attempt in $(seq 1 12); do
+    all_ready=true
+    for node in $OPERATORS; do
+        usable=$(ldk_cli "$node" list-channels 2>/dev/null | jq '[.channels[] | select(.is_usable==true)] | length' 2>/dev/null || echo "0")
+        usable=${usable:-0}
+        if [ "$usable" -lt 2 ] 2>/dev/null; then
+            all_ready=false
+        fi
+    done
+    if $all_ready; then break; fi
+    sleep 5
+done
 
 # ============================================================================
 # Summary

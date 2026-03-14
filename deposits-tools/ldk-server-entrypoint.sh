@@ -13,6 +13,11 @@ ALIAS="${NODE_NAME:-ldk-node}"
 
 mkdir -p "$DATA_DIR"
 
+# Copy CLI binary to shared volume (if mounted at /ldk-cli)
+if [ -d "/ldk-cli" ]; then
+    cp /usr/local/bin/ldk-server-cli /ldk-cli/ldk-server-cli 2>/dev/null || true
+fi
+
 # Generate TOML config
 cat > "$DATA_DIR/config.toml" <<EOF
 [node]

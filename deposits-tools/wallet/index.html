@@ -161,22 +161,31 @@ nav button:hover { color: var(--text); background: transparent; }
         <div class="row" style="margin-top:10px;">
           <div>
             <div class="form-group">
-              <label>Withdraw amount (sats)</label>
-              <input id="withdraw-amount" type="number" placeholder="10000">
+              <label>Amount (sats)</label>
+              <input id="action-amount" type="number" value="10000">
             </div>
+            <div class="actions" style="flex-wrap:wrap;">
+              <button onclick="doFundLightning()">Fund via Lightning</button>
+              <button onclick="doAddOffer()">Fund On-Chain</button>
+              <button onclick="doPayInvoice2()">Pay Invoice</button>
+            </div>
+          </div>
+          <div>
             <div class="form-group">
-              <label>Destination address</label>
+              <label>Withdraw to address</label>
               <input id="withdraw-address" type="text" placeholder="bc1q...">
             </div>
             <button class="primary" onclick="doWithdraw()">Withdraw</button>
           </div>
-          <div>
-            <div class="form-group">
-              <label>Add funds (sats)</label>
-              <input id="offer-amount" type="number" placeholder="50000">
-            </div>
-            <button onclick="doAddOffer()">Get Funding Address</button>
+        </div>
+        <div id="invoice-display" style="display:none; margin-top:10px; padding:10px; background:var(--bg); border:1px solid var(--border); border-radius:4px; word-break:break-all; font-size:11px; cursor:pointer;" onclick="copyInvoice()">
+        </div>
+        <div id="pay-invoice-input" style="display:none; margin-top:10px;">
+          <div class="form-group">
+            <label>BOLT11 Invoice</label>
+            <input id="action-bolt11" type="text" placeholder="lnbc...">
           </div>
+          <button class="primary" onclick="doPayInvoiceSubmit()">Send Payment</button>
         </div>
       </div>
     </div>
@@ -427,6 +436,82 @@ function transferLockSigningMessage(nonce, srcId, dstId, amount, fee, completion
 
 function computeTransferId(signingMessage) {
   return sha256(signingMessage);
+}
+
+function invoiceLockSigningMessage(depositId, paymentHash, amountMsat) {
+  const msg = `INVOICE:${bytesToHex(depositId)}:${bytesToHex(paymentHash)}:${amountMsat}`;
+  return sha256(utf8ToBytes(msg));
+}
+
+// Minimal BOLT11 decoder — extracts payment_hash and amount from a bech32-encoded invoice
+function decodeBolt11(invoice) {
+  const lower = invoice.toLowerCase();
+  // Find the human-readable part (everything before the last '1')
+  const lastOne = lower.lastIndexOf('1');
+  if (lastOne < 0) throw new Error('Invalid BOLT11: no separator');
+  const hrp = lower.slice(0, lastOne);
+  const dataStr = lower.slice(lastOne + 1);
+
+  // Parse amount from HRP: lnbc[rt][amount][multiplier]
+  let amountMsat = 0;
+  const amountMatch = hrp.match(/ln(?:bc|bcrt|tbs|tb)(\d+)([munp])?$/);
+  if (amountMatch) {
+    const num = parseInt(amountMatch[1]);
+    const mult = amountMatch[2] || '';
+    const btcToMsat = 100000000000; // 1 BTC = 100B msat
+    switch (mult) {
+      case 'm': amountMsat = num * btcToMsat / 1000; break;      // milli-BTC
+      case 'u': amountMsat = num * btcToMsat / 1000000; break;    // micro-BTC
+      case 'n': amountMsat = num * btcToMsat / 1000000000; break; // nano-BTC
+      case 'p': amountMsat = num * btcToMsat / 1000000000000; break; // pico-BTC
+      default:  amountMsat = num * btcToMsat; break;               // BTC
+    }
+  }
+
+  // Bech32 decode the data part (5-bit groups)
+  const CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+  const data5 = [];
+  for (let i = 0; i < dataStr.length - 6; i++) { // last 6 chars are checksum
+    const idx = CHARSET.indexOf(dataStr[i]);
+    if (idx < 0) throw new Error('Invalid bech32 character');
+    data5.push(idx);
+  }
+
+  // Convert 5-bit groups to 8-bit bytes
+  // First: timestamp (first 7 groups = 35 bits)
+  let bitPos = 35; // skip timestamp
+
+  // Parse tagged fields to find payment_hash (tag 'p' = 1)
+  let paymentHash = null;
+  while (bitPos + 10 <= data5.length * 5) {
+    const tag = getBits(data5, bitPos, 5); bitPos += 5;
+    const dataLen = getBits(data5, bitPos, 10); bitPos += 10; // length in 5-bit groups
+    const fieldBits = dataLen * 5;
+
+    if (tag === 1 && dataLen === 52) { // 'p' tag = payment_hash (52 * 5 = 260 bits = 32 bytes + 4 padding)
+      const hashBytes = [];
+      for (let i = 0; i < 32; i++) {
+        hashBytes.push(getBits(data5, bitPos + i * 8, 8));
+      }
+      paymentHash = new Uint8Array(hashBytes);
+    }
+    bitPos += fieldBits;
+  }
+
+  if (!paymentHash) throw new Error('Could not find payment_hash in invoice');
+  return { paymentHash, amountMsat };
+}
+
+function getBits(data5, bitOffset, numBits) {
+  let val = 0;
+  for (let i = 0; i < numBits; i++) {
+    const groupIdx = Math.floor((bitOffset + i) / 5);
+    const bitIdx = 4 - ((bitOffset + i) % 5); // MSB first within each 5-bit group
+    if (groupIdx < data5.length) {
+      val = (val << 1) | ((data5[groupIdx] >> bitIdx) & 1);
+    }
+  }
+  return val;
 }
 
 function withdrawalSigningMessage(nonce, depositId, address, amount, fee) {
@@ -900,6 +985,8 @@ window.selectDeposit = function(alias) {
   if (!selectedDeposit) return;
   document.getElementById('deposit-actions').style.display = 'block';
   document.getElementById('action-alias').textContent = alias;
+  document.getElementById('invoice-display').style.display = 'none';
+  document.getElementById('pay-invoice-input').style.display = 'none';
 };
 
 async function syncAll() {
@@ -938,7 +1025,7 @@ window.syncAll = syncAll;
 
 window.doWithdraw = async function() {
   if (!selectedDeposit) return;
-  const amount = parseInt(document.getElementById('withdraw-amount').value);
+  const amount = parseInt(document.getElementById('action-amount').value);
   const address = document.getElementById('withdraw-address').value;
   if (!amount || !address) { log('Missing amount or address', 'error'); return; }
 
@@ -978,7 +1065,7 @@ window.doWithdraw = async function() {
 
 window.doAddOffer = async function() {
   if (!selectedDeposit) return;
-  const amount = parseInt(document.getElementById('offer-amount').value);
+  const amount = parseInt(document.getElementById('action-amount').value);
   if (!amount) { log('Missing amount', 'error'); return; }
 
   try {
@@ -1021,6 +1108,91 @@ window.doAddOffer = async function() {
     }
   } catch (e) {
     log(`Offer error: ${e.message}`, 'error');
+  }
+};
+
+window.doFundLightning = async function() {
+  if (!selectedDeposit) return;
+  const amount = parseInt(document.getElementById('action-amount').value);
+  if (!amount) { log('Missing amount', 'error'); return; }
+
+  try {
+    log(`Creating Lightning invoice for ${amount} sats...`);
+    const response = await sendRequest(selectedDeposit.ledger_id, 'make_invoice', {
+      deposit_pubkey: selectedDeposit.deposit_pubkey,
+      amount_sats: amount,
+      description: `Fund deposit ${selectedDeposit.alias}`,
+    }, 60000);
+
+    if (response.success) {
+      const r = response.result || response;
+      const invoice = r.invoice;
+      if (invoice) {
+        log(`Invoice created — pay to fund deposit`, 'success');
+        const el = document.getElementById('invoice-display');
+        el.textContent = invoice;
+        el.style.display = 'block';
+        // Copy to clipboard
+        try { await navigator.clipboard.writeText(invoice); log('Copied to clipboard'); } catch {}
+      } else {
+        log('Response missing invoice', 'error');
+      }
+    } else {
+      log(`Invoice failed: ${response.error}`, 'error');
+    }
+  } catch (e) {
+    log(`Invoice error: ${e.message}`, 'error');
+  }
+};
+
+window.copyInvoice = async function() {
+  const text = document.getElementById('invoice-display').textContent;
+  try { await navigator.clipboard.writeText(text); log('Copied to clipboard'); } catch {}
+};
+
+window.doPayInvoice2 = function() {
+  const el = document.getElementById('pay-invoice-input');
+  el.style.display = el.style.display === 'none' ? 'block' : 'none';
+};
+
+window.doPayInvoiceSubmit = async function() {
+  if (!selectedDeposit) return;
+  const bolt11 = document.getElementById('action-bolt11').value.trim();
+  if (!bolt11) { log('Missing invoice', 'error'); return; }
+
+  try {
+    // Decode invoice to get payment_hash and amount
+    const { paymentHash, amountMsat } = decodeBolt11(bolt11);
+    log(`Invoice: ${amountMsat / 1000} sats, hash=${bytesToHex(paymentHash).slice(0,16)}...`);
+
+    // Sign authorization: INVOICE:{deposit_id}:{payment_hash}:{amount_msat}
+    const keyIndex = selectedDeposit.key_index || 0;
+    const secretKey = deriveSecretKey(state.seed, keyIndex);
+    const pubkey = getCompressedPubkey(secretKey);
+    const depositId = computeDepositId(pubkey);
+
+    const msgHash = invoiceLockSigningMessage(depositId, paymentHash, amountMsat);
+    const sig = schnorr.sign(msgHash, secretKey);
+
+    log('Paying invoice...');
+    const response = await sendRequest(selectedDeposit.ledger_id, 'pay_invoice', {
+      deposit_pubkey: selectedDeposit.deposit_pubkey,
+      invoice: bolt11,
+      payment_hash: bytesToHex(paymentHash),
+      amount_msats: amountMsat,
+      signature: bytesToHex(sig),
+    }, 60000);
+
+    if (response.success) {
+      log('Payment sent!', 'success');
+      document.getElementById('action-bolt11').value = '';
+      document.getElementById('pay-invoice-input').style.display = 'none';
+      syncAll();
+    } else {
+      log(`Payment failed: ${response.error}`, 'error');
+    }
+  } catch (e) {
+    log(`Payment error: ${e.message}`, 'error');
   }
 };
 
