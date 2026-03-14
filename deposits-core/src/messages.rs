@@ -876,6 +876,32 @@ impl LedgerOperation {
             Self::Tombstone { .. } => 61,
         }
     }
+
+    /// Return deposit IDs affected by this operation (for Nostr event tagging).
+    pub fn affected_deposit_ids(&self) -> Vec<&crate::types::DepositId> {
+        match self {
+            Self::DepositOpen { deposit_id, .. }
+            | Self::DepositClose { deposit_id }
+            | Self::DepositUpdate { deposit_id, .. }
+            | Self::DepositKeyRotate { deposit_id, .. }
+            | Self::InvoiceCredit { deposit_id, .. }
+            | Self::InvoiceLock { deposit_id, .. }
+            | Self::InvoiceFail { deposit_id, .. }
+            | Self::InvoiceFulfill { deposit_id, .. }
+            | Self::OnchainCredit { deposit_id, .. }
+            | Self::OnchainLock { deposit_id, .. }
+            | Self::OnchainFail { deposit_id, .. }
+            | Self::OnchainFulfill { deposit_id, .. }
+            | Self::FeeCollect { deposit_id, .. } => vec![deposit_id],
+
+            Self::TransferLock { source_deposit_id, destination_deposit_id, .. } => {
+                vec![source_deposit_id, destination_deposit_id]
+            }
+
+            // These don't reference deposits
+            _ => vec![],
+        }
+    }
 }
 
 // ============================================================================

@@ -287,8 +287,7 @@ services:
       - REFRESH_SECONDS=15
       - LOG_LEVEL=INFO
     networks:
-      regtest:
-        ipv4_address: 172.21.0.12
+      - regtest
 
   # deposits-node Node 1 - Alice (Operator)
   alice:

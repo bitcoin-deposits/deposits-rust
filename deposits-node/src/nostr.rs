@@ -898,7 +898,7 @@ impl NostrTransport {
         let content = BASE64.encode(&tlv_bytes);
 
         // Build the event with appropriate tags
-        let event = EventBuilder::new(Kind::Custom(KIND_LEDGER_UPDATE), &content)
+        let mut builder = EventBuilder::new(Kind::Custom(KIND_LEDGER_UPDATE), &content)
             .tag(Tag::custom(
                 TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::D)),
                 [&ledger_id],
@@ -914,7 +914,19 @@ impl NostrTransport {
             .tag(Tag::custom(
                 TagKind::custom("hash"),
                 [hex::encode(update.current_hash)],
-            ))
+            ));
+
+        // Tag affected deposit IDs for wallet filtering
+        if let Ok(op) = deposits_core::messages::LedgerOperation::tlv_decode(&update.message) {
+            for dep_id in op.affected_deposit_ids() {
+                builder = builder.tag(Tag::custom(
+                    TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::I)),
+                    [hex::encode(dep_id)],
+                ));
+            }
+        }
+
+        let event = builder
             .sign_with_keys(&self.keys)
             .map_err(|e| Error::Nostr(format!("Failed to sign event: {}", e)))?;
 

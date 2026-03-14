@@ -5232,6 +5232,7 @@ impl Node {
         // Look up the deposit balance
         match ledger.state.deposits.get(&deposit_id) {
             Some(deposit) => {
+                let block_height = self.wallet.get_block_height().unwrap_or(0);
                 let result = serde_json::json!({
                     "deposit_pubkey": deposit_pubkey_hex,
                     "deposit_id": hex::encode(deposit_id),
@@ -5240,6 +5241,7 @@ impl Node {
                     "locked_msats": deposit.locked_balance,
                     "collateral_lock_msats": deposit.collateral_lock_amount,
                     "collateral_lock_expires": deposit.collateral_lock_expires,
+                    "block_height": block_height,
                 });
                 tracing::debug!("Balance query: {}... -> {} msats", &deposit_pubkey_hex[..16], deposit.balance);
                 (true, Some(result.to_string()), None)

@@ -67,11 +67,15 @@ nav button:hover { color: var(--text); background: transparent; }
 .kv .k { color: var(--muted); }
 .kv .v { text-align: right; word-break: break-all; }
 
-.deposit-card { cursor: default; }
-.deposit-card .alias { font-weight: 600; font-size: 14px; }
-.deposit-card .balance { font-size: 18px; font-weight: 700; color: var(--green); }
-.deposit-card .balance.zero { color: var(--muted); }
-.deposit-card .meta { color: var(--muted); font-size: 11px; margin-top: 4px; }
+.deposit-tile {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+  padding: 10px 14px; cursor: pointer; min-width: 120px; transition: border-color 0.15s;
+}
+.deposit-tile:hover { border-color: var(--accent); }
+.deposit-tile.selected { border-color: var(--accent); background: #161b2a; }
+.deposit-tile .alias { font-weight: 600; font-size: 12px; }
+.deposit-tile .bal { font-size: 15px; font-weight: 700; color: var(--green); margin-top: 2px; }
+.deposit-tile .bal.zero { color: var(--muted); font-size: 12px; }
 
 .log { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 8px; max-height: 200px; overflow-y: auto; font-size: 11px; color: var(--muted); }
 .log .entry { padding: 1px 0; }
@@ -86,6 +90,9 @@ nav button:hover { color: var(--text); background: transparent; }
 .badge { font-size: 10px; padding: 2px 6px; border-radius: 3px; }
 .badge.pending { background: #2d1f00; color: var(--yellow); }
 .badge.funded { background: #0d1f0d; color: var(--green); }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+.spinner::after { content: '\21BB'; display:inline-block; animation: spin 0.8s linear infinite; font-size:20px; line-height:1; }
 
 #setup-panel { text-align: center; padding: 60px 20px; }
 #setup-panel .card { max-width: 400px; margin: 0 auto; text-align: left; }
@@ -151,7 +158,7 @@ nav button:hover { color: var(--text); background: transparent; }
       <button data-tab="transfer">Transfer</button>
       <button data-tab="settings">Settings</button>
       <span style="flex:1"></span>
-      <button style="border:none; color:var(--muted); font-size:11px;" onclick="syncAll()">Sync</button>
+      <button id="sync-btn" style="border:none; color:var(--muted); font-size:11px;" onclick="syncAll()">Sync</button>
       <span id="conn-status" class="disconnected" style="font-size:11px; padding:3px 8px; border-radius:10px; align-self:center;">disconnected</span>
     </nav>
 
@@ -205,7 +212,14 @@ nav button:hover { color: var(--text); background: transparent; }
           <button onclick="doWalletRecvLightning()">Lightning Invoice</button>
           <button onclick="doWalletRecvOnchain()">On-Chain Address</button>
         </div>
-        <div id="wallet-recv-result" style="display:none; margin-top:10px; padding:10px; background:var(--bg); border:1px solid var(--border); border-radius:4px; word-break:break-all; font-size:11px; cursor:pointer;" onclick="copyWalletResult()">
+        <div id="wallet-recv-result" style="display:none; margin-top:10px; padding:10px; background:var(--bg); border:1px solid var(--border); border-radius:4px;">
+          <div style="display:flex; gap:12px; align-items:flex-start;">
+            <canvas id="wallet-recv-qr" style="cursor:pointer; image-rendering:pixelated; border-radius:4px;" onclick="showQRFullscreenFrom('wallet')"></canvas>
+            <div style="flex:1;">
+              <div id="wallet-recv-text" style="word-break:break-all; font-size:11px;"></div>
+              <button style="margin-top:6px; font-size:11px; padding:2px 8px;" onclick="copyWalletResult()">&#128203; Copy</button>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -216,7 +230,8 @@ nav button:hover { color: var(--text); background: transparent; }
           <label>From deposit</label>
           <select id="wallet-send-deposit"></select>
         </div>
-        <div style="display:flex; gap:8px; margin-top:8px;">
+        <div style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;">
+          <button onclick="startQRScan()">Scan QR</button>
           <button onclick="showWalletSendInvoice()">Pay Invoice</button>
           <button onclick="showWalletSendAddress()">Withdraw to Address</button>
           <button onclick="showWalletSendTransfer()">Transfer</button>
@@ -255,6 +270,17 @@ nav button:hover { color: var(--text); background: transparent; }
           <button class="primary" onclick="doWalletTransfer()">Transfer</button>
         </div>
       </div>
+
+      <!-- History section (collapsed) -->
+      <div style="margin-top:20px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; cursor:pointer;" onclick="toggleHistory()">
+          <span style="color:var(--muted); font-size:12px;" id="history-toggle">History &#9654;</span>
+        </div>
+        <div id="history-panel" style="display:none; margin-top:8px;">
+          <div id="history-list"></div>
+          <div id="history-pager" style="display:flex; justify-content:center; gap:8px; margin-top:8px;"></div>
+        </div>
+      </div>
     </div>
 
     <!-- Deposits tab -->
@@ -262,10 +288,20 @@ nav button:hover { color: var(--text); background: transparent; }
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
         <span style="color:var(--muted)">Your deposits</span>
       </div>
-      <div id="deposits-list"></div>
+      <div id="deposits-list" style="display:flex; flex-wrap:wrap; gap:8px;"></div>
+
+      <!-- Deposit detail (shown when a deposit is selected) -->
+      <div id="deposit-detail" class="card" style="display:none; margin-top:12px;">
+        <div style="display:flex; justify-content:space-between; align-items:baseline;">
+          <h3 id="detail-alias" style="margin:0;"></h3>
+          <span id="detail-badge" class="badge"></span>
+        </div>
+        <div id="detail-balance" style="font-size:20px; font-weight:700; color:var(--green); margin:6px 0;"></div>
+        <div id="detail-info" style="font-size:11px; color:var(--muted);"></div>
+      </div>
 
       <!-- Deposit actions (shown when a deposit is selected) -->
-      <div id="deposit-actions" class="card" style="display:none; margin-top:12px;">
+      <div id="deposit-actions" class="card" style="display:none; margin-top:8px;">
         <h3 id="action-title">Actions for <span id="action-alias"></span></h3>
         <div class="row" style="margin-top:10px;">
           <div>
@@ -274,8 +310,8 @@ nav button:hover { color: var(--text); background: transparent; }
               <input id="action-amount" type="number" value="10000">
             </div>
             <div class="actions" style="flex-wrap:wrap;">
-              <button onclick="doFundLightning()">Fund via Lightning</button>
-              <button onclick="doAddOffer()">Fund On-Chain</button>
+              <button onclick="doFundLightning()">Receive Lightning</button>
+              <button onclick="doAddOffer()">Receive On-Chain</button>
               <button onclick="doPayInvoice2()">Pay Invoice</button>
             </div>
           </div>
@@ -287,7 +323,14 @@ nav button:hover { color: var(--text); background: transparent; }
             <button class="primary" onclick="doWithdraw()">Withdraw</button>
           </div>
         </div>
-        <div id="invoice-display" style="display:none; margin-top:10px; padding:10px; background:var(--bg); border:1px solid var(--border); border-radius:4px; word-break:break-all; font-size:11px; cursor:pointer;" onclick="copyInvoice()">
+        <div id="invoice-display" style="display:none; margin-top:10px; padding:10px; background:var(--bg); border:1px solid var(--border); border-radius:4px;">
+          <div style="display:flex; gap:12px; align-items:flex-start;">
+            <canvas id="invoice-qr" style="cursor:pointer; image-rendering:pixelated; border-radius:4px;" onclick="showQRFullscreenFrom('invoice')"></canvas>
+            <div style="flex:1;">
+              <div id="invoice-text" style="word-break:break-all; font-size:11px;"></div>
+              <button style="margin-top:6px; font-size:11px; padding:2px 8px;" onclick="copyInvoice()">&#128203; Copy</button>
+            </div>
+          </div>
         </div>
         <div id="pay-invoice-input" style="display:none; margin-top:10px;">
           <div class="form-group">
@@ -347,9 +390,15 @@ nav button:hover { color: var(--text); background: transparent; }
           <label>Hash lock (64 hex, leave blank to generate)</label>
           <input id="transfer-hash" type="text" placeholder="optional — will generate preimage">
         </div>
-        <div class="form-group">
-          <label>Timeout (block height)</label>
-          <input id="transfer-timeout" type="number" value="5000">
+        <div class="row">
+          <div class="form-group">
+            <label>Timeout (blocks from now)</label>
+            <input id="transfer-timeout" type="number" value="144" oninput="updateTimeoutEstimate()">
+          </div>
+          <div class="form-group">
+            <label>Estimated time</label>
+            <input id="transfer-timeout-est" type="text" readonly value="~1 day" style="color:var(--muted);">
+          </div>
         </div>
         <button class="primary" onclick="doTransferLock()">Lock Transfer</button>
       </div>
@@ -358,17 +407,17 @@ nav button:hover { color: var(--text); background: transparent; }
         <h3>Complete Transfer (Reveal Preimage)</h3>
         <div class="form-group">
           <label>Ledger ID</label>
-          <input id="complete-ledger" type="text" placeholder="64 hex chars">
+          <input id="complete-ledger" type="text" placeholder="64 hex chars" oninput="resetCompleteBtn()">
         </div>
         <div class="form-group">
           <label>Transfer ID (64 hex)</label>
-          <input id="complete-transfer-id" type="text">
+          <input id="complete-transfer-id" type="text" oninput="resetCompleteBtn()">
         </div>
         <div class="form-group">
           <label>Preimage (64 hex)</label>
-          <input id="complete-preimage" type="text">
+          <input id="complete-preimage" type="text" oninput="resetCompleteBtn()">
         </div>
-        <button class="primary" onclick="doTransferComplete()">Complete Transfer</button>
+        <button id="complete-btn" class="primary" onclick="doTransferComplete()">Complete Transfer</button>
       </div>
     </div>
 
@@ -423,6 +472,24 @@ nav button:hover { color: var(--text); background: transparent; }
       <button onclick="dismissError()" style="width:100%">Dismiss</button>
     </div>
   </div>
+
+  <!-- QR scanner modal -->
+  <div id="scan-modal" class="modal-overlay" style="background:rgba(0,0,0,0.9);">
+    <div style="display:flex; flex-direction:column; align-items:center; gap:12px; width:90%; max-width:400px;">
+      <video id="scan-video" style="width:100%; border-radius:8px; background:#000;" autoplay playsinline></video>
+      <canvas id="scan-canvas" style="display:none;"></canvas>
+      <div id="scan-status" style="color:var(--muted); font-size:12px;">Accessing camera...</div>
+      <button onclick="stopQRScan()" style="width:100%;">Cancel</button>
+    </div>
+  </div>
+
+  <!-- QR fullscreen modal -->
+  <div id="qr-modal" class="modal-overlay" onclick="dismissQR()" style="background:rgba(0,0,0,0.85);">
+    <div style="display:flex; flex-direction:column; align-items:center; gap:16px;">
+      <canvas id="qr-modal-canvas" style="image-rendering:pixelated; border-radius:8px;"></canvas>
+      <div id="qr-modal-text" style="color:var(--muted); font-size:11px; max-width:90vw; text-align:center; word-break:break-all; cursor:pointer;" onclick="event.stopPropagation(); copyQRText()"></div>
+    </div>
+  </div>
 </div>
 
 <script type="module">
@@ -435,6 +502,37 @@ import { sha512 } from 'https://esm.sh/@noble/hashes@1.7.1/sha512';
 import { bytesToHex, hexToBytes, utf8ToBytes } from 'https://esm.sh/@noble/hashes@1.7.1/utils';
 import * as secp from 'https://esm.sh/@noble/secp256k1@2.2.3';
 import { schnorr } from 'https://esm.sh/@noble/curves@1.8.1/secp256k1';
+import qrcode from 'https://esm.sh/qrcode-generator@1.4.4';
+import jsQR from 'https://esm.sh/jsqr@1.4.0';
+
+// ============================================================
+// QR code rendering
+// ============================================================
+function renderQR(canvas, text, targetSize = 180) {
+  const qr = qrcode(0, 'L');
+  qr.addData(text.toUpperCase()); // uppercase for alphanumeric mode (smaller QR)
+  qr.make();
+  const modules = qr.getModuleCount();
+  const border = 4; // quiet zone in modules
+  const totalModules = modules + border * 2;
+  const scale = Math.max(2, Math.floor(targetSize / totalModules));
+  const px = totalModules * scale;
+  canvas.width = px;
+  canvas.height = px;
+  canvas.style.width = px + 'px';
+  canvas.style.height = px + 'px';
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, px, px);
+  ctx.fillStyle = '#000000';
+  for (let r = 0; r < modules; r++) {
+    for (let c = 0; c < modules; c++) {
+      if (qr.isDark(r, c)) {
+        ctx.fillRect((c + border) * scale, (r + border) * scale, scale, scale);
+      }
+    }
+  }
+}
 
 // ============================================================
 // BIP-32 HD key derivation (minimal implementation)
@@ -631,6 +729,7 @@ let state = {
 
 let sockets = [];    // [{ws, url, connected, readOnly}]
 let pendingRequests = new Map(); // eventId -> {resolve, reject, timeout}
+let cachedBlockHeight = 0; // updated during sync
 
 function saveState() {
   const s = {
@@ -1033,29 +1132,19 @@ function renderDeposits() {
   const container = document.getElementById('deposits-list');
   renderWalletTab();
   if (state.deposits.length === 0) {
-    container.innerHTML = '<div class="empty">No deposits yet. Go to Discover to find a ledger and open one.</div>';
+    container.innerHTML = '<div class="empty" style="width:100%">No deposits yet. Go to Discover to find a ledger and open one.</div>';
     return;
   }
 
   let html = '';
   for (const d of state.deposits) {
-    const hasBal = d.amount_sats != null;
+    const hasBal = balanceVisible && d.amount_sats != null;
     const bal = d.amount_sats || 0;
-    const locked = d.locked_sats ? ` <span style="color:var(--yellow);font-size:12px">(${d.locked_sats} locked)</span>` : '';
-    const balDisplay = hasBal
-      ? `<div class="balance">${bal.toLocaleString()} sats${locked}</div>`
-      : `<div class="balance zero">unfunded — sync to check</div>`;
+    const selected = selectedDeposit && selectedDeposit.alias === d.alias ? ' selected' : '';
     html += `
-      <div class="card deposit-card" onclick="selectDeposit('${esc(d.alias)}')">
-        <div style="display:flex; justify-content:space-between; align-items:baseline;">
-          <span class="alias">${esc(d.alias)}</span>
-          <span class="badge ${d.status}">${d.status}</span>
-        </div>
-        ${balDisplay}
-        <div class="meta">
-          Ledger: ${d.ledger_id.slice(0, 16)}...
-          ${d.funding_address ? `<br>Fund: ${d.funding_address}` : ''}
-        </div>
+      <div class="deposit-tile${selected}" onclick="selectDeposit('${esc(d.alias)}')">
+        <div class="alias">${esc(d.alias)}</div>
+        <div class="bal${hasBal && bal > 0 ? '' : ' zero'}">${hasBal ? bal.toLocaleString() + 's' : d.status}</div>
       </div>`;
   }
   container.innerHTML = html;
@@ -1167,8 +1256,12 @@ window.showWalletOpen = async function() {
     groups.get(key).push(ad);
   }
 
+  const groupEntries = [...groups.values()];
+  const singleGroup = groupEntries.length === 1;
   let html = '';
-  for (const [, groupAds] of groups) {
+  let groupIdx = 0;
+
+  for (const groupAds of groupEntries) {
     const s = groupAds[0];
     const annualBps = s.annual_fee_bps || 0;
     const minFee = s.min_fee_sats || 0;
@@ -1178,17 +1271,38 @@ window.showWalletOpen = async function() {
     const totalHeadroom = groupAds.reduce((sum, a) => sum + (a.available_headroom_sats || 0), 0);
 
     // Pick the ledger with most headroom
-    const best = groupAds.sort((a, b) => (b.available_headroom_sats || 0) - (a.available_headroom_sats || 0))[0];
+    const sorted = groupAds.sort((a, b) => (b.available_headroom_sats || 0) - (a.available_headroom_sats || 0));
+    const best = sorted[0];
     const lid = best.ledger_id;
     const relay = best.relay_url || '';
+    const gid = 'open-group-' + groupIdx;
 
-    html += `<div style="display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px solid var(--border);">
-      <div style="flex:1">
-        <div style="font-size:12px;">${(annualBps/100).toFixed(2)}%/yr + ${minFee}s/${feePeriod}blk, xfer ${tfFixed}s+${(tfRate/100).toFixed(2)}%</div>
-        <div style="color:var(--muted); font-size:11px;">${groupAds.length} ledger(s), ${totalHeadroom.toLocaleString()} sats available</div>
-      </div>
-      <button class="primary" style="margin-left:10px;" onclick="doWalletQuickOpen('${lid}','${esc(relay)}')">Open</button>
-    </div>`;
+    html += `<div style="padding:8px 0;${singleGroup ? '' : ' border-bottom:1px solid var(--border);'}">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <div style="flex:1">
+          <div style="font-size:12px;">${(annualBps/100).toFixed(2)}%/yr + ${minFee}s/${feePeriod}blk, xfer ${tfFixed}s+${(tfRate/100).toFixed(2)}%</div>
+          <div style="color:var(--muted); font-size:11px;">${groupAds.length} ledger(s), ${totalHeadroom.toLocaleString()} sats available</div>
+        </div>
+        <button class="primary" style="margin-left:10px;" onclick="doWalletQuickOpen('${lid}','${esc(relay)}')">Open</button>
+      </div>`;
+
+    if (groupAds.length > 1) {
+      html += `<div style="margin-top:4px;">
+        <span style="color:var(--accent); font-size:11px; cursor:pointer;" onclick="document.getElementById('${gid}').style.display = document.getElementById('${gid}').style.display === 'none' ? 'flex' : 'none'">All ledgers &#9660;</span>
+        <div id="${gid}" style="display:none; margin-top:4px; flex-wrap:wrap; gap:4px;">`;
+      for (const ad of sorted) {
+        const name = ad.operator_name || 'Anon';
+        const adLid = ad.ledger_id || '';
+        const adRelay = ad.relay_url || '';
+        const headroom = (ad.available_headroom_sats || 0).toLocaleString();
+        const quorum = ad.quorum_size || 0;
+        html += `<button style="font-size:10px; padding:2px 6px;" onclick="event.stopPropagation(); doWalletQuickOpen('${adLid}','${esc(adRelay)}')" title="${adLid}">${esc(name)} (${adLid.slice(0,8)}...) ${headroom}s q=${quorum}</button>`;
+      }
+      html += `</div></div>`;
+    }
+
+    html += `</div>`;
+    groupIdx++;
   }
   document.getElementById('wallet-open-list').innerHTML = html;
 };
@@ -1240,6 +1354,105 @@ window.doWalletQuickOpen = async function(ledgerId, relayUrl) {
   }
 };
 
+let historyEvents = [];
+let historyPage = 0;
+const HISTORY_PAGE_SIZE = 10;
+
+window.toggleHistory = function() {
+  const panel = document.getElementById('history-panel');
+  const toggle = document.getElementById('history-toggle');
+  const show = panel.style.display === 'none';
+  panel.style.display = show ? 'block' : 'none';
+  toggle.innerHTML = show ? 'History &#9660;' : 'History &#9654;';
+  if (show && historyEvents.length === 0) fetchHistory();
+};
+
+async function fetchHistory() {
+  document.getElementById('history-list').innerHTML = '<div style="color:var(--muted); text-align:center; padding:10px;">Loading...</div>';
+
+  // Compute deposit IDs for all our deposits
+  const depositIds = state.deposits
+    .filter(d => d.deposit_pubkey)
+    .map(d => {
+      const pubkey = hexToBytes(d.deposit_pubkey);
+      return bytesToHex(computeDepositId(pubkey));
+    });
+
+  if (depositIds.length === 0) {
+    document.getElementById('history-list').innerHTML = '<div style="color:var(--muted); text-align:center; padding:10px;">No deposits to query.</div>';
+    return;
+  }
+
+  // Fetch Kind 9100 events tagged with our deposit IDs
+  const filter = { kinds: [9100], '#i': depositIds, limit: 100 };
+  const events = await fetchEvents(filter, 15000);
+
+  // Sort by timestamp descending (newest first)
+  historyEvents = events.sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+  historyPage = 0;
+  renderHistory();
+}
+
+function renderHistory() {
+  const container = document.getElementById('history-list');
+  if (historyEvents.length === 0) {
+    container.innerHTML = '<div style="color:var(--muted); text-align:center; padding:10px;">No history found.</div>';
+    document.getElementById('history-pager').innerHTML = '';
+    return;
+  }
+
+  const start = historyPage * HISTORY_PAGE_SIZE;
+  const page = historyEvents.slice(start, start + HISTORY_PAGE_SIZE);
+  const totalPages = Math.ceil(historyEvents.length / HISTORY_PAGE_SIZE);
+
+  // Build a deposit ID → alias map for display
+  const idToAlias = {};
+  for (const d of state.deposits) {
+    if (!d.deposit_pubkey) continue;
+    const pubkey = hexToBytes(d.deposit_pubkey);
+    const id = bytesToHex(computeDepositId(pubkey));
+    idToAlias[id] = d.alias;
+  }
+
+  let html = '';
+  for (const ev of page) {
+    const time = new Date(ev.created_at * 1000).toLocaleString();
+    const tags = Object.fromEntries((ev.tags || []).map(t => [t[0], t[1]]));
+    const seq = tags.seq || '?';
+    const depositIds = (ev.tags || []).filter(t => t[0] === 'i').map(t => t[1]);
+    const aliases = depositIds.map(id => idToAlias[id] || id.slice(0, 8) + '...').join(', ');
+
+    // Try to decode operation type from content
+    let opType = '?';
+    try {
+      // Content is base64 TLV — we can't fully decode in JS, but the seq tag gives us ordering
+      // Use the tag info we have
+      opType = aliases || 'ledger op';
+    } catch {}
+
+    html += `<div style="display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px solid var(--border); font-size:11px;">
+      <span style="color:var(--muted)">#${seq}</span>
+      <span>${aliases}</span>
+      <span style="color:var(--muted)">${time}</span>
+    </div>`;
+  }
+  container.innerHTML = html;
+
+  // Pager
+  if (totalPages > 1) {
+    let pager = '';
+    if (historyPage > 0) pager += `<button style="font-size:11px; padding:2px 10px;" onclick="historyPrev()">Prev</button>`;
+    pager += `<span style="color:var(--muted); font-size:11px; align-self:center;">${historyPage + 1} / ${totalPages}</span>`;
+    if (historyPage < totalPages - 1) pager += `<button style="font-size:11px; padding:2px 10px;" onclick="historyNext()">Next</button>`;
+    document.getElementById('history-pager').innerHTML = pager;
+  } else {
+    document.getElementById('history-pager').innerHTML = '';
+  }
+}
+
+window.historyPrev = function() { if (historyPage > 0) { historyPage--; renderHistory(); } };
+window.historyNext = function() { historyPage++; renderHistory(); };
+
 window.showWalletReceive = function() {
   document.getElementById('wallet-receive').style.display =
     document.getElementById('wallet-receive').style.display === 'none' ? 'block' : 'none';
@@ -1255,6 +1468,82 @@ window.showWalletSend = function() {
   document.getElementById('wallet-send-address-input').style.display = 'none';
   document.getElementById('wallet-send-transfer-input').style.display = 'none';
 };
+
+let scanStream = null;
+let scanTimer = null;
+
+window.startQRScan = async function() {
+  const modal = document.getElementById('scan-modal');
+  const video = document.getElementById('scan-video');
+  const status = document.getElementById('scan-status');
+  modal.classList.add('visible');
+  status.textContent = 'Accessing camera...';
+
+  try {
+    scanStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment' }
+    });
+    video.srcObject = scanStream;
+    await video.play();
+    status.textContent = 'Point at a QR code';
+
+    const canvas = document.getElementById('scan-canvas');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+    scanTimer = setInterval(() => {
+      if (video.readyState !== video.HAVE_ENOUGH_DATA) return;
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      ctx.drawImage(video, 0, 0);
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const code = jsQR(imageData.data, canvas.width, canvas.height);
+      if (code && code.data) {
+        handleScannedQR(code.data);
+        stopQRScan();
+      }
+    }, 150);
+  } catch (e) {
+    status.textContent = `Camera error: ${e.message}`;
+  }
+};
+
+window.stopQRScan = function() {
+  if (scanTimer) { clearInterval(scanTimer); scanTimer = null; }
+  if (scanStream) { scanStream.getTracks().forEach(t => t.stop()); scanStream = null; }
+  document.getElementById('scan-video').srcObject = null;
+  document.getElementById('scan-modal').classList.remove('visible');
+};
+
+function handleScannedQR(data) {
+  const lower = data.toLowerCase().trim();
+  if (lower.startsWith('lnbc') || lower.startsWith('lnbcrt') || lower.startsWith('lntb') || lower.startsWith('lntbs')) {
+    // Lightning invoice
+    document.getElementById('wallet-send-bolt11').value = data;
+    showWalletSendInvoice();
+    log(`Scanned Lightning invoice`, 'success');
+  } else if (lower.startsWith('bitcoin:')) {
+    // BIP21 URI — extract address and optional amount
+    const uri = data.replace(/^bitcoin:/i, '');
+    const [addr, params] = uri.split('?');
+    document.getElementById('wallet-send-address').value = addr;
+    if (params) {
+      const match = params.match(/amount=([0-9.]+)/i);
+      if (match) {
+        const btc = parseFloat(match[1]);
+        document.getElementById('wallet-send-amount').value = Math.round(btc * 100000000);
+      }
+    }
+    showWalletSendAddress();
+    log(`Scanned Bitcoin address`, 'success');
+  } else if (lower.startsWith('bc1') || lower.startsWith('bcrt1') || lower.startsWith('tb1') || lower.startsWith('1') || lower.startsWith('3')) {
+    // Plain address
+    document.getElementById('wallet-send-address').value = data;
+    showWalletSendAddress();
+    log(`Scanned Bitcoin address`, 'success');
+  } else {
+    log(`Scanned: ${data.slice(0, 40)}...`, 'error');
+  }
+}
 
 window.showWalletSendInvoice = function() {
   document.getElementById('wallet-send-invoice-input').style.display = 'block';
@@ -1318,7 +1607,9 @@ window.doWalletTransfer = async function() {
     }
   } catch {}
 
-  const timeout = 5000;
+  await syncAll();
+  if (cachedBlockHeight === 0) { log('Block height unknown — sync failed', 'error'); return; }
+  const timeout = cachedBlockHeight + 144; // ~1 day
   const completionScript_hash = new Uint8Array(32);
   crypto.getRandomValues(completionScript_hash);
   const preimage = new Uint8Array(32);
@@ -1390,9 +1681,7 @@ window.doWalletRecvLightning = async function() {
     if (response.success) {
       const r = response.result || response;
       if (r.invoice) {
-        const el = document.getElementById('wallet-recv-result');
-        el.textContent = r.invoice;
-        el.style.display = 'block';
+        showRecvResult(r.invoice);
         try { await navigator.clipboard.writeText(r.invoice); log('Invoice copied to clipboard', 'success'); } catch {}
       }
     } else {
@@ -1436,9 +1725,7 @@ window.doWalletRecvOnchain = async function() {
         deposit.funding_address = r.funding_address;
         if (r.offer_id) deposit.offer_id = r.offer_id;
         saveState(); renderDeposits();
-        const el = document.getElementById('wallet-recv-result');
-        el.textContent = r.funding_address;
-        el.style.display = 'block';
+        showRecvResult(r.funding_address);
         try { await navigator.clipboard.writeText(r.funding_address); log('Address copied to clipboard', 'success'); } catch {}
       }
     } else {
@@ -1447,8 +1734,36 @@ window.doWalletRecvOnchain = async function() {
   } catch (e) { log(`Offer error: ${e.message}`, 'error'); }
 };
 
+function showRecvResult(text) {
+  document.getElementById('wallet-recv-text').textContent = text;
+  document.getElementById('wallet-recv-result').style.display = 'block';
+  try { renderQR(document.getElementById('wallet-recv-qr'), text); } catch (e) { console.warn('QR render failed:', e); }
+}
+
+window.showQRFullscreenFrom = function(source) {
+  const textEl = source === 'wallet'
+    ? document.getElementById('wallet-recv-text')
+    : document.getElementById('invoice-text');
+  const text = textEl ? textEl.textContent : '';
+  if (!text) return;
+  const canvas = document.getElementById('qr-modal-canvas');
+  const vw = Math.min(window.innerWidth, window.innerHeight) * 0.75;
+  try { renderQR(canvas, text, vw); } catch {}
+  document.getElementById('qr-modal-text').textContent = text;
+  document.getElementById('qr-modal').classList.add('visible');
+};
+
+window.dismissQR = function() {
+  document.getElementById('qr-modal').classList.remove('visible');
+};
+
+window.copyQRText = async function() {
+  const text = document.getElementById('qr-modal-text').textContent;
+  try { await navigator.clipboard.writeText(text); log('Copied to clipboard'); } catch {}
+};
+
 window.copyWalletResult = async function() {
-  const text = document.getElementById('wallet-recv-result').textContent;
+  const text = document.getElementById('wallet-recv-text').textContent;
   try { await navigator.clipboard.writeText(text); log('Copied to clipboard'); } catch {}
 };
 
@@ -1527,6 +1842,33 @@ let selectedDeposit = null;
 window.selectDeposit = function(alias) {
   selectedDeposit = state.deposits.find(d => d.alias === alias);
   if (!selectedDeposit) return;
+
+  // Highlight selected tile
+  document.querySelectorAll('.deposit-tile').forEach(t => t.classList.remove('selected'));
+  document.querySelectorAll('.deposit-tile').forEach(t => {
+    if (t.querySelector('.alias')?.textContent === alias) t.classList.add('selected');
+  });
+
+  // Detail pane
+  const d = selectedDeposit;
+  document.getElementById('detail-alias').textContent = d.alias;
+  document.getElementById('detail-badge').textContent = d.status;
+  document.getElementById('detail-badge').className = 'badge ' + d.status;
+
+  const hasBal = balanceVisible && d.amount_sats != null;
+  const bal = d.amount_sats || 0;
+  const locked = d.locked_sats ? ` (${d.locked_sats} locked)` : '';
+  document.getElementById('detail-balance').textContent = hasBal ? `${bal.toLocaleString()} sats${locked}` : 'sync to check';
+  document.getElementById('detail-balance').style.color = hasBal && bal > 0 ? 'var(--green)' : 'var(--muted)';
+
+  let info = `Ledger: ${d.ledger_id}`;
+  if (d.deposit_pubkey) info += `\nDeposit pubkey: ${d.deposit_pubkey}`;
+  if (d.funding_address) info += `\nFunding address: ${d.funding_address}`;
+  if (d.offer_id) info += `\nOffer ID: ${d.offer_id}`;
+  if (d.key_index != null) info += `\nKey index: ${d.key_index}`;
+  document.getElementById('detail-info').innerText = info;
+
+  document.getElementById('deposit-detail').style.display = 'block';
   document.getElementById('deposit-actions').style.display = 'block';
   document.getElementById('action-alias').textContent = alias;
   document.getElementById('invoice-display').style.display = 'none';
@@ -1534,6 +1876,15 @@ window.selectDeposit = function(alias) {
 };
 
 async function syncAll() {
+  const btn = document.getElementById('sync-btn');
+  if (btn.disabled) return; // already syncing
+  const wasText = btn.textContent;
+  btn.style.minWidth = btn.offsetWidth + 'px';
+  btn.textContent = '';
+  btn.classList.add('spinner');
+  btn.disabled = true;
+  const minWait = new Promise(r => setTimeout(r, 500));
+
   log('Syncing balances...');
   let updated = false;
   for (const deposit of state.deposits) {
@@ -1553,6 +1904,7 @@ async function syncAll() {
         if (locked > 0) deposit.locked_sats = locked;
         else delete deposit.locked_sats;
         if (balMsats > 0 && deposit.status === 'pending') deposit.status = 'funded';
+        if (r.block_height) cachedBlockHeight = r.block_height;
         updated = true;
         log(`  ${deposit.alias}: ${available} sats${locked > 0 ? ` (${locked} locked)` : ''}`);
       } else {
@@ -1564,6 +1916,11 @@ async function syncAll() {
   }
   if (updated) { saveState(); renderDeposits(); }
   log('Sync complete', 'success');
+
+  await minWait;
+  btn.classList.remove('spinner');
+  btn.textContent = wasText;
+  btn.disabled = false;
 }
 window.syncAll = syncAll;
 
@@ -1646,7 +2003,10 @@ window.doAddOffer = async function() {
       saveState();
       renderDeposits();
       log(`Funding address: ${addr}`, 'success');
-      alert(`Send sats to:\n\n${addr}`);
+      document.getElementById('invoice-text').textContent = addr;
+      document.getElementById('invoice-display').style.display = 'block';
+      try { renderQR(document.getElementById('invoice-qr'), addr); } catch {}
+      try { await navigator.clipboard.writeText(addr); log('Copied to clipboard'); } catch {}
     } else {
       log(`Offer failed: ${response.error}`, 'error');
     }
@@ -1673,10 +2033,9 @@ window.doFundLightning = async function() {
       const invoice = r.invoice;
       if (invoice) {
         log(`Invoice created — pay to fund deposit`, 'success');
-        const el = document.getElementById('invoice-display');
-        el.textContent = invoice;
-        el.style.display = 'block';
-        // Copy to clipboard
+        document.getElementById('invoice-text').textContent = invoice;
+        document.getElementById('invoice-display').style.display = 'block';
+        try { renderQR(document.getElementById('invoice-qr'), invoice); } catch {}
         try { await navigator.clipboard.writeText(invoice); log('Copied to clipboard'); } catch {}
       } else {
         log('Response missing invoice', 'error');
@@ -1690,7 +2049,7 @@ window.doFundLightning = async function() {
 };
 
 window.copyInvoice = async function() {
-  const text = document.getElementById('invoice-display').textContent;
+  const text = document.getElementById('invoice-text').textContent;
   try { await navigator.clipboard.writeText(text); log('Copied to clipboard'); } catch {}
 };
 
@@ -1738,6 +2097,16 @@ window.doPayInvoiceSubmit = async function() {
   } catch (e) {
     log(`Payment error: ${e.message}`, 'error');
   }
+};
+
+window.updateTimeoutEstimate = function() {
+  const blocks = parseInt(document.getElementById('transfer-timeout').value) || 0;
+  const minutes = blocks * 10;
+  let est;
+  if (minutes < 60) est = `~${minutes} min`;
+  else if (minutes < 1440) est = `~${(minutes / 60).toFixed(1)} hours`;
+  else est = `~${(minutes / 1440).toFixed(1)} days`;
+  document.getElementById('transfer-timeout-est').value = est;
 };
 
 window.onTransferToChange = function() {
@@ -1813,9 +2182,12 @@ window.doTransferLock = async function() {
   const fee = parseInt(document.getElementById('transfer-fee').value) || 2;
   const destHex = resolveDestDepositId();
   let hashHex = document.getElementById('transfer-hash').value;
-  const timeout = parseInt(document.getElementById('transfer-timeout').value);
+  const timeoutBlocks = parseInt(document.getElementById('transfer-timeout').value);
 
-  if (!amount || !destHex || !timeout) { log('Missing required fields', 'error'); return; }
+  if (!amount || !destHex || !timeoutBlocks) { log('Missing required fields', 'error'); return; }
+  await syncAll();
+  if (cachedBlockHeight === 0) { log('Block height unknown — sync failed', 'error'); return; }
+  const timeout = cachedBlockHeight + timeoutBlocks;
   if (destHex.length !== 32) { log('Destination deposit ID must be 32 hex chars', 'error'); return; }
 
   try {
@@ -1860,11 +2232,11 @@ window.doTransferLock = async function() {
 
     if (response.success) {
       log(`Transfer locked! ID: ${bytesToHex(transferId)}`, 'success');
+      document.getElementById('complete-transfer-id').value = bytesToHex(transferId);
+      document.getElementById('complete-ledger').value = deposit.ledger_id;
       if (preimage) {
         log(`Preimage (save this!): ${bytesToHex(preimage)}`, 'success');
-        document.getElementById('complete-transfer-id').value = bytesToHex(transferId);
         document.getElementById('complete-preimage').value = bytesToHex(preimage);
-        document.getElementById('complete-ledger').value = deposit.ledger_id;
       }
     } else {
       log(`Transfer lock failed: ${response.error}`, 'error');
@@ -1889,12 +2261,24 @@ window.doTransferComplete = async function() {
 
     if (response.success) {
       log(`Transfer completed!`, 'success');
+      const btn = document.getElementById('complete-btn');
+      btn.textContent = 'Success';
+      btn.disabled = true;
+      btn.style.opacity = '0.6';
+      syncAll();
     } else {
       log(`Transfer complete failed: ${response.error}`, 'error');
     }
   } catch (e) {
     log(`Transfer complete error: ${e.message}`, 'error');
   }
+};
+
+window.resetCompleteBtn = function() {
+  const btn = document.getElementById('complete-btn');
+  btn.textContent = 'Complete Transfer';
+  btn.disabled = false;
+  btn.style.opacity = '';
 };
 
 window.doMakeInvoice = async function() {
@@ -1983,7 +2367,7 @@ window.dismissError = function() {
 };
 
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') dismissError();
+  if (e.key === 'Escape') { dismissError(); dismissQR(); stopQRScan(); }
 });
 
 // Tab switching
