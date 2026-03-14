@@ -5506,7 +5506,98 @@ impl Node {
         tracing::info!("Locked {} msat for payment {}",
             amount_msat, hex::encode(&payment_id[..8]));
 
-        // Pay invoice via LdkCli
+        // Check for self-pay: if this invoice was created by us (exists in pending_invoices),
+        // settle internally without touching LDK. This handles the case where a depositor
+        // pays an invoice created for another depositor on the same operator.
+        let self_pay = self.pending_invoices.lock().unwrap().contains_key(&payment_id);
+
+        if self_pay {
+            tracing::info!("Self-pay detected for payment {}... — settling internally",
+                hex::encode(&payment_id[..8]));
+
+            // Look up the pending invoice to find the destination deposit
+            let pending = self.pending_invoices.lock().unwrap().remove(&payment_id);
+            if let Some(pending) = pending {
+                // Fulfill the lock (debit sender)
+                let fulfill_sequence = {
+                    let ledger = ledger_arc.read().unwrap();
+                    ledger.next_sequence()
+                };
+
+                let fulfill_operation = LedgerOperation::InvoiceFulfill {
+                    deposit_id,
+                    amount: amount_msat,
+                    payment_id,
+                    sequence_number: fulfill_sequence,
+                    witness: witness.clone(),
+                    preimage: [0u8; 32], // No real preimage needed for internal settlement
+                };
+
+                {
+                    let mut ledger = ledger_arc.write().unwrap();
+                    let block_height = self.wallet.get_block_height().unwrap_or(0);
+                    let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
+
+                    if let Err(e) = ledger.append_operation_with_block(
+                        fulfill_operation,
+                        deposits_core::messages::consts::SENDING_FULFILL_PAYMENT,
+                        block_height,
+                        block_hash,
+                    ) {
+                        return (false, None, Some(format!("Failed to fulfill self-pay: {:?}", e)));
+                    }
+                }
+
+                // Credit the destination deposit
+                let credit_sequence = {
+                    let ledger = ledger_arc.read().unwrap();
+                    ledger.next_sequence()
+                };
+
+                let credit_operation = LedgerOperation::InvoiceCredit {
+                    payment_hash: payment_id,
+                    deposit_id: pending.deposit_id,
+                    amount: amount_msat,
+                    invoice_id: pending.invoice.clone(),
+                    sequence_number: credit_sequence,
+                };
+
+                {
+                    let mut ledger = ledger_arc.write().unwrap();
+                    let block_height = self.wallet.get_block_height().unwrap_or(0);
+                    let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
+
+                    if let Err(e) = ledger.append_operation_with_block(
+                        credit_operation,
+                        deposits_core::messages::consts::RECEIVING_CREDIT_PAYMENT,
+                        block_height,
+                        block_hash,
+                    ) {
+                        tracing::error!("Failed to credit destination deposit: {:?}", e);
+                    }
+                }
+
+                if let Err(e) = self.sign_and_broadcast(ledger_id).await {
+                    tracing::error!("Failed to broadcast self-pay: {}", e);
+                }
+
+                tracing::info!("Self-pay settled: {} msat from {} to {}",
+                    amount_msat,
+                    hex::encode(&deposit_id[..4]),
+                    hex::encode(&pending.deposit_id[..4]));
+
+                let result = serde_json::json!({
+                    "payment_id": hex::encode(&payment_id),
+                    "deposit_pubkey": deposit_pubkey_hex,
+                    "amount_msat": amount_msat,
+                    "status": "succeeded",
+                    "self_pay": true,
+                });
+                return (true, Some(result.to_string()), None);
+            }
+        }
+
+        // Pay invoice via LdkCli (external payment)
         let cli = LdkCli::from_env();
         let pay_result = cli.pay_invoice(invoice_str);
 
