@@ -212,15 +212,22 @@ nav button:hover { color: var(--text); background: transparent; }
     <!-- Transfer tab -->
     <div id="tab-transfer" class="panel">
       <div class="card">
-        <h3>Send Transfer (HTLC Lock)</h3>
-        <div class="form-group">
-          <label>From deposit</label>
-          <select id="transfer-from"></select>
+        <h3>Transfer (HTLC)</h3>
+        <div class="row">
+          <div class="form-group">
+            <label>From</label>
+            <select id="transfer-from" onchange="onTransferFromChange()"></select>
+          </div>
+          <div class="form-group">
+            <label>To</label>
+            <select id="transfer-to" onchange="onTransferToChange()"></select>
+            <input id="transfer-dest" type="text" placeholder="32 hex deposit ID" style="display:none; margin-top:4px;">
+          </div>
         </div>
         <div class="row">
           <div class="form-group">
             <label>Amount (sats)</label>
-            <input id="transfer-amount" type="number" placeholder="1000">
+            <input id="transfer-amount" type="number" value="1000" oninput="updateTransferFee()">
           </div>
           <div class="form-group">
             <label>Fee (sats)</label>
@@ -228,16 +235,12 @@ nav button:hover { color: var(--text); background: transparent; }
           </div>
         </div>
         <div class="form-group">
-          <label>Destination deposit ID (32 hex)</label>
-          <input id="transfer-dest" type="text" placeholder="abcdef0123456789...">
-        </div>
-        <div class="form-group">
           <label>Hash lock (64 hex, leave blank to generate)</label>
           <input id="transfer-hash" type="text" placeholder="optional — will generate preimage">
         </div>
         <div class="form-group">
           <label>Timeout (block height)</label>
-          <input id="transfer-timeout" type="number" placeholder="1000">
+          <input id="transfer-timeout" type="number" value="5000">
         </div>
         <button class="primary" onclick="doTransferLock()">Lock Transfer</button>
       </div>
@@ -257,34 +260,6 @@ nav button:hover { color: var(--text); background: transparent; }
           <input id="complete-preimage" type="text">
         </div>
         <button class="primary" onclick="doTransferComplete()">Complete Transfer</button>
-      </div>
-
-      <div class="card" style="margin-top: 12px;">
-        <h3>Lightning</h3>
-        <div class="row">
-          <div>
-            <div class="form-group">
-              <label>Deposit</label>
-              <select id="ln-deposit"></select>
-            </div>
-            <div class="form-group">
-              <label>Amount (sats)</label>
-              <input id="ln-amount" type="number" placeholder="1000">
-            </div>
-            <button onclick="doMakeInvoice()">Create Invoice</button>
-          </div>
-          <div>
-            <div class="form-group">
-              <label>Deposit</label>
-              <select id="ln-pay-deposit"></select>
-            </div>
-            <div class="form-group">
-              <label>BOLT11 Invoice</label>
-              <input id="ln-bolt11" type="text" placeholder="lnbc...">
-            </div>
-            <button onclick="doPayInvoice()">Pay Invoice</button>
-          </div>
-        </div>
       </div>
     </div>
 
@@ -967,15 +942,23 @@ function renderDeposits() {
   container.innerHTML = html;
 
   // Update transfer dropdowns
-  for (const selId of ['transfer-from', 'ln-deposit', 'ln-pay-deposit']) {
-    const sel = document.getElementById(selId);
-    if (sel) {
-      const opts = state.deposits.map(d => {
+  const fromSel = document.getElementById('transfer-from');
+  if (fromSel) {
+    fromSel.innerHTML = state.deposits.map(d => {
+      const label = d.amount_sats != null ? `${esc(d.alias)} (${d.amount_sats} sats)` : esc(d.alias);
+      return `<option value="${esc(d.alias)}">${label}</option>`;
+    }).join('');
+  }
+  const toSel = document.getElementById('transfer-to');
+  if (toSel) {
+    const fromVal = fromSel ? fromSel.value : '';
+    const opts = state.deposits
+      .filter(d => d.alias !== fromVal)
+      .map(d => {
         const label = d.amount_sats != null ? `${esc(d.alias)} (${d.amount_sats} sats)` : esc(d.alias);
         return `<option value="${esc(d.alias)}">${label}</option>`;
       }).join('');
-      sel.innerHTML = opts;
-    }
+    toSel.innerHTML = opts + '<option value="__other__">Other (enter ID)</option>';
   }
 }
 
@@ -1196,6 +1179,70 @@ window.doPayInvoiceSubmit = async function() {
   }
 };
 
+window.onTransferToChange = function() {
+  const val = document.getElementById('transfer-to').value;
+  document.getElementById('transfer-dest').style.display = val === '__other__' ? 'block' : 'none';
+};
+
+// Cached fee schedule for the currently selected source deposit's ledger
+let transferFeeSchedule = { fixed: 2, bps: 20 }; // defaults
+
+window.onTransferFromChange = async function() {
+  const alias = document.getElementById('transfer-from').value;
+  const deposit = state.deposits.find(d => d.alias === alias);
+
+  // Re-render "to" dropdown excluding the selected "from"
+  const toSel = document.getElementById('transfer-to');
+  if (toSel) {
+    const prevTo = toSel.value;
+    const opts = state.deposits
+      .filter(d => d.alias !== alias)
+      .map(d => {
+        const label = d.amount_sats != null ? `${esc(d.alias)} (${d.amount_sats} sats)` : esc(d.alias);
+        return `<option value="${esc(d.alias)}">${label}</option>`;
+      }).join('');
+    toSel.innerHTML = opts + '<option value="__other__">Other (enter ID)</option>';
+    // Restore previous selection if still valid
+    if ([...toSel.options].some(o => o.value === prevTo)) toSel.value = prevTo;
+  }
+
+  if (!deposit) return;
+
+  // Fetch the ledger advertisement to get the fee schedule
+  try {
+    const adFilter = { kinds: [39100], '#d': [deposit.ledger_id] };
+    const adEvents = await fetchEvents(adFilter, 5000);
+    if (adEvents.length > 0) {
+      const ad = JSON.parse(adEvents[0].content);
+      transferFeeSchedule = {
+        fixed: ad.transfer_fee_fixed_sats || 0,
+        bps: ad.transfer_fee_rate_bps || 0,
+      };
+    }
+  } catch {}
+  updateTransferFee();
+};
+
+window.updateTransferFee = function() {
+  const amount = parseInt(document.getElementById('transfer-amount').value) || 0;
+  const fee = transferFeeSchedule.fixed + Math.floor(amount * transferFeeSchedule.bps / 10000);
+  document.getElementById('transfer-fee').value = fee;
+};
+
+// Resolve destination deposit ID from dropdown or freetext
+function resolveDestDepositId() {
+  const toVal = document.getElementById('transfer-to').value;
+  if (toVal === '__other__') {
+    return document.getElementById('transfer-dest').value.trim();
+  }
+  // Look up deposit by alias and compute its deposit_id
+  const dest = state.deposits.find(d => d.alias === toVal);
+  if (!dest || !dest.deposit_pubkey) return null;
+  const pubkey = hexToBytes(dest.deposit_pubkey);
+  const id = computeDepositId(pubkey);
+  return bytesToHex(id);
+}
+
 window.doTransferLock = async function() {
   const alias = document.getElementById('transfer-from').value;
   const deposit = state.deposits.find(d => d.alias === alias);
@@ -1203,7 +1250,7 @@ window.doTransferLock = async function() {
 
   const amount = parseInt(document.getElementById('transfer-amount').value);
   const fee = parseInt(document.getElementById('transfer-fee').value) || 2;
-  const destHex = document.getElementById('transfer-dest').value;
+  const destHex = resolveDestDepositId();
   let hashHex = document.getElementById('transfer-hash').value;
   const timeout = parseInt(document.getElementById('transfer-timeout').value);
 
@@ -1363,6 +1410,7 @@ document.querySelectorAll('nav button').forEach(btn => {
     btn.classList.add('active');
     document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
     if (btn.dataset.tab === 'discover') discoverLedgers();
+    if (btn.dataset.tab === 'transfer') onTransferFromChange();
   });
 });
 
