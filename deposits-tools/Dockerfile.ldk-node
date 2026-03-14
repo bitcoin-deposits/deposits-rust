@@ -1,0 +1,43 @@
+# Dockerfile for LDK Lightning sidecar (stock ldk-server)
+#
+# Builds ldk-server and ldk-server-cli from source.
+# At runtime, generates a TOML config from environment variables.
+#
+# Build context must be ~/workspace/ (parent of all repos):
+#   docker build -f deposits-rust/deposits-tools/Dockerfile.ldk-node -t ldk-node:latest ~/workspace/
+
+FROM rust:1.85-slim AS builder
+
+RUN apt-get update && apt-get install -y pkg-config libssl-dev protobuf-compiler && rm -rf /var/lib/apt/lists/*
+
+COPY ldk-server /build/ldk-server
+COPY rust-lightning /build/rust-lightning
+COPY ldk-node /build/ldk-node
+
+WORKDIR /build/ldk-server
+RUN cargo build --release --bin ldk-server --bin ldk-server-cli && \
+    ls -la target/release/ldk-server target/release/ldk-server-cli
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y ca-certificates openssl curl jq && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/ldk-server/target/release/ldk-server /usr/local/bin/ldk-server
+COPY --from=builder /build/ldk-server/target/release/ldk-server-cli /usr/local/bin/ldk-server-cli
+
+COPY deposits-rust/deposits-tools/ldk-server-entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENV LDK_DATA_DIR=/ldk
+ENV ELECTRUM_HOST=electrs
+ENV ELECTRUM_PORT=3002
+ENV LISTEN_PORT=9735
+ENV API_PORT=3000
+ENV NODE_NAME=ldk-node
+ENV TLS_HOSTNAME=localhost
+ENV LDK_API_KEY=test_api_key
+ENV RUST_LOG=info
+
+EXPOSE 9735 3000
+
+ENTRYPOINT ["/entrypoint.sh"]

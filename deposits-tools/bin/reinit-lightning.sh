@@ -94,9 +94,9 @@ if ! $QUICK; then
     log_info "Building deposits-node image..."
     $DC_LIGHTNING build --no-cache alice
 
-    # Rebuild ldk-node image
+    # Rebuild ldk-node image (build context is ~/workspace/ for access to ldk-server, ldk-node, rust-lightning)
     log_info "Building ldk-node image..."
-    $DC_LIGHTNING build --no-cache alice-ln
+    docker build -f "$BDK_DIR/Dockerfile.ldk-node" -t ldk-node:latest "$HOME/workspace/"
 fi
 
 # Start infrastructure services first
