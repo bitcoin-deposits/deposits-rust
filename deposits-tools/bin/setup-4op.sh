@@ -230,13 +230,15 @@ open_ledgers() {
                 fi
             fi
 
-            # Pass enforcement block and fee schedule
+            # Pass enforcement block, fee schedule, and external relay URL
+            local relay_url=$(get_node_relay_url "$op")
             local output=$(run_bdk_cmd "$op" ledger open "$enforcement_block" \
                 --annual-fee-bps "$ANNUAL_FEE_BPS" \
                 --min-fee-sats "$MIN_FEE_SATS" \
                 --fee-period "$FEE_PERIOD" \
                 --transfer-fee-fixed "$TRANSFER_FEE_FIXED" \
-                --transfer-fee-rate-bps "$TRANSFER_FEE_RATE_BPS" 2>&1)
+                --transfer-fee-rate-bps "$TRANSFER_FEE_RATE_BPS" \
+                --advertise-relay "$relay_url" 2>&1)
 
             if echo "$output" | grep -q "Ledger opened\|opened successfully"; then
                 local ledger_id=$(echo "$output" | grep "Ledger ID:" | awk '{print $3}')

@@ -449,6 +449,12 @@ pub struct LedgerAdvertisement {
     #[serde(default)]
     pub quorum_members: Vec<QuorumMemberInfo>,
 
+    // === Connectivity ===
+
+    /// Relay URL where this operator publishes responses
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_url: Option<String>,
+
     // === Metadata ===
 
     /// Network (bitcoin, testnet, signet, regtest)
@@ -501,6 +507,7 @@ impl LedgerAdvertisement {
             reserves_amount_sats: 0,
             received_collateral_sats: 0,
             quorum_members: Vec::new(),
+            relay_url: None,
             network,
             version: 1,
             event_id: String::new(),

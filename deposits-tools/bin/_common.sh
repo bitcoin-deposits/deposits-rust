@@ -59,6 +59,18 @@ get_node_name() {
     esac
 }
 
+# Get external relay URL for a node (host-accessible port)
+get_node_relay_url() {
+    local node=$1
+    case "$node" in
+        "alice")     echo "ws://localhost:7801" ;;
+        "bob")       echo "ws://localhost:7802" ;;
+        "charlie")   echo "ws://localhost:7803" ;;
+        "diana")     echo "ws://localhost:7804" ;;
+        *) echo "" ;;
+    esac
+}
+
 # Get the wallet-derived deposit secret for a node's deposit on a target ledger
 # Usage: get_deposit_secret <depositor_node> [<target_ledger_id>]
 # If target_ledger_id is provided, looks up the key_index from deposits.json

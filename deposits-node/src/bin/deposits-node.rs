@@ -1063,6 +1063,7 @@ struct FeeScheduleArgs {
     fee_period_blocks: Option<u32>,
     transfer_fee_fixed: Option<u64>,
     transfer_fee_rate_bps: Option<u16>,
+    advertise_relay: Option<String>,
 }
 
 impl FeeScheduleArgs {
@@ -1117,6 +1118,7 @@ async fn auto_advertise_ledger(
         network_str.to_string(),
     );
     ad.operator_name = operator_name.map(|s| s.to_string());
+    ad.relay_url = fee_schedule.advertise_relay.clone();
     ad.reserves_amount_sats = ledger.reserves_amount();
     ad.collateral_enforcement_block = ledger.state.collateral_enforcement_block.unwrap_or(0);
     ad.quorum_size = ledger.state.quorum_members.len() as u8;
@@ -1193,6 +1195,7 @@ async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     let mut fee_period_blocks: Option<u32> = None;
     let mut transfer_fee_fixed: Option<u64> = None;
     let mut transfer_fee_rate_bps: Option<u16> = None;
+    let mut advertise_relay: Option<String> = None;
 
     let fee_flags = [
         "--annual-fee-bps", "--min-fee-sats", "--fee-period",
@@ -1223,6 +1226,10 @@ async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
                     transfer_fee_rate_bps = Some(args[i + 1].parse().map_err(|_| format!("Invalid {}: {}", args[i], args[i + 1]))?);
                     i += 1;
                 }
+                "--advertise-relay" if i + 1 < args.len() => {
+                    advertise_relay = Some(args[i + 1].clone());
+                    i += 1;
+                }
                 _ => {
                     // Config argument - pass through
                     config_args.push(args[i].clone());
@@ -1247,6 +1254,7 @@ async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         fee_period_blocks,
         transfer_fee_fixed,
         transfer_fee_rate_bps,
+        advertise_relay,
     };
 
     let config = parse_config(&config_args)?;
@@ -1977,6 +1985,7 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
     let mut fee_period_blocks: u32 = 2016; // default ~2 weeks
     let mut max_deposit_sats: u64 = u64::MAX;
     let mut min_deposit_sats: u64 = 0;
+    let mut advertise_relay_url: Option<String> = None;
     let mut config_args = Vec::new();
 
     let mut i = 0;
@@ -1984,6 +1993,7 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
         match args[i].as_str() {
             "--name" | "--operator-name" if i + 1 < args.len() => { operator_name = Some(args[i + 1].clone()); i += 1; }
             "--description" if i + 1 < args.len() => { description = Some(args[i + 1].clone()); i += 1; }
+            "--advertise-relay" if i + 1 < args.len() => { advertise_relay_url = Some(args[i + 1].clone()); i += 1; }
             "--annual-fee" if i + 1 < args.len() => {
                 annual_fee_bps = args[i + 1].parse().map_err(|e| {
                     format!("Invalid --annual-fee value '{}': {}", args[i + 1], e)
@@ -2060,6 +2070,7 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     ad.operator_name = operator_name;
     ad.description = description;
+    ad.relay_url = advertise_relay_url;
     ad.annual_fee_bps = annual_fee_bps;
     ad.deposit_fee_bps = deposit_fee_bps;
     ad.withdrawal_fee_bps = withdrawal_fee_bps;

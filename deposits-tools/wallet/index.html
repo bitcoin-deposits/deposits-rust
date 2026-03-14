@@ -1,0 +1,1286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Deposits Wallet</title>
+<style>
+:root {
+  --bg: #0d1117; --surface: #161b22; --border: #30363d;
+  --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
+  --green: #3fb950; --red: #f85149; --yellow: #d29922;
+  --font: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: var(--font); background: var(--bg); color: var(--text); font-size: 13px; line-height: 1.5; }
+a { color: var(--accent); text-decoration: none; }
+button {
+  font-family: var(--font); font-size: 12px; padding: 6px 14px;
+  background: var(--surface); color: var(--text); border: 1px solid var(--border);
+  border-radius: 4px; cursor: pointer; transition: background 0.15s;
+}
+button:hover { background: var(--border); }
+button.primary { background: #1f6feb; border-color: #388bfd; }
+button.primary:hover { background: #388bfd; }
+button.danger { border-color: var(--red); color: var(--red); }
+input, select {
+  font-family: var(--font); font-size: 12px; padding: 6px 10px;
+  background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  border-radius: 4px; outline: none; width: 100%;
+}
+input:focus { border-color: var(--accent); }
+label { font-size: 11px; color: var(--muted); display: block; margin-bottom: 3px; }
+
+#app { max-width: 840px; margin: 0 auto; padding: 20px; }
+
+header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 0; border-bottom: 1px solid var(--border); margin-bottom: 16px;
+}
+header h1 { font-size: 16px; font-weight: 600; }
+#conn-status { font-size: 11px; padding: 3px 8px; border-radius: 10px; }
+#conn-status.connected { background: #0d1f0d; color: var(--green); }
+#conn-status.disconnected { background: #1f0d0d; color: var(--red); }
+
+nav { display: flex; gap: 2px; margin-bottom: 16px; border-bottom: 1px solid var(--border); padding-bottom: 0; }
+nav button {
+  border: none; border-bottom: 2px solid transparent; border-radius: 0;
+  padding: 8px 14px; background: transparent; color: var(--muted); font-size: 12px;
+}
+nav button.active { color: var(--accent); border-bottom-color: var(--accent); }
+nav button:hover { color: var(--text); background: transparent; }
+
+.panel { display: none; }
+.panel.active { display: block; }
+
+.card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 6px; padding: 14px; margin-bottom: 10px;
+}
+.card h3 { font-size: 13px; font-weight: 600; margin-bottom: 8px; }
+
+.row { display: flex; gap: 10px; margin-bottom: 8px; }
+.row > * { flex: 1; }
+
+.kv { display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px solid var(--border); }
+.kv:last-child { border-bottom: none; }
+.kv .k { color: var(--muted); }
+.kv .v { text-align: right; word-break: break-all; }
+
+.deposit-card { cursor: default; }
+.deposit-card .alias { font-weight: 600; font-size: 14px; }
+.deposit-card .balance { font-size: 18px; font-weight: 700; color: var(--green); }
+.deposit-card .balance.zero { color: var(--muted); }
+.deposit-card .meta { color: var(--muted); font-size: 11px; margin-top: 4px; }
+
+.log { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 8px; max-height: 200px; overflow-y: auto; font-size: 11px; color: var(--muted); }
+.log .entry { padding: 1px 0; }
+.log .error { color: var(--red); }
+.log .success { color: var(--green); }
+
+.empty { text-align: center; padding: 40px; color: var(--muted); }
+
+.form-group { margin-bottom: 10px; }
+.actions { display: flex; gap: 8px; margin-top: 12px; }
+
+.badge { font-size: 10px; padding: 2px 6px; border-radius: 3px; }
+.badge.pending { background: #2d1f00; color: var(--yellow); }
+.badge.funded { background: #0d1f0d; color: var(--green); }
+
+#setup-panel { text-align: center; padding: 60px 20px; }
+#setup-panel .card { max-width: 400px; margin: 0 auto; text-align: left; }
+</style>
+</head>
+<body>
+<div id="app">
+  <!-- Setup screen (shown when no seed) -->
+  <div id="setup-panel">
+    <h1 style="margin-bottom: 8px;">Deposits Wallet</h1>
+    <p style="color: var(--muted); margin-bottom: 24px;">Nostr-native bitcoin custody</p>
+    <div class="card">
+      <h3>Get Started</h3>
+      <div class="form-group">
+        <label>Ledger relay (discovers operators automatically)</label>
+        <input id="setup-ledger-relay" type="text" placeholder="ws://localhost:7779" value="ws://localhost:7779">
+      </div>
+      <div class="form-group">
+        <label>Operator relays (optional — discovered from advertisements)</label>
+        <input id="setup-relay" type="text" placeholder="ws://localhost:7801,..." value="">
+      </div>
+      <div class="form-group">
+        <label>Network</label>
+        <select id="setup-network">
+          <option value="regtest" selected>regtest</option>
+          <option value="signet">signet</option>
+          <option value="testnet">testnet</option>
+          <option value="bitcoin">bitcoin</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Seed (64 hex chars, leave blank to generate)</label>
+        <input id="setup-seed" type="text" placeholder="optional — will generate random seed">
+      </div>
+      <div class="actions">
+        <button class="primary" onclick="initWallet()" style="width:100%">Create Wallet</button>
+      </div>
+      <div style="margin-top: 12px;">
+        <button onclick="importWallet()" style="width:100%">Import Existing Seed</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main wallet UI (shown after setup) -->
+  <div id="main-panel" style="display:none">
+    <header>
+      <h1>Deposits Wallet</h1>
+      <div>
+        <span id="conn-status" class="disconnected">disconnected</span>
+      </div>
+    </header>
+
+    <nav>
+      <button class="active" data-tab="deposits">Deposits</button>
+      <button data-tab="discover">Discover</button>
+      <button data-tab="transfer">Transfer</button>
+      <button data-tab="settings">Settings</button>
+    </nav>
+
+    <!-- Deposits tab -->
+    <div id="tab-deposits" class="panel active">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+        <span style="color:var(--muted)">Your deposits</span>
+        <div style="display:flex; gap:6px;">
+          <button onclick="syncAll()">Sync Balances</button>
+        </div>
+      </div>
+      <div id="deposits-list"></div>
+
+      <!-- Deposit actions (shown when a deposit is selected) -->
+      <div id="deposit-actions" class="card" style="display:none; margin-top:12px;">
+        <h3 id="action-title">Actions for <span id="action-alias"></span></h3>
+        <div class="row" style="margin-top:10px;">
+          <div>
+            <div class="form-group">
+              <label>Withdraw amount (sats)</label>
+              <input id="withdraw-amount" type="number" placeholder="10000">
+            </div>
+            <div class="form-group">
+              <label>Destination address</label>
+              <input id="withdraw-address" type="text" placeholder="bc1q...">
+            </div>
+            <button class="primary" onclick="doWithdraw()">Withdraw</button>
+          </div>
+          <div>
+            <div class="form-group">
+              <label>Add funds (sats)</label>
+              <input id="offer-amount" type="number" placeholder="50000">
+            </div>
+            <button onclick="doAddOffer()">Get Funding Address</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Discover tab -->
+    <div id="tab-discover" class="panel">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+        <span style="color:var(--muted)">Available ledgers</span>
+        <button onclick="discoverLedgers()">Refresh</button>
+      </div>
+      <div id="ledgers-list"></div>
+
+      <div id="open-deposit-form" class="card" style="display:none; margin-top:12px;">
+        <h3>Open Deposit on <span id="open-ledger-name"></span></h3>
+        <input type="hidden" id="open-ledger-id">
+        <div class="form-group">
+          <label>Alias</label>
+          <input id="open-alias" type="text" placeholder="my-deposit">
+        </div>
+        <button class="primary" onclick="doOpenDeposit()">Open Deposit</button>
+      </div>
+    </div>
+
+    <!-- Transfer tab -->
+    <div id="tab-transfer" class="panel">
+      <div class="card">
+        <h3>Send Transfer (HTLC Lock)</h3>
+        <div class="form-group">
+          <label>From deposit</label>
+          <select id="transfer-from"></select>
+        </div>
+        <div class="row">
+          <div class="form-group">
+            <label>Amount (sats)</label>
+            <input id="transfer-amount" type="number" placeholder="1000">
+          </div>
+          <div class="form-group">
+            <label>Fee (sats)</label>
+            <input id="transfer-fee" type="number" value="2">
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Destination deposit ID (32 hex)</label>
+          <input id="transfer-dest" type="text" placeholder="abcdef0123456789...">
+        </div>
+        <div class="form-group">
+          <label>Hash lock (64 hex, leave blank to generate)</label>
+          <input id="transfer-hash" type="text" placeholder="optional — will generate preimage">
+        </div>
+        <div class="form-group">
+          <label>Timeout (block height)</label>
+          <input id="transfer-timeout" type="number" placeholder="1000">
+        </div>
+        <button class="primary" onclick="doTransferLock()">Lock Transfer</button>
+      </div>
+
+      <div class="card" style="margin-top: 12px;">
+        <h3>Complete Transfer (Reveal Preimage)</h3>
+        <div class="form-group">
+          <label>Ledger ID</label>
+          <input id="complete-ledger" type="text" placeholder="64 hex chars">
+        </div>
+        <div class="form-group">
+          <label>Transfer ID (64 hex)</label>
+          <input id="complete-transfer-id" type="text">
+        </div>
+        <div class="form-group">
+          <label>Preimage (64 hex)</label>
+          <input id="complete-preimage" type="text">
+        </div>
+        <button class="primary" onclick="doTransferComplete()">Complete Transfer</button>
+      </div>
+
+      <div class="card" style="margin-top: 12px;">
+        <h3>Lightning</h3>
+        <div class="row">
+          <div>
+            <div class="form-group">
+              <label>Deposit</label>
+              <select id="ln-deposit"></select>
+            </div>
+            <div class="form-group">
+              <label>Amount (sats)</label>
+              <input id="ln-amount" type="number" placeholder="1000">
+            </div>
+            <button onclick="doMakeInvoice()">Create Invoice</button>
+          </div>
+          <div>
+            <div class="form-group">
+              <label>Deposit</label>
+              <select id="ln-pay-deposit"></select>
+            </div>
+            <div class="form-group">
+              <label>BOLT11 Invoice</label>
+              <input id="ln-bolt11" type="text" placeholder="lnbc...">
+            </div>
+            <button onclick="doPayInvoice()">Pay Invoice</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Settings tab -->
+    <div id="tab-settings" class="panel">
+      <div class="card">
+        <h3>Wallet Identity</h3>
+        <div class="kv"><span class="k">Nostr pubkey</span><span class="v" id="settings-npub">—</span></div>
+        <div class="kv"><span class="k">Deposit key index</span><span class="v" id="settings-key-index">0</span></div>
+        <div class="kv"><span class="k">Network</span><span class="v" id="settings-network">—</span></div>
+        <div class="kv"><span class="k">Relays</span><span class="v" id="settings-relay">—</span></div>
+      </div>
+      <div class="card">
+        <h3>Seed (keep secret!)</h3>
+        <div class="form-group">
+          <input id="settings-seed" type="password" readonly>
+          <button onclick="toggleSeed()" style="margin-top:6px">Show/Hide</button>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Relays</h3>
+        <div class="form-group">
+          <label>Operator relays (comma-separated)</label>
+          <input id="settings-relay-input" type="text">
+        </div>
+        <div class="form-group">
+          <label>Ledger relay (read-only, for advertisements)</label>
+          <input id="settings-ledger-relay-input" type="text">
+        </div>
+        <button onclick="changeRelays()">Reconnect</button>
+      </div>
+      <div class="card">
+        <button class="danger" onclick="resetWallet()">Reset Wallet (delete all local data)</button>
+      </div>
+    </div>
+
+    <!-- Activity log -->
+    <div style="margin-top: 16px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+        <span style="color:var(--muted); font-size:11px;">Activity</span>
+        <button style="font-size:10px; padding:2px 8px;" onclick="document.getElementById('activity-log').innerHTML=''">Clear</button>
+      </div>
+      <div id="activity-log" class="log"></div>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+// ============================================================
+// Crypto primitives — noble libraries from ESM CDN
+// ============================================================
+import { hmac } from 'https://esm.sh/@noble/hashes@1.7.1/hmac';
+import { sha256 } from 'https://esm.sh/@noble/hashes@1.7.1/sha256';
+import { sha512 } from 'https://esm.sh/@noble/hashes@1.7.1/sha512';
+import { bytesToHex, hexToBytes, utf8ToBytes } from 'https://esm.sh/@noble/hashes@1.7.1/utils';
+import * as secp from 'https://esm.sh/@noble/secp256k1@2.2.3';
+import { schnorr } from 'https://esm.sh/@noble/curves@1.8.1/secp256k1';
+
+// ============================================================
+// BIP-32 HD key derivation (minimal implementation)
+// ============================================================
+function ser32(i) { const b = new Uint8Array(4); new DataView(b.buffer).setUint32(0, i); return b; }
+
+function hmacSha512(key, data) { return hmac(sha512, key, data); }
+
+function deriveChild(parentKey, parentChainCode, index) {
+  const hardened = index >= 0x80000000;
+  let data;
+  if (hardened) {
+    data = new Uint8Array(1 + 32 + 4);
+    data[0] = 0;
+    data.set(parentKey, 1);
+    data.set(ser32(index), 33);
+  } else {
+    const pubkey = secp.getPublicKey(parentKey, true);
+    data = new Uint8Array(33 + 4);
+    data.set(pubkey, 0);
+    data.set(ser32(index), 33);
+  }
+  const I = hmacSha512(parentChainCode, data);
+  const IL = I.slice(0, 32);
+  const IR = I.slice(32);
+  // child key = parse256(IL) + parentKey mod n
+  const ilBig = BigInt('0x' + bytesToHex(IL));
+  const pkBig = BigInt('0x' + bytesToHex(parentKey));
+  const n = BigInt('0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141');
+  const childBig = (ilBig + pkBig) % n;
+  const childHex = childBig.toString(16).padStart(64, '0');
+  return { key: hexToBytes(childHex), chainCode: IR };
+}
+
+function masterKeyFromSeed(seed) {
+  const I = hmacSha512(utf8ToBytes('Bitcoin seed'), seed);
+  return { key: I.slice(0, 32), chainCode: I.slice(32) };
+}
+
+// Derive m/84'/0'/0'/0/{index}
+function deriveSecretKey(seed, index) {
+  let { key, chainCode } = masterKeyFromSeed(seed);
+  for (const idx of [84 + 0x80000000, 0x80000000, 0x80000000, 0, index]) {
+    ({ key, chainCode } = deriveChild(key, chainCode, idx));
+  }
+  return key;
+}
+
+// ============================================================
+// Nostr event helpers (minimal — no library dependency)
+// ============================================================
+function getPublicKeyHex(secretKeyBytes) {
+  return bytesToHex(secp.getPublicKey(secretKeyBytes, true).slice(1)); // x-only for nostr
+}
+
+function getCompressedPubkey(secretKeyBytes) {
+  return secp.getPublicKey(secretKeyBytes, true); // 33 bytes
+}
+
+async function createEvent(secretKey, kind, content, tags) {
+  const pubkey = getPublicKeyHex(secretKey);
+  const created_at = Math.floor(Date.now() / 1000);
+  const event = { pubkey, created_at, kind, tags, content };
+  // NIP-01: serialize as [0, pubkey, created_at, kind, tags, content]
+  const serialized = JSON.stringify([0, event.pubkey, event.created_at, event.kind, event.tags, event.content]);
+  const hash = sha256(utf8ToBytes(serialized));
+  event.id = bytesToHex(hash);
+  // NIP-01: sign the 32-byte event ID hash with Schnorr (BIP-340)
+  const sig = schnorr.sign(hash, secretKey);
+  event.sig = bytesToHex(sig);
+  // Debug: log the event structure
+  console.log('Event:', JSON.stringify({id: event.id.slice(0,16), pubkey: event.pubkey.slice(0,16), kind, tags, sig: event.sig.slice(0,16)}));
+  return event;
+}
+
+// ============================================================
+// Deposit ID computation (matches Rust: SHA256("pk(<compressed_pubkey_hex>)")[0..16])
+// ============================================================
+function computeDepositId(compressedPubkey) {
+  const descriptor = `pk(${bytesToHex(compressedPubkey)})`;
+  const hash = sha256(utf8ToBytes(descriptor));
+  return hash.slice(0, 16); // 16 bytes
+}
+
+// ============================================================
+// Signing helpers (match Rust signature_utils)
+// ============================================================
+function transferLockSigningMessage(nonce, srcId, dstId, amount, fee, completionScript, timeoutHeight) {
+  const msg = `TRANSFER:${bytesToHex(nonce)}:${bytesToHex(srcId)}:${bytesToHex(dstId)}:${amount}:${fee}:${completionScript}:${timeoutHeight}`;
+  return sha256(utf8ToBytes(msg));
+}
+
+function computeTransferId(signingMessage) {
+  return sha256(signingMessage);
+}
+
+function withdrawalSigningMessage(nonce, depositId, address, amount, fee) {
+  // Match Rust: OnChainWithdrawal::signing_message format
+  // Need to check what the Rust code produces
+  // For now, use the same format pattern
+  const msg = `WITHDRAWAL:${bytesToHex(nonce)}:${bytesToHex(depositId)}:${address}:${amount}:${fee}`;
+  return sha256(utf8ToBytes(msg));
+}
+
+// ============================================================
+// Wallet State
+// ============================================================
+const STATE_KEY = 'deposits-wallet-state';
+
+let state = {
+  seed: null,        // Uint8Array(32)
+  network: 'regtest',
+  relays: ['ws://localhost:7801', 'ws://localhost:7802', 'ws://localhost:7803', 'ws://localhost:7804'],
+  ledgerRelay: 'ws://localhost:7779',  // durable relay for advertisements (read-only)
+  deposits: [],
+  keyIndex: 0,
+};
+
+let sockets = [];    // [{ws, url, connected, readOnly}]
+let pendingRequests = new Map(); // eventId -> {resolve, reject, timeout}
+
+function saveState() {
+  const s = {
+    seed: bytesToHex(state.seed),
+    network: state.network,
+    relays: state.relays,
+    ledgerRelay: state.ledgerRelay,
+    deposits: state.deposits,
+    keyIndex: state.keyIndex,
+  };
+  localStorage.setItem(STATE_KEY, JSON.stringify(s));
+}
+
+function loadState() {
+  const raw = localStorage.getItem(STATE_KEY);
+  if (!raw) return false;
+  try {
+    const s = JSON.parse(raw);
+    state.seed = hexToBytes(s.seed);
+    state.network = s.network || 'regtest';
+    state.relays = (s.relays || (s.relay ? [s.relay] : ['ws://localhost:7801']))
+      .filter(r => r !== (s.ledgerRelay || 'ws://localhost:7779')); // strip ledger relay from operator list
+    state.ledgerRelay = s.ledgerRelay || 'ws://localhost:7779';
+    state.deposits = s.deposits || [];
+    state.keyIndex = s.keyIndex || 0;
+    return true;
+  } catch { return false; }
+}
+
+// ============================================================
+// Nostr WebSocket transport
+// ============================================================
+function connect() {
+  // Close existing sockets
+  for (const s of sockets) { try { s.ws.close(); } catch {} }
+  sockets = [];
+
+  log(`Connecting to ${state.relays.length} operator relay(s) + ledger relay...`);
+  for (const url of state.relays) {
+    connectOne(url, false);
+  }
+  if (state.ledgerRelay) {
+    connectOne(state.ledgerRelay, true);
+  }
+}
+
+function connectOne(url, readOnly = false) {
+  const entry = { url, ws: null, connected: false, readOnly };
+  sockets.push(entry);
+
+  function open() {
+    const sock = new WebSocket(url);
+    entry.ws = sock;
+
+    sock.onopen = () => {
+      entry.connected = true;
+      updateConnStatus();
+      log(`Connected to ${url}${readOnly ? ' (read-only)' : ''}`);
+      subscribeOnSocket(sock);
+    };
+
+    sock.onclose = (e) => {
+      entry.connected = false;
+      updateConnStatus();
+      log(`Disconnected from ${url} (code=${e.code})`);
+      setTimeout(open, 3000);
+    };
+
+    sock.onerror = (e) => {
+      log(`Connection error: ${url}`, 'error');
+    };
+
+    sock.onmessage = (msg) => {
+      try { handleRelayMessage(JSON.parse(msg.data), sock); } catch {}
+    };
+  }
+
+  open();
+}
+
+function updateConnStatus() {
+  const n = sockets.filter(s => s.connected).length;
+  const el = document.getElementById('conn-status');
+  if (n === 0) {
+    el.textContent = 'disconnected';
+    el.className = 'disconnected';
+  } else {
+    el.textContent = `${n}/${sockets.length} relays`;
+    el.className = 'connected';
+  }
+}
+
+function subscribeOnSocket(sock) {
+  const subId = 'wr-' + Date.now().toString(36);
+  const filter = { kinds: [20102], since: Math.floor(Date.now() / 1000) - 5 };
+  sock.send(JSON.stringify(['REQ', subId, filter]));
+}
+
+function wsSend(msg) {
+  const isEvent = Array.isArray(msg) && msg[0] === 'EVENT';
+  const payload = JSON.stringify(msg);
+  let sent = 0;
+  for (const s of sockets) {
+    if (s.ws && s.ws.readyState === WebSocket.OPEN) {
+      // Don't send ephemeral events to read-only (ledger) relay
+      if (isEvent && s.readOnly) continue;
+      s.ws.send(payload);
+      sent++;
+    }
+  }
+  if (isEvent && sent === 0) {
+    log(`WARNING: event not sent — no connected operator relays`, 'error');
+  } else if (isEvent) {
+    log(`Published to ${sent} relay(s)`);
+  }
+}
+
+function handleRelayMessage(data, sock) {
+  if (!Array.isArray(data)) return;
+  const [type] = data;
+
+  if (type === 'EVENT' && data.length >= 3) {
+    const event = data[2];
+    handleEvent(event);
+    // Also dispatch to fetchEvents listeners
+    for (const [subId, listener] of fetchListeners) {
+      if (data[1] === subId) listener.onEvent(event);
+    }
+  } else if (type === 'OK' && data.length >= 3) {
+    const accepted = data[2];
+    const msg = data[3] || '';
+    if (!accepted) {
+      log(`Relay REJECTED event ${data[1].slice(0,12)}...: ${msg}`, 'error');
+    } else {
+      log(`Relay accepted event ${data[1].slice(0,12)}...`);
+    }
+  } else if (type === 'EOSE' && data.length >= 2) {
+    const listener = fetchListeners.get(data[1]);
+    if (listener) listener.onEose(sock);
+  } else if (type === 'NOTICE') {
+    log(`Relay: ${data[1]}`, 'error');
+  }
+}
+
+function handleEvent(event) {
+  if (event.kind === 20102) {
+    // Ledger response — match to pending request via #e tag
+    const eTag = (event.tags || []).find(t => t[0] === 'e');
+    if (!eTag) return;
+    const requestId = eTag[1];
+    const pending = pendingRequests.get(requestId);
+    if (pending) {
+      clearTimeout(pending.timeout);
+      pendingRequests.delete(requestId);
+      try {
+        const response = JSON.parse(event.content);
+        pending.resolve(response);
+      } catch {
+        pending.reject(new Error('Invalid response JSON'));
+      }
+    }
+  }
+}
+
+async function sendRequest(ledgerId, action, params, timeoutMs = 30000) {
+  const nostrKey = deriveSecretKey(state.seed, 0);
+  const content = JSON.stringify(params);
+  const tags = [
+    ['l', ledgerId],
+    ['action', action],
+  ];
+  const event = await createEvent(nostrKey, 20101, content, tags);
+
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      pendingRequests.delete(event.id);
+      reject(new Error(`Timeout waiting for ${action} response`));
+    }, timeoutMs);
+
+    pendingRequests.set(event.id, { resolve, reject, timeout });
+    wsSend(['EVENT', event]);
+    log(`Sent ${action} request (${event.id.slice(0, 12)}...)`);
+  });
+}
+
+const fetchListeners = new Map(); // subId -> {onEvent, onEose}
+
+// Fetch events from all relays (deduped by event id)
+async function fetchEvents(filter, timeoutMs = 10000) {
+  return new Promise((resolve) => {
+    const subId = 'fetch-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    const seen = new Set();
+    const events = [];
+    let done = false;
+    let eoseCount = 0;
+    const activeSockets = sockets.filter(s => s.connected);
+    const needed = activeSockets.length;
+
+    const cleanup = () => {
+      if (done) return;
+      done = true;
+      fetchListeners.delete(subId);
+      wsSend(['CLOSE', subId]);
+      resolve(events);
+    };
+
+    const timer = setTimeout(cleanup, timeoutMs);
+
+    fetchListeners.set(subId, {
+      onEvent(event) {
+        if (!seen.has(event.id)) {
+          seen.add(event.id);
+          events.push(event);
+        }
+      },
+      onEose(sock) {
+        eoseCount++;
+        if (eoseCount >= needed) {
+          clearTimeout(timer);
+          cleanup();
+        }
+      },
+    });
+
+    wsSend(['REQ', subId, filter]);
+  });
+}
+
+// ============================================================
+// Wallet operations
+// ============================================================
+
+async function discoverLedgers() {
+  log('Discovering ledgers...');
+  const filter = { kinds: [39100] };
+  const events = await fetchEvents(filter);
+
+  const container = document.getElementById('ledgers-list');
+  if (events.length === 0) {
+    container.innerHTML = '<div class="empty">No ledgers found on this relay.</div>';
+    return;
+  }
+
+  // Parse ads and filter by network
+  const ads = [];
+  for (const event of events) {
+    try {
+      const ad = JSON.parse(event.content);
+      if (ad.network && ad.network !== state.network) continue;
+      ads.push(ad);
+    } catch {}
+  }
+
+  if (ads.length === 0) {
+    container.innerHTML = '<div class="empty">No ledgers on this network.</div>';
+    return;
+  }
+
+  // Group by fee schedule key
+  const groups = new Map();
+  for (const ad of ads) {
+    const key = [
+      ad.annual_fee_bps || 0,
+      ad.min_fee_sats || 0,
+      ad.fee_period_blocks || 2016,
+      ad.transfer_fee_fixed_sats || 0,
+      ad.transfer_fee_rate_bps || 0,
+    ].join(':');
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(ad);
+  }
+
+  let html = '';
+  for (const [key, groupAds] of groups) {
+    const sample = groupAds[0];
+    const annualBps = sample.annual_fee_bps || 0;
+    const minFee = sample.min_fee_sats || 0;
+    const feePeriod = sample.fee_period_blocks || 2016;
+    const tfFixed = sample.transfer_fee_fixed_sats || 0;
+    const tfRate = sample.transfer_fee_rate_bps || 0;
+
+    // Aggregate stats
+    const totalHeadroom = groupAds.reduce((s, a) => s + (a.available_headroom_sats || 0), 0);
+    const totalReserves = groupAds.reduce((s, a) => s + (a.reserves_amount_sats || 0), 0);
+    const operators = [...new Set(groupAds.map(a => a.operator_name || a.operator_pubkey?.slice(0, 12) || '?'))];
+
+    html += `<div class="card">
+      <div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:8px;">
+        <span style="font-weight:600">${groupAds.length} ledger(s)</span>
+        <span style="color:var(--green)">${totalHeadroom.toLocaleString()} sats available</span>
+      </div>
+      <div class="kv"><span class="k">Operators</span><span class="v">${operators.map(esc).join(', ')}</span></div>
+      <div class="kv"><span class="k">Total reserves</span><span class="v">${totalReserves.toLocaleString()} sats</span></div>
+      <div class="kv"><span class="k">Custody fee</span><span class="v">${(annualBps / 100).toFixed(2)}%/yr + ${minFee} sats/${feePeriod} blocks</span></div>
+      <div class="kv"><span class="k">Transfer fee</span><span class="v">${tfFixed} sats + ${(tfRate / 100).toFixed(2)}%</span></div>
+      <div style="margin-top:8px; display:flex; flex-wrap:wrap; gap:4px;">`;
+
+    for (const ad of groupAds) {
+      const name = ad.operator_name || 'Anon';
+      const lid = ad.ledger_id || '';
+      const headroom = (ad.available_headroom_sats || 0).toLocaleString();
+      const quorum = ad.quorum_size || 0;
+      const relay = ad.relay_url || '';
+      html += `<button style="font-size:11px; padding:3px 8px;" onclick="selectLedger('${lid}', '${esc(name)}', '${esc(relay)}')" title="${lid}">${esc(name)} (${lid.slice(0,8)}...) ${headroom}s q=${quorum}</button>`;
+    }
+
+    html += `</div></div>`;
+  }
+
+  container.innerHTML = html;
+  log(`Found ${ads.length} ledger(s) in ${groups.size} group(s)`, 'success');
+}
+
+window.selectLedger = function(ledgerId, name, relayUrl) {
+  document.getElementById('open-deposit-form').style.display = 'block';
+  document.getElementById('open-ledger-id').value = ledgerId;
+  document.getElementById('open-ledger-name').textContent = name;
+
+  // Connect to the operator's relay if declared and not already connected
+  if (relayUrl && relayUrl.startsWith('ws')) {
+    const already = sockets.find(s => s.url === relayUrl);
+    if (!already) {
+      log(`Connecting to operator relay ${relayUrl}...`);
+      connectOne(relayUrl, false);
+      // Also persist it so future sessions remember
+      if (!state.relays.includes(relayUrl)) {
+        state.relays.push(relayUrl);
+        saveState();
+      }
+    }
+  }
+};
+
+window.doOpenDeposit = async function() {
+  const ledgerId = document.getElementById('open-ledger-id').value;
+  const alias = document.getElementById('open-alias').value || `deposit-${state.deposits.length + 1}`;
+
+  if (!ledgerId) { log('Missing ledger', 'error'); return; }
+  if (state.deposits.some(d => d.alias === alias)) { log(`Alias '${alias}' already in use`, 'error'); return; }
+
+  try {
+    const keyIndex = state.keyIndex;
+    const depositKey = deriveSecretKey(state.seed, keyIndex);
+    const pubkey = getCompressedPubkey(depositKey);
+    const pubkeyHex = bytesToHex(pubkey);
+
+    // Fetch advertisement for fee info
+    const adFilter = { kinds: [39100], '#d': [ledgerId] };
+    const adEvents = await fetchEvents(adFilter, 5000);
+    let feeFixed = 0, feeBps = 0, feeFreq = 2016;
+    if (adEvents.length > 0) {
+      try {
+        const ad = JSON.parse(adEvents[0].content);
+        const period = ad.fee_period_blocks > 0 ? ad.fee_period_blocks : 2016;
+        const periodsPerYear = Math.floor(52560 / period);
+        feeFixed = (ad.min_fee_sats || 0) * periodsPerYear;
+        feeBps = ad.annual_fee_bps || 0;
+        feeFreq = period;
+      } catch {}
+    }
+
+    log(`Opening deposit on ${ledgerId.slice(0, 12)}...`);
+    const openResponse = await sendRequest(ledgerId, 'deposit_open', {
+      deposit_pubkey: pubkeyHex,
+      fee_fixed: feeFixed,
+      fee_bps: feeBps,
+      fee_frequency: feeFreq,
+    });
+
+    if (!openResponse.success && !(openResponse.error || '').includes('already')) {
+      throw new Error(openResponse.error || 'deposit_open failed');
+    }
+
+    // Save deposit (no offer yet — use "Add funds" to get a funding address)
+    state.deposits.push({
+      alias,
+      ledger_id: ledgerId,
+      deposit_pubkey: pubkeyHex,
+      key_index: keyIndex,
+      status: 'pending',
+    });
+    state.keyIndex = keyIndex + 1;
+    saveState();
+    renderDeposits();
+
+    log(`Deposit '${alias}' created. Use "Add funds" to get a funding address.`, 'success');
+
+    // Switch to deposits tab
+    document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    document.querySelector('nav button[data-tab="deposits"]').classList.add('active');
+    document.getElementById('tab-deposits').classList.add('active');
+
+  } catch (e) {
+    log(`Open deposit failed: ${e.message}`, 'error');
+  }
+};
+
+function renderDeposits() {
+  const container = document.getElementById('deposits-list');
+  if (state.deposits.length === 0) {
+    container.innerHTML = '<div class="empty">No deposits yet. Go to Discover to find a ledger and open one.</div>';
+    return;
+  }
+
+  let html = '';
+  for (const d of state.deposits) {
+    const hasBal = d.amount_sats != null;
+    const bal = d.amount_sats || 0;
+    const locked = d.locked_sats ? ` <span style="color:var(--yellow);font-size:12px">(${d.locked_sats} locked)</span>` : '';
+    const balDisplay = hasBal
+      ? `<div class="balance">${bal.toLocaleString()} sats${locked}</div>`
+      : `<div class="balance zero">unfunded — sync to check</div>`;
+    html += `
+      <div class="card deposit-card" onclick="selectDeposit('${esc(d.alias)}')">
+        <div style="display:flex; justify-content:space-between; align-items:baseline;">
+          <span class="alias">${esc(d.alias)}</span>
+          <span class="badge ${d.status}">${d.status}</span>
+        </div>
+        ${balDisplay}
+        <div class="meta">
+          Ledger: ${d.ledger_id.slice(0, 16)}...
+          ${d.funding_address ? `<br>Fund: ${d.funding_address}` : ''}
+        </div>
+      </div>`;
+  }
+  container.innerHTML = html;
+
+  // Update transfer dropdowns
+  for (const selId of ['transfer-from', 'ln-deposit', 'ln-pay-deposit']) {
+    const sel = document.getElementById(selId);
+    if (sel) {
+      const opts = state.deposits.map(d => {
+        const label = d.amount_sats != null ? `${esc(d.alias)} (${d.amount_sats} sats)` : esc(d.alias);
+        return `<option value="${esc(d.alias)}">${label}</option>`;
+      }).join('');
+      sel.innerHTML = opts;
+    }
+  }
+}
+
+let selectedDeposit = null;
+window.selectDeposit = function(alias) {
+  selectedDeposit = state.deposits.find(d => d.alias === alias);
+  if (!selectedDeposit) return;
+  document.getElementById('deposit-actions').style.display = 'block';
+  document.getElementById('action-alias').textContent = alias;
+};
+
+async function syncAll() {
+  log('Syncing balances...');
+  let updated = false;
+  for (const deposit of state.deposits) {
+    if (!deposit.deposit_pubkey || !deposit.ledger_id) continue;
+    try {
+      const response = await sendRequest(deposit.ledger_id, 'balance_query', {
+        deposit_pubkey: deposit.deposit_pubkey,
+      }, 10000);
+
+      if (response.success) {
+        const r = response.result || response;
+        const balMsats = r.balance_msats || 0;
+        const lockMsats = r.locked_msats || 0;
+        const available = Math.floor((balMsats - lockMsats) / 1000);
+        const locked = Math.floor(lockMsats / 1000);
+        deposit.amount_sats = available;
+        if (locked > 0) deposit.locked_sats = locked;
+        else delete deposit.locked_sats;
+        if (balMsats > 0 && deposit.status === 'pending') deposit.status = 'funded';
+        updated = true;
+        log(`  ${deposit.alias}: ${available} sats${locked > 0 ? ` (${locked} locked)` : ''}`);
+      } else {
+        log(`  ${deposit.alias}: ${response.error || 'error'}`, 'error');
+      }
+    } catch (e) {
+      log(`  ${deposit.alias}: ${e.message}`, 'error');
+    }
+  }
+  if (updated) { saveState(); renderDeposits(); }
+  log('Sync complete', 'success');
+}
+window.syncAll = syncAll;
+
+window.doWithdraw = async function() {
+  if (!selectedDeposit) return;
+  const amount = parseInt(document.getElementById('withdraw-amount').value);
+  const address = document.getElementById('withdraw-address').value;
+  if (!amount || !address) { log('Missing amount or address', 'error'); return; }
+
+  try {
+    const keyIndex = selectedDeposit.key_index || 0;
+    const secretKey = deriveSecretKey(state.seed, keyIndex);
+    const pubkey = getCompressedPubkey(secretKey);
+
+    const depositId = computeDepositId(pubkey);
+    const nonce = new Uint8Array(32);
+    crypto.getRandomValues(nonce);
+    const feeSats = 500;
+
+    const msgHash = withdrawalSigningMessage(nonce, depositId, address, amount, feeSats);
+    const sig = schnorr.sign(msgHash, secretKey);
+
+    const response = await sendRequest(selectedDeposit.ledger_id, 'withdraw', {
+      deposit_pubkey: bytesToHex(pubkey),
+      deposit_id: bytesToHex(depositId),
+      address: address,
+      amount_sats: amount,
+      fee_sats: feeSats,
+      nonce: bytesToHex(nonce),
+      signature: bytesToHex(sig),
+    }, 60000);
+
+    if (response.success) {
+      log(`Withdrawal accepted! ${amount} sats to ${address}`, 'success');
+      syncAll();
+    } else {
+      log(`Withdrawal failed: ${response.error}`, 'error');
+    }
+  } catch (e) {
+    log(`Withdrawal error: ${e.message}`, 'error');
+  }
+};
+
+window.doAddOffer = async function() {
+  if (!selectedDeposit) return;
+  const amount = parseInt(document.getElementById('offer-amount').value);
+  if (!amount) { log('Missing amount', 'error'); return; }
+
+  try {
+    // Fetch advertisement for fee info
+    const adFilter = { kinds: [39100], '#d': [selectedDeposit.ledger_id] };
+    const adEvents = await fetchEvents(adFilter, 5000);
+    let feeFixed = 0, feeBps = 0, feeFreq = 2016;
+    if (adEvents.length > 0) {
+      try {
+        const ad = JSON.parse(adEvents[0].content);
+        const period = ad.fee_period_blocks > 0 ? ad.fee_period_blocks : 2016;
+        const periodsPerYear = Math.floor(52560 / period);
+        feeFixed = (ad.min_fee_sats || 0) * periodsPerYear;
+        feeBps = ad.annual_fee_bps || 0;
+        feeFreq = period;
+      } catch {}
+    }
+
+    const response = await sendRequest(selectedDeposit.ledger_id, 'make_offer', {
+      deposit_pubkey: selectedDeposit.deposit_pubkey,
+      max_sats: amount,
+      min_sats: Math.min(1000, Math.max(1, amount - 1)),
+      blocks_valid: 144,
+      fee_fixed: feeFixed,
+      fee_bps: feeBps,
+      fee_frequency: feeFreq,
+    }, 60000);
+
+    if (response.success) {
+      const r = response.result || response;
+      const addr = r.funding_address;
+      selectedDeposit.funding_address = addr;
+      if (r.offer_id) selectedDeposit.offer_id = r.offer_id;
+      saveState();
+      renderDeposits();
+      log(`Funding address: ${addr}`, 'success');
+      alert(`Send sats to:\n\n${addr}`);
+    } else {
+      log(`Offer failed: ${response.error}`, 'error');
+    }
+  } catch (e) {
+    log(`Offer error: ${e.message}`, 'error');
+  }
+};
+
+window.doTransferLock = async function() {
+  const alias = document.getElementById('transfer-from').value;
+  const deposit = state.deposits.find(d => d.alias === alias);
+  if (!deposit) { log('Select a deposit', 'error'); return; }
+
+  const amount = parseInt(document.getElementById('transfer-amount').value);
+  const fee = parseInt(document.getElementById('transfer-fee').value) || 2;
+  const destHex = document.getElementById('transfer-dest').value;
+  let hashHex = document.getElementById('transfer-hash').value;
+  const timeout = parseInt(document.getElementById('transfer-timeout').value);
+
+  if (!amount || !destHex || !timeout) { log('Missing required fields', 'error'); return; }
+  if (destHex.length !== 32) { log('Destination deposit ID must be 32 hex chars', 'error'); return; }
+
+  try {
+    // Generate preimage if no hash provided
+    let preimage = null;
+    if (!hashHex) {
+      preimage = new Uint8Array(32);
+      crypto.getRandomValues(preimage);
+      const hashBytes = sha256(preimage);
+      hashHex = bytesToHex(hashBytes);
+      log(`Generated preimage: ${bytesToHex(preimage)}`);
+    }
+
+    const destBytes = hexToBytes(destHex);
+    const completionScript = `sha256(${hashHex})`;
+
+    const keyIndex = deposit.key_index || 0;
+    const secretKey = deriveSecretKey(state.seed, keyIndex);
+    const pubkey = getCompressedPubkey(secretKey);
+    const sourceId = computeDepositId(pubkey);
+
+    const nonce = new Uint8Array(32);
+    crypto.getRandomValues(nonce);
+
+    const msgHash = transferLockSigningMessage(nonce, sourceId, destBytes, amount, fee, completionScript, timeout);
+    const transferId = computeTransferId(msgHash);
+    const sig = schnorr.sign(msgHash, secretKey);
+
+    log(`Transfer lock: ${amount} sats, ID: ${bytesToHex(transferId).slice(0, 16)}...`);
+
+    const response = await sendRequest(deposit.ledger_id, 'transfer_lock', {
+      nonce: bytesToHex(nonce),
+      source_deposit_id: bytesToHex(sourceId),
+      destination_deposit_id: destHex,
+      amount: amount,
+      fee: fee,
+      completion_script: completionScript,
+      timeout_height: timeout,
+      transfer_id: bytesToHex(transferId),
+      signature: bytesToHex(sig),
+    }, 15000);
+
+    if (response.success) {
+      log(`Transfer locked! ID: ${bytesToHex(transferId)}`, 'success');
+      if (preimage) {
+        log(`Preimage (save this!): ${bytesToHex(preimage)}`, 'success');
+        document.getElementById('complete-transfer-id').value = bytesToHex(transferId);
+        document.getElementById('complete-preimage').value = bytesToHex(preimage);
+        document.getElementById('complete-ledger').value = deposit.ledger_id;
+      }
+    } else {
+      log(`Transfer lock failed: ${response.error}`, 'error');
+    }
+  } catch (e) {
+    log(`Transfer error: ${e.message}`, 'error');
+  }
+};
+
+window.doTransferComplete = async function() {
+  const ledgerId = document.getElementById('complete-ledger').value;
+  const transferIdHex = document.getElementById('complete-transfer-id').value;
+  const preimageHex = document.getElementById('complete-preimage').value;
+
+  if (!ledgerId || !transferIdHex || !preimageHex) { log('Missing required fields', 'error'); return; }
+
+  try {
+    const response = await sendRequest(ledgerId, 'transfer_complete', {
+      transfer_id: transferIdHex,
+      preimage: preimageHex,
+    }, 15000);
+
+    if (response.success) {
+      log(`Transfer completed!`, 'success');
+    } else {
+      log(`Transfer complete failed: ${response.error}`, 'error');
+    }
+  } catch (e) {
+    log(`Transfer complete error: ${e.message}`, 'error');
+  }
+};
+
+window.doMakeInvoice = async function() {
+  const alias = document.getElementById('ln-deposit').value;
+  const deposit = state.deposits.find(d => d.alias === alias);
+  if (!deposit) { log('Select a deposit', 'error'); return; }
+  const amount = parseInt(document.getElementById('ln-amount').value);
+  if (!amount) { log('Missing amount', 'error'); return; }
+
+  try {
+    const response = await sendRequest(deposit.ledger_id, 'make_invoice', {
+      deposit_pubkey: deposit.deposit_pubkey,
+      amount_sats: amount,
+      description: `Deposit to ${alias}`,
+    }, 60000);
+
+    if (response.success) {
+      const r = response.result || response;
+      const invoice = r.invoice;
+      log(`Invoice: ${invoice}`, 'success');
+      alert(`Lightning Invoice:\n\n${invoice}`);
+    } else {
+      log(`Invoice failed: ${response.error}`, 'error');
+    }
+  } catch (e) {
+    log(`Invoice error: ${e.message}`, 'error');
+  }
+};
+
+window.doPayInvoice = async function() {
+  const alias = document.getElementById('ln-pay-deposit').value;
+  const deposit = state.deposits.find(d => d.alias === alias);
+  if (!deposit) { log('Select a deposit', 'error'); return; }
+  const bolt11 = document.getElementById('ln-bolt11').value;
+  if (!bolt11) { log('Missing invoice', 'error'); return; }
+
+  try {
+    const response = await sendRequest(deposit.ledger_id, 'pay_invoice', {
+      deposit_pubkey: deposit.deposit_pubkey,
+      bolt11: bolt11,
+    }, 60000);
+
+    if (response.success) {
+      log(`Payment sent!`, 'success');
+      syncAll();
+    } else {
+      log(`Payment failed: ${response.error}`, 'error');
+    }
+  } catch (e) {
+    log(`Payment error: ${e.message}`, 'error');
+  }
+};
+
+// ============================================================
+// UI helpers
+// ============================================================
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+function log(msg, cls = '') {
+  const el = document.getElementById('activity-log');
+  if (!el) return;
+  const entry = document.createElement('div');
+  entry.className = 'entry' + (cls ? ' ' + cls : '');
+  entry.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  el.appendChild(entry);
+  el.scrollTop = el.scrollHeight;
+}
+
+// Tab switching
+document.querySelectorAll('nav button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+    if (btn.dataset.tab === 'discover') discoverLedgers();
+  });
+});
+
+// ============================================================
+// Init / Setup
+// ============================================================
+function parseRelays(input) {
+  return input.split(',').map(s => s.trim()).filter(s => s.startsWith('ws'));
+}
+
+window.initWallet = function() {
+  const relayInput = document.getElementById('setup-relay').value || 'ws://localhost:7801';
+  const ledgerRelay = document.getElementById('setup-ledger-relay').value || 'ws://localhost:7779';
+  const network = document.getElementById('setup-network').value;
+  let seedHex = document.getElementById('setup-seed').value.trim();
+
+  if (seedHex) {
+    if (seedHex.length !== 64) { alert('Seed must be 64 hex characters'); return; }
+    state.seed = hexToBytes(seedHex);
+  } else {
+    state.seed = new Uint8Array(32);
+    crypto.getRandomValues(state.seed);
+  }
+  state.network = network;
+  state.relays = parseRelays(relayInput);
+  state.ledgerRelay = ledgerRelay;
+  state.deposits = [];
+  state.keyIndex = 0;
+  saveState();
+  startMainUI();
+};
+
+window.importWallet = function() {
+  const seedHex = document.getElementById('setup-seed').value.trim();
+  if (!seedHex || seedHex.length !== 64) { alert('Enter a 64-char hex seed to import'); return; }
+  state.seed = hexToBytes(seedHex);
+  state.network = document.getElementById('setup-network').value;
+  state.relays = parseRelays(document.getElementById('setup-relay').value || 'ws://localhost:7801');
+  state.ledgerRelay = document.getElementById('setup-ledger-relay').value || 'ws://localhost:7779';
+  state.deposits = [];
+  state.keyIndex = 0;
+  saveState();
+  startMainUI();
+};
+
+window.resetWallet = function() {
+  if (!confirm('Delete all wallet data? This cannot be undone. Make sure you have your seed backed up.')) return;
+  localStorage.removeItem(STATE_KEY);
+  location.reload();
+};
+
+window.toggleSeed = function() {
+  const el = document.getElementById('settings-seed');
+  el.type = el.type === 'password' ? 'text' : 'password';
+};
+
+window.changeRelays = function() {
+  const input = document.getElementById('settings-relay-input').value;
+  if (!input) return;
+  state.relays = parseRelays(input);
+  state.ledgerRelay = document.getElementById('settings-ledger-relay-input').value || state.ledgerRelay;
+  saveState();
+  connect();
+  document.getElementById('settings-relay').textContent = state.relays.join(', ');
+};
+
+window.discoverLedgers = discoverLedgers;
+
+function startMainUI() {
+  document.getElementById('setup-panel').style.display = 'none';
+  document.getElementById('main-panel').style.display = 'block';
+
+  const nostrKey = deriveSecretKey(state.seed, 0);
+  const npub = getPublicKeyHex(nostrKey);
+  document.getElementById('settings-npub').textContent = npub;
+  document.getElementById('settings-key-index').textContent = state.keyIndex;
+  document.getElementById('settings-network').textContent = state.network;
+  document.getElementById('settings-relay').textContent = state.relays.join(', ') + ' + ' + state.ledgerRelay;
+  document.getElementById('settings-seed').value = bytesToHex(state.seed);
+  document.getElementById('settings-relay-input').value = state.relays.join(', ');
+  document.getElementById('settings-ledger-relay-input').value = state.ledgerRelay;
+
+  renderDeposits();
+  connect();
+}
+
+// Boot
+if (loadState()) {
+  startMainUI();
+}
+</script>
+</body>
+</html>
