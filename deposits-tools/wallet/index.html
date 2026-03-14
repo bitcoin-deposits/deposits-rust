@@ -212,15 +212,9 @@ nav button:hover { color: var(--text); background: transparent; }
       <!-- Send panel -->
       <div id="wallet-send" class="card" style="display:none;">
         <h3>Send</h3>
-        <div class="row">
-          <div class="form-group">
-            <label>Amount (sats)</label>
-            <input id="wallet-send-amount" type="number" value="10000">
-          </div>
-          <div class="form-group">
-            <label>From deposit</label>
-            <select id="wallet-send-deposit"></select>
-          </div>
+        <div class="form-group">
+          <label>From deposit</label>
+          <select id="wallet-send-deposit"></select>
         </div>
         <div style="display:flex; gap:8px; margin-top:8px;">
           <button onclick="showWalletSendInvoice()">Pay Invoice</button>
@@ -235,16 +229,28 @@ nav button:hover { color: var(--text); background: transparent; }
           <button class="primary" onclick="doWalletPayInvoice()">Pay</button>
         </div>
         <div id="wallet-send-address-input" style="display:none; margin-top:10px;">
-          <div class="form-group">
-            <label>Bitcoin address</label>
-            <input id="wallet-send-address" type="text" placeholder="bc1q...">
+          <div class="row">
+            <div class="form-group">
+              <label>Bitcoin address</label>
+              <input id="wallet-send-address" type="text" placeholder="bc1q...">
+            </div>
+            <div class="form-group">
+              <label>Amount (sats)</label>
+              <input id="wallet-send-amount" type="number" value="10000">
+            </div>
           </div>
           <button class="primary" onclick="doWalletWithdraw()">Withdraw</button>
         </div>
         <div id="wallet-send-transfer-input" style="display:none; margin-top:10px;">
-          <div class="form-group">
-            <label>To deposit</label>
-            <select id="wallet-send-transfer-to"></select>
+          <div class="row">
+            <div class="form-group">
+              <label>To deposit</label>
+              <select id="wallet-send-transfer-to"></select>
+            </div>
+            <div class="form-group">
+              <label>Amount (sats)</label>
+              <input id="wallet-send-transfer-amount" type="number" value="1000">
+            </div>
           </div>
           <button class="primary" onclick="doWalletTransfer()">Transfer</button>
         </div>
@@ -1291,7 +1297,7 @@ window.doWalletTransfer = async function() {
   const destDeposit = state.deposits.find(d => d.alias === toAlias);
   if (!destDeposit) { log('Select a destination deposit', 'error'); return; }
 
-  const amount = parseInt(document.getElementById('wallet-send-amount').value);
+  const amount = parseInt(document.getElementById('wallet-send-transfer-amount').value);
   if (!amount) { log('Missing amount', 'error'); return; }
 
   // Compute destination deposit ID
