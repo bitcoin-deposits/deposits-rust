@@ -12,7 +12,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/_common.sh"
 
-DC_LIGHTNING="docker compose -f $BDK_DIR/docker-compose.yml -f $BDK_DIR/docker-compose.lightning.yml"
+DC_LIGHTNING="docker compose -f $BDK_DIR/docker-compose.yml --profile lightning"
 
 QUICK=false
 

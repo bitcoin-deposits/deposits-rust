@@ -8,7 +8,7 @@
 #   ./bin/setup-4op-lightning.sh [--skip-reset] [--channel-size SATS]
 #
 # Prerequisites:
-#   - ldk-node image built (docker compose -f docker-compose.lightning.yml build alice-ln)
+#   - ldk-node image built (docker build -f deposits-tools/Dockerfile.ldk-node -t ldk-node:latest ~/workspace/)
 #   - ldk-server-cli available (cd ~/workspace/ldk-server && cargo build --release)
 
 set -e
@@ -17,7 +17,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/_common.sh"
 
 # Lightning-specific docker compose
-DC_LIGHTNING="docker compose -f $BDK_DIR/docker-compose.yml -f $BDK_DIR/docker-compose.lightning.yml"
+DC="docker compose -f $BDK_DIR/docker-compose.yml --profile lightning"
 
 # Configuration
 CHANNEL_AMOUNT=5000000  # 5M sats per channel
@@ -106,7 +106,7 @@ for v in $(docker volume ls -q --filter 'name=ldk_'); do
 done
 
 # Start LDK sidecars via compose overlay
-$DC_LIGHTNING up -d alice-ln bob-ln charlie-ln diana-ln
+$DC up -d alice-ln bob-ln charlie-ln diana-ln
 
 # Wait for LDK nodes to initialize and generate TLS certs
 log_info "Waiting for LDK nodes to initialize..."
@@ -128,7 +128,7 @@ done
 
 # Restart BDK nodes with LDK environment (compose overlay adds LDK_HOST etc.)
 log_info "Restarting operator nodes with Lightning sidecar config..."
-$DC_LIGHTNING up -d alice bob charlie diana
+$DC up -d alice bob charlie diana
 sleep 5
 
 # ============================================================================
