@@ -10,11 +10,11 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 WALLET_BIN="$REPO_ROOT/target/release/deposits-wallet"
 
 # Default relay (can be overridden with --relay)
-RELAY_URL="ws://localhost:7801"
+RELAY_URL="ws://localhost:7779"
 
 # Parse arguments
 COMMAND=""
