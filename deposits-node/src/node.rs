@@ -1964,7 +1964,7 @@ impl Node {
             };
 
             // Flush any ledgers modified during request processing
-            tracing::debug!("[PHASE] flush_dirty_ledgers");
+
             let flush_start = std::time::Instant::now();
             self.flush_dirty_ledgers();
             metrics::record_run_loop_phase("flush", flush_start.elapsed());
@@ -1986,7 +1986,6 @@ impl Node {
             }
 
             // Handle disputes
-            tracing::debug!("[PHASE] drain_disputes");
             {
                 let phase_start = std::time::Instant::now();
                 while let Some(dispute) = self.nostr.try_recv_dispute() {
@@ -1999,7 +1998,6 @@ impl Node {
             }
 
             // Handle responses (for auto-recording attestations)
-            tracing::debug!("[PHASE] drain_responses");
             {
                 let phase_start = std::time::Instant::now();
                 while let Some(response) = self.nostr.try_recv_response() {
@@ -2012,7 +2010,6 @@ impl Node {
             }
 
             // Handle ledger updates (validate and auto-dispute on invalid)
-            tracing::debug!("[PHASE] drain_updates");
             {
                 let phase_start = std::time::Instant::now();
                 while let Some(update) = self.nostr.try_recv_ledger_update() {
@@ -2022,7 +2019,6 @@ impl Node {
             }
 
             // Check for outbound messages (non-blocking)
-            tracing::debug!("[PHASE] outbound_messages");
             while let Ok(outbound) = self.outbound_rx.lock().unwrap().try_recv() {
                 match tokio::time::timeout(std::time::Duration::from_secs(5), self.nostr.send_message(outbound.peer, outbound.message)).await {
                     Ok(Err(e)) => tracing::error!("Failed to send message: {}", e),
@@ -2030,7 +2026,6 @@ impl Node {
                     _ => {},
                 }
             }
-            tracing::debug!("[PHASE] end_of_loop");
 
             // Update adaptive timeout: use short timeout next iteration if we
             // processed any requests OR have active spawned tasks (cosign responses

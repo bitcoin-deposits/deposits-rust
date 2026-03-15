@@ -110,6 +110,10 @@ pub struct NostrTransport {
     /// gap-fill `fetch_events` calls. None if no slow relay is configured.
     slow_client: Option<Client>,
 
+    /// Work queue for mirroring events to the durable relay in the background.
+    /// Events are sent here and a background task drains them to slow_client.
+    mirror_tx: Option<mpsc::UnboundedSender<Event>>,
+
     /// Our keypair for signing/decryption
     keys: Keys,
 
@@ -654,10 +658,37 @@ impl NostrTransport {
         let (response_tx, response_rx) = mpsc::unbounded_channel();
         let (dispute_tx, dispute_rx) = mpsc::unbounded_channel();
 
+        // Spawn background mirror task if we have a durable relay
+        let mirror_tx = if let Some(ref sc) = slow_client {
+            let (tx, mut rx) = mpsc::unbounded_channel::<Event>();
+            let sc = sc.clone();
+            tokio::spawn(async move {
+                while let Some(event) = rx.recv().await {
+                    let seq_tag = event.tags.iter()
+                        .find(|t| t.as_slice().first().map(|s| s.as_str()) == Some("seq"))
+                        .and_then(|t| t.as_slice().get(1))
+                        .map(|s| s.to_string())
+                        .unwrap_or_default();
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        sc.send_event(event),
+                    ).await {
+                        Ok(Ok(_)) => tracing::debug!("Mirrored seq {} to durable relay", seq_tag),
+                        Ok(Err(e)) => tracing::warn!("Mirror to durable relay failed: {}", e),
+                        Err(_) => tracing::warn!("Mirror to durable relay timed out (seq {})", seq_tag),
+                    }
+                }
+            });
+            Some(tx)
+        } else {
+            None
+        };
+
         Ok(Self {
             client,
             primary_relay_url,
             slow_client,
+            mirror_tx,
             keys,
             our_pubkey,
             inbound_rx: std::sync::Mutex::new(inbound_rx),
@@ -932,10 +963,15 @@ impl NostrTransport {
 
         let event_id = event.id.to_hex();
 
-        // Broadcast
-        self.send_event_with_timeout(event)
+        // Broadcast to primary (fast) relay
+        self.send_event_with_timeout(event.clone())
             .await
             .map_err(|e| Error::Nostr(format!("Failed to broadcast ledger update: {}", e)))?;
+
+        // Enqueue mirror to durable relay (processed by background task)
+        if let Some(ref tx) = self.mirror_tx {
+            let _ = tx.send(event);
+        }
 
         tracing::info!(
             "Broadcast ledger update: ledger={}, seq={}, hash={}",
@@ -1525,9 +1561,14 @@ impl NostrTransport {
 
         let event_id = event.id.to_hex();
 
-        self.send_event_with_timeout(event)
+        self.send_event_with_timeout(event.clone())
             .await
             .map_err(|e| Error::Nostr(format!("Failed to send advertisement: {}", e)))?;
+
+        // Enqueue mirror to durable relay (advertisements are NIP-33 replaceable, belong there)
+        if let Some(ref tx) = self.mirror_tx {
+            let _ = tx.send(event);
+        }
 
         tracing::info!(
             "Published ledger advertisement: ledger={}, event={}",
