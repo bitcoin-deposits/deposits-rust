@@ -331,6 +331,7 @@ services:
       - DEPOSITS_ENABLE_METRICS_EMITTER=1
     volumes:
       - alice_data:/data
+      - ./config/deposit_allowlist.txt:/data/deposit_allowlist.txt:ro
     depends_on:
       bitcoin:
         condition: service_healthy
@@ -384,6 +385,7 @@ services:
       - RUST_LOG=info,deposits_node=debug
     volumes:
       - bob_data:/data
+      - ./config/deposit_allowlist.txt:/data/deposit_allowlist.txt:ro
     depends_on:
       bitcoin:
         condition: service_healthy
@@ -437,6 +439,7 @@ services:
       - RUST_LOG=info,deposits_node=debug
     volumes:
       - charlie_data:/data
+      - ./config/deposit_allowlist.txt:/data/deposit_allowlist.txt:ro
     depends_on:
       bitcoin:
         condition: service_healthy
@@ -490,6 +493,7 @@ services:
       - RUST_LOG=info,deposits_node=debug
     volumes:
       - diana_data:/data
+      - ./config/deposit_allowlist.txt:/data/deposit_allowlist.txt:ro
     depends_on:
       bitcoin:
         condition: service_healthy

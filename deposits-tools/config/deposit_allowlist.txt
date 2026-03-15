@@ -1,0 +1,6 @@
+# Deposit allowlist — one npub hex per line
+# If this file is empty or all lines are comments, all deposits are allowed.
+# Reload is automatic (~60s). No restart needed.
+#
+# Example:
+# 4fbe21e4eb3dcd9686eaefbb561003397926ee949a88c301f36f42564c1971a8
