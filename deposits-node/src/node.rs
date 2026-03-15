@@ -254,6 +254,10 @@ pub struct Node {
     /// our OWN cosign responses get routed to oneshot channels.
     cosign_workers: Mutex<HashMap<String, tokio::sync::mpsc::UnboundedSender<crate::nostr::LedgerRequest>>>,
 
+    /// Optional allowlist of npubs (hex) that can open deposits.
+    /// If empty, anyone can open deposits. Loaded from {data_dir}/deposit_allowlist.txt.
+    deposit_allowlist: RwLock<std::collections::HashSet<String>>,
+
     /// Data directory for persistence
     data_dir: PathBuf,
 
@@ -405,6 +409,7 @@ impl Node {
             active_ledger_tasks: Mutex::new(HashMap::new()),
             ledger_workers: Mutex::new(HashMap::new()),
             cosign_workers: Mutex::new(HashMap::new()),
+            deposit_allowlist: RwLock::new(Self::load_allowlist(&config.data_dir)),
             data_dir: config.data_dir,
             relay_url,
             fast_poll: config.fast_poll,
@@ -1476,6 +1481,9 @@ impl Node {
                         timed_periodic!("auto_confiscate", node.auto_confiscate());
                         timed_periodic!("auto_reveal_on_confiscation", node.auto_reveal_on_confiscation());
                         timed_periodic!("auto_post_win_cleanup", node.auto_post_win_cleanup());
+
+                        // Reload allowlist (non-async, fast)
+                        node.reload_allowlist();
                     });
                 }
 
@@ -4785,6 +4793,15 @@ impl Node {
 
         tracing::info!("Processing deposit_open request for ledger {}...",
             &request.ledger_id[..16.min(request.ledger_id.len())]);
+
+        // Check deposit allowlist (if configured)
+        {
+            let allowlist = self.deposit_allowlist.read().unwrap();
+            if !allowlist.is_empty() && !allowlist.contains(&request.sender) {
+                tracing::warn!("Deposit open rejected: sender {} not on allowlist", &request.sender[..16.min(request.sender.len())]);
+                return (false, None, Some("Not authorized to open deposits on this ledger".to_string()));
+            }
+        }
 
         // Resolve to ledger_id (handles both hash and reserves_key formats)
         let ledger_id = match self.resolve_to_ledger_id(&request.ledger_id) {
@@ -10676,6 +10693,38 @@ impl Node {
     ) -> Option<(OnChainWithdrawal, OnChainWithdrawalStatus)> {
         let withdrawals = self.withdrawals.lock().unwrap();
         withdrawals.get(withdrawal_id).cloned()
+    }
+
+    /// Load deposit allowlist from {data_dir}/deposit_allowlist.txt.
+    /// Returns empty set if file doesn't exist (all deposits allowed).
+    fn load_allowlist(data_dir: &std::path::Path) -> std::collections::HashSet<String> {
+        let path = data_dir.join("deposit_allowlist.txt");
+        match std::fs::read_to_string(&path) {
+            Ok(content) => {
+                let list: std::collections::HashSet<String> = content
+                    .lines()
+                    .map(|l| l.trim().to_lowercase())
+                    .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                    .collect();
+                if !list.is_empty() {
+                    tracing::info!("Deposit allowlist loaded: {} entries from {}", list.len(), path.display());
+                }
+                list
+            }
+            Err(_) => std::collections::HashSet::new(),
+        }
+    }
+
+    /// Reload the deposit allowlist from disk (only updates if changed).
+    pub fn reload_allowlist(&self) {
+        let new_list = Self::load_allowlist(&self.data_dir);
+        let current = self.deposit_allowlist.read().unwrap();
+        if *current != new_list {
+            let count = new_list.len();
+            drop(current);
+            *self.deposit_allowlist.write().unwrap() = new_list;
+            tracing::info!("Deposit allowlist updated: {} entries", count);
+        }
     }
 
     /// Generate a random nonce for withdrawal uniqueness
