@@ -183,7 +183,7 @@ nav button:hover { color: var(--text); background: transparent; }
             <span id="wallet-deposit-count">0</span> deposit(s)
           </div>
           <div id="wallet-balance" style="font-size:32px; font-weight:700; color:var(--green); cursor:pointer;">
-            — sats
+            —
           </div>
           <div id="wallet-locked" style="color:var(--yellow); font-size:12px; display:none;"></div>
         </div>
@@ -200,7 +200,7 @@ nav button:hover { color: var(--text); background: transparent; }
         <h3>Receive</h3>
         <div class="row">
           <div class="form-group">
-            <label>Amount (sats)</label>
+            <label>Amount (₿)</label>
             <input id="wallet-recv-amount" type="number" value="10000">
           </div>
           <div class="form-group">
@@ -250,7 +250,7 @@ nav button:hover { color: var(--text); background: transparent; }
               <input id="wallet-send-address" type="text" placeholder="bc1q...">
             </div>
             <div class="form-group">
-              <label>Amount (sats)</label>
+              <label>Amount (₿)</label>
               <input id="wallet-send-amount" type="number" value="10000">
             </div>
           </div>
@@ -263,7 +263,7 @@ nav button:hover { color: var(--text); background: transparent; }
               <select id="wallet-send-transfer-to"></select>
             </div>
             <div class="form-group">
-              <label>Amount (sats)</label>
+              <label>Amount (₿)</label>
               <input id="wallet-send-transfer-amount" type="number" value="1000">
             </div>
           </div>
@@ -306,7 +306,7 @@ nav button:hover { color: var(--text); background: transparent; }
         <div class="row" style="margin-top:10px;">
           <div>
             <div class="form-group">
-              <label>Amount (sats)</label>
+              <label>Amount (₿)</label>
               <input id="action-amount" type="number" value="10000">
             </div>
             <div class="actions" style="flex-wrap:wrap;">
@@ -378,11 +378,11 @@ nav button:hover { color: var(--text); background: transparent; }
         </div>
         <div class="row">
           <div class="form-group">
-            <label>Amount (sats)</label>
+            <label>Amount (₿)</label>
             <input id="transfer-amount" type="number" value="1000" oninput="updateTransferFee()">
           </div>
           <div class="form-group">
-            <label>Fee (sats)</label>
+            <label>Fee (₿)</label>
             <input id="transfer-fee" type="number" value="2">
           </div>
         </div>
@@ -1019,12 +1019,12 @@ async function discoverLedgers() {
     html += `<div class="card">
       <div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:8px;">
         <span style="font-weight:600">${groupAds.length} ledger(s)</span>
-        <span style="color:var(--green)">${totalHeadroom.toLocaleString()} sats available</span>
+        <span style="color:var(--green)">${totalHeadroom.toLocaleString()} ₿ available</span>
       </div>
       <div class="kv"><span class="k">Operators</span><span class="v">${operators.map(esc).join(', ')}</span></div>
-      <div class="kv"><span class="k">Total reserves</span><span class="v">${totalReserves.toLocaleString()} sats</span></div>
-      <div class="kv"><span class="k">Custody fee</span><span class="v">${(annualBps / 100).toFixed(2)}%/yr + ${minFee} sats/${feePeriod} blocks</span></div>
-      <div class="kv"><span class="k">Transfer fee</span><span class="v">${tfFixed} sats + ${(tfRate / 100).toFixed(2)}%</span></div>
+      <div class="kv"><span class="k">Total reserves</span><span class="v">₿${totalReserves.toLocaleString()}</span></div>
+      <div class="kv"><span class="k">Custody fee</span><span class="v">${(annualBps / 100).toFixed(2)}%/yr + ₿${minFee}/${feePeriod}blk</span></div>
+      <div class="kv"><span class="k">Transfer fee</span><span class="v">₿${tfFixed} + ${(tfRate / 100).toFixed(2)}%</span></div>
       <div style="margin-top:8px; display:flex; flex-wrap:wrap; gap:4px;">`;
 
     for (const ad of groupAds) {
@@ -1144,14 +1144,14 @@ function renderDeposits() {
     html += `
       <div class="deposit-tile${selected}" onclick="selectDeposit('${esc(d.alias)}')">
         <div class="alias">${esc(d.alias)}</div>
-        <div class="bal${hasBal && bal > 0 ? '' : ' zero'}">${hasBal ? bal.toLocaleString() + 's' : d.status}</div>
+        <div class="bal${hasBal && bal > 0 ? '' : ' zero'}">${hasBal ? '₿' + bal.toLocaleString() : d.status}</div>
       </div>`;
   }
   container.innerHTML = html;
 
   // Update transfer dropdowns
   function depositLabel(d) {
-    return (balanceVisible && d.amount_sats != null) ? `${esc(d.alias)} (${d.amount_sats} sats)` : esc(d.alias);
+    return (balanceVisible && d.amount_sats != null) ? `${esc(d.alias)} (₿${d.amount_sats})` : esc(d.alias);
   }
   const fromSel = document.getElementById('transfer-from');
   if (fromSel) {
@@ -1175,7 +1175,7 @@ function renderDeposits() {
   // Update wallet tab dropdowns, sorted by balance (largest first)
   const sorted = [...state.deposits].sort((a, b) => (b.amount_sats || 0) - (a.amount_sats || 0));
   const depositOpts = sorted.map(d => {
-    const label = (balanceVisible && d.amount_sats != null) ? `${esc(d.alias)} (${d.amount_sats} sats)` : esc(d.alias);
+    const label = (balanceVisible && d.amount_sats != null) ? `${esc(d.alias)} (₿${d.amount_sats})` : esc(d.alias);
     return `<option value="${esc(d.alias)}">${label}</option>`;
   }).join('');
   for (const id of ['wallet-recv-deposit', 'wallet-send-deposit']) {
@@ -1200,7 +1200,7 @@ function renderWalletTab() {
 
   const balEl = document.getElementById('wallet-balance');
   if (balEl) {
-    balEl.textContent = balanceVisible ? `${totalSats.toLocaleString()} sats` : '****';
+    balEl.textContent = balanceVisible ? `₿ ${totalSats.toLocaleString()}` : '****';
   }
   const countEl = document.getElementById('wallet-deposit-count');
   if (countEl) countEl.textContent = state.deposits.length;
@@ -1208,7 +1208,7 @@ function renderWalletTab() {
   const lockEl = document.getElementById('wallet-locked');
   if (lockEl) {
     if (totalLocked > 0 && balanceVisible) {
-      lockEl.textContent = `${totalLocked.toLocaleString()} sats locked`;
+      lockEl.textContent = `₿ ${totalLocked.toLocaleString()} locked`;
       lockEl.style.display = 'block';
     } else {
       lockEl.style.display = 'none';
@@ -1281,7 +1281,7 @@ window.showWalletOpen = async function() {
       <div style="display:flex; justify-content:space-between; align-items:center;">
         <div style="flex:1">
           <div style="font-size:12px;">${(annualBps/100).toFixed(2)}%/yr + ${minFee}s/${feePeriod}blk, xfer ${tfFixed}s+${(tfRate/100).toFixed(2)}%</div>
-          <div style="color:var(--muted); font-size:11px;">${groupAds.length} ledger(s), ${totalHeadroom.toLocaleString()} sats available</div>
+          <div style="color:var(--muted); font-size:11px;">${groupAds.length} ledger(s), ${totalHeadroom.toLocaleString()} ₿ available</div>
         </div>
         <button class="primary" style="margin-left:10px;" onclick="doWalletQuickOpen('${lid}','${esc(relay)}')">Open</button>
       </div>`;
@@ -1571,7 +1571,7 @@ function updateWalletTransferTo() {
   const opts = state.deposits
     .filter(d => d.alias !== fromAlias)
     .map(d => {
-      const label = d.amount_sats != null ? `${esc(d.alias)} (${d.amount_sats} sats)` : esc(d.alias);
+      const label = d.amount_sats != null ? `${esc(d.alias)} (₿${d.amount_sats})` : esc(d.alias);
       return `<option value="${esc(d.alias)}">${label}</option>`;
     }).join('');
   toSel.innerHTML = opts;
@@ -1631,7 +1631,7 @@ window.doWalletTransfer = async function() {
   const sig = schnorr.sign(msgHash, secretKey);
 
   try {
-    log(`Transferring ${amount} sats to ${toAlias}...`);
+    log(`Transferring ₿${amount} to ${toAlias}...`);
     const lockResponse = await sendRequest(deposit.ledger_id, 'transfer_lock', {
       nonce: bytesToHex(nonce),
       source_deposit_id: bytesToHex(sourceId),
@@ -1655,7 +1655,7 @@ window.doWalletTransfer = async function() {
     }, 15000);
 
     if (completeResponse.success) {
-      log(`Transferred ${amount} sats to ${toAlias}!`, 'success');
+      log(`Transferred ₿${amount} to ${toAlias}!`, 'success');
       syncAll();
     } else {
       log(`Transfer complete failed: ${completeResponse.error}`, 'error');
@@ -1671,7 +1671,7 @@ window.doWalletRecvLightning = async function() {
   if (!amount) { log('Missing amount', 'error'); return; }
 
   try {
-    log(`Creating Lightning invoice for ${amount} sats...`);
+    log(`Creating Lightning invoice for ₿${amount}...`);
     const response = await sendRequest(deposit.ledger_id, 'make_invoice', {
       deposit_pubkey: deposit.deposit_pubkey,
       amount_sats: amount,
@@ -1783,7 +1783,7 @@ window.doWalletPayInvoice = async function() {
     const msgHash = invoiceLockSigningMessage(depositId, paymentHash, amountMsat);
     const sig = schnorr.sign(msgHash, secretKey);
 
-    log(`Paying ${amountMsat / 1000} sats...`);
+    log(`Paying ₿${amountMsat / 1000}...`);
     const response = await sendRequest(deposit.ledger_id, 'pay_invoice', {
       deposit_pubkey: deposit.deposit_pubkey,
       invoice: bolt11,
@@ -1821,7 +1821,7 @@ window.doWalletWithdraw = async function() {
     const msgHash = withdrawalSigningMessage(nonce, depositId, address, amount, feeSats);
     const sig = schnorr.sign(msgHash, secretKey);
 
-    log(`Withdrawing ${amount} sats...`);
+    log(`Withdrawing ₿${amount}...`);
     const response = await sendRequest(deposit.ledger_id, 'withdraw', {
       deposit_pubkey: bytesToHex(pubkey),
       deposit_id: bytesToHex(depositId),
@@ -1830,7 +1830,7 @@ window.doWalletWithdraw = async function() {
     }, 60000);
 
     if (response.success) {
-      log(`Withdrawal accepted! ${amount} sats to ${address}`, 'success');
+      log(`Withdrawal accepted! ₿${amount} to ${address}`, 'success');
       syncAll();
     } else {
       log(`Withdrawal failed: ${response.error}`, 'error');
@@ -1857,8 +1857,8 @@ window.selectDeposit = function(alias) {
 
   const hasBal = balanceVisible && d.amount_sats != null;
   const bal = d.amount_sats || 0;
-  const locked = d.locked_sats ? ` (${d.locked_sats} locked)` : '';
-  document.getElementById('detail-balance').textContent = hasBal ? `${bal.toLocaleString()} sats${locked}` : 'sync to check';
+  const locked = d.locked_sats ? ` (₿${d.locked_sats} locked)` : '';
+  document.getElementById('detail-balance').textContent = hasBal ? `₿ ${bal.toLocaleString()}${locked}` : 'sync to check';
   document.getElementById('detail-balance').style.color = hasBal && bal > 0 ? 'var(--green)' : 'var(--muted)';
 
   let info = `Ledger: ${d.ledger_id}`;
@@ -1906,7 +1906,7 @@ async function syncAll() {
         if (balMsats > 0 && deposit.status === 'pending') deposit.status = 'funded';
         if (r.block_height) cachedBlockHeight = r.block_height;
         updated = true;
-        log(`  ${deposit.alias}: ${available} sats${locked > 0 ? ` (${locked} locked)` : ''}`);
+        log(`  ${deposit.alias}: ₿${available}${locked > 0 ? ` (${locked} locked)` : ''}`);
       } else {
         log(`  ${deposit.alias}: ${response.error || 'error'}`, 'error');
       }
@@ -1954,7 +1954,7 @@ window.doWithdraw = async function() {
     }, 60000);
 
     if (response.success) {
-      log(`Withdrawal accepted! ${amount} sats to ${address}`, 'success');
+      log(`Withdrawal accepted! ₿${amount} to ${address}`, 'success');
       syncAll();
     } else {
       log(`Withdrawal failed: ${response.error}`, 'error');
@@ -2021,7 +2021,7 @@ window.doFundLightning = async function() {
   if (!amount) { log('Missing amount', 'error'); return; }
 
   try {
-    log(`Creating Lightning invoice for ${amount} sats...`);
+    log(`Creating Lightning invoice for ₿${amount}...`);
     const response = await sendRequest(selectedDeposit.ledger_id, 'make_invoice', {
       deposit_pubkey: selectedDeposit.deposit_pubkey,
       amount_sats: amount,
@@ -2066,7 +2066,7 @@ window.doPayInvoiceSubmit = async function() {
   try {
     // Decode invoice to get payment_hash and amount
     const { paymentHash, amountMsat } = decodeBolt11(bolt11);
-    log(`Invoice: ${amountMsat / 1000} sats, hash=${bytesToHex(paymentHash).slice(0,16)}...`);
+    log(`Invoice: ₿${amountMsat / 1000}, hash=${bytesToHex(paymentHash).slice(0,16)}...`);
 
     // Sign authorization: INVOICE:{deposit_id}:{payment_hash}:{amount_msat}
     const keyIndex = selectedDeposit.key_index || 0;
@@ -2128,7 +2128,7 @@ window.onTransferFromChange = async function() {
     const opts = state.deposits
       .filter(d => d.alias !== alias)
       .map(d => {
-        const label = d.amount_sats != null ? `${esc(d.alias)} (${d.amount_sats} sats)` : esc(d.alias);
+        const label = d.amount_sats != null ? `${esc(d.alias)} (₿${d.amount_sats})` : esc(d.alias);
         return `<option value="${esc(d.alias)}">${label}</option>`;
       }).join('');
     toSel.innerHTML = opts + '<option value="__other__">Other (enter ID)</option>';
@@ -2216,7 +2216,7 @@ window.doTransferLock = async function() {
     const transferId = computeTransferId(msgHash);
     const sig = schnorr.sign(msgHash, secretKey);
 
-    log(`Transfer lock: ${amount} sats, ID: ${bytesToHex(transferId).slice(0, 16)}...`);
+    log(`Transfer lock: ₿${amount}, ID: ${bytesToHex(transferId).slice(0, 16)}...`);
 
     const response = await sendRequest(deposit.ledger_id, 'transfer_lock', {
       nonce: bytesToHex(nonce),
