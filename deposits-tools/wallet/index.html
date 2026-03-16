@@ -476,8 +476,8 @@ nav button:hover { color: var(--text); background: transparent; }
         <h3>Backup</h3>
         <div id="settings-mnemonic" style="display:none; margin-bottom:8px;">
           <label style="margin-bottom:4px;">Recovery phrase (keep secret!)</label>
-          <div id="settings-mnemonic-words" style="background:var(--bg); padding:8px; border-radius:4px; font-size:13px; line-height:1.8; word-spacing:4px; cursor:pointer; filter:blur(5px); transition:filter 0.2s;" onclick="this.style.filter = this.style.filter ? '' : 'blur(5px)'"></div>
-          <div style="color:var(--muted); font-size:10px; margin-top:4px;">Click to reveal. Write these words down and store safely.</div>
+          <div id="settings-mnemonic-words" style="background:var(--bg); padding:8px; border-radius:4px; font-size:13px; line-height:1.8; word-spacing:4px; display:none;"></div>
+          <button onclick="const el=document.getElementById('settings-mnemonic-words'); el.style.display=el.style.display==='none'?'block':'none'; this.textContent=el.style.display==='none'?'Reveal':'Hide'" style="margin-top:4px;">Reveal</button>
         </div>
         <div class="form-group">
           <label>Hex seed</label>
