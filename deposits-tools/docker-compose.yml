@@ -711,6 +711,17 @@ services:
     networks:
       - regtest
 
+  # Web wallet — static HTML served via nginx
+  wallet:
+    build:
+      context: wallet
+    image: deposits-wallet:latest
+    container_name: wallet
+    ports:
+      - "8888:80"
+    networks:
+      - regtest
+
   # Lightweight regtest block miner (~5MB alpine+curl container)
   # Mines 1 block/sec so transfer timeouts resolve promptly after restarts.
   # Uses JSON-RPC directly — no bitcoind binary needed.
