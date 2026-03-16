@@ -2921,6 +2921,11 @@ window.initWallet = async function() {
   state.deposits = [];
   state.keyIndex = 0;
   saveState();
+
+  // Save to keychain immediately — on Safari this reloads the page,
+  // which is fine since state is already persisted to localStorage.
+  await saveToKeychain();
+
   startMainUI();
 };
 
