@@ -447,7 +447,12 @@ nav button:hover { color: var(--text); background: transparent; }
       </div>
       <!-- Quick links to deposits' ledgers -->
       <div id="ledger-quick-links" style="display:flex; flex-wrap:wrap; gap:4px; margin-bottom:12px;"></div>
-      <div id="ledger-explorer-content"></div>
+      <div id="ledger-explorer-header" style="display:none; color:var(--muted); font-size:11px; margin-bottom:4px;"></div>
+      <div id="ledger-explorer-viewport" style="display:none; height:500px; overflow-y:auto; border:1px solid var(--border); border-radius:6px; position:relative;">
+        <div id="ledger-explorer-spacer" style="width:100%;"></div>
+        <div id="ledger-explorer-rows" style="position:absolute; top:0; left:0; right:0;"></div>
+      </div>
+      <div id="ledger-explorer-empty"></div>
     </div>
 
     <!-- Settings tab -->
@@ -2592,88 +2597,122 @@ window.openLedgerEntry = function(ledgerId, seq) {
   exploreLedger().then(() => highlightLedgerEntry(seq));
 };
 
+// Virtual scroll state
+let vsUpdates = [];     // all decoded updates for current ledger
+let vsLedgerId = '';    // current ledger ID
+let vsExpanded = null;  // seq of expanded entry
+const VS_ROW_H = 44;   // row height in px (collapsed)
+const VS_ROW_EXP = 250; // max expanded row height
+const VS_OVERSCAN = 5;  // extra rows above/below viewport
+
 window.exploreLedger = async function() {
   const input = document.getElementById('ledger-explorer-id').value.trim();
   if (!input) { log('Enter a ledger ID', 'error'); return; }
 
-  const container = document.getElementById('ledger-explorer-content');
-  container.innerHTML = '<div style="color:var(--muted); padding:20px; text-align:center;">Loading...</div>';
+  const header = document.getElementById('ledger-explorer-header');
+  const viewport = document.getElementById('ledger-explorer-viewport');
+  const empty = document.getElementById('ledger-explorer-empty');
+  header.style.display = 'none';
+  viewport.style.display = 'none';
+  empty.innerHTML = '<div style="color:var(--muted); padding:20px; text-align:center;">Loading...</div>';
 
-  // Fetch Kind 9100 events for this ledger
-  const filter = { kinds: [9100], '#d': [input], limit: 200 };
+  const filter = { kinds: [9100], '#d': [input], limit: 500 };
   const events = await fetchEvents(filter, 15000);
 
   if (events.length === 0) {
-    container.innerHTML = '<div class="empty">No updates found for this ledger.</div>';
+    empty.innerHTML = '<div class="empty">No updates found for this ledger.</div>';
     return;
   }
 
-  // Decode and sort by sequence
-  const updates = [];
+  // Decode and sort
+  vsUpdates = [];
+  vsLedgerId = input;
+  vsExpanded = null;
   for (const ev of events) {
     try {
-      const update = decodeUpdate(ev.content);
-      update.eventId = ev.id;
-      update.createdAt = ev.created_at;
-      updates.push(update);
-    } catch (e) {
-      console.warn('Failed to decode update:', e);
-    }
+      const u = decodeUpdate(ev.content);
+      u.eventId = ev.id;
+      u.createdAt = ev.created_at;
+      vsUpdates.push(u);
+    } catch {}
   }
-  updates.sort((a, b) => a.seq - b.seq);
+  vsUpdates.sort((a, b) => a.seq - b.seq);
 
-  // Render
-  let html = `<div style="color:var(--muted); font-size:11px; margin-bottom:8px;">${updates.length} update(s) for ${input.slice(0,16)}...</div>`;
+  empty.innerHTML = '';
+  header.style.display = 'block';
+  header.textContent = `${vsUpdates.length} update(s) for ${input.slice(0,16)}...`;
+  viewport.style.display = 'block';
 
-  for (const u of updates) {
+  // Set spacer height for scrollbar
+  document.getElementById('ledger-explorer-spacer').style.height = (vsUpdates.length * VS_ROW_H) + 'px';
+
+  // Attach scroll handler
+  viewport.onscroll = vsRender;
+  vsRender();
+  log(`Loaded ${vsUpdates.length} updates for ${input.slice(0,16)}...`, 'success');
+};
+
+function vsRender() {
+  const viewport = document.getElementById('ledger-explorer-viewport');
+  const rows = document.getElementById('ledger-explorer-rows');
+  const scrollTop = viewport.scrollTop;
+  const viewH = viewport.clientHeight;
+
+  const first = Math.max(0, Math.floor(scrollTop / VS_ROW_H) - VS_OVERSCAN);
+  const last = Math.min(vsUpdates.length - 1, Math.ceil((scrollTop + viewH) / VS_ROW_H) + VS_OVERSCAN);
+
+  let html = '';
+  for (let i = first; i <= last; i++) {
+    const u = vsUpdates[i];
+    const top = i * VS_ROW_H;
     const time = u.timestamp ? new Date(u.timestamp * 1000).toLocaleString() : '';
     const hashShort = u.curHash.slice(0, 12);
+    const isExpanded = vsExpanded === u.seq;
 
-    // Determine color based on operation type
     let color = 'var(--text)';
     if (u.opName.includes('Credit') || u.opName.includes('Increase')) color = 'var(--balance)';
     else if (u.opName.includes('Lock') || u.opName.includes('Decrease')) color = 'var(--yellow)';
     else if (u.opName.includes('Fail') || u.opName.includes('Dispute') || u.opName.includes('Close')) color = 'var(--red)';
 
-    html += `<div id="ledger-entry-${u.seq}" class="card ledger-entry" style="padding:8px 12px; margin-bottom:4px; cursor:pointer;" onclick="selectLedgerEntry('${input}', ${u.seq}, this)">
+    const border = isExpanded ? 'var(--accent)' : 'var(--border)';
+
+    html += `<div id="ledger-entry-${u.seq}" style="position:absolute; top:${top}px; left:0; right:0; min-height:${VS_ROW_H}px; padding:6px 12px; border-bottom:1px solid var(--border); border-left:2px solid ${border}; cursor:pointer; background:var(--surface);" onclick="vsToggle(${u.seq})">
       <div style="display:flex; justify-content:space-between; align-items:baseline;">
-        <span><span style="color:var(--muted)">#${u.seq}</span> <span style="color:${color}; font-weight:600;">${u.opName}</span></span>
+        <span><span style="color:var(--muted); font-size:10px;">#${u.seq}</span> <span style="color:${color}; font-weight:600; font-size:12px;">${u.opName}</span></span>
         <span style="color:var(--muted); font-size:10px;">${time}</span>
       </div>
-      <div style="color:var(--muted); font-size:10px;">hash: ${hashShort}... block: ${u.blockHeight}</div>
-      <div class="op-detail" style="display:none; margin-top:6px; font-size:11px; border-top:1px solid var(--border); padding-top:6px;">`;
+      <div style="color:var(--muted); font-size:10px;">hash: ${hashShort}... block: ${u.blockHeight}</div>`;
 
-    for (const f of u.opFields) {
-      if (f.type === 0) continue; // skip discriminant
-      const val = f.text || (f.u64 !== null ? `${f.u64}` : (f.u32 !== null ? `${f.u32}` : f.hex));
-      html += `<div class="kv"><span class="k">${f.name} (${f.type})</span><span class="v">${esc(val)} <span style="color:var(--muted)">[${f.len}B]</span></span></div>`;
+    if (isExpanded) {
+      html += `<div style="margin-top:6px; font-size:11px; border-top:1px solid var(--border); padding-top:6px;">`;
+      for (const f of u.opFields) {
+        if (f.type === 0) continue;
+        const val = f.text || (f.u64 !== null ? `${f.u64}` : (f.u32 !== null ? `${f.u32}` : f.hex));
+        html += `<div class="kv"><span class="k">${f.name} (${f.type})</span><span class="v">${esc(val)} <span style="color:var(--muted)">[${f.len}B]</span></span></div>`;
+      }
+      html += `</div>`;
     }
 
-    html += `</div></div>`;
+    html += `</div>`;
   }
+  rows.innerHTML = html;
+}
 
-  container.innerHTML = html;
-  log(`Loaded ${updates.length} updates for ${input.slice(0,16)}...`, 'success');
-};
-
-window.selectLedgerEntry = function(ledgerId, seq, el) {
-  // Toggle detail
-  const detail = el.querySelector('.op-detail');
-  detail.style.display = detail.style.display === 'none' ? 'block' : 'none';
-  // Highlight
-  document.querySelectorAll('.ledger-entry').forEach(e => e.style.borderColor = 'var(--border)');
-  el.style.borderColor = 'var(--accent)';
-  // Update hash with seq
-  updateHash(`ledger/${ledgerId}/${seq}`);
+window.vsToggle = function(seq) {
+  vsExpanded = vsExpanded === seq ? null : seq;
+  updateHash(`ledger/${vsLedgerId}/${seq}`);
+  vsRender();
 };
 
 function highlightLedgerEntry(seq) {
-  const el = document.getElementById('ledger-entry-' + seq);
-  if (el) {
-    el.style.borderColor = 'var(--accent)';
-    el.querySelector('.op-detail').style.display = 'block';
-    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  vsExpanded = seq;
+  // Scroll to the entry
+  const idx = vsUpdates.findIndex(u => u.seq === seq);
+  if (idx >= 0) {
+    const viewport = document.getElementById('ledger-explorer-viewport');
+    viewport.scrollTop = idx * VS_ROW_H - viewport.clientHeight / 2 + VS_ROW_H;
   }
+  vsRender();
 }
 
 // ============================================================
