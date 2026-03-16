@@ -53,9 +53,17 @@
 #![allow(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+// Protocol definitions (re-exported from deposits-protocol for backward compatibility)
+pub use deposits_protocol::constants;
+pub use deposits_protocol::error;
+pub use deposits_protocol::messages;
+pub use deposits_protocol::signature_utils;
+pub use deposits_protocol::tlv;
+pub use deposits_protocol::types;
+pub use deposits_protocol::wire_messages;
+
+// Core modules (state machine, handlers, validation)
 pub mod channel_manager_ops;
-pub mod constants;
-pub mod error;
 pub mod event_store;
 pub mod handler;
 pub mod handler_traits;
@@ -64,21 +72,16 @@ pub mod ledger;
 #[macro_use]
 pub mod logging;
 pub mod message_processor;
-pub mod messages;
 pub mod operation_validation;
 pub mod payment_tracker;
 pub mod quorum;
 pub mod recovery;
 pub mod recovery_claim;
 pub mod reserves_proposal;
-pub mod signature_utils;
 pub mod tapscript_reserves;
 pub mod time_utils;
-pub mod tlv;
 pub mod traits;
-pub mod types;
 pub mod validation;
-pub mod wire_messages;
 pub mod message_validation;
 pub mod message_handlers;
 
