@@ -485,9 +485,15 @@ nav button:hover { color: var(--text); background: transparent; }
           <button onclick="toggleSeed()" style="margin-top:6px">Show/Hide</button>
         </div>
         <div style="display:flex; gap:6px; margin-top:8px;">
-          <button onclick="copyBackup()" style="flex:1;">Copy Backup to Clipboard</button>
-          <button onclick="downloadBackup()" style="flex:1;">Download Backup File</button>
+          <button onclick="copyBackup()" style="flex:1;">Copy</button>
+          <button onclick="downloadBackup()" style="flex:1;">Download</button>
+          <button onclick="showKeychainSave()" style="flex:1;">Save to Keychain</button>
         </div>
+        <form id="keychain-form" style="display:none; margin-top:8px;" method="post" action="javascript:void(0)" onsubmit="event.preventDefault(); keychainSaved();">
+          <input id="keychain-user" type="text" name="username" autocomplete="username" readonly style="margin-bottom:4px;">
+          <input id="keychain-pass" type="password" name="password" autocomplete="new-password" readonly>
+          <button type="submit" class="primary" style="width:100%; margin-top:6px;">Save to Keychain</button>
+        </form>
       </div>
       <div class="card">
         <h3>Relays</h3>
@@ -2958,6 +2964,35 @@ window.resetWallet = function() {
   localStorage.removeItem(STATE_KEY);
   localStorage.removeItem('deposits-balance-visible');
   location.reload();
+};
+
+window.showKeychainSave = function() {
+  const form = document.getElementById('keychain-form');
+  if (form.style.display !== 'none') { form.style.display = 'none'; return; }
+
+  const secret = state.mnemonic || bytesToHex(state.seed);
+  const nostrKey = deriveSecretKey(state.seed, 0);
+  const npub = getPublicKeyHex(nostrKey);
+  const username = 'deposits-wallet:' + npub.slice(0, 8);
+
+  const userInput = document.getElementById('keychain-user');
+  const passInput = document.getElementById('keychain-pass');
+
+  // Set values using native setter + dispatch events so browser registers them
+  const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+  nativeSetter.call(userInput, username);
+  userInput.dispatchEvent(new Event('input', { bubbles: true }));
+  userInput.dispatchEvent(new Event('change', { bubbles: true }));
+  nativeSetter.call(passInput, secret);
+  passInput.dispatchEvent(new Event('input', { bubbles: true }));
+  passInput.dispatchEvent(new Event('change', { bubbles: true }));
+
+  form.style.display = 'block';
+};
+
+window.keychainSaved = function() {
+  log('Keychain save triggered — check your browser\'s password save prompt', 'success');
+  document.getElementById('keychain-form').style.display = 'none';
 };
 
 window.copyBackup = async function() {
