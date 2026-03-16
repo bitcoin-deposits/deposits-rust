@@ -1904,6 +1904,7 @@ let selectedDeposit = null;
 window.selectDeposit = function(alias) {
   selectedDeposit = state.deposits.find(d => d.alias === alias);
   if (!selectedDeposit) return;
+  updateHash('deposit/' + encodeURIComponent(alias));
 
   // Highlight selected tile
   document.querySelectorAll('.deposit-tile').forEach(t => t.classList.remove('selected'));
@@ -1923,7 +1924,7 @@ window.selectDeposit = function(alias) {
   document.getElementById('detail-balance').textContent = hasBal ? `₿ ${bal.toLocaleString()}${locked}` : 'sync to check';
   document.getElementById('detail-balance').style.color = hasBal && bal > 0 ? 'var(--green)' : 'var(--muted)';
 
-  let info = `Ledger: <a href="#" onclick="event.preventDefault(); openLedgerTab('${d.ledger_id}')">${d.ledger_id}</a>`;
+  let info = `Ledger: <a href="#ledger/${d.ledger_id}" onclick="event.preventDefault(); openLedgerTab('${d.ledger_id}')">${d.ledger_id}</a>`;
   if (d.deposit_pubkey) info += `<br>Deposit pubkey: ${esc(d.deposit_pubkey)}`;
   if (d.funding_address) info += `<br>Funding address: ${esc(d.funding_address)}`;
   if (d.offer_id) info += `<br>Offer ID: ${esc(d.offer_id)}`;
@@ -2559,11 +2560,9 @@ function populateLedgerQuickLinks() {
 }
 
 window.openLedgerTab = function(ledgerId) {
-  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
-  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-  document.querySelector('nav button[data-tab="ledgers"]').classList.add('active');
-  document.getElementById('tab-ledgers').classList.add('active');
+  switchToTab('ledgers');
   document.getElementById('ledger-explorer-id').value = ledgerId;
+  updateHash('ledger/' + ledgerId);
   exploreLedger();
 };
 
@@ -2631,16 +2630,50 @@ window.exploreLedger = async function() {
   log(`Loaded ${updates.length} updates for ${input.slice(0,16)}...`, 'success');
 };
 
+// ============================================================
+// URL hash routing
+// ============================================================
+
+function switchToTab(tab) {
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  const btn = document.querySelector(`nav button[data-tab="${tab}"]`);
+  if (btn) btn.classList.add('active');
+  const panel = document.getElementById('tab-' + tab);
+  if (panel) panel.classList.add('active');
+  if (tab === 'discover') discoverLedgers();
+  if (tab === 'transfer') onTransferFromChange();
+  if (tab === 'ledgers') populateLedgerQuickLinks();
+}
+
+function updateHash(hash) {
+  history.replaceState(null, '', '#' + hash);
+}
+
+function restoreFromHash() {
+  const hash = location.hash.slice(1);
+  if (!hash) return;
+
+  const parts = hash.split('/');
+  const tab = parts[0];
+
+  if (tab === 'ledger' && parts[1]) {
+    switchToTab('ledgers');
+    document.getElementById('ledger-explorer-id').value = parts[1];
+    exploreLedger();
+  } else if (tab === 'deposit' && parts[1]) {
+    switchToTab('deposits');
+    selectDeposit(decodeURIComponent(parts[1]));
+  } else if (['wallet','deposits','discover','transfer','ledgers','settings'].includes(tab)) {
+    switchToTab(tab);
+  }
+}
+
 // Tab switching
 document.querySelectorAll('nav button[data-tab]').forEach(btn => {
   btn.addEventListener('click', () => {
-    document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
-    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-    btn.classList.add('active');
-    document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
-    if (btn.dataset.tab === 'discover') discoverLedgers();
-    if (btn.dataset.tab === 'transfer') onTransferFromChange();
-    if (btn.dataset.tab === 'ledgers') populateLedgerQuickLinks();
+    switchToTab(btn.dataset.tab);
+    updateHash(btn.dataset.tab);
   });
 });
 
@@ -2730,9 +2763,14 @@ function startMainUI() {
 // Boot
 if (loadState()) {
   startMainUI();
+  // Restore UI state from URL hash after a brief delay (wait for relays)
+  setTimeout(restoreFromHash, 500);
 } else {
   document.getElementById('setup-panel').style.display = '';
 }
+
+// Handle back/forward navigation
+window.addEventListener('hashchange', restoreFromHash);
 </script>
 </body>
 </html>
