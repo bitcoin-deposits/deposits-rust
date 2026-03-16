@@ -436,9 +436,6 @@ pub struct LedgerAdvertisement {
 
     // === Trust Info ===
 
-    /// Number of quorum members
-    pub quorum_size: u8,
-
     /// Block height when collateral requirements are enforced
     pub collateral_enforcement_block: u64,
 
@@ -448,10 +445,6 @@ pub struct LedgerAdvertisement {
     /// Total received collateral from quorum members (sats)
     #[serde(default)]
     pub received_collateral_sats: u64,
-
-    /// Quorum member details (pubkey, collateral amount, expiry block)
-    #[serde(default)]
-    pub quorum_members: Vec<QuorumMemberInfo>,
 
     // === Connectivity ===
 
@@ -506,11 +499,9 @@ impl LedgerAdvertisement {
             max_balance_sats: 0,
             total_obligations_sats: 0,
             available_headroom_sats: 0,
-            quorum_size: 0,
             collateral_enforcement_block: 0,
             reserves_amount_sats: 0,
             received_collateral_sats: 0,
-            quorum_members: Vec::new(),
             relay_url: None,
             network,
             version: 1,

@@ -1083,15 +1083,12 @@ window.selectLedger = function(ledgerId) {
   document.getElementById('ledger-info-explore').onclick = (e) => { e.preventDefault(); openLedgerTab(ledgerId); };
 
   if (ad) {
-    const quorum = ad.quorum_size || 0;
-    const members = (ad.quorum_members || []).map(m => m.pubkey?.slice(0, 12) + '...').join(', ');
     let details = '';
     details += `<div class="kv"><span class="k">Ledger ID</span><span class="v">${ledgerId}</span></div>`;
     details += `<div class="kv"><span class="k">Operator</span><span class="v">${esc(ad.operator_pubkey || '')}</span></div>`;
     details += `<div class="kv"><span class="k">Reserves</span><span class="v">₿${(ad.reserves_amount_sats || 0).toLocaleString()}</span></div>`;
     details += `<div class="kv"><span class="k">Obligations</span><span class="v">₿${(ad.total_obligations_sats || 0).toLocaleString()}</span></div>`;
     details += `<div class="kv"><span class="k">Available</span><span class="v">₿${(ad.available_headroom_sats || 0).toLocaleString()}</span></div>`;
-    details += `<div class="kv"><span class="k">Quorum</span><span class="v">${quorum} member(s)${members ? ' — ' + members : ''}</span></div>`;
     details += `<div class="kv"><span class="k">Collateral</span><span class="v">₿${(ad.received_collateral_sats || 0).toLocaleString()}</span></div>`;
     details += `<div class="kv"><span class="k">Custody fee</span><span class="v">${(ad.annual_fee_bps || 0) / 100}%/yr + ₿${ad.min_fee_sats || 0}/${ad.fee_period_blocks || 2016}blk</span></div>`;
     details += `<div class="kv"><span class="k">Transfer fee</span><span class="v">₿${ad.transfer_fee_fixed_sats || 0} + ${(ad.transfer_fee_rate_bps || 0) / 100}%</span></div>`;

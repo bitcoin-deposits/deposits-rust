@@ -718,7 +718,7 @@ impl DepositsProtocol_Varint {
             return Ok(self.value.borrow());
         }
         self.f_value.set(true);
-        *self.value.borrow_mut() = (if *self.first_byte() == 255 { *self.value_8() } else { if *self.first_byte() == 254 { *self.value_4() as u64 } else if *self.first_byte() == 253 { *self.value_2() as u64 } else { *self.first_byte() as u64 } };
+        *self.value.borrow_mut() = if *self.first_byte() == 255 { *self.value_8() } else if *self.first_byte() == 254 { *self.value_4() as u64 } else if *self.first_byte() == 253 { *self.value_2() as u64 } else { *self.first_byte() as u64 };
         Ok(self.value.borrow())
     }
 }

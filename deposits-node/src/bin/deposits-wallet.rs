@@ -402,19 +402,7 @@ async fn discover(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             ad.available_headroom_sats as f64 / 100_000_000.0);
         println!("   Reserves: {} sats, Obligations: {} sats",
             ad.reserves_amount_sats, ad.total_obligations_sats);
-        println!("   Quorum: {} members ({} sats collateral)",
-            ad.quorum_size, ad.received_collateral_sats);
-        if !ad.quorum_members.is_empty() {
-            let member_names: Vec<String> = ad.quorum_members.iter()
-                .map(|m| {
-                    match pubkey_to_name.get(m.pubkey.as_str()) {
-                        Some(name) => format!("{} ({}...)", name, &m.pubkey[..8.min(m.pubkey.len())]),
-                        None => format!("{}...", &m.pubkey[..8.min(m.pubkey.len())]),
-                    }
-                })
-                .collect();
-            println!("     Members: {}", member_names.join(", "));
-        }
+        println!("   Collateral: {} sats", ad.received_collateral_sats);
 
         // Fee summary
         let annual_pct = ad.annual_fee_bps as f64 / 100.0;
@@ -536,35 +524,8 @@ async fn ledger_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     println!();
     println!("Trust & Security");
     println!("----------------");
-    println!("Quorum Size: {} members", ad.quorum_size);
     println!("Received Collateral: {} sats", ad.received_collateral_sats);
     println!("Collateral Enforcement Block: {}", ad.collateral_enforcement_block);
-    if !ad.quorum_members.is_empty() {
-        // Fetch all ads to build pubkey -> name map for quorum member lookups
-        let all_ads = transport.fetch_ledger_advertisements(network_str).await.unwrap_or_default();
-        let pubkey_to_name: std::collections::HashMap<&str, &str> = all_ads.iter()
-            .filter_map(|a| {
-                a.operator_name.as_deref()
-                    .map(|name| (a.operator_pubkey.as_str(), name))
-            })
-            .collect();
-
-        println!("Quorum Members:");
-        for member in &ad.quorum_members {
-            let name_display = match pubkey_to_name.get(member.pubkey.as_str()) {
-                Some(name) => format!("{} ({}...)", name, &member.pubkey[..12.min(member.pubkey.len())]),
-                None => format!("{}...", &member.pubkey[..12.min(member.pubkey.len())]),
-            };
-            if member.collateral_sats > 0 {
-                println!("  - {}: {} sats (expires block {})",
-                    name_display,
-                    member.collateral_sats,
-                    member.lock_expires_block);
-            } else {
-                println!("  - {}: no attestation", name_display);
-            }
-        }
-    }
     println!();
     println!("Fee Structure");
     println!("-------------");
