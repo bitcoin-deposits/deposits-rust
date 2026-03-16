@@ -1468,24 +1468,34 @@ function renderHistory() {
 
   let html = '';
   for (const ev of page) {
-    const time = new Date(ev.created_at * 1000).toLocaleString();
     const tags = Object.fromEntries((ev.tags || []).map(t => [t[0], t[1]]));
-    const seq = tags.seq || '?';
+    const ledgerId = tags.d || tags.l || '';
     const depositIds = (ev.tags || []).filter(t => t[0] === 'i').map(t => t[1]);
     const aliases = depositIds.map(id => idToAlias[id] || id.slice(0, 8) + '...').join(', ');
 
-    // Try to decode operation type from content
-    let opType = '?';
+    // Decode the update to get operation name and details
+    let opName = '?', amount = 0, color = 'var(--text)', summary = '';
     try {
-      // Content is base64 TLV — we can't fully decode in JS, but the seq tag gives us ordering
-      // Use the tag info we have
-      opType = aliases || 'ledger op';
+      const u = decodeUpdate(ev.content);
+      opName = u.opName;
+      // Color code
+      if (opName.includes('Credit') || opName.includes('Increase') || opName.includes('Fulfill')) color = 'var(--green)';
+      else if (opName.includes('Lock') || opName.includes('Decrease')) color = 'var(--yellow)';
+      else if (opName.includes('Fail') || opName.includes('Dispute') || opName.includes('Close')) color = 'var(--red)';
+      // Extract amount from fields
+      const amtField = u.opFields.find(f => f.type === 2); // AMOUNT
+      if (amtField && amtField.u64 !== null) amount = amtField.u64;
+      // Build summary
+      if (amount > 0) summary = `₿${amount.toLocaleString()}`;
+      if (aliases) summary += summary ? ` · ${aliases}` : aliases;
     } catch {}
 
-    html += `<div style="display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px solid var(--border); font-size:11px;">
-      <span style="color:var(--muted)">#${seq}</span>
-      <span>${aliases}</span>
-      <span style="color:var(--muted)">${time}</span>
+    const timeAgo = formatTimeAgo(ev.created_at);
+
+    html += `<div style="display:flex; align-items:baseline; gap:8px; padding:5px 0; border-bottom:1px solid var(--border); font-size:11px; cursor:pointer;" onclick="openLedgerTab('${ledgerId}')">
+      <span style="color:${color}; font-weight:600; min-width:110px;">${opName}</span>
+      <span style="flex:1; color:var(--text);">${summary}</span>
+      <span style="color:var(--muted); white-space:nowrap;">${timeAgo}</span>
     </div>`;
   }
   container.innerHTML = html;
@@ -2388,6 +2398,15 @@ window.doPayInvoice = async function() {
 // UI helpers
 // ============================================================
 function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+function formatTimeAgo(unixSeconds) {
+  const diff = Math.floor(Date.now() / 1000) - unixSeconds;
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`;
+  return new Date(unixSeconds * 1000).toLocaleDateString();
+}
 
 function log(msg, cls = '') {
   const el = document.getElementById('activity-log');
