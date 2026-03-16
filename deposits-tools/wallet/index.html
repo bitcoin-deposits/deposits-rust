@@ -474,20 +474,19 @@ nav button:hover { color: var(--text); background: transparent; }
       </div>
       <div class="card">
         <h3>Backup</h3>
-        <div id="settings-mnemonic" style="display:none; margin-bottom:8px;">
-          <label style="margin-bottom:4px;">Recovery phrase (keep secret!)</label>
-          <div id="settings-mnemonic-words" style="background:var(--bg); padding:8px; border-radius:4px; font-size:13px; line-height:1.8; word-spacing:4px; display:none;"></div>
-          <button onclick="const el=document.getElementById('settings-mnemonic-words'); el.style.display=el.style.display==='none'?'block':'none'; this.textContent=el.style.display==='none'?'Reveal':'Hide'" style="margin-top:4px;">Reveal</button>
+        <div id="backup-secrets" style="display:none;">
+          <div id="settings-mnemonic" style="display:none; margin-bottom:8px;">
+            <div id="settings-mnemonic-words" style="background:var(--bg); padding:8px; border-radius:4px; font-size:13px; line-height:1.8; word-spacing:4px;"></div>
+          </div>
+          <div style="margin-bottom:8px;">
+            <input id="settings-seed" type="text" readonly style="font-size:11px;">
+          </div>
         </div>
-        <div class="form-group">
-          <label>Hex seed</label>
-          <input id="settings-seed" type="password" readonly>
-          <button onclick="toggleSeed()" style="margin-top:6px">Show/Hide</button>
-        </div>
-        <div style="display:flex; gap:6px; margin-top:8px;">
+        <div style="display:flex; gap:6px; flex-wrap:wrap;">
+          <button onclick="toggleBackupReveal()" style="flex:1;" id="backup-reveal-btn">Reveal</button>
           <button onclick="copyBackup()" style="flex:1;">Copy</button>
           <button onclick="downloadBackup()" style="flex:1;">Download</button>
-          <button onclick="saveToKeychain()" style="flex:1;">Save to Keychain</button>
+          <button onclick="saveToKeychain()" style="flex:1;">Keychain</button>
         </div>
       </div>
       <div class="card">
@@ -3039,9 +3038,11 @@ window.downloadBackup = function() {
   log('Backup file downloaded', 'success');
 };
 
-window.toggleSeed = function() {
-  const el = document.getElementById('settings-seed');
-  el.type = el.type === 'password' ? 'text' : 'password';
+window.toggleBackupReveal = function() {
+  const el = document.getElementById('backup-secrets');
+  const show = el.style.display === 'none';
+  el.style.display = show ? 'block' : 'none';
+  document.getElementById('backup-reveal-btn').textContent = show ? 'Hide' : 'Reveal';
 };
 
 window.changeRelays = function() {
