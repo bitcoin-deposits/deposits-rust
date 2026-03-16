@@ -495,7 +495,7 @@ pub struct DepositsProtocol_TlvRecord {
     pub _root: SharedType<DepositsProtocol>,
     pub _parent: SharedType<KStructUnit>,
     pub _self: SharedType<Self>,
-    type: RefCell<OptRc<DepositsProtocol_Varint>>,
+    record_type: RefCell<OptRc<DepositsProtocol_Varint>>,
     length: RefCell<OptRc<DepositsProtocol_Varint>>,
     value: RefCell<Vec<u8>>,
     _io: RefCell<BytesReader>,
@@ -518,7 +518,7 @@ impl KStruct for DepositsProtocol_TlvRecord {
         let _prc = self_rc._parent.get_value().borrow().upgrade();
         let _r = _rrc.as_ref().unwrap();
         let t = Self::read_into::<_, DepositsProtocol_Varint>(&*_io, Some(self_rc._root.clone()), Some(self_rc._self.clone()))?.into();
-        *self_rc.type.borrow_mut() = t;
+        *self_rc.record_type.borrow_mut() = t;
         let t = Self::read_into::<_, DepositsProtocol_Varint>(&*_io, Some(self_rc._root.clone()), Some(self_rc._self.clone()))?.into();
         *self_rc.length.borrow_mut() = t;
         *self_rc.value.borrow_mut() = _io.read_bytes(*self_rc.length().value()? as usize)?.into();
@@ -528,8 +528,8 @@ impl KStruct for DepositsProtocol_TlvRecord {
 impl DepositsProtocol_TlvRecord {
 }
 impl DepositsProtocol_TlvRecord {
-    pub fn type(&self) -> Ref<'_, OptRc<DepositsProtocol_Varint>> {
-        self.type.borrow()
+    pub fn record_type(&self) -> Ref<'_, OptRc<DepositsProtocol_Varint>> {
+        self.record_type.borrow()
     }
 }
 impl DepositsProtocol_TlvRecord {
@@ -718,7 +718,7 @@ impl DepositsProtocol_Varint {
             return Ok(self.value.borrow());
         }
         self.f_value.set(true);
-        *self.value.borrow_mut() = (if *self.first_byte() == 255 { *self.value_8() } else { if *self.first_byte() == 254 { *self.value_4() } else { if *self.first_byte() == 253 { *self.value_2() } else { *self.first_byte() } } }) as u64;
+        *self.value.borrow_mut() = if *self.first_byte() == 255 { *self.value_8() } else if *self.first_byte() == 254 { *self.value_4() as u64 } else if *self.first_byte() == 253 { *self.value_2() as u64 } else { *self.first_byte() as u64 };
         Ok(self.value.borrow())
     }
 }

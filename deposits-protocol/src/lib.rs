@@ -13,6 +13,11 @@ pub mod messages;
 pub mod signature_utils;
 pub mod wire_messages;
 
+/// Kaitai Struct generated parser (for reading raw TLV bytes)
+#[cfg(feature = "kaitai-parser")]
+#[path = "../generated/deposits_protocol.rs"]
+pub mod kaitai_parser;
+
 // Re-exports
 pub use constants::{
     MIN_RESERVES_OUTPUT_SATS, MAX_RESERVES_OUTPUT_SATS, DEFAULT_EMERGENCY_TIMEOUT_BLOCKS,
