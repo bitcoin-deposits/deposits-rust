@@ -156,6 +156,7 @@ nav button:hover { color: var(--text); background: transparent; }
       <button data-tab="deposits">Deposits</button>
       <button data-tab="discover">Discover</button>
       <button data-tab="transfer">Transfer</button>
+      <button data-tab="ledgers">Ledgers</button>
       <button data-tab="settings">Settings</button>
       <span style="flex:1"></span>
       <button id="sync-btn" style="border:none; color:var(--muted); font-size:11px;" onclick="syncAll()">Sync</button>
@@ -419,6 +420,23 @@ nav button:hover { color: var(--text); background: transparent; }
         </div>
         <button id="complete-btn" class="primary" onclick="doTransferComplete()">Complete Transfer</button>
       </div>
+    </div>
+
+    <!-- Ledgers tab -->
+    <div id="tab-ledgers" class="panel">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+        <span style="color:var(--muted)">Ledger Explorer</span>
+      </div>
+      <div class="form-group">
+        <label>Ledger ID (or prefix)</label>
+        <div style="display:flex; gap:6px;">
+          <input id="ledger-explorer-id" type="text" placeholder="64 hex chars or prefix" style="flex:1">
+          <button onclick="exploreLedger()">Load</button>
+        </div>
+      </div>
+      <!-- Quick links to deposits' ledgers -->
+      <div id="ledger-quick-links" style="display:flex; flex-wrap:wrap; gap:4px; margin-bottom:12px;"></div>
+      <div id="ledger-explorer-content"></div>
     </div>
 
     <!-- Settings tab -->
@@ -2370,6 +2388,187 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') { dismissError(); dismissQR(); stopQRScan(); }
 });
 
+// ============================================================
+// TLV decoder & Ledger Explorer
+// ============================================================
+
+const OP_NAMES = {
+  1:'LedgerOpen', 10:'ReservesIncrease', 11:'ReservesDecrease', 12:'ReservesRotate',
+  20:'DepositOpen', 21:'DepositClose', 22:'DepositUpdate', 23:'DepositKeyRotate',
+  30:'InvoiceCredit', 31:'InvoiceLock', 32:'InvoiceFail', 33:'InvoiceFulfill',
+  35:'OnchainCredit', 36:'OnchainLock', 37:'OnchainFail', 38:'OnchainFulfill',
+  40:'CollateralIncrease', 41:'CollateralDecrease', 42:'CollateralAttestation',
+  43:'QuorumAddMember', 44:'QuorumRemoveMember', 45:'CollateralLock', 46:'QuorumJoin',
+  50:'FeeCollect', 54:'CustodyDispute', 55:'CustodyAcquire', 56:'CustodyYield',
+  57:'CustodyArmed', 60:'LedgerClose', 61:'Tombstone',
+  70:'TransferLock', 71:'TransferComplete', 72:'TransferTimeout',
+};
+
+// Field names from .ksy catalog
+const FIELD_NAMES = {
+  0:'disc', 2:'amount', 8:'new_amount', 10:'pubkey', 12:'fees', 14:'payment_hash',
+  16:'invoice', 18:'cosigner_sig', 20:'new_fees', 26:'invoice_id', 28:'seq_num',
+  30:'payment_id', 34:'preimage', 36:'block_height', 38:'collateral_op', 40:'signature',
+  42:'ledger_hash', 44:'quorum_member', 46:'member_sig', 48:'operator_sig',
+  50:'channel_id', 52:'close_reason', 54:'timestamp', 56:'operator_id', 58:'reserves_id',
+  60:'ledger_addr', 64:'enforcement', 66:'txid', 68:'vout', 70:'dest_addr',
+  72:'withdrawal_id', 74:'funding_addr', 76:'lock_until', 80:'our_sig', 82:'membership_exp',
+  90:'spend_txid', 91:'new_txid', 92:'new_vout', 93:'quorum_thresh', 94:'quorum_size',
+  95:'first_expiry', 96:'genesis_block', 100:'reason', 102:'last_valid_seq',
+  105:'entropy_height', 106:'entropy_hash', 108:'new_custodian', 109:'armed_block',
+  110:'spend_txid', 111:'new_reserves_addr', 112:'commitment_hash', 113:'target_reserves',
+  114:'member_ledger_id', 115:'collateral_ledger_id',
+  200:'deposit_id', 202:'descriptor', 204:'witness', 208:'new_descriptor',
+  210:'nonce', 212:'source_deposit', 214:'dest_deposit', 216:'completion_script',
+  218:'timeout_height', 220:'transfer_id', 222:'block_hash', 224:'script_witness', 226:'transfer_fees',
+};
+
+// Decode BigEndian varint from Uint8Array at offset, returns [value, newOffset]
+function readVarint(buf, off) {
+  const b = buf[off];
+  if (b < 0xfd) return [b, off + 1];
+  if (b === 0xfd) return [(buf[off+1] << 8) | buf[off+2], off + 3];
+  if (b === 0xfe) return [(buf[off+1] << 24) | (buf[off+2] << 16) | (buf[off+3] << 8) | buf[off+4], off + 5];
+  // 0xff — 8 bytes
+  let val = 0;
+  for (let i = 0; i < 8; i++) val = val * 256 + buf[off + 1 + i];
+  return [val, off + 9];
+}
+
+// Parse TLV records from a Uint8Array → [{type, value: Uint8Array}]
+function parseTlv(buf) {
+  const records = [];
+  let off = 0;
+  while (off < buf.length) {
+    const [type_, o1] = readVarint(buf, off);
+    const [len, o2] = readVarint(buf, o1);
+    const value = buf.slice(o2, o2 + len);
+    records.push({ type: type_, value });
+    off = o2 + len;
+  }
+  return records;
+}
+
+// Decode a SignedLedgerUpdate from base64 content → {seq, hash, operator, timestamp, op_name, fields}
+function decodeUpdate(base64Content) {
+  const raw = Uint8Array.from(atob(base64Content), c => c.charCodeAt(0));
+  const outer = parseTlv(raw);
+
+  const get = (t) => outer.find(r => r.type === t)?.value;
+  const getHex = (t) => { const v = get(t); return v ? bytesToHex(v) : ''; };
+  const getU64 = (t) => { const v = get(t); if (!v || v.length < 8) return 0; let n = 0; for (let i = 0; i < 8; i++) n = n * 256 + v[i]; return n; };
+  const getU32 = (t) => { const v = get(t); if (!v || v.length < 4) return 0; return (v[0]<<24)|(v[1]<<16)|(v[2]<<8)|v[3]; };
+  const getU16 = (t) => { const v = get(t); if (!v || v.length < 2) return 0; return (v[0]<<8)|v[1]; };
+
+  const seq = getU64(8);       // SEQUENCE_NUMBER
+  const prevHash = getHex(10); // PREVIOUS_HASH
+  const curHash = getHex(12);  // CURRENT_HASH
+  const timestamp = getU64(14); // TIMESTAMP
+  const blockHeight = getU32(20); // BLOCK_HEIGHT
+  const msgType = getU16(2);   // MESSAGE_TYPE
+  const operatorHex = getHex(4); // OPERATOR_ID
+
+  // Decode inner operation
+  const msgBytes = get(0); // MESSAGE
+  let opName = '?';
+  let opDisc = 0;
+  let opFields = [];
+  if (msgBytes) {
+    const inner = parseTlv(msgBytes);
+    if (inner.length > 0 && inner[0].type === 0 && inner[0].value.length === 1) {
+      opDisc = inner[0].value[0];
+      opName = OP_NAMES[opDisc] || `Unknown(${opDisc})`;
+    }
+    opFields = inner.map(r => ({
+      type: r.type,
+      name: FIELD_NAMES[r.type] || `field_${r.type}`,
+      hex: bytesToHex(r.value).slice(0, 32) + (r.value.length > 16 ? '...' : ''),
+      len: r.value.length,
+      // Try to render as string if it looks like one
+      text: r.value.every(b => b >= 0x20 && b < 0x7f) ? new TextDecoder().decode(r.value) : null,
+      // Try u64
+      u64: r.value.length === 8 ? (() => { let n=0; for(let i=0;i<8;i++) n=n*256+r.value[i]; return n; })() : null,
+      // Try u32
+      u32: r.value.length === 4 ? ((r.value[0]<<24)|(r.value[1]<<16)|(r.value[2]<<8)|r.value[3]) : null,
+    }));
+  }
+
+  return { seq, prevHash, curHash, timestamp, blockHeight, msgType, operatorHex, opName, opDisc, opFields };
+}
+
+function populateLedgerQuickLinks() {
+  const container = document.getElementById('ledger-quick-links');
+  const ids = [...new Set(state.deposits.map(d => d.ledger_id).filter(Boolean))];
+  if (ids.length === 0) { container.innerHTML = ''; return; }
+  container.innerHTML = ids.map(id =>
+    `<button style="font-size:10px; padding:2px 6px;" onclick="document.getElementById('ledger-explorer-id').value='${id}'; exploreLedger()">${id.slice(0,12)}...</button>`
+  ).join('');
+}
+
+window.exploreLedger = async function() {
+  const input = document.getElementById('ledger-explorer-id').value.trim();
+  if (!input) { log('Enter a ledger ID', 'error'); return; }
+
+  const container = document.getElementById('ledger-explorer-content');
+  container.innerHTML = '<div style="color:var(--muted); padding:20px; text-align:center;">Loading...</div>';
+
+  // Fetch Kind 9100 events for this ledger
+  const filter = { kinds: [9100], '#d': [input], limit: 200 };
+  const events = await fetchEvents(filter, 15000);
+
+  if (events.length === 0) {
+    container.innerHTML = '<div class="empty">No updates found for this ledger.</div>';
+    return;
+  }
+
+  // Decode and sort by sequence
+  const updates = [];
+  for (const ev of events) {
+    try {
+      const update = decodeUpdate(ev.content);
+      update.eventId = ev.id;
+      update.createdAt = ev.created_at;
+      updates.push(update);
+    } catch (e) {
+      console.warn('Failed to decode update:', e);
+    }
+  }
+  updates.sort((a, b) => a.seq - b.seq);
+
+  // Render
+  let html = `<div style="color:var(--muted); font-size:11px; margin-bottom:8px;">${updates.length} update(s) for ${input.slice(0,16)}...</div>`;
+
+  for (const u of updates) {
+    const time = u.timestamp ? new Date(u.timestamp * 1000).toLocaleString() : '';
+    const hashShort = u.curHash.slice(0, 12);
+
+    // Determine color based on operation type
+    let color = 'var(--text)';
+    if (u.opName.includes('Credit') || u.opName.includes('Increase')) color = 'var(--green)';
+    else if (u.opName.includes('Lock') || u.opName.includes('Decrease')) color = 'var(--yellow)';
+    else if (u.opName.includes('Fail') || u.opName.includes('Dispute') || u.opName.includes('Close')) color = 'var(--red)';
+
+    html += `<div class="card" style="padding:8px 12px; margin-bottom:4px; cursor:pointer;" onclick="this.querySelector('.op-detail').style.display = this.querySelector('.op-detail').style.display === 'none' ? 'block' : 'none'">
+      <div style="display:flex; justify-content:space-between; align-items:baseline;">
+        <span><span style="color:var(--muted)">#${u.seq}</span> <span style="color:${color}; font-weight:600;">${u.opName}</span></span>
+        <span style="color:var(--muted); font-size:10px;">${time}</span>
+      </div>
+      <div style="color:var(--muted); font-size:10px;">hash: ${hashShort}... block: ${u.blockHeight}</div>
+      <div class="op-detail" style="display:none; margin-top:6px; font-size:11px; border-top:1px solid var(--border); padding-top:6px;">`;
+
+    for (const f of u.opFields) {
+      if (f.type === 0) continue; // skip discriminant
+      const val = f.text || (f.u64 !== null ? `${f.u64}` : (f.u32 !== null ? `${f.u32}` : f.hex));
+      html += `<div class="kv"><span class="k">${f.name} (${f.type})</span><span class="v">${esc(val)} <span style="color:var(--muted)">[${f.len}B]</span></span></div>`;
+    }
+
+    html += `</div></div>`;
+  }
+
+  container.innerHTML = html;
+  log(`Loaded ${updates.length} updates for ${input.slice(0,16)}...`, 'success');
+};
+
 // Tab switching
 document.querySelectorAll('nav button[data-tab]').forEach(btn => {
   btn.addEventListener('click', () => {
@@ -2379,6 +2578,7 @@ document.querySelectorAll('nav button[data-tab]').forEach(btn => {
     document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
     if (btn.dataset.tab === 'discover') discoverLedgers();
     if (btn.dataset.tab === 'transfer') onTransferFromChange();
+    if (btn.dataset.tab === 'ledgers') populateLedgerQuickLinks();
   });
 });
 
