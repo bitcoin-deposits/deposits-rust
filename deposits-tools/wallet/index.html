@@ -2642,12 +2642,21 @@ window.exploreLedger = async function() {
     pages++;
     empty.innerHTML = `<div style="color:var(--muted); padding:20px; text-align:center;">Loading... ${allEvents.length} events (page ${pages})</div>`;
 
-    // If we got fewer than PAGE_SIZE, we've reached the end
-    if (added < PAGE_SIZE) break;
+    // If we got no new events this page, we're stuck (all dupes)
+    if (added === 0) break;
 
-    // Set 'until' to oldest event's timestamp for next page
+    // If we got fewer than PAGE_SIZE new events, we've likely reached the end
+    if (events.length < PAGE_SIZE) break;
+
+    // Set 'until' to oldest timestamp minus 1 to advance past the boundary.
+    // Events at the boundary are already captured via dedup.
     const oldest = events.reduce((min, ev) => ev.created_at < min ? ev.created_at : min, Infinity);
-    until = oldest;
+    if (until !== undefined && oldest >= until) {
+      // Timestamp didn't advance — many events at same second. Try minus 1.
+      until = oldest - 1;
+    } else {
+      until = oldest;
+    }
   }
 
   if (allEvents.length === 0) {
@@ -2670,7 +2679,7 @@ window.exploreLedger = async function() {
   // Deduplicate by seq (in case of overlap between pages)
   const seenSeq = new Set();
   vsUpdates = vsUpdates.filter(u => { if (seenSeq.has(u.seq)) return false; seenSeq.add(u.seq); return true; });
-  vsUpdates.sort((a, b) => a.seq - b.seq);
+  vsUpdates.sort((a, b) => b.seq - a.seq); // reverse chronological
 
   empty.innerHTML = '';
   header.style.display = 'block';
