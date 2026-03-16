@@ -3077,6 +3077,11 @@ function startMainUI() {
   connect();
 }
 
+// Register service worker to intercept keychain save POST (keeps secrets local)
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('./sw.js').catch(() => {});
+}
+
 // Boot
 if (loadState()) {
   startMainUI();
