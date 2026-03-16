@@ -1455,64 +1455,80 @@ function renderHistory() {
     return;
   }
 
-  const start = historyPage * HISTORY_PAGE_SIZE;
-  const page = historyEvents.slice(start, start + HISTORY_PAGE_SIZE);
-  const totalPages = Math.ceil(historyEvents.length / HISTORY_PAGE_SIZE);
-
-  // Build a deposit ID → alias map for display
+  // Build deposit ID → alias map
   const idToAlias = {};
+  const idToLedger = {};
   for (const d of state.deposits) {
     if (!d.deposit_pubkey) continue;
     const pubkey = hexToBytes(d.deposit_pubkey);
     const id = bytesToHex(computeDepositId(pubkey));
     idToAlias[id] = d.alias;
+    idToLedger[id] = d.ledger_id;
   }
 
-  let html = '';
-  for (const ev of page) {
+  // Decode all events and group by deposit
+  const byDeposit = new Map(); // alias → [{opName, amount, sign, color, timeAgo, ledgerId, seq}]
+  for (const ev of historyEvents) {
+    const depositIds = (ev.tags || []).filter(t => t[0] === 'i').map(t => t[1]);
     const tags = Object.fromEntries((ev.tags || []).map(t => [t[0], t[1]]));
     const ledgerId = tags.d || tags.l || '';
-    const depositIds = (ev.tags || []).filter(t => t[0] === 'i').map(t => t[1]);
-    const aliases = depositIds.map(id => idToAlias[id] || id.slice(0, 8) + '...').join(', ');
 
-    // Decode the update to get operation name and details
-    let opName = '?', amount = 0, color = 'var(--text)', summary = '', seq = 0;
+    let opName = '?', amount = 0, seq = 0;
     try {
       const u = decodeUpdate(ev.content);
       opName = u.opName;
       seq = u.seq;
-      // Color code
-      if (opName.includes('Credit') || opName.includes('Increase') || opName.includes('Fulfill')) color = 'var(--balance)';
-      else if (opName.includes('Lock') || opName.includes('Decrease')) color = 'var(--yellow)';
-      else if (opName.includes('Fail') || opName.includes('Dispute') || opName.includes('Close')) color = 'var(--red)';
-      // Extract amount from fields
-      const amtField = u.opFields.find(f => f.type === 2); // AMOUNT
+      const amtField = u.opFields.find(f => f.type === 2);
       if (amtField && amtField.u64 !== null) amount = amtField.u64;
-      // Build summary
-      if (amount > 0) summary = `₿${amount.toLocaleString()}`;
-      if (aliases) summary += summary ? ` · ${aliases}` : aliases;
     } catch {}
 
-    const timeAgo = formatTimeAgo(ev.created_at);
+    // Determine sign and color
+    let sign = '', color = 'var(--text)';
+    if (opName.includes('Credit') || opName.includes('Fulfill') || opName === 'OnchainCredit') {
+      sign = '+'; color = 'var(--balance)';
+    } else if (opName.includes('Lock') || opName === 'FeeCollect') {
+      sign = '-'; color = 'var(--yellow)';
+    } else if (opName.includes('Fail') || opName.includes('Timeout')) {
+      sign = ''; color = 'var(--red)';
+    } else if (opName.includes('Decrease') || opName.includes('Close') || opName.includes('Dispute')) {
+      sign = ''; color = 'var(--red)';
+    } else if (opName.includes('Increase') || opName === 'DepositOpen') {
+      color = 'var(--balance)';
+    }
 
-    html += `<div style="display:flex; align-items:baseline; gap:8px; padding:5px 0; border-bottom:1px solid var(--border); font-size:11px; cursor:pointer;" onclick="openLedgerEntry('${ledgerId}', ${seq})">
-      <span style="color:${color}; font-weight:600; min-width:110px;">${opName}</span>
-      <span style="flex:1; color:var(--text);">${summary}</span>
-      <span style="color:var(--muted); white-space:nowrap;">${timeAgo}</span>
-    </div>`;
+    const entry = { opName, amount, sign, color, timeAgo: formatTimeAgo(ev.created_at), ledgerId, seq };
+
+    // Add to each affected deposit
+    for (const depId of depositIds) {
+      const alias = idToAlias[depId] || depId.slice(0, 8) + '...';
+      if (!byDeposit.has(alias)) byDeposit.set(alias, []);
+      byDeposit.get(alias).push(entry);
+    }
+    // Events without deposit IDs go to "Ledger"
+    if (depositIds.length === 0) {
+      const key = 'Ledger ' + ledgerId.slice(0, 8) + '...';
+      if (!byDeposit.has(key)) byDeposit.set(key, []);
+      byDeposit.get(key).push(entry);
+    }
+  }
+
+  // Render grouped by deposit, paginated across total entries
+  let html = '';
+  for (const [alias, entries] of byDeposit) {
+    html += `<div style="margin-bottom:12px;">
+      <div style="font-weight:600; font-size:12px; margin-bottom:4px; color:var(--text);">${esc(alias)}</div>`;
+    for (const e of entries) {
+      const amtStr = e.amount > 0 ? `${e.sign}₿${e.amount.toLocaleString()}` : '';
+      html += `<div style="display:flex; align-items:baseline; gap:8px; padding:3px 0 3px 8px; border-bottom:1px solid var(--border); font-size:11px; cursor:pointer;" onclick="openLedgerEntry('${e.ledgerId}', ${e.seq})">
+        <span style="color:${e.color}; font-weight:600; min-width:100px;">${e.opName}</span>
+        <span style="flex:1; color:${e.color};">${amtStr}</span>
+        <span style="color:var(--muted); white-space:nowrap;">${e.timeAgo}</span>
+      </div>`;
+    }
+    html += `</div>`;
   }
   container.innerHTML = html;
-
-  // Pager
-  if (totalPages > 1) {
-    let pager = '';
-    if (historyPage > 0) pager += `<button style="font-size:11px; padding:2px 10px;" onclick="historyPrev()">Prev</button>`;
-    pager += `<span style="color:var(--muted); font-size:11px; align-self:center;">${historyPage + 1} / ${totalPages}</span>`;
-    if (historyPage < totalPages - 1) pager += `<button style="font-size:11px; padding:2px 10px;" onclick="historyNext()">Next</button>`;
-    document.getElementById('history-pager').innerHTML = pager;
-  } else {
-    document.getElementById('history-pager').innerHTML = '';
-  }
+  document.getElementById('history-pager').innerHTML = '';
 }
 
 window.historyPrev = function() { if (historyPage > 0) { historyPage--; renderHistory(); } };
