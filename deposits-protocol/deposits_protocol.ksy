@@ -171,7 +171,7 @@ types:
   #   208 = new_descriptor (string)
   #
   # Fee fields:
-  #   12  = fees (nested TLV: FeeStructure)
+  #   12  = fees (nested TLV: FeeStructure in DepositOpen; u64 fee_sats in OnchainLock/TransferLock)
   #   226 = transfer_fees (nested TLV: TransferFeeSchedule)
   #   20  = new_fees (nested TLV: FeeStructure)
   #
