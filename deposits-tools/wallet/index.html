@@ -351,7 +351,16 @@ nav button:hover { color: var(--text); background: transparent; }
       </div>
       <div id="ledgers-list"></div>
 
-      <div id="open-deposit-form" class="card" style="display:none; margin-top:12px;">
+      <!-- Ledger info pane (shown when a ledger is selected) -->
+      <div id="ledger-info-pane" class="card" style="display:none; margin-top:12px;">
+        <div style="display:flex; justify-content:space-between; align-items:baseline;">
+          <h3 id="ledger-info-name"></h3>
+          <a href="#" id="ledger-info-explore" style="font-size:11px;" onclick="event.preventDefault()">View ledger history</a>
+        </div>
+        <div id="ledger-info-details"></div>
+      </div>
+
+      <div id="open-deposit-form" class="card" style="display:none; margin-top:8px;">
         <h3>Open Deposit on <span id="open-ledger-name"></span></h3>
         <input type="hidden" id="open-ledger-id">
         <div class="form-group">
@@ -993,11 +1002,13 @@ async function discoverLedgers() {
 
   // Parse ads and filter by network
   const ads = [];
+  window._discoveredAds = {}; // store for info pane lookup
   for (const event of events) {
     try {
       const ad = JSON.parse(event.content);
       if (ad.network && ad.network !== state.network) continue;
       ads.push(ad);
+      if (ad.ledger_id) window._discoveredAds[ad.ledger_id] = ad;
     } catch {}
   }
 
@@ -1051,7 +1062,7 @@ async function discoverLedgers() {
       const headroom = (ad.available_headroom_sats || 0).toLocaleString();
       const quorum = ad.quorum_size || 0;
       const relay = ad.relay_url || '';
-      html += `<button style="font-size:11px; padding:3px 8px;" onclick="selectLedger('${lid}', '${esc(name)}', '${esc(relay)}')" title="${lid}">${esc(name)} (${lid.slice(0,8)}...) ${headroom}s q=${quorum}</button>`;
+      html += `<button style="font-size:11px; padding:3px 8px;" onclick="selectLedger('${lid}')" title="${lid}">${esc(name)} · ₿${headroom}</button>`;
     }
 
     html += `</div></div>`;
@@ -1061,22 +1072,48 @@ async function discoverLedgers() {
   log(`Found ${ads.length} ledger(s) in ${groups.size} group(s)`, 'success');
 }
 
-window.selectLedger = function(ledgerId, name, relayUrl) {
+window.selectLedger = function(ledgerId) {
+  const ad = (window._discoveredAds || {})[ledgerId];
+  const name = ad?.operator_name || 'Unknown';
+  const relayUrl = ad?.relay_url || '';
+
+  // Show info pane
+  document.getElementById('ledger-info-pane').style.display = 'block';
+  document.getElementById('ledger-info-name').textContent = `${name} — ${ledgerId.slice(0, 16)}...`;
+  document.getElementById('ledger-info-explore').onclick = (e) => { e.preventDefault(); openLedgerTab(ledgerId); };
+
+  if (ad) {
+    const quorum = ad.quorum_size || 0;
+    const members = (ad.quorum_members || []).map(m => m.pubkey?.slice(0, 12) + '...').join(', ');
+    let details = '';
+    details += `<div class="kv"><span class="k">Ledger ID</span><span class="v">${ledgerId}</span></div>`;
+    details += `<div class="kv"><span class="k">Operator</span><span class="v">${esc(ad.operator_pubkey || '')}</span></div>`;
+    details += `<div class="kv"><span class="k">Reserves</span><span class="v">₿${(ad.reserves_amount_sats || 0).toLocaleString()}</span></div>`;
+    details += `<div class="kv"><span class="k">Obligations</span><span class="v">₿${(ad.total_obligations_sats || 0).toLocaleString()}</span></div>`;
+    details += `<div class="kv"><span class="k">Available</span><span class="v">₿${(ad.available_headroom_sats || 0).toLocaleString()}</span></div>`;
+    details += `<div class="kv"><span class="k">Quorum</span><span class="v">${quorum} member(s)${members ? ' — ' + members : ''}</span></div>`;
+    details += `<div class="kv"><span class="k">Collateral</span><span class="v">₿${(ad.received_collateral_sats || 0).toLocaleString()}</span></div>`;
+    details += `<div class="kv"><span class="k">Custody fee</span><span class="v">${(ad.annual_fee_bps || 0) / 100}%/yr + ₿${ad.min_fee_sats || 0}/${ad.fee_period_blocks || 2016}blk</span></div>`;
+    details += `<div class="kv"><span class="k">Transfer fee</span><span class="v">₿${ad.transfer_fee_fixed_sats || 0} + ${(ad.transfer_fee_rate_bps || 0) / 100}%</span></div>`;
+    if (ad.min_deposit_sats > 0) details += `<div class="kv"><span class="k">Min deposit</span><span class="v">₿${ad.min_deposit_sats}</span></div>`;
+    if (ad.max_deposit_sats < 1e18) details += `<div class="kv"><span class="k">Max deposit</span><span class="v">₿${ad.max_deposit_sats.toLocaleString()}</span></div>`;
+    if (ad.relay_url) details += `<div class="kv"><span class="k">Relay</span><span class="v">${esc(ad.relay_url)}</span></div>`;
+    if (ad.description) details += `<div style="margin-top:4px; color:var(--muted);">${esc(ad.description)}</div>`;
+    document.getElementById('ledger-info-details').innerHTML = details;
+  }
+
+  // Show open form
   document.getElementById('open-deposit-form').style.display = 'block';
   document.getElementById('open-ledger-id').value = ledgerId;
   document.getElementById('open-ledger-name').textContent = name;
 
-  // Connect to the operator's relay if declared and not already connected
+  // Connect to operator's relay if needed
   if (relayUrl && relayUrl.startsWith('ws')) {
     const already = sockets.find(s => s.url === relayUrl);
     if (!already) {
       log(`Connecting to operator relay ${relayUrl}...`);
       connectOne(relayUrl, false);
-      // Also persist it so future sessions remember
-      if (!state.relays.includes(relayUrl)) {
-        state.relays.push(relayUrl);
-        saveState();
-      }
+      if (!state.relays.includes(relayUrl)) { state.relays.push(relayUrl); saveState(); }
     }
   }
 };
