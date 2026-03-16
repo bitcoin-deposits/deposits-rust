@@ -115,17 +115,17 @@ nav button:hover { color: var(--text); background: transparent; }
 <body>
 <div id="app">
   <!-- Setup screen (shown when no seed) -->
-  <div id="setup-panel" style="display:none">
+  <div id="setup-panel" style="display:none; text-align:center; padding:40px 20px;">
     <h1 style="margin-bottom: 8px;">Deposits Wallet</h1>
     <p style="color: var(--muted); margin-bottom: 24px;">Nostr-native bitcoin custody</p>
-    <div class="card">
+    <div class="card" style="max-width:440px; margin:0 auto; text-align:left;">
       <h3>Get Started</h3>
       <div class="form-group">
-        <label>Ledger relay (discovers operators automatically)</label>
+        <label>Ledger relay</label>
         <input id="setup-ledger-relay" type="text" placeholder="ws://localhost:7779" value="ws://localhost:7779">
       </div>
       <div class="form-group">
-        <label>Operator relays (optional — discovered from advertisements)</label>
+        <label>Operator relays (optional)</label>
         <input id="setup-relay" type="text" placeholder="ws://localhost:7801,..." value="">
       </div>
       <div class="form-group">
@@ -137,15 +137,15 @@ nav button:hover { color: var(--text); background: transparent; }
           <option value="bitcoin">bitcoin</option>
         </select>
       </div>
-      <div class="form-group">
-        <label>Seed (64 hex chars, leave blank to generate)</label>
-        <input id="setup-seed" type="text" placeholder="optional — will generate random seed">
-      </div>
-      <div class="actions">
-        <button class="primary" onclick="initWallet()" style="width:100%">Create Wallet</button>
-      </div>
-      <div style="margin-top: 12px;">
-        <button onclick="importWallet()" style="width:100%">Import Existing Seed</button>
+      <button class="primary" onclick="initWallet()" style="width:100%; margin-top:8px;">Create New Wallet</button>
+
+      <div style="margin-top:16px; border-top:1px solid var(--border); padding-top:12px;">
+        <div style="color:var(--muted); font-size:11px; margin-bottom:8px;">Import existing wallet</div>
+        <div class="form-group">
+          <label>Recovery phrase or hex seed</label>
+          <textarea id="setup-seed" rows="2" style="font-family:var(--font); font-size:12px; padding:6px 10px; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:4px; outline:none; width:100%; resize:vertical;" placeholder="12 words, 24 words, or 64 hex chars"></textarea>
+        </div>
+        <button onclick="importWallet()" style="width:100%">Import</button>
       </div>
     </div>
   </div>
@@ -473,8 +473,14 @@ nav button:hover { color: var(--text); background: transparent; }
         <div class="kv"><span class="k">Relays</span><span class="v" id="settings-relay">—</span></div>
       </div>
       <div class="card">
-        <h3>Seed (keep secret!)</h3>
+        <h3>Backup</h3>
+        <div id="settings-mnemonic" style="display:none; margin-bottom:8px;">
+          <label style="margin-bottom:4px;">Recovery phrase (keep secret!)</label>
+          <div id="settings-mnemonic-words" style="background:var(--bg); padding:8px; border-radius:4px; font-size:13px; line-height:1.8; word-spacing:4px; cursor:pointer; filter:blur(5px); transition:filter 0.2s;" onclick="this.style.filter = this.style.filter ? '' : 'blur(5px)'"></div>
+          <div style="color:var(--muted); font-size:10px; margin-top:4px;">Click to reveal. Write these words down and store safely.</div>
+        </div>
         <div class="form-group">
+          <label>Hex seed</label>
           <input id="settings-seed" type="password" readonly>
           <button onclick="toggleSeed()" style="margin-top:6px">Show/Hide</button>
         </div>
@@ -492,7 +498,8 @@ nav button:hover { color: var(--text); background: transparent; }
         <button onclick="changeRelays()">Reconnect</button>
       </div>
       <div class="card">
-        <button class="danger" onclick="resetWallet()">Reset Wallet (delete all local data)</button>
+        <div style="color:var(--muted); font-size:11px; margin-bottom:8px;">Back up your recovery phrase before resetting.</div>
+        <button class="danger" onclick="resetWallet()">Reset Wallet</button>
       </div>
     </div>
 
@@ -546,6 +553,7 @@ import * as secp from './vendor/noble-secp256k1.js';
 import { schnorr } from './vendor/noble-curves-secp256k1.js';
 import qrcode from './vendor/qrcode-generator.js';
 import jsQR from './vendor/jsqr.js';
+import { WORDLIST } from './vendor/bip39-english.js';
 
 // ============================================================
 // QR code rendering
@@ -574,6 +582,47 @@ function renderQR(canvas, text, targetSize = 180) {
       }
     }
   }
+}
+
+// ============================================================
+// BIP-39 mnemonic generation
+// ============================================================
+
+function generateMnemonic(wordCount = 12) {
+  const strength = wordCount === 24 ? 32 : 16; // 256 or 128 bits
+  const entropy = new Uint8Array(strength);
+  crypto.getRandomValues(entropy);
+  const hash = sha256(entropy);
+  // Combine entropy + checksum bits
+  const bits = [];
+  for (const b of entropy) for (let i = 7; i >= 0; i--) bits.push((b >> i) & 1);
+  const checksumBits = strength / 4; // 4 or 8 bits
+  for (let i = 0; i < checksumBits; i++) bits.push((hash[0] >> (7 - i)) & 1);
+  // Split into 11-bit groups → word indices
+  const words = [];
+  for (let i = 0; i < bits.length; i += 11) {
+    let idx = 0;
+    for (let j = 0; j < 11; j++) idx = (idx << 1) | bits[i + j];
+    words.push(WORDLIST[idx]);
+  }
+  return words.join(' ');
+}
+
+async function mnemonicToSeed(mnemonic, passphrase = '') {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    'raw', enc.encode(mnemonic.normalize('NFKD')), 'PBKDF2', false, ['deriveBits']
+  );
+  const seed = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt: enc.encode('mnemonic' + passphrase), iterations: 2048, hash: 'SHA-512' },
+    key, 512
+  );
+  return new Uint8Array(seed).slice(0, 32); // use first 32 bytes as our wallet seed
+}
+
+function isValidMnemonic(words) {
+  const parts = words.trim().split(/\s+/);
+  return (parts.length === 12 || parts.length === 24) && parts.every(w => WORDLIST.includes(w));
 }
 
 // ============================================================
@@ -762,6 +811,7 @@ const STATE_KEY = 'deposits-wallet-state';
 
 let state = {
   seed: null,        // Uint8Array(32)
+  mnemonic: null,    // BIP-39 recovery phrase (if generated)
   network: 'regtest',
   relays: ['ws://localhost:7801', 'ws://localhost:7802', 'ws://localhost:7803', 'ws://localhost:7804'],
   ledgerRelay: 'ws://localhost:7779',  // durable relay for advertisements (read-only)
@@ -776,6 +826,7 @@ let cachedBlockHeight = 0; // updated during sync
 function saveState() {
   const s = {
     seed: bytesToHex(state.seed),
+    mnemonic: state.mnemonic || null,
     network: state.network,
     relays: state.relays,
     ledgerRelay: state.ledgerRelay,
@@ -795,6 +846,7 @@ function loadState() {
     state.relays = (s.relays || (s.relay ? [s.relay] : ['ws://localhost:7801']))
       .filter(r => r !== (s.ledgerRelay || 'ws://localhost:7779')); // strip ledger relay from operator list
     state.ledgerRelay = s.ledgerRelay || 'ws://localhost:7779';
+    state.mnemonic = s.mnemonic || null;
     state.deposits = s.deposits || [];
     state.keyIndex = s.keyIndex || 0;
     return true;
@@ -2849,19 +2901,15 @@ function parseRelays(input) {
   return input.split(',').map(s => s.trim()).filter(s => s.startsWith('ws'));
 }
 
-window.initWallet = function() {
-  const relayInput = document.getElementById('setup-relay').value || 'ws://localhost:7801';
+window.initWallet = async function() {
+  const relayInput = document.getElementById('setup-relay').value || '';
   const ledgerRelay = document.getElementById('setup-ledger-relay').value || 'ws://localhost:7779';
   const network = document.getElementById('setup-network').value;
-  let seedHex = document.getElementById('setup-seed').value.trim();
 
-  if (seedHex) {
-    if (seedHex.length !== 64) { alert('Seed must be 64 hex characters'); return; }
-    state.seed = hexToBytes(seedHex);
-  } else {
-    state.seed = new Uint8Array(32);
-    crypto.getRandomValues(state.seed);
-  }
+  // Generate 12-word mnemonic
+  const mnemonic = generateMnemonic(12);
+  state.seed = await mnemonicToSeed(mnemonic);
+  state.mnemonic = mnemonic;
   state.network = network;
   state.relays = parseRelays(relayInput);
   state.ledgerRelay = ledgerRelay;
@@ -2871,13 +2919,30 @@ window.initWallet = function() {
   startMainUI();
 };
 
-window.importWallet = function() {
-  const seedHex = document.getElementById('setup-seed').value.trim();
-  if (!seedHex || seedHex.length !== 64) { alert('Enter a 64-char hex seed to import'); return; }
-  state.seed = hexToBytes(seedHex);
-  state.network = document.getElementById('setup-network').value;
-  state.relays = parseRelays(document.getElementById('setup-relay').value || 'ws://localhost:7801');
-  state.ledgerRelay = document.getElementById('setup-ledger-relay').value || 'ws://localhost:7779';
+window.importWallet = async function() {
+  const input = document.getElementById('setup-seed').value.trim();
+  if (!input) { alert('Enter a recovery phrase or hex seed'); return; }
+
+  const network = document.getElementById('setup-network').value;
+  const relayInput = document.getElementById('setup-relay').value || '';
+  const ledgerRelay = document.getElementById('setup-ledger-relay').value || 'ws://localhost:7779';
+
+  if (isValidMnemonic(input)) {
+    // BIP-39 mnemonic
+    state.seed = await mnemonicToSeed(input);
+    state.mnemonic = input;
+  } else if (/^[a-f0-9]{64}$/i.test(input)) {
+    // 64-char hex seed
+    state.seed = hexToBytes(input);
+    state.mnemonic = null;
+  } else {
+    alert('Enter 12 words, 24 words, or a 64-character hex seed');
+    return;
+  }
+
+  state.network = network;
+  state.relays = parseRelays(relayInput);
+  state.ledgerRelay = ledgerRelay;
   state.deposits = [];
   state.keyIndex = 0;
   saveState();
@@ -2885,8 +2950,9 @@ window.importWallet = function() {
 };
 
 window.resetWallet = function() {
-  if (!confirm('Delete all wallet data? This cannot be undone. Make sure you have your seed backed up.')) return;
+  if (!confirm('Delete all wallet data? Make sure you have backed up your recovery phrase or seed.')) return;
   localStorage.removeItem(STATE_KEY);
+  localStorage.removeItem('deposits-balance-visible');
   location.reload();
 };
 
@@ -2918,6 +2984,12 @@ function startMainUI() {
   document.getElementById('settings-network').textContent = state.network;
   document.getElementById('settings-relay').textContent = state.relays.join(', ') + ' + ' + state.ledgerRelay;
   document.getElementById('settings-seed').value = bytesToHex(state.seed);
+  if (state.mnemonic) {
+    document.getElementById('settings-mnemonic').style.display = 'block';
+    document.getElementById('settings-mnemonic-words').textContent = state.mnemonic;
+  } else {
+    document.getElementById('settings-mnemonic').style.display = 'none';
+  }
   document.getElementById('settings-relay-input').value = state.relays.join(', ');
   document.getElementById('settings-ledger-relay-input').value = state.ledgerRelay;
 
