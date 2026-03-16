@@ -490,8 +490,8 @@ nav button:hover { color: var(--text); background: transparent; }
           <button onclick="showKeychainSave()" style="flex:1;">Save to Keychain</button>
         </div>
         <form id="keychain-form" style="display:none; margin-top:8px;" method="post" action="javascript:void(0)" onsubmit="event.preventDefault(); keychainSaved();">
-          <input id="keychain-user" type="text" name="username" autocomplete="username" readonly style="margin-bottom:4px;">
-          <input id="keychain-pass" type="password" name="password" autocomplete="new-password" readonly>
+          <input id="keychain-user" type="text" name="username" autocomplete="username" style="margin-bottom:4px;">
+          <input id="keychain-pass" type="password" name="password" autocomplete="new-password">
           <button type="submit" class="primary" style="width:100%; margin-top:6px;">Save to Keychain</button>
         </form>
       </div>
@@ -2980,14 +2980,20 @@ window.showKeychainSave = function() {
 
   // Set values using native setter + dispatch events so browser registers them
   const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+  form.style.display = 'block';
+
+  // Set values with focus/blur cycle so browser registers interaction
+  userInput.focus();
   nativeSetter.call(userInput, username);
   userInput.dispatchEvent(new Event('input', { bubbles: true }));
   userInput.dispatchEvent(new Event('change', { bubbles: true }));
+  userInput.blur();
+
+  passInput.focus();
   nativeSetter.call(passInput, secret);
   passInput.dispatchEvent(new Event('input', { bubbles: true }));
   passInput.dispatchEvent(new Event('change', { bubbles: true }));
-
-  form.style.display = 'block';
+  passInput.blur();
 };
 
 window.keychainSaved = function() {
