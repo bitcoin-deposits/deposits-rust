@@ -2616,10 +2616,41 @@ window.exploreLedger = async function() {
   viewport.style.display = 'none';
   empty.innerHTML = '<div style="color:var(--muted); padding:20px; text-align:center;">Loading...</div>';
 
-  const filter = { kinds: [9100], '#d': [input], limit: 500 };
-  const events = await fetchEvents(filter, 15000);
+  // Paginated fetch — keep fetching until we get all events
+  const PAGE_SIZE = 500;
+  const seen = new Set();
+  let allEvents = [];
+  let until = undefined;
+  let pages = 0;
 
-  if (events.length === 0) {
+  while (true) {
+    const filter = { kinds: [9100], '#d': [input], limit: PAGE_SIZE };
+    if (until) filter.until = until;
+
+    const events = await fetchEvents(filter, 15000);
+    if (events.length === 0) break;
+
+    let added = 0;
+    for (const ev of events) {
+      if (!seen.has(ev.id)) {
+        seen.add(ev.id);
+        allEvents.push(ev);
+        added++;
+      }
+    }
+
+    pages++;
+    empty.innerHTML = `<div style="color:var(--muted); padding:20px; text-align:center;">Loading... ${allEvents.length} events (page ${pages})</div>`;
+
+    // If we got fewer than PAGE_SIZE, we've reached the end
+    if (added < PAGE_SIZE) break;
+
+    // Set 'until' to oldest event's timestamp for next page
+    const oldest = events.reduce((min, ev) => ev.created_at < min ? ev.created_at : min, Infinity);
+    until = oldest;
+  }
+
+  if (allEvents.length === 0) {
     empty.innerHTML = '<div class="empty">No updates found for this ledger.</div>';
     return;
   }
@@ -2628,7 +2659,7 @@ window.exploreLedger = async function() {
   vsUpdates = [];
   vsLedgerId = input;
   vsExpanded = null;
-  for (const ev of events) {
+  for (const ev of allEvents) {
     try {
       const u = decodeUpdate(ev.content);
       u.eventId = ev.id;
@@ -2636,6 +2667,9 @@ window.exploreLedger = async function() {
       vsUpdates.push(u);
     } catch {}
   }
+  // Deduplicate by seq (in case of overlap between pages)
+  const seenSeq = new Set();
+  vsUpdates = vsUpdates.filter(u => { if (seenSeq.has(u.seq)) return false; seenSeq.add(u.seq); return true; });
   vsUpdates.sort((a, b) => a.seq - b.seq);
 
   empty.innerHTML = '';
