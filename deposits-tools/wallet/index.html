@@ -1474,10 +1474,11 @@ function renderHistory() {
     const aliases = depositIds.map(id => idToAlias[id] || id.slice(0, 8) + '...').join(', ');
 
     // Decode the update to get operation name and details
-    let opName = '?', amount = 0, color = 'var(--text)', summary = '';
+    let opName = '?', amount = 0, color = 'var(--text)', summary = '', seq = 0;
     try {
       const u = decodeUpdate(ev.content);
       opName = u.opName;
+      seq = u.seq;
       // Color code
       if (opName.includes('Credit') || opName.includes('Increase') || opName.includes('Fulfill')) color = 'var(--green)';
       else if (opName.includes('Lock') || opName.includes('Decrease')) color = 'var(--yellow)';
@@ -1492,7 +1493,7 @@ function renderHistory() {
 
     const timeAgo = formatTimeAgo(ev.created_at);
 
-    html += `<div style="display:flex; align-items:baseline; gap:8px; padding:5px 0; border-bottom:1px solid var(--border); font-size:11px; cursor:pointer;" onclick="openLedgerTab('${ledgerId}')">
+    html += `<div style="display:flex; align-items:baseline; gap:8px; padding:5px 0; border-bottom:1px solid var(--border); font-size:11px; cursor:pointer;" onclick="openLedgerEntry('${ledgerId}', ${seq})">
       <span style="color:${color}; font-weight:600; min-width:110px;">${opName}</span>
       <span style="flex:1; color:var(--text);">${summary}</span>
       <span style="color:var(--muted); white-space:nowrap;">${timeAgo}</span>
@@ -2566,6 +2567,13 @@ window.openLedgerTab = function(ledgerId) {
   exploreLedger();
 };
 
+window.openLedgerEntry = function(ledgerId, seq) {
+  switchToTab('ledgers');
+  document.getElementById('ledger-explorer-id').value = ledgerId;
+  updateHash('ledger/' + ledgerId + '/' + seq);
+  exploreLedger().then(() => highlightLedgerEntry(seq));
+};
+
 window.exploreLedger = async function() {
   const input = document.getElementById('ledger-explorer-id').value.trim();
   if (!input) { log('Enter a ledger ID', 'error'); return; }
@@ -2609,7 +2617,7 @@ window.exploreLedger = async function() {
     else if (u.opName.includes('Lock') || u.opName.includes('Decrease')) color = 'var(--yellow)';
     else if (u.opName.includes('Fail') || u.opName.includes('Dispute') || u.opName.includes('Close')) color = 'var(--red)';
 
-    html += `<div class="card" style="padding:8px 12px; margin-bottom:4px; cursor:pointer;" onclick="this.querySelector('.op-detail').style.display = this.querySelector('.op-detail').style.display === 'none' ? 'block' : 'none'">
+    html += `<div id="ledger-entry-${u.seq}" class="card ledger-entry" style="padding:8px 12px; margin-bottom:4px; cursor:pointer;" onclick="selectLedgerEntry('${input}', ${u.seq}, this)">
       <div style="display:flex; justify-content:space-between; align-items:baseline;">
         <span><span style="color:var(--muted)">#${u.seq}</span> <span style="color:${color}; font-weight:600;">${u.opName}</span></span>
         <span style="color:var(--muted); font-size:10px;">${time}</span>
@@ -2629,6 +2637,26 @@ window.exploreLedger = async function() {
   container.innerHTML = html;
   log(`Loaded ${updates.length} updates for ${input.slice(0,16)}...`, 'success');
 };
+
+window.selectLedgerEntry = function(ledgerId, seq, el) {
+  // Toggle detail
+  const detail = el.querySelector('.op-detail');
+  detail.style.display = detail.style.display === 'none' ? 'block' : 'none';
+  // Highlight
+  document.querySelectorAll('.ledger-entry').forEach(e => e.style.borderColor = 'var(--border)');
+  el.style.borderColor = 'var(--accent)';
+  // Update hash with seq
+  updateHash(`ledger/${ledgerId}/${seq}`);
+};
+
+function highlightLedgerEntry(seq) {
+  const el = document.getElementById('ledger-entry-' + seq);
+  if (el) {
+    el.style.borderColor = 'var(--accent)';
+    el.querySelector('.op-detail').style.display = 'block';
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+}
 
 // ============================================================
 // URL hash routing
@@ -2658,9 +2686,12 @@ function restoreFromHash() {
   const tab = parts[0];
 
   if (tab === 'ledger' && parts[1]) {
+    const seq = parts[2] ? parseInt(parts[2]) : null;
     switchToTab('ledgers');
     document.getElementById('ledger-explorer-id').value = parts[1];
-    exploreLedger();
+    exploreLedger().then(() => {
+      if (seq !== null) highlightLedgerEntry(seq);
+    });
   } else if (tab === 'deposit' && parts[1]) {
     switchToTab('deposits');
     selectDeposit(decodeURIComponent(parts[1]));
