@@ -711,14 +711,14 @@ services:
     networks:
       - regtest
 
-  # Web wallet — static HTML served via nginx
+  # Web wallet — static HTML served via nginx (live-mounted for dev)
   wallet:
-    build:
-      context: wallet
-    image: deposits-wallet:latest
+    image: nginx:alpine
     container_name: wallet
     ports:
       - "8888:80"
+    volumes:
+      - ./wallet:/usr/share/nginx/html:ro
     networks:
       - regtest
 
