@@ -538,14 +538,14 @@ nav button:hover { color: var(--text); background: transparent; }
 // ============================================================
 // Crypto primitives — noble libraries from ESM CDN
 // ============================================================
-import { hmac } from 'https://esm.sh/@noble/hashes@1.7.1/hmac';
-import { sha256 } from 'https://esm.sh/@noble/hashes@1.7.1/sha256';
-import { sha512 } from 'https://esm.sh/@noble/hashes@1.7.1/sha512';
-import { bytesToHex, hexToBytes, utf8ToBytes } from 'https://esm.sh/@noble/hashes@1.7.1/utils';
-import * as secp from 'https://esm.sh/@noble/secp256k1@2.2.3';
-import { schnorr } from 'https://esm.sh/@noble/curves@1.8.1/secp256k1';
-import qrcode from 'https://esm.sh/qrcode-generator@1.4.4';
-import jsQR from 'https://esm.sh/jsqr@1.4.0';
+import { hmac } from './vendor/noble-hashes-hmac.js';
+import { sha256 } from './vendor/noble-hashes-sha256.js';
+import { sha512 } from './vendor/noble-hashes-sha512.js';
+import { bytesToHex, hexToBytes, utf8ToBytes } from './vendor/noble-hashes-utils.js';
+import * as secp from './vendor/noble-secp256k1.js';
+import { schnorr } from './vendor/noble-curves-secp256k1.js';
+import qrcode from './vendor/qrcode-generator.js';
+import jsQR from './vendor/jsqr.js';
 
 // ============================================================
 // QR code rendering
