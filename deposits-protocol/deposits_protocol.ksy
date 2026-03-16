@@ -152,7 +152,12 @@ types:
   #   14  = payment_hash (32 bytes)
   #   30  = payment_id (32 bytes)
   #   34  = preimage (32 bytes)
+  #   36  = block_height (u32)
+  #   40  = signature (64 bytes)
   #   42  = ledger_hash (32 bytes)
+  #   48  = operator_sig (64 bytes)
+  #   50  = channel_id (32 bytes)
+  #   52  = close_reason (string)
   #   54  = timestamp (u64)
   #
   # Ledger fields:
@@ -209,11 +214,12 @@ types:
   # Collateral fields:
   #   38  = collateral_operator (33 bytes)
   #   40  = signature (64 bytes)
-  #   44  = quorum_member (33 bytes)
+  #   44  = quorum_member (33 bytes, compressed secp256k1)
+  #   46  = quorum_member_sig (64 bytes)
   #   76  = lock_until_block (u32)
   #   78  = deposit_holder_sig (64 bytes)
   #   80  = our_signature (64 bytes)
-  #   82  = membership_expires (u64)
+  #   82  = membership_expires (u32)
   #   114 = member_ledger_id (string)
   #   115 = collateral_ledger_id (string)
   #
@@ -229,7 +235,7 @@ types:
   #   109 = armed_block (u32)
   #   110 = spend_txid (32 bytes)
   #   111 = new_reserves_address (string)
-  #   112 = commitment_hash (32 bytes)
+  #   112 = commitment_hash (20 bytes, HASH160)
   #   113 = target_reserves (string)
 
   fee_structure:
