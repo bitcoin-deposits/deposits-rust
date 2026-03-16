@@ -2980,10 +2980,10 @@ window.saveToKeychain = async function() {
   }
 
   // Safari fallback: real form POST triggers Keychain save (reloads page)
-  if (confirm('This will save to Keychain and reload the page. Continue?')) {
+  {
     const form = document.createElement('form');
     form.method = 'post';
-    form.action = location.href;
+    form.action = location.pathname;
     const u = document.createElement('input');
     u.type = 'text'; u.name = 'username'; u.autocomplete = 'username'; u.value = username; u.style.display = 'none';
     const p = document.createElement('input');
