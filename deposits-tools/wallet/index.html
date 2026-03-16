@@ -484,6 +484,13 @@ nav button:hover { color: var(--text); background: transparent; }
           <input id="settings-seed" type="password" readonly>
           <button onclick="toggleSeed()" style="margin-top:6px">Show/Hide</button>
         </div>
+        <button onclick="saveToKeychain()" style="margin-top:8px; width:100%;">Save to Password Manager</button>
+        <!-- Hidden form that triggers the browser's password save prompt -->
+        <form id="keychain-form" style="display:none;" method="post" action="javascript:void(0)">
+          <input id="keychain-user" type="text" name="username" autocomplete="username">
+          <input id="keychain-pass" type="password" name="password" autocomplete="current-password">
+          <button type="submit"></button>
+        </form>
       </div>
       <div class="card">
         <h3>Relays</h3>
@@ -2954,6 +2961,38 @@ window.resetWallet = function() {
   localStorage.removeItem(STATE_KEY);
   localStorage.removeItem('deposits-balance-visible');
   location.reload();
+};
+
+window.saveToKeychain = async function() {
+  const secret = state.mnemonic || bytesToHex(state.seed);
+  const nostrKey = deriveSecretKey(state.seed, 0);
+  const npub = getPublicKeyHex(nostrKey);
+
+  // Try PasswordCredential API (Chrome/Edge)
+  if (window.PasswordCredential) {
+    try {
+      const cred = new PasswordCredential({
+        id: 'deposits-wallet:' + npub.slice(0, 8),
+        name: 'Deposits Wallet',
+        password: secret,
+      });
+      await navigator.credentials.store(cred);
+      log('Saved to password manager', 'success');
+      return;
+    } catch (e) {
+      console.warn('PasswordCredential failed:', e);
+    }
+  }
+
+  // Fallback: trigger browser's password save via hidden form submission
+  document.getElementById('keychain-user').value = 'deposits-wallet:' + npub.slice(0, 8);
+  document.getElementById('keychain-pass').value = secret;
+  // Briefly show the form so the browser detects it, then submit
+  const form = document.getElementById('keychain-form');
+  form.style.display = 'block';
+  form.querySelector('button').click();
+  setTimeout(() => { form.style.display = 'none'; }, 100);
+  log('Password manager prompt triggered', 'success');
 };
 
 window.toggleSeed = function() {
