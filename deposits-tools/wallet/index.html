@@ -448,9 +448,17 @@ nav button:hover { color: var(--text); background: transparent; }
       <!-- Quick links to deposits' ledgers -->
       <div id="ledger-quick-links" style="display:flex; flex-wrap:wrap; gap:4px; margin-bottom:12px;"></div>
       <div id="ledger-explorer-header" style="display:none; color:var(--muted); font-size:11px; margin-bottom:4px;"></div>
-      <div id="ledger-explorer-viewport" style="display:none; height:500px; overflow-y:auto; border:1px solid var(--border); border-radius:6px; position:relative;">
+      <div id="ledger-explorer-viewport" style="display:none; height:500px; overflow-y:auto; border:1px solid var(--border); border-radius:6px; position:relative; transition:height 0.15s;">
         <div id="ledger-explorer-spacer" style="width:100%;"></div>
         <div id="ledger-explorer-rows" style="position:absolute; top:0; left:0; right:0;"></div>
+      </div>
+      <div id="ledger-explorer-detail" class="card" style="display:none; margin-top:8px; max-height:300px; overflow-y:auto;">
+        <div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px;">
+          <h3 id="ledger-detail-title"></h3>
+          <button style="font-size:10px; padding:2px 8px;" onclick="closeLedgerDetail()">Close</button>
+        </div>
+        <div id="ledger-detail-meta" style="color:var(--muted); font-size:10px; margin-bottom:8px;"></div>
+        <div id="ledger-detail-fields"></div>
       </div>
       <div id="ledger-explorer-empty"></div>
     </div>
@@ -2719,22 +2727,12 @@ function vsRender() {
 
     const border = isExpanded ? 'var(--accent)' : 'var(--border)';
 
-    html += `<div id="ledger-entry-${u.seq}" style="position:absolute; top:${top}px; left:0; right:0; min-height:${VS_ROW_H}px; padding:6px 12px; border-bottom:1px solid var(--border); border-left:2px solid ${border}; cursor:pointer; background:var(--surface);" onclick="vsToggle(${u.seq})">
+    html += `<div id="ledger-entry-${u.seq}" style="position:absolute; top:${top}px; left:0; right:0; height:${VS_ROW_H}px; padding:6px 12px; border-bottom:1px solid var(--border); border-left:2px solid ${border}; cursor:pointer; background:var(--surface);" onclick="vsToggle(${u.seq})">
       <div style="display:flex; justify-content:space-between; align-items:baseline;">
         <span><span style="color:var(--muted); font-size:10px;">#${u.seq}</span> <span style="color:${color}; font-weight:600; font-size:12px;">${u.opName}</span></span>
         <span style="color:var(--muted); font-size:10px;">${time}</span>
       </div>
       <div style="color:var(--muted); font-size:10px;">hash: ${hashShort}... block: ${u.blockHeight}</div>`;
-
-    if (isExpanded) {
-      html += `<div style="margin-top:6px; font-size:11px; border-top:1px solid var(--border); padding-top:6px;">`;
-      for (const f of u.opFields) {
-        if (f.type === 0) continue;
-        const val = f.text || (f.u64 !== null ? `${f.u64}` : (f.u32 !== null ? `${f.u32}` : f.hex));
-        html += `<div class="kv"><span class="k">${f.name} (${f.type})</span><span class="v">${esc(val)} <span style="color:var(--muted)">[${f.len}B]</span></span></div>`;
-      }
-      html += `</div>`;
-    }
 
     html += `</div>`;
   }
@@ -2742,20 +2740,56 @@ function vsRender() {
 }
 
 window.vsToggle = function(seq) {
-  vsExpanded = vsExpanded === seq ? null : seq;
+  if (vsExpanded === seq) {
+    closeLedgerDetail();
+    return;
+  }
+  vsExpanded = seq;
   updateHash(`ledger/${vsLedgerId}/${seq}`);
+
+  // Shrink viewport and show detail pane
+  document.getElementById('ledger-explorer-viewport').style.height = '200px';
+
+  const u = vsUpdates.find(u => u.seq === seq);
+  if (u) {
+    const time = u.timestamp ? new Date(u.timestamp * 1000).toLocaleString() : '';
+    let color = 'var(--text)';
+    if (u.opName.includes('Credit') || u.opName.includes('Increase')) color = 'var(--balance)';
+    else if (u.opName.includes('Lock') || u.opName.includes('Decrease')) color = 'var(--yellow)';
+    else if (u.opName.includes('Fail') || u.opName.includes('Dispute') || u.opName.includes('Close')) color = 'var(--red)';
+
+    document.getElementById('ledger-detail-title').innerHTML = `<span style="color:var(--muted)">#${u.seq}</span> <span style="color:${color}">${u.opName}</span>`;
+    document.getElementById('ledger-detail-meta').innerHTML = `${time} · block ${u.blockHeight} · hash: ${u.curHash.slice(0,16)}... · prev: ${u.prevHash.slice(0,16)}...`;
+
+    let fields = '';
+    for (const f of u.opFields) {
+      if (f.type === 0) continue;
+      const val = f.text || (f.u64 !== null ? `${f.u64}` : (f.u32 !== null ? `${f.u32}` : f.hex));
+      fields += `<div class="kv"><span class="k">${f.name} (${f.type})</span><span class="v">${esc(val)} <span style="color:var(--muted)">[${f.len}B]</span></span></div>`;
+    }
+    document.getElementById('ledger-detail-fields').innerHTML = fields;
+    document.getElementById('ledger-explorer-detail').style.display = 'block';
+  }
+
+  vsRender();
+};
+
+window.closeLedgerDetail = function() {
+  vsExpanded = null;
+  document.getElementById('ledger-explorer-viewport').style.height = '500px';
+  document.getElementById('ledger-explorer-detail').style.display = 'none';
+  updateHash(`ledger/${vsLedgerId}`);
   vsRender();
 };
 
 function highlightLedgerEntry(seq) {
-  vsExpanded = seq;
-  // Scroll to the entry
+  // Scroll to the entry and open its detail
   const idx = vsUpdates.findIndex(u => u.seq === seq);
   if (idx >= 0) {
     const viewport = document.getElementById('ledger-explorer-viewport');
     viewport.scrollTop = idx * VS_ROW_H - viewport.clientHeight / 2 + VS_ROW_H;
   }
-  vsRender();
+  vsToggle(seq);
 }
 
 // ============================================================
