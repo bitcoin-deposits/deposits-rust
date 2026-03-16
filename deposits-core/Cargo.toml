@@ -9,7 +9,7 @@ keywords = ["bitcoin", "lightning", "custody", "deposits"]
 
 [dependencies]
 # Protocol definitions (types, messages, encoding)
-deposits-protocol = { path = "../deposits-protocol" }
+deposits-protocol = { path = "../deposits-protocol", features = ["kaitai-parser"] }
 
 # Bitcoin primitives (no Lightning dependencies!)
 bitcoin = { version = "0.32", features = ["serde"] }
