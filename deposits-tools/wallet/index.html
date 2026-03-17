@@ -292,7 +292,6 @@ body.hide-amounts .amt { visibility: hidden; }
     <div id="tab-deposits" class="panel">
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
         <span style="color:var(--muted)">Your deposits</span>
-        <button onclick="toggleNewDeposit()" style="font-size:18px; padding:2px 10px; line-height:1;">+</button>
       </div>
       <div id="deposits-list" style="display:flex; flex-wrap:wrap; gap:8px;"></div>
       <div id="new-deposit-pane" style="display:none; margin-top:12px;">
@@ -1298,7 +1297,7 @@ function renderDeposits() {
   const container = document.getElementById('deposits-list');
   renderWalletTab();
   if (state.deposits.length === 0) {
-    container.innerHTML = '<div class="empty" style="width:100%">No deposits yet. Go to Discover to find a ledger and open one.</div>';
+    container.innerHTML = '<div class="deposit-tile" onclick="toggleNewDeposit()" style="display:flex; align-items:center; justify-content:center; color:var(--muted); font-size:24px;">+</div>';
     return;
   }
 
@@ -1313,6 +1312,7 @@ function renderDeposits() {
         <div class="bal${hasBal && bal > 0 ? '' : ' zero'}"><span class="amt">${hasBal ? '₿' + bal.toLocaleString() : d.status}</span></div>
       </div>`;
   }
+  html += `<div class="deposit-tile" onclick="toggleNewDeposit()" style="display:flex; align-items:center; justify-content:center; color:var(--muted); font-size:24px;">+</div>`;
   container.innerHTML = html;
 
   // Update transfer dropdowns
