@@ -487,6 +487,19 @@ nav button:hover { color: var(--text); background: transparent; }
           <button onclick="copyBackup()" style="flex:1;">Copy</button>
           <button onclick="downloadBackup()" style="flex:1;">Download</button>
           <button onclick="saveToKeychain()" style="flex:1;">Keychain</button>
+          <button onclick="checkKeychain()" style="flex:1;">Check</button>
+        </div>
+        <div id="keychain-check" style="display:none; margin-top:10px; padding:10px; background:var(--bg); border:1px solid var(--border); border-radius:4px; font-size:11px;">
+          <div style="margin-bottom:8px;">Verify your saved backup matches this wallet.</div>
+          <form onsubmit="event.preventDefault(); verifyKeychainFill();" autocomplete="on">
+            <input type="text" name="username" autocomplete="username" style="display:none;">
+            <input id="keychain-check-pass" type="password" name="password" autocomplete="current-password" placeholder="Click here to autofill from Keychain" style="margin-bottom:6px;">
+            <div style="display:flex; gap:6px;">
+              <button type="submit" class="primary" style="flex:1;">Verify</button>
+              <button type="button" onclick="document.getElementById('keychain-check').style.display='none'" style="flex:1;">Cancel</button>
+            </div>
+          </form>
+          <div id="keychain-check-result" style="margin-top:6px;"></div>
         </div>
         <div id="keychain-confirm" style="display:none; margin-top:10px; padding:10px; background:var(--bg); border:1px solid var(--border); border-radius:4px; font-size:11px;">
           <div style="margin-bottom:8px;">
@@ -3027,6 +3040,48 @@ window.keychainConfirmSave = function() {
 window.keychainConfirmCancel = function() {
   document.getElementById('keychain-confirm').style.display = 'none';
 };
+
+window.checkKeychain = async function() {
+  // Chrome/Edge: try Credential Management API first
+  if (window.PasswordCredential) {
+    try {
+      const cred = await navigator.credentials.get({ password: true, mediation: 'optional' });
+      if (cred && cred.password) {
+        verifyBackupValue(cred.password);
+        return;
+      }
+    } catch {}
+  }
+  // Safari/fallback: show form for autofill
+  document.getElementById('keychain-check').style.display = 'block';
+  document.getElementById('keychain-check-result').innerHTML = '';
+  document.getElementById('keychain-check-pass').value = '';
+  document.getElementById('keychain-check-pass').focus();
+};
+
+window.verifyKeychainFill = function() {
+  const filled = document.getElementById('keychain-check-pass').value;
+  verifyBackupValue(filled);
+};
+
+function verifyBackupValue(filled) {
+  if (!filled) {
+    showCheckResult('No value provided', 'var(--muted)');
+    return;
+  }
+  const mnemonic = state.mnemonic || '';
+  const seedHex = bytesToHex(state.seed);
+  if (filled === mnemonic || filled === seedHex) {
+    showCheckResult('Backup matches this wallet', 'var(--balance)');
+  } else {
+    showCheckResult('Does not match — backup may be for a different wallet', 'var(--red)');
+  }
+}
+
+function showCheckResult(msg, color) {
+  const el = document.getElementById('keychain-check-result');
+  el.innerHTML = `<span style="color:${color}; font-weight:600;">${esc(msg)}</span>`;
+}
 
 window.copyBackup = async function() {
   const secret = state.mnemonic || bytesToHex(state.seed);
