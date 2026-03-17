@@ -847,6 +847,7 @@ const STATE_KEY = 'deposits-wallet-state';
 let state = {
   seed: null,        // Uint8Array(32)
   mnemonic: null,    // BIP-39 recovery phrase (if generated)
+  backupVerified: false,
   network: 'regtest',
   relays: ['ws://localhost:7801', 'ws://localhost:7802', 'ws://localhost:7803', 'ws://localhost:7804'],
   ledgerRelay: 'ws://localhost:7779',  // durable relay for advertisements (read-only)
@@ -867,6 +868,7 @@ function saveState() {
     ledgerRelay: state.ledgerRelay,
     deposits: state.deposits,
     keyIndex: state.keyIndex,
+    backupVerified: state.backupVerified || false,
   };
   localStorage.setItem(STATE_KEY, JSON.stringify(s));
 }
@@ -882,6 +884,7 @@ function loadState() {
       .filter(r => r !== (s.ledgerRelay || 'ws://localhost:7779')); // strip ledger relay from operator list
     state.ledgerRelay = s.ledgerRelay || 'ws://localhost:7779';
     state.mnemonic = s.mnemonic || null;
+    state.backupVerified = s.backupVerified || false;
     state.deposits = s.deposits || [];
     state.keyIndex = s.keyIndex || 0;
     return true;
@@ -3079,10 +3082,19 @@ function verifyBackupValue(filled) {
   const seedHex = bytesToHex(state.seed);
   if (filled === mnemonic || filled === seedHex) {
     document.getElementById('keychain-check').style.display = 'none';
-    document.getElementById('backup-check-btn').textContent = 'Check \u2713';
+    state.backupVerified = true;
+    saveState();
+    updateCheckBtn();
   } else {
+    state.backupVerified = false;
+    saveState();
+    updateCheckBtn();
     showCheckResult('Does not match — backup may be for a different wallet', 'var(--red)');
   }
+}
+
+function updateCheckBtn() {
+  document.getElementById('backup-check-btn').textContent = state.backupVerified ? 'Check \u2713' : 'Check ?';
 }
 
 function showCheckResult(msg, color) {
@@ -3167,6 +3179,7 @@ function startMainUI() {
   }
   document.getElementById('settings-relay-input').value = state.relays.join(', ');
   document.getElementById('settings-ledger-relay-input').value = state.ledgerRelay;
+  updateCheckBtn();
 
   renderDeposits();
   connect();
