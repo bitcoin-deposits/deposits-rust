@@ -1484,6 +1484,9 @@ impl Node {
 
                         // Reload allowlist (non-async, fast)
                         node.reload_allowlist();
+
+                        // Publish price oracle (~every periodic cycle)
+                        node.publish_price_oracle().await;
                     });
                 }
 
@@ -10693,6 +10696,23 @@ impl Node {
     ) -> Option<(OnChainWithdrawal, OnChainWithdrawalStatus)> {
         let withdrawals = self.withdrawals.lock().unwrap();
         withdrawals.get(withdrawal_id).cloned()
+    }
+
+    /// Fetch BTC/USD price and publish as a Nostr price oracle event.
+    async fn publish_price_oracle(&self) {
+        // Fetch from mempool.space (or esplora — operator has its own)
+        let url = "https://mempool.space/api/v1/prices";
+        let price = match reqwest::get(url).await {
+            Ok(resp) => match resp.json::<serde_json::Value>().await {
+                Ok(data) => data.get("USD").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                Err(_) => return,
+            },
+            Err(_) => return,
+        };
+        if price <= 0.0 { return; }
+        if let Err(e) = self.nostr.publish_price(price).await {
+            tracing::debug!("Failed to publish price: {}", e);
+        }
     }
 
     /// Load deposit allowlist from {data_dir}/deposit_allowlist.txt.

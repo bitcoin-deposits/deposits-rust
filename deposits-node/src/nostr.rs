@@ -92,6 +92,12 @@ pub const KIND_RECOVERY_AGREE: u16 = 9104;
 /// Content: JSON with fees, limits, and metadata.
 pub const KIND_LEDGER_ADVERTISE: u16 = 39100;
 
+/// Custom Kind for price oracle (BTC/USD rate published by operators)
+/// Uses NIP-33 parameterized replaceable events (30000-39999).
+/// Tag `d` = "btcusd" ensures only the latest price per operator is kept.
+/// Content: JSON with price, currency, and timestamp.
+pub const KIND_PRICE_ORACLE: u16 = 39101;
+
 /// Default relay URLs for the network
 /// Empty by default - relays should be explicitly configured
 pub const DEFAULT_RELAYS: &[&str] = &[];
@@ -1567,6 +1573,41 @@ impl NostrTransport {
             &event_id[..16]
         );
 
+        Ok(event_id)
+    }
+
+    /// Publish a price oracle event (BTC/USD rate)
+    pub async fn publish_price(&self, price_usd: f64) -> Result<String, Error> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let content = serde_json::json!({
+            "pair": "BTCUSD",
+            "price": price_usd,
+            "timestamp": now,
+        }).to_string();
+
+        let event = EventBuilder::new(Kind::Custom(KIND_PRICE_ORACLE), &content)
+            .tag(Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::D)),
+                ["btcusd"],
+            ))
+            .sign_with_keys(&self.keys)
+            .map_err(|e| Error::Nostr(format!("Failed to sign price event: {}", e)))?;
+
+        let event_id = event.id.to_hex();
+
+        self.send_event_with_timeout(event.clone()).await
+            .map_err(|e| Error::Nostr(format!("Failed to publish price: {}", e)))?;
+
+        // Mirror to durable relay
+        if let Some(ref tx) = self.mirror_tx {
+            let _ = tx.send(event);
+        }
+
+        tracing::debug!("Published BTC/USD price: ${}", price_usd);
         Ok(event_id)
     }
 

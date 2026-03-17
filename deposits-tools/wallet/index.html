@@ -1351,20 +1351,23 @@ if (localStorage.getItem('deposits-balance-visible') === '0' && !localStorage.ge
 }
 let balanceVisible = balanceMode !== 'hidden';
 
-// Price oracle
+// Price oracle — fetch from Nostr Kind 39101 events published by operators
 let btcPriceUsd = 0;
-const PRICE_ORACLE_URL = 'https://mempool.space/api/v1/prices';
 
 async function fetchPrice() {
   try {
-    const resp = await fetch(PRICE_ORACLE_URL);
-    const data = await resp.json();
-    btcPriceUsd = data.USD || 0;
+    const filter = { kinds: [39101], '#d': ['btcusd'], limit: 10 };
+    const events = await fetchEvents(filter, 5000);
+    if (events.length === 0) return;
+    // Use the most recent price
+    const newest = events.reduce((best, ev) => ev.created_at > best.created_at ? ev : best, events[0]);
+    const data = JSON.parse(newest.content);
+    if (data.price > 0) btcPriceUsd = data.price;
   } catch {}
 }
 
-// Fetch price on load and every 60s
-fetchPrice();
+// Fetch price after relays connect and every 60s
+setTimeout(fetchPrice, 3000);
 setInterval(fetchPrice, 60000);
 
 function satsToFiat(sats) {
