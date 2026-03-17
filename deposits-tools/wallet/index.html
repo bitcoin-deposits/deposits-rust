@@ -356,10 +356,19 @@ body.hide-amounts .amt { visibility: hidden; }
     <!-- Discover tab -->
     <div id="tab-discover" class="panel">
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-        <span style="color:var(--muted)">Available ledgers</span>
+        <span style="color:var(--muted)">Network</span>
         <button onclick="discoverLedgers()">Refresh</button>
       </div>
-      <div id="ledgers-list"></div>
+      <canvas id="network-graph" style="width:100%; height:350px; border:1px solid var(--border); border-radius:6px; cursor:grab; background:var(--surface);"></canvas>
+      <div id="network-node-info" class="card" style="display:none; margin-top:8px;">
+        <div style="display:flex; justify-content:space-between; align-items:baseline;">
+          <h3 id="node-info-name"></h3>
+          <span style="color:var(--muted); font-size:11px;" id="node-info-pubkey"></span>
+        </div>
+        <div id="node-info-details"></div>
+        <div id="node-info-ledgers" style="margin-top:8px; display:flex; flex-wrap:wrap; gap:4px;"></div>
+      </div>
+      <div id="ledgers-list" style="margin-top:12px;"></div>
 
       <!-- Ledger info pane (shown when a ledger is selected) -->
       <div id="ledger-info-pane" class="card" style="display:none; margin-top:12px;">
@@ -1100,87 +1109,282 @@ async function fetchEvents(filter, timeoutMs = 10000) {
 // Wallet operations
 // ============================================================
 
+// Network graph state
+let graphNodes = []; // [{id, name, pubkey, x, y, vx, vy, reserves, collateral, ledgerCount, ads}]
+let graphEdges = []; // [{from, to}] — quorum membership edges
+let graphSelected = null;
+let graphAnimFrame = null;
+
 async function discoverLedgers() {
-  log('Discovering ledgers...');
-  const filter = { kinds: [39100] };
-  const events = await fetchEvents(filter);
+  log('Discovering network...');
 
-  const container = document.getElementById('ledgers-list');
-  if (events.length === 0) {
-    container.innerHTML = '<div class="empty">No ledgers found on this relay.</div>';
-    return;
-  }
-
-  // Parse ads and filter by network
+  // Fetch advertisements
+  const adEvents = await fetchEvents({ kinds: [39100] }, 10000);
   const ads = [];
-  window._discoveredAds = {}; // store for info pane lookup
-  for (const event of events) {
+  window._discoveredAds = {};
+  for (const ev of adEvents) {
     try {
-      const ad = JSON.parse(event.content);
+      const ad = JSON.parse(ev.content);
       if (ad.network && ad.network !== state.network) continue;
       ads.push(ad);
       if (ad.ledger_id) window._discoveredAds[ad.ledger_id] = ad;
     } catch {}
   }
 
-  if (ads.length === 0) {
-    container.innerHTML = '<div class="empty">No ledgers on this network.</div>';
-    return;
-  }
-
-  // Group by fee schedule key
-  const groups = new Map();
+  // Build nodes from operators
+  const nodeMap = new Map(); // pubkey → node
   for (const ad of ads) {
-    const key = [
-      ad.annual_fee_bps || 0,
-      ad.min_fee_sats || 0,
-      ad.fee_period_blocks || 2016,
-      ad.transfer_fee_fixed_sats || 0,
-      ad.transfer_fee_rate_bps || 0,
-    ].join(':');
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(ad);
+    const pk = ad.operator_pubkey || '';
+    if (!pk) continue;
+    if (!nodeMap.has(pk)) {
+      nodeMap.set(pk, {
+        id: pk, name: ad.operator_name || pk.slice(0, 8) + '...', pubkey: pk,
+        x: 0, y: 0, vx: 0, vy: 0,
+        reserves: 0, collateral: 0, ledgerCount: 0, ads: [],
+      });
+    }
+    const node = nodeMap.get(pk);
+    node.reserves += ad.reserves_amount_sats || 0;
+    node.collateral += ad.received_collateral_sats || 0;
+    node.ledgerCount++;
+    node.ads.push(ad);
   }
 
-  let html = '';
-  for (const [key, groupAds] of groups) {
-    const sample = groupAds[0];
-    const annualBps = sample.annual_fee_bps || 0;
-    const minFee = sample.min_fee_sats || 0;
-    const feePeriod = sample.fee_period_blocks || 2016;
-    const tfFixed = sample.transfer_fee_fixed_sats || 0;
-    const tfRate = sample.transfer_fee_rate_bps || 0;
+  graphNodes = [...nodeMap.values()];
 
-    // Aggregate stats
-    const totalHeadroom = groupAds.reduce((s, a) => s + (a.available_headroom_sats || 0), 0);
-    const totalReserves = groupAds.reduce((s, a) => s + (a.reserves_amount_sats || 0), 0);
-    const operators = [...new Set(groupAds.map(a => a.operator_name || a.operator_pubkey?.slice(0, 12) || '?'))];
+  // Fetch quorum edges from ledger updates (QuorumAddMember=43, QuorumJoin=46)
+  graphEdges = [];
+  const updateEvents = await fetchEvents({ kinds: [9100], limit: 500 }, 10000);
+  const edgeSet = new Set();
+  // Map ledger_id → operator pubkey
+  const ledgerToOp = {};
+  for (const ad of ads) {
+    if (ad.ledger_id && ad.operator_pubkey) ledgerToOp[ad.ledger_id] = ad.operator_pubkey;
+  }
 
-    html += `<div class="card">
-      <div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:8px;">
-        <span style="font-weight:600">${groupAds.length} ledger(s)</span>
-        <span style="color:var(--balance)">₿${totalHeadroom.toLocaleString()} available</span>
-      </div>
-      <div class="kv"><span class="k">Operators</span><span class="v">${operators.map(esc).join(', ')}</span></div>
-      <div class="kv"><span class="k">Total reserves</span><span class="v">₿${totalReserves.toLocaleString()}</span></div>
-      <div class="kv"><span class="k">Custody fee</span><span class="v">${(annualBps / 100).toFixed(2)}%/yr + ₿${Math.floor(minFee * 52560 / feePeriod).toLocaleString()}/yr</span></div>
-      <div class="kv"><span class="k">Transfer fee</span><span class="v">₿${tfFixed} + ${(tfRate / 100).toFixed(2)}%</span></div>
-      <div style="margin-top:8px; display:flex; flex-wrap:wrap; gap:4px;">`;
+  for (const ev of updateEvents) {
+    try {
+      const u = decodeUpdate(ev.content);
+      const tags = Object.fromEntries((ev.tags || []).map(t => [t[0], t[1]]));
+      const ledgerId = tags.d || '';
+      const opPk = ledgerToOp[ledgerId] || '';
 
-    for (const ad of groupAds) {
-      const name = ad.operator_name || 'Anon';
-      const lid = ad.ledger_id || '';
-      const headroom = (ad.available_headroom_sats || 0).toLocaleString();
-      const quorum = ad.quorum_size || 0;
-      const relay = ad.relay_url || '';
-      html += `<button style="font-size:11px; padding:3px 8px;" onclick="selectLedger('${lid}')" title="${lid}">${esc(name)} · ₿${headroom}</button>`;
+      if (u.opDisc === 43) { // QuorumAddMember — field 44 is quorum_member pubkey
+        const memberField = u.opFields.find(f => f.type === 44);
+        if (memberField && opPk) {
+          const memberPk = memberField.hex.replace('...', '');
+          // Find the node whose pubkey starts with this
+          const memberNode = graphNodes.find(n => n.pubkey.startsWith(memberPk.slice(0, 16)));
+          const opNode = graphNodes.find(n => n.pubkey === opPk);
+          if (memberNode && opNode && memberNode !== opNode) {
+            const key = [opNode.id, memberNode.id].sort().join(':');
+            if (!edgeSet.has(key)) { edgeSet.add(key); graphEdges.push({ from: opNode.id, to: memberNode.id }); }
+          }
+        }
+      }
+    } catch {}
+  }
+
+  // Initial positions — circle layout
+  const cx = 200, cy = 175, r = 120;
+  graphNodes.forEach((n, i) => {
+    const a = (i / graphNodes.length) * Math.PI * 2 - Math.PI / 2;
+    n.x = cx + Math.cos(a) * r;
+    n.y = cy + Math.sin(a) * r;
+  });
+
+  graphSelected = null;
+  document.getElementById('network-node-info').style.display = 'none';
+  document.getElementById('ledgers-list').innerHTML = '';
+
+  renderGraph();
+  // Run force simulation
+  if (graphAnimFrame) cancelAnimationFrame(graphAnimFrame);
+  let ticks = 0;
+  function simulate() {
+    forceStep();
+    renderGraph();
+    ticks++;
+    if (ticks < 200) graphAnimFrame = requestAnimationFrame(simulate);
+  }
+  simulate();
+
+  log(`Found ${graphNodes.length} operators, ${graphEdges.length} quorum links`, 'success');
+}
+
+function forceStep() {
+  const N = graphNodes.length;
+  if (N === 0) return;
+  // Repulsion between all nodes
+  for (let i = 0; i < N; i++) {
+    for (let j = i + 1; j < N; j++) {
+      let dx = graphNodes[j].x - graphNodes[i].x;
+      let dy = graphNodes[j].y - graphNodes[i].y;
+      let d = Math.sqrt(dx * dx + dy * dy) || 1;
+      let force = 3000 / (d * d);
+      graphNodes[i].vx -= dx / d * force;
+      graphNodes[i].vy -= dy / d * force;
+      graphNodes[j].vx += dx / d * force;
+      graphNodes[j].vy += dy / d * force;
+    }
+  }
+  // Attraction along edges
+  for (const e of graphEdges) {
+    const a = graphNodes.find(n => n.id === e.from);
+    const b = graphNodes.find(n => n.id === e.to);
+    if (!a || !b) continue;
+    let dx = b.x - a.x, dy = b.y - a.y;
+    let d = Math.sqrt(dx * dx + dy * dy) || 1;
+    let force = (d - 100) * 0.01;
+    a.vx += dx / d * force;
+    a.vy += dy / d * force;
+    b.vx -= dx / d * force;
+    b.vy -= dy / d * force;
+  }
+  // Center gravity
+  const cx = 200, cy = 175;
+  for (const n of graphNodes) {
+    n.vx += (cx - n.x) * 0.002;
+    n.vy += (cy - n.y) * 0.002;
+    n.vx *= 0.9; n.vy *= 0.9; // damping
+    n.x += n.vx; n.y += n.vy;
+  }
+}
+
+function renderGraph() {
+  const canvas = document.getElementById('network-graph');
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth;
+  const h = canvas.clientHeight;
+  canvas.width = w * dpr;
+  canvas.height = h * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+
+  // Background
+  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--surface').trim();
+  ctx.fillRect(0, 0, w, h);
+
+  // Edges
+  for (const e of graphEdges) {
+    const a = graphNodes.find(n => n.id === e.from);
+    const b = graphNodes.find(n => n.id === e.to);
+    if (!a || !b) continue;
+    const isHighlighted = graphSelected && (e.from === graphSelected || e.to === graphSelected);
+    ctx.strokeStyle = isHighlighted ? '#58a6ff' : '#30363d';
+    ctx.lineWidth = isHighlighted ? 2 : 1;
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.stroke();
+  }
+
+  // Nodes
+  const maxCollateral = Math.max(1, ...graphNodes.map(n => n.collateral));
+  for (const n of graphNodes) {
+    const radius = 12 + (n.collateral / maxCollateral) * 18;
+    const isSelected = graphSelected === n.id;
+
+    // Node circle
+    ctx.beginPath();
+    ctx.arc(n.x, n.y, radius, 0, Math.PI * 2);
+    ctx.fillStyle = isSelected ? '#f7931a' : '#1f6feb';
+    ctx.fill();
+    if (isSelected) {
+      ctx.strokeStyle = '#f7931a';
+      ctx.lineWidth = 3;
+      ctx.stroke();
     }
 
-    html += `</div></div>`;
+    // Label
+    ctx.fillStyle = '#e6edf3';
+    ctx.font = '11px -apple-system, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(n.name, n.x, n.y + radius + 14);
+
+    // Collateral label inside node
+    if (n.collateral > 0) {
+      ctx.fillStyle = '#fff';
+      ctx.font = '9px -apple-system, sans-serif';
+      ctx.fillText('₿' + (n.collateral / 1e6).toFixed(1) + 'M', n.x, n.y + 3);
+    }
+  }
+}
+
+// Click handling for graph
+document.getElementById('network-graph')?.addEventListener('click', function(e) {
+  const rect = this.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+
+  // Find clicked node
+  let clicked = null;
+  for (const n of graphNodes) {
+    const dx = n.x - x, dy = n.y - y;
+    if (dx * dx + dy * dy < 900) { clicked = n; break; } // ~30px radius
   }
 
-  container.innerHTML = html;
-  log(`Found ${ads.length} ledger(s) in ${groups.size} group(s)`, 'success');
+  if (clicked) {
+    graphSelected = clicked.id;
+
+    // Center selected node and arrange neighbors
+    const cx = 200, cy = 175;
+    clicked.x = cx; clicked.y = cy; clicked.vx = 0; clicked.vy = 0;
+    const neighbors = graphEdges
+      .filter(e => e.from === clicked.id || e.to === clicked.id)
+      .map(e => e.from === clicked.id ? e.to : e.from);
+    neighbors.forEach((nid, i) => {
+      const nn = graphNodes.find(n => n.id === nid);
+      if (nn) {
+        const a = (i / neighbors.length) * Math.PI * 2 - Math.PI / 2;
+        nn.x = cx + Math.cos(a) * 120;
+        nn.y = cy + Math.sin(a) * 120;
+        nn.vx = 0; nn.vy = 0;
+      }
+    });
+
+    // Re-run brief simulation for non-neighbors
+    if (graphAnimFrame) cancelAnimationFrame(graphAnimFrame);
+    let t = 0;
+    function reSimulate() { forceStep(); renderGraph(); if (++t < 60) graphAnimFrame = requestAnimationFrame(reSimulate); }
+    reSimulate();
+
+    // Show node info
+    showNodeInfo(clicked);
+  } else {
+    graphSelected = null;
+    document.getElementById('network-node-info').style.display = 'none';
+    renderGraph();
+  }
+});
+
+function showNodeInfo(node) {
+  document.getElementById('node-info-name').textContent = node.name;
+  document.getElementById('node-info-pubkey').textContent = node.pubkey.slice(0, 16) + '...';
+
+  const neighbors = graphEdges
+    .filter(e => e.from === node.id || e.to === node.id)
+    .map(e => {
+      const otherId = e.from === node.id ? e.to : e.from;
+      return graphNodes.find(n => n.id === otherId);
+    }).filter(Boolean);
+
+  let details = '';
+  details += `<div class="kv"><span class="k">Ledgers</span><span class="v">${node.ledgerCount}</span></div>`;
+  details += `<div class="kv"><span class="k">Reserves</span><span class="v amt">₿${node.reserves.toLocaleString()}</span></div>`;
+  details += `<div class="kv"><span class="k">Collateral received</span><span class="v amt">₿${node.collateral.toLocaleString()}</span></div>`;
+  details += `<div class="kv"><span class="k">Quorum members</span><span class="v">${neighbors.map(n => esc(n.name)).join(', ') || 'none'}</span></div>`;
+  document.getElementById('node-info-details').innerHTML = details;
+
+  // Ledger buttons
+  let ledgers = '';
+  for (const ad of node.ads) {
+    const lid = ad.ledger_id || '';
+    const headroom = (ad.available_headroom_sats || 0).toLocaleString();
+    ledgers += `<button style="font-size:10px; padding:2px 6px;" onclick="selectLedger('${lid}')" title="${lid}">₿${headroom}</button>`;
+  }
+  document.getElementById('node-info-ledgers').innerHTML = ledgers;
+  document.getElementById('network-node-info').style.display = 'block';
 }
 
 window.selectLedger = function(ledgerId) {
