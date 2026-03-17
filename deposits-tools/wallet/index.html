@@ -1153,7 +1153,7 @@ async function discoverLedgers() {
     html += `<div class="card">
       <div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:8px;">
         <span style="font-weight:600">${groupAds.length} ledger(s)</span>
-        <span style="color:var(--balance)">${totalHeadroom.toLocaleString()} ₿ available</span>
+        <span style="color:var(--balance)">₿${totalHeadroom.toLocaleString()} available</span>
       </div>
       <div class="kv"><span class="k">Operators</span><span class="v">${operators.map(esc).join(', ')}</span></div>
       <div class="kv"><span class="k">Total reserves</span><span class="v">₿${totalReserves.toLocaleString()}</span></div>
@@ -1440,7 +1440,7 @@ window.showWalletOpen = async function() {
       <div style="display:flex; justify-content:space-between; align-items:center;">
         <div style="flex:1">
           <div style="font-size:12px;">${(annualBps/100).toFixed(2)}%/yr + ₿${Math.floor(minFee * 52560 / feePeriod).toLocaleString()}/yr, xfer ₿${tfFixed}+${(tfRate/100).toFixed(2)}%</div>
-          <div style="color:var(--muted); font-size:11px;">${groupAds.length} ledger(s), ${totalHeadroom.toLocaleString()} ₿ available</div>
+          <div style="color:var(--muted); font-size:11px;">${groupAds.length} ledger(s), ₿${totalHeadroom.toLocaleString()} available</div>
         </div>
         <button class="primary" style="margin-left:10px;" onclick="doWalletQuickOpen('${lid}','${esc(relay)}')">Open</button>
       </div>`;
