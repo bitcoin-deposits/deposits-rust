@@ -174,6 +174,7 @@ types:
   #   204 = witness (nested TLV)
   #   206 = witness_element (bytes)
   #   208 = new_descriptor (string)
+  #   229 = is_collateral (u8, 0 or 1, optional — odd type)
   #
   # Fee fields:
   #   12  = fees (nested TLV: FeeStructure in DepositOpen; u64 fee_sats in OnchainLock/TransferLock)

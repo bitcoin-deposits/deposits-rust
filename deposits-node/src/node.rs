@@ -4728,6 +4728,7 @@ impl Node {
                 payment_hash: None,
                 invoice: None,
                 cosigner_guarantee_signature: None,
+                is_collateral: false,
             };
 
             let message_bytes = operation.tlv_encode();
@@ -9307,6 +9308,7 @@ impl Node {
                 payment_hash: None,
                 invoice: None,
                 cosigner_guarantee_signature: None,
+                is_collateral: false,
             };
 
             let block_height = self.wallet.get_block_height().unwrap_or(0);

@@ -1209,11 +1209,12 @@ impl Ledger {
                 self.state.reserves_key = reserves_id.clone();
                 self.state.reserves.amount = *amount;
             }
-            LedgerOperation::DepositOpen { deposit_id, descriptor, fees, transfer_fees, .. } => {
+            LedgerOperation::DepositOpen { deposit_id, descriptor, fees, transfer_fees, is_collateral, .. } => {
                 let mut deposit = Deposit::new(descriptor.clone(), fees.clone());
                 if let Some(tf) = transfer_fees {
                     deposit.transfer_fees = tf.clone();
                 }
+                deposit.is_collateral = *is_collateral;
                 self.state.deposits.insert(*deposit_id, deposit);
             }
             LedgerOperation::DepositClose { deposit_id } => {
@@ -1326,6 +1327,11 @@ impl Ledger {
                 ..
             } => {
                 if let Some(deposit) = self.state.deposits.get_mut(deposit_id) {
+                    if !deposit.is_collateral {
+                        return Err(deposits_protocol::error::DepositsError::InvalidState(
+                            "CollateralLock can only be applied to collateral deposits".to_string()
+                        ));
+                    }
                     deposit.collateral_lock_amount = *amount;
                     deposit.collateral_lock_expires = *lock_until_block;
                 }

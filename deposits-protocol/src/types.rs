@@ -620,6 +620,9 @@ pub struct Deposit {
     /// Per-transfer fee schedule (fixed + proportional).
     #[serde(default)]
     pub transfer_fees: TransferFeeSchedule,
+    /// If true, this deposit is collateral — subject to collateral rules only.
+    #[serde(default)]
+    pub is_collateral: bool,
 }
 
 impl Deposit {
@@ -639,6 +642,7 @@ impl Deposit {
             collateral_lock_amount: 0,
             collateral_lock_expires: 0,
             transfer_fees: TransferFeeSchedule::default(),
+            is_collateral: false,
         }
     }
 
@@ -2135,6 +2139,7 @@ mod deposit_fields {
     pub const FEES: u64 = 8;
     pub const LAST_FEE_ASSESSMENT: u64 = 10;
     pub const TRANSFER_FEES: u64 = 16;
+    pub const IS_COLLATERAL: u64 = 17; // odd = optional
 }
 
 impl TlvEncode for Deposit {
@@ -2150,6 +2155,7 @@ impl TlvEncode for Deposit {
             .u64_field(deposit_fields::COLLATERAL_PLEDGE_AMOUNT, self.collateral_lock_amount)
             .u32_field(deposit_fields::COLLATERAL_PLEDGE_EXPIRES, self.collateral_lock_expires)
             .nested(deposit_fields::TRANSFER_FEES, &self.transfer_fees)
+            .u8_field(deposit_fields::IS_COLLATERAL, if self.is_collateral { 1 } else { 0 })
             .build()
     }
 }
@@ -2168,6 +2174,7 @@ impl TlvDecode for Deposit {
             collateral_lock_amount: reader.read_u64_opt(deposit_fields::COLLATERAL_PLEDGE_AMOUNT)?.unwrap_or(0),
             collateral_lock_expires: reader.read_u32_opt(deposit_fields::COLLATERAL_PLEDGE_EXPIRES)?.unwrap_or(0),
             transfer_fees: reader.read_nested_opt(deposit_fields::TRANSFER_FEES)?.unwrap_or_default(),
+            is_collateral: reader.read_u8(deposit_fields::IS_COLLATERAL).unwrap_or(0) != 0,
         })
     }
 }

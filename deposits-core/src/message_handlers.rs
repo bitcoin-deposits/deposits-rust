@@ -1602,6 +1602,7 @@ pub fn handle_deposit_open<C: HandlerContext>(
         payment_hash: msg.payment_hash,
         invoice: msg.invoice.clone(),
         cosigner_guarantee_signature: msg.cosigner_guarantee_signature,
+        is_collateral: false,
     };
 
     // Check for idempotency and append (single write lock scope)
