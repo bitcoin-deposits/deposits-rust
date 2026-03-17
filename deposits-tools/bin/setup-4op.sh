@@ -413,6 +413,50 @@ establish_collateral() {
         done
     done
     mine_blocks 1
+    sleep 3
+
+    # Lock collateral and record attestations
+    log_info "Locking collateral and recording attestations..."
+    local collateral_msats=$((collateral_amount * 1000))
+    local lock_blocks=10000  # ~70 days
+
+    for op in $OPERATORS; do
+        local op_node_id=$(get_value "node_id_$op")
+
+        for member in $OPERATORS; do
+            if [ "$op" != "$member" ]; then
+                local member_suffix=""
+                [ "$LEDGERS_PER_OP" -gt 1 ] && member_suffix="_1"
+                local member_ledger_id=$(get_value "ledger_id_${member}${member_suffix}")
+
+                # Op locks their collateral deposit on member's ledger
+                # The deposit was opened with op's seed, so op runs the lock command
+                local lock_output=$(run_bdk_cmd "$op" collateral lock \
+                    "$member_ledger_id" "$collateral_msats" "$lock_blocks" "$op_node_id" 2>&1)
+
+                local attestation_json=$(echo "$lock_output" | grep "^ATTESTATION_JSON:" | sed 's/^ATTESTATION_JSON://')
+
+                if [ -n "$attestation_json" ]; then
+                    # Record attestation on op's first ledger
+                    local op_suffix=""
+                    [ "$LEDGERS_PER_OP" -gt 1 ] && op_suffix="_1"
+                    local op_reserves_id=$(get_value "reserves_id_${op}${op_suffix}")
+
+                    local record_output=$(run_bdk_cmd "$op" collateral record \
+                        "$op_reserves_id" "$attestation_json" 2>&1)
+
+                    if echo "$record_output" | grep -q "recorded\|Attestation"; then
+                        log_success "$op locked collateral on $member, attestation recorded"
+                    else
+                        log_warn "$op attestation record issue: $(echo "$record_output" | head -1)"
+                    fi
+                else
+                    log_warn "$op collateral lock on $member failed: $(echo "$lock_output" | tail -1)"
+                fi
+            fi
+        done
+    done
+    mine_blocks 1
 }
 
 # ============================================================================
