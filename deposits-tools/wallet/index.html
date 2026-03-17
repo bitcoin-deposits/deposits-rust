@@ -96,6 +96,8 @@ nav button:hover { color: var(--text); background: transparent; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .spinner::after { content: '\21BB'; display:inline-block; animation: spin 0.8s linear infinite; font-size:20px; line-height:1; }
 
+body.hide-amounts .amt { visibility: hidden; }
+
 #setup-panel { text-align: center; padding: 60px 20px; }
 #setup-panel .card { max-width: 400px; margin: 0 auto; text-align: left; }
 
@@ -299,7 +301,7 @@ nav button:hover { color: var(--text); background: transparent; }
           <h3 id="detail-alias" style="margin:0;"></h3>
           <span id="detail-badge" class="badge"></span>
         </div>
-        <div id="detail-balance" style="font-size:20px; font-weight:700; color:var(--balance); margin:6px 0;"></div>
+        <div id="detail-balance" class="amt" style="font-size:20px; font-weight:700; color:var(--balance); margin:6px 0;"></div>
         <div id="detail-info" style="font-size:11px; color:var(--muted);"></div>
       </div>
 
@@ -1301,7 +1303,7 @@ function renderDeposits() {
     html += `
       <div class="deposit-tile${selected}" onclick="selectDeposit('${esc(d.alias)}')">
         <div class="alias">${esc(d.alias)}</div>
-        <div class="bal${hasBal && bal > 0 ? '' : ' zero'}">${hasBal ? '₿' + bal.toLocaleString() : d.status}</div>
+        <div class="bal${hasBal && bal > 0 ? '' : ' zero'}"><span class="amt">${hasBal ? '₿' + bal.toLocaleString() : d.status}</span></div>
       </div>`;
   }
   container.innerHTML = html;
@@ -1421,6 +1423,7 @@ window.toggleBalanceVisibility = function() {
   balanceMode = balanceMode === 'sats' ? 'fiat' : balanceMode === 'fiat' ? 'hidden' : 'sats';
   balanceVisible = balanceMode !== 'hidden';
   localStorage.setItem('deposits-balance-mode', balanceMode);
+  document.body.classList.toggle('hide-amounts', !balanceVisible);
   renderDeposits();
 };
 
@@ -1669,7 +1672,7 @@ function renderHistory() {
       const amtStr = e.amount > 0 ? `${e.sign}₿${e.amount.toLocaleString()}` : '';
       html += `<div style="display:flex; align-items:baseline; gap:8px; padding:3px 0 3px 8px; border-bottom:1px solid var(--border); font-size:11px; cursor:pointer;" onclick="openLedgerEntry('${e.ledgerId}', ${e.seq})">
         <span style="color:${e.color}; font-weight:600; min-width:100px;">${e.opName}</span>
-        <span style="flex:1; color:${e.color};">${amtStr}</span>
+        <span class="amt" style="flex:1; color:${e.color};">${amtStr}</span>
         <span style="color:var(--muted); white-space:nowrap;">${e.timeAgo}</span>
       </div>`;
     }
@@ -3263,6 +3266,7 @@ window.discoverLedgers = discoverLedgers;
 function startMainUI() {
   document.getElementById('setup-panel').style.display = 'none';
   document.getElementById('main-panel').style.display = 'block';
+  document.body.classList.toggle('hide-amounts', !balanceVisible);
 
   const nostrKey = deriveSecretKey(state.seed, 0);
   const npub = getPublicKeyHex(nostrKey);
