@@ -490,11 +490,13 @@ nav button:hover { color: var(--text); background: transparent; }
         </div>
         <div id="keychain-confirm" style="display:none; margin-top:10px; padding:10px; background:var(--bg); border:1px solid var(--border); border-radius:4px; font-size:11px;">
           <div style="margin-bottom:8px;">
-            Safari will prompt you to save your recovery phrase to iCloud Keychain.
-            The page will reload after saving.
+            Safari requires a form submission to trigger Keychain save.
+            A Service Worker intercepts the request and redirects back to
+            this page — <strong>your recovery phrase is never transmitted</strong>.
           </div>
           <div style="color:var(--muted); margin-bottom:8px;">
-            If the passphrase is already saved, Safari will reload without prompting.
+            The page will reload. If the passphrase is already in your Keychain,
+            Safari will reload without prompting.
           </div>
           <div style="display:flex; gap:6px;">
             <button class="primary" onclick="keychainConfirmSave()" style="flex:1;">Save to Keychain</button>
