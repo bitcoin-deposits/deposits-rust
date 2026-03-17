@@ -490,7 +490,7 @@ nav button:hover { color: var(--text); background: transparent; }
           <button onclick="copyBackup()" style="flex:1;">Copy</button>
           <button onclick="downloadBackup()" style="flex:1;">Download</button>
           <button onclick="saveToKeychain()" style="flex:1;">Keychain</button>
-          <button onclick="checkKeychain()" style="flex:1;">Check</button>
+          <button id="backup-check-btn" onclick="checkKeychain()" style="flex:1;">Check</button>
         </div>
         <div id="keychain-check" style="display:none; margin-top:10px; padding:10px; background:var(--bg); border:1px solid var(--border); border-radius:4px; font-size:11px;">
           <div style="margin-bottom:8px;">Verify your saved backup matches this wallet.</div>
@@ -3078,7 +3078,8 @@ function verifyBackupValue(filled) {
   const mnemonic = state.mnemonic || '';
   const seedHex = bytesToHex(state.seed);
   if (filled === mnemonic || filled === seedHex) {
-    showCheckResult('Backup matches this wallet', 'var(--balance)');
+    document.getElementById('keychain-check').style.display = 'none';
+    document.getElementById('backup-check-btn').textContent = 'Check \u2713';
   } else {
     showCheckResult('Does not match — backup may be for a different wallet', 'var(--red)');
   }
