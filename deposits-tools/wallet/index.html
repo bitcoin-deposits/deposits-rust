@@ -473,7 +473,10 @@ nav button:hover { color: var(--text); background: transparent; }
         <div class="kv"><span class="k">Relays</span><span class="v" id="settings-relay">—</span></div>
       </div>
       <div class="card">
-        <h3>Backup</h3>
+        <div style="display:flex; justify-content:space-between; align-items:baseline;">
+          <h3>Backup</h3>
+          <span id="backup-wallet-id" style="color:var(--muted); font-size:11px; font-family:var(--font);"></span>
+        </div>
         <div id="backup-secrets" style="display:none;">
           <div id="settings-mnemonic" style="display:none; margin-bottom:8px;">
             <div id="settings-mnemonic-words" style="background:var(--bg); padding:8px; border-radius:4px; font-size:13px; line-height:1.8; word-spacing:4px;"></div>
@@ -492,7 +495,7 @@ nav button:hover { color: var(--text); background: transparent; }
         <div id="keychain-check" style="display:none; margin-top:10px; padding:10px; background:var(--bg); border:1px solid var(--border); border-radius:4px; font-size:11px;">
           <div style="margin-bottom:8px;">Verify your saved backup matches this wallet.</div>
           <form onsubmit="event.preventDefault(); verifyKeychainFill();" autocomplete="on">
-            <input type="text" name="username" autocomplete="username" style="display:none;">
+            <input id="keychain-check-user" type="text" name="username" autocomplete="username" style="display:none;">
             <input id="keychain-check-pass" type="password" name="password" autocomplete="current-password" placeholder="Click here to autofill from Keychain" style="margin-bottom:6px;">
             <div style="display:flex; gap:6px;">
               <button type="submit" class="primary" style="flex:1;">Verify</button>
@@ -3053,6 +3056,9 @@ window.checkKeychain = async function() {
     } catch {}
   }
   // Safari/fallback: show form for autofill
+  const nostrKey2 = deriveSecretKey(state.seed, 0);
+  const npub2 = getPublicKeyHex(nostrKey2);
+  document.getElementById('keychain-check-user').value = 'deposits-wallet:' + npub2.slice(0, 8);
   document.getElementById('keychain-check').style.display = 'block';
   document.getElementById('keychain-check-result').innerHTML = '';
   document.getElementById('keychain-check-pass').value = '';
@@ -3150,6 +3156,8 @@ function startMainUI() {
   document.getElementById('settings-network').textContent = state.network;
   document.getElementById('settings-relay').textContent = state.relays.join(', ') + ' + ' + state.ledgerRelay;
   document.getElementById('settings-seed').value = bytesToHex(state.seed);
+  const walletId = 'deposits-wallet:' + npub.slice(0, 8);
+  document.getElementById('backup-wallet-id').textContent = walletId;
   if (state.mnemonic) {
     document.getElementById('settings-mnemonic').style.display = 'block';
     document.getElementById('settings-mnemonic-words').textContent = state.mnemonic;
