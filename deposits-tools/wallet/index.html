@@ -1343,7 +1343,36 @@ function renderDeposits() {
   updateWalletTransferTo();
 }
 
-let balanceVisible = localStorage.getItem('deposits-balance-visible') !== '0';
+// Balance display mode: 'sats' | 'fiat' | 'hidden'
+let balanceMode = localStorage.getItem('deposits-balance-mode') || 'sats';
+// Legacy migration
+if (localStorage.getItem('deposits-balance-visible') === '0' && !localStorage.getItem('deposits-balance-mode')) {
+  balanceMode = 'hidden';
+}
+let balanceVisible = balanceMode !== 'hidden';
+
+// Price oracle
+let btcPriceUsd = 0;
+const PRICE_ORACLE_URL = 'https://mempool.space/api/v1/prices';
+
+async function fetchPrice() {
+  try {
+    const resp = await fetch(PRICE_ORACLE_URL);
+    const data = await resp.json();
+    btcPriceUsd = data.USD || 0;
+  } catch {}
+}
+
+// Fetch price on load and every 60s
+fetchPrice();
+setInterval(fetchPrice, 60000);
+
+function satsToFiat(sats) {
+  if (!btcPriceUsd) return '$?.??';
+  const btc = sats / 100_000_000;
+  const fiat = btc * btcPriceUsd;
+  return fiat >= 1 ? `$${fiat.toLocaleString(undefined, {maximumFractionDigits: 2})}` : `$${fiat.toFixed(4)}`;
+}
 
 function renderWalletTab() {
   const hasDeposits = state.deposits.length > 0;
@@ -1357,15 +1386,26 @@ function renderWalletTab() {
 
   const balEl = document.getElementById('wallet-balance');
   if (balEl) {
-    balEl.textContent = balanceVisible ? `₿ ${totalSats.toLocaleString()}` : '****';
+    if (balanceMode === 'sats') {
+      balEl.textContent = `₿ ${totalSats.toLocaleString()}`;
+      balEl.style.color = 'var(--btc)';
+    } else if (balanceMode === 'fiat') {
+      balEl.textContent = satsToFiat(totalSats);
+      balEl.style.color = 'var(--balance)';
+    } else {
+      balEl.textContent = '****';
+      balEl.style.color = 'var(--muted)';
+    }
   }
   const countEl = document.getElementById('wallet-deposit-count');
   if (countEl) countEl.textContent = state.deposits.length;
 
   const lockEl = document.getElementById('wallet-locked');
   if (lockEl) {
-    if (totalLocked > 0 && balanceVisible) {
-      lockEl.textContent = `₿ ${totalLocked.toLocaleString()} locked`;
+    if (totalLocked > 0 && balanceMode !== 'hidden') {
+      lockEl.textContent = balanceMode === 'fiat'
+        ? `${satsToFiat(totalLocked)} locked`
+        : `₿ ${totalLocked.toLocaleString()} locked`;
       lockEl.style.display = 'block';
     } else {
       lockEl.style.display = 'none';
@@ -1374,8 +1414,10 @@ function renderWalletTab() {
 }
 
 window.toggleBalanceVisibility = function() {
-  balanceVisible = !balanceVisible;
-  localStorage.setItem('deposits-balance-visible', balanceVisible ? '1' : '0');
+  // Cycle: sats → fiat → hidden → sats
+  balanceMode = balanceMode === 'sats' ? 'fiat' : balanceMode === 'fiat' ? 'hidden' : 'sats';
+  balanceVisible = balanceMode !== 'hidden';
+  localStorage.setItem('deposits-balance-mode', balanceMode);
   renderDeposits();
 };
 
