@@ -1157,7 +1157,7 @@ async function discoverLedgers() {
       </div>
       <div class="kv"><span class="k">Operators</span><span class="v">${operators.map(esc).join(', ')}</span></div>
       <div class="kv"><span class="k">Total reserves</span><span class="v">₿${totalReserves.toLocaleString()}</span></div>
-      <div class="kv"><span class="k">Custody fee</span><span class="v">${(annualBps / 100).toFixed(2)}%/yr + ₿${minFee}/${feePeriod}blk</span></div>
+      <div class="kv"><span class="k">Custody fee</span><span class="v">${(annualBps / 100).toFixed(2)}%/yr + ₿${Math.floor(minFee * 52560 / feePeriod).toLocaleString()}/yr</span></div>
       <div class="kv"><span class="k">Transfer fee</span><span class="v">₿${tfFixed} + ${(tfRate / 100).toFixed(2)}%</span></div>
       <div style="margin-top:8px; display:flex; flex-wrap:wrap; gap:4px;">`;
 
@@ -1195,7 +1195,9 @@ window.selectLedger = function(ledgerId) {
     details += `<div class="kv"><span class="k">Obligations</span><span class="v">₿${(ad.total_obligations_sats || 0).toLocaleString()}</span></div>`;
     details += `<div class="kv"><span class="k">Available</span><span class="v">₿${(ad.available_headroom_sats || 0).toLocaleString()}</span></div>`;
     details += `<div class="kv"><span class="k">Collateral</span><span class="v">₿${(ad.received_collateral_sats || 0).toLocaleString()}</span></div>`;
-    details += `<div class="kv"><span class="k">Custody fee</span><span class="v">${(ad.annual_fee_bps || 0) / 100}%/yr + ₿${ad.min_fee_sats || 0}/${ad.fee_period_blocks || 2016}blk</span></div>`;
+    const adFeePeriod = ad.fee_period_blocks || 2016;
+    const adAnnualFixed = Math.floor((ad.min_fee_sats || 0) * 52560 / adFeePeriod);
+    details += `<div class="kv"><span class="k">Custody fee</span><span class="v">${(ad.annual_fee_bps || 0) / 100}%/yr + ₿${adAnnualFixed.toLocaleString()}/yr</span></div>`;
     details += `<div class="kv"><span class="k">Transfer fee</span><span class="v">₿${ad.transfer_fee_fixed_sats || 0} + ${(ad.transfer_fee_rate_bps || 0) / 100}%</span></div>`;
     if (ad.min_deposit_sats > 0) details += `<div class="kv"><span class="k">Min deposit</span><span class="v">₿${ad.min_deposit_sats}</span></div>`;
     if (ad.max_deposit_sats < 1e18) details += `<div class="kv"><span class="k">Max deposit</span><span class="v">₿${ad.max_deposit_sats.toLocaleString()}</span></div>`;
@@ -1437,7 +1439,7 @@ window.showWalletOpen = async function() {
     html += `<div style="padding:8px 0;${singleGroup ? '' : ' border-bottom:1px solid var(--border);'}">
       <div style="display:flex; justify-content:space-between; align-items:center;">
         <div style="flex:1">
-          <div style="font-size:12px;">${(annualBps/100).toFixed(2)}%/yr + ${minFee}s/${feePeriod}blk, xfer ${tfFixed}s+${(tfRate/100).toFixed(2)}%</div>
+          <div style="font-size:12px;">${(annualBps/100).toFixed(2)}%/yr + ₿${Math.floor(minFee * 52560 / feePeriod).toLocaleString()}/yr, xfer ₿${tfFixed}+${(tfRate/100).toFixed(2)}%</div>
           <div style="color:var(--muted); font-size:11px;">${groupAds.length} ledger(s), ${totalHeadroom.toLocaleString()} ₿ available</div>
         </div>
         <button class="primary" style="margin-left:10px;" onclick="doWalletQuickOpen('${lid}','${esc(relay)}')">Open</button>
