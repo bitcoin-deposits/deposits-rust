@@ -292,8 +292,15 @@ body.hide-amounts .amt { visibility: hidden; }
     <div id="tab-deposits" class="panel">
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
         <span style="color:var(--muted)">Your deposits</span>
+        <button onclick="toggleNewDeposit()" style="font-size:18px; padding:2px 10px; line-height:1;">+</button>
       </div>
       <div id="deposits-list" style="display:flex; flex-wrap:wrap; gap:8px;"></div>
+      <div id="new-deposit-pane" style="display:none; margin-top:12px;">
+        <div class="card">
+          <h3>Open New Deposit</h3>
+          <div id="new-deposit-list" style="color:var(--muted);">Loading...</div>
+        </div>
+      </div>
 
       <!-- Deposit detail (shown when a deposit is selected) -->
       <div id="deposit-detail" class="card" style="display:none; margin-top:12px;">
@@ -2071,6 +2078,69 @@ window.doWalletWithdraw = async function() {
 };
 
 let selectedDeposit = null;
+window.toggleNewDeposit = async function() {
+  const pane = document.getElementById('new-deposit-pane');
+  if (pane.style.display !== 'none') { pane.style.display = 'none'; return; }
+  pane.style.display = 'block';
+  document.getElementById('new-deposit-list').innerHTML = '<div style="color:var(--muted)">Discovering ledgers...</div>';
+
+  const events = await fetchEvents({ kinds: [39100] }, 10000);
+  const ads = [];
+  for (const ev of events) {
+    try { const ad = JSON.parse(ev.content); if (!ad.network || ad.network === state.network) ads.push(ad); } catch {}
+  }
+  if (ads.length === 0) {
+    document.getElementById('new-deposit-list').innerHTML = '<div class="empty">No ledgers found.</div>';
+    return;
+  }
+
+  // Group by fee schedule
+  const groups = new Map();
+  for (const ad of ads) {
+    const key = [ad.annual_fee_bps||0, ad.min_fee_sats||0, ad.fee_period_blocks||2016, ad.transfer_fee_fixed_sats||0, ad.transfer_fee_rate_bps||0].join(':');
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(ad);
+  }
+
+  const groupEntries = [...groups.values()];
+  const singleGroup = groupEntries.length === 1;
+  let html = '';
+  let gIdx = 0;
+  for (const groupAds of groupEntries) {
+    const s = groupAds[0];
+    const annualBps = s.annual_fee_bps||0, minFee = s.min_fee_sats||0, feePeriod = s.fee_period_blocks||2016;
+    const tfFixed = s.transfer_fee_fixed_sats||0, tfRate = s.transfer_fee_rate_bps||0;
+    const totalHeadroom = groupAds.reduce((sum, a) => sum + (a.available_headroom_sats||0), 0);
+    const sorted = groupAds.sort((a, b) => (b.available_headroom_sats||0) - (a.available_headroom_sats||0));
+    const best = sorted[0];
+    const gid = 'newdep-group-' + gIdx;
+
+    html += `<div style="padding:8px 0;${singleGroup ? '' : ' border-bottom:1px solid var(--border);'}">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <div style="flex:1">
+          <div style="font-size:12px;">${(annualBps/100).toFixed(2)}%/yr + ₿${Math.floor(minFee*52560/feePeriod).toLocaleString()}/yr, xfer ₿${tfFixed}+${(tfRate/100).toFixed(2)}%</div>
+          <div style="color:var(--muted); font-size:11px;">${groupAds.length} ledger(s), ₿${totalHeadroom.toLocaleString()} available</div>
+        </div>
+        <button class="primary" style="margin-left:10px;" onclick="doWalletQuickOpen('${best.ledger_id}','${esc(best.relay_url||'')}')">Open</button>
+      </div>`;
+    if (groupAds.length > 1) {
+      html += `<div style="margin-top:4px;">
+        <span style="color:var(--accent); font-size:11px; cursor:pointer;" onclick="document.getElementById('${gid}').style.display = document.getElementById('${gid}').style.display === 'none' ? 'flex' : 'none'">All ledgers &#9660;</span>
+        <div id="${gid}" style="display:none; margin-top:4px; flex-wrap:wrap; gap:4px;">`;
+      for (const ad of sorted) {
+        const name = ad.operator_name || 'Anon';
+        const lid = ad.ledger_id || '';
+        const headroom = (ad.available_headroom_sats||0).toLocaleString();
+        html += `<button style="font-size:10px; padding:2px 6px;" onclick="event.stopPropagation(); doWalletQuickOpen('${lid}','${esc(ad.relay_url||'')}')" title="${lid}">${esc(name)} · ₿${headroom}</button>`;
+      }
+      html += `</div></div>`;
+    }
+    html += `</div>`;
+    gIdx++;
+  }
+  document.getElementById('new-deposit-list').innerHTML = html;
+};
+
 window.selectDeposit = function(alias) {
   selectedDeposit = state.deposits.find(d => d.alias === alias);
   if (!selectedDeposit) return;
