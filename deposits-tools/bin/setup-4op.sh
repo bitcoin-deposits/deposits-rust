@@ -388,8 +388,8 @@ establish_collateral() {
                     --data-dir /data/wallet 2>&1 || true)
 
                 if echo "$open_output" | grep -q "created\|Fund with"; then
-                    # Extract funding address
-                    local fund_addr=$(echo "$open_output" | grep -E '^  bcrt1|^bcrt1' | head -1 | tr -d ' ')
+                    # Extract funding address (may have leading whitespace)
+                    local fund_addr=$(echo "$open_output" | grep -oE 'bcrt1[a-z0-9]+' | head -1)
                     if [ -n "$fund_addr" ]; then
                         local btc_amount=$(printf "%.8f" "$(echo "scale=8; $collateral_amount / 100000000" | bc)")
                         bitcoin_cli -rpcwallet=faucet sendtoaddress "$fund_addr" "$btc_amount" >/dev/null 2>&1 || true
