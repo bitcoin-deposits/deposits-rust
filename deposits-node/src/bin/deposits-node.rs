@@ -2692,14 +2692,25 @@ async fn collateral_lock(args: &[String]) -> Result<(), Box<dyn std::error::Erro
             let blocks: u32 = positional_args[2].parse().map_err(|_| "Invalid lock_blocks")?;
             let req_op = positional_args.get(3).cloned();
 
-            // Derive deposit key from seed using BIP-84 path (same as deposits-wallet)
+            // Look up key_index from wallet deposits.json for this ledger
+            let wallet_dir = config.data_dir.join("wallet");
+            let deposits_file = wallet_dir.join("deposits.json");
+            let key_index: u32 = if deposits_file.exists() {
+                let data = std::fs::read_to_string(&deposits_file)?;
+                let deposits: Vec<serde_json::Value> = serde_json::from_str(&data).unwrap_or_default();
+                deposits.iter()
+                    .find(|d| d.get("ledger_id").and_then(|v| v.as_str()) == Some(&ledger_id))
+                    .and_then(|d| d.get("key_index").and_then(|v| v.as_u64()))
+                    .unwrap_or(0) as u32
+            } else { 0 };
+
             let xpriv = Xpriv::new_master(config.network, &config.seed)?;
             let secp = Secp256k1::new();
-            let path = DerivationPath::from_str("m/84'/0'/0'/0/0")?;
+            let path = DerivationPath::from_str(&format!("m/84'/0'/0'/0/{}", key_index))?;
             let derived = xpriv.derive_priv(&secp, &path)?;
             let secret = derived.private_key;
 
-            println!("(Using wallet-derived deposit key)");
+            println!("(Using wallet key index {} for ledger {}...)", key_index, &ledger_id[..16.min(ledger_id.len())]);
 
             (ledger_id, secret, amount, blocks, req_op)
         } else {
