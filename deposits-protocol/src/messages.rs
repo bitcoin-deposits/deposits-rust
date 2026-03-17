@@ -4342,6 +4342,7 @@ mod tests {
             payment_hash: Some([0xAB; 32]),
             invoice: Some("lnbc...".to_string()),
             cosigner_guarantee_signature: None,
+            is_collateral: false,
         };
 
         let mut bytes = Vec::new();
@@ -4464,6 +4465,7 @@ mod tests {
                 payment_hash: Some([0xAA; 32]),
                 invoice: Some("lnbc...".to_string()),
                 cosigner_guarantee_signature: None,
+                is_collateral: false,
             },
             LedgerOperation::DepositClose { deposit_id: crate::types::compute_deposit_id("pk(test)") },
             LedgerOperation::InvoiceCredit {

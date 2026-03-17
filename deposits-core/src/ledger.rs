@@ -2220,6 +2220,7 @@ mod tests {
                 payment_hash: None,
                 invoice: None,
                 cosigner_guarantee_signature: None,
+                is_collateral: false,
             })
             .unwrap();
 
@@ -2328,7 +2329,7 @@ mod tests {
             last_fee_assessment: 0,
             collateral_lock_amount: 0,
             collateral_lock_expires: 0,
-            transfer_fees: TransferFeeSchedule::default(),
+            transfer_fees: TransferFeeSchedule::default(), is_collateral: false,
         };
         let dest_deposit = Deposit {
             deposit_id: dest_id,
@@ -2340,7 +2341,7 @@ mod tests {
             last_fee_assessment: 0,
             collateral_lock_amount: 0,
             collateral_lock_expires: 0,
-            transfer_fees: TransferFeeSchedule::default(),
+            transfer_fees: TransferFeeSchedule::default(), is_collateral: false,
         };
         ledger.state.deposits.insert(source_id, source_deposit);
         ledger.state.deposits.insert(dest_id, dest_deposit);
@@ -2421,7 +2422,7 @@ mod tests {
             last_fee_assessment: 0,
             collateral_lock_amount: 0,
             collateral_lock_expires: 0,
-            transfer_fees: TransferFeeSchedule::default(),
+            transfer_fees: TransferFeeSchedule::default(), is_collateral: false,
         };
         ledger.state.deposits.insert(source_id, source_deposit);
 

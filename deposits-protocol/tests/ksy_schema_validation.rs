@@ -226,10 +226,9 @@ fn schema_reserves_rotate() {
         (NEW_OUTPOINT_TXID, hash32()),
         (NEW_OUTPOINT_VOUT, u32_bytes(0)),
         (AMOUNT, u64_bytes(100_000_000)),
-        (QUORUM_THRESHOLD, u8_bytes(2)),
-        (QUORUM_SIZE, u8_bytes(3)),
         (FIRST_EXPIRY_BLOCK, u32_bytes(1000)),
         (LEDGER_HASH, hash32()),
+        (6, pubkey_bytes()), // QUORUM_MEMBERS — one member
     ]);
 }
 
@@ -243,6 +242,7 @@ fn schema_deposit_open() {
         (PAYMENT_HASH, hash32()),
         (INVOICE, str_bytes("lnbcrt1test")),
         (COSIGNER_SIG, sig64()),
+        (229, u8_bytes(1)), // IS_COLLATERAL
     ]);
 }
 

@@ -1299,7 +1299,7 @@ mod tests {
             last_fee_assessment: 0,
             collateral_lock_amount: 0,
             collateral_lock_expires: 0,
-            transfer_fees: TransferFeeSchedule::default(),
+            transfer_fees: TransferFeeSchedule::default(), is_collateral: false,
         };
         ledger.state.deposits.insert(source_id, source_deposit);
 
@@ -1382,7 +1382,7 @@ mod tests {
             last_fee_assessment: 0,
             collateral_lock_amount: 0,
             collateral_lock_expires: 0,
-            transfer_fees: TransferFeeSchedule::default(),
+            transfer_fees: TransferFeeSchedule::default(), is_collateral: false,
         };
         ledger.state.deposits.insert(source_id, source_deposit);
 

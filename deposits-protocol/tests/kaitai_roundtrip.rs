@@ -73,21 +73,28 @@ fn wit() -> DescriptorWitness { DescriptorWitness { stack: vec![vec![0x30; 64]] 
 
 #[test] fn reserves_rotate() { test_roundtrip(&LedgerOperation::ReservesRotate {
     reserves_id: "bcrt1qtest".into(), spending_txid: h32(), new_outpoint_txid: h32(),
-    new_outpoint_vout: 0, amount: 100_000_000, quorum_threshold: 2, quorum_size: 3,
-    first_expiry_block: 1000, ledger_hash: h32(),
+    new_outpoint_vout: 0, amount: 100_000_000,
+    first_expiry_block: 1000, ledger_hash: h32(), quorum_members: vec![pk()],
 }); }
 
 #[test] fn deposit_open() { test_roundtrip(&LedgerOperation::DepositOpen {
     deposit_id: did(), descriptor: "pk(0279be66...)".into(),
     fees: Some(fees()), transfer_fees: Some(tfees()),
     payment_hash: Some(h32()), invoice: Some("lnbcrt1test".into()),
-    cosigner_guarantee_signature: Some(sig()),
+    cosigner_guarantee_signature: Some(sig()), is_collateral: false,
+}); }
+
+#[test] fn deposit_open_collateral() { test_roundtrip(&LedgerOperation::DepositOpen {
+    deposit_id: did(), descriptor: "pk(0279be66...)".into(),
+    fees: Some(fees()), transfer_fees: None,
+    payment_hash: None, invoice: None,
+    cosigner_guarantee_signature: None, is_collateral: true,
 }); }
 
 #[test] fn deposit_open_minimal() { test_roundtrip(&LedgerOperation::DepositOpen {
     deposit_id: did(), descriptor: "pk(0279be66...)".into(),
     fees: None, transfer_fees: None, payment_hash: None, invoice: None,
-    cosigner_guarantee_signature: None,
+    cosigner_guarantee_signature: None, is_collateral: false,
 }); }
 
 #[test] fn deposit_close() { test_roundtrip(&LedgerOperation::DepositClose { deposit_id: did() }); }

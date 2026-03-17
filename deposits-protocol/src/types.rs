@@ -2914,6 +2914,7 @@ mod tests {
             collateral_lock_amount: 500_000,
             collateral_lock_expires: 850_000,
             transfer_fees: TransferFeeSchedule::default(),
+            is_collateral: true,
         };
         let encoded = original.tlv_encode();
         let decoded = Deposit::tlv_decode(&encoded).unwrap();

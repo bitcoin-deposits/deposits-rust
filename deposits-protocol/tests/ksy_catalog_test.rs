@@ -143,6 +143,10 @@ fn generate_value_for_disc(field: &KsyField, disc: u8) -> Vec<u8> {
         10 | 38 | 44 | 56 | 108 => {
             hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798").unwrap()
         }
+        // quorum_members: concatenated 33-byte compressed pubkeys
+        6 => {
+            hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798").unwrap()
+        }
         // Field 12 is overloaded: nested FeeStructure in DepositOpen (20), plain u64 fee elsewhere
         12 => {
             if disc == 20 || disc == 22 {
@@ -325,14 +329,16 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
         }),
         ("ReservesRotate", LedgerOperation::ReservesRotate {
             reserves_id: "bcrt1qtest".into(), spending_txid: h32(), new_outpoint_txid: h32(),
-            new_outpoint_vout: 0, amount: 100_000_000, quorum_threshold: 2, quorum_size: 3,
+            new_outpoint_vout: 0, amount: 100_000_000, 
             first_expiry_block: 1000, ledger_hash: h32(),
+            quorum_members: vec![pk()],
         }),
         ("DepositOpen", LedgerOperation::DepositOpen {
             deposit_id: did(), descriptor: "pk(0279be66...)".into(),
             fees: Some(fees()), transfer_fees: Some(tfees()),
             payment_hash: Some(h32()), invoice: Some("lnbcrt1test".into()),
             cosigner_guarantee_signature: Some(sig()),
+            is_collateral: false,
         }),
         ("DepositClose", LedgerOperation::DepositClose { deposit_id: did() }),
         ("DepositUpdate", LedgerOperation::DepositUpdate { deposit_id: did(), new_fees: fees() }),
