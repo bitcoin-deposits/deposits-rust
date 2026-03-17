@@ -380,14 +380,12 @@ establish_collateral() {
                 # Open collateral deposit — connect to member's relay + ledger relay for fee discovery
                 local member_relay="ws://relay-${member}:7777"
                 local op_seed=$(get_node_seed "$op")
-                # Use prefix (first 16 chars) to trigger ad discovery from ledger relay
-                local lid_prefix=${member_ledger_id:0:16}
                 local open_output=$(docker exec -e RUST_LOG=error "$op" deposits-wallet open \
-                    "$lid_prefix" "$collateral_amount" \
+                    "$member_ledger_id" "$collateral_amount" \
                     --alias "collateral-${op}-on-${member}" --collateral --skip-cosign-verify \
+                    --fee-bps "$ANNUAL_FEE_BPS" --fee-fixed "$MIN_FEE_SATS" --fee-period "$FEE_PERIOD" \
                     --seed "$op_seed" --network regtest \
                     --relay "$member_relay" \
-                    --relay ws://relay-ledgers:7777 \
                     --data-dir /data/wallet 2>&1 || true)
 
                 if echo "$open_output" | grep -q "created\|Fund with"; then

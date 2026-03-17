@@ -568,6 +568,9 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
     let mut alias: Option<String> = None;
     let mut skip_cosign_verify = false;
     let mut is_collateral = false;
+    let mut cli_fee_bps: Option<u64> = None;
+    let mut cli_fee_fixed: Option<u64> = None;
+    let mut cli_fee_period: Option<u64> = None;
     let mut config_args = Vec::new();
 
     let mut i = 0;
@@ -582,6 +585,18 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
             }
             "--collateral" => {
                 is_collateral = true;
+            }
+            "--fee-bps" if i + 1 < args.len() => {
+                cli_fee_bps = Some(args[i + 1].parse().unwrap_or(0));
+                i += 1;
+            }
+            "--fee-fixed" if i + 1 < args.len() => {
+                cli_fee_fixed = Some(args[i + 1].parse().unwrap_or(0));
+                i += 1;
+            }
+            "--fee-period" if i + 1 < args.len() => {
+                cli_fee_period = Some(args[i + 1].parse().unwrap_or(2016));
+                i += 1;
             }
             s if s.starts_with("--") => {
                 config_args.push(args[i].clone());
@@ -664,9 +679,15 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
         println!("  Alias: {}", a);
     }
 
-    // Get fee structure from advertisement
-    // If fee_period_blocks is 0 (not set), use default of 2016 blocks (~2 weeks)
-    let (fee_fixed, fee_bps, fee_frequency) = if let Some(ref ad) = advertisement {
+    // Get fee structure: CLI flags override, then advertisement, then defaults
+    let (fee_fixed, fee_bps, fee_frequency) = if cli_fee_bps.is_some() || cli_fee_fixed.is_some() {
+        let bps = cli_fee_bps.unwrap_or(0);
+        let period = cli_fee_period.unwrap_or(2016);
+        let fixed = cli_fee_fixed.unwrap_or(0);
+        let annualized_fixed = fixed * (52560 / period);
+        println!("  Fees: {} bps/year + {} sats/year fixed (CLI override)", bps, annualized_fixed);
+        (annualized_fixed, bps, period)
+    } else if let Some(ref ad) = advertisement {
         let period = if ad.fee_period_blocks > 0 { ad.fee_period_blocks } else { 2016 };
         let fee_struct = ad.to_fee_structure();
         println!("  Fees: {} bps/year + {} sats/year fixed (period: {} blocks)",
