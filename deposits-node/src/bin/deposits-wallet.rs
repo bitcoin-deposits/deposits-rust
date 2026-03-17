@@ -2613,8 +2613,7 @@ enum CustodyEvent {
     ReservesRotated {
         new_address: String,
         amount: u64,
-        quorum_threshold: u8,
-        quorum_size: u8,
+        quorum_member_count: usize,
         first_expiry_block: u32,
     },
     /// Custody dispute initiated
@@ -2738,7 +2737,7 @@ async fn ledger_custody(args: &[String]) -> Result<(), Box<dyn std::error::Error
                         }));
                     }
                 }
-                LedgerOperation::ReservesRotate { reserves_id, amount, quorum_threshold, quorum_size, first_expiry_block, .. } => {
+                LedgerOperation::ReservesRotate { reserves_id, amount, first_expiry_block, quorum_members, .. } => {
                     // Verify signer is current operator
                     let signer_valid = current_operator.map(|op| op == signer).unwrap_or(false);
                     let signer_status = if signer_valid { "✓" } else { "⚠" };
@@ -2746,8 +2745,8 @@ async fn ledger_custody(args: &[String]) -> Result<(), Box<dyn std::error::Error
                     println!("seq {:>4} | block {:>6} | RESERVES ROTATED {}", seq, block, signer_status);
                     println!("         |              |   New address: {}...", &reserves_id[..24.min(reserves_id.len())]);
                     println!("         |              |   Amount: {} sats", amount);
-                    if quorum_size > 0 {
-                        println!("         |              |   Quorum: {}-of-{}, expires block {}", quorum_threshold, quorum_size, first_expiry_block);
+                    if !quorum_members.is_empty() {
+                        println!("         |              |   Quorum: {} members, expires block {}", quorum_members.len(), first_expiry_block);
                     }
                     if !signer_valid {
                         println!("         |              |   ⚠ Signer {}... != expected operator", &hex::encode(signer.serialize())[..12]);
@@ -2755,8 +2754,7 @@ async fn ledger_custody(args: &[String]) -> Result<(), Box<dyn std::error::Error
                     custody_events.push((seq, block, CustodyEvent::ReservesRotated {
                         new_address: reserves_id,
                         amount,
-                        quorum_threshold,
-                        quorum_size,
+                        quorum_member_count: quorum_members.len(),
                         first_expiry_block,
                     }));
                 }

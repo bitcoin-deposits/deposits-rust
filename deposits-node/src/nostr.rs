@@ -944,8 +944,14 @@ impl NostrTransport {
                 [hex::encode(update.current_hash)],
             ));
 
-        // Tag affected deposit IDs for wallet filtering
+        // Tag operation type and affected deposit IDs for relay-side filtering
         if let Ok(op) = deposits_core::messages::LedgerOperation::tlv_decode(&update.message) {
+            // Operation type tag (e.g. "QuorumAddMember", "TransferLock")
+            builder = builder.tag(Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::T)),
+                [op.discriminant().to_string()],
+            ));
+
             for dep_id in op.affected_deposit_ids() {
                 builder = builder.tag(Tag::custom(
                     TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::I)),

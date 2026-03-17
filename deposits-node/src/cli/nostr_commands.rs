@@ -2561,8 +2561,7 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                 LedgerOperation::ReservesRotate {
                     reserves_id,
                     amount,
-                    quorum_threshold,
-                    quorum_size,
+                    quorum_members,
                     first_expiry_block,
                     ..
                 } => {
@@ -2579,7 +2578,7 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                         "ReservesRotate",
                         format!(
                             "addr:{}  amt:{} sat  quorum:{}/{}  expiry:{}",
-                            addr_short, amount, quorum_threshold, quorum_size, first_expiry_block
+                            addr_short, amount, quorum_members.len(), quorum_members.len(), first_expiry_block
                         ),
                     )
                 }

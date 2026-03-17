@@ -4597,10 +4597,9 @@ impl Node {
             new_outpoint_txid: *rotate_txid.as_ref(),
             new_outpoint_vout: 0,
             amount: output_amount,
-            quorum_threshold,
-            quorum_size,
             first_expiry_block,
             ledger_hash,
+            quorum_members: quorum_members.clone(),
         };
 
         let message_bytes = operation.tlv_encode();
@@ -10342,19 +10341,15 @@ impl Node {
             };
 
             // Calculate quorum parameters
-            let quorum_size = (quorum_members.len() + 1) as u8; // +1 for operator
-            let quorum_threshold = (quorum_size / 2) + 1; // Majority
-
             let operation = LedgerOperation::ReservesRotate {
                 reserves_id: result.address.to_string(),
                 spending_txid: txid_bytes,
                 new_outpoint_txid: txid_bytes, // Same tx creates the new output
                 new_outpoint_vout: result.outpoint.vout,
                 amount: result.amount,
-                quorum_threshold,
-                quorum_size,
                 first_expiry_block: result.first_expiry_block,
                 ledger_hash,
+                quorum_members: quorum_members.clone(),
             };
 
             let mut ledger = ledger_arc.write().unwrap();
@@ -10366,10 +10361,9 @@ impl Node {
             ).map_err(|e| Error::Protocol(format!("Failed to record reserves rotation: {:?}", e)))?;
 
             tracing::info!(
-                "Appended ReservesRotate operation to ledger: txid={}, quorum={}/{}",
+                "Appended ReservesRotate operation to ledger: txid={}, quorum={} members",
                 txid,
-                quorum_threshold,
-                quorum_size
+                quorum_members.len()
             );
         }
 

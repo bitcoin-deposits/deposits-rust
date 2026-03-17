@@ -3490,10 +3490,9 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
         new_outpoint_txid: txid_bytes,
         new_outpoint_vout: 0,
         amount: output_amount,
-        quorum_threshold,
-        quorum_size,
         first_expiry_block,
         ledger_hash,
+        quorum_members: quorum_members.clone(),
     };
 
     let message_bytes = operation.tlv_encode();

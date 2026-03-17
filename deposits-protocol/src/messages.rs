@@ -537,14 +537,12 @@ pub enum LedgerOperation {
         new_outpoint_vout: u32,
         /// Amount in satoshis (should match previous reserves)
         amount: u64,
-        /// Number of signatures required for immediate spend
-        quorum_threshold: u8,
-        /// Total number of quorum members (including operator)
-        quorum_size: u8,
         /// Block height when operator can spend alone (earliest member expiry)
         first_expiry_block: u32,
         /// Ledger hash committed in the Taproot script
         ledger_hash: [u8; 32],
+        /// Quorum member pubkeys included in this rotation
+        quorum_members: Vec<bitcoin::secp256k1::PublicKey>,
     },
 
     // ========== Deposit Operations (6) ==========
@@ -1469,14 +1467,14 @@ impl BinaryCodec for LedgerOperation {
                 write_string(w, reserves_id)?;
                 write_u64(w, *new_amount)?;
             }
-            Self::ReservesRotate { reserves_id, spending_txid, new_outpoint_txid, new_outpoint_vout, amount, quorum_threshold, quorum_size, first_expiry_block, ledger_hash } => {
+            Self::ReservesRotate { reserves_id, spending_txid, new_outpoint_txid, new_outpoint_vout, amount, first_expiry_block, ledger_hash, quorum_members } => {
                 write_string(w, reserves_id)?;
                 write_32(w, spending_txid)?;
                 write_32(w, new_outpoint_txid)?;
                 write_u32(w, *new_outpoint_vout)?;
                 write_u64(w, *amount)?;
-                write_u8(w, *quorum_threshold)?;
-                write_u8(w, *quorum_size)?;
+                write_u8(w, quorum_members.len() as u8)?; // backward compat: write count as threshold
+                write_u8(w, quorum_members.len() as u8)?; // backward compat: write count as size
                 write_u32(w, *first_expiry_block)?;
                 write_32(w, ledger_hash)?;
             }
@@ -1741,17 +1739,21 @@ impl BinaryCodec for LedgerOperation {
                 reserves_id: read_string(r)?,
                 new_amount: read_u64(r)?,
             }),
-            12 => Ok(Self::ReservesRotate {
-                reserves_id: read_string(r)?,
-                spending_txid: read_32(r)?,
-                new_outpoint_txid: read_32(r)?,
-                new_outpoint_vout: read_u32(r)?,
-                amount: read_u64(r)?,
-                quorum_threshold: read_u8(r)?,
-                quorum_size: read_u8(r)?,
-                first_expiry_block: read_u32(r)?,
-                ledger_hash: read_32(r)?,
-            }),
+            12 => {
+                let reserves_id = read_string(r)?;
+                let spending_txid = read_32(r)?;
+                let new_outpoint_txid = read_32(r)?;
+                let new_outpoint_vout = read_u32(r)?;
+                let amount = read_u64(r)?;
+                let _threshold = read_u8(r)?; // legacy: skip
+                let _size = read_u8(r)?; // legacy: skip
+                let first_expiry_block = read_u32(r)?;
+                let ledger_hash = read_32(r)?;
+                Ok(Self::ReservesRotate {
+                    reserves_id, spending_txid, new_outpoint_txid, new_outpoint_vout,
+                    amount, first_expiry_block, ledger_hash, quorum_members: Vec::new(),
+                })
+            }
             // Deposit operations (20-25) - legacy decoding extracts deposit_id from embedded bytes
             20 => {
                 let legacy_bytes = read_33(r)?;
@@ -2792,17 +2794,21 @@ impl TlvEncode for LedgerOperation {
                     .string_field(RESERVES_ID, reserves_id)
                     .u64_field(NEW_AMOUNT, *new_amount);
             }
-            Self::ReservesRotate { reserves_id, spending_txid, new_outpoint_txid, new_outpoint_vout, amount, quorum_threshold, quorum_size, first_expiry_block, ledger_hash } => {
+            Self::ReservesRotate { reserves_id, spending_txid, new_outpoint_txid, new_outpoint_vout, amount, first_expiry_block, ledger_hash, quorum_members } => {
+                // Encode quorum members as concatenated 33-byte compressed pubkeys
+                let mut members_bytes = Vec::new();
+                for pk in quorum_members {
+                    members_bytes.extend_from_slice(&pk.serialize());
+                }
                 builder = builder
                     .string_field(RESERVES_ID, reserves_id)
                     .bytes_field(SPENDING_TXID, spending_txid)
                     .bytes_field(NEW_OUTPOINT_TXID, new_outpoint_txid)
                     .u32_field(NEW_OUTPOINT_VOUT, *new_outpoint_vout)
                     .u64_field(AMOUNT, *amount)
-                    .u8_field(QUORUM_THRESHOLD, *quorum_threshold)
-                    .u8_field(QUORUM_SIZE, *quorum_size)
                     .u32_field(FIRST_EXPIRY_BLOCK, *first_expiry_block)
-                    .bytes_field(LEDGER_HASH, ledger_hash);
+                    .bytes_field(LEDGER_HASH, ledger_hash)
+                    .bytes_field(QUORUM_MEMBERS, &members_bytes);
             }
             Self::DepositOpen { deposit_id, descriptor, fees, transfer_fees, payment_hash, invoice, cosigner_guarantee_signature } => {
                 builder = builder
@@ -3034,17 +3040,27 @@ impl TlvDecode for LedgerOperation {
                 reserves_id: reader.read_string(RESERVES_ID)?,
                 new_amount: reader.read_u64(NEW_AMOUNT)?,
             }),
-            12 => Ok(Self::ReservesRotate {
-                reserves_id: reader.read_string(RESERVES_ID)?,
-                spending_txid: reader.read_bytes(SPENDING_TXID)?,
-                new_outpoint_txid: reader.read_bytes(NEW_OUTPOINT_TXID)?,
-                new_outpoint_vout: reader.read_u32(NEW_OUTPOINT_VOUT)?,
-                amount: reader.read_u64(AMOUNT)?,
-                quorum_threshold: reader.read_u8(QUORUM_THRESHOLD)?,
-                quorum_size: reader.read_u8(QUORUM_SIZE)?,
-                first_expiry_block: reader.read_u32(FIRST_EXPIRY_BLOCK)?,
-                ledger_hash: reader.read_bytes(LEDGER_HASH)?,
-            }),
+            12 => {
+                let members_bytes = reader.read_raw_opt(QUORUM_MEMBERS).unwrap_or(&[]);
+                let mut quorum_members = Vec::new();
+                let mut off = 0;
+                while off + 33 <= members_bytes.len() {
+                    if let Ok(pk) = bitcoin::secp256k1::PublicKey::from_slice(&members_bytes[off..off+33]) {
+                        quorum_members.push(pk);
+                    }
+                    off += 33;
+                }
+                Ok(Self::ReservesRotate {
+                    reserves_id: reader.read_string(RESERVES_ID)?,
+                    spending_txid: reader.read_bytes(SPENDING_TXID)?,
+                    new_outpoint_txid: reader.read_bytes(NEW_OUTPOINT_TXID)?,
+                    new_outpoint_vout: reader.read_u32(NEW_OUTPOINT_VOUT)?,
+                    amount: reader.read_u64(AMOUNT)?,
+                    first_expiry_block: reader.read_u32(FIRST_EXPIRY_BLOCK)?,
+                    ledger_hash: reader.read_bytes(LEDGER_HASH)?,
+                    quorum_members,
+                })
+            }
             20 => Ok(Self::DepositOpen {
                 deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
                 descriptor: reader.read_string(DESCRIPTOR)?,

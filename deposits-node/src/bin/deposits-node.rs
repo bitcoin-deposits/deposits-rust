@@ -2217,14 +2217,14 @@ fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                 LedgerOperation::ReservesDecrease { new_amount, .. } => {
                     ("ReservesDecrease", format!("{} sat", new_amount))
                 }
-                LedgerOperation::ReservesRotate { reserves_id, amount, quorum_threshold, quorum_size, first_expiry_block, .. } => {
+                LedgerOperation::ReservesRotate { reserves_id, amount, first_expiry_block, quorum_members, .. } => {
                     let addr_short = if reserves_id.len() > 20 {
                         format!("{}..{}", &reserves_id[..8], &reserves_id[reserves_id.len()-6..])
                     } else {
                         reserves_id.clone()
                     };
                     ("ReservesRotate", format!("addr:{}  amt:{} sat  quorum:{}/{}  expiry:{}",
-                        addr_short, amount, quorum_threshold, quorum_size, first_expiry_block))
+                        addr_short, amount, quorum_members.len(), quorum_members.len(), first_expiry_block))
                 }
                 LedgerOperation::DepositOpen { deposit_id, .. } => {
                     ("DepositOpen", format!("id:{:02x}{:02x}{:02x}{:02x}", deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]))

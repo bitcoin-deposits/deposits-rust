@@ -207,8 +207,7 @@ types:
   #   90  = spending_txid (32 bytes)
   #   91  = new_outpoint_txid (32 bytes)
   #   92  = new_outpoint_vout (u32)
-  #   93  = quorum_threshold (u8)
-  #   94  = quorum_size (u8)
+  #   6   = quorum_members (concatenated 33-byte compressed pubkeys)
   #   95  = first_expiry_block (u32)
   #
   # Collateral fields:
