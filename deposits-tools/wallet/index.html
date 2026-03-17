@@ -488,6 +488,19 @@ nav button:hover { color: var(--text); background: transparent; }
           <button onclick="downloadBackup()" style="flex:1;">Download</button>
           <button onclick="saveToKeychain()" style="flex:1;">Keychain</button>
         </div>
+        <div id="keychain-confirm" style="display:none; margin-top:10px; padding:10px; background:var(--bg); border:1px solid var(--border); border-radius:4px; font-size:11px;">
+          <div style="margin-bottom:8px;">
+            Safari will prompt you to save your recovery phrase to iCloud Keychain.
+            The page will reload after saving.
+          </div>
+          <div style="color:var(--muted); margin-bottom:8px;">
+            If the passphrase is already saved, Safari will reload without prompting.
+          </div>
+          <div style="display:flex; gap:6px;">
+            <button class="primary" onclick="keychainConfirmSave()" style="flex:1;">Save to Keychain</button>
+            <button onclick="keychainConfirmCancel()" style="flex:1;">Cancel</button>
+          </div>
+        </div>
       </div>
       <div class="card">
         <h3>Relays</h3>
@@ -2923,7 +2936,7 @@ window.initWallet = async function() {
 
   // Save to keychain immediately — on Safari this reloads the page,
   // which is fine since state is already persisted to localStorage.
-  await saveToKeychain();
+  await saveToKeychain(true);
 
   startMainUI();
 };
@@ -2965,7 +2978,7 @@ window.resetWallet = function() {
   location.reload();
 };
 
-window.saveToKeychain = async function() {
+window.saveToKeychain = async function(autoConfirm = false) {
   const secret = state.mnemonic || bytesToHex(state.seed);
   const nostrKey = deriveSecretKey(state.seed, 0);
   const npub = getPublicKeyHex(nostrKey);
@@ -2983,22 +2996,34 @@ window.saveToKeychain = async function() {
     }
   }
 
-  // Safari fallback: submit a real form POST to trigger the Keychain save
-  // prompt. The Service Worker (sw.js) intercepts the POST and responds with
-  // a 303 redirect back to /#settings — the mnemonic never leaves the browser.
+  // Safari fallback: show confirmation pane, then submit a real form POST.
+  // The Service Worker (sw.js) intercepts the POST and responds with a 303
+  // redirect back to /#settings — the mnemonic never leaves the browser.
   // nginx also blocks POST as a defense-in-depth measure.
-  {
-    const form = document.createElement('form');
-    form.method = 'post';
-    form.action = location.pathname + '#settings';
-    const u = document.createElement('input');
-    u.type = 'text'; u.name = 'username'; u.autocomplete = 'username'; u.value = username; u.style.display = 'none';
-    const p = document.createElement('input');
-    p.type = 'password'; p.name = 'password'; p.autocomplete = 'current-password'; p.value = secret; p.style.display = 'none';
-    form.append(u, p);
-    document.body.appendChild(form);
-    form.submit();
+  window._keychainUsername = username;
+  window._keychainSecret = secret;
+  if (autoConfirm) {
+    keychainConfirmSave();
+  } else {
+    document.getElementById('keychain-confirm').style.display = 'block';
   }
+};
+
+window.keychainConfirmSave = function() {
+  const form = document.createElement('form');
+  form.method = 'post';
+  form.action = location.pathname + '#settings';
+  const u = document.createElement('input');
+  u.type = 'text'; u.name = 'username'; u.autocomplete = 'username'; u.value = window._keychainUsername; u.style.display = 'none';
+  const p = document.createElement('input');
+  p.type = 'password'; p.name = 'password'; p.autocomplete = 'current-password'; p.value = window._keychainSecret; p.style.display = 'none';
+  form.append(u, p);
+  document.body.appendChild(form);
+  form.submit();
+};
+
+window.keychainConfirmCancel = function() {
+  document.getElementById('keychain-confirm').style.display = 'none';
 };
 
 window.copyBackup = async function() {
