@@ -4872,13 +4872,21 @@ impl Node {
             advertisement.to_fee_structure()
         };
 
-        // Validate proposed fees meet operator minimums
-        if let Err(e) = deposits_core::operation_validation::validate_fee_minimum(
-            &fees,
-            min_annual_bps,
-            min_fixed_per_period,
-        ) {
-            return (false, None, Some(format!("Fee validation failed: {}", e)));
+        // Check if this is a collateral deposit
+        let is_collateral = request.params.get("is_collateral")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        // Validate proposed fees meet operator minimums (skip for collateral deposits —
+        // the operator is depositing their own funds as backing, fees don't apply)
+        if !is_collateral {
+            if let Err(e) = deposits_core::operation_validation::validate_fee_minimum(
+                &fees,
+                min_annual_bps,
+                min_fixed_per_period,
+            ) {
+                return (false, None, Some(format!("Fee validation failed: {}", e)));
+            }
         }
 
         // Extract per-transfer fee schedule (optional, defaults to 2 sats fixed + 20 bps)
@@ -4897,11 +4905,6 @@ impl Node {
 
         // Create descriptor from pubkey (single-key deposit)
         let descriptor = format!("pk({})", deposit_pubkey_str);
-
-        // Check if this is a collateral deposit
-        let is_collateral = request.params.get("is_collateral")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
 
         // Open the deposit with co-signing
         match self.open_deposit(&ledger_id, &descriptor, Some(fees), transfer_fees, is_collateral).await {
