@@ -451,10 +451,14 @@ run_wallet_cmd() {
     fi
 
     # Run deposits-wallet with the node's seed
+    # Connect to all operator relays so wallet can reach any operator's daemon
     docker exec -e RUST_LOG=error "$container" deposits-wallet "$@" \
         --seed "$seed" \
         --network regtest \
         --relay ws://relay-alice:7777 \
+        --relay ws://relay-bob:7777 \
+        --relay ws://relay-charlie:7777 \
+        --relay ws://relay-diana:7777 \
         --data-dir /data/wallet 2>&1
 }
 
