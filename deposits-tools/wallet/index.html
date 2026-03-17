@@ -438,15 +438,13 @@ nav button:hover { color: var(--text); background: transparent; }
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
         <span style="color:var(--muted)">Ledger Explorer</span>
       </div>
+      <div id="ledger-browse" style="margin-bottom:12px;"></div>
       <div class="form-group">
-        <label>Ledger ID (or prefix)</label>
         <div style="display:flex; gap:6px;">
-          <input id="ledger-explorer-id" type="text" placeholder="64 hex chars or prefix" style="flex:1">
+          <input id="ledger-explorer-id" type="text" placeholder="Ledger ID (64 hex or prefix)" style="flex:1">
           <button onclick="exploreLedger()">Load</button>
         </div>
       </div>
-      <!-- Quick links to deposits' ledgers -->
-      <div id="ledger-quick-links" style="display:flex; flex-wrap:wrap; gap:4px; margin-bottom:12px;"></div>
       <div id="ledger-explorer-header" style="display:none; color:var(--muted); font-size:11px; margin-bottom:4px;"></div>
       <div id="ledger-explorer-viewport" style="display:none; height:500px; overflow-y:auto; border:1px solid var(--border); border-radius:6px; position:relative; transition:height 0.15s;">
         <div id="ledger-explorer-spacer" style="width:100%;"></div>
@@ -2674,13 +2672,70 @@ function decodeUpdate(base64Content) {
   return { seq, prevHash, curHash, timestamp, blockHeight, msgType, operatorHex, opName, opDisc, opFields };
 }
 
-function populateLedgerQuickLinks() {
-  const container = document.getElementById('ledger-quick-links');
-  const ids = [...new Set(state.deposits.map(d => d.ledger_id).filter(Boolean))];
-  if (ids.length === 0) { container.innerHTML = ''; return; }
-  container.innerHTML = ids.map(id =>
-    `<button style="font-size:10px; padding:2px 6px;" onclick="document.getElementById('ledger-explorer-id').value='${id}'; exploreLedger()">${id.slice(0,12)}...</button>`
-  ).join('');
+async function populateLedgerQuickLinks() {
+  const container = document.getElementById('ledger-browse');
+
+  // My deposits' ledgers (always show)
+  const myIds = [...new Set(state.deposits.map(d => d.ledger_id).filter(Boolean))];
+  const myAliases = {};
+  for (const d of state.deposits) {
+    if (d.ledger_id) myAliases[d.ledger_id] = (myAliases[d.ledger_id] || []).concat(d.alias);
+  }
+
+  // Fetch all advertisements
+  const filter = { kinds: [39100] };
+  const events = await fetchEvents(filter, 10000);
+  const ads = [];
+  for (const ev of events) {
+    try {
+      const ad = JSON.parse(ev.content);
+      if (ad.network && ad.network !== state.network) continue;
+      ads.push(ad);
+    } catch {}
+  }
+
+  let html = '';
+
+  // My ledgers first
+  if (myIds.length > 0) {
+    html += '<div style="color:var(--muted); font-size:11px; margin-bottom:4px;">Your deposits</div>';
+    html += '<div style="display:flex; flex-wrap:wrap; gap:4px; margin-bottom:10px;">';
+    for (const id of myIds) {
+      const ad = ads.find(a => a.ledger_id === id);
+      const name = ad?.operator_name || id.slice(0, 8) + '...';
+      const aliases = myAliases[id]?.join(', ') || '';
+      html += `<button style="font-size:11px; padding:3px 8px;" onclick="openLedgerTab('${id}')" title="${id}">${esc(name)}${aliases ? ' · ' + esc(aliases) : ''}</button>`;
+    }
+    html += '</div>';
+  }
+
+  // All ledgers grouped by operator
+  if (ads.length > 0) {
+    const byOp = new Map();
+    for (const ad of ads) {
+      const name = ad.operator_name || ad.operator_pubkey?.slice(0, 12) || '?';
+      if (!byOp.has(name)) byOp.set(name, []);
+      byOp.get(name).push(ad);
+    }
+
+    html += '<div style="color:var(--muted); font-size:11px; margin-bottom:4px;">All ledgers</div>';
+    for (const [name, opAds] of byOp) {
+      html += `<div style="margin-bottom:6px;"><span style="font-size:11px; font-weight:600;">${esc(name)}</span> `;
+      html += '<span style="display:inline-flex; flex-wrap:wrap; gap:3px;">';
+      for (const ad of opAds) {
+        const lid = ad.ledger_id || '';
+        const headroom = (ad.available_headroom_sats || 0).toLocaleString();
+        const isMine = myIds.includes(lid);
+        const border = isMine ? 'border-color:var(--balance);' : '';
+        html += `<button style="font-size:10px; padding:2px 6px; ${border}" onclick="openLedgerTab('${lid}')" title="${lid}">₿${headroom}</button>`;
+      }
+      html += '</span></div>';
+    }
+  } else if (myIds.length === 0) {
+    html = '<div style="color:var(--muted); font-size:11px;">No ledgers found. Connect to a relay first.</div>';
+  }
+
+  container.innerHTML = html;
 }
 
 window.openLedgerTab = function(ledgerId) {
