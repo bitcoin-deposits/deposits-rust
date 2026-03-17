@@ -95,7 +95,7 @@ pub async fn process_deposit_open_request(
     let descriptor = format!("pk({})", deposit_pubkey_str);
 
     // Open the deposit with co-signing
-    match node.open_deposit(ledger_id, &descriptor, Some(fees), None).await {
+    match node.open_deposit(ledger_id, &descriptor, Some(fees), None, false).await {
         Ok(deposit) => {
             let result = serde_json::json!({
                 "deposit_pubkey": deposit_pubkey_str,

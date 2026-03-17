@@ -349,12 +349,79 @@ add_quorum_members() {
 }
 
 # ============================================================================
-# Phase 3c: Rotate reserves to quorum-based Taproot
+# Phase 3c: Establish collateral deposits
+# ============================================================================
+
+establish_collateral() {
+    log_info ""
+    log_info "=== Phase 3c: Establish Collateral Deposits ==="
+    log_info "(Each operator opens and funds collateral deposits on quorum member ledgers)"
+    echo ""
+
+    local collateral_amount=$((RESERVES_AMOUNT / 6))  # 1/6th of reserves per member
+    log_info "Collateral per member: $collateral_amount sats (1/6 of $RESERVES_AMOUNT)"
+    echo ""
+
+    for op in $OPERATORS; do
+        for member in $OPERATORS; do
+            if [ "$op" != "$member" ]; then
+                # Operator opens a collateral deposit on member's first ledger
+                local member_suffix=""
+                [ "$LEDGERS_PER_OP" -gt 1 ] && member_suffix="_1"
+                local member_ledger_id=$(get_value "ledger_id_${member}${member_suffix}")
+
+                if [ -z "$member_ledger_id" ]; then
+                    log_warn "No ledger for $member, skipping collateral"
+                    continue
+                fi
+
+                log_info "$op opening collateral deposit on $member's ledger..."
+
+                # Open collateral deposit using the operator's wallet identity
+                local open_output=$(run_wallet_cmd "$op" open "$member_ledger_id" "$collateral_amount" \
+                    --alias "collateral-$member" --collateral --skip-cosign-verify 2>&1)
+
+                if echo "$open_output" | grep -q "created\|Fund with"; then
+                    # Extract funding address
+                    local fund_addr=$(echo "$open_output" | grep -E '^  bcrt1|^bcrt1' | head -1 | tr -d ' ')
+                    if [ -n "$fund_addr" ]; then
+                        bitcoin_cli -rpcwallet=faucet sendtoaddress "$fund_addr" "$(echo "scale=8; $collateral_amount / 100000000" | bc)" >/dev/null 2>&1
+                        log_success "$op collateral on $member: $collateral_amount sats"
+                    else
+                        log_warn "$op collateral on $member: created but no funding address"
+                    fi
+                else
+                    log_warn "$op collateral on $member failed: $(echo "$open_output" | head -1)"
+                fi
+            fi
+        done
+    done
+
+    mine_blocks 1
+
+    # Wait for deposits to complete
+    sleep 5
+    log_info "Bumping operators to complete collateral deposits..."
+    for op in $OPERATORS; do
+        for member in $OPERATORS; do
+            if [ "$op" != "$member" ]; then
+                local member_suffix=""
+                [ "$LEDGERS_PER_OP" -gt 1 ] && member_suffix="_1"
+                local member_ledger_id=$(get_value "ledger_id_${member}${member_suffix}")
+                bump_operator "$member" "$member_ledger_id" 2>/dev/null || true
+            fi
+        done
+    done
+    mine_blocks 1
+}
+
+# ============================================================================
+# Phase 3d: Rotate reserves to quorum-based Taproot
 # ============================================================================
 
 rotate_reserves_to_quorum() {
     log_info ""
-    log_info "=== Phase 3c: Rotate Reserves to Quorum-Based Taproot ==="
+    log_info "=== Phase 3d: Rotate Reserves to Quorum-Based Taproot ==="
     echo ""
 
     for op in $OPERATORS; do
@@ -457,6 +524,7 @@ main() {
     start_nostr_watchers
 
     add_quorum_members
+    establish_collateral
     rotate_reserves_to_quorum
 
     # Give watchers a moment to settle

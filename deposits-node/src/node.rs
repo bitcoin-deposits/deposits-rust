@@ -4898,8 +4898,13 @@ impl Node {
         // Create descriptor from pubkey (single-key deposit)
         let descriptor = format!("pk({})", deposit_pubkey_str);
 
+        // Check if this is a collateral deposit
+        let is_collateral = request.params.get("is_collateral")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
         // Open the deposit with co-signing
-        match self.open_deposit(&ledger_id, &descriptor, Some(fees), transfer_fees).await {
+        match self.open_deposit(&ledger_id, &descriptor, Some(fees), transfer_fees, is_collateral).await {
             Ok(deposit) => {
                 let result = serde_json::json!({
                     "deposit_pubkey": deposit_pubkey_str,
@@ -9269,6 +9274,7 @@ impl Node {
         descriptor: &str,
         fees: Option<FeeStructure>,
         transfer_fees: Option<deposits_core::TransferFeeSchedule>,
+        is_collateral: bool,
     ) -> Result<Deposit, Error> {
         let deposit_id = compute_deposit_id(descriptor);
 
@@ -9308,7 +9314,7 @@ impl Node {
                 payment_hash: None,
                 invoice: None,
                 cosigner_guarantee_signature: None,
-                is_collateral: false,
+                is_collateral,
             };
 
             let block_height = self.wallet.get_block_height().unwrap_or(0);
@@ -10903,7 +10909,7 @@ impl Node {
             )))?;
 
         // First, open the deposit if it doesn't already exist (with co-signing)
-        match self.open_deposit(&reserves_id, &offer.descriptor, offer.fees.clone(), offer.transfer_fees.clone()).await {
+        match self.open_deposit(&reserves_id, &offer.descriptor, offer.fees.clone(), offer.transfer_fees.clone(), false).await {
             Ok(_) => {
                 tracing::info!(
                     "Opened deposit for {} in ledger {}",
