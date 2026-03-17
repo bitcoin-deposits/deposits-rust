@@ -377,9 +377,15 @@ establish_collateral() {
 
                 log_info "$op opening collateral deposit on $member's ledger..."
 
-                # Open collateral deposit using the operator's wallet identity
-                local open_output=$(run_wallet_cmd "$op" open "$member_ledger_id" "$collateral_amount" \
-                    --alias "collateral-$member" --collateral --skip-cosign-verify 2>&1)
+                # Open collateral deposit — connect to member's relay for the request
+                local member_relay="ws://relay-${member}:7777"
+                local op_seed=$(get_node_seed "$op")
+                local open_output=$(docker exec -e RUST_LOG=error "$op" deposits-wallet open \
+                    "$member_ledger_id" "$collateral_amount" \
+                    --alias "collateral-$member" --collateral --skip-cosign-verify \
+                    --seed "$op_seed" --network regtest \
+                    --relay "$member_relay" \
+                    --data-dir /data/wallet 2>&1)
 
                 if echo "$open_output" | grep -q "created\|Fund with"; then
                     # Extract funding address
