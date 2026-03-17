@@ -2733,33 +2733,53 @@ async fn collateral_lock(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         node.node_id
     };
 
-    println!("Creating collateral lock...");
+    println!("Creating collateral lock via Nostr...");
     println!("  Ledger: {}", ledger_id);
     println!("  Deposit: {}", deposit_pubkey);
     println!("  Amount: {} msats", amount_msats);
     println!("  Lock until block: {} (current: {}, +{} blocks)", lock_until_block, current_block, lock_blocks);
     println!("  Requesting operator: {}", requesting_operator);
 
-    let attestation = node.lock_collateral(
+    // Send collateral_lock request via Nostr
+    // NOTE: current handler expects deposit_secret (private key) — this is a known
+    // security concern that should be replaced with signature-based auth in the future.
+    let request_params = serde_json::json!({
+        "deposit_secret": hex::encode(deposit_secret.secret_bytes()),
+        "amount_msats": amount_msats,
+        "lock_blocks": lock_blocks,
+        "requesting_operator": hex::encode(requesting_operator.serialize()),
+    });
+
+    let request_id = node.nostr.send_ledger_request(
         &ledger_id,
-        &descriptor,
-        &deposit_secret,
-        amount_msats,
-        lock_until_block,
-        requesting_operator,
+        "collateral_lock",
+        request_params,
     ).await?;
 
-    println!("\nCollateral locked!");
-    println!("  Total locked: {} msats", attestation.amount);
-    println!("  Lock expires: block {}", attestation.lock_until_block);
-    println!("  Attestation for: {}", attestation.quorum_member);
+    println!("  Request ID: {}...", &request_id[..16]);
 
-    // Output the attestation as JSON for the requesting operator to use
-    let attestation_json = serde_json::to_string(&attestation)?;
-    println!("\nAttestation (record on requesting operator's ledger):");
-    println!("ATTESTATION_JSON:{}", attestation_json);
-    // Also output base64 for easier scripting
-    println!("attestation_b64: {}", base64::engine::general_purpose::STANDARD.encode(&attestation_json));
+    // Wait for response
+    match node.nostr.wait_for_response(&request_id, 30000).await {
+        Ok(response) => {
+            if response.success {
+                if let Some(result) = &response.result {
+                    println!("\nCollateral locked!");
+                    // Extract attestation from response
+                    if let Some(att_str) = result.as_str().or_else(|| result.get("attestation").and_then(|v| v.as_str())) {
+                        println!("ATTESTATION_JSON:{}", att_str);
+                    } else {
+                        println!("ATTESTATION_JSON:{}", result);
+                    }
+                } else {
+                    println!("\nCollateral locked! (no attestation in response)");
+                }
+            } else {
+                let error = response.error.as_deref().unwrap_or("Unknown error");
+                return Err(format!("Collateral lock failed: {}", error).into());
+            }
+        }
+        Err(e) => return Err(format!("Timeout waiting for collateral_lock response: {}", e).into()),
+    }
 
     Ok(())
 }

@@ -12,7 +12,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/_common.sh"
 
-DC_LIGHTNING="docker compose -f $BDK_DIR/docker-compose.yml --profile lightning"
+DC_LIGHTNING="docker compose -f $SCRIPT_DIR/docker-compose.yml --profile lightning"
 
 QUICK=false
 
@@ -83,7 +83,7 @@ fi
 
 # Start infrastructure
 log_info "Starting infrastructure..."
-$DC_LIGHTNING up -d bitcoin electrs relay-alice relay-bob relay-charlie relay-diana relay-ledgers
+$DC_LIGHTNING up -d bitcoin electrs relay-alice relay-bob relay-charlie relay-diana relay-ledgers wallet
 
 wait_for_bitcoin
 wait_for_electrs
