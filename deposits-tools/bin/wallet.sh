@@ -20,8 +20,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BDK_DIR="$(dirname "$SCRIPT_DIR")"
-REPO_ROOT="$(dirname "$(dirname "$BDK_DIR")")"
+REPO_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
 
 # Default configuration
 RELAY="${WALLET_RELAY:-ws://localhost:7801}"
