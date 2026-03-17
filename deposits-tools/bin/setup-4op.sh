@@ -382,16 +382,17 @@ establish_collateral() {
                 local op_seed=$(get_node_seed "$op")
                 local open_output=$(docker exec -e RUST_LOG=error "$op" deposits-wallet open \
                     "$member_ledger_id" "$collateral_amount" \
-                    --alias "collateral-$member" --collateral --skip-cosign-verify \
+                    --alias "collateral-${op}-on-${member}" --collateral --skip-cosign-verify \
                     --seed "$op_seed" --network regtest \
                     --relay "$member_relay" \
-                    --data-dir /data/wallet 2>&1)
+                    --data-dir /data/wallet 2>&1 || true)
 
                 if echo "$open_output" | grep -q "created\|Fund with"; then
                     # Extract funding address
                     local fund_addr=$(echo "$open_output" | grep -E '^  bcrt1|^bcrt1' | head -1 | tr -d ' ')
                     if [ -n "$fund_addr" ]; then
-                        bitcoin_cli -rpcwallet=faucet sendtoaddress "$fund_addr" "$(echo "scale=8; $collateral_amount / 100000000" | bc)" >/dev/null 2>&1
+                        local btc_amount=$(printf "%.8f" "$(echo "scale=8; $collateral_amount / 100000000" | bc)")
+                        bitcoin_cli -rpcwallet=faucet sendtoaddress "$fund_addr" "$btc_amount" >/dev/null 2>&1 || true
                         log_success "$op collateral on $member: $collateral_amount sats"
                     else
                         log_warn "$op collateral on $member: created but no funding address"
@@ -438,7 +439,7 @@ establish_collateral() {
                 # Op locks their collateral deposit on member's ledger
                 # The deposit was opened with op's seed, so op runs the lock command
                 local lock_output=$(run_bdk_cmd "$op" collateral lock \
-                    "$member_ledger_id" "$collateral_msats" "$lock_blocks" "$op_node_id" 2>&1)
+                    "$member_ledger_id" "$collateral_msats" "$lock_blocks" "$op_node_id" 2>&1 || true)
 
                 local attestation_json=$(echo "$lock_output" | grep "^ATTESTATION_JSON:" | sed 's/^ATTESTATION_JSON://')
 
@@ -449,7 +450,7 @@ establish_collateral() {
                     local op_reserves_id=$(get_value "reserves_id_${op}${op_suffix}")
 
                     local record_output=$(run_bdk_cmd "$op" collateral record \
-                        "$op_reserves_id" "$attestation_json" 2>&1)
+                        "$op_reserves_id" "$attestation_json" 2>&1 || true)
 
                     if echo "$record_output" | grep -q "recorded\|Attestation"; then
                         log_success "$op locked collateral on $member, attestation recorded"
