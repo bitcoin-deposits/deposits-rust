@@ -4877,16 +4877,13 @@ impl Node {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        // Validate proposed fees meet operator minimums (skip for collateral deposits —
-        // the operator is depositing their own funds as backing, fees don't apply)
-        if !is_collateral {
-            if let Err(e) = deposits_core::operation_validation::validate_fee_minimum(
-                &fees,
-                min_annual_bps,
-                min_fixed_per_period,
-            ) {
-                return (false, None, Some(format!("Fee validation failed: {}", e)));
-            }
+        // Validate proposed fees meet operator minimums
+        if let Err(e) = deposits_core::operation_validation::validate_fee_minimum(
+            &fees,
+            min_annual_bps,
+            min_fixed_per_period,
+        ) {
+            return (false, None, Some(format!("Fee validation failed: {}", e)));
         }
 
         // Extract per-transfer fee schedule (optional, defaults to 2 sats fixed + 20 bps)
@@ -5031,25 +5028,13 @@ impl Node {
             advertisement.to_fee_structure()
         };
 
-        // Check if deposit exists and is collateral (skip fee validation for collateral)
-        let is_collateral_deposit = {
-            let descriptor = format!("pk({})", deposit_pubkey_str);
-            let deposit_id = compute_deposit_id(&descriptor);
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            ledgers.get(&resolved_ledger_id)
-                .and_then(|l| l.read().unwrap().state.deposits.get(&deposit_id).map(|d| d.is_collateral))
-                .unwrap_or(false)
-        };
-
-        // Validate proposed fees meet operator minimums (skip for collateral deposits)
-        if !is_collateral_deposit {
-            if let Err(e) = deposits_core::operation_validation::validate_fee_minimum(
-                &fees,
-                min_annual_bps,
-                min_fixed_per_period,
-            ) {
-                return (false, None, Some(format!("Fee validation failed: {}", e)));
-            }
+        // Validate proposed fees meet operator minimums
+        if let Err(e) = deposits_core::operation_validation::validate_fee_minimum(
+            &fees,
+            min_annual_bps,
+            min_fixed_per_period,
+        ) {
+            return (false, None, Some(format!("Fee validation failed: {}", e)));
         }
 
         // Sync wallet to get current block height

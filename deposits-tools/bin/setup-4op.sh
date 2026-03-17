@@ -377,7 +377,7 @@ establish_collateral() {
 
                 log_info "$op opening collateral deposit on $member's ledger..."
 
-                # Open collateral deposit — connect to member's relay for the request
+                # Open collateral deposit — connect to member's relay + ledger relay for fee discovery
                 local member_relay="ws://relay-${member}:7777"
                 local op_seed=$(get_node_seed "$op")
                 local open_output=$(docker exec -e RUST_LOG=error "$op" deposits-wallet open \
@@ -385,6 +385,7 @@ establish_collateral() {
                     --alias "collateral-${op}-on-${member}" --collateral --skip-cosign-verify \
                     --seed "$op_seed" --network regtest \
                     --relay "$member_relay" \
+                    --relay ws://relay-ledgers:7777 \
                     --data-dir /data/wallet 2>&1 || true)
 
                 if echo "$open_output" | grep -q "created\|Fund with"; then
