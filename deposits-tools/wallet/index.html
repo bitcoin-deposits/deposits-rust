@@ -1312,35 +1312,34 @@ async function discoverLedgers() {
           const memberPk = memberField.hex.replace('...', '');
           const amount = amtField.u64 || 0;
           const collatLedger = ledgerField ? ledgerField.hex.replace('...', '') : '';
-          // Dedup by (collateral_operator, member, collateral_ledger) — same attestation
-          // may appear on multiple ledgers of the same operator
-          const dedupKey = collatOpPk + ':' + memberPk + ':' + collatLedger;
-          // Look up the operator node being backed
+          // Dedup per-ledger: (d_tag_ledger, member, collateral_ledger)
+          // Each ledger accumulates its own attestations independently
+          const dedupKey = ledgerId + ':' + memberPk + ':' + collatLedger;
           const backedNode = graphNodes.find(n =>
             n.pubkey === collatOpPk || n.pubkey.startsWith(collatOpPk) || collatOpPk.startsWith(n.pubkey)
           );
           if (backedNode) {
-            if (!attestationDedup.has(dedupKey)) attestationDedup.set(dedupKey, { opNode: backedNode, memberPk, amount });
-            else attestationDedup.get(dedupKey).amount = amount; // overwrite with latest
+            if (!attestationDedup.has(dedupKey)) {
+              attestationDedup.set(dedupKey, { opNode: backedNode, memberPk, amount, ledgerId, collatLedger });
+            } else {
+              attestationDedup.get(dedupKey).amount = amount;
+            }
           }
         }
       }
     } catch {}
   }
 
-  // Apply deduplicated collateral attestations and build per-ledger map
-  window._ledgerCollateral = {};
-  for (const [dedupKey, { opNode, memberPk, amount }] of attestationDedup) {
+  // Apply deduplicated collateral attestations — per-ledger totals
+  window._ledgerCollateral = {};       // ledger_id → total collateral sats
+  window._ledgerCollateralMembers = {}; // ledger_id → Set of collateral_ledger IDs (for overlap detection)
+  for (const [, { opNode, memberPk, amount, ledgerId, collatLedger }] of attestationDedup) {
     const amtSats = Math.floor(amount / 1000);
     opNode.collateralAtRisk += amtSats;
-    // Per-ledger: distribute evenly across the operator's ledgers
-    // (attestation backs the operator, not a specific ledger)
-    if (opNode.ads.length > 0) {
-      const perLedger = Math.floor(amtSats / opNode.ads.length);
-      for (const ad of opNode.ads) {
-        const lid = ad.ledger_id || '';
-        window._ledgerCollateral[lid] = (window._ledgerCollateral[lid] || 0) + perLedger;
-      }
+    if (ledgerId) {
+      window._ledgerCollateral[ledgerId] = (window._ledgerCollateral[ledgerId] || 0) + amtSats;
+      if (!window._ledgerCollateralMembers[ledgerId]) window._ledgerCollateralMembers[ledgerId] = new Set();
+      if (collatLedger) window._ledgerCollateralMembers[ledgerId].add(collatLedger);
     }
     const memberNode = graphNodes.find(n =>
       n.pubkey === memberPk || n.pubkey.startsWith(memberPk) || memberPk.startsWith(n.pubkey)
@@ -1538,14 +1537,13 @@ function showNodeInfo(node) {
   let details = '';
   details += `<div class="kv"><span class="k">Quorum</span><span class="v">${neighbors.length} — ${neighbors.map(n => esc(n.name)).join(', ') || 'none'}</span></div>`;
 
-  // Per-ledger: collateral vs reserves
+  // Per-ledger: collateral vs reserves, with peer reuse detection
+  const lcm = window._ledgerCollateralMembers || {};
   for (const ad of node.ads) {
     const lid = ad.ledger_id || '';
     const reserves = ad.reserves_amount_sats || 0;
     const obligations = ad.total_obligations_sats || 0;
-    // Compute collateral for this specific ledger from attestation data
-    let ledgerCollateral = 0;
-    if (window._ledgerCollateral) ledgerCollateral = window._ledgerCollateral[lid] || 0;
+    const ledgerCollateral = (window._ledgerCollateral && window._ledgerCollateral[lid]) || 0;
     const ratio = reserves > 0 ? Math.round(ledgerCollateral / reserves * 100) : 0;
     const ratioColor = ratio >= 100 ? 'var(--balance)' : ratio >= 50 ? 'var(--yellow)' : 'var(--red)';
     details += `<div style="margin-top:4px; padding:4px 0; border-top:1px solid var(--border);">`;
@@ -1553,6 +1551,25 @@ function showNodeInfo(node) {
     details += `<div class="kv"><span class="k">Collateral</span><span class="v amt">₿${ledgerCollateral.toLocaleString()} <span style="color:${ratioColor}">(${ratio}%)</span></span></div>`;
     details += `<div class="kv"><span class="k">Reserves</span><span class="v amt">₿${reserves.toLocaleString()}</span></div>`;
     if (obligations > 0) details += `<div class="kv"><span class="k">Obligations</span><span class="v amt">₿${obligations.toLocaleString()}</span></div>`;
+
+    // Peer reuse: check if this ledger's collateral sources are shared with other ledgers
+    const myMembers = lcm[lid];
+    if (myMembers && myMembers.size > 0) {
+      const shared = [];
+      for (const otherAd of node.ads) {
+        if (otherAd.ledger_id === lid) continue;
+        const otherMembers = lcm[otherAd.ledger_id];
+        if (!otherMembers) continue;
+        const overlap = [...myMembers].filter(m => otherMembers.has(m));
+        if (overlap.length > 0) {
+          shared.push({ lid: otherAd.ledger_id, count: overlap.length, total: myMembers.size });
+        }
+      }
+      if (shared.length > 0) {
+        const pct = Math.round(shared.reduce((s, x) => s + x.count, 0) / myMembers.size * 100);
+        details += `<div style="color:var(--yellow); font-size:10px;">${pct}% collateral shared with ${shared.length} other ledger${shared.length > 1 ? 's' : ''}</div>`;
+      }
+    }
     details += `</div>`;
   }
 
