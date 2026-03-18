@@ -63,7 +63,7 @@ types:
 
       Co-signing: the partner signs SHA256(tag || tag || partner_signing_data || member_ledger_hash)
       where tag = SHA256("deposits/cosign") and partner_signing_data =
-      message || message_type || sequence || previous_hash || timestamp.
+      message || message_type || sequence || previous_hash.
       Note: current_hash is NOT in partner_signing_data — it is derived after co-signing.
     seq:
       - id: records
@@ -91,27 +91,24 @@ types:
       current_hash:
         doc: "32-byte hash: SHA256(seq || prev_hash || message [|| member_ledger_hash]) (type 12)"
         value: "records[6].value"
-      timestamp:
-        doc: "Unix timestamp in seconds (type 14, u64)"
-        value: "records[7].value"
       partner_signature:
         doc: "64-byte ECDSA co-signature from quorum member (type 16)"
-        value: "records[8].value"
+        value: "records[7].value"
       operator_signature:
         doc: "64-byte Schnorr signature from operator (type 18)"
-        value: "records[9].value"
+        value: "records[8].value"
       block_height:
         doc: "Block height when update was created (type 20, u32, optional)"
-        value: "records[10].value"
+        value: "records[9].value"
       block_hash:
         doc: "32-byte block hash at time of creation (type 22, optional)"
-        value: "records[11].value"
+        value: "records[10].value"
       cosigner_pubkey:
         doc: "33-byte compressed pubkey of the co-signing quorum member (type 24, optional)"
-        value: "records[12].value"
+        value: "records[11].value"
       member_ledger_hash:
         doc: "32-byte tip hash of the co-signer's own ledger at time of signing (type 26, optional). Included in current_hash for causal ordering."
-        value: "records[13].value"
+        value: "records[12].value"
 
   ledger_operation:
     doc: |
@@ -179,7 +176,6 @@ types:
   #   48  = operator_sig (64 bytes)
   #   50  = channel_id (32 bytes)
   #   52  = close_reason (string)
-  #   54  = timestamp (u64)
   #
   # Ledger fields:
   #   56  = operator_id (33 bytes)

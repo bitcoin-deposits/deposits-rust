@@ -2092,7 +2092,6 @@ impl BinaryCodec for SignedLedgerUpdate {
         write_u64(w, self.sequence_number)?;
         write_32(w, &self.previous_hash)?;
         write_32(w, &self.current_hash)?;
-        write_u64(w, self.timestamp)?;
         write_u32(w, self.block_height)?;
         write_32(w, &self.block_hash)?;
         write_64(w, &self.partner_signature)?;
@@ -2110,7 +2109,6 @@ impl BinaryCodec for SignedLedgerUpdate {
         let sequence_number = read_u64(r)?;
         let previous_hash = read_32(r)?;
         let current_hash = read_32(r)?;
-        let timestamp = read_u64(r)?;
         let block_height = read_u32(r)?;
         let block_hash = read_32(r)?;
         let partner_signature = read_64(r)?;
@@ -2126,7 +2124,6 @@ impl BinaryCodec for SignedLedgerUpdate {
             sequence_number,
             previous_hash,
             current_hash,
-            timestamp,
             block_height,
             block_hash,
             partner_signature,
@@ -4597,7 +4594,6 @@ mod tests {
             sequence_number: 1,
             previous_hash: [0xCC; 32],
             current_hash: [0xDD; 32],
-            timestamp: 1234567890,
             block_height: 12345,
             block_hash: [0x11; 32],
             partner_signature: [0xFF; 64],

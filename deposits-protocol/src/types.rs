@@ -1439,8 +1439,6 @@ pub struct SignedLedgerUpdate {
     /// Hash of current ledger state after this update.
     #[serde(with = "serde_32")]
     pub current_hash: [u8; 32],
-    /// Timestamp when operator created this update.
-    pub timestamp: u64,
     /// Block height when this update was created.
     #[serde(default)]
     pub block_height: u32,
@@ -1502,7 +1500,7 @@ impl SignedLedgerUpdate {
 
     /// Compute the data that the partner signs (update content only, no operator signature).
     ///
-    /// Partner signs: message || message_type || sequence || prev_hash || timestamp
+    /// Partner signs: message || message_type || sequence || prev_hash
     /// Does NOT include current_hash — the hash is finalized after co-signing
     /// (it incorporates member_ledger_hash for causal ordering).
     /// Partner signs ONLY the content, NOT any operator signature.
@@ -1513,7 +1511,6 @@ impl SignedLedgerUpdate {
         data.extend_from_slice(&self.message_type.to_le_bytes());
         data.extend_from_slice(&self.sequence_number.to_le_bytes());
         data.extend_from_slice(&self.previous_hash);
-        data.extend_from_slice(&self.timestamp.to_le_bytes());
         data
     }
 
@@ -2245,7 +2242,6 @@ mod signed_update_fields {
     pub const SEQUENCE_NUMBER: u64 = 8;
     pub const PREVIOUS_HASH: u64 = 10;
     pub const CURRENT_HASH: u64 = 12;
-    pub const TIMESTAMP: u64 = 14;
     pub const PARTNER_SIGNATURE: u64 = 16;
     pub const OPERATOR_SIGNATURE: u64 = 18;
     pub const BLOCK_HEIGHT: u64 = 20;
@@ -2264,7 +2260,6 @@ impl TlvEncode for SignedLedgerUpdate {
             .u64_field(signed_update_fields::SEQUENCE_NUMBER, self.sequence_number)
             .bytes_field(signed_update_fields::PREVIOUS_HASH, &self.previous_hash)
             .bytes_field(signed_update_fields::CURRENT_HASH, &self.current_hash)
-            .u64_field(signed_update_fields::TIMESTAMP, self.timestamp)
             .u32_field(signed_update_fields::BLOCK_HEIGHT, self.block_height)
             .bytes_field(signed_update_fields::BLOCK_HASH, &self.block_hash)
             .bytes_field(signed_update_fields::PARTNER_SIGNATURE, &self.partner_signature)
@@ -2290,7 +2285,6 @@ impl TlvDecode for SignedLedgerUpdate {
             sequence_number: reader.read_u64(signed_update_fields::SEQUENCE_NUMBER)?,
             previous_hash: reader.read_bytes(signed_update_fields::PREVIOUS_HASH)?,
             current_hash: reader.read_bytes(signed_update_fields::CURRENT_HASH)?,
-            timestamp: reader.read_u64(signed_update_fields::TIMESTAMP)?,
             block_height: reader.read_u32_opt(signed_update_fields::BLOCK_HEIGHT)?.unwrap_or(0),
             block_hash: reader.read_bytes_opt(signed_update_fields::BLOCK_HASH)?.unwrap_or([0u8; 32]),
             partner_signature: reader.read_bytes(signed_update_fields::PARTNER_SIGNATURE)?,
@@ -2808,7 +2802,6 @@ mod tests {
             sequence_number: 1,
             previous_hash: [0u8; 32],
             current_hash: [0u8; 32],
-            timestamp: 0,
             block_height: 0,
             block_hash: [0u8; 32],
             partner_signature: [0u8; 64],
@@ -2832,7 +2825,6 @@ mod tests {
             sequence_number: 1,
             previous_hash: [0u8; 32],
             current_hash: [0u8; 32],
-            timestamp: 1000,
             block_height: 0,
             block_hash: [0u8; 32],
             partner_signature: [0u8; 64],

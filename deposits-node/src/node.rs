@@ -995,15 +995,10 @@ impl Node {
                 .unwrap_or(0)
         };
 
-        // Paginate forward from our last known timestamp. The relay returns
-        // newest-first capped by maxFilterLimit per query, so we advance
-        // `since` after each page to walk forward through the history.
-        let mut cursor_ts: u64 = {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            ledgers.get(ledger_id)
-                .and_then(|arc| arc.read().unwrap().history.last().map(|u| u.timestamp.saturating_sub(Self::RELAY_FETCH_CLOCK_SKEW_SECS)))
-                .unwrap_or(0)
-        };
+        // Paginate forward using Nostr event created_at timestamps.
+        // The relay returns newest-first capped by maxFilterLimit per query,
+        // so we advance `since` after each page to walk forward through history.
+        let mut cursor_ts: u64 = 0;
 
         let mut all_fetched: Vec<deposits_core::SignedLedgerUpdate> = Vec::new();
         let mut pages = 0u32;
@@ -1031,10 +1026,11 @@ impl Node {
             let mut page_max_ts = cursor_ts;
             let mut page_count = 0usize;
             for event in events.iter() {
+                let event_ts = event.created_at.as_u64();
                 if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
                     if let Ok(update) = deposits_core::SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
-                        if update.timestamp > page_max_ts {
-                            page_max_ts = update.timestamp;
+                        if event_ts > page_max_ts {
+                            page_max_ts = event_ts;
                         }
                         all_fetched.push(update);
                         page_count += 1;
@@ -3427,7 +3423,6 @@ impl Node {
             sequence_number: sequence,
             previous_hash: our_armed.current_hash,
             current_hash: new_hash,
-            timestamp: deposits_core::now_unix_timestamp(),
             block_height: current_block,
             block_hash: current_block_hash,
         };
@@ -3499,7 +3494,6 @@ impl Node {
             sequence_number: sequence,
             previous_hash: our_armed.current_hash,
             current_hash: new_hash,
-            timestamp: deposits_core::now_unix_timestamp(),
             block_height: current_block,
             block_hash: current_block_hash,
         };
@@ -4640,7 +4634,6 @@ impl Node {
             sequence_number: sequence,
             previous_hash: our_latest.current_hash,
             current_hash: new_hash,
-            timestamp: deposits_core::now_unix_timestamp(),
             block_height: current_block,
             block_hash,
         };
@@ -4768,8 +4761,7 @@ impl Node {
                 sequence_number: sequence,
                 previous_hash: our_latest.current_hash,
                 current_hash: new_hash,
-                timestamp: deposits_core::now_unix_timestamp(),
-                block_height: current_block,
+                    block_height: current_block,
                 block_hash,
             };
 

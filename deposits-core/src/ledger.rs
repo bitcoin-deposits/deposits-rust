@@ -942,7 +942,6 @@ impl Ledger {
             sequence_number: sequence,
             previous_hash: prev_hash,
             current_hash: new_hash,
-            timestamp: crate::now_unix_timestamp(),
             block_height,
             block_hash,
         };

@@ -716,7 +716,6 @@ pub async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error:
         sequence_number: sequence,
         previous_hash: last_valid_hash,
         current_hash: new_hash,
-        timestamp: deposits_core::now_unix_timestamp(),
         block_height: current_block_height,
         block_hash: entropy_block_hash,
     };
@@ -885,7 +884,6 @@ pub async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error:
         sequence_number: sequence,
         previous_hash: our_armed.current_hash,
         current_hash: new_hash,
-        timestamp: deposits_core::now_unix_timestamp(),
         block_height: current_block_height,
         block_hash: [0u8; 32],
     };
@@ -1132,7 +1130,6 @@ pub async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error:
         sequence_number: sequence,
         previous_hash: last_valid_hash,
         current_hash: new_hash,
-        timestamp: deposits_core::now_unix_timestamp(),
         block_height: current_block_height,
         block_hash: [0u8; 32],
     };
@@ -1315,7 +1312,6 @@ pub async fn recovery_rebuild_quorum_add(ledger_id: &str, args: &[String]) -> Re
         sequence_number: sequence,
         previous_hash: our_latest.current_hash,
         current_hash: new_hash,
-        timestamp: deposits_core::now_unix_timestamp(),
         block_height: current_block_height,
         block_hash: [0u8; 32],
     };
@@ -1472,7 +1468,6 @@ pub async fn recovery_rebuild_attestation(ledger_id: &str, args: &[String]) -> R
         sequence_number: sequence,
         previous_hash: our_latest.current_hash,
         current_hash: new_hash,
-        timestamp: deposits_core::now_unix_timestamp(),
         block_height: current_block_height,
         block_hash: [0u8; 32],
     };
@@ -1763,7 +1758,6 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
         sequence_number: sequence,
         previous_hash: latest.current_hash,
         current_hash: new_hash,
-        timestamp: deposits_core::now_unix_timestamp(),
         block_height: current_block_height,
         block_hash: [0u8; 32],
     };
@@ -1986,8 +1980,7 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
             sequence_number: sequence,
             previous_hash: our_latest.current_hash,
             current_hash: new_hash,
-            timestamp: deposits_core::now_unix_timestamp(),
-            block_height: current_block_height,
+                block_height: current_block_height,
             block_hash: entropy_block_hash,
         };
 
@@ -2046,8 +2039,7 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
             sequence_number: sequence,
             previous_hash: our_latest.current_hash,
             current_hash: new_hash,
-            timestamp: deposits_core::now_unix_timestamp(),
-            block_height: current_block_height,
+                block_height: current_block_height,
             block_hash: entropy_block_hash,
         };
 
@@ -2243,8 +2235,7 @@ pub async fn recovery_continue(args: &[String]) -> Result<(), Box<dyn std::error
             sequence_number: sequence,
             previous_hash: latest.current_hash,
             current_hash: new_hash,
-            timestamp: deposits_core::now_unix_timestamp(),
-            block_height: current_block_height,
+                block_height: current_block_height,
             block_hash,
         };
 
@@ -3206,7 +3197,6 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
         sequence_number: sequence,
         previous_hash: our_armed.current_hash,
         current_hash: new_hash,
-        timestamp: deposits_core::now_unix_timestamp(),
         block_height: current_block_height,
         block_hash: current_block_hash,
     };
@@ -3533,7 +3523,6 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
         sequence_number: sequence,
         previous_hash: our_latest.current_hash,
         current_hash: new_hash,
-        timestamp: deposits_core::now_unix_timestamp(),
         block_height: current_block_height,
         block_hash,
     };

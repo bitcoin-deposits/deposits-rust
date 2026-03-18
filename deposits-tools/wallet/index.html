@@ -3002,7 +3002,7 @@ function parseTlv(buf) {
   return records;
 }
 
-// Decode a SignedLedgerUpdate from base64 content → {seq, hash, operator, timestamp, op_name, fields}
+// Decode a SignedLedgerUpdate from base64 content → {seq, hash, operator, op_name, fields}
 function decodeUpdate(base64Content) {
   const raw = Uint8Array.from(atob(base64Content), c => c.charCodeAt(0));
   const outer = parseTlv(raw);
@@ -3016,7 +3016,6 @@ function decodeUpdate(base64Content) {
   const seq = getU64(8);       // SEQUENCE_NUMBER
   const prevHash = getHex(10); // PREVIOUS_HASH
   const curHash = getHex(12);  // CURRENT_HASH
-  const timestamp = getU64(14); // TIMESTAMP
   const blockHeight = getU32(20); // BLOCK_HEIGHT
   const msgType = getU16(2);   // MESSAGE_TYPE
   const operatorHex = getHex(4); // OPERATOR_ID
@@ -3046,7 +3045,7 @@ function decodeUpdate(base64Content) {
     }));
   }
 
-  return { seq, prevHash, curHash, timestamp, blockHeight, msgType, operatorHex, opName, opDisc, opFields };
+  return { seq, prevHash, curHash, blockHeight, msgType, operatorHex, opName, opDisc, opFields };
 }
 
 async function populateLedgerQuickLinks() {
@@ -3240,7 +3239,7 @@ function vsRender() {
   for (let i = first; i <= last; i++) {
     const u = vsUpdates[i];
     const top = i * VS_ROW_H;
-    const time = u.timestamp ? new Date(u.timestamp * 1000).toLocaleString() : '';
+    const time = u.createdAt ? new Date(u.createdAt * 1000).toLocaleString() : '';
     const hashShort = u.curHash.slice(0, 12);
     const isExpanded = vsExpanded === u.seq;
 
@@ -3276,7 +3275,7 @@ window.vsToggle = function(seq) {
 
   const u = vsUpdates.find(u => u.seq === seq);
   if (u) {
-    const time = u.timestamp ? new Date(u.timestamp * 1000).toLocaleString() : '';
+    const time = u.createdAt ? new Date(u.createdAt * 1000).toLocaleString() : '';
     let color = 'var(--text)';
     if (u.opName.includes('Credit') || u.opName.includes('Increase')) color = 'var(--balance)';
     else if (u.opName.includes('Lock') || u.opName.includes('Decrease')) color = 'var(--yellow)';

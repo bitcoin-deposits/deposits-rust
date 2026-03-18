@@ -4857,12 +4857,6 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
             let old_update = &ledger.history[ledger.history.len() / 2];
             let mut replayed = old_update.clone();
 
-            // Modify timestamp so it's different
-            replayed.timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-
             // Re-sign with our key
             let signing_data = {
                 let mut data = Vec::new();
@@ -4871,7 +4865,6 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
                 data.extend_from_slice(&replayed.sequence_number.to_le_bytes());
                 data.extend_from_slice(&replayed.previous_hash);
                 data.extend_from_slice(&replayed.current_hash);
-                data.extend_from_slice(&replayed.timestamp.to_le_bytes());
                 data
             };
 
@@ -4880,7 +4873,7 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
             let sig = secp.sign_schnorr(&message, &secret_key.keypair(&secp));
             replayed.operator_signature = sig.serialize();
 
-            println!("Replaying update at sequence {} with modified timestamp", replayed.sequence_number);
+            println!("Replaying update at sequence {}", replayed.sequence_number);
 
             replayed
         }

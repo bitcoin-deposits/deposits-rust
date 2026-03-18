@@ -464,7 +464,6 @@ mod tests {
             sequence_number: seq,
             previous_hash: prev_hash,
             current_hash,
-            timestamp: 1000 + seq,
             block_height: 100 + seq as u32,
             block_hash: [0u8; 32],
             partner_signature: [0u8; 64],
