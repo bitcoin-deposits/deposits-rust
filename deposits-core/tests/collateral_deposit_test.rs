@@ -27,6 +27,7 @@ fn open_deposit(ledger: &mut Ledger, descriptor: &str, is_collateral: bool) -> [
         invoice: None,
         cosigner_guarantee_signature: None,
         is_collateral,
+        receive_requires_sig: false,
     }).unwrap();
     deposit_id
 }

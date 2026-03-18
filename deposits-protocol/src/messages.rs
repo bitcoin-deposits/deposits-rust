@@ -562,6 +562,9 @@ pub enum LedgerOperation {
         /// not regular deposit obligations. Collateral deposits cannot be
         /// transferred or withdrawn normally.
         is_collateral: bool,
+        /// If true, incoming funds (transfers, offers, invoices) require a
+        /// signature from the deposit key. Prevents unsolicited crediting.
+        receive_requires_sig: bool,
     },
     /// Close a deposit
     DepositClose { deposit_id: DepositId },
@@ -1772,6 +1775,7 @@ impl BinaryCodec for LedgerOperation {
                     invoice: read_option(r, read_string)?,
                     cosigner_guarantee_signature: read_option(r, read_64)?,
                     is_collateral: false,
+                    receive_requires_sig: false,
                 })
             }
             21 => {
@@ -2770,6 +2774,7 @@ mod ledger_op_tlv {
     pub const SCRIPT_WITNESS: u64 = 224;
     pub const TRANSFER_FEES: u64 = 226;
     pub const IS_COLLATERAL: u64 = 229; // odd = optional, u8 (0 or 1)
+    pub const RECEIVE_REQUIRES_SIG: u64 = 231; // odd = optional, u8 (0 or 1)
 }
 
 impl TlvEncode for LedgerOperation {
@@ -2813,7 +2818,7 @@ impl TlvEncode for LedgerOperation {
                     .bytes_field(LEDGER_HASH, ledger_hash)
                     .bytes_field(QUORUM_MEMBERS, &members_bytes);
             }
-            Self::DepositOpen { deposit_id, descriptor, fees, transfer_fees, payment_hash, invoice, cosigner_guarantee_signature, is_collateral } => {
+            Self::DepositOpen { deposit_id, descriptor, fees, transfer_fees, payment_hash, invoice, cosigner_guarantee_signature, is_collateral, receive_requires_sig } => {
                 builder = builder
                     .deposit_id_field(DEPOSIT_ID, deposit_id)
                     .string_field(DESCRIPTOR, descriptor);
@@ -2834,6 +2839,9 @@ impl TlvEncode for LedgerOperation {
                 }
                 if *is_collateral {
                     builder = builder.u8_field(IS_COLLATERAL, 1);
+                }
+                if *receive_requires_sig {
+                    builder = builder.u8_field(RECEIVE_REQUIRES_SIG, 1);
                 }
             }
             Self::DepositClose { deposit_id } => {
@@ -3076,6 +3084,7 @@ impl TlvDecode for LedgerOperation {
                 invoice: reader.read_string_opt(INVOICE)?,
                 cosigner_guarantee_signature: reader.read_bytes_opt(COSIGNER_SIG)?,
                 is_collateral: reader.read_u8(IS_COLLATERAL).unwrap_or(0) != 0,
+                receive_requires_sig: reader.read_u8(RECEIVE_REQUIRES_SIG).unwrap_or(0) != 0,
             }),
             21 => Ok(Self::DepositClose { deposit_id: reader.read_deposit_id(DEPOSIT_ID)? }),
             22 => Ok(Self::DepositUpdate {
@@ -4340,6 +4349,7 @@ mod tests {
             invoice: Some("lnbc...".to_string()),
             cosigner_guarantee_signature: None,
             is_collateral: false,
+            receive_requires_sig: false,
         };
 
         let mut bytes = Vec::new();
@@ -4463,6 +4473,7 @@ mod tests {
                 invoice: Some("lnbc...".to_string()),
                 cosigner_guarantee_signature: None,
                 is_collateral: false,
+                receive_requires_sig: false,
             },
             LedgerOperation::DepositClose { deposit_id: crate::types::compute_deposit_id("pk(test)") },
             LedgerOperation::InvoiceCredit {

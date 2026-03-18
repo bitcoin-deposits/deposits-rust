@@ -192,6 +192,7 @@ types:
   #   206 = witness_element (bytes)
   #   208 = new_descriptor (string)
   #   229 = is_collateral (u8, 0 or 1, optional — odd type)
+  #   231 = receive_requires_sig (u8, 0 or 1, optional — odd type. incoming funds require deposit key signature)
   #
   # Fee fields:
   #   12  = fees (nested TLV: FeeStructure in DepositOpen; u64 fee_sats in OnchainLock/TransferLock)

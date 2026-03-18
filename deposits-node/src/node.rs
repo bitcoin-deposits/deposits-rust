@@ -4722,6 +4722,7 @@ impl Node {
                 invoice: None,
                 cosigner_guarantee_signature: None,
                 is_collateral: false,
+                receive_requires_sig: false,
             };
 
             let message_bytes = operation.tlv_encode();
@@ -4869,6 +4870,11 @@ impl Node {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
+        // Check if receiving requires wallet signature
+        let receive_requires_sig = request.params.get("receive_requires_sig")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
         // Validate proposed fees meet operator minimums
         if let Err(e) = deposits_core::operation_validation::validate_fee_minimum(
             &fees,
@@ -4896,7 +4902,7 @@ impl Node {
         let descriptor = format!("pk({})", deposit_pubkey_str);
 
         // Open the deposit with co-signing
-        match self.open_deposit(&ledger_id, &descriptor, Some(fees), transfer_fees, is_collateral).await {
+        match self.open_deposit(&ledger_id, &descriptor, Some(fees), transfer_fees, is_collateral, receive_requires_sig).await {
             Ok(deposit) => {
                 let result = serde_json::json!({
                     "deposit_pubkey": deposit_pubkey_str,
@@ -5027,6 +5033,44 @@ impl Node {
             min_fixed_per_period,
         ) {
             return (false, None, Some(format!("Fee validation failed: {}", e)));
+        }
+
+        // Check if the deposit (if it already exists) requires a receive signature
+        {
+            let descriptor = format!("pk({})", deposit_pubkey_str);
+            let deposit_id = compute_deposit_id(&descriptor);
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            if let Some(ledger_arc) = ledgers.get(&resolved_ledger_id) {
+                let ledger = ledger_arc.read().unwrap();
+                if let Some(deposit) = ledger.state.deposits.get(&deposit_id) {
+                    if deposit.receive_requires_sig {
+                        // Verify receive signature from deposit key
+                        use bitcoin::secp256k1::{schnorr::Signature, Message};
+                        let recv_sig_hex = match request.params.get("receive_signature").and_then(|v| v.as_str()) {
+                            Some(s) => s,
+                            None => return (false, None, Some("Deposit requires receive_signature for offers".to_string())),
+                        };
+                        let recv_sig = match hex::decode(recv_sig_hex)
+                            .ok()
+                            .and_then(|bytes| Signature::from_slice(&bytes).ok())
+                        {
+                            Some(sig) => sig,
+                            None => return (false, None, Some("Invalid receive_signature".to_string())),
+                        };
+                        // Sign the deposit_id to authorize receiving
+                        let recv_msg = Message::from_digest({
+                            let mut h = [0u8; 32];
+                            h[..16].copy_from_slice(&deposit_id);
+                            h
+                        });
+                        let dest_pubkey = deposit_pubkey.x_only_public_key().0;
+                        let secp = &self.secp;
+                        if secp.verify_schnorr(&recv_sig, &recv_msg, &dest_pubkey).is_err() {
+                            return (false, None, Some("Invalid receive_signature".to_string()));
+                        }
+                    }
+                }
+            }
         }
 
         // Sync wallet to get current block height
@@ -5286,6 +5330,47 @@ impl Node {
         // Convert pubkey hex to descriptor and deposit_id
         let descriptor = format!("pk({})", deposit_pubkey_hex);
         let deposit_id = compute_deposit_id(&descriptor);
+
+        // Check if deposit requires receive signature
+        {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            if let Some(ledger_arc) = ledgers.get(&request.ledger_id) {
+                let ledger = ledger_arc.read().unwrap();
+                if let Some(deposit) = ledger.state.deposits.get(&deposit_id) {
+                    if deposit.receive_requires_sig {
+                        use bitcoin::secp256k1::{schnorr::Signature, Message};
+                        let recv_sig_hex = match request.params.get("receive_signature").and_then(|v| v.as_str()) {
+                            Some(s) => s,
+                            None => return (false, None, Some("Deposit requires receive_signature for invoices".to_string())),
+                        };
+                        let recv_sig = match hex::decode(recv_sig_hex)
+                            .ok()
+                            .and_then(|bytes| Signature::from_slice(&bytes).ok())
+                        {
+                            Some(sig) => sig,
+                            None => return (false, None, Some("Invalid receive_signature".to_string())),
+                        };
+                        // Sign the deposit_id to authorize receiving
+                        let recv_msg = Message::from_digest({
+                            let mut h = [0u8; 32];
+                            h[..16].copy_from_slice(&deposit_id);
+                            h
+                        });
+                        let dest_pubkey = match hex::decode(deposit_pubkey_hex)
+                            .ok()
+                            .and_then(|b| bitcoin::secp256k1::PublicKey::from_slice(&b).ok())
+                        {
+                            Some(pk) => pk.x_only_public_key().0,
+                            None => return (false, None, Some("Invalid deposit_pubkey".to_string())),
+                        };
+                        let secp = &self.secp;
+                        if secp.verify_schnorr(&recv_sig, &recv_msg, &dest_pubkey).is_err() {
+                            return (false, None, Some("Invalid receive_signature".to_string()));
+                        }
+                    }
+                }
+            }
+        }
 
         let amount_sats = match request.params.get("amount_sats").and_then(|v| v.as_u64()) {
             Some(a) => a,
@@ -6038,6 +6123,44 @@ impl Node {
         let msg = Message::from_digest(msg_hash);
         if secp.verify_schnorr(&signature, &msg, &pubkey).is_err() {
             return (false, None, Some("Invalid signature".to_string()));
+        }
+
+        // Check if destination deposit requires a receive signature
+        {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            if let Some(ledger_arc) = ledgers.get(ledger_id) {
+                let ledger = ledger_arc.read().unwrap();
+                if let Some(dest_deposit) = ledger.state.deposits.get(&destination_deposit_id) {
+                    if dest_deposit.receive_requires_sig {
+                        // Verify receive signature from destination deposit key
+                        let recv_sig_hex = match request.params.get("receive_signature").and_then(|v| v.as_str()) {
+                            Some(s) => s,
+                            None => return (false, None, Some("Destination deposit requires receive_signature".to_string())),
+                        };
+                        let recv_sig = match hex::decode(recv_sig_hex)
+                            .ok()
+                            .and_then(|bytes| Signature::from_slice(&bytes).ok())
+                        {
+                            Some(sig) => sig,
+                            None => return (false, None, Some("Invalid receive_signature".to_string())),
+                        };
+                        // Destination key signs the transfer_id to authorize receiving
+                        let recv_msg = Message::from_digest(transfer_id);
+                        let dest_pubkey = if dest_deposit.descriptor.starts_with("pk(") {
+                            let pk_hex = &dest_deposit.descriptor[3..dest_deposit.descriptor.len()-1];
+                            match hex::decode(pk_hex).ok().and_then(|b| bitcoin::secp256k1::PublicKey::from_slice(&b).ok()) {
+                                Some(pk) => pk.x_only_public_key().0,
+                                None => return (false, None, Some("Invalid destination deposit pubkey".to_string())),
+                            }
+                        } else {
+                            return (false, None, Some("Only pk() descriptors supported for receive_requires_sig".to_string()));
+                        };
+                        if secp.verify_schnorr(&recv_sig, &recv_msg, &dest_pubkey).is_err() {
+                            return (false, None, Some("Invalid receive_signature: does not match destination deposit key".to_string()));
+                        }
+                    }
+                }
+            }
         }
 
         // Create and append the operation
@@ -9269,6 +9392,7 @@ impl Node {
         fees: Option<FeeStructure>,
         transfer_fees: Option<deposits_core::TransferFeeSchedule>,
         is_collateral: bool,
+        receive_requires_sig: bool,
     ) -> Result<Deposit, Error> {
         let deposit_id = compute_deposit_id(descriptor);
 
@@ -9309,6 +9433,7 @@ impl Node {
                 invoice: None,
                 cosigner_guarantee_signature: None,
                 is_collateral,
+                receive_requires_sig,
             };
 
             let block_height = self.wallet.get_block_height().unwrap_or(0);
@@ -10903,7 +11028,7 @@ impl Node {
             )))?;
 
         // First, open the deposit if it doesn't already exist (with co-signing)
-        match self.open_deposit(&reserves_id, &offer.descriptor, offer.fees.clone(), offer.transfer_fees.clone(), false).await {
+        match self.open_deposit(&reserves_id, &offer.descriptor, offer.fees.clone(), offer.transfer_fees.clone(), false, false).await {
             Ok(_) => {
                 tracing::info!(
                     "Opened deposit for {} in ledger {}",

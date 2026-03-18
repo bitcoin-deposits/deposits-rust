@@ -1603,6 +1603,7 @@ pub fn handle_deposit_open<C: HandlerContext>(
         invoice: msg.invoice.clone(),
         cosigner_guarantee_signature: msg.cosigner_guarantee_signature,
         is_collateral: false,
+        receive_requires_sig: false,
     };
 
     // Check for idempotency and append (single write lock scope)

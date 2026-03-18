@@ -339,6 +339,7 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
             payment_hash: Some(h32()), invoice: Some("lnbcrt1test".into()),
             cosigner_guarantee_signature: Some(sig()),
             is_collateral: false,
+            receive_requires_sig: false,
         }),
         ("DepositClose", LedgerOperation::DepositClose { deposit_id: did() }),
         ("DepositUpdate", LedgerOperation::DepositUpdate { deposit_id: did(), new_fees: fees() }),

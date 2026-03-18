@@ -81,20 +81,20 @@ fn wit() -> DescriptorWitness { DescriptorWitness { stack: vec![vec![0x30; 64]] 
     deposit_id: did(), descriptor: "pk(0279be66...)".into(),
     fees: Some(fees()), transfer_fees: Some(tfees()),
     payment_hash: Some(h32()), invoice: Some("lnbcrt1test".into()),
-    cosigner_guarantee_signature: Some(sig()), is_collateral: false,
+    cosigner_guarantee_signature: Some(sig()), is_collateral: false, receive_requires_sig: false,
 }); }
 
 #[test] fn deposit_open_collateral() { test_roundtrip(&LedgerOperation::DepositOpen {
     deposit_id: did(), descriptor: "pk(0279be66...)".into(),
     fees: Some(fees()), transfer_fees: None,
     payment_hash: None, invoice: None,
-    cosigner_guarantee_signature: None, is_collateral: true,
+    cosigner_guarantee_signature: None, is_collateral: true, receive_requires_sig: false,
 }); }
 
 #[test] fn deposit_open_minimal() { test_roundtrip(&LedgerOperation::DepositOpen {
     deposit_id: did(), descriptor: "pk(0279be66...)".into(),
     fees: None, transfer_fees: None, payment_hash: None, invoice: None,
-    cosigner_guarantee_signature: None, is_collateral: false,
+    cosigner_guarantee_signature: None, is_collateral: false, receive_requires_sig: false,
 }); }
 
 #[test] fn deposit_close() { test_roundtrip(&LedgerOperation::DepositClose { deposit_id: did() }); }

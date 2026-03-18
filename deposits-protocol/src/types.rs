@@ -623,6 +623,9 @@ pub struct Deposit {
     /// If true, this deposit is collateral — subject to collateral rules only.
     #[serde(default)]
     pub is_collateral: bool,
+    /// If true, incoming funds require a signature from the deposit key.
+    #[serde(default)]
+    pub receive_requires_sig: bool,
 }
 
 impl Deposit {
@@ -643,6 +646,7 @@ impl Deposit {
             collateral_lock_expires: 0,
             transfer_fees: TransferFeeSchedule::default(),
             is_collateral: false,
+            receive_requires_sig: false,
         }
     }
 
@@ -2166,6 +2170,7 @@ mod deposit_fields {
     pub const LAST_FEE_ASSESSMENT: u64 = 10;
     pub const TRANSFER_FEES: u64 = 16;
     pub const IS_COLLATERAL: u64 = 17; // odd = optional
+    pub const RECEIVE_REQUIRES_SIG: u64 = 19; // odd = optional
 }
 
 impl TlvEncode for Deposit {
@@ -2182,6 +2187,7 @@ impl TlvEncode for Deposit {
             .u32_field(deposit_fields::COLLATERAL_PLEDGE_EXPIRES, self.collateral_lock_expires)
             .nested(deposit_fields::TRANSFER_FEES, &self.transfer_fees)
             .u8_field(deposit_fields::IS_COLLATERAL, if self.is_collateral { 1 } else { 0 })
+            .u8_field(deposit_fields::RECEIVE_REQUIRES_SIG, if self.receive_requires_sig { 1 } else { 0 })
             .build()
     }
 }
@@ -2201,6 +2207,7 @@ impl TlvDecode for Deposit {
             collateral_lock_expires: reader.read_u32_opt(deposit_fields::COLLATERAL_PLEDGE_EXPIRES)?.unwrap_or(0),
             transfer_fees: reader.read_nested_opt(deposit_fields::TRANSFER_FEES)?.unwrap_or_default(),
             is_collateral: reader.read_u8(deposit_fields::IS_COLLATERAL).unwrap_or(0) != 0,
+            receive_requires_sig: reader.read_u8(deposit_fields::RECEIVE_REQUIRES_SIG).unwrap_or(0) != 0,
         })
     }
 }
@@ -2936,6 +2943,7 @@ mod tests {
             collateral_lock_expires: 850_000,
             transfer_fees: TransferFeeSchedule::default(),
             is_collateral: true,
+            receive_requires_sig: false,
         };
         let encoded = original.tlv_encode();
         let decoded = Deposit::tlv_decode(&encoded).unwrap();

@@ -1228,12 +1228,13 @@ impl Ledger {
                 self.state.reserves_key = reserves_id.clone();
                 self.state.reserves.amount = *amount;
             }
-            LedgerOperation::DepositOpen { deposit_id, descriptor, fees, transfer_fees, is_collateral, .. } => {
+            LedgerOperation::DepositOpen { deposit_id, descriptor, fees, transfer_fees, is_collateral, receive_requires_sig, .. } => {
                 let mut deposit = Deposit::new(descriptor.clone(), fees.clone());
                 if let Some(tf) = transfer_fees {
                     deposit.transfer_fees = tf.clone();
                 }
                 deposit.is_collateral = *is_collateral;
+                deposit.receive_requires_sig = *receive_requires_sig;
                 self.state.deposits.insert(*deposit_id, deposit);
             }
             LedgerOperation::DepositClose { deposit_id } => {
@@ -2240,6 +2241,7 @@ mod tests {
                 invoice: None,
                 cosigner_guarantee_signature: None,
                 is_collateral: false,
+                receive_requires_sig: false,
             })
             .unwrap();
 
@@ -2348,7 +2350,7 @@ mod tests {
             last_fee_assessment: 0,
             collateral_lock_amount: 0,
             collateral_lock_expires: 0,
-            transfer_fees: TransferFeeSchedule::default(), is_collateral: false,
+            transfer_fees: TransferFeeSchedule::default(), is_collateral: false, receive_requires_sig: false,
         };
         let dest_deposit = Deposit {
             deposit_id: dest_id,
@@ -2360,7 +2362,7 @@ mod tests {
             last_fee_assessment: 0,
             collateral_lock_amount: 0,
             collateral_lock_expires: 0,
-            transfer_fees: TransferFeeSchedule::default(), is_collateral: false,
+            transfer_fees: TransferFeeSchedule::default(), is_collateral: false, receive_requires_sig: false,
         };
         ledger.state.deposits.insert(source_id, source_deposit);
         ledger.state.deposits.insert(dest_id, dest_deposit);
@@ -2441,7 +2443,7 @@ mod tests {
             last_fee_assessment: 0,
             collateral_lock_amount: 0,
             collateral_lock_expires: 0,
-            transfer_fees: TransferFeeSchedule::default(), is_collateral: false,
+            transfer_fees: TransferFeeSchedule::default(), is_collateral: false, receive_requires_sig: false,
         };
         ledger.state.deposits.insert(source_id, source_deposit);
 

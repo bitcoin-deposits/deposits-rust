@@ -3114,7 +3114,7 @@ async fn deposit_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
             f.annualized_bps, f.annualized_fixed, f.frequency_blocks);
     }
 
-    let deposit = node.open_deposit(&ledger_id, &descriptor, fees, None, false).await?;
+    let deposit = node.open_deposit(&ledger_id, &descriptor, fees, None, false, false).await?;
 
     println!("\nDeposit opened!");
     println!("  Deposit ID: {}", hex::encode(deposit.deposit_id));
