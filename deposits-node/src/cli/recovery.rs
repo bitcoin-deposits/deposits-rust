@@ -1270,9 +1270,9 @@ pub async fn recovery_rebuild_quorum_add(ledger_id: &str, args: &[String]) -> Re
         quorum_member: member_pubkey,
         quorum_member_signature: [0u8; 64],
         member_ledger_id: member_ledger_id.clone(),
-        max_fee_bps: None,
-        max_fee_fixed: None,
-        min_fee_period: None,
+        min_fee_bps: None,
+        min_fee_fixed: None,
+        max_fee_period: None,
     };
 
     let message_bytes = operation.tlv_encode();

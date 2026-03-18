@@ -2489,13 +2489,13 @@ async fn partner_add(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     println!("  Member's collateral ledger: {}...", &member_ledger_id[..16]);
 
     // Extract fee limit flags
-    let max_fee_bps: Option<u64> = config_args.windows(2)
+    let min_fee_bps: Option<u64> = config_args.windows(2)
         .find(|w| w[0] == "--max-fee-bps")
         .and_then(|w| w[1].parse().ok());
-    let max_fee_fixed: Option<u64> = config_args.windows(2)
+    let min_fee_fixed: Option<u64> = config_args.windows(2)
         .find(|w| w[0] == "--max-fee-fixed")
         .and_then(|w| w[1].parse().ok());
-    let min_fee_period: Option<u64> = config_args.windows(2)
+    let max_fee_period: Option<u64> = config_args.windows(2)
         .find(|w| w[0] == "--min-fee-period")
         .and_then(|w| w[1].parse().ok());
 
@@ -2503,9 +2503,9 @@ async fn partner_add(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         "member_pubkey": quorum_member_str,
         "member_ledger_id": member_ledger_id,
     });
-    if let Some(v) = max_fee_bps { params["max_fee_bps"] = v.into(); }
-    if let Some(v) = max_fee_fixed { params["max_fee_fixed"] = v.into(); }
-    if let Some(v) = min_fee_period { params["min_fee_period"] = v.into(); }
+    if let Some(v) = min_fee_bps { params["min_fee_bps"] = v.into(); }
+    if let Some(v) = min_fee_fixed { params["min_fee_fixed"] = v.into(); }
+    if let Some(v) = max_fee_period { params["max_fee_period"] = v.into(); }
 
     let result = send_daemon_request(&config, &ledger_id, "partner_add", params).await?;
 

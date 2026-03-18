@@ -2830,9 +2830,9 @@ impl Node {
                         quorum_member: member,
                         quorum_member_signature: [0u8; 64],
                         member_ledger_id: member_ledger_id.clone(),
-                        max_fee_bps: None,
-                        max_fee_fixed: None,
-                        min_fee_period: None,
+                        min_fee_bps: None,
+                        min_fee_fixed: None,
+                        max_fee_period: None,
                     };
 
                     if let Err(e) = fork_ledger.append_operation_with_block(
@@ -7379,11 +7379,11 @@ impl Node {
         let placeholder_sig = [0u8; 64];
 
         // Extract fee limits the member is imposing (from their advertisement)
-        let max_fee_bps = request.params.get("max_fee_bps").and_then(|v| v.as_u64()).map(|v| v as u16);
-        let max_fee_fixed = request.params.get("max_fee_fixed").and_then(|v| v.as_u64());
-        let min_fee_period = request.params.get("min_fee_period").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let min_fee_bps = request.params.get("min_fee_bps").and_then(|v| v.as_u64()).map(|v| v as u16);
+        let min_fee_fixed = request.params.get("min_fee_fixed").and_then(|v| v.as_u64());
+        let max_fee_period = request.params.get("max_fee_period").and_then(|v| v.as_u64()).map(|v| v as u32);
 
-        match self.add_quorum_member(&ledger_id, quorum_member, &member_ledger_id, placeholder_sig, max_fee_bps, max_fee_fixed, min_fee_period).await {
+        match self.add_quorum_member(&ledger_id, quorum_member, &member_ledger_id, placeholder_sig, min_fee_bps, min_fee_fixed, max_fee_period).await {
             Ok(event_id) => {
                 let result = serde_json::json!({
                     "status": "SUCCESS",
@@ -9012,9 +9012,9 @@ impl Node {
         quorum_member: PublicKey,
         member_ledger_id: &str,
         signature: [u8; 64],
-        max_fee_bps: Option<u16>,
-        max_fee_fixed: Option<u64>,
-        min_fee_period: Option<u32>,
+        min_fee_bps: Option<u16>,
+        min_fee_fixed: Option<u64>,
+        max_fee_period: Option<u32>,
     ) -> Result<String, Error> {
         // Check if there are existing quorum members BEFORE adding the new one
         let has_quorum = {
@@ -9055,9 +9055,9 @@ impl Node {
                 quorum_member,
                 quorum_member_signature: signature,
                 member_ledger_id: member_ledger_id.to_string(),
-                max_fee_bps,
-                max_fee_fixed,
-                min_fee_period,
+                min_fee_bps,
+                min_fee_fixed,
+                max_fee_period,
             };
 
             ledger.append_operation_with_block(

@@ -703,19 +703,20 @@ pub enum LedgerOperation {
 
     // ========== Quorum Membership (2) ==========
     /// Add a quorum member to the VoterSet.
-    /// Fee limits are the member's terms — maximum fees they will tolerate.
-    /// DepositOpen fees must not exceed the strictest quorum member limits.
+    /// Fee limits are the member's terms — minimum fees they require.
+    /// DepositOpen fees must meet or exceed the strictest quorum member minimums.
+    /// This protects members from inheriting low-fee obligations after custody transfer.
     QuorumAddMember {
         quorum_member: PublicKey,
         quorum_member_signature: [u8; 64],
         /// The ledger ID where this member will lock collateral
         member_ledger_id: String,
-        /// Maximum annualized fee rate (basis points) the member allows
-        max_fee_bps: Option<u16>,
-        /// Maximum annualized fixed fee (msats/year) the member allows
-        max_fee_fixed: Option<u64>,
-        /// Minimum fee collection period (blocks) the member requires
-        min_fee_period: Option<u32>,
+        /// Minimum annualized fee rate (basis points) the member requires
+        min_fee_bps: Option<u16>,
+        /// Minimum annualized fixed fee (msats/year) the member requires
+        min_fee_fixed: Option<u64>,
+        /// Maximum fee collection period (blocks) the member allows
+        max_fee_period: Option<u32>,
     },
     /// Remove a quorum member from the VoterSet
     QuorumRemoveMember {
@@ -1986,9 +1987,9 @@ impl BinaryCodec for LedgerOperation {
                 quorum_member: read_pubkey(r)?,
                 quorum_member_signature: read_64(r)?,
                 member_ledger_id: read_string(r)?,
-                max_fee_bps: None,
-                max_fee_fixed: None,
-                min_fee_period: None,
+                min_fee_bps: None,
+                min_fee_fixed: None,
+                max_fee_period: None,
             }),
             44 => Ok(Self::QuorumRemoveMember {
                 quorum_member: read_pubkey(r)?,
@@ -2767,9 +2768,9 @@ mod ledger_op_tlv {
     pub const IS_COLLATERAL: u64 = 229; // odd = optional, u8 (0 or 1)
     pub const RECEIVE_REQUIRES_SIG: u64 = 231; // odd = optional, u8 (0 or 1)
     // Quorum member fee limits (on QuorumAddMember)
-    pub const MAX_FEE_BPS: u64 = 233;     // odd = optional, u16
-    pub const MAX_FEE_FIXED: u64 = 235;   // odd = optional, u64 (msats/year)
-    pub const MIN_FEE_PERIOD: u64 = 237;   // odd = optional, u32 (blocks)
+    pub const MIN_FEE_BPS: u64 = 233;     // odd = optional, u16
+    pub const MIN_FEE_FIXED: u64 = 235;   // odd = optional, u64 (msats/year)
+    pub const MAX_FEE_PERIOD: u64 = 237;   // odd = optional, u32 (blocks)
 }
 
 impl TlvEncode for LedgerOperation {
@@ -2958,19 +2959,19 @@ impl TlvEncode for LedgerOperation {
                     .bytes_field(SIGNATURE, signature)
                     .bytes_field(LEDGER_HASH, ledger_hash);
             }
-            Self::QuorumAddMember { quorum_member, quorum_member_signature, member_ledger_id, max_fee_bps, max_fee_fixed, min_fee_period } => {
+            Self::QuorumAddMember { quorum_member, quorum_member_signature, member_ledger_id, min_fee_bps, min_fee_fixed, max_fee_period } => {
                 builder = builder
                     .pubkey_field(QUORUM_MEMBER, quorum_member)
                     .bytes_field(QUORUM_MEMBER_SIG, quorum_member_signature)
                     .string_field(MEMBER_LEDGER_ID, member_ledger_id);
-                if let Some(bps) = max_fee_bps {
-                    builder = builder.u16_field(MAX_FEE_BPS, *bps);
+                if let Some(bps) = min_fee_bps {
+                    builder = builder.u16_field(MIN_FEE_BPS, *bps);
                 }
-                if let Some(fixed) = max_fee_fixed {
-                    builder = builder.u64_field(MAX_FEE_FIXED, *fixed);
+                if let Some(fixed) = min_fee_fixed {
+                    builder = builder.u64_field(MIN_FEE_FIXED, *fixed);
                 }
-                if let Some(period) = min_fee_period {
-                    builder = builder.u32_field(MIN_FEE_PERIOD, *period);
+                if let Some(period) = max_fee_period {
+                    builder = builder.u32_field(MAX_FEE_PERIOD, *period);
                 }
             }
             Self::QuorumRemoveMember { quorum_member, operator_signature } => {
@@ -3188,9 +3189,9 @@ impl TlvDecode for LedgerOperation {
                 quorum_member: reader.read_pubkey(QUORUM_MEMBER)?,
                 quorum_member_signature: reader.read_bytes(QUORUM_MEMBER_SIG)?,
                 member_ledger_id: reader.read_string(MEMBER_LEDGER_ID)?,
-                max_fee_bps: reader.read_u16_opt(MAX_FEE_BPS)?,
-                max_fee_fixed: reader.read_u64_opt(MAX_FEE_FIXED)?,
-                min_fee_period: reader.read_u32_opt(MIN_FEE_PERIOD)?,
+                min_fee_bps: reader.read_u16_opt(MIN_FEE_BPS)?,
+                min_fee_fixed: reader.read_u64_opt(MIN_FEE_FIXED)?,
+                max_fee_period: reader.read_u32_opt(MAX_FEE_PERIOD)?,
             }),
             44 => Ok(Self::QuorumRemoveMember {
                 quorum_member: reader.read_pubkey(QUORUM_MEMBER)?,
