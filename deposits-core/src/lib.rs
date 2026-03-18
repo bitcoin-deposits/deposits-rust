@@ -226,7 +226,7 @@ pub use wire_messages::{
     SendingFailPaymentMsg, SendingFulfillPaymentMsg,
     ReceivingCosignInvoiceMsg, UncreditedPaymentMsg,
     // Sync messages
-    SyncRequestMsg, ChannelCloseTombstoneMsg,
+    SyncRequestMsg,
     // Quorum messages (wire-specific versions with Wire suffix)
     QuorumJoinRequestMsgWire, QuorumJoinResponseMsgWire, QuorumVoteMsgWire,
     QuorumMembershipChangeMsg, QuorumStateSyncMsg, QuorumVoteRequestMsg,

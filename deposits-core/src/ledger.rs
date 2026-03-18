@@ -719,13 +719,12 @@ impl Ledger {
     // State Query Methods
     // ========================================================================
 
-    /// Check if this ledger is closed (has a Tombstone or LedgerClose as the last operation).
+    /// Check if this ledger is closed (has a LedgerClose as the last operation).
     /// Note: This checks the message_type field for quick detection without deserialization.
     pub fn is_closed(&self) -> bool {
-        use crate::messages::consts::{LEDGER_CLOSE, CHANNEL_CLOSE_TOMBSTONE};
+        use crate::messages::consts::LEDGER_CLOSE;
         if let Some(last_update) = self.history.last() {
-            // Check message type for LedgerClose (0x801D) or Tombstone (0x8051)
-            last_update.message_type == LEDGER_CLOSE || last_update.message_type == CHANNEL_CLOSE_TOMBSTONE
+            last_update.message_type == LEDGER_CLOSE
         } else {
             false
         }
@@ -1356,7 +1355,7 @@ impl Ledger {
                     deposit.collateral_lock_expires = *lock_until_block;
                 }
             }
-            LedgerOperation::LedgerClose | LedgerOperation::Tombstone { .. } => {
+            LedgerOperation::LedgerClose => {
                 // Mark ledger as closed - clear collateral attestations
                 self.state.clear_collateral_attestations();
             }

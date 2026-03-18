@@ -2865,7 +2865,6 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                 }
                 LedgerOperation::CustodyYield => ("CustodyYield", String::new()),
                 LedgerOperation::LedgerClose => ("LedgerClose", String::new()),
-                LedgerOperation::Tombstone { .. } => ("Tombstone", String::new()),
                 LedgerOperation::TransferLock { source_deposit_id, destination_deposit_id, amount, fee, timeout_height, .. } => (
                     "TransferLock",
                     format!(

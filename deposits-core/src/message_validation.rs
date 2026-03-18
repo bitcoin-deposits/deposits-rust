@@ -698,8 +698,7 @@ pub fn validate_ledger_operation<C: ValidationContext>(
         LedgerOperation::CustodyDispute { .. } |
         LedgerOperation::CustodyArmed { .. } |
         LedgerOperation::CustodyAcquire { .. } |
-        LedgerOperation::CustodyYield |
-        LedgerOperation::Tombstone { .. } => Ok(()),
+        LedgerOperation::CustodyYield => Ok(()),
     }
 }
 

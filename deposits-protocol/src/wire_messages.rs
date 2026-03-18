@@ -1146,42 +1146,6 @@ impl WireDecode for SyncRequestMsg {
     }
 }
 
-/// channel close tombstone message
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ChannelCloseTombstoneMsg {
-    pub operator_id: PublicKey,
-    pub reserves_id: String,
-    pub timestamp: u64,
-    pub channel_id: [u8; 32],
-    pub close_reason: Option<String>,
-    pub sequence_number: u64,
-}
-
-impl WireEncode for ChannelCloseTombstoneMsg {
-    fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
-        write_pubkey(writer, &self.operator_id)?;
-        write_string(writer, &self.reserves_id)?;
-        write_u64(writer, self.timestamp)?;
-        write_bytes32(writer, &self.channel_id)?;
-        write_optional(writer, &self.close_reason, |w, s| write_string(w, s))?;
-        write_u64(writer, self.sequence_number)?;
-        Ok(())
-    }
-}
-
-impl WireDecode for ChannelCloseTombstoneMsg {
-    fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
-        Ok(Self {
-            operator_id: read_pubkey(reader)?,
-            reserves_id: read_string(reader)?,
-            timestamp: read_u64(reader)?,
-            channel_id: read_bytes32(reader)?,
-            close_reason: read_optional(reader, read_string)?,
-            sequence_number: read_u64(reader)?,
-        })
-    }
-}
-
 // ============================================================================
 // Quorum Messages
 // ============================================================================

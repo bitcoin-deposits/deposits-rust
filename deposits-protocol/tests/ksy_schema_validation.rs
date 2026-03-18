@@ -140,7 +140,6 @@ const LEDGER_HASH: u64 = 42;
 const QUORUM_MEMBER: u64 = 44;
 const QUORUM_MEMBER_SIG: u64 = 46;
 const OPERATOR_SIG: u64 = 48;
-const TIMESTAMP: u64 = 54;
 const OPERATOR_ID: u64 = 56;
 const RESERVES_ID: u64 = 58;
 const LEDGER_ADDRESS: u64 = 60;
@@ -185,9 +184,6 @@ const TRANSFER_ID: u64 = 220;
 const BLOCK_HASH: u64 = 222;
 const SCRIPT_WITNESS: u64 = 224;
 const TRANSFER_FEES: u64 = 226;
-// Channel close fields
-const CHANNEL_ID: u64 = 50;
-const CLOSE_REASON: u64 = 52;
 // Fee amount field
 const FEE: u64 = 2; // shares with AMOUNT for some ops, but fee uses it differently in TransferLock
 
@@ -469,15 +465,6 @@ fn schema_custody_armed() {
 #[test]
 fn schema_ledger_close() {
     validate_schema(60, "LedgerClose", &[]);
-}
-
-#[test]
-fn schema_tombstone() {
-    validate_schema(61, "Tombstone", &[
-        (CHANNEL_ID, hash32()),
-        (CLOSE_REASON, str_bytes("test")),
-        (TIMESTAMP, u64_bytes(12345)),
-    ]);
 }
 
 #[test]

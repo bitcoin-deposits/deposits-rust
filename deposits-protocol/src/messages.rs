@@ -97,7 +97,7 @@ pub mod consts {
 
     // Ledger lifecycle
     pub const LEDGER_CLOSE: u16 = 0x801D;
-    pub const CHANNEL_CLOSE_TOMBSTONE: u16 = 0x8051;
+
 
     // Maintenance
     pub const MAINTENANCE_FEE_COLLECT: u16 = 0x8021;
@@ -167,7 +167,7 @@ pub const ALL_OPERATION_MESSAGE_TYPES: &[u16] = &[
     COLLATERAL_CONSENT_REQUEST, COLLATERAL_CONSENT_RESPONSE,
     DEPOSIT_OPEN, DEPOSIT_CLOSE, DEPOSIT_UPDATE,
     ONCHAIN_CREDIT, ONCHAIN_LOCK, ONCHAIN_FAIL, ONCHAIN_FULFILL,
-    LEDGER_CLOSE, CHANNEL_CLOSE_TOMBSTONE,
+    LEDGER_CLOSE,
     MAINTENANCE_FEE_COLLECT,
     RECEIVING_COSIGN_INVOICE, RECEIVING_CREDIT_PAYMENT, UNCREDITED_PAYMENT,
     SENDING_LOCK_PAYMENT, SENDING_FAIL_PAYMENT, SENDING_FULFILL_PAYMENT,
@@ -192,7 +192,7 @@ pub const MESSAGES_REQUIRING_ACK: &[u16] = &[
     QUORUM_ADD_MEMBER, QUORUM_REMOVE_MEMBER,
     COLLATERAL_CONSENT_REQUEST, COLLATERAL_CONSENT_RESPONSE,
     MAINTENANCE_FEE_COLLECT,
-    LEDGER_CLOSE, CHANNEL_CLOSE_TOMBSTONE,
+    LEDGER_CLOSE,
     LEDGER_OPEN_REQUEST,
     LEDGER_UPDATE,
     HANDSHAKE,
@@ -226,7 +226,7 @@ pub fn get_message_category(message_type: u16) -> Option<&'static str> {
 
         ONCHAIN_CREDIT | ONCHAIN_LOCK | ONCHAIN_FAIL | ONCHAIN_FULFILL => Some("onchain"),
 
-        LEDGER_CLOSE | CHANNEL_CLOSE_TOMBSTONE => Some("lifecycle"),
+        LEDGER_CLOSE => Some("lifecycle"),
 
         MAINTENANCE_FEE_COLLECT => Some("maintenance"),
 
@@ -830,15 +830,9 @@ pub enum LedgerOperation {
     /// Note: This is NOT "invalid" - it's simply a terminated branch.
     CustodyYield,
 
-    // ========== Lifecycle (2) ==========
+    // ========== Lifecycle (1) ==========
     /// Close the ledger
     LedgerClose,
-    /// Mark ledger as tombstoned (channel closed)
-    Tombstone {
-        channel_id: [u8; 32],
-        close_reason: Option<String>,
-        timestamp: u64,
-    },
 }
 
 impl LedgerOperation {
@@ -878,7 +872,6 @@ impl LedgerOperation {
             Self::CustodyYield => 56,           // Loser yields, branch tombstoned
             Self::CustodyArmed { .. } => 57,    // Pre-commitment, transitions to READY
             Self::LedgerClose => 60,
-            Self::Tombstone { .. } => 61,
         }
     }
 
@@ -1717,11 +1710,6 @@ impl BinaryCodec for LedgerOperation {
             }
             Self::CustodyYield => {}
             Self::LedgerClose => {}
-            Self::Tombstone { channel_id, close_reason, timestamp } => {
-                write_32(w, channel_id)?;
-                write_option(w, close_reason, |w, s| write_string(w, s))?;
-                write_u64(w, *timestamp)?;
-            }
         }
         Ok(())
     }
@@ -2049,13 +2037,8 @@ impl BinaryCodec for LedgerOperation {
                 commitment_hash: read_20(r)?,
                 target_reserves: read_string(r)?,
             }),
-            // Close operations (60-61)
+            // Close operations (60)
             60 => Ok(Self::LedgerClose),
-            61 => Ok(Self::Tombstone {
-                channel_id: read_32(r)?,
-                close_reason: read_option(r, read_string)?,
-                timestamp: read_u64(r)?,
-            }),
             _ => Err(CodecError::InvalidDiscriminant(discriminant)),
         }
     }
@@ -2708,9 +2691,6 @@ mod ledger_op_tlv {
     pub const QUORUM_MEMBER: u64 = 44;
     pub const QUORUM_MEMBER_SIG: u64 = 46;
     pub const OPERATOR_SIG: u64 = 48;
-    pub const CHANNEL_ID: u64 = 50;
-    pub const CLOSE_REASON: u64 = 52;
-    pub const TIMESTAMP: u64 = 54;
     // LedgerOpen fields
     pub const OPERATOR_ID: u64 = 56;
     pub const RESERVES_ID: u64 = 58;
@@ -3018,13 +2998,6 @@ impl TlvEncode for LedgerOperation {
             }
             Self::CustodyYield => {}
             Self::LedgerClose => {}
-            Self::Tombstone { channel_id, close_reason, timestamp } => {
-                builder = builder.bytes_field(CHANNEL_ID, channel_id);
-                if let Some(reason) = close_reason {
-                    builder = builder.string_field(CLOSE_REASON, reason);
-                }
-                builder = builder.u64_field(TIMESTAMP, *timestamp);
-            }
         }
 
         builder.build()
@@ -3233,11 +3206,6 @@ impl TlvDecode for LedgerOperation {
                 target_reserves: reader.read_string(TARGET_RESERVES)?,
             }),
             60 => Ok(Self::LedgerClose),
-            61 => Ok(Self::Tombstone {
-                channel_id: reader.read_bytes(CHANNEL_ID)?,
-                close_reason: reader.read_string_opt(CLOSE_REASON)?,
-                timestamp: reader.read_u64(TIMESTAMP)?,
-            }),
             d => Err(TlvError::InvalidFieldValue {
                 field_type: DISCRIMINANT,
                 reason: format!("unknown LedgerOperation discriminant: {}", d),
@@ -4318,11 +4286,6 @@ mod tests {
                 amount: 500,
                 block_height: 800000,
             },
-            LedgerOperation::Tombstone {
-                channel_id: [0xCD; 32],
-                close_reason: Some("test close".to_string()),
-                timestamp: 1234567890,
-            },
         ];
 
         for op in ops {
@@ -4488,11 +4451,6 @@ mod tests {
                 block_height: 800000,
             },
             LedgerOperation::LedgerClose,
-            LedgerOperation::Tombstone {
-                channel_id: [0xCC; 32],
-                close_reason: Some("test".to_string()),
-                timestamp: 1234567890,
-            },
         ];
 
         for op in ops {

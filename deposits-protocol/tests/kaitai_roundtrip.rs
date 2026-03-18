@@ -211,6 +211,3 @@ fn wit() -> DescriptorWitness { DescriptorWitness { stack: vec![vec![0x30; 64]] 
 
 #[test] fn ledger_close() { test_roundtrip(&LedgerOperation::LedgerClose); }
 
-#[test] fn tombstone() { test_roundtrip(&LedgerOperation::Tombstone {
-    channel_id: h32(), close_reason: Some("test".into()), timestamp: 12345,
-}); }

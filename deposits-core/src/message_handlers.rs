@@ -41,7 +41,6 @@ use crate::wire_messages::{
     ReservesIncreaseMsg, ReservesDecreaseMsg,
     FeeCollectMsg, LedgerCloseMsg, ReceivingCosignInvoiceMsg,
     RecoveryClaimRequestMsg, RecoveryClaimSignatureMsg, RecoveryClaimCompleteMsg,
-    ChannelCloseTombstoneMsg,
 };
 use crate::operation_validation::{
     validate_credit_payment, validate_payment_lock,
@@ -314,15 +313,6 @@ pub enum ResponseData {
         claim_txid: [u8; 32],
         confirmation_block: u32,
     },
-    /// Channel close tombstone validated - can be appended to ledger
-    ChannelCloseTombstoneValidated {
-        operator: PublicKey,
-        reserves_id: String,
-        channel_id: [u8; 32],
-        sequence_number: u64,
-        timestamp: u64,
-        close_reason: Option<String>,
-    },
     /// Quorum state sync processed
     QuorumStateSyncProcessed {
         applied: u32,
@@ -536,7 +526,6 @@ pub fn handle_ledger_update<C: HandlerContext>(
                 LedgerOperation::CustodyArmed { .. } |
                 LedgerOperation::CustodyAcquire { .. } |
                 LedgerOperation::CustodyYield |
-                LedgerOperation::Tombstone { .. } |
                 LedgerOperation::TransferLock { .. } |
                 LedgerOperation::TransferComplete { .. } |
                 LedgerOperation::TransferTimeout { .. } |
@@ -2513,65 +2502,6 @@ pub fn handle_recovery_claim_complete<C: HandlerContext>(
     ctx.remove_claim(msg.operator, msg.partner);
 
     Ok(HandlerResult::Ok)
-}
-
-// ============================================================================
-// Tombstone Message Handlers
-// ============================================================================
-
-/// Handle a ChannelCloseTombstone message.
-///
-/// Tombstones are appended to ledgers when channels are closed. This marks
-/// the ledger as permanently closed and prevents further operations.
-///
-/// # Validation
-/// - We must be either the operator or partner for this ledger
-/// - The message format must be valid
-///
-/// # Arguments
-/// * `ctx` - Handler context providing access to ledgers
-/// * `msg` - The tombstone message
-/// * `_sender` - Public key of the message sender
-///
-/// # Returns
-/// * `HandlerResult::Response(ChannelCloseTombstoneValidated)` - Tombstone is valid
-/// * `HandlerResult::Rejected(reason)` - Tombstone is invalid
-/// * `HandlerError` - Internal error
-pub fn handle_channel_close_tombstone<C: HandlerContext>(
-    ctx: &C,
-    msg: &ChannelCloseTombstoneMsg,
-    _sender: PublicKey,
-) -> Result<HandlerResult, HandlerError> {
-    let our_node_id = ctx.our_node_id();
-
-    // Determine our role: operator or partner
-    let we_are_operator = msg.operator_id == our_node_id;
-    let we_are_partner = msg.reserves_id == our_node_id.to_string();
-
-    if !we_are_operator && !we_are_partner {
-        return Ok(HandlerResult::Rejected(format!(
-            "Received tombstone for ledger we're not part of: operator={}, partner={}",
-            msg.operator_id, msg.reserves_id
-        )));
-    }
-
-    // Emit event for channel close
-    ctx.emit_event(ProtocolEvent::ChannelClosed {
-        operator: msg.operator_id,
-        reserves_id: msg.reserves_id.clone(),
-        channel_id: msg.channel_id,
-        reason: msg.close_reason.clone(),
-    });
-
-    // Return validated data for LDK layer to append to ledger
-    Ok(HandlerResult::Response(ResponseData::ChannelCloseTombstoneValidated {
-        operator: msg.operator_id,
-        reserves_id: msg.reserves_id.clone(),
-        channel_id: msg.channel_id,
-        sequence_number: msg.sequence_number,
-        timestamp: msg.timestamp,
-        close_reason: msg.close_reason.clone(),
-    }))
 }
 
 // ============================================================================
@@ -5417,120 +5347,4 @@ mod tests {
         }
     }
 
-    // ========================================================================
-    // Channel Close Tombstone Tests
-    // ========================================================================
-
-    #[test]
-    fn test_handle_channel_close_tombstone_not_participant() {
-        let our_node_id = create_test_pubkey(1);
-        let operator = create_test_pubkey(2);
-        let partner = create_test_pubkey(3);
-        let sender = create_test_pubkey(4);
-
-        let ctx = TestContext::new(our_node_id);
-
-        let msg = ChannelCloseTombstoneMsg {
-            operator_id: operator,
-            reserves_id: partner.to_string(), // We're neither
-            timestamp: 1234567890,
-            channel_id: [0xAB; 32],
-            close_reason: Some("test close".to_string()),
-            sequence_number: 42,
-        };
-
-        // We're not a participant - should be rejected
-        let result = handle_channel_close_tombstone(&ctx, &msg, sender);
-        assert!(matches!(result, Ok(HandlerResult::Rejected(_))));
-    }
-
-    #[test]
-    fn test_handle_channel_close_tombstone_we_are_operator() {
-        let our_node_id = create_test_pubkey(1);
-        let partner = create_test_pubkey(2);
-        let sender = create_test_pubkey(3);
-
-        let ctx = TestContext::new(our_node_id);
-
-        let channel_id = [0xAB; 32];
-        let msg = ChannelCloseTombstoneMsg {
-            operator_id: our_node_id, // We are operator
-            reserves_id: partner.to_string(),
-            timestamp: 1234567890,
-            channel_id,
-            close_reason: Some("test close".to_string()),
-            sequence_number: 42,
-        };
-
-        // We are operator - should succeed
-        let result = handle_channel_close_tombstone(&ctx, &msg, sender);
-        match result {
-            Ok(HandlerResult::Response(ResponseData::ChannelCloseTombstoneValidated {
-                operator, reserves_id: p, channel_id: cid, sequence_number, ..
-            })) => {
-                assert_eq!(operator, our_node_id);
-                assert_eq!(p, partner.to_string());
-                assert_eq!(cid, channel_id);
-                assert_eq!(sequence_number, 42);
-            }
-            other => panic!("Expected Response(ChannelCloseTombstoneValidated), got {:?}", other),
-        }
-
-        // Check that event was emitted
-        let events = ctx.events.lock().unwrap();
-        assert_eq!(events.len(), 1);
-        match &events[0] {
-            ProtocolEvent::ChannelClosed { operator: op, channel_id: cid, reason, .. } => {
-                assert_eq!(*op, our_node_id);
-                assert_eq!(*cid, channel_id);
-                assert_eq!(*reason, Some("test close".to_string()));
-            }
-            other => panic!("Expected ChannelClosed event, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_handle_channel_close_tombstone_we_are_partner() {
-        let our_node_id = create_test_pubkey(1);
-        let operator = create_test_pubkey(2);
-        let sender = create_test_pubkey(3);
-
-        let ctx = TestContext::new(our_node_id);
-
-        let channel_id = [0xCD; 32];
-        let msg = ChannelCloseTombstoneMsg {
-            operator_id: operator,
-            reserves_id: our_node_id.to_string(), // We are partner
-            timestamp: 1234567890,
-            channel_id,
-            close_reason: None,
-            sequence_number: 100,
-        };
-
-        // We are partner - should succeed
-        let result = handle_channel_close_tombstone(&ctx, &msg, sender);
-        match result {
-            Ok(HandlerResult::Response(ResponseData::ChannelCloseTombstoneValidated {
-                operator: op, reserves_id, channel_id: cid, close_reason, ..
-            })) => {
-                assert_eq!(op, operator);
-                assert_eq!(reserves_id, our_node_id.to_string());
-                assert_eq!(cid, channel_id);
-                assert!(close_reason.is_none());
-            }
-            other => panic!("Expected Response(ChannelCloseTombstoneValidated), got {:?}", other),
-        }
-
-        // Check that event was emitted
-        let events = ctx.events.lock().unwrap();
-        assert_eq!(events.len(), 1);
-        match &events[0] {
-            ProtocolEvent::ChannelClosed { reserves_id: p, channel_id: cid, reason, .. } => {
-                assert_eq!(*p, our_node_id.to_string());
-                assert_eq!(*cid, channel_id);
-                assert!(reason.is_none());
-            }
-            other => panic!("Expected ChannelClosed event, got {:?}", other),
-        }
-    }
 }

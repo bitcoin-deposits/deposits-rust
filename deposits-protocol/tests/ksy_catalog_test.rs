@@ -424,8 +424,5 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
         }),
         ("CustodyYield", LedgerOperation::CustodyYield),
         ("LedgerClose", LedgerOperation::LedgerClose),
-        ("Tombstone", LedgerOperation::Tombstone {
-            channel_id: h32(), close_reason: Some("test".into()), timestamp: 12345,
-        }),
     ]
 }

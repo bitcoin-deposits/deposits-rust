@@ -962,7 +962,7 @@ pub enum ProtocolEvent {
         claim_txid: [u8; 32],
         confirmation_block: u32,
     },
-    /// A channel was closed (tombstone received)
+    /// A channel was closed
     ChannelClosed {
         operator: PublicKey,
         reserves_id: String,
