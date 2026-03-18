@@ -184,6 +184,9 @@ const TRANSFER_ID: u64 = 220;
 const BLOCK_HASH: u64 = 222;
 const SCRIPT_WITNESS: u64 = 224;
 const TRANSFER_FEES: u64 = 226;
+const MAX_FEE_BPS: u64 = 233;
+const MAX_FEE_FIXED: u64 = 235;
+const MIN_FEE_PERIOD: u64 = 237;
 // Fee amount field
 const FEE: u64 = 2; // shares with AMOUNT for some ops, but fee uses it differently in TransferLock
 
@@ -388,6 +391,9 @@ fn schema_quorum_add_member() {
         (QUORUM_MEMBER, pubkey_bytes()),
         (QUORUM_MEMBER_SIG, sig64()),
         (MEMBER_LEDGER_ID, str_bytes("abc123")),
+        (MAX_FEE_BPS, u16_bytes(500)),
+        (MAX_FEE_FIXED, u64_bytes(100_000)),
+        (MIN_FEE_PERIOD, u32_bytes(2016)),
     ]);
 }
 

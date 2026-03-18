@@ -817,6 +817,16 @@ pub struct QuorumMember {
     /// The ledger ID where this member will lock collateral.
     /// This must match the collateral_ledger_id in any CollateralAttestation from this member.
     pub ledger_id: String,
+    /// Maximum annualized fee rate (basis points) this member allows.
+    /// DepositOpen fees exceeding this should be rejected during co-signing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_fee_bps: Option<u16>,
+    /// Maximum annualized fixed fee (msats/year) this member allows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_fee_fixed: Option<u64>,
+    /// Minimum fee collection period (blocks) this member requires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_fee_period: Option<u32>,
 }
 
 /// A collateral attestation from a quorum member proving their reserves backing.
@@ -3021,8 +3031,8 @@ mod tests {
         let collateral1 = test_pubkey_2();
         let collateral2 = test_pubkey_3();
         state.quorum_members = vec![
-            QuorumMember { pubkey: collateral1, ledger_id: String::new() },
-            QuorumMember { pubkey: collateral2, ledger_id: String::new() },
+            QuorumMember { pubkey: collateral1, ledger_id: String::new(), max_fee_bps: None, max_fee_fixed: None, min_fee_period: None },
+            QuorumMember { pubkey: collateral2, ledger_id: String::new(), max_fee_bps: None, max_fee_fixed: None, min_fee_period: None },
         ];
 
         // Add attestation for collateral1

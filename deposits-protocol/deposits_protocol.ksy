@@ -192,6 +192,9 @@ types:
   #   208 = new_descriptor (string)
   #   229 = is_collateral (u8, 0 or 1, optional — odd type)
   #   231 = receive_requires_sig (u8, 0 or 1, optional — odd type. incoming funds require deposit key signature)
+  #   233 = max_fee_bps (u16, optional — member's max annualized fee rate in basis points)
+  #   235 = max_fee_fixed (u64, optional — member's max annualized fixed fee in msats/year)
+  #   237 = min_fee_period (u32, optional — member's min fee collection period in blocks)
   #
   # Fee fields:
   #   12  = fees (nested TLV: FeeStructure in DepositOpen; u64 fee_sats in OnchainLock/TransferLock)

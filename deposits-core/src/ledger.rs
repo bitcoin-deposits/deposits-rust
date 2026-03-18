@@ -659,6 +659,9 @@ impl Ledger {
         self.state.quorum_members.push(crate::types::QuorumMember {
             pubkey: partner,
             ledger_id: member_ledger_id,
+            max_fee_bps: None,
+            max_fee_fixed: None,
+            min_fee_period: None,
         });
         Ok(())
     }
@@ -1320,7 +1323,7 @@ impl Ledger {
                 self.state.collateral_amount = *new_amount;
             }
             LedgerOperation::QuorumAddMember {
-                quorum_member, member_ledger_id, ..
+                quorum_member, member_ledger_id, max_fee_bps, max_fee_fixed, min_fee_period, ..
             } => {
                 use crate::types::QuorumMember;
                 // Check if this member already exists (by pubkey)
@@ -1328,6 +1331,9 @@ impl Ledger {
                     let member = QuorumMember {
                         pubkey: *quorum_member,
                         ledger_id: member_ledger_id.clone(),
+                        max_fee_bps: *max_fee_bps,
+                        max_fee_fixed: *max_fee_fixed,
+                        min_fee_period: *min_fee_period,
                     };
                     self.state.quorum_members.push(member);
                 }
