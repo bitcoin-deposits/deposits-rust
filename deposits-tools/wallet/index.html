@@ -191,6 +191,7 @@ body.hide-amounts .amt { visibility: hidden; }
             —
           </div>
           <div id="wallet-locked" style="color:var(--yellow); font-size:12px; display:none;"></div>
+          <div id="wallet-concentration" style="color:var(--yellow); font-size:11px; display:none; margin-top:4px;"></div>
         </div>
 
         <!-- Action buttons -->
@@ -1526,8 +1527,10 @@ function showNodeInfo(node) {
   let details = '';
   details += `<div class="kv"><span class="k">Ledgers</span><span class="v">${node.ledgerCount}</span></div>`;
   details += `<div class="kv"><span class="k">Reserves</span><span class="v amt">₿${node.reserves.toLocaleString()}</span></div>`;
-  details += `<div class="kv"><span class="k">Collateral at risk</span><span class="v amt">₿${node.collateralAtRisk.toLocaleString()}</span></div>`;
-  details += `<div class="kv"><span class="k">Quorum members</span><span class="v">${neighbors.map(n => esc(n.name)).join(', ') || 'none'}</span></div>`;
+  const nodeRatio = node.reserves > 0 ? Math.round(node.collateralAtRisk / node.reserves * 100) : 0;
+  const nodeRatioColor = nodeRatio >= 100 ? 'var(--balance)' : nodeRatio >= 50 ? 'var(--yellow)' : 'var(--red)';
+  details += `<div class="kv"><span class="k">Collateral at risk</span><span class="v amt">₿${node.collateralAtRisk.toLocaleString()} <span style="color:${nodeRatioColor}">(${nodeRatio}%)</span></span></div>`;
+  details += `<div class="kv"><span class="k">Quorum</span><span class="v">${neighbors.length} — ${neighbors.map(n => esc(n.name)).join(', ') || 'none'}</span></div>`;
   document.getElementById('node-info-details').innerHTML = details;
 
   // Ledger buttons
@@ -1558,7 +1561,49 @@ window.selectLedger = function(ledgerId) {
     details += `<div class="kv"><span class="k">Reserves</span><span class="v">₿${(ad.reserves_amount_sats || 0).toLocaleString()}</span></div>`;
     details += `<div class="kv"><span class="k">Obligations</span><span class="v">₿${(ad.total_obligations_sats || 0).toLocaleString()}</span></div>`;
     details += `<div class="kv"><span class="k">Available</span><span class="v">₿${(ad.available_headroom_sats || 0).toLocaleString()}</span></div>`;
-    details += `<div class="kv"><span class="k">Collateral</span><span class="v">₿${(ad.received_collateral_sats || 0).toLocaleString()}</span></div>`;
+    // Collateral ratio with color coding
+    const collateral = ad.received_collateral_sats || 0;
+    const obligations = ad.total_obligations_sats || 1;
+    const ratio = obligations > 0 ? Math.round(collateral / obligations * 100) : 0;
+    const ratioColor = ratio >= 100 ? 'var(--balance)' : ratio >= 50 ? 'var(--yellow)' : 'var(--red)';
+    details += `<div class="kv"><span class="k">Collateral</span><span class="v">₿${collateral.toLocaleString()} <span style="color:${ratioColor}">(${ratio}%)</span></span></div>`;
+
+    // Quorum size from graph data
+    const opNode = graphNodes.find(n => n.pubkey === (ad.operator_pubkey || ''));
+    if (opNode) {
+      const qMembers = graphEdges.filter(e => e.from === opNode.id || e.to === opNode.id).length;
+      const qColor = qMembers >= 3 ? 'var(--balance)' : qMembers >= 1 ? 'var(--yellow)' : 'var(--red)';
+      details += `<div class="kv"><span class="k">Quorum</span><span class="v" style="color:${qColor}">${qMembers} member${qMembers !== 1 ? 's' : ''}</span></div>`;
+
+      // Overlap warning: check if user already has deposits with operators who share quorum members
+      const userOps = new Set(state.deposits.map(d => d.ledger_id).filter(Boolean));
+      if (userOps.size > 0) {
+        const neighbors = graphEdges
+          .filter(e => e.from === opNode.id || e.to === opNode.id)
+          .map(e => e.from === opNode.id ? e.to : e.from);
+        // Check if any neighbor operator also has a quorum edge to an operator the user already uses
+        const userOpNodes = graphNodes.filter(n => n.ads.some(a => userOps.has(a.ledger_id)));
+        const sharedMembers = [];
+        for (const neighborId of neighbors) {
+          for (const userOp of userOpNodes) {
+            if (userOp.id === opNode.id) continue;
+            const hasEdge = graphEdges.some(e =>
+              (e.from === neighborId && e.to === userOp.id) ||
+              (e.to === neighborId && e.from === userOp.id)
+            );
+            if (hasEdge) {
+              const memberNode = graphNodes.find(n => n.id === neighborId);
+              if (memberNode) sharedMembers.push(memberNode.name);
+            }
+          }
+        }
+        if (sharedMembers.length > 0) {
+          const unique = [...new Set(sharedMembers)];
+          details += `<div style="color:var(--yellow); font-size:10px; margin-top:2px;">Shared quorum member${unique.length > 1 ? 's' : ''} with your deposits: ${unique.join(', ')}</div>`;
+        }
+      }
+    }
+
     const adFeePeriod = ad.fee_period_blocks || 2016;
     const adAnnualFixed = Math.floor((ad.min_fee_sats || 0) * 52560 / adFeePeriod);
     details += `<div class="kv"><span class="k">Custody fee</span><span class="v">${(ad.annual_fee_bps || 0) / 100}%/yr + ₿${adAnnualFixed.toLocaleString()}/yr</span></div>`;
@@ -1602,7 +1647,7 @@ window.doOpenDeposit = async function() {
     // Fetch advertisement for fee info
     const adFilter = { kinds: [39100], '#d': [ledgerId] };
     const adEvents = await fetchEvents(adFilter, 5000);
-    let feeFixed = 0, feeBps = 0, feeFreq = 2016;
+    let feeFixed = 0, feeBps = 0, feeFreq = 2016, operatorName = '';
     if (adEvents.length > 0) {
       try {
         const ad = JSON.parse(adEvents[0].content);
@@ -1611,10 +1656,11 @@ window.doOpenDeposit = async function() {
         feeFixed = (ad.min_fee_sats || 0) * periodsPerYear;
         feeBps = ad.annual_fee_bps || 0;
         feeFreq = period;
+        operatorName = ad.operator_name || '';
       } catch {}
     }
 
-    log(`Opening deposit on ${ledgerId.slice(0, 12)}...`);
+    log(`Opening deposit on ${operatorName || ledgerId.slice(0, 12)}...`);
     const openResponse = await sendRequest(ledgerId, 'deposit_open', {
       deposit_pubkey: pubkeyHex,
       fee_fixed: feeFixed,
@@ -1633,6 +1679,7 @@ window.doOpenDeposit = async function() {
       deposit_pubkey: pubkeyHex,
       key_index: keyIndex,
       status: 'pending',
+      operator_name: operatorName,
     });
     state.keyIndex = keyIndex + 1;
     saveState();
@@ -1664,10 +1711,12 @@ function renderDeposits() {
     const hasBal = balanceVisible && d.amount_sats != null;
     const bal = d.amount_sats || 0;
     const selected = selectedDeposit && selectedDeposit.alias === d.alias ? ' selected' : '';
+    const opLabel = d.operator_name ? `<div style="color:var(--muted); font-size:9px; margin-top:1px;">${esc(d.operator_name)}</div>` : '';
     html += `
       <div class="deposit-tile${selected}" onclick="selectDeposit('${esc(d.alias)}')">
         <div class="alias">${esc(d.alias)}</div>
         <div class="bal${hasBal && bal > 0 ? '' : ' zero'}"><span class="amt">${hasBal ? '₿' + bal.toLocaleString() : d.status}</span></div>
+        ${opLabel}
       </div>`;
   }
   html += `<div class="deposit-tile" onclick="toggleNewDeposit()" style="display:flex; align-items:center; justify-content:center; color:var(--muted); font-size:24px;">+</div>`;
@@ -1780,6 +1829,35 @@ function renderWalletTab() {
     } else {
       lockEl.style.display = 'none';
     }
+  }
+
+  // Concentration warning: if >50% of funds are with one operator
+  const concEl = document.getElementById('wallet-concentration');
+  if (concEl && totalSats > 0 && balanceMode !== 'hidden') {
+    const byOperator = {};
+    for (const d of state.deposits) {
+      const lid = d.ledger_id || 'unknown';
+      const opName = d.operator_name || lid.slice(0, 8);
+      byOperator[opName] = (byOperator[opName] || 0) + (d.amount_sats || 0);
+    }
+    const entries = Object.entries(byOperator).sort((a, b) => b[1] - a[1]);
+    if (entries.length > 0) {
+      const [topOp, topAmt] = entries[0];
+      const pct = Math.round(topAmt / totalSats * 100);
+      if (entries.length === 1) {
+        concEl.textContent = 'All funds with one operator — consider spreading';
+        concEl.style.display = 'block';
+      } else if (pct > 75) {
+        concEl.textContent = `${pct}% with ${topOp} — consider spreading`;
+        concEl.style.display = 'block';
+      } else {
+        concEl.style.display = 'none';
+      }
+    } else {
+      concEl.style.display = 'none';
+    }
+  } else if (concEl) {
+    concEl.style.display = 'none';
   }
 }
 
@@ -1895,7 +1973,7 @@ window.doWalletQuickOpen = async function(ledgerId, relayUrl) {
   const pubkeyHex = bytesToHex(pubkey);
 
   // Fetch fee info
-  let feeFixed = 0, feeBps = 0, feeFreq = 2016;
+  let feeFixed = 0, feeBps = 0, feeFreq = 2016, operatorName = '';
   try {
     const adEvents = await fetchEvents({ kinds: [39100], '#d': [ledgerId] }, 5000);
     if (adEvents.length > 0) {
@@ -1904,17 +1982,18 @@ window.doWalletQuickOpen = async function(ledgerId, relayUrl) {
       feeFixed = (ad.min_fee_sats || 0) * Math.floor(52560 / period);
       feeBps = ad.annual_fee_bps || 0;
       feeFreq = period;
+      operatorName = ad.operator_name || '';
     }
   } catch {}
 
   try {
-    log(`Opening deposit on ${ledgerId.slice(0,12)}...`);
+    log(`Opening deposit on ${operatorName || ledgerId.slice(0,12)}...`);
     const resp = await sendRequest(ledgerId, 'deposit_open', {
       deposit_pubkey: pubkeyHex, fee_fixed: feeFixed, fee_bps: feeBps, fee_frequency: feeFreq,
     });
     if (!resp.success && !(resp.error || '').includes('already')) throw new Error(resp.error || 'Failed');
 
-    state.deposits.push({ alias, ledger_id: ledgerId, deposit_pubkey: pubkeyHex, key_index: keyIndex, status: 'pending' });
+    state.deposits.push({ alias, ledger_id: ledgerId, deposit_pubkey: pubkeyHex, key_index: keyIndex, status: 'pending', operator_name: operatorName });
     state.keyIndex = keyIndex + 1;
     saveState();
     renderDeposits();
