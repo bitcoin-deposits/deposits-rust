@@ -11,8 +11,9 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/_common.sh"
+TOOLS_DIR="${SCRIPT_DIR}/.."
 
-DC_LIGHTNING="docker compose -f $SCRIPT_DIR/docker-compose.yml --profile lightning"
+DC_LIGHTNING="docker compose -f $TOOLS_DIR/docker-compose.yml --profile lightning"
 
 QUICK=false
 
@@ -37,14 +38,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-log_info "=== Reinitializing BDK + Lightning Test Network ==="
+log_info "=== Reinitializing + Lightning Test Network ==="
 
 # Stop any eve containers from setup-scale.sh
 for c in $(docker ps -aq --filter 'name=eve'); do
     docker stop "$c" 2>/dev/null || true
     docker rm "$c" 2>/dev/null || true
 done
-for v in $(docker volume ls -q --filter 'name=bdk_eve'); do
+for v in $(docker volume ls -q --filter 'name=eve'); do
     docker volume rm "$v" 2>/dev/null || true
 done
 
@@ -72,13 +73,13 @@ docker image prune -f 2>/dev/null || true
 
 if ! $QUICK; then
     log_info "Building local deposits-wallet binary..."
-    cargo build --release --manifest-path "$BDK_DIR/../../Cargo.toml" -p deposits-node --bin deposits-wallet 2>&1 | tail -3
+    cargo build --release --manifest-path "$TOOLS_DIR/../Cargo.toml" -p deposits-node --bin deposits-wallet 2>&1 | tail -3
 
     log_info "Building deposits-node image..."
     $DC_LIGHTNING build --no-cache alice
 
     log_info "Building ldk-node image..."
-    docker build -f "$BDK_DIR/Dockerfile.ldk-node" -t ldk-node:latest "$HOME/workspace/"
+    docker build -f "$TOOLS_DIR/Dockerfile.ldk-node" -t ldk-node:latest "$HOME/workspace/"
 fi
 
 # Start infrastructure

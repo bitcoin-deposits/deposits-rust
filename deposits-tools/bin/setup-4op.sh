@@ -407,21 +407,12 @@ establish_collateral() {
 
     mine_blocks 1
 
-    # Wait for deposits to complete
-    sleep 5
-    log_info "Bumping operators to complete collateral deposits..."
-    for op in $OPERATORS; do
-        for member in $OPERATORS; do
-            if [ "$op" != "$member" ]; then
-                local member_suffix=""
-                [ "$LEDGERS_PER_OP" -gt 1 ] && member_suffix="_1"
-                local member_ledger_id=$(get_value "ledger_id_${member}${member_suffix}")
-                bump_operator "$member" "$member_ledger_id" 2>/dev/null || true
-            fi
-        done
-    done
+    # Wait for auto_complete_deposits to pick up the funded offers
     mine_blocks 1
-    sleep 3
+    log_info "Waiting for deposits to complete (auto-complete cycle)..."
+    sleep 15
+    mine_blocks 1
+    sleep 5
 
     # Lock collateral and record attestations
     log_info "Locking collateral and recording attestations..."
