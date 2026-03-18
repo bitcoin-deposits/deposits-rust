@@ -433,7 +433,12 @@ establish_collateral() {
                 local lock_output=$(run_bdk_cmd "$op" collateral lock \
                     "$member_ledger_id" "$collateral_msats" "$lock_blocks" "$op_node_id" 2>&1 || true)
 
-                local attestation_json=$(echo "$lock_output" | grep "^ATTESTATION_JSON:" | sed 's/^ATTESTATION_JSON://')
+                # Extract the base64-encoded attestation from the response
+                local attestation_b64=$(echo "$lock_output" | grep "attestation_b64" | sed 's/.*"attestation_b64":"\([^"]*\)".*/\1/')
+                local attestation_json=""
+                if [ -n "$attestation_b64" ]; then
+                    attestation_json=$(echo "$attestation_b64" | base64 -d 2>/dev/null || echo "")
+                fi
 
                 if [ -n "$attestation_json" ]; then
                     # Record attestation on op's first ledger
