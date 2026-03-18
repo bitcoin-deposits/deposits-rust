@@ -1463,6 +1463,12 @@ pub struct SignedLedgerUpdate {
 
 impl SignedLedgerUpdate {
     /// Compute the hash of this update.
+    ///
+    /// When `member_ledger_hash` is present (co-signed update), it is included
+    /// in the hash: `SHA256(seq || prev_hash || message || member_ledger_hash)`.
+    /// This creates causal ordering — the co-signer's ledger tip is baked into
+    /// the chain, proving this update was created after that point in the
+    /// co-signer's ledger.
     pub fn compute_hash(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
 
@@ -1470,6 +1476,9 @@ impl SignedLedgerUpdate {
         hasher.update(&self.sequence_number.to_le_bytes());
         hasher.update(&self.previous_hash);
         hasher.update(&self.message);
+        if let Some(ref mlh) = self.member_ledger_hash {
+            hasher.update(mlh);
+        }
 
         let result = hasher.finalize();
         let mut hash = [0u8; 32];
@@ -1493,7 +1502,9 @@ impl SignedLedgerUpdate {
 
     /// Compute the data that the partner signs (update content only, no operator signature).
     ///
-    /// Partner signs: message || message_type || sequence || prev_hash || curr_hash || timestamp
+    /// Partner signs: message || message_type || sequence || prev_hash || timestamp
+    /// Does NOT include current_hash — the hash is finalized after co-signing
+    /// (it incorporates member_ledger_hash for causal ordering).
     /// Partner signs ONLY the content, NOT any operator signature.
     /// This prevents operator from tricking partner into endorsing invalid state.
     pub fn partner_signing_data(&self) -> Vec<u8> {
@@ -1502,7 +1513,6 @@ impl SignedLedgerUpdate {
         data.extend_from_slice(&self.message_type.to_le_bytes());
         data.extend_from_slice(&self.sequence_number.to_le_bytes());
         data.extend_from_slice(&self.previous_hash);
-        data.extend_from_slice(&self.current_hash);
         data.extend_from_slice(&self.timestamp.to_le_bytes());
         data
     }
@@ -1519,6 +1529,9 @@ impl SignedLedgerUpdate {
 
     /// Verify the partner's signature over the update content.
     ///
+    /// The co-signer uses BIP-340 tagged hashing:
+    /// `SHA256(SHA256("deposits/cosign") || SHA256("deposits/cosign") || partner_signing_data || member_ledger_hash)`
+    ///
     /// The partner pubkey must be provided by the caller (from the Ledger).
     /// For BDK ledgers without a partner, pass None and this returns Ok.
     pub fn verify_partner_signature(&self, partner_pubkey: Option<&PublicKey>) -> Result<(), String> {
@@ -1531,9 +1544,25 @@ impl SignedLedgerUpdate {
             None => return Ok(()),
         };
 
+        // If no partner signature, skip
+        if self.partner_signature == [0u8; 64] {
+            return Ok(());
+        }
+
         let secp = Secp256k1::new();
         let data = self.partner_signing_data();
-        let hash = sha256::Hash::hash(&data);
+        let member_hash = self.member_ledger_hash.unwrap_or([0u8; 32]);
+
+        // BIP-340 tagged hash: SHA256(tag_hash || tag_hash || data || member_ledger_hash)
+        let tag = b"deposits/cosign";
+        let tag_hash = sha256::Hash::hash(tag);
+        let mut tagged_input = Vec::new();
+        tagged_input.extend_from_slice(tag_hash.as_byte_array());
+        tagged_input.extend_from_slice(tag_hash.as_byte_array());
+        tagged_input.extend_from_slice(&data);
+        tagged_input.extend_from_slice(&member_hash);
+
+        let hash = sha256::Hash::hash(&tagged_input);
         let msg = Message::from_digest(hash.to_byte_array());
 
         let sig = Signature::from_compact(&self.partner_signature)

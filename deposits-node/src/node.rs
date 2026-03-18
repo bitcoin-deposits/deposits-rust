@@ -8793,22 +8793,24 @@ impl Node {
                 Ok(result) => {
                     let label = format!("success_attempt_{}", attempt);
                     metrics::record_cosign_attempt(&label, attempt_start.elapsed());
-                    // Apply partner signature
+                    // Apply co-signer info and recompute hash for causal ordering,
+                    // then apply partner signature
                     let ledgers = self.handler.ledgers.lock().unwrap();
                     let ledger_arc = ledgers
                         .get(ledger_id)
                         .ok_or_else(|| Error::Protocol("Ledger not found".to_string()))?;
                     let mut ledger = ledger_arc.write().unwrap();
 
+                    // Recompute current_hash to include member_ledger_hash (causal ordering)
+                    ledger.apply_cosigner_hash(result.member_ledger_hash, result.cosigner_pubkey);
                     if let Some(last) = ledger.history.last_mut() {
                         last.partner_signature = result.partner_signature;
-                        last.cosigner_pubkey = Some(result.cosigner_pubkey);
-                        last.member_ledger_hash = Some(result.member_ledger_hash);
                     }
 
-                    tracing::info!("Applied partner signature from {}... (member_ledger_hash: {}...)",
+                    tracing::info!("Applied co-sign from {}... (member_hash: {}..., new chain_hash: {}...)",
                         &pubkey_hex(&result.cosigner_pubkey)[..8],
-                        &hex::encode(&result.member_ledger_hash[..4]));
+                        &hex::encode(&result.member_ledger_hash[..4]),
+                        &hex::encode(&ledger.state.hash[..4]));
                     last_error = None;
                     break;
                 }

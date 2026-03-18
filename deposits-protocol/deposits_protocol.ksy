@@ -56,6 +56,15 @@ types:
     doc: |
       A signed ledger update, broadcast as Kind 9100 Nostr events.
       Contains the inner operation (as TLV bytes), metadata, and signatures.
+
+      Hash chain: current_hash = SHA256(sequence || previous_hash || message [|| member_ledger_hash]).
+      When a quorum member co-signs, their ledger's tip hash is included in
+      current_hash, creating causal ordering across ledgers.
+
+      Co-signing: the partner signs SHA256(tag || tag || partner_signing_data || member_ledger_hash)
+      where tag = SHA256("deposits/cosign") and partner_signing_data =
+      message || message_type || sequence || previous_hash || timestamp.
+      Note: current_hash is NOT in partner_signing_data — it is derived after co-signing.
     seq:
       - id: records
         type: tlv_record
@@ -65,7 +74,7 @@ types:
         doc: "Inner LedgerOperation TLV bytes (type 0)"
         value: "records[0].value"
       message_type:
-        doc: "Protocol message type constant (type 2)"
+        doc: "Protocol message type constant (type 2, u16)"
         value: "records[1].value"
       operator_id:
         doc: "Operator's 33-byte compressed secp256k1 pubkey (type 4)"
@@ -74,23 +83,35 @@ types:
         doc: "32-byte ledger identifier hash (type 6)"
         value: "records[3].value"
       sequence_number:
-        doc: "Monotonically increasing sequence number (type 8)"
+        doc: "Monotonically increasing sequence number (type 8, u64)"
         value: "records[4].value"
       previous_hash:
         doc: "32-byte hash of the previous update (type 10)"
         value: "records[5].value"
       current_hash:
-        doc: "32-byte hash of this update (type 12)"
+        doc: "32-byte hash: SHA256(seq || prev_hash || message [|| member_ledger_hash]) (type 12)"
         value: "records[6].value"
       timestamp:
-        doc: "Unix timestamp in seconds (type 14)"
+        doc: "Unix timestamp in seconds (type 14, u64)"
         value: "records[7].value"
       partner_signature:
-        doc: "64-byte ECDSA signature from co-signing partner (type 16)"
+        doc: "64-byte ECDSA co-signature from quorum member (type 16)"
         value: "records[8].value"
       operator_signature:
         doc: "64-byte Schnorr signature from operator (type 18)"
         value: "records[9].value"
+      block_height:
+        doc: "Block height when update was created (type 20, u32, optional)"
+        value: "records[10].value"
+      block_hash:
+        doc: "32-byte block hash at time of creation (type 22, optional)"
+        value: "records[11].value"
+      cosigner_pubkey:
+        doc: "33-byte compressed pubkey of the co-signing quorum member (type 24, optional)"
+        value: "records[12].value"
+      member_ledger_hash:
+        doc: "32-byte tip hash of the co-signer's own ledger at time of signing (type 26, optional). Included in current_hash for causal ordering."
+        value: "records[13].value"
 
   ledger_operation:
     doc: |
@@ -205,10 +226,10 @@ types:
   #   74  = funding_address (string)
   #
   # Reserves rotation fields:
+  #   6   = quorum_members (concatenated 33-byte compressed pubkeys)
   #   90  = spending_txid (32 bytes)
   #   91  = new_outpoint_txid (32 bytes)
   #   92  = new_outpoint_vout (u32)
-  #   6   = quorum_members (concatenated 33-byte compressed pubkeys)
   #   95  = first_expiry_block (u32)
   #
   # Collateral fields:

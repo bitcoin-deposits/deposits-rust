@@ -974,6 +974,26 @@ impl Ledger {
         }
     }
 
+    /// Apply co-signer info and recompute the hash chain to include causal ordering.
+    ///
+    /// After a quorum member co-signs, their ledger's tip hash is incorporated into
+    /// this update's `current_hash`. This creates a web of causality: the co-signer's
+    /// ledger state at the time of signing is baked into our chain, proving temporal
+    /// ordering across ledgers.
+    ///
+    /// Must be called BEFORE `sign_last_update` with the operator signature, since
+    /// the operator signature covers the final hash.
+    pub fn apply_cosigner_hash(&mut self, member_ledger_hash: [u8; 32], cosigner_pubkey: PublicKey) {
+        if let Some(update) = self.history.last_mut() {
+            update.member_ledger_hash = Some(member_ledger_hash);
+            update.cosigner_pubkey = Some(cosigner_pubkey);
+            // Recompute current_hash to include the member's ledger hash
+            update.current_hash = update.compute_hash();
+            // Update the ledger's state hash to match
+            self.state.hash = update.current_hash;
+        }
+    }
+
     /// Validate an operation before applying.
     fn validate_operation(&self, operation: &LedgerOperation) -> DepositsResult<()> {
         // Check dispute state allows this operation type
