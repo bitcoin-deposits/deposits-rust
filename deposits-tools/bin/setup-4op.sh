@@ -441,18 +441,22 @@ establish_collateral() {
                 fi
 
                 if [ -n "$attestation_json" ]; then
-                    # Record attestation on op's first ledger
-                    local op_suffix=""
-                    [ "$LEDGERS_PER_OP" -gt 1 ] && op_suffix="_1"
-                    local op_reserves_id=$(get_value "reserves_id_${op}${op_suffix}")
-
-                    local record_output=$(run_bdk_cmd "$op" collateral record \
-                        "$op_reserves_id" "$attestation_json" 2>&1 || true)
-
-                    if echo "$record_output" | grep -q "recorded\|Attestation"; then
-                        log_success "$op locked collateral on $member, attestation recorded"
+                    # Record attestation on ALL of op's ledgers
+                    local recorded=0
+                    for lidx in $(seq 1 $LEDGERS_PER_OP); do
+                        local lsuffix=""
+                        [ "$LEDGERS_PER_OP" -gt 1 ] && lsuffix="_$lidx"
+                        local op_reserves_id=$(get_value "reserves_id_${op}${lsuffix}")
+                        if [ -n "$op_reserves_id" ]; then
+                            run_bdk_cmd "$op" collateral record \
+                                "$op_reserves_id" "$attestation_json" 2>&1 >/dev/null || true
+                            recorded=$((recorded + 1))
+                        fi
+                    done
+                    if [ $recorded -gt 0 ]; then
+                        log_success "$op locked collateral on $member, attestation on $recorded ledger(s)"
                     else
-                        log_warn "$op attestation record issue: $(echo "$record_output" | head -1)"
+                        log_warn "$op attestation record issue"
                     fi
                 else
                     log_warn "$op collateral lock on $member failed: $(echo "$lock_output" | tail -1)"
