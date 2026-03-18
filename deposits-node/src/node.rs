@@ -1798,7 +1798,7 @@ impl Node {
                         // Dispatch poll requests to workers (non-blocking)
                         for (_lid, reqs) in poll_by_ledger {
                             for req in reqs {
-                                if req.action == "cosign_update" || req.action == "cosign_offer" {
+                                if req.action == "cosign_update" || req.action == "cosign_offer" || req.action == "cosign_invoice" {
                                     // Dispatch to cosign worker
                                     let lid = req.ledger_id.clone();
                                     let mut workers = self.cosign_workers.lock().unwrap();
@@ -1898,7 +1898,7 @@ impl Node {
                     // These are requests from PARTNERS asking US to co-sign their updates.
                     // Must not block main loop — main loop needs to pump process_events +
                     // drain_responses so our OWN outbound cosign responses get routed.
-                    if request.action == "cosign_update" || request.action == "cosign_offer" {
+                    if request.action == "cosign_update" || request.action == "cosign_offer" || request.action == "cosign_invoice" {
                         let lid = request.ledger_id.clone();
                         let mut workers = self.cosign_workers.lock().unwrap();
                         let tx = workers.entry(lid.clone()).or_insert_with(|| {
@@ -2077,7 +2077,8 @@ impl Node {
         // cosign requests can come from ledgers where we're a quorum member
         // (we may not have the full ledger locally, just a QuorumJoin record)
         let is_cosign_request = request.action == "cosign_update"
-            || request.action == "cosign_offer";
+            || request.action == "cosign_offer"
+            || request.action == "cosign_invoice";
 
         // Silently drop operator-only actions if we're not the operator
         // (these are broadcast but only the operator should respond)
@@ -2213,15 +2214,19 @@ impl Node {
                 if !result.0 { return; }  // Silent — don't send error response
                 result
             }
-            "cosign_offer" => {
+            "cosign_offer" | "cosign_invoice" => {
                 // Silently ignore if we're not a quorum member for this ledger
                 if !self.is_quorum_member_of_ledger(&request.ledger_id) {
-                    tracing::debug!("Ignoring cosign_offer for {} - not a quorum member",
-                        &request.ledger_id[..16.min(request.ledger_id.len())]);
+                    tracing::debug!("Ignoring {} for {} - not a quorum member",
+                        request.action, &request.ledger_id[..16.min(request.ledger_id.len())]);
                     return;
                 }
 
-                let result = self.process_cosign_offer_request(&request).await;
+                let result = if request.action == "cosign_offer" {
+                    self.process_cosign_offer_request(&request).await
+                } else {
+                    self.process_cosign_invoice_request(&request).await
+                };
                 if !result.0 { return; }  // Silent — don't send error response
                 result
             }
@@ -5428,14 +5433,77 @@ impl Node {
                     amount_sats,
                     hex::encode(&payment_hash[..8]));
 
-                let result = serde_json::json!({
-                    "invoice": invoice_str,
-                    "amount_sats": amount_sats,
-                    "deposit_pubkey": deposit_pubkey_hex,
-                    "deposit_id": hex::encode(deposit_id),
-                    "payment_hash": hex::encode(payment_hash),
-                });
-                (true, Some(result.to_string()), None)
+                // Request co-signature from quorum member (if post-rotation)
+                let requires_cosign = self.has_quorum_reserves(&request.ledger_id);
+                if requires_cosign {
+                    let params = serde_json::json!({
+                        "payment_hash": hex::encode(payment_hash),
+                        "deposit_id": hex::encode(deposit_id),
+                        "amount_msat": amount_msat,
+                        "invoice": &invoice_str,
+                    });
+
+                    let mut notification_rx = self.nostr.create_notification_receiver();
+                    let req_id = match self.nostr.send_ledger_request(&request.ledger_id, "cosign_invoice", params).await {
+                        Ok(id) => id,
+                        Err(e) => {
+                            return (false, None, Some(format!("Failed to send cosign_invoice: {:?}", e)));
+                        }
+                    };
+                    self.track_sent_event(&req_id);
+
+                    // Poll for response (3s timeout)
+                    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
+                    let mut cosign_result: Option<serde_json::Value> = None;
+                    loop {
+                        // Drain notifications to trigger response processing
+                        match tokio::time::timeout(
+                            tokio::time::Duration::from_millis(100),
+                            notification_rx.recv(),
+                        ).await {
+                            Ok(Ok(n)) => { self.nostr.dispatch_or_extract_request(n, ""); }
+                            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
+                            _ => {}
+                        }
+                        // Check for our response
+                        while let Some(response) = self.nostr.try_recv_response() {
+                            if response.request_id == req_id && response.success {
+                                cosign_result = response.result.clone();
+                                break;
+                            }
+                        }
+                        if cosign_result.is_some() || tokio::time::Instant::now() >= deadline { break; }
+                    }
+
+                    match cosign_result {
+                        Some(r) => {
+                            let result = serde_json::json!({
+                                "invoice": invoice_str,
+                                "amount_sats": amount_sats,
+                                "deposit_pubkey": deposit_pubkey_hex,
+                                "deposit_id": hex::encode(deposit_id),
+                                "payment_hash": hex::encode(payment_hash),
+                                "cosign_required": true,
+                                "cosigner_pubkey": r.get("cosigner_pubkey").and_then(|v| v.as_str()).unwrap_or(""),
+                                "cosigner_ledger_hash": r.get("cosigner_ledger_hash").and_then(|v| v.as_str()).unwrap_or(""),
+                                "cosign_signature": r.get("cosign_signature").and_then(|v| v.as_str()).unwrap_or(""),
+                            });
+                            (true, Some(result.to_string()), None)
+                        }
+                        None => {
+                            (false, None, Some("Invoice co-signature required but no quorum member responded".to_string()))
+                        }
+                    }
+                } else {
+                    let result = serde_json::json!({
+                        "invoice": invoice_str,
+                        "amount_sats": amount_sats,
+                        "deposit_pubkey": deposit_pubkey_hex,
+                        "deposit_id": hex::encode(deposit_id),
+                        "payment_hash": hex::encode(payment_hash),
+                    });
+                    (true, Some(result.to_string()), None)
+                }
             }
             Err(e) => {
                 tracing::error!("Failed to create invoice: {}", e);
@@ -7026,6 +7094,101 @@ impl Node {
             "member_ledger_hash_hex": hex::encode(member_ledger_hash),
         });
 
+        (true, Some(result.to_string()), None)
+    }
+
+    async fn process_cosign_invoice_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+        use bitcoin::hashes::{sha256, Hash};
+        use bitcoin::secp256k1::Message;
+
+        tracing::info!("Processing cosign_invoice request for ledger {}...",
+            &request.ledger_id[..16.min(request.ledger_id.len())]);
+
+        // Extract parameters
+        let payment_hash_hex = match request.params.get("payment_hash").and_then(|v| v.as_str()) {
+            Some(h) => h.to_string(),
+            None => return (false, None, Some("Missing payment_hash".to_string())),
+        };
+        let deposit_id_hex = match request.params.get("deposit_id").and_then(|v| v.as_str()) {
+            Some(d) => d.to_string(),
+            None => return (false, None, Some("Missing deposit_id".to_string())),
+        };
+        let amount_msat = match request.params.get("amount_msat").and_then(|v| v.as_u64()) {
+            Some(a) => a,
+            None => return (false, None, Some("Missing amount_msat".to_string())),
+        };
+
+        let payment_hash: [u8; 32] = match hex::decode(&payment_hash_hex) {
+            Ok(b) if b.len() == 32 => { let mut a = [0u8; 32]; a.copy_from_slice(&b); a }
+            _ => return (false, None, Some("Invalid payment_hash".to_string())),
+        };
+        let deposit_id: [u8; 16] = match hex::decode(&deposit_id_hex) {
+            Ok(b) if b.len() == 16 => { let mut a = [0u8; 16]; a.copy_from_slice(&b); a }
+            _ => return (false, None, Some("Invalid deposit_id".to_string())),
+        };
+
+        // Find our member ledger hash (same lookup as cosign_offer)
+        let member_ledger_hash: [u8; 32] = {
+            let cached_key = self.cosign_member_cache.lock().unwrap()
+                .get(&request.ledger_id).cloned();
+            let member_key = if let Some(key) = cached_key { key } else {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                let mut found_key = None;
+                for (ledger_key, arc) in ledgers.iter() {
+                    let ledger = arc.read().unwrap();
+                    if ledger.operator_key() != self.node_id { continue; }
+                    let has_join = ledger.history.iter().any(|update| {
+                        if update.message_type != deposits_core::messages::consts::QUORUM_JOIN { return false; }
+                        if let Ok(LedgerOperation::QuorumJoin { ledger_id: join_ledger, .. }) =
+                            LedgerOperation::tlv_decode(&update.message)
+                        { join_ledger == request.ledger_id } else { false }
+                    });
+                    if has_join { found_key = Some(ledger_key.clone()); break; }
+                }
+                drop(ledgers);
+                match found_key {
+                    Some(key) => {
+                        self.cosign_member_cache.lock().unwrap()
+                            .insert(request.ledger_id.clone(), key.clone());
+                        key
+                    }
+                    None => return (false, None, Some("Not a quorum member".to_string())),
+                }
+            };
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            match ledgers.get(&member_key) {
+                Some(arc) => arc.read().unwrap().history.last()
+                    .map(|u| u.current_hash).unwrap_or([0u8; 32]),
+                None => return (false, None, Some("Member ledger not found".to_string())),
+            }
+        };
+
+        // Build tagged hash: SHA256(tag || tag || signing_data || member_ledger_hash)
+        let signing_data = Self::build_invoice_signing_data(
+            &request.ledger_id, &payment_hash, &deposit_id, amount_msat,
+        );
+        let tag = b"deposits/invoice_cosign";
+        let tag_hash = sha256::Hash::hash(tag);
+        let mut tagged_input = Vec::new();
+        tagged_input.extend_from_slice(tag_hash.as_byte_array());
+        tagged_input.extend_from_slice(tag_hash.as_byte_array());
+        tagged_input.extend_from_slice(&signing_data);
+        tagged_input.extend_from_slice(&member_ledger_hash);
+        let hash = sha256::Hash::hash(&tagged_input);
+
+        let secp = &self.secp;
+        let msg = Message::from_digest(hash.to_byte_array());
+        let secret = self.wallet.operator_secret();
+        let sig = secp.sign_ecdsa(&msg, &secret);
+
+        tracing::info!("Co-signed invoice {} for ledger {}...",
+            &payment_hash_hex[..16], &request.ledger_id[..16]);
+
+        let result = serde_json::json!({
+            "cosign_signature": hex::encode(sig.serialize_compact()),
+            "cosigner_pubkey": self.node_id_hex.clone(),
+            "cosigner_ledger_hash": hex::encode(member_ledger_hash),
+        });
         (true, Some(result.to_string()), None)
     }
 
@@ -8803,6 +8966,27 @@ impl Node {
         self.quorum_reserves_cache.lock().unwrap()
             .insert(ledger_id.to_string(), (result, current_len));
         result
+    }
+
+    /// Build canonical signing data for invoice co-signatures.
+    ///
+    /// The signing data format is:
+    /// `ledger_id || payment_hash || deposit_id || amount_msat`
+    ///
+    /// This data is then hashed using BIP-340 tagged hashing with tag "deposits/invoice_cosign"
+    /// and combined with the member's ledger hash before signing.
+    fn build_invoice_signing_data(
+        ledger_id: &str,
+        payment_hash: &[u8; 32],
+        deposit_id: &[u8; 16],
+        amount_msat: u64,
+    ) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(ledger_id.as_bytes());
+        data.extend_from_slice(payment_hash);
+        data.extend_from_slice(deposit_id);
+        data.extend_from_slice(&amount_msat.to_le_bytes());
+        data
     }
 
     /// Build canonical signing data for deposit offer co-signatures.

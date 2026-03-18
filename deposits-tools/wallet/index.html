@@ -884,6 +884,7 @@ function saveState() {
     deposits: state.deposits,
     keyIndex: state.keyIndex,
     backupVerified: state.backupVerified || false,
+    evidence: state.evidence || [],
   };
   localStorage.setItem(STATE_KEY, JSON.stringify(s));
 }
@@ -902,8 +903,106 @@ function loadState() {
     state.backupVerified = s.backupVerified || false;
     state.deposits = s.deposits || [];
     state.keyIndex = s.keyIndex || 0;
+    state.evidence = s.evidence || [];
     return true;
   } catch { return false; }
+}
+
+// ============================================================
+// Evidence: store and verify cosigned offers/invoices
+// ============================================================
+
+// Store an offer or invoice with its cosignature as evidence.
+// type: 'offer' or 'invoice'
+function storeEvidence(type, depositAlias, data) {
+  if (!state.evidence) state.evidence = [];
+  // Remove any existing evidence for same offer_id or payment_hash
+  const key = type === 'offer' ? data.offer_id : data.payment_hash;
+  state.evidence = state.evidence.filter(e => {
+    if (e.type !== type) return true;
+    return type === 'offer' ? e.offer_id !== key : e.payment_hash !== key;
+  });
+  state.evidence.push({
+    type,
+    deposit_alias: depositAlias,
+    created: Math.floor(Date.now() / 1000),
+    ...data,
+  });
+  // Prune expired evidence (offers older than 24h without completion, invoices older than 1h)
+  const now = Math.floor(Date.now() / 1000);
+  state.evidence = state.evidence.filter(e => {
+    if (e.settled) return false; // already settled, can drop
+    const maxAge = e.type === 'offer' ? 86400 : 3600;
+    return (now - e.created) < maxAge;
+  });
+  saveState();
+}
+
+// Verify ECDSA cosignature using BIP-340 tagged hashing.
+// tag: "deposits/offer_cosign" or "deposits/invoice_cosign"
+// signingData: Uint8Array of the canonical signing data
+// memberLedgerHash: 32 bytes
+// signature: 64 bytes (compact ECDSA)
+// cosignerPubkey: 33 bytes (compressed secp256k1)
+async function verifyCosignature(tag, signingData, memberLedgerHash, signature, cosignerPubkey) {
+  try {
+    // BIP-340 tagged hash: SHA256(SHA256(tag) || SHA256(tag) || data || member_hash)
+    const tagBytes = new TextEncoder().encode(tag);
+    const tagHash = nobleHashes.sha256(tagBytes);
+    const input = new Uint8Array(tagHash.length * 2 + signingData.length + memberLedgerHash.length);
+    input.set(tagHash, 0);
+    input.set(tagHash, tagHash.length);
+    input.set(signingData, tagHash.length * 2);
+    input.set(memberLedgerHash, tagHash.length * 2 + signingData.length);
+    const hash = nobleHashes.sha256(input);
+
+    // Verify ECDSA signature
+    const sig = nobleSecp256k1.Signature.fromCompact(signature);
+    const pubkey = nobleSecp256k1.ProjectivePoint.fromHex(bytesToHex(cosignerPubkey));
+    return nobleSecp256k1.verify(sig, hash, pubkey);
+  } catch (e) {
+    console.warn('Cosignature verification failed:', e);
+    return false;
+  }
+}
+
+// Build offer signing data: ledger_id_bytes || offer_id || operator_x || len(addr) || addr || deadline_le32
+function buildOfferSigningData(ledgerIdHex, offerIdHex, operatorPubkeyHex, fundingAddress, deadlineBlock) {
+  const parts = [];
+  parts.push(new TextEncoder().encode(ledgerIdHex)); // raw hex chars as bytes
+  parts.push(hexToBytes(offerIdHex));
+  parts.push(hexToBytes(operatorPubkeyHex.length === 66 ? operatorPubkeyHex.slice(2) : operatorPubkeyHex)); // x-only
+  const addrBytes = new TextEncoder().encode(fundingAddress);
+  parts.push(new Uint8Array([addrBytes.length]));
+  parts.push(addrBytes);
+  const deadlineBuf = new Uint8Array(4);
+  new DataView(deadlineBuf.buffer).setUint32(0, deadlineBlock, true); // little-endian
+  parts.push(deadlineBuf);
+  const total = parts.reduce((s, p) => s + p.length, 0);
+  const result = new Uint8Array(total);
+  let off = 0;
+  for (const p of parts) { result.set(p, off); off += p.length; }
+  return result;
+}
+
+// Build invoice signing data: ledger_id_bytes || payment_hash || deposit_id || amount_msat_le64
+function buildInvoiceSigningData(ledgerIdHex, paymentHashHex, depositIdHex, amountMsat) {
+  const parts = [];
+  parts.push(new TextEncoder().encode(ledgerIdHex));
+  parts.push(hexToBytes(paymentHashHex));
+  parts.push(hexToBytes(depositIdHex));
+  const amtBuf = new Uint8Array(8);
+  // Write u64 little-endian
+  const lo = amountMsat & 0xFFFFFFFF;
+  const hi = Math.floor(amountMsat / 0x100000000);
+  new DataView(amtBuf.buffer).setUint32(0, lo, true);
+  new DataView(amtBuf.buffer).setUint32(4, hi, true);
+  parts.push(amtBuf);
+  const total = parts.reduce((s, p) => s + p.length, 0);
+  const result = new Uint8Array(total);
+  let off = 0;
+  for (const p of parts) { result.set(p, off); off += p.length; }
+  return result;
 }
 
 // ============================================================
@@ -2181,6 +2280,26 @@ window.doWalletRecvLightning = async function() {
       if (r.invoice) {
         showRecvResult(r.invoice);
         try { await navigator.clipboard.writeText(r.invoice); log('Invoice copied to clipboard', 'success'); } catch {}
+        // Verify and store cosignature as evidence
+        if (r.cosign_signature && r.cosigner_pubkey) {
+          const sigData = buildInvoiceSigningData(deposit.ledger_id, r.payment_hash, r.deposit_id, (r.amount_sats || amount) * 1000);
+          const memberHash = hexToBytes(r.cosigner_ledger_hash || '0'.repeat(64));
+          const sig = hexToBytes(r.cosign_signature);
+          const cosignerPk = hexToBytes(r.cosigner_pubkey);
+          const valid = await verifyCosignature('deposits/invoice_cosign', sigData, memberHash, sig, cosignerPk);
+          storeEvidence('invoice', deposit.alias, {
+            invoice: r.invoice, payment_hash: r.payment_hash, deposit_id: r.deposit_id,
+            amount_sats: r.amount_sats || amount, ledger_id: deposit.ledger_id,
+            cosigner_pubkey: r.cosigner_pubkey, cosigner_ledger_hash: r.cosigner_ledger_hash,
+            cosign_signature: r.cosign_signature, cosign_verified: valid,
+          });
+          log(valid ? 'Invoice cosignature verified' : 'Invoice cosignature INVALID', valid ? 'success' : 'error');
+        } else {
+          storeEvidence('invoice', deposit.alias, {
+            invoice: r.invoice, payment_hash: r.payment_hash, deposit_id: r.deposit_id,
+            amount_sats: r.amount_sats || amount, ledger_id: deposit.ledger_id, cosign_verified: null,
+          });
+        }
       }
     } else {
       log(`Invoice failed: ${response.error}`, 'error');
@@ -2225,6 +2344,26 @@ window.doWalletRecvOnchain = async function() {
         saveState(); renderDeposits();
         showRecvResult(r.funding_address);
         try { await navigator.clipboard.writeText(r.funding_address); log('Address copied to clipboard', 'success'); } catch {}
+        // Verify and store cosignature as evidence
+        if (r.cosign_signature && r.cosigner_pubkey) {
+          const sigData = buildOfferSigningData(deposit.ledger_id, r.offer_id, r.operator_id, r.funding_address, r.deadline_block);
+          const memberHash = hexToBytes(r.cosigner_ledger_hash || '0'.repeat(64));
+          const sig = hexToBytes(r.cosign_signature);
+          const cosignerPk = hexToBytes(r.cosigner_pubkey);
+          const valid = await verifyCosignature('deposits/offer_cosign', sigData, memberHash, sig, cosignerPk);
+          storeEvidence('offer', deposit.alias, {
+            offer_id: r.offer_id, funding_address: r.funding_address,
+            operator_id: r.operator_id, deadline_block: r.deadline_block,
+            cosigner_pubkey: r.cosigner_pubkey, cosigner_ledger_hash: r.cosigner_ledger_hash,
+            cosign_signature: r.cosign_signature, cosign_verified: valid, ledger_id: deposit.ledger_id,
+          });
+          log(valid ? 'Offer cosignature verified' : 'Offer cosignature INVALID', valid ? 'success' : 'error');
+        } else {
+          storeEvidence('offer', deposit.alias, {
+            offer_id: r.offer_id, funding_address: r.funding_address,
+            ledger_id: deposit.ledger_id, cosign_verified: null,
+          });
+        }
       }
     } else {
       log(`Offer failed: ${response.error}`, 'error');
@@ -2569,6 +2708,21 @@ window.doAddOffer = async function() {
       document.getElementById('invoice-display').style.display = 'block';
       try { renderQR(document.getElementById('invoice-qr'), addr); } catch {}
       try { await navigator.clipboard.writeText(addr); log('Copied to clipboard'); } catch {}
+      // Verify and store cosignature as evidence
+      if (r.cosign_signature && r.cosigner_pubkey) {
+        const sigData = buildOfferSigningData(selectedDeposit.ledger_id, r.offer_id, r.operator_id, r.funding_address, r.deadline_block);
+        const memberHash = hexToBytes(r.cosigner_ledger_hash || '0'.repeat(64));
+        const sig = hexToBytes(r.cosign_signature);
+        const cosignerPk = hexToBytes(r.cosigner_pubkey);
+        const valid = await verifyCosignature('deposits/offer_cosign', sigData, memberHash, sig, cosignerPk);
+        storeEvidence('offer', selectedDeposit.alias, {
+          offer_id: r.offer_id, funding_address: r.funding_address,
+          operator_id: r.operator_id, deadline_block: r.deadline_block,
+          cosigner_pubkey: r.cosigner_pubkey, cosigner_ledger_hash: r.cosigner_ledger_hash,
+          cosign_signature: r.cosign_signature, cosign_verified: valid, ledger_id: selectedDeposit.ledger_id,
+        });
+        log(valid ? 'Offer cosignature verified' : 'Offer cosignature INVALID', valid ? 'success' : 'error');
+      }
     } else {
       log(`Offer failed: ${response.error}`, 'error');
     }
@@ -2599,6 +2753,26 @@ window.doFundLightning = async function() {
         document.getElementById('invoice-display').style.display = 'block';
         try { renderQR(document.getElementById('invoice-qr'), invoice); } catch {}
         try { await navigator.clipboard.writeText(invoice); log('Copied to clipboard'); } catch {}
+        // Verify and store cosignature as evidence
+        if (r.cosign_signature && r.cosigner_pubkey) {
+          const sigData = buildInvoiceSigningData(selectedDeposit.ledger_id, r.payment_hash, r.deposit_id, (r.amount_sats || amount) * 1000);
+          const memberHash = hexToBytes(r.cosigner_ledger_hash || '0'.repeat(64));
+          const sig = hexToBytes(r.cosign_signature);
+          const cosignerPk = hexToBytes(r.cosigner_pubkey);
+          const valid = await verifyCosignature('deposits/invoice_cosign', sigData, memberHash, sig, cosignerPk);
+          storeEvidence('invoice', selectedDeposit.alias, {
+            invoice, payment_hash: r.payment_hash, deposit_id: r.deposit_id,
+            amount_sats: r.amount_sats || amount, ledger_id: selectedDeposit.ledger_id,
+            cosigner_pubkey: r.cosigner_pubkey, cosigner_ledger_hash: r.cosigner_ledger_hash,
+            cosign_signature: r.cosign_signature, cosign_verified: valid,
+          });
+          log(valid ? 'Invoice cosignature verified' : 'Invoice cosignature INVALID', valid ? 'success' : 'error');
+        } else {
+          storeEvidence('invoice', selectedDeposit.alias, {
+            invoice, payment_hash: r.payment_hash, deposit_id: r.deposit_id,
+            amount_sats: r.amount_sats || amount, ledger_id: selectedDeposit.ledger_id, cosign_verified: null,
+          });
+        }
       } else {
         log('Response missing invoice', 'error');
       }
