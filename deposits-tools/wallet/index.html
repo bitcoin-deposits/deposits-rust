@@ -1328,9 +1328,20 @@ async function discoverLedgers() {
     } catch {}
   }
 
-  // Apply deduplicated collateral attestations
-  for (const [, { opNode, memberPk, amount }] of attestationDedup) {
-    opNode.collateralAtRisk += Math.floor(amount / 1000); // msats to sats
+  // Apply deduplicated collateral attestations and build per-ledger map
+  window._ledgerCollateral = {};
+  for (const [dedupKey, { opNode, memberPk, amount }] of attestationDedup) {
+    const amtSats = Math.floor(amount / 1000);
+    opNode.collateralAtRisk += amtSats;
+    // Per-ledger: distribute evenly across the operator's ledgers
+    // (attestation backs the operator, not a specific ledger)
+    if (opNode.ads.length > 0) {
+      const perLedger = Math.floor(amtSats / opNode.ads.length);
+      for (const ad of opNode.ads) {
+        const lid = ad.ledger_id || '';
+        window._ledgerCollateral[lid] = (window._ledgerCollateral[lid] || 0) + perLedger;
+      }
+    }
     const memberNode = graphNodes.find(n =>
       n.pubkey === memberPk || n.pubkey.startsWith(memberPk) || memberPk.startsWith(n.pubkey)
     );
@@ -1525,22 +1536,28 @@ function showNodeInfo(node) {
     }).filter(Boolean);
 
   let details = '';
-  details += `<div class="kv"><span class="k">Ledgers</span><span class="v">${node.ledgerCount}</span></div>`;
-  details += `<div class="kv"><span class="k">Reserves</span><span class="v amt">₿${node.reserves.toLocaleString()}</span></div>`;
-  const nodeRatio = node.reserves > 0 ? Math.round(node.collateralAtRisk / node.reserves * 100) : 0;
-  const nodeRatioColor = nodeRatio >= 100 ? 'var(--balance)' : nodeRatio >= 50 ? 'var(--yellow)' : 'var(--red)';
-  details += `<div class="kv"><span class="k">Collateral at risk</span><span class="v amt">₿${node.collateralAtRisk.toLocaleString()} <span style="color:${nodeRatioColor}">(${nodeRatio}%)</span></span></div>`;
   details += `<div class="kv"><span class="k">Quorum</span><span class="v">${neighbors.length} — ${neighbors.map(n => esc(n.name)).join(', ') || 'none'}</span></div>`;
-  document.getElementById('node-info-details').innerHTML = details;
 
-  // Ledger buttons
-  let ledgers = '';
+  // Per-ledger: collateral vs reserves
   for (const ad of node.ads) {
     const lid = ad.ledger_id || '';
-    const headroom = (ad.available_headroom_sats || 0).toLocaleString();
-    ledgers += `<button style="font-size:10px; padding:2px 6px;" onclick="selectLedger('${lid}')" title="${lid}">₿${headroom}</button>`;
+    const reserves = ad.reserves_amount_sats || 0;
+    const obligations = ad.total_obligations_sats || 0;
+    // Compute collateral for this specific ledger from attestation data
+    let ledgerCollateral = 0;
+    if (window._ledgerCollateral) ledgerCollateral = window._ledgerCollateral[lid] || 0;
+    const ratio = reserves > 0 ? Math.round(ledgerCollateral / reserves * 100) : 0;
+    const ratioColor = ratio >= 100 ? 'var(--balance)' : ratio >= 50 ? 'var(--yellow)' : 'var(--red)';
+    details += `<div style="margin-top:4px; padding:4px 0; border-top:1px solid var(--border);">`;
+    details += `<div style="font-size:10px; color:var(--muted); cursor:pointer;" onclick="selectLedger('${lid}')">${lid.slice(0, 16)}...</div>`;
+    details += `<div class="kv"><span class="k">Collateral</span><span class="v amt">₿${ledgerCollateral.toLocaleString()} <span style="color:${ratioColor}">(${ratio}%)</span></span></div>`;
+    details += `<div class="kv"><span class="k">Reserves</span><span class="v amt">₿${reserves.toLocaleString()}</span></div>`;
+    if (obligations > 0) details += `<div class="kv"><span class="k">Obligations</span><span class="v amt">₿${obligations.toLocaleString()}</span></div>`;
+    details += `</div>`;
   }
-  document.getElementById('node-info-ledgers').innerHTML = ledgers;
+
+  document.getElementById('node-info-details').innerHTML = details;
+  document.getElementById('node-info-ledgers').innerHTML = '';
   document.getElementById('network-node-info').style.display = 'block';
 }
 
@@ -1558,15 +1575,16 @@ window.selectLedger = function(ledgerId) {
     let details = '';
     details += `<div class="kv"><span class="k">Ledger ID</span><span class="v">${ledgerId}</span></div>`;
     details += `<div class="kv"><span class="k">Operator</span><span class="v">${esc(ad.operator_pubkey || '')}</span></div>`;
-    details += `<div class="kv"><span class="k">Reserves</span><span class="v">₿${(ad.reserves_amount_sats || 0).toLocaleString()}</span></div>`;
-    details += `<div class="kv"><span class="k">Obligations</span><span class="v">₿${(ad.total_obligations_sats || 0).toLocaleString()}</span></div>`;
-    details += `<div class="kv"><span class="k">Available</span><span class="v">₿${(ad.available_headroom_sats || 0).toLocaleString()}</span></div>`;
-    // Collateral ratio with color coding
-    const collateral = ad.received_collateral_sats || 0;
-    const obligations = ad.total_obligations_sats || 1;
-    const ratio = obligations > 0 ? Math.round(collateral / obligations * 100) : 0;
+    // Collateral first, then reserves
+    const collateral = (window._ledgerCollateral && window._ledgerCollateral[ledgerId]) || 0;
+    const reserves = ad.reserves_amount_sats || 0;
+    const obligations = ad.total_obligations_sats || 0;
+    const ratio = reserves > 0 ? Math.round(collateral / reserves * 100) : 0;
     const ratioColor = ratio >= 100 ? 'var(--balance)' : ratio >= 50 ? 'var(--yellow)' : 'var(--red)';
     details += `<div class="kv"><span class="k">Collateral</span><span class="v">₿${collateral.toLocaleString()} <span style="color:${ratioColor}">(${ratio}%)</span></span></div>`;
+    details += `<div class="kv"><span class="k">Reserves</span><span class="v">₿${reserves.toLocaleString()}</span></div>`;
+    details += `<div class="kv"><span class="k">Obligations</span><span class="v">₿${obligations.toLocaleString()}</span></div>`;
+    details += `<div class="kv"><span class="k">Available</span><span class="v">₿${(ad.available_headroom_sats || 0).toLocaleString()}</span></div>`;
 
     // Quorum size from graph data
     const opNode = graphNodes.find(n => n.pubkey === (ad.operator_pubkey || ''));
