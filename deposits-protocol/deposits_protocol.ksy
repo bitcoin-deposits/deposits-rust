@@ -176,6 +176,7 @@ types:
   #   48  = operator_sig (64 bytes)
   #   50  = channel_id (32 bytes)
   #   52  = close_reason (string)
+  #   54  = timestamp (u64, used in Tombstone)
   #
   # Ledger fields:
   #   56  = operator_id (33 bytes)
