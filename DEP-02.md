@@ -2,7 +2,7 @@
 
 ## Abstract
 
-This document specifies the wire format, hash chain structure, and signing protocol for Bitcoin Deposits ledger updates. A ledger is an append-only chain of signed updates, cooperatively maintained by an operator and a quorum of co-signers. See DEP-04 for the Nostr transport layer.
+This document specifies the wire format, hash chain structure, and signing protocol for Bitcoin Deposits ledger updates. A ledger is an append-only chain of signed updates, cooperatively maintained by an operator and a quorum of co-signing members. See DEP-04 for the Nostr transport layer.
 
 ## Notation
 
@@ -49,12 +49,12 @@ A signed ledger update is broadcast as a Nostr Kind 9100 event. The event conten
 | 6 | ledger_id | 32 | Ledger identifier hash |
 | 8 | sequence_number | 8 | Monotonically increasing sequence (u64 LE) |
 | 10 | previous_hash | 32 | Chain hash of the previous update |
-| 16 | partner_signature | 64 | Schnorr (BIP-340) co-signature from quorum member |
-| 18 | operator_signature | 64 | Schnorr signature from operator |
+| 16 | cosign_signature | 64 | Schnorr (BIP-340) co-signature from quorum member |
+| 18 | operator_signature | 64 | Schnorr (BIP-340) signature from operator |
 | 20 | block_height | 4 | Block height at creation (u32, optional) |
 | 22 | block_hash | 32 | Block hash at creation (optional) |
 | 24 | cosigner_pubkey | 33 | Co-signing quorum member's pubkey (optional) |
-| 26 | member_ledger_hash | 32 | Co-signer's ledger tip hash (optional) |
+| 26 | member_ledger_hash | 32 | Co-signer's ledger tip hash for causal ordering (optional) |
 
 `current_hash` is not on the wire -- it is derived by the receiver from the update content (see Hash Chain). Type 12 is reserved.
 
@@ -69,10 +69,10 @@ The hash chain has two levels: `current_hash` commits to the update content and 
         || previous_hash (32 bytes)
         || message (variable)
         [|| member_ledger_hash (32 bytes)]
-        [|| partner_signature (64 bytes)]
+        [|| cosign_signature (64 bytes)]
     )
 
-`member_ledger_hash` is included when present (co-signed update). `partner_signature` is included when non-zero. This creates causal ordering: the co-signer's ledger state and their attestation are baked into the hash.
+`member_ledger_hash` is included when present (co-signed update). `cosign_signature` is included when non-zero. This creates causal ordering: the quorum member's ledger state and their attestation are baked into the hash.
 
 ### chain_hash
 
@@ -89,24 +89,24 @@ The first update (sequence 0) has `previous_hash` = `[0; 32]`.
 
 ## Signing
 
-### Partner (Co-signer)
+### Quorum Member (Co-signer)
 
-The co-signer signs a BIP-340 tagged hash:
+The quorum member signs a BIP-340 tagged hash:
 
     tag = SHA256("deposits/cosign")
-    message = partner_signing_data || member_ledger_hash
+    data = cosign_data || member_ledger_hash
 
-    partner_signing_data =
+    cosign_data =
         message (operation TLV bytes)
         || message_type (2 bytes LE)
         || sequence_number (8 bytes LE)
         || previous_hash (32 bytes)
 
-    digest = SHA256(tag || tag || message)
+    digest = SHA256(tag || tag || data)
 
-The co-signer signs `digest` with Schnorr (BIP-340) using their operator key, producing a 64-byte signature.
+The quorum member signs `digest` with Schnorr (BIP-340) using their operator key, producing a 64-byte signature stored in `cosign_signature`.
 
-Note: `current_hash` is NOT in `partner_signing_data` because it is not finalized until after co-signing (it incorporates the partner signature itself).
+Note: `current_hash` is NOT in `cosign_data` because it is not finalized until after co-signing (it incorporates the co-signature itself).
 
 ### Operator
 
@@ -147,7 +147,7 @@ The `message` field contains a TLV-encoded operation. The first record (type 0) 
 | 38 | OnchainFulfill | Fulfill a locked withdrawal |
 | 40 | CollateralIncrease | Increase collateral amount |
 | 41 | CollateralDecrease | Decrease collateral amount |
-| 42 | CollateralAttestation | Record collateral attestation |
+| 42 | CollateralAttestation | Record collateral attestation from quorum member |
 | 43 | QuorumAddMember | Add a quorum member |
 | 44 | QuorumRemoveMember | Remove a quorum member |
 | 45 | CollateralLock | Lock deposit balance as collateral |
@@ -177,11 +177,11 @@ The `message` field contains a TLV-encoded operation. The first record (type 0) 
 | 20 | new_fees | variable | Nested TLV: FeeStructure |
 | 36 | block_height | 4 | Block height (u32) |
 | 38 | collateral_operator | 33 | Operator being backed |
-| 44 | quorum_member | 33 | Member pubkey |
+| 44 | quorum_member | 33 | Quorum member pubkey |
 | 56 | operator_id | 33 | Operator pubkey |
 | 58 | reserves_id | variable | Reserves identifier string |
 | 76 | lock_until_block | 4 | Lock expiry block height |
-| 114 | member_ledger_id | variable | Member's ledger ID string |
+| 114 | member_ledger_id | variable | Quorum member's ledger ID string |
 | 115 | collateral_ledger_id | variable | Collateral ledger ID string |
 | 200 | deposit_id | 16 | Deposit identifier |
 | 202 | descriptor | variable | Miniscript descriptor string |
@@ -194,10 +194,10 @@ The `message` field contains a TLV-encoded operation. The first record (type 0) 
 | 226 | transfer_fees | variable | Nested TLV: TransferFeeSchedule |
 | 229 | is_collateral | 1 | Collateral deposit flag (odd, optional) |
 | 231 | receive_requires_sig | 1 | Receive requires signature (odd, optional) |
-| 233 | min_fee_bps | 2 | Member's min fee rate (odd, optional) |
-| 235 | min_fee_fixed | 8 | Member's min fixed fee (odd, optional) |
-| 237 | max_fee_period | 4 | Member's max fee period (odd, optional) |
-| 239 | collateral_lock_amount | 8 | Member's collateral commitment (odd, optional) |
+| 233 | min_fee_bps | 2 | Quorum member's min fee rate (odd, optional) |
+| 235 | min_fee_fixed | 8 | Quorum member's min fixed fee (odd, optional) |
+| 237 | max_fee_period | 4 | Quorum member's max fee period (odd, optional) |
+| 239 | collateral_lock_amount | 8 | Quorum member's collateral commitment (odd, optional) |
 | 241 | collateral_lock_until | 4 | Collateral lock expiry (odd, optional) |
 | 243 | fee_change_after_blocks | 4 | Blocks before fees can change (odd, optional) |
 | 245 | fee_change_notice_blocks | 4 | Fee change notice period (odd, optional) |
