@@ -451,3 +451,119 @@ fn compute_hash_without_member_hash_is_backward_compatible() {
 
     assert_eq!(update.compute_hash(), expected);
 }
+
+#[test]
+fn compute_hash_includes_partner_signature() {
+    use deposits_protocol::types::SignedLedgerUpdate;
+
+    let pk = {
+        use std::str::FromStr;
+        bitcoin::secp256k1::PublicKey::from_str(
+            "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+        ).unwrap()
+    };
+
+    let mut update = SignedLedgerUpdate {
+        message: vec![1, 2, 3],
+        message_type: 1,
+        operator_id: pk,
+        ledger_id: [0x12; 32],
+        sequence_number: 1,
+        previous_hash: [0u8; 32],
+        current_hash: [0u8; 32],
+        block_height: 0,
+        block_hash: [0u8; 32],
+        partner_signature: [0u8; 64],
+        operator_signature: [0u8; 64],
+        cosigner_pubkey: None,
+        member_ledger_hash: None,
+    };
+
+    let hash_no_sig = update.compute_hash();
+
+    update.partner_signature = [0xAA; 64];
+    let hash_with_sig = update.compute_hash();
+
+    assert_ne!(hash_no_sig, hash_with_sig, "partner_signature should change compute_hash");
+
+    update.partner_signature = [0xBB; 64];
+    let hash_different_sig = update.compute_hash();
+
+    assert_ne!(hash_with_sig, hash_different_sig, "different partner_signature = different hash");
+}
+
+#[test]
+fn chain_hash_includes_operator_signature() {
+    use deposits_protocol::types::SignedLedgerUpdate;
+
+    let pk = {
+        use std::str::FromStr;
+        bitcoin::secp256k1::PublicKey::from_str(
+            "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+        ).unwrap()
+    };
+
+    let mut update = SignedLedgerUpdate {
+        message: vec![1, 2, 3],
+        message_type: 1,
+        operator_id: pk,
+        ledger_id: [0x12; 32],
+        sequence_number: 1,
+        previous_hash: [0u8; 32],
+        current_hash: [0u8; 32],
+        block_height: 0,
+        block_hash: [0u8; 32],
+        partner_signature: [0u8; 64],
+        operator_signature: [0u8; 64],
+        cosigner_pubkey: None,
+        member_ledger_hash: None,
+    };
+    update.current_hash = update.compute_hash();
+
+    let chain_no_sig = update.chain_hash();
+
+    update.operator_signature = [0xCC; 64];
+    let chain_with_sig = update.chain_hash();
+
+    assert_ne!(chain_no_sig, chain_with_sig, "operator_signature should change chain_hash");
+    // chain_hash != current_hash
+    assert_ne!(update.chain_hash(), update.current_hash, "chain_hash should differ from current_hash");
+}
+
+#[test]
+fn chain_hash_is_sha256_of_current_hash_and_operator_sig() {
+    use deposits_protocol::types::SignedLedgerUpdate;
+    use sha2::{Digest, Sha256};
+
+    let pk = {
+        use std::str::FromStr;
+        bitcoin::secp256k1::PublicKey::from_str(
+            "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+        ).unwrap()
+    };
+
+    let mut update = SignedLedgerUpdate {
+        message: vec![1, 2, 3],
+        message_type: 1,
+        operator_id: pk,
+        ledger_id: [0x12; 32],
+        sequence_number: 1,
+        previous_hash: [0u8; 32],
+        current_hash: [0u8; 32],
+        block_height: 0,
+        block_hash: [0u8; 32],
+        partner_signature: [0xAA; 64],
+        operator_signature: [0xBB; 64],
+        cosigner_pubkey: None,
+        member_ledger_hash: Some([0xCC; 32]),
+    };
+    update.current_hash = update.compute_hash();
+
+    // Manual chain_hash computation
+    let mut hasher = Sha256::new();
+    hasher.update(&update.current_hash);
+    hasher.update(&update.operator_signature);
+    let expected: [u8; 32] = hasher.finalize().into();
+
+    assert_eq!(update.chain_hash(), expected);
+}

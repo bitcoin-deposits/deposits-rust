@@ -466,9 +466,10 @@ impl Ledger {
             let next_seq = self.next_sequence();
 
             if update.sequence_number == next_seq {
-                // Expected next update — previous_hash must match our tip
+                // Expected next update — previous_hash must match our tip's chain_hash
+                // chain_hash = SHA256(current_hash || operator_signature)
                 let tip_hash = self.history.last()
-                    .map(|u| u.current_hash)
+                    .map(|u| u.chain_hash())
                     .unwrap_or([0u8; 32]);
                 if update.previous_hash != tip_hash {
                     return Err(DepositsError::ProtocolViolation {
@@ -963,6 +964,10 @@ impl Ledger {
         // Apply state changes
         self.apply_state_changes(&operation)?;
 
+        // Update state.hash to current_hash for now — will be updated to
+        // chain_hash() after operator signing via finalize_chain_hash()
+        self.state.hash = new_hash;
+
         // Set opened_at_block for new deposits
         if let LedgerOperation::DepositOpen { deposit_id, .. } = &operation {
             if let Some(deposit) = self.state.deposits.get_mut(deposit_id) {
@@ -970,9 +975,8 @@ impl Ledger {
             }
         }
 
-        // Update sequence and hash
+        // Update sequence (hash is set above, will become chain_hash after signing)
         self.state.sequence = sequence;
-        self.state.hash = new_hash;
 
         // Append to history
         self.history.push(signed_update);
@@ -994,23 +998,35 @@ impl Ledger {
         }
     }
 
-    /// Apply co-signer info and recompute the hash chain to include causal ordering.
+    /// Apply co-signer info and recompute current_hash.
     ///
-    /// After a quorum member co-signs, their ledger's tip hash is incorporated into
-    /// this update's `current_hash`. This creates a web of causality: the co-signer's
-    /// ledger state at the time of signing is baked into our chain, proving temporal
-    /// ordering across ledgers.
-    ///
-    /// Must be called BEFORE `sign_last_update` with the operator signature, since
-    /// the operator signature covers the final hash.
-    pub fn apply_cosigner_hash(&mut self, member_ledger_hash: [u8; 32], cosigner_pubkey: PublicKey) {
+    /// Sets member_ledger_hash, cosigner_pubkey, and partner_signature, then
+    /// recomputes current_hash to include all three. Must be called BEFORE
+    /// operator signing, since the operator signs current_hash.
+    pub fn apply_cosigner_hash(
+        &mut self,
+        member_ledger_hash: [u8; 32],
+        cosigner_pubkey: PublicKey,
+        partner_signature: [u8; 64],
+    ) {
         if let Some(update) = self.history.last_mut() {
             update.member_ledger_hash = Some(member_ledger_hash);
             update.cosigner_pubkey = Some(cosigner_pubkey);
-            // Recompute current_hash to include the member's ledger hash
+            update.partner_signature = partner_signature;
+            // Recompute current_hash: includes message + member_ledger_hash + partner_signature
             update.current_hash = update.compute_hash();
-            // Update the ledger's state hash to match
+            // state.hash tracks current_hash until finalize_chain_hash
             self.state.hash = update.current_hash;
+        }
+    }
+
+    /// Finalize state.hash to chain_hash after operator signing.
+    ///
+    /// chain_hash = SHA256(current_hash || operator_signature)
+    /// This becomes the next update's previous_hash.
+    pub fn finalize_chain_hash(&mut self) {
+        if let Some(update) = self.history.last() {
+            self.state.hash = update.chain_hash();
         }
     }
 

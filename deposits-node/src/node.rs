@@ -464,6 +464,9 @@ impl Node {
             tracing::debug!("Signed update seq={} for ledger {}", update.sequence_number, &ledger_id[..16.min(ledger_id.len())]);
         }
 
+        // Finalize state.hash = chain_hash = SHA256(current_hash || operator_signature)
+        ledger.finalize_chain_hash();
+
         Ok(())
     }
 
@@ -9328,11 +9331,12 @@ impl Node {
                         .ok_or_else(|| Error::Protocol("Ledger not found".to_string()))?;
                     let mut ledger = ledger_arc.write().unwrap();
 
-                    // Recompute current_hash to include member_ledger_hash (causal ordering)
-                    ledger.apply_cosigner_hash(result.member_ledger_hash, result.cosigner_pubkey);
-                    if let Some(last) = ledger.history.last_mut() {
-                        last.partner_signature = result.partner_signature;
-                    }
+                    // Apply cosigner data + partner signature, recompute current_hash
+                    ledger.apply_cosigner_hash(
+                        result.member_ledger_hash,
+                        result.cosigner_pubkey,
+                        result.partner_signature,
+                    );
 
                     tracing::info!("Applied co-sign from {}... (member_hash: {}..., new chain_hash: {}...)",
                         &pubkey_hex(&result.cosigner_pubkey)[..8],

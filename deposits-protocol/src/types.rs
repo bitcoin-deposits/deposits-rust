@@ -1502,13 +1502,12 @@ pub struct SignedLedgerUpdate {
 }
 
 impl SignedLedgerUpdate {
-    /// Compute the hash of this update.
+    /// Compute current_hash: commits to content, causal ordering, and co-signature.
     ///
-    /// When `member_ledger_hash` is present (co-signed update), it is included
-    /// in the hash: `SHA256(seq || prev_hash || message || member_ledger_hash)`.
-    /// This creates causal ordering — the co-signer's ledger tip is baked into
-    /// the chain, proving this update was created after that point in the
-    /// co-signer's ledger.
+    /// `SHA256(sequence || previous_hash || message [|| member_ledger_hash] [|| partner_signature])`
+    ///
+    /// The operator signs current_hash. The operator's signature is not in
+    /// current_hash (circular), but is folded into the chain via chain_hash().
     pub fn compute_hash(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
 
@@ -1519,6 +1518,9 @@ impl SignedLedgerUpdate {
         if let Some(ref mlh) = self.member_ledger_hash {
             hasher.update(mlh);
         }
+        if self.partner_signature != [0u8; 64] {
+            hasher.update(&self.partner_signature);
+        }
 
         let result = hasher.finalize();
         let mut hash = [0u8; 32];
@@ -1526,7 +1528,26 @@ impl SignedLedgerUpdate {
         hash
     }
 
-    /// Verify the hash chain.
+    /// Compute the chain hash: the value used as previous_hash for the next update.
+    ///
+    /// `SHA256(current_hash || operator_signature)`
+    ///
+    /// This folds the operator's signature into the chain without circularity.
+    /// The next update's previous_hash = this update's chain_hash().
+    pub fn chain_hash(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+
+        let mut hasher = Sha256::new();
+        hasher.update(&self.current_hash);
+        hasher.update(&self.operator_signature);
+
+        let result = hasher.finalize();
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&result);
+        hash
+    }
+
+    /// Verify current_hash matches the computed value.
     pub fn verify_hash(&self) -> bool {
         self.compute_hash() == self.current_hash
     }
