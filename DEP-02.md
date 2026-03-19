@@ -98,10 +98,14 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 | 1 | LedgerOpen | Lifecycle |
 | 60 | LedgerClose | Lifecycle |
 | 12 | QuorumBegin | Quorum |
+| 43 | QuorumAddMember | Quorum |
+| 44 | QuorumRemoveMember | Quorum |
+| 46 | QuorumJoin | Quorum |
 | 20 | DepositOpen | Deposits |
 | 21 | DepositClose | Deposits |
-| 22 | FeeChange | Deposits |
 | 23 | DepositKeyRotate | Deposits |
+| 22 | FeeChange | Fees |
+| 50 | FeeCollect | Fees |
 | 30 | InvoiceCredit | Lightning |
 | 31 | InvoiceLock | Lightning |
 | 32 | InvoiceFail | Lightning |
@@ -110,19 +114,15 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 | 36 | OnchainLock | On-chain |
 | 37 | OnchainFail | On-chain |
 | 38 | OnchainFulfill | On-chain |
-| 42 | CollateralAttestation | Collateral |
-| 43 | QuorumAddMember | Quorum |
-| 44 | QuorumRemoveMember | Quorum |
-| 45 | CollateralLock | Collateral |
-| 46 | QuorumJoin | Quorum |
-| 50 | FeeCollect | Fees |
-| 54 | DisputeEnter | Recovery |
-| 55 | DisputeAcquire | Recovery |
-| 56 | DisputeYield | Recovery |
-| 57 | DisputeArmed | Recovery |
 | 70 | TransferLock | Transfers |
 | 71 | TransferComplete | Transfers |
 | 72 | TransferFail | Transfers |
+| 42 | CollateralAttestation | Collateral |
+| 45 | CollateralLock | Collateral |
+| 54 | DisputeEnter | Dispute |
+| 55 | DisputeAcquire | Dispute |
+| 56 | DisputeYield | Dispute |
+| 57 | DisputeArmed | Dispute |
 
 ### Operation TLV Fields
 
