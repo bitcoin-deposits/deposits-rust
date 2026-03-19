@@ -717,6 +717,12 @@ pub enum LedgerOperation {
         min_fee_fixed: Option<u64>,
         /// Maximum fee collection period (blocks) the member allows
         max_fee_period: Option<u32>,
+        /// Minimum collateral (msats) the member commits to maintain on their ledger.
+        /// Obligations are limited to 2x the smallest member's commitment.
+        collateral_lock_amount: Option<u64>,
+        /// Block height until which the member's collateral must remain locked.
+        /// Membership duration is limited to the shortest lock time.
+        collateral_lock_until: Option<u32>,
     },
     /// Remove a quorum member from the VoterSet
     QuorumRemoveMember {
@@ -1990,6 +1996,8 @@ impl BinaryCodec for LedgerOperation {
                 min_fee_bps: None,
                 min_fee_fixed: None,
                 max_fee_period: None,
+                collateral_lock_amount: None,
+                collateral_lock_until: None,
             }),
             44 => Ok(Self::QuorumRemoveMember {
                 quorum_member: read_pubkey(r)?,
@@ -2771,6 +2779,8 @@ mod ledger_op_tlv {
     pub const MIN_FEE_BPS: u64 = 233;     // odd = optional, u16
     pub const MIN_FEE_FIXED: u64 = 235;   // odd = optional, u64 (msats/year)
     pub const MAX_FEE_PERIOD: u64 = 237;   // odd = optional, u32 (blocks)
+    pub const COLLATERAL_LOCK_AMOUNT: u64 = 239; // odd = optional, u64 (msats)
+    pub const COLLATERAL_LOCK_UNTIL: u64 = 241; // odd = optional, u32 (block height)
 }
 
 impl TlvEncode for LedgerOperation {
@@ -2959,7 +2969,7 @@ impl TlvEncode for LedgerOperation {
                     .bytes_field(SIGNATURE, signature)
                     .bytes_field(LEDGER_HASH, ledger_hash);
             }
-            Self::QuorumAddMember { quorum_member, quorum_member_signature, member_ledger_id, min_fee_bps, min_fee_fixed, max_fee_period } => {
+            Self::QuorumAddMember { quorum_member, quorum_member_signature, member_ledger_id, min_fee_bps, min_fee_fixed, max_fee_period, collateral_lock_amount, collateral_lock_until } => {
                 builder = builder
                     .pubkey_field(QUORUM_MEMBER, quorum_member)
                     .bytes_field(QUORUM_MEMBER_SIG, quorum_member_signature)
@@ -2972,6 +2982,12 @@ impl TlvEncode for LedgerOperation {
                 }
                 if let Some(period) = max_fee_period {
                     builder = builder.u32_field(MAX_FEE_PERIOD, *period);
+                }
+                if let Some(amt) = collateral_lock_amount {
+                    builder = builder.u64_field(COLLATERAL_LOCK_AMOUNT, *amt);
+                }
+                if let Some(lock) = collateral_lock_until {
+                    builder = builder.u32_field(COLLATERAL_LOCK_UNTIL, *lock);
                 }
             }
             Self::QuorumRemoveMember { quorum_member, operator_signature } => {
@@ -3192,6 +3208,8 @@ impl TlvDecode for LedgerOperation {
                 min_fee_bps: reader.read_u16_opt(MIN_FEE_BPS)?,
                 min_fee_fixed: reader.read_u64_opt(MIN_FEE_FIXED)?,
                 max_fee_period: reader.read_u32_opt(MAX_FEE_PERIOD)?,
+                collateral_lock_amount: reader.read_u64_opt(COLLATERAL_LOCK_AMOUNT)?,
+                collateral_lock_until: reader.read_u32_opt(COLLATERAL_LOCK_UNTIL)?,
             }),
             44 => Ok(Self::QuorumRemoveMember {
                 quorum_member: reader.read_pubkey(QUORUM_MEMBER)?,

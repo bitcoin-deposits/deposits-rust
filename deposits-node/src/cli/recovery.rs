@@ -1273,6 +1273,8 @@ pub async fn recovery_rebuild_quorum_add(ledger_id: &str, args: &[String]) -> Re
         min_fee_bps: None,
         min_fee_fixed: None,
         max_fee_period: None,
+        collateral_lock_amount: None,
+        collateral_lock_until: None,
     };
 
     let message_bytes = operation.tlv_encode();

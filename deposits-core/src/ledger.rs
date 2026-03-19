@@ -662,6 +662,8 @@ impl Ledger {
             min_fee_bps: None,
             min_fee_fixed: None,
             max_fee_period: None,
+            collateral_lock_amount: None,
+            collateral_lock_until: None,
         });
         Ok(())
     }
@@ -1323,7 +1325,8 @@ impl Ledger {
                 self.state.collateral_amount = *new_amount;
             }
             LedgerOperation::QuorumAddMember {
-                quorum_member, member_ledger_id, min_fee_bps, min_fee_fixed, max_fee_period, ..
+                quorum_member, member_ledger_id, min_fee_bps, min_fee_fixed, max_fee_period,
+                collateral_lock_amount, collateral_lock_until, ..
             } => {
                 use crate::types::QuorumMember;
                 // Check if this member already exists (by pubkey)
@@ -1334,6 +1337,8 @@ impl Ledger {
                         min_fee_bps: *min_fee_bps,
                         min_fee_fixed: *min_fee_fixed,
                         max_fee_period: *max_fee_period,
+                        collateral_lock_amount: *collateral_lock_amount,
+                        collateral_lock_until: *collateral_lock_until,
                     };
                     self.state.quorum_members.push(member);
                 }

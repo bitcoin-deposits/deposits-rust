@@ -187,6 +187,8 @@ const TRANSFER_FEES: u64 = 226;
 const MIN_FEE_BPS: u64 = 233;
 const MIN_FEE_FIXED: u64 = 235;
 const MAX_FEE_PERIOD: u64 = 237;
+const COLLATERAL_LOCK_AMT: u64 = 239;
+const COLLATERAL_LOCK_UNTIL_BLOCK: u64 = 241;
 // Fee amount field
 const FEE: u64 = 2; // shares with AMOUNT for some ops, but fee uses it differently in TransferLock
 
@@ -394,6 +396,8 @@ fn schema_quorum_add_member() {
         (MIN_FEE_BPS, u16_bytes(500)),
         (MIN_FEE_FIXED, u64_bytes(100_000)),
         (MAX_FEE_PERIOD, u32_bytes(2016)),
+        (COLLATERAL_LOCK_AMT, u64_bytes(50_000_000)),
+        (COLLATERAL_LOCK_UNTIL_BLOCK, u32_bytes(10000)),
     ]);
 }
 

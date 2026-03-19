@@ -65,6 +65,8 @@ fn add_member(
             min_fee_bps,
             min_fee_fixed,
             max_fee_period,
+            collateral_lock_amount: None,
+            collateral_lock_until: None,
         })
         .unwrap();
 }
@@ -181,6 +183,8 @@ fn quorum_add_member_fee_limits_tlv_roundtrip() {
         min_fee_bps: Some(200),
         min_fee_fixed: Some(50_000),
         max_fee_period: Some(4032),
+        collateral_lock_amount: None,
+        collateral_lock_until: None,
     };
 
     let encoded = op.tlv_encode();
@@ -210,6 +214,8 @@ fn quorum_add_member_no_limits_tlv_roundtrip() {
         min_fee_bps: None,
         min_fee_fixed: None,
         max_fee_period: None,
+        collateral_lock_amount: None,
+        collateral_lock_until: None,
     };
 
     let encoded = op.tlv_encode();
@@ -242,6 +248,8 @@ fn strictest_limits_single_member() {
         min_fee_bps: Some(50),
         min_fee_fixed: Some(1000),
         max_fee_period: Some(2016),
+        collateral_lock_amount: None,
+        collateral_lock_until: None,
     }];
 
     let (bps, fixed, period) = strictest_quorum_limits(&members);
@@ -259,6 +267,8 @@ fn strictest_limits_multiple_members_takes_most_restrictive() {
             min_fee_bps: Some(50),    // less strict
             min_fee_fixed: Some(5000), // more strict
             max_fee_period: Some(4032), // less strict (longer period allowed)
+            collateral_lock_amount: None,
+            collateral_lock_until: None,
         },
         QuorumMember {
             pubkey: test_pubkey_3(),
@@ -266,6 +276,8 @@ fn strictest_limits_multiple_members_takes_most_restrictive() {
             min_fee_bps: Some(100),   // more strict (higher min)
             min_fee_fixed: Some(1000), // less strict
             max_fee_period: Some(2016), // more strict (shorter max period)
+            collateral_lock_amount: None,
+            collateral_lock_until: None,
         },
     ];
 
@@ -285,6 +297,8 @@ fn strictest_limits_with_none_values() {
             min_fee_bps: Some(50),
             min_fee_fixed: None,
             max_fee_period: Some(2016),
+            collateral_lock_amount: None,
+            collateral_lock_until: None,
         },
         QuorumMember {
             pubkey: test_pubkey_3(),
@@ -292,6 +306,8 @@ fn strictest_limits_with_none_values() {
             min_fee_bps: None,
             min_fee_fixed: Some(1000),
             max_fee_period: None,
+            collateral_lock_amount: None,
+            collateral_lock_until: None,
         },
     ];
 
@@ -311,6 +327,8 @@ fn strictest_limits_all_none() {
             min_fee_bps: None,
             min_fee_fixed: None,
             max_fee_period: None,
+            collateral_lock_amount: None,
+            collateral_lock_until: None,
         },
     ];
 
@@ -332,6 +350,8 @@ fn fees_meeting_all_limits_pass() {
         min_fee_bps: Some(50),
         min_fee_fixed: Some(1000),
         max_fee_period: Some(2016),
+        collateral_lock_amount: None,
+        collateral_lock_until: None,
     }];
 
     let fees = FeeStructure {
@@ -351,6 +371,8 @@ fn fees_below_min_bps_rejected() {
         min_fee_bps: Some(100),
         min_fee_fixed: None,
         max_fee_period: None,
+        collateral_lock_amount: None,
+        collateral_lock_until: None,
     }];
 
     let fees = FeeStructure {
@@ -371,6 +393,8 @@ fn fees_below_min_fixed_rejected() {
         min_fee_bps: None,
         min_fee_fixed: Some(5000),
         max_fee_period: None,
+        collateral_lock_amount: None,
+        collateral_lock_until: None,
     }];
 
     let fees = FeeStructure {
@@ -391,6 +415,8 @@ fn fees_exceeding_max_period_rejected() {
         min_fee_bps: None,
         min_fee_fixed: None,
         max_fee_period: Some(2016),
+        collateral_lock_amount: None,
+        collateral_lock_until: None,
     }];
 
     let fees = FeeStructure {
@@ -411,6 +437,8 @@ fn fees_with_no_quorum_limits_always_pass() {
         min_fee_bps: None,
         min_fee_fixed: None,
         max_fee_period: None,
+        collateral_lock_amount: None,
+        collateral_lock_until: None,
     }];
 
     // Even zero fees pass when member has no limits
@@ -432,6 +460,8 @@ fn fees_must_satisfy_strictest_member() {
             min_fee_bps: Some(50),
             min_fee_fixed: None,
             max_fee_period: None,
+            collateral_lock_amount: None,
+            collateral_lock_until: None,
         },
         QuorumMember {
             pubkey: test_pubkey_3(),
@@ -439,6 +469,8 @@ fn fees_must_satisfy_strictest_member() {
             min_fee_bps: Some(200), // strictest
             min_fee_fixed: None,
             max_fee_period: None,
+            collateral_lock_amount: None,
+            collateral_lock_until: None,
         },
     ];
 
@@ -529,6 +561,8 @@ fn quorum_member_struct_fee_limits_survive_json_roundtrip() {
         min_fee_bps: Some(75),
         min_fee_fixed: Some(2500),
         max_fee_period: Some(1008),
+        collateral_lock_amount: None,
+        collateral_lock_until: None,
     };
 
     let json = serde_json::to_string(&member).unwrap();
@@ -548,6 +582,8 @@ fn quorum_member_struct_no_limits_json_roundtrip() {
         min_fee_bps: None,
         min_fee_fixed: None,
         max_fee_period: None,
+        collateral_lock_amount: None,
+        collateral_lock_until: None,
     };
 
     let json = serde_json::to_string(&member).unwrap();

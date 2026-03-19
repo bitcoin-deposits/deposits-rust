@@ -828,6 +828,14 @@ pub struct QuorumMember {
     /// Longer periods mean less frequent fee collection (worse for the member).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_fee_period: Option<u32>,
+    /// Minimum collateral (msats) the member commits to maintain.
+    /// Obligations are limited to 2x the smallest member's commitment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collateral_lock_amount: Option<u64>,
+    /// Block height until which the member's collateral must remain locked.
+    /// Membership duration is limited to the shortest lock time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collateral_lock_until: Option<u32>,
 }
 
 /// A collateral attestation from a quorum member proving their reserves backing.
@@ -3032,8 +3040,8 @@ mod tests {
         let collateral1 = test_pubkey_2();
         let collateral2 = test_pubkey_3();
         state.quorum_members = vec![
-            QuorumMember { pubkey: collateral1, ledger_id: String::new(), min_fee_bps: None, min_fee_fixed: None, max_fee_period: None },
-            QuorumMember { pubkey: collateral2, ledger_id: String::new(), min_fee_bps: None, min_fee_fixed: None, max_fee_period: None },
+            QuorumMember { pubkey: collateral1, ledger_id: String::new(), min_fee_bps: None, min_fee_fixed: None, max_fee_period: None, collateral_lock_amount: None, collateral_lock_until: None },
+            QuorumMember { pubkey: collateral2, ledger_id: String::new(), min_fee_bps: None, min_fee_fixed: None, max_fee_period: None, collateral_lock_amount: None, collateral_lock_until: None },
         ];
 
         // Add attestation for collateral1

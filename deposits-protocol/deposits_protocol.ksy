@@ -195,6 +195,8 @@ types:
   #   233 = min_fee_bps (u16, optional — member's min annualized fee rate in basis points)
   #   235 = min_fee_fixed (u64, optional — member's min annualized fixed fee in msats/year)
   #   237 = max_fee_period (u32, optional — member's max fee collection period in blocks)
+  #   239 = collateral_lock_amount (u64, optional — member's minimum collateral commitment in msats)
+  #   241 = collateral_lock_until (u32, optional — block height until which collateral is locked)
   #
   # Fee fields:
   #   12  = fees (nested TLV: FeeStructure in DepositOpen; u64 fee_sats in OnchainLock/TransferLock)
