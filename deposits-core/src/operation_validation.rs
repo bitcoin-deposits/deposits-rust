@@ -81,7 +81,7 @@ pub fn validate_reserves_increase(
     if let Some(balance) = channel_balance {
         if new_amount > balance {
             return Err(format!(
-                "Cannot increase reserves to {} sats: exceeds channel balance {} sats",
+                "Cannot increase reserves to {} msats: exceeds channel balance {} msats",
                 new_amount, balance
             ));
         }
@@ -120,7 +120,7 @@ pub fn validate_reserves_decrease(
 
     if new_amount < required {
         return Err(format!(
-            "Cannot decrease reserves to {} sats: must maintain at least {} sats (deposits {} + max invoice {})",
+            "Cannot decrease reserves to {} msats: must maintain at least {} msats (deposits {} + max invoice {})",
             new_amount, required, total_deposits, max_invoice
         ));
     }
@@ -175,7 +175,7 @@ pub fn validate_credit_payment(
 
     if new_total_deposits > ledger.reserves_amount() {
         return Err(format!(
-            "Credit would exceed reserves: new deposits {} sats > reserves {} sats",
+            "Credit would exceed reserves: new deposits {} msats > reserves {} msats",
             new_total_deposits, ledger.reserves_amount()
         ));
     }
@@ -506,7 +506,7 @@ pub fn validate_collateral_increase(
 
     if new_amount > reserves_amount {
         return Err(format!(
-            "Collateral increase exceeds reserves: {} sats committed > {} sats reserves",
+            "Collateral increase exceeds reserves: {} msats committed > {} msats reserves",
             new_amount, reserves_amount
         ));
     }

@@ -633,7 +633,7 @@ pub struct LedgerStateSnapshot {
     pub hash: [u8; 32],
     /// Total deposit balance (millisatoshis).
     pub total_deposits: u64,
-    /// Reserves amount (satoshis).
+    /// Reserves amount (millisatoshis).
     pub reserves_amount: u64,
     /// Number of active deposits.
     pub deposit_count: usize,
@@ -904,17 +904,17 @@ impl LedgerConformanceValidator {
     pub fn validate_business_rules(ledger: &crate::ledger::Ledger) -> Vec<RuleCheck> {
         let mut checks = Vec::new();
 
-        // Rule 1: reserves >= deposits (in satoshis)
-        let total_deposits_sat = ledger.total_deposit_balance() / 1000; // msat to sat
-        let reserves = ledger.reserves_amount();
+        // Rule 1: reserves >= deposits (both in millisatoshis)
+        let total_deposits_msats = ledger.total_deposit_balance();
+        let reserves_msats = ledger.reserves_amount();
         checks.push(RuleCheck {
             rule: "reserves_coverage".to_string(),
-            passed: reserves >= total_deposits_sat,
+            passed: reserves_msats >= total_deposits_msats,
             details: Some(format!(
                 "reserves: {} sats, deposits: {} sats ({}%)",
-                reserves,
-                total_deposits_sat,
-                if total_deposits_sat > 0 { (reserves * 100) / total_deposits_sat } else { 100 }
+                reserves_msats / 1000,
+                total_deposits_msats / 1000,
+                if total_deposits_msats > 0 { (reserves_msats * 100) / total_deposits_msats } else { 100 }
             )),
         });
 

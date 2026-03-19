@@ -243,9 +243,9 @@ impl DepositsHandler {
 
             // Get reserves amount from the ledger state (in millisatoshis)
             let reserves_msats = ledger.state.reserves.amount;
-            // Convert to satoshis (divide by 1000)
+            // Convert to satoshis for display (divide by 1000)
             let reserves_sats = reserves_msats / 1000;
-            reserves_total += reserves_sats;
+            reserves_total += reserves_sats; // reserves_total is in sats for display
 
             // Get deposits amount from the ledger state (HashMap<DepositId, Deposit>)
             let deposits_msats = ledger.state.deposits.values()
@@ -845,9 +845,10 @@ impl DepositsHandler {
 
         // If we created a new ledger for ourselves, add initial operations
         if is_new && operator == self.our_node_id {
-            // Get reserves balance — use specific amount if provided, else total wallet balance
+            // Get reserves balance in msats — use specific amount if provided (already msats),
+            // else convert total wallet balance from sats to msats
             let reserves_balance = specific_reserves_balance
-                .unwrap_or_else(|| self.wallet.get_reserves_balance().unwrap_or(0));
+                .unwrap_or_else(|| self.wallet.get_reserves_balance().unwrap_or(0).saturating_mul(1000));
 
             // Add LedgerOpen operation
             {
@@ -1443,8 +1444,8 @@ impl ValidationContext for DepositsHandler {
 
     fn get_commitment_tx_reserves_amount(&self, _operator: PublicKey) -> Option<u64> {
         // In BDK implementation, reserves are on-chain UTXOs, not commitment tx outputs
-        // Return the wallet balance for reserves
-        self.wallet.get_reserves_balance().ok()
+        // Return the wallet balance for reserves, converted from sats to msats
+        self.wallet.get_reserves_balance().ok().map(|sats| sats.saturating_mul(1000))
     }
 }
 

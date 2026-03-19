@@ -4594,13 +4594,13 @@ impl Node {
         let rotate_txid = self.wallet.broadcast(&rotate_tx)?;
         tracing::info!("Rotation TX broadcast: {}", rotate_txid);
 
-        // Publish ReservesRotate operation
+        // Publish ReservesRotate operation (convert sats to msats at boundary)
         let operation = LedgerOperation::ReservesRotate {
             reserves_id: taproot_output.address.to_string(),
             spending_txid: *outpoint.txid.as_ref(),
             new_outpoint_txid: *rotate_txid.as_ref(),
             new_outpoint_vout: 0,
-            amount: output_amount,
+            amount: output_amount.saturating_mul(1000), // sats to msats
             first_expiry_block,
             ledger_hash,
             quorum_members: quorum_members.clone(),
@@ -9002,11 +9002,11 @@ impl Node {
             .sum();
         let new_total = current_obligations.saturating_add(additional_msats);
 
-        // Check reserves limit: obligations (msats) <= reserves (sats) * 1000
-        let reserves_limit_msats = ledger.state.reserves.amount.saturating_mul(1000);
+        // Check reserves limit: obligations (msats) <= reserves (msats)
+        let reserves_limit_msats = ledger.state.reserves.amount;
         if reserves_limit_msats > 0 && new_total > reserves_limit_msats {
             return Some(format!(
-                "Would exceed reserves: {} + {} = {} msats > {} msats (reserves {} sats)",
+                "Would exceed reserves: {} + {} = {} msats > {} msats (reserves {} msats)",
                 current_obligations, additional_msats, new_total,
                 reserves_limit_msats, ledger.state.reserves.amount
             ));
@@ -10528,8 +10528,10 @@ impl Node {
 
         // Get or create the ledger - this automatically adds LedgerOpen and ReservesIncrease
         // if it's a new ledger for our own operator
+        // Convert reserves_balance from sats to msats at the on-chain boundary
+        let reserves_balance_msats = reserves_balance.saturating_mul(1000);
         let ledger_arc = self.handler.get_or_create_ledger_with_outpoint(
-            self.node_id, reserves_id.clone(), Some(reserves_balance), None,
+            self.node_id, reserves_id.clone(), Some(reserves_balance_msats), None,
         );
 
         // Update enforcement block and other state, get ledger_id
@@ -10737,7 +10739,7 @@ impl Node {
                 spending_txid: txid_bytes,
                 new_outpoint_txid: txid_bytes, // Same tx creates the new output
                 new_outpoint_vout: result.outpoint.vout,
-                amount: result.amount,
+                amount: result.amount.saturating_mul(1000), // sats to msats
                 first_expiry_block: result.first_expiry_block,
                 ledger_hash,
                 quorum_members: quorum_members.clone(),

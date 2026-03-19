@@ -866,7 +866,7 @@ async fn reserves_create(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     println!("Reserves created!");
     println!("  TXID: {}", txid);
     println!("  Vout: {}", reserves.outpoint.vout);
-    println!("  Amount: {} sats", reserves.amount);
+    println!("  Amount: {} sats", reserves.amount); // wallet ReservesOutput.amount is in sats
     println!("  Address: {}", reserves.address);
     println!("  Timeout height: {}", reserves.timeout_height);
 
@@ -1119,7 +1119,7 @@ async fn auto_advertise_ledger(
     );
     ad.operator_name = operator_name.map(|s| s.to_string());
     ad.relay_url = fee_schedule.advertise_relay.clone();
-    ad.reserves_amount_sats = ledger.reserves_amount();
+    ad.reserves_amount_sats = ledger.reserves_amount() / 1000; // msats to sats for advertisement
     ad.collateral_enforcement_block = ledger.state.collateral_enforcement_block.unwrap_or(0);
     ad.received_collateral_sats = ledger.state.received_collateral_amount / 1000;
 
@@ -1353,7 +1353,7 @@ async fn ledger_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         println!("    Deposits: {} total, {} msats balance",
             ledger.state.deposits.len(),
             ledger.total_deposit_balance());
-        println!("    Reserves: {} sats", ledger.reserves_amount());
+        println!("    Reserves: {} sats", ledger.reserves_amount() / 1000);
         if let Some(block) = ledger.state.collateral_enforcement_block {
             println!("    Enforcement block: {}", block);
         }
@@ -1557,7 +1557,7 @@ async fn ledger_validate(args: &[String]) -> Result<(), Box<dyn std::error::Erro
             println!("  Sequence: {}", report.final_state.sequence);
             println!("  Hash: {:02x?}", &report.final_state.hash[..8]);
             println!("  Total deposits: {} msat", report.final_state.total_deposits);
-            println!("  Reserves: {} sats", report.final_state.reserves_amount);
+            println!("  Reserves: {} sats", report.final_state.reserves_amount / 1000);
             println!("  Deposit count: {}", report.final_state.deposit_count);
             println!();
 
@@ -1676,7 +1676,7 @@ async fn ledger_health(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         // Reserves status - scan history for rotation (inline to avoid deadlock)
         let has_rotation = ledger.history.iter()
             .any(|u| u.message_type == consts::RESERVES_ROTATE);
-        let reserves_sats = ledger.reserves_amount();
+        let reserves_sats = ledger.reserves_amount() / 1000;
         println!("  Reserves:      {} sats (rotated: {})",
             reserves_sats, if has_rotation { "yes" } else { "no" });
 
@@ -1933,7 +1933,7 @@ async fn ledger_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>
             println!("Imported Ledger State:");
             println!("  Sequence: {}", ledger.state.sequence);
             println!("  Total deposits: {} msat", ledger.total_deposit_balance());
-            println!("  Reserves: {} sats", ledger.reserves_amount());
+            println!("  Reserves: {} sats", ledger.reserves_amount() / 1000);
             println!("  Deposit count: {}", ledger.state.deposits.len());
 
             if !report.warnings.is_empty() {
@@ -2064,7 +2064,7 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
     ad.max_deposit_sats = max_deposit_sats;
     ad.min_deposit_sats = min_deposit_sats;
     ad.collateral_enforcement_block = ledger.state.collateral_enforcement_block.unwrap_or(0);
-    ad.reserves_amount_sats = ledger.reserves_amount();
+    ad.reserves_amount_sats = ledger.reserves_amount() / 1000; // msats to sats for advertisement
 
     // Calculate obligations and headroom
     let total_obligations_msats = ledger.total_deposit_balance();

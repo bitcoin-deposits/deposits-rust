@@ -741,7 +741,7 @@ pub struct ReservesOutput {
     /// Associated channel ID.
     #[serde(with = "serde_32")]
     pub channel_id: [u8; 32],
-    /// Amount held in reserves (satoshis).
+    /// Amount held in reserves (millisatoshis).
     pub amount: u64,
     /// Public key that can spend reserves after timelock.
     #[serde(with = "serde_pubkey")]
@@ -1248,16 +1248,15 @@ impl LedgerState {
         self.deposits.values().map(|d| d.locked_balance).sum()
     }
 
-    /// Get reserves amount (satoshis).
+    /// Get reserves amount (millisatoshis).
     pub fn reserves_amount(&self) -> u64 {
         self.reserves.amount
     }
 
     /// Check if reserves are sufficient.
     pub fn has_sufficient_reserves(&self) -> bool {
-        // Convert deposits from msat to sat for comparison
-        let total_deposits_sat = self.total_deposit_balance() / 1000;
-        self.reserves_amount() >= total_deposits_sat
+        // Both reserves and deposits are in millisatoshis
+        self.reserves_amount() >= self.total_deposit_balance()
     }
 
     // ========================================================================

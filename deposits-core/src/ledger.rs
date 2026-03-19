@@ -218,15 +218,15 @@ impl Ledger {
         self.state.total_deposit_balance()
     }
 
-    /// Get reserves amount (satoshis).
+    /// Get reserves amount (millisatoshis).
     pub fn reserves_amount(&self) -> u64 {
         self.state.reserves_amount()
     }
 
-    /// Calculate required reserves for current deposits.
+    /// Calculate required reserves for current deposits (millisatoshis).
     pub fn required_reserves(&self) -> u64 {
-        // Convert msat to sat
-        self.total_deposit_balance() / 1000
+        // Both deposits and reserves are in millisatoshis
+        self.total_deposit_balance()
     }
 
     /// Check if reserves are sufficient.

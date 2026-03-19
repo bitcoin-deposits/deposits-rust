@@ -509,14 +509,14 @@ pub enum LedgerOperation {
     ReservesIncrease {
         /// Current reserves identifier (UTXO address for BDK, partner pubkey for LDK)
         reserves_id: String,
-        /// New total reserves amount in satoshis
+        /// New total reserves amount in millisatoshis
         new_amount: u64,
     },
     /// Decrease reserves amount
     ReservesDecrease {
         /// Current reserves identifier (UTXO address for BDK, partner pubkey for LDK)
         reserves_id: String,
-        /// New total reserves amount in satoshis
+        /// New total reserves amount in millisatoshis
         new_amount: u64,
     },
     /// Rotate reserves to a new Taproot output with quorum-based spending
@@ -535,7 +535,7 @@ pub enum LedgerOperation {
         new_outpoint_txid: [u8; 32],
         /// New reserves UTXO vout
         new_outpoint_vout: u32,
-        /// Amount in satoshis (should match previous reserves)
+        /// Amount in millisatoshis (should match previous reserves)
         amount: u64,
         /// Block height when operator can spend alone (earliest member expiry)
         first_expiry_block: u32,
