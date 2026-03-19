@@ -8,11 +8,11 @@ an ideal peer-to-peer version of electronic cash would allow online payments to 
 bitcoin deposits aims to provide fast, scalable, key controlled funds, trustlessly, mostly off-chain. on-chain activity scales with the number of ledgers and frequency of reserves rotation. throughput scales slightly above linearly with the number of ledgers in the network, making millions of transactions per second across trillions of wallets plausible
 
 there are explicit tradeoffs:
-- no unilateral exit – when operators fail funds stay in the network
-- no privacy – verification requires transparency
-- intermittent availability – a deposit is only as available as the operator. wallets should spread out funds to increase availability
+- no unilateral exit -- when operators fail funds stay in the network
+- no privacy -- verification requires transparency
+- intermittent availability -- a deposit is only as available as the operator. wallets should spread out funds to increase availability
 
-we expect the wallet experience to be similar to a fast base layer, having payment economics similar to the lightning network. communication is channel agnostic, but will likely be based on nostr relays
+we expect the wallet experience to be similar to a fast base layer, having payment economics similar to the lightning network
 
 ## ledgers
 
@@ -22,35 +22,53 @@ ledgers have a single active operator, but are cooperatively maintained by the m
 
 ## deposits
 
-a deposit is a stable account that can send and receive funds, controlled by miniscript. at opening a fee schedule is established, as well as whether receiving funds requires a wallet signed request. an operator must allow transfers between deposits on the same ledger as well as on-chain exits. they should allow deposits to pay lightning invoices. 
+a deposit is a stable account that can send and receive funds, controlled by miniscript. at opening a fee schedule is established, as well as whether receiving funds requires a wallet signed request. an operator must allow transfers between deposits on the same ledger as well as on-chain exits. they should allow deposits to pay lightning invoices
 
-it is in the operator's discretion to create on-chain funding offers or lightning invoices on behalf of a deposit. if they do, these should be co-signed by a quorum member, and the wallet should verify this signature. offers and invoices are not part of the ledger, so it is the wallet's responsibility to verify signatures and retain them as evidence.
+it is in the operator's discretion to create on-chain funding offers or lightning invoices on behalf of a deposit. if they do, these should be co-signed by a quorum member, and the wallet should verify this signature. offers and invoices are not part of the ledger, so it is the wallet's responsibility to verify signatures and retain them as evidence
 
 ## fees
 
-transfers between deposits, on-chain, and through lightning have fees paid to the ledger's operator. there are also fees periodically applied to balances with a specified period. all are negotiated when a new deposit is opened, and can be changed (within limits that have not yet been established) after a specified number of blocks, given a specified block notice. the quorum may refuse to co-sign updates that create unprofitable circumstances that they could ultimately be responsible for
+transfers between deposits, on-chain, and through lightning have fees paid to the ledger's operator. there are also fees periodically applied to balances with a specified period. all are negotiated when a new deposit is opened. fees can be changed after a specified number of blocks, given a specified block notice and within a per-adjustment percentage limit negotiated at opening. the quorum may refuse to co-sign updates that create unprofitable circumstances that they could ultimately be responsible for
 
 ## transfers
 
 the basic form of transfer is a two phased operation between two deposits on the same ledger: a deposit issues a request to send funds. if there are sufficient funds available, a lock on the funds with a spending condition is appended to the ledger. if the spending condition is fulfilled before a timeout, funds move from the sender to recipient minus the operator's fee. if the timeout is reached, the lock is released, minus a smaller operator fee. with miniscript spending conditions, this is sufficient to allow any deposit to provide bridges and liquidity services to other deposits on the same ledger
 
+## lightning
+
+operators may run a lightning sidecar alongside their deposits node, allowing deposits to send and receive over the lightning network. when a deposit requests a lightning invoice, the operator creates one through their lightning node, co-signed by a quorum member to prove the operator committed to credit the deposit upon payment. the wallet retains this cosigned invoice as evidence. when a deposit pays a lightning invoice, the operator routes the payment through their lightning node and debits the deposit upon confirmation of the preimage
+
+when the payer and payee are deposits on the same operator, the operator may settle internally without routing through lightning, crediting and debiting the respective deposits directly. this avoids routing fees and failure modes while maintaining the same accounting guarantees
+
+## communication
+
+all communication between wallets and operators, and between operators, uses nostr relays. ledger updates are published as durable events that relays retain, creating a permanent auditable record. requests and responses between wallets and operators are ephemeral events with a short relay TTL. operators advertise their terms as replaceable events, allowing wallets to discover and compare operators without a centralized directory
+
+this architecture means wallets need no persistent connections -- they can go offline indefinitely and catch up by replaying events from any relay that has them. operators can be reached through any relay they monitor, and the choice of relay is a deployment decision, not a protocol constraint
+
 ## reserves and collateral
 
-reserves are held in a utxo with an amount greater than or equal to the sum of a ledger's obligations, spendable by a majority of the quorum with fallback to the operator after a lengthy period. collateral is kept on other operators' ledgers, locked with specific terms. it may be attached to multiple ledgers to improve capital efficiency. wallets should prefer higher collateral ratios and non-overlapping quorum members
+reserves are held in a utxo with an amount greater than or equal to the sum of a ledger's obligations, spendable by a majority of the quorum with fallback to the operator after a lengthy period
+
+collateral is kept on other operators' ledgers as locked deposits. when an operator joins a quorum, they commit to a minimum collateral level and lock duration. a ledger's total obligations are limited to twice the smallest quorum member's collateral commitment, and the membership duration is limited to the shortest member's lock time. this ensures that the collateral web always has enough backing to cover a custody transfer. collateral may be attached to multiple ledgers to improve capital efficiency, though wallets should prefer operators with non-overlapping collateral sources
+
+obligations are enforced when creating new funding offers or invoices. the operator cannot create offers or invoices that would push the ledger's total obligations above the reserves or above twice the smallest quorum member's collateral commitment, whichever is lower
 
 ## quorum
 
-operators request nodes where they store collateral to join a ledger's quorum. once membership is established, reserves are rotated into a new multisig utxo. each participant must operate their own a ledger, maintaining at least half the collateral as the one being joined. members co-sign valid updates and participate in recovery if the operator signs non-conforming ones. larger quorums increase communication overhead but reduce operator risk, increase availability, and make collusion more difficult and expensive. wallets should prefer larger quorums
+operators request nodes where they store collateral to join a ledger's quorum. the request includes the collateral commitment (amount and lock duration) and the member's terms: minimum fee schedules that deposits on the ledger must meet. each participant must operate their own ledger, maintaining at least half the collateral as the one being joined. members specify limits on fee schedules during their quorum membership -- the operator cannot open deposits with fees below the strictest quorum member's minimums, protecting members from inheriting unprofitable obligations after a custody transfer
+
+once quorum is established, reserves are rotated into a new multisig utxo. members co-sign valid updates and participate in recovery if the operator signs non-conforming ones. larger quorums increase communication overhead but reduce operator risk, increase availability, and make collusion more difficult and expensive. wallets should prefer larger quorums
 
 ## time
 
-absolute time is measured against the base layer. tolerances should not exceed a reasonable number of confirmations in order to maintain stability during chain reorganizations. 
+absolute time is measured against the base layer. tolerances should not exceed a reasonable number of confirmations in order to maintain stability during chain reorganizations
 
-when higher tolerances are required, we instead rely on causal ordering. a cryptographic ledger is a merkle chain. each update proves it was created after all updates before it, but provides no guarantees about information outside the chain. in order to construct a distributed ordering, we require that co-signatures include the latest update hash from the co-signer's ledger. that hash then becomes incorporated into the ledger's chain, as well as part of all other chains that the ledger operator co-signs for, creating a web of causality. this is unable to prove time explicitly, but is able to prove that certain pieces of information were created in a specific order
+when higher tolerances are required, we instead rely on causal ordering. a cryptographic ledger is a merkle chain. each update proves it was created after all updates before it, but provides no guarantees about information outside the chain. in order to construct a distributed ordering, we require that co-signatures include the latest update hash from the co-signer's ledger. that hash is then incorporated into the current update's hash, becoming part of the chain as well as part of all other chains that the ledger operator co-signs for, creating a web of causality. this is unable to prove time explicitly, but is able to prove that certain pieces of information were created in a specific order
 
-## fraud proofs and bridging
+## fraud proofs
 
-we can then prove various types of fraud by exposing information which has been created in the wrong order. when the information is not included by normal network operations, it can smuggled in by creating activity that includes a hash of the evidence. once incorporated into an update signed by the operator, the evidence is revealed as having been created at a non-conforming place in the ordering:
+we can then prove various types of fraud by exposing information which has been created in the wrong order. when the information is not included by normal network operations, it can be smuggled in by creating activity that includes a hash of the evidence. once incorporated into an update signed by the operator, the evidence is revealed as having been created at a non-conforming place in the ordering:
 
 - an operator, having offered to credit a deposit with funds sent on-chain to a specific address, signs a ledger update that does not contain the appropriate credit, but does contain a chain revealing some block hash exceeding the number of confirmations allowed before credit
 
@@ -61,6 +79,8 @@ we can then prove various types of fraud by exposing information which has been 
 - a member of the quorum of a contested ledger who was active but did not act in accordance with proof of fraud within a number of blocks
 
 - signing or co-signing non-conforming ledger updates
+
+a fraud proof consists of the evidence and a causal chain connecting the embedded hash to the accused operator's ledger. the chain is a sequence of co-signed updates, each including a member_ledger_hash from the previous link's ledger. verifiers walk the chain without searching, confirming each link is a signed update, and that the proof hash matches the embedded data
 
 ## recovery
 
