@@ -147,6 +147,11 @@ impl FraudProof {
 
         sha256::Hash::hash(&input).to_byte_array()
     }
+
+    /// Verify that a given 32-byte value matches this proof's hash.
+    pub fn verify_embedding(&self, embedded_hash: &[u8; 32]) -> bool {
+        &self.proof_hash() == embedded_hash
+    }
 }
 
 // ============================================================================
