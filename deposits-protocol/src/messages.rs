@@ -91,7 +91,7 @@ pub mod consts {
     // Transfer operations (conditional transfers between deposits)
     pub const TRANSFER_LOCK: u16 = 0x80F1;
     pub const TRANSFER_COMPLETE: u16 = 0x80F3;
-    pub const TRANSFER_TIMEOUT: u16 = 0x80F5;
+    pub const TRANSFER_FAIL: u16 = 0x80F5;
 
     // Ledger lifecycle
     pub const LEDGER_CLOSE: u16 = 0x801D;
@@ -666,10 +666,14 @@ pub enum LedgerOperation {
         transfer_id: [u8; 32],
         script_witness: DescriptorWitness,
     },
-    /// Timeout a transfer after the deadline (returns funds to source)
-    TransferTimeout {
+    /// Fail a transfer and return funds to source.
+    /// Reason 1 = timeout (deadline reached without completion).
+    /// Reason 0 is reserved/invalid.
+    TransferFail {
         transfer_id: [u8; 32],
         block_hash: [u8; 32],
+        /// Failure reason: 1 = timeout. 0 is reserved.
+        reason: u8,
     },
 
     // ========== Collateral Operations ==========
@@ -856,7 +860,7 @@ impl LedgerOperation {
             Self::OnchainFulfill { .. } => 38,
             Self::TransferLock { .. } => 70,
             Self::TransferComplete { .. } => 71,
-            Self::TransferTimeout { .. } => 72,
+            Self::TransferFail { .. } => 72,
             Self::CollateralAttestation { .. } => 42,
             Self::QuorumAddMember { .. } => 43,
             Self::QuorumRemoveMember { .. } => 44,
@@ -1624,9 +1628,10 @@ impl BinaryCodec for LedgerOperation {
                     w.write_all(element)?;
                 }
             }
-            Self::TransferTimeout { transfer_id, block_hash } => {
+            Self::TransferFail { transfer_id, block_hash, reason } => {
                 write_32(w, transfer_id)?;
                 write_32(w, block_hash)?;
+                write_u8(w, *reason)?;
             }
             Self::CollateralAttestation { collateral_operator, quorum_member, collateral_ledger_id, amount, block_height, lock_until_block, signature, ledger_hash } => {
                 write_pubkey(w, collateral_operator)?;
@@ -1935,9 +1940,10 @@ impl BinaryCodec for LedgerOperation {
                     script_witness: DescriptorWitness { stack },
                 })
             }
-            72 => Ok(Self::TransferTimeout {
+            72 => Ok(Self::TransferFail {
                 transfer_id: read_32(r)?,
                 block_hash: read_32(r)?,
+                reason: read_u8(r).unwrap_or(1),
             }),
             // Collateral operations (40-44)
             42 => Ok(Self::CollateralAttestation {
@@ -2734,6 +2740,7 @@ mod ledger_op_tlv {
     pub const BLOCK_HASH: u64 = 222;
     pub const SCRIPT_WITNESS: u64 = 224;
     pub const TRANSFER_FEES: u64 = 226;
+    pub const FAIL_REASON: u64 = 228;   // u8 (0 = timeout)
     pub const IS_COLLATERAL: u64 = 229; // odd = optional, u8 (0 or 1)
     pub const RECEIVE_REQUIRES_SIG: u64 = 231; // odd = optional, u8 (0 or 1)
     // Quorum member fee limits (on QuorumAddMember)
@@ -2909,10 +2916,11 @@ impl TlvEncode for LedgerOperation {
                     .bytes_field(TRANSFER_ID, transfer_id)
                     .witness_field(SCRIPT_WITNESS, script_witness);
             }
-            Self::TransferTimeout { transfer_id, block_hash } => {
+            Self::TransferFail { transfer_id, block_hash, reason } => {
                 builder = builder
                     .bytes_field(TRANSFER_ID, transfer_id)
-                    .bytes_field(BLOCK_HASH, block_hash);
+                    .bytes_field(BLOCK_HASH, block_hash)
+                    .u8_field(FAIL_REASON, *reason);
             }
             Self::CollateralAttestation { collateral_operator, quorum_member, collateral_ledger_id, amount, block_height, lock_until_block, signature, ledger_hash } => {
                 builder = builder
@@ -3132,9 +3140,10 @@ impl TlvDecode for LedgerOperation {
                 transfer_id: reader.read_bytes(TRANSFER_ID)?,
                 script_witness: reader.read_witness(SCRIPT_WITNESS)?,
             }),
-            72 => Ok(Self::TransferTimeout {
+            72 => Ok(Self::TransferFail {
                 transfer_id: reader.read_bytes(TRANSFER_ID)?,
                 block_hash: reader.read_bytes(BLOCK_HASH)?,
+                reason: reader.read_u8(FAIL_REASON).unwrap_or(1),
             }),
             42 => Ok(Self::CollateralAttestation {
                 collateral_operator: reader.read_pubkey(COLLATERAL_OPERATOR)?,
@@ -4794,10 +4803,11 @@ mod tests {
     }
 
     #[test]
-    fn test_transfer_timeout_wire_roundtrip() {
-        let op = LedgerOperation::TransferTimeout {
+    fn test_transfer_fail_wire_roundtrip() {
+        let op = LedgerOperation::TransferFail {
             transfer_id: [0xEFu8; 32],
             block_hash: [0x99u8; 32],
+            reason: 1,
         };
 
         let mut bytes = Vec::new();
@@ -4871,10 +4881,11 @@ mod tests {
     }
 
     #[test]
-    fn test_transfer_timeout_tlv_roundtrip() {
-        let op = LedgerOperation::TransferTimeout {
+    fn test_transfer_fail_tlv_roundtrip() {
+        let op = LedgerOperation::TransferFail {
             transfer_id: [0xBBu8; 32],
             block_hash: [0xCCu8; 32],
+            reason: 1,
         };
 
         let encoded = op.tlv_encode();
@@ -4905,9 +4916,10 @@ mod tests {
             script_witness: DescriptorWitness { stack: vec![] },
         };
 
-        let timeout = LedgerOperation::TransferTimeout {
+        let timeout = LedgerOperation::TransferFail {
             transfer_id: [0u8; 32],
             block_hash: [0u8; 32],
+            reason: 1,
         };
 
         assert_eq!(lock.discriminant(), 70);

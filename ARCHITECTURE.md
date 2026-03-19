@@ -803,7 +803,7 @@ State: `source.balance -= (amount + fee)`, `source.locked_balance += (amount + f
 
 State: removes `PendingTransfer`, credits `destination.balance += amount`, deducts from `source.locked_balance`, fee consumed.
 
-**TransferTimeout** (disc=72) — Refund timed-out transfer.
+**TransferFail** (disc=72) — Refund timed-out transfer.
 
 | Field | Type | TLV ID |
 |-------|------|--------|
@@ -1004,7 +1004,7 @@ Selected wire constants for operation types (0x80xx range):
 | `0x80E7` | `ONCHAIN_FULFILL` | On-chain |
 | `0x80F1` | `TRANSFER_LOCK` | Transfer |
 | `0x80F3` | `TRANSFER_COMPLETE` | Transfer |
-| `0x80F5` | `TRANSFER_TIMEOUT` | Transfer |
+| `0x80F5` | `TRANSFER_FAIL` | Transfer |
 | `0x8021` | `MAINTENANCE_FEE_COLLECT` | Maintenance |
 | `0x801D` | `LEDGER_CLOSE` | Lifecycle |
 | `0x8051` | `CHANNEL_CLOSE_TOMBSTONE` | Lifecycle |
@@ -1029,7 +1029,7 @@ Sender                          Operator                        Receiver
   |                                |   (credits destination)       |
   |                                |                               |
   OR on timeout:                   |                               |
-  |                                |-- TransferTimeout(72) ------->|
+  |                                |-- TransferFail(72) ------->|
   |                                |   (refunds source)            |
 ```
 
@@ -1047,7 +1047,7 @@ Sender                          Operator                        Receiver
 - Fee is consumed (exits circulation)
 - Removes `PendingTransfer`
 
-**TransferTimeout:**
+**TransferFail:**
 - `source.balance += (amount + fee)`
 - `source.locked_balance -= (amount + fee)`
 - Removes `PendingTransfer`
@@ -1423,7 +1423,7 @@ Every valid ledger must maintain these invariants at all times:
 | `InvoiceLock` / `OnchainLock` | `available_balance() >= amount` |
 | `TransferLock` | Source deposit exists, sufficient balance for `amount + fee` |
 | `TransferComplete` | Transfer ID exists in `pending_transfers`, witness satisfies script |
-| `TransferTimeout` | Transfer exists, `block_height >= timeout_height` |
+| `TransferFail` | Transfer exists, `block_height >= timeout_height` |
 | `CollateralLock` | Amount <= `deposit.balance`, ratchet enforced |
 | `QuorumAddMember` | Valid member signature |
 | `FeeCollect` | Fee matches formula, deposit has sufficient balance |

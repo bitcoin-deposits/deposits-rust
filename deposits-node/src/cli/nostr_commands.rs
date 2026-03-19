@@ -2872,8 +2872,8 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                     "TransferComplete",
                     format!("id={}", hex::encode(&transfer_id[..8])),
                 ),
-                LedgerOperation::TransferTimeout { transfer_id, .. } => (
-                    "TransferTimeout",
+                LedgerOperation::TransferFail { transfer_id, .. } => (
+                    "TransferFail",
                     format!("id={}", hex::encode(&transfer_id[..8])),
                 ),
             };

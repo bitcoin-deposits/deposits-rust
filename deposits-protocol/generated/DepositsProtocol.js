@@ -94,7 +94,7 @@ var DepositsProtocol = (function() {
    *   61 = Tombstone
    *   70 = TransferLock
    *   71 = TransferComplete
-   *   72 = TransferTimeout
+   *   72 = TransferFail
    */
 
   var LedgerOperation = DepositsProtocol.LedgerOperation = (function() {

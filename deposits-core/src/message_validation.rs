@@ -641,7 +641,7 @@ pub fn validate_ledger_operation<C: ValidationContext>(
                 Err(format!("No channel ledger found for sender {}", sender))
             }
         }
-        LedgerOperation::TransferTimeout { transfer_id, block_hash: _ } => {
+        LedgerOperation::TransferFail { transfer_id, block_hash: _, .. } => {
             // For timeout, we need current block height - use 0 as placeholder
             // Real validation happens in the handler with actual block context
             if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {

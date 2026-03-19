@@ -549,7 +549,7 @@ impl PendingInvoice {
 /// A pending conditional transfer between deposits.
 ///
 /// Created by TransferLock, resolved by TransferComplete (funds to destination)
-/// or TransferTimeout (funds returned to source).
+/// or TransferFail (funds returned to source).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingTransfer {
     /// Unique transfer identifier (hash of signing message).

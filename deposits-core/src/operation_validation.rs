@@ -1087,7 +1087,7 @@ pub fn validate_transfer_complete(
     Ok(())
 }
 
-/// Validate a TransferTimeout operation.
+/// Validate a TransferFail operation.
 ///
 /// Checks:
 /// - Pending transfer exists

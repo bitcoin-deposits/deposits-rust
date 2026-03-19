@@ -96,7 +96,7 @@ class DepositsProtocol(KaitaiStruct):
           61 = Tombstone
           70 = TransferLock
           71 = TransferComplete
-          72 = TransferTimeout
+          72 = TransferFail
         """
         def __init__(self, _io, _parent=None, _root=None):
             super(DepositsProtocol.LedgerOperation, self).__init__(_io)

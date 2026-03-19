@@ -149,8 +149,8 @@ fn wit() -> DescriptorWitness { DescriptorWitness { stack: vec![vec![0x30; 64]] 
     transfer_id: h32(), script_witness: wit(),
 }); }
 
-#[test] fn transfer_timeout() { test_roundtrip(&LedgerOperation::TransferTimeout {
-    transfer_id: h32(), block_hash: h32(),
+#[test] fn transfer_fail() { test_roundtrip(&LedgerOperation::TransferFail {
+    transfer_id: h32(), block_hash: h32(), reason: 1,
 }); }
 
 #[test] fn collateral_attestation() { test_roundtrip(&LedgerOperation::CollateralAttestation {

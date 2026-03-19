@@ -8250,7 +8250,7 @@ impl Node {
     /// Automatically timeout expired transfers.
     ///
     /// Scans all operated ledgers for pending transfers that have passed their
-    /// timeout_height and issues TransferTimeout operations to return funds
+    /// timeout_height and issues TransferFail operations to return funds
     /// to the source deposits.
     pub async fn auto_timeout_transfers(&self) {
         use deposits_core::messages::LedgerOperation;
@@ -8318,16 +8318,17 @@ impl Node {
                     current_block
                 );
 
-                let operation = LedgerOperation::TransferTimeout {
+                let operation = LedgerOperation::TransferFail {
                     transfer_id,
                     block_hash,
+                    reason: 1,
                 };
 
                 {
                     let mut ledger = ledger_arc.write().unwrap();
                     if let Err(e) = ledger.append_operation_with_block(
                         operation,
-                        deposits_core::messages::consts::TRANSFER_TIMEOUT,
+                        deposits_core::messages::consts::TRANSFER_FAIL,
                         current_block,
                         block_hash,
                     ) {

@@ -184,6 +184,7 @@ const TRANSFER_ID: u64 = 220;
 const BLOCK_HASH: u64 = 222;
 const SCRIPT_WITNESS: u64 = 224;
 const TRANSFER_FEES: u64 = 226;
+const FAIL_REASON: u64 = 228;
 const MIN_FEE_BPS: u64 = 233;
 const MIN_FEE_FIXED: u64 = 235;
 const MAX_FEE_PERIOD: u64 = 237;
@@ -471,9 +472,10 @@ fn schema_transfer_complete() {
 }
 
 #[test]
-fn schema_transfer_timeout() {
-    validate_schema(72, "TransferTimeout", &[
+fn schema_transfer_fail() {
+    validate_schema(72, "TransferFail", &[
         (TRANSFER_ID, hash32()),
         (BLOCK_HASH, hash32()),
+        (FAIL_REASON, u8_bytes(1)),
     ]);
 }

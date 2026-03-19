@@ -1506,7 +1506,7 @@ impl Ledger {
                     // Fee is implicitly collected (removed from circulation)
                 }
             }
-            LedgerOperation::TransferTimeout { transfer_id, .. } => {
+            LedgerOperation::TransferFail { transfer_id, .. } => {
                 // Look up and remove pending transfer
                 if let Some(pending) = self.state.pending_transfers.remove(transfer_id) {
                     let total = pending.total_locked();
@@ -2520,9 +2520,10 @@ mod tests {
         assert_eq!(source.locked_balance, 25_250);
 
         // Timeout the transfer (deadline passed, preimage not revealed)
-        let timeout_op = LedgerOperation::TransferTimeout {
+        let timeout_op = LedgerOperation::TransferFail {
             transfer_id,
             block_hash: [0x99u8; 32],
+            reason: 1,
         };
 
         ledger.apply_operation(&timeout_op).unwrap();

@@ -122,7 +122,7 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 | 57 | CustodyArmed | Recovery |
 | 70 | TransferLock | Transfers |
 | 71 | TransferComplete | Transfers |
-| 72 | TransferTimeout | Transfers |
+| 72 | TransferFail | Transfers |
 
 ### Operation TLV Fields
 
@@ -176,7 +176,7 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 | 214 | destination_deposit_id | 16 | TransferLock |
 | 216 | completion_script | variable | TransferLock |
 | 218 | timeout_height | 4 | TransferLock |
-| 220 | transfer_id | 32 | TransferLock, TransferComplete, TransferTimeout |
+| 220 | transfer_id | 32 | TransferLock, TransferComplete, TransferFail |
 | 204 | witness | variable | TransferLock, DepositKeyRotate (nested) |
 | 224 | script_witness | variable | TransferComplete (nested) |
 

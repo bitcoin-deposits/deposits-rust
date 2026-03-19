@@ -158,7 +158,7 @@ impl DepositsProtocol_FeeStructure {
  *   61 = Tombstone
  *   70 = TransferLock
  *   71 = TransferComplete
- *   72 = TransferTimeout
+ *   72 = TransferFail
  */
 
 #[derive(Default, Debug, Clone)]

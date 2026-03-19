@@ -491,7 +491,7 @@ pub fn handle_ledger_update<C: HandlerContext>(
                 LedgerOperation::CustodyYield |
                 LedgerOperation::TransferLock { .. } |
                 LedgerOperation::TransferComplete { .. } |
-                LedgerOperation::TransferTimeout { .. } |
+                LedgerOperation::TransferFail { .. } |
                 LedgerOperation::LedgerOpen { .. } => {}
             }
 

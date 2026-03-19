@@ -140,7 +140,7 @@ types:
         60 = LedgerClose
         70 = TransferLock
         71 = TransferComplete
-        72 = TransferTimeout
+        72 = TransferFail
     seq:
       - id: records
         type: tlv_record
@@ -215,6 +215,7 @@ types:
   #   220 = transfer_id (32 bytes)
   #   222 = block_hash (32 bytes)
   #   224 = script_witness (nested TLV)
+  #   228 = fail_reason (u8)
   #
   # On-chain fields:
   #   66  = txid (32 bytes)

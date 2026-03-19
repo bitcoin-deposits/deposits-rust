@@ -378,8 +378,8 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
         ("TransferComplete", LedgerOperation::TransferComplete {
             transfer_id: h32(), script_witness: wit(),
         }),
-        ("TransferTimeout", LedgerOperation::TransferTimeout {
-            transfer_id: h32(), block_hash: h32(),
+        ("TransferFail", LedgerOperation::TransferFail {
+            transfer_id: h32(), block_hash: h32(), reason: 1,
         }),
         ("CollateralAttestation", LedgerOperation::CollateralAttestation {
             collateral_operator: pk(), quorum_member: pk(), collateral_ledger_id: "abc123".into(),
