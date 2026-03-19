@@ -2230,13 +2230,13 @@ mod deposit_fields {
     pub const FEES: u64 = 8;
     pub const LAST_FEE_ASSESSMENT: u64 = 10;
     pub const TRANSFER_FEES: u64 = 16;
-    pub const IS_COLLATERAL: u64 = 17; // odd = optional
-    pub const RECEIVE_REQUIRES_SIG: u64 = 19; // odd = optional
-    pub const FEE_CHANGE_AFTER: u64 = 21; // odd = optional, u32
-    pub const FEE_CHANGE_NOTICE: u64 = 23; // odd = optional, u32
-    pub const FEE_CHANGE_LIMIT_BPS: u64 = 25; // odd = optional, u16
+    pub const IS_COLLATERAL: u64 = 20; // u8 (0 or 1)
+    pub const RECEIVE_REQUIRES_SIG: u64 = 22; // u8 (0 or 1)
+    pub const FEE_CHANGE_AFTER: u64 = 24; // u32
+    pub const FEE_CHANGE_NOTICE: u64 = 26; // u32
+    pub const FEE_CHANGE_LIMIT_BPS: u64 = 28; // u16
     pub const OPENED_AT_BLOCK: u64 = 18; // u32
-    pub const PENDING_FEE_CHANGE: u64 = 27; // odd = optional, nested
+    pub const PENDING_FEE_CHANGE: u64 = 30; // nested
 }
 
 impl TlvEncode for Deposit {

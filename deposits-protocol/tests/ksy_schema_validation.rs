@@ -185,11 +185,11 @@ const BLOCK_HASH: u64 = 222;
 const SCRIPT_WITNESS: u64 = 224;
 const TRANSFER_FEES: u64 = 226;
 const FAIL_REASON: u64 = 228;
-const MIN_FEE_BPS: u64 = 233;
-const MIN_FEE_FIXED: u64 = 235;
-const MAX_FEE_PERIOD: u64 = 237;
-const COLLATERAL_LOCK_AMT: u64 = 239;
-const COLLATERAL_LOCK_UNTIL_BLOCK: u64 = 241;
+const MIN_FEE_BPS: u64 = 234;
+const MIN_FEE_FIXED: u64 = 236;
+const MAX_FEE_PERIOD: u64 = 238;
+const COLLATERAL_LOCK_AMT: u64 = 240;
+const COLLATERAL_LOCK_UNTIL_BLOCK: u64 = 242;
 // Fee amount field
 const FEE: u64 = 2; // shares with AMOUNT for some ops, but fee uses it differently in TransferLock
 
@@ -229,7 +229,7 @@ fn schema_deposit_open() {
         (PAYMENT_HASH, hash32()),
         (INVOICE, str_bytes("lnbcrt1test")),
         (COSIGNER_SIG, sig64()),
-        (229, u8_bytes(1)), // IS_COLLATERAL
+        (230, u8_bytes(1)), // IS_COLLATERAL
     ]);
 }
 
@@ -245,7 +245,7 @@ fn schema_fee_change() {
     validate_schema(22, "FeeChange", &[
         (DEPOSIT_ID, deposit_id()),
         (NEW_FEES, fee_structure_tlv()),
-        (249, u32_bytes(0)), // EFFECTIVE_BLOCK
+        (250, u32_bytes(0)), // EFFECTIVE_BLOCK
     ]);
 }
 

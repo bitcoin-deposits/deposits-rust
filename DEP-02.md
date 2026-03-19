@@ -152,8 +152,8 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 | 200 | deposit_id | 16 | DepositOpen, DepositClose, FeeChange, DepositKeyRotate, FeeCollect |
 | 202 | descriptor | variable | DepositOpen |
 | 208 | new_descriptor | variable | DepositKeyRotate |
-| 229 | is_collateral | 1 | DepositOpen (odd, optional) |
-| 231 | receive_requires_sig | 1 | DepositOpen (odd, optional) |
+| 230 | is_collateral | 1 | DepositOpen |
+| 232 | receive_requires_sig | 1 | DepositOpen |
 
 #### Fees
 
@@ -162,10 +162,10 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 | 12 | fees | variable | DepositOpen (nested FeeStructure) |
 | 20 | new_fees | variable | FeeChange (nested FeeStructure) |
 | 226 | transfer_fees | variable | DepositOpen (nested TransferFeeSchedule) |
-| 243 | fee_change_after_blocks | 4 | DepositOpen (odd, optional) |
-| 245 | fee_change_notice_blocks | 4 | DepositOpen (odd, optional) |
-| 247 | fee_change_limit_bps | 2 | DepositOpen (odd, optional) |
-| 249 | effective_block | 4 | FeeChange (odd, optional) |
+| 244 | fee_change_after_blocks | 4 | DepositOpen |
+| 246 | fee_change_notice_blocks | 4 | DepositOpen |
+| 248 | fee_change_limit_bps | 2 | DepositOpen |
+| 250 | effective_block | 4 | FeeChange |
 
 #### Transfers
 
@@ -201,11 +201,11 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 | 76 | lock_until_block | 4 | CollateralLock, CollateralAttestation |
 | 114 | member_ledger_id | variable | QuorumAddMember, QuorumJoin |
 | 115 | collateral_ledger_id | variable | CollateralAttestation |
-| 233 | min_fee_bps | 2 | QuorumAddMember (odd, optional) |
-| 235 | min_fee_fixed | 8 | QuorumAddMember (odd, optional) |
-| 237 | max_fee_period | 4 | QuorumAddMember (odd, optional) |
-| 239 | collateral_lock_amount | 8 | QuorumAddMember (odd, optional) |
-| 241 | collateral_lock_until | 4 | QuorumAddMember (odd, optional) |
+| 234 | min_fee_bps | 2 | QuorumAddMember |
+| 236 | min_fee_fixed | 8 | QuorumAddMember |
+| 238 | max_fee_period | 4 | QuorumAddMember |
+| 240 | collateral_lock_amount | 8 | QuorumAddMember |
+| 242 | collateral_lock_until | 4 | QuorumAddMember |
 
 ### Nested TLV: FeeStructure
 

@@ -2741,18 +2741,18 @@ mod ledger_op_tlv {
     pub const SCRIPT_WITNESS: u64 = 224;
     pub const TRANSFER_FEES: u64 = 226;
     pub const FAIL_REASON: u64 = 228;   // u8 (0 = timeout)
-    pub const IS_COLLATERAL: u64 = 229; // odd = optional, u8 (0 or 1)
-    pub const RECEIVE_REQUIRES_SIG: u64 = 231; // odd = optional, u8 (0 or 1)
+    pub const IS_COLLATERAL: u64 = 230; // u8 (0 or 1)
+    pub const RECEIVE_REQUIRES_SIG: u64 = 232; // u8 (0 or 1)
     // Quorum member fee limits (on QuorumAddMember)
-    pub const MIN_FEE_BPS: u64 = 233;     // odd = optional, u16
-    pub const MIN_FEE_FIXED: u64 = 235;   // odd = optional, u64 (msats/year)
-    pub const MAX_FEE_PERIOD: u64 = 237;   // odd = optional, u32 (blocks)
-    pub const FEE_CHANGE_AFTER: u64 = 243;  // odd = optional, u32 (blocks after open)
-    pub const FEE_CHANGE_NOTICE: u64 = 245; // odd = optional, u32 (notice blocks)
-    pub const FEE_CHANGE_LIMIT_BPS: u64 = 247; // odd = optional, u16 (default 1000 = 10%)
-    pub const EFFECTIVE_BLOCK: u64 = 249;   // odd = optional, u32 (on FeeChange)
-    pub const COLLATERAL_LOCK_AMOUNT: u64 = 239; // odd = optional, u64 (msats)
-    pub const COLLATERAL_LOCK_UNTIL: u64 = 241; // odd = optional, u32 (block height)
+    pub const MIN_FEE_BPS: u64 = 234;     // u16
+    pub const MIN_FEE_FIXED: u64 = 236;   // u64 (msats/year)
+    pub const MAX_FEE_PERIOD: u64 = 238;   // u32 (blocks)
+    pub const FEE_CHANGE_AFTER: u64 = 244;  // u32 (blocks after open)
+    pub const FEE_CHANGE_NOTICE: u64 = 246; // u32 (notice blocks)
+    pub const FEE_CHANGE_LIMIT_BPS: u64 = 248; // u16 (default 1000 = 10%)
+    pub const EFFECTIVE_BLOCK: u64 = 250;   // u32 (on FeeChange)
+    pub const COLLATERAL_LOCK_AMOUNT: u64 = 240; // u64 (msats)
+    pub const COLLATERAL_LOCK_UNTIL: u64 = 242; // u32 (block height)
 }
 
 impl TlvEncode for LedgerOperation {
