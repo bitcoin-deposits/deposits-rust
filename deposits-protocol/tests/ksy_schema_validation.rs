@@ -412,7 +412,7 @@ fn schema_fee_collect() {
 
 #[test]
 fn schema_custody_dispute() {
-    validate_schema(54, "CustodyDispute", &[
+    validate_schema(54, "DisputeEnter", &[
         (LAST_VALID_SEQUENCE, u64_bytes(10)),
         (REASON, str_bytes("hash_chain_broken")),
     ]);
@@ -420,7 +420,7 @@ fn schema_custody_dispute() {
 
 #[test]
 fn schema_custody_acquire() {
-    validate_schema(55, "CustodyAcquire", &[
+    validate_schema(55, "DisputeAcquire", &[
         (NEW_CUSTODIAN, pubkey_bytes()),
         (ENTROPY_BLOCK_HEIGHT, u32_bytes(400)),
         (ENTROPY_BLOCK_HASH, hash32()),
@@ -431,12 +431,12 @@ fn schema_custody_acquire() {
 
 #[test]
 fn schema_custody_yield() {
-    validate_schema(56, "CustodyYield", &[]);
+    validate_schema(56, "DisputeYield", &[]);
 }
 
 #[test]
 fn schema_custody_armed() {
-    validate_schema(57, "CustodyArmed", &[
+    validate_schema(57, "DisputeArmed", &[
         (ARMED_BLOCK, u32_bytes(300)),
         (COMMITMENT_HASH, hash20()),
         (TARGET_RESERVES, str_bytes("bcrt1qtarget")),

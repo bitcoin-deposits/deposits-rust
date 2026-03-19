@@ -620,7 +620,7 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     // Sort updates by sequence number but keep ALL updates (including branches)
     // Include operator_id in sort/dedup to preserve different operators' updates at same sequence
-    // (e.g., parallel CustodyDisputes from different quorum members)
+    // (e.g., parallel DisputeEnters from different quorum members)
     for updates in ledgers.values_mut() {
         updates.sort_by_key(|u| (u.sequence_number, u.operator_id.serialize(), u.current_hash));
         // Deduplicate exact copies only (same seq, same operator, same hash)
@@ -707,7 +707,7 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
         };
 
         // Extract the best chain from updates (handles branches)
-        // Preference: chains with CustodyAcquire > longest chain
+        // Preference: chains with DisputeAcquire > longest chain
         // Build a map from previous_hash to updates
         let mut by_prev: std::collections::HashMap<[u8; 32], Vec<&SignedLedgerUpdate>> =
             std::collections::HashMap::new();
@@ -715,11 +715,11 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
             by_prev.entry(update.previous_hash).or_default().push(update);
         }
 
-        // Check if a chain contains CustodyAcquire
+        // Check if a chain contains DisputeAcquire
         fn chain_has_custody_acquire(chain: &[&SignedLedgerUpdate]) -> bool {
             for update in chain {
                 if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                    if matches!(op, LedgerOperation::CustodyAcquire { .. }) {
+                    if matches!(op, LedgerOperation::DisputeAcquire { .. }) {
                         return true;
                     }
                 }
@@ -728,7 +728,7 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
         }
 
         // Walk the chain iteratively from genesis. At forks, pick the
-        // branch that contains CustodyAcquire (or the longest if tied).
+        // branch that contains DisputeAcquire (or the longest if tied).
         let longest_chain = {
             let mut chain: Vec<&SignedLedgerUpdate> = Vec::new();
             let mut current_hash = [0u8; 32];
@@ -775,7 +775,7 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
         if filtered_updates.len() < updates.len() {
             let has_acquire = chain_has_custody_acquire(&longest_chain);
-            println!("  Note: Filtered {} updates to {} (branches detected, has CustodyAcquire: {})",
+            println!("  Note: Filtered {} updates to {} (branches detected, has DisputeAcquire: {})",
                 updates.len(), filtered_updates.len(), has_acquire);
 
             // Show final operation type
@@ -872,7 +872,7 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
                 update.operator_id.serialize()
             }
 
-            // Collect invalid update hashes from CustodyDispute reasons (which now contain the hash)
+            // Collect invalid update hashes from DisputeEnter reasons (which now contain the hash)
             // Also collect the actual invalid updates for display
             let mut invalid_hashes: HashSet<[u8; 32]> = HashSet::new();
             let mut invalid_updates: Vec<&SignedLedgerUpdate> = Vec::new();
@@ -883,9 +883,9 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
                     let next_idx = pk_colors.len();
                     pk_colors.entry(key).or_insert(next_idx);
                 }
-                // Check if this is a CustodyDispute and extract the invalid hash from reason
+                // Check if this is a DisputeEnter and extract the invalid hash from reason
                 if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                    if let LedgerOperation::CustodyDispute { reason, .. } = op {
+                    if let LedgerOperation::DisputeEnter { reason, .. } = op {
                         // The reason is now the invalid update's hash (64 hex chars)
                         if reason.len() == 64 {
                             if let Ok(hash_bytes) = hex::decode(&reason) {
@@ -941,11 +941,11 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
                     let mut max_depth = 0;
                     for child in kids {
                         let is_cd = if let Ok(op) = LedgerOperation::tlv_decode(&child.message) {
-                            matches!(op, LedgerOperation::CustodyDispute { .. })
+                            matches!(op, LedgerOperation::DisputeEnter { .. })
                         } else {
                             false
                         };
-                        // Follow same operator's chain (CustodyDispute can branch but we track by operator)
+                        // Follow same operator's chain (DisputeEnter can branch but we track by operator)
                         if child.operator_id == operator || is_cd {
                             let depth =
                                 1 + get_chain_depth(children, child.current_hash, child.operator_id);
@@ -961,7 +961,7 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
             // Print tree recursively with operator continuity tracking
             // parent_operator: None for genesis, Some(op) for subsequent nodes
             // Only show children that:
-            // 1. Are CustodyDispute (can branch from any operator), or
+            // 1. Are DisputeEnter (can branch from any operator), or
             // 2. Have same operator_id as parent (operator continuity)
             // Branches are sorted by chain depth (ascending) so surviving chain comes last
             fn print_tree(
@@ -983,10 +983,10 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
                     let mut filtered_kids: Vec<&&SignedLedgerUpdate> = kids
                         .iter()
                         .filter(|update| {
-                            // Check if this is a CustodyDispute operation
+                            // Check if this is a DisputeEnter operation
                             let is_custody_dispute =
                                 if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                                    matches!(op, LedgerOperation::CustodyDispute { .. })
+                                    matches!(op, LedgerOperation::DisputeEnter { .. })
                                 } else {
                                     false
                                 };
@@ -994,7 +994,7 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
                             // Also show invalid updates (so they can blink)
                             let is_invalid = invalid_hashes.contains(&update.current_hash);
 
-                            // CustodyDispute can branch from anyone
+                            // DisputeEnter can branch from anyone
                             // Invalid updates should be shown (with blinking)
                             // Other operations must continue from same operator (or be first op from genesis)
                             is_custody_dispute
@@ -1100,7 +1100,7 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
                                 .filter(|c| {
                                     let is_cd =
                                         if let Ok(op) = LedgerOperation::tlv_decode(&c.message) {
-                                            matches!(op, LedgerOperation::CustodyDispute { .. })
+                                            matches!(op, LedgerOperation::DisputeEnter { .. })
                                         } else {
                                             false
                                         };
@@ -1424,7 +1424,7 @@ pub async fn nostr_validate(args: &[String]) -> Result<(), Box<dyn std::error::E
     }
 
     // Sort by sequence number and deduplicate (relay may have duplicates)
-    // Include operator_id to preserve different operators' updates at same sequence (e.g., parallel CustodyDisputes)
+    // Include operator_id to preserve different operators' updates at same sequence (e.g., parallel DisputeEnters)
     updates.sort_by_key(|u| (u.sequence_number, u.operator_id));
     updates.dedup_by(|a, b| {
         a.sequence_number == b.sequence_number
@@ -1509,13 +1509,13 @@ pub async fn nostr_validate(args: &[String]) -> Result<(), Box<dyn std::error::E
 
 /// Check dispute status for a ledger - whether it's safe to deposit
 ///
-/// CustodyDispute is a LedgerOperation (published as KIND_LEDGER_UPDATE), not KIND_LEDGER_DISPUTE.
-/// We look for CustodyDispute operations in the ledger updates, then check for CustodyAcquire resolution.
+/// DisputeEnter is a LedgerOperation (published as KIND_LEDGER_UPDATE), not KIND_LEDGER_DISPUTE.
+/// We look for DisputeEnter operations in the ledger updates, then check for DisputeAcquire resolution.
 ///
 /// Returns:
 /// - SAFE: No custody disputes found
-/// - DISPUTED: Active custody dispute, no CustodyAcquire yet (DO NOT DEPOSIT)
-/// - RESOLVED: Custody dispute resolved with CustodyAcquire (safe to deposit)
+/// - DISPUTED: Active custody dispute, no DisputeAcquire yet (DO NOT DEPOSIT)
+/// - RESOLVED: Custody dispute resolved with DisputeAcquire (safe to deposit)
 pub async fn nostr_dispute_status(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut ledger_id: Option<String> = None;
     let mut config_args = Vec::new();
@@ -1550,7 +1550,7 @@ pub async fn nostr_dispute_status(args: &[String]) -> Result<(), Box<dyn std::er
 
     let client = get_or_create_client(&relay_url).await?;
 
-    // CustodyDispute is a LedgerOperation, so look in KIND_LEDGER_UPDATE events
+    // DisputeEnter is a LedgerOperation, so look in KIND_LEDGER_UPDATE events
     let update_filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
         .custom_tag(SingleLetterTag::lowercase(Alphabet::L), [ledger_id.as_str()]);
@@ -1572,7 +1572,7 @@ pub async fn nostr_dispute_status(args: &[String]) -> Result<(), Box<dyn std::er
                     if message_bytes.len() >= 2 {
                         let msg_type = (message_bytes[0] as u16) << 8 | message_bytes[1] as u16;
 
-                        // CustodyDispute = 0x0036 (54)
+                        // DisputeEnter = 0x0036 (54)
                         if msg_type == 0x0036 {
                             has_custody_dispute = true;
                             // The disputer is who signed the update, extract from event pubkey
@@ -1582,11 +1582,11 @@ pub async fn nostr_dispute_status(args: &[String]) -> Result<(), Box<dyn std::er
                             }
                         }
 
-                        // CustodyAcquire = 0x0037 (55)
+                        // DisputeAcquire = 0x0037 (55)
                         if msg_type == 0x0037 {
                             has_custody_acquire = true;
                             if let Ok(op) = LedgerOperation::tlv_decode(&message_bytes) {
-                                if let LedgerOperation::CustodyAcquire { new_custodian: nc, .. } = op {
+                                if let LedgerOperation::DisputeAcquire { new_custodian: nc, .. } = op {
                                     new_custodian = Some(hex::encode(nc.serialize()));
                                 }
                             }
@@ -1604,8 +1604,8 @@ pub async fn nostr_dispute_status(args: &[String]) -> Result<(), Box<dyn std::er
         return Ok(());
     }
 
-    // Found CustodyDispute - check if resolved
-    println!("  Found CustodyDispute from {} quorum member(s):", disputers.len());
+    // Found DisputeEnter - check if resolved
+    println!("  Found DisputeEnter from {} quorum member(s):", disputers.len());
     for d in &disputers {
         println!("    - {}...", &d[..16.min(d.len())]);
     }
@@ -1613,7 +1613,7 @@ pub async fn nostr_dispute_status(args: &[String]) -> Result<(), Box<dyn std::er
     if has_custody_acquire {
         println!();
         println!("DISPUTE_STATUS: RESOLVED");
-        println!("  Custody dispute has been resolved via CustodyAcquire.");
+        println!("  Custody dispute has been resolved via DisputeAcquire.");
         if let Some(nc) = new_custodian {
             println!("  New custodian: {}...", &nc[..16.min(nc.len())]);
         }
@@ -1622,10 +1622,10 @@ pub async fn nostr_dispute_status(args: &[String]) -> Result<(), Box<dyn std::er
         println!();
         println!("DISPUTE_STATUS: DISPUTED");
         println!("  WARNING: Active custody dispute with NO resolution!");
-        println!("  Found {} CustodyDispute(s) but no CustodyAcquire.", disputers.len());
+        println!("  Found {} DisputeEnter(s) but no DisputeAcquire.", disputers.len());
         println!();
         println!("  DO NOT DEPOSIT until custody is resolved.");
-        println!("  Wait for CustodyAcquire from the winning candidate.");
+        println!("  Wait for DisputeAcquire from the winning candidate.");
     }
 
     Ok(())
@@ -2799,14 +2799,14 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                 LedgerOperation::InvoiceFail { .. } => ("InvoiceFail", String::new()),
                 LedgerOperation::InvoiceFulfill { .. } => ("InvoiceFulfill", String::new()),
                 LedgerOperation::FeeCollect { .. } => ("FeeCollect", String::new()),
-                LedgerOperation::CustodyDispute {
+                LedgerOperation::DisputeEnter {
                     last_valid_sequence,
                     reason,
                 } => (
-                    "CustodyDispute",
+                    "DisputeEnter",
                     format!("last_valid_seq:{}  reason:{}", last_valid_sequence, reason),
                 ),
-                LedgerOperation::CustodyArmed {
+                LedgerOperation::DisputeArmed {
                     armed_block,
                     commitment_hash,
                     target_reserves,
@@ -2822,7 +2822,7 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                         target_reserves.clone()
                     };
                     (
-                        "CustodyArmed",
+                        "DisputeArmed",
                         format!(
                             "armed_block:{}  commit:{}..  target:{}",
                             armed_block,
@@ -2831,7 +2831,7 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                         ),
                     )
                 }
-                LedgerOperation::CustodyAcquire {
+                LedgerOperation::DisputeAcquire {
                     new_custodian,
                     entropy_block_height,
                     spend_txid,
@@ -2841,7 +2841,7 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                     let pk_bytes = new_custodian.serialize();
                     let txid_hex = hex::encode(spend_txid);
                     (
-                        "CustodyAcquire",
+                        "DisputeAcquire",
                         format!(
                             "to:{:02x}{:02x}{:02x}{:02x}  entropy_block:{}  txid:{}..  reserves:{}..{}",
                             pk_bytes[0],
@@ -2855,7 +2855,7 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                         ),
                     )
                 }
-                LedgerOperation::CustodyYield => ("CustodyYield", String::new()),
+                LedgerOperation::DisputeYield => ("DisputeYield", String::new()),
                 LedgerOperation::LedgerClose => ("LedgerClose", String::new()),
                 LedgerOperation::TransferLock { source_deposit_id, destination_deposit_id, amount, fee, timeout_height, .. } => (
                     "TransferLock",

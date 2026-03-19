@@ -2652,7 +2652,7 @@ enum CustodyEvent {
         target_reserves: String,
     },
     /// New custodian acquired custody
-    CustodyAcquired {
+    DisputeAcquired {
         new_custodian: bitcoin::secp256k1::PublicKey,
         entropy_block: u32,
         new_reserves_address: String,
@@ -2783,7 +2783,7 @@ async fn ledger_custody(args: &[String]) -> Result<(), Box<dyn std::error::Error
                         first_expiry_block,
                     }));
                 }
-                LedgerOperation::CustodyDispute { last_valid_sequence, reason } => {
+                LedgerOperation::DisputeEnter { last_valid_sequence, reason } => {
                     in_dispute = true;
                     // Check if signer was a quorum member
                     let is_quorum_member = quorum_members.iter().any(|(pk, _)| pk == &signer);
@@ -2798,7 +2798,7 @@ async fn ledger_custody(args: &[String]) -> Result<(), Box<dyn std::error::Error
                         reason,
                     }));
                 }
-                LedgerOperation::CustodyArmed { armed_block, target_reserves, .. } => {
+                LedgerOperation::DisputeArmed { armed_block, target_reserves, .. } => {
                     let is_quorum_member = quorum_members.iter().any(|(pk, _)| pk == &signer);
                     let signer_status = if is_quorum_member { "✓" } else { "⚠" };
 
@@ -2811,7 +2811,7 @@ async fn ledger_custody(args: &[String]) -> Result<(), Box<dyn std::error::Error
                         target_reserves,
                     }));
                 }
-                LedgerOperation::CustodyAcquire { new_custodian, entropy_block_height, new_reserves_address, .. } => {
+                LedgerOperation::DisputeAcquire { new_custodian, entropy_block_height, new_reserves_address, .. } => {
                     let is_quorum_member = quorum_members.iter().any(|(pk, _)| pk == &new_custodian);
                     let valid = if is_quorum_member { "✓" } else { "⚠" };
 
@@ -2824,13 +2824,13 @@ async fn ledger_custody(args: &[String]) -> Result<(), Box<dyn std::error::Error
                     current_operator = Some(new_custodian);
                     in_dispute = false;
 
-                    custody_events.push((seq, block, CustodyEvent::CustodyAcquired {
+                    custody_events.push((seq, block, CustodyEvent::DisputeAcquired {
                         new_custodian,
                         entropy_block: entropy_block_height,
                         new_reserves_address,
                     }));
                 }
-                LedgerOperation::CustodyYield => {
+                LedgerOperation::DisputeYield => {
                     println!("seq {:>4} | block {:>6} | 🏳️ CUSTODY YIELDED", seq, block);
                     println!("         |              |   Candidate: {}...", &hex::encode(signer.serialize())[..16]);
                 }
@@ -2862,7 +2862,7 @@ async fn ledger_custody(args: &[String]) -> Result<(), Box<dyn std::error::Error
 
     // Count custody transitions
     let transitions: Vec<_> = custody_events.iter()
-        .filter(|(_, _, e)| matches!(e, CustodyEvent::CustodyAcquired { .. }))
+        .filter(|(_, _, e)| matches!(e, CustodyEvent::DisputeAcquired { .. }))
         .collect();
 
     if !transitions.is_empty() {

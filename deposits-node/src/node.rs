@@ -870,7 +870,7 @@ impl Node {
                 continue;
             };
 
-            // Build best chain (handle branches: prefer chains with CustodyAcquire, then longest)
+            // Build best chain (handle branches: prefer chains with DisputeAcquire, then longest)
             let by_prev: std::collections::HashMap<[u8; 32], Vec<&deposits_core::SignedLedgerUpdate>> = {
                 let mut map = std::collections::HashMap::new();
                 for u in &updates {
@@ -880,7 +880,7 @@ impl Node {
             };
 
             // Walk the chain iteratively from genesis. At forks, pick the
-            // branch that contains CustodyAcquire (or the longest if tied).
+            // branch that contains DisputeAcquire (or the longest if tied).
             let best_chain = {
                 let mut chain: Vec<&deposits_core::SignedLedgerUpdate> = Vec::new();
                 let mut current_hash = [0u8; 32];
@@ -896,7 +896,7 @@ impl Node {
                         let mut best_depth = 0usize;
                         for &child in children {
                             let has_acquire = LedgerOperation::tlv_decode(&child.message)
-                                .map(|op| matches!(op, LedgerOperation::CustodyAcquire { .. }))
+                                .map(|op| matches!(op, LedgerOperation::DisputeAcquire { .. }))
                                 .unwrap_or(false);
                             // Count chain length from this child (iterative peek)
                             let mut depth = 1usize;
@@ -1177,7 +1177,7 @@ impl Node {
                         let mut best_depth = 0usize;
                         for &child in children {
                             let has_acquire = LedgerOperation::tlv_decode(&child.message)
-                                .map(|op| matches!(op, LedgerOperation::CustodyAcquire { .. }))
+                                .map(|op| matches!(op, LedgerOperation::DisputeAcquire { .. }))
                                 .unwrap_or(false);
                             let mut depth = 1usize;
                             let mut h = child.current_hash;
@@ -2351,13 +2351,13 @@ impl Node {
             }
         }
 
-        // Drop updates from non-operators (except CustodyDispute, which any
+        // Drop updates from non-operators (except DisputeEnter, which any
         // quorum member may publish).  Non-operator writes are never legitimate
         // and must not trigger a dispute — they're just noise.
         //
         // Exception: if the ledger is in a non-Normal dispute state and we see
         // an update from a different key, the operator may have changed via
-        // CustodyAcquire.  Re-import the ledger to pick up the custody transfer,
+        // DisputeAcquire.  Re-import the ledger to pick up the custody transfer,
         // then re-check.
         {
             let ledger = ledger_arc.read().unwrap();
@@ -2365,11 +2365,11 @@ impl Node {
             if !is_from_operator {
                 use deposits_core::tlv::TlvDecode;
                 let is_dispute = deposits_core::messages::LedgerOperation::tlv_decode(&inbound.update.message)
-                    .map(|op| matches!(op, deposits_core::messages::LedgerOperation::CustodyDispute { .. }))
+                    .map(|op| matches!(op, deposits_core::messages::LedgerOperation::DisputeEnter { .. }))
                     .unwrap_or(false);
                 if !is_dispute {
                     // If the ledger is in a dispute state, the operator may have
-                    // changed (CustodyAcquire).  Re-import and re-check.
+                    // changed (DisputeAcquire).  Re-import and re-check.
                     let in_dispute = ledger.state.dispute_state
                         != deposits_core::types::DisputeState::Normal;
                     drop(ledger);
@@ -2866,7 +2866,7 @@ impl Node {
     }
 
     /// Auto-arm for a dispute by creating a fork of the disputed ledger,
-    /// then publishing CustodyDispute and CustodyArmed on the fork.
+    /// then publishing DisputeEnter and DisputeArmed on the fork.
     ///
     /// This ensures the operator's own ledger stays in Normal state and is
     /// not affected by the dispute. The fork is stored under a compound
@@ -2899,23 +2899,23 @@ impl Node {
         // Track whether we actually added new operations (to avoid re-broadcast loops)
         let mut added_new_operations = false;
 
-        // 1. Publish CustodyDispute on the fork
+        // 1. Publish DisputeEnter on the fork
         {
             let mut fork_ledger = fork_arc.write().unwrap();
 
-            // Check if we've already published a CustodyDispute on this fork
+            // Check if we've already published a DisputeEnter on this fork
             let already_disputed = fork_ledger.history.iter().any(|u| {
                 if let Ok(op) = LedgerOperation::tlv_decode(&u.message) {
-                    matches!(op, LedgerOperation::CustodyDispute { .. })
+                    matches!(op, LedgerOperation::DisputeEnter { .. })
                 } else {
                     false
                 }
             });
 
             if already_disputed {
-                tracing::info!("Already have CustodyDispute on fork");
+                tracing::info!("Already have DisputeEnter on fork");
             } else {
-                let dispute_op = LedgerOperation::CustodyDispute {
+                let dispute_op = LedgerOperation::DisputeEnter {
                     last_valid_sequence: last_valid_seq,
                     reason: "auto_dispute".to_string(),
                 };
@@ -2925,7 +2925,7 @@ impl Node {
                     deposits_core::messages::consts::LEDGER_UPDATE,
                     current_block,
                     block_hash,
-                ).map_err(|e| Error::Protocol(format!("Failed to append CustodyDispute to fork: {:?}", e)))?;
+                ).map_err(|e| Error::Protocol(format!("Failed to append DisputeEnter to fork: {:?}", e)))?;
 
                 // Set parent_pubkey to our key (we now operate this fork branch)
                 fork_ledger.state.parent_pubkey = our_pubkey;
@@ -2935,7 +2935,7 @@ impl Node {
                     update.operator_id = our_pubkey;
                 }
 
-                tracing::info!("Published CustodyDispute on fork (parent_pubkey set to us)");
+                tracing::info!("Published DisputeEnter on fork (parent_pubkey set to us)");
                 added_new_operations = true;
             }
         }
@@ -3041,20 +3041,20 @@ impl Node {
             }
         }
 
-        // 3. Publish CustodyArmed with preimage commitment on the fork
+        // 3. Publish DisputeArmed with preimage commitment on the fork
         {
             let mut fork_ledger = fork_arc.write().unwrap();
 
             let already_armed = fork_ledger.history.iter().any(|u| {
                 if let Ok(op) = LedgerOperation::tlv_decode(&u.message) {
-                    matches!(op, LedgerOperation::CustodyArmed { .. })
+                    matches!(op, LedgerOperation::DisputeArmed { .. })
                 } else {
                     false
                 }
             });
 
             if already_armed {
-                tracing::info!("Already have CustodyArmed on fork");
+                tracing::info!("Already have DisputeArmed on fork");
             } else {
                 // Generate random preimage (17-20 bytes for lottery entropy)
                 let mut rng = OsRng;
@@ -3080,7 +3080,7 @@ impl Node {
                     .map_err(|e| Error::Protocol(format!("Invalid pubkey: {}", e)))?;
                 let target_reserves = bitcoin::Address::p2wpkh(&compressed, self.wallet.network()).to_string();
 
-                let armed_op = LedgerOperation::CustodyArmed {
+                let armed_op = LedgerOperation::DisputeArmed {
                     armed_block: current_block,
                     commitment_hash,
                     target_reserves,
@@ -3091,14 +3091,14 @@ impl Node {
                     deposits_core::messages::consts::LEDGER_UPDATE,
                     current_block,
                     block_hash,
-                ).map_err(|e| Error::Protocol(format!("Failed to append CustodyArmed to fork: {:?}", e)))?;
+                ).map_err(|e| Error::Protocol(format!("Failed to append DisputeArmed to fork: {:?}", e)))?;
 
                 // Patch operator_id
                 if let Some(update) = fork_ledger.history.last_mut() {
                     update.operator_id = our_pubkey;
                 }
 
-                tracing::info!("Published CustodyArmed on fork");
+                tracing::info!("Published DisputeArmed on fork");
                 added_new_operations = true;
             }
         }
@@ -3209,8 +3209,8 @@ impl Node {
     /// For each ledger where we've revealed our preimage:
     /// 1. Check if all preimages are collected
     /// 2. Determine winner
-    /// 3. Winner: claim lottery output + publish CustodyAcquire
-    /// 4. Loser: publish CustodyYield
+    /// 3. Winner: claim lottery output + publish DisputeAcquire
+    /// 4. Loser: publish DisputeYield
     async fn auto_lottery_claim_or_yield(&self) {
         use bitcoin::secp256k1::Secp256k1;
 
@@ -3329,7 +3329,7 @@ impl Node {
             .await
             .map_err(|e| Error::Protocol(format!("Failed to fetch reveals: {}", e)))?;
 
-        // Extract CustodyArmed participants
+        // Extract DisputeArmed participants
         let mut participants: Vec<(PublicKey, LotteryParticipant)> = Vec::new();
         let mut our_armed: Option<SignedLedgerUpdate> = None;
 
@@ -3337,7 +3337,7 @@ impl Node {
             if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
                 if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
                     if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                        if let LedgerOperation::CustodyArmed { commitment_hash, target_reserves, .. } = op {
+                        if let LedgerOperation::DisputeArmed { commitment_hash, target_reserves, .. } = op {
                             let x_only = update.operator_id.x_only_public_key().0;
                             participants.push((update.operator_id, LotteryParticipant::new(
                                 x_only,
@@ -3354,11 +3354,11 @@ impl Node {
         }
 
         if participants.is_empty() {
-            return Err(Error::Protocol("No CustodyArmed participants found".to_string()));
+            return Err(Error::Protocol("No DisputeArmed participants found".to_string()));
         }
 
         let our_armed = our_armed.ok_or_else(||
-            Error::Protocol("Could not find our CustodyArmed".to_string()))?;
+            Error::Protocol("Could not find our DisputeArmed".to_string()))?;
 
         // Sort participants by x-only pubkey for deterministic order
         participants.sort_by(|a, b| a.1.pubkey.serialize().cmp(&b.1.pubkey.serialize()));
@@ -3412,7 +3412,7 @@ impl Node {
             self.claim_lottery(ledger_id, &participants, &ordered_preimages, winner_index, &our_armed, keypair).await?;
         } else {
             // We lost - yield
-            tracing::info!("We lost the lottery for ledger {}. Publishing CustodyYield.", &ledger_id[..16]);
+            tracing::info!("We lost the lottery for ledger {}. Publishing DisputeYield.", &ledger_id[..16]);
             self.publish_custody_yield(ledger_id, &our_armed, keypair).await?;
         }
 
@@ -3539,12 +3539,12 @@ impl Node {
         let claim_txid = claim_tx.compute_txid();
         tracing::info!("Claim TX broadcast: {}", claim_txid);
 
-        // Publish CustodyAcquire
+        // Publish DisputeAcquire
         let current_block = self.wallet.get_block_height().unwrap_or(0);
         let current_block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
         let spend_txid_bytes: [u8; 32] = *claim_txid.as_ref();
 
-        let operation = LedgerOperation::CustodyAcquire {
+        let operation = LedgerOperation::DisputeAcquire {
             new_custodian: our_pubkey,
             entropy_block_height: current_block,
             entropy_block_hash: current_block_hash,
@@ -3554,7 +3554,7 @@ impl Node {
 
         let message_bytes = operation.tlv_encode();
 
-        // Build update continuing from our CustodyArmed
+        // Build update continuing from our DisputeArmed
         let sequence = our_armed.sequence_number + 1;
         let mut hash_input = Vec::new();
         hash_input.extend_from_slice(&sequence.to_le_bytes());
@@ -3597,13 +3597,13 @@ impl Node {
 
         // Broadcast to Nostr
         self.nostr.broadcast_ledger_update(&signed_update).await
-            .map_err(|e| Error::Protocol(format!("Failed to broadcast CustodyAcquire: {:?}", e)))?;
+            .map_err(|e| Error::Protocol(format!("Failed to broadcast DisputeAcquire: {:?}", e)))?;
 
-        tracing::info!("CustodyAcquire published! We are now the operator.");
+        tracing::info!("DisputeAcquire published! We are now the operator.");
         Ok(())
     }
 
-    /// Publish CustodyYield as a loser
+    /// Publish DisputeYield as a loser
     async fn publish_custody_yield(
         &self,
         ledger_id: &str,
@@ -3621,11 +3621,11 @@ impl Node {
         let current_block = self.wallet.get_block_height().unwrap_or(0);
         let current_block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
 
-        // Create CustodyYield operation
-        let operation = LedgerOperation::CustodyYield;
+        // Create DisputeYield operation
+        let operation = LedgerOperation::DisputeYield;
         let message_bytes = operation.tlv_encode();
 
-        // Build update continuing from our CustodyArmed
+        // Build update continuing from our DisputeArmed
         let sequence = our_armed.sequence_number + 1;
         let mut hash_input = Vec::new();
         hash_input.extend_from_slice(&sequence.to_le_bytes());
@@ -3668,9 +3668,9 @@ impl Node {
 
         // Broadcast to Nostr
         self.nostr.broadcast_ledger_update(&signed_update).await
-            .map_err(|e| Error::Protocol(format!("Failed to broadcast CustodyYield: {:?}", e)))?;
+            .map_err(|e| Error::Protocol(format!("Failed to broadcast DisputeYield: {:?}", e)))?;
 
-        tracing::info!("CustodyYield published. Branch terminated.");
+        tracing::info!("DisputeYield published. Branch terminated.");
         Ok(())
     }
 
@@ -3933,7 +3933,7 @@ impl Node {
                 Err(_) => continue,
             };
 
-            // Extract CustodyArmed participants, quorum members, and reserves info
+            // Extract DisputeArmed participants, quorum members, and reserves info
             let mut participants: Vec<LotteryParticipant> = Vec::new();
             let mut quorum_members: Vec<PublicKey> = Vec::new();
             let mut reserves_address: Option<String> = None;
@@ -3967,7 +3967,7 @@ impl Node {
                                     reserves_address = Some(reserves_id);
                                     ledger_hash = Some(lh);
                                 }
-                                LedgerOperation::CustodyArmed { commitment_hash, target_reserves, .. } => {
+                                LedgerOperation::DisputeArmed { commitment_hash, target_reserves, .. } => {
                                     let x_only = update.operator_id.x_only_public_key().0;
                                     // Check if we already have this participant
                                     if !participants.iter().any(|p| p.pubkey == x_only) {
@@ -3987,7 +3987,7 @@ impl Node {
 
             // Need at least 2 participants to proceed
             if participants.len() < 2 {
-                tracing::debug!("Not enough CustodyArmed participants yet ({}/2)", participants.len());
+                tracing::debug!("Not enough DisputeArmed participants yet ({}/2)", participants.len());
                 continue;
             }
 
@@ -4369,7 +4369,7 @@ impl Node {
             .await
             .map_err(|e| Error::Protocol(format!("Failed to fetch: {}", e)))?;
 
-        // Extract CustodyArmed participants AND quorum members (must match auto_confiscate)
+        // Extract DisputeArmed participants AND quorum members (must match auto_confiscate)
         let mut participants: Vec<LotteryParticipant> = Vec::new();
         let mut quorum_members: Vec<PublicKey> = Vec::new();
         let mut original_operator: Option<PublicKey> = None;
@@ -4392,7 +4392,7 @@ impl Node {
                                     quorum_members.push(quorum_member);
                                 }
                             }
-                            LedgerOperation::CustodyArmed { commitment_hash, target_reserves, .. } => {
+                            LedgerOperation::DisputeArmed { commitment_hash, target_reserves, .. } => {
                                 let x_only = update.operator_id.x_only_public_key().0;
                                 if !participants.iter().any(|p| p.pubkey == x_only) {
                                     participants.push(LotteryParticipant::new(x_only, commitment_hash, target_reserves));
@@ -4512,7 +4512,7 @@ impl Node {
                 ledger_key.clone()
             };
 
-            // Check if we won (we published CustodyAcquire)
+            // Check if we won (we published DisputeAcquire)
             match self.check_if_we_won(&ledger_id).await {
                 Ok(true) => {
                     tracing::info!("We won lottery for {}. Auto-rotating to quorum...", &ledger_id[..16]);
@@ -4545,7 +4545,7 @@ impl Node {
         }
     }
 
-    /// Check if we won the lottery for a ledger (we published CustodyAcquire)
+    /// Check if we won the lottery for a ledger (we published DisputeAcquire)
     async fn check_if_we_won(&self, ledger_id: &str) -> Result<bool, Error> {
         use deposits_core::TlvDecode;
         use deposits_core::messages::LedgerOperation;
@@ -4572,13 +4572,13 @@ impl Node {
             .await
             .map_err(|e| Error::Protocol(format!("Failed to fetch: {}", e)))?;
 
-        // Check if we have a CustodyAcquire
+        // Check if we have a DisputeAcquire
         for event in events.iter() {
             if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
                 if let Ok(update) = deposits_core::SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
                     if update.operator_id == our_pubkey {
                         if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                            if matches!(op, LedgerOperation::CustodyAcquire { .. }) {
+                            if matches!(op, LedgerOperation::DisputeAcquire { .. }) {
                                 return Ok(true);
                             }
                         }
@@ -4619,7 +4619,7 @@ impl Node {
             .await
             .map_err(|e| Error::Protocol(format!("Failed to fetch: {}", e)))?;
 
-        // Find our CustodyAcquire and quorum members
+        // Find our DisputeAcquire and quorum members
         let mut current_reserves_address: Option<String> = None;
         let mut our_latest: Option<SignedLedgerUpdate> = None;
         let mut quorum_members: Vec<PublicKey> = Vec::new();
@@ -4629,7 +4629,7 @@ impl Node {
                 if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
                     if update.operator_id == our_pubkey {
                         if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                            if let LedgerOperation::CustodyAcquire { ref new_reserves_address, .. } = op {
+                            if let LedgerOperation::DisputeAcquire { ref new_reserves_address, .. } = op {
                                 current_reserves_address = Some(new_reserves_address.clone());
                             }
                             if let LedgerOperation::QuorumAddMember { quorum_member, .. } = op {
@@ -4647,7 +4647,7 @@ impl Node {
         }
 
         let current_reserves_address = current_reserves_address
-            .ok_or_else(|| Error::Protocol("No CustodyAcquire found".to_string()))?;
+            .ok_or_else(|| Error::Protocol("No DisputeAcquire found".to_string()))?;
         let our_latest = our_latest
             .ok_or_else(|| Error::Protocol("No latest update found".to_string()))?;
 
@@ -11677,11 +11677,11 @@ impl Node {
     ///
     /// Returns true when either:
     /// - The ledger's original operator_key matches our node_id, OR
-    /// - A CustodyAcquire operation transferred custody to our node_id.
+    /// - A DisputeAcquire operation transferred custody to our node_id.
     ///
     /// Results are cached by (ledger_id, history_len). Once true, the cache
     /// entry is permanent. False entries use incremental scanning — only new
-    /// history entries since the last check are scanned for CustodyAcquire.
+    /// history entries since the last check are scanned for DisputeAcquire.
     fn is_operator_of_ledger(&self, ledger_id: &str) -> bool {
         // Single lock: resolve canonical_id + get Arc clone
         let (canonical_id, arc) = {
@@ -11727,16 +11727,16 @@ impl Node {
                 ledger.history.iter().rev().any(|u| {
                     u.message_type == 55
                         && deposits_core::messages::LedgerOperation::tlv_decode(&u.message)
-                            .map(|op| matches!(op, deposits_core::messages::LedgerOperation::CustodyAcquire { new_custodian, .. } if new_custodian == self.node_id))
+                            .map(|op| matches!(op, deposits_core::messages::LedgerOperation::DisputeAcquire { new_custodian, .. } if new_custodian == self.node_id))
                             .unwrap_or(false)
                 })
             }
         } else {
-            // Incremental: only scan entries [scan_from..] for CustodyAcquire
+            // Incremental: only scan entries [scan_from..] for DisputeAcquire
             ledger.history[scan_from..].iter().rev().any(|u| {
                 u.message_type == 55
                     && deposits_core::messages::LedgerOperation::tlv_decode(&u.message)
-                        .map(|op| matches!(op, deposits_core::messages::LedgerOperation::CustodyAcquire { new_custodian, .. } if new_custodian == self.node_id))
+                        .map(|op| matches!(op, deposits_core::messages::LedgerOperation::DisputeAcquire { new_custodian, .. } if new_custodian == self.node_id))
                         .unwrap_or(false)
             })
         };

@@ -405,17 +405,17 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
         ("FeeCollect", LedgerOperation::FeeCollect {
             deposit_id: did(), amount: 1000, block_height: 500,
         }),
-        ("CustodyDispute", LedgerOperation::CustodyDispute {
+        ("DisputeEnter", LedgerOperation::DisputeEnter {
             last_valid_sequence: 10, reason: "hash_chain_broken".into(),
         }),
-        ("CustodyArmed", LedgerOperation::CustodyArmed {
+        ("DisputeArmed", LedgerOperation::DisputeArmed {
             armed_block: 300, commitment_hash: h20(), target_reserves: "bcrt1qtarget".into(),
         }),
-        ("CustodyAcquire", LedgerOperation::CustodyAcquire {
+        ("DisputeAcquire", LedgerOperation::DisputeAcquire {
             new_custodian: pk(), entropy_block_height: 400, entropy_block_hash: h32(),
             spend_txid: h32(), new_reserves_address: "bcrt1qnew".into(),
         }),
-        ("CustodyYield", LedgerOperation::CustodyYield),
+        ("DisputeYield", LedgerOperation::DisputeYield),
         ("LedgerClose", LedgerOperation::LedgerClose),
     ]
 }

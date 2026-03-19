@@ -1370,11 +1370,11 @@ impl Wallet {
     /// * `request` - The custody transfer parameters
     ///
     /// # Returns
-    /// A `CustodyAcquireSpend` with the unsigned tx and sighash for signing
+    /// A `DisputeAcquireSpend` with the unsigned tx and sighash for signing
     pub fn create_custody_transfer_spend(
         &self,
-        request: &CustodyAcquireRequest,
-    ) -> Result<CustodyAcquireSpend, Error> {
+        request: &DisputeAcquireRequest,
+    ) -> Result<DisputeAcquireSpend, Error> {
         use deposits_core::ReservesSpendBuilder;
 
         // Get the Taproot reserves info
@@ -1445,7 +1445,7 @@ impl Wallet {
             .into_iter()
             .collect();
 
-        Ok(CustodyAcquireSpend {
+        Ok(DisputeAcquireSpend {
             unsigned_tx,
             sighash: sighash.to_byte_array(),
             leaf_script,
@@ -1486,12 +1486,12 @@ impl Wallet {
     /// * `signatures` - Signatures from voters, keyed by their pubkey
     ///
     /// # Returns
-    /// A `CustodyAcquireResult` with the signed transaction
+    /// A `DisputeAcquireResult` with the signed transaction
     pub fn finalize_custody_transfer(
         &self,
-        spend: &CustodyAcquireSpend,
+        spend: &DisputeAcquireSpend,
         signatures: &std::collections::HashMap<PublicKey, [u8; 64]>,
-    ) -> Result<CustodyAcquireResult, Error> {
+    ) -> Result<DisputeAcquireResult, Error> {
         use deposits_core::ReservesSpendBuilder;
 
         // Build the signature array in the correct order (matching voter pubkey order)
@@ -1532,7 +1532,7 @@ impl Wallet {
 
         let txid = signed_tx.compute_txid();
 
-        Ok(CustodyAcquireResult {
+        Ok(DisputeAcquireResult {
             signed_tx,
             txid,
         })
@@ -1547,12 +1547,12 @@ impl Wallet {
         &self,
         destination_address: Address,
         fee_rate: u64,
-    ) -> Result<CustodyAcquireResult, Error> {
+    ) -> Result<DisputeAcquireResult, Error> {
         // Get the first Taproot reserves
         let reserves_outpoint = self.get_taproot_reserves_outpoint()
             .ok_or_else(|| Error::Wallet("No Taproot reserves found".to_string()))?;
 
-        let request = CustodyAcquireRequest {
+        let request = DisputeAcquireRequest {
             reserves_outpoint,
             destination_address,
             fee_rate,
@@ -1672,7 +1672,7 @@ pub struct TaprootReservesCreateResult {
 
 /// Parameters for a custody transfer spend
 #[derive(Debug, Clone)]
-pub struct CustodyAcquireRequest {
+pub struct DisputeAcquireRequest {
     /// The Taproot reserves outpoint to spend
     pub reserves_outpoint: OutPoint,
     /// Destination address (new custodian's receiving address)
@@ -1683,7 +1683,7 @@ pub struct CustodyAcquireRequest {
 
 /// Result of preparing a custody transfer spend
 #[derive(Debug, Clone)]
-pub struct CustodyAcquireSpend {
+pub struct DisputeAcquireSpend {
     /// The unsigned spend transaction
     pub unsigned_tx: Transaction,
     /// The sighash that each quorum member must sign
@@ -1704,7 +1704,7 @@ pub struct CustodyAcquireSpend {
 
 /// Result of finalizing a custody transfer spend
 #[derive(Debug, Clone)]
-pub struct CustodyAcquireResult {
+pub struct DisputeAcquireResult {
     /// The signed transaction ready for broadcast
     pub signed_tx: Transaction,
     /// The transaction ID

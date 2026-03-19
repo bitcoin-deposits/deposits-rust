@@ -934,23 +934,23 @@ impl CollateralAttestation {
 /// ```text
 /// NORMAL
 ///   │
-///   │ CustodyDispute (from quorum member)
+///   │ DisputeEnter (from quorum member)
 ///   ▼
 /// DISPUTED
 ///   │  - Quorum is disbanded
 ///   │  - All collateral attestations voided
 ///   │  - Only QuorumAddMember and CollateralAttestation allowed
 ///   │
-///   │ CustodyArmed (pre-commitment)
+///   │ DisputeArmed (pre-commitment)
 ///   ▼
 /// ARMED
 ///   │  - No more quorum/collateral changes
 ///   │  - Candidate is locked in for entropy selection
-///   │  - Only CustodyAcquire or CustodyYield allowed
+///   │  - Only DisputeAcquire or DisputeYield allowed
 ///   │
-///   ├─── CustodyAcquire ──► NORMAL (new operator, reserves spent)
+///   ├─── DisputeAcquire ──► NORMAL (new operator, reserves spent)
 ///   │
-///   └─── CustodyYield ───► TOMBSTONED (branch terminated)
+///   └─── DisputeYield ───► TOMBSTONED (branch terminated)
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum DisputeState {
@@ -980,17 +980,17 @@ impl DisputeState {
     pub fn allows_operation(&self, operation_discriminant: u8) -> bool {
         match self {
             DisputeState::Normal => {
-                // Normal state allows all operations except CustodyArmed, CustodyAcquire, CustodyYield
-                // CustodyDispute is the only way to transition out
-                !matches!(operation_discriminant, 57 | 55 | 56) // CustodyArmed, CustodyAcquire, CustodyYield
+                // Normal state allows all operations except DisputeArmed, DisputeAcquire, DisputeYield
+                // DisputeEnter is the only way to transition out
+                !matches!(operation_discriminant, 57 | 55 | 56) // DisputeArmed, DisputeAcquire, DisputeYield
             }
             DisputeState::Disputed => {
-                // Only QuorumAddMember, CollateralAttestation, and CustodyArmed allowed
-                matches!(operation_discriminant, 43 | 42 | 57) // QuorumAddMember, CollateralAttestation, CustodyArmed
+                // Only QuorumAddMember, CollateralAttestation, and DisputeArmed allowed
+                matches!(operation_discriminant, 43 | 42 | 57) // QuorumAddMember, CollateralAttestation, DisputeArmed
             }
             DisputeState::Armed => {
-                // Only CustodyAcquire or CustodyYield allowed
-                matches!(operation_discriminant, 55 | 56) // CustodyAcquire, CustodyYield
+                // Only DisputeAcquire or DisputeYield allowed
+                matches!(operation_discriminant, 55 | 56) // DisputeAcquire, DisputeYield
             }
             DisputeState::Tombstoned => {
                 // No operations allowed
@@ -1163,12 +1163,12 @@ pub struct LedgerState {
     #[serde(default)]
     pub dispute_state: DisputeState,
     /// The pubkey that signed the last update.
-    /// All subsequent updates must be signed by this same pubkey (except CustodyDispute).
+    /// All subsequent updates must be signed by this same pubkey (except DisputeEnter).
     /// For Normal state this is typically the operator; for Disputed/Ready it's the dispute opener.
     #[serde(with = "serde_pubkey", default = "default_parent_pubkey")]
     pub parent_pubkey: PublicKey,
-    /// Quorum members at the point of the last CustodyDispute.
-    /// Used to verify that CustodyDispute signers were actually quorum members at the fork point.
+    /// Quorum members at the point of the last DisputeEnter.
+    /// Used to verify that DisputeEnter signers were actually quorum members at the fork point.
     /// Only populated when dispute_state != Normal.
     #[serde(default)]
     pub quorum_at_fork: Vec<QuorumMember>,
@@ -3167,24 +3167,24 @@ mod tests {
         // Normal state
         assert!(DisputeState::Normal.allows_operations());
         assert!(DisputeState::Normal.allows_operation(10)); // Some random op
-        assert!(!DisputeState::Normal.allows_operation(55)); // CustodyAcquire
-        assert!(!DisputeState::Normal.allows_operation(56)); // CustodyYield
-        assert!(!DisputeState::Normal.allows_operation(57)); // CustodyArmed
+        assert!(!DisputeState::Normal.allows_operation(55)); // DisputeAcquire
+        assert!(!DisputeState::Normal.allows_operation(56)); // DisputeYield
+        assert!(!DisputeState::Normal.allows_operation(57)); // DisputeArmed
 
-        // Disputed state - only QuorumAddMember(43), CollateralAttestation(42), CustodyArmed(57)
+        // Disputed state - only QuorumAddMember(43), CollateralAttestation(42), DisputeArmed(57)
         assert!(DisputeState::Disputed.allows_operations());
         assert!(DisputeState::Disputed.allows_operation(42)); // CollateralAttestation
         assert!(DisputeState::Disputed.allows_operation(43)); // QuorumAddMember
-        assert!(DisputeState::Disputed.allows_operation(57)); // CustodyArmed
+        assert!(DisputeState::Disputed.allows_operation(57)); // DisputeArmed
         assert!(!DisputeState::Disputed.allows_operation(10)); // Random op blocked
-        assert!(!DisputeState::Disputed.allows_operation(55)); // CustodyAcquire
+        assert!(!DisputeState::Disputed.allows_operation(55)); // DisputeAcquire
 
-        // Armed state - only CustodyAcquire(55) or CustodyYield(56)
+        // Armed state - only DisputeAcquire(55) or DisputeYield(56)
         assert!(DisputeState::Armed.allows_operations());
-        assert!(DisputeState::Armed.allows_operation(55)); // CustodyAcquire
-        assert!(DisputeState::Armed.allows_operation(56)); // CustodyYield
+        assert!(DisputeState::Armed.allows_operation(55)); // DisputeAcquire
+        assert!(DisputeState::Armed.allows_operation(56)); // DisputeYield
         assert!(!DisputeState::Armed.allows_operation(43)); // QuorumAddMember blocked
-        assert!(!DisputeState::Armed.allows_operation(57)); // CustodyArmed blocked
+        assert!(!DisputeState::Armed.allows_operation(57)); // DisputeArmed blocked
 
         // Tombstoned - nothing allowed
         assert!(!DisputeState::Tombstoned.allows_operations());

@@ -133,10 +133,10 @@ types:
         45 = CollateralLock
         46 = QuorumJoin
         50 = FeeCollect
-        54 = CustodyDispute
-        55 = CustodyAcquire
-        56 = CustodyYield
-        57 = CustodyArmed
+        54 = DisputeEnter
+        55 = DisputeAcquire
+        56 = DisputeYield
+        57 = DisputeArmed
         60 = LedgerClose
         70 = TransferLock
         71 = TransferComplete

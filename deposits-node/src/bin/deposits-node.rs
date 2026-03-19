@@ -1422,7 +1422,7 @@ async fn ledger_history(args: &[String]) -> Result<(), Box<dyn std::error::Error
             if has_partner_sig { "P" } else { "·" }
         );
 
-        // Show signer: actual operator_id from update (may differ for CustodyAcquire)
+        // Show signer: actual operator_id from update (may differ for DisputeAcquire)
         let signer = if has_operator_sig {
             let pk = update.operator_id.serialize();
             format!("{:02x}{:02x}", pk[1], pk[2])
@@ -2307,30 +2307,30 @@ fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                 LedgerOperation::FeeCollect { .. } => {
                     ("FeeCollect", String::new())
                 }
-                LedgerOperation::CustodyDispute { last_valid_sequence, reason } => {
-                    ("CustodyDispute", format!("last_valid_seq:{}  reason:{}", last_valid_sequence, reason))
+                LedgerOperation::DisputeEnter { last_valid_sequence, reason } => {
+                    ("DisputeEnter", format!("last_valid_seq:{}  reason:{}", last_valid_sequence, reason))
                 }
-                LedgerOperation::CustodyArmed { armed_block, commitment_hash, target_reserves } => {
+                LedgerOperation::DisputeArmed { armed_block, commitment_hash, target_reserves } => {
                     let hash_hex = hex::encode(commitment_hash);
                     let target_short = if target_reserves.len() > 16 {
                         format!("{}..{}", &target_reserves[..8], &target_reserves[target_reserves.len()-6..])
                     } else {
                         target_reserves.clone()
                     };
-                    ("CustodyArmed", format!("armed_block:{}  commit:{}..  target:{}", armed_block, &hash_hex[..8], target_short))
+                    ("DisputeArmed", format!("armed_block:{}  commit:{}..  target:{}", armed_block, &hash_hex[..8], target_short))
                 }
-                LedgerOperation::CustodyAcquire { new_custodian, entropy_block_height, spend_txid, new_reserves_address, .. } => {
+                LedgerOperation::DisputeAcquire { new_custodian, entropy_block_height, spend_txid, new_reserves_address, .. } => {
                     let pk_bytes = new_custodian.serialize();
                     let txid_hex = hex::encode(spend_txid);
-                    ("CustodyAcquire", format!("to:{:02x}{:02x}{:02x}{:02x}  entropy_block:{}  txid:{}..  reserves:{}..{}",
+                    ("DisputeAcquire", format!("to:{:02x}{:02x}{:02x}{:02x}  entropy_block:{}  txid:{}..  reserves:{}..{}",
                         pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3],
                         entropy_block_height,
                         &txid_hex[..8],
                         &new_reserves_address[..10.min(new_reserves_address.len())],
                         &new_reserves_address[new_reserves_address.len().saturating_sub(6)..]))
                 }
-                LedgerOperation::CustodyYield => {
-                    ("CustodyYield", String::new())
+                LedgerOperation::DisputeYield => {
+                    ("DisputeYield", String::new())
                 }
                 LedgerOperation::LedgerClose => {
                     ("LedgerClose", String::new())

@@ -206,7 +206,7 @@ These are distinct derivation paths — the operator key cannot sign for wallet 
 | Function | Usage |
 |----------|-------|
 | SHA-256 | Ledger ID, deposit ID, transfer ID, hash chain, signing data, entropy selection |
-| HASH160 (SHA-256 then RIPEMD-160) | Lottery commitment in CustodyArmed (20-byte `commitment_hash`) |
+| HASH160 (SHA-256 then RIPEMD-160) | Lottery commitment in DisputeArmed (20-byte `commitment_hash`) |
 | ECDSA over SHA-256 | Partner and operator co-signatures |
 | Schnorr over SHA-256 | BDK operator-only signatures |
 
@@ -364,7 +364,7 @@ After a `ReservesRotate` operation, all subsequent updates **require** a co-sign
 quorum member. The `member_ledger_hash` field in the co-signed update ties the co-signer's
 own ledger state to the attestation, preventing the co-signer from signing with stale state.
 
-**Exception**: `CustodyDispute` operations can omit the co-signature, since they are initiated
+**Exception**: `DisputeEnter` operations can omit the co-signature, since they are initiated
 by a quorum member challenging the operator.
 
 > Source: `ledger.rs:422-442`
@@ -578,10 +578,10 @@ pub enum DisputeState {
 | 45 | `CollateralLock` | Quorum |
 | 46 | `QuorumJoin` | Quorum |
 | 50 | `FeeCollect` | Maintenance |
-| 54 | `CustodyDispute` | Dispute |
-| 55 | `CustodyAcquire` | Dispute |
-| 56 | `CustodyYield` | Dispute |
-| 57 | `CustodyArmed` | Dispute |
+| 54 | `DisputeEnter` | Dispute |
+| 55 | `DisputeAcquire` | Dispute |
+| 56 | `DisputeYield` | Dispute |
+| 57 | `DisputeArmed` | Dispute |
 | 60 | `LedgerClose` | Lifecycle |
 | 61 | `Tombstone` | Lifecycle |
 
@@ -903,18 +903,18 @@ State: `deposit.balance -= amount`, updates `deposit.last_fee_assessment`.
 
 ### 7.11 Dispute Operations
 
-**CustodyDispute** (disc=54) — Open a dispute against the operator.
+**DisputeEnter** (disc=54) — Open a dispute against the operator.
 
 | Field | Type | TLV ID |
 |-------|------|--------|
 | `last_valid_sequence` | `u64` | 102 |
 | `reason` | `String` | 100 |
 
-State: snapshots `quorum_at_fork`, clears `collateral_attestations`, records `dispute_fork_sequence`, sets `dispute_state = Disputed`. The quorum is **not disbanded** — existing members continue co-signing updates throughout the dispute process and persist through `CustodyAcquire` for the new custodian. Attestations are voided so the new custodian must collect fresh proofs before `CustodyArmed`.
+State: snapshots `quorum_at_fork`, clears `collateral_attestations`, records `dispute_fork_sequence`, sets `dispute_state = Disputed`. The quorum is **not disbanded** — existing members continue co-signing updates throughout the dispute process and persist through `DisputeAcquire` for the new custodian. Attestations are voided so the new custodian must collect fresh proofs before `DisputeArmed`.
 
 **This is the only operation that may be signed by a quorum member** (not the operator).
 
-**CustodyArmed** (disc=57) — Lock in candidate for entropy selection.
+**DisputeArmed** (disc=57) — Lock in candidate for entropy selection.
 
 | Field | Type | TLV ID |
 |-------|------|--------|
@@ -926,7 +926,7 @@ State: snapshots `quorum_at_fork`, clears `collateral_attestations`, records `di
 
 State: sets `dispute_state = Armed`.
 
-**CustodyAcquire** (disc=55) — Transfer custody to the winning candidate.
+**DisputeAcquire** (disc=55) — Transfer custody to the winning candidate.
 
 | Field | Type | TLV ID |
 |-------|------|--------|
@@ -938,7 +938,7 @@ State: sets `dispute_state = Armed`.
 
 State: `operator_key = new_custodian`, `parent_pubkey = new_custodian`, clears dispute state to `Normal`, clears `quorum_at_fork` and `dispute_fork_sequence`.
 
-**CustodyYield** (disc=56) — Yield custody (loser of entropy selection). No fields.
+**DisputeYield** (disc=56) — Yield custody (loser of entropy selection). No fields.
 
 State: sets `dispute_state = Tombstoned`.
 
@@ -1155,7 +1155,7 @@ the bootstrap period, allowing the ledger to operate before a full quorum is ass
 ### 11.1 State Diagram
 
 ```
-                    CustodyDispute (54)
+                    DisputeEnter (54)
           ┌──────── (quorum member) ────────┐
           │                                 │
           ▼                                 │
@@ -1164,13 +1164,13 @@ the bootstrap period, allowing the ledger to operate before a full quorum is ass
     │          │◄── (quorum co-signs) ──►│      │
     └────┬─────┘                         └──────┘
          │                                  ▲
-         │ CustodyArmed (57)                │
+         │ DisputeArmed (57)                │
          ▼                                  │
-    ┌──────────┐   CustodyAcquire (55)      │
+    ┌──────────┐   DisputeAcquire (55)      │
     │  Armed   │────── (winner) ────────────┘
     │          │
     └────┬─────┘
-         │ CustodyYield (56)
+         │ DisputeYield (56)
          │   (loser)
          ▼
     ┌──────────┐
@@ -1183,9 +1183,9 @@ the bootstrap period, allowing the ledger to operate before a full quorum is ass
 
 | Current State | Allowed Operations | Blocked |
 |--------------|-------------------|---------|
-| **Normal** | All except 55 (CustodyAcquire), 56 (CustodyYield), 57 (CustodyArmed) | Dispute resolution ops |
-| **Disputed** | 42 (CollateralAttestation), 43 (QuorumAddMember), 57 (CustodyArmed) | All normal operations |
-| **Armed** | 55 (CustodyAcquire), 56 (CustodyYield) | Everything else |
+| **Normal** | All except 55 (DisputeAcquire), 56 (DisputeYield), 57 (DisputeArmed) | Dispute resolution ops |
+| **Disputed** | 42 (CollateralAttestation), 43 (QuorumAddMember), 57 (DisputeArmed) | All normal operations |
+| **Armed** | 55 (DisputeAcquire), 56 (DisputeYield) | Everything else |
 | **Tombstoned** | None | All operations |
 
 > Source: `types.rs:933-953` — `allows_operation()`
@@ -1194,11 +1194,11 @@ the bootstrap period, allowing the ledger to operate before a full quorum is ass
 
 | Operation | Authorized Signer |
 |-----------|------------------|
-| `CustodyDispute` (54) | Any current quorum member (NOT the operator) |
-| All other operations | `parent_pubkey` (the operator, or new custodian after CustodyAcquire) |
+| `DisputeEnter` (54) | Any current quorum member (NOT the operator) |
+| All other operations | `parent_pubkey` (the operator, or new custodian after DisputeAcquire) |
 
 Non-operator updates (signed by someone other than `parent_pubkey`) are **rejected** — not
-disputed, but refused entirely. The only exception is `CustodyDispute`, which must come from
+disputed, but refused entirely. The only exception is `DisputeEnter`, which must come from
 a quorum member.
 
 > Source: `ledger.rs:314-355` — `validate_update_signer()`
@@ -1217,7 +1217,7 @@ Properties:
 - **Deterministic** — every observer computes the same winner
 - **Order-independent** — shuffling the candidate list doesn't change the result
 
-Each candidate commits to a preimage via `HASH160(preimage)` in the `CustodyArmed` operation's
+Each candidate commits to a preimage via `HASH160(preimage)` in the `DisputeArmed` operation's
 `commitment_hash` field before the entropy block is known.
 
 > Source: `types.rs:956-992` — `entropy_selection_score()`, `select_entropy_winner()`
@@ -1227,8 +1227,8 @@ Each candidate commits to a preimage via `HASH160(preimage)` in the `CustodyArme
 After entropy selection:
 
 - **Winner**: builds and broadcasts a confiscation transaction spending the reserves, then
-  publishes `CustodyAcquire` (disc=55) with the new reserves address and transaction details
-- **Loser**: publishes `CustodyYield` (disc=56), tombstoning their branch
+  publishes `DisputeAcquire` (disc=55) with the new reserves address and transaction details
+- **Loser**: publishes `DisputeYield` (disc=56), tombstoning their branch
 
 The winning candidate becomes the new operator with `parent_pubkey` updated to their key.
 
@@ -1403,7 +1403,7 @@ Trailing-character JSONL parse warnings from concurrent appends are benign and s
 Every valid ledger must maintain these invariants at all times:
 
 1. **Hash chain integrity**: each update's `previous_hash` must equal the prior update's `current_hash`
-2. **Signature authorization**: updates must be signed by `parent_pubkey` (except CustodyDispute by quorum member)
+2. **Signature authorization**: updates must be signed by `parent_pubkey` (except DisputeEnter by quorum member)
 3. **Reserves coverage**: `reserves.amount >= sum(deposits.balance) / 1000`
 4. **Non-negative available balance**: no deposit may have `locked_balance > balance`
 5. **Contiguous sequences**: `history.len() - 1 == current_sequence`
@@ -1427,7 +1427,7 @@ Every valid ledger must maintain these invariants at all times:
 | `CollateralLock` | Amount <= `deposit.balance`, ratchet enforced |
 | `QuorumAddMember` | Valid member signature |
 | `FeeCollect` | Fee matches formula, deposit has sufficient balance |
-| `CustodyDispute` | Signer is current quorum member, state is Normal |
+| `DisputeEnter` | Signer is current quorum member, state is Normal |
 
 Reserves validation formula:
 

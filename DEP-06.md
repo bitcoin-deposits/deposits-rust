@@ -36,19 +36,19 @@ Placeholder -- to be extracted from the reference implementation.
 
 - Quorum members detect fraud (via Kind 9101 broadcasts or direct observation)
 - Create a fork of the disputed ledger from the last valid sequence
-- Publish `CustodyDispute` and `CustodyArmed` on the fork with commitment hash
+- Publish `DisputeEnter` and `DisputeArmed` on the fork with commitment hash
 - Coordinate lottery to determine new custodian
 
 ### Recovery
 
 - Members spend previous reserves output to a lottery of candidate chains
-- Winner appends `CustodyAcquire`, losers append `CustodyYield`
+- Winner appends `DisputeAcquire`, losers append `DisputeYield`
 - Respectful custody: only obligation amount goes to lottery, change to operator
 - Non-conformance: excess reserves split among quorum, collateral confiscated
 
 ## Related DEPs
 
-- [DEP-02](DEP-02.md): Ledger State Model (CustodyDispute, CustodyAcquire, CustodyYield operations)
+- [DEP-02](DEP-02.md): Ledger State Model (DisputeEnter, DisputeAcquire, DisputeYield operations)
 - [DEP-03](DEP-03.md): On-Chain Transaction Formats (lottery transaction construction)
 - [DEP-04](DEP-04.md): Peer Messaging (Kind 9101 fraud proof, Kind 9103 dispute events)
 - [DEP-05](DEP-05.md): Quorum and Collateral (quorum members initiate disputes)

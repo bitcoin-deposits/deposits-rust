@@ -183,20 +183,20 @@ fn wit() -> DescriptorWitness { DescriptorWitness { stack: vec![vec![0x30; 64]] 
     deposit_id: did(), amount: 1000, block_height: 500,
 }); }
 
-#[test] fn custody_dispute() { test_roundtrip(&LedgerOperation::CustodyDispute {
+#[test] fn custody_dispute() { test_roundtrip(&LedgerOperation::DisputeEnter {
     last_valid_sequence: 10, reason: "hash_chain_broken".into(),
 }); }
 
-#[test] fn custody_armed() { test_roundtrip(&LedgerOperation::CustodyArmed {
+#[test] fn custody_armed() { test_roundtrip(&LedgerOperation::DisputeArmed {
     armed_block: 300, commitment_hash: [0xab; 20], target_reserves: "bcrt1qtarget".into(),
 }); }
 
-#[test] fn custody_acquire() { test_roundtrip(&LedgerOperation::CustodyAcquire {
+#[test] fn custody_acquire() { test_roundtrip(&LedgerOperation::DisputeAcquire {
     new_custodian: pk(), entropy_block_height: 400, entropy_block_hash: h32(),
     spend_txid: h32(), new_reserves_address: "bcrt1qnew".into(),
 }); }
 
-#[test] fn custody_yield() { test_roundtrip(&LedgerOperation::CustodyYield); }
+#[test] fn custody_yield() { test_roundtrip(&LedgerOperation::DisputeYield); }
 
 #[test] fn ledger_close() { test_roundtrip(&LedgerOperation::LedgerClose); }
 

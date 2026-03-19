@@ -1169,10 +1169,10 @@ test_automated_dispute() {
     if [ -n "$selected_candidate" ]; then
         test_pass "lottery winner: $selected_candidate"
     else
-        # Fallback: check ledger history for CustodyAcquire
+        # Fallback: check ledger history for DisputeAcquire
         for candidate in bob charlie diana; do
             local history=$(run_bdk_cmd "$candidate" ledger history "$alice_ledger_id" 2>&1)
-            if echo "$history" | grep -q "CustodyAcquire"; then
+            if echo "$history" | grep -q "DisputeAcquire"; then
                 selected_candidate="$candidate"
                 break
             fi
@@ -1259,7 +1259,7 @@ test_post_recovery_payment() {
     log_info "Verifying imported ledger state..."
     local ledger_info=$(run_bdk_cmd "$new_custodian" ledger info 2>&1 | head -20)
     log_info "  Ledger info on $new_custodian:"
-    echo "$ledger_info" | grep -E "(Ledger|Operator|operator_key|CustodyAcquire)" | head -5
+    echo "$ledger_info" | grep -E "(Ledger|Operator|operator_key|DisputeAcquire)" | head -5
 
     # Start nostr watchers for the recovered ledger on ALL quorum members
     log_info ""
@@ -1278,7 +1278,7 @@ test_post_recovery_payment() {
     log_info "  Dispute status: $dispute_status"
 
     if [ "$dispute_status" = "DISPUTED" ]; then
-        log_info "  Ledger has unresolved custody dispute - waiting for CustodyAcquire..."
+        log_info "  Ledger has unresolved custody dispute - waiting for DisputeAcquire..."
         sleep 2
         run_bdk_cmd "$new_custodian" nostr import "$alice_ledger_id" >/dev/null 2>&1
         sleep 1
@@ -1367,8 +1367,8 @@ test_post_recovery_payment() {
     if [ "$deposit_completed" = true ]; then
         test_pass "deposit_s funded under new custody! (OnchainCredit in ledger)"
     else
-        if echo "$history_output" | grep -q "CustodyAcquire"; then
-            test_fail "deposit_s funding not auto-completed (CustodyAcquire exists but no OnchainCredit)"
+        if echo "$history_output" | grep -q "DisputeAcquire"; then
+            test_fail "deposit_s funding not auto-completed (DisputeAcquire exists but no OnchainCredit)"
         else
             test_fail "deposit_s funding not confirmed in ledger"
         fi

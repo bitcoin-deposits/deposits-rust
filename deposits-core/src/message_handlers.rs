@@ -485,10 +485,10 @@ pub fn handle_ledger_update<C: HandlerContext>(
                 LedgerOperation::QuorumJoin { .. } |
                 LedgerOperation::CollateralAttestation { .. } |
                 LedgerOperation::QuorumBegin { .. } |
-                LedgerOperation::CustodyDispute { .. } |
-                LedgerOperation::CustodyArmed { .. } |
-                LedgerOperation::CustodyAcquire { .. } |
-                LedgerOperation::CustodyYield |
+                LedgerOperation::DisputeEnter { .. } |
+                LedgerOperation::DisputeArmed { .. } |
+                LedgerOperation::DisputeAcquire { .. } |
+                LedgerOperation::DisputeYield |
                 LedgerOperation::TransferLock { .. } |
                 LedgerOperation::TransferComplete { .. } |
                 LedgerOperation::TransferFail { .. } |

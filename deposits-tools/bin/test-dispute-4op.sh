@@ -7,15 +7,15 @@
 # 3. Each operator adds others as quorum members (15% collateral each)
 # 4. Alice publishes invalid update (goes rogue)
 # 5. Bob, Charlie, Diana each:
-#    - Publish CustodyDispute (opens dispute)
+#    - Publish DisputeEnter (opens dispute)
 #    - Rebuild quorum with non-Alice members
 #    - Post collateral attestations from non-Alice members
 #    - Request non-Alice quorum members join their chain
-#    - Publish CustodyArmed (pre-commitment with lottery hash)
+#    - Publish DisputeArmed (pre-commitment with lottery hash)
 # 6. Confiscate reserves to lottery Tapscript output
 # 7. All participants reveal preimages via Nostr
 # 8. Winner determined by preimage-size lottery, claims output
-# 9. Winner: CustodyAcquire, Losers: CustodyYield
+# 9. Winner: DisputeAcquire, Losers: DisputeYield
 #
 # Usage:
 #   ./bin/test-dispute-4op.sh
@@ -571,15 +571,15 @@ start_disputes() {
     for op in $NON_ALICE_OPERATORS; do
         local op_short="$op"
 
-        log_info "$op_short publishing CustodyDispute on Alice's ledger..."
+        log_info "$op_short publishing DisputeEnter on Alice's ledger..."
 
         local dispute_output=$(run_bdk_cmd "$op" recovery dispute "$alice_ledger_id" 2>&1)
 
-        if echo "$dispute_output" | grep -q "CustodyDispute published"; then
-            test_pass "$op_short published CustodyDispute"
+        if echo "$dispute_output" | grep -q "DisputeEnter published"; then
+            test_pass "$op_short published DisputeEnter"
             store_value "dispute_${op}" "1"
         else
-            test_fail "$op_short failed to publish CustodyDispute"
+            test_fail "$op_short failed to publish DisputeEnter"
             echo "Output: $dispute_output"
         fi
     done
@@ -711,12 +711,12 @@ post_attestations() {
 }
 
 # ============================================================================
-# Phase 12: Publish CustodyArmed (pre-commitment)
+# Phase 12: Publish DisputeArmed (pre-commitment)
 # ============================================================================
 
 arm_for_entropy() {
     log_info ""
-    log_info "=== Phase 12: Publish CustodyArmed (Pre-Commitment) ==="
+    log_info "=== Phase 12: Publish DisputeArmed (Pre-Commitment) ==="
     echo ""
 
     local alice_ledger_id=$(get_value "ledger_id_alice")
@@ -729,11 +729,11 @@ arm_for_entropy() {
 
         local op_short="$op"
 
-        log_info "$op_short publishing CustodyArmed..."
+        log_info "$op_short publishing DisputeArmed..."
 
         local arm_output=$(run_bdk_cmd "$op" recovery arm "$alice_ledger_id" 2>&1)
 
-        if echo "$arm_output" | grep -q "CustodyArmed published"; then
+        if echo "$arm_output" | grep -q "DisputeArmed published"; then
             local armed_block=$(echo "$arm_output" | grep "Armed block:" | awk '{print $3}')
             test_pass "$op_short armed at block $armed_block"
             store_value "armed_${op}" "1"
@@ -834,7 +834,7 @@ reveal_preimages() {
 }
 
 # ============================================================================
-# Phase 15: Lottery claim (Winner: CustodyAcquire, Losers: CustodyYield)
+# Phase 15: Lottery claim (Winner: DisputeAcquire, Losers: DisputeYield)
 # ============================================================================
 
 claim_custody() {
@@ -857,8 +857,8 @@ claim_custody() {
 
         local claim_output=$(run_bdk_cmd "$op" recovery lottery-claim "$alice_ledger_id" 2>&1)
 
-        if echo "$claim_output" | grep -q "CustodyAcquire published successfully"; then
-            test_pass "$op_short WON (published CustodyAcquire)"
+        if echo "$claim_output" | grep -q "DisputeAcquire published successfully"; then
+            test_pass "$op_short WON (published DisputeAcquire)"
             winner="$op"
             store_value "dispute_winner" "$op"
 
@@ -892,9 +892,9 @@ claim_custody() {
         log_info "Lottery Winner: $winner"
     fi
 
-    # Losers publish CustodyYield
+    # Losers publish DisputeYield
     log_info ""
-    log_info "Losers publishing CustodyYield..."
+    log_info "Losers publishing DisputeYield..."
     for op in $NON_ALICE_OPERATORS; do
         local has_armed=$(get_value "armed_${op}")
         if [ "$has_armed" != "1" ]; then
@@ -906,11 +906,11 @@ claim_custody() {
         fi
 
         local op_short="$op"
-        log_info "$op_short publishing CustodyYield..."
+        log_info "$op_short publishing DisputeYield..."
 
         local release_output=$(run_bdk_cmd "$op" recovery release "$alice_ledger_id" 2>&1)
 
-        if echo "$release_output" | grep -q "CustodyYield published"; then
+        if echo "$release_output" | grep -q "DisputeYield published"; then
             test_pass "$op_short yielded"
         else
             log_warn "$op_short release output: $(echo "$release_output" | tail -5)"

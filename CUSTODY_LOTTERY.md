@@ -11,7 +11,7 @@ Current flow:
 2. Wait for entropy block
 3. Off-chain calculation determines winner
 4. Quorum members sign custody transfer to winner
-5. Winner broadcasts CustodyAcquire
+5. Winner broadcasts DisputeAcquire
 
 Issues:
 - Quorum must coordinate to sign for the "correct" winner
@@ -26,7 +26,7 @@ Use committed preimages where the SIZE of each preimage contributes entropy. No 
 
 Each disputant:
 1. Chooses a secret preimage of length 17 to 16+N bytes (where N = number of disputants)
-2. Commits `HASH160(preimage)` in their CustodyArmed message
+2. Commits `HASH160(preimage)` in their DisputeArmed message
 3. After confiscation tx confirms, reveals preimage via Nostr
 
 Winner calculation:
@@ -43,11 +43,11 @@ Since each party commits their hash before seeing others' commitments, and preim
 ### Phase 1: Dispute & Arm
 
 ```
-Operator A: CustodyDispute { reason: "..." }
-Operator B: CustodyDispute { reason: "..." }
-Operator C: CustodyDispute { reason: "..." }
+Operator A: DisputeEnter { reason: "..." }
+Operator B: DisputeEnter { reason: "..." }
+Operator C: DisputeEnter { reason: "..." }
 
-Operator A: CustodyArmed {
+Operator A: DisputeArmed {
     commitment_hash: HASH160(preimage_a),  // 20 bytes
     target_reserves: "bcrt1p...",          // winner destination
 }
@@ -88,9 +88,9 @@ The script verifies:
 2. Each preimage is valid length (17 to 16+N)
 3. Winner calculation matches the signer's index
 
-### Phase 5: CustodyAcquire
+### Phase 5: DisputeAcquire
 
-Winner publishes CustodyAcquire with the claim txid, completing custody transfer.
+Winner publishes DisputeAcquire with the claim txid, completing custody transfer.
 
 ## Script Construction
 
@@ -162,10 +162,10 @@ The disputed operator is excluded from recovery paths - they lost the dispute by
 
 ## Message Changes
 
-### CustodyArmed (modified)
+### DisputeArmed (modified)
 
 ```rust
-pub struct CustodyArmed {
+pub struct DisputeArmed {
     pub reserves_id: String,
     pub operator_id: String,
     pub enforcement_height: u32,
@@ -184,10 +184,10 @@ pub struct CustodyLotteryReveal {
 }
 ```
 
-### CustodyAcquire (modified)
+### DisputeAcquire (modified)
 
 ```rust
-pub struct CustodyAcquire {
+pub struct DisputeAcquire {
     pub reserves_id: String,
     pub operator_id: String,
     pub claim_txid: String,           // Lottery claim tx (not confiscation tx)
@@ -235,7 +235,7 @@ The collateral mechanism (already implemented) incentivizes revelation.
 
 ## Implementation Checklist
 
-- [x] Add `commitment_hash` and `target_reserves` to CustodyArmed
+- [x] Add `commitment_hash` and `target_reserves` to DisputeArmed
 - [x] Create lottery Tapscript builder (LotteryScriptBuilder)
 - [x] Add preimage generation/storage in `recovery arm`
 - [x] Add `recovery confiscate` command (builds lottery output)
@@ -245,5 +245,5 @@ The collateral mechanism (already implemented) incentivizes revelation.
 - [x] Implement quorum signature collection for confiscation TX
 - [x] Build and broadcast claim transaction (lottery → winner)
 - [x] Add confiscation_sign handler for quorum watcher
-- [x] Update CustodyAcquire to use claim txid
+- [x] Update DisputeAcquire to use claim txid
 - [x] Update test-dispute-4op.sh for new flow

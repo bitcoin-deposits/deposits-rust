@@ -662,10 +662,10 @@ pub fn validate_ledger_operation<C: ValidationContext>(
         LedgerOperation::CollateralLock { .. } |
         LedgerOperation::QuorumJoin { .. } |
         LedgerOperation::QuorumBegin { .. } |
-        LedgerOperation::CustodyDispute { .. } |
-        LedgerOperation::CustodyArmed { .. } |
-        LedgerOperation::CustodyAcquire { .. } |
-        LedgerOperation::CustodyYield => Ok(()),
+        LedgerOperation::DisputeEnter { .. } |
+        LedgerOperation::DisputeArmed { .. } |
+        LedgerOperation::DisputeAcquire { .. } |
+        LedgerOperation::DisputeYield => Ok(()),
     }
 }
 

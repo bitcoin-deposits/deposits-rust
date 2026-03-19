@@ -1252,7 +1252,7 @@ impl DepositsHandler {
     /// If the ledger already exists locally, this will apply any newer updates
     /// from the export instead of failing. This is essential for custody recovery
     /// scenarios where a quorum member already has the ledger but needs the
-    /// CustodyAcquire updates to become the new operator.
+    /// DisputeAcquire updates to become the new operator.
     pub fn import_ledger(&self, export: LedgerExport) -> Result<(ValidationReport, Arc<RwLock<Ledger>>), String> {
         // Check if this is our own ledger (not allowed to import our own)
         if export.operator_id == self.our_node_id {

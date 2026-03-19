@@ -768,9 +768,9 @@ pub enum LedgerOperation {
     /// - Transitions ledger to DISPUTED state
     ///
     /// Signature rule: This is the ONE EXCEPTION to the rule that updates must be
-    /// signed by the same pubkey as the previous update. CustodyDispute can be
+    /// signed by the same pubkey as the previous update. DisputeEnter can be
     /// signed by any pubkey that was a quorum member at the fork point.
-    CustodyDispute {
+    DisputeEnter {
         /// Sequence number of the last valid update before the dispute.
         last_valid_sequence: u64,
         /// Human-readable description of why the dispute was opened.
@@ -783,13 +783,13 @@ pub enum LedgerOperation {
     /// Effects:
     /// - Locks in the current quorum - no more changes allowed
     /// - Registers this candidate for entropy-based selection
-    /// - Only candidates with CustodyArmed before the entropy block are eligible
+    /// - Only candidates with DisputeArmed before the entropy block are eligible
     ///
     /// Validation:
     /// - Must be in DISPUTED state
     /// - Must have at least N quorum members added
     /// - Must have collateral attestations from quorum members
-    CustodyArmed {
+    DisputeArmed {
         /// Block height when this candidate is ready (used for eligibility cutoff).
         armed_block: u32,
         /// HASH160 of secret preimage (17-20 bytes) for lottery entropy.
@@ -808,7 +808,7 @@ pub enum LedgerOperation {
     /// Validation:
     /// - Must be in READY state
     /// - Must be the entropy-selected winner among all READY candidates
-    CustodyAcquire {
+    DisputeAcquire {
         /// The new custodian (this candidate's pubkey).
         /// Validators verify this matches the entropy-selected winner.
         new_custodian: PublicKey,
@@ -833,7 +833,7 @@ pub enum LedgerOperation {
     /// - Must NOT be the entropy-selected winner
     ///
     /// Note: This is NOT "invalid" - it's simply a terminated branch.
-    CustodyYield,
+    DisputeYield,
 
     // ========== Lifecycle (1) ==========
     /// Close the ledger
@@ -868,10 +868,10 @@ impl LedgerOperation {
             Self::QuorumJoin { .. } => 46,
             Self::FeeCollect { .. } => 50,
             // Custody dispute operations
-            Self::CustodyDispute { .. } => 54,  // Opens dispute, transitions to DISPUTED
-            Self::CustodyAcquire { .. } => 55,  // Winner acquires custody
-            Self::CustodyYield => 56,           // Loser yields, branch tombstoned
-            Self::CustodyArmed { .. } => 57,    // Pre-commitment, transitions to READY
+            Self::DisputeEnter { .. } => 54,  // Opens dispute, transitions to DISPUTED
+            Self::DisputeAcquire { .. } => 55,  // Winner acquires custody
+            Self::DisputeYield => 56,           // Loser yields, branch tombstoned
+            Self::DisputeArmed { .. } => 57,    // Pre-commitment, transitions to READY
             Self::LedgerClose => 60,
         }
     }
@@ -1679,23 +1679,23 @@ impl BinaryCodec for LedgerOperation {
                 write_u64(w, *amount)?;
                 write_u32(w, *block_height)?;
             }
-            Self::CustodyDispute { last_valid_sequence, reason } => {
+            Self::DisputeEnter { last_valid_sequence, reason } => {
                 write_u64(w, *last_valid_sequence)?;
                 write_string(w, reason)?;
             }
-            Self::CustodyArmed { armed_block, commitment_hash, target_reserves } => {
+            Self::DisputeArmed { armed_block, commitment_hash, target_reserves } => {
                 write_u32(w, *armed_block)?;
                 write_20(w, commitment_hash)?;
                 write_string(w, target_reserves)?;
             }
-            Self::CustodyAcquire { new_custodian, entropy_block_height, entropy_block_hash, spend_txid, new_reserves_address } => {
+            Self::DisputeAcquire { new_custodian, entropy_block_height, entropy_block_hash, spend_txid, new_reserves_address } => {
                 write_pubkey(w, new_custodian)?;
                 write_u32(w, *entropy_block_height)?;
                 write_32(w, entropy_block_hash)?;
                 write_32(w, spend_txid)?;
                 write_string(w, new_reserves_address)?;
             }
-            Self::CustodyYield => {}
+            Self::DisputeYield => {}
             Self::LedgerClose => {}
         }
         Ok(())
@@ -2003,23 +2003,23 @@ impl BinaryCodec for LedgerOperation {
                     block_height: read_u32(r)?,
                 })
             }
-            // CustodyDispute (54)
-            54 => Ok(Self::CustodyDispute {
+            // DisputeEnter (54)
+            54 => Ok(Self::DisputeEnter {
                 last_valid_sequence: read_u64(r)?,
                 reason: read_string(r)?,
             }),
-            // CustodyAcquire (55)
-            55 => Ok(Self::CustodyAcquire {
+            // DisputeAcquire (55)
+            55 => Ok(Self::DisputeAcquire {
                 new_custodian: read_pubkey(r)?,
                 entropy_block_height: read_u32(r)?,
                 entropy_block_hash: read_32(r)?,
                 spend_txid: read_32(r)?,
                 new_reserves_address: read_string(r)?,
             }),
-            // CustodyYield (56)
-            56 => Ok(Self::CustodyYield),
-            // CustodyArmed (57)
-            57 => Ok(Self::CustodyArmed {
+            // DisputeYield (56)
+            56 => Ok(Self::DisputeYield),
+            // DisputeArmed (57)
+            57 => Ok(Self::DisputeArmed {
                 armed_block: read_u32(r)?,
                 commitment_hash: read_20(r)?,
                 target_reserves: read_string(r)?,
@@ -2704,7 +2704,7 @@ mod ledger_op_tlv {
     pub const QUORUM_THRESHOLD: u64 = 93;
     pub const QUORUM_SIZE: u64 = 94;
     pub const FIRST_EXPIRY_BLOCK: u64 = 95;
-    // CustodyAcquire fields
+    // DisputeAcquire fields
     pub const REASON: u64 = 100;
     pub const LAST_VALID_HASH: u64 = 101;
     pub const LAST_VALID_SEQUENCE: u64 = 102;
@@ -2717,7 +2717,7 @@ mod ledger_op_tlv {
     pub const ARMED_BLOCK: u64 = 109;
     pub const SPEND_TXID: u64 = 110;
     pub const NEW_RESERVES_ADDRESS: u64 = 111;
-    // CustodyArmed lottery fields
+    // DisputeArmed lottery fields
     pub const COMMITMENT_HASH: u64 = 112;
     pub const TARGET_RESERVES: u64 = 113;
     // Quorum/Collateral ledger binding fields
@@ -2982,18 +2982,18 @@ impl TlvEncode for LedgerOperation {
                     .u64_field(AMOUNT, *amount)
                     .u32_field(BLOCK_HEIGHT, *block_height);
             }
-            Self::CustodyDispute { last_valid_sequence, reason } => {
+            Self::DisputeEnter { last_valid_sequence, reason } => {
                 builder = builder
                     .u64_field(LAST_VALID_SEQUENCE, *last_valid_sequence)
                     .string_field(REASON, reason);
             }
-            Self::CustodyArmed { armed_block, commitment_hash, target_reserves } => {
+            Self::DisputeArmed { armed_block, commitment_hash, target_reserves } => {
                 builder = builder
                     .u32_field(ARMED_BLOCK, *armed_block)
                     .bytes_field(COMMITMENT_HASH, commitment_hash)
                     .string_field(TARGET_RESERVES, target_reserves);
             }
-            Self::CustodyAcquire { new_custodian, entropy_block_height, entropy_block_hash, spend_txid, new_reserves_address } => {
+            Self::DisputeAcquire { new_custodian, entropy_block_height, entropy_block_hash, spend_txid, new_reserves_address } => {
                 builder = builder
                     .pubkey_field(NEW_CUSTODIAN, new_custodian)
                     .u32_field(ENTROPY_BLOCK_HEIGHT, *entropy_block_height)
@@ -3001,7 +3001,7 @@ impl TlvEncode for LedgerOperation {
                     .bytes_field(SPEND_TXID, spend_txid)
                     .string_field(NEW_RESERVES_ADDRESS, new_reserves_address);
             }
-            Self::CustodyYield => {}
+            Self::DisputeYield => {}
             Self::LedgerClose => {}
         }
 
@@ -3188,19 +3188,19 @@ impl TlvDecode for LedgerOperation {
                 amount: reader.read_u64(AMOUNT)?,
                 block_height: reader.read_u32(BLOCK_HEIGHT)?,
             }),
-            54 => Ok(Self::CustodyDispute {
+            54 => Ok(Self::DisputeEnter {
                 last_valid_sequence: reader.read_u64(LAST_VALID_SEQUENCE)?,
                 reason: reader.read_string(REASON)?,
             }),
-            55 => Ok(Self::CustodyAcquire {
+            55 => Ok(Self::DisputeAcquire {
                 new_custodian: reader.read_pubkey(NEW_CUSTODIAN)?,
                 entropy_block_height: reader.read_u32(ENTROPY_BLOCK_HEIGHT)?,
                 entropy_block_hash: reader.read_bytes(ENTROPY_BLOCK_HASH)?,
                 spend_txid: reader.read_bytes(SPEND_TXID)?,
                 new_reserves_address: reader.read_string(NEW_RESERVES_ADDRESS)?,
             }),
-            56 => Ok(Self::CustodyYield),
-            57 => Ok(Self::CustodyArmed {
+            56 => Ok(Self::DisputeYield),
+            57 => Ok(Self::DisputeArmed {
                 armed_block: reader.read_u32(ARMED_BLOCK)?,
                 commitment_hash: reader.read_bytes(COMMITMENT_HASH)?,
                 target_reserves: reader.read_string(TARGET_RESERVES)?,

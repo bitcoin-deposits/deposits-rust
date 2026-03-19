@@ -121,7 +121,7 @@ format_tx() {
             if [ "$INPUT_FROM_P2TR" -gt 0 ]; then
                 # Spending from Taproot reserves - either dispute resolution or rotation
                 if [[ "$DEST" == bcrt1p* ]] || [[ "$DEST" == bc1p* ]]; then
-                    printf "  %s  [dispute]     %s...  %s sats → %s..%s§              └─ CustodyAcquire: dispute winner claiming reserves via threshold sig\n" "$block_height" "${txid:0:12}" "$AMT" "${DEST:0:10}" "${DEST: -6}"
+                    printf "  %s  [dispute]     %s...  %s sats → %s..%s§              └─ DisputeAcquire: dispute winner claiming reserves via threshold sig\n" "$block_height" "${txid:0:12}" "$AMT" "${DEST:0:10}" "${DEST: -6}"
                 else
                     printf "  %s  [confiscate]  %s...  %s sats → %s..%s§              └─ Quorum confiscation: reserves spent to non-Taproot address\n" "$block_height" "${txid:0:12}" "$AMT" "${DEST:0:10}" "${DEST: -6}"
                 fi

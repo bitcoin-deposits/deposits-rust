@@ -117,10 +117,10 @@ Partner operators who:
 
 | Operation | Purpose |
 |-----------|---------|
-| `CustodyDispute` | Quorum member declares invalid ledger |
-| `CustodyArmed` | Candidate commits to custody race |
-| `CustodyAcquire` | Winner claims reserves |
-| `CustodyYield` | Loser acknowledges loss |
+| `DisputeEnter` | Quorum member declares invalid ledger |
+| `DisputeArmed` | Candidate commits to custody race |
+| `DisputeAcquire` | Winner claims reserves |
+| `DisputeYield` | Loser acknowledges loss |
 
 ## Validation Rules
 
@@ -137,7 +137,7 @@ These constraints apply to all operations:
 
 **Signature Authorization:**
 - Normal operations: Must be signed by `operator_key`
-- `CustodyDispute`: May be signed by any `quorum_at_fork` member
+- `DisputeEnter`: May be signed by any `quorum_at_fork` member
 
 **Reserves Backing (100% Model):**
 - `sum(deposits.balance) <= reserves_amount` (always enforced)
@@ -392,7 +392,7 @@ These constraints apply to all operations:
 
 ### Dispute Operations
 
-#### CustodyDispute
+#### DisputeEnter
 
 | Check | Rule |
 |-------|------|
@@ -406,7 +406,7 @@ These constraints apply to all operations:
 - `collateral_attestations.clear()`
 - `dispute_state = Disputed`
 
-#### CustodyArmed
+#### DisputeArmed
 
 | Check | Rule |
 |-------|------|
@@ -417,7 +417,7 @@ These constraints apply to all operations:
 **State changes:**
 - `dispute_state = Armed`
 
-#### CustodyAcquire
+#### DisputeAcquire
 
 | Check | Rule |
 |-------|------|
@@ -430,7 +430,7 @@ These constraints apply to all operations:
 - `dispute_state = Normal`
 - `quorum_at_fork.clear()`
 
-#### CustodyYield
+#### DisputeYield
 
 | Check | Rule |
 |-------|------|
@@ -466,11 +466,11 @@ These constraints apply to all operations:
 | Current State | Allowed Operations | Next State |
 |---------------|-------------------|------------|
 | `Normal` | All except dispute ops | `Normal` |
-| `Normal` | `CustodyDispute` | `Disputed` |
+| `Normal` | `DisputeEnter` | `Disputed` |
 | `Disputed` | `QuorumAddMember`, `CollateralAttestation` | `Disputed` |
-| `Disputed` | `CustodyArmed` | `Armed` |
-| `Armed` | `CustodyAcquire` | `Normal` |
-| `Armed` | `CustodyYield` | `Tombstoned` |
+| `Disputed` | `DisputeArmed` | `Armed` |
+| `Armed` | `DisputeAcquire` | `Normal` |
+| `Armed` | `DisputeYield` | `Tombstoned` |
 | `Tombstoned` | None | `Tombstoned` |
 
 ## Wire Protocol
@@ -650,11 +650,11 @@ Ratchet semantics: can only increase amount and duration.
 ### Flow
 
 1. **Detection**: Quorum member detects invalid operation
-2. **Dispute**: Publishes `CustodyDispute` → state becomes `Disputed`
-3. **Arming**: Candidates publish `CustodyArmed` with commitment hash
+2. **Dispute**: Publishes `DisputeEnter` → state becomes `Disputed`
+3. **Arming**: Candidates publish `DisputeArmed` with commitment hash
 4. **Selection**: After 6 blocks, entropy block determines winner
-5. **Claim**: Winner proves on-chain spend with `CustodyAcquire`
-6. **Yield**: Losers publish `CustodyYield` → branch `Tombstoned`
+5. **Claim**: Winner proves on-chain spend with `DisputeAcquire`
+6. **Yield**: Losers publish `DisputeYield` → branch `Tombstoned`
 
 ### Entropy Selection
 
@@ -665,7 +665,7 @@ entropy = SHA256(entropy_block_hash || candidates)
 winner_index = entropy % len(candidates)
 ```
 
-The entropy block must be at least 6 blocks after the latest `CustodyArmed`.
+The entropy block must be at least 6 blocks after the latest `DisputeArmed`.
 
 ## Constants
 
@@ -728,12 +728,12 @@ If operator misbehaves:
 
 ```
 1. Quorum member: Detects invalid operation
-2. Quorum member: Publishes CustodyDispute on Nostr
+2. Quorum member: Publishes DisputeEnter on Nostr
 3. Ledger: Transitions to DISPUTED state
-4. Candidates: Publish CustodyArmed with commitments
+4. Candidates: Publish DisputeArmed with commitments
 5. Ledger: Transitions to ARMED state
 6. Wait: 6+ blocks for entropy
-7. Winner: Spends reserves, publishes CustodyAcquire
-8. Losers: Publish CustodyYield
+7. Winner: Spends reserves, publishes DisputeAcquire
+8. Losers: Publish DisputeYield
 9. Result: New custodian controls ledger
 ```

@@ -811,11 +811,11 @@ pub async fn process_confiscation_sign_request(
 
     println!("    Verified: we are a quorum member");
 
-    // Verify there are CustodyArmed messages (active dispute)
+    // Verify there are DisputeArmed messages (active dispute)
     let mut armed_count = 0;
     for update in updates.iter() {
         if let Ok(operation) = LedgerOperation::tlv_decode(&update.message) {
-            if let LedgerOperation::CustodyArmed { .. } = operation {
+            if let LedgerOperation::DisputeArmed { .. } = operation {
                 armed_count += 1;
             }
         }

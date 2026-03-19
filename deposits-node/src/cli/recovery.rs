@@ -56,10 +56,10 @@ pub async fn recovery_command(args: &[String]) -> Result<(), Box<dyn std::error:
         eprintln!("Usage: deposits-node recovery <dispute|rebuild|arm|claim|continue|spend|status> [args...]");
         eprintln!();
         eprintln!("Subcommands (Dispute Protocol):");
-        eprintln!("  dispute <ledger_id> [--reason <text>]  Open dispute: publish CustodyDispute operation");
+        eprintln!("  dispute <ledger_id> [--reason <text>]  Open dispute: publish DisputeEnter operation");
         eprintln!("  rebuild <ledger_id>                    Rebuild quorum: add members + get attestations");
-        eprintln!("  arm <ledger_id>                        Pre-commit: publish CustodyArmed operation");
-        eprintln!("  claim <ledger_id>                      After entropy: CustodyAcquire (win) or CustodyYield (lose)");
+        eprintln!("  arm <ledger_id>                        Pre-commit: publish DisputeArmed operation");
+        eprintln!("  claim <ledger_id>                      After entropy: DisputeAcquire (win) or DisputeYield (lose)");
         eprintln!("  continue <ledger_id> [--count N]       Winner: add operations to continue the ledger");
         eprintln!("  spend <ledger_id>                      Execute on-chain spend (winner only)");
         eprintln!("  status <ledger_id>                     Show recovery status and candidates");
@@ -70,11 +70,11 @@ pub async fn recovery_command(args: &[String]) -> Result<(), Box<dyn std::error:
         eprintln!("  lottery-claim <ledger_id>              Claim lottery output if winner");
         eprintln!();
         eprintln!("Recovery flow (entropy-based):");
-        eprintln!("  1. dispute - Detect violation, publish CustodyDispute (quorum disbanded)");
+        eprintln!("  1. dispute - Detect violation, publish DisputeEnter (quorum disbanded)");
         eprintln!("  2. rebuild - Add new quorum members, collect attestations");
-        eprintln!("  3. arm     - Publish CustodyArmed (locks in for entropy selection)");
+        eprintln!("  3. arm     - Publish DisputeArmed (locks in for entropy selection)");
         eprintln!("  4. (wait)  - Wait for entropy block to be mined");
-        eprintln!("  5. claim   - Winner: CustodyAcquire, Losers: CustodyYield");
+        eprintln!("  5. claim   - Winner: DisputeAcquire, Losers: DisputeYield");
         eprintln!("  6. continue- Winner adds operations to resume normal ledger operation");
         eprintln!("  7. spend   - Winner broadcasts on-chain spend to claim reserves");
         eprintln!();
@@ -501,10 +501,10 @@ pub async fn recovery_status(args: &[String]) -> Result<(), Box<dyn std::error::
 pub async fn recovery_complete(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("WARNING: 'recovery complete' is deprecated and uses the old protocol.");
     eprintln!("Please use the new dispute protocol commands instead:");
-    eprintln!("  1. recovery dispute <ledger_id>   - Open dispute with CustodyDispute");
+    eprintln!("  1. recovery dispute <ledger_id>   - Open dispute with DisputeEnter");
     eprintln!("  2. recovery rebuild <ledger_id>   - Rebuild quorum");
-    eprintln!("  3. recovery arm <ledger_id>       - Publish CustodyArmed pre-commitment");
-    eprintln!("  4. recovery claim <ledger_id>     - Claim with CustodyAcquire/CustodyYield");
+    eprintln!("  3. recovery arm <ledger_id>       - Publish DisputeArmed pre-commitment");
+    eprintln!("  4. recovery claim <ledger_id>     - Claim with DisputeAcquire/DisputeYield");
     eprintln!("  5. recovery spend <ledger_id>     - Execute on-chain spend");
     eprintln!();
 
@@ -519,10 +519,10 @@ pub async fn recovery_complete(args: &[String]) -> Result<(), Box<dyn std::error
 pub async fn recovery_publish_transfer(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("WARNING: 'recovery publish-transfer' is deprecated and uses the old protocol.");
     eprintln!("Please use the new dispute protocol commands instead:");
-    eprintln!("  1. recovery dispute <ledger_id>   - Open dispute with CustodyDispute");
+    eprintln!("  1. recovery dispute <ledger_id>   - Open dispute with DisputeEnter");
     eprintln!("  2. recovery rebuild <ledger_id>   - Rebuild quorum");
-    eprintln!("  3. recovery arm <ledger_id>       - Publish CustodyArmed pre-commitment");
-    eprintln!("  4. recovery claim <ledger_id>     - Claim with CustodyAcquire/CustodyYield");
+    eprintln!("  3. recovery arm <ledger_id>       - Publish DisputeArmed pre-commitment");
+    eprintln!("  4. recovery claim <ledger_id>     - Claim with DisputeAcquire/DisputeYield");
     eprintln!("  5. recovery spend <ledger_id>     - Execute on-chain spend");
     eprintln!();
 
@@ -671,7 +671,7 @@ pub async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error:
     println!("  Initiation block: {}", initiation_block);
     println!("  Entropy block (expected): {}", entropy_block_height);
 
-    let custody_dispute = LedgerOperation::CustodyDispute {
+    let custody_dispute = LedgerOperation::DisputeEnter {
         last_valid_sequence,
         reason: violation_details.clone(),
     };
@@ -721,7 +721,7 @@ pub async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error:
     };
 
     println!();
-    println!("Publishing CustodyDispute to Nostr...");
+    println!("Publishing DisputeEnter to Nostr...");
 
     let publish_transport = NostrTransportBuilder::new(secret_key)
         .relay(&relay_url)
@@ -731,7 +731,7 @@ pub async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error:
     publish_transport.broadcast_ledger_update(&signed_update).await?;
 
     println!();
-    println!("CustodyDispute published successfully!");
+    println!("DisputeEnter published successfully!");
     println!("  Disputer: {}...", &our_pubkey.to_string()[..16]);
     println!("  Sequence: {} (forked from {})", sequence, last_valid_sequence);
     println!("  Hash: {}...", &hex::encode(new_hash)[..16]);
@@ -753,7 +753,7 @@ pub async fn recovery_spend(args: &[String]) -> Result<(), Box<dyn std::error::E
     recovery_lottery_claim(args).await
 }
 
-/// Publish CustodyYield to close a candidate branch after not being selected.
+/// Publish DisputeYield to close a candidate branch after not being selected.
 pub async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut ledger_id: Option<String> = None;
     let mut config_args = Vec::new();
@@ -784,7 +784,7 @@ pub async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error:
         .ok_or("No relay configured")?
         .clone();
 
-    println!("Publishing CustodyYield (closing candidate branch)...");
+    println!("Publishing DisputeYield (closing candidate branch)...");
     println!("  Ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
     println!("  Relay: {}", relay_url);
     println!();
@@ -803,7 +803,7 @@ pub async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error:
 
     println!("Our pubkey: {}...", &our_pubkey.to_string()[..16]);
 
-    println!("Fetching our CustodyArmed branch...");
+    println!("Fetching our DisputeArmed branch...");
     let client = get_or_create_client(&relay_url).await?;
 
     let filter = Filter::new()
@@ -822,7 +822,7 @@ pub async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error:
             if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
                 if update.operator_id == our_pubkey {
                     if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                        if matches!(op, LedgerOperation::CustodyArmed { .. }) {
+                        if matches!(op, LedgerOperation::DisputeArmed { .. }) {
                             our_armed = Some(update);
                             break;
                         }
@@ -834,16 +834,16 @@ pub async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error:
 
 
     let our_armed = our_armed.ok_or(
-        "Could not find our CustodyArmed. Did you run 'recovery arm' first?"
+        "Could not find our DisputeArmed. Did you run 'recovery arm' first?"
     )?;
 
-    println!("  Found our CustodyArmed at sequence {}", our_armed.sequence_number);
+    println!("  Found our DisputeArmed at sequence {}", our_armed.sequence_number);
 
     let esplora = EsploraBuilder::new(&config.electrum_url).build_blocking();
     let current_block_height = esplora.get_height()
         .map_err(|e| format!("Failed to get block height: {:?}", e))?;
 
-    let custody_release = LedgerOperation::CustodyYield;
+    let custody_release = LedgerOperation::DisputeYield;
     let message_bytes = custody_release.tlv_encode();
 
     let sequence = our_armed.sequence_number + 1;
@@ -889,7 +889,7 @@ pub async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error:
     };
 
     println!();
-    println!("Publishing CustodyYield to Nostr...");
+    println!("Publishing DisputeYield to Nostr...");
 
     let publish_transport = NostrTransportBuilder::new(secret_key)
         .relay(&relay_url)
@@ -899,7 +899,7 @@ pub async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error:
     publish_transport.broadcast_ledger_update(&signed_update).await?;
 
     println!();
-    println!("CustodyYield published successfully!");
+    println!("DisputeYield published successfully!");
     println!("  Sequence: {}", sequence);
     println!("  Hash: {}...", &hex::encode(new_hash)[..16]);
     println!();
@@ -913,7 +913,7 @@ pub async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error:
 // NEW DISPUTE PROTOCOL COMMANDS
 // =============================================================================
 
-/// Open a custody dispute by publishing a CustodyDispute ledger operation.
+/// Open a custody dispute by publishing a DisputeEnter ledger operation.
 pub async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut ledger_id: Option<String> = None;
     let mut reason: Option<String> = None;
@@ -1075,13 +1075,13 @@ pub async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error:
     println!("  Last valid sequence: {}", last_valid_sequence_u64);
     println!("  Last valid hash: {}...", hex::encode(&last_valid_hash[..8]));
 
-    // Create CustodyDispute operation
+    // Create DisputeEnter operation
     let dispute_reason = if let Some(hash) = invalid_update_hash {
         hex::encode(hash)
     } else {
         violation_details.clone()
     };
-    let custody_dispute = LedgerOperation::CustodyDispute {
+    let custody_dispute = LedgerOperation::DisputeEnter {
         last_valid_sequence: last_valid_sequence_u64,
         reason: dispute_reason,
     };
@@ -1135,7 +1135,7 @@ pub async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error:
     };
 
     println!();
-    println!("Publishing CustodyDispute to Nostr...");
+    println!("Publishing DisputeEnter to Nostr...");
 
     let publish_transport = NostrTransportBuilder::new(secret_key)
         .relay(&relay_url)
@@ -1145,7 +1145,7 @@ pub async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error:
     publish_transport.broadcast_ledger_update(&signed_update).await?;
 
     println!();
-    println!("CustodyDispute published successfully!");
+    println!("DisputeEnter published successfully!");
     println!("  Dispute opener: {}...", &our_pubkey.to_string()[..16]);
     println!("  Sequence: {} (forked from {})", sequence, last_valid_sequence_u64);
     println!("  Hash: {}...", &hex::encode(new_hash)[..16]);
@@ -1548,8 +1548,8 @@ pub async fn recovery_rebuild_status(ledger_id: &str, args: &[String]) -> Result
                 if update.operator_id == our_pubkey {
                     if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
                         match op {
-                            LedgerOperation::CustodyDispute { .. } => has_dispute = true,
-                            LedgerOperation::CustodyArmed { .. } => has_armed = true,
+                            LedgerOperation::DisputeEnter { .. } => has_dispute = true,
+                            LedgerOperation::DisputeArmed { .. } => has_armed = true,
                             LedgerOperation::QuorumAddMember { quorum_member, .. } => {
                                 if !quorum_members.contains(&quorum_member) {
                                     quorum_members.push(quorum_member);
@@ -1576,8 +1576,8 @@ pub async fn recovery_rebuild_status(ledger_id: &str, args: &[String]) -> Result
 
     println!("Your dispute branch status:");
     println!("  Updates: {}", our_updates.len());
-    println!("  Has CustodyDispute: {}", if has_dispute { "yes" } else { "NO - run 'recovery dispute' first" });
-    println!("  Has CustodyArmed: {}", if has_armed { "yes (locked in)" } else { "no" });
+    println!("  Has DisputeEnter: {}", if has_dispute { "yes" } else { "NO - run 'recovery dispute' first" });
+    println!("  Has DisputeArmed: {}", if has_armed { "yes (locked in)" } else { "no" });
     println!();
     println!("Quorum members: {}", quorum_members.len());
     for member in &quorum_members {
@@ -1605,7 +1605,7 @@ pub async fn recovery_rebuild_status(ledger_id: &str, args: &[String]) -> Result
     Ok(())
 }
 
-/// Publish CustodyArmed to pre-commit for entropy selection.
+/// Publish DisputeArmed to pre-commit for entropy selection.
 pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     use rand::Rng;
 
@@ -1717,7 +1717,7 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
         .map_err(|e| format!("Failed to store preimage: {}", e))?;
     println!("  Stored lottery preimage in: {}", preimage_file);
 
-    let custody_armed = LedgerOperation::CustodyArmed {
+    let custody_armed = LedgerOperation::DisputeArmed {
         armed_block: current_block_height,
         commitment_hash,
         target_reserves: target_reserves_addr.clone(),
@@ -1768,7 +1768,7 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
     };
 
     println!();
-    println!("Publishing CustodyArmed to Nostr...");
+    println!("Publishing DisputeArmed to Nostr...");
 
     let publish_transport = NostrTransportBuilder::new(secret_key)
         .relay(&relay_url)
@@ -1780,7 +1780,7 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
     let entropy_block = current_block_height + 6;
 
     println!();
-    println!("CustodyArmed published successfully!");
+    println!("DisputeArmed published successfully!");
     println!("  Armed block: {}", current_block_height);
     println!("  Sequence: {}", sequence);
     println!("  Hash: {}...", &hex::encode(new_hash)[..16]);
@@ -1794,7 +1794,7 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
-/// Claim custody after entropy block - publish CustodyAcquire (winner) or CustodyYield (loser).
+/// Claim custody after entropy block - publish DisputeAcquire (winner) or DisputeYield (loser).
 pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut ledger_id: Option<String> = None;
     let mut config_args = Vec::new();
@@ -1845,7 +1845,7 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
         .map_err(|e| format!("Failed to fetch events: {}", e))?;
 
 
-    // Find all CustodyArmed candidates
+    // Find all DisputeArmed candidates
     let mut candidates: Vec<(PublicKey, u32, SignedLedgerUpdate)> = Vec::new();
     let mut our_latest: Option<SignedLedgerUpdate> = None;
     let mut our_armed_block: Option<u32> = None;
@@ -1854,7 +1854,7 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
         if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
             if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
                 if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                    if let LedgerOperation::CustodyArmed { armed_block, .. } = op {
+                    if let LedgerOperation::DisputeArmed { armed_block, .. } = op {
                         candidates.push((update.operator_id, armed_block, update.clone()));
                         if update.operator_id == our_pubkey {
                             our_armed_block = Some(armed_block);
@@ -1872,12 +1872,12 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
     }
 
     if candidates.is_empty() {
-        return Err("No CustodyArmed candidates found.".into());
+        return Err("No DisputeArmed candidates found.".into());
     }
 
     let our_latest = our_latest.ok_or("No updates found from you")?;
     if our_armed_block.is_none() {
-        return Err("You haven't published CustodyArmed yet. Run 'recovery arm' first.".into());
+        return Err("You haven't published DisputeArmed yet. Run 'recovery arm' first.".into());
     }
 
     println!("  Found {} armed candidates", candidates.len());
@@ -1935,9 +1935,9 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
     println!();
 
     if we_won {
-        println!("YOU WON! Publishing CustodyAcquire...");
+        println!("YOU WON! Publishing DisputeAcquire...");
 
-        let operation = LedgerOperation::CustodyAcquire {
+        let operation = LedgerOperation::DisputeAcquire {
             new_custodian: our_pubkey,
             entropy_block_height,
             entropy_block_hash,
@@ -1997,13 +1997,13 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
         publish_transport.broadcast_ledger_update(&signed_update).await?;
 
         println!();
-        println!("CustodyAcquire published successfully!");
+        println!("DisputeAcquire published successfully!");
         println!("  Sequence: {}", sequence);
         println!("  Hash: {}...", &hex::encode(new_hash)[..16]);
     } else {
-        println!("You did NOT win. Publishing CustodyYield...");
+        println!("You did NOT win. Publishing DisputeYield...");
 
-        let operation = LedgerOperation::CustodyYield;
+        let operation = LedgerOperation::DisputeYield;
         let message_bytes = operation.tlv_encode();
 
         let sequence = our_latest.sequence_number + 1;
@@ -2056,7 +2056,7 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
         publish_transport.broadcast_ledger_update(&signed_update).await?;
 
         println!();
-        println!("CustodyYield published successfully!");
+        println!("DisputeYield published successfully!");
         println!("  Sequence: {}", sequence);
         println!("  Hash: {}...", &hex::encode(new_hash)[..16]);
         println!();
@@ -2141,7 +2141,7 @@ pub async fn recovery_continue(args: &[String]) -> Result<(), Box<dyn std::error
 
                 if update.operator_id == our_pubkey {
                     if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                        if matches!(op, LedgerOperation::CustodyAcquire { .. }) {
+                        if matches!(op, LedgerOperation::DisputeAcquire { .. }) {
                             has_custody_acquire = true;
                         }
                     }
@@ -2156,7 +2156,7 @@ pub async fn recovery_continue(args: &[String]) -> Result<(), Box<dyn std::error
     let mut latest = our_latest.ok_or("No updates found from you. Did you win custody?")?;
 
     if !has_custody_acquire {
-        return Err("You don't have CustodyAcquire. You must win custody first (recovery claim).".into());
+        return Err("You don't have DisputeAcquire. You must win custody first (recovery claim).".into());
     }
 
     println!("  Your latest: seq {} (hash: {}...)", latest.sequence_number, hex::encode(&latest.current_hash[..8]));
@@ -2322,7 +2322,7 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
         .map_err(|e| format!("Failed to fetch events: {}", e))?;
 
 
-    // Extract CustodyArmed data and quorum info
+    // Extract DisputeArmed data and quorum info
     let mut participants: Vec<LotteryParticipant> = Vec::new();
     let mut quorum_members: Vec<PublicKey> = Vec::new();
     let mut reserves_address: Option<String> = None;
@@ -2346,7 +2346,7 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
                             reserves_address = Some(reserves_id);
                             ledger_hash = Some(lh);
                         }
-                        LedgerOperation::CustodyArmed { commitment_hash, target_reserves, .. } => {
+                        LedgerOperation::DisputeArmed { commitment_hash, target_reserves, .. } => {
                             let x_only = update.operator_id.x_only_public_key().0;
                             participants.push(LotteryParticipant::new(
                                 x_only,
@@ -2362,7 +2362,7 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
     }
 
     if participants.len() < 2 {
-        return Err(format!("Need at least 2 CustodyArmed participants, found {}", participants.len()).into());
+        return Err(format!("Need at least 2 DisputeArmed participants, found {}", participants.len()).into());
     }
 
     // Sort participants by pubkey for deterministic order
@@ -2820,14 +2820,14 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
         .map_err(|e| format!("Failed to fetch reveals: {}", e))?;
 
 
-    // Extract CustodyArmed participants
+    // Extract DisputeArmed participants
     let mut participants: Vec<(PublicKey, LotteryParticipant)> = Vec::new();
 
     for event in update_events.iter() {
         if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
             if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
                 if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                    if let LedgerOperation::CustodyArmed { commitment_hash, target_reserves, .. } = op {
+                    if let LedgerOperation::DisputeArmed { commitment_hash, target_reserves, .. } = op {
                         let x_only = update.operator_id.x_only_public_key().0;
                         participants.push((update.operator_id, LotteryParticipant::new(
                             x_only,
@@ -2841,7 +2841,7 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
     }
 
     if participants.is_empty() {
-        return Err("No CustodyArmed participants found".into());
+        return Err("No DisputeArmed participants found".into());
     }
 
     // Sort participants by x-only pubkey for deterministic order (must match confiscate)
@@ -2941,7 +2941,7 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
 
     if *winner_pubkey != our_pubkey {
         println!();
-        println!("You did not win. Run 'recovery release' to publish CustodyYield.");
+        println!("You did not win. Run 'recovery release' to publish DisputeYield.");
         return Ok(());
     }
 
@@ -3118,21 +3118,21 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
     println!("  Txid: {}", claim_txid);
     println!("  Output: {} sats to {}", output_amount, winner_participant.target_reserves);
 
-    // Publish CustodyAcquire to Nostr
+    // Publish DisputeAcquire to Nostr
     println!();
-    println!("Publishing CustodyAcquire to Nostr...");
+    println!("Publishing DisputeAcquire to Nostr...");
 
     use bitcoin::hashes::{sha256, Hash};
     use deposits_core::TlvEncode;
 
-    // Find our CustodyArmed to get sequence number and hash
+    // Find our DisputeArmed to get sequence number and hash
     let mut our_armed: Option<SignedLedgerUpdate> = None;
     for event in update_events.iter() {
         if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
             if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
                 if update.operator_id == our_pubkey {
                     if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                        if matches!(op, LedgerOperation::CustodyArmed { .. }) {
+                        if matches!(op, LedgerOperation::DisputeArmed { .. }) {
                             our_armed = Some(update);
                         }
                     }
@@ -3141,7 +3141,7 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
         }
     }
 
-    let our_armed = our_armed.ok_or("Could not find our CustodyArmed update")?;
+    let our_armed = our_armed.ok_or("Could not find our DisputeArmed update")?;
 
     // Get current block for entropy reference
     let current_block_height = esplora.get_height()
@@ -3150,10 +3150,10 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
         .map_err(|e| format!("Failed to get block hash: {:?}", e))?;
     let current_block_hash: [u8; 32] = *current_block_hash.as_ref();
 
-    // Create CustodyAcquire operation
+    // Create DisputeAcquire operation
     let spend_txid_bytes: [u8; 32] = *claim_txid.as_ref();
 
-    let operation = LedgerOperation::CustodyAcquire {
+    let operation = LedgerOperation::DisputeAcquire {
         new_custodian: our_pubkey,
         entropy_block_height: current_block_height,
         entropy_block_hash: current_block_hash,
@@ -3163,7 +3163,7 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
 
     let message_bytes = operation.tlv_encode();
 
-    // Build update continuing from our CustodyArmed
+    // Build update continuing from our DisputeArmed
     let sequence = our_armed.sequence_number + 1;
     let mut hash_input = Vec::new();
     hash_input.extend_from_slice(&sequence.to_le_bytes());
@@ -3215,7 +3215,7 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
     publish_transport.broadcast_ledger_update(&signed_update).await?;
 
     println!();
-    println!("CustodyAcquire published successfully!");
+    println!("DisputeAcquire published successfully!");
     println!("  Sequence: {}", sequence);
     println!("  Hash: {}...", &hex::encode(new_hash)[..16]);
     println!("  Spend txid: {}...", &hex::encode(spend_txid_bytes)[..16]);
@@ -3303,7 +3303,7 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
     updates.sort_by_key(|u| (u.sequence_number, u.operator_id));
     updates.dedup_by(|a, b| a.sequence_number == b.sequence_number && a.operator_id == b.operator_id && a.current_hash == b.current_hash);
 
-    // Find our updates (we're the new operator after CustodyAcquire)
+    // Find our updates (we're the new operator after DisputeAcquire)
     let our_updates: Vec<&SignedLedgerUpdate> = updates.iter()
         .filter(|u| u.operator_id == our_pubkey)
         .collect();
@@ -3312,13 +3312,13 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
         return Err("No updates found from you. Did you win the lottery?".into());
     }
 
-    // Find our CustodyAcquire to get the current reserves address
+    // Find our DisputeAcquire to get the current reserves address
     let mut current_reserves_address: Option<String> = None;
     let mut our_latest: Option<&SignedLedgerUpdate> = None;
 
     for update in &our_updates {
         if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-            if let LedgerOperation::CustodyAcquire { new_reserves_address, .. } = op {
+            if let LedgerOperation::DisputeAcquire { new_reserves_address, .. } = op {
                 current_reserves_address = Some(new_reserves_address);
             }
         }
@@ -3328,7 +3328,7 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
     }
 
     let current_reserves_address = current_reserves_address
-        .ok_or("Could not find CustodyAcquire with reserves address")?;
+        .ok_or("Could not find DisputeAcquire with reserves address")?;
     let our_latest = our_latest.ok_or("Could not find latest update")?;
 
     println!("  Current reserves: {}...", &current_reserves_address[..20.min(current_reserves_address.len())]);

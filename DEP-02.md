@@ -116,10 +116,10 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 | 45 | CollateralLock | Collateral |
 | 46 | QuorumJoin | Quorum |
 | 50 | FeeCollect | Fees |
-| 54 | CustodyDispute | Recovery |
-| 55 | CustodyAcquire | Recovery |
-| 56 | CustodyYield | Recovery |
-| 57 | CustodyArmed | Recovery |
+| 54 | DisputeEnter | Recovery |
+| 55 | DisputeAcquire | Recovery |
+| 56 | DisputeYield | Recovery |
+| 57 | DisputeArmed | Recovery |
 | 70 | TransferLock | Transfers |
 | 71 | TransferComplete | Transfers |
 | 72 | TransferFail | Transfers |
