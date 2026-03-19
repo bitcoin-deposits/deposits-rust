@@ -210,9 +210,9 @@ pub trait HandlerContext: ValidationContext {
         sequence: u64,
         prev_hash: [u8; 32],
         new_hash: [u8; 32],
-        partner_signature: Option<[u8; 64]>,
+        cosign_signature: Option<[u8; 64]>,
     ) -> Result<(), HandlerError> {
-        let _ = (peer, message_hash, message_type, success, error_message, sequence, prev_hash, new_hash, partner_signature);
+        let _ = (peer, message_hash, message_type, success, error_message, sequence, prev_hash, new_hash, cosign_signature);
         Ok(()) // Default: no-op
     }
 

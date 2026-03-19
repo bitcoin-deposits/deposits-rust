@@ -255,8 +255,8 @@ pub struct DepositsProtocol_SignedLedgerUpdate {
     operator_id: RefCell<Vec<u8>>,
     f_operator_signature: Cell<bool>,
     operator_signature: RefCell<Vec<u8>>,
-    f_partner_signature: Cell<bool>,
-    partner_signature: RefCell<Vec<u8>>,
+    f_cosign_signature: Cell<bool>,
+    cosign_signature: RefCell<Vec<u8>>,
     f_previous_hash: Cell<bool>,
     previous_hash: RefCell<Vec<u8>>,
     f_sequence_number: Cell<bool>,
@@ -406,19 +406,19 @@ impl DepositsProtocol_SignedLedgerUpdate {
     /**
      * 64-byte ECDSA signature from co-signing partner (type 16)
      */
-    pub fn partner_signature(
+    pub fn cosign_signature(
         &self
     ) -> KResult<Ref<'_, Vec<u8>>> {
         let _io = self._io.borrow();
         let _rrc = self._root.get_value().borrow().upgrade();
         let _prc = self._parent.get_value().borrow().upgrade();
         let _r = _rrc.as_ref().unwrap();
-        if self.f_partner_signature.get() {
-            return Ok(self.partner_signature.borrow());
+        if self.f_cosign_signature.get() {
+            return Ok(self.cosign_signature.borrow());
         }
-        self.f_partner_signature.set(true);
-        *self.partner_signature.borrow_mut() = self.records()[8 as usize].value().to_vec();
-        Ok(self.partner_signature.borrow())
+        self.f_cosign_signature.set(true);
+        *self.cosign_signature.borrow_mut() = self.records()[8 as usize].value().to_vec();
+        Ok(self.cosign_signature.borrow())
     }
 
     /**

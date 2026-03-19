@@ -259,8 +259,8 @@ impl Ledger {
         if seq < expected_seq {
             // Update in place if this has better signatures
             if let Some(existing) = self.history.get_mut(seq as usize) {
-                // Preserve existing partner signature if new one is empty
-                if update.partner_signature != [0u8; 64] || existing.partner_signature == [0u8; 64] {
+                // Preserve existing co-signer signature if new one is empty
+                if update.cosign_signature != [0u8; 64] || existing.cosign_signature == [0u8; 64] {
                     *existing = update;
                 }
             }
@@ -429,7 +429,7 @@ impl Ledger {
             // After rotation, co-signature is required
             // Exception: CustodyDispute can be signed by any quorum member
             if !matches!(operation, LedgerOperation::CustodyDispute { .. }) {
-                if !update.has_partner_signature() {
+                if !update.has_cosign_signature() {
                     return Err(DepositsError::ProtocolViolation {
                         violation_type: "missing_cosignature".to_string(),
                         details: format!(
@@ -951,7 +951,7 @@ impl Ledger {
             operator_signature: [0u8; 64],
             cosigner_pubkey: None,
             member_ledger_hash: None,
-            partner_signature: [0u8; 64],
+            cosign_signature: [0u8; 64],
             operator_id: self.state.operator_key,
             ledger_id: self.state.ledger_id,
             sequence_number: sequence,
@@ -987,33 +987,33 @@ impl Ledger {
     /// Update the signature on the last history entry.
     ///
     /// This is used after `append_operation` to add signatures from the porcupine dance.
-    pub fn sign_last_update(&mut self, operator_sig: Option<[u8; 64]>, partner_sig: Option<[u8; 64]>) {
+    pub fn sign_last_update(&mut self, operator_sig: Option<[u8; 64]>, cosign_sig: Option<[u8; 64]>) {
         if let Some(update) = self.history.last_mut() {
             if let Some(sig) = operator_sig {
                 update.operator_signature = sig;
             }
-            if let Some(sig) = partner_sig {
-                update.partner_signature = sig;
+            if let Some(sig) = cosign_sig {
+                update.cosign_signature = sig;
             }
         }
     }
 
     /// Apply co-signer info and recompute current_hash.
     ///
-    /// Sets member_ledger_hash, cosigner_pubkey, and partner_signature, then
+    /// Sets member_ledger_hash, cosigner_pubkey, and co-signer's signature, then
     /// recomputes current_hash to include all three. Must be called BEFORE
     /// operator signing, since the operator signs current_hash.
     pub fn apply_cosigner_hash(
         &mut self,
         member_ledger_hash: [u8; 32],
         cosigner_pubkey: PublicKey,
-        partner_signature: [u8; 64],
+        cosign_signature: [u8; 64],
     ) {
         if let Some(update) = self.history.last_mut() {
             update.member_ledger_hash = Some(member_ledger_hash);
             update.cosigner_pubkey = Some(cosigner_pubkey);
-            update.partner_signature = partner_signature;
-            // Recompute current_hash: includes message + member_ledger_hash + partner_signature
+            update.cosign_signature = cosign_signature;
+            // Recompute current_hash: includes message + member_ledger_hash + cosign_signature
             update.current_hash = update.compute_hash();
             // state.hash tracks current_hash until finalize_chain_hash
             self.state.hash = update.current_hash;

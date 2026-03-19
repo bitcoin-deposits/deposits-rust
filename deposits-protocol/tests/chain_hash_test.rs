@@ -1,5 +1,5 @@
 //! Tests for the hash chain structure:
-//!   current_hash = SHA256(seq || prev_hash || message [|| member_ledger_hash] [|| partner_signature])
+//!   current_hash = SHA256(seq || prev_hash || message [|| member_ledger_hash] [|| cosign_signature])
 //!   chain_hash   = SHA256(current_hash || operator_signature)
 //!   next update's previous_hash = chain_hash
 
@@ -25,7 +25,7 @@ fn make_update(seq: u64, prev_hash: [u8; 32], message: &[u8]) -> SignedLedgerUpd
         current_hash: [0u8; 32],
         block_height: 0,
         block_hash: [0u8; 32],
-        partner_signature: [0u8; 64],
+        cosign_signature: [0u8; 64],
         operator_signature: [0u8; 64],
         cosigner_pubkey: None,
         member_ledger_hash: None,
@@ -52,11 +52,11 @@ fn current_hash_without_signatures_is_content_only() {
 }
 
 #[test]
-fn current_hash_with_partner_signature() {
+fn current_hash_with_cosign_signature() {
     let mut u = make_update(0, [0u8; 32], &[1, 2, 3]);
     let hash_before = u.current_hash;
 
-    u.partner_signature = [0xAA; 64];
+    u.cosign_signature = [0xAA; 64];
     u.current_hash = u.compute_hash();
 
     assert_ne!(u.current_hash, hash_before);
@@ -73,11 +73,11 @@ fn current_hash_with_partner_signature() {
 }
 
 #[test]
-fn current_hash_with_member_ledger_hash_and_partner_signature() {
+fn current_hash_with_member_ledger_hash_and_cosign_signature() {
     let mut u = make_update(0, [0u8; 32], &[1, 2, 3]);
 
     u.member_ledger_hash = Some([0xBB; 32]);
-    u.partner_signature = [0xCC; 64];
+    u.cosign_signature = [0xCC; 64];
     u.current_hash = u.compute_hash();
 
     let mut h = Sha256::new();
@@ -142,17 +142,17 @@ fn two_update_chain_links_via_chain_hash() {
 fn three_update_chain_with_signatures() {
     // Build a 3-update chain with distinct signatures
     let mut u0 = make_update(0, [0u8; 32], &[1]);
-    u0.partner_signature = [0xA1; 64];
+    u0.cosign_signature = [0xA1; 64];
     u0.current_hash = u0.compute_hash();
     u0.operator_signature = [0xA2; 64];
 
     let mut u1 = make_update(1, u0.chain_hash(), &[2]);
-    u1.partner_signature = [0xB1; 64];
+    u1.cosign_signature = [0xB1; 64];
     u1.current_hash = u1.compute_hash();
     u1.operator_signature = [0xB2; 64];
 
     let mut u2 = make_update(2, u1.chain_hash(), &[3]);
-    u2.partner_signature = [0xC1; 64];
+    u2.cosign_signature = [0xC1; 64];
     u2.current_hash = u2.compute_hash();
     u2.operator_signature = [0xC2; 64];
 
@@ -160,7 +160,7 @@ fn three_update_chain_with_signatures() {
     assert_eq!(u1.previous_hash, u0.chain_hash());
     assert_eq!(u2.previous_hash, u1.chain_hash());
 
-    // Verify each current_hash includes partner_signature
+    // Verify each current_hash includes cosign_signature
     assert!(u0.verify_hash());
     assert!(u1.verify_hash());
     assert!(u2.verify_hash());
@@ -178,10 +178,10 @@ fn chain_with_cosigned_and_unsigned_updates() {
     let mut u0 = make_update(0, [0u8; 32], &[1]);
     u0.operator_signature = [0x01; 64];
 
-    // u1: co-signed (has member_ledger_hash + partner_signature)
+    // u1: co-signed (has member_ledger_hash + cosign_signature)
     let mut u1 = make_update(1, u0.chain_hash(), &[2]);
     u1.member_ledger_hash = Some([0xAA; 32]);
-    u1.partner_signature = [0xBB; 64];
+    u1.cosign_signature = [0xBB; 64];
     u1.current_hash = u1.compute_hash();
     u1.operator_signature = [0x02; 64];
 
@@ -193,7 +193,7 @@ fn chain_with_cosigned_and_unsigned_updates() {
     assert_eq!(u1.previous_hash, u0.chain_hash());
     assert_eq!(u2.previous_hash, u1.chain_hash());
 
-    // u1's current_hash includes member_ledger_hash + partner_signature
+    // u1's current_hash includes member_ledger_hash + cosign_signature
     let mut h = Sha256::new();
     h.update(&1u64.to_le_bytes());
     h.update(&u0.chain_hash());
@@ -229,13 +229,13 @@ fn changing_operator_signature_changes_chain_hash() {
 }
 
 #[test]
-fn changing_partner_signature_changes_current_hash() {
+fn changing_cosign_signature_changes_current_hash() {
     let mut u = make_update(0, [0u8; 32], &[1, 2, 3]);
-    u.partner_signature = [0x11; 64];
+    u.cosign_signature = [0x11; 64];
     u.current_hash = u.compute_hash();
     let h1 = u.current_hash;
 
-    u.partner_signature = [0x22; 64];
+    u.cosign_signature = [0x22; 64];
     u.current_hash = u.compute_hash();
     let h2 = u.current_hash;
 
@@ -246,14 +246,14 @@ fn changing_partner_signature_changes_current_hash() {
 fn swapping_cosigner_breaks_chain() {
     // Build u0 → u1 chain
     let mut u0 = make_update(0, [0u8; 32], &[1]);
-    u0.partner_signature = [0xAA; 64];
+    u0.cosign_signature = [0xAA; 64];
     u0.current_hash = u0.compute_hash();
     u0.operator_signature = [0x01; 64];
 
     let u1 = make_update(1, u0.chain_hash(), &[2]);
 
     // Now swap the cosigner on u0
-    u0.partner_signature = [0xFF; 64];
+    u0.cosign_signature = [0xFF; 64];
     u0.current_hash = u0.compute_hash();
     // u0.chain_hash() has changed, so u1.previous_hash no longer matches
     assert_ne!(u1.previous_hash, u0.chain_hash());
@@ -280,7 +280,7 @@ fn tlv_roundtrip_derives_current_hash() {
     use deposits_protocol::tlv::{TlvEncode, TlvDecode};
 
     let mut u = make_update(5, [0xAA; 32], &[10, 20, 30]);
-    u.partner_signature = [0xBB; 64];
+    u.cosign_signature = [0xBB; 64];
     u.member_ledger_hash = Some([0xCC; 32]);
     u.current_hash = u.compute_hash();
     u.operator_signature = [0xDD; 64];
@@ -298,7 +298,7 @@ fn tlv_roundtrip_derives_current_hash() {
     assert_eq!(decoded.sequence_number, 5);
     assert_eq!(decoded.previous_hash, [0xAA; 32]);
     assert_eq!(decoded.message, vec![10, 20, 30]);
-    assert_eq!(decoded.partner_signature, [0xBB; 64]);
+    assert_eq!(decoded.cosign_signature, [0xBB; 64]);
     assert_eq!(decoded.member_ledger_hash, Some([0xCC; 32]));
     assert_eq!(decoded.operator_signature, [0xDD; 64]);
     assert_eq!(decoded.chain_hash(), u.chain_hash());
@@ -315,7 +315,7 @@ fn tlv_roundtrip_unsigned_update_derives_hash() {
     let decoded = SignedLedgerUpdate::tlv_decode(&encoded).unwrap();
 
     assert_eq!(decoded.current_hash, expected);
-    assert_eq!(decoded.partner_signature, [0u8; 64]);
+    assert_eq!(decoded.cosign_signature, [0u8; 64]);
     assert_eq!(decoded.member_ledger_hash, None);
 }
 
@@ -336,7 +336,7 @@ fn tlv_wire_does_not_contain_current_hash_bytes() {
     assert!(stream.get(0).is_some(), "message (type 0) should be present");
     assert!(stream.get(8).is_some(), "sequence_number (type 8) should be present");
     assert!(stream.get(10).is_some(), "previous_hash (type 10) should be present");
-    assert!(stream.get(16).is_some(), "partner_signature (type 16) should be present");
+    assert!(stream.get(16).is_some(), "cosign_signature (type 16) should be present");
     assert!(stream.get(18).is_some(), "operator_signature (type 18) should be present");
 }
 
@@ -346,17 +346,17 @@ fn chain_of_three_survives_tlv_roundtrip() {
 
     // Build a 3-update chain
     let mut u0 = make_update(0, [0u8; 32], &[1]);
-    u0.partner_signature = [0xA1; 64];
+    u0.cosign_signature = [0xA1; 64];
     u0.current_hash = u0.compute_hash();
     u0.operator_signature = [0xA2; 64];
 
     let mut u1 = make_update(1, u0.chain_hash(), &[2]);
-    u1.partner_signature = [0xB1; 64];
+    u1.cosign_signature = [0xB1; 64];
     u1.current_hash = u1.compute_hash();
     u1.operator_signature = [0xB2; 64];
 
     let mut u2 = make_update(2, u1.chain_hash(), &[3]);
-    u2.partner_signature = [0xC1; 64];
+    u2.cosign_signature = [0xC1; 64];
     u2.current_hash = u2.compute_hash();
     u2.operator_signature = [0xC2; 64];
 

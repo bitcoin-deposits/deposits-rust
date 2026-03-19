@@ -474,7 +474,7 @@ mod tests {
                 request_hash: [0u8; 32],
                 accepted: true,
                 error: None,
-                partner_signature: None,
+                cosign_signature: None,
                 confirmed_sequence: 0,
                 confirmed_hash: [0u8; 32],
             }),

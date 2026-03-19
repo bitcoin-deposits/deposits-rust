@@ -103,8 +103,8 @@ pub struct RotateReservesResult {
 /// Result of a co-sign request from a quorum member
 #[derive(Debug, Clone)]
 pub struct CoSignResult {
-    /// The partner's ECDSA signature over (partner_signing_data || member_ledger_hash)
-    pub partner_signature: [u8; 64],
+    /// The co-signer's ECDSA signature over (cosign_data || member_ledger_hash)
+    pub cosign_signature: [u8; 64],
 
     /// The public key of the quorum member who co-signed
     pub cosigner_pubkey: PublicKey,
@@ -210,7 +210,7 @@ pub struct Node {
     pending_collateral_requests: Mutex<HashMap<String, String>>,
 
     /// Pending co-sign requests: request_id -> (ledger_id, oneshot sender for co-sign result)
-    /// The result includes the partner signature and the member's ledger hash
+    /// The result includes the co-signer's signature and the member's ledger hash
     pending_cosign_requests: Arc<Mutex<HashMap<String, (String, tokio::sync::oneshot::Sender<CoSignResult>)>>>,
 
     /// Semaphore to limit concurrent request_cosign calls.
@@ -3585,7 +3585,7 @@ impl Node {
             operator_signature: operator_sig_bytes,
             cosigner_pubkey: None,
             member_ledger_hash: None,
-            partner_signature: [0u8; 64],
+            cosign_signature: [0u8; 64],
             operator_id: our_pubkey,
             ledger_id: ledger_id_bytes,
             sequence_number: sequence,
@@ -3656,7 +3656,7 @@ impl Node {
             operator_signature: operator_sig_bytes,
             cosigner_pubkey: None,
             member_ledger_hash: None,
-            partner_signature: [0u8; 64],
+            cosign_signature: [0u8; 64],
             operator_id: our_pubkey,
             ledger_id: ledger_id_bytes,
             sequence_number: sequence,
@@ -4796,7 +4796,7 @@ impl Node {
             operator_signature: operator_sig_bytes,
             cosigner_pubkey: None,
             member_ledger_hash: None,
-            partner_signature: [0u8; 64],
+            cosign_signature: [0u8; 64],
             operator_id: our_pubkey,
             ledger_id: ledger_id_bytes,
             sequence_number: sequence,
@@ -4927,7 +4927,7 @@ impl Node {
                 operator_signature: operator_sig_bytes,
                 cosigner_pubkey: None,
                 member_ledger_hash: None,
-                partner_signature: [0u8; 64],
+                cosign_signature: [0u8; 64],
                 operator_id: our_pubkey,
                 ledger_id: ledger_id_bytes,
                 sequence_number: sequence,
@@ -6738,7 +6738,7 @@ impl Node {
     /// When another operator wants to update their ledger where we are a quorum member,
     /// they send us a co-sign request. We validate the update and return our ECDSA signature.
     ///
-    /// The signature covers: partner_signing_data || our_ledger_current_hash
+    /// The signature covers: cosign_data || our_ledger_current_hash
     /// This binds the co-signature to the current state of our own ledger.
     async fn process_cosign_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
         use bitcoin::hashes::{sha256, Hash};
@@ -6856,9 +6856,9 @@ impl Node {
             }
         }
 
-        let partner_signing_data_hex = match request.params.get("partner_signing_data_hex").and_then(|v| v.as_str()) {
+        let cosign_data_hex = match request.params.get("cosign_data_hex").and_then(|v| v.as_str()) {
             Some(hex) => hex.to_string(),
-            None => return (false, None, Some("Missing partner_signing_data_hex parameter".to_string())),
+            None => return (false, None, Some("Missing cosign_data_hex parameter".to_string())),
         };
 
         let current_hash_hex = match request.params.get("current_hash_hex").and_then(|v| v.as_str()) {
@@ -6866,10 +6866,10 @@ impl Node {
             None => return (false, None, Some("Missing current_hash_hex parameter".to_string())),
         };
 
-        // Decode partner signing data
-        let partner_signing_data = match hex::decode(&partner_signing_data_hex) {
+        // Decode cosign data
+        let cosign_data = match hex::decode(&cosign_data_hex) {
             Ok(data) => data,
-            Err(e) => return (false, None, Some(format!("Invalid partner_signing_data_hex: {}", e))),
+            Err(e) => return (false, None, Some(format!("Invalid cosign_data_hex: {}", e))),
         };
 
         // Decode current hash (used for validation logging)
@@ -7058,7 +7058,7 @@ impl Node {
         let mut tagged_input = Vec::new();
         tagged_input.extend_from_slice(tag_hash.as_byte_array());
         tagged_input.extend_from_slice(tag_hash.as_byte_array());
-        tagged_input.extend_from_slice(&partner_signing_data);
+        tagged_input.extend_from_slice(&cosign_data);
         tagged_input.extend_from_slice(&member_ledger_hash);
 
         let hash = sha256::Hash::hash(&tagged_input);
@@ -7076,7 +7076,7 @@ impl Node {
 
         // Return the signature, our pubkey, and our ledger hash
         let result = serde_json::json!({
-            "partner_signature_hex": hex::encode(sig_bytes),
+            "cosign_signature_hex": hex::encode(sig_bytes),
             "cosigner_pubkey": self.node_id_hex.clone(),
             "sequence_number": sequence_number,
             "member_ledger_hash_hex": hex::encode(member_ledger_hash),
@@ -8534,7 +8534,7 @@ impl Node {
                     return;
                 };
 
-                let sig_hex = result_obj.get("partner_signature_hex").and_then(|v| v.as_str());
+                let sig_hex = result_obj.get("cosign_signature_hex").and_then(|v| v.as_str());
                 let hash_hex = result_obj.get("member_ledger_hash_hex").and_then(|v| v.as_str());
                 let cosigner_str = result_obj.get("cosigner_pubkey").and_then(|v| v.as_str());
 
@@ -8551,7 +8551,7 @@ impl Node {
                                 .unwrap_or(self.node_id); // fallback for old responders
 
                             let cosign_result = CoSignResult {
-                                partner_signature: sig,
+                                cosign_signature: sig,
                                 cosigner_pubkey,
                                 member_ledger_hash: hash,
                             };
@@ -8564,7 +8564,7 @@ impl Node {
                         tracing::warn!("Co-sign response has invalid hex encoding");
                     }
                 } else {
-                    tracing::warn!("Co-sign response missing partner_signature_hex or member_ledger_hash_hex");
+                    tracing::warn!("Co-sign response missing cosign_signature_hex or member_ledger_hash_hex");
                 }
             } else {
                 tracing::warn!("Co-sign response has no result");
@@ -8615,8 +8615,8 @@ impl Node {
                         serde_json::Value::Null
                     };
 
-                    // Extract partner_signature_hex
-                    let sig_hex = result_obj.get("partner_signature_hex").and_then(|v| v.as_str());
+                    // Extract cosign_signature_hex
+                    let sig_hex = result_obj.get("cosign_signature_hex").and_then(|v| v.as_str());
                     // Extract member_ledger_hash_hex
                     let hash_hex = result_obj.get("member_ledger_hash_hex").and_then(|v| v.as_str());
                     // Extract cosigner_pubkey
@@ -8641,7 +8641,7 @@ impl Node {
                                     .unwrap_or(self.node_id); // fallback for old responders
 
                                 let cosign_result = CoSignResult {
-                                    partner_signature: sig,
+                                    cosign_signature: sig,
                                     cosigner_pubkey,
                                     member_ledger_hash: hash,
                                 };
@@ -8652,7 +8652,7 @@ impl Node {
                             }
                         }
                     }
-                    tracing::warn!("Co-sign response missing valid partner_signature_hex or member_ledger_hash_hex");
+                    tracing::warn!("Co-sign response missing valid cosign_signature_hex or member_ledger_hash_hex");
                 }
             }
             // tx is dropped here if we didn't send, receiver will get an error
@@ -8786,7 +8786,7 @@ impl Node {
     ///
     /// This sends a cosign_update request via Nostr and waits for the response.
     /// The quorum member will validate the update and return their ECDSA signature
-    /// over (partner_signing_data || member_ledger_hash).
+    /// over (cosign_data || member_ledger_hash).
     ///
     /// This is a multicast request - it goes to all quorum members subscribed to the
     /// ledger, and the first valid response is used. Each responder auto-detects which
@@ -8797,7 +8797,7 @@ impl Node {
     /// * `update` - The SignedLedgerUpdate that needs co-signing
     ///
     /// # Returns
-    /// A CoSignResult containing the partner signature and the member's ledger hash
+    /// A CoSignResult containing the co-signer's signature and the member's ledger hash
     pub async fn request_cosign(
         &self,
         ledger_id: &str,
@@ -8811,13 +8811,13 @@ impl Node {
         let _permit = self.cosign_semaphore.acquire().await
             .map_err(|_| Error::Protocol("Cosign semaphore closed".to_string()))?;
 
-        // Compute partner signing data
-        let partner_signing_data = update.partner_signing_data();
+        // Compute cosign data
+        let cosign_data = update.cosign_data();
 
         // Create request parameters - responders auto-detect their bound ledger
         let mut params = serde_json::json!({
             "sequence_number": update.sequence_number,
-            "partner_signing_data_hex": hex::encode(&partner_signing_data),
+            "cosign_data_hex": hex::encode(&cosign_data),
             "current_hash_hex": hex::encode(update.current_hash),
             "message_type": update.message_type,
         });
@@ -9255,7 +9255,7 @@ impl Node {
     ///
     /// This implements the "Porcupine Dance" signing order:
     /// 1. Partner (quorum member) signs (update content || their_ledger_hash) with ECDSA
-    /// 2. Operator signs (content + partner_signature) with Schnorr
+    /// 2. Operator signs (content + cosign_signature) with Schnorr
     ///
     /// Co-signature behavior:
     /// - Before reserves rotation: Falls back to operator-only if no quorum members
@@ -9327,18 +9327,18 @@ impl Node {
                     let label = format!("success_attempt_{}", attempt);
                     metrics::record_cosign_attempt(&label, attempt_start.elapsed());
                     // Apply co-signer info and recompute hash for causal ordering,
-                    // then apply partner signature
+                    // then apply co-signer's signature
                     let ledgers = self.handler.ledgers.lock().unwrap();
                     let ledger_arc = ledgers
                         .get(ledger_id)
                         .ok_or_else(|| Error::Protocol("Ledger not found".to_string()))?;
                     let mut ledger = ledger_arc.write().unwrap();
 
-                    // Apply cosigner data + partner signature, recompute current_hash
+                    // Apply cosigner data + co-signer's signature, recompute current_hash
                     ledger.apply_cosigner_hash(
                         result.member_ledger_hash,
                         result.cosigner_pubkey,
-                        result.partner_signature,
+                        result.cosign_signature,
                     );
 
                     tracing::info!("Applied co-sign from {}... (member_hash: {}..., new chain_hash: {}...)",

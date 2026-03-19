@@ -211,13 +211,13 @@ class DepositsProtocol(KaitaiStruct):
             return getattr(self, '_m_operator_signature', None)
 
         @property
-        def partner_signature(self):
+        def cosign_signature(self):
             """64-byte ECDSA signature from co-signing partner (type 16)."""
-            if hasattr(self, '_m_partner_signature'):
-                return self._m_partner_signature
+            if hasattr(self, '_m_cosign_signature'):
+                return self._m_cosign_signature
 
-            self._m_partner_signature = self.records[8].value
-            return getattr(self, '_m_partner_signature', None)
+            self._m_cosign_signature = self.records[8].value
+            return getattr(self, '_m_cosign_signature', None)
 
         @property
         def previous_hash(self):

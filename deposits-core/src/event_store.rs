@@ -466,7 +466,7 @@ mod tests {
             current_hash,
             block_height: 100 + seq as u32,
             block_hash: [0u8; 32],
-            partner_signature: [0u8; 64],
+            cosign_signature: [0u8; 64],
             operator_signature: [0u8; 64],
             cosigner_pubkey: None,
             member_ledger_hash: None,

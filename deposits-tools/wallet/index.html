@@ -3625,18 +3625,18 @@ function decodeUpdate(base64Content) {
     }));
   }
 
-  // Compute current_hash: SHA256(seq_le || prev_hash || message [|| member_ledger_hash] [|| partner_signature])
+  // Compute current_hash: SHA256(seq_le || prev_hash || message [|| member_ledger_hash] [|| cosign_signature])
   const seqBytes = new Uint8Array(8);
   new DataView(seqBytes.buffer).setUint32(0, seq & 0xFFFFFFFF, true);
   new DataView(seqBytes.buffer).setUint32(4, Math.floor(seq / 0x100000000), true);
   const prevHashBytes = get(10) || new Uint8Array(32);
-  const partnerSig = get(16) || new Uint8Array(64);
+  const cosignSig = get(16) || new Uint8Array(64);
   const memberHash = get(26); // optional
   const hashParts = [seqBytes, prevHashBytes];
   if (msgBytes) hashParts.push(msgBytes);
   if (memberHash) hashParts.push(memberHash);
-  const isNonZeroSig = partnerSig.some(b => b !== 0);
-  if (isNonZeroSig) hashParts.push(partnerSig);
+  const isNonZeroSig = cosignSig.some(b => b !== 0);
+  if (isNonZeroSig) hashParts.push(cosignSig);
   const totalLen = hashParts.reduce((s, p) => s + p.length, 0);
   const hashInput = new Uint8Array(totalLen);
   let hOff = 0;

@@ -395,7 +395,7 @@ fn compute_hash_changes_with_member_ledger_hash() {
         current_hash: [0u8; 32],
         block_height: 0,
         block_hash: [0u8; 32],
-        partner_signature: [0u8; 64],
+        cosign_signature: [0u8; 64],
         operator_signature: [0u8; 64],
         cosigner_pubkey: None,
         member_ledger_hash: None,
@@ -435,7 +435,7 @@ fn compute_hash_without_member_hash_is_backward_compatible() {
         current_hash: [0u8; 32],
         block_height: 0,
         block_hash: [0u8; 32],
-        partner_signature: [0u8; 64],
+        cosign_signature: [0u8; 64],
         operator_signature: [0u8; 64],
         cosigner_pubkey: None,
         member_ledger_hash: None,
@@ -453,7 +453,7 @@ fn compute_hash_without_member_hash_is_backward_compatible() {
 }
 
 #[test]
-fn compute_hash_includes_partner_signature() {
+fn compute_hash_includes_cosign_signature() {
     use deposits_protocol::types::SignedLedgerUpdate;
 
     let pk = {
@@ -473,7 +473,7 @@ fn compute_hash_includes_partner_signature() {
         current_hash: [0u8; 32],
         block_height: 0,
         block_hash: [0u8; 32],
-        partner_signature: [0u8; 64],
+        cosign_signature: [0u8; 64],
         operator_signature: [0u8; 64],
         cosigner_pubkey: None,
         member_ledger_hash: None,
@@ -481,15 +481,15 @@ fn compute_hash_includes_partner_signature() {
 
     let hash_no_sig = update.compute_hash();
 
-    update.partner_signature = [0xAA; 64];
+    update.cosign_signature = [0xAA; 64];
     let hash_with_sig = update.compute_hash();
 
-    assert_ne!(hash_no_sig, hash_with_sig, "partner_signature should change compute_hash");
+    assert_ne!(hash_no_sig, hash_with_sig, "cosign_signature should change compute_hash");
 
-    update.partner_signature = [0xBB; 64];
+    update.cosign_signature = [0xBB; 64];
     let hash_different_sig = update.compute_hash();
 
-    assert_ne!(hash_with_sig, hash_different_sig, "different partner_signature = different hash");
+    assert_ne!(hash_with_sig, hash_different_sig, "different cosign_signature = different hash");
 }
 
 #[test]
@@ -513,7 +513,7 @@ fn chain_hash_includes_operator_signature() {
         current_hash: [0u8; 32],
         block_height: 0,
         block_hash: [0u8; 32],
-        partner_signature: [0u8; 64],
+        cosign_signature: [0u8; 64],
         operator_signature: [0u8; 64],
         cosigner_pubkey: None,
         member_ledger_hash: None,
@@ -552,7 +552,7 @@ fn chain_hash_is_sha256_of_current_hash_and_operator_sig() {
         current_hash: [0u8; 32],
         block_height: 0,
         block_hash: [0u8; 32],
-        partner_signature: [0xAA; 64],
+        cosign_signature: [0xAA; 64],
         operator_signature: [0xBB; 64],
         cosigner_pubkey: None,
         member_ledger_hash: Some([0xCC; 32]),

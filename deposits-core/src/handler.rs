@@ -574,7 +574,7 @@ where
         }
 
         // Sign the response
-        let partner_signature = self.signer.sign_schnorr(msg.current_hash)
+        let cosign_signature = self.signer.sign_schnorr(msg.current_hash)
             .map_err(|e| HandleError::Internal(e))?;
 
         // Create response
@@ -584,7 +584,7 @@ where
             request_hash: msg.current_hash,
             accepted: true,
             error: None,
-            partner_signature: Some(partner_signature),
+            cosign_signature: Some(cosign_signature),
             confirmed_sequence: msg.sequence_number,
             confirmed_hash: msg.current_hash,
         };
@@ -615,14 +615,14 @@ where
             );
         }
 
-        // Verify partner signature if accepted (only for LDK where reserves_id is a pubkey)
+        // Verify co-signer signature if accepted (only for LDK where reserves_id is a pubkey)
         if msg.accepted {
-            if let Some(sig) = &msg.partner_signature {
+            if let Some(sig) = &msg.cosign_signature {
                 // Try to parse reserves_id as pubkey for signature verification
                 if let Ok(partner_pubkey) = msg.reserves_id.parse::<PublicKey>() {
                     if !self.signer.verify_schnorr(&partner_pubkey, msg.confirmed_hash, sig) {
                         return Err(HandleError::ValidationFailed(
-                            "Invalid partner signature".to_string(),
+                            "Invalid co-signer signature".to_string(),
                         ));
                     }
                 }

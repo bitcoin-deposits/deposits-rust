@@ -475,8 +475,8 @@ pub struct LedgerUpdateResponseMsg {
     pub accepted: bool,
     /// Error message if rejected
     pub error: Option<String>,
-    /// Partner's signature if accepted
-    pub partner_signature: Option<[u8; 64]>,
+    /// Co-signer's signature if accepted
+    pub cosign_signature: Option<[u8; 64]>,
     /// Confirmed sequence number
     pub confirmed_sequence: u64,
     /// Confirmed ledger hash
@@ -2114,7 +2114,7 @@ impl BinaryCodec for SignedLedgerUpdate {
         write_32(w, &self.previous_hash)?;
         write_u32(w, self.block_height)?;
         write_32(w, &self.block_hash)?;
-        write_64(w, &self.partner_signature)?;
+        write_64(w, &self.cosign_signature)?;
         write_64(w, &self.operator_signature)?;
         write_option(w, &self.cosigner_pubkey, |w, pk| write_pubkey(w, pk))?;
         write_option(w, &self.member_ledger_hash, |w, h| write_32(w, h))?;
@@ -2130,7 +2130,7 @@ impl BinaryCodec for SignedLedgerUpdate {
         let previous_hash = read_32(r)?;
         let block_height = read_u32(r)?;
         let block_hash = read_32(r)?;
-        let partner_signature = read_64(r)?;
+        let cosign_signature = read_64(r)?;
         let operator_signature = read_64(r)?;
         // Optional fields (backward compatible - not present in old format)
         let cosigner_pubkey = read_option(r, read_pubkey).unwrap_or(None);
@@ -2145,7 +2145,7 @@ impl BinaryCodec for SignedLedgerUpdate {
             current_hash: [0u8; 32],
             block_height,
             block_hash,
-            partner_signature,
+            cosign_signature,
             operator_signature,
             cosigner_pubkey,
             member_ledger_hash,
@@ -2174,7 +2174,7 @@ impl DepositsMessage {
                 write_32(w, &m.request_hash)?;
                 write_bool(w, m.accepted)?;
                 write_option(w, &m.error, |w, s| write_string(w, s))?;
-                write_option(w, &m.partner_signature, |w, s| write_64(w, s))?;
+                write_option(w, &m.cosign_signature, |w, s| write_64(w, s))?;
                 write_u64(w, m.confirmed_sequence)?;
                 write_32(w, &m.confirmed_hash)?;
             }
@@ -2245,7 +2245,7 @@ impl DepositsMessage {
                 request_hash: read_32(r)?,
                 accepted: read_bool(r)?,
                 error: read_option(r, read_string)?,
-                partner_signature: read_option(r, read_64)?,
+                cosign_signature: read_option(r, read_64)?,
                 confirmed_sequence: read_u64(r)?,
                 confirmed_hash: read_32(r)?,
             })),
@@ -3341,7 +3341,7 @@ mod ledger_response_tlv {
     pub const REQUEST_HASH: u64 = 4;
     pub const ACCEPTED: u64 = 6;
     pub const ERROR: u64 = 8;
-    pub const PARTNER_SIGNATURE: u64 = 10;
+    pub const COSIGN_SIGNATURE: u64 = 10;
     pub const CONFIRMED_SEQUENCE: u64 = 12;
     pub const CONFIRMED_HASH: u64 = 14;
 }
@@ -3358,8 +3358,8 @@ impl TlvEncode for LedgerUpdateResponseMsg {
         if let Some(ref err) = self.error {
             builder = builder.string_field(ERROR, err);
         }
-        if let Some(ref sig) = self.partner_signature {
-            builder = builder.bytes_field(PARTNER_SIGNATURE, sig);
+        if let Some(ref sig) = self.cosign_signature {
+            builder = builder.bytes_field(COSIGN_SIGNATURE, sig);
         }
 
         builder
@@ -3379,7 +3379,7 @@ impl TlvDecode for LedgerUpdateResponseMsg {
             request_hash: reader.read_bytes(REQUEST_HASH)?,
             accepted: reader.read_u8(ACCEPTED)? != 0,
             error: reader.read_string_opt(ERROR)?,
-            partner_signature: reader.read_bytes_opt(PARTNER_SIGNATURE)?,
+            cosign_signature: reader.read_bytes_opt(COSIGN_SIGNATURE)?,
             confirmed_sequence: reader.read_u64(CONFIRMED_SEQUENCE)?,
             confirmed_hash: reader.read_bytes(CONFIRMED_HASH)?,
         })
@@ -4573,7 +4573,7 @@ mod tests {
             request_hash: [0xAA; 32],
             accepted: true,
             error: None,
-            partner_signature: Some([0xBB; 64]),
+            cosign_signature: Some([0xBB; 64]),
             confirmed_sequence: 5,
             confirmed_hash: [0xCC; 32],
         };
@@ -4649,7 +4649,7 @@ mod tests {
             current_hash: [0u8; 32], // will be computed
             block_height: 12345,
             block_hash: [0x11; 32],
-            partner_signature: [0xFF; 64],
+            cosign_signature: [0xFF; 64],
             operator_signature: [0xEE; 64],
             cosigner_pubkey: None,
             member_ledger_hash: None,

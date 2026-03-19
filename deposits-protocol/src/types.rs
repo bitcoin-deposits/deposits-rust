@@ -1487,10 +1487,10 @@ pub struct SignedLedgerUpdate {
     /// Block hash at the time this update was created.
     #[serde(default, with = "serde_32")]
     pub block_hash: [u8; 32],
-    /// Partner's signature over update content.
+    /// Co-signer's signature over update content.
     #[serde(with = "serde_64")]
-    pub partner_signature: [u8; 64],
-    /// Operator's final signature covering partner's signature.
+    pub cosign_signature: [u8; 64],
+    /// Operator's final signature covering co-signer's signature.
     #[serde(with = "serde_64")]
     pub operator_signature: [u8; 64],
     /// Public key of the quorum member who co-signed this update (if co-signed).
@@ -1504,7 +1504,7 @@ pub struct SignedLedgerUpdate {
 impl SignedLedgerUpdate {
     /// Compute current_hash: commits to content, causal ordering, and co-signature.
     ///
-    /// `SHA256(sequence || previous_hash || message [|| member_ledger_hash] [|| partner_signature])`
+    /// `SHA256(sequence || previous_hash || message [|| member_ledger_hash] [|| cosign_signature])`
     ///
     /// The operator signs current_hash. The operator's signature is not in
     /// current_hash (circular), but is folded into the chain via chain_hash().
@@ -1518,8 +1518,8 @@ impl SignedLedgerUpdate {
         if let Some(ref mlh) = self.member_ledger_hash {
             hasher.update(mlh);
         }
-        if self.partner_signature != [0u8; 64] {
-            hasher.update(&self.partner_signature);
+        if self.cosign_signature != [0u8; 64] {
+            hasher.update(&self.cosign_signature);
         }
 
         let result = hasher.finalize();
@@ -1561,14 +1561,14 @@ impl SignedLedgerUpdate {
     // Signature Methods
     // ========================================================================
 
-    /// Compute the data that the partner signs (update content only, no operator signature).
+    /// Compute the data that the co-signer signs (update content only, no operator signature).
     ///
-    /// Partner signs: message || message_type || sequence || prev_hash
+    /// Co-signer signs: message || message_type || sequence || prev_hash
     /// Does NOT include current_hash — the hash is finalized after co-signing
     /// (it incorporates member_ledger_hash for causal ordering).
-    /// Partner signs ONLY the content, NOT any operator signature.
-    /// This prevents operator from tricking partner into endorsing invalid state.
-    pub fn partner_signing_data(&self) -> Vec<u8> {
+    /// Co-signer signs ONLY the content, NOT any operator signature.
+    /// This prevents operator from tricking co-signer into endorsing invalid state.
+    pub fn cosign_data(&self) -> Vec<u8> {
         let mut data = Vec::new();
         data.extend_from_slice(&self.message);
         data.extend_from_slice(&self.message_type.to_le_bytes());
@@ -1577,40 +1577,40 @@ impl SignedLedgerUpdate {
         data
     }
 
-    /// Compute the data that the operator signs (content + partner signature).
+    /// Compute the data that the operator signs (content + co-signer's signature).
     ///
-    /// Operator signs: partner_signing_data || partner_signature
-    /// This seals the bilateral agreement and proves operator accepted partner's validation.
+    /// Operator signs: cosign_data || cosign_signature
+    /// This seals the bilateral agreement and proves operator accepted co-signer's validation.
     pub fn operator_signing_data(&self) -> Vec<u8> {
-        let mut data = self.partner_signing_data();
-        data.extend_from_slice(&self.partner_signature);
+        let mut data = self.cosign_data();
+        data.extend_from_slice(&self.cosign_signature);
         data
     }
 
-    /// Verify the partner's signature over the update content.
+    /// Verify the co-signer's signature over the update content.
     ///
     /// The co-signer uses BIP-340 tagged hashing:
-    /// `SHA256(SHA256("deposits/cosign") || SHA256("deposits/cosign") || partner_signing_data || member_ledger_hash)`
+    /// `SHA256(SHA256("deposits/cosign") || SHA256("deposits/cosign") || cosign_data || member_ledger_hash)`
     ///
-    /// The partner pubkey must be provided by the caller (from the Ledger).
-    /// For BDK ledgers without a partner, pass None and this returns Ok.
-    pub fn verify_partner_signature(&self, partner_pubkey: Option<&PublicKey>) -> Result<(), String> {
+    /// The co-signer pubkey must be provided by the caller (from the Ledger).
+    /// For BDK ledgers without a co-signer, pass None and this returns Ok.
+    pub fn verify_cosign_signature(&self, partner_pubkey: Option<&PublicKey>) -> Result<(), String> {
         use bitcoin::hashes::{Hash, sha256};
         use bitcoin::secp256k1::{Secp256k1, Message, schnorr::Signature};
 
-        // If no partner pubkey provided (BDK ledger), skip verification
+        // If no co-signer pubkey provided (BDK ledger), skip verification
         let partner_pubkey = match partner_pubkey {
             Some(pk) => pk,
             None => return Ok(()),
         };
 
-        // If no partner signature, skip
-        if self.partner_signature == [0u8; 64] {
+        // If no co-signer signature, skip
+        if self.cosign_signature == [0u8; 64] {
             return Ok(());
         }
 
         let secp = Secp256k1::new();
-        let data = self.partner_signing_data();
+        let data = self.cosign_data();
         let member_hash = self.member_ledger_hash.unwrap_or([0u8; 32]);
 
         // BIP-340 tagged hash: SHA256(tag_hash || tag_hash || data || member_ledger_hash)
@@ -1625,15 +1625,15 @@ impl SignedLedgerUpdate {
         let hash = sha256::Hash::hash(&tagged_input);
         let msg = Message::from_digest(hash.to_byte_array());
 
-        let sig = Signature::from_slice(&self.partner_signature)
-            .map_err(|e| format!("Invalid partner signature format: {}", e))?;
+        let sig = Signature::from_slice(&self.cosign_signature)
+            .map_err(|e| format!("Invalid co-signer signature format: {}", e))?;
 
         let (xonly, _parity) = partner_pubkey.x_only_public_key();
         secp.verify_schnorr(&sig, &msg, &xonly)
-            .map_err(|e| format!("Partner signature verification failed: {}", e))
+            .map_err(|e| format!("Co-signer signature verification failed: {}", e))
     }
 
-    /// Verify the operator's signature over content + partner signature.
+    /// Verify the operator's signature over content + co-signer's signature.
     pub fn verify_operator_signature(&self) -> Result<(), String> {
         use bitcoin::hashes::{Hash, sha256};
         use bitcoin::secp256k1::{Secp256k1, Message, schnorr::Signature};
@@ -1653,21 +1653,21 @@ impl SignedLedgerUpdate {
 
     /// Verify both signatures on this update.
     ///
-    /// The partner pubkey must be provided by the caller (from the Ledger).
-    /// For BDK ledgers without a partner, pass None.
+    /// The co-signer pubkey must be provided by the caller (from the Ledger).
+    /// For BDK ledgers without a co-signer, pass None.
     pub fn verify_signatures(&self, partner_pubkey: Option<&PublicKey>) -> Result<(), String> {
-        self.verify_partner_signature(partner_pubkey)?;
+        self.verify_cosign_signature(partner_pubkey)?;
         self.verify_operator_signature()
     }
 
     /// Check if this update has valid (non-zero) signatures.
     pub fn is_fully_signed(&self) -> bool {
-        self.partner_signature != [0u8; 64] && self.operator_signature != [0u8; 64]
+        self.cosign_signature != [0u8; 64] && self.operator_signature != [0u8; 64]
     }
 
-    /// Check if partner has signed (non-zero signature).
-    pub fn has_partner_signature(&self) -> bool {
-        self.partner_signature != [0u8; 64]
+    /// Check if co-signer has signed (non-zero signature).
+    pub fn has_cosign_signature(&self) -> bool {
+        self.cosign_signature != [0u8; 64]
     }
 
     /// Check if operator has signed (non-zero signature).
@@ -2330,7 +2330,7 @@ mod signed_update_fields {
     pub const SEQUENCE_NUMBER: u64 = 8;
     pub const PREVIOUS_HASH: u64 = 10;
     // 12 was CURRENT_HASH — removed from wire, now derived from content
-    pub const PARTNER_SIGNATURE: u64 = 16;
+    pub const COSIGN_SIGNATURE: u64 = 16;
     pub const OPERATOR_SIGNATURE: u64 = 18;
     pub const BLOCK_HEIGHT: u64 = 20;
     pub const BLOCK_HASH: u64 = 22;
@@ -2349,7 +2349,7 @@ impl TlvEncode for SignedLedgerUpdate {
             .bytes_field(signed_update_fields::PREVIOUS_HASH, &self.previous_hash)
             .u32_field(signed_update_fields::BLOCK_HEIGHT, self.block_height)
             .bytes_field(signed_update_fields::BLOCK_HASH, &self.block_hash)
-            .bytes_field(signed_update_fields::PARTNER_SIGNATURE, &self.partner_signature)
+            .bytes_field(signed_update_fields::COSIGN_SIGNATURE, &self.cosign_signature)
             .bytes_field(signed_update_fields::OPERATOR_SIGNATURE, &self.operator_signature);
         if let Some(ref pk) = self.cosigner_pubkey {
             builder = builder.pubkey_field(signed_update_fields::COSIGNER_PUBKEY, pk);
@@ -2374,7 +2374,7 @@ impl TlvDecode for SignedLedgerUpdate {
             current_hash: [0u8; 32],
             block_height: reader.read_u32_opt(signed_update_fields::BLOCK_HEIGHT)?.unwrap_or(0),
             block_hash: reader.read_bytes_opt(signed_update_fields::BLOCK_HASH)?.unwrap_or([0u8; 32]),
-            partner_signature: reader.read_bytes(signed_update_fields::PARTNER_SIGNATURE)?,
+            cosign_signature: reader.read_bytes(signed_update_fields::COSIGN_SIGNATURE)?,
             operator_signature: reader.read_bytes(signed_update_fields::OPERATOR_SIGNATURE)?,
             cosigner_pubkey: reader.read_pubkey_opt(signed_update_fields::COSIGNER_PUBKEY)?,
             member_ledger_hash: reader.read_bytes_opt(signed_update_fields::MEMBER_LEDGER_HASH)?,
@@ -2894,7 +2894,7 @@ mod tests {
             current_hash: [0u8; 32],
             block_height: 0,
             block_hash: [0u8; 32],
-            partner_signature: [0u8; 64],
+            cosign_signature: [0u8; 64],
             operator_signature: [0u8; 64],
             cosigner_pubkey: None,
             member_ledger_hash: None,
@@ -2917,29 +2917,29 @@ mod tests {
             current_hash: [0u8; 32],
             block_height: 0,
             block_hash: [0u8; 32],
-            partner_signature: [0u8; 64],
+            cosign_signature: [0u8; 64],
             operator_signature: [0u8; 64],
             cosigner_pubkey: None,
             member_ledger_hash: None,
         };
 
         // Test signing data generation
-        let partner_data = update.partner_signing_data();
-        assert!(!partner_data.is_empty());
+        let cosign_data = update.cosign_data();
+        assert!(!cosign_data.is_empty());
 
         let operator_data = update.operator_signing_data();
-        // Operator data includes partner_signature
-        assert!(operator_data.len() > partner_data.len());
-        assert_eq!(operator_data.len(), partner_data.len() + 64);
+        // Operator data includes cosign_signature
+        assert!(operator_data.len() > cosign_data.len());
+        assert_eq!(operator_data.len(), cosign_data.len() + 64);
 
         // Test signature status checks
         assert!(!update.is_fully_signed());
-        assert!(!update.has_partner_signature());
+        assert!(!update.has_cosign_signature());
         assert!(!update.has_operator_signature());
 
         // Set non-zero signatures and check
-        update.partner_signature = [0xaa; 64];
-        assert!(update.has_partner_signature());
+        update.cosign_signature = [0xaa; 64];
+        assert!(update.has_cosign_signature());
         assert!(!update.is_fully_signed());
 
         update.operator_signature = [0xbb; 64];

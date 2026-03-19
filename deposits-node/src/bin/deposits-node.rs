@@ -1415,7 +1415,7 @@ async fn ledger_history(args: &[String]) -> Result<(), Box<dyn std::error::Error
         let curr = &update.current_hash;
 
         // Determine signature status and signer
-        let has_partner_sig = update.partner_signature != [0u8; 64];
+        let has_partner_sig = update.cosign_signature != [0u8; 64];
         let has_operator_sig = update.operator_signature != [0u8; 64];
         let sig_status = format!("[{}{}]",
             if has_operator_sig { "O" } else { "·" },
@@ -4801,7 +4801,7 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
                 timestamp,
                 block_height: 0,
                 block_hash: [0u8; 32],
-                partner_signature: [0u8; 64],
+                cosign_signature: [0u8; 64],
                 operator_signature,
                 cosigner_pubkey: None,
                 member_ledger_hash: None,
@@ -4859,7 +4859,7 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
                 timestamp,
                 block_height: 0,
                 block_hash: [0u8; 32],
-                partner_signature: [0u8; 64],
+                cosign_signature: [0u8; 64],
                 operator_signature,
                 cosigner_pubkey: None,
                 member_ledger_hash: None,

@@ -61,10 +61,10 @@ types:
       When a quorum member co-signs, their ledger's tip hash is included in
       current_hash, creating causal ordering across ledgers.
 
-      Co-signing: the partner signs SHA256(tag || tag || partner_signing_data || member_ledger_hash)
-      where tag = SHA256("deposits/cosign") and partner_signing_data =
+      Co-signing: the co-signer signs SHA256(tag || tag || cosign_data || member_ledger_hash)
+      where tag = SHA256("deposits/cosign") and cosign_data =
       message || message_type || sequence || previous_hash.
-      Note: current_hash is NOT in partner_signing_data — it is derived after co-signing.
+      Note: current_hash is NOT in cosign_data - it is derived after co-signing.
     seq:
       - id: records
         type: tlv_record
@@ -88,7 +88,7 @@ types:
       previous_hash:
         doc: "32-byte chain hash of the previous update (type 10)"
         value: "records[5].value"
-      partner_signature:
+      cosign_signature:
         doc: "64-byte ECDSA co-signature from quorum member (type 16)"
         value: "records[6].value"
       operator_signature:

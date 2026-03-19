@@ -844,7 +844,7 @@ impl LedgerConformanceValidator {
 
         for update in &export.updates {
             let has_operator = update.operator_signature != [0u8; 64];
-            let has_partner = update.partner_signature != [0u8; 64];
+            let has_partner = update.cosign_signature != [0u8; 64];
 
             if has_operator && has_partner {
                 // Verify signatures if we have the keys
