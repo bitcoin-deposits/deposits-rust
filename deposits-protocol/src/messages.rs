@@ -491,8 +491,6 @@ pub enum LedgerOperation {
         operator_id: PublicKey,
         /// Reserves identifier (UTXO address for BDK, partner pubkey string for LDK)
         reserves_id: String,
-        /// Stable ledger address for continuity across reassignments
-        ledger_address: String,
         /// Block height when this ledger was opened (used in ledger_id computation)
         genesis_block: u32,
         /// Block height after which collateral requirements are enforced (0 = immediate)
@@ -1453,10 +1451,9 @@ impl BinaryCodec for LedgerOperation {
     fn write_to<W: Write>(&self, w: &mut W) -> Result<(), CodecError> {
         write_u8(w, self.discriminant())?;
         match self {
-            Self::LedgerOpen { operator_id, reserves_id, ledger_address, genesis_block, collateral_enforcement_block, reserves_amount } => {
+            Self::LedgerOpen { operator_id, reserves_id, genesis_block, collateral_enforcement_block, reserves_amount } => {
                 write_pubkey(w, operator_id)?;
                 write_string(w, reserves_id)?;
-                write_string(w, ledger_address)?;
                 write_u32(w, *genesis_block)?;
                 write_u64(w, *collateral_enforcement_block)?;
                 write_u64(w, *reserves_amount)?;
@@ -1708,13 +1705,12 @@ impl BinaryCodec for LedgerOperation {
             1 => {
                 let operator_id = read_pubkey(r)?;
                 let reserves_id = read_string(r)?;
-                let ledger_address = read_string(r)?;
                 let genesis_block = read_u32(r)?;
                 let collateral_enforcement_block = read_u64(r)?;
                 // reserves_amount added later; default to 0 for legacy data
                 let reserves_amount = read_u64(r).unwrap_or(0);
                 Ok(Self::LedgerOpen {
-                    operator_id, reserves_id, ledger_address, genesis_block,
+                    operator_id, reserves_id, genesis_block,
                     collateral_enforcement_block, reserves_amount,
                 })
             }
@@ -2681,7 +2677,6 @@ mod ledger_op_tlv {
     // LedgerOpen fields
     pub const OPERATOR_ID: u64 = 56;
     pub const RESERVES_ID: u64 = 58;
-    pub const LEDGER_ADDRESS: u64 = 60;
     pub const RESERVES_AMOUNT: u64 = 62;
     pub const ENFORCEMENT_BLOCK: u64 = 64;
     pub const GENESIS_BLOCK: u64 = 96;
@@ -2762,11 +2757,10 @@ impl TlvEncode for LedgerOperation {
         let mut builder = TlvBuilder::new().u8_field(DISCRIMINANT, self.discriminant());
 
         match self {
-            Self::LedgerOpen { operator_id, reserves_id, ledger_address, genesis_block, collateral_enforcement_block, reserves_amount } => {
+            Self::LedgerOpen { operator_id, reserves_id, genesis_block, collateral_enforcement_block, reserves_amount } => {
                 builder = builder
                     .pubkey_field(OPERATOR_ID, operator_id)
                     .string_field(RESERVES_ID, reserves_id)
-                    .string_field(LEDGER_ADDRESS, ledger_address)
                     .u32_field(GENESIS_BLOCK, *genesis_block)
                     .u64_field(ENFORCEMENT_BLOCK, *collateral_enforcement_block)
                     .u64_field(RESERVES_AMOUNT, *reserves_amount);
@@ -3020,7 +3014,6 @@ impl TlvDecode for LedgerOperation {
             1 => Ok(Self::LedgerOpen {
                 operator_id: reader.read_pubkey(OPERATOR_ID)?,
                 reserves_id: reader.read_string(RESERVES_ID)?,
-                ledger_address: reader.read_string(LEDGER_ADDRESS)?,
                 genesis_block: reader.read_u32_opt(GENESIS_BLOCK)?.unwrap_or(0),
                 collateral_enforcement_block: reader.read_u64_opt(ENFORCEMENT_BLOCK)?.unwrap_or(0),
                 reserves_amount: reader.read_u64_opt(RESERVES_AMOUNT)?.unwrap_or(0),

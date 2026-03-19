@@ -837,7 +837,6 @@ impl DepositsHandler {
                     reserves_address.clone(),
                     role,
                     vec![],
-                    reserves_address.clone(), // Use reserves_address as ledger_address for BDK
                     genesis_block,
                 )))
             })
@@ -856,7 +855,6 @@ impl DepositsHandler {
                 let operation = deposits_core::messages::LedgerOperation::LedgerOpen {
                     operator_id: operator,
                     reserves_id: reserves_address.clone(),
-                    ledger_address: reserves_address.clone(),
                     genesis_block,
                     collateral_enforcement_block: 0, // Default to immediate enforcement
                     reserves_amount: reserves_balance,

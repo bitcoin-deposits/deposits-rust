@@ -1635,8 +1635,6 @@ pub struct LedgerExportResponseMsg {
     pub operator_id: PublicKey,
     /// Reserves identifier for the ledger.
     pub reserves_id: String,
-    /// Ledger address.
-    pub ledger_address: String,
     /// Protocol version.
     pub version: u32,
     /// Export timestamp.
@@ -1657,7 +1655,6 @@ impl WireEncode for LedgerExportResponseMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
         write_pubkey(writer, &self.operator_id)?;
         write_string(writer, &self.reserves_id)?;
-        write_string(writer, &self.ledger_address)?;
         write_u32(writer, self.version)?;
         write_u64(writer, self.exported_at)?;
         write_u32(writer, self.block_height)?;
@@ -1675,7 +1672,6 @@ impl WireDecode for LedgerExportResponseMsg {
     fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
         let operator_id = read_pubkey(reader)?;
         let reserves_id = read_string(reader)?;
-        let ledger_address = read_string(reader)?;
         let version = read_u32(reader)?;
         let exported_at = read_u64(reader)?;
         let block_height = read_u32(reader)?;
@@ -1689,7 +1685,6 @@ impl WireDecode for LedgerExportResponseMsg {
         Ok(Self {
             operator_id,
             reserves_id,
-            ledger_address,
             version,
             exported_at,
             block_height,
@@ -1791,7 +1786,6 @@ mod tests {
         let msg = LedgerExportResponseMsg {
             operator_id: test_pubkey(1),
             reserves_id: test_pubkey(2).to_string(),
-            ledger_address: "tb1q...".to_string(),
             version: 1,
             exported_at: 1700000000,
             block_height: 100_000,
@@ -1810,7 +1804,6 @@ mod tests {
         let msg = LedgerExportResponseMsg {
             operator_id: test_pubkey(1),
             reserves_id: test_pubkey(2).to_string(),
-            ledger_address: "".to_string(),
             version: 1,
             exported_at: 1700000000,
             block_height: 100_000,

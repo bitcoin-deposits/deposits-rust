@@ -172,7 +172,6 @@ types:
   # Ledger fields:
   #   56  = operator_id (33 bytes)
   #   58  = reserves_id (string)
-  #   60  = ledger_address (string)
   #   62  = reserves_amount (u64)
   #   64  = enforcement_block (u64)
   #   96  = genesis_block (u32)

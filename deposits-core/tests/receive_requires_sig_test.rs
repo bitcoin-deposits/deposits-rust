@@ -25,7 +25,6 @@ fn make_ledger() -> Ledger {
     let state = LedgerState::new(
         test_pubkey(),
         "bcrt1qtest".to_string(),
-        "bcrt1qaddr".to_string(),
         0,
     );
     Ledger {

@@ -1074,8 +1074,6 @@ pub struct LedgerState {
     /// Used to distinguish reserves when multiple share the same P2WSH address.
     #[serde(default)]
     pub reserves_outpoint: Option<String>,
-    /// Ledger address (as string).
-    pub ledger_address: String,
     /// All deposits in this ledger, keyed by deposit_id.
     #[serde(with = "serde_deposit_id_map")]
     pub deposits: HashMap<DepositId, Deposit>,
@@ -1193,8 +1191,8 @@ impl LedgerState {
     }
 
     /// Create a new empty ledger state.
-    pub fn new(operator_key: PublicKey, reserves_key: String, ledger_address: String, genesis_block: u32) -> Self {
-        Self::with_enforcement_block(operator_key, reserves_key, ledger_address, genesis_block, None)
+    pub fn new(operator_key: PublicKey, reserves_key: String, genesis_block: u32) -> Self {
+        Self::with_enforcement_block(operator_key, reserves_key, genesis_block, None)
     }
 
     /// Create a new ledger state with explicit collateral enforcement block.
@@ -1204,7 +1202,6 @@ impl LedgerState {
     pub fn with_enforcement_block(
         operator_key: PublicKey,
         reserves_key: String,
-        ledger_address: String,
         genesis_block: u32,
         collateral_enforcement_block: Option<u64>,
     ) -> Self {
@@ -1215,7 +1212,6 @@ impl LedgerState {
             operator_key,
             reserves_key,
             reserves_outpoint: None,
-            ledger_address,
             deposits: HashMap::new(),
             reserves: ReservesOutput::default(),
             pending_invoice: None,
@@ -2870,7 +2866,7 @@ mod tests {
     fn test_ledger_state() {
         let op = test_pubkey();
         let partner = test_pubkey();
-        let mut state = LedgerState::new(op, partner.to_string(), "tb1q...".to_string(), 0);
+        let mut state = LedgerState::new(op, partner.to_string(), 0);
 
         assert_eq!(state.total_deposit_balance(), 0);
         assert_eq!(state.reserves_amount(), 0);
@@ -3103,7 +3099,7 @@ mod tests {
     fn test_ledger_state_collateral_tracking() {
         let op = test_pubkey();
         let partner = test_pubkey_2();
-        let mut state = LedgerState::new(op, partner.to_string(), "tb1q...".to_string(), 0);
+        let mut state = LedgerState::new(op, partner.to_string(), 0);
 
         // Add quorum members
         let collateral1 = test_pubkey_2();

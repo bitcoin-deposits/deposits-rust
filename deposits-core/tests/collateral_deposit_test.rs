@@ -12,7 +12,7 @@ fn test_pubkey() -> bitcoin::secp256k1::PublicKey {
 }
 
 fn make_ledger() -> Ledger {
-    let state = LedgerState::new(test_pubkey(), "bcrt1qtest".to_string(), "bcrt1qaddr".to_string(), 0);
+    let state = LedgerState::new(test_pubkey(), "bcrt1qtest".to_string(), 0);
     Ledger { state, role: LedgerRole::Operator, history: Vec::new() }
 }
 

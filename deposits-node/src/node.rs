@@ -857,14 +857,14 @@ impl Node {
             // Find LedgerOpen to get metadata
             let ledger_open = updates.iter().find_map(|u| {
                 if let Ok(op) = LedgerOperation::tlv_decode(&u.message) {
-                    if let LedgerOperation::LedgerOpen { operator_id, reserves_id, ledger_address, genesis_block, .. } = op {
-                        return Some((operator_id, reserves_id, ledger_address, genesis_block));
+                    if let LedgerOperation::LedgerOpen { operator_id, reserves_id, genesis_block, .. } = op {
+                        return Some((operator_id, reserves_id, genesis_block));
                     }
                 }
                 None
             });
 
-            let Some((operator_id, reserves_id, ledger_address, genesis_block)) = ledger_open else {
+            let Some((operator_id, reserves_id, genesis_block)) = ledger_open else {
                 tracing::warn!("No LedgerOpen found for ledger {} — cannot import", &ledger_id[..16]);
                 self.imported_joined_ledgers.lock().unwrap().insert(ledger_id.clone());
                 continue;
@@ -957,7 +957,6 @@ impl Node {
                 genesis_block,
                 operator_id,
                 reserves_id,
-                ledger_address,
                 filtered.clone(),
                 block_height,
             );
@@ -1146,14 +1145,14 @@ impl Node {
 
             let ledger_open = updates.iter().find_map(|u| {
                 if let Ok(op) = LedgerOperation::tlv_decode(&u.message) {
-                    if let LedgerOperation::LedgerOpen { operator_id, reserves_id, ledger_address, genesis_block, .. } = op {
-                        return Some((operator_id, reserves_id, ledger_address, genesis_block));
+                    if let LedgerOperation::LedgerOpen { operator_id, reserves_id, genesis_block, .. } = op {
+                        return Some((operator_id, reserves_id, genesis_block));
                     }
                 }
                 None
             });
 
-            let Some((operator_id, reserves_id, ledger_address, genesis_block)) = ledger_open else {
+            let Some((operator_id, reserves_id, genesis_block)) = ledger_open else {
                 return Err(Error::Protocol("No LedgerOpen in fetched events".into()));
             };
 
@@ -1228,7 +1227,7 @@ impl Node {
 
             let export = LedgerExport::new(
                 ledger_id_bytes, genesis_block, operator_id,
-                reserves_id, ledger_address, filtered.clone(), block_height,
+                reserves_id, filtered.clone(), block_height,
             );
 
             match self.handler.import_ledger(export) {
@@ -10643,7 +10642,7 @@ impl Node {
     /// - Future block: Bootstrap phase (allows cross-establishing collateral)
     ///
     /// For BDK, the ledger is identified by the reserves UTXO address (stored in
-    /// ledger_address). The reserves_id field uses our own pubkey since there is
+    /// reserves_id). The reserves_id field uses our own pubkey since there is
     /// no separate partner node.
     pub fn open_ledger(
         &self,
@@ -10675,7 +10674,7 @@ impl Node {
 
         let reserves_balance = unused.amount;
         let reserves_outpoint = Some(unused.outpoint);
-        let ledger_address = bitcoin::Address::p2wsh(&unused.redeem_script, self.wallet.network()).to_string();
+        let reserves_address = bitcoin::Address::p2wsh(&unused.redeem_script, self.wallet.network()).to_string();
 
         if reserves_balance == 0 {
             return Err(Error::NoReserves);
@@ -10695,8 +10694,8 @@ impl Node {
             None
         };
 
-        // For BDK, use the ledger_address as the reserves_id (identifies the reserves UTXO)
-        let reserves_id = ledger_address.clone();
+        // For BDK, use the reserves address as the reserves_id (identifies the reserves UTXO)
+        let reserves_id = reserves_address;
 
         // Get or create the ledger - this automatically adds LedgerOpen (with reserves_amount)
         // if it's a new ledger for our own operator

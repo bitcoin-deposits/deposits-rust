@@ -2203,13 +2203,13 @@ fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
     if !message.is_empty() {
         if let Ok(op) = LedgerOperation::tlv_decode(message) {
             let (name, details) = match op {
-                LedgerOperation::LedgerOpen { ledger_address, .. } => {
-                    let addr_short = if ledger_address.len() > 20 {
-                        format!("{}..{}", &ledger_address[..8], &ledger_address[ledger_address.len()-6..])
+                LedgerOperation::LedgerOpen { reserves_id, .. } => {
+                    let id_short = if reserves_id.len() > 20 {
+                        format!("{}..{}", &reserves_id[..8], &reserves_id[reserves_id.len()-6..])
                     } else {
-                        ledger_address.clone()
+                        reserves_id.clone()
                     };
-                    ("LedgerOpen", format!("addr:{}", addr_short))
+                    ("LedgerOpen", format!("reserves:{}", id_short))
                 }
                 LedgerOperation::QuorumBegin { reserves_id, amount, first_expiry_block, quorum_members, .. } => {
                     let addr_short = if reserves_id.len() > 20 {

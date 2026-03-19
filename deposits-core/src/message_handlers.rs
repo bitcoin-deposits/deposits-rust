@@ -298,7 +298,6 @@ pub enum ResponseData {
     LedgerExportResponse {
         operator_id: PublicKey,
         reserves_id: String,
-        ledger_address: String,
         version: u32,
         exported_at: u64,
         block_height: u32,
@@ -2380,7 +2379,6 @@ pub fn handle_ledger_export_request<C: HandlerContext>(
         return Ok(HandlerResult::Response(ResponseData::LedgerExportResponse {
             operator_id: msg.operator_id,
             reserves_id: msg.reserves_id.clone(),
-            ledger_address: String::new(),
             version: 1,
             exported_at: crate::now_unix_timestamp(),
             block_height: msg.block_height,
@@ -2399,8 +2397,7 @@ pub fn handle_ledger_export_request<C: HandlerContext>(
             return Ok(HandlerResult::Response(ResponseData::LedgerExportResponse {
                 operator_id: msg.operator_id,
                 reserves_id: msg.reserves_id.clone(),
-                ledger_address: String::new(),
-                version: 1,
+                    version: 1,
                 exported_at: crate::now_unix_timestamp(),
                 block_height: msg.block_height,
                 update_count: 0,
@@ -2423,7 +2420,6 @@ pub fn handle_ledger_export_request<C: HandlerContext>(
         return Ok(HandlerResult::Response(ResponseData::LedgerExportResponse {
             operator_id: msg.operator_id,
             reserves_id: msg.reserves_id.clone(),
-            ledger_address: ledger_guard.state.ledger_address.clone(),
             version: 1,
             exported_at: crate::now_unix_timestamp(),
             block_height: msg.block_height,
@@ -2449,7 +2445,6 @@ pub fn handle_ledger_export_request<C: HandlerContext>(
     Ok(HandlerResult::Response(ResponseData::LedgerExportResponse {
         operator_id: export.operator_id,
         reserves_id: export.reserves_id,
-        ledger_address: export.ledger_address,
         version: export.version,
         exported_at: export.exported_at,
         block_height: export.block_height,
@@ -2476,12 +2471,11 @@ pub fn validate_ledger_export_response(
     response: &ResponseData,
 ) -> Result<crate::validation::ValidationReport, crate::validation::ValidationError> {
     // Extract data from ResponseData
-    let (operator_id, reserves_id, ledger_address, version, exported_at, block_height, update_count, updates_data, success, error_message) =
+    let (operator_id, reserves_id, version, exported_at, block_height, update_count, updates_data, success, error_message) =
         match response {
             ResponseData::LedgerExportResponse {
                 operator_id,
                 reserves_id,
-                ledger_address,
                 version,
                 exported_at,
                 block_height,
@@ -2492,7 +2486,6 @@ pub fn validate_ledger_export_response(
             } => (
                 *operator_id,
                 reserves_id.clone(),
-                ledger_address.clone(),
                 *version,
                 *exported_at,
                 *block_height,
@@ -2568,7 +2561,6 @@ pub fn validate_ledger_export_response(
         genesis_block,
         operator_id,
         reserves_id,
-        ledger_address,
         updates,
         exported_at,
         block_height,
@@ -2708,7 +2700,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger where operator is the operator and we are the partner
-        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = CollateralConsentRequestMsg {
@@ -2779,7 +2771,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger where operator is the operator and we are the partner
-        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = QuorumAddMemberMsg {
@@ -2804,7 +2796,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with the quorum member already added
-        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         ledger.state.quorum_members.push(crate::types::QuorumMember { pubkey: quorum_member, ledger_id: String::new(), min_fee_bps: None, min_fee_fixed: None, max_fee_period: None, collateral_lock_amount: None, collateral_lock_until: None });
         ctx.add_ledger(operator, our_node_id, ledger);
 
@@ -2850,7 +2842,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger without the quorum member
-        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = QuorumRemoveMemberMsg {
@@ -2873,7 +2865,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with the quorum member
-        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         ledger.state.quorum_members.push(crate::types::QuorumMember { pubkey: quorum_member, ledger_id: String::new(), min_fee_bps: None, min_fee_fixed: None, max_fee_period: None, collateral_lock_amount: None, collateral_lock_until: None });
         ctx.add_ledger(operator, our_node_id, ledger);
 
@@ -3166,7 +3158,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger without the deposit
-        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         ledger.state.reserves.amount = 100_000;
         ledger.state.received_collateral_amount = 100_000;
         ctx.add_ledger(operator, our_node_id, ledger);
@@ -3200,7 +3192,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with the deposit
-        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         ledger.state.reserves.amount = 100_000;
         ledger.state.received_collateral_amount = 100_000;
         let deposit = Deposit::from_pubkey(&deposit_pubkey, None);
@@ -3277,7 +3269,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with a different deposit
-        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         let deposit = Deposit::from_pubkey(&other_deposit, None);
         ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
@@ -3306,7 +3298,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with a deposit that has low balance
-        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         let mut deposit = Deposit::from_pubkey(&deposit_pubkey, None);
         deposit.balance = 10_000; // Low balance
         ledger.state.deposits.insert(deposit.deposit_id, deposit);
@@ -3336,7 +3328,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with a deposit that has sufficient balance
-        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         let mut deposit = Deposit::from_pubkey(&deposit_pubkey, None);
         deposit.balance = 100_000;
         ledger.state.deposits.insert(deposit.deposit_id, deposit);
@@ -3397,7 +3389,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with the deposit
-        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         let deposit = Deposit::from_pubkey(&deposit_pubkey, None);
         ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
@@ -3432,7 +3424,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with the deposit
-        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         let mut deposit = Deposit::from_pubkey(&deposit_pubkey, None);
         deposit.balance = 100_000;
         ledger.state.deposits.insert(deposit.deposit_id, deposit);
@@ -3507,7 +3499,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with the deposit
-        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         let deposit = Deposit::from_pubkey(&deposit_pubkey, None);
         ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
@@ -3536,7 +3528,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with a different deposit
-        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         let deposit = Deposit::from_pubkey(&other_deposit, None);
         ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
@@ -3564,7 +3556,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with the deposit
-        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         let deposit = Deposit::from_pubkey(&deposit_pubkey, None);
         ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
@@ -3644,7 +3636,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger
-        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = DepositOpenMsg {
@@ -3672,7 +3664,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with the deposit already added
-        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         let deposit = Deposit::from_pubkey(&deposit_pubkey, None);
         ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
@@ -3702,7 +3694,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger
-        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let fees = FeeStructure {
@@ -3736,7 +3728,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger
-        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         // Invalid fee structure with zero frequency
@@ -3812,7 +3804,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with a deposit that has zero balance
-        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         let deposit = Deposit::from_pubkey(&deposit_pubkey, None); // balance=0 by default
         ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
@@ -3838,7 +3830,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with a deposit that has non-zero balance
-        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         let mut deposit = Deposit::from_pubkey(&deposit_pubkey, None);
         deposit.balance = 50_000; // Non-zero balance
         ledger.state.deposits.insert(deposit.deposit_id, deposit);
@@ -3865,7 +3857,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with a deposit that has locked balance
-        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         let mut deposit = Deposit::from_pubkey(&deposit_pubkey, None);
         deposit.locked_balance = 10_000; // Has locked funds
         ledger.state.deposits.insert(deposit.deposit_id, deposit);
@@ -3890,7 +3882,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger without the deposit (already closed)
-        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = DepositCloseMsg {
@@ -3961,7 +3953,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger without the deposit
-        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = FeeChangeMsg {
@@ -3986,7 +3978,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with the deposit
-        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         let deposit = Deposit::from_pubkey(&deposit_pubkey, None);
         ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
@@ -4019,7 +4011,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with the deposit
-        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         let deposit = Deposit::from_pubkey(&deposit_pubkey, None);
         ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
@@ -4053,7 +4045,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with the deposit
-        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         let deposit = Deposit::from_pubkey(&deposit_pubkey, None);
         ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
@@ -4130,7 +4122,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with no reserves
-        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = ReservesAddOutputMsg {
@@ -4159,7 +4151,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with no reserves
-        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = ReservesAddOutputMsg {
@@ -4183,7 +4175,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger that already has reserves
-        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         ledger.state.reserves.amount = 100_000;
         ledger.state.reserves.spend_to = spend_to;
         ctx.add_ledger(operator, our_node_id, ledger);
@@ -4251,7 +4243,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with reserves but no deposits
-        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         ledger.state.reserves.amount = 100_000;
         ledger.state.reserves.spend_to = spend_to;
         ctx.add_ledger(operator, our_node_id, ledger);
@@ -4281,7 +4273,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with reserves and active deposits
-        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         ledger.state.reserves.amount = 100_000;
         ledger.state.reserves.spend_to = spend_to;
         let mut deposit = Deposit::from_pubkey(&deposit_pubkey, None);
@@ -4307,7 +4299,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with no reserves (already removed)
-        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = ReservesRemoveOutputMsg {
@@ -4355,7 +4347,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger without the deposit
-        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = FeeCollectMsg {
@@ -4380,7 +4372,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with a deposit that has balance and is eligible for fee collection
-        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         let mut deposit = Deposit::from_pubkey(&deposit_pubkey, Some(FeeStructure {
             annualized_msats: 0,
             annualized_bps: 100,
@@ -4430,7 +4422,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with a deposit where fees were recently collected
-        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         let mut deposit = Deposit::from_pubkey(&deposit_pubkey, Some(FeeStructure {
             annualized_msats: 0,
             annualized_bps: 100,
@@ -4500,7 +4492,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with a deposit that has balance
-        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         let mut deposit = Deposit::from_pubkey(&deposit_pubkey, None);
         deposit.balance = 100_000; // Has balance
         ledger.state.deposits.insert(deposit.deposit_id, deposit);
@@ -4526,7 +4518,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with a deposit that has locked balance
-        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         let mut deposit = Deposit::from_pubkey(&deposit_pubkey, None);
         deposit.balance = 0;
         deposit.locked_balance = 50_000; // Has locked balance
@@ -4550,7 +4542,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create an empty ledger
-        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = LedgerCloseMsg {
@@ -4590,7 +4582,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with zero-balance deposits
-        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         let deposit = Deposit::from_pubkey(&deposit_pubkey, None); // Balance defaults to 0
         ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
@@ -4639,7 +4631,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger without the deposit
-        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = ReceivingCosignInvoiceMsg {
@@ -4668,7 +4660,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with a deposit
-        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         let deposit = Deposit::from_pubkey(&deposit_pubkey, None);
         ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ledger.state.reserves.amount = 200_000;
@@ -4701,7 +4693,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with a deposit, sufficient reserves, and collateral
-        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         let deposit = Deposit::from_pubkey(&deposit_pubkey, None);
         ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ledger.state.reserves.amount = 200_000;
@@ -4758,7 +4750,7 @@ mod tests {
         let mut ctx = TestContext::new(our_node_id);
 
         // Create a ledger with a deposit but insufficient reserves
-        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
+        let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         let deposit = Deposit::from_pubkey(&deposit_pubkey, None);
         ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ledger.state.reserves.amount = 50_000; // Only 50k reserves

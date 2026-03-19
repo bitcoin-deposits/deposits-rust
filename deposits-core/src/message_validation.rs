@@ -954,7 +954,6 @@ mod tests {
             our_node_id.to_string(),
             LedgerRole::Partner,
             vec![],
-            "tb1qtest".to_string(),
             0,
         );
         ctx.add_ledger(operator, our_node_id.to_string(), ledger);
@@ -1042,7 +1041,6 @@ mod tests {
             our_node_id.to_string(),
             LedgerRole::Partner,
             vec![],
-            "tb1qtest".to_string(),
             0,
         );
         let mut deposit = Deposit::from_pubkey(&deposit_pubkey, None);
@@ -1070,7 +1068,6 @@ mod tests {
             our_node_id.to_string(),
             LedgerRole::Partner,
             vec![],
-            "tb1qtest".to_string(),
             0,
         );
         ctx.add_ledger(operator, our_node_id.to_string(), ledger);

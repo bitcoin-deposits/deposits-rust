@@ -528,8 +528,6 @@ pub struct LedgerExport {
     pub operator_id: PublicKey,
     /// Reserves identifier (UTXO address for BDK, partner pubkey for LDK).
     pub reserves_id: String,
-    /// Ledger address.
-    pub ledger_address: String,
     /// Complete update history (chronologically ordered).
     pub updates: Vec<crate::types::SignedLedgerUpdate>,
     /// Export timestamp.
@@ -545,7 +543,6 @@ impl LedgerExport {
         genesis_block: u32,
         operator_id: PublicKey,
         reserves_id: String,
-        ledger_address: String,
         updates: Vec<crate::types::SignedLedgerUpdate>,
         block_height: u32,
     ) -> Self {
@@ -555,7 +552,6 @@ impl LedgerExport {
             genesis_block,
             operator_id,
             reserves_id,
-            ledger_address,
             updates,
             exported_at: crate::now_unix_timestamp(),
             block_height,
@@ -872,7 +868,6 @@ impl LedgerConformanceValidator {
             export.reserves_id.clone(),
             LedgerRole::Partner,
             Vec::new(),
-            export.ledger_address.clone(),
             export.genesis_block,
         );
 
@@ -1007,7 +1002,7 @@ mod tests {
     }
 
     fn create_test_state(deposit_balance: u64, reserves: u64) -> LedgerState {
-        let mut state = LedgerState::new(test_pubkey(), test_pubkey_2().to_string(), "tb1q...".to_string(), 0);
+        let mut state = LedgerState::new(test_pubkey(), test_pubkey_2().to_string(), 0);
 
         let deposit = create_test_deposit(deposit_balance);
         let deposit_id = deposit.deposit_id;
@@ -1318,7 +1313,6 @@ mod tests {
             genesis_block,
             op,
             "reserves_id".to_string(),
-            "tb1q...".to_string(),
             Vec::new(),
             100,
         );
@@ -1328,7 +1322,6 @@ mod tests {
         assert_eq!(export.genesis_block, genesis_block);
         assert_eq!(export.operator_id, op);
         assert_eq!(export.reserves_id, "reserves_id");
-        assert_eq!(export.ledger_address, "tb1q...");
         assert!(export.updates.is_empty());
         assert_eq!(export.block_height, 100);
         assert!(export.exported_at > 0);
@@ -1344,7 +1337,6 @@ mod tests {
             genesis_block,
             op,
             "reserves_id".to_string(),
-            "tb1q...".to_string(),
             Vec::new(),
             100,
         );
@@ -1373,7 +1365,6 @@ mod tests {
             genesis_block,
             op,
             "reserves_id".to_string(),
-            "tb1q...".to_string(),
             Vec::new(),
             100,
         );
@@ -1472,7 +1463,6 @@ mod tests {
             genesis_block,
             op,
             "reserves_id".to_string(),
-            "tb1q...".to_string(),
             Vec::new(),
             100,
         );

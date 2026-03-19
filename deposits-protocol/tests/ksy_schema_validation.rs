@@ -142,7 +142,6 @@ const QUORUM_MEMBER_SIG: u64 = 46;
 const OPERATOR_SIG: u64 = 48;
 const OPERATOR_ID: u64 = 56;
 const RESERVES_ID: u64 = 58;
-const LEDGER_ADDRESS: u64 = 60;
 const ENFORCEMENT_BLOCK: u64 = 64;
 const TXID: u64 = 66;
 const VOUT: u64 = 68;
@@ -198,7 +197,6 @@ fn schema_ledger_open() {
     validate_schema(1, "LedgerOpen", &[
         (OPERATOR_ID, pubkey_bytes()),
         (RESERVES_ID, str_bytes("bcrt1qtest")),
-        (LEDGER_ADDRESS, str_bytes("bcrt1qaddr")),
         (62, u64_bytes(100_000_000)), // RESERVES_AMOUNT
         (GENESIS_BLOCK, u32_bytes(100)),
         (ENFORCEMENT_BLOCK, u64_bytes(500)),

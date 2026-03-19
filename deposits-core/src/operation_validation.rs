@@ -1136,7 +1136,6 @@ mod tests {
             test_pubkey_2().to_string(),
             LedgerRole::Operator,
             vec![],
-            "test_ledger".to_string(),
             0,
         )
     }
