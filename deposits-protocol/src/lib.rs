@@ -12,6 +12,7 @@ pub mod types;
 pub mod messages;
 pub mod signature_utils;
 pub mod wire_messages;
+pub mod fraud;
 
 /// Kaitai Struct generated parser (for reading raw TLV bytes)
 #[cfg(feature = "kaitai-parser")]
