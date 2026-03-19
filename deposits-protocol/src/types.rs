@@ -1596,7 +1596,7 @@ impl SignedLedgerUpdate {
     /// For BDK ledgers without a partner, pass None and this returns Ok.
     pub fn verify_partner_signature(&self, partner_pubkey: Option<&PublicKey>) -> Result<(), String> {
         use bitcoin::hashes::{Hash, sha256};
-        use bitcoin::secp256k1::{Secp256k1, Message, ecdsa::Signature};
+        use bitcoin::secp256k1::{Secp256k1, Message, schnorr::Signature};
 
         // If no partner pubkey provided (BDK ledger), skip verification
         let partner_pubkey = match partner_pubkey {
@@ -1625,27 +1625,29 @@ impl SignedLedgerUpdate {
         let hash = sha256::Hash::hash(&tagged_input);
         let msg = Message::from_digest(hash.to_byte_array());
 
-        let sig = Signature::from_compact(&self.partner_signature)
+        let sig = Signature::from_slice(&self.partner_signature)
             .map_err(|e| format!("Invalid partner signature format: {}", e))?;
 
-        secp.verify_ecdsa(&msg, &sig, partner_pubkey)
+        let (xonly, _parity) = partner_pubkey.x_only_public_key();
+        secp.verify_schnorr(&sig, &msg, &xonly)
             .map_err(|e| format!("Partner signature verification failed: {}", e))
     }
 
     /// Verify the operator's signature over content + partner signature.
     pub fn verify_operator_signature(&self) -> Result<(), String> {
         use bitcoin::hashes::{Hash, sha256};
-        use bitcoin::secp256k1::{Secp256k1, Message, ecdsa::Signature};
+        use bitcoin::secp256k1::{Secp256k1, Message, schnorr::Signature};
 
         let secp = Secp256k1::new();
         let data = self.operator_signing_data();
         let hash = sha256::Hash::hash(&data);
         let msg = Message::from_digest(hash.to_byte_array());
 
-        let sig = Signature::from_compact(&self.operator_signature)
+        let sig = Signature::from_slice(&self.operator_signature)
             .map_err(|e| format!("Invalid operator signature format: {}", e))?;
 
-        secp.verify_ecdsa(&msg, &sig, &self.operator_id)
+        let (xonly, _parity) = self.operator_id.x_only_public_key();
+        secp.verify_schnorr(&sig, &msg, &xonly)
             .map_err(|e| format!("Operator signature verification failed: {}", e))
     }
 

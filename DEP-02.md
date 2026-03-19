@@ -49,7 +49,7 @@ A signed ledger update is broadcast as a Nostr Kind 9100 event. The event conten
 | 6 | ledger_id | 32 | Ledger identifier hash |
 | 8 | sequence_number | 8 | Monotonically increasing sequence (u64 LE) |
 | 10 | previous_hash | 32 | Chain hash of the previous update |
-| 16 | partner_signature | 64 | ECDSA co-signature from quorum member |
+| 16 | partner_signature | 64 | Schnorr (BIP-340) co-signature from quorum member |
 | 18 | operator_signature | 64 | Schnorr signature from operator |
 | 20 | block_height | 4 | Block height at creation (u32, optional) |
 | 22 | block_hash | 32 | Block hash at creation (optional) |
@@ -104,7 +104,7 @@ The co-signer signs a BIP-340 tagged hash:
 
     digest = SHA256(tag || tag || message)
 
-The co-signer signs `digest` with ECDSA using their operator key, producing a 64-byte compact signature.
+The co-signer signs `digest` with Schnorr (BIP-340) using their operator key, producing a 64-byte signature.
 
 Note: `current_hash` is NOT in `partner_signing_data` because it is not finalized until after co-signing (it incorporates the partner signature itself).
 

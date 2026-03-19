@@ -438,8 +438,9 @@ pub async fn process_deposit_withdraw_request(
     let msg_hash = sha256::Hash::hash(signing_message.as_bytes());
     let msg = Message::from_digest(*msg_hash.as_byte_array());
     let secp = Secp256k1::signing_only();
-    let sig = secp.sign_ecdsa(&msg, &deposit_secret);
-    let signature: [u8; 64] = sig.serialize_compact();
+    let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &deposit_secret);
+    let sig = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
+    let signature: [u8; 64] = sig.serialize();
 
     // Create witness from signature
     let depositor_witness = deposits_core::types::DescriptorWitness { stack: vec![signature.to_vec()] };

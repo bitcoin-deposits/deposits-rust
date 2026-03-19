@@ -7063,12 +7063,13 @@ impl Node {
 
         let hash = sha256::Hash::hash(&tagged_input);
 
-        // Sign with ECDSA
+        // Sign with Schnorr (BIP-340)
         let secp = &self.secp;
         let msg = Message::from_digest(hash.to_byte_array());
         let secret = self.wallet.operator_secret();
-        let sig = secp.sign_ecdsa(&msg, &secret);
-        let sig_bytes = sig.serialize_compact();
+        let keypair = bitcoin::secp256k1::Keypair::from_secret_key(secp, &secret);
+        let sig = secp.sign_schnorr(&msg, &keypair);
+        let sig_bytes = sig.serialize();
 
         tracing::info!("Co-signed update seq={} for ledger {}... (member_ledger_hash: {}...)",
             sequence_number, &request.ledger_id[..16], &hex::encode(&member_ledger_hash[..4]));
@@ -7251,12 +7252,13 @@ impl Node {
 
         let hash = sha256::Hash::hash(&tagged_input);
 
-        // Sign with ECDSA
+        // Sign with Schnorr (BIP-340)
         let secp = &self.secp;
         let msg = Message::from_digest(hash.to_byte_array());
         let secret = self.wallet.operator_secret();
-        let sig = secp.sign_ecdsa(&msg, &secret);
-        let sig_bytes = sig.serialize_compact();
+        let keypair = bitcoin::secp256k1::Keypair::from_secret_key(secp, &secret);
+        let sig = secp.sign_schnorr(&msg, &keypair);
+        let sig_bytes = sig.serialize();
 
         tracing::info!("Co-signed offer {} for ledger {}... (member_ledger_hash: {}...)",
             &offer_id_hex[..16], &request.ledger_id[..16], &hex::encode(&member_ledger_hash[..4]));
@@ -7353,13 +7355,14 @@ impl Node {
         let secp = &self.secp;
         let msg = Message::from_digest(hash.to_byte_array());
         let secret = self.wallet.operator_secret();
-        let sig = secp.sign_ecdsa(&msg, &secret);
+        let keypair = bitcoin::secp256k1::Keypair::from_secret_key(secp, &secret);
+        let sig = secp.sign_schnorr(&msg, &keypair);
 
         tracing::info!("Co-signed invoice {} for ledger {}...",
             &payment_hash_hex[..16], &request.ledger_id[..16]);
 
         let result = serde_json::json!({
-            "cosign_signature": hex::encode(sig.serialize_compact()),
+            "cosign_signature": hex::encode(sig.serialize()),
             "cosigner_pubkey": self.node_id_hex.clone(),
             "cosigner_ledger_hash": hex::encode(member_ledger_hash),
         });
@@ -9659,8 +9662,9 @@ impl Node {
                 );
                 let msg_hash = sha256::Hash::hash(msg_str.as_bytes());
                 let msg = Message::from_digest(*msg_hash.as_byte_array());
-                let signature = secp.sign_ecdsa(&msg, deposit_secret);
-                let lock_signature: [u8; 64] = signature.serialize_compact();
+                let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, deposit_secret);
+                let signature = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
+                let lock_signature: [u8; 64] = signature.serialize();
 
                 // Create witness from signature
                 let witness = DescriptorWitness { stack: vec![lock_signature.to_vec()] };

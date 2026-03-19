@@ -303,7 +303,7 @@ impl CollateralProcessor {
         signer: &PublicKey,
     ) -> bool {
         use bitcoin::hashes::{Hash, sha256};
-        use bitcoin::secp256k1::{Secp256k1, Message, ecdsa::Signature};
+        use bitcoin::secp256k1::{Secp256k1, Message, schnorr::Signature};
 
         // Reconstruct the signed message
         let mut preimage = Vec::new();
@@ -315,8 +315,9 @@ impl CollateralProcessor {
         let secp_message = Message::from_digest(message_hash.to_byte_array());
 
         let secp = Secp256k1::new();
-        match Signature::from_compact(signature) {
-            Ok(sig) => secp.verify_ecdsa(&secp_message, &sig, signer).is_ok(),
+        let (xonly, _parity) = signer.x_only_public_key();
+        match Signature::from_slice(signature) {
+            Ok(sig) => secp.verify_schnorr(&sig, &secp_message, &xonly).is_ok(),
             Err(_) => false,
         }
     }
@@ -348,8 +349,9 @@ impl CollateralProcessor {
         let secp_message = Message::from_digest(message_hash.to_byte_array());
 
         let secp = Secp256k1::new();
-        let sig = secp.sign_ecdsa(&secp_message, secret_key);
-        sig.serialize_compact()
+        let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, secret_key);
+        let sig = secp.sign_schnorr_no_aux_rand(&secp_message, &keypair);
+        sig.serialize()
     }
 }
 

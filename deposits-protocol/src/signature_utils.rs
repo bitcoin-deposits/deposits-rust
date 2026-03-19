@@ -10,7 +10,7 @@
 //! This module contains functions for creating and verifying various signatures
 //! used in the deposits protocol, including deposit guarantees and payment authorizations.
 
-use bitcoin::secp256k1::{Message, PublicKey, SecretKey, Secp256k1, ecdsa::Signature};
+use bitcoin::secp256k1::{Message, PublicKey, SecretKey, Secp256k1, Keypair, schnorr::Signature};
 use bitcoin::hashes::{Hash, sha256};
 use crate::error::DepositsError;
 
@@ -34,11 +34,12 @@ pub fn create_deposit_guarantee_signature(
             details: "Failed to create secp256k1 message from hash".to_string(),
         })?;
 
-    // Sign the message
+    // Sign the message with Schnorr (BIP-340)
     let secp = Secp256k1::signing_only();
-    let signature = secp.sign_ecdsa(&secp_message, private_key);
+    let keypair = Keypair::from_secret_key(&secp, private_key);
+    let signature = secp.sign_schnorr_no_aux_rand(&secp_message, &keypair);
 
-    Ok(signature.serialize_compact())
+    Ok(signature.serialize())
 }
 
 /// Verify a deposit guarantee signature
@@ -61,15 +62,16 @@ pub fn verify_deposit_guarantee_signature(
         })?;
 
     // Parse signature
-    let signature = Signature::from_compact(signature)
+    let signature = Signature::from_slice(signature)
         .map_err(|_| DepositsError::ProtocolViolation {
             violation_type: "invalid_signature".to_string(),
             details: "Failed to parse signature".to_string(),
         })?;
 
-    // Verify signature
+    // Verify Schnorr signature
     let secp = Secp256k1::verification_only();
-    match secp.verify_ecdsa(&secp_message, &signature, bob_pubkey) {
+    let (xonly, _parity) = bob_pubkey.x_only_public_key();
+    match secp.verify_schnorr(&signature, &secp_message, &xonly) {
         Ok(_) => Ok(true),
         Err(_) => Ok(false),
     }
@@ -176,11 +178,12 @@ pub fn create_payment_authorization_signature(
             details: "Failed to create secp256k1 message from hash".to_string(),
         })?;
 
-    // Sign the message
+    // Sign the message with Schnorr (BIP-340)
     let secp = Secp256k1::signing_only();
-    let signature = secp.sign_ecdsa(&secp_message, private_key);
+    let keypair = Keypair::from_secret_key(&secp, private_key);
+    let signature = secp.sign_schnorr_no_aux_rand(&secp_message, &keypair);
 
-    Ok(signature.serialize_compact().to_vec())
+    Ok(signature.serialize().to_vec())
 }
 
 /// Create a deposit offer signature (operator's commitment to credit deposit with on-chain funds)
@@ -218,11 +221,12 @@ pub fn create_deposit_offer_signature(
             details: "Failed to create secp256k1 message from hash".to_string(),
         })?;
 
-    // Sign the message
+    // Sign the message with Schnorr (BIP-340)
     let secp = Secp256k1::signing_only();
-    let signature = secp.sign_ecdsa(&secp_message, operator_secret);
+    let keypair = Keypair::from_secret_key(&secp, operator_secret);
+    let signature = secp.sign_schnorr_no_aux_rand(&secp_message, &keypair);
 
-    Ok(signature.serialize_compact())
+    Ok(signature.serialize())
 }
 
 /// Verify a deposit offer signature
@@ -242,16 +246,17 @@ pub fn verify_deposit_offer_signature(
             details: "Failed to create secp256k1 message from hash".to_string(),
         })?;
 
-    // Parse signature
-    let signature = Signature::from_compact(&offer.operator_signature)
+    // Parse Schnorr signature
+    let signature = Signature::from_slice(&offer.operator_signature)
         .map_err(|_| DepositsError::ProtocolViolation {
             violation_type: "invalid_signature".to_string(),
             details: "Failed to parse deposit offer signature".to_string(),
         })?;
 
-    // Verify signature against operator's public key
+    // Verify Schnorr signature against operator's x-only public key
     let secp = Secp256k1::verification_only();
-    match secp.verify_ecdsa(&secp_message, &signature, &offer.operator_id) {
+    let (xonly, _parity) = offer.operator_id.x_only_public_key();
+    match secp.verify_schnorr(&signature, &secp_message, &xonly) {
         Ok(_) => Ok(true),
         Err(_) => Ok(false),
     }

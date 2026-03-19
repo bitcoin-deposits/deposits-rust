@@ -19,7 +19,7 @@ use tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
-use bitcoin::secp256k1::{ecdsa, Message, PublicKey, Secp256k1, SecretKey};
+use bitcoin::secp256k1::{schnorr, Message, PublicKey, Secp256k1, SecretKey};
 use bitcoin::hashes::{sha256, Hash};
 use chrono::Utc;
 use deposits_node::nostr::{NostrTransportBuilder, KIND_LEDGER_UPDATE};
@@ -92,14 +92,13 @@ fn verify_offer_cosignature(
 
     let hash = sha256::Hash::hash(&tagged_input);
 
-    // Verify ECDSA signature
+    // Verify Schnorr (BIP-340) signature
     let secp = Secp256k1::verification_only();
-    let msg = match Message::from_digest(hash.to_byte_array()) {
-        m => m,
-    };
+    let msg = Message::from_digest(hash.to_byte_array());
 
-    match ecdsa::Signature::from_compact(signature) {
-        Ok(sig) => secp.verify_ecdsa(&msg, &sig, cosigner_pubkey).is_ok(),
+    let (xonly, _parity) = cosigner_pubkey.x_only_public_key();
+    match schnorr::Signature::from_slice(signature) {
+        Ok(sig) => secp.verify_schnorr(&sig, &msg, &xonly).is_ok(),
         Err(_) => false,
     }
 }

@@ -138,20 +138,20 @@ pub trait HandlerContext: ValidationContext {
     /// Get our secret key for signing (optional, for handlers that need it)
     fn our_secret_key(&self) -> Option<SecretKey> { None }
 
-    /// Sign arbitrary message content with our node key (ECDSA).
+    /// Sign arbitrary message content with our node key (Schnorr/BIP-340).
     /// Returns 64-byte signature or None if signing unavailable.
     fn sign_message(&self, content: &[u8]) -> Option<[u8; 64]> {
         use bitcoin::hashes::{Hash, sha256};
-        use bitcoin::secp256k1::{Secp256k1, Message};
+        use bitcoin::secp256k1::{Secp256k1, Message, Keypair};
 
         let secret_key = self.our_secret_key()?;
         let hash = sha256::Hash::hash(content);
         let secp_msg = Message::from_digest(hash.to_byte_array());
         let secp = Secp256k1::new();
+        let keypair = Keypair::from_secret_key(&secp, &secret_key);
 
-        match secp.sign_ecdsa(&secp_msg, &secret_key) {
-            sig => Some(sig.serialize_compact())
-        }
+        let sig = secp.sign_schnorr_no_aux_rand(&secp_msg, &keypair);
+        Some(sig.serialize())
     }
 
     /// Sign a sighash with Schnorr (BIP340) for recovery claims.
