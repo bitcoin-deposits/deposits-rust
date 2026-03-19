@@ -2,7 +2,7 @@
 
 ## Abstract
 
-This document specifies the wire format, hash chain structure, and signing protocol for Bitcoin Deposits ledger updates. A ledger is an append-only chain of signed updates, cooperatively maintained by an operator and a quorum of co-signing members. See DEP-04 for the Nostr transport layer.
+This document specifies the wire format, hash chain structure, and signing protocol for Bitcoin Deposits ledger updates. A ledger is an append-only chain of signed updates, cooperatively maintained by an operator and a quorum of co-signing members.
 
 ## Notation
 
@@ -18,8 +18,6 @@ All structures use Type-Length-Value encoding with BigSize varints, compatible w
 
 ### BigSize
 
-A BigSize integer is encoded as:
-
 | Value Range | Encoding |
 |---|---|
 | 0x00..0xfc | 1 byte |
@@ -33,36 +31,28 @@ A BigSize integer is encoded as:
 
 Records are ordered by type number. Even types are required; odd types are optional and may be ignored by parsers that don't understand them.
 
-### TLV Stream
-
-A sequence of TLV records, ordered by ascending type number, concatenated until end of input.
-
 ## Signed Ledger Update
 
-A signed ledger update is broadcast as a Nostr Kind 9100 event. The event content is a base64-encoded TLV stream with the following fields:
+The event content is a base64-encoded TLV stream:
 
 | Type | Name | Size | Description |
 |---|---|---|---|
-| 0 | message | variable | Inner operation (TLV-encoded LedgerOperation) |
+| 0 | message | variable | Inner operation (TLV-encoded) |
 | 2 | message_type | 2 | Protocol message type constant |
 | 4 | operator_id | 33 | Operator's compressed secp256k1 pubkey |
 | 6 | ledger_id | 32 | Ledger identifier hash |
 | 8 | sequence_number | 8 | Monotonically increasing sequence (u64 LE) |
 | 10 | previous_hash | 32 | Chain hash of the previous update |
-| 16 | cosign_signature | 64 | Schnorr (BIP-340) co-signature from quorum member |
-| 18 | operator_signature | 64 | Schnorr (BIP-340) signature from operator |
-| 20 | block_height | 4 | Block height at creation (u32, optional) |
+| 16 | cosign_signature | 64 | Schnorr co-signature from quorum member |
+| 18 | operator_signature | 64 | Schnorr signature from operator |
+| 20 | block_height | 4 | Block height at creation (optional) |
 | 22 | block_hash | 32 | Block hash at creation (optional) |
 | 24 | cosigner_pubkey | 33 | Co-signing quorum member's pubkey (optional) |
-| 26 | member_ledger_hash | 32 | Co-signer's ledger tip hash for causal ordering (optional) |
+| 26 | member_ledger_hash | 32 | Co-signer's ledger tip hash (optional) |
 
-`current_hash` is not on the wire -- it is derived by the receiver from the update content (see Hash Chain). Type 12 is reserved.
+Type 12 is reserved. `current_hash` is derived by the receiver (see Hash Chain).
 
 ## Hash Chain
-
-The hash chain has two levels: `current_hash` commits to the update content and co-signature; `chain_hash` folds in the operator's signature and becomes the next update's `previous_hash`.
-
-### current_hash
 
     current_hash = SHA256(
         sequence_number (8 bytes LE)
@@ -72,162 +62,179 @@ The hash chain has two levels: `current_hash` commits to the update content and 
         [|| cosign_signature (64 bytes)]
     )
 
-`member_ledger_hash` is included when present (co-signed update). `cosign_signature` is included when non-zero. This creates causal ordering: the quorum member's ledger state and their attestation are baked into the hash.
+    chain_hash = SHA256(current_hash (32 bytes) || operator_signature (64 bytes))
 
-### chain_hash
+The operator signs `current_hash`. Their signature is folded into `chain_hash`, which becomes the next update's `previous_hash`. Both signatures are committed to the chain without circularity.
 
-    chain_hash = SHA256(
-        current_hash (32 bytes)
-        || operator_signature (64 bytes)
-    )
-
-The operator signs `current_hash`. Their signature is then folded into `chain_hash`, which becomes the next update's `previous_hash`. This commits the chain to both signatures without circularity.
-
-### Genesis
-
-The first update (sequence 0) has `previous_hash` = `[0; 32]`.
+Optional fields (`member_ledger_hash`, `cosign_signature`) are included in `current_hash` only when present and non-zero. The first update (sequence 0) has `previous_hash` = `[0; 32]`.
 
 ## Signing
 
-### Quorum Member (Co-signer)
+All protocol signatures use Schnorr (BIP-340). On-chain transaction signatures follow bitcoin consensus rules separately.
 
-The quorum member signs a BIP-340 tagged hash:
+### Co-signing
+
+The quorum member signs a tagged hash over the update content and their ledger's tip:
 
     tag = SHA256("deposits/cosign")
-    data = cosign_data || member_ledger_hash
+    digest = SHA256(tag || tag || message || message_type (2 LE) || sequence_number (8 LE) || previous_hash || member_ledger_hash)
 
-    cosign_data =
-        message (operation TLV bytes)
-        || message_type (2 bytes LE)
-        || sequence_number (8 bytes LE)
-        || previous_hash (32 bytes)
-
-    digest = SHA256(tag || tag || data)
-
-The quorum member signs `digest` with Schnorr (BIP-340) using their operator key, producing a 64-byte signature stored in `cosign_signature`.
-
-Note: `current_hash` is NOT in `cosign_data` because it is not finalized until after co-signing (it incorporates the co-signature itself).
+`current_hash` is not signed directly -- it incorporates the co-signature itself, so it cannot be known at signing time.
 
 ### Operator
 
-The operator signs `current_hash` with Schnorr (BIP-340):
+    sig_input = SHA256(sequence_number (8 LE) || previous_hash || current_hash || message)
 
-    sig_input = SHA256(
-        sequence_number (8 bytes LE)
-        || previous_hash (32 bytes)
-        || current_hash (32 bytes)
-        || message (variable)
-    )
+The operator signs `sig_input` after `current_hash` is finalized (which requires the co-signature).
 
-The operator signs `sig_input` with their keypair, producing a 64-byte Schnorr signature stored in `operator_signature`.
+## Operations
 
-## Ledger Operations
-
-The `message` field contains a TLV-encoded operation. The first record (type 0) is always a 1-byte discriminant identifying the operation type.
+The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte discriminant.
 
 ### Discriminants
 
-| Disc | Operation | Description |
+| Disc | Operation | Category |
 |---|---|---|
-| 1 | LedgerOpen | Initialize a new ledger |
-| 10 | ReservesIncrease | Increase reserves amount |
-| 11 | ReservesDecrease | Decrease reserves amount |
-| 12 | ReservesRotate | Rotate reserves to new multisig UTXO |
-| 20 | DepositOpen | Open a new deposit |
-| 21 | DepositClose | Close a deposit |
-| 22 | FeeChange | Announce a fee change |
-| 23 | DepositKeyRotate | Rotate deposit spending key |
-| 30 | InvoiceCredit | Credit deposit from lightning payment |
-| 31 | InvoiceLock | Lock deposit for lightning payment |
-| 32 | InvoiceFail | Fail a locked lightning payment |
-| 33 | InvoiceFulfill | Fulfill a locked lightning payment |
-| 35 | OnchainCredit | Credit deposit from on-chain payment |
-| 36 | OnchainLock | Lock deposit for on-chain withdrawal |
-| 37 | OnchainFail | Fail a locked withdrawal |
-| 38 | OnchainFulfill | Fulfill a locked withdrawal |
-| 40 | CollateralIncrease | Increase collateral amount |
-| 41 | CollateralDecrease | Decrease collateral amount |
-| 42 | CollateralAttestation | Record collateral attestation from quorum member |
-| 43 | QuorumAddMember | Add a quorum member |
-| 44 | QuorumRemoveMember | Remove a quorum member |
-| 45 | CollateralLock | Lock deposit balance as collateral |
-| 46 | QuorumJoin | Record joining another operator's quorum |
-| 50 | FeeCollect | Collect periodic fees from a deposit |
-| 54 | CustodyDispute | Initiate custody dispute |
-| 55 | CustodyAcquire | Winner acquires custody |
-| 56 | CustodyYield | Loser yields custody |
-| 57 | CustodyArmed | Pre-commitment for lottery |
-| 60 | LedgerClose | Close the ledger |
-| 70 | TransferLock | Lock funds for conditional transfer |
-| 71 | TransferComplete | Complete a transfer |
-| 72 | TransferTimeout | Timeout a transfer |
+| 1 | LedgerOpen | Lifecycle |
+| 60 | LedgerClose | Lifecycle |
+| 10 | ReservesIncrease | Reserves |
+| 11 | ReservesDecrease | Reserves |
+| 12 | ReservesRotate | Reserves |
+| 20 | DepositOpen | Deposits |
+| 21 | DepositClose | Deposits |
+| 22 | FeeChange | Deposits |
+| 23 | DepositKeyRotate | Deposits |
+| 30 | InvoiceCredit | Lightning |
+| 31 | InvoiceLock | Lightning |
+| 32 | InvoiceFail | Lightning |
+| 33 | InvoiceFulfill | Lightning |
+| 35 | OnchainCredit | On-chain |
+| 36 | OnchainLock | On-chain |
+| 37 | OnchainFail | On-chain |
+| 38 | OnchainFulfill | On-chain |
+| 40 | CollateralIncrease | Collateral |
+| 41 | CollateralDecrease | Collateral |
+| 42 | CollateralAttestation | Collateral |
+| 43 | QuorumAddMember | Quorum |
+| 44 | QuorumRemoveMember | Quorum |
+| 45 | CollateralLock | Collateral |
+| 46 | QuorumJoin | Quorum |
+| 50 | FeeCollect | Fees |
+| 54 | CustodyDispute | Recovery |
+| 55 | CustodyAcquire | Recovery |
+| 56 | CustodyYield | Recovery |
+| 57 | CustodyArmed | Recovery |
+| 70 | TransferLock | Transfers |
+| 71 | TransferComplete | Transfers |
+| 72 | TransferTimeout | Transfers |
 
-### Common TLV Field Types
+### Operation TLV Fields
 
-| Type | Name | Size | Description |
+#### Common
+
+| Type | Name | Size |
+|---|---|---|
+| 0 | discriminant | 1 |
+| 2 | amount | 8 |
+| 36 | block_height | 4 |
+
+#### Ledger and Reserves
+
+| Type | Name | Size | Used by |
 |---|---|---|---|
-| 0 | discriminant | 1 | Operation type |
-| 2 | amount | 8 | Amount in millisatoshis |
-| 6 | quorum_members | N*33 | Concatenated compressed pubkeys |
-| 8 | new_amount | 8 | New amount (msats) |
-| 10 | pubkey | 33 | Compressed secp256k1 pubkey |
-| 12 | fees | variable | Nested TLV: FeeStructure |
-| 14 | payment_hash | 32 | Payment hash |
-| 16 | invoice | variable | BOLT11 invoice string |
-| 20 | new_fees | variable | Nested TLV: FeeStructure |
-| 36 | block_height | 4 | Block height (u32) |
-| 38 | collateral_operator | 33 | Operator being backed |
-| 44 | quorum_member | 33 | Quorum member pubkey |
-| 56 | operator_id | 33 | Operator pubkey |
-| 58 | reserves_id | variable | Reserves identifier string |
-| 76 | lock_until_block | 4 | Lock expiry block height |
-| 114 | member_ledger_id | variable | Quorum member's ledger ID string |
-| 115 | collateral_ledger_id | variable | Collateral ledger ID string |
-| 200 | deposit_id | 16 | Deposit identifier |
-| 202 | descriptor | variable | Miniscript descriptor string |
-| 210 | nonce | 32 | Transfer nonce |
-| 212 | source_deposit_id | 16 | Source deposit ID |
-| 214 | destination_deposit_id | 16 | Destination deposit ID |
-| 216 | completion_script | variable | Transfer completion script |
-| 218 | timeout_height | 4 | Transfer timeout block height |
-| 220 | transfer_id | 32 | Transfer identifier |
-| 226 | transfer_fees | variable | Nested TLV: TransferFeeSchedule |
-| 229 | is_collateral | 1 | Collateral deposit flag (odd, optional) |
-| 231 | receive_requires_sig | 1 | Receive requires signature (odd, optional) |
-| 233 | min_fee_bps | 2 | Quorum member's min fee rate (odd, optional) |
-| 235 | min_fee_fixed | 8 | Quorum member's min fixed fee (odd, optional) |
-| 237 | max_fee_period | 4 | Quorum member's max fee period (odd, optional) |
-| 239 | collateral_lock_amount | 8 | Quorum member's collateral commitment (odd, optional) |
-| 241 | collateral_lock_until | 4 | Collateral lock expiry (odd, optional) |
-| 243 | fee_change_after_blocks | 4 | Blocks before fees can change (odd, optional) |
-| 245 | fee_change_notice_blocks | 4 | Fee change notice period (odd, optional) |
-| 247 | fee_change_limit_bps | 2 | Max fee change per adjustment (odd, optional) |
-| 249 | effective_block | 4 | Fee change effective block (odd, optional) |
+| 6 | quorum_members | N*33 | ReservesRotate |
+| 8 | new_amount | 8 | ReservesIncrease, ReservesDecrease |
+| 56 | operator_id | 33 | LedgerOpen |
+| 58 | reserves_id | variable | LedgerOpen, ReservesIncrease, ReservesDecrease, ReservesRotate, QuorumJoin |
+| 60 | ledger_address | variable | LedgerOpen |
+| 96 | genesis_block | 4 | LedgerOpen |
 
-### FeeStructure (Nested TLV)
+#### Deposits
 
-| Type | Name | Size | Description |
+| Type | Name | Size | Used by |
 |---|---|---|---|
-| 0 | annualized_fixed | 8 | Fixed fee per year (msats) |
-| 2 | annualized_bps | 2 | Fee rate (basis points per year) |
-| 4 | frequency_blocks | 4 | Collection period (blocks) |
+| 200 | deposit_id | 16 | DepositOpen, DepositClose, FeeChange, DepositKeyRotate, FeeCollect |
+| 202 | descriptor | variable | DepositOpen |
+| 208 | new_descriptor | variable | DepositKeyRotate |
+| 229 | is_collateral | 1 | DepositOpen (odd, optional) |
+| 231 | receive_requires_sig | 1 | DepositOpen (odd, optional) |
 
-### TransferFeeSchedule (Nested TLV)
+#### Fees
 
-| Type | Name | Size | Description |
+| Type | Name | Size | Used by |
 |---|---|---|---|
-| 0 | fixed_sats | 8 | Fixed fee per transfer (sats) |
-| 2 | rate_bps | 2 | Proportional fee (basis points) |
+| 12 | fees | variable | DepositOpen (nested FeeStructure) |
+| 20 | new_fees | variable | FeeChange (nested FeeStructure) |
+| 226 | transfer_fees | variable | DepositOpen (nested TransferFeeSchedule) |
+| 243 | fee_change_after_blocks | 4 | DepositOpen (odd, optional) |
+| 245 | fee_change_notice_blocks | 4 | DepositOpen (odd, optional) |
+| 247 | fee_change_limit_bps | 2 | DepositOpen (odd, optional) |
+| 249 | effective_block | 4 | FeeChange (odd, optional) |
+
+#### Transfers
+
+| Type | Name | Size | Used by |
+|---|---|---|---|
+| 210 | nonce | 32 | TransferLock |
+| 212 | source_deposit_id | 16 | TransferLock |
+| 214 | destination_deposit_id | 16 | TransferLock |
+| 216 | completion_script | variable | TransferLock |
+| 218 | timeout_height | 4 | TransferLock |
+| 220 | transfer_id | 32 | TransferLock, TransferComplete, TransferTimeout |
+| 204 | witness | variable | TransferLock, DepositKeyRotate (nested) |
+| 224 | script_witness | variable | TransferComplete (nested) |
+
+#### Lightning and On-chain
+
+| Type | Name | Size | Used by |
+|---|---|---|---|
+| 14 | payment_hash | 32 | InvoiceCredit, InvoiceLock, InvoiceFulfill |
+| 16 | invoice | variable | DepositOpen (BOLT11 string) |
+| 26 | invoice_id | variable | InvoiceCredit |
+| 66 | txid | 32 | OnchainCredit, OnchainFulfill |
+| 68 | vout | 4 | OnchainCredit |
+| 70 | destination_address | variable | OnchainLock, OnchainFulfill |
+| 72 | withdrawal_id | 32 | OnchainLock, OnchainFail, OnchainFulfill |
+
+#### Quorum and Collateral
+
+| Type | Name | Size | Used by |
+|---|---|---|---|
+| 44 | quorum_member | 33 | QuorumAddMember, QuorumRemoveMember, CollateralAttestation |
+| 38 | collateral_operator | 33 | CollateralAttestation |
+| 76 | lock_until_block | 4 | CollateralLock, CollateralAttestation |
+| 114 | member_ledger_id | variable | QuorumAddMember, QuorumJoin |
+| 115 | collateral_ledger_id | variable | CollateralAttestation |
+| 233 | min_fee_bps | 2 | QuorumAddMember (odd, optional) |
+| 235 | min_fee_fixed | 8 | QuorumAddMember (odd, optional) |
+| 237 | max_fee_period | 4 | QuorumAddMember (odd, optional) |
+| 239 | collateral_lock_amount | 8 | QuorumAddMember (odd, optional) |
+| 241 | collateral_lock_until | 4 | QuorumAddMember (odd, optional) |
+
+### Nested TLV: FeeStructure
+
+| Type | Name | Size |
+|---|---|---|
+| 0 | annualized_fixed | 8 |
+| 2 | annualized_bps | 2 |
+| 4 | frequency_blocks | 4 |
+
+### Nested TLV: TransferFeeSchedule
+
+| Type | Name | Size |
+|---|---|---|
+| 0 | fixed_sats | 8 |
+| 2 | rate_bps | 2 |
 
 ## Related DEPs
 
-- [DEP-03](DEP-03.md): On-chain transaction formats (reserves UTXO, tapscript, rotation)
-- [DEP-04](DEP-04.md): Peer messaging (Nostr transport, event kinds, request/response)
-- [DEP-05](DEP-05.md): Quorum and collateral (membership, obligation limits, attestations)
-- [DEP-06](DEP-06.md): Fraud proofs and recovery (proof types, embedding, causal chain, dispute)
-- [DEP-07](DEP-07.md): Fee schedules (periodic fees, transfer fees, fee changes)
+- [DEP-03](DEP-03.md): On-chain transaction formats
+- [DEP-04](DEP-04.md): Peer messaging
+- [DEP-05](DEP-05.md): Quorum and collateral
+- [DEP-06](DEP-06.md): Fraud proofs and recovery
+- [DEP-07](DEP-07.md): Fee schedules
 
 ## References
 
-- [BOLT #1: Base Protocol](https://github.com/lightning/bolts/blob/master/01-messaging.md) -- TLV encoding
-- [BIP-340: Schnorr Signatures](https://github.com/bitcoin/bips/blob/master/bip-0340.mediawiki) -- Tagged hashing, Schnorr signing
+- [BOLT #1](https://github.com/lightning/bolts/blob/master/01-messaging.md) -- TLV encoding
+- [BIP-340](https://github.com/bitcoin/bips/blob/master/bip-0340.mediawiki) -- Schnorr signatures, tagged hashing
