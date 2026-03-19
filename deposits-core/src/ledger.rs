@@ -419,21 +419,21 @@ impl Ledger {
             });
         }
 
-        // 5. After ReservesRotate, all updates must have valid co-signatures
-        // Check if we've already seen a ReservesRotate in history
-        let has_reserves_rotated = self.history.iter().any(|u| {
-            u.message_type == crate::messages::consts::RESERVES_ROTATE
+        // 5. After QuorumBegin, all updates must have valid co-signatures
+        // Check if we've already seen a QuorumBegin in history
+        let has_quorum_begin = self.history.iter().any(|u| {
+            u.message_type == crate::messages::consts::QUORUM_BEGIN
         });
 
-        if has_reserves_rotated {
-            // After rotation, co-signature is required
+        if has_quorum_begin {
+            // After quorum begin, co-signature is required
             // Exception: CustodyDispute can be signed by any quorum member
             if !matches!(operation, LedgerOperation::CustodyDispute { .. }) {
                 if !update.has_cosign_signature() {
                     return Err(DepositsError::ProtocolViolation {
                         violation_type: "missing_cosignature".to_string(),
                         details: format!(
-                            "Co-signature required after ReservesRotate (seq {})",
+                            "Co-signature required after QuorumBegin (seq {})",
                             update.sequence_number
                         ),
                     });
@@ -1045,30 +1045,6 @@ impl Ledger {
         }
 
         match operation {
-            LedgerOperation::ReservesIncrease { reserves_id: _, new_amount } => {
-                let current = self.reserves_amount();
-                // Allow setting initial reserves (current == 0), otherwise must increase
-                if current > 0 && *new_amount <= current {
-                    return Err(DepositsError::InvalidReservesDecrease(
-                        "New amount must be greater than current".to_string(),
-                    ));
-                }
-            }
-            LedgerOperation::ReservesDecrease { reserves_id: _, new_amount } => {
-                let current = self.reserves_amount();
-                if *new_amount >= current {
-                    return Err(DepositsError::InvalidReservesDecrease(
-                        "New amount must be less than current".to_string(),
-                    ));
-                }
-                let required = self.required_reserves();
-                if *new_amount < required {
-                    return Err(DepositsError::InsufficientReserves {
-                        required,
-                        available: *new_amount,
-                    });
-                }
-            }
             LedgerOperation::DepositOpen { deposit_id, .. } => {
                 if self.state.deposits.contains_key(deposit_id) {
                     return Err(DepositsError::DepositAlreadyExists);
@@ -1241,26 +1217,19 @@ impl Ledger {
                 ledger_address,
                 genesis_block,
                 collateral_enforcement_block,
+                reserves_amount,
             } => {
-                // LedgerOpen sets up the initial ledger identity
-                // Note: reserves amount is set via subsequent ReservesIncrease
+                // LedgerOpen sets up the initial ledger identity and reserves
                 self.state.operator_key = *operator_id;
                 self.state.reserves_key = reserves_id.clone();
                 self.state.ledger_address = ledger_address.clone();
                 self.state.genesis_block = *genesis_block;
                 self.state.ledger_id = LedgerState::compute_ledger_id(operator_id, reserves_id, *genesis_block);
                 self.state.collateral_enforcement_block = Some(*collateral_enforcement_block);
+                self.state.reserves.amount = *reserves_amount;
             }
-            LedgerOperation::ReservesIncrease { reserves_id, new_amount } => {
-                self.state.reserves_key = reserves_id.clone();
-                self.state.reserves.amount = *new_amount;
-            }
-            LedgerOperation::ReservesDecrease { reserves_id, new_amount } => {
-                self.state.reserves_key = reserves_id.clone();
-                self.state.reserves.amount = *new_amount;
-            }
-            LedgerOperation::ReservesRotate { reserves_id, amount, .. } => {
-                // ReservesRotate records the rotation to Taproot
+            LedgerOperation::QuorumBegin { reserves_id, amount, .. } => {
+                // QuorumBegin records the quorum establishment / reserves rotation to Taproot
                 // Update the reserves_id to the new Taproot address
                 self.state.reserves_key = reserves_id.clone();
                 self.state.reserves.amount = *amount;
@@ -2210,16 +2179,11 @@ impl LedgerManager {
 
         let mut hashes = Vec::new();
 
-        // Check if reserves topup is needed
+        // Check if reserves topup is needed — directly adjust reserves amount
+        // (ReservesIncrease operation was removed; reserves are now set at LedgerOpen
+        // and updated at QuorumBegin)
         if let Some(required_amount) = self.reserves_topup_needed(credit_amount) {
-            // Apply reserves increase operation
-            let reserves_update = self.ledger.apply_operation(
-                &LedgerOperation::ReservesIncrease {
-                    reserves_id: self.ledger.state.reserves_key.clone(),
-                    new_amount: required_amount,
-                }
-            )?;
-            hashes.push(reserves_update.current_hash);
+            self.ledger.state.reserves.amount = required_amount;
         }
 
         // Apply the credit operation
@@ -2259,15 +2223,22 @@ mod tests {
     }
 
     #[test]
-    fn test_reserves_increase() {
-        let op = test_pubkey();
+    fn test_reserves_set_at_open() {
+        let op_key = test_pubkey();
         let partner = test_pubkey_2();
-        let mut ledger = Ledger::new_as_operator(op, partner.to_string(), "tb1q...".to_string(), 0);
+        let mut ledger = Ledger::new(op_key, partner.to_string(), LedgerRole::Operator, vec![], "tb1q...".to_string(), 0);
 
-        // Initial reserves are 0, use ReservesIncrease to add funds
-        let op = LedgerOperation::ReservesIncrease { reserves_id: "bcrt1q...".to_string(), new_amount: 100_000 };
+        // Set reserves via LedgerOpen
+        let open = LedgerOperation::LedgerOpen {
+            operator_id: op_key,
+            reserves_id: "bcrt1q...".to_string(),
+            ledger_address: "tb1q...".to_string(),
+            genesis_block: 0,
+            collateral_enforcement_block: 0,
+            reserves_amount: 100_000,
+        };
 
-        let update = ledger.apply_operation(&op).unwrap();
+        let update = ledger.apply_operation(&open).unwrap();
         assert_eq!(update.sequence_number, 1);
         assert_eq!(ledger.reserves_amount(), 100_000);
     }
@@ -2278,10 +2249,8 @@ mod tests {
         let partner = test_pubkey_2();
         let mut ledger = Ledger::new_as_operator(op_key, partner.to_string(), "tb1q...".to_string(), 0);
 
-        // Add reserves first via ReservesIncrease
-        ledger
-            .apply_operation(&LedgerOperation::ReservesIncrease { reserves_id: "bcrt1q...".to_string(), new_amount: 100_000 })
-            .unwrap();
+        // Set reserves directly on state (reserves are now set at LedgerOpen)
+        ledger.state.reserves.amount = 100_000;
 
         // Open deposit
         let user = test_pubkey_2();
@@ -2329,17 +2298,38 @@ mod tests {
         let initial_hash = ledger.hash();
         assert_eq!(initial_hash, [0u8; 32]);
 
-        // Initial reserves are 0, use ReservesIncrease to add funds
-        ledger
-            .apply_operation(&LedgerOperation::ReservesIncrease { reserves_id: "bcrt1q...".to_string(), new_amount: 100_000 })
-            .unwrap();
+        // Apply a LedgerOpen with reserves to change the hash
+        let op_key = test_pubkey();
+        let open = LedgerOperation::LedgerOpen {
+            operator_id: op_key,
+            reserves_id: "bcrt1q...".to_string(),
+            ledger_address: "tb1q...".to_string(),
+            genesis_block: 0,
+            collateral_enforcement_block: 0,
+            reserves_amount: 100_000,
+        };
+        ledger.apply_operation(&open).unwrap();
 
         let hash_after_1 = ledger.hash();
         assert_ne!(hash_after_1, initial_hash);
 
-        ledger
-            .apply_operation(&LedgerOperation::ReservesIncrease { reserves_id: "bcrt1q...".to_string(), new_amount: 200_000 })
-            .unwrap();
+        // Apply a deposit open to change the hash again
+        let deposit_id = crate::types::compute_deposit_id("pk(test_hash)");
+        let deposit_open = LedgerOperation::DepositOpen {
+            deposit_id,
+            descriptor: "pk(test_hash)".to_string(),
+            fees: None,
+            transfer_fees: None,
+            payment_hash: None,
+            invoice: None,
+            cosigner_guarantee_signature: None,
+            is_collateral: false,
+            receive_requires_sig: false,
+            fee_change_after_blocks: None,
+            fee_change_notice_blocks: None,
+            fee_change_limit_bps: None,
+        };
+        ledger.apply_operation(&deposit_open).unwrap();
 
         let hash_after_2 = ledger.hash();
         assert_ne!(hash_after_2, hash_after_1);

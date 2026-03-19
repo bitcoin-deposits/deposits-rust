@@ -94,7 +94,7 @@ mod tests {
         ledger.apply_update(DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             operator_key,
             "test".to_string(),
-            LedgerOperation::ReservesIncrease { reserves_id: "test".to_string(), new_amount: required_reserves },
+            LedgerOperation::LedgerOpen { operator_id: operator_key, reserves_id: "test".to_string(), ledger_address: "test".to_string(), genesis_block: 0, collateral_enforcement_block: 0, reserves_amount: required_reserves },
         ))).expect("Should add reserves");
         println!("   Added {} sats to reserves", required_reserves);
 
@@ -136,7 +136,7 @@ mod tests {
         ledger.apply_update(DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             operator_key,
             "test".to_string(),
-            LedgerOperation::ReservesIncrease { reserves_id: "test".to_string(), new_amount: excess_reserves },
+            LedgerOperation::LedgerOpen { operator_id: operator_key, reserves_id: "test".to_string(), ledger_address: "test".to_string(), genesis_block: 0, collateral_enforcement_block: 0, reserves_amount: excess_reserves },
         ))).expect("Should add excess reserves");
 
         let status = ledger.get_reserves_status();
@@ -186,7 +186,7 @@ mod tests {
         ledger.apply_update(DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             operator_key,
             "test".to_string(),
-            LedgerOperation::ReservesIncrease { reserves_id: "test".to_string(), new_amount: additional_reserves_needed },
+            LedgerOperation::LedgerOpen { operator_id: operator_key, reserves_id: "test".to_string(), ledger_address: "test".to_string(), genesis_block: 0, collateral_enforcement_block: 0, reserves_amount: additional_reserves_needed },
         ))).expect("Should add additional reserves");
 
         ledger.mark_committed_to_channel(hash_from_int(10)); // Allow changes
@@ -243,7 +243,7 @@ mod tests {
         ledger.apply_update(DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             operator_key,
             "test".to_string(),
-            LedgerOperation::ReservesIncrease { reserves_id: "test".to_string(), new_amount: initial_reserves },
+            LedgerOperation::LedgerOpen { operator_id: operator_key, reserves_id: "test".to_string(), ledger_address: "test".to_string(), genesis_block: 0, collateral_enforcement_block: 0, reserves_amount: initial_reserves },
         ))).unwrap();
         ledger.mark_committed_to_channel(hash_from_int(2));
 
@@ -266,7 +266,7 @@ mod tests {
         ledger.apply_update(DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             operator_key,
             "test".to_string(),
-            LedgerOperation::ReservesDecrease { reserves_id: "test".to_string(), new_amount: reduction },
+            LedgerOperation::LedgerOpen { operator_id: operator_key, reserves_id: "test".to_string(), ledger_address: "test".to_string(), genesis_block: 0, collateral_enforcement_block: 0, reserves_amount: initial_reserves - reduction },
         ))).expect("Should reduce reserves");
 
         let status_after = ledger.get_reserves_status();
@@ -285,7 +285,7 @@ mod tests {
         ledger.apply_update(DepositsMessage::LedgerUpdate(LedgerUpdateMsg::new_with_operation(
             operator_key,
             "test".to_string(),
-            LedgerOperation::ReservesDecrease { reserves_id: "test".to_string(), new_amount: 30_000 },
+            LedgerOperation::LedgerOpen { operator_id: operator_key, reserves_id: "test".to_string(), ledger_address: "test".to_string(), genesis_block: 0, collateral_enforcement_block: 0, reserves_amount: 90_000 },
         ))).expect("Message processing succeeds");
 
         let final_status = ledger.get_reserves_status();

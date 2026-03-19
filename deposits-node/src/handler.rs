@@ -782,7 +782,7 @@ impl DepositsHandler {
     /// Create or get a ledger for the given operator/reserves_id pair
     ///
     /// When creating a new ledger for our own operator, automatically adds
-    /// LedgerOpen and ReservesIncrease operations with the UTXO value.
+    /// LedgerOpen operation with the UTXO value as reserves_amount.
     pub fn get_or_create_ledger(
         &self,
         operator: PublicKey,
@@ -793,7 +793,7 @@ impl DepositsHandler {
 
     /// Get or create a ledger with a specific reserves balance and outpoint.
     ///
-    /// If `reserves_balance` is Some, use that for the ReservesIncrease operation
+    /// If `reserves_balance` is Some, use that for the LedgerOpen reserves_amount
     /// instead of the total wallet reserves balance.
     ///
     /// If `outpoint` is Some, include it in the ledger_id computation so multiple
@@ -859,29 +859,13 @@ impl DepositsHandler {
                     ledger_address: reserves_address.clone(),
                     genesis_block,
                     collateral_enforcement_block: 0, // Default to immediate enforcement
+                    reserves_amount: reserves_balance,
                 };
                 if let Err(e) = ledger_guard.append_operation(
                     operation,
                     deposits_core::messages::consts::LEDGER_OPEN_REQUEST,
                 ) {
                     tracing::error!("Failed to append LedgerOpen: {:?}", e);
-                } else {
-                    self.sign_ledger_update(&mut ledger_guard);
-                }
-            }
-
-            // Add ReservesIncrease operation with UTXO value
-            if reserves_balance > 0 {
-                let mut ledger_guard = ledger.write().unwrap();
-                let operation = deposits_core::messages::LedgerOperation::ReservesIncrease {
-                    reserves_id: reserves_address.clone(),
-                    new_amount: reserves_balance,
-                };
-                if let Err(e) = ledger_guard.append_operation(
-                    operation,
-                    deposits_core::messages::consts::RESERVES_INCREASE,
-                ) {
-                    tracing::error!("Failed to append ReservesIncrease: {:?}", e);
                 } else {
                     self.sign_ledger_update(&mut ledger_guard);
                 }

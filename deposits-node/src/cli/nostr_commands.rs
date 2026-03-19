@@ -2552,13 +2552,7 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                     };
                     ("LedgerOpen", format!("addr:{}", addr_short))
                 }
-                LedgerOperation::ReservesIncrease { new_amount, .. } => {
-                    ("ReservesIncrease", format!("{} sat", new_amount))
-                }
-                LedgerOperation::ReservesDecrease { new_amount, .. } => {
-                    ("ReservesDecrease", format!("{} sat", new_amount))
-                }
-                LedgerOperation::ReservesRotate {
+                LedgerOperation::QuorumBegin {
                     reserves_id,
                     amount,
                     quorum_members,
@@ -2575,7 +2569,7 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                         reserves_id.clone()
                     };
                     (
-                        "ReservesRotate",
+                        "QuorumBegin",
                         format!(
                             "addr:{}  amt:{} sat  quorum:{}/{}  expiry:{}",
                             addr_short, amount, quorum_members.len(), quorum_members.len(), first_expiry_block

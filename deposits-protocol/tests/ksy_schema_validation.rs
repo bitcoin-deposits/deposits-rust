@@ -198,30 +198,15 @@ fn schema_ledger_open() {
         (OPERATOR_ID, pubkey_bytes()),
         (RESERVES_ID, str_bytes("bcrt1qtest")),
         (LEDGER_ADDRESS, str_bytes("bcrt1qaddr")),
+        (62, u64_bytes(100_000_000)), // RESERVES_AMOUNT
         (GENESIS_BLOCK, u32_bytes(100)),
         (ENFORCEMENT_BLOCK, u64_bytes(500)),
     ]);
 }
 
 #[test]
-fn schema_reserves_increase() {
-    validate_schema(10, "ReservesIncrease", &[
-        (RESERVES_ID, str_bytes("bcrt1qtest")),
-        (NEW_AMOUNT, u64_bytes(100_000_000)),
-    ]);
-}
-
-#[test]
-fn schema_reserves_decrease() {
-    validate_schema(11, "ReservesDecrease", &[
-        (RESERVES_ID, str_bytes("bcrt1qtest")),
-        (NEW_AMOUNT, u64_bytes(50_000_000)),
-    ]);
-}
-
-#[test]
-fn schema_reserves_rotate() {
-    validate_schema(12, "ReservesRotate", &[
+fn schema_quorum_begin() {
+    validate_schema(12, "QuorumBegin", &[
         (RESERVES_ID, str_bytes("bcrt1qtest")),
         (SPENDING_TXID, hash32()),
         (NEW_OUTPOINT_TXID, hash32()),

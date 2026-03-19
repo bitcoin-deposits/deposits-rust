@@ -97,9 +97,7 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 |---|---|---|
 | 1 | LedgerOpen | Lifecycle |
 | 60 | LedgerClose | Lifecycle |
-| 10 | ReservesIncrease | Reserves |
-| 11 | ReservesDecrease | Reserves |
-| 12 | ReservesRotate | Reserves |
+| 12 | QuorumBegin | Reserves |
 | 20 | DepositOpen | Deposits |
 | 21 | DepositClose | Deposits |
 | 22 | FeeChange | Deposits |
@@ -142,11 +140,11 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 
 | Type | Name | Size | Used by |
 |---|---|---|---|
-| 6 | quorum_members | N*33 | ReservesRotate |
-| 8 | new_amount | 8 | ReservesIncrease, ReservesDecrease |
+| 6 | quorum_members | N*33 | QuorumBegin |
 | 56 | operator_id | 33 | LedgerOpen |
-| 58 | reserves_id | variable | LedgerOpen, ReservesIncrease, ReservesDecrease, ReservesRotate, QuorumJoin |
+| 58 | reserves_id | variable | LedgerOpen, QuorumBegin, QuorumJoin |
 | 60 | ledger_address | variable | LedgerOpen |
+| 62 | reserves_amount | 8 | LedgerOpen |
 | 96 | genesis_block | 4 | LedgerOpen |
 
 #### Deposits

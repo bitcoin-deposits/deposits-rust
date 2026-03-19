@@ -2342,7 +2342,7 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
                                 quorum_members.push(quorum_member);
                             }
                         }
-                        LedgerOperation::ReservesRotate { reserves_id, ledger_hash: lh, .. } => {
+                        LedgerOperation::QuorumBegin { reserves_id, ledger_hash: lh, .. } => {
                             reserves_address = Some(reserves_id);
                             ledger_hash = Some(lh);
                         }
@@ -3462,9 +3462,9 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
     let rotation_txid = rotation_tx.compute_txid();
     println!("  Rotation txid: {}", rotation_txid);
 
-    // Publish ReservesRotate operation
+    // Publish QuorumBegin operation
     println!();
-    println!("Publishing ReservesRotate to Nostr...");
+    println!("Publishing QuorumBegin to Nostr...");
 
     let txid_bytes: [u8; 32] = *rotation_txid.as_ref();
 
@@ -3479,7 +3479,7 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
     let quorum_threshold = (quorum_size / 2) + 1;
     let first_expiry_block = current_block_height + 144; // ~1 day for degraded spending
 
-    let operation = LedgerOperation::ReservesRotate {
+    let operation = LedgerOperation::QuorumBegin {
         reserves_id: new_reserves_address.to_string(),
         spending_txid: txid_bytes,
         new_outpoint_txid: txid_bytes,

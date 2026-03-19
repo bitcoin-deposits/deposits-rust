@@ -114,9 +114,7 @@ types:
 
       Discriminant values:
         1  = LedgerOpen
-        10 = ReservesIncrease
-        11 = ReservesDecrease
-        12 = ReservesRotate
+        12 = QuorumBegin
         20 = DepositOpen
         21 = DepositClose
         22 = FeeChange

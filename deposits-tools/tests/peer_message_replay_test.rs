@@ -459,8 +459,6 @@ mod tests {
                     LedgerOperation::InvoiceLock { amount, .. } => Some(*amount),
                     LedgerOperation::InvoiceFail { amount, .. } => Some(*amount),
                     LedgerOperation::InvoiceFulfill { amount, .. } => Some(*amount),
-                    LedgerOperation::ReservesIncrease { new_amount, .. } => Some(*new_amount),
-                    LedgerOperation::ReservesDecrease { new_amount, .. } => Some(*new_amount),
                     _ => None,
                 }
             }

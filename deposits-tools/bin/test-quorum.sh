@@ -816,7 +816,7 @@ validate_ledgers() {
             local deposit_count=$(echo "$history_output" | grep -c "DepositOpen" 2>/dev/null || echo "0")
             local quorum_add_count=$(echo "$history_output" | grep -c "QuorumAddMember" 2>/dev/null || echo "0")
             local quorum_join_count=$(echo "$history_output" | grep -c "QuorumJoin" 2>/dev/null || echo "0")
-            local reserves_rotate_count=$(echo "$history_output" | grep -c "ReservesRotate" 2>/dev/null || echo "0")
+            local reserves_rotate_count=$(echo "$history_output" | grep -c "QuorumBegin" 2>/dev/null || echo "0")
 
             if [ "$op_count" -gt 0 ]; then
                 test_pass "$op_short L$n: $op_count ops, $deposit_count deposits, $quorum_add_count adds, $quorum_join_count joins, $reserves_rotate_count rotations, $lock_count locks, $attestation_count attestations"

@@ -60,18 +60,10 @@ fn wit() -> DescriptorWitness { DescriptorWitness { stack: vec![vec![0x30; 64]] 
 
 #[test] fn ledger_open() { test_roundtrip(&LedgerOperation::LedgerOpen {
     operator_id: pk(), reserves_id: "bcrt1qtest".into(), ledger_address: "bcrt1qaddr".into(),
-    genesis_block: 100, collateral_enforcement_block: 500,
+    genesis_block: 100, collateral_enforcement_block: 500, reserves_amount: 100_000_000,
 }); }
 
-#[test] fn reserves_increase() { test_roundtrip(&LedgerOperation::ReservesIncrease {
-    reserves_id: "bcrt1qtest".into(), new_amount: 100_000_000,
-}); }
-
-#[test] fn reserves_decrease() { test_roundtrip(&LedgerOperation::ReservesDecrease {
-    reserves_id: "bcrt1qtest".into(), new_amount: 50_000_000,
-}); }
-
-#[test] fn reserves_rotate() { test_roundtrip(&LedgerOperation::ReservesRotate {
+#[test] fn quorum_begin() { test_roundtrip(&LedgerOperation::QuorumBegin {
     reserves_id: "bcrt1qtest".into(), spending_txid: h32(), new_outpoint_txid: h32(),
     new_outpoint_vout: 0, amount: 100_000_000,
     first_expiry_block: 1000, ledger_hash: h32(), quorum_members: vec![pk()],

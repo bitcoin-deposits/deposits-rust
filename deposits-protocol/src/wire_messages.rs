@@ -350,54 +350,6 @@ impl WireDecode for QuorumVoteMsg {
 // Reserves Messages
 // ============================================================================
 
-/// reserves increase message
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ReservesIncreaseMsg {
-    pub reserves_id: String,
-    pub new_amount: u64,
-}
-
-impl WireEncode for ReservesIncreaseMsg {
-    fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
-        write_string(writer, &self.reserves_id)?;
-        write_u64(writer, self.new_amount)?;
-        Ok(())
-    }
-}
-
-impl WireDecode for ReservesIncreaseMsg {
-    fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
-        Ok(Self {
-            reserves_id: read_string(reader)?,
-            new_amount: read_u64(reader)?,
-        })
-    }
-}
-
-/// reserves decrease message
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ReservesDecreaseMsg {
-    pub reserves_id: String,
-    pub new_amount: u64,
-}
-
-impl WireEncode for ReservesDecreaseMsg {
-    fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
-        write_string(writer, &self.reserves_id)?;
-        write_u64(writer, self.new_amount)?;
-        Ok(())
-    }
-}
-
-impl WireDecode for ReservesDecreaseMsg {
-    fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
-        Ok(Self {
-            reserves_id: read_string(reader)?,
-            new_amount: read_u64(reader)?,
-        })
-    }
-}
-
 /// reserves add output message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReservesAddOutputMsg {
@@ -1814,17 +1766,6 @@ mod tests {
         if seed == 0 { bytes[0] = 1; }
         let secret = SecretKey::from_slice(&bytes).unwrap();
         PublicKey::from_secret_key(&secp, &secret)
-    }
-
-    #[test]
-    fn test_reserves_increase_roundtrip() {
-        let msg = ReservesIncreaseMsg {
-            reserves_id: test_pubkey(1).to_string(),
-            new_amount: 100_000,
-        };
-        let bytes = msg.to_wire_bytes();
-        let decoded = ReservesIncreaseMsg::from_wire_bytes(&bytes).unwrap();
-        assert_eq!(msg, decoded);
     }
 
     #[test]

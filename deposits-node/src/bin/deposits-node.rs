@@ -1675,7 +1675,7 @@ async fn ledger_health(args: &[String]) -> Result<(), Box<dyn std::error::Error>
 
         // Reserves status - scan history for rotation (inline to avoid deadlock)
         let has_rotation = ledger.history.iter()
-            .any(|u| u.message_type == consts::RESERVES_ROTATE);
+            .any(|u| u.message_type == consts::QUORUM_BEGIN);
         let reserves_sats = ledger.reserves_amount() / 1000;
         println!("  Reserves:      {} sats (rotated: {})",
             reserves_sats, if has_rotation { "yes" } else { "no" });
@@ -2211,19 +2211,13 @@ fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                     };
                     ("LedgerOpen", format!("addr:{}", addr_short))
                 }
-                LedgerOperation::ReservesIncrease { new_amount, .. } => {
-                    ("ReservesIncrease", format!("{} sat", new_amount))
-                }
-                LedgerOperation::ReservesDecrease { new_amount, .. } => {
-                    ("ReservesDecrease", format!("{} sat", new_amount))
-                }
-                LedgerOperation::ReservesRotate { reserves_id, amount, first_expiry_block, quorum_members, .. } => {
+                LedgerOperation::QuorumBegin { reserves_id, amount, first_expiry_block, quorum_members, .. } => {
                     let addr_short = if reserves_id.len() > 20 {
                         format!("{}..{}", &reserves_id[..8], &reserves_id[reserves_id.len()-6..])
                     } else {
                         reserves_id.clone()
                     };
-                    ("ReservesRotate", format!("addr:{}  amt:{} sat  quorum:{}/{}  expiry:{}",
+                    ("QuorumBegin", format!("addr:{}  amt:{} sat  quorum:{}/{}  expiry:{}",
                         addr_short, amount, quorum_members.len(), quorum_members.len(), first_expiry_block))
                 }
                 LedgerOperation::DepositOpen { deposit_id, .. } => {

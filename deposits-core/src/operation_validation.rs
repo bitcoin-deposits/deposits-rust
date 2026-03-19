@@ -61,73 +61,6 @@ pub fn validate_reserves_add(initial_amount: u64) -> ValidationResult {
     Ok(())
 }
 
-/// Validate a reserves increase operation
-///
-/// Checks:
-/// - New amount is greater than current reserves
-/// - Optional: channel balance check (caller must provide)
-pub fn validate_reserves_increase(
-    current_reserves: u64,
-    new_amount: u64,
-    channel_balance: Option<u64>,
-) -> ValidationResult {
-    if new_amount <= current_reserves {
-        return Err(format!(
-            "New reserves amount {} must be greater than current {}",
-            new_amount, current_reserves
-        ));
-    }
-
-    if let Some(balance) = channel_balance {
-        if new_amount > balance {
-            return Err(format!(
-                "Cannot increase reserves to {} msats: exceeds channel balance {} msats",
-                new_amount, balance
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-/// Validate a reserves decrease operation
-///
-/// Checks:
-/// - New amount is less than current reserves
-/// - New amount still covers required reserves (deposits + max invoice)
-pub fn validate_reserves_decrease(
-    ledger: &Ledger,
-    new_amount: u64,
-) -> ValidationResult {
-    let current = ledger.reserves_amount();
-
-    if new_amount >= current {
-        return Err(format!(
-            "New reserves amount {} must be less than current {}",
-            new_amount, current
-        ));
-    }
-
-    // Calculate minimum required reserves
-    let total_deposits: u64 = ledger.state.deposits.values().map(|d| d.balance).sum();
-    let max_invoice = ledger.state.deposits.values()
-        .flat_map(|d| d.invoices.iter())
-        .map(|i| i.amount)
-        .max()
-        .unwrap_or(0);
-
-    let required = total_deposits.saturating_add(max_invoice);
-
-    if new_amount < required {
-        return Err(format!(
-            "Cannot decrease reserves to {} msats: must maintain at least {} msats (deposits {} + max invoice {})",
-            new_amount, required, total_deposits, max_invoice
-        ));
-    }
-
-    Ok(())
-}
-
 // ============================================================================
 // Payment Validations
 // ============================================================================
@@ -1291,19 +1224,6 @@ mod tests {
 
         // Too large
         assert!(validate_reserves_add(1_000_000_000_000).is_err());
-    }
-
-    #[test]
-    fn test_validate_reserves_increase() {
-        // Valid increase
-        assert!(validate_reserves_increase(1000, 2000, None).is_ok());
-
-        // Not actually increasing
-        assert!(validate_reserves_increase(1000, 1000, None).is_err());
-        assert!(validate_reserves_increase(1000, 500, None).is_err());
-
-        // Exceeds channel balance
-        assert!(validate_reserves_increase(1000, 2000, Some(1500)).is_err());
     }
 
     #[test]

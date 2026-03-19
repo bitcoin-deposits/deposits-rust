@@ -300,7 +300,7 @@ pub struct Node {
     dirty_ledgers: Mutex<std::collections::HashSet<String>>,
 
     /// Cache for has_quorum_reserves: ledger_id → (result, history_len_when_scanned).
-    /// Once a ReservesRotate is found, the result is permanently true (never reverts).
+    /// Once a QuorumBegin is found, the result is permanently true (never reverts).
     /// For false results, the history_len is stored so we only rescan when history grows.
     quorum_reserves_cache: Mutex<HashMap<String, (bool, usize)>>,
 
@@ -585,7 +585,7 @@ impl Node {
     /// Broadcast all ledger updates to Nostr
     ///
     /// Use this when initializing a ledger (e.g., after ledger_open) to broadcast
-    /// all initial operations (LedgerOpen, ReservesIncrease, etc.)
+    /// all initial operations (LedgerOpen, LedgerOpen, etc.)
     pub async fn broadcast_all_updates(&self, ledger_id: &str) -> Result<usize, Error> {
         // Get the ledger by ledger_id
         let ledger_arc = self.handler.ledgers.lock().unwrap()
@@ -3947,7 +3947,7 @@ impl Node {
                             match op {
                                 LedgerOperation::LedgerOpen { operator_id, reserves_id, .. } => {
                                     original_operator = Some(operator_id);
-                                    // Use LedgerOpen reserves_id as fallback if no ReservesRotate
+                                    // Use LedgerOpen reserves_id as fallback if no QuorumBegin
                                     if reserves_address.is_none() {
                                         reserves_address = Some(reserves_id);
                                     }
@@ -3963,7 +3963,7 @@ impl Node {
                                         quorum_members.push(quorum_member);
                                     }
                                 }
-                                LedgerOperation::ReservesRotate { reserves_id, ledger_hash: lh, .. } => {
+                                LedgerOperation::QuorumBegin { reserves_id, ledger_hash: lh, .. } => {
                                     reserves_address = Some(reserves_id);
                                     ledger_hash = Some(lh);
                                 }
@@ -4005,11 +4005,11 @@ impl Node {
                     continue;
                 }
             };
-            // ledger_hash comes from ReservesRotate; fall back to fork's current hash
+            // ledger_hash comes from QuorumBegin; fall back to fork's current hash
             let ledger_hash_val = match ledger_hash {
                 Some(lh) => lh,
                 None => {
-                    // No ReservesRotate found — use the fork ledger's current hash
+                    // No QuorumBegin found — use the fork ledger's current hash
                     let ledgers = self.handler.ledgers.lock().unwrap();
                     if let Some(fork_arc) = ledgers.get(&ledger_key) {
                         let fork = fork_arc.read().unwrap();
@@ -4681,7 +4681,7 @@ impl Node {
             .collect();
         let voter_set = VoterSet::new(our_pubkey, other_voters);
 
-        // Compute quorum parameters for ReservesRotate
+        // Compute quorum parameters for QuorumBegin
         let quorum_size = quorum_members.len() as u8;
         let quorum_threshold = ((quorum_members.len() + 1) / 2) as u8;
         let first_expiry_block = expiry_block;
@@ -4752,8 +4752,8 @@ impl Node {
         let rotate_txid = self.wallet.broadcast(&rotate_tx)?;
         tracing::info!("Rotation TX broadcast: {}", rotate_txid);
 
-        // Publish ReservesRotate operation (convert sats to msats at boundary)
-        let operation = LedgerOperation::ReservesRotate {
+        // Publish QuorumBegin operation (convert sats to msats at boundary)
+        let operation = LedgerOperation::QuorumBegin {
             reserves_id: taproot_output.address.to_string(),
             spending_txid: *outpoint.txid.as_ref(),
             new_outpoint_txid: *rotate_txid.as_ref(),
@@ -4792,7 +4792,7 @@ impl Node {
         let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
         let signed_update = SignedLedgerUpdate {
             message: message_bytes,
-            message_type: deposits_core::messages::consts::RESERVES_ROTATE,
+            message_type: deposits_core::messages::consts::QUORUM_BEGIN,
             operator_signature: operator_sig_bytes,
             cosigner_pubkey: None,
             member_ledger_hash: None,
@@ -4807,9 +4807,9 @@ impl Node {
         };
 
         self.nostr.broadcast_ledger_update(&signed_update).await
-            .map_err(|e| Error::Protocol(format!("Failed to broadcast ReservesRotate: {:?}", e)))?;
+            .map_err(|e| Error::Protocol(format!("Failed to broadcast QuorumBegin: {:?}", e)))?;
 
-        tracing::info!("ReservesRotate published. New reserves at: {}", taproot_output.address);
+        tracing::info!("QuorumBegin published. New reserves at: {}", taproot_output.address);
         Ok(())
     }
 
@@ -9104,7 +9104,7 @@ impl Node {
 
     /// Check if this ledger has had a reserves rotation to quorum-based Taproot.
     ///
-    /// After the first ReservesRotate operation, co-signatures are required for all updates.
+    /// After the first QuorumBegin operation, co-signatures are required for all updates.
     /// This persists through disputes and custody transfers — the quorum co-signing
     /// requirement is permanent once rotation occurs.
     fn has_quorum_reserves(&self, ledger_id: &str) -> bool {
@@ -9122,7 +9122,7 @@ impl Node {
         {
             let cache = self.quorum_reserves_cache.lock().unwrap();
             if let Some(&(cached_result, cached_len)) = cache.get(ledger_id) {
-                // True is permanent (ReservesRotate never reverts)
+                // True is permanent (QuorumBegin never reverts)
                 if cached_result {
                     return true;
                 }
@@ -9138,7 +9138,7 @@ impl Node {
             let ledgers = self.handler.ledgers.lock().unwrap();
             if let Some(ledger_arc) = ledgers.get(ledger_id) {
                 let ledger = ledger_arc.read().unwrap();
-                ledger.history.iter().any(|u| u.message_type == consts::RESERVES_ROTATE)
+                ledger.history.iter().any(|u| u.message_type == consts::QUORUM_BEGIN)
             } else {
                 false
             }
@@ -10695,7 +10695,7 @@ impl Node {
         // For BDK, use the ledger_address as the reserves_id (identifies the reserves UTXO)
         let reserves_id = ledger_address.clone();
 
-        // Get or create the ledger - this automatically adds LedgerOpen and ReservesIncrease
+        // Get or create the ledger - this automatically adds LedgerOpen (with reserves_amount)
         // if it's a new ledger for our own operator
         // Convert reserves_balance from sats to msats at the on-chain boundary
         let reserves_balance_msats = reserves_balance.saturating_mul(1000);
@@ -10890,7 +10890,7 @@ impl Node {
             result.first_expiry_block
         );
 
-        // Append ReservesRotate operation to the ledger for audit trail
+        // Append QuorumBegin operation to the ledger for audit trail
         {
             let block_height = self.wallet.get_block_height().unwrap_or(0);
             let block_hash = [0u8; 32]; // We don't have the block hash yet since tx is just broadcast
@@ -10903,7 +10903,7 @@ impl Node {
             };
 
             // Calculate quorum parameters
-            let operation = LedgerOperation::ReservesRotate {
+            let operation = LedgerOperation::QuorumBegin {
                 reserves_id: result.address.to_string(),
                 spending_txid: txid_bytes,
                 new_outpoint_txid: txid_bytes, // Same tx creates the new output
@@ -10917,13 +10917,13 @@ impl Node {
             let mut ledger = ledger_arc.write().unwrap();
             ledger.append_operation_with_block(
                 operation,
-                deposits_core::messages::consts::RESERVES_ROTATE,
+                deposits_core::messages::consts::QUORUM_BEGIN,
                 block_height,
                 block_hash,
             ).map_err(|e| Error::Protocol(format!("Failed to record reserves rotation: {:?}", e)))?;
 
             tracing::info!(
-                "Appended ReservesRotate operation to ledger: txid={}, quorum={} members",
+                "Appended QuorumBegin operation to ledger: txid={}, quorum={} members",
                 txid,
                 quorum_members.len()
             );

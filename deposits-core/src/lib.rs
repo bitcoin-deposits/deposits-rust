@@ -188,7 +188,7 @@ pub use tlv::{
 };
 pub use operation_validation::{
     // Reserves validations
-    validate_reserves_add, validate_reserves_increase, validate_reserves_decrease,
+    validate_reserves_add,
     // Payment validations
     validate_credit_payment, validate_payment_lock, validate_payment_fulfill, validate_payment_fail,
     // Fee validations
@@ -210,7 +210,7 @@ pub use wire_messages::{
     // Traits
     WireEncode, WireDecode, WireError,
     // Reserves messages
-    ReservesIncreaseMsg, ReservesDecreaseMsg, ReservesAddOutputMsg,
+    ReservesAddOutputMsg,
     ReservesRemoveOutputMsg, ReservesUpdateOutputMsg,
     UpdateReservesMsg, AcceptReservesMsg,
     // Deposit messages
@@ -247,7 +247,6 @@ pub use message_validation::{
     validate_add_deposit_msg, validate_remove_deposit_msg, validate_update_deposit_msg,
     validate_sending_lock_payment_msg, validate_sending_fulfill_payment_msg, validate_sending_fail_payment_msg,
     validate_receiving_credit_payment_msg, validate_reserves_add_output_msg, validate_reserves_remove_msg,
-    validate_reserves_increase_msg, validate_reserves_decrease_msg,
     validate_fee_collect_msg, validate_collateral_increase_msg, validate_collateral_decrease_msg,
     validate_receiving_cosign_invoice_msg, validate_ledger_close_msg,
 };

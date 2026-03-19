@@ -44,7 +44,7 @@
 //!
 //! // Validate individual messages using the context
 //! validate_add_deposit_msg(&context, &msg, sender)?;
-//! validate_reserves_increase_msg(&context, &msg, sender)?;
+//! validate_collateral_increase_msg(&context, &msg, sender)?;
 //! ```
 
 use bitcoin::secp256k1::PublicKey;
@@ -55,8 +55,7 @@ use crate::messages::LedgerOperation;
 use crate::operation_validation::{
     validate_deposit_add, validate_deposit_close, validate_fee_change,
     validate_payment_lock, validate_payment_fulfill, validate_payment_fail,
-    validate_credit_payment, validate_reserves_add, validate_reserves_increase,
-    validate_reserves_decrease, validate_fee_collect,
+    validate_credit_payment, validate_reserves_add, validate_fee_collect,
     validate_collateral_increase, validate_collateral_decrease,
     validate_cosign_invoice, validate_ledger_close,
     // DepositId-based validation functions
@@ -71,7 +70,7 @@ use crate::wire_messages::{
     DepositOpenMsg, DepositCloseMsg, FeeChangeMsg,
     SendingLockPaymentMsg, SendingFulfillPaymentMsg, SendingFailPaymentMsg,
     ReceivingCreditPaymentMsg, ReservesAddOutputMsg, ReservesRemoveOutputMsg,
-    ReservesIncreaseMsg, ReservesDecreaseMsg, FeeCollectMsg,
+    FeeCollectMsg,
     CollateralIncreaseMsg, CollateralDecreaseMsg,
     ReceivingCosignInvoiceMsg, LedgerCloseMsg,
 };
@@ -599,20 +598,6 @@ pub fn validate_ledger_operation<C: ValidationContext>(
                 Err(format!("No channel ledger found for sender {}", sender))
             }
         }
-        LedgerOperation::ReservesIncrease { reserves_id, new_amount } => {
-            let msg = ReservesIncreaseMsg {
-                new_amount: *new_amount,
-                reserves_id: reserves_id.clone(),
-            };
-            validate_reserves_increase_msg(ctx, &msg, sender)
-        }
-        LedgerOperation::ReservesDecrease { reserves_id, new_amount } => {
-            let msg = ReservesDecreaseMsg {
-                new_amount: *new_amount,
-                reserves_id: reserves_id.clone(),
-            };
-            validate_reserves_decrease_msg(ctx, &msg, sender)
-        }
         LedgerOperation::CollateralIncrease { new_amount, block_height } => {
             let msg = CollateralIncreaseMsg {
                 reserves_id: partner_pubkey.to_string(),
@@ -694,7 +679,7 @@ pub fn validate_ledger_operation<C: ValidationContext>(
         LedgerOperation::QuorumRemoveMember { .. } |
         LedgerOperation::CollateralLock { .. } |
         LedgerOperation::QuorumJoin { .. } |
-        LedgerOperation::ReservesRotate { .. } |
+        LedgerOperation::QuorumBegin { .. } |
         LedgerOperation::CustodyDispute { .. } |
         LedgerOperation::CustodyArmed { .. } |
         LedgerOperation::CustodyAcquire { .. } |
@@ -890,47 +875,6 @@ pub fn validate_collateral_decrease_msg<C: ValidationContext>(
             msg.block_height,
             ledger.state.last_collateral_increase_block,
         )
-    } else {
-        Err(format!("No channel ledger found for sender {}", sender))
-    }
-}
-
-/// Validate ReservesIncrease message.
-///
-/// CONSTRAINT: reservesincrease doesn't increase reserves past channel balance
-pub fn validate_reserves_increase_msg<C: ValidationContext>(
-    ctx: &C,
-    msg: &ReservesIncreaseMsg,
-    sender: PublicKey,
-) -> ValidationResult {
-    // Get channel balance for optional constraint check (LDK-specific)
-    let channel_balance = ctx.get_commitment_tx_reserves_amount(sender);
-
-    // Get current reserves
-    if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
-        let ledger = ledger_arc.read().unwrap();
-        validate_reserves_increase(
-            ledger.reserves_amount(),
-            msg.new_amount,
-            channel_balance,
-        )
-    } else {
-        // No ledger - just do basic validation without current reserves check
-        validate_reserves_increase(0, msg.new_amount, channel_balance)
-    }
-}
-
-/// Validate ReservesDecrease message.
-///
-/// CONSTRAINT: reservesdecrease doesn't fall below ledger requirement
-pub fn validate_reserves_decrease_msg<C: ValidationContext>(
-    ctx: &C,
-    msg: &ReservesDecreaseMsg,
-    sender: PublicKey,
-) -> ValidationResult {
-    if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
-        let ledger = ledger_arc.read().unwrap();
-        validate_reserves_decrease(&ledger, msg.new_amount)
     } else {
         Err(format!("No channel ledger found for sender {}", sender))
     }
@@ -1144,34 +1088,6 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_reserves_increase_must_actually_increase() {
-        let our_node_id = create_test_pubkey(1);
-        let operator = create_test_pubkey(2);
-
-        let mut ctx = TestContext::new(our_node_id);
-        let mut ledger = Ledger::new(
-            operator,
-            our_node_id.to_string(),
-            LedgerRole::Partner,
-            vec![],
-            "tb1qtest".to_string(),
-            0,
-        );
-        ledger.state.reserves.amount = 5000;
-        ctx.add_ledger(operator, our_node_id.to_string(), ledger);
-
-        // Try to "increase" to a lower amount - should fail
-        let msg = ReservesIncreaseMsg {
-            new_amount: 4000, // Less than current 5000
-            reserves_id: our_node_id.to_string(),
-        };
-
-        let result = validate_reserves_increase_msg(&ctx, &msg, operator);
-        assert!(result.is_err(), "ReservesIncrease to lower amount should fail");
-        assert!(result.unwrap_err().contains("must be greater than current"));
-    }
-
-    #[test]
     fn test_validate_collateral_decrease_too_soon_after_increase() {
         let our_node_id = create_test_pubkey(1);
         let operator = create_test_pubkey(2);
@@ -1228,40 +1144,6 @@ mod tests {
 
         let result = validate_collateral_decrease_msg(&ctx, &msg, operator);
         assert!(result.is_ok(), "Decrease after reporting period should succeed: {:?}", result);
-    }
-
-    #[test]
-    fn test_validate_reserves_decrease_below_requirement_fails() {
-        let our_node_id = create_test_pubkey(1);
-        let operator = create_test_pubkey(2);
-        let deposit_pubkey = create_test_pubkey(3);
-
-        let mut ctx = TestContext::new(our_node_id);
-        let mut ledger = Ledger::new(
-            operator,
-            our_node_id.to_string(),
-            LedgerRole::Partner,
-            vec![],
-            "tb1qtest".to_string(),
-            0,
-        );
-        ledger.state.reserves.amount = 100_000;
-
-        // Add a deposit with 80k balance - this requires reserves backing
-        let mut deposit = Deposit::from_pubkey(&deposit_pubkey, None);
-        deposit.balance = 80_000;
-        ledger.state.deposits.insert(deposit.deposit_id, deposit);
-        ctx.add_ledger(operator, our_node_id.to_string(), ledger);
-
-        // Try to decrease reserves below what's required to back deposits
-        let msg = ReservesDecreaseMsg {
-            new_amount: 50_000, // Less than the 80k deposit balance
-            reserves_id: our_node_id.to_string(),
-        };
-
-        let result = validate_reserves_decrease_msg(&ctx, &msg, operator);
-        assert!(result.is_err(), "Should fail when decrease falls below requirement");
-        assert!(result.unwrap_err().contains("must maintain at least"));
     }
 
     #[test]

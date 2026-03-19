@@ -2522,9 +2522,7 @@ fn format_operation(op: &LedgerOperation) -> (String, Option<deposits_core::type
         LedgerOperation::FeeCollect { deposit_id, .. } => ("FeeCollect".to_string(), Some(*deposit_id)),
         LedgerOperation::CollateralLock { deposit_id, .. } => ("CollateralLock".to_string(), Some(*deposit_id)),
         LedgerOperation::CollateralAttestation { .. } => ("CollateralAttest".to_string(), None),
-        LedgerOperation::ReservesRotate { .. } => ("ReservesRotate".to_string(), None),
-        LedgerOperation::ReservesIncrease { .. } => ("ReservesIncrease".to_string(), None),
-        LedgerOperation::ReservesDecrease { .. } => ("ReservesDecrease".to_string(), None),
+        LedgerOperation::QuorumBegin { .. } => ("QuorumBegin".to_string(), None),
         _ => ("Unknown".to_string(), None),
     }
 }
@@ -2637,7 +2635,7 @@ enum CustodyEvent {
         member_ledger_id: String,
     },
     /// Reserves rotated to new address
-    ReservesRotated {
+    QuorumBegun {
         new_address: String,
         amount: u64,
         quorum_member_count: usize,
@@ -2764,12 +2762,12 @@ async fn ledger_custody(args: &[String]) -> Result<(), Box<dyn std::error::Error
                         }));
                     }
                 }
-                LedgerOperation::ReservesRotate { reserves_id, amount, first_expiry_block, quorum_members, .. } => {
+                LedgerOperation::QuorumBegin { reserves_id, amount, first_expiry_block, quorum_members, .. } => {
                     // Verify signer is current operator
                     let signer_valid = current_operator.map(|op| op == signer).unwrap_or(false);
                     let signer_status = if signer_valid { "✓" } else { "⚠" };
 
-                    println!("seq {:>4} | block {:>6} | RESERVES ROTATED {}", seq, block, signer_status);
+                    println!("seq {:>4} | block {:>6} | QUORUM BEGIN {}", seq, block, signer_status);
                     println!("         |              |   New address: {}...", &reserves_id[..24.min(reserves_id.len())]);
                     println!("         |              |   Amount: {} sats", amount);
                     if !quorum_members.is_empty() {
@@ -2778,7 +2776,7 @@ async fn ledger_custody(args: &[String]) -> Result<(), Box<dyn std::error::Error
                     if !signer_valid {
                         println!("         |              |   ⚠ Signer {}... != expected operator", &hex::encode(signer.serialize())[..12]);
                     }
-                    custody_events.push((seq, block, CustodyEvent::ReservesRotated {
+                    custody_events.push((seq, block, CustodyEvent::QuorumBegun {
                         new_address: reserves_id,
                         amount,
                         quorum_member_count: quorum_members.len(),

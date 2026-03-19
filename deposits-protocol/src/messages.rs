@@ -57,9 +57,7 @@ pub mod consts {
     // Reserves operations
     pub const RESERVES_ADD_OUTPUT: u16 = 0x80C1;
     pub const RESERVES_REMOVE_OUTPUT: u16 = 0x80C3;
-    pub const RESERVES_INCREASE: u16 = 0x80B1;
-    pub const RESERVES_DECREASE: u16 = 0x80B3;
-    pub const RESERVES_ROTATE: u16 = 0x80B5;
+    pub const QUORUM_BEGIN: u16 = 0x80B5;
     pub const RESERVES_UPDATE_OUTPUT: u16 = 0x80C9;
 
     // Reserves commitment protocol
@@ -160,8 +158,8 @@ pub const ALL_ENVELOPE_MESSAGE_TYPES: &[u16] = &[
 
 /// Operation message types - stored in SignedLedgerUpdate.message_type field
 pub const ALL_OPERATION_MESSAGE_TYPES: &[u16] = &[
-    RESERVES_ADD_OUTPUT, RESERVES_REMOVE_OUTPUT, RESERVES_INCREASE,
-    RESERVES_DECREASE, RESERVES_UPDATE_OUTPUT, UPDATE_RESERVES, ACCEPT_RESERVES,
+    RESERVES_ADD_OUTPUT, RESERVES_REMOVE_OUTPUT,
+    RESERVES_UPDATE_OUTPUT, UPDATE_RESERVES, ACCEPT_RESERVES,
     COLLATERAL_INCREASE, COLLATERAL_DECREASE, COLLATERAL_STATUS,
     COLLATERAL_ATTESTATION, QUORUM_ADD_MEMBER, QUORUM_REMOVE_MEMBER,
     COLLATERAL_CONSENT_REQUEST, COLLATERAL_CONSENT_RESPONSE,
@@ -182,8 +180,8 @@ pub const ALL_OPERATION_MESSAGE_TYPES: &[u16] = &[
 
 /// Messages that require acknowledgment
 pub const MESSAGES_REQUIRING_ACK: &[u16] = &[
-    RESERVES_ADD_OUTPUT, RESERVES_REMOVE_OUTPUT, RESERVES_INCREASE,
-    RESERVES_DECREASE, RESERVES_UPDATE_OUTPUT,
+    RESERVES_ADD_OUTPUT, RESERVES_REMOVE_OUTPUT,
+    RESERVES_UPDATE_OUTPUT,
     DEPOSIT_OPEN, DEPOSIT_CLOSE, FEE_CHANGE,
     ONCHAIN_CREDIT, ONCHAIN_LOCK, ONCHAIN_FAIL, ONCHAIN_FULFILL,
     RECEIVING_CREDIT_PAYMENT, RECEIVING_COSIGN_INVOICE,
@@ -215,8 +213,8 @@ pub fn requires_acknowledgment(message_type: u16) -> bool {
 /// Get the message category for a message type
 pub fn get_message_category(message_type: u16) -> Option<&'static str> {
     match message_type {
-        RESERVES_ADD_OUTPUT | RESERVES_REMOVE_OUTPUT | RESERVES_INCREASE |
-        RESERVES_DECREASE | RESERVES_UPDATE_OUTPUT => Some("reserves"),
+        RESERVES_ADD_OUTPUT | RESERVES_REMOVE_OUTPUT |
+        RESERVES_UPDATE_OUTPUT => Some("reserves"),
 
         COLLATERAL_INCREASE | COLLATERAL_DECREASE | COLLATERAL_STATUS |
         COLLATERAL_ATTESTATION | QUORUM_ADD_MEMBER | QUORUM_REMOVE_MEMBER |
@@ -317,7 +315,7 @@ impl HashStrategy {
     pub fn for_message_type(msg_type: u16) -> (bool, HashStrategy) {
         match msg_type {
             // Amount-changing operations - sync after applying
-            RESERVES_ADD_OUTPUT | RESERVES_INCREASE | COLLATERAL_INCREASE => {
+            RESERVES_ADD_OUTPUT | COLLATERAL_INCREASE => {
                 (true, HashStrategy::CurrentCommitted)
             },
             // Credit must be in committed hash - predict before applying
@@ -488,7 +486,6 @@ pub struct LedgerUpdateResponseMsg {
 pub enum LedgerOperation {
     // ========== Ledger Establishment (1) ==========
     /// Open/establish a new ledger (first operation, sequence 0)
-    /// Note: Initial reserves amount is set via ReservesIncrease after open
     LedgerOpen {
         /// Operator's node ID
         operator_id: PublicKey,
@@ -500,33 +497,22 @@ pub enum LedgerOperation {
         genesis_block: u32,
         /// Block height after which collateral requirements are enforced (0 = immediate)
         collateral_enforcement_block: u64,
+        /// Initial reserves amount in millisatoshis (from on-chain UTXO balance)
+        reserves_amount: u64,
     },
 
-    // ========== Reserves Operations (3) ==========
+    // ========== Reserves Operations (1) ==========
     // Note: ReservesAdd/Remove/UpdateSpendTo are peer messages, not ledger operations.
     // The initial reserves state is set via LedgerOpen.
-    /// Increase reserves amount
-    ReservesIncrease {
-        /// Current reserves identifier (UTXO address for BDK, partner pubkey for LDK)
-        reserves_id: String,
-        /// New total reserves amount in millisatoshis
-        new_amount: u64,
-    },
-    /// Decrease reserves amount
-    ReservesDecrease {
-        /// Current reserves identifier (UTXO address for BDK, partner pubkey for LDK)
-        reserves_id: String,
-        /// New total reserves amount in millisatoshis
-        new_amount: u64,
-    },
-    /// Rotate reserves to a new Taproot output with quorum-based spending
+    // Reserves amount is updated at QuorumBegin (formerly ReservesRotate).
+    /// Establish/refresh the quorum and rotate reserves UTXO into a new multisig
     ///
     /// Records the rotation of reserves from P2WSH to P2TR with tiered spending:
     /// - Immediate: quorum_threshold-of-quorum_size multisig
     /// - After first_expiry_block: operator can spend alone
     ///
     /// The quorum member pubkeys are derived from QuorumAddMember operations on this ledger.
-    ReservesRotate {
+    QuorumBegin {
         /// New reserves identifier (the new Taproot address)
         reserves_id: String,
         /// Transaction that spent the old reserves UTXO
@@ -865,9 +851,7 @@ impl LedgerOperation {
     pub fn discriminant(&self) -> u8 {
         match self {
             Self::LedgerOpen { .. } => 1,  // First operation
-            Self::ReservesIncrease { .. } => 10,
-            Self::ReservesDecrease { .. } => 11,
-            Self::ReservesRotate { .. } => 12,
+            Self::QuorumBegin { .. } => 12,
             Self::DepositOpen { .. } => 20,
             Self::DepositClose { .. } => 21,
             Self::FeeChange { .. } => 22,
@@ -1477,22 +1461,15 @@ impl BinaryCodec for LedgerOperation {
     fn write_to<W: Write>(&self, w: &mut W) -> Result<(), CodecError> {
         write_u8(w, self.discriminant())?;
         match self {
-            Self::LedgerOpen { operator_id, reserves_id, ledger_address, genesis_block, collateral_enforcement_block } => {
+            Self::LedgerOpen { operator_id, reserves_id, ledger_address, genesis_block, collateral_enforcement_block, reserves_amount } => {
                 write_pubkey(w, operator_id)?;
                 write_string(w, reserves_id)?;
                 write_string(w, ledger_address)?;
                 write_u32(w, *genesis_block)?;
                 write_u64(w, *collateral_enforcement_block)?;
+                write_u64(w, *reserves_amount)?;
             }
-            Self::ReservesIncrease { reserves_id, new_amount } => {
-                write_string(w, reserves_id)?;
-                write_u64(w, *new_amount)?;
-            }
-            Self::ReservesDecrease { reserves_id, new_amount } => {
-                write_string(w, reserves_id)?;
-                write_u64(w, *new_amount)?;
-            }
-            Self::ReservesRotate { reserves_id, spending_txid, new_outpoint_txid, new_outpoint_vout, amount, first_expiry_block, ledger_hash, quorum_members } => {
+            Self::QuorumBegin { reserves_id, spending_txid, new_outpoint_txid, new_outpoint_vout, amount, first_expiry_block, ledger_hash, quorum_members } => {
                 write_string(w, reserves_id)?;
                 write_32(w, spending_txid)?;
                 write_32(w, new_outpoint_txid)?;
@@ -1743,22 +1720,20 @@ impl BinaryCodec for LedgerOperation {
         let discriminant = read_u8(r)?;
         match discriminant {
             // LedgerOpen (1)
-            1 => Ok(Self::LedgerOpen {
-                operator_id: read_pubkey(r)?,
-                reserves_id: read_string(r)?,
-                ledger_address: read_string(r)?,
-                genesis_block: read_u32(r)?,
-                collateral_enforcement_block: read_u64(r)?,
-            }),
-            // Reserves operations (10-12)
-            10 => Ok(Self::ReservesIncrease {
-                reserves_id: read_string(r)?,
-                new_amount: read_u64(r)?,
-            }),
-            11 => Ok(Self::ReservesDecrease {
-                reserves_id: read_string(r)?,
-                new_amount: read_u64(r)?,
-            }),
+            1 => {
+                let operator_id = read_pubkey(r)?;
+                let reserves_id = read_string(r)?;
+                let ledger_address = read_string(r)?;
+                let genesis_block = read_u32(r)?;
+                let collateral_enforcement_block = read_u64(r)?;
+                // reserves_amount added later; default to 0 for legacy data
+                let reserves_amount = read_u64(r).unwrap_or(0);
+                Ok(Self::LedgerOpen {
+                    operator_id, reserves_id, ledger_address, genesis_block,
+                    collateral_enforcement_block, reserves_amount,
+                })
+            }
+            // QuorumBegin (12) — formerly ReservesRotate
             12 => {
                 let reserves_id = read_string(r)?;
                 let spending_txid = read_32(r)?;
@@ -1769,7 +1744,7 @@ impl BinaryCodec for LedgerOperation {
                 let _size = read_u8(r)?; // legacy: skip
                 let first_expiry_block = read_u32(r)?;
                 let ledger_hash = read_32(r)?;
-                Ok(Self::ReservesRotate {
+                Ok(Self::QuorumBegin {
                     reserves_id, spending_txid, new_outpoint_txid, new_outpoint_vout,
                     amount, first_expiry_block, ledger_hash, quorum_members: Vec::new(),
                 })
@@ -2744,7 +2719,7 @@ mod ledger_op_tlv {
     // QuorumJoin fields
     pub const OUR_SIGNATURE: u64 = 80;
     pub const MEMBERSHIP_EXPIRES: u64 = 82;
-    // ReservesRotate fields
+    // QuorumBegin fields
     pub const SPENDING_TXID: u64 = 90;
     pub const NEW_OUTPOINT_TXID: u64 = 91;
     pub const NEW_OUTPOINT_VOUT: u64 = 92;
@@ -2808,25 +2783,16 @@ impl TlvEncode for LedgerOperation {
         let mut builder = TlvBuilder::new().u8_field(DISCRIMINANT, self.discriminant());
 
         match self {
-            Self::LedgerOpen { operator_id, reserves_id, ledger_address, genesis_block, collateral_enforcement_block } => {
+            Self::LedgerOpen { operator_id, reserves_id, ledger_address, genesis_block, collateral_enforcement_block, reserves_amount } => {
                 builder = builder
                     .pubkey_field(OPERATOR_ID, operator_id)
                     .string_field(RESERVES_ID, reserves_id)
                     .string_field(LEDGER_ADDRESS, ledger_address)
                     .u32_field(GENESIS_BLOCK, *genesis_block)
-                    .u64_field(ENFORCEMENT_BLOCK, *collateral_enforcement_block);
+                    .u64_field(ENFORCEMENT_BLOCK, *collateral_enforcement_block)
+                    .u64_field(RESERVES_AMOUNT, *reserves_amount);
             }
-            Self::ReservesIncrease { reserves_id, new_amount } => {
-                builder = builder
-                    .string_field(RESERVES_ID, reserves_id)
-                    .u64_field(NEW_AMOUNT, *new_amount);
-            }
-            Self::ReservesDecrease { reserves_id, new_amount } => {
-                builder = builder
-                    .string_field(RESERVES_ID, reserves_id)
-                    .u64_field(NEW_AMOUNT, *new_amount);
-            }
-            Self::ReservesRotate { reserves_id, spending_txid, new_outpoint_txid, new_outpoint_vout, amount, first_expiry_block, ledger_hash, quorum_members } => {
+            Self::QuorumBegin { reserves_id, spending_txid, new_outpoint_txid, new_outpoint_vout, amount, first_expiry_block, ledger_hash, quorum_members } => {
                 // Encode quorum members as concatenated 33-byte compressed pubkeys
                 let mut members_bytes = Vec::new();
                 for pk in quorum_members {
@@ -3087,14 +3053,7 @@ impl TlvDecode for LedgerOperation {
                 ledger_address: reader.read_string(LEDGER_ADDRESS)?,
                 genesis_block: reader.read_u32_opt(GENESIS_BLOCK)?.unwrap_or(0),
                 collateral_enforcement_block: reader.read_u64_opt(ENFORCEMENT_BLOCK)?.unwrap_or(0),
-            }),
-            10 => Ok(Self::ReservesIncrease {
-                reserves_id: reader.read_string(RESERVES_ID)?,
-                new_amount: reader.read_u64(NEW_AMOUNT)?,
-            }),
-            11 => Ok(Self::ReservesDecrease {
-                reserves_id: reader.read_string(RESERVES_ID)?,
-                new_amount: reader.read_u64(NEW_AMOUNT)?,
+                reserves_amount: reader.read_u64_opt(RESERVES_AMOUNT)?.unwrap_or(0),
             }),
             12 => {
                 let members_bytes = reader.read_raw_opt(QUORUM_MEMBERS).unwrap_or(&[]);
@@ -3106,7 +3065,7 @@ impl TlvDecode for LedgerOperation {
                     }
                     off += 33;
                 }
-                Ok(Self::ReservesRotate {
+                Ok(Self::QuorumBegin {
                     reserves_id: reader.read_string(RESERVES_ID)?,
                     spending_txid: reader.read_bytes(SPENDING_TXID)?,
                     new_outpoint_txid: reader.read_bytes(NEW_OUTPOINT_TXID)?,
@@ -4357,8 +4316,6 @@ mod tests {
     fn test_ledger_operation_roundtrip() {
         // Test non-deposit operations that fully round-trip with BinaryCodec
         let ops = vec![
-            LedgerOperation::ReservesIncrease { reserves_id: "bcrt1q...".to_string(), new_amount: 200000 },
-            LedgerOperation::ReservesDecrease { reserves_id: "bcrt1q...".to_string(), new_amount: 100000 },
             LedgerOperation::FeeCollect {
                 deposit_id: crate::types::compute_deposit_id("pk(test)"),
                 amount: 500,
@@ -4414,7 +4371,11 @@ mod tests {
         let msg = DepositsMessage::LedgerUpdate(LedgerUpdateMsg {
             operator_id: test_pubkey(),
             reserves_id: test_pubkey().to_string(),
-            operation: LedgerOperation::ReservesIncrease { reserves_id: "bcrt1q...".to_string(), new_amount: 100000 },
+            operation: LedgerOperation::FeeCollect {
+                deposit_id: crate::types::compute_deposit_id("pk(test)"),
+                amount: 500,
+                block_height: 800000,
+            },
             sequence_number: 1,
             previous_hash: [0u8; 32],
             current_hash: [0xAB; 32],
@@ -4506,8 +4467,6 @@ mod tests {
         use crate::tlv::{TlvEncode, TlvDecode};
 
         let ops = vec![
-            LedgerOperation::ReservesIncrease { reserves_id: "bcrt1q...".to_string(), new_amount: 200000 },
-            LedgerOperation::ReservesDecrease { reserves_id: "bcrt1q...".to_string(), new_amount: 50000 },
             LedgerOperation::DepositOpen {
                 deposit_id: crate::types::compute_deposit_id("pk(test)"),
                 descriptor: "pk(test)".to_string(),
@@ -4551,7 +4510,11 @@ mod tests {
         let msg = LedgerUpdateMsg {
             operator_id: test_pubkey(),
             reserves_id: test_pubkey().to_string(),
-            operation: LedgerOperation::ReservesIncrease { reserves_id: "bcrt1q...".to_string(), new_amount: 100000 },
+            operation: LedgerOperation::FeeCollect {
+                deposit_id: crate::types::compute_deposit_id("pk(test)"),
+                amount: 500,
+                block_height: 800000,
+            },
             sequence_number: 1,
             previous_hash: [0u8; 32],
             current_hash: [0xAB; 32],
