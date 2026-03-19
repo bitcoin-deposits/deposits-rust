@@ -3596,7 +3596,6 @@ function decodeUpdate(base64Content) {
 
   const seq = getU64(8);       // SEQUENCE_NUMBER
   const prevHash = getHex(10); // PREVIOUS_HASH
-  const curHash = getHex(12);  // CURRENT_HASH
   const blockHeight = getU32(20); // BLOCK_HEIGHT
   const msgType = getU16(2);   // MESSAGE_TYPE
   const operatorHex = getHex(4); // OPERATOR_ID
@@ -3625,6 +3624,24 @@ function decodeUpdate(base64Content) {
       u32: r.value.length === 4 ? ((r.value[0]<<24)|(r.value[1]<<16)|(r.value[2]<<8)|r.value[3]) : null,
     }));
   }
+
+  // Compute current_hash: SHA256(seq_le || prev_hash || message [|| member_ledger_hash] [|| partner_signature])
+  const seqBytes = new Uint8Array(8);
+  new DataView(seqBytes.buffer).setUint32(0, seq & 0xFFFFFFFF, true);
+  new DataView(seqBytes.buffer).setUint32(4, Math.floor(seq / 0x100000000), true);
+  const prevHashBytes = get(10) || new Uint8Array(32);
+  const partnerSig = get(16) || new Uint8Array(64);
+  const memberHash = get(26); // optional
+  const hashParts = [seqBytes, prevHashBytes];
+  if (msgBytes) hashParts.push(msgBytes);
+  if (memberHash) hashParts.push(memberHash);
+  const isNonZeroSig = partnerSig.some(b => b !== 0);
+  if (isNonZeroSig) hashParts.push(partnerSig);
+  const totalLen = hashParts.reduce((s, p) => s + p.length, 0);
+  const hashInput = new Uint8Array(totalLen);
+  let hOff = 0;
+  for (const p of hashParts) { hashInput.set(p, hOff); hOff += p.length; }
+  const curHash = bytesToHex(nobleHashes.sha256(hashInput));
 
   return { seq, prevHash, curHash, blockHeight, msgType, operatorHex, opName, opDisc, opFields };
 }

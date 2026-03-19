@@ -2112,7 +2112,6 @@ impl BinaryCodec for SignedLedgerUpdate {
         write_32(w, &self.ledger_id)?;
         write_u64(w, self.sequence_number)?;
         write_32(w, &self.previous_hash)?;
-        write_32(w, &self.current_hash)?;
         write_u32(w, self.block_height)?;
         write_32(w, &self.block_hash)?;
         write_64(w, &self.partner_signature)?;
@@ -2129,7 +2128,6 @@ impl BinaryCodec for SignedLedgerUpdate {
         let ledger_id = read_32(r)?;
         let sequence_number = read_u64(r)?;
         let previous_hash = read_32(r)?;
-        let current_hash = read_32(r)?;
         let block_height = read_u32(r)?;
         let block_hash = read_32(r)?;
         let partner_signature = read_64(r)?;
@@ -2137,21 +2135,23 @@ impl BinaryCodec for SignedLedgerUpdate {
         // Optional fields (backward compatible - not present in old format)
         let cosigner_pubkey = read_option(r, read_pubkey).unwrap_or(None);
         let member_ledger_hash = read_option(r, |r| Ok(read_32(r)?)).unwrap_or(None);
-        Ok(Self {
+        let mut update = Self {
             message,
             message_type,
             operator_id,
             ledger_id,
             sequence_number,
             previous_hash,
-            current_hash,
+            current_hash: [0u8; 32],
             block_height,
             block_hash,
             partner_signature,
             operator_signature,
             cosigner_pubkey,
             member_ledger_hash,
-        })
+        };
+        update.current_hash = update.compute_hash();
+        Ok(update)
     }
 }
 
@@ -4639,14 +4639,14 @@ mod tests {
     fn test_sync_response_msg_tlv_roundtrip() {
         use crate::tlv::{TlvEncode, TlvDecode};
 
-        let update = SignedLedgerUpdate {
+        let mut update = SignedLedgerUpdate {
             message: vec![0x80, 0x01, 0xAA, 0xBB], // Sample message bytes
             message_type: 0x8001,
             operator_id: test_pubkey(),
             ledger_id: [0x12; 32],
             sequence_number: 1,
             previous_hash: [0xCC; 32],
-            current_hash: [0xDD; 32],
+            current_hash: [0u8; 32], // will be computed
             block_height: 12345,
             block_hash: [0x11; 32],
             partner_signature: [0xFF; 64],
@@ -4654,6 +4654,7 @@ mod tests {
             cosigner_pubkey: None,
             member_ledger_hash: None,
         };
+        update.current_hash = update.compute_hash();
 
         let msg = SyncResponseMsg {
             ledger_id: [0x12; 32],

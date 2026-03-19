@@ -49,13 +49,14 @@ A signed ledger update is broadcast as a Nostr Kind 9100 event. The event conten
 | 6 | ledger_id | 32 | Ledger identifier hash |
 | 8 | sequence_number | 8 | Monotonically increasing sequence (u64 LE) |
 | 10 | previous_hash | 32 | Chain hash of the previous update |
-| 12 | current_hash | 32 | Hash of this update (see Hash Chain) |
 | 16 | partner_signature | 64 | ECDSA co-signature from quorum member |
 | 18 | operator_signature | 64 | Schnorr signature from operator |
 | 20 | block_height | 4 | Block height at creation (u32, optional) |
 | 22 | block_hash | 32 | Block hash at creation (optional) |
 | 24 | cosigner_pubkey | 33 | Co-signing quorum member's pubkey (optional) |
 | 26 | member_ledger_hash | 32 | Co-signer's ledger tip hash (optional) |
+
+`current_hash` is not on the wire -- it is derived by the receiver from the update content (see Hash Chain). Type 12 is reserved.
 
 ## Hash Chain
 

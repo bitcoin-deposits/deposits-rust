@@ -86,29 +86,26 @@ types:
         doc: "Monotonically increasing sequence number (type 8, u64)"
         value: "records[4].value"
       previous_hash:
-        doc: "32-byte hash of the previous update (type 10)"
+        doc: "32-byte chain hash of the previous update (type 10)"
         value: "records[5].value"
-      current_hash:
-        doc: "32-byte hash: SHA256(seq || prev_hash || message [|| member_ledger_hash]) (type 12)"
-        value: "records[6].value"
       partner_signature:
         doc: "64-byte ECDSA co-signature from quorum member (type 16)"
-        value: "records[7].value"
+        value: "records[6].value"
       operator_signature:
         doc: "64-byte Schnorr signature from operator (type 18)"
-        value: "records[8].value"
+        value: "records[7].value"
       block_height:
         doc: "Block height when update was created (type 20, u32, optional)"
-        value: "records[9].value"
+        value: "records[8].value"
       block_hash:
         doc: "32-byte block hash at time of creation (type 22, optional)"
-        value: "records[10].value"
+        value: "records[9].value"
       cosigner_pubkey:
         doc: "33-byte compressed pubkey of the co-signing quorum member (type 24, optional)"
-        value: "records[11].value"
+        value: "records[10].value"
       member_ledger_hash:
-        doc: "32-byte tip hash of the co-signer's own ledger at time of signing (type 26, optional). Included in current_hash for causal ordering."
-        value: "records[12].value"
+        doc: "32-byte tip hash of the co-signer's own ledger at time of signing (type 26, optional). Included in derived current_hash for causal ordering."
+        value: "records[11].value"
 
   ledger_operation:
     doc: |

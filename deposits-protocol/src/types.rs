@@ -2327,7 +2327,7 @@ mod signed_update_fields {
     pub const LEDGER_ID: u64 = 6;
     pub const SEQUENCE_NUMBER: u64 = 8;
     pub const PREVIOUS_HASH: u64 = 10;
-    pub const CURRENT_HASH: u64 = 12;
+    // 12 was CURRENT_HASH — removed from wire, now derived from content
     pub const PARTNER_SIGNATURE: u64 = 16;
     pub const OPERATOR_SIGNATURE: u64 = 18;
     pub const BLOCK_HEIGHT: u64 = 20;
@@ -2345,7 +2345,6 @@ impl TlvEncode for SignedLedgerUpdate {
             .bytes_field(signed_update_fields::LEDGER_ID, &self.ledger_id)
             .u64_field(signed_update_fields::SEQUENCE_NUMBER, self.sequence_number)
             .bytes_field(signed_update_fields::PREVIOUS_HASH, &self.previous_hash)
-            .bytes_field(signed_update_fields::CURRENT_HASH, &self.current_hash)
             .u32_field(signed_update_fields::BLOCK_HEIGHT, self.block_height)
             .bytes_field(signed_update_fields::BLOCK_HASH, &self.block_hash)
             .bytes_field(signed_update_fields::PARTNER_SIGNATURE, &self.partner_signature)
@@ -2363,21 +2362,24 @@ impl TlvEncode for SignedLedgerUpdate {
 impl TlvDecode for SignedLedgerUpdate {
     fn tlv_decode(data: &[u8]) -> TlvResult<Self> {
         let reader = TlvReader::new(data)?;
-        Ok(Self {
+        let mut update = Self {
             message: reader.read_raw(signed_update_fields::MESSAGE)?.to_vec(),
             message_type: reader.read_u16(signed_update_fields::MESSAGE_TYPE)?,
             operator_id: reader.read_pubkey(signed_update_fields::OPERATOR_ID)?,
             ledger_id: reader.read_bytes(signed_update_fields::LEDGER_ID)?,
             sequence_number: reader.read_u64(signed_update_fields::SEQUENCE_NUMBER)?,
             previous_hash: reader.read_bytes(signed_update_fields::PREVIOUS_HASH)?,
-            current_hash: reader.read_bytes(signed_update_fields::CURRENT_HASH)?,
+            current_hash: [0u8; 32],
             block_height: reader.read_u32_opt(signed_update_fields::BLOCK_HEIGHT)?.unwrap_or(0),
             block_hash: reader.read_bytes_opt(signed_update_fields::BLOCK_HASH)?.unwrap_or([0u8; 32]),
             partner_signature: reader.read_bytes(signed_update_fields::PARTNER_SIGNATURE)?,
             operator_signature: reader.read_bytes(signed_update_fields::OPERATOR_SIGNATURE)?,
             cosigner_pubkey: reader.read_pubkey_opt(signed_update_fields::COSIGNER_PUBKEY)?,
             member_ledger_hash: reader.read_bytes_opt(signed_update_fields::MEMBER_LEDGER_HASH)?,
-        })
+        };
+        // Derive current_hash from content (not stored on wire)
+        update.current_hash = update.compute_hash();
+        Ok(update)
     }
 }
 
