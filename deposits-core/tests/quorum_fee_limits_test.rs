@@ -592,3 +592,181 @@ fn quorum_member_struct_no_limits_json_roundtrip() {
     assert_eq!(member, decoded);
 }
 
+// =========================================================================
+// Collateral obligation limits
+// =========================================================================
+
+/// Compute the maximum obligations allowed based on quorum collateral commitments.
+/// Returns None if no members have commitments (no limit).
+fn max_obligations(members: &[QuorumMember]) -> Option<u64> {
+    members.iter()
+        .filter_map(|m| m.collateral_lock_amount)
+        .min()
+        .map(|min_collateral| min_collateral.saturating_mul(2))
+}
+
+/// Check if current obligations + additional would exceed the limit.
+fn check_obligation_limit(
+    members: &[QuorumMember],
+    current_obligations: u64,
+    additional: u64,
+) -> Result<(), String> {
+    if let Some(max) = max_obligations(members) {
+        let total = current_obligations.saturating_add(additional);
+        if total > max {
+            return Err(format!(
+                "Would exceed limit: {} + {} = {} > {} (2x smallest collateral)",
+                current_obligations, additional, total, max
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn obligation_limit_no_members_no_limit() {
+    let members: Vec<QuorumMember> = vec![];
+    assert!(check_obligation_limit(&members, 1_000_000, 1_000_000).is_ok());
+}
+
+#[test]
+fn obligation_limit_no_collateral_commitments_no_limit() {
+    let members = vec![QuorumMember {
+        pubkey: test_pubkey_2(),
+        ledger_id: String::new(),
+        min_fee_bps: None, min_fee_fixed: None, max_fee_period: None,
+        collateral_lock_amount: None, collateral_lock_until: None,
+    }];
+    assert!(check_obligation_limit(&members, 1_000_000, 1_000_000).is_ok());
+}
+
+#[test]
+fn obligation_within_limit_passes() {
+    let members = vec![QuorumMember {
+        pubkey: test_pubkey_2(),
+        ledger_id: String::new(),
+        min_fee_bps: None, min_fee_fixed: None, max_fee_period: None,
+        collateral_lock_amount: Some(100_000), // 2x = 200_000 max
+        collateral_lock_until: Some(10000),
+    }];
+    // 50k existing + 100k new = 150k < 200k limit
+    assert!(check_obligation_limit(&members, 50_000, 100_000).is_ok());
+}
+
+#[test]
+fn obligation_at_limit_passes() {
+    let members = vec![QuorumMember {
+        pubkey: test_pubkey_2(),
+        ledger_id: String::new(),
+        min_fee_bps: None, min_fee_fixed: None, max_fee_period: None,
+        collateral_lock_amount: Some(100_000),
+        collateral_lock_until: Some(10000),
+    }];
+    // 100k + 100k = 200k == 200k limit (exactly at limit, passes)
+    assert!(check_obligation_limit(&members, 100_000, 100_000).is_ok());
+}
+
+#[test]
+fn obligation_exceeding_limit_rejected() {
+    let members = vec![QuorumMember {
+        pubkey: test_pubkey_2(),
+        ledger_id: String::new(),
+        min_fee_bps: None, min_fee_fixed: None, max_fee_period: None,
+        collateral_lock_amount: Some(100_000),
+        collateral_lock_until: Some(10000),
+    }];
+    // 100k + 100k + 1 > 200k limit
+    let err = check_obligation_limit(&members, 100_001, 100_000).unwrap_err();
+    assert!(err.contains("exceed"), "{}", err);
+}
+
+#[test]
+fn obligation_limit_uses_smallest_member() {
+    let members = vec![
+        QuorumMember {
+            pubkey: test_pubkey_2(),
+            ledger_id: String::new(),
+            min_fee_bps: None, min_fee_fixed: None, max_fee_period: None,
+            collateral_lock_amount: Some(500_000), // large
+            collateral_lock_until: Some(10000),
+        },
+        QuorumMember {
+            pubkey: test_pubkey_3(),
+            ledger_id: String::new(),
+            min_fee_bps: None, min_fee_fixed: None, max_fee_period: None,
+            collateral_lock_amount: Some(50_000), // small — this is the bottleneck
+            collateral_lock_until: Some(10000),
+        },
+    ];
+    // Max = 2 * 50_000 = 100_000
+    assert!(check_obligation_limit(&members, 0, 100_000).is_ok());
+    assert!(check_obligation_limit(&members, 0, 100_001).is_err());
+}
+
+#[test]
+fn obligation_limit_mixed_some_none() {
+    let members = vec![
+        QuorumMember {
+            pubkey: test_pubkey_2(),
+            ledger_id: String::new(),
+            min_fee_bps: None, min_fee_fixed: None, max_fee_period: None,
+            collateral_lock_amount: Some(100_000),
+            collateral_lock_until: Some(10000),
+        },
+        QuorumMember {
+            pubkey: test_pubkey_3(),
+            ledger_id: String::new(),
+            min_fee_bps: None, min_fee_fixed: None, max_fee_period: None,
+            collateral_lock_amount: None, // no commitment
+            collateral_lock_until: None,
+        },
+    ];
+    // Only one member has a commitment: limit = 2 * 100_000 = 200_000
+    assert!(check_obligation_limit(&members, 0, 200_000).is_ok());
+    assert!(check_obligation_limit(&members, 0, 200_001).is_err());
+}
+
+// =========================================================================
+// Membership duration limited by shortest collateral lock
+// =========================================================================
+
+/// Compute maximum membership duration from collateral lock times.
+fn max_membership_block(members: &[QuorumMember]) -> Option<u32> {
+    members.iter()
+        .filter_map(|m| m.collateral_lock_until)
+        .min()
+}
+
+#[test]
+fn membership_duration_limited_by_shortest_lock() {
+    let members = vec![
+        QuorumMember {
+            pubkey: test_pubkey_2(),
+            ledger_id: String::new(),
+            min_fee_bps: None, min_fee_fixed: None, max_fee_period: None,
+            collateral_lock_amount: Some(100_000),
+            collateral_lock_until: Some(50_000), // locks until block 50k
+        },
+        QuorumMember {
+            pubkey: test_pubkey_3(),
+            ledger_id: String::new(),
+            min_fee_bps: None, min_fee_fixed: None, max_fee_period: None,
+            collateral_lock_amount: Some(100_000),
+            collateral_lock_until: Some(30_000), // locks until block 30k — shortest
+        },
+    ];
+
+    assert_eq!(max_membership_block(&members), Some(30_000));
+}
+
+#[test]
+fn membership_duration_no_locks_no_limit() {
+    let members = vec![QuorumMember {
+        pubkey: test_pubkey_2(),
+        ledger_id: String::new(),
+        min_fee_bps: None, min_fee_fixed: None, max_fee_period: None,
+        collateral_lock_amount: None,
+        collateral_lock_until: None,
+    }];
+    assert_eq!(max_membership_block(&members), None);
+}

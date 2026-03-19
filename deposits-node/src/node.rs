@@ -5088,6 +5088,11 @@ impl Node {
             return (false, None, Some(format!("Failed to sync wallet: {}", e)));
         }
 
+        // Check collateral obligation limits before creating the offer
+        if let Some(err) = self.check_collateral_obligation_limit(&resolved_ledger_id, max_sats * 1000) {
+            return (false, None, Some(err));
+        }
+
         // Create the offer using ledger_id (stable across custody transfers)
         match self.create_deposit_offer(&resolved_ledger_id, deposit_pubkey, max_sats, min_sats, blocks_valid, Some(fees)) {
             Ok(offer) => {
@@ -5391,9 +5396,15 @@ impl Node {
             .and_then(|v| v.as_str())
             .unwrap_or("Deposit credit");
 
+        let amount_msat = amount_sats * 1000;
+
+        // Check collateral obligation limits before creating the invoice
+        if let Some(err) = self.check_collateral_obligation_limit(&request.ledger_id, amount_msat) {
+            return (false, None, Some(err));
+        }
+
         // Create invoice via LdkCli (same as `deposits-node lightning invoice`)
         let cli = LdkCli::from_env();
-        let amount_msat = amount_sats * 1000;
 
         match cli.create_invoice(amount_msat, description) {
             Ok(invoice_str) => {
@@ -8972,6 +8983,44 @@ impl Node {
         self.quorum_reserves_cache.lock().unwrap()
             .insert(ledger_id.to_string(), (result, current_len));
         result
+    }
+
+    /// Check if adding `additional_msats` to a ledger's obligations would exceed
+    /// 2x the smallest quorum member's collateral commitment.
+    ///
+    /// Returns None if OK, or Some(error_message) if the limit would be exceeded.
+    fn check_collateral_obligation_limit(&self, ledger_id: &str, additional_msats: u64) -> Option<String> {
+        let ledgers = self.handler.ledgers.lock().unwrap();
+        let ledger_arc = match ledgers.get(ledger_id) {
+            Some(l) => l.clone(),
+            None => return None, // can't check without ledger
+        };
+        let ledger = ledger_arc.read().unwrap();
+
+        // Only enforce if there are quorum members with collateral commitments
+        let min_collateral = ledger.state.quorum_members.iter()
+            .filter_map(|m| m.collateral_lock_amount)
+            .min();
+
+        let min_collateral = match min_collateral {
+            Some(c) => c,
+            None => return None, // no members have collateral commitments
+        };
+
+        let max_obligations = min_collateral.saturating_mul(2);
+        let current_obligations: u64 = ledger.state.deposits.values()
+            .map(|d| d.balance + d.locked_balance)
+            .sum();
+
+        let new_total = current_obligations.saturating_add(additional_msats);
+        if new_total > max_obligations {
+            Some(format!(
+                "Would exceed collateral obligation limit: {} + {} = {} msats > {} msats (2x smallest member collateral {})",
+                current_obligations, additional_msats, new_total, max_obligations, min_collateral
+            ))
+        } else {
+            None
+        }
     }
 
     /// Build canonical signing data for invoice co-signatures.
