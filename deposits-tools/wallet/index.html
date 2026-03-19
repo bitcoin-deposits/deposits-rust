@@ -750,6 +750,23 @@ async function createEvent(secretKey, kind, content, tags) {
   return event;
 }
 
+// Publish a signed event to all connected relays (including ledger relay for durable events).
+async function publishEvent(kind, content, tags) {
+  const nostrKey = deriveSecretKey(state.seed, 0);
+  const event = await createEvent(nostrKey, kind, content, tags);
+  // Durable events (non-ephemeral) go to ALL relays including ledger relay
+  const payload = JSON.stringify(['EVENT', event]);
+  let sent = 0;
+  for (const s of sockets) {
+    if (s.ws && s.ws.readyState === WebSocket.OPEN) {
+      s.ws.send(payload);
+      sent++;
+    }
+  }
+  if (sent === 0) log('WARNING: event not sent — no connected relays', 'error');
+  return event.id;
+}
+
 // ============================================================
 // Deposit ID computation (matches Rust: SHA256("pk(<compressed_pubkey_hex>)")[0..16])
 // ============================================================
@@ -2730,6 +2747,10 @@ async function syncAll() {
     }
   }
   if (updated) { saveState(); renderDeposits(); }
+
+  // Check for uncredited payments after sync
+  await checkForFraud();
+
   log('Sync complete', 'success');
 
   await minWait;
@@ -2738,6 +2759,278 @@ async function syncAll() {
   btn.disabled = false;
 }
 window.syncAll = syncAll;
+
+// ============================================================
+// Fraud detection and proof embedding
+// ============================================================
+
+// Construct a fraud proof hash using BIP-340 tagged hashing.
+// Returns 32-byte Uint8Array.
+function computeFraudProofHash(proofType, accused, ledgerId, evidenceBytes) {
+  const tag = new TextEncoder().encode('deposits/fraud_proof');
+  const tagHash = nobleHashes.sha256(tag);
+  const input = new Uint8Array(tagHash.length * 2 + 1 + accused.length + ledgerId.length + evidenceBytes.length);
+  let off = 0;
+  input.set(tagHash, off); off += tagHash.length;
+  input.set(tagHash, off); off += tagHash.length;
+  input[off++] = proofType;
+  const accusedBytes = new TextEncoder().encode(accused);
+  input.set(accusedBytes, off); off += accusedBytes.length;
+  const ledgerBytes = new TextEncoder().encode(ledgerId);
+  input.set(ledgerBytes, off); off += ledgerBytes.length;
+  input.set(evidenceBytes, off);
+  return nobleHashes.sha256(input);
+}
+
+// Build canonical evidence bytes for an uncredited on-chain payment.
+function uncreditedOnchainEvidenceBytes(offerId, txid, amountSats, confirmedAtBlock) {
+  const parts = [
+    new TextEncoder().encode(offerId),
+    new TextEncoder().encode(txid),
+    new Uint8Array(new BigUint64Array([BigInt(amountSats)]).buffer),
+    new Uint8Array(new Uint32Array([confirmedAtBlock]).buffer),
+  ];
+  const total = parts.reduce((s, p) => s + p.length, 0);
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const p of parts) { out.set(p, off); off += p.length; }
+  return out;
+}
+
+// Build canonical evidence bytes for an uncredited lightning payment.
+function uncreditedLightningEvidenceBytes(paymentHash, preimage) {
+  const parts = [
+    new TextEncoder().encode(paymentHash),
+    new TextEncoder().encode(preimage),
+  ];
+  const total = parts.reduce((s, p) => s + p.length, 0);
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const p of parts) { out.set(p, off); off += p.length; }
+  return out;
+}
+
+// Check stored evidence for uncredited payments and initiate fraud proofs.
+async function checkForFraud() {
+  if (!state.evidence || state.evidence.length === 0) return;
+  const now = Math.floor(Date.now() / 1000);
+  const REQUIRED_CONFIRMATIONS = 6;
+  // Generous grace period: 30 minutes for on-chain, 5 minutes for lightning
+  const ONCHAIN_GRACE_SECS = 1800;
+  const LIGHTNING_GRACE_SECS = 300;
+
+  for (const ev of state.evidence) {
+    if (ev.settled || ev.fraud_proof_embedded) continue;
+
+    if (ev.type === 'offer' && ev.cosign_verified && ev.offer_id) {
+      // Check if the deposit should have been credited by now
+      const deposit = state.deposits.find(d => d.alias === ev.deposit_alias);
+      if (!deposit) continue;
+      const age = now - ev.created;
+      if (age < ONCHAIN_GRACE_SECS) continue; // still in grace period
+
+      // If deposit still has no balance and the offer is old enough, flag it
+      if ((deposit.amount_sats || 0) === 0 && deposit.status === 'pending') {
+        log(`Potential uncredited on-chain payment for ${ev.deposit_alias} (offer ${ev.offer_id.slice(0,16)}...)`, 'error');
+
+        // Construct fraud proof
+        const evidenceBytes = uncreditedOnchainEvidenceBytes(
+          ev.offer_id, ev.funding_address || '', 0, 0
+        );
+        const proofHash = computeFraudProofHash(
+          1, // UncreditedOnchainPayment
+          ev.operator_id || '',
+          ev.ledger_id || deposit.ledger_id,
+          evidenceBytes
+        );
+
+        // Store the proof for later embedding
+        ev.fraud_proof_hash = bytesToHex(proofHash);
+        ev.fraud_proof_type = 'uncredited_onchain';
+        ev.fraud_detected_at = now;
+        saveState();
+
+        log(`Fraud proof hash: ${bytesToHex(proofHash).slice(0,16)}... — embed as transfer nonce to prove`, 'error');
+      }
+    }
+
+    if (ev.type === 'invoice' && ev.cosign_verified && ev.payment_hash) {
+      const deposit = state.deposits.find(d => d.alias === ev.deposit_alias);
+      if (!deposit) continue;
+      const age = now - ev.created;
+      if (age < LIGHTNING_GRACE_SECS) continue;
+
+      // If deposit balance hasn't increased and invoice is old enough
+      if ((deposit.amount_sats || 0) === 0 && deposit.status === 'pending') {
+        log(`Potential uncredited lightning payment for ${ev.deposit_alias} (hash ${ev.payment_hash.slice(0,16)}...)`, 'error');
+
+        const evidenceBytes = uncreditedLightningEvidenceBytes(
+          ev.payment_hash, '' // preimage not known by wallet in general
+        );
+        const proofHash = computeFraudProofHash(
+          2, // UncreditedLightningPayment
+          '',
+          ev.ledger_id || deposit.ledger_id,
+          evidenceBytes
+        );
+
+        ev.fraud_proof_hash = bytesToHex(proofHash);
+        ev.fraud_proof_type = 'uncredited_lightning';
+        ev.fraud_detected_at = now;
+        saveState();
+
+        log(`Fraud proof hash: ${bytesToHex(proofHash).slice(0,16)}... — embed as transfer nonce to prove`, 'error');
+      }
+    }
+  }
+
+  // Check for embedded proofs ready to broadcast
+  for (const ev of state.evidence) {
+    if (!ev.fraud_proof_embedded || ev.fraud_proof_broadcast) continue;
+
+    // Fetch the update containing our embedded hash to get its sequence and hash
+    try {
+      const ledgerId = ev.embedding_ledger_id || ev.ledger_id;
+      const filter = { kinds: [9100], '#d': [ledgerId], limit: 50 };
+      const events = await fetchEvents(filter, 10000);
+
+      let embeddingUpdate = null;
+      for (const nostrEv of events) {
+        try {
+          const u = decodeUpdate(nostrEv.content);
+          // Look for our proof hash in the transfer nonce (field type 210)
+          const nonceField = u.opFields.find(f => f.type === 210);
+          if (nonceField && nonceField.hex.startsWith(ev.fraud_proof_hash.slice(0, 32))) {
+            embeddingUpdate = { seq: u.seq, hash: u.curHash, ledgerId };
+            break;
+          }
+        } catch {}
+      }
+
+      if (!embeddingUpdate) continue; // not found yet
+
+      // Build the fraud broadcast
+      const broadcast = {
+        proof: {
+          proof_type: ev.fraud_proof_type,
+          accused: ev.operator_id || '',
+          ledger_id: ev.ledger_id,
+          evidence: ev, // full evidence record
+        },
+        embedding: {
+          ledger_id: embeddingUpdate.ledgerId,
+          sequence: embeddingUpdate.seq,
+          update_hash: embeddingUpdate.hash,
+          field: 'transfer_nonce',
+        },
+        causal_chain: [], // direct if on same ledger, otherwise filled by co-sig lookup
+      };
+
+      // If embedding is on a different ledger than the accused, find the causal link
+      if (embeddingUpdate.ledgerId !== ev.ledger_id) {
+        // Look for a co-signed update on the accused ledger that includes
+        // a member_ledger_hash from the embedding ledger
+        const targetFilter = { kinds: [9100], '#d': [ev.ledger_id], limit: 100 };
+        const targetEvents = await fetchEvents(targetFilter, 10000);
+        for (const tEv of targetEvents) {
+          try {
+            const tu = decodeUpdate(tEv.content);
+            // Field 26 = member_ledger_hash on the outer update
+            const outerTlv = parseTlv(Uint8Array.from(atob(tEv.content), c => c.charCodeAt(0)));
+            const mlhField = outerTlv.find(r => r.type === 26);
+            if (mlhField && tu.seq > embeddingUpdate.seq) {
+              broadcast.causal_chain.push({
+                ledger_id: ev.ledger_id,
+                sequence: tu.seq,
+                update_hash: tu.curHash,
+                member_ledger_hash: bytesToHex(mlhField.value),
+                source_ledger_id: embeddingUpdate.ledgerId,
+              });
+              break;
+            }
+          } catch {}
+        }
+      }
+
+      // Broadcast as Kind 9101 Nostr event
+      const content = JSON.stringify(broadcast);
+      const tags = [
+        ['p', ev.operator_id || ''],
+        ['d', ev.ledger_id || ''],
+        ['t', ev.fraud_proof_type || 'fraud'],
+      ];
+      await publishEvent(9101, content, tags);
+
+      ev.fraud_proof_broadcast = true;
+      ev.fraud_broadcast_at = now;
+      saveState();
+      log(`Fraud proof broadcast for ${ev.deposit_alias}!`, 'error');
+    } catch (e) {
+      log(`Fraud broadcast error: ${e.message}`, 'error');
+    }
+  }
+
+  // Check for evidence with proof hashes ready to embed
+  for (const ev of state.evidence) {
+    if (!ev.fraud_proof_hash || ev.fraud_proof_embedded) continue;
+
+    // Find a deposit on the same ledger (or any ledger) to use for embedding
+    const deposit = state.deposits.find(d =>
+      d.ledger_id === (ev.ledger_id) && (d.amount_sats || 0) > 0
+    ) || state.deposits.find(d => (d.amount_sats || 0) > 0);
+
+    if (!deposit) {
+      log(`Cannot embed fraud proof — no funded deposits available`, 'error');
+      continue;
+    }
+
+    // Embed: create a self-transfer with the proof hash as nonce
+    try {
+      const proofHashBytes = hexToBytes(ev.fraud_proof_hash);
+      const keyIndex = deposit.key_index || 0;
+      const secretKey = deriveSecretKey(state.seed, keyIndex);
+      const pubkey = getCompressedPubkey(secretKey);
+      const depositId = computeDepositId(pubkey);
+
+      // Small self-transfer: 1 sat + fee, with proof hash as nonce
+      const amount = 1;
+      const fee = deposit.transfer_fee_fixed || 2;
+      const timeout = cachedBlockHeight + 144;
+      const transferId = nobleHashes.sha256(proofHashBytes); // deterministic
+
+      const msgHash = transferLockSigningMessage(
+        proofHashBytes, depositId, depositId, amount, fee,
+        'sha256(' + ev.fraud_proof_hash.slice(0,16) + ')', timeout
+      );
+      const sig = schnorr.sign(msgHash, secretKey);
+
+      log(`Embedding fraud proof in transfer on ${deposit.alias}...`);
+      const response = await sendRequest(deposit.ledger_id, 'transfer_lock', {
+        nonce: ev.fraud_proof_hash,
+        source_deposit_id: bytesToHex(depositId),
+        destination_deposit_id: bytesToHex(depositId),
+        amount,
+        fee,
+        completion_script: 'sha256(' + ev.fraud_proof_hash.slice(0,16) + ')',
+        timeout_height: timeout,
+        transfer_id: bytesToHex(transferId),
+        signature: bytesToHex(sig),
+      }, 30000);
+
+      if (response.success) {
+        ev.fraud_proof_embedded = true;
+        ev.embedding_ledger_id = deposit.ledger_id;
+        ev.embedding_deposit = deposit.alias;
+        saveState();
+        log(`Fraud proof embedded in transfer on ${deposit.alias}`, 'success');
+      } else {
+        log(`Failed to embed fraud proof: ${response.error}`, 'error');
+      }
+    } catch (e) {
+      log(`Fraud proof embedding error: ${e.message}`, 'error');
+    }
+  }
+}
 
 window.doWithdraw = async function() {
   if (!selectedDeposit) return;
