@@ -6309,7 +6309,7 @@ impl Node {
 
         // Get ledger and verify source deposit exists
         let ledger_id = &request.ledger_id;
-        let (deposit_descriptor, deposit_pubkey) = {
+        let deposit_descriptor = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let ledger_arc = match ledgers.get(ledger_id) {
                 Some(l) => l.clone(),
@@ -6342,7 +6342,7 @@ impl Node {
                 )));
             }
 
-            (deposit.descriptor.clone(), deposit.descriptor.clone())
+            deposit.descriptor.clone()
         };
 
         // Verify signature
@@ -6357,20 +6357,12 @@ impl Node {
             timeout_height,
         );
 
-        // Extract pubkey from descriptor for verification
-        let pubkey = if deposit_descriptor.starts_with("pk(") {
-            let pk_hex = &deposit_descriptor[3..deposit_descriptor.len()-1];
-            match hex::decode(pk_hex).ok().and_then(|b| bitcoin::secp256k1::PublicKey::from_slice(&b).ok()) {
-                Some(pk) => pk.x_only_public_key().0,
-                None => return (false, None, Some("Invalid pubkey in descriptor".to_string())),
-            }
-        } else {
-            return (false, None, Some("Only pk() descriptors supported for transfers".to_string()));
-        };
-
-        let msg = Message::from_digest(msg_hash);
-        if secp.verify_schnorr(&signature, &msg, &pubkey).is_err() {
-            return (false, None, Some("Invalid signature".to_string()));
+        // Verify signature against deposit descriptor (supports any miniscript)
+        let witness = DescriptorWitness { stack: vec![signature.serialize().to_vec()] };
+        match deposits_core::descriptor::verify_witness(&deposit_descriptor, &witness, &msg_hash) {
+            Ok(true) => {},
+            Ok(false) => return (false, None, Some("Invalid signature".to_string())),
+            Err(e) => return (false, None, Some(format!("Descriptor verification failed: {}", e))),
         }
 
         // Check if destination deposit requires a receive signature
@@ -6392,19 +6384,12 @@ impl Node {
                             Some(sig) => sig,
                             None => return (false, None, Some("Invalid receive_signature".to_string())),
                         };
-                        // Destination key signs the transfer_id to authorize receiving
-                        let recv_msg = Message::from_digest(transfer_id);
-                        let dest_pubkey = if dest_deposit.descriptor.starts_with("pk(") {
-                            let pk_hex = &dest_deposit.descriptor[3..dest_deposit.descriptor.len()-1];
-                            match hex::decode(pk_hex).ok().and_then(|b| bitcoin::secp256k1::PublicKey::from_slice(&b).ok()) {
-                                Some(pk) => pk.x_only_public_key().0,
-                                None => return (false, None, Some("Invalid destination deposit pubkey".to_string())),
-                            }
-                        } else {
-                            return (false, None, Some("Only pk() descriptors supported for receive_requires_sig".to_string()));
-                        };
-                        if secp.verify_schnorr(&recv_sig, &recv_msg, &dest_pubkey).is_err() {
-                            return (false, None, Some("Invalid receive_signature: does not match destination deposit key".to_string()));
+                        // Destination descriptor signs the transfer_id to authorize receiving
+                        let recv_witness = DescriptorWitness { stack: vec![recv_sig.serialize().to_vec()] };
+                        match deposits_core::descriptor::verify_witness(&dest_deposit.descriptor, &recv_witness, &transfer_id) {
+                            Ok(true) => {},
+                            Ok(false) => return (false, None, Some("Invalid receive_signature: does not satisfy destination descriptor".to_string())),
+                            Err(e) => return (false, None, Some(format!("Receive signature verification failed: {}", e))),
                         }
                     }
                 }

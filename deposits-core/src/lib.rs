@@ -65,6 +65,7 @@ pub use deposits_protocol::wire_messages;
 
 // Core modules (state machine, handlers, validation)
 pub mod channel_manager_ops;
+pub mod descriptor;
 pub mod event_store;
 pub mod handler;
 pub mod handler_traits;
