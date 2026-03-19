@@ -270,3 +270,110 @@ fn swapping_operator_sig_breaks_chain() {
     u0.operator_signature = [0xFF; 64];
     assert_ne!(u1.previous_hash, u0.chain_hash());
 }
+
+// =========================================================================
+// TLV roundtrip: current_hash derived on decode, not transmitted
+// =========================================================================
+
+#[test]
+fn tlv_roundtrip_derives_current_hash() {
+    use deposits_protocol::tlv::{TlvEncode, TlvDecode};
+
+    let mut u = make_update(5, [0xAA; 32], &[10, 20, 30]);
+    u.partner_signature = [0xBB; 64];
+    u.member_ledger_hash = Some([0xCC; 32]);
+    u.current_hash = u.compute_hash();
+    u.operator_signature = [0xDD; 64];
+
+    let expected_hash = u.current_hash;
+    assert_ne!(expected_hash, [0u8; 32]);
+
+    // Encode (current_hash is NOT on the wire)
+    let encoded = u.tlv_encode();
+
+    // Decode — current_hash is recomputed from content
+    let decoded = SignedLedgerUpdate::tlv_decode(&encoded).unwrap();
+
+    assert_eq!(decoded.current_hash, expected_hash, "derived current_hash should match original");
+    assert_eq!(decoded.sequence_number, 5);
+    assert_eq!(decoded.previous_hash, [0xAA; 32]);
+    assert_eq!(decoded.message, vec![10, 20, 30]);
+    assert_eq!(decoded.partner_signature, [0xBB; 64]);
+    assert_eq!(decoded.member_ledger_hash, Some([0xCC; 32]));
+    assert_eq!(decoded.operator_signature, [0xDD; 64]);
+    assert_eq!(decoded.chain_hash(), u.chain_hash());
+}
+
+#[test]
+fn tlv_roundtrip_unsigned_update_derives_hash() {
+    use deposits_protocol::tlv::{TlvEncode, TlvDecode};
+
+    let u = make_update(0, [0u8; 32], &[1, 2, 3]);
+    let expected = u.current_hash;
+
+    let encoded = u.tlv_encode();
+    let decoded = SignedLedgerUpdate::tlv_decode(&encoded).unwrap();
+
+    assert_eq!(decoded.current_hash, expected);
+    assert_eq!(decoded.partner_signature, [0u8; 64]);
+    assert_eq!(decoded.member_ledger_hash, None);
+}
+
+#[test]
+fn tlv_wire_does_not_contain_current_hash_bytes() {
+    use deposits_protocol::tlv::{TlvEncode, TlvStream};
+
+    let mut u = make_update(0, [0u8; 32], &[1, 2, 3]);
+    u.current_hash = u.compute_hash();
+
+    let encoded = u.tlv_encode();
+    let stream = TlvStream::decode(&encoded).unwrap();
+
+    // Field 12 (CURRENT_HASH) should not be in the TLV stream
+    assert!(stream.get(12).is_none(), "current_hash (type 12) should not be on the wire");
+
+    // But other fields should be present
+    assert!(stream.get(0).is_some(), "message (type 0) should be present");
+    assert!(stream.get(8).is_some(), "sequence_number (type 8) should be present");
+    assert!(stream.get(10).is_some(), "previous_hash (type 10) should be present");
+    assert!(stream.get(16).is_some(), "partner_signature (type 16) should be present");
+    assert!(stream.get(18).is_some(), "operator_signature (type 18) should be present");
+}
+
+#[test]
+fn chain_of_three_survives_tlv_roundtrip() {
+    use deposits_protocol::tlv::{TlvEncode, TlvDecode};
+
+    // Build a 3-update chain
+    let mut u0 = make_update(0, [0u8; 32], &[1]);
+    u0.partner_signature = [0xA1; 64];
+    u0.current_hash = u0.compute_hash();
+    u0.operator_signature = [0xA2; 64];
+
+    let mut u1 = make_update(1, u0.chain_hash(), &[2]);
+    u1.partner_signature = [0xB1; 64];
+    u1.current_hash = u1.compute_hash();
+    u1.operator_signature = [0xB2; 64];
+
+    let mut u2 = make_update(2, u1.chain_hash(), &[3]);
+    u2.partner_signature = [0xC1; 64];
+    u2.current_hash = u2.compute_hash();
+    u2.operator_signature = [0xC2; 64];
+
+    // Roundtrip each through TLV
+    let d0 = SignedLedgerUpdate::tlv_decode(&u0.tlv_encode()).unwrap();
+    let d1 = SignedLedgerUpdate::tlv_decode(&u1.tlv_encode()).unwrap();
+    let d2 = SignedLedgerUpdate::tlv_decode(&u2.tlv_encode()).unwrap();
+
+    // Chain linkage preserved
+    assert_eq!(d1.previous_hash, d0.chain_hash());
+    assert_eq!(d2.previous_hash, d1.chain_hash());
+
+    // Hashes match originals
+    assert_eq!(d0.current_hash, u0.current_hash);
+    assert_eq!(d1.current_hash, u1.current_hash);
+    assert_eq!(d2.current_hash, u2.current_hash);
+    assert_eq!(d0.chain_hash(), u0.chain_hash());
+    assert_eq!(d1.chain_hash(), u1.chain_hash());
+    assert_eq!(d2.chain_hash(), u2.chain_hash());
+}
