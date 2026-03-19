@@ -916,6 +916,16 @@ impl Ledger {
         // Validate the operation
         self.validate_operation(&operation)?;
 
+        // Validate fee change constraints (needs block_height context)
+        if let LedgerOperation::DepositUpdate { deposit_id, new_fees, effective_block } = &operation {
+            crate::operation_validation::validate_deposit_fee_change(
+                self, deposit_id, new_fees, *effective_block, block_height,
+            ).map_err(|e| DepositsError::ProtocolViolation {
+                violation_type: "fee_change_violation".to_string(),
+                details: e,
+            })?;
+        }
+
         // Serialize the operation
         let message_bytes = operation.tlv_encode();
 

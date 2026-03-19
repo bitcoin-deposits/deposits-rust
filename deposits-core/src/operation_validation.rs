@@ -736,11 +736,30 @@ pub fn validate_deposit_update_by_id(
     deposit_id: &DepositId,
     new_fees: &FeeStructure,
 ) -> ValidationResult {
-    if !ledger.state.deposits.contains_key(deposit_id) {
-        return Err(format!("Deposit with id {} does not exist", hex::encode(deposit_id)));
-    }
+    validate_deposit_fee_change(ledger, deposit_id, new_fees, 0, 0)
+}
 
-    // Validate new fee structure
+/// Validate a fee change with full constraint checking.
+///
+/// Checks:
+/// - Deposit exists
+/// - New fee structure is valid
+/// - Enough blocks since deposit open (fee_change_after_blocks)
+/// - Effective block is far enough in future (fee_change_notice_blocks)
+/// - Fee change is within limit (fee_change_limit_bps)
+pub fn validate_deposit_fee_change(
+    ledger: &Ledger,
+    deposit_id: &DepositId,
+    new_fees: &FeeStructure,
+    effective_block: u32,
+    current_block: u32,
+) -> ValidationResult {
+    let deposit = match ledger.state.deposits.get(deposit_id) {
+        Some(d) => d,
+        None => return Err(format!("Deposit with id {} does not exist", hex::encode(deposit_id))),
+    };
+
+    // Validate new fee structure basics
     if new_fees.frequency_blocks == 0 {
         return Err("Fee frequency must be greater than zero".to_string());
     }
@@ -749,6 +768,69 @@ pub fn validate_deposit_update_by_id(
             "Fee rate too high: {} bps exceeds maximum of {} bps",
             new_fees.annualized_bps, MAX_FEE_RATE_BPS
         ));
+    }
+
+    // Skip timing/limit checks if no change parameters were negotiated
+    // or if current_block is 0 (legacy validation without block context)
+    if current_block == 0 {
+        return Ok(());
+    }
+
+    // Check: enough blocks since deposit open
+    if let Some(after) = deposit.fee_change_after_blocks {
+        let earliest = deposit.opened_at_block.saturating_add(after);
+        if current_block < earliest {
+            return Err(format!(
+                "Fee change too early: {} blocks since open, {} required (earliest block {})",
+                current_block.saturating_sub(deposit.opened_at_block), after, earliest
+            ));
+        }
+    }
+
+    // Check: effective_block far enough in future
+    if let Some(notice) = deposit.fee_change_notice_blocks {
+        let min_effective = current_block.saturating_add(notice);
+        if effective_block < min_effective {
+            return Err(format!(
+                "Insufficient notice: effective_block {} < current {} + notice {} = {}",
+                effective_block, current_block, notice, min_effective
+            ));
+        }
+    }
+
+    // Check: fee change within limit
+    if let Some(limit_bps) = deposit.fee_change_limit_bps {
+        // Check annualized_bps change
+        let old_bps = deposit.fees.annualized_bps as i64;
+        let new_bps = new_fees.annualized_bps as i64;
+        let bps_change = (new_bps - old_bps).unsigned_abs();
+        let max_bps_change = if old_bps > 0 {
+            (old_bps as u64 * limit_bps as u64) / 10000
+        } else {
+            limit_bps as u64 // allow setting from zero
+        };
+        if bps_change > max_bps_change {
+            return Err(format!(
+                "Fee rate change too large: {} -> {} ({} bps change, max {} at {}% limit)",
+                old_bps, new_bps, bps_change, max_bps_change, limit_bps as f64 / 100.0
+            ));
+        }
+
+        // Check annualized_fixed change
+        let old_fixed = deposit.fees.annualized_fixed as i64;
+        let new_fixed = new_fees.annualized_fixed as i64;
+        let fixed_change = (new_fixed - old_fixed).unsigned_abs();
+        let max_fixed_change = if old_fixed > 0 {
+            (old_fixed as u64 * limit_bps as u64) / 10000
+        } else {
+            limit_bps as u64 // allow setting from zero
+        };
+        if fixed_change > max_fixed_change {
+            return Err(format!(
+                "Fixed fee change too large: {} -> {} ({} change, max {} at {}% limit)",
+                old_fixed, new_fixed, fixed_change, max_fixed_change, limit_bps as f64 / 100.0
+            ));
+        }
     }
 
     Ok(())

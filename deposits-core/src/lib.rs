@@ -193,7 +193,7 @@ pub use operation_validation::{
     // Fee validations
     validate_fee_collect,
     // Deposit validations
-    validate_deposit_add, validate_deposit_close, validate_deposit_update,
+    validate_deposit_add, validate_deposit_close, validate_deposit_update, validate_deposit_fee_change,
     // Collateral validations
     validate_collateral_increase, validate_collateral_decrease,
     // Invoice validations

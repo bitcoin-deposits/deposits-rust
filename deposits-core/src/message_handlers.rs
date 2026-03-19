@@ -49,7 +49,7 @@ use crate::operation_validation::{
     validate_reserves_add, validate_reserves_increase, validate_reserves_decrease,
     validate_fee_collect, validate_ledger_close, validate_cosign_invoice,
     // DepositId-based validation functions
-    validate_deposit_add_by_id, validate_deposit_close_by_id, validate_deposit_update_by_id,
+    validate_deposit_add_by_id, validate_deposit_close_by_id, validate_deposit_update_by_id, validate_deposit_fee_change,
     validate_payment_lock_by_id, validate_payment_fulfill_by_id, validate_credit_payment_by_id,
     validate_fee_collect_by_id, validate_deposit_key_rotate,
 };
@@ -431,8 +431,8 @@ pub fn handle_ledger_update<C: HandlerContext>(
                     validate_deposit_close_by_id(&ledger, deposit_id)
                         .map_err(|e| HandlerError::ValidationFailed(e))?;
                 }
-                LedgerOperation::DepositUpdate { deposit_id, new_fees, .. } => {
-                    validate_deposit_update_by_id(&ledger, deposit_id, new_fees)
+                LedgerOperation::DepositUpdate { deposit_id, new_fees, effective_block, .. } => {
+                    validate_deposit_fee_change(&ledger, deposit_id, new_fees, *effective_block, 0)
                         .map_err(|e| HandlerError::ValidationFailed(e))?;
                 }
                 LedgerOperation::DepositKeyRotate { deposit_id, new_descriptor, witness } => {
