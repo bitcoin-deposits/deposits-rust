@@ -81,7 +81,7 @@ pub mod consts {
     // Deposit operations
     pub const DEPOSIT_OPEN: u16 = 0x80D1;
     pub const DEPOSIT_CLOSE: u16 = 0x80D3;
-    pub const DEPOSIT_UPDATE: u16 = 0x80D5;
+    pub const FEE_CHANGE: u16 = 0x80D5;
     pub const DEPOSIT_KEY_ROTATE: u16 = 0x80D7;
 
     // Onchain operations (Bitcoin layer credits/withdrawals)
@@ -165,7 +165,7 @@ pub const ALL_OPERATION_MESSAGE_TYPES: &[u16] = &[
     COLLATERAL_INCREASE, COLLATERAL_DECREASE, COLLATERAL_STATUS,
     COLLATERAL_ATTESTATION, QUORUM_ADD_MEMBER, QUORUM_REMOVE_MEMBER,
     COLLATERAL_CONSENT_REQUEST, COLLATERAL_CONSENT_RESPONSE,
-    DEPOSIT_OPEN, DEPOSIT_CLOSE, DEPOSIT_UPDATE,
+    DEPOSIT_OPEN, DEPOSIT_CLOSE, FEE_CHANGE,
     ONCHAIN_CREDIT, ONCHAIN_LOCK, ONCHAIN_FAIL, ONCHAIN_FULFILL,
     LEDGER_CLOSE,
     MAINTENANCE_FEE_COLLECT,
@@ -184,7 +184,7 @@ pub const ALL_OPERATION_MESSAGE_TYPES: &[u16] = &[
 pub const MESSAGES_REQUIRING_ACK: &[u16] = &[
     RESERVES_ADD_OUTPUT, RESERVES_REMOVE_OUTPUT, RESERVES_INCREASE,
     RESERVES_DECREASE, RESERVES_UPDATE_OUTPUT,
-    DEPOSIT_OPEN, DEPOSIT_CLOSE, DEPOSIT_UPDATE,
+    DEPOSIT_OPEN, DEPOSIT_CLOSE, FEE_CHANGE,
     ONCHAIN_CREDIT, ONCHAIN_LOCK, ONCHAIN_FAIL, ONCHAIN_FULFILL,
     RECEIVING_CREDIT_PAYMENT, RECEIVING_COSIGN_INVOICE,
     SENDING_LOCK_PAYMENT, SENDING_FAIL_PAYMENT, SENDING_FULFILL_PAYMENT,
@@ -222,7 +222,7 @@ pub fn get_message_category(message_type: u16) -> Option<&'static str> {
         COLLATERAL_ATTESTATION | QUORUM_ADD_MEMBER | QUORUM_REMOVE_MEMBER |
         COLLATERAL_CONSENT_REQUEST | COLLATERAL_CONSENT_RESPONSE => Some("collateral"),
 
-        DEPOSIT_OPEN | DEPOSIT_CLOSE | DEPOSIT_UPDATE => Some("deposit"),
+        DEPOSIT_OPEN | DEPOSIT_CLOSE | FEE_CHANGE => Some("deposit"),
 
         ONCHAIN_CREDIT | ONCHAIN_LOCK | ONCHAIN_FAIL | ONCHAIN_FULFILL => Some("onchain"),
 
@@ -576,7 +576,7 @@ pub enum LedgerOperation {
     DepositClose { deposit_id: DepositId },
     /// Announce a fee change. Takes effect after the notice period.
     /// The new fees must be within fee_change_limit_bps of the current fees.
-    DepositUpdate {
+    FeeChange {
         deposit_id: DepositId,
         new_fees: FeeStructure,
         /// Block height at which this change takes effect.
@@ -870,7 +870,7 @@ impl LedgerOperation {
             Self::ReservesRotate { .. } => 12,
             Self::DepositOpen { .. } => 20,
             Self::DepositClose { .. } => 21,
-            Self::DepositUpdate { .. } => 22,
+            Self::FeeChange { .. } => 22,
             Self::DepositKeyRotate { .. } => 23,
             Self::InvoiceCredit { .. } => 30,
             Self::InvoiceLock { .. } => 31,
@@ -905,7 +905,7 @@ impl LedgerOperation {
         match self {
             Self::DepositOpen { deposit_id, .. }
             | Self::DepositClose { deposit_id }
-            | Self::DepositUpdate { deposit_id, .. }
+            | Self::FeeChange { deposit_id, .. }
             | Self::DepositKeyRotate { deposit_id, .. }
             | Self::InvoiceCredit { deposit_id, .. }
             | Self::InvoiceLock { deposit_id, .. }
@@ -1522,7 +1522,7 @@ impl BinaryCodec for LedgerOperation {
                 legacy_bytes[1..17].copy_from_slice(deposit_id);
                 w.write_all(&legacy_bytes)?;
             }
-            Self::DepositUpdate { deposit_id, new_fees, .. } => {
+            Self::FeeChange { deposit_id, new_fees, .. } => {
                 let mut legacy_bytes = [0u8; 33];
                 legacy_bytes[0] = 0x02;
                 legacy_bytes[1..17].copy_from_slice(deposit_id);
@@ -1804,7 +1804,7 @@ impl BinaryCodec for LedgerOperation {
                 let legacy_bytes = read_33(r)?;
                 let mut deposit_id = [0u8; 16];
                 deposit_id.copy_from_slice(&legacy_bytes[1..17]);
-                Ok(Self::DepositUpdate {
+                Ok(Self::FeeChange {
                     deposit_id,
                     new_fees: FeeStructure::read_from(r)?,
                     effective_block: 0,
@@ -2796,7 +2796,7 @@ mod ledger_op_tlv {
     pub const FEE_CHANGE_AFTER: u64 = 243;  // odd = optional, u32 (blocks after open)
     pub const FEE_CHANGE_NOTICE: u64 = 245; // odd = optional, u32 (notice blocks)
     pub const FEE_CHANGE_LIMIT_BPS: u64 = 247; // odd = optional, u16 (default 1000 = 10%)
-    pub const EFFECTIVE_BLOCK: u64 = 249;   // odd = optional, u32 (on DepositUpdate)
+    pub const EFFECTIVE_BLOCK: u64 = 249;   // odd = optional, u32 (on FeeChange)
     pub const COLLATERAL_LOCK_AMOUNT: u64 = 239; // odd = optional, u64 (msats)
     pub const COLLATERAL_LOCK_UNTIL: u64 = 241; // odd = optional, u32 (block height)
 }
@@ -2880,7 +2880,7 @@ impl TlvEncode for LedgerOperation {
             Self::DepositClose { deposit_id } => {
                 builder = builder.deposit_id_field(DEPOSIT_ID, deposit_id);
             }
-            Self::DepositUpdate { deposit_id, new_fees, effective_block } => {
+            Self::FeeChange { deposit_id, new_fees, effective_block } => {
                 builder = builder
                     .deposit_id_field(DEPOSIT_ID, deposit_id)
                     .nested(NEW_FEES, new_fees)
@@ -3132,7 +3132,7 @@ impl TlvDecode for LedgerOperation {
                 fee_change_limit_bps: reader.read_u16_opt(FEE_CHANGE_LIMIT_BPS)?,
             }),
             21 => Ok(Self::DepositClose { deposit_id: reader.read_deposit_id(DEPOSIT_ID)? }),
-            22 => Ok(Self::DepositUpdate {
+            22 => Ok(Self::FeeChange {
                 deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
                 new_fees: reader.read_nested(NEW_FEES)?,
                 effective_block: reader.read_u32_opt(EFFECTIVE_BLOCK)?.unwrap_or(0),

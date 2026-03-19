@@ -2510,7 +2510,7 @@ fn format_operation(op: &LedgerOperation) -> (String, Option<deposits_core::type
         LedgerOperation::QuorumJoin { .. } => ("QuorumJoin".to_string(), None),
         LedgerOperation::DepositOpen { deposit_id, .. } => ("DepositOpen".to_string(), Some(*deposit_id)),
         LedgerOperation::DepositClose { deposit_id, .. } => ("DepositClose".to_string(), Some(*deposit_id)),
-        LedgerOperation::DepositUpdate { deposit_id, .. } => ("DepositUpdate".to_string(), Some(*deposit_id)),
+        LedgerOperation::FeeChange { deposit_id, .. } => ("FeeChange".to_string(), Some(*deposit_id)),
         LedgerOperation::OnchainLock { deposit_id, .. } => ("OnchainLock".to_string(), Some(*deposit_id)),
         LedgerOperation::OnchainFulfill { deposit_id, .. } => ("OnchainFulfill".to_string(), Some(*deposit_id)),
         LedgerOperation::OnchainFail { deposit_id, .. } => ("OnchainFail".to_string(), Some(*deposit_id)),

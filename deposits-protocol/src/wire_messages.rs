@@ -629,15 +629,15 @@ impl WireDecode for DepositCloseMsg {
     }
 }
 
-/// deposit update message
+/// fee change message
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DepositUpdateMsg {
+pub struct FeeChangeMsg {
     pub reserves_id: String,
     pub pubkey: PublicKey,
     pub new_fees: FeeStructure,
 }
 
-impl WireEncode for DepositUpdateMsg {
+impl WireEncode for FeeChangeMsg {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
         write_string(writer, &self.reserves_id)?;
         write_pubkey(writer, &self.pubkey)?;
@@ -646,7 +646,7 @@ impl WireEncode for DepositUpdateMsg {
     }
 }
 
-impl WireDecode for DepositUpdateMsg {
+impl WireDecode for FeeChangeMsg {
     fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
         Ok(Self {
             reserves_id: read_string(reader)?,

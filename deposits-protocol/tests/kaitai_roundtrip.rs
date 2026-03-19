@@ -102,7 +102,7 @@ fn wit() -> DescriptorWitness { DescriptorWitness { stack: vec![vec![0x30; 64]] 
 
 #[test] fn deposit_close() { test_roundtrip(&LedgerOperation::DepositClose { deposit_id: did() }); }
 
-#[test] fn deposit_update() { test_roundtrip(&LedgerOperation::DepositUpdate {
+#[test] fn fee_change() { test_roundtrip(&LedgerOperation::FeeChange {
     deposit_id: did(), new_fees: fees(), effective_block: 0,
 }); }
 

@@ -840,7 +840,7 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
                 let deposit_id = match op {
                     LedgerOperation::DepositOpen { deposit_id, .. } => Some(*deposit_id),
                     LedgerOperation::DepositClose { deposit_id, .. } => Some(*deposit_id),
-                    LedgerOperation::DepositUpdate { deposit_id, .. } => Some(*deposit_id),
+                    LedgerOperation::FeeChange { deposit_id, .. } => Some(*deposit_id),
                     LedgerOperation::CollateralLock { deposit_id, .. } => Some(*deposit_id),
                     LedgerOperation::OnchainCredit { deposit_id, .. } => Some(*deposit_id),
                     LedgerOperation::OnchainLock { deposit_id, .. } => Some(*deposit_id),
@@ -2600,9 +2600,9 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                         ),
                     )
                 }
-                LedgerOperation::DepositUpdate { deposit_id, .. } => {
+                LedgerOperation::FeeChange { deposit_id, .. } => {
                     (
-                        "DepositUpdate",
+                        "FeeChange",
                         format!(
                             "id:{:02x}{:02x}{:02x}{:02x}",
                             deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]

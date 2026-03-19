@@ -119,7 +119,7 @@ types:
         12 = ReservesRotate
         20 = DepositOpen
         21 = DepositClose
-        22 = DepositUpdate
+        22 = FeeChange
         23 = DepositKeyRotate
         30 = InvoiceCredit
         31 = InvoiceLock
@@ -197,7 +197,7 @@ types:
   #   243 = fee_change_after_blocks (u32, optional — blocks after deposit open before fees can change)
   #   245 = fee_change_notice_blocks (u32, optional — blocks of notice required before fee change takes effect)
   #   247 = fee_change_limit_bps (u16, optional — max fee change per adjustment in basis points of current fee)
-  #   249 = effective_block (u32, optional — block height at which DepositUpdate fee change takes effect)
+  #   249 = effective_block (u32, optional — block height at which FeeChange fee change takes effect)
   #
   # Fee fields:
   #   12  = fees (nested TLV: FeeStructure in DepositOpen; u64 fee_sats in OnchainLock/TransferLock)

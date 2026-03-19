@@ -918,7 +918,7 @@ impl Ledger {
         self.validate_operation(&operation)?;
 
         // Validate fee change constraints (needs block_height context)
-        if let LedgerOperation::DepositUpdate { deposit_id, new_fees, effective_block } = &operation {
+        if let LedgerOperation::FeeChange { deposit_id, new_fees, effective_block } = &operation {
             crate::operation_validation::validate_deposit_fee_change(
                 self, deposit_id, new_fees, *effective_block, block_height,
             ).map_err(|e| DepositsError::ProtocolViolation {
@@ -1281,7 +1281,7 @@ impl Ledger {
             LedgerOperation::DepositClose { deposit_id } => {
                 self.state.deposits.remove(deposit_id);
             }
-            LedgerOperation::DepositUpdate { deposit_id, new_fees, effective_block } => {
+            LedgerOperation::FeeChange { deposit_id, new_fees, effective_block } => {
                 if let Some(deposit) = self.state.deposits.get_mut(deposit_id) {
                     // Store as pending fee change — takes effect at effective_block
                     deposit.pending_fee_change = Some((new_fees.clone(), *effective_block));

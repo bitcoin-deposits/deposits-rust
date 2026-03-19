@@ -255,8 +255,8 @@ fn schema_deposit_close() {
 }
 
 #[test]
-fn schema_deposit_update() {
-    validate_schema(22, "DepositUpdate", &[
+fn schema_fee_change() {
+    validate_schema(22, "FeeChange", &[
         (DEPOSIT_ID, deposit_id()),
         (NEW_FEES, fee_structure_tlv()),
         (249, u32_bytes(0)), // EFFECTIVE_BLOCK

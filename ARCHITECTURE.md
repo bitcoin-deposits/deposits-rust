@@ -560,7 +560,7 @@ pub enum DisputeState {
 | 12 | `ReservesRotate` | Reserves |
 | 20 | `DepositOpen` | Deposits |
 | 21 | `DepositClose` | Deposits |
-| 22 | `DepositUpdate` | Deposits |
+| 22 | `FeeChange` | Deposits |
 | 23 | `DepositKeyRotate` | Deposits |
 | 30 | `InvoiceCredit` | Invoices |
 | 31 | `InvoiceLock` | Invoices |
@@ -673,7 +673,7 @@ State changes: creates new `Deposit` in `deposits` map with zero balance.
 
 Validation: `deposit.balance == 0`, no outstanding invoices.
 
-**DepositUpdate** (disc=22) — Update deposit fee structure.
+**FeeChange** (disc=22) — Update deposit fee structure.
 
 | Field | Type | TLV ID |
 |-------|------|--------|
@@ -987,7 +987,7 @@ Selected wire constants for operation types (0x80xx range):
 | `0x809F` | `COLLATERAL_LOCK` | Collateral |
 | `0x80D1` | `DEPOSIT_OPEN` | Deposits |
 | `0x80D3` | `DEPOSIT_CLOSE` | Deposits |
-| `0x80D5` | `DEPOSIT_UPDATE` | Deposits |
+| `0x80D5` | `FEE_CHANGE` | Deposits |
 | `0x80D7` | `DEPOSIT_KEY_ROTATE` | Deposits |
 | `0x8097` | `QUORUM_ADD_MEMBER` | Quorum |
 | `0x8099` | `QUORUM_REMOVE_MEMBER` | Quorum |
@@ -1419,7 +1419,7 @@ Every valid ledger must maintain these invariants at all times:
 | `ReservesRotate` | Reserves exist, quorum parameters valid |
 | `DepositOpen` | Deposit ID must not already exist |
 | `DepositClose` | `balance == 0`, `locked_balance == 0`, no active invoices |
-| `DepositUpdate` | Deposit exists, `annualized_bps <= 10000` |
+| `FeeChange` | Deposit exists, `annualized_bps <= 10000` |
 | `InvoiceLock` / `OnchainLock` | `available_balance() >= amount` |
 | `TransferLock` | Source deposit exists, sufficient balance for `amount + fee` |
 | `TransferComplete` | Transfer ID exists in `pending_transfers`, witness satisfies script |

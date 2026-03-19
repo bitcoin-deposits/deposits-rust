@@ -77,7 +77,7 @@ Partner operators who:
 |-----------|---------|
 | `DepositOpen` | Create new deposit with fee structure |
 | `DepositClose` | Close deposit (must have zero balance) |
-| `DepositUpdate` | Modify fee structure |
+| `FeeChange` | Modify fee structure |
 
 ### Payment Operations
 
@@ -193,7 +193,7 @@ These constraints apply to all operations:
 **State changes:**
 - Removes deposit from state
 
-#### DepositUpdate
+#### FeeChange
 
 | Check | Rule |
 |-------|------|

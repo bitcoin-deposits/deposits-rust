@@ -36,7 +36,7 @@ use crate::wire_messages::{
     CollateralAttestationMsg, UncreditedPaymentMsg,
     ReceivingCreditPaymentMsg, SendingLockPaymentMsg,
     SendingFulfillPaymentMsg, SendingFailPaymentMsg,
-    DepositOpenMsg, DepositCloseMsg, DepositUpdateMsg,
+    DepositOpenMsg, DepositCloseMsg, FeeChangeMsg,
     ReservesAddOutputMsg, ReservesRemoveOutputMsg,
     ReservesIncreaseMsg, ReservesDecreaseMsg,
     FeeCollectMsg, LedgerCloseMsg, ReceivingCosignInvoiceMsg,
@@ -45,11 +45,11 @@ use crate::wire_messages::{
 use crate::operation_validation::{
     validate_credit_payment, validate_payment_lock,
     validate_payment_fulfill, validate_payment_fail,
-    validate_deposit_add, validate_deposit_close, validate_deposit_update,
+    validate_deposit_add, validate_deposit_close, validate_fee_change,
     validate_reserves_add, validate_reserves_increase, validate_reserves_decrease,
     validate_fee_collect, validate_ledger_close, validate_cosign_invoice,
     // DepositId-based validation functions
-    validate_deposit_add_by_id, validate_deposit_close_by_id, validate_deposit_update_by_id, validate_deposit_fee_change,
+    validate_deposit_add_by_id, validate_deposit_close_by_id, validate_fee_change_by_id, validate_deposit_fee_change,
     validate_payment_lock_by_id, validate_payment_fulfill_by_id, validate_credit_payment_by_id,
     validate_fee_collect_by_id, validate_deposit_key_rotate,
 };
@@ -193,8 +193,8 @@ pub enum ResponseData {
         /// New state hash after append
         new_hash: [u8; 32],
     },
-    /// Deposit update validated - partner should sign and ACK
-    DepositUpdateValidated {
+    /// Fee change validated - partner should sign and ACK
+    FeeChangeValidated {
         operator: PublicKey,
         reserves_id: String,
         deposit_pubkey: PublicKey,
@@ -431,7 +431,7 @@ pub fn handle_ledger_update<C: HandlerContext>(
                     validate_deposit_close_by_id(&ledger, deposit_id)
                         .map_err(|e| HandlerError::ValidationFailed(e))?;
                 }
-                LedgerOperation::DepositUpdate { deposit_id, new_fees, effective_block, .. } => {
+                LedgerOperation::FeeChange { deposit_id, new_fees, effective_block, .. } => {
                     validate_deposit_fee_change(&ledger, deposit_id, new_fees, *effective_block, 0)
                         .map_err(|e| HandlerError::ValidationFailed(e))?;
                 }
@@ -1770,13 +1770,13 @@ pub fn handle_deposit_close<C: HandlerContext>(
     Ok(HandlerResult::Ok)
 }
 
-/// Handle a DepositUpdate message.
+/// Handle a fee change message.
 ///
 /// Received by partners when an operator updates a deposit's fee structure.
 /// This handler does the complete flow: validate, mutate, sign, persist, send ACK.
-pub fn handle_deposit_update<C: HandlerContext>(
+pub fn handle_fee_change<C: HandlerContext>(
     ctx: &C,
-    msg: &DepositUpdateMsg,
+    msg: &FeeChangeMsg,
     sender: PublicKey,
 ) -> Result<HandlerResult, HandlerError> {
     use crate::messages::{LedgerOperation, LEDGER_UPDATE};
@@ -1802,7 +1802,7 @@ pub fn handle_deposit_update<C: HandlerContext>(
     let descriptor = format!("pk({})", hex::encode(msg.pubkey.serialize()));
     let deposit_id = crate::types::compute_deposit_id(&descriptor);
 
-    let operation = LedgerOperation::DepositUpdate {
+    let operation = LedgerOperation::FeeChange {
         deposit_id,
         new_fees: msg.new_fees.clone(),
         effective_block: 0,
@@ -1815,7 +1815,7 @@ pub fn handle_deposit_update<C: HandlerContext>(
         )?;
 
         // Validate first
-        validate_deposit_update_by_id(
+        validate_fee_change_by_id(
             &ledger,
             &deposit_id,
             &msg.new_fees,
@@ -4068,11 +4068,11 @@ mod tests {
     }
 
     // ========================================================================
-    // Deposit Update Tests
+    // Fee Change Tests
     // ========================================================================
 
     #[test]
-    fn test_handle_deposit_update_wrong_partner() {
+    fn test_handle_fee_change_wrong_partner() {
         use crate::types::FeeStructure;
 
         let our_node_id = create_test_pubkey(1);
@@ -4082,19 +4082,19 @@ mod tests {
 
         let ctx = TestContext::new(our_node_id);
 
-        let msg = DepositUpdateMsg {
+        let msg = FeeChangeMsg {
             reserves_id: other_partner.to_string(), // Not us
             pubkey: deposit_pubkey,
             new_fees: FeeStructure::default(),
         };
 
         // We're not the target partner - should be rejected
-        let result = handle_deposit_update(&ctx, &msg, operator);
+        let result = handle_fee_change(&ctx, &msg, operator);
         assert!(matches!(result, Ok(HandlerResult::Rejected(_))));
     }
 
     #[test]
-    fn test_handle_deposit_update_no_ledger() {
+    fn test_handle_fee_change_no_ledger() {
         use crate::types::FeeStructure;
 
         let our_node_id = create_test_pubkey(1);
@@ -4103,19 +4103,19 @@ mod tests {
 
         let ctx = TestContext::new(our_node_id);
 
-        let msg = DepositUpdateMsg {
+        let msg = FeeChangeMsg {
             reserves_id: our_node_id.to_string(),
             pubkey: deposit_pubkey,
             new_fees: FeeStructure::default(),
         };
 
         // No ledger exists - should error
-        let result = handle_deposit_update(&ctx, &msg, operator);
+        let result = handle_fee_change(&ctx, &msg, operator);
         assert!(matches!(result, Err(HandlerError::LedgerNotFound { .. })));
     }
 
     #[test]
-    fn test_handle_deposit_update_deposit_not_found() {
+    fn test_handle_fee_change_deposit_not_found() {
         use crate::types::FeeStructure;
 
         let our_node_id = create_test_pubkey(1);
@@ -4128,19 +4128,19 @@ mod tests {
         let ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
         ctx.add_ledger(operator, our_node_id, ledger);
 
-        let msg = DepositUpdateMsg {
+        let msg = FeeChangeMsg {
             reserves_id: our_node_id.to_string(),
             pubkey: deposit_pubkey,
             new_fees: FeeStructure::default(),
         };
 
         // Deposit not found - should fail validation
-        let result = handle_deposit_update(&ctx, &msg, operator);
+        let result = handle_fee_change(&ctx, &msg, operator);
         assert!(matches!(result, Err(HandlerError::ValidationFailed(_))));
     }
 
     #[test]
-    fn test_handle_deposit_update_valid() {
+    fn test_handle_fee_change_valid() {
         use crate::types::{Deposit, FeeStructure};
 
         let our_node_id = create_test_pubkey(1);
@@ -4161,19 +4161,19 @@ mod tests {
             frequency_blocks: 288,
         };
 
-        let msg = DepositUpdateMsg {
+        let msg = FeeChangeMsg {
             reserves_id: our_node_id.to_string(),
             pubkey: deposit_pubkey,
             new_fees,
         };
 
-        // Valid deposit update - should return Ok (handler does complete flow)
-        let result = handle_deposit_update(&ctx, &msg, operator);
+        // Valid fee change - should return Ok (handler does complete flow)
+        let result = handle_fee_change(&ctx, &msg, operator);
         assert!(matches!(result, Ok(HandlerResult::Ok)));
     }
 
     #[test]
-    fn test_handle_deposit_update_invalid_fees() {
+    fn test_handle_fee_change_invalid_fees() {
         use crate::types::{Deposit, FeeStructure};
 
         let our_node_id = create_test_pubkey(1);
@@ -4195,19 +4195,19 @@ mod tests {
             frequency_blocks: 0, // Invalid
         };
 
-        let msg = DepositUpdateMsg {
+        let msg = FeeChangeMsg {
             reserves_id: our_node_id.to_string(),
             pubkey: deposit_pubkey,
             new_fees: invalid_fees,
         };
 
         // Invalid fees - should fail validation
-        let result = handle_deposit_update(&ctx, &msg, operator);
+        let result = handle_fee_change(&ctx, &msg, operator);
         assert!(matches!(result, Err(HandlerError::ValidationFailed(_))));
     }
 
     #[test]
-    fn test_handle_deposit_update_fee_rate_too_high() {
+    fn test_handle_fee_change_fee_rate_too_high() {
         use crate::types::{Deposit, FeeStructure};
 
         let our_node_id = create_test_pubkey(1);
@@ -4229,14 +4229,14 @@ mod tests {
             frequency_blocks: 144,
         };
 
-        let msg = DepositUpdateMsg {
+        let msg = FeeChangeMsg {
             reserves_id: our_node_id.to_string(),
             pubkey: deposit_pubkey,
             new_fees: invalid_fees,
         };
 
         // Fee rate too high - should fail validation
-        let result = handle_deposit_update(&ctx, &msg, operator);
+        let result = handle_fee_change(&ctx, &msg, operator);
         assert!(matches!(result, Err(HandlerError::ValidationFailed(_))));
     }
 

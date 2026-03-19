@@ -2232,8 +2232,8 @@ fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                 LedgerOperation::DepositClose { deposit_id, .. } => {
                     ("DepositClose", format!("id:{:02x}{:02x}{:02x}{:02x}", deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]))
                 }
-                LedgerOperation::DepositUpdate { deposit_id, .. } => {
-                    ("DepositUpdate", format!("id:{:02x}{:02x}{:02x}{:02x}", deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]))
+                LedgerOperation::FeeChange { deposit_id, .. } => {
+                    ("FeeChange", format!("id:{:02x}{:02x}{:02x}{:02x}", deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]))
                 }
                 LedgerOperation::DepositKeyRotate { deposit_id, .. } => {
                     ("DepositKeyRotate", format!("id:{:02x}{:02x}{:02x}{:02x}", deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]))

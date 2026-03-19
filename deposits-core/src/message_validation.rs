@@ -53,14 +53,14 @@ use std::sync::{Arc, RwLock};
 use crate::ledger::Ledger;
 use crate::messages::LedgerOperation;
 use crate::operation_validation::{
-    validate_deposit_add, validate_deposit_close, validate_deposit_update,
+    validate_deposit_add, validate_deposit_close, validate_fee_change,
     validate_payment_lock, validate_payment_fulfill, validate_payment_fail,
     validate_credit_payment, validate_reserves_add, validate_reserves_increase,
     validate_reserves_decrease, validate_fee_collect,
     validate_collateral_increase, validate_collateral_decrease,
     validate_cosign_invoice, validate_ledger_close,
     // DepositId-based validation functions
-    validate_deposit_add_by_id, validate_deposit_close_by_id, validate_deposit_update_by_id,
+    validate_deposit_add_by_id, validate_deposit_close_by_id, validate_fee_change_by_id,
     validate_payment_lock_by_id, validate_payment_fulfill_by_id, validate_credit_payment_by_id,
     validate_fee_collect_by_id, validate_deposit_key_rotate, validate_onchain_lock_by_id,
     // Transfer validation functions
@@ -68,7 +68,7 @@ use crate::operation_validation::{
     ValidationResult,
 };
 use crate::wire_messages::{
-    DepositOpenMsg, DepositCloseMsg, DepositUpdateMsg,
+    DepositOpenMsg, DepositCloseMsg, FeeChangeMsg,
     SendingLockPaymentMsg, SendingFulfillPaymentMsg, SendingFailPaymentMsg,
     ReceivingCreditPaymentMsg, ReservesAddOutputMsg, ReservesRemoveOutputMsg,
     ReservesIncreaseMsg, ReservesDecreaseMsg, FeeCollectMsg,
@@ -539,11 +539,11 @@ pub fn validate_ledger_operation<C: ValidationContext>(
                 Err(format!("No channel ledger found for sender {}", sender))
             }
         }
-        LedgerOperation::DepositUpdate { deposit_id, new_fees, .. } => {
+        LedgerOperation::FeeChange { deposit_id, new_fees, .. } => {
             // Validate deposit exists and new fees are valid
             if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
                 let ledger = ledger_arc.read().unwrap();
-                validate_deposit_update_by_id(&ledger, deposit_id, new_fees)
+                validate_fee_change_by_id(&ledger, deposit_id, new_fees)
             } else {
                 Err(format!("No channel ledger found for sender {}", sender))
             }
@@ -734,15 +734,15 @@ pub fn validate_remove_deposit_msg<C: ValidationContext>(
     }
 }
 
-/// Validate DepositUpdate message.
+/// Validate FeeChange message.
 pub fn validate_update_deposit_msg<C: ValidationContext>(
     ctx: &C,
-    msg: &DepositUpdateMsg,
+    msg: &FeeChangeMsg,
     sender: PublicKey,
 ) -> ValidationResult {
     if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
         let ledger = ledger_arc.read().unwrap();
-        validate_deposit_update(&ledger, msg.pubkey, &msg.new_fees)
+        validate_fee_change(&ledger, msg.pubkey, &msg.new_fees)
     } else {
         Err(format!("No channel ledger found for sender {}", sender))
     }

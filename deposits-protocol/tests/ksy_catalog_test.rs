@@ -150,7 +150,7 @@ fn generate_value_for_disc(field: &KsyField, disc: u8) -> Vec<u8> {
         // Field 12 is overloaded: nested FeeStructure in DepositOpen (20), plain u64 fee elsewhere
         12 => {
             if disc == 20 || disc == 22 {
-                // DepositOpen / DepositUpdate: nested FeeStructure
+                // DepositOpen / FeeChange: nested FeeStructure
                 let f = FeeStructure { annualized_fixed: 1000, annualized_bps: 50, frequency_blocks: 2016 };
                 f.tlv_encode()
             } else {
@@ -345,7 +345,7 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
             fee_change_limit_bps: None,
         }),
         ("DepositClose", LedgerOperation::DepositClose { deposit_id: did() }),
-        ("DepositUpdate", LedgerOperation::DepositUpdate { deposit_id: did(), new_fees: fees(), effective_block: 0 }),
+        ("FeeChange", LedgerOperation::FeeChange { deposit_id: did(), new_fees: fees(), effective_block: 0 }),
         ("DepositKeyRotate", LedgerOperation::DepositKeyRotate {
             deposit_id: did(), new_descriptor: "pk(03...)".into(), witness: wit(),
         }),

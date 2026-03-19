@@ -445,12 +445,12 @@ pub fn validate_deposit_close(
     Ok(())
 }
 
-/// Validate a deposit update operation
+/// Validate a fee change operation
 ///
 /// Checks:
 /// - Deposit exists
 /// - New fee structure is valid
-pub fn validate_deposit_update(
+pub fn validate_fee_change(
     ledger: &Ledger,
     deposit_pubkey: PublicKey,
     new_fees: &FeeStructure,
@@ -726,12 +726,12 @@ pub fn validate_deposit_close_by_id(
     Ok(())
 }
 
-/// Validate a deposit update operation by deposit_id
+/// Validate a fee change operation by deposit_id
 ///
 /// Checks:
 /// - Deposit exists
 /// - New fee structure is valid
-pub fn validate_deposit_update_by_id(
+pub fn validate_fee_change_by_id(
     ledger: &Ledger,
     deposit_id: &DepositId,
     new_fees: &FeeStructure,

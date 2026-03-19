@@ -37,7 +37,7 @@ Parameters negotiated at deposit opening:
 - `fee_change_notice_blocks`: blocks of notice before change takes effect
 - `fee_change_limit_bps`: maximum change per adjustment (basis points of current fee)
 
-A `DepositUpdate` (disc 22) announces new fees with an `effective_block`. Validation checks:
+A `FeeChange` (disc 22) announces new fees with an `effective_block`. Validation checks:
 
 1. Current block >= `opened_at_block + fee_change_after_blocks`
 2. `effective_block` >= current block + `fee_change_notice_blocks`
@@ -47,5 +47,5 @@ The change is stored as `pending_fee_change` and applied when `FeeCollect` runs 
 
 ## Related DEPs
 
-- [DEP-02](DEP-02.md): Ledger State Model (DepositOpen, DepositUpdate, FeeCollect operations)
+- [DEP-02](DEP-02.md): Ledger State Model (DepositOpen, FeeChange, FeeCollect operations)
 - [DEP-05](DEP-05.md): Quorum and Collateral (fee limits negotiated by quorum members)

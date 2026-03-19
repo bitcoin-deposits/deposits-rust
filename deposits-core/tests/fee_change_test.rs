@@ -279,7 +279,7 @@ fn all_constraints_first_failure_reported() {
 }
 
 // =========================================================================
-// State machine: DepositUpdate stored as pending, applied at FeeCollect
+// State machine: FeeChange stored as pending, applied at FeeCollect
 // =========================================================================
 
 #[test]
@@ -293,8 +293,8 @@ fn deposit_update_creates_pending_fee_change() {
         100,
     );
 
-    // Apply DepositUpdate
-    ledger.apply_state_changes(&LedgerOperation::DepositUpdate {
+    // Apply FeeChange
+    ledger.apply_state_changes(&LedgerOperation::FeeChange {
         deposit_id: did,
         new_fees: FeeStructure::new(2000, 200, 2016),
         effective_block: 500,
@@ -331,7 +331,7 @@ fn fee_collect_applies_pending_change_at_effective_block() {
     }).unwrap();
 
     // Schedule fee change for block 500
-    ledger.apply_state_changes(&LedgerOperation::DepositUpdate {
+    ledger.apply_state_changes(&LedgerOperation::FeeChange {
         deposit_id: did,
         new_fees: FeeStructure::new(2000, 200, 2016),
         effective_block: 500,
@@ -377,12 +377,12 @@ fn append_fee_change_too_early_rejected() {
 
     // Try to append at block 500 — too early
     let result = ledger.append_operation_with_block(
-        LedgerOperation::DepositUpdate {
+        LedgerOperation::FeeChange {
             deposit_id: did,
             new_fees: FeeStructure::new(1100, 110, 2016),
             effective_block: 600,
         },
-        deposits_core::messages::consts::DEPOSIT_UPDATE,
+        deposits_core::messages::consts::FEE_CHANGE,
         500,
         [0u8; 32],
     );
@@ -405,12 +405,12 @@ fn append_fee_change_exceeding_limit_rejected() {
 
     // Try 50% increase
     let result = ledger.append_operation_with_block(
-        LedgerOperation::DepositUpdate {
+        LedgerOperation::FeeChange {
             deposit_id: did,
             new_fees: FeeStructure::new(15000, 1500, 2016),
             effective_block: 300,
         },
-        deposits_core::messages::consts::DEPOSIT_UPDATE,
+        deposits_core::messages::consts::FEE_CHANGE,
         200,
         [0u8; 32],
     );
@@ -511,7 +511,7 @@ fn pending_fee_change_survives_multiple_fee_collects_before_effective() {
     }).unwrap();
 
     // Schedule change for block 500
-    ledger.apply_state_changes(&LedgerOperation::DepositUpdate {
+    ledger.apply_state_changes(&LedgerOperation::FeeChange {
         deposit_id: did,
         new_fees: FeeStructure::new(2000, 200, 2016),
         effective_block: 500,
@@ -548,14 +548,14 @@ fn second_fee_change_replaces_pending() {
     );
 
     // First change
-    ledger.apply_state_changes(&LedgerOperation::DepositUpdate {
+    ledger.apply_state_changes(&LedgerOperation::FeeChange {
         deposit_id: did,
         new_fees: FeeStructure::new(2000, 200, 2016),
         effective_block: 500,
     }).unwrap();
 
     // Second change replaces the first
-    ledger.apply_state_changes(&LedgerOperation::DepositUpdate {
+    ledger.apply_state_changes(&LedgerOperation::FeeChange {
         deposit_id: did,
         new_fees: FeeStructure::new(3000, 300, 2016),
         effective_block: 600,

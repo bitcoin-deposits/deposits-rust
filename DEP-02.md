@@ -135,7 +135,7 @@ The `message` field contains a TLV-encoded operation. The first record (type 0) 
 | 12 | ReservesRotate | Rotate reserves to new multisig UTXO |
 | 20 | DepositOpen | Open a new deposit |
 | 21 | DepositClose | Close a deposit |
-| 22 | DepositUpdate | Announce a fee change |
+| 22 | FeeChange | Announce a fee change |
 | 23 | DepositKeyRotate | Rotate deposit spending key |
 | 30 | InvoiceCredit | Credit deposit from lightning payment |
 | 31 | InvoiceLock | Lock deposit for lightning payment |
