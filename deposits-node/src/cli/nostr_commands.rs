@@ -2681,8 +2681,6 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                         ),
                     )
                 }
-                LedgerOperation::CollateralIncrease { .. } => ("CollateralIncrease", String::new()),
-                LedgerOperation::CollateralDecrease { .. } => ("CollateralDecrease", String::new()),
                 LedgerOperation::OnchainCredit {
                     deposit_id,
                     amount,

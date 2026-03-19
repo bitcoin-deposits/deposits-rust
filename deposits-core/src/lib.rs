@@ -195,8 +195,6 @@ pub use operation_validation::{
     validate_fee_collect,
     // Deposit validations
     validate_deposit_add, validate_deposit_close, validate_fee_change, validate_deposit_fee_change,
-    // Collateral validations
-    validate_collateral_increase, validate_collateral_decrease,
     // Invoice validations
     validate_cosign_invoice,
     // Ledger validations
@@ -216,7 +214,6 @@ pub use wire_messages::{
     // Deposit messages
     DepositOpenMsg, DepositCloseMsg, FeeChangeMsg,
     // Collateral messages
-    CollateralIncreaseMsg, CollateralDecreaseMsg,
     QuorumAddMemberMsg, QuorumRemoveMemberMsg,
     CollateralAttestationMsg,
     CollateralConsentRequestMsg, CollateralConsentResponseMsg,
@@ -247,7 +244,7 @@ pub use message_validation::{
     validate_add_deposit_msg, validate_remove_deposit_msg, validate_update_deposit_msg,
     validate_sending_lock_payment_msg, validate_sending_fulfill_payment_msg, validate_sending_fail_payment_msg,
     validate_receiving_credit_payment_msg, validate_reserves_add_output_msg, validate_reserves_remove_msg,
-    validate_fee_collect_msg, validate_collateral_increase_msg, validate_collateral_decrease_msg,
+    validate_fee_collect_msg,
     validate_receiving_cosign_invoice_msg, validate_ledger_close_msg,
 };
 pub use message_handlers::{

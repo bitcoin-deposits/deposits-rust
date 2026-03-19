@@ -2259,12 +2259,6 @@ fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                     ("CollateralLock", format!("id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  until_block:{}",
                         deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3], amount, lock_until_block))
                 }
-                LedgerOperation::CollateralIncrease { .. } => {
-                    ("CollateralIncrease", String::new())
-                }
-                LedgerOperation::CollateralDecrease { .. } => {
-                    ("CollateralDecrease", String::new())
-                }
                 LedgerOperation::OnchainCredit { deposit_id, amount, funding_address, .. } => {
                     let addr_short = if funding_address.len() > 20 {
                         format!("{}..{}", &funding_address[..8], &funding_address[funding_address.len()-6..])

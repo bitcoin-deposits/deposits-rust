@@ -483,8 +483,6 @@ pub fn handle_ledger_update<C: HandlerContext>(
                 LedgerOperation::QuorumRemoveMember { .. } |
                 LedgerOperation::CollateralLock { .. } |
                 LedgerOperation::QuorumJoin { .. } |
-                LedgerOperation::CollateralIncrease { .. } |
-                LedgerOperation::CollateralDecrease { .. } |
                 LedgerOperation::CollateralAttestation { .. } |
                 LedgerOperation::QuorumBegin { .. } |
                 LedgerOperation::CustodyDispute { .. } |
@@ -1121,7 +1119,7 @@ pub fn handle_collateral_remove_partner<C: HandlerContext>(
 
 /// Handle a CollateralAttestation message.
 ///
-/// Received by operators from quorum members after they process a CollateralIncrease.
+/// Received by operators from quorum members after they process a collateral lock.
 /// The operator stores the attestation as proof and forwards it to channel partners.
 pub fn handle_collateral_attestation<C: HandlerContext>(
     ctx: &C,

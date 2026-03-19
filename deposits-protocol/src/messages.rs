@@ -672,17 +672,7 @@ pub enum LedgerOperation {
         block_hash: [u8; 32],
     },
 
-    // ========== Collateral Operations (3) ==========
-    /// Increase collateral commitment
-    CollateralIncrease {
-        new_amount: u64,
-        block_height: u32,
-    },
-    /// Decrease collateral commitment
-    CollateralDecrease {
-        new_amount: u64,
-        block_height: u32,
-    },
+    // ========== Collateral Operations ==========
     /// Record a collateral attestation from another quorum member
     CollateralAttestation {
         collateral_operator: PublicKey,
@@ -867,8 +857,6 @@ impl LedgerOperation {
             Self::TransferLock { .. } => 70,
             Self::TransferComplete { .. } => 71,
             Self::TransferTimeout { .. } => 72,
-            Self::CollateralIncrease { .. } => 40,
-            Self::CollateralDecrease { .. } => 41,
             Self::CollateralAttestation { .. } => 42,
             Self::QuorumAddMember { .. } => 43,
             Self::QuorumRemoveMember { .. } => 44,
@@ -1640,14 +1628,6 @@ impl BinaryCodec for LedgerOperation {
                 write_32(w, transfer_id)?;
                 write_32(w, block_hash)?;
             }
-            Self::CollateralIncrease { new_amount, block_height } => {
-                write_u64(w, *new_amount)?;
-                write_u32(w, *block_height)?;
-            }
-            Self::CollateralDecrease { new_amount, block_height } => {
-                write_u64(w, *new_amount)?;
-                write_u32(w, *block_height)?;
-            }
             Self::CollateralAttestation { collateral_operator, quorum_member, collateral_ledger_id, amount, block_height, lock_until_block, signature, ledger_hash } => {
                 write_pubkey(w, collateral_operator)?;
                 write_pubkey(w, quorum_member)?;
@@ -1960,14 +1940,6 @@ impl BinaryCodec for LedgerOperation {
                 block_hash: read_32(r)?,
             }),
             // Collateral operations (40-44)
-            40 => Ok(Self::CollateralIncrease {
-                new_amount: read_u64(r)?,
-                block_height: read_u32(r)?,
-            }),
-            41 => Ok(Self::CollateralDecrease {
-                new_amount: read_u64(r)?,
-                block_height: read_u32(r)?,
-            }),
             42 => Ok(Self::CollateralAttestation {
                 collateral_operator: read_pubkey(r)?,
                 quorum_member: read_pubkey(r)?,
@@ -2942,16 +2914,6 @@ impl TlvEncode for LedgerOperation {
                     .bytes_field(TRANSFER_ID, transfer_id)
                     .bytes_field(BLOCK_HASH, block_hash);
             }
-            Self::CollateralIncrease { new_amount, block_height } => {
-                builder = builder
-                    .u64_field(NEW_AMOUNT, *new_amount)
-                    .u32_field(BLOCK_HEIGHT, *block_height);
-            }
-            Self::CollateralDecrease { new_amount, block_height } => {
-                builder = builder
-                    .u64_field(NEW_AMOUNT, *new_amount)
-                    .u32_field(BLOCK_HEIGHT, *block_height);
-            }
             Self::CollateralAttestation { collateral_operator, quorum_member, collateral_ledger_id, amount, block_height, lock_until_block, signature, ledger_hash } => {
                 builder = builder
                     .pubkey_field(COLLATERAL_OPERATOR, collateral_operator)
@@ -3173,14 +3135,6 @@ impl TlvDecode for LedgerOperation {
             72 => Ok(Self::TransferTimeout {
                 transfer_id: reader.read_bytes(TRANSFER_ID)?,
                 block_hash: reader.read_bytes(BLOCK_HASH)?,
-            }),
-            40 => Ok(Self::CollateralIncrease {
-                new_amount: reader.read_u64(NEW_AMOUNT)?,
-                block_height: reader.read_u32(BLOCK_HEIGHT)?,
-            }),
-            41 => Ok(Self::CollateralDecrease {
-                new_amount: reader.read_u64(NEW_AMOUNT)?,
-                block_height: reader.read_u32(BLOCK_HEIGHT)?,
             }),
             42 => Ok(Self::CollateralAttestation {
                 collateral_operator: reader.read_pubkey(COLLATERAL_OPERATOR)?,
@@ -4488,10 +4442,6 @@ mod tests {
                 amount: 50000,
                 invoice_id: "inv123".to_string(),
                 sequence_number: 1,
-            },
-            LedgerOperation::CollateralIncrease {
-                new_amount: 100000,
-                block_height: 800000,
             },
             LedgerOperation::LedgerClose,
         ];

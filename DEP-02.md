@@ -110,8 +110,6 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 | 36 | OnchainLock | On-chain |
 | 37 | OnchainFail | On-chain |
 | 38 | OnchainFulfill | On-chain |
-| 40 | CollateralIncrease | Collateral |
-| 41 | CollateralDecrease | Collateral |
 | 42 | CollateralAttestation | Collateral |
 | 43 | QuorumAddMember | Quorum |
 | 44 | QuorumRemoveMember | Quorum |

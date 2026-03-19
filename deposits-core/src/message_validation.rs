@@ -44,7 +44,7 @@
 //!
 //! // Validate individual messages using the context
 //! validate_add_deposit_msg(&context, &msg, sender)?;
-//! validate_collateral_increase_msg(&context, &msg, sender)?;
+//! validate_receiving_cosign_invoice_msg(&context, &msg, sender)?;
 //! ```
 
 use bitcoin::secp256k1::PublicKey;
@@ -56,7 +56,6 @@ use crate::operation_validation::{
     validate_deposit_add, validate_deposit_close, validate_fee_change,
     validate_payment_lock, validate_payment_fulfill, validate_payment_fail,
     validate_credit_payment, validate_reserves_add, validate_fee_collect,
-    validate_collateral_increase, validate_collateral_decrease,
     validate_cosign_invoice, validate_ledger_close,
     // DepositId-based validation functions
     validate_deposit_add_by_id, validate_deposit_close_by_id, validate_fee_change_by_id,
@@ -71,7 +70,6 @@ use crate::wire_messages::{
     SendingLockPaymentMsg, SendingFulfillPaymentMsg, SendingFailPaymentMsg,
     ReceivingCreditPaymentMsg, ReservesAddOutputMsg, ReservesRemoveOutputMsg,
     FeeCollectMsg,
-    CollateralIncreaseMsg, CollateralDecreaseMsg,
     ReceivingCosignInvoiceMsg, LedgerCloseMsg,
 };
 
@@ -598,22 +596,6 @@ pub fn validate_ledger_operation<C: ValidationContext>(
                 Err(format!("No channel ledger found for sender {}", sender))
             }
         }
-        LedgerOperation::CollateralIncrease { new_amount, block_height } => {
-            let msg = CollateralIncreaseMsg {
-                reserves_id: partner_pubkey.to_string(),
-                new_amount: *new_amount,
-                block_height: *block_height,
-            };
-            validate_collateral_increase_msg(ctx, &msg, sender)
-        }
-        LedgerOperation::CollateralDecrease { new_amount, block_height } => {
-            let msg = CollateralDecreaseMsg {
-                reserves_id: partner_pubkey.to_string(),
-                new_amount: *new_amount,
-                block_height: *block_height,
-            };
-            validate_collateral_decrease_msg(ctx, &msg, sender)
-        }
         LedgerOperation::FeeCollect { deposit_id, amount, block_height } => {
             // Validate fee collection
             if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
@@ -841,45 +823,6 @@ pub fn validate_fee_collect_msg<C: ValidationContext>(
     }
 }
 
-/// Validate CollateralIncrease message.
-pub fn validate_collateral_increase_msg<C: ValidationContext>(
-    ctx: &C,
-    msg: &CollateralIncreaseMsg,
-    sender: PublicKey,
-) -> ValidationResult {
-    if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
-        let ledger = ledger_arc.read().unwrap();
-        validate_collateral_increase(
-            ledger.state.collateral_amount,
-            msg.new_amount,
-            ledger.reserves_amount(),
-        )
-    } else {
-        Err(format!("No channel ledger found for sender {}", sender))
-    }
-}
-
-/// Validate CollateralDecrease message.
-///
-/// CONSTRAINT: collateraldecrease doesn't happen in the same reporting period as collateralincrease
-pub fn validate_collateral_decrease_msg<C: ValidationContext>(
-    ctx: &C,
-    msg: &CollateralDecreaseMsg,
-    sender: PublicKey,
-) -> ValidationResult {
-    if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
-        let ledger = ledger_arc.read().unwrap();
-        validate_collateral_decrease(
-            ledger.state.collateral_amount,
-            msg.new_amount,
-            msg.block_height,
-            ledger.state.last_collateral_increase_block,
-        )
-    } else {
-        Err(format!("No channel ledger found for sender {}", sender))
-    }
-}
-
 /// Validate ReceivingCosignInvoice message.
 ///
 /// Partner must verify the invoice amount doesn't exceed reserves/collateral BEFORE cosigning.
@@ -1085,65 +1028,6 @@ mod tests {
         let result = validate_reserves_add_output_msg(&msg);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("exceeds maximum"));
-    }
-
-    #[test]
-    fn test_validate_collateral_decrease_too_soon_after_increase() {
-        let our_node_id = create_test_pubkey(1);
-        let operator = create_test_pubkey(2);
-
-        let mut ctx = TestContext::new(our_node_id);
-        let mut ledger = Ledger::new(
-            operator,
-            our_node_id.to_string(),
-            LedgerRole::Partner,
-            vec![],
-            "tb1qtest".to_string(),
-            0,
-        );
-        ledger.state.collateral_amount = 5000;
-        ledger.state.last_collateral_increase_block = Some(100);
-        ctx.add_ledger(operator, our_node_id.to_string(), ledger);
-
-        // Try to decrease at block 150 (within 144-block period)
-        let msg = CollateralDecreaseMsg {
-            new_amount: 3000,
-            reserves_id: our_node_id.to_string(),
-            block_height: 150,
-        };
-
-        let result = validate_collateral_decrease_msg(&ctx, &msg, operator);
-        assert!(result.is_err(), "Decrease too soon after increase should fail");
-        assert!(result.unwrap_err().contains("too soon after increase"));
-    }
-
-    #[test]
-    fn test_validate_collateral_decrease_after_reporting_period() {
-        let our_node_id = create_test_pubkey(1);
-        let operator = create_test_pubkey(2);
-
-        let mut ctx = TestContext::new(our_node_id);
-        let mut ledger = Ledger::new(
-            operator,
-            our_node_id.to_string(),
-            LedgerRole::Partner,
-            vec![],
-            "tb1qtest".to_string(),
-            0,
-        );
-        ledger.state.collateral_amount = 5000;
-        ledger.state.last_collateral_increase_block = Some(100);
-        ctx.add_ledger(operator, our_node_id.to_string(), ledger);
-
-        // Decrease at block 250 (after 144-block period: 100 + 144 = 244)
-        let msg = CollateralDecreaseMsg {
-            new_amount: 3000,
-            reserves_id: our_node_id.to_string(),
-            block_height: 250,
-        };
-
-        let result = validate_collateral_decrease_msg(&ctx, &msg, operator);
-        assert!(result.is_ok(), "Decrease after reporting period should succeed: {:?}", result);
     }
 
     #[test]

@@ -127,8 +127,6 @@ types:
         36 = OnchainLock
         37 = OnchainFail
         38 = OnchainFulfill
-        40 = CollateralIncrease
-        41 = CollateralDecrease
         42 = CollateralAttestation
         43 = QuorumAddMember
         44 = QuorumRemoveMember

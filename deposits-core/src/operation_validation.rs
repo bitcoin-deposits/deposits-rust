@@ -410,79 +410,6 @@ pub fn validate_fee_change(
 }
 
 // ============================================================================
-// Collateral Validations
-// ============================================================================
-
-/// Validate a collateral increase operation
-///
-/// Checks:
-/// - New amount is greater than current
-/// - New amount doesn't exceed reserves backing
-pub fn validate_collateral_increase(
-    current_collateral: u64,
-    new_amount: u64,
-    reserves_amount: u64,
-) -> ValidationResult {
-    // Allow idempotent case: if already at target, return Ok (no-op)
-    // This handles state sync issues where operator thinks collateral is 0
-    // but partner has it at the target value from a previous interaction
-    if new_amount == current_collateral {
-        return Ok(()); // Idempotent - already at target
-    }
-
-    if new_amount < current_collateral {
-        return Err(format!(
-            "CollateralIncrease must increase collateral: {} is less than current {}",
-            new_amount, current_collateral
-        ));
-    }
-
-    if new_amount > reserves_amount {
-        return Err(format!(
-            "Collateral increase exceeds reserves: {} msats committed > {} msats reserves",
-            new_amount, reserves_amount
-        ));
-    }
-
-    Ok(())
-}
-
-/// Collateral reporting period in blocks (used to prevent decrease right after increase)
-pub use crate::constants::COLLATERAL_REPORTING_PERIOD_BLOCKS;
-
-/// Validate a collateral decrease operation
-///
-/// Checks:
-/// - New amount is less than current
-/// - Not in same reporting period as increase
-pub fn validate_collateral_decrease(
-    current_collateral: u64,
-    new_amount: u64,
-    block_height: u32,
-    last_increase_block: Option<u32>,
-) -> ValidationResult {
-    if new_amount >= current_collateral {
-        return Err(format!(
-            "CollateralDecrease must decrease collateral: {} is not less than current {}",
-            new_amount, current_collateral
-        ));
-    }
-
-    // Check timing constraint
-    if let Some(last_increase) = last_increase_block {
-        let earliest_allowed = last_increase.saturating_add(COLLATERAL_REPORTING_PERIOD_BLOCKS);
-        if block_height < earliest_allowed {
-            return Err(format!(
-                "CollateralDecrease too soon after increase: block {} < earliest allowed {} (last increase {} + period {})",
-                block_height, earliest_allowed, last_increase, COLLATERAL_REPORTING_PERIOD_BLOCKS
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-// ============================================================================
 // Invoice Validations
 // ============================================================================
 
@@ -1247,38 +1174,6 @@ mod tests {
             frequency_blocks: 0, // Invalid
         };
         assert!(validate_deposit_add(&ledger, new_pubkey, Some(&bad_fees)).is_err());
-    }
-
-    #[test]
-    fn test_validate_collateral_increase() {
-        // Valid increase within reserves
-        assert!(validate_collateral_increase(1000, 2000, 5000).is_ok());
-
-        // Idempotent: same amount is OK (handles state sync issues)
-        assert!(validate_collateral_increase(1000, 1000, 5000).is_ok());
-
-        // Decrease is not allowed via CollateralIncrease
-        assert!(validate_collateral_increase(1000, 500, 5000).is_err());
-
-        // Exceeds reserves
-        assert!(validate_collateral_increase(1000, 6000, 5000).is_err());
-    }
-
-    #[test]
-    fn test_validate_collateral_decrease() {
-        // Valid decrease, no timing constraint
-        assert!(validate_collateral_decrease(2000, 1000, 1000, None).is_ok());
-
-        // Not actually decreasing
-        assert!(validate_collateral_decrease(1000, 1000, 1000, None).is_err());
-        assert!(validate_collateral_decrease(1000, 1500, 1000, None).is_err());
-
-        // Timing constraint: too soon after increase
-        // COLLATERAL_REPORTING_PERIOD_BLOCKS is typically 144 blocks
-        assert!(validate_collateral_decrease(2000, 1000, 100, Some(50)).is_err());
-
-        // Timing constraint: after reporting period
-        assert!(validate_collateral_decrease(2000, 1000, 1000, Some(50)).is_ok());
     }
 
     #[test]

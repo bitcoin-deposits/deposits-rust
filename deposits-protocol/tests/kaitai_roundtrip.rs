@@ -153,14 +153,6 @@ fn wit() -> DescriptorWitness { DescriptorWitness { stack: vec![vec![0x30; 64]] 
     transfer_id: h32(), block_hash: h32(),
 }); }
 
-#[test] fn collateral_increase() { test_roundtrip(&LedgerOperation::CollateralIncrease {
-    new_amount: 50_000_000, block_height: 200,
-}); }
-
-#[test] fn collateral_decrease() { test_roundtrip(&LedgerOperation::CollateralDecrease {
-    new_amount: 10_000_000, block_height: 300,
-}); }
-
 #[test] fn collateral_attestation() { test_roundtrip(&LedgerOperation::CollateralAttestation {
     collateral_operator: pk(), quorum_member: pk(), collateral_ledger_id: "abc123".into(),
     amount: 50_000_000, block_height: 200, lock_until_block: 1000,

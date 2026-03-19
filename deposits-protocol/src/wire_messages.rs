@@ -612,60 +612,6 @@ impl WireDecode for FeeChangeMsg {
 // Collateral Messages
 // ============================================================================
 
-/// collateral increase message
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CollateralIncreaseMsg {
-    pub reserves_id: String,
-    pub new_amount: u64,
-    pub block_height: u32,
-}
-
-impl WireEncode for CollateralIncreaseMsg {
-    fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
-        write_string(writer, &self.reserves_id)?;
-        write_u64(writer, self.new_amount)?;
-        write_u32(writer, self.block_height)?;
-        Ok(())
-    }
-}
-
-impl WireDecode for CollateralIncreaseMsg {
-    fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
-        Ok(Self {
-            reserves_id: read_string(reader)?,
-            new_amount: read_u64(reader)?,
-            block_height: read_u32(reader)?,
-        })
-    }
-}
-
-/// collateral decrease message
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CollateralDecreaseMsg {
-    pub reserves_id: String,
-    pub new_amount: u64,
-    pub block_height: u32,
-}
-
-impl WireEncode for CollateralDecreaseMsg {
-    fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
-        write_string(writer, &self.reserves_id)?;
-        write_u64(writer, self.new_amount)?;
-        write_u32(writer, self.block_height)?;
-        Ok(())
-    }
-}
-
-impl WireDecode for CollateralDecreaseMsg {
-    fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
-        Ok(Self {
-            reserves_id: read_string(reader)?,
-            new_amount: read_u64(reader)?,
-            block_height: read_u32(reader)?,
-        })
-    }
-}
-
 // ============================================================================
 // Fee and Ledger Close Messages
 // ============================================================================

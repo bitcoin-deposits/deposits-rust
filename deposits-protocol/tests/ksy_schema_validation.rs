@@ -344,22 +344,6 @@ fn schema_onchain_fulfill() {
 }
 
 #[test]
-fn schema_collateral_increase() {
-    validate_schema(40, "CollateralIncrease", &[
-        (NEW_AMOUNT, u64_bytes(50_000_000)),
-        (BLOCK_HEIGHT, u32_bytes(200)),
-    ]);
-}
-
-#[test]
-fn schema_collateral_decrease() {
-    validate_schema(41, "CollateralDecrease", &[
-        (NEW_AMOUNT, u64_bytes(10_000_000)),
-        (BLOCK_HEIGHT, u32_bytes(300)),
-    ]);
-}
-
-#[test]
 fn schema_collateral_attestation() {
     validate_schema(42, "CollateralAttestation", &[
         (COLLATERAL_OPERATOR, pubkey_bytes()),

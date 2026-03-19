@@ -1332,13 +1332,6 @@ impl Ledger {
                     deposit.last_fee_assessment = *block_height;
                 }
             }
-            LedgerOperation::CollateralIncrease { new_amount, block_height } => {
-                self.state.collateral_amount = *new_amount;
-                self.state.last_collateral_increase_block = Some(*block_height);
-            }
-            LedgerOperation::CollateralDecrease { new_amount, .. } => {
-                self.state.collateral_amount = *new_amount;
-            }
             LedgerOperation::QuorumAddMember {
                 quorum_member, member_ledger_id, min_fee_bps, min_fee_fixed, max_fee_period,
                 collateral_lock_amount, collateral_lock_until, ..
