@@ -565,13 +565,23 @@ pub enum LedgerOperation {
         /// If true, incoming funds (transfers, offers, invoices) require a
         /// signature from the deposit key. Prevents unsolicited crediting.
         receive_requires_sig: bool,
+        /// Blocks after deposit open before fees can be changed (relative).
+        fee_change_after_blocks: Option<u32>,
+        /// Blocks of notice required before a fee change takes effect.
+        fee_change_notice_blocks: Option<u32>,
+        /// Maximum fee change per adjustment in basis points of current fee (default 1000 = 10%).
+        fee_change_limit_bps: Option<u16>,
     },
     /// Close a deposit
     DepositClose { deposit_id: DepositId },
-    /// Update deposit fee structure
+    /// Announce a fee change. Takes effect after the notice period.
+    /// The new fees must be within fee_change_limit_bps of the current fees.
     DepositUpdate {
         deposit_id: DepositId,
         new_fees: FeeStructure,
+        /// Block height at which this change takes effect.
+        /// Must be >= current_block + fee_change_notice_blocks.
+        effective_block: u32,
     },
     /// Rotate the deposit's spending key/descriptor
     /// The deposit_id stays the same (derived from original descriptor)
@@ -1512,7 +1522,7 @@ impl BinaryCodec for LedgerOperation {
                 legacy_bytes[1..17].copy_from_slice(deposit_id);
                 w.write_all(&legacy_bytes)?;
             }
-            Self::DepositUpdate { deposit_id, new_fees } => {
+            Self::DepositUpdate { deposit_id, new_fees, .. } => {
                 let mut legacy_bytes = [0u8; 33];
                 legacy_bytes[0] = 0x02;
                 legacy_bytes[1..17].copy_from_slice(deposit_id);
@@ -1779,6 +1789,9 @@ impl BinaryCodec for LedgerOperation {
                     cosigner_guarantee_signature: read_option(r, read_64)?,
                     is_collateral: false,
                     receive_requires_sig: false,
+                    fee_change_after_blocks: None,
+                    fee_change_notice_blocks: None,
+                    fee_change_limit_bps: None,
                 })
             }
             21 => {
@@ -1794,6 +1807,7 @@ impl BinaryCodec for LedgerOperation {
                 Ok(Self::DepositUpdate {
                     deposit_id,
                     new_fees: FeeStructure::read_from(r)?,
+                    effective_block: 0,
                 })
             }
             23 => {
@@ -2779,6 +2793,10 @@ mod ledger_op_tlv {
     pub const MIN_FEE_BPS: u64 = 233;     // odd = optional, u16
     pub const MIN_FEE_FIXED: u64 = 235;   // odd = optional, u64 (msats/year)
     pub const MAX_FEE_PERIOD: u64 = 237;   // odd = optional, u32 (blocks)
+    pub const FEE_CHANGE_AFTER: u64 = 243;  // odd = optional, u32 (blocks after open)
+    pub const FEE_CHANGE_NOTICE: u64 = 245; // odd = optional, u32 (notice blocks)
+    pub const FEE_CHANGE_LIMIT_BPS: u64 = 247; // odd = optional, u16 (default 1000 = 10%)
+    pub const EFFECTIVE_BLOCK: u64 = 249;   // odd = optional, u32 (on DepositUpdate)
     pub const COLLATERAL_LOCK_AMOUNT: u64 = 239; // odd = optional, u64 (msats)
     pub const COLLATERAL_LOCK_UNTIL: u64 = 241; // odd = optional, u32 (block height)
 }
@@ -2824,7 +2842,7 @@ impl TlvEncode for LedgerOperation {
                     .bytes_field(LEDGER_HASH, ledger_hash)
                     .bytes_field(QUORUM_MEMBERS, &members_bytes);
             }
-            Self::DepositOpen { deposit_id, descriptor, fees, transfer_fees, payment_hash, invoice, cosigner_guarantee_signature, is_collateral, receive_requires_sig } => {
+            Self::DepositOpen { deposit_id, descriptor, fees, transfer_fees, payment_hash, invoice, cosigner_guarantee_signature, is_collateral, receive_requires_sig, fee_change_after_blocks, fee_change_notice_blocks, fee_change_limit_bps } => {
                 builder = builder
                     .deposit_id_field(DEPOSIT_ID, deposit_id)
                     .string_field(DESCRIPTOR, descriptor);
@@ -2849,14 +2867,24 @@ impl TlvEncode for LedgerOperation {
                 if *receive_requires_sig {
                     builder = builder.u8_field(RECEIVE_REQUIRES_SIG, 1);
                 }
+                if let Some(v) = fee_change_after_blocks {
+                    builder = builder.u32_field(FEE_CHANGE_AFTER, *v);
+                }
+                if let Some(v) = fee_change_notice_blocks {
+                    builder = builder.u32_field(FEE_CHANGE_NOTICE, *v);
+                }
+                if let Some(v) = fee_change_limit_bps {
+                    builder = builder.u16_field(FEE_CHANGE_LIMIT_BPS, *v);
+                }
             }
             Self::DepositClose { deposit_id } => {
                 builder = builder.deposit_id_field(DEPOSIT_ID, deposit_id);
             }
-            Self::DepositUpdate { deposit_id, new_fees } => {
+            Self::DepositUpdate { deposit_id, new_fees, effective_block } => {
                 builder = builder
                     .deposit_id_field(DEPOSIT_ID, deposit_id)
-                    .nested(NEW_FEES, new_fees);
+                    .nested(NEW_FEES, new_fees)
+                    .u32_field(EFFECTIVE_BLOCK, *effective_block);
             }
             Self::DepositKeyRotate { deposit_id, new_descriptor, witness } => {
                 builder = builder
@@ -3099,11 +3127,15 @@ impl TlvDecode for LedgerOperation {
                 cosigner_guarantee_signature: reader.read_bytes_opt(COSIGNER_SIG)?,
                 is_collateral: reader.read_u8(IS_COLLATERAL).unwrap_or(0) != 0,
                 receive_requires_sig: reader.read_u8(RECEIVE_REQUIRES_SIG).unwrap_or(0) != 0,
+                fee_change_after_blocks: reader.read_u32_opt(FEE_CHANGE_AFTER)?,
+                fee_change_notice_blocks: reader.read_u32_opt(FEE_CHANGE_NOTICE)?,
+                fee_change_limit_bps: reader.read_u16_opt(FEE_CHANGE_LIMIT_BPS)?,
             }),
             21 => Ok(Self::DepositClose { deposit_id: reader.read_deposit_id(DEPOSIT_ID)? }),
             22 => Ok(Self::DepositUpdate {
                 deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
                 new_fees: reader.read_nested(NEW_FEES)?,
+                effective_block: reader.read_u32_opt(EFFECTIVE_BLOCK)?.unwrap_or(0),
             }),
             23 => Ok(Self::DepositKeyRotate {
                 deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
@@ -4359,6 +4391,9 @@ mod tests {
             cosigner_guarantee_signature: None,
             is_collateral: false,
             receive_requires_sig: false,
+            fee_change_after_blocks: None,
+            fee_change_notice_blocks: None,
+            fee_change_limit_bps: None,
         };
 
         let mut bytes = Vec::new();
@@ -4483,6 +4518,9 @@ mod tests {
                 cosigner_guarantee_signature: None,
                 is_collateral: false,
                 receive_requires_sig: false,
+                fee_change_after_blocks: Some(52560),
+                fee_change_notice_blocks: Some(2016),
+                fee_change_limit_bps: Some(1000),
             },
             LedgerOperation::DepositClose { deposit_id: crate::types::compute_deposit_id("pk(test)") },
             LedgerOperation::InvoiceCredit {

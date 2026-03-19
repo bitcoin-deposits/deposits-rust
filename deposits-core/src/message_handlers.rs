@@ -431,7 +431,7 @@ pub fn handle_ledger_update<C: HandlerContext>(
                     validate_deposit_close_by_id(&ledger, deposit_id)
                         .map_err(|e| HandlerError::ValidationFailed(e))?;
                 }
-                LedgerOperation::DepositUpdate { deposit_id, new_fees } => {
+                LedgerOperation::DepositUpdate { deposit_id, new_fees, .. } => {
                     validate_deposit_update_by_id(&ledger, deposit_id, new_fees)
                         .map_err(|e| HandlerError::ValidationFailed(e))?;
                 }
@@ -1598,6 +1598,9 @@ pub fn handle_deposit_open<C: HandlerContext>(
         cosigner_guarantee_signature: msg.cosigner_guarantee_signature,
         is_collateral: false,
         receive_requires_sig: false,
+        fee_change_after_blocks: None,
+        fee_change_notice_blocks: None,
+        fee_change_limit_bps: None,
     };
 
     // Check for idempotency and append (single write lock scope)
@@ -1802,6 +1805,7 @@ pub fn handle_deposit_update<C: HandlerContext>(
     let operation = LedgerOperation::DepositUpdate {
         deposit_id,
         new_fees: msg.new_fees.clone(),
+        effective_block: 0,
     };
 
     // Validate and append (single write lock scope)

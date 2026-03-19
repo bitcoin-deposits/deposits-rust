@@ -197,6 +197,10 @@ types:
   #   237 = max_fee_period (u32, optional — member's max fee collection period in blocks)
   #   239 = collateral_lock_amount (u64, optional — member's minimum collateral commitment in msats)
   #   241 = collateral_lock_until (u32, optional — block height until which collateral is locked)
+  #   243 = fee_change_after_blocks (u32, optional — blocks after deposit open before fees can change)
+  #   245 = fee_change_notice_blocks (u32, optional — blocks of notice required before fee change takes effect)
+  #   247 = fee_change_limit_bps (u16, optional — max fee change per adjustment in basis points of current fee)
+  #   249 = effective_block (u32, optional — block height at which DepositUpdate fee change takes effect)
   #
   # Fee fields:
   #   12  = fees (nested TLV: FeeStructure in DepositOpen; u64 fee_sats in OnchainLock/TransferLock)

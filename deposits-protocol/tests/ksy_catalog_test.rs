@@ -340,9 +340,12 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
             cosigner_guarantee_signature: Some(sig()),
             is_collateral: false,
             receive_requires_sig: false,
+            fee_change_after_blocks: None,
+            fee_change_notice_blocks: None,
+            fee_change_limit_bps: None,
         }),
         ("DepositClose", LedgerOperation::DepositClose { deposit_id: did() }),
-        ("DepositUpdate", LedgerOperation::DepositUpdate { deposit_id: did(), new_fees: fees() }),
+        ("DepositUpdate", LedgerOperation::DepositUpdate { deposit_id: did(), new_fees: fees(), effective_block: 0 }),
         ("DepositKeyRotate", LedgerOperation::DepositKeyRotate {
             deposit_id: did(), new_descriptor: "pk(03...)".into(), witness: wit(),
         }),

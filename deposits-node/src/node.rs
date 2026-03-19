@@ -4733,6 +4733,9 @@ impl Node {
                 cosigner_guarantee_signature: None,
                 is_collateral: false,
                 receive_requires_sig: false,
+                fee_change_after_blocks: None,
+                fee_change_notice_blocks: None,
+                fee_change_limit_bps: None,
             };
 
             let message_bytes = operation.tlv_encode();
@@ -9698,6 +9701,9 @@ impl Node {
                 cosigner_guarantee_signature: None,
                 is_collateral,
                 receive_requires_sig,
+                fee_change_after_blocks: None,
+                fee_change_notice_blocks: None,
+                fee_change_limit_bps: None,
             };
 
             let block_height = self.wallet.get_block_height().unwrap_or(0);

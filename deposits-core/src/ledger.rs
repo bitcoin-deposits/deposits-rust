@@ -953,6 +953,13 @@ impl Ledger {
         // Apply state changes
         self.apply_state_changes(&operation)?;
 
+        // Set opened_at_block for new deposits
+        if let LedgerOperation::DepositOpen { deposit_id, .. } = &operation {
+            if let Some(deposit) = self.state.deposits.get_mut(deposit_id) {
+                deposit.opened_at_block = block_height;
+            }
+        }
+
         // Update sequence and hash
         self.state.sequence = sequence;
         self.state.hash = new_hash;
@@ -1232,21 +1239,26 @@ impl Ledger {
                 self.state.reserves_key = reserves_id.clone();
                 self.state.reserves.amount = *amount;
             }
-            LedgerOperation::DepositOpen { deposit_id, descriptor, fees, transfer_fees, is_collateral, receive_requires_sig, .. } => {
+            LedgerOperation::DepositOpen { deposit_id, descriptor, fees, transfer_fees, is_collateral, receive_requires_sig, fee_change_after_blocks, fee_change_notice_blocks, fee_change_limit_bps, .. } => {
                 let mut deposit = Deposit::new(descriptor.clone(), fees.clone());
                 if let Some(tf) = transfer_fees {
                     deposit.transfer_fees = tf.clone();
                 }
                 deposit.is_collateral = *is_collateral;
                 deposit.receive_requires_sig = *receive_requires_sig;
+                deposit.fee_change_after_blocks = *fee_change_after_blocks;
+                deposit.fee_change_notice_blocks = *fee_change_notice_blocks;
+                deposit.fee_change_limit_bps = *fee_change_limit_bps;
+                // opened_at_block is set by append_operation_with_block after apply_state_changes
                 self.state.deposits.insert(*deposit_id, deposit);
             }
             LedgerOperation::DepositClose { deposit_id } => {
                 self.state.deposits.remove(deposit_id);
             }
-            LedgerOperation::DepositUpdate { deposit_id, new_fees } => {
+            LedgerOperation::DepositUpdate { deposit_id, new_fees, effective_block } => {
                 if let Some(deposit) = self.state.deposits.get_mut(deposit_id) {
-                    deposit.fees = new_fees.clone();
+                    // Store as pending fee change — takes effect at effective_block
+                    deposit.pending_fee_change = Some((new_fees.clone(), *effective_block));
                 }
             }
             LedgerOperation::DepositKeyRotate { deposit_id, new_descriptor, .. } => {
@@ -1313,6 +1325,14 @@ impl Ledger {
                 block_height,
             } => {
                 if let Some(deposit) = self.state.deposits.get_mut(deposit_id) {
+                    // Apply pending fee change if effective block has been reached
+                    if let Some((new_fees, effective)) = deposit.pending_fee_change.take() {
+                        if *block_height >= effective {
+                            deposit.fees = new_fees;
+                        } else {
+                            deposit.pending_fee_change = Some((new_fees, effective));
+                        }
+                    }
                     deposit.balance = deposit.balance.saturating_sub(*amount);
                     deposit.last_fee_assessment = *block_height;
                 }
@@ -2252,6 +2272,9 @@ mod tests {
                 cosigner_guarantee_signature: None,
                 is_collateral: false,
                 receive_requires_sig: false,
+                fee_change_after_blocks: None,
+                fee_change_notice_blocks: None,
+                fee_change_limit_bps: None,
             })
             .unwrap();
 
@@ -2361,6 +2384,8 @@ mod tests {
             collateral_lock_amount: 0,
             collateral_lock_expires: 0,
             transfer_fees: TransferFeeSchedule::default(), is_collateral: false, receive_requires_sig: false,
+            fee_change_after_blocks: None, fee_change_notice_blocks: None, fee_change_limit_bps: None,
+            opened_at_block: 0, pending_fee_change: None,
         };
         let dest_deposit = Deposit {
             deposit_id: dest_id,
@@ -2373,6 +2398,8 @@ mod tests {
             collateral_lock_amount: 0,
             collateral_lock_expires: 0,
             transfer_fees: TransferFeeSchedule::default(), is_collateral: false, receive_requires_sig: false,
+            fee_change_after_blocks: None, fee_change_notice_blocks: None, fee_change_limit_bps: None,
+            opened_at_block: 0, pending_fee_change: None,
         };
         ledger.state.deposits.insert(source_id, source_deposit);
         ledger.state.deposits.insert(dest_id, dest_deposit);
@@ -2454,6 +2481,8 @@ mod tests {
             collateral_lock_amount: 0,
             collateral_lock_expires: 0,
             transfer_fees: TransferFeeSchedule::default(), is_collateral: false, receive_requires_sig: false,
+            fee_change_after_blocks: None, fee_change_notice_blocks: None, fee_change_limit_bps: None,
+            opened_at_block: 0, pending_fee_change: None,
         };
         ledger.state.deposits.insert(source_id, source_deposit);
 

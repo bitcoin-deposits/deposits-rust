@@ -82,6 +82,7 @@ fn wit() -> DescriptorWitness { DescriptorWitness { stack: vec![vec![0x30; 64]] 
     fees: Some(fees()), transfer_fees: Some(tfees()),
     payment_hash: Some(h32()), invoice: Some("lnbcrt1test".into()),
     cosigner_guarantee_signature: Some(sig()), is_collateral: false, receive_requires_sig: false,
+    fee_change_after_blocks: None, fee_change_notice_blocks: None, fee_change_limit_bps: None,
 }); }
 
 #[test] fn deposit_open_collateral() { test_roundtrip(&LedgerOperation::DepositOpen {
@@ -89,18 +90,20 @@ fn wit() -> DescriptorWitness { DescriptorWitness { stack: vec![vec![0x30; 64]] 
     fees: Some(fees()), transfer_fees: None,
     payment_hash: None, invoice: None,
     cosigner_guarantee_signature: None, is_collateral: true, receive_requires_sig: false,
+    fee_change_after_blocks: None, fee_change_notice_blocks: None, fee_change_limit_bps: None,
 }); }
 
 #[test] fn deposit_open_minimal() { test_roundtrip(&LedgerOperation::DepositOpen {
     deposit_id: did(), descriptor: "pk(0279be66...)".into(),
     fees: None, transfer_fees: None, payment_hash: None, invoice: None,
     cosigner_guarantee_signature: None, is_collateral: false, receive_requires_sig: false,
+    fee_change_after_blocks: None, fee_change_notice_blocks: None, fee_change_limit_bps: None,
 }); }
 
 #[test] fn deposit_close() { test_roundtrip(&LedgerOperation::DepositClose { deposit_id: did() }); }
 
 #[test] fn deposit_update() { test_roundtrip(&LedgerOperation::DepositUpdate {
-    deposit_id: did(), new_fees: fees(),
+    deposit_id: did(), new_fees: fees(), effective_block: 0,
 }); }
 
 #[test] fn deposit_key_rotate() { test_roundtrip(&LedgerOperation::DepositKeyRotate {

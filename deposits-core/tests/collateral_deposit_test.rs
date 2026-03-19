@@ -28,6 +28,9 @@ fn open_deposit(ledger: &mut Ledger, descriptor: &str, is_collateral: bool) -> [
         cosigner_guarantee_signature: None,
         is_collateral,
         receive_requires_sig: false,
+        fee_change_after_blocks: None,
+        fee_change_notice_blocks: None,
+        fee_change_limit_bps: None,
     }).unwrap();
     deposit_id
 }

@@ -539,7 +539,7 @@ pub fn validate_ledger_operation<C: ValidationContext>(
                 Err(format!("No channel ledger found for sender {}", sender))
             }
         }
-        LedgerOperation::DepositUpdate { deposit_id, new_fees } => {
+        LedgerOperation::DepositUpdate { deposit_id, new_fees, .. } => {
             // Validate deposit exists and new fees are valid
             if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
                 let ledger = ledger_arc.read().unwrap();

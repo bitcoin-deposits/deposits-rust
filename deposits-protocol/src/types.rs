@@ -626,6 +626,21 @@ pub struct Deposit {
     /// If true, incoming funds require a signature from the deposit key.
     #[serde(default)]
     pub receive_requires_sig: bool,
+    /// Blocks after deposit creation before fees can be changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fee_change_after_blocks: Option<u32>,
+    /// Blocks of notice required before a fee change takes effect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fee_change_notice_blocks: Option<u32>,
+    /// Maximum fee change per adjustment in bps of current fee (default 1000 = 10%).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fee_change_limit_bps: Option<u16>,
+    /// Block height at which the deposit was opened (for fee_change_after_blocks).
+    #[serde(default)]
+    pub opened_at_block: u32,
+    /// Pending fee change: new fees and the block at which they take effect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_fee_change: Option<(FeeStructure, u32)>,
 }
 
 impl Deposit {
@@ -647,6 +662,11 @@ impl Deposit {
             transfer_fees: TransferFeeSchedule::default(),
             is_collateral: false,
             receive_requires_sig: false,
+            fee_change_after_blocks: None,
+            fee_change_notice_blocks: None,
+            fee_change_limit_bps: None,
+            opened_at_block: 0,
+            pending_fee_change: None,
         }
     }
 
@@ -2189,11 +2209,16 @@ mod deposit_fields {
     pub const TRANSFER_FEES: u64 = 16;
     pub const IS_COLLATERAL: u64 = 17; // odd = optional
     pub const RECEIVE_REQUIRES_SIG: u64 = 19; // odd = optional
+    pub const FEE_CHANGE_AFTER: u64 = 21; // odd = optional, u32
+    pub const FEE_CHANGE_NOTICE: u64 = 23; // odd = optional, u32
+    pub const FEE_CHANGE_LIMIT_BPS: u64 = 25; // odd = optional, u16
+    pub const OPENED_AT_BLOCK: u64 = 18; // u32
+    pub const PENDING_FEE_CHANGE: u64 = 27; // odd = optional, nested
 }
 
 impl TlvEncode for Deposit {
     fn tlv_encode(&self) -> Vec<u8> {
-        TlvBuilder::new()
+        let mut builder = TlvBuilder::new()
             .deposit_id_field(deposit_fields::DEPOSIT_ID, &self.deposit_id)
             .string_field(deposit_fields::DESCRIPTOR, &self.descriptor)
             .u64_field(deposit_fields::BALANCE, self.balance)
@@ -2206,7 +2231,17 @@ impl TlvEncode for Deposit {
             .nested(deposit_fields::TRANSFER_FEES, &self.transfer_fees)
             .u8_field(deposit_fields::IS_COLLATERAL, if self.is_collateral { 1 } else { 0 })
             .u8_field(deposit_fields::RECEIVE_REQUIRES_SIG, if self.receive_requires_sig { 1 } else { 0 })
-            .build()
+            .u32_field(deposit_fields::OPENED_AT_BLOCK, self.opened_at_block);
+        if let Some(v) = self.fee_change_after_blocks {
+            builder = builder.u32_field(deposit_fields::FEE_CHANGE_AFTER, v);
+        }
+        if let Some(v) = self.fee_change_notice_blocks {
+            builder = builder.u32_field(deposit_fields::FEE_CHANGE_NOTICE, v);
+        }
+        if let Some(v) = self.fee_change_limit_bps {
+            builder = builder.u16_field(deposit_fields::FEE_CHANGE_LIMIT_BPS, v);
+        }
+        builder.build()
     }
 }
 
@@ -2226,6 +2261,11 @@ impl TlvDecode for Deposit {
             transfer_fees: reader.read_nested_opt(deposit_fields::TRANSFER_FEES)?.unwrap_or_default(),
             is_collateral: reader.read_u8(deposit_fields::IS_COLLATERAL).unwrap_or(0) != 0,
             receive_requires_sig: reader.read_u8(deposit_fields::RECEIVE_REQUIRES_SIG).unwrap_or(0) != 0,
+            fee_change_after_blocks: reader.read_u32_opt(deposit_fields::FEE_CHANGE_AFTER)?,
+            fee_change_notice_blocks: reader.read_u32_opt(deposit_fields::FEE_CHANGE_NOTICE)?,
+            fee_change_limit_bps: reader.read_u16_opt(deposit_fields::FEE_CHANGE_LIMIT_BPS)?,
+            opened_at_block: reader.read_u32_opt(deposit_fields::OPENED_AT_BLOCK)?.unwrap_or(0),
+            pending_fee_change: None, // transient state, not serialized in TLV
         })
     }
 }
@@ -2962,6 +3002,11 @@ mod tests {
             transfer_fees: TransferFeeSchedule::default(),
             is_collateral: true,
             receive_requires_sig: false,
+            fee_change_after_blocks: Some(52560),
+            fee_change_notice_blocks: Some(2016),
+            fee_change_limit_bps: Some(1000),
+            opened_at_block: 100,
+            pending_fee_change: None,
         };
         let encoded = original.tlv_encode();
         let decoded = Deposit::tlv_decode(&encoded).unwrap();

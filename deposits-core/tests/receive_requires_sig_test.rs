@@ -53,6 +53,9 @@ fn open_deposit_ex(
             cosigner_guarantee_signature: None,
             is_collateral,
             receive_requires_sig,
+            fee_change_after_blocks: None,
+            fee_change_notice_blocks: None,
+            fee_change_limit_bps: None,
         })
         .unwrap();
     deposit_id
@@ -114,6 +117,9 @@ fn deposit_open_receive_requires_sig_tlv_roundtrip() {
         cosigner_guarantee_signature: None,
         is_collateral: false,
         receive_requires_sig: true,
+        fee_change_after_blocks: None,
+        fee_change_notice_blocks: None,
+        fee_change_limit_bps: None,
     };
 
     let encoded = op.tlv_encode();
@@ -145,6 +151,9 @@ fn deposit_open_without_flag_decodes_as_false() {
         cosigner_guarantee_signature: None,
         is_collateral: false,
         receive_requires_sig: false,
+        fee_change_after_blocks: None,
+        fee_change_notice_blocks: None,
+        fee_change_limit_bps: None,
     };
 
     let encoded = op.tlv_encode();
@@ -177,6 +186,11 @@ fn deposit_struct_receive_requires_sig_tlv_roundtrip() {
         transfer_fees: TransferFeeSchedule::default(),
         is_collateral: false,
         receive_requires_sig: true,
+        fee_change_after_blocks: None,
+        fee_change_notice_blocks: None,
+        fee_change_limit_bps: None,
+        opened_at_block: 0,
+        pending_fee_change: None,
     };
 
     let encoded = deposit.tlv_encode();
@@ -206,6 +220,11 @@ fn deposit_struct_without_flag_field_defaults_false() {
         transfer_fees: TransferFeeSchedule::default(),
         is_collateral: false,
         receive_requires_sig: false,
+        fee_change_after_blocks: None,
+        fee_change_notice_blocks: None,
+        fee_change_limit_bps: None,
+        opened_at_block: 0,
+        pending_fee_change: None,
     };
 
     let encoded = deposit.tlv_encode();

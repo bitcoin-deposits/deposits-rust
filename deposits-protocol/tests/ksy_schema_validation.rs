@@ -259,6 +259,7 @@ fn schema_deposit_update() {
     validate_schema(22, "DepositUpdate", &[
         (DEPOSIT_ID, deposit_id()),
         (NEW_FEES, fee_structure_tlv()),
+        (249, u32_bytes(0)), // EFFECTIVE_BLOCK
     ]);
 }
 
