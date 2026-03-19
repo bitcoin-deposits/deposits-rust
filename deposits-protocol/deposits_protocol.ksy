@@ -262,7 +262,7 @@ types:
     doc: |
       Nested TLV for fee structure (annualized).
       Field types:
-        0 = annualized_fixed (u64, msat/year)
+        0 = annualized_msats (u64, msat/year)
         2 = annualized_bps (u16, basis points/year)
         4 = frequency_blocks (u32, collection period)
     seq:
@@ -274,7 +274,7 @@ types:
     doc: |
       Nested TLV for per-transfer fee schedule.
       Field types:
-        0 = fixed_sats (u64)
+        0 = fixed_msats (u64)
         2 = rate_bps (u16)
     seq:
       - id: records

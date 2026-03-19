@@ -708,7 +708,7 @@ test_fee_rejection() {
     log_info ""
     log_info "Test 2: Sending request with fees at minimum..."
     log_info "  (100 bps = min, 1000 fixed = min)"
-    # annualized_fixed for 1000/period at 10 blocks = 1000 * (52560/10) = 5256000
+    # annualized_msats for 1000/period at 10 blocks = 1000 * (52560/10) = 5256000
     local ok_fee_result=$(run_bdk_cmd bob nostr request "$alice_ledger" make_offer \
         "$pubkey" 50000 5000 144 100 5256000 10 2>&1)
     sleep 1

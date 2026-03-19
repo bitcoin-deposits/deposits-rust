@@ -1659,7 +1659,7 @@ window.selectLedger = function(ledgerId) {
     const adFeePeriod = ad.fee_period_blocks || 2016;
     const adAnnualFixed = Math.floor((ad.min_fee_sats || 0) * 52560 / adFeePeriod);
     details += `<div class="kv"><span class="k">Custody fee</span><span class="v">${(ad.annual_fee_bps || 0) / 100}%/yr + ₿${adAnnualFixed.toLocaleString()}/yr</span></div>`;
-    details += `<div class="kv"><span class="k">Transfer fee</span><span class="v">₿${ad.transfer_fee_fixed_sats || 0} + ${(ad.transfer_fee_rate_bps || 0) / 100}%</span></div>`;
+    details += `<div class="kv"><span class="k">Transfer fee</span><span class="v">₿${ad.transfer_fee_fixed_msats || 0} + ${(ad.transfer_fee_rate_bps || 0) / 100}%</span></div>`;
     if (ad.min_deposit_sats > 0) details += `<div class="kv"><span class="k">Min deposit</span><span class="v">₿${ad.min_deposit_sats}</span></div>`;
     if (ad.max_deposit_sats < 1e18) details += `<div class="kv"><span class="k">Max deposit</span><span class="v">₿${ad.max_deposit_sats.toLocaleString()}</span></div>`;
     if (ad.relay_url) details += `<div class="kv"><span class="k">Relay</span><span class="v">${esc(ad.relay_url)}</span></div>`;
@@ -1950,7 +1950,7 @@ window.showWalletOpen = async function() {
   for (const ad of ads) {
     const key = [
       ad.annual_fee_bps || 0, ad.min_fee_sats || 0, ad.fee_period_blocks || 2016,
-      ad.transfer_fee_fixed_sats || 0, ad.transfer_fee_rate_bps || 0,
+      ad.transfer_fee_fixed_msats || 0, ad.transfer_fee_rate_bps || 0,
     ].join(':');
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(ad);
@@ -1966,7 +1966,7 @@ window.showWalletOpen = async function() {
     const annualBps = s.annual_fee_bps || 0;
     const minFee = s.min_fee_sats || 0;
     const feePeriod = s.fee_period_blocks || 2016;
-    const tfFixed = s.transfer_fee_fixed_sats || 0;
+    const tfFixed = s.transfer_fee_fixed_msats || 0;
     const tfRate = s.transfer_fee_rate_bps || 0;
     const totalHeadroom = groupAds.reduce((sum, a) => sum + (a.available_headroom_sats || 0), 0);
 
@@ -2329,7 +2329,7 @@ window.doWalletTransfer = async function() {
     const adEvents = await fetchEvents(adFilter, 5000);
     if (adEvents.length > 0) {
       const ad = JSON.parse(adEvents[0].content);
-      const fixed = ad.transfer_fee_fixed_sats || 0;
+      const fixed = ad.transfer_fee_fixed_msats || 0;
       const bps = ad.transfer_fee_rate_bps || 0;
       fee = fixed + Math.floor(amount * bps / 10000);
     }
@@ -2626,7 +2626,7 @@ window.toggleNewDeposit = async function() {
   // Group by fee schedule
   const groups = new Map();
   for (const ad of ads) {
-    const key = [ad.annual_fee_bps||0, ad.min_fee_sats||0, ad.fee_period_blocks||2016, ad.transfer_fee_fixed_sats||0, ad.transfer_fee_rate_bps||0].join(':');
+    const key = [ad.annual_fee_bps||0, ad.min_fee_sats||0, ad.fee_period_blocks||2016, ad.transfer_fee_fixed_msats||0, ad.transfer_fee_rate_bps||0].join(':');
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(ad);
   }
@@ -2638,7 +2638,7 @@ window.toggleNewDeposit = async function() {
   for (const groupAds of groupEntries) {
     const s = groupAds[0];
     const annualBps = s.annual_fee_bps||0, minFee = s.min_fee_sats||0, feePeriod = s.fee_period_blocks||2016;
-    const tfFixed = s.transfer_fee_fixed_sats||0, tfRate = s.transfer_fee_rate_bps||0;
+    const tfFixed = s.transfer_fee_fixed_msats||0, tfRate = s.transfer_fee_rate_bps||0;
     const totalHeadroom = groupAds.reduce((sum, a) => sum + (a.available_headroom_sats||0), 0);
     const sorted = groupAds.sort((a, b) => (b.available_headroom_sats||0) - (a.available_headroom_sats||0));
     const best = sorted[0];
@@ -3288,7 +3288,7 @@ window.onTransferFromChange = async function() {
     if (adEvents.length > 0) {
       const ad = JSON.parse(adEvents[0].content);
       transferFeeSchedule = {
-        fixed: ad.transfer_fee_fixed_sats || 0,
+        fixed: ad.transfer_fee_fixed_msats || 0,
         bps: ad.transfer_fee_rate_bps || 0,
       };
     }

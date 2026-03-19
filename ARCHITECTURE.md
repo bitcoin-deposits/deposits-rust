@@ -258,8 +258,8 @@ produces `TlvError::NonCanonicalOrder`.
 
 Complex types are encoded as nested TLV streams within a parent field's value:
 
-- **FeeStructure**: `annualized_fixed` (u64) + `annualized_bps` (u16) + `frequency_blocks` (u32)
-- **TransferFeeSchedule**: `fixed_sats` (u64) + `rate_bps` (u16)
+- **FeeStructure**: `annualized_msats` (u64) + `annualized_bps` (u16) + `frequency_blocks` (u32)
+- **TransferFeeSchedule**: `fixed_msats` (u64) + `rate_bps` (u16)
 - **DescriptorWitness**: `varint(count) || (varint(elem_len) || elem_bytes)*`
   - Max stack size: 1000 elements
   - Max element size: 520 bytes
@@ -1057,12 +1057,12 @@ Sender                          Operator                        Receiver
 **TransferFeeSchedule:**
 
 ```
-fee = fixed_sats + (amount_sats * rate_bps / 10_000)
+fee = fixed_msats + (amount_sats * rate_bps / 10_000)
 ```
 
 | Field | Type | Default |
 |-------|------|---------|
-| `fixed_sats` | `u64` | 2 sats |
+| `fixed_msats` | `u64` | 2 sats |
 | `rate_bps` | `u16` | 20 bps (0.20%) |
 
 Maximum: `rate_bps <= 10000` (100%).
@@ -1072,7 +1072,7 @@ Maximum: `rate_bps <= 10000` (100%).
 **FeeStructure** (periodic custody fees):
 
 ```
-fee = (annualized_fixed * blocks_elapsed / BLOCKS_PER_YEAR)
+fee = (annualized_msats * blocks_elapsed / BLOCKS_PER_YEAR)
     + (balance * annualized_bps * blocks_elapsed / (BLOCKS_PER_YEAR * 10_000))
 ```
 
@@ -1080,7 +1080,7 @@ Where `BLOCKS_PER_YEAR = 52560` (365.25 * 144).
 
 | Field | Type | Default |
 |-------|------|---------|
-| `annualized_fixed` | `u64` | 0 sats |
+| `annualized_msats` | `u64` | 0 sats |
 | `annualized_bps` | `u16` | 0 bps |
 | `frequency_blocks` | `u32` | 2016 (~2 weeks) |
 

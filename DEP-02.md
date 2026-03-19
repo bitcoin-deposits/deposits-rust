@@ -211,7 +211,7 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 
 | Type | Name | Size |
 |---|---|---|
-| 0 | annualized_fixed | 8 |
+| 0 | annualized_msats | 8 |
 | 2 | annualized_bps | 2 |
 | 4 | frequency_blocks | 4 |
 
@@ -219,7 +219,7 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 
 | Type | Name | Size |
 |---|---|---|
-| 0 | fixed_sats | 8 |
+| 0 | fixed_msats | 8 |
 | 2 | rate_bps | 2 |
 
 ## Related DEPs

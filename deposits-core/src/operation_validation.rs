@@ -242,7 +242,7 @@ pub fn validate_fee_minimum(
     const BLOCKS_PER_YEAR: u64 = 52560;
     let periods_per_year = BLOCKS_PER_YEAR / proposed.frequency_blocks.max(1) as u64;
     let proposed_fixed_per_period = if periods_per_year > 0 {
-        proposed.annualized_fixed / periods_per_year
+        proposed.annualized_msats / periods_per_year
     } else {
         0
     };
@@ -676,9 +676,9 @@ pub fn validate_deposit_fee_change(
             ));
         }
 
-        // Check annualized_fixed change
-        let old_fixed = deposit.fees.annualized_fixed as i64;
-        let new_fixed = new_fees.annualized_fixed as i64;
+        // Check annualized_msats change
+        let old_fixed = deposit.fees.annualized_msats as i64;
+        let new_fixed = new_fees.annualized_msats as i64;
         let fixed_change = (new_fixed - old_fixed).unsigned_abs();
         let max_fixed_change = if old_fixed > 0 {
             (old_fixed as u64 * limit_bps as u64) / 10000
@@ -1169,7 +1169,7 @@ mod tests {
 
         // Invalid fee structure
         let bad_fees = FeeStructure {
-            annualized_fixed: 0,
+            annualized_msats: 0,
             annualized_bps: 0,
             frequency_blocks: 0, // Invalid
         };

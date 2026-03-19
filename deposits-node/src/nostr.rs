@@ -429,9 +429,9 @@ pub struct LedgerAdvertisement {
     #[serde(default)]
     pub fee_period_blocks: u32,
 
-    /// Fixed per-transfer fee in sats
+    /// Fixed per-transfer fee in msats
     #[serde(default)]
-    pub transfer_fee_fixed_sats: u64,
+    pub transfer_fee_fixed_msats: u64,
 
     /// Proportional per-transfer fee in basis points
     #[serde(default)]
@@ -520,7 +520,7 @@ impl LedgerAdvertisement {
             invoice_fee_bps: 0,
             min_fee_sats: 0,
             fee_period_blocks: 0,
-            transfer_fee_fixed_sats: 0,
+            transfer_fee_fixed_msats: 0,
             transfer_fee_rate_bps: 0,
             max_deposit_sats: u64::MAX,
             min_deposit_sats: 0,
@@ -548,7 +548,7 @@ impl LedgerAdvertisement {
         let frequency = self.fee_period_blocks;
         let periods_per_year = if frequency > 0 { BLOCKS_PER_YEAR / frequency as u64 } else { 0 };
         deposits_core::types::FeeStructure {
-            annualized_fixed: self.min_fee_sats.saturating_mul(periods_per_year),
+            annualized_msats: self.min_fee_sats.saturating_mul(periods_per_year),
             annualized_bps: self.annual_fee_bps as u16,
             frequency_blocks: frequency,
         }

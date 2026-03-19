@@ -39,7 +39,7 @@
 //! let op = LedgerOperation::DepositOpen {
 //!     pubkey: user_pubkey,
 //!     fees: Some(FeeStructure {
-//!         annualized_fixed: 1000,
+//!         annualized_msats: 1000,
 //!         annualized_bps: 50,
 //!         frequency_blocks: 144,
 //!     }),

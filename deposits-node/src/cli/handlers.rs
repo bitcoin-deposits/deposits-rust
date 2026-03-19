@@ -69,7 +69,7 @@ pub async fn process_deposit_open_request(
         || request.params.get("fee_bps").is_some()
     {
         deposits_core::FeeStructure {
-            annualized_fixed: request.params.get("fee_fixed")
+            annualized_msats: request.params.get("fee_fixed")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0),
             annualized_bps: request.params.get("fee_bps")
@@ -102,7 +102,7 @@ pub async fn process_deposit_open_request(
                 "deposit_id": hex::encode(deposit.deposit_id),
                 "balance": deposit.balance,
                 "fees": {
-                    "fixed": deposit.fees.annualized_fixed,
+                    "fixed": deposit.fees.annualized_msats,
                     "bps": deposit.fees.annualized_bps,
                     "frequency": deposit.fees.frequency_blocks,
                 }
@@ -203,7 +203,7 @@ pub async fn process_make_offer_request(
             .unwrap_or(ad_period);
 
         deposits_core::FeeStructure {
-            annualized_fixed: request.params.get("fee_fixed")
+            annualized_msats: request.params.get("fee_fixed")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0),
             annualized_bps: request.params.get("fee_bps")

@@ -5023,7 +5023,7 @@ impl Node {
             || request.params.get("fee_bps").is_some()
         {
             FeeStructure {
-                annualized_fixed: request.params.get("fee_fixed")
+                annualized_msats: request.params.get("fee_fixed")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0),
                 annualized_bps: request.params.get("fee_bps")
@@ -5079,12 +5079,12 @@ impl Node {
                     "deposit_pubkey": deposit_pubkey_str,
                     "balance": deposit.balance,
                     "fees": {
-                        "fixed": deposit.fees.annualized_fixed,
+                        "fixed": deposit.fees.annualized_msats,
                         "bps": deposit.fees.annualized_bps,
                         "frequency": deposit.fees.frequency_blocks,
                     },
                     "transfer_fees": {
-                        "fixed_sats": deposit.transfer_fees.fixed_sats,
+                        "fixed_msats": deposit.transfer_fees.fixed_msats,
                         "rate_bps": deposit.transfer_fees.rate_bps,
                     }
                 });
@@ -5184,7 +5184,7 @@ impl Node {
                 .unwrap_or(ad_period);
 
             FeeStructure {
-                annualized_fixed: request.params.get("fee_fixed")
+                annualized_msats: request.params.get("fee_fixed")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0),
                 annualized_bps: request.params.get("fee_bps")
@@ -6304,6 +6304,10 @@ impl Node {
             None => return (false, None, Some("Invalid signature".to_string())),
         };
 
+        // Convert to msats for all internal operations
+        let amount_msats = amount * 1000;
+        let fee_msats = fee * 1000;
+
         // Get ledger and verify source deposit exists
         let ledger_id = &request.ledger_id;
         let (deposit_descriptor, deposit_pubkey) = {
@@ -6319,18 +6323,18 @@ impl Node {
                 None => return (false, None, Some("Source deposit not found".to_string())),
             };
 
-            // Validate fee against deposit's transfer fee schedule
-            let expected_fee = deposit.transfer_fees.calculate_fee(amount);
-            if fee != expected_fee {
+            // Validate fee against deposit's transfer fee schedule (all in msats)
+            let expected_fee = deposit.transfer_fees.calculate_fee(amount_msats);
+            if fee_msats != expected_fee {
                 return (false, None, Some(format!(
-                    "Fee mismatch: expected {} sats (fixed={} + {}bps on {}), got {}",
-                    expected_fee, deposit.transfer_fees.fixed_sats,
-                    deposit.transfer_fees.rate_bps, amount, fee
+                    "Fee mismatch: expected {} msats (fixed={} + {}bps on {} msats), got {} msats",
+                    expected_fee, deposit.transfer_fees.fixed_msats,
+                    deposit.transfer_fees.rate_bps, amount_msats, fee_msats
                 )));
             }
 
             // Check sufficient balance
-            let total = (amount + fee) * 1000; // Convert to msats
+            let total = amount_msats + fee_msats;
             if deposit.balance < total {
                 let balance_json = format!("{{\"balance_msats\":{}}}", deposit.balance);
                 return (false, Some(balance_json), Some(format!(
@@ -6408,9 +6412,7 @@ impl Node {
             }
         }
 
-        // Create and append the operation
-        let amount_msats = amount * 1000;
-        let fee_msats = fee * 1000;
+        // Create and append the operation (amount_msats/fee_msats computed above in fee validation)
         let witness = DescriptorWitness { stack: vec![signature.serialize().to_vec()] };
         let operation = LedgerOperation::TransferLock {
             nonce,

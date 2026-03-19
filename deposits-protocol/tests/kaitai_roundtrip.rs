@@ -54,8 +54,8 @@ fn pk() -> bitcoin::secp256k1::PublicKey {
 fn did() -> [u8; 16] { [1; 16] }
 fn h32() -> [u8; 32] { [0xab; 32] }
 fn sig() -> [u8; 64] { [0x30; 64] }
-fn fees() -> FeeStructure { FeeStructure { annualized_fixed: 1000, annualized_bps: 50, frequency_blocks: 2016 } }
-fn tfees() -> TransferFeeSchedule { TransferFeeSchedule { fixed_sats: 2, rate_bps: 20 } }
+fn fees() -> FeeStructure { FeeStructure { annualized_msats: 1000, annualized_bps: 50, frequency_blocks: 2016 } }
+fn tfees() -> TransferFeeSchedule { TransferFeeSchedule { fixed_msats: 2, rate_bps: 20 } }
 fn wit() -> DescriptorWitness { DescriptorWitness { stack: vec![vec![0x30; 64]] } }
 
 #[test] fn ledger_open() { test_roundtrip(&LedgerOperation::LedgerOpen {

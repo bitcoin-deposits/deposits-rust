@@ -1433,7 +1433,7 @@ where
 // FeeStructure codec
 impl BinaryCodec for FeeStructure {
     fn write_to<W: Write>(&self, w: &mut W) -> Result<(), CodecError> {
-        write_u64(w, self.annualized_fixed)?;
+        write_u64(w, self.annualized_msats)?;
         write_u16(w, self.annualized_bps)?;
         write_u32(w, self.frequency_blocks)?;
         Ok(())
@@ -1441,7 +1441,7 @@ impl BinaryCodec for FeeStructure {
 
     fn read_from<R: Read>(r: &mut R) -> Result<Self, CodecError> {
         Ok(Self {
-            annualized_fixed: read_u64(r)?,
+            annualized_msats: read_u64(r)?,
             annualized_bps: read_u16(r)?,
             frequency_blocks: read_u32(r)?,
         })
@@ -4301,7 +4301,7 @@ mod tests {
             deposit_id,
             descriptor: "pk(test)".to_string(),
             fees: Some(FeeStructure {
-                annualized_fixed: 1000,
+                annualized_msats: 1000,
                 annualized_bps: 50,
                 frequency_blocks: 144,
             }),

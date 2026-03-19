@@ -32,13 +32,13 @@ fn u32_bytes(v: u32) -> Vec<u8> { v.to_be_bytes().to_vec() }
 fn u64_bytes(v: u64) -> Vec<u8> { v.to_be_bytes().to_vec() }
 
 fn fee_structure_tlv() -> Vec<u8> {
-    // Nested TLV matching FeeStructure: type 0 = annualized_fixed, 2 = annualized_bps, 4 = frequency
-    let fees = FeeStructure { annualized_fixed: 1000, annualized_bps: 50, frequency_blocks: 2016 };
+    // Nested TLV matching FeeStructure: type 0 = annualized_msats, 2 = annualized_bps, 4 = frequency
+    let fees = FeeStructure { annualized_msats: 1000, annualized_bps: 50, frequency_blocks: 2016 };
     fees.tlv_encode()
 }
 
 fn transfer_fee_tlv() -> Vec<u8> {
-    let tf = TransferFeeSchedule { fixed_sats: 2, rate_bps: 20 };
+    let tf = TransferFeeSchedule { fixed_msats: 2, rate_bps: 20 };
     tf.tlv_encode()
 }
 

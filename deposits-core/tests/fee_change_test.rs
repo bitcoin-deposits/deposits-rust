@@ -355,7 +355,7 @@ fn fee_collect_applies_pending_change_at_effective_block() {
     }).unwrap();
     let deposit = ledger.state.deposits.get(&did).unwrap();
     assert_eq!(deposit.fees.annualized_bps, 200); // new!
-    assert_eq!(deposit.fees.annualized_fixed, 2000);
+    assert_eq!(deposit.fees.annualized_msats, 2000);
     assert!(deposit.pending_fee_change.is_none()); // consumed
 }
 

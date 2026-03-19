@@ -3706,7 +3706,7 @@ mod tests {
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let fees = FeeStructure {
-            annualized_fixed: 1000,
+            annualized_msats: 1000,
             annualized_bps: 50,
             frequency_blocks: 144,
         };
@@ -3741,7 +3741,7 @@ mod tests {
 
         // Invalid fee structure with zero frequency
         let invalid_fees = FeeStructure {
-            annualized_fixed: 1000,
+            annualized_msats: 1000,
             annualized_bps: 50,
             frequency_blocks: 0, // Invalid
         };
@@ -3992,7 +3992,7 @@ mod tests {
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let new_fees = FeeStructure {
-            annualized_fixed: 2000,
+            annualized_msats: 2000,
             annualized_bps: 100,
             frequency_blocks: 288,
         };
@@ -4026,7 +4026,7 @@ mod tests {
 
         // Invalid fee structure with zero frequency
         let invalid_fees = FeeStructure {
-            annualized_fixed: 2000,
+            annualized_msats: 2000,
             annualized_bps: 100,
             frequency_blocks: 0, // Invalid
         };
@@ -4060,7 +4060,7 @@ mod tests {
 
         // Fee rate too high (over 100%)
         let invalid_fees = FeeStructure {
-            annualized_fixed: 0,
+            annualized_msats: 0,
             annualized_bps: 15000, // 150% - too high
             frequency_blocks: 144,
         };
@@ -4382,7 +4382,7 @@ mod tests {
         // Create a ledger with a deposit that has balance and is eligible for fee collection
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
         let mut deposit = Deposit::from_pubkey(&deposit_pubkey, Some(FeeStructure {
-            annualized_fixed: 0,
+            annualized_msats: 0,
             annualized_bps: 100,
             frequency_blocks: 100,
         }));
@@ -4432,7 +4432,7 @@ mod tests {
         // Create a ledger with a deposit where fees were recently collected
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], "tb1qtest".to_string(), 0);
         let mut deposit = Deposit::from_pubkey(&deposit_pubkey, Some(FeeStructure {
-            annualized_fixed: 0,
+            annualized_msats: 0,
             annualized_bps: 100,
             frequency_blocks: 100,
         }));

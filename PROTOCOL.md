@@ -310,7 +310,7 @@ These constraints apply to all operations:
 | Check | Rule |
 |-------|------|
 | Annual rate | `proposed.annualized_bps >= operator_min_annual_bps` |
-| Fixed fee | `proposed.annualized_fixed / periods_per_year >= operator_min_fixed_per_period` |
+| Fixed fee | `proposed.annualized_msats / periods_per_year >= operator_min_fixed_per_period` |
 
 ### Collateral Operations
 
@@ -554,7 +554,7 @@ Deposits incur maintenance fees:
 
 ```rust
 FeeStructure {
-    annualized_fixed: u64,    // Fixed annual fee (satoshis)
+    annualized_msats: u64,    // Fixed annual fee (satoshis)
     annualized_bps: u16,      // Percentage (basis points)
     frequency_blocks: u32,    // Collection frequency
 }
@@ -564,7 +564,7 @@ FeeStructure {
 
 ```
 elapsed_blocks = current_block - last_fee_assessment
-fixed_portion = (annualized_fixed * elapsed_blocks) / BLOCKS_PER_YEAR
+fixed_portion = (annualized_msats * elapsed_blocks) / BLOCKS_PER_YEAR
 percentage_portion = (balance * annualized_bps * elapsed_blocks) / (BLOCKS_PER_YEAR * 10000)
 total_fee = fixed_portion + percentage_portion
 ```

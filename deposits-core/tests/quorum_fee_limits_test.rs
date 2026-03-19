@@ -111,10 +111,10 @@ fn fees_meet_quorum_limits(
     }
 
     if let Some(required_fixed) = min_fixed {
-        if fees.annualized_fixed < required_fixed {
+        if fees.annualized_msats < required_fixed {
             return Err(format!(
                 "Fixed fee {} below quorum minimum {}",
-                fees.annualized_fixed, required_fixed
+                fees.annualized_msats, required_fixed
             ));
         }
     }
@@ -356,7 +356,7 @@ fn fees_meeting_all_limits_pass() {
 
     let fees = FeeStructure {
         annualized_bps: 100, // above 50 min
-        annualized_fixed: 5000, // above 1000 min
+        annualized_msats: 5000, // above 1000 min
         frequency_blocks: 2016, // equal to max
     };
 
@@ -377,7 +377,7 @@ fn fees_below_min_bps_rejected() {
 
     let fees = FeeStructure {
         annualized_bps: 50, // below 100 min
-        annualized_fixed: 10_000,
+        annualized_msats: 10_000,
         frequency_blocks: 2016,
     };
 
@@ -399,7 +399,7 @@ fn fees_below_min_fixed_rejected() {
 
     let fees = FeeStructure {
         annualized_bps: 100,
-        annualized_fixed: 1000, // below 5000 min
+        annualized_msats: 1000, // below 5000 min
         frequency_blocks: 2016,
     };
 
@@ -421,7 +421,7 @@ fn fees_exceeding_max_period_rejected() {
 
     let fees = FeeStructure {
         annualized_bps: 100,
-        annualized_fixed: 5000,
+        annualized_msats: 5000,
         frequency_blocks: 4032, // exceeds 2016 max
     };
 
@@ -444,7 +444,7 @@ fn fees_with_no_quorum_limits_always_pass() {
     // Even zero fees pass when member has no limits
     let fees = FeeStructure {
         annualized_bps: 0,
-        annualized_fixed: 0,
+        annualized_msats: 0,
         frequency_blocks: 100_000,
     };
 
@@ -477,7 +477,7 @@ fn fees_must_satisfy_strictest_member() {
     // 100 bps meets member 1 (50) but not member 2 (200)
     let fees = FeeStructure {
         annualized_bps: 100,
-        annualized_fixed: 10_000,
+        annualized_msats: 10_000,
         frequency_blocks: 2016,
     };
 
@@ -487,7 +487,7 @@ fn fees_must_satisfy_strictest_member() {
     // 200 bps meets both
     let fees_ok = FeeStructure {
         annualized_bps: 200,
-        annualized_fixed: 10_000,
+        annualized_msats: 10_000,
         frequency_blocks: 2016,
     };
 
@@ -517,7 +517,7 @@ fn deposit_open_on_ledger_with_quorum_fee_limits() {
     // Open a deposit with fees that meet limits
     let good_fees = FeeStructure {
         annualized_bps: 150,
-        annualized_fixed: 5000,
+        annualized_msats: 5000,
         frequency_blocks: 2016,
     };
     assert!(fees_meet_quorum_limits(&good_fees, &ledger.state.quorum_members).is_ok());
@@ -545,7 +545,7 @@ fn deposit_open_on_ledger_with_quorum_fee_limits() {
     // A deposit with fees below limits should be rejected (by the co-signer)
     let bad_fees = FeeStructure {
         annualized_bps: 25, // below 100 minimum
-        annualized_fixed: 500, // below 1000 minimum
+        annualized_msats: 500, // below 1000 minimum
         frequency_blocks: 8064, // above 2016 maximum
     };
     let err = fees_meet_quorum_limits(&bad_fees, &ledger.state.quorum_members).unwrap_err();

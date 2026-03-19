@@ -407,12 +407,12 @@ async fn discover(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         let annual_pct = ad.annual_fee_bps as f64 / 100.0;
         // Annualize the fixed fee using actual fee period
         let periods_per_year = 52560u64 / ad.fee_period_blocks.max(1) as u64;
-        let annualized_fixed = ad.min_fee_sats.saturating_mul(periods_per_year);
+        let annualized_msats = ad.min_fee_sats.saturating_mul(periods_per_year);
 
-        let fee_str = match (ad.annual_fee_bps > 0, annualized_fixed > 0) {
-            (true, true) => format!("{}% and {} sats per year", annual_pct, annualized_fixed),
+        let fee_str = match (ad.annual_fee_bps > 0, annualized_msats > 0) {
+            (true, true) => format!("{}% and {} sats per year", annual_pct, annualized_msats),
             (true, false) => format!("{}% per year", annual_pct),
-            (false, true) => format!("{} sats per year", annualized_fixed),
+            (false, true) => format!("{} sats per year", annualized_msats),
             (false, false) => "None".to_string(),
         };
 
@@ -683,15 +683,15 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
         let bps = cli_fee_bps.unwrap_or(0);
         let period = cli_fee_period.unwrap_or(2016);
         let fixed = cli_fee_fixed.unwrap_or(0);
-        let annualized_fixed = fixed * (52560 / period);
-        println!("  Fees: {} bps/year + {} sats/year fixed (CLI override)", bps, annualized_fixed);
-        (annualized_fixed, bps, period)
+        let annualized_msats = fixed * (52560 / period);
+        println!("  Fees: {} bps/year + {} sats/year fixed (CLI override)", bps, annualized_msats);
+        (annualized_msats, bps, period)
     } else if let Some(ref ad) = advertisement {
         let period = if ad.fee_period_blocks > 0 { ad.fee_period_blocks } else { 2016 };
         let fee_struct = ad.to_fee_structure();
         println!("  Fees: {} bps/year + {} sats/year fixed (period: {} blocks)",
-            ad.annual_fee_bps, fee_struct.annualized_fixed, period);
-        (fee_struct.annualized_fixed, fee_struct.annualized_bps as u64, period as u64)
+            ad.annual_fee_bps, fee_struct.annualized_msats, period);
+        (fee_struct.annualized_msats, fee_struct.annualized_bps as u64, period as u64)
     } else {
         println!("  Fees: (using defaults - no advertisement found)");
         (0, 0, 2016)
@@ -1036,7 +1036,7 @@ async fn add_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let (fee_fixed, fee_bps, fee_frequency) = if let Some(ref ad) = advertisement {
         let period = if ad.fee_period_blocks > 0 { ad.fee_period_blocks } else { 2016 };
         let fee_struct = ad.to_fee_structure();
-        (fee_struct.annualized_fixed, fee_struct.annualized_bps as u64, period as u64)
+        (fee_struct.annualized_msats, fee_struct.annualized_bps as u64, period as u64)
     } else {
         (0, 0, 2016)
     };

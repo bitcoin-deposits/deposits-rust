@@ -399,8 +399,8 @@ pub fn default_parent_pubkey() -> PublicKey {
 /// Fee structure for a deposit.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FeeStructure {
-    /// Fixed annual fee in satoshis.
-    pub annualized_fixed: u64,
+    /// Fixed annual fee in msats.
+    pub annualized_msats: u64,
     /// Percentage fee in basis points (0.01% = 1 bps).
     pub annualized_bps: u16,
     /// How often fees are assessed (in blocks).
@@ -410,7 +410,7 @@ pub struct FeeStructure {
 impl Default for FeeStructure {
     fn default() -> Self {
         Self {
-            annualized_fixed: 0,
+            annualized_msats: 0,
             annualized_bps: 0,
             frequency_blocks: 2016, // ~2 weeks
         }
@@ -419,9 +419,9 @@ impl Default for FeeStructure {
 
 impl FeeStructure {
     /// Create a new fee structure.
-    pub fn new(annualized_fixed: u64, annualized_bps: u16, frequency_blocks: u32) -> Self {
+    pub fn new(annualized_msats: u64, annualized_bps: u16, frequency_blocks: u32) -> Self {
         Self {
-            annualized_fixed,
+            annualized_msats,
             annualized_bps,
             frequency_blocks,
         }
@@ -435,7 +435,7 @@ impl FeeStructure {
         let blocks = blocks_elapsed as u64;
 
         // Fixed fee portion (pro-rated for blocks elapsed)
-        let fixed_fee = (self.annualized_fixed * blocks) / BLOCKS_PER_YEAR;
+        let fixed_fee = (self.annualized_msats * blocks) / BLOCKS_PER_YEAR;
 
         // Percentage fee portion (pro-rated)
         let bps_fee = (balance * self.annualized_bps as u64 * blocks) / (BLOCKS_PER_YEAR * 10000);
@@ -452,11 +452,11 @@ impl FeeStructure {
 ///
 /// Unlike `FeeStructure` (which defines periodic custody fees),
 /// this defines the fee charged on each transfer out of the deposit.
-/// Fee = `fixed_sats` + (`amount_sats` * `rate_bps` / 10_000).
+/// Fee = `fixed_msats` + (`amount_msats` * `rate_bps` / 10_000).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferFeeSchedule {
-    /// Fixed fee per transfer in satoshis.
-    pub fixed_sats: u64,
+    /// Fixed fee per transfer in msats.
+    pub fixed_msats: u64,
     /// Proportional fee in basis points (1 bps = 0.01%).
     pub rate_bps: u16,
 }
@@ -464,21 +464,21 @@ pub struct TransferFeeSchedule {
 impl Default for TransferFeeSchedule {
     fn default() -> Self {
         Self {
-            fixed_sats: 2,
+            fixed_msats: 2,
             rate_bps: 20,
         }
     }
 }
 
 impl TransferFeeSchedule {
-    pub fn new(fixed_sats: u64, rate_bps: u16) -> Self {
-        Self { fixed_sats, rate_bps }
+    pub fn new(fixed_msats: u64, rate_bps: u16) -> Self {
+        Self { fixed_msats, rate_bps }
     }
 
-    /// Calculate the transfer fee for a given amount in satoshis.
-    pub fn calculate_fee(&self, amount_sats: u64) -> u64 {
-        let proportional = (amount_sats * self.rate_bps as u64) / 10_000;
-        self.fixed_sats.saturating_add(proportional)
+    /// Calculate the transfer fee for a given amount in msats.
+    pub fn calculate_fee(&self, amount_msats: u64) -> u64 {
+        let proportional = (amount_msats * self.rate_bps as u64) / 10_000;
+        self.fixed_msats.saturating_add(proportional)
     }
 }
 
@@ -2093,7 +2093,7 @@ use crate::tlv::{TlvEncode, TlvDecode, TlvBuilder, TlvReader, TlvResult};
 
 // Field type constants for FeeStructure
 mod fee_structure_fields {
-    pub const ANNUALIZED_FIXED: u64 = 0;
+    pub const ANNUALIZED_MSATS: u64 = 0;
     pub const ANNUALIZED_BPS: u64 = 2;
     pub const FREQUENCY_BLOCKS: u64 = 4;
 }
@@ -2101,7 +2101,7 @@ mod fee_structure_fields {
 impl TlvEncode for FeeStructure {
     fn tlv_encode(&self) -> Vec<u8> {
         TlvBuilder::new()
-            .u64_field(fee_structure_fields::ANNUALIZED_FIXED, self.annualized_fixed)
+            .u64_field(fee_structure_fields::ANNUALIZED_MSATS, self.annualized_msats)
             .u16_field(fee_structure_fields::ANNUALIZED_BPS, self.annualized_bps)
             .u32_field(fee_structure_fields::FREQUENCY_BLOCKS, self.frequency_blocks)
             .build()
@@ -2112,7 +2112,7 @@ impl TlvDecode for FeeStructure {
     fn tlv_decode(data: &[u8]) -> TlvResult<Self> {
         let reader = TlvReader::new(data)?;
         Ok(Self {
-            annualized_fixed: reader.read_u64(fee_structure_fields::ANNUALIZED_FIXED)?,
+            annualized_msats: reader.read_u64(fee_structure_fields::ANNUALIZED_MSATS)?,
             annualized_bps: reader.read_u16(fee_structure_fields::ANNUALIZED_BPS)?,
             frequency_blocks: reader.read_u32(fee_structure_fields::FREQUENCY_BLOCKS)?,
         })
@@ -2121,14 +2121,14 @@ impl TlvDecode for FeeStructure {
 
 // Field type constants for TransferFeeSchedule
 mod transfer_fee_fields {
-    pub const FIXED_SATS: u64 = 0;
+    pub const FIXED_MSATS: u64 = 0;
     pub const RATE_BPS: u64 = 2;
 }
 
 impl TlvEncode for TransferFeeSchedule {
     fn tlv_encode(&self) -> Vec<u8> {
         TlvBuilder::new()
-            .u64_field(transfer_fee_fields::FIXED_SATS, self.fixed_sats)
+            .u64_field(transfer_fee_fields::FIXED_MSATS, self.fixed_msats)
             .u16_field(transfer_fee_fields::RATE_BPS, self.rate_bps)
             .build()
     }
@@ -2138,7 +2138,7 @@ impl TlvDecode for TransferFeeSchedule {
     fn tlv_decode(data: &[u8]) -> TlvResult<Self> {
         let reader = TlvReader::new(data)?;
         Ok(Self {
-            fixed_sats: reader.read_u64(transfer_fee_fields::FIXED_SATS)?,
+            fixed_msats: reader.read_u64(transfer_fee_fields::FIXED_MSATS)?,
             rate_bps: reader.read_u16(transfer_fee_fields::RATE_BPS)?,
         })
     }

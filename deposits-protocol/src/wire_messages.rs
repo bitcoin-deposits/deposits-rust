@@ -216,7 +216,7 @@ where
 
 impl WireEncode for FeeStructure {
     fn wire_encode<W: Write>(&self, writer: &mut W) -> Result<(), WireError> {
-        write_u64(writer, self.annualized_fixed)?;
+        write_u64(writer, self.annualized_msats)?;
         write_u16(writer, self.annualized_bps)?;
         write_u32(writer, self.frequency_blocks)?;
         Ok(())
@@ -226,7 +226,7 @@ impl WireEncode for FeeStructure {
 impl WireDecode for FeeStructure {
     fn wire_decode<R: Read>(reader: &mut R) -> Result<Self, WireError> {
         Ok(FeeStructure {
-            annualized_fixed: read_u64(reader)?,
+            annualized_msats: read_u64(reader)?,
             annualized_bps: read_u16(reader)?,
             frequency_blocks: read_u32(reader)?,
         })
@@ -1720,7 +1720,7 @@ mod tests {
             reserves_id: test_pubkey(1).to_string(),
             pubkey: test_pubkey(2),
             fees: Some(FeeStructure {
-                annualized_fixed: 1000,
+                annualized_msats: 1000,
                 annualized_bps: 50,
                 frequency_blocks: 144,
             }),
@@ -1751,7 +1751,7 @@ mod tests {
     #[test]
     fn test_fee_structure_roundtrip() {
         let fees = FeeStructure {
-            annualized_fixed: 5000,
+            annualized_msats: 5000,
             annualized_bps: 100,
             frequency_blocks: 288,
         };

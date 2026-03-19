@@ -151,7 +151,7 @@ fn generate_value_for_disc(field: &KsyField, disc: u8) -> Vec<u8> {
         12 => {
             if disc == 20 || disc == 22 {
                 // DepositOpen / FeeChange: nested FeeStructure
-                let f = FeeStructure { annualized_fixed: 1000, annualized_bps: 50, frequency_blocks: 2016 };
+                let f = FeeStructure { annualized_msats: 1000, annualized_bps: 50, frequency_blocks: 2016 };
                 f.tlv_encode()
             } else {
                 // OnchainLock (36), TransferLock (70), etc: plain u64 fee
@@ -160,7 +160,7 @@ fn generate_value_for_disc(field: &KsyField, disc: u8) -> Vec<u8> {
         }
         // Nested TransferFeeSchedule
         226 => {
-            let tf = TransferFeeSchedule { fixed_sats: 2, rate_bps: 20 };
+            let tf = TransferFeeSchedule { fixed_msats: 2, rate_bps: 20 };
             tf.tlv_encode()
         }
         // Witness (nested TLV with stack elements)
@@ -173,7 +173,7 @@ fn generate_value_for_disc(field: &KsyField, disc: u8) -> Vec<u8> {
         }
         // nested FeeStructure (new_fees)
         20 => {
-            let f = FeeStructure { annualized_fixed: 500, annualized_bps: 25, frequency_blocks: 1008 };
+            let f = FeeStructure { annualized_msats: 500, annualized_bps: 25, frequency_blocks: 1008 };
             f.tlv_encode()
         }
         // Default: generate from type annotation
@@ -193,7 +193,7 @@ fn generate_from_type(ft: &FieldType) -> Vec<u8> {
         FieldType::DepositId => vec![0x01; 16],
         FieldType::NestedTlv(_) => {
             // Generic nested — empty TLV
-            let f = FeeStructure { annualized_fixed: 100, annualized_bps: 10, frequency_blocks: 144 };
+            let f = FeeStructure { annualized_msats: 100, annualized_bps: 10, frequency_blocks: 144 };
             f.tlv_encode()
         }
     }
@@ -309,8 +309,8 @@ fn did() -> [u8; 16] { [0x01; 16] }
 fn h32() -> [u8; 32] { [0xab; 32] }
 fn h20() -> [u8; 20] { [0xab; 20] }
 fn sig() -> [u8; 64] { [0x30; 64] }
-fn fees() -> FeeStructure { FeeStructure { annualized_fixed: 1000, annualized_bps: 50, frequency_blocks: 2016 } }
-fn tfees() -> TransferFeeSchedule { TransferFeeSchedule { fixed_sats: 2, rate_bps: 20 } }
+fn fees() -> FeeStructure { FeeStructure { annualized_msats: 1000, annualized_bps: 50, frequency_blocks: 2016 } }
+fn tfees() -> TransferFeeSchedule { TransferFeeSchedule { fixed_msats: 2, rate_bps: 20 } }
 fn wit() -> deposits_protocol::types::DescriptorWitness {
     deposits_protocol::types::DescriptorWitness { stack: vec![vec![0x30; 64]] }
 }

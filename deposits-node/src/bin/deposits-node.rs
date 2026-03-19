@@ -1134,7 +1134,7 @@ async fn auto_advertise_ledger(
         ad.fee_period_blocks = blocks;
     }
     if let Some(fixed) = fee_schedule.transfer_fee_fixed {
-        ad.transfer_fee_fixed_sats = fixed;
+        ad.transfer_fee_fixed_msats = fixed;
     }
     if let Some(bps) = fee_schedule.transfer_fee_rate_bps {
         ad.transfer_fee_rate_bps = bps;
@@ -2086,12 +2086,12 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
     println!("  Available headroom: {} sats (80% of {})", ad.available_headroom_sats, raw_headroom);
     println!("  Collateral: {} sats", ad.received_collateral_sats);
     let periods_per_year = 52560u64 / ad.fee_period_blocks.max(1) as u64;
-    let annualized_fixed = ad.min_fee_sats.saturating_mul(periods_per_year);
+    let annualized_msats = ad.min_fee_sats.saturating_mul(periods_per_year);
     let annual_pct = ad.annual_fee_bps as f64 / 100.0;
-    let fee_str = match (ad.annual_fee_bps > 0, annualized_fixed > 0) {
-        (true, true) => format!("{}% and {} sats per year", annual_pct, annualized_fixed),
+    let fee_str = match (ad.annual_fee_bps > 0, annualized_msats > 0) {
+        (true, true) => format!("{}% and {} sats per year", annual_pct, annualized_msats),
         (true, false) => format!("{}% per year", annual_pct),
-        (false, true) => format!("{} sats per year", annualized_fixed),
+        (false, true) => format!("{} sats per year", annualized_msats),
         (false, false) => "None".to_string(),
     };
     println!("  Fees: {} (period: {} blocks, {}bps deposit, {}bps withdrawal)",
@@ -2955,7 +2955,7 @@ async fn deposit_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>
             let fee_struct = ad.to_fee_structure();
             println!("  Using fees from advertisement:");
             println!("    {} bps/year + {} sats/year (period: {} blocks)",
-                fee_struct.annualized_bps, fee_struct.annualized_fixed, fee_struct.frequency_blocks);
+                fee_struct.annualized_bps, fee_struct.annualized_msats, fee_struct.frequency_blocks);
             Some(fee_struct)
         }
         None => {
@@ -3118,7 +3118,7 @@ async fn deposit_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     println!("  Descriptor: {}", descriptor);
     if let Some(ref f) = fees {
         println!("  Fees: {} bps/year + {} sats/year (period: {} blocks)",
-            f.annualized_bps, f.annualized_fixed, f.frequency_blocks);
+            f.annualized_bps, f.annualized_msats, f.frequency_blocks);
     }
 
     let deposit = node.open_deposit(&ledger_id, &descriptor, fees, None, false, false).await?;
@@ -3180,7 +3180,7 @@ async fn deposit_ls(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         println!("    Locked: {} msats", deposit.locked_balance);
         let fees = &deposit.fees;
         println!("    Fees: {} fixed + {} bps every {} blocks",
-            fees.annualized_fixed, fees.annualized_bps, fees.frequency_blocks);
+            fees.annualized_msats, fees.annualized_bps, fees.frequency_blocks);
         println!();
     }
 
@@ -3585,7 +3585,7 @@ async fn deposit_collect_fees(args: &[String]) -> Result<(), Box<dyn std::error:
             println!("  Deposit {}...:", &hex::encode(deposit_id)[..16]);
             println!("    Balance: {} msats", deposit.balance);
             println!("    Fee structure: {} bps, {} fixed, {} block period",
-                deposit.fees.annualized_bps, deposit.fees.annualized_fixed, deposit.fees.frequency_blocks);
+                deposit.fees.annualized_bps, deposit.fees.annualized_msats, deposit.fees.frequency_blocks);
             println!("    Last fee assessment: block {}", deposit.last_fee_assessment);
             println!("    Blocks since assessment: {}", current_block.saturating_sub(deposit.last_fee_assessment));
             println!("    Fee due: {} msats", fee_due);
