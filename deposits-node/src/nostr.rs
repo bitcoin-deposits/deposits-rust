@@ -58,6 +58,17 @@ use tokio::sync::mpsc;
 use crate::Error;
 use crate::metrics;
 
+/// A received fraud proof broadcast from a wallet.
+#[derive(Clone, Debug)]
+pub struct FraudProofEvent {
+    /// The fraud broadcast (proof + embedding + causal chain).
+    pub broadcast: deposits_core::fraud::FraudBroadcast,
+    /// The Nostr event ID.
+    pub event_id: String,
+    /// Sender pubkey.
+    pub sender: String,
+}
+
 /// Track last advertisement timestamp to ensure monotonic ordering.
 /// NIP-33 replaceable events use created_at to determine which event is "latest".
 static LAST_AD_TIMESTAMP: AtomicU64 = AtomicU64::new(0);
@@ -91,6 +102,11 @@ pub const KIND_RECOVERY_AGREE: u16 = 9104;
 /// Tag `d` = ledger_id ensures only latest ad per ledger is kept.
 /// Content: JSON with fees, limits, and metadata.
 pub const KIND_LEDGER_ADVERTISE: u16 = 39100;
+
+/// Custom Kind for fraud proof broadcasts (wallet evidence of operator dishonesty)
+/// Uses range 1000-9999 (regular custom events) for relay storage.
+/// Published by wallets with evidence embedded in the causal chain.
+pub const KIND_FRAUD_PROOF: u16 = 9101;
 
 /// Custom Kind for price oracle (BTC/USD rate published by operators)
 /// Uses NIP-33 parameterized replaceable events (30000-39999).
@@ -160,6 +176,12 @@ pub struct NostrTransport {
 
     /// Sender for ledger disputes
     dispute_tx: mpsc::UnboundedSender<LedgerDispute>,
+
+    /// Pending inbound fraud proofs.
+    fraud_proof_rx: std::sync::Mutex<mpsc::UnboundedReceiver<FraudProofEvent>>,
+
+    /// Sender for fraud proofs
+    fraud_proof_tx: mpsc::UnboundedSender<FraudProofEvent>,
 
     /// Peer pubkey mapping (secp256k1 -> nostr)
     peer_keys: RwLock<HashMap<PublicKey, nostr_sdk::PublicKey>>,
@@ -654,6 +676,7 @@ impl NostrTransport {
         let (request_tx, request_rx) = mpsc::unbounded_channel();
         let (response_tx, response_rx) = mpsc::unbounded_channel();
         let (dispute_tx, dispute_rx) = mpsc::unbounded_channel();
+        let (fraud_proof_tx, fraud_proof_rx) = mpsc::unbounded_channel();
 
         // Spawn background mirror task if we have a durable relay
         let mirror_tx = if let Some(ref sc) = slow_client {
@@ -698,6 +721,8 @@ impl NostrTransport {
             response_tx,
             dispute_rx: std::sync::Mutex::new(dispute_rx),
             dispute_tx,
+            fraud_proof_rx: std::sync::Mutex::new(fraud_proof_rx),
+            fraud_proof_tx,
             peer_keys: RwLock::new(HashMap::new()),
             active_subscriptions: RwLock::new(std::collections::HashSet::new()),
             response_ledger_filter: RwLock::new(Vec::new()),
@@ -794,6 +819,10 @@ impl NostrTransport {
             // Disputes (durable kind 9103)
             Filter::new()
                 .kind(Kind::Custom(KIND_LEDGER_DISPUTE))
+                .since(since),
+            // Fraud proofs (durable kind 9101)
+            Filter::new()
+                .kind(Kind::Custom(KIND_FRAUD_PROOF))
                 .since(since),
         ];
 
@@ -2405,6 +2434,10 @@ impl NostrTransport {
                 if let Ok(dispute) = self.process_ledger_dispute(&event) {
                     let _ = self.dispute_tx.send(dispute);
                 }
+            } else if kind_num == KIND_FRAUD_PROOF {
+                if let Ok(fp) = self.process_fraud_proof(&event) {
+                    let _ = self.fraud_proof_tx.send(fp);
+                }
             }
             return true;
         }
@@ -2647,6 +2680,30 @@ impl NostrTransport {
         Ok(dispute)
     }
 
+    fn process_fraud_proof(&self, event: &Event) -> Result<FraudProofEvent, Error> {
+        let broadcast: deposits_core::fraud::FraudBroadcast = serde_json::from_str(&event.content)
+            .map_err(|e| Error::Serialization(format!("Failed to parse fraud proof: {}", e)))?;
+
+        // Structural verification (chain links connect properly)
+        if let Err(e) = broadcast.verify_chain_structure() {
+            return Err(Error::Protocol(format!("Invalid fraud proof chain: {}", e)));
+        }
+
+        tracing::warn!(
+            "Received fraud proof: type={:?}, accused={}, ledger={}, from={}",
+            broadcast.proof.proof_type,
+            &broadcast.proof.accused[..16.min(broadcast.proof.accused.len())],
+            &broadcast.proof.ledger_id[..16.min(broadcast.proof.ledger_id.len())],
+            &event.pubkey.to_hex()[..16]
+        );
+
+        Ok(FraudProofEvent {
+            broadcast,
+            event_id: event.id.to_hex(),
+            sender: event.pubkey.to_hex(),
+        })
+    }
+
     /// Receive the next inbound message (non-blocking)
     pub fn try_recv(&self) -> Option<InboundMessage> {
         self.inbound_rx.lock().unwrap().try_recv().ok()
@@ -2675,6 +2732,10 @@ impl NostrTransport {
     /// Receive the next ledger dispute (non-blocking)
     pub fn try_recv_dispute(&self) -> Option<LedgerDispute> {
         self.dispute_rx.lock().unwrap().try_recv().ok()
+    }
+
+    pub fn try_recv_fraud_proof(&self) -> Option<FraudProofEvent> {
+        self.fraud_proof_rx.lock().unwrap().try_recv().ok()
     }
 
     /// Disconnect from all relays

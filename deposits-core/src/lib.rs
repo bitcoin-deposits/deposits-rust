@@ -58,6 +58,7 @@ pub use deposits_protocol::constants;
 pub use deposits_protocol::error;
 pub use deposits_protocol::messages;
 pub use deposits_protocol::signature_utils;
+pub use deposits_protocol::fraud;
 pub use deposits_protocol::tlv;
 pub use deposits_protocol::types;
 pub use deposits_protocol::wire_messages;

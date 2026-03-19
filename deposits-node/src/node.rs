@@ -2004,6 +2004,18 @@ impl Node {
                 metrics::record_run_loop_phase("drain_disputes", phase_start.elapsed());
             }
 
+            // Handle fraud proofs
+            {
+                let phase_start = std::time::Instant::now();
+                while let Some(fp) = self.nostr.try_recv_fraud_proof() {
+                    match tokio::time::timeout(std::time::Duration::from_secs(5), self.handle_fraud_proof(fp)).await {
+                        Ok(()) => {},
+                        Err(_) => { tracing::error!("handle_fraud_proof timed out after 5s"); break; }
+                    }
+                }
+                metrics::record_run_loop_phase("drain_fraud_proofs", phase_start.elapsed());
+            }
+
             // Handle responses (for auto-recording attestations)
             {
                 let phase_start = std::time::Instant::now();
@@ -2542,6 +2554,149 @@ impl Node {
             Err(e) => {
                 tracing::error!("Failed to auto-arm for dispute: {}", e);
                 tracing::warn!("Manual intervention required: Run 'recovery arm {}'", dispute.ledger_id);
+            }
+        }
+    }
+
+    /// Handle an incoming fraud proof broadcast.
+    ///
+    /// Verifies the proof hash against the embedding, then checks if we're
+    /// a quorum member. If so, initiates a custody dispute.
+    async fn handle_fraud_proof(&self, fp: crate::nostr::FraudProofEvent) {
+        use deposits_core::fraud::FraudProofType;
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+
+        let broadcast = &fp.broadcast;
+        let ledger_id = &broadcast.proof.ledger_id;
+
+        tracing::warn!(
+            "Processing fraud proof: {:?} against {} on ledger {}...",
+            broadcast.proof.proof_type,
+            &broadcast.proof.accused[..16.min(broadcast.proof.accused.len())],
+            &ledger_id[..16.min(ledger_id.len())]
+        );
+
+        // 1. Verify proof hash matches embedding
+        let proof_hash = broadcast.proof.proof_hash();
+        let proof_hash_hex = hex::encode(proof_hash);
+
+        // 2. Fetch the embedding update and verify the hash is in the nonce
+        let embedding = &broadcast.embedding;
+        let embedding_verified = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            if let Some(arc) = ledgers.get(&embedding.ledger_id) {
+                let ledger = arc.read().unwrap();
+                ledger.history.iter().any(|u| {
+                    if u.sequence_number != embedding.sequence { return false; }
+                    // Decode the operation and check the nonce field
+                    if let Ok(op) = deposits_core::messages::LedgerOperation::tlv_decode(&u.message) {
+                        if let deposits_core::messages::LedgerOperation::TransferLock { nonce, .. } = op {
+                            return nonce == proof_hash;
+                        }
+                    }
+                    false
+                })
+            } else {
+                false
+            }
+        };
+
+        if !embedding_verified {
+            tracing::warn!("Fraud proof embedding not verified — hash {} not found at seq {} on ledger {}",
+                &proof_hash_hex[..16], embedding.sequence, &embedding.ledger_id[..16]);
+            // Don't act on unverified proofs, but log for manual review
+            return;
+        }
+
+        tracing::warn!("Fraud proof embedding VERIFIED: hash {} at seq {} on {}",
+            &proof_hash_hex[..16], embedding.sequence, &embedding.ledger_id[..16]);
+
+        // 3. Verify causal chain (if indirect embedding)
+        if embedding.ledger_id != *ledger_id {
+            // Verify each causal link exists
+            let mut chain_verified = true;
+            for link in &broadcast.causal_chain {
+                let link_ok = {
+                    let ledgers = self.handler.ledgers.lock().unwrap();
+                    if let Some(arc) = ledgers.get(&link.ledger_id) {
+                        let ledger = arc.read().unwrap();
+                        ledger.history.iter().any(|u| {
+                            u.sequence_number == link.sequence
+                                && u.member_ledger_hash.map(|h| hex::encode(h)) == Some(link.member_ledger_hash.clone())
+                        })
+                    } else {
+                        false
+                    }
+                };
+                if !link_ok {
+                    tracing::warn!("Causal link not verified: seq {} on ledger {}",
+                        link.sequence, &link.ledger_id[..16]);
+                    chain_verified = false;
+                    break;
+                }
+            }
+            if !chain_verified {
+                tracing::warn!("Fraud proof causal chain not fully verified — skipping");
+                return;
+            }
+            tracing::warn!("Fraud proof causal chain verified ({} links)", broadcast.causal_chain.len());
+        }
+
+        // 4. Check if we're a quorum member of the accused ledger
+        if !self.is_quorum_member_of_ledger(ledger_id) {
+            tracing::info!("Not a quorum member of accused ledger {}, skipping", &ledger_id[..16]);
+            return;
+        }
+
+        // 5. Determine last valid sequence from the proof
+        let last_valid_seq = match &broadcast.proof.evidence {
+            deposits_core::fraud::FraudEvidence::UncreditedOnchain { proof_sequence, .. } => {
+                proof_sequence.saturating_sub(1)
+            }
+            deposits_core::fraud::FraudEvidence::UncreditedLightning { proof_sequence, .. } => {
+                proof_sequence.saturating_sub(1)
+            }
+            deposits_core::fraud::FraudEvidence::NonConforming { sequence, .. } => {
+                sequence.saturating_sub(1)
+            }
+            _ => {
+                // For stale cosign and inactive quorum, use the embedding sequence
+                // as a reference point (the fraud happened before this)
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                ledgers.get(ledger_id)
+                    .map(|arc| arc.read().unwrap().next_sequence().saturating_sub(1))
+                    .unwrap_or(0)
+            }
+        };
+
+        tracing::warn!(
+            "INITIATING DISPUTE based on fraud proof: ledger={}, last_valid_seq={}, type={:?}",
+            &ledger_id[..16], last_valid_seq, broadcast.proof.proof_type
+        );
+
+        // 6. Auto-arm for dispute
+        let reason = format!("fraud_proof:{:?}", broadcast.proof.proof_type);
+        match self.auto_arm_for_dispute(ledger_id, last_valid_seq).await {
+            Ok(()) => {
+                tracing::warn!("Successfully armed for dispute based on fraud proof");
+
+                // Also broadcast a dispute event referencing the fraud proof
+                let secret = self.wallet.operator_secret();
+                let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&self.secp, &secret);
+                if let Err(e) = self.nostr.publish_dispute(
+                    ledger_id,
+                    &reason,
+                    &format!("Fraud proof verified: {}", &fp.event_id[..16]),
+                    proof_hash,
+                    last_valid_seq,
+                    None,
+                    &keypair,
+                ).await {
+                    tracing::error!("Failed to broadcast dispute: {:?}", e);
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to arm for fraud-proof dispute: {}", e);
             }
         }
     }
