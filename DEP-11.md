@@ -8,58 +8,47 @@ All times are measured in block height against the base layer.
 
 ## Operator Obligations
 
-### On-chain Offer Credit (slashable)
-
+### On-chain Offer Credit
 When an operator creates a cosigned funding offer (see DEP-10), they commit to credit the deposit. The offer includes a `deadline_block`. The operator must append an `OnchainCredit` before signing any update with a `block_height` exceeding `deadline_block`.
 
 Signing an update past the deadline without crediting is provable fraud: the cosigned offer + the signed update with a later block_height constitute a complete fraud proof (see DEP-06).
 
-### Lightning Invoice Credit (slashable with preimage)
-
+### Lightning Invoice Credit
 When an operator creates a cosigned invoice (see DEP-10), they commit to credit the deposit upon payment. If the payer provides the preimage to the wallet, and the operator has not credited the deposit, the wallet can construct a fraud proof.
 
 Without the preimage, this obligation is not autonomously provable.
 
-### Transfer Timeout (slashable)
-
+### Transfer Timeout
 When a `TransferLock` is appended with a `timeout_height`, the operator must append `TransferFail` after the timeout block is reached if no `TransferComplete` has been provided. Signing updates past `timeout_height` while funds remain locked is provable non-conformance.
 
-### Fee Collection (advisory)
-
+### Fee Collection
 Fee collection is at the operator's discretion within the `frequency_blocks` period. Skipping or delaying collection is not non-conforming — it reduces operator revenue but does not affect depositor funds. Quorum members may decline to co-sign for operators who do not collect fees, as uncollected fees create accounting discrepancies.
 
-### Quorum Rotation (slashable)
-
+### Quorum Rotation
 The operator must append a new `QuorumBegin` before `quorum_expiry`. Signing updates after `quorum_expiry` without a new quorum is non-conforming — the operator is operating without the bilateral agreement the protocol requires. This is provable: any co-signed update with `block_height >= quorum_expiry` on a ledger without a subsequent `QuorumBegin` constitutes evidence.
 
 ## Quorum Member Obligations
 
-### Co-signing (advisory)
-
+### Co-signing
 Co-signing timeliness is not protocol-enforced. A slow or unresponsive member will not be selected for the next quorum. The degraded spending path in the reserves tapscript (see DEP-03) allows the remaining members to rotate without the missing member.
 
-### Dispute Participation (slashable)
-
+### Dispute Participation
 When valid fraud evidence is embedded in the causal chain and a quorum member's ledger has updates after the evidence block, the member must initiate a dispute. Failure to act while remaining active is provable: the fraud proof hash was embedded at block N, the member's ledger has updates after block N + `dispute_response_blocks`, and no dispute was initiated.
 
 `dispute_response_blocks` is a protocol parameter. The specific value is determined by the network — shorter values increase responsiveness requirements, longer values are more forgiving.
 
-### Collateral Maintenance (slashable)
-
+### Collateral Maintenance
 Collateral must remain locked through `collateral_lock_until`. Early withdrawal while listed as a quorum member is provable non-conformance: the `CollateralLock` operation on the member's ledger has a `lock_until_block`, and any operation that reduces the locked amount before that block is evidence.
 
 ## Wallet Obligations
 
-### Evidence Retention (self-enforced)
-
+### Evidence Retention
 Wallets should retain cosigned offers and invoices until the corresponding credit appears or the deadline expires. This is not a protocol obligation — it is in the wallet's self-interest. Without evidence, the wallet cannot prove fraud.
 
-### Dispute Detection (advisory)
-
+### Dispute Detection
 Wallets should periodically verify co-signatures on ledger updates. When co-signatures are absent or invalid, the wallet should query for dispute events and replay history to identify custody changes.
 
-### Fund Distribution (advisory)
-
+### Fund Distribution
 Wallets should distribute funds across operators with non-overlapping quorum members. A deposit is only as available as its operator.
 
 ## Timeline Summary
