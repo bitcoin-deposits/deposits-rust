@@ -29,7 +29,7 @@ All structures use Type-Length-Value encoding with BigSize varints, compatible w
 
     [BigSize: type] [BigSize: length] [length bytes: value]
 
-Records are ordered by type number. Even types are required; odd types are optional and may be ignored by parsers that don't understand them.
+Records are ordered by type number. All current field types are even. Odd types are reserved for future forward-compatible extensions that unknown implementations may safely ignore.
 
 ## Signed Ledger Update
 
@@ -38,17 +38,17 @@ The event content is a base64-encoded TLV stream:
 | Type | Name | Size | Description |
 |---|---|---|---|
 | 0 | message | variable | Inner operation (TLV-encoded) |
-| 2 | message_type | 2 | Protocol message type constant |
+| 2 | message_type | 2 | Operation type constant (for fast filtering without deserializing) |
 | 4 | operator_id | 33 | Operator's compressed secp256k1 pubkey |
 | 6 | ledger_id | 32 | Ledger identifier hash |
 | 8 | sequence_number | 8 | Monotonically increasing sequence (u64 LE) |
 | 10 | previous_hash | 32 | Chain hash of the previous update |
 | 16 | cosign_signature | 64 | Schnorr co-signature from quorum member |
 | 18 | operator_signature | 64 | Schnorr signature from operator |
-| 20 | block_height | 4 | Block height at creation (optional) |
-| 22 | block_hash | 32 | Block hash at creation (optional) |
-| 24 | cosigner_pubkey | 33 | Co-signing quorum member's pubkey (optional) |
-| 26 | member_ledger_hash | 32 | Co-signer's ledger tip hash (optional) |
+| 20 | block_height | 4 | Block height at creation |
+| 22 | block_hash | 32 | Block hash at creation |
+| 24 | cosigner_pubkey | 33 | Co-signing quorum member's pubkey |
+| 26 | member_ledger_hash | 32 | Co-signer's ledger tip hash for causal ordering |
 
 Type 12 is reserved. `current_hash` is derived by the receiver (see Hash Chain).
 
@@ -66,7 +66,7 @@ Type 12 is reserved. `current_hash` is derived by the receiver (see Hash Chain).
 
 The operator signs `current_hash`. Their signature is folded into `chain_hash`, which becomes the next update's `previous_hash`. Both signatures are committed to the chain without circularity.
 
-Optional fields (`member_ledger_hash`, `cosign_signature`) are included in `current_hash` only when present and non-zero. The first update (sequence 0) has `previous_hash` = `[0; 32]`.
+`member_ledger_hash` and `cosign_signature` are included in `current_hash` only when present and non-zero. The first update (sequence 0) has `previous_hash` = `[0; 32]`.
 
 ## Signing
 
@@ -89,7 +89,7 @@ The operator signs `sig_input` after `current_hash` is finalized (which requires
 
 ## Operations
 
-The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte discriminant.
+The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte discriminant. Deposit operations authorize via miniscript descriptor witnesses -- `pk()` is the common case but any valid miniscript is supported.
 
 ### Discriminants
 
@@ -141,6 +141,7 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 | 56 | operator_id | 33 | LedgerOpen |
 | 58 | reserves_id | variable | LedgerOpen, QuorumBegin, QuorumJoin |
 | 62 | reserves_amount | 8 | LedgerOpen, QuorumBegin |
+| 64 | collateral_enforcement_block | 8 | LedgerOpen |
 | 96 | genesis_block | 4 | LedgerOpen |
 | 6 | quorum_members | N*33 | QuorumBegin |
 
@@ -149,7 +150,8 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 | Type | Name | Size | Used by |
 |---|---|---|---|
 | 200 | deposit_id | 16 | DepositOpen, DepositClose, FeeChange, DepositKeyRotate, FeeCollect |
-| 202 | descriptor | variable | DepositOpen |
+| 202 | descriptor | variable | DepositOpen (miniscript) |
+| 204 | witness | variable | TransferLock, DepositKeyRotate (nested) |
 | 208 | new_descriptor | variable | DepositKeyRotate |
 | 230 | is_collateral | 1 | DepositOpen |
 | 232 | receive_requires_sig | 1 | DepositOpen |
@@ -173,11 +175,11 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 | 210 | nonce | 32 | TransferLock |
 | 212 | source_deposit_id | 16 | TransferLock |
 | 214 | destination_deposit_id | 16 | TransferLock |
-| 216 | completion_script | variable | TransferLock |
+| 216 | completion_script | variable | TransferLock (miniscript) |
 | 218 | timeout_height | 4 | TransferLock |
 | 220 | transfer_id | 32 | TransferLock, TransferComplete, TransferFail |
-| 204 | witness | variable | TransferLock, DepositKeyRotate (nested) |
 | 224 | script_witness | variable | TransferComplete (nested) |
+| 228 | fail_reason | 1 | TransferFail (1=timeout, 0=reserved) |
 
 #### Lightning and On-chain
 
@@ -186,6 +188,7 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 | 14 | payment_hash | 32 | InvoiceCredit, InvoiceLock, InvoiceFulfill |
 | 16 | invoice | variable | DepositOpen (BOLT11 string) |
 | 26 | invoice_id | variable | InvoiceCredit |
+| 34 | preimage | 32 | InvoiceFulfill |
 | 66 | txid | 32 | OnchainCredit, OnchainFulfill |
 | 68 | vout | 4 | OnchainCredit |
 | 70 | destination_address | variable | OnchainLock, OnchainFulfill |
@@ -205,6 +208,21 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 | 238 | max_fee_period | 4 | QuorumAddMember |
 | 240 | collateral_lock_amount | 8 | QuorumAddMember |
 | 242 | collateral_lock_until | 4 | QuorumAddMember |
+
+#### Dispute
+
+| Type | Name | Size | Used by |
+|---|---|---|---|
+| 100 | reason | variable | DisputeEnter |
+| 102 | last_valid_sequence | 8 | DisputeEnter |
+| 105 | entropy_block_height | 4 | DisputeAcquire |
+| 106 | entropy_block_hash | 32 | DisputeAcquire |
+| 108 | new_custodian | 33 | DisputeAcquire |
+| 109 | armed_block | 4 | DisputeArmed |
+| 110 | spend_txid | 32 | DisputeAcquire |
+| 111 | new_reserves_address | variable | DisputeAcquire |
+| 112 | commitment_hash | 20 | DisputeArmed (HASH160) |
+| 113 | target_reserves | variable | DisputeArmed |
 
 ### Nested TLV: FeeStructure
 
