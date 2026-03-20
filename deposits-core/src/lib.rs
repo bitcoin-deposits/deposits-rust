@@ -67,6 +67,7 @@ pub use deposits_protocol::wire_messages;
 pub mod channel_manager_ops;
 pub mod descriptor;
 pub mod event_store;
+pub mod signing;
 pub mod handler;
 pub mod handler_traits;
 pub mod handler_types;
@@ -173,15 +174,22 @@ pub use reserves_proposal::{
     ReservesOutputProposal, SpendingPolicy, EmergencyRecovery, ProposalStatus,
     serde_arrays,
 };
+// Re-export signing message builders from signature_utils (pure data construction)
 pub use signature_utils::{
+    withdrawal_signing_message, collateral_lock_signing_message,
+    invoice_lock_signing_message, transfer_lock_signing_message,
+    compute_transfer_id,
+};
+// Re-export crypto operations from signing module
+pub use signing::{
     create_deposit_guarantee_signature, verify_deposit_guarantee_signature,
     create_payment_authorization_signature, verify_payment_signature,
     create_payment_signature,
     create_deposit_offer_signature, verify_deposit_offer_signature,
-    withdrawal_signing_message, verify_withdrawal_witness,
-    verify_descriptor_witness, verify_collateral_lock_witness,
+    verify_withdrawal_witness, verify_collateral_lock_witness,
     create_withdrawal_signature, create_collateral_lock_signature,
-    invoice_lock_signing_message, verify_invoice_lock_witness,
+    verify_invoice_lock_witness, verify_transfer_lock_witness,
+    verify_transfer_complete_witness,
 };
 pub use tlv::{
     TlvEncode, TlvDecode, TlvStream, TlvBuilder, TlvReader,

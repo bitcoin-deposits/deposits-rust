@@ -44,12 +44,7 @@ pub use types::{
     PendingTransfer,
 };
 pub use signature_utils::{
-    create_deposit_guarantee_signature, verify_deposit_guarantee_signature,
-    create_payment_authorization_signature, verify_payment_signature,
-    create_payment_signature,
-    create_deposit_offer_signature, verify_deposit_offer_signature,
-    withdrawal_signing_message, verify_withdrawal_witness,
-    verify_descriptor_witness, verify_collateral_lock_witness,
-    create_withdrawal_signature, create_collateral_lock_signature,
-    invoice_lock_signing_message, verify_invoice_lock_witness,
+    withdrawal_signing_message, collateral_lock_signing_message,
+    invoice_lock_signing_message, transfer_lock_signing_message,
+    compute_transfer_id,
 };

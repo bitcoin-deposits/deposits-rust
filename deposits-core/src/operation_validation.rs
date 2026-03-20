@@ -29,7 +29,7 @@ use bitcoin::hashes::{sha256, Hash};
 use crate::constants::{MIN_RESERVES_OUTPUT_SATS, MAX_RESERVES_OUTPUT_SATS};
 use crate::ledger::Ledger;
 use crate::types::FeeStructure;
-use crate::signature_utils::verify_payment_signature;
+use crate::signing::verify_payment_signature;
 
 /// Result type for validation operations
 pub type ValidationResult = Result<(), String>;
@@ -716,13 +716,10 @@ pub fn validate_deposit_key_rotate(
     // The message being signed is the new_descriptor hash (proving intent to rotate to it)
     let message_hash = bitcoin::hashes::sha256::Hash::hash(new_descriptor.as_bytes()).to_byte_array();
 
-    match crate::signature_utils::verify_descriptor_witness(
+    match crate::descriptor::verify_witness(
         &deposit.descriptor,
-        deposit_id,
-        &message_hash,
-        0,  // No amount for key rotation
         witness,
-        0,  // Block height not relevant for key rotation
+        &message_hash,
     ) {
         Ok(true) => {}
         Ok(false) => return Err("Witness does not satisfy current descriptor".to_string()),
@@ -772,7 +769,7 @@ pub fn validate_payment_lock_by_id(
     }
 
     // Verify witness satisfies the deposit's descriptor
-    match crate::signature_utils::verify_invoice_lock_witness(
+    match crate::signing::verify_invoice_lock_witness(
         &deposit.descriptor,
         deposit_id,
         payment_id,
@@ -841,13 +838,10 @@ pub fn validate_onchain_lock_by_id(
         fee_sats,
     );
 
-    match crate::signature_utils::verify_descriptor_witness(
+    match crate::descriptor::verify_witness(
         &deposit.descriptor,
-        deposit_id,
-        &message_hash,
-        total_debit,
         witness,
-        0, // Block height not relevant for withdrawals
+        &message_hash,
     ) {
         Ok(true) => {}
         Ok(false) => return Err("Witness does not satisfy deposit descriptor".to_string()),
@@ -1034,7 +1028,7 @@ pub fn validate_transfer_lock(
     }
 
     // Verify witness satisfies source deposit's descriptor
-    match crate::signature_utils::verify_transfer_lock_witness(
+    match crate::signing::verify_transfer_lock_witness(
         &source_deposit.descriptor,
         source_deposit_id,
         destination_deposit_id,
@@ -1068,7 +1062,7 @@ pub fn validate_transfer_complete(
         .ok_or_else(|| format!("Pending transfer {} does not exist", hex::encode(transfer_id)))?;
 
     // Verify script_witness satisfies completion_script
-    match crate::signature_utils::verify_transfer_complete_witness(
+    match crate::signing::verify_transfer_complete_witness(
         &pending.completion_script,
         transfer_id,
         &pending.nonce,
