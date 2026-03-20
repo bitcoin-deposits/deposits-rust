@@ -60,6 +60,16 @@ operators request other operators to join their quorum by depositing and locking
 
 once quorum is established, reserves are rotated into a new multisig utxo. members co-sign valid updates and participate in recovery if the operator signs non-conforming ones. larger quorums increase communication overhead but reduce operator risk, increase availability, and make collusion more difficult and expensive. wallets should prefer larger quorums
 
+## economic deterrence
+
+the protocol replaces unilateral exit with economic deterrence. quorum members are not neutral validators — they are incentivized predators. a member earns basis points on co-signing fees during normal operation, but stands to confiscate the operator's entire collateral deposit on their ledger if the operator misbehaves. this asymmetry — steady small income versus a one-time windfall worth orders of magnitude more — ensures that members actively monitor operators without requiring protocol-level enforcement
+
+when a wallet suspects censorship, it escalates the request to quorum members via certified delivery: the member embeds the request hash in their own ledger for a small fee, creating causally anchored evidence. if the operator fails to process the request, the member has both the evidence and the economic incentive to initiate a dispute. the wallet's escalation is effectively a bounty
+
+lightning invoice fraud follows the same deterrence pattern. the operator's lightning node is a trust boundary that the protocol cannot fully bridge — the operator knows whether a preimage was received, but the wallet does not. however, any payer might provide the preimage to the wallet. one confirmed theft triggers dispute, reserves seizure, and collateral confiscation. the upside of stealing a single payment is bounded; the downside is existential. this makes lightning theft economically irrational despite being formally unprovable without third party cooperation
+
+the only failure mode for both censorship and lightning deterrence is unanimous quorum collusion. the protocol cannot protect against a quorum that cooperates to steal — but the collateral web ensures that collusion costs more than it gains, and the network's transparency allows wallets and discovery markets to identify suspicious quorum structures before depositing funds
+
 ## time
 
 absolute time is measured against the base layer. tolerances should not exceed a reasonable number of confirmations in order to maintain stability during chain reorganizations

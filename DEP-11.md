@@ -22,7 +22,9 @@ Without the preimage, this obligation is not autonomously provable.
 When a `TransferLock` is appended with a `timeout_height`, the operator must append `TransferFail` after the timeout block is reached if no `TransferComplete` has been provided. Signing updates past `timeout_height` while funds remain locked is provable non-conformance.
 
 ### Withdrawal and Transfer Processing
-When a wallet publishes a signed withdrawal or transfer request (Kind 20101), the operator must process it within `service_response_blocks`. Failure to do so is provable: the signed request event on the relay, combined with the operator's ledger advancing past the deadline block without a corresponding operation, constitutes a fraud proof. `service_response_blocks` is a per-quorum parameter recorded in `QuorumAddMember`.
+When a wallet's signed request is not processed by the operator, the wallet may escalate through certified delivery (see DEP-12). A quorum member embeds the request hash in their own ledger via `DeliveryEmbed`. The `service_response_blocks` clock starts at the embed's `block_height`. If the operator's ledger advances past the deadline without a corresponding operation, the combination constitutes a censorship proof.
+
+`service_response_blocks` is a per-quorum parameter recorded in `QuorumAddMember`. The strictest value across all members applies.
 
 Without this obligation, an operator could hold deposits hostage — refusing to process withdrawals without it being non-conforming. This is the provable service-level guarantee.
 
@@ -63,7 +65,7 @@ Wallets should distribute funds across operators with non-overlapping quorum mem
 | On-chain credit | Operator signs past `deadline_block` without credit | Yes (autonomous) |
 | Lightning credit | Preimage exists, no credit | Yes (with preimage) |
 | Transfer timeout | Operator signs past `timeout_height` with funds locked | Yes |
-| Withdrawal/transfer processing | Operator signs past `service_response_blocks` without processing signed request | Yes |
+| Withdrawal/transfer processing | Operator signs past `DeliveryEmbed block_height + service_response_blocks` without processing embedded request | Yes |
 | Quorum rotation | Operator signs past `quorum_expiry` without new quorum | Yes |
 | Dispute response | Member active after `evidence_block + dispute_response_blocks` | Yes |
 | Collateral lock | Reduced before `lock_until_block` | Yes |
@@ -90,3 +92,4 @@ The following timing parameters are recorded in `QuorumAddMember` so that all pa
 - [DEP-07](DEP-07.md): Fee schedules (collection period)
 - [DEP-09](DEP-09.md): Transfers (timeout mechanics)
 - [DEP-10](DEP-10.md): Payment channels (offer deadlines, invoice credit)
+- [DEP-12](DEP-12.md): Certified delivery (escalation protocol, DeliveryEmbed, censorship proof construction)

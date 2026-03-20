@@ -123,6 +123,7 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 | 55 | DisputeAcquire | Dispute |
 | 56 | DisputeYield | Dispute |
 | 57 | DisputeArmed | Dispute |
+| 80 | DeliveryEmbed | Delivery |
 
 ### Operation TLV Fields
 
@@ -213,7 +214,7 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 | 254 | dispute_arm_blocks | 4 | QuorumAddMember |
 | 256 | service_response_blocks | 4 | QuorumAddMember |
 | 258 | max_transfer_timeout_blocks | 4 | QuorumAddMember |
-| 260 | backed_ledger_count | 2 | CollateralAttestation |
+| 262 | max_descriptor_bytes | 4 | QuorumAddMember |
 
 #### Dispute
 
@@ -229,6 +230,14 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 | 120 | new_reserves_address | variable | DisputeAcquire |
 | 112 | commitment_hash | 20 | DisputeArmed (HASH160) |
 | 122 | target_reserves | variable | DisputeArmed |
+
+#### Delivery
+
+| Type | Name | Size | Used by |
+|---|---|---|---|
+| 270 | request_hash | 32 | DeliveryEmbed |
+| 272 | target_ledger_id | 32 | DeliveryEmbed |
+| 274 | target_operator | 33 | DeliveryEmbed |
 
 ### Nested TLV: FeeStructure
 

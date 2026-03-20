@@ -28,6 +28,8 @@ When joining, each member specifies:
 
 The operator cannot open deposits with fees below the strictest member's minimums. This protects members from inheriting unprofitable obligations after a custody transfer.
 
+- **max_descriptor_bytes**: maximum serialized descriptor size (bytes) the member will accept on deposits they may inherit after custody transfer
+
 Members also specify timing parameters that govern protocol obligations (see DEP-11):
 
 - **dispute_response_blocks**: blocks before a member must respond to embedded fraud evidence
@@ -35,7 +37,7 @@ Members also specify timing parameters that govern protocol obligations (see DEP
 - **service_response_blocks**: blocks before an unprocessed signed request becomes provable censorship
 - **max_transfer_timeout_blocks**: maximum `timeout_height` distance for `TransferLock`
 
-The strictest (smallest) values across all members apply to the quorum.
+The strictest (smallest) values across all members apply to the quorum. The operator cannot open deposits with descriptors exceeding the quorum's `max_descriptor_bytes` limit.
 
 ### QuorumBegin (disc 12)
 
@@ -87,9 +89,7 @@ A coordinated theft yields at most 2C but costs 3C in confiscated collateral —
 
 ### Multi-Ledger Collateral
 
-The same collateral deposit on a member's ledger may back multiple ledgers of the same operator. When it does, the `CollateralAttestation` on each backed ledger must include a `backed_ledger_count` indicating how many ledgers share this collateral. Wallets and quorum members should divide the attested amount by the backed count to compute effective per-ledger coverage.
-
-Wallets should prefer operators with non-overlapping collateral sources, as shared collateral provides weaker per-ledger coverage.
+The same collateral deposit on a member's ledger may back multiple ledgers of the same operator. Wallets should prefer operators with non-overlapping collateral sources, as shared collateral provides weaker per-ledger coverage. The mechanism for discovering and accounting for multi-ledger collateral reuse is an open design question.
 
 ## Co-Signer Obligations
 
@@ -118,3 +118,4 @@ If the operator is proven non-conforming (see DEP-06), members may confiscate th
 - [DEP-08](DEP-08.md): Deposits (collateral deposits)
 - [DEP-10](DEP-10.md): Payment channels (obligation limits enforced at offer/invoice creation)
 - [DEP-11](DEP-11.md): Time obligations (quorum rotation, collateral maintenance)
+- [DEP-12](DEP-12.md): Certified delivery (service_response_blocks enforcement)

@@ -21,6 +21,7 @@ Wallets connect to both: operator relays for requests, ledger relays for reading
 | 9101 | Fraud Proof | Durable | Fraud proof broadcast (JSON, see DEP-06) |
 | 9103 | Dispute | Durable | Custody dispute notification (JSON) |
 | 9104 | Recovery Agreement | Durable | Quorum member recovery agreement (JSON) |
+| 9105 | Delivery Escalation | Durable | Wallet escalation of unprocessed request (JSON) |
 | 20101 | Request | Ephemeral | Wallet-to-operator request (JSON) |
 | 20102 | Response | Ephemeral | Operator-to-wallet response (JSON) |
 | 39100 | Advertisement | Replaceable | Operator terms (JSON, NIP-33) |
@@ -39,6 +40,10 @@ Wallets connect to both: operator relays for requests, ledger relays for reading
 | `l` | Kind 20101, 20102 | Ledger ID (for relay-side request routing) |
 | `action` | Kind 20101 | Request action name |
 | `p` | Kind 9101 | Accused operator pubkey |
+| `d` | Kind 9105 | Deposit ID (hex) |
+| `l` | Kind 9105 | Ledger ID (hex) |
+| `p` | Kind 9105 | Operator pubkey |
+| `action` | Kind 9105 | Request action name |
 
 ## Request/Response Protocol
 
@@ -95,6 +100,7 @@ Wallets need no persistent connections. They can go offline indefinitely and cat
 
 - [DEP-02](DEP-02.md): Ledger update wire format (Kind 9100 content)
 - [DEP-06](DEP-06.md): Fraud proof broadcast format (Kind 9101 content)
+- [DEP-12](DEP-12.md): Certified delivery (Kind 9105 durable escalation)
 
 ## References
 

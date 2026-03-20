@@ -27,6 +27,8 @@ A deposit is created with `DepositOpen`, which establishes:
 - **fee_change_notice_blocks**: blocks of notice before a fee change takes effect
 - **fee_change_limit_bps**: maximum fee change per adjustment
 
+The serialized descriptor must not exceed the quorum's `max_descriptor_bytes` limit (see DEP-05). If no quorum is established, the operator's own advertised limit applies. Operators advertise their descriptor size limit in their Kind 39100 advertisement.
+
 The deposit starts with zero balance. Funds are added via on-chain offers, lightning invoices, or transfers from other deposits (see DEP-10, DEP-09).
 
 ### Close (disc 21)
@@ -77,3 +79,4 @@ When `is_collateral` is true:
 - [DEP-07](DEP-07.md): Fee schedules (periodic and transfer fees, fee changes)
 - [DEP-09](DEP-09.md): Transfers (two-phase transfer protocol)
 - [DEP-10](DEP-10.md): Payment channels (on-chain and lightning funding)
+- [DEP-12](DEP-12.md): Certified delivery (escalation for unprocessed deposit operations)
