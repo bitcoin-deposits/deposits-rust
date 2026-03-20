@@ -1,0 +1,88 @@
+# DEP-09: Transfers
+
+## Abstract
+
+This document specifies the two-phase transfer protocol between deposits on the same ledger. A transfer locks funds with a miniscript spending condition; if the condition is satisfied before a timeout, funds move to the recipient minus the operator's fee. If the timeout is reached, funds are returned to the sender minus a smaller fee.
+
+## Transfer Protocol
+
+### Phase 1: Lock (disc 70)
+
+The sender requests a `TransferLock` with:
+
+- **nonce**: 32 random bytes (also used for fraud proof embedding -- see DEP-06)
+- **source_deposit_id**: the sender's deposit
+- **destination_deposit_id**: the recipient's deposit
+- **amount**: amount to transfer (msats)
+- **fee**: operator's transfer fee (msats, must match the deposit's TransferFeeSchedule)
+- **completion_script**: miniscript condition the recipient must satisfy
+- **timeout_height**: block height after which the transfer can be failed
+- **transfer_id**: 32-byte identifier (derived from the signing message hash)
+- **witness**: satisfies the sender's deposit descriptor, authorizing the lock
+
+The operator verifies the sender's witness, checks sufficient balance, validates the fee, and appends the operation. The sender's balance is reduced by `amount + fee`, which moves to `locked_balance`.
+
+If the destination deposit has `receive_requires_sig`, the request must also include a `receive_signature` from the destination descriptor.
+
+### Phase 2a: Complete (disc 71)
+
+The recipient (or anyone who can satisfy the completion_script) provides a `TransferComplete` with:
+
+- **transfer_id**: matches the lock
+- **script_witness**: satisfies the `completion_script` from the lock
+
+On success: `amount` is credited to the destination deposit, `fee` is credited to the operator, and the transfer is removed from pending.
+
+### Phase 2b: Fail (disc 72)
+
+If the timeout is reached without completion, the operator appends `TransferFail` with:
+
+- **transfer_id**: matches the lock
+- **block_hash**: the block hash at timeout height
+- **reason**: failure reason (1 = timeout, 0 = reserved)
+
+On failure: `amount` is returned to the source deposit (minus a smaller timeout fee), and the transfer is removed from pending.
+
+## Completion Scripts
+
+The `completion_script` is a miniscript policy that determines how the transfer can be completed. Common patterns:
+
+- **HTLC**: `sha256(H)` — recipient provides the preimage. This is the basis for cross-ledger and lightning-compatible transfers.
+- **Signature**: `pk(recipient_key)` — recipient signs the transfer_id
+- **Timelock**: `and(pk(key), after(N))` — key + minimum block height
+- **Multi-party**: `multi(2, key1, key2)` — requires multiple signers
+
+Any valid miniscript is supported. The witness stack must satisfy the policy.
+
+## Fee Validation
+
+The transfer fee must exactly match the source deposit's `TransferFeeSchedule`:
+
+    expected_fee = fixed_msats + (amount_msats * rate_bps / 10000)
+
+The operator rejects transfers with mismatched fees.
+
+## Transfer ID
+
+The transfer_id is derived deterministically from the lock signing message:
+
+    signing_message = transfer_lock_signing_message(nonce, src, dst, amount, fee, script, timeout)
+    transfer_id = SHA256(signing_message)
+
+This ensures uniqueness and allows the sender to compute the transfer_id before submitting.
+
+## State Machine
+
+```
+Lock → [pending_transfers]
+  ├─ Complete → funds to recipient, fee to operator
+  └─ Fail (timeout) → funds to sender (minus timeout fee)
+```
+
+A pending transfer occupies `locked_balance` on the source deposit until resolved.
+
+## Related DEPs
+
+- [DEP-02](DEP-02.md): Wire format (TransferLock, TransferComplete, TransferFail fields)
+- [DEP-07](DEP-07.md): Fee schedules (TransferFeeSchedule)
+- [DEP-08](DEP-08.md): Deposits (descriptor witnesses, receive_requires_sig)

@@ -33,9 +33,12 @@ Specifications use the conventions from BOLT #0: MUST, SHOULD, MAY for requireme
 | DEP | Title | Status |
 |---|---|---|
 | [DEP-01](DEP-01.md) | DEP Purpose and Guidelines | Accepted |
-| [DEP-02](DEP-02.md) | Ledger State Model | Draft |
-| [DEP-03](DEP-03.md) | On-Chain Transaction Formats | Placeholder |
-| [DEP-04](DEP-04.md) | Peer Messaging | Placeholder |
-| [DEP-05](DEP-05.md) | Quorum and Collateral | Placeholder |
-| [DEP-06](DEP-06.md) | Fraud Proofs and Recovery | Placeholder |
-| [DEP-07](DEP-07.md) | Fee Schedules | Placeholder |
+| [DEP-02](DEP-02.md) | Wire Format | Draft |
+| [DEP-03](DEP-03.md) | On-Chain Transactions | Draft |
+| [DEP-04](DEP-04.md) | Peer Messaging | Draft |
+| [DEP-05](DEP-05.md) | Quorum and Collateral | Draft |
+| [DEP-06](DEP-06.md) | Fraud Proofs and Recovery | Draft |
+| [DEP-07](DEP-07.md) | Fee Schedules | Draft |
+| [DEP-08](DEP-08.md) | Deposits | Draft |
+| [DEP-09](DEP-09.md) | Transfers | Draft |
+| [DEP-10](DEP-10.md) | Payment Channels | Draft |

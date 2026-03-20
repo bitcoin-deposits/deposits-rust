@@ -4,48 +4,64 @@
 
 This document specifies the fee structures for Bitcoin Deposits: periodic custody fees, per-transfer fees, fee negotiation at deposit opening, and the fee change mechanism with block notice and change limits.
 
-## Status
+## Periodic Custody Fees (FeeStructure)
 
-Placeholder -- to be extracted from the reference implementation.
+Custody fees are charged periodically against deposit balances:
 
-## Scope
+- **annualized_msats**: fixed fee per year (msats), pro-rated for elapsed blocks
+- **annualized_bps**: proportional fee rate (basis points per year), applied to the deposit balance
+- **frequency_blocks**: collection period (blocks) -- how often `FeeCollect` is appended
 
-### Periodic Custody Fees (FeeStructure)
+Fee calculation for a collection period:
 
-- `annualized_msats`: fixed fee per year (msats)
-- `annualized_bps`: proportional fee rate (basis points per year)
-- `frequency_blocks`: collection period (blocks)
-- Collected via `FeeCollect` operation, pro-rated for elapsed blocks
+    fixed_portion = annualized_msats * blocks_elapsed / 52560
+    proportional_portion = balance * annualized_bps * blocks_elapsed / (52560 * 10000)
+    total_fee = fixed_portion + proportional_portion
 
-### Per-Transfer Fees (TransferFeeSchedule)
+The operator appends `FeeCollect` (disc 50) with the computed fee, which is deducted from the deposit's balance.
 
-- `fixed_msats`: fixed fee per transfer (msats)
-- `rate_bps`: proportional fee per transfer (basis points)
-- Fee = `fixed_msats + (amount * rate_bps / 10000)`
+## Per-Transfer Fees (TransferFeeSchedule)
 
-### Fee Negotiation
+Each transfer out of a deposit incurs a fee:
 
-- Fee schedules are negotiated at `DepositOpen`
-- Quorum members specify minimums via `QuorumAddMember` (see DEP-05)
-- Deposits must meet the strictest quorum member's minimums
+- **fixed_msats**: fixed fee per transfer (msats)
+- **rate_bps**: proportional fee (basis points of the transfer amount)
 
-### Fee Changes
+Fee calculation:
 
-Parameters negotiated at deposit opening:
+    fee = fixed_msats + (amount_msats * rate_bps / 10000)
 
-- `fee_change_after_blocks`: blocks after opening before any change
-- `fee_change_notice_blocks`: blocks of notice before change takes effect
-- `fee_change_limit_bps`: maximum change per adjustment (basis points of current fee)
+The sender must provide the exact expected fee in the `TransferLock` request. The operator rejects mismatches.
 
-A `FeeChange` (disc 22) announces new fees with an `effective_block`. Validation checks:
+## Fee Negotiation
 
-1. Current block >= `opened_at_block + fee_change_after_blocks`
-2. `effective_block` >= current block + `fee_change_notice_blocks`
-3. Change in `annualized_bps` and `annualized_msats` within `fee_change_limit_bps` of current values
+Fee schedules are negotiated at deposit opening (`DepositOpen`). The operator's advertisement (Kind 39100) publishes their minimum fees. The wallet proposes fees in the open request; the operator validates they meet the minimums.
 
-The change is stored as `pending_fee_change` and applied when `FeeCollect` runs at or after `effective_block`.
+Quorum members also set fee minimums at join time (see DEP-05). The operator cannot open deposits with fees below the strictest quorum member's minimums.
+
+## Fee Changes
+
+Fee parameters negotiated at deposit opening:
+
+- **fee_change_after_blocks**: blocks after opening before any change is allowed
+- **fee_change_notice_blocks**: blocks of notice before a change takes effect
+- **fee_change_limit_bps**: maximum change per adjustment (basis points of current fee, e.g. 1000 = 10%)
+
+### FeeChange (disc 22)
+
+The operator announces new fees with an `effective_block`:
+
+1. `current_block >= opened_at_block + fee_change_after_blocks` -- enough time since opening
+2. `effective_block >= current_block + fee_change_notice_blocks` -- sufficient notice
+3. Change in `annualized_bps` and `annualized_msats` must be within `fee_change_limit_bps` of current values
+
+The change is stored as `pending_fee_change` on the deposit. When `FeeCollect` runs at or after `effective_block`, the new fees take effect.
+
+A subsequent `FeeChange` replaces any pending change.
 
 ## Related DEPs
 
-- [DEP-02](DEP-02.md): Ledger State Model (DepositOpen, FeeChange, FeeCollect operations)
-- [DEP-05](DEP-05.md): Quorum and Collateral (fee limits negotiated by quorum members)
+- [DEP-02](DEP-02.md): Wire format (FeeStructure, TransferFeeSchedule nested TLV, FeeChange/FeeCollect fields)
+- [DEP-05](DEP-05.md): Quorum and collateral (fee limits negotiated by quorum members)
+- [DEP-08](DEP-08.md): Deposits (fee schedule established at opening)
+- [DEP-09](DEP-09.md): Transfers (transfer fee validation)

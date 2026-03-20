@@ -240,11 +240,14 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 
 ## Related DEPs
 
-- [DEP-03](DEP-03.md): On-chain transaction formats
+- [DEP-03](DEP-03.md): On-chain transactions
 - [DEP-04](DEP-04.md): Peer messaging
 - [DEP-05](DEP-05.md): Quorum and collateral
 - [DEP-06](DEP-06.md): Fraud proofs and recovery
 - [DEP-07](DEP-07.md): Fee schedules
+- [DEP-08](DEP-08.md): Deposits
+- [DEP-09](DEP-09.md): Transfers
+- [DEP-10](DEP-10.md): Payment channels
 
 ## References
 
