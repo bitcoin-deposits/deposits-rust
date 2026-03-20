@@ -4751,6 +4751,14 @@ impl Node {
         let rotate_txid = self.wallet.broadcast(&rotate_tx)?;
         tracing::info!("Rotation TX broadcast: {}", rotate_txid);
 
+        // Compute total attested collateral from the ledger state
+        let total_collateral = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers.get(ledger_id)
+                .map(|arc| arc.read().unwrap().state.received_collateral_amount)
+                .unwrap_or(0)
+        };
+
         // Publish QuorumBegin operation (convert sats to msats at boundary)
         let operation = LedgerOperation::QuorumBegin {
             reserves_id: taproot_output.address.to_string(),
@@ -4761,6 +4769,7 @@ impl Node {
             first_expiry_block,
             ledger_hash,
             quorum_members: quorum_members.clone(),
+            total_collateral,
         };
 
         let message_bytes = operation.tlv_encode();
@@ -10874,15 +10883,17 @@ impl Node {
             };
 
             // Calculate quorum parameters
+            let total_collateral = ledger_arc.read().unwrap().state.received_collateral_amount;
             let operation = LedgerOperation::QuorumBegin {
                 reserves_id: result.address.to_string(),
                 spending_txid: txid_bytes,
-                new_outpoint_txid: txid_bytes, // Same tx creates the new output
+                new_outpoint_txid: txid_bytes,
                 new_outpoint_vout: result.outpoint.vout,
-                amount: result.amount.saturating_mul(1000), // sats to msats
+                amount: result.amount.saturating_mul(1000),
                 first_expiry_block: result.first_expiry_block,
                 ledger_hash,
                 quorum_members: quorum_members.clone(),
+                total_collateral,
             };
 
             let mut ledger = ledger_arc.write().unwrap();

@@ -525,6 +525,9 @@ pub enum LedgerOperation {
         ledger_hash: [u8; 32],
         /// Quorum member pubkeys included in this rotation
         quorum_members: Vec<bitcoin::secp256k1::PublicKey>,
+        /// Total attested collateral across all quorum members (msats).
+        /// Wallets use this to verify obligation limits without scanning attestations.
+        total_collateral: u64,
     },
 
     // ========== Deposit Operations (6) ==========
@@ -1447,16 +1450,17 @@ impl BinaryCodec for LedgerOperation {
                 write_u32(w, 0)?; // reserved (was collateral_enforcement_block)
                 write_u64(w, *reserves_amount)?;
             }
-            Self::QuorumBegin { reserves_id, spending_txid, new_outpoint_txid, new_outpoint_vout, amount, first_expiry_block, ledger_hash, quorum_members } => {
+            Self::QuorumBegin { reserves_id, spending_txid, new_outpoint_txid, new_outpoint_vout, amount, first_expiry_block, ledger_hash, quorum_members, total_collateral } => {
                 write_string(w, reserves_id)?;
                 write_32(w, spending_txid)?;
                 write_32(w, new_outpoint_txid)?;
                 write_u32(w, *new_outpoint_vout)?;
                 write_u64(w, *amount)?;
-                write_u8(w, quorum_members.len() as u8)?; // backward compat: write count as threshold
-                write_u8(w, quorum_members.len() as u8)?; // backward compat: write count as size
+                write_u8(w, quorum_members.len() as u8)?;
+                write_u8(w, quorum_members.len() as u8)?;
                 write_u32(w, *first_expiry_block)?;
                 write_32(w, ledger_hash)?;
+                write_u64(w, *total_collateral)?;
             }
             // Legacy encoding - deposit operations now use deposit_id/descriptor, but we encode
             // the deposit_id bytes as a placeholder for legacy compatibility
@@ -1714,9 +1718,11 @@ impl BinaryCodec for LedgerOperation {
                 let _size = read_u8(r)?; // legacy: skip
                 let first_expiry_block = read_u32(r)?;
                 let ledger_hash = read_32(r)?;
+                let total_collateral = read_u64(r).unwrap_or(0);
                 Ok(Self::QuorumBegin {
                     reserves_id, spending_txid, new_outpoint_txid, new_outpoint_vout,
                     amount, first_expiry_block, ledger_hash, quorum_members: Vec::new(),
+                    total_collateral,
                 })
             }
             // Deposit operations (20-25) - legacy decoding extracts deposit_id from embedded bytes
@@ -2686,6 +2692,7 @@ mod ledger_op_tlv {
     pub const NEW_OUTPOINT_TXID: u64 = 84;
     pub const NEW_OUTPOINT_VOUT: u64 = 92;
     pub const FIRST_EXPIRY_BLOCK: u64 = 86;
+    pub const TOTAL_COLLATERAL: u64 = 88;
     // Dispute fields
     pub const REASON: u64 = 100;
     pub const LAST_VALID_SEQUENCE: u64 = 102;
@@ -2747,8 +2754,7 @@ impl TlvEncode for LedgerOperation {
                     .u32_field(GENESIS_BLOCK, *genesis_block)
                     .u64_field(RESERVES_AMOUNT, *reserves_amount);
             }
-            Self::QuorumBegin { reserves_id, spending_txid, new_outpoint_txid, new_outpoint_vout, amount, first_expiry_block, ledger_hash, quorum_members } => {
-                // Encode quorum members as concatenated 33-byte compressed pubkeys
+            Self::QuorumBegin { reserves_id, spending_txid, new_outpoint_txid, new_outpoint_vout, amount, first_expiry_block, ledger_hash, quorum_members, total_collateral } => {
                 let mut members_bytes = Vec::new();
                 for pk in quorum_members {
                     members_bytes.extend_from_slice(&pk.serialize());
@@ -2761,7 +2767,8 @@ impl TlvEncode for LedgerOperation {
                     .u64_field(AMOUNT, *amount)
                     .u32_field(FIRST_EXPIRY_BLOCK, *first_expiry_block)
                     .bytes_field(LEDGER_HASH, ledger_hash)
-                    .bytes_field(QUORUM_MEMBERS, &members_bytes);
+                    .bytes_field(QUORUM_MEMBERS, &members_bytes)
+                    .u64_field(TOTAL_COLLATERAL, *total_collateral);
             }
             Self::DepositOpen { deposit_id, descriptor, fees, transfer_fees, payment_hash, invoice, cosigner_guarantee_signature, is_collateral, receive_requires_sig, fee_change_after_blocks, fee_change_notice_blocks, fee_change_limit_bps } => {
                 builder = builder
@@ -3018,6 +3025,7 @@ impl TlvDecode for LedgerOperation {
                     first_expiry_block: reader.read_u32(FIRST_EXPIRY_BLOCK)?,
                     ledger_hash: reader.read_bytes(LEDGER_HASH)?,
                     quorum_members,
+                    total_collateral: reader.read_u64(TOTAL_COLLATERAL)?,
                 })
             }
             20 => Ok(Self::DepositOpen {

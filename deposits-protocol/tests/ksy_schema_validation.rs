@@ -213,6 +213,7 @@ fn schema_quorum_begin() {
         (FIRST_EXPIRY_BLOCK, u32_bytes(1000)),
         (LEDGER_HASH, hash32()),
         (6, pubkey_bytes()), // QUORUM_MEMBERS — one member
+        (88, u64_bytes(50_000_000)), // TOTAL_COLLATERAL
     ]);
 }
 

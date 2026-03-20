@@ -143,6 +143,7 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 | 62 | reserves_amount | 8 | LedgerOpen, QuorumBegin |
 | 96 | genesis_block | 4 | LedgerOpen |
 | 6 | quorum_members | N*33 | QuorumBegin |
+| 88 | total_collateral | 8 | QuorumBegin (sum of attested collateral, msats) |
 
 #### Deposits
 

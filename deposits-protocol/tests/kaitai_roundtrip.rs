@@ -67,6 +67,7 @@ fn wit() -> DescriptorWitness { DescriptorWitness { stack: vec![vec![0x30; 64]] 
     reserves_id: "bcrt1qtest".into(), spending_txid: h32(), new_outpoint_txid: h32(),
     new_outpoint_vout: 0, amount: 100_000_000,
     first_expiry_block: 1000, ledger_hash: h32(), quorum_members: vec![pk()],
+    total_collateral: 50_000_000,
 }); }
 
 #[test] fn deposit_open() { test_roundtrip(&LedgerOperation::DepositOpen {

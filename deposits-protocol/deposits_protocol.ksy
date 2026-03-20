@@ -229,10 +229,11 @@ types:
   #   242 = collateral_lock_until (u32, QuorumAddMember)
   #
   # QuorumBegin:
-  #   90  = spending_txid (32 bytes)
   #   84  = new_outpoint_txid (32 bytes)
-  #   92  = new_outpoint_vout (u32)
   #   86  = first_expiry_block (u32)
+  #   88  = total_collateral (u64, msats, sum of attested collateral)
+  #   90  = spending_txid (32 bytes)
+  #   92  = new_outpoint_vout (u32)
   #
   # Dispute:
   #   100 = reason (string, DisputeEnter)

@@ -3488,6 +3488,7 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
         first_expiry_block,
         ledger_hash,
         quorum_members: quorum_members.clone(),
+        total_collateral: 0, // recovery — collateral will be re-attested
     };
 
     let message_bytes = operation.tlv_encode();
