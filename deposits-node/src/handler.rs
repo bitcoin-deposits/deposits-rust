@@ -509,7 +509,9 @@ impl DepositsHandler {
 
         if let Some(last_update) = updates.last() {
             ledger_state.sequence = last_update.sequence_number as u64;
-            ledger_state.hash = last_update.current_hash;
+            // Use chain_hash (SHA256(current_hash || operator_signature)) so the next
+            // append_operation sets prev_hash = chain_hash, matching the protocol spec.
+            ledger_state.hash = last_update.chain_hash();
         }
 
         let mut ledger = Ledger {
@@ -1239,6 +1241,10 @@ impl DepositsHandler {
             update.operator_signature = sig.serialize();
             tracing::debug!("Signed update seq={}", update.sequence_number);
         }
+
+        // Finalize state.hash = chain_hash = SHA256(current_hash || operator_signature)
+        // so the next append_operation uses chain_hash as prev_hash (per protocol spec).
+        ledger.finalize_chain_hash();
     }
 
     /// Import a ledger from an export file (JSON or binary)

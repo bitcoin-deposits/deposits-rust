@@ -465,6 +465,7 @@ impl Node {
         }
 
         // Finalize state.hash = chain_hash = SHA256(current_hash || operator_signature)
+        // so the next append_operation uses chain_hash as prev_hash (per protocol spec).
         ledger.finalize_chain_hash();
 
         Ok(())
@@ -499,13 +500,16 @@ impl Node {
             )));
         }
 
-        if last.previous_hash != prev.current_hash {
+        // The protocol chains via chain_hash = SHA256(current_hash || operator_signature),
+        // so previous_hash of the next entry must equal chain_hash() of the prior entry.
+        let prev_chain_hash = prev.chain_hash();
+        if last.previous_hash != prev_chain_hash {
             return Err(Error::Protocol(format!(
-                "Hash chain break before persist: seq={} prev_hash={}... but seq={} hash={}...",
+                "Hash chain break before persist: seq={} prev_hash={}... but seq={} chain_hash={}...",
                 last.sequence_number,
                 hex::encode(&last.previous_hash[..8]),
                 prev.sequence_number,
-                hex::encode(&prev.current_hash[..8]),
+                hex::encode(&prev_chain_hash[..8]),
             )));
         }
 
@@ -9196,41 +9200,49 @@ impl Node {
         };
         let ledger = ledger_arc.read().unwrap();
 
-        let current_obligations: u64 = ledger.state.deposits.values()
+        // All deposits (including collateral) count toward reserves usage
+        let all_deposits: u64 = ledger.state.deposits.values()
             .map(|d| d.balance + d.locked_balance)
             .sum();
-        let new_total = current_obligations.saturating_add(additional_msats);
+        let new_total_all = all_deposits.saturating_add(additional_msats);
 
-        // Check reserves limit: obligations (msats) <= reserves (msats)
+        // Check reserves limit: reserves cover everything (including collateral deposits)
         let reserves_limit_msats = ledger.state.reserves.amount;
-        if reserves_limit_msats > 0 && new_total > reserves_limit_msats {
+        if reserves_limit_msats > 0 && new_total_all > reserves_limit_msats {
             return Some(format!(
                 "Would exceed reserves: {} + {} = {} msats > {} msats (reserves {} msats)",
-                current_obligations, additional_msats, new_total,
+                all_deposits, additional_msats, new_total_all,
                 reserves_limit_msats, ledger.state.reserves.amount
             ));
         }
 
-        // Check total_collateral limit: obligations <= sum of attested collateral
-        // total_collateral is recorded on QuorumBegin from collateral attestations
-        if ledger.state.total_collateral > 0 && new_total > ledger.state.total_collateral {
+        // Non-collateral obligations only for collateral limit checks
+        // (collateral does not cover collateral — only customer deposits)
+        let customer_obligations: u64 = ledger.state.deposits.values()
+            .filter(|d| !d.is_collateral)
+            .map(|d| d.balance + d.locked_balance)
+            .sum();
+        let new_customer_total = customer_obligations.saturating_add(additional_msats);
+
+        // Check total_collateral limit: customer obligations <= sum of attested collateral
+        if ledger.state.total_collateral > 0 && new_customer_total > ledger.state.total_collateral {
             return Some(format!(
                 "Would exceed total collateral: {} + {} = {} msats > {} msats (total attested collateral)",
-                current_obligations, additional_msats, new_total, ledger.state.total_collateral
+                customer_obligations, additional_msats, new_customer_total, ledger.state.total_collateral
             ));
         }
 
-        // Check collateral limit: obligations <= 2 * min(member.collateral_lock_amount)
+        // Check per-member collateral limit: customer obligations <= 2 * min(member.collateral_lock_amount)
         let min_collateral = ledger.state.quorum_members.iter()
             .filter_map(|m| m.collateral_lock_amount)
             .min();
 
         if let Some(min_c) = min_collateral {
             let collateral_limit = min_c.saturating_mul(2);
-            if new_total > collateral_limit {
+            if new_customer_total > collateral_limit {
                 return Some(format!(
                     "Would exceed collateral limit: {} + {} = {} msats > {} msats (2x smallest member collateral {})",
-                    current_obligations, additional_msats, new_total, collateral_limit, min_c
+                    customer_obligations, additional_msats, new_customer_total, collateral_limit, min_c
                 ));
             }
         }

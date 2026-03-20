@@ -634,11 +634,14 @@ impl Ledger {
     // Hash Chain Methods
     // ========================================================================
 
-    /// Get the hash of the last update (tail hash).
+    /// Get the chain hash of the last update (tail hash).
     /// Returns zero hash if no updates exist yet.
+    ///
+    /// chain_hash = SHA256(current_hash || operator_signature), which is
+    /// the value the next update must use as its previous_hash.
     pub fn tail_hash(&self) -> [u8; 32] {
         self.history.last()
-            .map(|u| u.current_hash)
+            .map(|u| u.chain_hash())
             .unwrap_or([0u8; 32])
     }
 

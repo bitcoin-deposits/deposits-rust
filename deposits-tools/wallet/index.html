@@ -970,18 +970,18 @@ async function verifyCosignature(tag, signingData, memberLedgerHash, signature, 
   try {
     // BIP-340 tagged hash: SHA256(SHA256(tag) || SHA256(tag) || data || member_hash)
     const tagBytes = new TextEncoder().encode(tag);
-    const tagHash = nobleHashes.sha256(tagBytes);
+    const tagHash = sha256(tagBytes);
     const input = new Uint8Array(tagHash.length * 2 + signingData.length + memberLedgerHash.length);
     input.set(tagHash, 0);
     input.set(tagHash, tagHash.length);
     input.set(signingData, tagHash.length * 2);
     input.set(memberLedgerHash, tagHash.length * 2 + signingData.length);
-    const hash = nobleHashes.sha256(input);
+    const hash = sha256(input);
 
-    // Verify ECDSA signature
-    const sig = nobleSecp256k1.Signature.fromCompact(signature);
-    const pubkey = nobleSecp256k1.ProjectivePoint.fromHex(bytesToHex(cosignerPubkey));
-    return nobleSecp256k1.verify(sig, hash, pubkey);
+    // Verify Schnorr (BIP-340) signature — cosigners sign with sign_schnorr
+    // schnorr.verify expects x-only pubkey (32 bytes), strip 02/03 prefix if present
+    const xonly = cosignerPubkey.length === 33 ? cosignerPubkey.slice(1) : cosignerPubkey;
+    return schnorr.verify(signature, hash, xonly);
   } catch (e) {
     console.warn('Cosignature verification failed:', e);
     return false;
@@ -2773,7 +2773,7 @@ window.syncAll = syncAll;
 // Returns 32-byte Uint8Array.
 function computeFraudProofHash(proofType, accused, ledgerId, evidenceBytes) {
   const tag = new TextEncoder().encode('deposits/fraud_proof');
-  const tagHash = nobleHashes.sha256(tag);
+  const tagHash = sha256(tag);
   const input = new Uint8Array(tagHash.length * 2 + 1 + accused.length + ledgerId.length + evidenceBytes.length);
   let off = 0;
   input.set(tagHash, off); off += tagHash.length;
@@ -2784,7 +2784,7 @@ function computeFraudProofHash(proofType, accused, ledgerId, evidenceBytes) {
   const ledgerBytes = new TextEncoder().encode(ledgerId);
   input.set(ledgerBytes, off); off += ledgerBytes.length;
   input.set(evidenceBytes, off);
-  return nobleHashes.sha256(input);
+  return sha256(input);
 }
 
 // Build canonical evidence bytes for an uncredited on-chain payment.
@@ -2866,7 +2866,7 @@ async function checkForFraud() {
 
       // Verify preimage matches payment_hash
       const preimageBytes = hexToBytes(ev.preimage);
-      const computedHash = bytesToHex(nobleHashes.sha256(preimageBytes));
+      const computedHash = bytesToHex(sha256(preimageBytes));
       if (computedHash !== ev.payment_hash) {
         log(`Preimage does not match payment hash for ${ev.deposit_alias}`, 'error');
         continue;
@@ -3005,7 +3005,7 @@ async function checkForFraud() {
       const amount = 1;
       const fee = deposit.transfer_fee_fixed || 2;
       const timeout = cachedBlockHeight + 144;
-      const transferId = nobleHashes.sha256(proofHashBytes); // deterministic
+      const transferId = sha256(proofHashBytes); // deterministic
 
       const msgHash = transferLockSigningMessage(
         proofHashBytes, depositId, depositId, amount, fee,
@@ -3248,7 +3248,7 @@ window.submitPreimage = function(paymentHash, hashShort) {
   // Verify: SHA256(preimage) == payment_hash
   try {
     const preimageBytes = hexToBytes(preimage);
-    const computedHash = bytesToHex(nobleHashes.sha256(preimageBytes));
+    const computedHash = bytesToHex(sha256(preimageBytes));
     if (computedHash !== paymentHash) {
       log('Preimage does not match payment hash', 'error');
       return;
@@ -3712,7 +3712,7 @@ function decodeUpdate(base64Content) {
   const hashInput = new Uint8Array(totalLen);
   let hOff = 0;
   for (const p of hashParts) { hashInput.set(p, hOff); hOff += p.length; }
-  const curHash = bytesToHex(nobleHashes.sha256(hashInput));
+  const curHash = bytesToHex(sha256(hashInput));
 
   return { seq, prevHash, curHash, blockHeight, msgType, operatorHex, opName, opDisc, opFields };
 }
