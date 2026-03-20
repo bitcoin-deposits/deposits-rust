@@ -391,6 +391,8 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
             quorum_member: pk(), quorum_member_signature: sig(), member_ledger_id: "abc123".into(),
             min_fee_bps: Some(500), min_fee_fixed: Some(100_000), max_fee_period: Some(2016),
             collateral_lock_amount: Some(50_000_000), collateral_lock_until: Some(10000),
+            dispute_response_blocks: None, dispute_arm_blocks: None, service_response_blocks: None,
+            max_transfer_timeout_blocks: None, max_descriptor_bytes: None,
         }),
         ("QuorumRemoveMember", LedgerOperation::QuorumRemoveMember {
             quorum_member: pk(), operator_signature: sig(),

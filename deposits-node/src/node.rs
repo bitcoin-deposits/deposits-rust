@@ -2997,6 +2997,11 @@ impl Node {
                         max_fee_period: None,
                         collateral_lock_amount: None,
                         collateral_lock_until: None,
+                        dispute_response_blocks: None,
+                        dispute_arm_blocks: None,
+                        service_response_blocks: None,
+                        max_transfer_timeout_blocks: None,
+                        max_descriptor_bytes: None,
                     };
 
                     if let Err(e) = fork_ledger.append_operation_with_block(
@@ -3055,10 +3060,9 @@ impl Node {
             if already_armed {
                 tracing::info!("Already have DisputeArmed on fork");
             } else {
-                // Generate random preimage (17-20 bytes for lottery entropy)
+                // Generate random preimage (32 bytes for lottery entropy)
                 let mut rng = OsRng;
-                let preimage_len = rng.gen_range(17..=20);
-                let mut preimage = vec![0u8; preimage_len];
+                let mut preimage = vec![0u8; 32];
                 rng.fill(&mut preimage[..]);
 
                 // Compute commitment_hash = HASH160(preimage)
@@ -5080,6 +5084,25 @@ impl Node {
         // Create descriptor from pubkey (single-key deposit)
         let descriptor = format!("pk({})", deposit_pubkey_str);
 
+        // Validate descriptor size against quorum's max_descriptor_bytes
+        {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            if let Some(ledger_arc) = ledgers.get(&ledger_id) {
+                let ledger = ledger_arc.read().unwrap();
+                let max_bytes = ledger.state.quorum_members.iter()
+                    .filter_map(|m| m.max_descriptor_bytes)
+                    .min();
+                if let Some(limit) = max_bytes {
+                    if descriptor.len() as u32 > limit {
+                        return (false, None, Some(format!(
+                            "Descriptor size {} bytes exceeds quorum limit of {} bytes",
+                            descriptor.len(), limit
+                        )));
+                    }
+                }
+            }
+        }
+
         // Open the deposit with co-signing
         match self.open_deposit(&ledger_id, &descriptor, Some(fees), transfer_fees, is_collateral, receive_requires_sig).await {
             Ok(deposit) => {
@@ -6330,6 +6353,22 @@ impl Node {
                 Some(d) => d,
                 None => return (false, None, Some("Source deposit not found".to_string())),
             };
+
+            // Validate timeout_height against max_transfer_timeout_blocks (strictest quorum member)
+            let max_timeout = ledger.state.quorum_members.iter()
+                .filter_map(|m| m.max_transfer_timeout_blocks)
+                .min()
+                .unwrap_or(1008); // default ~1 week
+            let current_block = ledger.history.last()
+                .map(|u| u.block_height)
+                .unwrap_or(0);
+            if current_block > 0 && timeout_height > current_block.saturating_add(max_timeout) {
+                return (false, None, Some(format!(
+                    "timeout_height {} exceeds max: current_block {} + max_timeout {} = {}",
+                    timeout_height, current_block, max_timeout,
+                    current_block.saturating_add(max_timeout)
+                )));
+            }
 
             // Validate fee against deposit's transfer fee schedule (all in msats)
             let expected_fee = deposit.transfer_fees.calculate_fee(amount_msats);
@@ -9172,6 +9211,15 @@ impl Node {
             ));
         }
 
+        // Check total_collateral limit: obligations <= sum of attested collateral
+        // total_collateral is recorded on QuorumBegin from collateral attestations
+        if ledger.state.total_collateral > 0 && new_total > ledger.state.total_collateral {
+            return Some(format!(
+                "Would exceed total collateral: {} + {} = {} msats > {} msats (total attested collateral)",
+                current_obligations, additional_msats, new_total, ledger.state.total_collateral
+            ));
+        }
+
         // Check collateral limit: obligations <= 2 * min(member.collateral_lock_amount)
         let min_collateral = ledger.state.quorum_members.iter()
             .filter_map(|m| m.collateral_lock_amount)
@@ -9469,6 +9517,11 @@ impl Node {
                 max_fee_period,
                 collateral_lock_amount,
                 collateral_lock_until,
+                dispute_response_blocks: None,
+                dispute_arm_blocks: None,
+                service_response_blocks: None,
+                max_transfer_timeout_blocks: None,
+                max_descriptor_bytes: None,
             };
 
             ledger.append_operation_with_block(

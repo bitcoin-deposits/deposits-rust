@@ -1275,6 +1275,11 @@ pub async fn recovery_rebuild_quorum_add(ledger_id: &str, args: &[String]) -> Re
         max_fee_period: None,
         collateral_lock_amount: None,
         collateral_lock_until: None,
+        dispute_response_blocks: None,
+        dispute_arm_blocks: None,
+        service_response_blocks: None,
+        max_transfer_timeout_blocks: None,
+        max_descriptor_bytes: None,
     };
 
     let message_bytes = operation.tlv_encode();

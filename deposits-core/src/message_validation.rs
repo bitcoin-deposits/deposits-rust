@@ -665,7 +665,8 @@ pub fn validate_ledger_operation<C: ValidationContext>(
         LedgerOperation::DisputeEnter { .. } |
         LedgerOperation::DisputeArmed { .. } |
         LedgerOperation::DisputeAcquire { .. } |
-        LedgerOperation::DisputeYield => Ok(()),
+        LedgerOperation::DisputeYield |
+        LedgerOperation::DeliveryEmbed { .. } => Ok(()),
     }
 }
 

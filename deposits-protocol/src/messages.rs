@@ -481,7 +481,7 @@ pub struct LedgerUpdateResponseMsg {
     pub confirmed_hash: [u8; 32],
 }
 
-/// All possible ledger operations (22 variants)
+/// All possible ledger operations (29 variants)
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LedgerOperation {
     // ========== Ledger Establishment (1) ==========
@@ -717,6 +717,16 @@ pub enum LedgerOperation {
         /// Block height until which the member's collateral must remain locked.
         /// Membership duration is limited to the shortest lock time.
         collateral_lock_until: Option<u32>,
+        /// Per-quorum timing: blocks before member must respond to fraud evidence
+        dispute_response_blocks: Option<u32>,
+        /// Per-quorum timing: blocks after DisputeEnter to arm for lottery
+        dispute_arm_blocks: Option<u32>,
+        /// Per-quorum timing: blocks before unprocessed request = censorship
+        service_response_blocks: Option<u32>,
+        /// Per-quorum timing: max timeout_height distance for TransferLock
+        max_transfer_timeout_blocks: Option<u32>,
+        /// Maximum descriptor size (bytes) member will accept on deposits
+        max_descriptor_bytes: Option<u32>,
     },
     /// Remove a quorum member from the VoterSet
     QuorumRemoveMember {
@@ -796,7 +806,7 @@ pub enum LedgerOperation {
     DisputeArmed {
         /// Block height when this candidate is ready (used for eligibility cutoff).
         armed_block: u32,
-        /// HASH160 of secret preimage (17-20 bytes) for lottery entropy.
+        /// HASH160 of secret preimage (32 bytes) for lottery entropy.
         commitment_hash: [u8; 20],
         /// Bitcoin address where winner wants reserves sent.
         target_reserves: String,
@@ -839,6 +849,19 @@ pub enum LedgerOperation {
     /// Note: This is NOT "invalid" - it's simply a terminated branch.
     DisputeYield,
 
+    // ========== Delivery (1) ==========
+    /// Embed a wallet's request hash for certified delivery (see DEP-12).
+    /// Appended by a quorum member to their own ledger when a wallet escalates
+    /// an unprocessed request. Starts the service_response_blocks clock.
+    DeliveryEmbed {
+        /// SHA256 of the wallet's signed request payload
+        request_hash: [u8; 32],
+        /// Ledger ID where the request should be processed
+        target_ledger_id: [u8; 32],
+        /// Operator pubkey of the target ledger
+        target_operator: PublicKey,
+    },
+
     // ========== Lifecycle (1) ==========
     /// Close the ledger
     LedgerClose,
@@ -876,6 +899,7 @@ impl LedgerOperation {
             Self::DisputeAcquire { .. } => 55,  // Winner acquires custody
             Self::DisputeYield => 56,           // Loser yields, branch tombstoned
             Self::DisputeArmed { .. } => 57,    // Pre-commitment, transitions to READY
+            Self::DeliveryEmbed { .. } => 80,
             Self::LedgerClose => 60,
         }
     }
@@ -1690,6 +1714,11 @@ impl BinaryCodec for LedgerOperation {
                 write_32(w, spend_txid)?;
                 write_string(w, new_reserves_address)?;
             }
+            Self::DeliveryEmbed { request_hash, target_ledger_id, target_operator } => {
+                write_32(w, request_hash)?;
+                write_32(w, target_ledger_id)?;
+                write_pubkey(w, target_operator)?;
+            }
             Self::DisputeYield => {}
             Self::LedgerClose => {}
         }
@@ -1961,6 +1990,11 @@ impl BinaryCodec for LedgerOperation {
                 max_fee_period: None,
                 collateral_lock_amount: None,
                 collateral_lock_until: None,
+                dispute_response_blocks: None,
+                dispute_arm_blocks: None,
+                service_response_blocks: None,
+                max_transfer_timeout_blocks: None,
+                max_descriptor_bytes: None,
             }),
             44 => Ok(Self::QuorumRemoveMember {
                 quorum_member: read_pubkey(r)?,
@@ -2019,6 +2053,12 @@ impl BinaryCodec for LedgerOperation {
                 armed_block: read_u32(r)?,
                 commitment_hash: read_20(r)?,
                 target_reserves: read_string(r)?,
+            }),
+            // DeliveryEmbed (80)
+            80 => Ok(Self::DeliveryEmbed {
+                request_hash: read_32(r)?,
+                target_ledger_id: read_32(r)?,
+                target_operator: read_pubkey(r)?,
             }),
             // Close operations (60)
             60 => Ok(Self::LedgerClose),
@@ -2743,6 +2783,18 @@ mod ledger_op_tlv {
     pub const EFFECTIVE_BLOCK: u64 = 250;   // u32 (on FeeChange)
     pub const COLLATERAL_LOCK_AMOUNT: u64 = 240; // u64 (msats)
     pub const COLLATERAL_LOCK_UNTIL: u64 = 242; // u32 (block height)
+
+    // Per-quorum timing parameters (on QuorumAddMember)
+    pub const DISPUTE_RESPONSE_BLOCKS: u64 = 252; // u32
+    pub const DISPUTE_ARM_BLOCKS: u64 = 254;       // u32
+    pub const SERVICE_RESPONSE_BLOCKS: u64 = 256;  // u32
+    pub const MAX_TRANSFER_TIMEOUT_BLOCKS: u64 = 258; // u32
+    pub const MAX_DESCRIPTOR_BYTES: u64 = 262;     // u32
+
+    // Delivery operation fields
+    pub const REQUEST_HASH: u64 = 270;       // [u8; 32]
+    pub const TARGET_LEDGER_ID: u64 = 272;   // [u8; 32]
+    pub const TARGET_OPERATOR: u64 = 274;    // pubkey (33 bytes)
 }
 
 impl TlvEncode for LedgerOperation {
@@ -2921,7 +2973,7 @@ impl TlvEncode for LedgerOperation {
                     .bytes_field(SIGNATURE, signature)
                     .bytes_field(LEDGER_HASH, ledger_hash);
             }
-            Self::QuorumAddMember { quorum_member, quorum_member_signature, member_ledger_id, min_fee_bps, min_fee_fixed, max_fee_period, collateral_lock_amount, collateral_lock_until } => {
+            Self::QuorumAddMember { quorum_member, quorum_member_signature, member_ledger_id, min_fee_bps, min_fee_fixed, max_fee_period, collateral_lock_amount, collateral_lock_until, dispute_response_blocks, dispute_arm_blocks, service_response_blocks, max_transfer_timeout_blocks, max_descriptor_bytes } => {
                 builder = builder
                     .pubkey_field(QUORUM_MEMBER, quorum_member)
                     .bytes_field(QUORUM_MEMBER_SIG, quorum_member_signature)
@@ -2940,6 +2992,21 @@ impl TlvEncode for LedgerOperation {
                 }
                 if let Some(lock) = collateral_lock_until {
                     builder = builder.u32_field(COLLATERAL_LOCK_UNTIL, *lock);
+                }
+                if let Some(v) = dispute_response_blocks {
+                    builder = builder.u32_field(DISPUTE_RESPONSE_BLOCKS, *v);
+                }
+                if let Some(v) = dispute_arm_blocks {
+                    builder = builder.u32_field(DISPUTE_ARM_BLOCKS, *v);
+                }
+                if let Some(v) = service_response_blocks {
+                    builder = builder.u32_field(SERVICE_RESPONSE_BLOCKS, *v);
+                }
+                if let Some(v) = max_transfer_timeout_blocks {
+                    builder = builder.u32_field(MAX_TRANSFER_TIMEOUT_BLOCKS, *v);
+                }
+                if let Some(v) = max_descriptor_bytes {
+                    builder = builder.u32_field(MAX_DESCRIPTOR_BYTES, *v);
                 }
             }
             Self::QuorumRemoveMember { quorum_member, operator_signature } => {
@@ -2988,6 +3055,12 @@ impl TlvEncode for LedgerOperation {
                     .bytes_field(ENTROPY_BLOCK_HASH, entropy_block_hash)
                     .bytes_field(SPEND_TXID, spend_txid)
                     .string_field(NEW_RESERVES_ADDRESS, new_reserves_address);
+            }
+            Self::DeliveryEmbed { request_hash, target_ledger_id, target_operator } => {
+                builder = builder
+                    .bytes_field(REQUEST_HASH, request_hash)
+                    .bytes_field(TARGET_LEDGER_ID, target_ledger_id)
+                    .pubkey_field(TARGET_OPERATOR, target_operator);
             }
             Self::DisputeYield => {}
             Self::LedgerClose => {}
@@ -3151,6 +3224,11 @@ impl TlvDecode for LedgerOperation {
                 max_fee_period: reader.read_u32_opt(MAX_FEE_PERIOD)?,
                 collateral_lock_amount: reader.read_u64_opt(COLLATERAL_LOCK_AMOUNT)?,
                 collateral_lock_until: reader.read_u32_opt(COLLATERAL_LOCK_UNTIL)?,
+                dispute_response_blocks: reader.read_u32_opt(DISPUTE_RESPONSE_BLOCKS)?,
+                dispute_arm_blocks: reader.read_u32_opt(DISPUTE_ARM_BLOCKS)?,
+                service_response_blocks: reader.read_u32_opt(SERVICE_RESPONSE_BLOCKS)?,
+                max_transfer_timeout_blocks: reader.read_u32_opt(MAX_TRANSFER_TIMEOUT_BLOCKS)?,
+                max_descriptor_bytes: reader.read_u32_opt(MAX_DESCRIPTOR_BYTES)?,
             }),
             44 => Ok(Self::QuorumRemoveMember {
                 quorum_member: reader.read_pubkey(QUORUM_MEMBER)?,
@@ -3191,6 +3269,11 @@ impl TlvDecode for LedgerOperation {
                 armed_block: reader.read_u32(ARMED_BLOCK)?,
                 commitment_hash: reader.read_bytes(COMMITMENT_HASH)?,
                 target_reserves: reader.read_string(TARGET_RESERVES)?,
+            }),
+            80 => Ok(Self::DeliveryEmbed {
+                request_hash: reader.read_bytes(REQUEST_HASH)?,
+                target_ledger_id: reader.read_bytes(TARGET_LEDGER_ID)?,
+                target_operator: reader.read_pubkey(TARGET_OPERATOR)?,
             }),
             60 => Ok(Self::LedgerClose),
             d => Err(TlvError::InvalidFieldValue {

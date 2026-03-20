@@ -621,6 +621,11 @@ impl Ledger {
             max_fee_period: None,
             collateral_lock_amount: None,
             collateral_lock_until: None,
+            dispute_response_blocks: None,
+            dispute_arm_blocks: None,
+            service_response_blocks: None,
+            max_transfer_timeout_blocks: None,
+            max_descriptor_bytes: None,
         });
         Ok(())
     }
@@ -1180,11 +1185,14 @@ impl Ledger {
                 self.state.ledger_id = LedgerState::compute_ledger_id(operator_id, reserves_id, *genesis_block);
                 self.state.reserves.amount = *reserves_amount;
             }
-            LedgerOperation::QuorumBegin { reserves_id, amount, .. } => {
+            LedgerOperation::QuorumBegin { reserves_id, amount, total_collateral, quorum_expiry, .. } => {
                 // QuorumBegin records the quorum establishment / reserves rotation to Taproot
                 // Update the reserves_id to the new Taproot address
                 self.state.reserves_key = reserves_id.clone();
                 self.state.reserves.amount = *amount;
+                // Store total attested collateral for obligation limit checks
+                self.state.total_collateral = *total_collateral;
+                self.state.quorum_expiry = Some(*quorum_expiry);
             }
             LedgerOperation::DepositOpen { deposit_id, descriptor, fees, transfer_fees, is_collateral, receive_requires_sig, fee_change_after_blocks, fee_change_notice_blocks, fee_change_limit_bps, .. } => {
                 let mut deposit = Deposit::new(descriptor.clone(), fees.clone());
@@ -1286,7 +1294,9 @@ impl Ledger {
             }
             LedgerOperation::QuorumAddMember {
                 quorum_member, member_ledger_id, min_fee_bps, min_fee_fixed, max_fee_period,
-                collateral_lock_amount, collateral_lock_until, ..
+                collateral_lock_amount, collateral_lock_until,
+                dispute_response_blocks, dispute_arm_blocks, service_response_blocks,
+                max_transfer_timeout_blocks, max_descriptor_bytes, ..
             } => {
                 use crate::types::QuorumMember;
                 // Check if this member already exists (by pubkey)
@@ -1299,6 +1309,11 @@ impl Ledger {
                         max_fee_period: *max_fee_period,
                         collateral_lock_amount: *collateral_lock_amount,
                         collateral_lock_until: *collateral_lock_until,
+                        dispute_response_blocks: *dispute_response_blocks,
+                        dispute_arm_blocks: *dispute_arm_blocks,
+                        service_response_blocks: *service_response_blocks,
+                        max_transfer_timeout_blocks: *max_transfer_timeout_blocks,
+                        max_descriptor_bytes: *max_descriptor_bytes,
                     };
                     self.state.quorum_members.push(member);
                 }
@@ -1468,6 +1483,10 @@ impl Ledger {
                         source.balance = source.balance.saturating_add(total);
                     }
                 }
+            }
+            LedgerOperation::DeliveryEmbed { .. } => {
+                // DeliveryEmbed is recorded on a quorum member's ledger for certified delivery.
+                // No state changes on the embedding ledger itself — the effect is causal ordering.
             }
         }
         Ok(())

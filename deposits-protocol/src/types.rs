@@ -856,6 +856,21 @@ pub struct QuorumMember {
     /// Membership duration is limited to the shortest lock time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collateral_lock_until: Option<u32>,
+    /// Blocks before a member must respond to embedded fraud evidence (default 144 ~1 day)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispute_response_blocks: Option<u32>,
+    /// Blocks after DisputeEnter during which members must arm for lottery (default 144 ~1 day)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispute_arm_blocks: Option<u32>,
+    /// Blocks before unprocessed signed request becomes provable censorship (default 72 ~12hrs)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_response_blocks: Option<u32>,
+    /// Maximum timeout_height distance for TransferLock (default 1008 ~1 week)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_transfer_timeout_blocks: Option<u32>,
+    /// Maximum serialized descriptor size (bytes) member will accept on deposits
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_descriptor_bytes: Option<u32>,
 }
 
 /// A collateral attestation from a quorum member proving their reserves backing.
@@ -1101,6 +1116,13 @@ pub struct LedgerState {
     /// In the 100%+100% model, deposits need 100% reserves + 100% received collateral.
     #[serde(default)]
     pub received_collateral_amount: u64,
+    /// Total attested collateral from QuorumBegin (msats).
+    /// Used for obligation limit: obligations <= min(reserves, total_collateral, 2*min_member_collateral).
+    #[serde(default)]
+    pub total_collateral: u64,
+    /// Block height when the current quorum expires (from QuorumBegin).
+    #[serde(default)]
+    pub quorum_expiry: Option<u32>,
     /// Collateral attestations from quorum members proving their reserves.
     /// Key is the partner's public key (must be in quorum_members list).
     /// Attestations are updated periodically and validated before use.
@@ -1193,6 +1215,8 @@ impl LedgerState {
             collateral_amount: 0,
             last_collateral_increase_block: None,
             received_collateral_amount: 0,
+            total_collateral: 0,
+            quorum_expiry: None,
             collateral_attestations: HashMap::new(),
             partner_deepest_ack_hash: [0u8; 32],
             channel_deepest_commitment_hash: [0u8; 32],
@@ -3066,8 +3090,8 @@ mod tests {
         let collateral1 = test_pubkey_2();
         let collateral2 = test_pubkey_3();
         state.quorum_members = vec![
-            QuorumMember { pubkey: collateral1, ledger_id: String::new(), min_fee_bps: None, min_fee_fixed: None, max_fee_period: None, collateral_lock_amount: None, collateral_lock_until: None },
-            QuorumMember { pubkey: collateral2, ledger_id: String::new(), min_fee_bps: None, min_fee_fixed: None, max_fee_period: None, collateral_lock_amount: None, collateral_lock_until: None },
+            QuorumMember { pubkey: collateral1, ledger_id: String::new(), min_fee_bps: None, min_fee_fixed: None, max_fee_period: None, collateral_lock_amount: None, collateral_lock_until: None, dispute_response_blocks: None, dispute_arm_blocks: None, service_response_blocks: None, max_transfer_timeout_blocks: None, max_descriptor_bytes: None },
+            QuorumMember { pubkey: collateral2, ledger_id: String::new(), min_fee_bps: None, min_fee_fixed: None, max_fee_period: None, collateral_lock_amount: None, collateral_lock_until: None, dispute_response_blocks: None, dispute_arm_blocks: None, service_response_blocks: None, max_transfer_timeout_blocks: None, max_descriptor_bytes: None },
         ];
 
         // Add attestation for collateral1

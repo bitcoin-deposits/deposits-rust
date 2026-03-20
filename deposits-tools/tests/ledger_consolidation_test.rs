@@ -305,6 +305,16 @@ fn test_ledger_with_quorum_members() {
     let quorum_member = QuorumMember {
         pubkey: quorum_member_pubkey,
         ledger_id: "collateral_ledger".to_string(),
+        min_fee_bps: None,
+        min_fee_fixed: None,
+        max_fee_period: None,
+        collateral_lock_amount: None,
+        collateral_lock_until: None,
+        dispute_response_blocks: None,
+        dispute_arm_blocks: None,
+        service_response_blocks: None,
+        max_transfer_timeout_blocks: None,
+        max_descriptor_bytes: None,
     };
 
     let ledger = Ledger::new(
@@ -327,14 +337,26 @@ fn test_ledger_multiple_quorum_members() {
     let qm1 = QuorumMember {
         pubkey: generate_test_pubkey(3),
         ledger_id: "collateral_ledger_1".to_string(),
+        min_fee_bps: None, min_fee_fixed: None, max_fee_period: None,
+        collateral_lock_amount: None, collateral_lock_until: None,
+        dispute_response_blocks: None, dispute_arm_blocks: None, service_response_blocks: None,
+        max_transfer_timeout_blocks: None, max_descriptor_bytes: None,
     };
     let qm2 = QuorumMember {
         pubkey: generate_test_pubkey(4),
         ledger_id: "collateral_ledger_2".to_string(),
+        min_fee_bps: None, min_fee_fixed: None, max_fee_period: None,
+        collateral_lock_amount: None, collateral_lock_until: None,
+        dispute_response_blocks: None, dispute_arm_blocks: None, service_response_blocks: None,
+        max_transfer_timeout_blocks: None, max_descriptor_bytes: None,
     };
     let qm3 = QuorumMember {
         pubkey: generate_test_pubkey(5),
         ledger_id: "collateral_ledger_3".to_string(),
+        min_fee_bps: None, min_fee_fixed: None, max_fee_period: None,
+        collateral_lock_amount: None, collateral_lock_until: None,
+        dispute_response_blocks: None, dispute_arm_blocks: None, service_response_blocks: None,
+        max_transfer_timeout_blocks: None, max_descriptor_bytes: None,
     };
 
     let ledger = Ledger::new(

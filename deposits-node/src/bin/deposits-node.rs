@@ -2312,6 +2312,9 @@ fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                 LedgerOperation::DisputeYield => {
                     ("DisputeYield", String::new())
                 }
+                LedgerOperation::DeliveryEmbed { target_ledger_id, .. } => {
+                    ("DeliveryEmbed", format!("target_ledger={}...", &hex::encode(target_ledger_id)[..16]))
+                }
                 LedgerOperation::LedgerClose => {
                     ("LedgerClose", String::new())
                 }

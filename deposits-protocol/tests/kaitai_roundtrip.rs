@@ -164,6 +164,8 @@ fn wit() -> DescriptorWitness { DescriptorWitness { stack: vec![vec![0x30; 64]] 
     quorum_member: pk(), quorum_member_signature: sig(), member_ledger_id: "abc123".into(),
     min_fee_bps: Some(500), min_fee_fixed: Some(100_000), max_fee_period: Some(2016),
     collateral_lock_amount: Some(50_000_000), collateral_lock_until: Some(10000),
+    dispute_response_blocks: None, dispute_arm_blocks: None, service_response_blocks: None,
+    max_transfer_timeout_blocks: None, max_descriptor_bytes: None,
 }); }
 
 #[test] fn quorum_remove_member() { test_roundtrip(&LedgerOperation::QuorumRemoveMember {

@@ -491,7 +491,8 @@ pub fn handle_ledger_update<C: HandlerContext>(
                 LedgerOperation::TransferLock { .. } |
                 LedgerOperation::TransferComplete { .. } |
                 LedgerOperation::TransferFail { .. } |
-                LedgerOperation::LedgerOpen { .. } => {}
+                LedgerOperation::LedgerOpen { .. } |
+                LedgerOperation::DeliveryEmbed { .. } => {}
             }
 
             // Append operation to ledger
@@ -985,6 +986,11 @@ pub fn handle_collateral_add_partner<C: HandlerContext>(
         max_fee_period: None,
         collateral_lock_amount: None,
         collateral_lock_until: None,
+        dispute_response_blocks: None,
+        dispute_arm_blocks: None,
+        service_response_blocks: None,
+        max_transfer_timeout_blocks: None,
+        max_descriptor_bytes: None,
     };
 
     // Check for idempotency and append (single write lock scope)
@@ -2797,7 +2803,7 @@ mod tests {
 
         // Create a ledger with the quorum member already added
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
-        ledger.state.quorum_members.push(crate::types::QuorumMember { pubkey: quorum_member, ledger_id: String::new(), min_fee_bps: None, min_fee_fixed: None, max_fee_period: None, collateral_lock_amount: None, collateral_lock_until: None });
+        ledger.state.quorum_members.push(crate::types::QuorumMember { pubkey: quorum_member, ledger_id: String::new(), min_fee_bps: None, min_fee_fixed: None, max_fee_period: None, collateral_lock_amount: None, collateral_lock_until: None, dispute_response_blocks: None, dispute_arm_blocks: None, service_response_blocks: None, max_transfer_timeout_blocks: None, max_descriptor_bytes: None });
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = QuorumAddMemberMsg {
@@ -2866,7 +2872,7 @@ mod tests {
 
         // Create a ledger with the quorum member
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
-        ledger.state.quorum_members.push(crate::types::QuorumMember { pubkey: quorum_member, ledger_id: String::new(), min_fee_bps: None, min_fee_fixed: None, max_fee_period: None, collateral_lock_amount: None, collateral_lock_until: None });
+        ledger.state.quorum_members.push(crate::types::QuorumMember { pubkey: quorum_member, ledger_id: String::new(), min_fee_bps: None, min_fee_fixed: None, max_fee_period: None, collateral_lock_amount: None, collateral_lock_until: None, dispute_response_blocks: None, dispute_arm_blocks: None, service_response_blocks: None, max_transfer_timeout_blocks: None, max_descriptor_bytes: None });
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = QuorumRemoveMemberMsg {
