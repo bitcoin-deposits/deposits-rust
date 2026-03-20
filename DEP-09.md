@@ -16,7 +16,7 @@ The sender requests a `TransferLock` with:
 - **amount**: amount to transfer (msats)
 - **fee**: operator's transfer fee (msats, must match the deposit's TransferFeeSchedule)
 - **completion_script**: miniscript condition the recipient must satisfy
-- **timeout_height**: block height after which the transfer can be failed
+- **timeout_height**: block height after which the transfer can be failed. Must not exceed `block_height + max_transfer_timeout_blocks` (see below)
 - **transfer_id**: 32-byte identifier (derived from the signing message hash)
 - **witness**: satisfies the sender's deposit descriptor, authorizing the lock
 
@@ -80,6 +80,10 @@ Lock → [pending_transfers]
 ```
 
 A pending transfer occupies `locked_balance` on the source deposit until resolved.
+
+## Transfer Timeout Limits
+
+The `timeout_height` must not be more than `max_transfer_timeout_blocks` beyond the current `block_height`. This prevents an attacker from locking funds with an unreasonably distant timeout, effectively freezing the sender's balance. `max_transfer_timeout_blocks` is a per-quorum parameter recorded in `QuorumAddMember` (default: 1008 blocks, ~1 week). The operator rejects `TransferLock` requests that exceed this limit.
 
 ## Related DEPs
 

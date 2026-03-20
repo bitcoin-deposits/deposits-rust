@@ -18,7 +18,7 @@ Fee calculation for a collection period:
     proportional_portion = balance * annualized_bps * blocks_elapsed / (52560 * 10000)
     total_fee = fixed_portion + proportional_portion
 
-The operator appends `FeeCollect` (disc 50) with the computed fee, which is deducted from the deposit's balance.
+All fee arithmetic uses integer division with floor rounding. The operator appends `FeeCollect` (disc 50) with the computed fee, which is deducted from the deposit's balance.
 
 ## Per-Transfer Fees (TransferFeeSchedule)
 

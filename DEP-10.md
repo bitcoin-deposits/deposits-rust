@@ -67,12 +67,23 @@ Wallets should retain co-signed offers and invoices until the corresponding cred
 
 Without evidence retention, the wallet cannot prove fraud.
 
+## Lightning Trust Boundary
+
+Lightning invoice fraud is not autonomously provable. The operator's lightning node is a trust boundary that the protocol cannot fully bridge — the operator knows whether the preimage was received, but the wallet does not. The on-chain fraud proof system provides autonomous provability; lightning relies on deterrence: any payer might provide the preimage to the wallet, and if they do, the operator faces dispute, reserves seizure, and collateral confiscation. The upside of stealing a single payment is bounded; the downside is existential.
+
+Wallets should:
+
+- limit outstanding uncredited invoices per operator
+- prefer on-chain funding for amounts exceeding their risk tolerance
+- for high-value invoices, arrange for the payer to share proof-of-payment out-of-band
+
 ## Obligation Limits
 
-Creating offers and invoices increases the ledger's potential obligations. The operator must not create offers or invoices that would push total obligations above:
+Creating offers and invoices increases the ledger's potential obligations. The operator must not create offers or invoices that would push total obligations above the least of:
 
 1. The reserves amount (from LedgerOpen/QuorumBegin)
-2. Twice the smallest quorum member's `collateral_lock_amount`
+2. The sum of all attested collateral (`total_collateral` from QuorumBegin)
+3. Twice the smallest quorum member's `collateral_lock_amount`
 
 See DEP-05 for details.
 

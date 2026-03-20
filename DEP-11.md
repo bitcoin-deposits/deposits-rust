@@ -21,6 +21,11 @@ Without the preimage, this obligation is not autonomously provable.
 ### Transfer Timeout
 When a `TransferLock` is appended with a `timeout_height`, the operator must append `TransferFail` after the timeout block is reached if no `TransferComplete` has been provided. Signing updates past `timeout_height` while funds remain locked is provable non-conformance.
 
+### Withdrawal and Transfer Processing
+When a wallet publishes a signed withdrawal or transfer request (Kind 20101), the operator must process it within `service_response_blocks`. Failure to do so is provable: the signed request event on the relay, combined with the operator's ledger advancing past the deadline block without a corresponding operation, constitutes a fraud proof. `service_response_blocks` is a per-quorum parameter recorded in `QuorumAddMember`.
+
+Without this obligation, an operator could hold deposits hostage — refusing to process withdrawals without it being non-conforming. This is the provable service-level guarantee.
+
 ### Fee Collection
 Fee collection is at the operator's discretion within the `frequency_blocks` period. Skipping or delaying collection is not non-conforming — it reduces operator revenue but does not affect depositor funds. Quorum members may decline to co-sign for operators who do not collect fees, as uncollected fees create accounting discrepancies.
 
@@ -35,7 +40,7 @@ Co-signing timeliness is not protocol-enforced. A slow or unresponsive member wi
 ### Dispute Participation
 When valid fraud evidence is embedded in the causal chain and a quorum member's ledger has updates after the evidence block, the member must initiate a dispute. Failure to act while remaining active is provable: the fraud proof hash was embedded at block N, the member's ledger has updates after block N + `dispute_response_blocks`, and no dispute was initiated.
 
-`dispute_response_blocks` is a protocol parameter. The specific value is determined by the network — shorter values increase responsiveness requirements, longer values are more forgiving.
+`dispute_response_blocks` is a per-quorum parameter recorded in `QuorumAddMember`, so all parties agree on the obligation at join time. Shorter values increase responsiveness requirements; longer values are more forgiving but delay recovery.
 
 ### Collateral Maintenance
 Collateral must remain locked through `collateral_lock_until`. Early withdrawal while listed as a quorum member is provable non-conformance: the `CollateralLock` operation on the member's ledger has a `lock_until_block`, and any operation that reduces the locked amount before that block is evidence.
@@ -58,12 +63,24 @@ Wallets should distribute funds across operators with non-overlapping quorum mem
 | On-chain credit | Operator signs past `deadline_block` without credit | Yes (autonomous) |
 | Lightning credit | Preimage exists, no credit | Yes (with preimage) |
 | Transfer timeout | Operator signs past `timeout_height` with funds locked | Yes |
+| Withdrawal/transfer processing | Operator signs past `service_response_blocks` without processing signed request | Yes |
 | Quorum rotation | Operator signs past `quorum_expiry` without new quorum | Yes |
 | Dispute response | Member active after `evidence_block + dispute_response_blocks` | Yes |
 | Collateral lock | Reduced before `lock_until_block` | Yes |
 | Fee collection | Within `frequency_blocks` | No (advisory) |
 | Co-sign response | Timely | No (advisory) |
 | Evidence retention | Until credit or expiry | No (self-interest) |
+
+## Per-Quorum Parameters
+
+The following timing parameters are recorded in `QuorumAddMember` so that all parties agree on obligations at join time:
+
+| Parameter | Description | Suggested Default |
+|---|---|---|
+| `dispute_response_blocks` | Blocks before a member must respond to embedded fraud evidence | 144 (~1 day) |
+| `dispute_arm_blocks` | Blocks after `DisputeEnter` during which members must arm | 144 (~1 day) |
+| `service_response_blocks` | Blocks before an unprocessed signed request becomes provable censorship | 72 (~12 hours) |
+| `max_transfer_timeout_blocks` | Maximum `timeout_height` distance for `TransferLock` | 1008 (~1 week) |
 
 ## Related DEPs
 

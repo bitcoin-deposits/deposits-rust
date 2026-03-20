@@ -80,11 +80,11 @@ The lottery determines which quorum member takes custody of the disputed ledger.
 
 Each participating quorum member appends `DisputeArmed` to their fork with:
 
-- **commitment_hash**: `HASH160(preimage)` where `preimage` is a secret 17-20 byte value chosen by the member
+- **commitment_hash**: `HASH160(preimage)` where `preimage` is a 32-byte random value chosen by the member
 - **target_reserves**: the bitcoin address where the member wants reserves sent if they win
 - **armed_block**: the block height at time of arming
 
-Members must arm within `dispute_arm_blocks` after `DisputeEnter`. Late entries are excluded.
+Members must arm within `dispute_arm_blocks` after `DisputeEnter`. Late entries are excluded. `dispute_arm_blocks` is recorded in `QuorumAddMember` so all parties agree on the obligation at join time.
 
 #### Phase 2: Entropy
 
@@ -132,7 +132,10 @@ Wallets continue addressing the same ledger by its `ledger_id`, accepting only r
 1. Query the network for dispute events (Kind 9103) on the ledger
 2. Replay ledger updates to identify the last valid sequence
 3. Look for `DisputeAcquire` events to identify the new operator
-4. Verify the new operator's quorum and begin accepting their co-signed updates
+4. Wait for the reserves UTXO spend to confirm on-chain and verify that the `DisputeAcquire` contains a `spend_txid` matching the confirmed transaction
+5. Verify the new operator's quorum and begin accepting their co-signed updates
+
+Wallets must not accept post-dispute updates until the on-chain reserves spend is confirmed. This prevents an attacker from publishing fake `DisputeAcquire` events claiming custody before the lottery resolves.
 
 ## Related DEPs
 

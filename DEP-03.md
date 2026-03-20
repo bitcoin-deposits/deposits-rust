@@ -42,6 +42,14 @@ When a quorum is established or refreshed, the operator constructs a new Taproot
 
 After `QuorumBegin`, co-signatures become required for all subsequent updates. A new `QuorumBegin` MUST be appended before `quorum_expiry` (see DEP-11).
 
+### On-Chain State Anchor
+
+The reserves rotation transaction should include an `OP_RETURN` output containing the `chain_hash` at the `QuorumBegin` sequence. This gives wallets an on-chain anchor to verify that the ledger state on relays matches the operator's committed state at the time of rotation — without trusting any relay. The `OP_RETURN` output is:
+
+    OP_RETURN <chain_hash (32 bytes)>
+
+This is cheap (one additional output on a transaction the operator is already making) and provides a verifiable checkpoint for wallets that suspect relay censorship or data loss.
+
 ## Lottery
 
 When a ledger becomes contested (dispute), quorum members compete for custody via a preimage-based lottery:

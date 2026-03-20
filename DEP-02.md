@@ -66,7 +66,7 @@ Type 12 is reserved. `current_hash` is derived by the receiver (see Hash Chain).
 
 The operator signs `current_hash`. Their signature is folded into `chain_hash`, which becomes the next update's `previous_hash`. Both signatures are committed to the chain without circularity.
 
-`member_ledger_hash` and `cosign_signature` are included in `current_hash` only when present and non-zero. The first update (sequence 0) has `previous_hash` = `[0; 32]`.
+`member_ledger_hash` and `cosign_signature` are included in `current_hash` only when present and non-zero. After `QuorumBegin`, these fields are mandatory on all subsequent updates — omitting them is non-conforming. Before quorum establishment, they are always omitted. The first update (sequence 0) has `previous_hash` = `[0; 32]`.
 
 ## Signing
 
@@ -209,6 +209,11 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 | 238 | max_fee_period | 4 | QuorumAddMember |
 | 240 | collateral_lock_amount | 8 | QuorumAddMember |
 | 242 | collateral_lock_until | 4 | QuorumAddMember |
+| 252 | dispute_response_blocks | 4 | QuorumAddMember |
+| 254 | dispute_arm_blocks | 4 | QuorumAddMember |
+| 256 | service_response_blocks | 4 | QuorumAddMember |
+| 258 | max_transfer_timeout_blocks | 4 | QuorumAddMember |
+| 260 | backed_ledger_count | 2 | CollateralAttestation |
 
 #### Dispute
 

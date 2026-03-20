@@ -67,7 +67,8 @@ This prevents unsolicited crediting and gives the deposit owner control over wha
 When `is_collateral` is true:
 - The deposit is subject to `CollateralLock` operations (see DEP-05)
 - Normal transfers and withdrawals are restricted
-- The depositor uses this deposit to back obligations on other ledgers
+- The deposit holds operator capital on a quorum member's ledger, backing the operator's obligations elsewhere
+- If the operator misbehaves, the member operating this ledger may confiscate the locked funds
 
 ## Related DEPs
 
