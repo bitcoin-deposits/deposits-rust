@@ -74,18 +74,65 @@ When a quorum member detects fraud (via Kind 9101 broadcast or direct observatio
 
 ### Lottery
 
-Members coordinate to spend the previous reserves output:
+The lottery determines which quorum member takes custody of the disputed ledger. It uses on-chain entropy to prevent manipulation.
 
-1. An entropy block is determined
-2. Preimages are revealed
-3. The winner (lowest hash combination) appends `DisputeAcquire`
-4. Losers append `DisputeYield` (transitions to Tombstoned state)
+#### Phase 1: Commitment
 
-See DEP-03 for transaction construction details.
+Each participating quorum member appends `DisputeArmed` to their fork with:
+
+- **commitment_hash**: `HASH160(preimage)` where `preimage` is a secret 17-20 byte value chosen by the member
+- **target_reserves**: the bitcoin address where the member wants reserves sent if they win
+- **armed_block**: the block height at time of arming
+
+Members MUST arm within a bounded window after `DisputeEnter`. Late entries are excluded.
+
+#### Phase 2: Entropy
+
+The participants agree on an entropy block — a future bitcoin block whose hash is unpredictable at commitment time. The `DisputeAcquire` operation records the `entropy_block_height` and `entropy_block_hash`.
+
+The entropy block MUST be sufficiently far in the future that no participant could have influenced it when committing. Typically this is the first block mined after all participants have armed.
+
+#### Phase 3: Reveal and Selection
+
+Each participant reveals their preimage. The winner is selected by:
+
+    score(participant) = SHA256(preimage || entropy_block_hash)
+
+The participant with the lowest score wins. This is verifiable by anyone with the preimages and the block hash.
+
+If a participant does not reveal their preimage within the reveal window, they forfeit.
+
+#### Phase 4: Settlement
+
+The winner:
+
+1. Constructs a transaction spending the old reserves UTXO to their `target_reserves` address (see DEP-03 for transaction format)
+2. Appends `DisputeAcquire` to their fork with the `spend_txid`, `new_reserves_address`, `new_custodian`, entropy block data
+3. Establishes a new quorum on the ledger
+4. Begins co-signing updates as the new operator
+
+Losers append `DisputeYield` to their forks, transitioning them to Tombstoned state. Only the winner's fork continues as the canonical ledger.
+
+#### Respectful vs Punitive
+
+**Respectful** (unavailability without proven fraud):
+- Only the amount covering the ledger's obligations goes to the winner
+- Change is returned to the original operator's pubkey
+- Collateral on other ledgers is unaffected
+
+**Punitive** (proven non-conformance):
+- The full reserves output goes to the winner
+- Excess above obligations is split equally among quorum members
+- Collateral held on other operators' ledgers may be confiscated by those operators
 
 ### Recovery
 
-Wallets continue addressing the same ledger, accepting only replies co-signed by the quorum. When co-signatures stop or fail verification, the wallet queries the network and replays ledger updates to identify custody changes.
+Wallets continue addressing the same ledger by its `ledger_id`, accepting only replies co-signed by the quorum. When co-signatures stop or fail verification, the wallet SHOULD:
+
+1. Query the network for dispute events (Kind 9103) on the ledger
+2. Replay ledger updates to identify the last valid sequence
+3. Look for `DisputeAcquire` events to identify the new operator
+4. Verify the new operator's quorum and begin accepting their co-signed updates
 
 ## Related DEPs
 
