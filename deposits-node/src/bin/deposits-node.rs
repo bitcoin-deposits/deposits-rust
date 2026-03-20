@@ -1170,7 +1170,7 @@ async fn auto_advertise_ledger(
 async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // Parse positional arguments: [enforcement_block]
     // and fee schedule flags
-    let mut enforcement_block: u64 = 0; // Default: immediate enforcement
+    let mut enforcement_block: u32 = 0; // Default: immediate enforcement
     let mut config_args = Vec::new();
 
     // Fee schedule (advertised minimums)

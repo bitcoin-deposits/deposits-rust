@@ -10631,7 +10631,7 @@ impl Node {
     /// no separate partner node.
     pub fn open_ledger(
         &self,
-        enforcement_block: u64,
+        enforcement_block: u32,
     ) -> Result<Ledger, Error> {
         // Find an unused reserves output (not already backing a ledger)
         let all_reserves = self.wallet.get_reserves();

@@ -465,7 +465,7 @@ pub struct LedgerAdvertisement {
     // === Trust Info ===
 
     /// Block height when collateral requirements are enforced
-    pub collateral_enforcement_block: u64,
+    pub collateral_enforcement_block: u32,
 
     /// Current total reserves backing the ledger (sats)
     pub reserves_amount_sats: u64,

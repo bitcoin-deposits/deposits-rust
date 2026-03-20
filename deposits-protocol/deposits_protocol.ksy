@@ -165,7 +165,7 @@ types:
   #   56  = operator_id (33 bytes, LedgerOpen)
   #   58  = reserves_id (string, LedgerOpen/QuorumBegin/QuorumJoin)
   #   62  = reserves_amount (u64, msats, LedgerOpen/QuorumBegin)
-  #   64  = collateral_enforcement_block (u64, LedgerOpen)
+  #   64  = collateral_enforcement_block (u32, LedgerOpen)
   #   96  = genesis_block (u32, LedgerOpen)
   #
   # Deposits:
@@ -221,7 +221,7 @@ types:
   #   80  = our_signature (64 bytes, QuorumJoin)
   #   82  = membership_expires (u32, QuorumJoin)
   #   114 = member_ledger_id (string)
-  #   115 = collateral_ledger_id (string)
+  #   124 = collateral_ledger_id (string)
   #   234 = min_fee_bps (u16, QuorumAddMember)
   #   236 = min_fee_fixed (u64, QuorumAddMember)
   #   238 = max_fee_period (u32, QuorumAddMember)
@@ -230,21 +230,21 @@ types:
   #
   # QuorumBegin:
   #   90  = spending_txid (32 bytes)
-  #   91  = new_outpoint_txid (32 bytes)
+  #   84  = new_outpoint_txid (32 bytes)
   #   92  = new_outpoint_vout (u32)
-  #   95  = first_expiry_block (u32)
+  #   86  = first_expiry_block (u32)
   #
   # Dispute:
   #   100 = reason (string, DisputeEnter)
   #   102 = last_valid_sequence (u64, DisputeEnter)
-  #   105 = entropy_block_height (u32, DisputeAcquire)
+  #   116 = entropy_block_height (u32, DisputeAcquire)
   #   106 = entropy_block_hash (32 bytes, DisputeAcquire)
   #   108 = new_custodian (33 bytes, DisputeAcquire)
-  #   109 = armed_block (u32, DisputeArmed)
+  #   118 = armed_block (u32, DisputeArmed)
   #   110 = spend_txid (32 bytes, DisputeAcquire)
-  #   111 = new_reserves_address (string, DisputeAcquire)
+  #   120 = new_reserves_address (string, DisputeAcquire)
   #   112 = commitment_hash (20 bytes HASH160, DisputeArmed)
-  #   113 = target_reserves (string, DisputeArmed)
+  #   122 = target_reserves (string, DisputeArmed)
 
   fee_structure:
     doc: |

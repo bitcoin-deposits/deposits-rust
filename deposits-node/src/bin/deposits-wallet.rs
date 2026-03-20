@@ -2627,7 +2627,7 @@ enum CustodyEvent {
         operator: bitcoin::secp256k1::PublicKey,
         reserves_address: String,
         genesis_block: u32,
-        enforcement_block: u64,
+        enforcement_block: u32,
     },
     /// Quorum member added
     QuorumMemberAdded {

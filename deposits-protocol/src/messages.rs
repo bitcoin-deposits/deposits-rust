@@ -494,7 +494,7 @@ pub enum LedgerOperation {
         /// Block height when this ledger was opened (used in ledger_id computation)
         genesis_block: u32,
         /// Block height after which collateral requirements are enforced (0 = immediate)
-        collateral_enforcement_block: u64,
+        collateral_enforcement_block: u32,
         /// Initial reserves amount in millisatoshis (from on-chain UTXO balance)
         reserves_amount: u64,
     },
@@ -930,7 +930,7 @@ pub struct HandshakeMsg {
     ///
     /// Before this block: ledger validation enforced, collateral size requirements relaxed.
     /// After this block: full 51% capital threshold applies.
-    pub collateral_enforcement_block: u64,
+    pub collateral_enforcement_block: u32,
 }
 
 /// Response to handshake
@@ -1455,7 +1455,7 @@ impl BinaryCodec for LedgerOperation {
                 write_pubkey(w, operator_id)?;
                 write_string(w, reserves_id)?;
                 write_u32(w, *genesis_block)?;
-                write_u64(w, *collateral_enforcement_block)?;
+                write_u32(w, *collateral_enforcement_block)?;
                 write_u64(w, *reserves_amount)?;
             }
             Self::QuorumBegin { reserves_id, spending_txid, new_outpoint_txid, new_outpoint_vout, amount, first_expiry_block, ledger_hash, quorum_members } => {
@@ -1706,7 +1706,7 @@ impl BinaryCodec for LedgerOperation {
                 let operator_id = read_pubkey(r)?;
                 let reserves_id = read_string(r)?;
                 let genesis_block = read_u32(r)?;
-                let collateral_enforcement_block = read_u64(r)?;
+                let collateral_enforcement_block = read_u32(r)?;
                 // reserves_amount added later; default to 0 for legacy data
                 let reserves_amount = read_u64(r).unwrap_or(0);
                 Ok(Self::LedgerOpen {
@@ -2135,7 +2135,7 @@ impl DepositsMessage {
                 write_string(w, &m.reserves_id)?;
                 write_32(w, &m.funding_txid)?;
                 write_u16(w, m.funding_vout)?;
-                write_u64(w, m.collateral_enforcement_block)?;
+                write_u32(w, m.collateral_enforcement_block)?;
             }
             Self::HandshakeResponse(m) => {
                 write_32(w, &m.request_hash)?;
@@ -2206,7 +2206,7 @@ impl DepositsMessage {
                 reserves_id: read_string(r)?,
                 funding_txid: read_32(r)?,
                 funding_vout: read_u16(r)?,
-                collateral_enforcement_block: read_u64(r)?,
+                collateral_enforcement_block: read_u32(r)?,
             })),
             HANDSHAKE_RESPONSE => Ok(Self::HandshakeResponse(HandshakeResponseMsg {
                 request_hash: read_32(r)?,
@@ -2654,8 +2654,6 @@ mod ledger_op_tlv {
     pub const AMOUNT: u64 = 2;
     pub const SPEND_TO: u64 = 4;
     pub const QUORUM_MEMBERS: u64 = 6;
-    pub const NEW_AMOUNT: u64 = 8;
-    pub const PUBKEY: u64 = 10;
     pub const FEES: u64 = 12;
     pub const PAYMENT_HASH: u64 = 14;
     pub const INVOICE: u64 = 16;
@@ -2665,7 +2663,6 @@ mod ledger_op_tlv {
     pub const INVOICE_ID: u64 = 26;
     pub const SEQUENCE_NUMBER: u64 = 28;
     pub const PAYMENT_ID: u64 = 30;
-    pub const SCRIPTPUBKEY_SIG: u64 = 32;
     pub const PREIMAGE: u64 = 34;
     pub const BLOCK_HEIGHT: u64 = 36;
     pub const COLLATERAL_OPERATOR: u64 = 38;
@@ -2688,36 +2685,29 @@ mod ledger_op_tlv {
     pub const FUNDING_ADDRESS: u64 = 74;
     // CollateralLock fields
     pub const LOCK_UNTIL_BLOCK: u64 = 76;
-    pub const DEPOSIT_HOLDER_SIG: u64 = 78;
     // QuorumJoin fields
     pub const OUR_SIGNATURE: u64 = 80;
     pub const MEMBERSHIP_EXPIRES: u64 = 82;
     // QuorumBegin fields
     pub const SPENDING_TXID: u64 = 90;
-    pub const NEW_OUTPOINT_TXID: u64 = 91;
+    pub const NEW_OUTPOINT_TXID: u64 = 84;
     pub const NEW_OUTPOINT_VOUT: u64 = 92;
-    pub const QUORUM_THRESHOLD: u64 = 93;
-    pub const QUORUM_SIZE: u64 = 94;
-    pub const FIRST_EXPIRY_BLOCK: u64 = 95;
-    // DisputeAcquire fields
+    pub const FIRST_EXPIRY_BLOCK: u64 = 86;
+    // Dispute fields
     pub const REASON: u64 = 100;
-    pub const LAST_VALID_HASH: u64 = 101;
     pub const LAST_VALID_SEQUENCE: u64 = 102;
-    pub const EVIDENCE_HASH: u64 = 103;
-    pub const INITIATION_BLOCK: u64 = 104;
-    pub const ENTROPY_BLOCK_HEIGHT: u64 = 105;
+    pub const ENTROPY_BLOCK_HEIGHT: u64 = 116;
     pub const ENTROPY_BLOCK_HASH: u64 = 106;
-    pub const CANDIDATE_POOL: u64 = 107;  // Deprecated, but kept for backward compat
     pub const NEW_CUSTODIAN: u64 = 108;
-    pub const ARMED_BLOCK: u64 = 109;
+    pub const ARMED_BLOCK: u64 = 118;
     pub const SPEND_TXID: u64 = 110;
-    pub const NEW_RESERVES_ADDRESS: u64 = 111;
+    pub const NEW_RESERVES_ADDRESS: u64 = 120;
     // DisputeArmed lottery fields
     pub const COMMITMENT_HASH: u64 = 112;
-    pub const TARGET_RESERVES: u64 = 113;
+    pub const TARGET_RESERVES: u64 = 122;
     // Quorum/Collateral ledger binding fields
     pub const MEMBER_LEDGER_ID: u64 = 114;
-    pub const COLLATERAL_LEDGER_ID: u64 = 115;
+    pub const COLLATERAL_LEDGER_ID: u64 = 124;
     // Descriptor-based deposit fields
     pub const DEPOSIT_ID: u64 = 200;      // 16-byte deposit identifier
     pub const DESCRIPTOR: u64 = 202;       // Variable-length string
@@ -2762,7 +2752,7 @@ impl TlvEncode for LedgerOperation {
                     .pubkey_field(OPERATOR_ID, operator_id)
                     .string_field(RESERVES_ID, reserves_id)
                     .u32_field(GENESIS_BLOCK, *genesis_block)
-                    .u64_field(ENFORCEMENT_BLOCK, *collateral_enforcement_block)
+                    .u32_field(ENFORCEMENT_BLOCK, *collateral_enforcement_block)
                     .u64_field(RESERVES_AMOUNT, *reserves_amount);
             }
             Self::QuorumBegin { reserves_id, spending_txid, new_outpoint_txid, new_outpoint_vout, amount, first_expiry_block, ledger_hash, quorum_members } => {
@@ -3015,7 +3005,7 @@ impl TlvDecode for LedgerOperation {
                 operator_id: reader.read_pubkey(OPERATOR_ID)?,
                 reserves_id: reader.read_string(RESERVES_ID)?,
                 genesis_block: reader.read_u32_opt(GENESIS_BLOCK)?.unwrap_or(0),
-                collateral_enforcement_block: reader.read_u64_opt(ENFORCEMENT_BLOCK)?.unwrap_or(0),
+                collateral_enforcement_block: reader.read_u32_opt(ENFORCEMENT_BLOCK)?.unwrap_or(0),
                 reserves_amount: reader.read_u64_opt(RESERVES_AMOUNT)?.unwrap_or(0),
             }),
             12 => {
@@ -3324,7 +3314,7 @@ impl TlvEncode for HandshakeMsg {
             .string_field(PARTNER_PUBKEY, &self.reserves_id)
             .bytes_field(FUNDING_TXID, &self.funding_txid)
             .u16_field(FUNDING_VOUT, self.funding_vout)
-            .u64_field(COLLATERAL_ENFORCEMENT_BLOCK, self.collateral_enforcement_block)
+            .u32_field(COLLATERAL_ENFORCEMENT_BLOCK, self.collateral_enforcement_block)
             .build()
     }
 }
@@ -3341,7 +3331,7 @@ impl TlvDecode for HandshakeMsg {
             reserves_id: reader.read_string(PARTNER_PUBKEY)?,
             funding_txid: reader.read_bytes(FUNDING_TXID)?,
             funding_vout: reader.read_u16(FUNDING_VOUT)?,
-            collateral_enforcement_block: reader.read_u64_opt(COLLATERAL_ENFORCEMENT_BLOCK)?.unwrap_or(0),
+            collateral_enforcement_block: reader.read_u32_opt(COLLATERAL_ENFORCEMENT_BLOCK)?.unwrap_or(0),
         })
     }
 }

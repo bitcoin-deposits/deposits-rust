@@ -1109,7 +1109,7 @@ pub struct LedgerState {
     /// before the requirements kick in. Set to None for immediate enforcement (joining
     /// an established network), or Some(future_block) for bootstrap phase.
     #[serde(default)]
-    pub collateral_enforcement_block: Option<u64>,
+    pub collateral_enforcement_block: Option<u32>,
     /// Collateral received from other operators that backs this ledger's deposits.
     /// In the 100%+100% model, deposits need 100% reserves + 100% received collateral.
     #[serde(default)]
@@ -1203,7 +1203,7 @@ impl LedgerState {
         operator_key: PublicKey,
         reserves_key: String,
         genesis_block: u32,
-        collateral_enforcement_block: Option<u64>,
+        collateral_enforcement_block: Option<u32>,
     ) -> Self {
         let ledger_id = Self::compute_ledger_id(&operator_key, &reserves_key, genesis_block);
         Self {
@@ -1250,7 +1250,7 @@ impl LedgerState {
     pub fn is_collateral_enforced(&self, current_block: u64) -> bool {
         match self.collateral_enforcement_block {
             None => true, // Immediate enforcement
-            Some(enforcement_block) => current_block >= enforcement_block,
+            Some(enforcement_block) => current_block >= enforcement_block as u64,
         }
     }
 

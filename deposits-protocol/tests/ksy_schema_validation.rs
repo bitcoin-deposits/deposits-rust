@@ -152,24 +152,24 @@ const LOCK_UNTIL_BLOCK: u64 = 76;
 const OUR_SIGNATURE: u64 = 80;
 const MEMBERSHIP_EXPIRES: u64 = 82;
 const SPENDING_TXID: u64 = 90;
-const NEW_OUTPOINT_TXID: u64 = 91;
+const NEW_OUTPOINT_TXID: u64 = 84;
 const NEW_OUTPOINT_VOUT: u64 = 92;
 const QUORUM_THRESHOLD: u64 = 93;
 const QUORUM_SIZE: u64 = 94;
-const FIRST_EXPIRY_BLOCK: u64 = 95;
+const FIRST_EXPIRY_BLOCK: u64 = 86;
 const GENESIS_BLOCK: u64 = 96;
 const REASON: u64 = 100;
 const LAST_VALID_SEQUENCE: u64 = 102;
-const ENTROPY_BLOCK_HEIGHT: u64 = 105;
+const ENTROPY_BLOCK_HEIGHT: u64 = 116;
 const ENTROPY_BLOCK_HASH: u64 = 106;
 const NEW_CUSTODIAN: u64 = 108;
-const ARMED_BLOCK: u64 = 109;
+const ARMED_BLOCK: u64 = 118;
 const SPEND_TXID: u64 = 110;
-const NEW_RESERVES_ADDRESS: u64 = 111;
+const NEW_RESERVES_ADDRESS: u64 = 120;
 const COMMITMENT_HASH: u64 = 112;
-const TARGET_RESERVES: u64 = 113;
+const TARGET_RESERVES: u64 = 122;
 const MEMBER_LEDGER_ID: u64 = 114;
-const COLLATERAL_LEDGER_ID: u64 = 115;
+const COLLATERAL_LEDGER_ID: u64 = 124;
 const DEPOSIT_ID: u64 = 200;
 const DESCRIPTOR: u64 = 202;
 const WITNESS: u64 = 204;
@@ -199,7 +199,7 @@ fn schema_ledger_open() {
         (RESERVES_ID, str_bytes("bcrt1qtest")),
         (62, u64_bytes(100_000_000)), // RESERVES_AMOUNT
         (GENESIS_BLOCK, u32_bytes(100)),
-        (ENFORCEMENT_BLOCK, u64_bytes(500)),
+        (ENFORCEMENT_BLOCK, u32_bytes(500)),
     ]);
 }
 

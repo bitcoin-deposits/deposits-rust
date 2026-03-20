@@ -171,7 +171,7 @@ impl Ledger {
         role: LedgerRole,
         quorum_members: Vec<crate::types::QuorumMember>,
         genesis_block: u32,
-        collateral_enforcement_block: Option<u64>,
+        collateral_enforcement_block: Option<u32>,
     ) -> Self {
         let mut state = LedgerState::with_enforcement_block(
             operator_key,
@@ -193,7 +193,7 @@ impl Ledger {
     }
 
     /// Get the collateral enforcement block (None for immediate enforcement).
-    pub fn collateral_enforcement_block(&self) -> Option<u64> {
+    pub fn collateral_enforcement_block(&self) -> Option<u32> {
         self.state.collateral_enforcement_block
     }
 

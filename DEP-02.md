@@ -141,7 +141,7 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 | 56 | operator_id | 33 | LedgerOpen |
 | 58 | reserves_id | variable | LedgerOpen, QuorumBegin, QuorumJoin |
 | 62 | reserves_amount | 8 | LedgerOpen, QuorumBegin |
-| 64 | collateral_enforcement_block | 8 | LedgerOpen |
+| 64 | collateral_enforcement_block | 4 | LedgerOpen |
 | 96 | genesis_block | 4 | LedgerOpen |
 | 6 | quorum_members | N*33 | QuorumBegin |
 
@@ -202,7 +202,7 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 | 38 | collateral_operator | 33 | CollateralAttestation |
 | 76 | lock_until_block | 4 | CollateralLock, CollateralAttestation |
 | 114 | member_ledger_id | variable | QuorumAddMember, QuorumJoin |
-| 115 | collateral_ledger_id | variable | CollateralAttestation |
+| 124 | collateral_ledger_id | variable | CollateralAttestation |
 | 234 | min_fee_bps | 2 | QuorumAddMember |
 | 236 | min_fee_fixed | 8 | QuorumAddMember |
 | 238 | max_fee_period | 4 | QuorumAddMember |
@@ -215,14 +215,14 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 |---|---|---|---|
 | 100 | reason | variable | DisputeEnter |
 | 102 | last_valid_sequence | 8 | DisputeEnter |
-| 105 | entropy_block_height | 4 | DisputeAcquire |
+| 116 | entropy_block_height | 4 | DisputeAcquire |
 | 106 | entropy_block_hash | 32 | DisputeAcquire |
 | 108 | new_custodian | 33 | DisputeAcquire |
-| 109 | armed_block | 4 | DisputeArmed |
+| 118 | armed_block | 4 | DisputeArmed |
 | 110 | spend_txid | 32 | DisputeAcquire |
-| 111 | new_reserves_address | variable | DisputeAcquire |
+| 120 | new_reserves_address | variable | DisputeAcquire |
 | 112 | commitment_hash | 20 | DisputeArmed (HASH160) |
-| 113 | target_reserves | variable | DisputeArmed |
+| 122 | target_reserves | variable | DisputeArmed |
 
 ### Nested TLV: FeeStructure
 
