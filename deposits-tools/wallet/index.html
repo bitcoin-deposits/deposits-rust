@@ -351,6 +351,10 @@ body.hide-amounts .amt { visibility: hidden; }
           </div>
           <button class="primary" onclick="doPayInvoiceSubmit()">Send Payment</button>
         </div>
+        <div id="outstanding-invoices" style="display:none; margin-top:10px; padding:10px; background:var(--bg); border:1px solid var(--border); border-radius:4px;">
+          <div style="font-size:11px; color:var(--muted); margin-bottom:6px;">Outstanding invoices</div>
+          <div id="outstanding-invoices-list"></div>
+        </div>
       </div>
     </div>
 
@@ -2703,6 +2707,7 @@ window.selectDeposit = function(alias) {
   document.getElementById('deposit-detail').style.display = 'block';
   document.getElementById('deposit-actions').style.display = 'block';
   document.getElementById('action-alias').textContent = alias;
+  renderOutstandingInvoices();
   document.getElementById('invoice-display').style.display = 'none';
   document.getElementById('pay-invoice-input').style.display = 'none';
 };
@@ -2813,29 +2818,29 @@ function uncreditedLightningEvidenceBytes(paymentHash, preimage) {
 // Check stored evidence for uncredited payments and initiate fraud proofs.
 async function checkForFraud() {
   if (!state.evidence || state.evidence.length === 0) return;
-  const now = Math.floor(Date.now() / 1000);
-  const REQUIRED_CONFIRMATIONS = 6;
-  // Generous grace period: 30 minutes for on-chain, 5 minutes for lightning
-  const ONCHAIN_GRACE_SECS = 1800;
-  const LIGHTNING_GRACE_SECS = 300;
+  const GRACE_BLOCKS = 6; // extra blocks beyond required confirmations
 
   for (const ev of state.evidence) {
     if (ev.settled || ev.fraud_proof_embedded) continue;
 
+    // On-chain: use block height, not wall clock
     if (ev.type === 'offer' && ev.cosign_verified && ev.offer_id) {
-      // Check if the deposit should have been credited by now
       const deposit = state.deposits.find(d => d.alias === ev.deposit_alias);
       if (!deposit) continue;
-      const age = now - ev.created;
-      if (age < ONCHAIN_GRACE_SECS) continue; // still in grace period
+      if ((deposit.amount_sats || 0) > 0) { ev.settled = true; saveState(); continue; }
 
-      // If deposit still has no balance and the offer is old enough, flag it
-      if ((deposit.amount_sats || 0) === 0 && deposit.status === 'pending') {
-        log(`Potential uncredited on-chain payment for ${ev.deposit_alias} (offer ${ev.offer_id.slice(0,16)}...)`, 'error');
+      // Need block height context — skip if we haven't synced
+      if (!cachedBlockHeight) continue;
 
-        // Construct fraud proof
+      // Check if enough blocks have passed since the offer's deadline
+      const deadlineBlock = ev.deadline_block || 0;
+      if (deadlineBlock === 0 || cachedBlockHeight < deadlineBlock + GRACE_BLOCKS) continue;
+
+      if (!ev.fraud_proof_hash) {
+        log(`Uncredited on-chain payment for ${ev.deposit_alias} — deadline block ${deadlineBlock} passed at block ${cachedBlockHeight}`, 'error');
+
         const evidenceBytes = uncreditedOnchainEvidenceBytes(
-          ev.offer_id, ev.funding_address || '', 0, 0
+          ev.offer_id, ev.funding_address || '', ev.max_sats || 0, deadlineBlock
         );
         const proofHash = computeFraudProofHash(
           1, // UncreditedOnchainPayment
@@ -2844,42 +2849,46 @@ async function checkForFraud() {
           evidenceBytes
         );
 
-        // Store the proof for later embedding
         ev.fraud_proof_hash = bytesToHex(proofHash);
         ev.fraud_proof_type = 'uncredited_onchain';
-        ev.fraud_detected_at = now;
+        ev.fraud_detected_at = Math.floor(Date.now() / 1000);
         saveState();
 
-        log(`Fraud proof hash: ${bytesToHex(proofHash).slice(0,16)}... — embed as transfer nonce to prove`, 'error');
+        log(`Fraud proof hash: ${bytesToHex(proofHash).slice(0,16)}...`, 'error');
       }
     }
 
-    if (ev.type === 'invoice' && ev.cosign_verified && ev.payment_hash) {
+    // Lightning: only construct proof when wallet has the preimage
+    if (ev.type === 'invoice' && ev.cosign_verified && ev.payment_hash && ev.preimage) {
       const deposit = state.deposits.find(d => d.alias === ev.deposit_alias);
       if (!deposit) continue;
-      const age = now - ev.created;
-      if (age < LIGHTNING_GRACE_SECS) continue;
+      if ((deposit.amount_sats || 0) > 0) { ev.settled = true; saveState(); continue; }
 
-      // If deposit balance hasn't increased and invoice is old enough
-      if ((deposit.amount_sats || 0) === 0 && deposit.status === 'pending') {
-        log(`Potential uncredited lightning payment for ${ev.deposit_alias} (hash ${ev.payment_hash.slice(0,16)}...)`, 'error');
+      // Verify preimage matches payment_hash
+      const preimageBytes = hexToBytes(ev.preimage);
+      const computedHash = bytesToHex(nobleHashes.sha256(preimageBytes));
+      if (computedHash !== ev.payment_hash) {
+        log(`Preimage does not match payment hash for ${ev.deposit_alias}`, 'error');
+        continue;
+      }
 
-        const evidenceBytes = uncreditedLightningEvidenceBytes(
-          ev.payment_hash, '' // preimage not known by wallet in general
-        );
+      if (!ev.fraud_proof_hash) {
+        log(`Uncredited lightning payment for ${ev.deposit_alias} — preimage verified`, 'error');
+
+        const evidenceBytes = uncreditedLightningEvidenceBytes(ev.payment_hash, ev.preimage);
         const proofHash = computeFraudProofHash(
           2, // UncreditedLightningPayment
-          '',
+          ev.operator_id || '',
           ev.ledger_id || deposit.ledger_id,
           evidenceBytes
         );
 
         ev.fraud_proof_hash = bytesToHex(proofHash);
         ev.fraud_proof_type = 'uncredited_lightning';
-        ev.fraud_detected_at = now;
+        ev.fraud_detected_at = Math.floor(Date.now() / 1000);
         saveState();
 
-        log(`Fraud proof hash: ${bytesToHex(proofHash).slice(0,16)}... — embed as transfer nonce to prove`, 'error');
+        log(`Fraud proof hash: ${bytesToHex(proofHash).slice(0,16)}...`, 'error');
       }
     }
   }
@@ -3194,6 +3203,68 @@ window.doFundLightning = async function() {
 window.copyInvoice = async function() {
   const text = document.getElementById('invoice-text').textContent;
   try { await navigator.clipboard.writeText(text); log('Copied to clipboard'); } catch {}
+};
+
+// Show outstanding invoices for the selected deposit (invoices without credit)
+function renderOutstandingInvoices() {
+  const container = document.getElementById('outstanding-invoices');
+  const list = document.getElementById('outstanding-invoices-list');
+  if (!container || !list || !selectedDeposit) { if (container) container.style.display = 'none'; return; }
+
+  const outstanding = (state.evidence || []).filter(ev =>
+    ev.type === 'invoice' && ev.deposit_alias === selectedDeposit.alias
+    && !ev.settled && ev.payment_hash
+  );
+
+  if (outstanding.length === 0) { container.style.display = 'none'; return; }
+
+  container.style.display = 'block';
+  let html = '';
+  for (const ev of outstanding) {
+    const hashShort = ev.payment_hash.slice(0, 16);
+    const hasPreimage = !!ev.preimage;
+    const amount = ev.amount_sats || '?';
+    html += `<div style="padding:4px 0; border-bottom:1px solid var(--border); font-size:11px;">`;
+    html += `<div>₿${amount} — hash: ${hashShort}...</div>`;
+    if (hasPreimage) {
+      html += `<div style="color:var(--balance);">Preimage provided — ready for fraud proof</div>`;
+    } else {
+      html += `<div style="margin-top:2px;">`;
+      html += `<input id="preimage-${hashShort}" type="text" placeholder="Paste preimage (64 hex)" style="font-size:10px; width:200px; padding:2px 4px;">`;
+      html += ` <button style="font-size:10px; padding:1px 6px;" onclick="submitPreimage('${ev.payment_hash}', '${hashShort}')">Verify</button>`;
+      html += `</div>`;
+    }
+    html += `</div>`;
+  }
+  list.innerHTML = html;
+}
+
+window.submitPreimage = function(paymentHash, hashShort) {
+  const input = document.getElementById('preimage-' + hashShort);
+  if (!input) return;
+  const preimage = input.value.trim();
+  if (!preimage || preimage.length !== 64) { log('Preimage must be 64 hex characters', 'error'); return; }
+
+  // Verify: SHA256(preimage) == payment_hash
+  try {
+    const preimageBytes = hexToBytes(preimage);
+    const computedHash = bytesToHex(nobleHashes.sha256(preimageBytes));
+    if (computedHash !== paymentHash) {
+      log('Preimage does not match payment hash', 'error');
+      return;
+    }
+
+    // Store preimage on the evidence record
+    const ev = (state.evidence || []).find(e => e.payment_hash === paymentHash);
+    if (ev) {
+      ev.preimage = preimage;
+      saveState();
+      log('Preimage verified and stored — will construct fraud proof on next sync', 'success');
+      renderOutstandingInvoices();
+    }
+  } catch (e) {
+    log(`Preimage error: ${e.message}`, 'error');
+  }
 };
 
 window.doPayInvoice2 = function() {
