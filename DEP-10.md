@@ -60,7 +60,7 @@ When the payer and payee are deposits on the same operator, the operator may set
 
 ## Evidence Retention
 
-Wallets MUST retain co-signed offers and invoices until the corresponding credit appears on the ledger or the deadline expires. This evidence is the basis for fraud proofs:
+Wallets should retain co-signed offers and invoices until the corresponding credit appears on the ledger or the deadline expires. Without this evidence, fraud cannot be proven:
 
 - **On-chain**: if the offer's deadline block passes with sufficient confirmations but no credit, the wallet constructs a fraud proof autonomously (see DEP-06)
 - **Lightning**: the wallet retains the co-signed invoice. If a payer provides the preimage proving payment, and no credit appears, the wallet constructs a fraud proof with the preimage as evidence
@@ -69,7 +69,7 @@ Without evidence retention, the wallet cannot prove fraud.
 
 ## Obligation Limits
 
-Creating offers and invoices increases the ledger's potential obligations. The operator MUST NOT create offers or invoices that would push total obligations above:
+Creating offers and invoices increases the ledger's potential obligations. The operator must not create offers or invoices that would push total obligations above:
 
 1. The reserves amount (from LedgerOpen/QuorumBegin)
 2. Twice the smallest quorum member's `collateral_lock_amount`

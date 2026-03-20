@@ -84,13 +84,13 @@ Each participating quorum member appends `DisputeArmed` to their fork with:
 - **target_reserves**: the bitcoin address where the member wants reserves sent if they win
 - **armed_block**: the block height at time of arming
 
-Members MUST arm within a bounded window after `DisputeEnter`. Late entries are excluded.
+Members must arm within `dispute_arm_blocks` after `DisputeEnter`. Late entries are excluded.
 
 #### Phase 2: Entropy
 
 The participants agree on an entropy block — a future bitcoin block whose hash is unpredictable at commitment time. The `DisputeAcquire` operation records the `entropy_block_height` and `entropy_block_hash`.
 
-The entropy block MUST be sufficiently far in the future that no participant could have influenced it when committing. Typically this is the first block mined after all participants have armed.
+The entropy block is the first block mined after all participants have armed (or after the arm window closes).
 
 #### Phase 3: Reveal and Selection
 
@@ -127,7 +127,7 @@ Losers append `DisputeYield` to their forks, transitioning them to Tombstoned st
 
 ### Recovery
 
-Wallets continue addressing the same ledger by its `ledger_id`, accepting only replies co-signed by the quorum. When co-signatures stop or fail verification, the wallet SHOULD:
+Wallets continue addressing the same ledger by its `ledger_id`, accepting only replies co-signed by the quorum. When co-signatures stop or fail verification, the wallet should:
 
 1. Query the network for dispute events (Kind 9103) on the ledger
 2. Replay ledger updates to identify the last valid sequence
