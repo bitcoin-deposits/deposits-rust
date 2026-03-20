@@ -42,3 +42,4 @@ Specifications use the conventions from BOLT #0: MUST, SHOULD, MAY for requireme
 | [DEP-08](DEP-08.md) | Deposits | Draft |
 | [DEP-09](DEP-09.md) | Transfers | Draft |
 | [DEP-10](DEP-10.md) | Payment Channels | Draft |
+| [DEP-11](DEP-11.md) | Time Obligations | Draft |
