@@ -113,7 +113,7 @@ pub struct TaprootReservesInfo {
     pub quorum_members: Vec<PublicKey>,
 
     /// Minimum quorum member expiration block (first timeout)
-    pub first_expiry_block: u32,
+    pub quorum_expiry: u32,
 
     /// The ledger hash committed to in the Taproot tree
     pub ledger_hash: [u8; 32],
@@ -147,7 +147,7 @@ struct TaprootReservesInfoSerde {
     amount: u64,
     operator: String,
     quorum_members: Vec<String>,
-    first_expiry_block: u32,
+    quorum_expiry: u32,
     ledger_hash: String,  // hex encoded
     address: String,      // Taproot address
     confirmed: bool,
@@ -161,7 +161,7 @@ impl From<&TaprootReservesInfo> for TaprootReservesInfoSerde {
             amount: info.amount,
             operator: info.operator.to_string(),
             quorum_members: info.quorum_members.iter().map(|p| p.to_string()).collect(),
-            first_expiry_block: info.first_expiry_block,
+            quorum_expiry: info.quorum_expiry,
             ledger_hash: hex::encode(info.ledger_hash),
             address: info.taproot_output.address.to_string(),
             confirmed: info.confirmed,
@@ -434,7 +434,7 @@ impl Wallet {
                 amount: serde_info.amount,
                 operator,
                 quorum_members,
-                first_expiry_block: serde_info.first_expiry_block,
+                quorum_expiry: serde_info.quorum_expiry,
                 ledger_hash,
                 taproot_output,
                 confirmed: serde_info.confirmed,
@@ -858,7 +858,7 @@ impl Wallet {
             amount: amount_sats,
             operator: self.operator_pubkey,
             quorum_members: quorum_members.clone(),
-            first_expiry_block: first_expiry,
+            quorum_expiry: first_expiry,
             ledger_hash,
             taproot_output: taproot_output.clone(),
             confirmed: false,
@@ -880,7 +880,7 @@ impl Wallet {
             amount: amount_sats,
             tx,
             taproot_output,
-            first_expiry_block: first_expiry,
+            quorum_expiry: first_expiry,
             ledger_hash,
         })
     }
@@ -1036,7 +1036,7 @@ impl Wallet {
             amount: output_amount,
             operator: self.operator_pubkey,
             quorum_members: quorum_members.clone(),
-            first_expiry_block: first_expiry,
+            quorum_expiry: first_expiry,
             ledger_hash,
             taproot_output: taproot_output.clone(),
             confirmed: false,
@@ -1068,7 +1068,7 @@ impl Wallet {
             amount: output_amount,
             tx,
             taproot_output,
-            first_expiry_block: first_expiry,
+            quorum_expiry: first_expiry,
             ledger_hash,
         })
     }
@@ -1664,7 +1664,7 @@ pub struct TaprootReservesCreateResult {
     pub taproot_output: TaprootReservesOutput,
 
     /// Block height when first quorum member expires (operator-only spend unlocks)
-    pub first_expiry_block: u32,
+    pub quorum_expiry: u32,
 
     /// The ledger hash committed to in the Taproot tree
     pub ledger_hash: [u8; 32],

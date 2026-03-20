@@ -94,7 +94,7 @@ pub struct RotateReservesResult {
     pub quorum_member_count: usize,
 
     /// Block height when first quorum member expires (operator-only unlock)
-    pub first_expiry_block: u32,
+    pub quorum_expiry: u32,
 
     /// The ledger hash committed to in the new Taproot tree
     pub ledger_hash: [u8; 32],
@@ -4683,7 +4683,7 @@ impl Node {
         // Compute quorum parameters for QuorumBegin
         let quorum_size = quorum_members.len() as u8;
         let quorum_threshold = ((quorum_members.len() + 1) / 2) as u8;
-        let first_expiry_block = expiry_block;
+        let quorum_expiry = expiry_block;
 
         // Compute ledger hash
         let ledger_hash = our_latest.current_hash;
@@ -4766,7 +4766,7 @@ impl Node {
             new_outpoint_txid: *rotate_txid.as_ref(),
             new_outpoint_vout: 0,
             amount: output_amount.saturating_mul(1000), // sats to msats
-            first_expiry_block,
+            quorum_expiry,
             ledger_hash,
             quorum_members: quorum_members.clone(),
             total_collateral,
@@ -7879,7 +7879,7 @@ impl Node {
                     "new_address": result.new_address,
                     "amount_sats": result.amount_sats,
                     "quorum_member_count": result.quorum_member_count,
-                    "first_expiry_block": result.first_expiry_block,
+                    "quorum_expiry": result.quorum_expiry,
                     "ledger_hash": hex::encode(&result.ledger_hash[..8]),
                 });
                 (true, Some(response.to_string()), None)
@@ -10867,7 +10867,7 @@ impl Node {
             txid,
             result.address,
             quorum_members.len(),
-            result.first_expiry_block
+            result.quorum_expiry
         );
 
         // Append QuorumBegin operation to the ledger for audit trail
@@ -10890,7 +10890,7 @@ impl Node {
                 new_outpoint_txid: txid_bytes,
                 new_outpoint_vout: result.outpoint.vout,
                 amount: result.amount.saturating_mul(1000),
-                first_expiry_block: result.first_expiry_block,
+                quorum_expiry: result.quorum_expiry,
                 ledger_hash,
                 quorum_members: quorum_members.clone(),
                 total_collateral,
@@ -10927,7 +10927,7 @@ impl Node {
             new_address: result.address.to_string(),
             amount_sats: result.amount,
             quorum_member_count: quorum_members.len(),
-            first_expiry_block: result.first_expiry_block,
+            quorum_expiry: result.quorum_expiry,
             ledger_hash,
         })
     }

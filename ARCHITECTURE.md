@@ -644,7 +644,7 @@ Validation: `new_amount < current_amount` AND `new_amount >= required_reserves()
 | `amount` | `u64` | 2 |
 | `quorum_threshold` | `u8` | 93 |
 | `quorum_size` | `u8` | 94 |
-| `first_expiry_block` | `u32` | 95 |
+| `quorum_expiry` | `u32` | 95 |
 | `ledger_hash` | `[u8; 32]` | 42 |
 
 After rotation, all subsequent updates require co-signature from a quorum member.
@@ -1143,7 +1143,7 @@ quorum-controlled recovery paths. After rotation:
 
 - All subsequent updates require a co-signature from a quorum member
 - The `quorum_threshold` and `quorum_size` fields define the multisig parameters
-- The `first_expiry_block` defines when the earliest quorum member's commitment expires
+- The `quorum_expiry` defines when the earliest quorum member's commitment expires
 
 The `collateral_enforcement_block` in `LedgerOpen` defers collateral size requirements during
 the bootstrap period, allowing the ledger to operate before a full quorum is assembled.

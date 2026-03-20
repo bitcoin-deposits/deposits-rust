@@ -934,7 +934,7 @@ async fn reserves_rotate(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     if let Some(count) = result.get("quorum_member_count").and_then(|v| v.as_u64()) {
         println!("  Quorum Members: {}", count);
     }
-    if let Some(expiry) = result.get("first_expiry_block").and_then(|v| v.as_u64()) {
+    if let Some(expiry) = result.get("quorum_expiry").and_then(|v| v.as_u64()) {
         println!("  First Expiry Block: {}", expiry);
         println!("\nSpending tiers:");
         println!("  Tier 0: Majority of quorum + operator (immediate)");
@@ -983,7 +983,7 @@ async fn reserves_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         for (i, member) in info.quorum_members.iter().enumerate() {
             println!("      {}: {}", i + 1, member);
         }
-        println!("    First Expiry: block {}", info.first_expiry_block);
+        println!("    First Expiry: block {}", info.quorum_expiry);
         println!("    Ledger Hash: {}", hex::encode(&info.ledger_hash[..8]));
         println!("    Confirmed: {}", info.confirmed);
 
@@ -2191,14 +2191,14 @@ fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                     };
                     ("LedgerOpen", format!("reserves:{}", id_short))
                 }
-                LedgerOperation::QuorumBegin { reserves_id, amount, first_expiry_block, quorum_members, .. } => {
+                LedgerOperation::QuorumBegin { reserves_id, amount, quorum_expiry, quorum_members, .. } => {
                     let addr_short = if reserves_id.len() > 20 {
                         format!("{}..{}", &reserves_id[..8], &reserves_id[reserves_id.len()-6..])
                     } else {
                         reserves_id.clone()
                     };
                     ("QuorumBegin", format!("addr:{}  amt:{} sat  quorum:{}/{}  expiry:{}",
-                        addr_short, amount, quorum_members.len(), quorum_members.len(), first_expiry_block))
+                        addr_short, amount, quorum_members.len(), quorum_members.len(), quorum_expiry))
                 }
                 LedgerOperation::DepositOpen { deposit_id, .. } => {
                     ("DepositOpen", format!("id:{:02x}{:02x}{:02x}{:02x}", deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]))

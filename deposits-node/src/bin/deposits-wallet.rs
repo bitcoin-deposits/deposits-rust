@@ -2637,7 +2637,7 @@ enum CustodyEvent {
         new_address: String,
         amount: u64,
         quorum_member_count: usize,
-        first_expiry_block: u32,
+        quorum_expiry: u32,
     },
     /// Custody dispute initiated
     DisputeStarted {
@@ -2758,7 +2758,7 @@ async fn ledger_custody(args: &[String]) -> Result<(), Box<dyn std::error::Error
                         }));
                     }
                 }
-                LedgerOperation::QuorumBegin { reserves_id, amount, first_expiry_block, quorum_members, .. } => {
+                LedgerOperation::QuorumBegin { reserves_id, amount, quorum_expiry, quorum_members, .. } => {
                     // Verify signer is current operator
                     let signer_valid = current_operator.map(|op| op == signer).unwrap_or(false);
                     let signer_status = if signer_valid { "✓" } else { "⚠" };
@@ -2767,7 +2767,7 @@ async fn ledger_custody(args: &[String]) -> Result<(), Box<dyn std::error::Error
                     println!("         |              |   New address: {}...", &reserves_id[..24.min(reserves_id.len())]);
                     println!("         |              |   Amount: {} sats", amount);
                     if !quorum_members.is_empty() {
-                        println!("         |              |   Quorum: {} members, expires block {}", quorum_members.len(), first_expiry_block);
+                        println!("         |              |   Quorum: {} members, expires block {}", quorum_members.len(), quorum_expiry);
                     }
                     if !signer_valid {
                         println!("         |              |   ⚠ Signer {}... != expected operator", &hex::encode(signer.serialize())[..12]);
@@ -2776,7 +2776,7 @@ async fn ledger_custody(args: &[String]) -> Result<(), Box<dyn std::error::Error
                         new_address: reserves_id,
                         amount,
                         quorum_member_count: quorum_members.len(),
-                        first_expiry_block,
+                        quorum_expiry,
                     }));
                 }
                 LedgerOperation::DisputeEnter { last_valid_sequence, reason } => {

@@ -3468,7 +3468,7 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
 
     let txid_bytes: [u8; 32] = *rotation_txid.as_ref();
 
-    // Get current block height for first_expiry_block calculation
+    // Get current block height for quorum_expiry calculation
     let current_block_height = esplora.get_height()
         .map_err(|e| format!("Failed to get block height: {:?}", e))?;
     let current_block_hash = esplora.get_block_hash(current_block_height)
@@ -3477,7 +3477,7 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
 
     let quorum_size = (quorum_members.len() + 1) as u8;
     let quorum_threshold = (quorum_size / 2) + 1;
-    let first_expiry_block = current_block_height + 144; // ~1 day for degraded spending
+    let quorum_expiry = current_block_height + 144; // ~1 day for degraded spending
 
     let operation = LedgerOperation::QuorumBegin {
         reserves_id: new_reserves_address.to_string(),
@@ -3485,7 +3485,7 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
         new_outpoint_txid: txid_bytes,
         new_outpoint_vout: 0,
         amount: output_amount,
-        first_expiry_block,
+        quorum_expiry,
         ledger_hash,
         quorum_members: quorum_members.clone(),
         total_collateral: 0, // recovery — collateral will be re-attested

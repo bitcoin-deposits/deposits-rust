@@ -156,7 +156,7 @@ const NEW_OUTPOINT_TXID: u64 = 84;
 const NEW_OUTPOINT_VOUT: u64 = 92;
 const QUORUM_THRESHOLD: u64 = 93;
 const QUORUM_SIZE: u64 = 94;
-const FIRST_EXPIRY_BLOCK: u64 = 86;
+const QUORUM_EXPIRY: u64 = 86;
 const GENESIS_BLOCK: u64 = 96;
 const REASON: u64 = 100;
 const LAST_VALID_SEQUENCE: u64 = 102;
@@ -210,7 +210,7 @@ fn schema_quorum_begin() {
         (NEW_OUTPOINT_TXID, hash32()),
         (NEW_OUTPOINT_VOUT, u32_bytes(0)),
         (AMOUNT, u64_bytes(100_000_000)),
-        (FIRST_EXPIRY_BLOCK, u32_bytes(1000)),
+        (QUORUM_EXPIRY, u32_bytes(1000)),
         (LEDGER_HASH, hash32()),
         (6, pubkey_bytes()), // QUORUM_MEMBERS — one member
         (88, u64_bytes(50_000_000)), // TOTAL_COLLATERAL

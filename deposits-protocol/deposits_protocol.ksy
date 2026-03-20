@@ -230,7 +230,7 @@ types:
   #
   # QuorumBegin:
   #   84  = new_outpoint_txid (32 bytes)
-  #   86  = first_expiry_block (u32)
+  #   86  = quorum_expiry (u32)
   #   88  = total_collateral (u64, msats, sum of attested collateral)
   #   90  = spending_txid (32 bytes)
   #   92  = new_outpoint_vout (u32)

@@ -2554,7 +2554,7 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                     reserves_id,
                     amount,
                     quorum_members,
-                    first_expiry_block,
+                    quorum_expiry,
                     ..
                 } => {
                     let addr_short = if reserves_id.len() > 20 {
@@ -2570,7 +2570,7 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                         "QuorumBegin",
                         format!(
                             "addr:{}  amt:{} sat  quorum:{}/{}  expiry:{}",
-                            addr_short, amount, quorum_members.len(), quorum_members.len(), first_expiry_block
+                            addr_short, amount, quorum_members.len(), quorum_members.len(), quorum_expiry
                         ),
                     )
                 }

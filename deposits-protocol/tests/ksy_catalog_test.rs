@@ -324,7 +324,7 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
         ("QuorumBegin", LedgerOperation::QuorumBegin {
             reserves_id: "bcrt1qtest".into(), spending_txid: h32(), new_outpoint_txid: h32(),
             new_outpoint_vout: 0, amount: 100_000_000, 
-            first_expiry_block: 1000, ledger_hash: h32(),
+            quorum_expiry: 1000, ledger_hash: h32(),
             quorum_members: vec![pk()],
             total_collateral: 50_000_000,
         }),

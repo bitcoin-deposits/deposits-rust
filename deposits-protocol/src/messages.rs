@@ -505,7 +505,7 @@ pub enum LedgerOperation {
     ///
     /// Records the rotation of reserves from P2WSH to P2TR with tiered spending:
     /// - Immediate: quorum_threshold-of-quorum_size multisig
-    /// - After first_expiry_block: operator can spend alone
+    /// - After quorum_expiry: operator can spend alone
     ///
     /// The quorum member pubkeys are derived from QuorumAddMember operations on this ledger.
     QuorumBegin {
@@ -519,8 +519,13 @@ pub enum LedgerOperation {
         new_outpoint_vout: u32,
         /// Amount in millisatoshis (should match previous reserves)
         amount: u64,
-        /// Block height when operator can spend alone (earliest member expiry)
-        first_expiry_block: u32,
+        /// Block height when the quorum expires (shortest member's collateral_lock_until).
+        /// A new QuorumBegin MUST be appended before this block (see DEP-11).
+        /// The reserves tapscript uses this for tiered spending:
+        ///   - Full quorum (k-of-n): no timelock
+        ///   - Degraded quorum (k-1 of n): available before quorum_expiry (rotation window)
+        ///   - Operator solo: available well after quorum_expiry (last resort)
+        quorum_expiry: u32,
         /// Ledger hash committed in the Taproot script
         ledger_hash: [u8; 32],
         /// Quorum member pubkeys included in this rotation
@@ -1450,7 +1455,7 @@ impl BinaryCodec for LedgerOperation {
                 write_u32(w, 0)?; // reserved (was collateral_enforcement_block)
                 write_u64(w, *reserves_amount)?;
             }
-            Self::QuorumBegin { reserves_id, spending_txid, new_outpoint_txid, new_outpoint_vout, amount, first_expiry_block, ledger_hash, quorum_members, total_collateral } => {
+            Self::QuorumBegin { reserves_id, spending_txid, new_outpoint_txid, new_outpoint_vout, amount, quorum_expiry, ledger_hash, quorum_members, total_collateral } => {
                 write_string(w, reserves_id)?;
                 write_32(w, spending_txid)?;
                 write_32(w, new_outpoint_txid)?;
@@ -1458,7 +1463,7 @@ impl BinaryCodec for LedgerOperation {
                 write_u64(w, *amount)?;
                 write_u8(w, quorum_members.len() as u8)?;
                 write_u8(w, quorum_members.len() as u8)?;
-                write_u32(w, *first_expiry_block)?;
+                write_u32(w, *quorum_expiry)?;
                 write_32(w, ledger_hash)?;
                 write_u64(w, *total_collateral)?;
             }
@@ -1716,12 +1721,12 @@ impl BinaryCodec for LedgerOperation {
                 let amount = read_u64(r)?;
                 let _threshold = read_u8(r)?; // legacy: skip
                 let _size = read_u8(r)?; // legacy: skip
-                let first_expiry_block = read_u32(r)?;
+                let quorum_expiry = read_u32(r)?;
                 let ledger_hash = read_32(r)?;
                 let total_collateral = read_u64(r).unwrap_or(0);
                 Ok(Self::QuorumBegin {
                     reserves_id, spending_txid, new_outpoint_txid, new_outpoint_vout,
-                    amount, first_expiry_block, ledger_hash, quorum_members: Vec::new(),
+                    amount, quorum_expiry, ledger_hash, quorum_members: Vec::new(),
                     total_collateral,
                 })
             }
@@ -2691,7 +2696,7 @@ mod ledger_op_tlv {
     pub const SPENDING_TXID: u64 = 90;
     pub const NEW_OUTPOINT_TXID: u64 = 84;
     pub const NEW_OUTPOINT_VOUT: u64 = 92;
-    pub const FIRST_EXPIRY_BLOCK: u64 = 86;
+    pub const QUORUM_EXPIRY: u64 = 86;
     pub const TOTAL_COLLATERAL: u64 = 88;
     // Dispute fields
     pub const REASON: u64 = 100;
@@ -2754,7 +2759,7 @@ impl TlvEncode for LedgerOperation {
                     .u32_field(GENESIS_BLOCK, *genesis_block)
                     .u64_field(RESERVES_AMOUNT, *reserves_amount);
             }
-            Self::QuorumBegin { reserves_id, spending_txid, new_outpoint_txid, new_outpoint_vout, amount, first_expiry_block, ledger_hash, quorum_members, total_collateral } => {
+            Self::QuorumBegin { reserves_id, spending_txid, new_outpoint_txid, new_outpoint_vout, amount, quorum_expiry, ledger_hash, quorum_members, total_collateral } => {
                 let mut members_bytes = Vec::new();
                 for pk in quorum_members {
                     members_bytes.extend_from_slice(&pk.serialize());
@@ -2765,7 +2770,7 @@ impl TlvEncode for LedgerOperation {
                     .bytes_field(NEW_OUTPOINT_TXID, new_outpoint_txid)
                     .u32_field(NEW_OUTPOINT_VOUT, *new_outpoint_vout)
                     .u64_field(AMOUNT, *amount)
-                    .u32_field(FIRST_EXPIRY_BLOCK, *first_expiry_block)
+                    .u32_field(QUORUM_EXPIRY, *quorum_expiry)
                     .bytes_field(LEDGER_HASH, ledger_hash)
                     .bytes_field(QUORUM_MEMBERS, &members_bytes)
                     .u64_field(TOTAL_COLLATERAL, *total_collateral);
@@ -3022,7 +3027,7 @@ impl TlvDecode for LedgerOperation {
                     new_outpoint_txid: reader.read_bytes(NEW_OUTPOINT_TXID)?,
                     new_outpoint_vout: reader.read_u32(NEW_OUTPOINT_VOUT)?,
                     amount: reader.read_u64(AMOUNT)?,
-                    first_expiry_block: reader.read_u32(FIRST_EXPIRY_BLOCK)?,
+                    quorum_expiry: reader.read_u32(QUORUM_EXPIRY)?,
                     ledger_hash: reader.read_bytes(LEDGER_HASH)?,
                     quorum_members,
                     total_collateral: reader.read_u64(TOTAL_COLLATERAL)?,

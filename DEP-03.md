@@ -13,12 +13,19 @@ A ledger's reserves are held in a single UTXO with an amount greater than or equ
 
 ## Tapscript Construction
 
-The reserves UTXO uses a Taproot output with a tapscript tree containing:
+The reserves UTXO uses a Taproot output with a tapscript tree containing tiered spending paths. The internal key is an unspendable point (no key-path spend). All spending goes through script-path reveals.
 
-- One leaf per valid quorum spending combination (k-of-n threshold)
-- One leaf for the operator's fallback timelock path
+### Spending Tiers
 
-The internal key is an unspendable point (no key-path spend). All spending goes through script-path reveals.
+The `quorum_expiry` block (shortest member's `collateral_lock_until`) determines the timelock structure:
+
+1. **Full quorum** (k-of-n): no timelock. Available immediately. This is the normal operating path for rotation and recovery.
+
+2. **Degraded quorum** (k-1 of n): available before `quorum_expiry`. This allows the remaining members to initiate a new `QuorumBegin` if one member disappears. The degraded window should be early enough that the new quorum can be established before collateral expires. Suggested: `quorum_expiry - 2016` (~2 weeks before expiry).
+
+3. **Operator solo**: available well after `quorum_expiry`. This is the absolute last resort when the entire quorum is unresponsive. Suggested: `quorum_expiry + 8640` (~2 months after expiry).
+
+The degraded path predating `quorum_expiry` is critical: letting the quorum expire without rotation is non-conforming (see DEP-11), so the mechanism to prevent that must be available before expiry.
 
 ## QuorumBegin (disc 12)
 
@@ -30,9 +37,10 @@ When a quorum is established or refreshed, the operator constructs a new Taproot
 - **new_outpoint_txid**: the txid of the new reserves output
 - **new_outpoint_vout**: the vout index
 - **quorum_members**: the pubkeys included in the new multisig
-- **first_expiry_block**: earliest quorum member expiry
+- **quorum_expiry**: block height when the quorum expires (shortest member collateral lock)
+- **total_collateral**: sum of attested collateral across all members (msats)
 
-After `QuorumBegin`, co-signatures become required for all subsequent updates.
+After `QuorumBegin`, co-signatures become required for all subsequent updates. A new `QuorumBegin` MUST be appended before `quorum_expiry` (see DEP-11).
 
 ## Lottery
 
