@@ -199,7 +199,6 @@ fn schema_ledger_open() {
         (RESERVES_ID, str_bytes("bcrt1qtest")),
         (62, u64_bytes(100_000_000)), // RESERVES_AMOUNT
         (GENESIS_BLOCK, u32_bytes(100)),
-        (ENFORCEMENT_BLOCK, u32_bytes(500)),
     ]);
 }
 

@@ -1097,19 +1097,6 @@ pub struct LedgerState {
     /// Before this block:
     /// - Ledger conformance is always enforced (valid signatures, state roots)
     /// - Partner validation is always required
-    /// - Collateral SIZE requirements are NOT enforced (quorum members don't need ledgers >= half size)
-    /// - The 51% security threshold is NOT guaranteed
-    ///
-    /// After this block:
-    /// - Full collateral size requirements enforced
-    /// - 51% capital threshold applies
-    /// - Non-compliant partner relationships are invalid
-    ///
-    /// This enables network bootstrap where operators can cross-establish collateral
-    /// before the requirements kick in. Set to None for immediate enforcement (joining
-    /// an established network), or Some(future_block) for bootstrap phase.
-    #[serde(default)]
-    pub collateral_enforcement_block: Option<u32>,
     /// Collateral received from other operators that backs this ledger's deposits.
     /// In the 100%+100% model, deposits need 100% reserves + 100% received collateral.
     #[serde(default)]
@@ -1192,19 +1179,6 @@ impl LedgerState {
 
     /// Create a new empty ledger state.
     pub fn new(operator_key: PublicKey, reserves_key: String, genesis_block: u32) -> Self {
-        Self::with_enforcement_block(operator_key, reserves_key, genesis_block, None)
-    }
-
-    /// Create a new ledger state with explicit collateral enforcement block.
-    ///
-    /// - `enforcement_block = None`: Immediate enforcement (for joining established networks)
-    /// - `enforcement_block = Some(future_block)`: Deferred enforcement (for bootstrap)
-    pub fn with_enforcement_block(
-        operator_key: PublicKey,
-        reserves_key: String,
-        genesis_block: u32,
-        collateral_enforcement_block: Option<u32>,
-    ) -> Self {
         let ledger_id = Self::compute_ledger_id(&operator_key, &reserves_key, genesis_block);
         Self {
             ledger_id,
@@ -1218,7 +1192,6 @@ impl LedgerState {
             quorum_members: Vec::new(),
             collateral_amount: 0,
             last_collateral_increase_block: None,
-            collateral_enforcement_block,
             received_collateral_amount: 0,
             collateral_attestations: HashMap::new(),
             partner_deepest_ack_hash: [0u8; 32],
@@ -1240,18 +1213,6 @@ impl LedgerState {
     /// Get the ledger_id as a hex string.
     pub fn ledger_id_hex(&self) -> String {
         hex::encode(self.ledger_id)
-    }
-
-    /// Check if collateral size requirements are enforced at the given block.
-    ///
-    /// Returns true if:
-    /// - No enforcement block is set (immediate enforcement), OR
-    /// - Current block >= enforcement block
-    pub fn is_collateral_enforced(&self, current_block: u64) -> bool {
-        match self.collateral_enforcement_block {
-            None => true, // Immediate enforcement
-            Some(enforcement_block) => current_block >= enforcement_block as u64,
-        }
     }
 
     /// Get total balance across all deposits (millisatoshis).

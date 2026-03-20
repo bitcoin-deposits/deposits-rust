@@ -60,7 +60,7 @@ fn wit() -> DescriptorWitness { DescriptorWitness { stack: vec![vec![0x30; 64]] 
 
 #[test] fn ledger_open() { test_roundtrip(&LedgerOperation::LedgerOpen {
     operator_id: pk(), reserves_id: "bcrt1qtest".into(),
-    genesis_block: 100, collateral_enforcement_block: 500, reserves_amount: 100_000_000,
+    genesis_block: 100, reserves_amount: 100_000_000,
 }); }
 
 #[test] fn quorum_begin() { test_roundtrip(&LedgerOperation::QuorumBegin {

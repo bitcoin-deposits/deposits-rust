@@ -139,7 +139,6 @@ impl Ledger {
     }
 
     /// Create a new ledger with explicit role and optional quorum members.
-    /// This constructor is provided for compatibility with existing code.
     pub fn new(
         operator_key: PublicKey,
         reserves_key: String,
@@ -147,37 +146,10 @@ impl Ledger {
         quorum_members: Vec<crate::types::QuorumMember>,
         genesis_block: u32,
     ) -> Self {
-        Self::with_enforcement_block(
-            operator_key,
-            reserves_key,
-            role,
-            quorum_members,
-            genesis_block,
-            None,
-        )
-    }
-
-    /// Create a new ledger with explicit collateral enforcement block.
-    ///
-    /// - `enforcement_block = None`: Immediate enforcement (for joining established networks)
-    /// - `enforcement_block = Some(future_block)`: Deferred enforcement (for bootstrap phase)
-    ///
-    /// During bootstrap, operators can cross-establish quorum memberships before
-    /// the size requirements kick in. After the enforcement block, partners must have
-    /// ledgers >= half the operator's ledger size.
-    pub fn with_enforcement_block(
-        operator_key: PublicKey,
-        reserves_key: String,
-        role: LedgerRole,
-        quorum_members: Vec<crate::types::QuorumMember>,
-        genesis_block: u32,
-        collateral_enforcement_block: Option<u32>,
-    ) -> Self {
-        let mut state = LedgerState::with_enforcement_block(
+        let mut state = LedgerState::new(
             operator_key,
             reserves_key,
             genesis_block,
-            collateral_enforcement_block,
         );
         state.quorum_members = quorum_members;
         Self {
@@ -185,16 +157,6 @@ impl Ledger {
             role,
             history: Vec::new(),
         }
-    }
-
-    /// Check if collateral size requirements are enforced at the given block.
-    pub fn is_collateral_enforced(&self, current_block: u64) -> bool {
-        self.state.is_collateral_enforced(current_block)
-    }
-
-    /// Get the collateral enforcement block (None for immediate enforcement).
-    pub fn collateral_enforcement_block(&self) -> Option<u32> {
-        self.state.collateral_enforcement_block
     }
 
     /// Get the current sequence number.
@@ -1209,7 +1171,6 @@ impl Ledger {
                 operator_id,
                 reserves_id,
                 genesis_block,
-                collateral_enforcement_block,
                 reserves_amount,
             } => {
                 // LedgerOpen sets up the initial ledger identity and reserves
@@ -1217,7 +1178,6 @@ impl Ledger {
                 self.state.reserves_key = reserves_id.clone();
                 self.state.genesis_block = *genesis_block;
                 self.state.ledger_id = LedgerState::compute_ledger_id(operator_id, reserves_id, *genesis_block);
-                self.state.collateral_enforcement_block = Some(*collateral_enforcement_block);
                 self.state.reserves.amount = *reserves_amount;
             }
             LedgerOperation::QuorumBegin { reserves_id, amount, .. } => {
@@ -2211,7 +2171,7 @@ mod tests {
             operator_id: op_key,
             reserves_id: "bcrt1q...".to_string(),
             genesis_block: 0,
-            collateral_enforcement_block: 0,
+
             reserves_amount: 100_000,
         };
 
@@ -2281,7 +2241,7 @@ mod tests {
             operator_id: op_key,
             reserves_id: "bcrt1q...".to_string(),
             genesis_block: 0,
-            collateral_enforcement_block: 0,
+
             reserves_amount: 100_000,
         };
         ledger.apply_operation(&open).unwrap();

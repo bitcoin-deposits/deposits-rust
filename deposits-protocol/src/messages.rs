@@ -493,8 +493,6 @@ pub enum LedgerOperation {
         reserves_id: String,
         /// Block height when this ledger was opened (used in ledger_id computation)
         genesis_block: u32,
-        /// Block height after which collateral requirements are enforced (0 = immediate)
-        collateral_enforcement_block: u32,
         /// Initial reserves amount in millisatoshis (from on-chain UTXO balance)
         reserves_amount: u64,
     },
@@ -922,15 +920,6 @@ pub struct HandshakeMsg {
     pub funding_txid: [u8; 32],
     /// Funding output index
     pub funding_vout: u16,
-    /// Block height at which collateral size requirements are enforced.
-    ///
-    /// Set to 0 for immediate enforcement (joining an established network).
-    /// Set to a future block for bootstrap phase (allows cross-establishing
-    /// collateral before requirements kick in).
-    ///
-    /// Before this block: ledger validation enforced, collateral size requirements relaxed.
-    /// After this block: full 51% capital threshold applies.
-    pub collateral_enforcement_block: u32,
 }
 
 /// Response to handshake
@@ -1451,11 +1440,11 @@ impl BinaryCodec for LedgerOperation {
     fn write_to<W: Write>(&self, w: &mut W) -> Result<(), CodecError> {
         write_u8(w, self.discriminant())?;
         match self {
-            Self::LedgerOpen { operator_id, reserves_id, genesis_block, collateral_enforcement_block, reserves_amount } => {
+            Self::LedgerOpen { operator_id, reserves_id, genesis_block, reserves_amount } => {
                 write_pubkey(w, operator_id)?;
                 write_string(w, reserves_id)?;
                 write_u32(w, *genesis_block)?;
-                write_u32(w, *collateral_enforcement_block)?;
+                write_u32(w, 0)?; // reserved (was collateral_enforcement_block)
                 write_u64(w, *reserves_amount)?;
             }
             Self::QuorumBegin { reserves_id, spending_txid, new_outpoint_txid, new_outpoint_vout, amount, first_expiry_block, ledger_hash, quorum_members } => {
@@ -1706,12 +1695,12 @@ impl BinaryCodec for LedgerOperation {
                 let operator_id = read_pubkey(r)?;
                 let reserves_id = read_string(r)?;
                 let genesis_block = read_u32(r)?;
-                let collateral_enforcement_block = read_u32(r)?;
+                let _reserved = read_u32(r)?; // was collateral_enforcement_block
                 // reserves_amount added later; default to 0 for legacy data
                 let reserves_amount = read_u64(r).unwrap_or(0);
                 Ok(Self::LedgerOpen {
                     operator_id, reserves_id, genesis_block,
-                    collateral_enforcement_block, reserves_amount,
+                    reserves_amount,
                 })
             }
             // QuorumBegin (12) — formerly ReservesRotate
@@ -2135,7 +2124,7 @@ impl DepositsMessage {
                 write_string(w, &m.reserves_id)?;
                 write_32(w, &m.funding_txid)?;
                 write_u16(w, m.funding_vout)?;
-                write_u32(w, m.collateral_enforcement_block)?;
+                write_u32(w, 0)?; // reserved (was collateral_enforcement_block)
             }
             Self::HandshakeResponse(m) => {
                 write_32(w, &m.request_hash)?;
@@ -2198,16 +2187,20 @@ impl DepositsMessage {
                 confirmed_sequence: read_u64(r)?,
                 confirmed_hash: read_32(r)?,
             })),
-            HANDSHAKE => Ok(Self::Handshake(HandshakeMsg {
-                protocol_version: read_u16(r)?,
-                min_protocol_version: read_u16(r)?,
-                features: read_u32(r)?,
-                operator_id: read_pubkey(r)?,
-                reserves_id: read_string(r)?,
-                funding_txid: read_32(r)?,
-                funding_vout: read_u16(r)?,
-                collateral_enforcement_block: read_u32(r)?,
-            })),
+            HANDSHAKE => {
+                let protocol_version = read_u16(r)?;
+                let min_protocol_version = read_u16(r)?;
+                let features = read_u32(r)?;
+                let operator_id = read_pubkey(r)?;
+                let reserves_id = read_string(r)?;
+                let funding_txid = read_32(r)?;
+                let funding_vout = read_u16(r)?;
+                let _reserved = read_u32(r)?; // was collateral_enforcement_block
+                Ok(Self::Handshake(HandshakeMsg {
+                    protocol_version, min_protocol_version, features,
+                    operator_id, reserves_id, funding_txid, funding_vout,
+                }))
+            }
             HANDSHAKE_RESPONSE => Ok(Self::HandshakeResponse(HandshakeResponseMsg {
                 request_hash: read_32(r)?,
                 protocol_version: read_u16(r)?,
@@ -2675,7 +2668,7 @@ mod ledger_op_tlv {
     pub const OPERATOR_ID: u64 = 56;
     pub const RESERVES_ID: u64 = 58;
     pub const RESERVES_AMOUNT: u64 = 62;
-    pub const ENFORCEMENT_BLOCK: u64 = 64;
+    // 64 was collateral_enforcement_block (removed)
     pub const GENESIS_BLOCK: u64 = 96;
     // Onchain operation fields
     pub const TXID: u64 = 66;
@@ -2747,12 +2740,11 @@ impl TlvEncode for LedgerOperation {
         let mut builder = TlvBuilder::new().u8_field(DISCRIMINANT, self.discriminant());
 
         match self {
-            Self::LedgerOpen { operator_id, reserves_id, genesis_block, collateral_enforcement_block, reserves_amount } => {
+            Self::LedgerOpen { operator_id, reserves_id, genesis_block, reserves_amount } => {
                 builder = builder
                     .pubkey_field(OPERATOR_ID, operator_id)
                     .string_field(RESERVES_ID, reserves_id)
                     .u32_field(GENESIS_BLOCK, *genesis_block)
-                    .u32_field(ENFORCEMENT_BLOCK, *collateral_enforcement_block)
                     .u64_field(RESERVES_AMOUNT, *reserves_amount);
             }
             Self::QuorumBegin { reserves_id, spending_txid, new_outpoint_txid, new_outpoint_vout, amount, first_expiry_block, ledger_hash, quorum_members } => {
@@ -3005,7 +2997,6 @@ impl TlvDecode for LedgerOperation {
                 operator_id: reader.read_pubkey(OPERATOR_ID)?,
                 reserves_id: reader.read_string(RESERVES_ID)?,
                 genesis_block: reader.read_u32_opt(GENESIS_BLOCK)?.unwrap_or(0),
-                collateral_enforcement_block: reader.read_u32_opt(ENFORCEMENT_BLOCK)?.unwrap_or(0),
                 reserves_amount: reader.read_u64_opt(RESERVES_AMOUNT)?.unwrap_or(0),
             }),
             12 => {
@@ -3300,7 +3291,7 @@ mod handshake_tlv {
     pub const PARTNER_PUBKEY: u64 = 8;
     pub const FUNDING_TXID: u64 = 10;
     pub const FUNDING_VOUT: u64 = 12;
-    pub const COLLATERAL_ENFORCEMENT_BLOCK: u64 = 14;
+    // 14 was COLLATERAL_ENFORCEMENT_BLOCK (removed)
 }
 
 impl TlvEncode for HandshakeMsg {
@@ -3314,7 +3305,6 @@ impl TlvEncode for HandshakeMsg {
             .string_field(PARTNER_PUBKEY, &self.reserves_id)
             .bytes_field(FUNDING_TXID, &self.funding_txid)
             .u16_field(FUNDING_VOUT, self.funding_vout)
-            .u32_field(COLLATERAL_ENFORCEMENT_BLOCK, self.collateral_enforcement_block)
             .build()
     }
 }
@@ -3331,7 +3321,6 @@ impl TlvDecode for HandshakeMsg {
             reserves_id: reader.read_string(PARTNER_PUBKEY)?,
             funding_txid: reader.read_bytes(FUNDING_TXID)?,
             funding_vout: reader.read_u16(FUNDING_VOUT)?,
-            collateral_enforcement_block: reader.read_u32_opt(COLLATERAL_ENFORCEMENT_BLOCK)?.unwrap_or(0),
         })
     }
 }
@@ -4344,7 +4333,6 @@ mod tests {
             reserves_id: test_pubkey().to_string(),
             funding_txid: [0x11; 32],
             funding_vout: 0,
-            collateral_enforcement_block: 1000, // Bootstrap until block 1000
         });
 
         let encoded = msg.encode();
@@ -4500,7 +4488,6 @@ mod tests {
             reserves_id: test_pubkey().to_string(),
             funding_txid: [0x11; 32],
             funding_vout: 0,
-            collateral_enforcement_block: 0, // Immediate enforcement
         };
 
         let encoded = msg.tlv_encode();
@@ -4704,7 +4691,6 @@ mod tests {
                 reserves_id: test_pubkey().to_string(),
                 funding_txid: [0xEE; 32],
                 funding_vout: 0,
-                collateral_enforcement_block: 500,
             }),
             DepositsMessage::Sync(SyncMsg {
                 ledger_id: [0x12; 32],

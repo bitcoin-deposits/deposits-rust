@@ -856,7 +856,6 @@ impl DepositsHandler {
                     operator_id: operator,
                     reserves_id: reserves_address.clone(),
                     genesis_block,
-                    collateral_enforcement_block: 0, // Default to immediate enforcement
                     reserves_amount: reserves_balance,
                 };
                 if let Err(e) = ledger_guard.append_operation(

@@ -524,7 +524,6 @@ async fn ledger_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     println!("Trust & Security");
     println!("----------------");
     println!("Received Collateral: {} sats", ad.received_collateral_sats);
-    println!("Collateral Enforcement Block: {}", ad.collateral_enforcement_block);
     println!();
     println!("Fee Structure");
     println!("-------------");
@@ -2627,7 +2626,6 @@ enum CustodyEvent {
         operator: bitcoin::secp256k1::PublicKey,
         reserves_address: String,
         genesis_block: u32,
-        enforcement_block: u32,
     },
     /// Quorum member added
     QuorumMemberAdded {
@@ -2736,17 +2734,15 @@ async fn ledger_custody(args: &[String]) -> Result<(), Box<dyn std::error::Error
         // Parse the operation
         if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
             match op {
-                LedgerOperation::LedgerOpen { operator_id, reserves_id, genesis_block, collateral_enforcement_block, .. } => {
+                LedgerOperation::LedgerOpen { operator_id, reserves_id, genesis_block, .. } => {
                     current_operator = Some(operator_id);
                     println!("seq {:>4} | block {:>6} | LEDGER OPENED", seq, block);
                     println!("         |              |   Operator: {}", hex::encode(operator_id.serialize())[..16].to_string() + "...");
                     println!("         |              |   Reserves: {}...", &reserves_id[..20.min(reserves_id.len())]);
-                    println!("         |              |   Enforcement block: {}", collateral_enforcement_block);
                     custody_events.push((seq, block, CustodyEvent::LedgerOpened {
                         operator: operator_id,
                         reserves_address: reserves_id,
                         genesis_block,
-                        enforcement_block: collateral_enforcement_block,
                     }));
                 }
                 LedgerOperation::QuorumAddMember { quorum_member, member_ledger_id, .. } => {

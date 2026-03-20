@@ -544,7 +544,6 @@ mod tests {
             reserves_id: "test_reserves".to_string(),
             funding_txid: [0u8; 32],
             funding_vout: 0,
-            collateral_enforcement_block: 0,
         });
 
         // V2 uses HANDSHAKE (0x8005)

@@ -10621,18 +10621,12 @@ impl Node {
 
     /// Open a new ledger backed by our reserves UTXO
     ///
-    /// This creates a self-ledger where we are the operator. The `enforcement_block`
-    /// parameter controls when collateral size requirements are enforced:
-    /// - 0: Immediate enforcement (joining an established network)
-    /// - Future block: Bootstrap phase (allows cross-establishing collateral)
+    /// This creates a self-ledger where we are the operator.
     ///
     /// For BDK, the ledger is identified by the reserves UTXO address (stored in
     /// reserves_id). The reserves_id field uses our own pubkey since there is
     /// no separate partner node.
-    pub fn open_ledger(
-        &self,
-        enforcement_block: u32,
-    ) -> Result<Ledger, Error> {
+    pub fn open_ledger(&self) -> Result<Ledger, Error> {
         // Find an unused reserves output (not already backing a ledger)
         let all_reserves = self.wallet.get_reserves();
         if all_reserves.is_empty() {
@@ -10672,13 +10666,6 @@ impl Node {
             ([0u8; 32], 0u16)
         };
 
-        // Create the ledger state
-        let enforcement = if enforcement_block > 0 {
-            Some(enforcement_block)
-        } else {
-            None
-        };
-
         // For BDK, use the reserves address as the reserves_id (identifies the reserves UTXO)
         let reserves_id = reserves_address;
 
@@ -10690,10 +10677,9 @@ impl Node {
             self.node_id, reserves_id.clone(), Some(reserves_balance_msats), None,
         );
 
-        // Update enforcement block and other state, get ledger_id
+        // Update state, get ledger_id
         let ledger_id = {
             let mut ledger_guard = ledger_arc.write().unwrap();
-            ledger_guard.state.collateral_enforcement_block = enforcement;
             ledger_guard.state.reserves.spend_to = self.node_id;
             ledger_guard.ledger_id_hex()
         };
@@ -10713,7 +10699,6 @@ impl Node {
             reserves_id: reserves_id.clone(),
             funding_txid,
             funding_vout,
-            collateral_enforcement_block: enforcement_block,
         };
 
         // Queue the handshake message (for BDK, sent to self as there's no remote partner)
@@ -10760,7 +10745,6 @@ impl Node {
                 reserves_id: peer.to_string(),
                 funding_txid: [0u8; 32],
                 funding_vout: 0,
-                collateral_enforcement_block: 0,
             },
         );
 

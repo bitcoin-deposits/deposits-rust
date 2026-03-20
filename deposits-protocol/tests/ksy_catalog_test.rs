@@ -319,7 +319,7 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
     vec![
         ("LedgerOpen", LedgerOperation::LedgerOpen {
             operator_id: pk(), reserves_id: "bcrt1qtest".into(),
-            genesis_block: 100, collateral_enforcement_block: 500, reserves_amount: 100_000_000,
+            genesis_block: 100, reserves_amount: 100_000_000,
         }),
         ("QuorumBegin", LedgerOperation::QuorumBegin {
             reserves_id: "bcrt1qtest".into(), spending_txid: h32(), new_outpoint_txid: h32(),

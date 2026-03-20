@@ -165,7 +165,7 @@ types:
   #   56  = operator_id (33 bytes, LedgerOpen)
   #   58  = reserves_id (string, LedgerOpen/QuorumBegin/QuorumJoin)
   #   62  = reserves_amount (u64, msats, LedgerOpen/QuorumBegin)
-  #   64  = collateral_enforcement_block (u32, LedgerOpen)
+  #   64  = (reserved, was collateral_enforcement_block)
   #   96  = genesis_block (u32, LedgerOpen)
   #
   # Deposits:

@@ -133,9 +133,8 @@ RESERVES SUBCOMMANDS:
     reserves list   List all reserves outputs
 
 LEDGER SUBCOMMANDS:
-    ledger open [enforcement_block] [fee options]
-                    Open a ledger backed by your reserves UTXO. Set enforcement_block to a
-                    future block for bootstrap phase, or 0 for immediate enforcement.
+    ledger open [fee options]
+                    Open a ledger backed by your reserves UTXO.
                     Fee options set advertised minimums for deposit negotiation:
                       --annual-fee-bps <N>        Annual custody fee in basis points
                       --min-fee-sats <N>          Minimum fee per period in sats
@@ -1120,7 +1119,6 @@ async fn auto_advertise_ledger(
     ad.operator_name = operator_name.map(|s| s.to_string());
     ad.relay_url = fee_schedule.advertise_relay.clone();
     ad.reserves_amount_sats = ledger.reserves_amount() / 1000; // msats to sats for advertisement
-    ad.collateral_enforcement_block = ledger.state.collateral_enforcement_block.unwrap_or(0);
     ad.received_collateral_sats = ledger.state.received_collateral_amount / 1000;
 
     // Apply fee schedule from CLI flags
@@ -1168,9 +1166,7 @@ async fn auto_advertise_ledger(
 
 /// Open a new ledger backed by our reserves UTXO
 async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    // Parse positional arguments: [enforcement_block]
-    // and fee schedule flags
-    let mut enforcement_block: u32 = 0; // Default: immediate enforcement
+    // Parse fee schedule flags
     let mut config_args = Vec::new();
 
     // Fee schedule (advertised minimums)
@@ -1224,10 +1220,7 @@ async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
                 }
             }
         } else {
-            // First positional argument - enforcement block
-            enforcement_block = args[i]
-                .parse()
-                .map_err(|_| format!("Invalid enforcement block: {}", args[i]))?;
+            // Skip unknown positional arguments (enforcement_block was removed)
         }
         i += 1;
     }
@@ -1260,10 +1253,9 @@ async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     println!("Opening ledger backed by reserves UTXO");
     println!("  Our node ID: {}", node.node_id);
     println!("  Reserves: {} sats", reserves_balance);
-    println!("  Collateral enforcement block: {}", enforcement_block);
 
     // Create the ledger
-    let ledger = node.open_ledger(enforcement_block)?;
+    let ledger = node.open_ledger()?;
 
     println!("\nLedger opened successfully!");
     println!("  Ledger ID: {}", ledger.ledger_id_hex());
@@ -1271,14 +1263,6 @@ async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     println!("  Reserves: {}", ledger.state.reserves_key);
     println!("  Sequence: {}", ledger.state.sequence);
     println!("  Hash: {:02x?}", &ledger.state.hash[0..8]);
-    if let Some(block) = ledger.state.collateral_enforcement_block {
-        if block > 0 {
-            println!("  Bootstrap phase: collateral requirements enforced at block {}", block);
-        } else {
-            println!("  Immediate collateral enforcement");
-        }
-    }
-
     // Get ledger identifiers
     let ledger_id = ledger.ledger_id_hex();
     let reserves_key = ledger.state.reserves_key.clone();
@@ -1354,9 +1338,6 @@ async fn ledger_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
             ledger.state.deposits.len(),
             ledger.total_deposit_balance());
         println!("    Reserves: {} sats", ledger.reserves_amount() / 1000);
-        if let Some(block) = ledger.state.collateral_enforcement_block {
-            println!("    Enforcement block: {}", block);
-        }
         println!();
     }
 
@@ -2063,7 +2044,6 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
     ad.fee_period_blocks = fee_period_blocks;
     ad.max_deposit_sats = max_deposit_sats;
     ad.min_deposit_sats = min_deposit_sats;
-    ad.collateral_enforcement_block = ledger.state.collateral_enforcement_block.unwrap_or(0);
     ad.reserves_amount_sats = ledger.reserves_amount() / 1000; // msats to sats for advertisement
 
     // Calculate obligations and headroom
