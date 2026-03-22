@@ -48,7 +48,7 @@ struct TransferWork {
     sender_idx: usize,
     receiver_idx: usize,
     amount_sats: u64,
-    fee_sats: u64,
+    fee_msats: u64,
     preimage: [u8; 32],
     hash: [u8; 32],
 }
@@ -154,9 +154,9 @@ impl SimTransport {
                 break;
             }
             if start.elapsed() > Duration::from_secs(10) {
-                return Err("Timeout connecting to relay".into());
+                return Err("No relay connected after 10s".into());
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
         // Subscribe to responses for our ledger IDs
@@ -330,7 +330,7 @@ impl WalletRunner {
         };
         // Collect all known relay URLs so wallet can reach any operator's primary relay
         let mut relays = vec![config.relay.clone()];
-        let (_, relay_map) = scan_docker_for_ledgers();
+        let (_, relay_map) = scan_for_ledgers();
         for url in relay_map.values() {
             if !relays.contains(url) {
                 relays.push(url.clone());
@@ -399,12 +399,12 @@ impl WalletRunner {
             }
         }
 
-        // Also scan Docker operator containers for ledger JSONL files
-        let (docker_ids, ledger_relay_map) = scan_docker_for_ledgers();
-        if !docker_ids.is_empty() {
-            eprintln!("  Found {} ledger(s) from Docker scan", docker_ids.len());
+        // Also scan operator data directories (or Docker containers) for ledger JSONL files
+        let (host_ids, ledger_relay_map) = scan_for_ledgers();
+        if !host_ids.is_empty() {
+            eprintln!("  Found {} ledger(s) from operator scan", host_ids.len());
         }
-        for id in docker_ids {
+        for id in host_ids {
             if !ledger_ids.contains(&id) {
                 ledger_ids.push(id);
             }
@@ -601,46 +601,96 @@ fn operator_relay_url(container: &str) -> Option<String> {
 
 /// Scan Docker containers for ledgers. Returns (ledger_ids, ledger→relay_url mapping).
 /// Only maps ledgers that are OWNED by a container (Role=Operator), not joined ones.
-fn scan_docker_for_ledgers() -> (Vec<String>, HashMap<String, String>) {
-    // List running operator containers
-    let output = match std::process::Command::new("docker")
-        .args(["ps", "--format", "{{.Names}}"])
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => return (Vec::new(), HashMap::new()),
-    };
-    let container_names: Vec<String> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|name| {
-            // Only operator containers, skip infrastructure
-            !name.contains("bitcoind") && !name.contains("electrs")
-                && !name.contains("relay") && !name.contains("grafana")
-                && !name.contains("prometheus") && !name.contains("miner")
-        })
-        .map(|s| s.to_string())
-        .collect();
-
+fn scan_for_ledgers() -> (Vec<String>, HashMap<String, String>) {
     let mut ledger_ids = std::collections::HashSet::new();
     let mut ledger_relay_map: HashMap<String, String> = HashMap::new();
-    for container in &container_names {
-        let relay_url = operator_relay_url(container);
-        // For each ledger file, check if this container is the Operator (not Partner).
-        // The first line of each JSONL file is {"type":"Role","role":"Operator"|"Partner"}.
+
+    // Scan host data directories for bare-process operators.
+    // Look in ./data/{operator}/wallet/ledgers/*.jsonl relative to the binary's
+    // grandparent (repo_root/deposits-tools/data/) or relative to cwd.
+    let candidates = [
+        std::path::PathBuf::from("data"),
+        std::path::PathBuf::from("deposits-tools/data"),
+        // Also try the env var DATA_ROOT if set
+    ];
+    let data_root_env = std::env::var("DATA_ROOT").ok().map(std::path::PathBuf::from);
+    let operators = ["alice", "bob", "charlie", "diana"];
+
+    for base in candidates.iter().chain(data_root_env.iter()) {
+        for op in &operators {
+            let ledgers_dir = base.join(op).join("wallet").join("ledgers");
+            let entries = match std::fs::read_dir(&ledgers_dir) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let relay_url = operator_relay_url(op);
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                let lid = match path.file_stem().and_then(|s| s.to_str()) {
+                    Some(s) if s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()) => s.to_string(),
+                    _ => continue,
+                };
+                // Check first line for Role=Operator
+                if let Ok(file) = std::fs::File::open(&path) {
+                    use std::io::BufRead;
+                    if let Some(Ok(first_line)) = std::io::BufReader::new(file).lines().next() {
+                        if !first_line.contains("Operator") {
+                            continue;
+                        }
+                    }
+                }
+                ledger_ids.insert(lid.clone());
+                if let Some(ref url) = relay_url {
+                    ledger_relay_map.insert(lid, url.clone());
+                }
+            }
+        }
+        // If we found anything, stop (don't double-count)
+        if !ledger_ids.is_empty() {
+            break;
+        }
+    }
+
+    // Fallback: scan Docker containers (legacy mode)
+    if ledger_ids.is_empty() {
         let output = match std::process::Command::new("docker")
-            .args(["exec", container, "sh", "-c",
-                   "for f in /data/wallet/ledgers/*.jsonl; do role=$(head -1 \"$f\"); lid=$(basename \"$f\" .jsonl); if echo \"$role\" | grep -q Operator; then echo \"$lid\"; fi; done"])
+            .args(["ps", "--format", "{{.Names}}"])
             .output()
         {
-            Ok(o) if o.status.success() => o,
-            _ => continue,
+            Ok(o) => o,
+            Err(_) => return (Vec::new(), HashMap::new()),
         };
-        for line in String::from_utf8_lossy(&output.stdout).lines() {
-            let id = line.trim();
-            if id.len() == 64 && id.chars().all(|c| c.is_ascii_hexdigit()) {
-                ledger_ids.insert(id.to_string());
-                if let Some(ref url) = relay_url {
-                    ledger_relay_map.insert(id.to_string(), url.clone());
+        let container_names: Vec<String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|name| {
+                !name.contains("bitcoind") && !name.contains("electrs")
+                    && !name.contains("relay") && !name.contains("grafana")
+                    && !name.contains("prometheus") && !name.contains("miner")
+                    && !name.contains("wallet")
+            })
+            .map(|s| s.to_string())
+            .collect();
+
+        for container in &container_names {
+            let relay_url = operator_relay_url(container);
+            let output = match std::process::Command::new("docker")
+                .args(["exec", container, "sh", "-c",
+                       "for f in /data/wallet/ledgers/*.jsonl; do role=$(head -1 \"$f\"); lid=$(basename \"$f\" .jsonl); if echo \"$role\" | grep -q Operator; then echo \"$lid\"; fi; done"])
+                .output()
+            {
+                Ok(o) if o.status.success() => o,
+                _ => continue,
+            };
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                let id = line.trim();
+                if id.len() == 64 && id.chars().all(|c| c.is_ascii_hexdigit()) {
+                    ledger_ids.insert(id.to_string());
+                    if let Some(ref url) = relay_url {
+                        ledger_relay_map.insert(id.to_string(), url.clone());
+                    }
                 }
             }
         }
@@ -1050,7 +1100,8 @@ async fn execute_transfer(
 
     // Convert to msats for signing and request
     let amount_msats = work.amount_sats * 1000;
-    let fee_msats = work.fee_sats * 1000;
+    // Fee is computed in msats: fixed_msats + rate_bps on amount_msats
+    let fee_msats = work.fee_msats;
 
     // Compute signing message and transfer_id (all in msats)
     let msg_hash = deposits_core::signature_utils::transfer_lock_signing_message(
@@ -1244,7 +1295,7 @@ fn parse_args() -> Result<Config, Box<dyn std::error::Error>> {
         max_workers: 50,
         min_amount: 10,
         max_amount: 50,
-        timeout_height: 99999,
+        timeout_height: 0, // 0 = auto (current_block + 500)
         fee_fixed: 2,
         fee_rate_bps: 20,
         max_transfers: 0,
@@ -1393,7 +1444,7 @@ fn parse_args() -> Result<Config, Box<dyn std::error::Error>> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = parse_args()?;
+    let mut config = parse_args()?;
 
     eprintln!("=== Transfer Simulator ===");
     eprintln!("Relay:       {}", config.relay);
@@ -1458,7 +1509,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("{} eligible deposits (on ledgers with >=2 deposits)", eligible_deposit_indices.len());
 
     // Discover ledger→relay mapping (which operator owns which ledger)
-    let (_, ledger_relay_map) = scan_docker_for_ledgers();
+    let (_, ledger_relay_map) = scan_for_ledgers();
     if !ledger_relay_map.is_empty() {
         eprintln!("Relay routing: {} ledgers mapped to per-operator relays", ledger_relay_map.len());
         let mut relay_counts: HashMap<&str, usize> = HashMap::new();
@@ -1701,6 +1752,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let topoff_funding_sats = config.funding_sats;
 
+    // Resolve timeout_height: 0 → current_block + 500
+    if config.timeout_height == 0 {
+        let output = std::process::Command::new("sh")
+            .args(["-c", &format!("{} getblockcount", config.bitcoin_cli)])
+            .output();
+        let height: u32 = output.ok()
+            .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
+            .unwrap_or(200);
+        config.timeout_height = height + 500;
+        eprintln!("Timeout height: {} (current block {} + 500)", config.timeout_height, height);
+    }
+
     eprintln!("\nStarting transfers (ramp 5 → {} TPS, {} workers, no throttle)...\n",
         config.target_tps, config.max_workers);
 
@@ -1810,8 +1873,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut rng = OsRng;
         let range = config.max_amount - config.min_amount + 1;
         let amount_sats = config.min_amount + (rng.next_u64() % range);
-        let fee_sats = config.fee_fixed + (amount_sats * config.fee_rate_bps / 10000);
-        let debit_msats = (amount_sats + fee_sats) as i64 * 1000;
+        let amount_msats = amount_sats * 1000;
+        let fee_msats = config.fee_fixed + (amount_msats * config.fee_rate_bps / 10000);
+        let debit_msats = amount_msats as i64 + fee_msats as i64;
 
         // Pre-debit balance atomically
         let old_bal = sender.balance_msats.fetch_sub(debit_msats, Ordering::Relaxed);
@@ -1819,7 +1883,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             sender.balance_msats.fetch_add(debit_msats, Ordering::Relaxed);
             // Check if all deposits are depleted
             if last_dispatch_time.elapsed() > Duration::from_secs(30) {
-                let min_needed = (config.min_amount + config.fee_fixed) as i64 * 1000;
+                let min_amount_msats = config.min_amount * 1000;
+                let min_fee_msats = config.fee_fixed + (min_amount_msats * config.fee_rate_bps / 10000);
+                let min_needed = min_amount_msats as i64 + min_fee_msats as i64;
                 let any_funded = deposits.iter().any(|d| d.balance_msats.load(Ordering::Relaxed) >= min_needed);
                 if !any_funded {
                     eprintln!("\nAll deposits depleted — no deposit has enough balance for min transfer ({} sats + {} fee):", config.min_amount, config.fee_fixed);
@@ -1855,7 +1921,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             sender_idx,
             receiver_idx,
             amount_sats,
-            fee_sats,
+            fee_msats,
             preimage,
             hash,
         };
@@ -1889,7 +1955,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 metrics_c.volume_sats.fetch_add(work.amount_sats, Ordering::Relaxed);
             } else if !result.locked {
                 // Lock failed — restore sender balance
-                let restore = (work.amount_sats + work.fee_sats) as i64 * 1000;
+                let restore = work.amount_sats as i64 * 1000 + work.fee_msats as i64;
                 deposits_c[work.sender_idx].balance_msats.fetch_add(restore, Ordering::Relaxed);
                 metrics_c.failed.fetch_add(1, Ordering::Relaxed);
                 if result.error.as_deref().map_or(false, |e| e.contains("timeout")) {
