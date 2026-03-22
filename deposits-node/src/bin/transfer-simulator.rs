@@ -689,86 +689,126 @@ async fn batch_open_deposits(
     let mut key_index = load_deposit_key_index(data_dir);
     let mut created = Vec::new();
 
+    // Prepare all deposit info upfront
+    struct DepInfo {
+        alias: String,
+        ledger_id: String,
+        pubkey_hex: String,
+        key_idx: u32,
+    }
+    let mut dep_infos = Vec::new();
     for (i, alias) in aliases.iter().enumerate() {
-        let ledger_id = &ledger_ids[i % ledger_ids.len()];
-
+        let ledger_id = ledger_ids[i % ledger_ids.len()].clone();
         let secret_key = derive_secret_key_at_index(seed, network, key_index)?;
         let pubkey = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
-        let pubkey_hex = hex::encode(pubkey.serialize());
-
-        // deposit_open
-        let open_params = serde_json::json!({
-            "deposit_pubkey": pubkey_hex,
-            "fee_fixed": 0_u64,
-            "fee_bps": 0_u64,
-            "fee_frequency": 2016_u64,
+        dep_infos.push(DepInfo {
+            alias: alias.clone(),
+            ledger_id,
+            pubkey_hex: hex::encode(pubkey.serialize()),
+            key_idx: key_index,
         });
+        key_index += 1;
+    }
 
-        let (_, open_rx) = transport.send_request(ledger_id, "deposit_open", open_params).await
-            .map_err(|e| -> Box<dyn std::error::Error> { e })?;
-        match tokio::time::timeout(Duration::from_secs(15), open_rx).await {
-            Ok(Ok(resp)) => {
-                if !resp.success {
-                    let err = resp.error.as_deref().unwrap_or("unknown");
-                    if !err.contains("already exists") && !err.contains("Deposit already") {
-                        eprintln!("  {} deposit_open failed: {}", alias, err);
-                        continue;
-                    }
-                }
+    // Phase 1: Fire all deposit_open requests concurrently (batched by ledger to avoid flooding)
+    const BATCH_SIZE: usize = 8;
+    let mut opened = Vec::new(); // indices that succeeded
+
+    for batch in dep_infos.chunks(BATCH_SIZE) {
+        let mut futures = Vec::new();
+        for (batch_idx, info) in batch.iter().enumerate() {
+            let open_params = serde_json::json!({
+                "deposit_pubkey": info.pubkey_hex,
+                "fee_fixed": 0_u64,
+                "fee_bps": 0_u64,
+                "fee_frequency": 2016_u64,
+            });
+            let rx_result = transport.send_request(&info.ledger_id, "deposit_open", open_params).await;
+            match rx_result {
+                Ok((_, rx)) => futures.push((batch_idx, rx)),
+                Err(e) => eprintln!("  {} deposit_open send failed: {}", info.alias, e),
             }
-            Ok(Err(_)) => { eprintln!("  {} deposit_open: channel closed", alias); continue; }
-            Err(_) => { eprintln!("  {} deposit_open: timeout", alias); continue; }
         }
 
-        // make_offer
-        let offer_params = serde_json::json!({
-            "deposit_pubkey": pubkey_hex,
-            "max_sats": amount_sats,
-            "min_sats": std::cmp::min(1000_u64, amount_sats.saturating_sub(1).max(1)),
-            "blocks_valid": 10000_u64,
-            "fee_fixed": 0_u64,
-            "fee_bps": 0_u64,
-            "fee_frequency": 2016_u64,
-        });
-
-        let (_, offer_rx) = transport.send_request(ledger_id, "make_offer", offer_params).await
-            .map_err(|e| -> Box<dyn std::error::Error> { e })?;
-        match tokio::time::timeout(Duration::from_secs(15), offer_rx).await {
-            Ok(Ok(resp)) if resp.success => {
-                if let Some(ref result) = resp.result {
-                    let address = result.get("funding_address").and_then(|v| v.as_str()).unwrap_or("");
-                    let offer_id = result.get("offer_id").and_then(|v| v.as_str()).unwrap_or("");
-                    let min = result.get("min_sats").and_then(|v| v.as_u64()).unwrap_or(1);
-                    let max = result.get("max_sats").and_then(|v| v.as_u64()).unwrap_or(amount_sats);
-
-                    if address.is_empty() || offer_id.is_empty() {
-                        eprintln!("  {} make_offer: missing fields", alias);
-                        continue;
+        // Collect results
+        for (batch_idx, rx) in futures {
+            let info = &batch[batch_idx];
+            match tokio::time::timeout(Duration::from_secs(30), rx).await {
+                Ok(Ok(resp)) => {
+                    if resp.success || resp.error.as_deref().map_or(false, |e| e.contains("already")) {
+                        opened.push(info.alias.clone());
+                    } else {
+                        eprintln!("  {} deposit_open failed: {}", info.alias, resp.error.as_deref().unwrap_or("unknown"));
                     }
-
-                    eprintln!("  {} → {} (ledger {}...)", alias, &address[..20], &ledger_id[..8]);
-                    created.push(serde_json::json!({
-                        "alias": alias,
-                        "offer_id": offer_id,
-                        "ledger_id": ledger_id,
-                        "funding_address": address,
-                        "deposit_pubkey": pubkey_hex,
-                        "key_index": key_index,
-                        "min_sats": min,
-                        "max_sats": max,
-                        "status": "pending",
-                        "created_at": chrono::Utc::now().to_rfc3339(),
-                    }));
-                    key_index += 1;
-                } else {
-                    eprintln!("  {} make_offer: no result", alias);
                 }
+                Ok(Err(_)) => eprintln!("  {} deposit_open: channel closed", info.alias),
+                Err(_) => eprintln!("  {} deposit_open: timeout", info.alias),
             }
-            Ok(Ok(resp)) => {
-                eprintln!("  {} make_offer failed: {}", alias, resp.error.as_deref().unwrap_or("unknown"));
+        }
+    }
+
+    // Phase 2: Fire make_offer for all opened deposits
+    let opened_set: std::collections::HashSet<&str> = opened.iter().map(|s| s.as_str()).collect();
+
+    for batch in dep_infos.chunks(BATCH_SIZE) {
+        let batch_infos: Vec<&DepInfo> = batch.iter().filter(|i| opened_set.contains(i.alias.as_str())).collect();
+        if batch_infos.is_empty() { continue; }
+
+        let mut futures = Vec::new();
+        for info in &batch_infos {
+            let offer_params = serde_json::json!({
+                "deposit_pubkey": info.pubkey_hex,
+                "max_sats": amount_sats,
+                "min_sats": std::cmp::min(1000_u64, amount_sats.saturating_sub(1).max(1)),
+                "blocks_valid": 10000_u64,
+                "fee_fixed": 0_u64,
+                "fee_bps": 0_u64,
+                "fee_frequency": 2016_u64,
+            });
+            let rx_result = transport.send_request(&info.ledger_id, "make_offer", offer_params).await;
+            match rx_result {
+                Ok((_, rx)) => futures.push((*info, rx)),
+                Err(e) => eprintln!("  {} make_offer send failed: {}", info.alias, e),
             }
-            Ok(Err(_)) => { eprintln!("  {} make_offer: channel closed", alias); }
-            Err(_) => { eprintln!("  {} make_offer: timeout", alias); }
+        }
+
+        for (info, rx) in futures {
+            match tokio::time::timeout(Duration::from_secs(30), rx).await {
+                Ok(Ok(resp)) if resp.success => {
+                    if let Some(ref result) = resp.result {
+                        let address = result.get("funding_address").and_then(|v| v.as_str()).unwrap_or("");
+                        let offer_id = result.get("offer_id").and_then(|v| v.as_str()).unwrap_or("");
+                        let min = result.get("min_sats").and_then(|v| v.as_u64()).unwrap_or(1);
+                        let max = result.get("max_sats").and_then(|v| v.as_u64()).unwrap_or(amount_sats);
+
+                        if address.is_empty() || offer_id.is_empty() {
+                            eprintln!("  {} make_offer: missing fields", info.alias);
+                            continue;
+                        }
+
+                        eprintln!("  {} → {} (ledger {}...)", info.alias, &address[..20], &info.ledger_id[..8]);
+                        created.push(serde_json::json!({
+                            "alias": info.alias,
+                            "offer_id": offer_id,
+                            "ledger_id": info.ledger_id,
+                            "funding_address": address,
+                            "deposit_pubkey": info.pubkey_hex,
+                            "key_index": info.key_idx,
+                            "min_sats": min,
+                            "max_sats": max,
+                            "status": "pending",
+                            "created_at": chrono::Utc::now().to_rfc3339(),
+                        }));
+                    } else {
+                        eprintln!("  {} make_offer: no result", info.alias);
+                    }
+                }
+                Ok(Ok(resp)) => {
+                    eprintln!("  {} make_offer failed: {}", info.alias, resp.error.as_deref().unwrap_or("unknown"));
+                }
+                Ok(Err(_)) => eprintln!("  {} make_offer: channel closed", info.alias),
+                Err(_) => eprintln!("  {} make_offer: timeout", info.alias),
+            }
         }
     }
 
