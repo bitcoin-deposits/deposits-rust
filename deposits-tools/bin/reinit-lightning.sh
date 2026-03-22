@@ -1,7 +1,7 @@
 #!/bin/bash
 # Reinitialize the full test network with Lightning sidecars
 #
-# Tears down everything, optionally rebuilds images, then runs setup-4op-lightning.sh.
+# Tears down everything, optionally rebuilds binaries, then runs setup-4op-lightning.sh.
 #
 # Usage:
 #   ./bin/reinit-lightning.sh           # Full teardown + rebuild + setup
@@ -11,7 +11,6 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/_common.sh"
-TOOLS_DIR="${SCRIPT_DIR}/.."
 
 DC_LIGHTNING="docker compose -f $TOOLS_DIR/docker-compose.yml --profile lightning"
 
@@ -40,27 +39,29 @@ done
 
 log_info "=== Reinitializing + Lightning Test Network ==="
 
-# Stop any eve containers from setup-scale.sh
-for c in $(docker ps -aq --filter 'name=eve'); do
-    docker stop "$c" 2>/dev/null || true
-    docker rm "$c" 2>/dev/null || true
-done
-for v in $(docker volume ls -q --filter 'name=eve'); do
-    docker volume rm "$v" 2>/dev/null || true
-done
+# Stop node processes
+log_info "Stopping node processes..."
+stop_all_nodes
 
-# Stop and remove everything
+# Stop any eve scale node processes
+pkill -f "deposits-node run.*eve" 2>/dev/null || true
+
+# Stop and remove all containers (including lightning sidecars)
 log_info "Stopping all containers..."
 $DC_LIGHTNING down -v --remove-orphans 2>/dev/null || true
 
-# Clean up containers not managed by compose
+# Clean up LDK containers/volumes not managed by compose
 for node in alice bob charlie diana; do
-    docker stop "${node}" "${node}-ln" 2>/dev/null || true
-    docker rm "${node}" "${node}-ln" 2>/dev/null || true
+    docker stop "${node}-ln" 2>/dev/null || true
+    docker rm "${node}-ln" 2>/dev/null || true
 done
 for v in $(docker volume ls -q --filter 'name=ldk_'); do
     docker volume rm "$v" 2>/dev/null || true
 done
+
+# Clear node data
+log_info "Clearing node data ($DATA_ROOT)..."
+rm -rf "$DATA_ROOT"
 
 # Clear wallet data
 WALLET_DATA_DIR="${WALLET_DATA_DIR:-$HOME/.deposits-wallet}"
@@ -72,17 +73,17 @@ fi
 docker image prune -f 2>/dev/null || true
 
 if ! $QUICK; then
-    log_info "Building local deposits-wallet binary..."
-    cargo build --release --manifest-path "$TOOLS_DIR/../Cargo.toml" -p deposits-node --bin deposits-wallet 2>&1 | tail -3
-
-    log_info "Building deposits-node image..."
-    $DC_LIGHTNING build --no-cache alice
+    log_info "Building deposits-node and deposits-wallet binaries..."
+    cargo build --release --manifest-path "$REPO_ROOT/Cargo.toml" -p deposits-node --bin deposits-node --bin deposits-wallet 2>&1 | tail -3
 
     log_info "Building ldk-node image..."
     docker build -f "$TOOLS_DIR/Dockerfile.ldk-node" -t ldk-node:latest "$HOME/workspace/"
 fi
 
-# Start infrastructure
+# Create relay bind-mount directories
+mkdir -p "$DATA_ROOT/relays/alice" "$DATA_ROOT/relays/bob" "$DATA_ROOT/relays/charlie" "$DATA_ROOT/relays/diana" "$DATA_ROOT/relays/ledgers"
+
+# Start infrastructure (including lightning sidecars)
 log_info "Starting infrastructure..."
 $DC_LIGHTNING up -d bitcoin electrs relay-alice relay-bob relay-charlie relay-diana relay-ledgers wallet
 

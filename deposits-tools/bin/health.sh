@@ -27,9 +27,9 @@ for node in "${TARGET_NODES[@]}"; do
 
     echo -e "${BLUE}=== $node ===${NC}"
     if [ -n "$LEDGER_ID" ]; then
-        run_bdk_cmd "$node" ledger health "$LEDGER_ID" 2>&1 | filter_logs
+        run_node_cmd "$node" ledger health "$LEDGER_ID" 2>&1 | filter_logs
     else
-        run_bdk_cmd "$node" ledger health 2>&1 | filter_logs
+        run_node_cmd "$node" ledger health 2>&1 | filter_logs
     fi
     echo
 done

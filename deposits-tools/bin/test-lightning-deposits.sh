@@ -49,7 +49,7 @@ test_fail() {
     TESTS_FAILED=$((TESTS_FAILED + 1))
 }
 
-# Helper to call ldk-cli for BDK Lightning nodes
+# Helper to call ldk-cli for Deposit nodes
 ldk_cli() {
     "$SCRIPT_DIR/ldk-cli.sh" "$@"
 }
@@ -95,19 +95,19 @@ verify_lightning_channel() {
 }
 
 # ============================================================================
-# Phase 2: Setup BDK operators with deposits
+# Phase 2: Setup operators with deposits
 # ============================================================================
 
 setup_operators() {
     log_info ""
-    log_info "=== Phase 2: Setup BDK Operators ==="
+    log_info "=== Phase 2: Setup Operators ==="
     echo ""
 
     for op in alice bob charlie diana; do
         log_info "Setting up $op..."
 
         # Get node info
-        local info=$(run_bdk_cmd "$op" info 2>&1)
+        local info=$(run_node_cmd "$op" info 2>&1)
         local node_id=$(echo "$info" | grep "Node ID:" | awk '{print $3}')
         local balance=$(echo "$info" | grep "Wallet balance:" | awk '{print $3}')
 
@@ -138,7 +138,7 @@ create_ledgers() {
         log_info "Creating reserves for $op..."
 
         # Create reserves
-        local reserves_output=$(run_bdk_cmd "$op" reserves 50000000 2>&1)
+        local reserves_output=$(run_node_cmd "$op" reserves 50000000 2>&1)
 
         if echo "$reserves_output" | grep -q "Reserves created\|already have"; then
             test_pass "$op has reserves"
@@ -154,14 +154,14 @@ create_ledgers() {
     for op in alice bob charlie diana; do
         log_info "Opening ledger for $op..."
 
-        local ledger_output=$(run_bdk_cmd "$op" ledger open 0 2>&1)
+        local ledger_output=$(run_node_cmd "$op" ledger open 0 2>&1)
 
         if echo "$ledger_output" | grep -q "Ledger opened\|already"; then
             local reserves_id=$(echo "$ledger_output" | grep "Reserves:.*bcrt1" | awk '{print $2}')
             local ledger_id=$(echo "$ledger_output" | grep "Ledger ID:" | awk '{print $3}')
             if [ -z "$reserves_id" ]; then
                 # Fallback: get from info
-                local info=$(run_bdk_cmd "$op" info 2>&1)
+                local info=$(run_node_cmd "$op" info 2>&1)
                 reserves_id=$(echo "$info" | grep "Reserves address:" | awk '{print $3}')
             fi
             store_value "reserves_id_$op" "$reserves_id"
@@ -207,10 +207,10 @@ add_quorum_members() {
             local member_short="$member"
 
             # Owner adds member to their quorum (pass member's ledger ID for collateral binding)
-            local add_output=$(run_bdk_cmd "$owner" partner add "$owner_reserves" "$member_node_id" "$member_ledger_id" 2>&1)
+            local add_output=$(run_node_cmd "$owner" partner add "$owner_reserves" "$member_node_id" "$member_ledger_id" 2>&1)
             if echo "$add_output" | grep -q "Quorum member added\|added"; then
                 # Member records the join on their side
-                local join_output=$(run_bdk_cmd "$member" partner join "$member_reserves" "$owner_node_id" "$owner_reserves" "$membership_expires" 2>&1)
+                local join_output=$(run_node_cmd "$member" partner join "$member_reserves" "$owner_node_id" "$owner_reserves" "$membership_expires" 2>&1)
                 if echo "$join_output" | grep -q "Quorum join recorded\|recorded"; then
                     log_info "  $member_short joined $owner_short's quorum"
                 else
@@ -241,7 +241,7 @@ advertise_with_fees() {
         log_info "Advertising $op_short's ledger with fees..."
         # Note: arguments must be separate for proper parsing
         # --fee-period 10 for fast testing (10 blocks instead of 2016)
-        local ad_output=$(run_bdk_cmd "$op" ledger advertise "$reserves_id" \
+        local ad_output=$(run_node_cmd "$op" ledger advertise "$reserves_id" \
             --annual-fee "100" \
             --min-fee "1000" \
             --fee-period "10" 2>&1)
@@ -275,7 +275,7 @@ create_deposits() {
         local op_short="$op"
 
         # Generate deposit keypair
-        local keypair=$(run_bdk_cmd "$op" keygen 2>&1)
+        local keypair=$(run_node_cmd "$op" keygen 2>&1)
         local secret=$(echo "$keypair" | awk '{print $1}')
         local pubkey=$(echo "$keypair" | awk '{print $2}')
 
@@ -285,7 +285,7 @@ create_deposits() {
         log_info "Opening deposit on $op_short's ledger..."
 
         # Open deposit
-        local open_output=$(run_bdk_cmd "$op" deposit open "$reserves_id" "$pubkey" 2>&1)
+        local open_output=$(run_node_cmd "$op" deposit open "$reserves_id" "$pubkey" 2>&1)
 
         if echo "$open_output" | grep -q "Deposit opened"; then
             test_pass "$op_short opened deposit: ${pubkey:0:16}..."
@@ -299,7 +299,7 @@ create_deposits() {
         local fund_amount=100000
 
         # Create a deposit offer
-        local offer_output=$(run_bdk_cmd "$op" deposit offer "$reserves_id" "$pubkey" "$fund_amount" "10000" "144" 2>&1)
+        local offer_output=$(run_node_cmd "$op" deposit offer "$reserves_id" "$pubkey" "$fund_amount" "10000" "144" 2>&1)
         local offer_id=$(echo "$offer_output" | grep "Offer ID:" | awk '{print $3}')
         local funding_address=$(echo "$offer_output" | grep "Funding address:" | awk '{print $3}')
 
@@ -312,13 +312,13 @@ create_deposits() {
                 mine_blocks 1
 
                 # Check and complete
-                local check_output=$(run_bdk_cmd "$op" deposit check "$offer_id" 2>&1)
+                local check_output=$(run_node_cmd "$op" deposit check "$offer_id" 2>&1)
 
                 if echo "$check_output" | grep -q "Funding detected"; then
                     local txid=$(echo "$check_output" | grep "Transaction:" | awk '{print $2}')
                     local detected_amount=$(echo "$check_output" | grep "Amount:" | awk '{print $2}')
 
-                    local complete_output=$(run_bdk_cmd "$op" deposit complete "$offer_id" "$txid" "$detected_amount" 2>&1)
+                    local complete_output=$(run_node_cmd "$op" deposit complete "$offer_id" "$txid" "$detected_amount" 2>&1)
 
                     if echo "$complete_output" | grep -q "completed\|credited"; then
                         test_pass "$op_short deposit funded with $detected_amount sats"
@@ -418,7 +418,7 @@ test_deposit_payment_bob_to_alice() {
     local zero_sig="00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
 
     # Lock the payment
-    local lock_output=$(run_bdk_cmd "bob" ln lock \
+    local lock_output=$(run_node_cmd "bob" ln lock \
         "$bob_reserves" "$bob_deposit" "$payment_amount_msat" "$payment_id" "$zero_sig" 2>&1)
 
     if echo "$lock_output" | grep -q "Payment locked\|Locked balance"; then
@@ -430,7 +430,7 @@ test_deposit_payment_bob_to_alice() {
     fi
 
     # Fulfill with preimage
-    local fulfill_output=$(run_bdk_cmd "bob" ln fulfill \
+    local fulfill_output=$(run_node_cmd "bob" ln fulfill \
         "$bob_reserves" "$bob_deposit" "$payment_amount_msat" "$payment_id" "$preimage" "$zero_sig" 2>&1)
 
     if echo "$fulfill_output" | grep -q "Payment fulfilled\|New balance"; then
@@ -446,7 +446,7 @@ test_deposit_payment_bob_to_alice() {
     log_info ""
     log_info "Step 4: Alice crediting deposit with received payment..."
 
-    local credit_output=$(run_bdk_cmd "alice" deposit credit \
+    local credit_output=$(run_node_cmd "alice" deposit credit \
         "$alice_reserves" "$alice_deposit" "$payment_amount_msat" "$payment_id" 2>&1)
 
     if echo "$credit_output" | grep -q "Deposit credited\|New balance"; then
@@ -458,8 +458,8 @@ test_deposit_payment_bob_to_alice() {
     fi
 
     # Broadcast to Nostr
-    run_bdk_cmd "alice" nostr export >/dev/null 2>&1 || true
-    run_bdk_cmd "bob" nostr export >/dev/null 2>&1 || true
+    run_node_cmd "alice" nostr export >/dev/null 2>&1 || true
+    run_node_cmd "bob" nostr export >/dev/null 2>&1 || true
 }
 
 # ============================================================================
@@ -539,7 +539,7 @@ test_deposit_payment_alice_to_bob() {
     local zero_sig="00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
 
     # Lock the payment
-    local lock_output=$(run_bdk_cmd "alice" ln lock \
+    local lock_output=$(run_node_cmd "alice" ln lock \
         "$alice_reserves" "$alice_deposit" "$payment_amount_msat" "$payment_id" "$zero_sig" 2>&1)
 
     if echo "$lock_output" | grep -q "Payment locked\|Locked balance"; then
@@ -551,7 +551,7 @@ test_deposit_payment_alice_to_bob() {
     fi
 
     # Fulfill with preimage
-    local fulfill_output=$(run_bdk_cmd "alice" ln fulfill \
+    local fulfill_output=$(run_node_cmd "alice" ln fulfill \
         "$alice_reserves" "$alice_deposit" "$payment_amount_msat" "$payment_id" "$preimage" "$zero_sig" 2>&1)
 
     if echo "$fulfill_output" | grep -q "Payment fulfilled\|New balance"; then
@@ -567,7 +567,7 @@ test_deposit_payment_alice_to_bob() {
     log_info ""
     log_info "Step 4: Bob crediting deposit with received payment..."
 
-    local credit_output=$(run_bdk_cmd "bob" deposit credit \
+    local credit_output=$(run_node_cmd "bob" deposit credit \
         "$bob_reserves" "$bob_deposit" "$payment_amount_msat" "$payment_id" 2>&1)
 
     if echo "$credit_output" | grep -q "Deposit credited\|New balance"; then
@@ -579,8 +579,8 @@ test_deposit_payment_alice_to_bob() {
     fi
 
     # Broadcast to Nostr
-    run_bdk_cmd "alice" nostr export >/dev/null 2>&1 || true
-    run_bdk_cmd "bob" nostr export >/dev/null 2>&1 || true
+    run_node_cmd "alice" nostr export >/dev/null 2>&1 || true
+    run_node_cmd "bob" nostr export >/dev/null 2>&1 || true
 }
 
 # ============================================================================
@@ -613,7 +613,7 @@ show_final_state() {
         local reserves_id=$(get_value "reserves_id_$op")
         local op_short="$op"
 
-        local deposits=$(run_bdk_cmd "$op" deposit ls "$reserves_id" 2>&1)
+        local deposits=$(run_node_cmd "$op" deposit ls "$reserves_id" 2>&1)
         local balance=$(echo "$deposits" | grep "Balance:" | head -1 | awk '{print $2}')
 
         log_info "  $op_short: $balance msat"
@@ -632,7 +632,7 @@ test_fee_collection() {
 
     # Get initial balances for alice's deposit
     local alice_reserves=$(get_value "reserves_id_alice")
-    local alice_deposit_before=$(run_bdk_cmd alice deposit ls "$alice_reserves" 2>&1 | grep "Balance:" | head -1 | awk '{print $2}')
+    local alice_deposit_before=$(run_node_cmd alice deposit ls "$alice_reserves" 2>&1 | grep "Balance:" | head -1 | awk '{print $2}')
     log_info "Alice deposit balance before: $alice_deposit_before msat"
 
     # Mine enough blocks to trigger fee collection (fee period is 10 blocks)
@@ -641,10 +641,10 @@ test_fee_collection() {
 
     # Manually trigger fee collection
     log_info "Triggering fee collection..."
-    run_bdk_cmd alice deposit collect-fees 2>&1
+    run_node_cmd alice deposit collect-fees 2>&1
 
     # Check if balance decreased (fees were collected)
-    local alice_deposit_after=$(run_bdk_cmd alice deposit ls "$alice_reserves" 2>&1 | grep "Balance:" | head -1 | awk '{print $2}')
+    local alice_deposit_after=$(run_node_cmd alice deposit ls "$alice_reserves" 2>&1 | grep "Balance:" | head -1 | awk '{print $2}')
     log_info "Alice deposit balance after: $alice_deposit_after msat"
 
     if [ -n "$alice_deposit_before" ] && [ -n "$alice_deposit_after" ]; then
@@ -679,20 +679,20 @@ test_fee_rejection() {
     local alice_ledger=$(get_value "ledger_id_alice")
 
     # Generate a new keypair for this test
-    local keypair=$(run_bdk_cmd alice keygen 2>&1)
+    local keypair=$(run_node_cmd alice keygen 2>&1)
     local pubkey=$(echo "$keypair" | awk '{print $2}')
 
     log_info "Testing with deposit pubkey: ${pubkey:0:20}..."
 
     # Start Alice's watch loop in background
-    run_bdk_cmd alice nostr watch "$alice_ledger" > /tmp/fee_test_watch.log 2>&1 &
+    run_node_cmd alice nostr watch "$alice_ledger" > /tmp/fee_test_watch.log 2>&1 &
     local watch_pid=$!
     sleep 2
 
     # Test 1: Try with fees BELOW minimum (should fail)
     log_info "Test 1: Sending request with fees below minimum..."
     log_info "  (50 bps < min 100 bps, 500 fixed < min 1000)"
-    local low_fee_result=$(run_bdk_cmd bob nostr request "$alice_ledger" make_offer \
+    local low_fee_result=$(run_node_cmd bob nostr request "$alice_ledger" make_offer \
         "$pubkey" 50000 5000 144 50 500 10 2>&1)
     sleep 1
 
@@ -709,7 +709,7 @@ test_fee_rejection() {
     log_info "Test 2: Sending request with fees at minimum..."
     log_info "  (100 bps = min, 1000 fixed = min)"
     # annualized_msats for 1000/period at 10 blocks = 1000 * (52560/10) = 5256000
-    local ok_fee_result=$(run_bdk_cmd bob nostr request "$alice_ledger" make_offer \
+    local ok_fee_result=$(run_node_cmd bob nostr request "$alice_ledger" make_offer \
         "$pubkey" 50000 5000 144 100 5256000 10 2>&1)
     sleep 1
 

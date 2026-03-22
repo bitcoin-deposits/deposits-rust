@@ -16,8 +16,8 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BDK_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-OUT_DIR="$BDK_DIR/flamegraphs"
+TOOLS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+OUT_DIR="$TOOLS_DIR/flamegraphs"
 
 CONTAINER="${1:-all}"
 

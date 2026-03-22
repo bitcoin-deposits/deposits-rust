@@ -1,10 +1,8 @@
 #!/bin/bash
 # Redeploy nodes with new code, preserving all data
 #
-# Rebuilds the Rust binary and Docker image, then restarts only the BDK node
-# containers. All volumes (blockchain, electrs, relay DB, node /data) are kept.
-# Infrastructure services (bitcoind, electrs, strfry, prometheus, grafana) are
-# left running untouched.
+# Rebuilds the Rust binaries, then restarts the node processes.
+# All data directories and infrastructure services are left untouched.
 #
 # Usage:
 #   ./bin/redeploy.sh
@@ -16,21 +14,16 @@ source "$SCRIPT_DIR/_common.sh"
 
 log_info "=== Redeploying Nodes (data preserved) ==="
 
-# Build local wallet binary
-log_info "Building local deposits-wallet binary..."
-cargo build --release --manifest-path "$BDK_DIR/../../Cargo.toml" -p deposits-node --bin deposits-wallet 2>&1 | tail -3
+# Build binaries
+log_info "Building deposits-node and deposits-wallet binaries..."
+cargo build --release --manifest-path "$REPO_ROOT/Cargo.toml" -p deposits-node --bin deposits-node --bin deposits-wallet 2>&1 | tail -3
 
-# Rebuild Docker image
-log_info "Building deposits-node image..."
-$DC build --no-cache alice
-
-# Stop and recreate only the BDK node containers (volumes stay)
+# Stop and restart node processes (data dirs stay)
 log_info "Stopping nodes..."
-$DC stop alice bob charlie diana
+stop_all_nodes
 
-log_info "Recreating nodes with new image..."
-$DC rm -f alice bob charlie diana
-$DC up -d alice bob charlie diana
+log_info "Starting nodes with new binary..."
+start_all_nodes
 
 log_info "Waiting for nodes to initialize..."
 sleep 5

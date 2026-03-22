@@ -397,11 +397,12 @@ async fn discover(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         println!("{}. {} ({}...)", i + 1, operator_name, &ad.operator_pubkey[..8.min(ad.operator_pubkey.len())]);
         println!("   Ledger: {}", ad.ledger_id);
         println!("   Available: {} sats ({} BTC)",
-            ad.available_headroom_sats,
-            ad.available_headroom_sats as f64 / 100_000_000.0);
-        println!("   Reserves: {} sats, Obligations: {} sats",
-            ad.reserves_amount_sats, ad.total_obligations_sats);
-        println!("   Collateral: {} sats", ad.received_collateral_sats);
+            ad.available_headroom_msats,
+            ad.available_headroom_msats as f64 / 100_000_000_000.0);
+        println!("   Reserves: {} msats, Obligations: {} msats",
+            ad.reserves_amount_msats, ad.total_obligations_msats);
+        println!("   Deposited collateral: {} msats", ad.attested_collateral_msats);
+        println!("   Held collateral: {} msats", ad.held_collateral_msats);
 
         // Fee summary
         let annual_pct = ad.annual_fee_bps as f64 / 100.0;
@@ -425,11 +426,11 @@ async fn discover(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         println!("   Fees: {}{}", fee_str, deposit_fee);
 
         // Limits
-        if ad.max_deposit_sats < u64::MAX {
-            println!("   Max deposit: {} sats", ad.max_deposit_sats);
+        if ad.max_deposit_msats < u64::MAX {
+            println!("   Max deposit: {} sats", ad.max_deposit_msats);
         }
-        if ad.min_deposit_sats > 0 {
-            println!("   Min deposit: {} sats", ad.min_deposit_sats);
+        if ad.min_deposit_msats > 0 {
+            println!("   Min deposit: {} sats", ad.min_deposit_msats);
         }
 
         if let Some(desc) = &ad.description {
@@ -516,14 +517,15 @@ async fn ledger_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     println!("Capacity");
     println!("--------");
     println!("Available Headroom: {} sats ({} BTC)",
-        ad.available_headroom_sats,
-        ad.available_headroom_sats as f64 / 100_000_000.0);
-    println!("Total Reserves: {} sats", ad.reserves_amount_sats);
-    println!("Current Obligations: {} sats", ad.total_obligations_sats);
+        ad.available_headroom_msats,
+        ad.available_headroom_msats as f64 / 100_000_000_000.0);
+    println!("Total Reserves: {} sats", ad.reserves_amount_msats);
+    println!("Current Obligations: {} sats", ad.total_obligations_msats);
     println!();
     println!("Trust & Security");
     println!("----------------");
-    println!("Received Collateral: {} sats", ad.received_collateral_sats);
+    println!("Attested Collateral: {} msats", ad.attested_collateral_msats);
+    println!("Held Collateral: {} msats", ad.held_collateral_msats);
     println!();
     println!("Fee Structure");
     println!("-------------");
@@ -537,13 +539,13 @@ async fn ledger_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     println!();
     println!("Deposit Limits");
     println!("--------------");
-    if ad.min_deposit_sats > 0 {
-        println!("Minimum: {} sats", ad.min_deposit_sats);
+    if ad.min_deposit_msats > 0 {
+        println!("Minimum: {} sats", ad.min_deposit_msats);
     } else {
         println!("Minimum: None");
     }
-    if ad.max_deposit_sats < u64::MAX {
-        println!("Maximum: {} sats", ad.max_deposit_sats);
+    if ad.max_deposit_msats < u64::MAX {
+        println!("Maximum: {} sats", ad.max_deposit_msats);
     } else {
         println!("Maximum: Unlimited");
     }
@@ -1227,9 +1229,9 @@ async fn show_balance(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 
     println!();
     if total_locked > 0 {
-        println!("  Total:  {} sats ({} BTC)  [{} pending]", total_sats, total_sats as f64 / 100_000_000.0, total_locked);
+        println!("  Total:  {} sats ({} BTC)  [{} pending]", total_sats, total_sats as f64 / 100_000_000_000.0, total_locked);
     } else {
-        println!("  Total:  {} sats ({} BTC)", total_sats, total_sats as f64 / 100_000_000.0);
+        println!("  Total:  {} sats ({} BTC)", total_sats, total_sats as f64 / 100_000_000_000.0);
     }
     println!();
     println!("  + = funded/completed, ~ = pending, [N pending] = locked for withdrawal");
@@ -1621,7 +1623,7 @@ async fn transfer_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     let mut dest_deposit_id: Option<String> = None;
     let mut hash_hex: Option<String> = None;
     let mut timeout_height: Option<u32> = None;
-    let mut fee_sats: u64 = 2; // Default fixed fee (matches TransferFeeSchedule::default())
+    let mut fee_msats: u64 = 2; // Default fixed fee in msats (matches TransferFeeSchedule::default())
     let mut config_args = Vec::new();
 
     let mut i = 0;
@@ -1640,7 +1642,7 @@ async fn transfer_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
                 i += 1;
             }
             "--fee" if i + 1 < args.len() => {
-                fee_sats = args[i + 1].parse()?;
+                fee_msats = args[i + 1].parse()?;
                 i += 1;
             }
             s if s.starts_with("--") => {
@@ -1662,7 +1664,7 @@ async fn transfer_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     }
 
     let alias = alias.ok_or(
-        "Usage: deposits-wallet transfer <alias> <amount> --to <dest_id> --hash <sha256> --timeout <block> --relay <url>"
+        "Usage: deposits-wallet transfer <alias> <amount_sats> --to <dest_id> --hash <sha256> --timeout <block> [--fee <msats>] --relay <url>"
     )?;
     let amount_sats = amount_sats.ok_or("Missing amount")?;
     let dest_deposit_id_hex = dest_deposit_id.ok_or("Missing destination. Use --to <deposit_id>")?;
@@ -1726,13 +1728,16 @@ async fn transfer_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     let mut nonce = [0u8; 32];
     rng.fill_bytes(&mut nonce);
 
-    // Compute signing message and transfer_id
+    // Convert to msats for signing and request
+    let amount_msats = amount_sats * 1000;
+
+    // Compute signing message and transfer_id (all in msats)
     let msg_hash = deposits_core::signature_utils::transfer_lock_signing_message(
         &nonce,
         &source_id,
         &dest_id,
-        amount_sats,
-        fee_sats,
+        amount_msats,
+        fee_msats,
         &completion_script,
         timeout_height,
     );
@@ -1746,8 +1751,8 @@ async fn transfer_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     println!("=====================");
     println!("  Source:      {} ({})", alias, hex::encode(&source_id[..4]));
     println!("  Destination: {}", dest_deposit_id_hex);
-    println!("  Amount:      {} sats", amount_sats);
-    println!("  Fee:         {} sats", fee_sats);
+    println!("  Amount:      {} sats ({} msats)", amount_sats, amount_msats);
+    println!("  Fee:         {} msats", fee_msats);
     println!("  Hash Lock:   {}...{}", &hash_hex[..8], &hash_hex[hash_hex.len()-8..]);
     println!("  Timeout:     block {}", timeout_height);
     println!("  Transfer ID: {}", hex::encode(transfer_id));
@@ -1766,8 +1771,8 @@ async fn transfer_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         "nonce": hex::encode(nonce),
         "source_deposit_id": hex::encode(source_id),
         "destination_deposit_id": hex::encode(dest_id),
-        "amount": amount_sats,
-        "fee": fee_sats,
+        "amount": amount_msats,
+        "fee": fee_msats,
         "completion_script": completion_script,
         "timeout_height": timeout_height,
         "transfer_id": hex::encode(transfer_id),
@@ -3079,7 +3084,7 @@ async fn batch_transfer_lock(
         Some(t) => t as u32,
         None => return serde_json::json!({"success": false, "error": "Missing timeout"}),
     };
-    let fee_sats = cmd.get("fee").and_then(|v| v.as_u64()).unwrap_or(2);
+    let fee_msats = cmd.get("fee").and_then(|v| v.as_u64()).unwrap_or(2);
 
     // Look up deposit
     let info = match deposits.get(alias) {
@@ -3099,18 +3104,21 @@ async fn batch_transfer_lock(
 
     let completion_script = format!("sha256({})", hash_hex);
 
+    // Convert to msats
+    let amount_msats = amount_sats * 1000;
+
     // Generate nonce
     let mut rng = OsRng;
     let mut nonce = [0u8; 32];
     rng.fill_bytes(&mut nonce);
 
-    // Compute signing message and transfer_id
+    // Compute signing message and transfer_id (all in msats)
     let msg_hash = deposits_core::signature_utils::transfer_lock_signing_message(
         &nonce,
         &info.deposit_id,
         &dest_bytes,
-        amount_sats,
-        fee_sats,
+        amount_msats,
+        fee_msats,
         &completion_script,
         timeout_height,
     );
@@ -3124,8 +3132,8 @@ async fn batch_transfer_lock(
         "nonce": hex::encode(nonce),
         "source_deposit_id": hex::encode(info.deposit_id),
         "destination_deposit_id": hex::encode(dest_bytes),
-        "amount": amount_sats,
-        "fee": fee_sats,
+        "amount": amount_msats,
+        "fee": fee_msats,
         "completion_script": completion_script,
         "timeout_height": timeout_height,
         "transfer_id": hex::encode(transfer_id),

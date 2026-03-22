@@ -1,5 +1,5 @@
 #!/bin/bash
-# Test the Lightning bridge between BDK nodes and their LDK sidecars
+# Test the Lightning bridge between deposit nodes and their LDK sidecars
 #
 # This demonstrates deposit operators using Lightning for payments.
 #
@@ -30,11 +30,11 @@ test_fail() {
 }
 
 log_info "=========================================="
-log_info "  Lightning Bridge Test (BDK <-> LDK)"
+log_info "  Lightning Bridge Test (deposits-node <-> LDK)"
 log_info "=========================================="
 echo ""
 
-# Test 1: Alice's BDK node creates an invoice via her LDK sidecar
+# Test 1: Alice's deposit node creates an invoice via her LDK sidecar
 log_info "=== Test 1: Alice creates invoice ==="
 AMOUNT_SATS=50000
 INVOICE=$(ldk_cli alice bolt11-receive --amount-msat $((AMOUNT_SATS * 1000)) --description "Bridge test payment" 2>/dev/null | jq -r '.invoice // empty')
@@ -46,7 +46,7 @@ else
     exit 1
 fi
 
-# Test 2: Bob's BDK node pays the invoice via his LDK sidecar
+# Test 2: Bob's deposit node pays the invoice via his LDK sidecar
 log_info ""
 log_info "=== Test 2: Bob pays Alice's invoice ==="
 PAY_RESULT=$(ldk_cli bob bolt11-send --invoice "$INVOICE" 2>&1) || true
@@ -118,7 +118,7 @@ else
 fi
 
 log_info ""
-log_info "The Lightning bridge allows BDK deposit operators to:"
+log_info "The Lightning bridge allows deposit operators to:"
 log_info "  1. Create invoices for deposits (credit via Lightning)"
 log_info "  2. Pay invoices for withdrawals (instant settlement)"
 log_info "  3. Route payments between operators"

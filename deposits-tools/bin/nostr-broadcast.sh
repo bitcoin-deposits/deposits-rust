@@ -46,49 +46,32 @@ done
 # Default to alice
 NODE=${NODE:-alice}
 
-# Normalize node name
-normalize_node() {
-    local node=$1
-    case "$node" in
-        alice)   echo "alice" ;;
-        bob)       echo "bob" ;;
-        charlie)   echo "charlie" ;;
-        diana)     echo "diana" ;;
-        eve)       echo "eve" ;;
-        *)                 echo "$node" ;;
-    esac
-}
+SEED=$(get_node_seed "$NODE")
+DATA_DIR=$(get_node_data_dir "$NODE")
 
-CONTAINER=$(normalize_node "$NODE")
-DISPLAY_NAME="$CONTAINER"
-
-# Check if container is running
-if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
-    log_error "Container $CONTAINER is not running"
-    log_info "Start the environment with: ./bin/start.sh"
+if [ -z "$SEED" ]; then
+    log_error "Unknown node: $NODE"
     exit 1
 fi
 
-SEED=$(get_node_seed "$CONTAINER")
-
-log_info "Broadcasting ledger updates from $DISPLAY_NAME to Nostr relay..."
+log_info "Broadcasting ledger updates from $NODE to Nostr relay..."
 echo ""
 
 # Run nostr export command
 if [ -n "$LEDGER_ID" ]; then
-    docker exec -e RUST_LOG=error "$CONTAINER" deposits-node nostr export "$LEDGER_ID" \
+    RUST_LOG=error "$DEPOSITS_NODE" nostr export "$LEDGER_ID" \
         --seed "$SEED" \
         --network regtest \
-        --esplora http://electrs:3002 \
-        --relay ws://relay-alice:7777 \
-        --data-dir /data 2>&1 | filter_logs
+        --esplora "$ELECTRS_URL" \
+        --relay "$RELAY_ALICE" \
+        --data-dir "$DATA_DIR" 2>&1 | filter_logs
 else
-    docker exec -e RUST_LOG=error "$CONTAINER" deposits-node nostr export \
+    RUST_LOG=error "$DEPOSITS_NODE" nostr export \
         --seed "$SEED" \
         --network regtest \
-        --esplora http://electrs:3002 \
-        --relay ws://relay-alice:7777 \
-        --data-dir /data 2>&1 | filter_logs
+        --esplora "$ELECTRS_URL" \
+        --relay "$RELAY_ALICE" \
+        --data-dir "$DATA_DIR" 2>&1 | filter_logs
 fi
 
 echo ""

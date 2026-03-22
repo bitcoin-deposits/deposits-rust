@@ -79,9 +79,9 @@ get_list() {
     [ -f "$STATE_DIR/$1" ] && cat "$STATE_DIR/$1"
 }
 
-# Core nodes use compose containers with named seeds
-# Nodes 1-4: alice, bob, charlie, diana (from docker-compose)
-# Nodes 5+: eve01, eve02, etc. (dynamically created)
+# Core nodes use named seeds from _common.sh
+# Nodes 1-4: alice, bob, charlie, diana
+# Nodes 5+: eve01, eve02, etc. (dynamically created as bare processes)
 
 # Container names
 CORE_NAMES=("" "alice" "bob" "charlie" "diana")
@@ -104,7 +104,7 @@ generate_seed() {
     fi
 }
 
-# Generate container name for node N
+# Generate node name for node N
 node_name() {
     local n=$1
     if [ $n -le 4 ]; then
@@ -124,13 +124,14 @@ run_node_cmd() {
 
     local name=$(node_name $n)
     local seed=$(generate_seed $n)
+    local node_data_dir="$DATA_ROOT/$name"
 
-    docker exec -e RUST_LOG=error "$name" deposits-node "$cmd" "$@" \
+    RUST_LOG=error "$DEPOSITS_NODE" "$cmd" "$@" \
         --seed "$seed" \
         --network regtest \
-        --electrum http://electrs:3002 \
-        --relay ws://relay-alice:7777 \
-        --data-dir /data 2>&1
+        --esplora "$ELECTRS_URL" \
+        --relay "$RELAY_ALICE" \
+        --data-dir "$node_data_dir" 2>&1
 }
 
 # ============================================================================
@@ -140,36 +141,39 @@ run_node_cmd() {
 setup_infrastructure() {
     log_info "=== Setting up infrastructure ==="
 
-    # Stop and remove any existing eve scale nodes (not alice/bob/charlie/diana)
-    log_info "Cleaning up existing eve scale nodes..."
+    # Stop any existing eve scale node processes
+    log_info "Cleaning up existing eve scale node processes..."
+    pkill -f "deposits-node run.*eve" 2>/dev/null || true
+
+    # Clear eve data directories
     for i in $(seq 1 99); do
         local name="eve$(printf '%02d' $i)"
-        docker stop "$name" 2>/dev/null || true
-        docker rm "$name" 2>/dev/null || true
-        docker volume rm "bdk_${name}_data" 2>/dev/null || true
-    done
-    # Also clean up old nodeXX format
-    for i in $(seq 1 99); do
-        local name="node$(printf '%02d' $i)"
-        docker stop "$name" 2>/dev/null || true
-        docker rm "$name" 2>/dev/null || true
-        docker volume rm "bdk_${name}_data" 2>/dev/null || true
+        rm -rf "$DATA_ROOT/$name"
     done
 
-    # Reset nostr relay and core containers
-    log_info "Resetting Nostr relay and core containers..."
-    $DC stop relay-alice relay-bob relay-charlie relay-diana relay-ledgers alice bob charlie diana >/dev/null 2>&1 || true
-    $DC rm -f relay-alice relay-bob relay-charlie relay-diana relay-ledgers alice bob charlie diana >/dev/null 2>&1 || true
-    docker volume rm bdk_relay_alice_data bdk_relay_bob_data bdk_relay_charlie_data bdk_relay_diana_data bdk_relay_ledgers_data 2>/dev/null || true
-    docker volume rm bdk_alice_data bdk_bob_data bdk_charlie_data bdk_diana_data 2>/dev/null || true
+    # Stop core node processes
+    stop_all_nodes
 
-    # Start core services and core operator nodes
-    log_info "Starting core services and nodes..."
-    $DC up -d bitcoin electrs relay-alice relay-bob relay-charlie relay-diana relay-ledgers alice bob charlie diana
+    # Reset relay containers
+    $DC stop relay-alice relay-bob relay-charlie relay-diana relay-ledgers >/dev/null 2>&1 || true
+    $DC rm -f relay-alice relay-bob relay-charlie relay-diana relay-ledgers >/dev/null 2>&1 || true
+    docker volume rm deposits-tools_relay_alice_data deposits-tools_relay_bob_data deposits-tools_relay_charlie_data deposits-tools_relay_diana_data deposits-tools_relay_ledgers_data >/dev/null 2>&1 || true
+
+    # Clear core node data
+    rm -rf "$DATA_ROOT"
+
+    # Start core services
+    log_info "Starting core services..."
+    $DC up -d bitcoin electrs relay-alice relay-bob relay-charlie relay-diana relay-ledgers
 
     # Wait for services
     log_info "Waiting for services to be ready..."
-    sleep 10
+    wait_for_bitcoin
+    wait_for_nostr
+    wait_for_electrs
+
+    # Start core operator nodes as bare processes
+    start_all_nodes
 
     # Create faucet wallet
     bitcoin_cli createwallet "faucet" 2>/dev/null || true
@@ -182,18 +186,15 @@ setup_infrastructure() {
 # Node management
 # ============================================================================
 
-start_node() {
+start_scale_node() {
     local n=$1
     local name=$(node_name $n)
     local seed=$(generate_seed $n)
 
-    # Core nodes (1-4) are started via docker-compose in setup_infrastructure
-    # Just fund them, don't create new containers
+    # Core nodes (1-4) are started via start_all_nodes in setup_infrastructure
+    # Just fund them, don't create new processes
     if [ $n -le 4 ]; then
-        log_info "Using compose container $name (seed: ${seed:0:16}...)..."
-
-        # Wait a moment for container to be ready
-        sleep 1
+        log_info "Using existing process for $name (seed: ${seed:0:16}...)..."
 
         # Get wallet address and fund the node
         local address=$(run_node_cmd $n address 2>&1 | grep -E '^bcrt1' | head -1)
@@ -206,30 +207,30 @@ start_node() {
         return
     fi
 
-    # Eve nodes (5+) are dynamically created
-    local ip="172.21.0.$((100 + n))"
+    # Eve nodes (5+) are started as bare processes
+    local node_data_dir="$DATA_ROOT/$name"
+    local metrics_port=$((9100 + n))
+    mkdir -p "$node_data_dir"
 
     log_info "Starting $name (seed: ${seed:0:16}...)..."
 
-    # Create volume
-    docker volume create "bdk_${name}_data" >/dev/null 2>&1 || true
-
-    # Start container with metrics port
-    docker run -d \
-        --name "$name" \
-        --network bdk_bdk_network \
-        --ip "$ip" \
-        -v "bdk_${name}_data:/data" \
-        -e RUST_LOG=warn,deposits_node=info \
-        deposits-node:latest \
-        run \
+    RUST_LOG=warn,deposits_node=info \
+    "$DEPOSITS_NODE" run \
         --seed "$seed" \
         --network regtest \
-        --electrum http://electrs:3002 \
-        --relay ws://relay-alice:7777 \
-        --data-dir /data \
-        --metrics-port 9100 \
-        >/dev/null 2>&1
+        --electrum "$ELECTRS_URL" \
+        --relay "$RELAY_ALICE" \
+        --relay "$RELAY_BOB" \
+        --relay "$RELAY_CHARLIE" \
+        --relay "$RELAY_DIANA" \
+        --slow-relay "$RELAY_LEDGERS" \
+        --data-dir "$node_data_dir" \
+        --metrics-port "$metrics_port" \
+        --fast-poll \
+        --skip-nostr-verify \
+        > "$node_data_dir/node.log" 2>&1 &
+
+    echo $! > "$node_data_dir/node.pid"
 
     # Wait for it to be ready
     sleep 2
@@ -244,9 +245,8 @@ start_node() {
     fi
 }
 
-get_node_info() {
+get_node_info_scale() {
     local n=$1
-    local name=$(node_name $n)
 
     local info=$(run_node_cmd $n info)
     local node_id=$(echo "$info" | grep "Node ID:" | awk '{print $3}')
@@ -262,7 +262,7 @@ setup_node() {
     log_info "Setting up $name..."
 
     # Get node ID
-    local node_id=$(get_node_info $n)
+    local node_id=$(get_node_info_scale $n)
     if [ -z "$node_id" ]; then
         log_error "Could not get node ID for $name"
         return 1
@@ -294,13 +294,13 @@ setup_node() {
 
     # Start nostr watcher in background
     local seed=$(generate_seed $n)
-    docker exec -d "$name" deposits-node nostr watch "$ledger_id" \
+    local node_data_dir="$DATA_ROOT/$name"
+    RUST_LOG=error "$DEPOSITS_NODE" nostr watch "$ledger_id" \
         --seed "$seed" \
         --network regtest \
-        --electrum http://electrs:3002 \
-        --relay ws://relay-alice:7777 \
-        --data-dir /data \
-        >/dev/null 2>&1
+        --esplora "$ELECTRS_URL" \
+        --relay "$RELAY_ALICE" \
+        --data-dir "$node_data_dir" &
 
     # Track this node as ready
     append_value "ready_nodes" "$n"
@@ -475,7 +475,7 @@ main() {
 
         # Start nodes in this wave
         for n in $(seq $((started + 1)) $wave_end); do
-            start_node $n
+            start_scale_node $n
         done
 
         # Mine blocks to confirm funding and wait for wallet sync
@@ -554,7 +554,7 @@ main() {
     log_info "Block height: $(get_block_height)"
     echo ""
     log_info "View all ledgers: ./bin/nostr-updates.sh --color"
-    log_info "Stop eve nodes: docker stop \$(docker ps -q --filter 'name=eve')"
+    log_info "Stop eve nodes: pkill -f 'deposits-node run.*eve'"
     echo ""
 
     log_success "Done! $TOTAL_NODES operators running with semi-random quorum membership."

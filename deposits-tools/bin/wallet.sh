@@ -141,7 +141,7 @@ faucet_send() {
     echo "  Amount: $sats sats ($btc BTC)"
     echo ""
 
-    # Send from faucet
+    # Send from faucet (bitcoind still runs in Docker)
     local txid=$(docker exec bitcoind bitcoin-cli -regtest \
         -rpcuser=user -rpcpassword=pass \
         -rpcwallet=faucet sendtoaddress "$address" "$btc" 2>&1)

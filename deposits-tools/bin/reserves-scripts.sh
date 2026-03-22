@@ -24,7 +24,7 @@ for op in $OPERATORS; do
     echo "[$op_short]"
 
     # Get full reserves list output (includes script details)
-    run_bdk_cmd "$op" reserves list 2>&1 | grep -v "^\[2m" | grep -v "^$"
+    run_node_cmd "$op" reserves list 2>&1 | grep -v "^\[2m" | grep -v "^$"
 
     echo ""
     echo "---"

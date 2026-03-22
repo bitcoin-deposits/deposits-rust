@@ -2,11 +2,11 @@
 # Reinitialize the test network
 #
 # This script:
-# 1. Stops and removes all containers and volumes
-# 2. Rebuilds the deposits-node image
-# 3. Starts all services
-# 4. Sets up the faucet wallet
-# 5. Funds the nodes
+# 1. Stops node processes and infrastructure containers
+# 2. Rebuilds the deposits-node binaries
+# 3. Starts infrastructure services (bitcoin, electrs, relays)
+# 4. Starts operator nodes as bare processes
+# 5. Sets up the faucet wallet and funds the nodes
 #
 # Usage:
 #   ./bin/reinit.sh           # Full reinit
@@ -36,7 +36,7 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [OPTIONS]"
             echo ""
             echo "Options:"
-            echo "  --quick, -q   Skip rebuild, just restart containers"
+            echo "  --quick, -q   Skip rebuild, just restart"
             echo "  --fund, -f    Just fund the nodes (assumes services are running)"
             echo "  --help, -h    Show this help message"
             exit 0
@@ -61,20 +61,17 @@ fi
 
 log_info "=== Reinitializing Test Network ==="
 
-# Stop any eve containers from setup-scale.sh (not managed by compose)
-log_info "Cleaning up eve containers..."
-for c in $(docker ps -aq --filter 'name=eve'); do
-    docker stop "$c" 2>/dev/null || true
-    docker rm "$c" 2>/dev/null || true
-done
-# Remove eve volumes
-for v in $(docker volume ls -q --filter 'name=bdk_eve'); do
-    docker volume rm "$v" 2>/dev/null || true
-done
+# Stop node processes
+log_info "Stopping node processes..."
+stop_all_nodes
 
-# Stop everything
-log_info "Stopping all containers..."
+# Stop infrastructure
+log_info "Stopping infrastructure containers..."
 $DC down -v --remove-orphans 2>/dev/null || true
+
+# Clear node data
+log_info "Clearing node data ($DATA_ROOT)..."
+rm -rf "$DATA_ROOT"
 
 # Clear wallet data (deposits become invalid after reinit)
 WALLET_DATA_DIR="${WALLET_DATA_DIR:-$HOME/.deposits-wallet}"
@@ -87,13 +84,16 @@ fi
 docker image prune -f 2>/dev/null || true
 
 if ! $QUICK; then
-    # Build local wallet binary for ./bin/wallet.sh
-    log_info "Building local deposits-wallet binary..."
-    cargo build --release --manifest-path "$BDK_DIR/../../Cargo.toml" -p deposits-node --bin deposits-wallet 2>&1 | tail -3
+    # Build binaries
+    log_info "Building deposits-node and deposits-wallet binaries..."
+    cargo build --release --manifest-path "$REPO_ROOT/Cargo.toml" -p deposits-node --bin deposits-node --bin deposits-wallet 2>&1 | tail -3
+fi
 
-    # Rebuild deposits-node image (shared by all nodes)
-    log_info "Building deposits-node image..."
-    $DC build --no-cache alice
+# Verify binaries exist
+if [ ! -f "$DEPOSITS_NODE" ]; then
+    log_error "deposits-node binary not found at $DEPOSITS_NODE"
+    log_error "Run: cargo build --release -p deposits-node --bin deposits-node --bin deposits-wallet"
+    exit 1
 fi
 
 # Start infrastructure services first
@@ -114,9 +114,9 @@ setup_faucet
 # Start block miner (1 block/sec for regtest)
 $DC up -d miner
 
-# Start nodes
-log_info "Starting nodes..."
-$DC up -d alice bob charlie diana
+# Start nodes as bare processes
+log_info "Starting node processes..."
+start_all_nodes
 
 # Start monitoring stack
 log_info "Starting monitoring (Prometheus + Grafana)..."
@@ -140,10 +140,11 @@ echo ""
 log_info "Block height: $(get_block_height)"
 echo ""
 log_info "Useful commands:"
-echo "  Follow logs:    $DC logs -f"
-echo "  Alice logs:     $DC logs -f alice"
+echo "  Follow logs:    tail -f $DATA_ROOT/alice/node.log"
+echo "  All logs:       tail -f $DATA_ROOT/*/node.log"
 echo "  Mine blocks:    docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass -rpcwallet=faucet -generate 1"
 echo "  Nostr relay:    ws://localhost:7801"
 echo "  Electrs:        http://localhost:3102"
 echo "  Prometheus:     http://localhost:9090"
 echo "  Grafana:        http://localhost:3010 (admin/admin)"
+echo "  Stop nodes:     source bin/_common.sh && stop_all_nodes"

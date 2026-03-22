@@ -745,14 +745,14 @@ def withdraw_to(from_alias: str, to_address: str, amount_sats: int) -> bool:
 
 
 # Lightning payment functions
-# These use wallet.sh to talk to BDK nodes via Nostr
-# The BDK node handles LDK interaction internally
+# These use wallet.sh to talk to deposit nodes via Nostr
+# The deposit node handles LDK interaction internally
 
 
 def make_invoice(alias: str, amount_sats: int) -> Optional[str]:
     """
     Request a Lightning invoice for a deposit.
-    The BDK node creates the invoice via its LDK sidecar.
+    The deposit node creates the invoice via its LDK sidecar.
     """
     code, stdout, stderr = run_wallet("make_invoice", alias, str(amount_sats))
 
@@ -780,7 +780,7 @@ def make_invoice(alias: str, amount_sats: int) -> Optional[str]:
 def pay_invoice(alias: str, invoice: str) -> bool:
     """
     Pay a Lightning invoice from a deposit.
-    The BDK node pays via its LDK sidecar.
+    The deposit node pays via its LDK sidecar.
     """
     code, stdout, stderr = run_wallet("pay_invoice", alias, invoice)
 

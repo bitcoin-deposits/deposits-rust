@@ -86,15 +86,16 @@ pub fn invoice_lock_signing_message(
 
 /// Create the signing message hash for a transfer lock.
 ///
-/// Format: SHA256("TRANSFER:{nonce}:{source}:{dest}:{amount}:{fee}:{script}:{timeout}")
+/// Format: SHA256("TRANSFER:{nonce}:{source}:{dest}:{amount_msats}:{fee_msats}:{script}:{timeout}")
 ///
 /// The source deposit holder signs this to authorize locking funds for conditional transfer.
+/// All amounts are in millisatoshis.
 pub fn transfer_lock_signing_message(
     nonce: &[u8; 32],
     source_deposit_id: &crate::types::DepositId,
     destination_deposit_id: &crate::types::DepositId,
-    amount_sats: u64,
-    fee_sats: u64,
+    amount_msats: u64,
+    fee_msats: u64,
     completion_script: &str,
     timeout_height: u32,
 ) -> [u8; 32] {
@@ -103,8 +104,8 @@ pub fn transfer_lock_signing_message(
         hex::encode(nonce),
         hex::encode(source_deposit_id),
         hex::encode(destination_deposit_id),
-        amount_sats,
-        fee_sats,
+        amount_msats,
+        fee_msats,
         completion_script,
         timeout_height
     );

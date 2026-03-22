@@ -440,14 +440,14 @@ pub struct LedgerAdvertisement {
     // === Deposit Limits ===
 
     /// Maximum single deposit size in sats
-    pub max_deposit_sats: u64,
+    pub max_deposit_msats: u64,
 
     /// Minimum deposit size in sats
-    pub min_deposit_sats: u64,
+    pub min_deposit_msats: u64,
 
     /// Maximum total balance per depositor in sats (0 = unlimited)
     #[serde(default)]
-    pub max_balance_sats: u64,
+    pub max_balance_msats: u64,
 
     // === Trust Info ===
 
@@ -455,21 +455,30 @@ pub struct LedgerAdvertisement {
 
     /// Current total obligations (deposit balances) in sats
     #[serde(default)]
-    pub total_obligations_sats: u64,
+    pub total_obligations_msats: u64,
 
     /// Available headroom for new deposits in sats
     /// Calculated as: reserves_amount - total_obligations (or fraction thereof)
     #[serde(default)]
-    pub available_headroom_sats: u64,
+    pub available_headroom_msats: u64,
 
     // === Trust Info ===
 
     /// Current total reserves backing the ledger (sats)
-    pub reserves_amount_sats: u64,
+    pub reserves_amount_msats: u64,
 
-    /// Total received collateral from quorum members (sats)
+    /// Total received collateral from quorum members (msats)
     #[serde(default)]
-    pub received_collateral_sats: u64,
+    pub received_collateral_msats: u64,
+
+    /// Total collateral attestations attached to this ledger (msats)
+    #[serde(default)]
+    pub attested_collateral_msats: u64,
+
+    /// Total collateral held by other operators on this ledger (msats)
+    /// Subtract from reserves to get effective reserves backing customer deposits
+    #[serde(default)]
+    pub held_collateral_msats: u64,
 
     // === Connectivity ===
 
@@ -519,13 +528,15 @@ impl LedgerAdvertisement {
             fee_period_blocks: 0,
             transfer_fee_fixed_msats: 0,
             transfer_fee_rate_bps: 0,
-            max_deposit_sats: u64::MAX,
-            min_deposit_sats: 0,
-            max_balance_sats: 0,
-            total_obligations_sats: 0,
-            available_headroom_sats: 0,
-            reserves_amount_sats: 0,
-            received_collateral_sats: 0,
+            max_deposit_msats: u64::MAX,
+            min_deposit_msats: 0,
+            max_balance_msats: 0,
+            total_obligations_msats: 0,
+            available_headroom_msats: 0,
+            reserves_amount_msats: 0,
+            received_collateral_msats: 0,
+            attested_collateral_msats: 0,
+            held_collateral_msats: 0,
             relay_url: None,
             network,
             version: 1,
@@ -1040,7 +1051,7 @@ impl NostrTransport {
         // Mark as subscribed
         self.active_subscriptions.write().unwrap().insert(sub_key);
 
-        tracing::info!("Subscribed to ledger updates: {}", ledger_id);
+        tracing::debug!("Subscribed to ledger updates: {}", ledger_id);
         Ok(())
     }
 
@@ -1071,7 +1082,7 @@ impl NostrTransport {
         // Mark as subscribed
         self.active_subscriptions.write().unwrap().insert(sub_key);
 
-        tracing::info!("Subscribed to ledger updates from operator: {}", operator_pubkey);
+        tracing::debug!("Subscribed to ledger updates from operator: {}", operator_pubkey);
         Ok(())
     }
 
@@ -1291,7 +1302,7 @@ impl NostrTransport {
         // Mark as subscribed
         self.active_subscriptions.write().unwrap().insert(sub_key);
 
-        tracing::info!("Subscribed to disputes for ledger: {}", ledger_id);
+        tracing::debug!("Subscribed to disputes for ledger: {}", ledger_id);
         Ok(())
     }
 
@@ -1321,7 +1332,7 @@ impl NostrTransport {
         // Mark as subscribed
         self.active_subscriptions.write().unwrap().insert(sub_key);
 
-        tracing::info!("Subscribed to all ledger disputes (kind {})", KIND_LEDGER_DISPUTE);
+        tracing::debug!("Subscribed to all ledger disputes (kind {})", KIND_LEDGER_DISPUTE);
         Ok(())
     }
 
@@ -1898,7 +1909,7 @@ impl NostrTransport {
         // Mark as subscribed
         self.active_subscriptions.write().unwrap().insert(sub_key);
 
-        tracing::info!("Subscribed to ledger requests (kind {}) for ledger: {}", KIND_LEDGER_REQUEST, &ledger_id[..16.min(ledger_id.len())]);
+        tracing::debug!("Subscribed to ledger requests (kind {}) for ledger: {}", KIND_LEDGER_REQUEST, &ledger_id[..16.min(ledger_id.len())]);
         Ok(())
     }
 

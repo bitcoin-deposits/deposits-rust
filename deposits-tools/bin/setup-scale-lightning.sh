@@ -57,7 +57,7 @@ get_value() { [ -f "$STATE_DIR/$1" ] && cat "$STATE_DIR/$1"; }
 append_value() { echo "$2" >> "$STATE_DIR/$1"; }
 get_list() { [ -f "$STATE_DIR/$1" ] && cat "$STATE_DIR/$1"; }
 
-# Container names (BDK nodes)
+# Node names
 CORE_NAMES=("" "alice" "bob" "charlie" "diana")
 CORE_SEEDS=(
     ""
@@ -110,12 +110,13 @@ run_node_cmd() {
     shift
     local name=$(node_name $n)
     local seed=$(generate_seed $n)
-    docker exec -e RUST_LOG=error "$name" deposits-node "$cmd" "$@" \
+    local node_data_dir="$DATA_ROOT/$name"
+    RUST_LOG=error "$DEPOSITS_NODE" "$cmd" "$@" \
         --seed "$seed" \
         --network regtest \
-        --electrum http://electrs:3002 \
-        --relay ws://relay-alice:7777 \
-        --data-dir /data 2>&1
+        --esplora "$ELECTRS_URL" \
+        --relay "$RELAY_ALICE" \
+        --data-dir "$node_data_dir" 2>&1
 }
 
 # LDK CLI helper
@@ -124,7 +125,7 @@ ldk_cli() {
     shift
     local port=$(ldk_host_port $n)
     local name=$(node_name $n)
-    local cert="$BDK_DIR/certs/${name}.crt"
+    local cert="$TOOLS_DIR/certs/${name}.crt"
 
     local cli="${LDK_SERVER_CLI:-$HOME/workspace/ldk-server/target/release/ldk-server-cli}"
     if [ ! -x "$cli" ]; then
@@ -147,7 +148,7 @@ setup_infrastructure() {
         local name="eve$(printf '%02d' $i)"
         docker stop "$name" 2>/dev/null || true
         docker rm "$name" 2>/dev/null || true
-        docker volume rm "bdk_${name}_data" 2>/dev/null || true
+        docker volume rm "deposits-tools_${name}_data" 2>/dev/null || true
         # LN sidecar
         docker stop "${name}-ln" 2>/dev/null || true
         docker rm "${name}-ln" 2>/dev/null || true
@@ -158,8 +159,8 @@ setup_infrastructure() {
     log_info "Resetting Nostr relay and core containers..."
     $DC stop relay-alice relay-bob relay-charlie relay-diana relay-ledgers alice bob charlie diana >/dev/null 2>&1 || true
     $DC rm -f relay-alice relay-bob relay-charlie relay-diana relay-ledgers alice bob charlie diana >/dev/null 2>&1 || true
-    docker volume rm bdk_relay_alice_data bdk_relay_bob_data bdk_relay_charlie_data bdk_relay_diana_data bdk_relay_ledgers_data 2>/dev/null || true
-    docker volume rm bdk_alice_data bdk_bob_data bdk_charlie_data bdk_diana_data 2>/dev/null || true
+    docker volume rm deposits-tools_relay_alice_data deposits-tools_relay_bob_data deposits-tools_relay_charlie_data deposits-tools_relay_diana_data deposits-tools_relay_ledgers_data 2>/dev/null || true
+    docker volume rm deposits-tools_alice_data deposits-tools_bob_data deposits-tools_charlie_data deposits-tools_diana_data 2>/dev/null || true
 
     # Stop LDK sidecars for core nodes
     for node in alice bob charlie diana; do
@@ -180,8 +181,8 @@ setup_infrastructure() {
     bitcoin_cli -rpcwallet=faucet -generate 110 >/dev/null 2>&1
 
     # Create certs directory
-    rm -rf "$BDK_DIR/certs"
-    mkdir -p "$BDK_DIR/certs"
+    rm -rf "$TOOLS_DIR/certs"
+    mkdir -p "$TOOLS_DIR/certs"
 
     # Create shared CLI volume and populate with ldk-server-cli
     log_info "Setting up shared LDK CLI volume..."
@@ -197,7 +198,7 @@ setup_infrastructure() {
 # Node management
 # ============================================================================
 
-start_bdk_node() {
+start_deposit_node() {
     local n=$1
     local name=$(node_name $n)
     local seed=$(generate_seed $n)
@@ -206,15 +207,15 @@ start_bdk_node() {
 
     log_info "Starting $name (seed: ${seed:0:16}...)..."
 
-    docker volume create "bdk_${name}_data" >/dev/null 2>&1 || true
+    docker volume create "deposits-tools_${name}_data" >/dev/null 2>&1 || true
 
     # All nodes started manually with LDK_HOST pointing to their sidecar
     # Mount shared CLI volume and LDK data (for TLS cert) as read-only
     docker run -d \
         --name "$name" \
-        --network bdk_bdk_network \
+        --network deposits-tools_regtest \
         --ip "$ip" \
-        -v "bdk_${name}_data:/data" \
+        -v "deposits-tools_${name}_data:/data" \
         -v "ldk_cli:/ldk-cli:ro" \
         -v "ldk_${name}_data:/ldk-data:ro" \
         -e RUST_LOG=warn,deposits_node=info \
@@ -244,7 +245,7 @@ start_bdk_node() {
 
 start_ln_node() {
     local n=$1
-    local bdk_name=$(node_name $n)
+    local deposit_name=$(node_name $n)
     local ln_name=$(ln_node_name $n)
     local ip="172.21.0.$((150 + n))"
     local internal_port=$(ldk_internal_port $n)
@@ -252,15 +253,15 @@ start_ln_node() {
 
     log_info "Starting $ln_name..."
 
-    docker volume create "ldk_${bdk_name}_data" >/dev/null 2>&1 || true
+    docker volume create "ldk_${deposit_name}_data" >/dev/null 2>&1 || true
 
     docker run -d \
         --name "$ln_name" \
-        --network bdk_bdk_network \
+        --network deposits-tools_regtest \
         --ip "$ip" \
         -p "${host_port}:3000" \
-        -v "ldk_${bdk_name}_data:/ldk" \
-        -e NODE_NAME="$bdk_name" \
+        -v "ldk_${deposit_name}_data:/ldk" \
+        -e NODE_NAME="$deposit_name" \
         -e TLS_HOSTNAME="$ln_name" \
         -e LDK_DATA_DIR=/ldk \
         -e ELECTRUM_HOST=electrs \
@@ -276,7 +277,7 @@ start_ln_node() {
 
     # Copy TLS cert
     for attempt in 1 2 3 4 5; do
-        if docker cp "${ln_name}:/ldk/tls.crt" "$BDK_DIR/certs/${bdk_name}.crt" 2>/dev/null; then
+        if docker cp "${ln_name}:/ldk/tls.crt" "$TOOLS_DIR/certs/${deposit_name}.crt" 2>/dev/null; then
             break
         fi
         sleep 2
@@ -336,10 +337,10 @@ get_ln_address() {
 }
 
 # ============================================================================
-# BDK setup (reserves, ledger, quorum)
+# Deposit node setup (reserves, ledger, quorum)
 # ============================================================================
 
-setup_bdk_node() {
+setup_deposit_node() {
     local n=$1
     local name=$(node_name $n)
 
@@ -361,13 +362,13 @@ setup_bdk_node() {
     store_value "ledger_id_$n" "$ledger_id"
 
     local seed=$(generate_seed $n)
-    docker exec -d "$name" deposits-node nostr watch "$ledger_id" \
+    local node_data_dir="$DATA_ROOT/$name"
+    RUST_LOG=error "$DEPOSITS_NODE" nostr watch "$ledger_id" \
         --seed "$seed" \
         --network regtest \
-        --electrum http://electrs:3002 \
-        --relay ws://relay-alice:7777 \
-        --data-dir /data \
-        >/dev/null 2>&1
+        --esplora "$ELECTRS_URL" \
+        --relay "$RELAY_ALICE" \
+        --data-dir "$node_data_dir" &
 
     log_success "$name ready: ${node_id:0:12}... ledger: ${ledger_id:0:12}..."
 }
@@ -483,20 +484,20 @@ main() {
 
     setup_infrastructure
 
-    # Start all BDK nodes
+    # Start all deposit nodes
     log_info ""
-    log_info "=== Starting BDK nodes ==="
+    log_info "=== Starting deposit nodes ==="
     for n in $(seq 1 $TOTAL_NODES); do
-        start_bdk_node $n
+        start_deposit_node $n
     done
     mine_blocks 1
     sleep 5
 
-    # Setup BDK nodes (reserves, ledger)
+    # Setup deposit nodes (reserves, ledger)
     log_info ""
-    log_info "=== Setting up BDK nodes ==="
+    log_info "=== Setting up deposit nodes ==="
     for n in $(seq 1 $TOTAL_NODES); do
-        setup_bdk_node $n
+        setup_deposit_node $n
     done
     mine_blocks 1
 
@@ -571,7 +572,7 @@ main() {
         local ledger_id=$(get_value "ledger_id_$n")
         local ln_pubkey=$(get_value "ln_pubkey_$n")
         echo "  $name:"
-        echo "    BDK: ${node_id:0:16}... -> ${ledger_id:0:16}..."
+        echo "    Node: ${node_id:0:16}... -> ${ledger_id:0:16}..."
         echo "    LN:  ${ln_pubkey:0:16}..."
     done
     echo ""

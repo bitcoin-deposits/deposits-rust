@@ -1244,6 +1244,11 @@ impl LedgerState {
         self.deposits.values().map(|d| d.balance).sum()
     }
 
+    /// Get total balance of collateral deposits held by other operators on this ledger (msats).
+    pub fn total_held_collateral(&self) -> u64 {
+        self.deposits.values().filter(|d| d.is_collateral).map(|d| d.balance).sum()
+    }
+
     /// Get total locked balance across all deposits.
     pub fn total_locked_balance(&self) -> u64 {
         self.deposits.values().map(|d| d.locked_balance).sum()

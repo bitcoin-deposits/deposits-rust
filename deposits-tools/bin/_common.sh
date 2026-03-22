@@ -13,14 +13,20 @@ NC='\033[0m' # No Color
 
 # Get the directory containing this script
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BDK_DIR="$(dirname "$SCRIPT_DIR")"
-TOOLS_DIR="$(dirname "$BDK_DIR")"
+TOOLS_DIR="$(dirname "$SCRIPT_DIR")"
 REPO_ROOT="$(dirname "$TOOLS_DIR")"
 
-# Docker compose command
-DC="docker compose -f $BDK_DIR/docker-compose.yml"
+# Docker compose command (infrastructure services only)
+DC="docker compose -f $TOOLS_DIR/docker-compose.yml"
 
-# Bitcoin RPC settings (matching docker-compose)
+# Binary paths (host-compiled)
+DEPOSITS_NODE="${DEPOSITS_NODE:-$REPO_ROOT/target/release/deposits-node}"
+DEPOSITS_WALLET="${DEPOSITS_WALLET:-$REPO_ROOT/target/release/deposits-wallet}"
+
+# Data directory root for all nodes
+DATA_ROOT="${DATA_ROOT:-$TOOLS_DIR/data}"
+
+# Bitcoin RPC settings (matching docker-compose mapped ports)
 BITCOIN_RPC_HOST="localhost"
 BITCOIN_RPC_PORT="18543"
 BITCOIN_RPC_USER="user"
@@ -29,9 +35,37 @@ BITCOIN_RPC_PASS="pass"
 # Electrs settings
 ELECTRS_HOST="localhost"
 ELECTRS_PORT="3102"
+ELECTRS_URL="http://$ELECTRS_HOST:$ELECTRS_PORT"
 
-# Node containers
+# Relay URLs (host-mapped ports from docker-compose)
+RELAY_ALICE="ws://localhost:7801"
+RELAY_BOB="ws://localhost:7802"
+RELAY_CHARLIE="ws://localhost:7803"
+RELAY_DIANA="ws://localhost:7804"
+RELAY_LEDGERS="ws://localhost:7779"
+ALL_RELAYS=("$RELAY_ALICE" "$RELAY_BOB" "$RELAY_CHARLIE" "$RELAY_DIANA")
+
+# Metrics ports (unique per node since all on localhost)
+get_node_metrics_port() {
+    local node=$1
+    case "$node" in
+        "alice")     echo "9101" ;;
+        "bob")       echo "9102" ;;
+        "charlie")   echo "9103" ;;
+        "diana")     echo "9104" ;;
+        "eve")       echo "9105" ;;
+        *) echo "9100" ;;
+    esac
+}
+
+# Node names
 NODES=("alice" "bob" "charlie" "diana")
+
+# Get data directory for a node
+get_node_data_dir() {
+    local node=$1
+    echo "$DATA_ROOT/$node"
+}
 
 # Get seed for a node (compatible with bash 3.x)
 get_node_seed() {
@@ -63,10 +97,10 @@ get_node_name() {
 get_node_relay_url() {
     local node=$1
     case "$node" in
-        "alice")     echo "ws://localhost:7801" ;;
-        "bob")       echo "ws://localhost:7802" ;;
-        "charlie")   echo "ws://localhost:7803" ;;
-        "diana")     echo "ws://localhost:7804" ;;
+        "alice")     echo "$RELAY_ALICE" ;;
+        "bob")       echo "$RELAY_BOB" ;;
+        "charlie")   echo "$RELAY_CHARLIE" ;;
+        "diana")     echo "$RELAY_DIANA" ;;
         *) echo "" ;;
     esac
 }
@@ -83,12 +117,12 @@ get_deposit_secret() {
         return 1
     fi
 
+    local data_dir=$(get_node_data_dir "$node")
     local key_index=0
     if [ -n "$target_ledger" ]; then
         # Look up key_index from deposits.json for this ledger
-        # The python script outputs just the index number, nothing else
         local idx_output
-        idx_output=$(docker exec "$node" sh -c "cat /data/wallet/deposits.json 2>/dev/null" | \
+        idx_output=$(cat "$data_dir/wallet/deposits.json" 2>/dev/null | \
             python3 -c "
 import sys, json
 data = json.load(sys.stdin)
@@ -107,7 +141,7 @@ print(found)
     fi
 
     # Use deposits-node to derive the key at the correct index
-    docker exec -e RUST_LOG=error "$node" deposits-node derive-deposit-key \
+    RUST_LOG=error "$DEPOSITS_NODE" derive-deposit-key \
         --seed "$seed" \
         --network regtest \
         --index "$key_index" 2>&1 | grep "^[0-9a-f]\{64\}$" | head -1
@@ -136,7 +170,7 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
-# Run bitcoin-cli command
+# Run bitcoin-cli command (bitcoind still runs in Docker)
 bitcoin_cli() {
     docker exec bitcoind bitcoin-cli -regtest -rpcuser=$BITCOIN_RPC_USER -rpcpassword=$BITCOIN_RPC_PASS "$@"
 }
@@ -229,98 +263,116 @@ mine_blocks() {
     log_success "Mined $count block(s)"
 }
 
+# Ensure deposits-node binary exists
+ensure_deposits_node() {
+    if [ ! -f "$DEPOSITS_NODE" ]; then
+        log_info "Building deposits-node..."
+        cargo build --release --manifest-path "$REPO_ROOT/Cargo.toml" -p deposits-node --bin deposits-node 2>&1 | tail -3
+    fi
+}
+
+# Ensure deposits-wallet binary exists
+ensure_deposits_wallet() {
+    if [ ! -f "$DEPOSITS_WALLET" ]; then
+        log_info "Building deposits-wallet..."
+        cargo build --release --manifest-path "$REPO_ROOT/Cargo.toml" -p deposits-node --bin deposits-wallet 2>&1 | tail -3
+    fi
+}
+
 # Run a deposits-node command on a node with correct args
-run_bdk_cmd() {
-    local container=$1
+run_node_cmd() {
+    local node=$1
     shift
     local cmd=$1
     shift
 
-    local seed=$(get_node_seed "$container")
+    local seed=$(get_node_seed "$node")
     if [ -z "$seed" ]; then
-        log_error "Unknown node: $container"
+        log_error "Unknown node: $node"
         return 1
     fi
 
-    local name=$(get_node_name "$container")
+    local name=$(get_node_name "$node")
+    local data_dir=$(get_node_data_dir "$node")
 
     # Run command with positional args first, then config args at the end
-    # This supports subcommands like: ledger open <block> --seed ...
     # Use RUST_LOG=error to suppress INFO logs from CLI output
     # Connect to all operator relays so CLI can reach any daemon's primary relay
-    docker exec -e RUST_LOG=error "$container" deposits-node "$cmd" \
+    RUST_LOG=error "$DEPOSITS_NODE" "$cmd" \
         "$@" \
         --seed "$seed" \
         --name "$name" \
         --network regtest \
-        --esplora http://electrs:3002 \
-        --relay ws://relay-alice:7777 \
-        --relay ws://relay-bob:7777 \
-        --relay ws://relay-charlie:7777 \
-        --relay ws://relay-diana:7777 \
-        --data-dir /data 2>&1
+        --esplora "$ELECTRS_URL" \
+        --relay "$RELAY_ALICE" \
+        --relay "$RELAY_BOB" \
+        --relay "$RELAY_CHARLIE" \
+        --relay "$RELAY_DIANA" \
+        --data-dir "$data_dir" 2>&1
 }
 
 # Get node address
 get_node_address() {
-    local container=$1
-    local seed=$(get_node_seed "$container")
+    local node=$1
+    local seed=$(get_node_seed "$node")
     if [ -z "$seed" ]; then
-        log_error "Unknown node: $container"
+        log_error "Unknown node: $node"
         return 1
     fi
 
+    local data_dir=$(get_node_data_dir "$node")
+
     # Run address command and extract just the address
-    docker exec -e RUST_LOG=error "$container" deposits-node address \
+    RUST_LOG=error "$DEPOSITS_NODE" address \
         --seed "$seed" \
         --network regtest \
-        --esplora http://electrs:3002 \
-        --relay ws://relay-alice:7777 \
-        --data-dir /data 2>&1 | grep -E '^bcrt1' | head -1
+        --esplora "$ELECTRS_URL" \
+        --relay "$RELAY_ALICE" \
+        --data-dir "$data_dir" 2>&1 | grep -E '^bcrt1' | head -1
 }
 
 # Get node info
 get_node_info() {
-    local container=$1
-    run_bdk_cmd "$container" info
+    local node=$1
+    run_node_cmd "$node" info
 }
 
 # Create reserves UTXO on a node
 create_node_reserves() {
-    local container=$1
+    local node=$1
     local amount_sats=${2:-100000000}  # Default 1 BTC
 
-    log_info "Creating reserves on $container: $amount_sats sats..."
+    log_info "Creating reserves on $node: $amount_sats sats..."
 
-    local output=$(run_bdk_cmd "$container" reserves "$amount_sats")
+    local output=$(run_node_cmd "$node" reserves "$amount_sats")
 
     if echo "$output" | grep -q "Reserves created"; then
         local txid=$(echo "$output" | grep "TXID:" | awk '{print $2}')
-        log_success "$container reserves created: $txid"
+        log_success "$node reserves created: $txid"
         echo "$txid"
         return 0
     else
-        log_error "$container reserves failed: $output"
+        log_error "$node reserves failed: $output"
         return 1
     fi
 }
 
 # Fund a node (sends BTC but does NOT mine — caller must mine to confirm)
 fund_node() {
-    local container=$1
+    local node=$1
     local amount=${2:-1}
 
-    log_info "Funding $container with $amount BTC..."
+    log_info "Funding $node with $amount BTC..."
 
-    local address=$(get_node_address "$container")
+    local address=$(get_node_address "$node")
     if [ -z "$address" ]; then
-        log_error "Could not get address for $container"
+        log_error "Could not get address for $node"
         return 1
     fi
 
     send_btc "$address" "$amount"
 
-    log_success "Funded $container"
+    log_success "Funded $node"
 }
 
 # Fund multiple nodes in batch (parallel address lookup, single mine pass)
@@ -378,136 +430,263 @@ get_block_height() {
 
 # Show all services status
 show_status() {
-    log_info "Service status:"
+    log_info "Infrastructure services:"
     $DC ps
+    echo ""
+    log_info "Node processes:"
+    for node in "${NODES[@]}"; do
+        local pidfile="$DATA_ROOT/$node/node.pid"
+        if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+            log_success "$node running (pid $(cat "$pidfile"))"
+        else
+            log_warn "$node not running"
+        fi
+    done
 }
 
 # Show node logs
 show_logs() {
-    local container=${1:-""}
-    if [ -z "$container" ]; then
-        $DC logs --tail=50
+    local node=${1:-""}
+    if [ -z "$node" ]; then
+        for n in "${NODES[@]}"; do
+            local logfile="$DATA_ROOT/$n/node.log"
+            if [ -f "$logfile" ]; then
+                echo "=== $n ==="
+                tail -50 "$logfile"
+            fi
+        done
     else
-        $DC logs --tail=50 "$container"
+        local logfile="$DATA_ROOT/$node/node.log"
+        if [ -f "$logfile" ]; then
+            tail -50 "$logfile"
+        else
+            log_warn "No log file for $node"
+        fi
     fi
 }
 
 # Follow node logs
 follow_logs() {
-    local container=${1:-""}
-    if [ -z "$container" ]; then
-        $DC logs -f
+    local node=${1:-""}
+    if [ -z "$node" ]; then
+        tail -f "$DATA_ROOT"/*/node.log
     else
-        $DC logs -f "$container"
+        tail -f "$DATA_ROOT/$node/node.log"
     fi
 }
 
 # Generate a keypair using deposits-node keygen (no extra args needed)
 # Returns: secret_hex pubkey_hex
 run_keygen() {
-    local container=$1
-    # keygen doesn't need seed/network/etc - it just generates a random keypair
-    docker exec -e RUST_LOG=error "$container" deposits-node keygen 2>&1
+    RUST_LOG=error "$DEPOSITS_NODE" keygen 2>&1
 }
 
 # Run a nostr request from one node to a ledger
-# Usage: run_nostr_request <from_container> <ledger_id> <action> [params...]
+# Usage: run_nostr_request <from_node> <ledger_id> <action> [params...]
 # Returns the response JSON
 run_nostr_request() {
-    local container=$1
+    local node=$1
     shift
     local ledger_id=$1
     shift
     local action=$1
     shift
 
-    local seed=$(get_node_seed "$container")
+    local seed=$(get_node_seed "$node")
     if [ -z "$seed" ]; then
-        log_error "Unknown node: $container"
+        log_error "Unknown node: $node"
         return 1
     fi
 
+    local data_dir=$(get_node_data_dir "$node")
+
     # Run nostr request command
-    docker exec -e RUST_LOG=error "$container" deposits-node nostr request \
+    RUST_LOG=error "$DEPOSITS_NODE" nostr request \
         "$ledger_id" "$action" "$@" \
         --seed "$seed" \
         --network regtest \
-        --esplora http://electrs:3002 \
-        --relay ws://relay-alice:7777 \
-        --data-dir /data 2>&1
+        --esplora "$ELECTRS_URL" \
+        --relay "$RELAY_ALICE" \
+        --data-dir "$data_dir" 2>&1
 }
 
 # Run a deposits-wallet command on a node
-# Usage: run_wallet_cmd <container> <command> [args...]
-# The container name determines the wallet seed/identity
+# Usage: run_wallet_cmd <node> <command> [args...]
+# The node name determines the wallet seed/identity
 run_wallet_cmd() {
-    local container=$1
+    local node=$1
     shift
 
-    local seed=$(get_node_seed "$container")
+    local seed=$(get_node_seed "$node")
     if [ -z "$seed" ]; then
-        log_error "Unknown node: $container"
+        log_error "Unknown node: $node"
         return 1
     fi
+
+    local data_dir=$(get_node_data_dir "$node")
 
     # Run deposits-wallet with the node's seed
     # Connect to all operator relays so wallet can reach any operator's daemon
-    docker exec -e RUST_LOG=error "$container" deposits-wallet "$@" \
+    RUST_LOG=error "$DEPOSITS_WALLET" "$@" \
         --seed "$seed" \
         --network regtest \
-        --relay ws://relay-alice:7777 \
-        --relay ws://relay-bob:7777 \
-        --relay ws://relay-charlie:7777 \
-        --relay ws://relay-diana:7777 \
-        --data-dir /data/wallet 2>&1
+        --relay "$RELAY_ALICE" \
+        --relay "$RELAY_BOB" \
+        --relay "$RELAY_CHARLIE" \
+        --relay "$RELAY_DIANA" \
+        --data-dir "$data_dir/wallet" 2>&1
 }
 
 # Send a bump request to trigger immediate wallet sync and deposit completion
-# Usage: bump_operator <from_container> <ledger_id>
+# Usage: bump_operator <from_node> <ledger_id>
 bump_operator() {
-    local container=$1
+    local node=$1
     local ledger_id=$2
-    run_nostr_request "$container" "$ledger_id" bump 2>&1
+    run_nostr_request "$node" "$ledger_id" bump 2>&1
+}
+
+# Start a deposits-node daemon for a given node
+# Usage: start_node <node>
+start_node() {
+    local node=$1
+    local seed=$(get_node_seed "$node")
+    local data_dir=$(get_node_data_dir "$node")
+    local metrics_port=$(get_node_metrics_port "$node")
+
+    mkdir -p "$data_dir"
+
+    # Copy allowlist if it exists
+    if [ -f "$TOOLS_DIR/config/deposit_allowlist.txt" ]; then
+        cp "$TOOLS_DIR/config/deposit_allowlist.txt" "$data_dir/deposit_allowlist.txt"
+    fi
+
+    # Put this node's own relay first — the first relay is the "primary" (publish target).
+    # Other relays are for subscriptions/reads only.
+    local own_relay=$(get_node_relay_url "$node")
+    local relay_args="--relay $own_relay"
+    for r in $RELAY_ALICE $RELAY_BOB $RELAY_CHARLIE $RELAY_DIANA; do
+        [ "$r" != "$own_relay" ] && relay_args="$relay_args --relay $r"
+    done
+
+    # LDK Lightning sidecar: if certs exist, wire up the sidecar connection
+    local ldk_api_port
+    case "$node" in
+        "alice")   ldk_api_port=3111 ;;
+        "bob")     ldk_api_port=3112 ;;
+        "charlie") ldk_api_port=3113 ;;
+        "diana")   ldk_api_port=3114 ;;
+        *)         ldk_api_port=3110 ;;
+    esac
+    if [ -f "$TOOLS_DIR/certs/${node}.crt" ]; then
+        local ldk_cli="${LDK_SERVER_CLI:-$HOME/workspace/ldk-server/target/release/ldk-server-cli}"
+        if [ ! -x "$ldk_cli" ]; then
+            log_warn "ldk-server-cli not found at $ldk_cli — building..."
+            (cd "$HOME/workspace/ldk-server" && cargo build --release --bin ldk-server-cli 2>&1 | tail -3) || true
+        fi
+        export LDK_CLI="$ldk_cli"
+        export LDK_HOST="localhost"
+        export LDK_PORT="$ldk_api_port"
+        export LDK_TLS_CERT="$TOOLS_DIR/certs/${node}.crt"
+    fi
+
+    RUST_LOG=info,deposits_node=debug \
+    DEPOSITS_ENABLE_METRICS_EMITTER=1 \
+    "$DEPOSITS_NODE" run \
+        --seed "$seed" \
+        --network regtest \
+        --electrum "$ELECTRS_URL" \
+        $relay_args \
+        --slow-relay "$RELAY_LEDGERS" \
+        --data-dir "$data_dir" \
+        --metrics-port "$metrics_port" \
+        --fast-poll \
+        --skip-nostr-verify \
+        > "$data_dir/node.log" 2>&1 &
+
+    local pid=$!
+    echo "$pid" > "$data_dir/node.pid"
+    log_success "Started $node (pid $pid, metrics :$metrics_port, data $data_dir)"
+}
+
+# Stop a node daemon
+# Usage: stop_node <node>
+stop_node() {
+    local node=$1
+    local data_dir=$(get_node_data_dir "$node")
+
+    # Stop nostr watch processes for this node first
+    stop_nostr_watch "$node"
+
+    local pidfile="$DATA_ROOT/$node/node.pid"
+    if [ -f "$pidfile" ]; then
+        local pid=$(cat "$pidfile")
+        if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+            # Wait for graceful shutdown
+            local attempts=0
+            while kill -0 "$pid" 2>/dev/null && [ $attempts -lt 10 ]; do
+                sleep 0.5
+                attempts=$((attempts + 1))
+            done
+            if kill -0 "$pid" 2>/dev/null; then
+                kill -9 "$pid" 2>/dev/null || true
+            fi
+            log_info "Stopped $node (pid $pid)"
+        fi
+        rm -f "$pidfile"
+    fi
+
+    # Belt and suspenders: kill any remaining deposits-node processes for this node
+    pkill -f "deposits-node.*--data-dir $data_dir" 2>/dev/null || true
+}
+
+# Start all node daemons
+start_all_nodes() {
+    for node in "${NODES[@]}"; do
+        start_node "$node"
+    done
+}
+
+# Stop all node daemons
+stop_all_nodes() {
+    for node in "${NODES[@]}"; do
+        stop_node "$node"
+    done
 }
 
 # Start nostr watch on a node in the background
-# Usage: start_nostr_watch <container> <ledger_id>
-# Returns the background process name for later cleanup
+# Usage: start_nostr_watch <node> <ledger_id>
 start_nostr_watch() {
-    local container=$1
+    local node=$1
     local ledger_id=$2
 
-    local seed=$(get_node_seed "$container")
+    local seed=$(get_node_seed "$node")
     if [ -z "$seed" ]; then
-        log_error "Unknown node: $container"
+        log_error "Unknown node: $node"
         return 1
     fi
 
-    # Start watch in background inside the container
-    docker exec -d -e RUST_LOG=error "$container" deposits-node nostr watch \
+    local data_dir=$(get_node_data_dir "$node")
+
+    # Start watch in background — use node's own relay as primary
+    local own_relay=$(get_node_relay_url "$node")
+    RUST_LOG=error "$DEPOSITS_NODE" nostr watch \
         "$ledger_id" \
         --seed "$seed" \
         --network regtest \
-        --esplora http://electrs:3002 \
-        --relay ws://relay-alice:7777 \
-        --data-dir /data
+        --esplora "$ELECTRS_URL" \
+        --relay "$own_relay" \
+        --data-dir "$data_dir" &
 
-    log_info "Started nostr watch on $container for $ledger_id"
+    log_info "Started nostr watch on $node for $ledger_id"
 }
 
-# Stop all nostr watch processes on a node
+# Stop all nostr watch processes for a node
 stop_nostr_watch() {
-    local container=$1
-    # pkill may not be available, so use kill with grep from /proc
-    # Use SIGKILL (-9) to ensure processes die
-    docker exec "$container" sh -c '
-        for pid in $(ls /proc 2>/dev/null | grep -E "^[0-9]+$"); do
-            if [ -f /proc/$pid/cmdline ] && grep -q "nostr watch" /proc/$pid/cmdline 2>/dev/null; then
-                kill -9 $pid 2>/dev/null || true
-            fi
-        done
-    ' 2>/dev/null || true
-    # Give processes time to die
+    local node=$1
+    local data_dir=$(get_node_data_dir "$node")
+    # Kill any deposits-node processes that have "nostr watch" and this node's data dir
+    pkill -9 -f "deposits-node nostr watch.*--data-dir $data_dir" 2>/dev/null || true
     sleep 0.5
 }
 
@@ -539,10 +718,11 @@ check_health() {
         log_success "Nostr relay healthy"
     fi
 
-    # Check nodes are running
+    # Check node processes
     for node in "${NODES[@]}"; do
-        if docker ps --format '{{.Names}}' | grep -q "^${node}$"; then
-            log_success "$node running"
+        local pidfile="$DATA_ROOT/$node/node.pid"
+        if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+            log_success "$node running (pid $(cat "$pidfile"))"
         else
             log_warn "$node not running"
         fi
@@ -551,11 +731,11 @@ check_health() {
     return $unhealthy
 }
 
-# Wait for a marker file to appear inside any of the specified Docker containers.
-# Usage: wait_for_docker_marker <glob_pattern> <timeout_secs> <node1> [node2 ...]
+# Wait for a marker file to appear in any of the specified node data dirs.
+# Usage: wait_for_marker <glob_pattern> <timeout_secs> <node1> [node2 ...]
 # Prints the name of the node where the marker was found.
 # Returns 0 on success, 1 on timeout.
-wait_for_docker_marker() {
+wait_for_marker() {
     local pattern=$1
     local timeout=$2
     shift 2
@@ -564,7 +744,8 @@ wait_for_docker_marker() {
     local elapsed=0
     while [ $elapsed -lt $timeout ]; do
         for node in "${nodes[@]}"; do
-            local found=$(docker exec "$node" sh -c "ls /data/${pattern} 2>/dev/null | head -1" 2>/dev/null)
+            local data_dir=$(get_node_data_dir "$node")
+            local found=$(ls "$data_dir"/${pattern} 2>/dev/null | head -1)
             if [ -n "$found" ]; then
                 echo "$node"
                 return 0
@@ -574,4 +755,9 @@ wait_for_docker_marker() {
         elapsed=$((elapsed + 5))
     done
     return 1
+}
+
+# Backward compatibility alias
+wait_for_docker_marker() {
+    wait_for_marker "$@"
 }

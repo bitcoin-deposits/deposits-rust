@@ -174,6 +174,11 @@ impl Ledger {
         self.state.total_deposit_balance()
     }
 
+    /// Get total collateral held by other operators on this ledger (millisatoshis).
+    pub fn total_held_collateral(&self) -> u64 {
+        self.state.total_held_collateral()
+    }
+
     /// Get reserves amount (millisatoshis).
     pub fn reserves_amount(&self) -> u64 {
         self.state.reserves_amount()
@@ -1358,7 +1363,11 @@ impl Ledger {
                 signature,
                 ledger_hash,
             } => {
-                // Record the attestation keyed by the actual quorum member
+                // Record the attestation keyed by collateral_operator (the member
+                // holding the locked collateral). Each quorum member holds
+                // collateral independently, so the key must distinguish them.
+                // quorum_member is the operator who deposited — same for all
+                // attestations on this ledger, so it can't be the key.
                 use crate::types::CollateralAttestation;
                 let attestation = CollateralAttestation::new(
                     *collateral_operator,
@@ -1370,7 +1379,7 @@ impl Ledger {
                     *signature,
                     *ledger_hash,
                 );
-                self.state.collateral_attestations.insert(*quorum_member, attestation);
+                self.state.collateral_attestations.insert(*collateral_operator, attestation);
                 // Update received_collateral_amount - sum of all attestations
                 self.state.received_collateral_amount = self.state.collateral_attestations.values()
                     .map(|a| a.available_collateral())

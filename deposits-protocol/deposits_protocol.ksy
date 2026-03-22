@@ -142,6 +142,7 @@ types:
         70 = TransferLock
         71 = TransferComplete
         72 = TransferFail
+        80 = DeliveryEmbed
     seq:
       - id: records
         type: tlv_record
@@ -227,6 +228,16 @@ types:
   #   238 = max_fee_period (u32, QuorumAddMember)
   #   240 = collateral_lock_amount (u64, QuorumAddMember)
   #   242 = collateral_lock_until (u32, QuorumAddMember)
+  #   252 = dispute_response_blocks (u32, QuorumAddMember)
+  #   254 = dispute_arm_blocks (u32, QuorumAddMember)
+  #   256 = service_response_blocks (u32, QuorumAddMember)
+  #   258 = max_transfer_timeout_blocks (u32, QuorumAddMember)
+  #   262 = max_descriptor_bytes (u32, QuorumAddMember)
+  #
+  # Delivery:
+  #   270 = request_hash (32 bytes, DeliveryEmbed)
+  #   272 = target_ledger_id (32 bytes, DeliveryEmbed)
+  #   274 = target_operator (33 bytes, DeliveryEmbed)
   #
   # QuorumBegin:
   #   84  = new_outpoint_txid (32 bytes)

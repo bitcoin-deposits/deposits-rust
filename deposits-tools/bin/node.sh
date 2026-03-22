@@ -53,4 +53,4 @@ fi
 
 LOG_LEVEL="${RUST_LOG:-error}"
 
-run_bdk_cmd "$CONTAINER" "$@"
+run_node_cmd "$CONTAINER" "$@"

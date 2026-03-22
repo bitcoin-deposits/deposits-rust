@@ -139,7 +139,7 @@ LEDGER SUBCOMMANDS:
                       --annual-fee-bps <N>        Annual custody fee in basis points
                       --min-fee-sats <N>          Minimum fee per period in sats
                       --fee-period <N>            Fee collection period in blocks (default: 2016)
-                      --transfer-fee-fixed <N>    Fixed per-transfer fee in sats
+                      --transfer-fee-fixed <N>    Fixed per-transfer fee in msats
                       --transfer-fee-rate-bps <N> Proportional per-transfer fee in basis points
     ledger list     List all ledgers
     ledger history [reserves_id]
@@ -1118,8 +1118,10 @@ async fn auto_advertise_ledger(
     );
     ad.operator_name = operator_name.map(|s| s.to_string());
     ad.relay_url = fee_schedule.advertise_relay.clone();
-    ad.reserves_amount_sats = ledger.reserves_amount() / 1000; // msats to sats for advertisement
-    ad.received_collateral_sats = ledger.state.received_collateral_amount / 1000;
+    ad.reserves_amount_msats = ledger.reserves_amount();
+    ad.received_collateral_msats = ledger.state.received_collateral_amount;
+    ad.attested_collateral_msats = ledger.state.total_collateral;
+    ad.held_collateral_msats = ledger.total_held_collateral();
 
     // Apply fee schedule from CLI flags
     if let Some(bps) = fee_schedule.annual_fee_bps {
@@ -1139,10 +1141,9 @@ async fn auto_advertise_ledger(
     }
 
     // Calculate headroom
-    let total_obligations_sats = ledger.total_deposit_balance() / 1000;
-    ad.total_obligations_sats = total_obligations_sats;
-    let raw_headroom = ad.reserves_amount_sats.saturating_sub(total_obligations_sats);
-    ad.available_headroom_sats = (raw_headroom * 80) / 100;
+    let total_obligations_msats = ledger.total_deposit_balance();
+    ad.total_obligations_msats = total_obligations_msats;
+    ad.available_headroom_msats = ad.reserves_amount_msats.saturating_sub(total_obligations_msats);
 
     let secret_key = match derive_operator_secret(seed, network) {
         Ok(sk) => sk,
@@ -1948,8 +1949,8 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
     let mut invoice_fee_bps: u32 = 0;
     let mut min_fee_sats: u64 = 0;
     let mut fee_period_blocks: u32 = 2016; // default ~2 weeks
-    let mut max_deposit_sats: u64 = u64::MAX;
-    let mut min_deposit_sats: u64 = 0;
+    let mut max_deposit_msats: u64 = u64::MAX;
+    let mut min_deposit_msats: u64 = 0;
     let mut advertise_relay_url: Option<String> = None;
     let mut config_args = Vec::new();
 
@@ -1980,8 +1981,8 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
                 })?;
                 i += 1;
             }
-            "--max-deposit" if i + 1 < args.len() => { max_deposit_sats = args[i + 1].parse()?; i += 1; }
-            "--min-deposit" if i + 1 < args.len() => { min_deposit_sats = args[i + 1].parse()?; i += 1; }
+            "--max-deposit" if i + 1 < args.len() => { max_deposit_msats = args[i + 1].parse()?; i += 1; }
+            "--min-deposit" if i + 1 < args.len() => { min_deposit_msats = args[i + 1].parse()?; i += 1; }
             s if s.starts_with("--") => {
                 config_args.push(args[i].clone());
                 if i + 1 < args.len() && !args[i + 1].starts_with("--") {
@@ -2042,29 +2043,28 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
     ad.invoice_fee_bps = invoice_fee_bps;
     ad.min_fee_sats = min_fee_sats;
     ad.fee_period_blocks = fee_period_blocks;
-    ad.max_deposit_sats = max_deposit_sats;
-    ad.min_deposit_sats = min_deposit_sats;
-    ad.reserves_amount_sats = ledger.reserves_amount() / 1000; // msats to sats for advertisement
+    ad.max_deposit_msats = max_deposit_msats;
+    ad.min_deposit_msats = min_deposit_msats;
+    ad.reserves_amount_msats = ledger.reserves_amount();
 
     // Calculate obligations and headroom
     let total_obligations_msats = ledger.total_deposit_balance();
-    let total_obligations_sats = total_obligations_msats / 1000;
-    ad.total_obligations_sats = total_obligations_sats;
+    ad.total_obligations_msats = total_obligations_msats;
 
-    // Headroom is the difference between reserves and obligations
-    // For BDK, we advertise 80% of the raw headroom as available
-    let raw_headroom = ad.reserves_amount_sats.saturating_sub(total_obligations_sats);
-    ad.available_headroom_sats = (raw_headroom * 80) / 100;
+    ad.available_headroom_msats = ad.reserves_amount_msats.saturating_sub(total_obligations_msats);
 
-    // Received collateral
-    ad.received_collateral_sats = ledger.state.received_collateral_amount / 1000; // msats to sats
+    // Collateral
+    ad.received_collateral_msats = ledger.state.received_collateral_amount;
+    ad.attested_collateral_msats = ledger.state.total_collateral;
+    ad.held_collateral_msats = ledger.total_held_collateral();
 
     println!("Publishing ledger advertisement...");
     println!("  Ledger ID: {}...", &ledger_id[..16]);
-    println!("  Reserves: {} sats", ad.reserves_amount_sats);
-    println!("  Obligations: {} sats", ad.total_obligations_sats);
-    println!("  Available headroom: {} sats (80% of {})", ad.available_headroom_sats, raw_headroom);
-    println!("  Collateral: {} sats", ad.received_collateral_sats);
+    println!("  Reserves: {} msats", ad.reserves_amount_msats);
+    println!("  Obligations: {} msats", ad.total_obligations_msats);
+    println!("  Available headroom: {} msats", ad.available_headroom_msats);
+    println!("  Attested collateral: {} msats", ad.attested_collateral_msats);
+    println!("  Held collateral: {} msats", ad.held_collateral_msats);
     let periods_per_year = 52560u64 / ad.fee_period_blocks.max(1) as u64;
     let annualized_msats = ad.min_fee_sats.saturating_mul(periods_per_year);
     let annual_pct = ad.annual_fee_bps as f64 / 100.0;
@@ -2146,10 +2146,11 @@ async fn ledger_discover(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         println!("{} ({}...):", operator_name, &ad.operator_pubkey[..12.min(ad.operator_pubkey.len())]);
         println!("  Ledger ID: {}...", &ad.ledger_id[..16.min(ad.ledger_id.len())]);
         println!("  Capacity:");
-        println!("    Reserves: {} sats", ad.reserves_amount_sats);
-        println!("    Obligations: {} sats", ad.total_obligations_sats);
-        println!("    Available: {} sats", ad.available_headroom_sats);
-        println!("  Collateral: {} sats", ad.received_collateral_sats);
+        println!("    Reserves: {} msats", ad.reserves_amount_msats);
+        println!("    Obligations: {} msats", ad.total_obligations_msats);
+        println!("    Available: {} msats", ad.available_headroom_msats);
+        println!("  Attested collateral: {} msats", ad.attested_collateral_msats);
+        println!("  Held collateral: {} msats", ad.held_collateral_msats);
         println!("  Fees:");
         println!("    Annual: {}bps ({}%)", ad.annual_fee_bps, ad.annual_fee_bps as f64 / 100.0);
         println!("    Deposit: {}bps", ad.deposit_fee_bps);
@@ -2159,11 +2160,11 @@ async fn ledger_discover(args: &[String]) -> Result<(), Box<dyn std::error::Erro
             println!("    Min fee: {} sats", ad.min_fee_sats);
         }
         println!("  Limits:");
-        if ad.max_deposit_sats < u64::MAX {
-            println!("    Max deposit: {} sats", ad.max_deposit_sats);
+        if ad.max_deposit_msats < u64::MAX {
+            println!("    Max deposit: {} sats", ad.max_deposit_msats);
         }
-        if ad.min_deposit_sats > 0 {
-            println!("    Min deposit: {} sats", ad.min_deposit_sats);
+        if ad.min_deposit_msats > 0 {
+            println!("    Min deposit: {} sats", ad.min_deposit_msats);
         }
         if let Some(desc) = &ad.description {
             println!("  Description: {}", desc);

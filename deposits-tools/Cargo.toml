@@ -32,6 +32,10 @@ path = "src/bin/treasury-send.rs"
 name = "standalone-reserves-demo"
 path = "src/bin/standalone_reserves_demo.rs"
 
+[[bin]]
+name = "discover"
+path = "src/bin/discover.rs"
+
 [dependencies]
 # Bitcoin
 bitcoin = { version = "0.32", features = ["serde", "rand-std"] }

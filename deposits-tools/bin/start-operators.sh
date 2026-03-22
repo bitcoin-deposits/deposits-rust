@@ -20,7 +20,7 @@ start_operator_watch() {
 
     if [ -z "$reserves_id" ]; then
         # Try to get reserves from node info
-        local info=$(run_bdk_cmd "$container" info 2>&1)
+        local info=$(run_node_cmd "$container" info 2>&1)
         reserves_id=$(echo "$info" | grep "Reserves address:" | awk '{print $3}')
     fi
 

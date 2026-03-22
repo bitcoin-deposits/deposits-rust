@@ -1,15 +1,12 @@
-# Docker Compose for deposits-node network
+# Docker Compose for deposits-node infrastructure services
 #
-# This mirrors ../docker-compose-deposits.yml but uses deposits-node nodes
-# instead of LDK nodes. The key difference:
-# - LDK nodes use Lightning channels for reserves and Lightning wire protocol for messaging
-# - Nodes use on-chain UTXOs for reserves and Nostr for messaging
+# Infrastructure only — operator nodes run as bare processes on the host.
+# Use bin/reinit.sh to start everything (infra + nodes).
 #
 # Usage:
 #   cd deposits-tools
-#   docker-compose up -d
-#   docker-compose logs -f
-#   docker-compose down -v
+#   docker compose up -d              # Start infrastructure
+#   source bin/_common.sh && start_all_nodes  # Start operator nodes
 #
 # Block explorer (electrs REST API):
 #   curl http://localhost:3102/blocks
@@ -29,7 +26,7 @@ services:
     ports:
       - "7801:7777"
     volumes:
-      - relay_alice_data:/app/strfry-db
+      - ./data/relays/alice:/app/strfry-db
       - ../strfry-performance/strfry.conf:/app/strfry.conf:ro
       - ./permissive-write-policy.py:/app/write-policy.py:ro
     networks:
@@ -47,7 +44,7 @@ services:
     ports:
       - "7802:7777"
     volumes:
-      - relay_bob_data:/app/strfry-db
+      - ./data/relays/bob:/app/strfry-db
       - ../strfry-performance/strfry.conf:/app/strfry.conf:ro
       - ./permissive-write-policy.py:/app/write-policy.py:ro
     networks:
@@ -65,7 +62,7 @@ services:
     ports:
       - "7803:7777"
     volumes:
-      - relay_charlie_data:/app/strfry-db
+      - ./data/relays/charlie:/app/strfry-db
       - ../strfry-performance/strfry.conf:/app/strfry.conf:ro
       - ./permissive-write-policy.py:/app/write-policy.py:ro
     networks:
@@ -83,7 +80,7 @@ services:
     ports:
       - "7804:7777"
     volumes:
-      - relay_diana_data:/app/strfry-db
+      - ./data/relays/diana:/app/strfry-db
       - ../strfry-performance/strfry.conf:/app/strfry.conf:ro
       - ./permissive-write-policy.py:/app/write-policy.py:ro
     networks:
@@ -103,7 +100,7 @@ services:
     ports:
       - "7779:7777"
     volumes:
-      - relay_ledgers_data:/app/strfry-db
+      - ./data/relays/ledgers:/app/strfry-db
       - ../strfry-performance/strfry-slow.conf:/app/strfry-slow.conf:ro
       - ./drop-ephemeral-policy.sh:/app/drop-ephemeral-policy.sh:ro
       - ./bin/slow-relay-entrypoint.sh:/app/slow-relay-entrypoint.sh:ro
@@ -158,7 +155,7 @@ services:
       timeout: 10s
       retries: 5
 
-  # Shared Electrs for external access (wallet, block explorer)
+  # Electrs for external access (wallet, block explorer, all nodes)
   electrs:
     image: mempool/electrs:v3.2.0
     platform: linux/amd64
@@ -186,91 +183,6 @@ services:
       regtest:
         ipv4_address: 172.21.0.11
 
-  # Per-node Electrs instances to distribute load
-  electrs-alice:
-    image: mempool/electrs:v3.2.0
-    platform: linux/amd64
-    container_name: electrs-alice
-    depends_on:
-      bitcoin:
-        condition: service_healthy
-    command:
-      [
-        "--jsonrpc-import",
-        "--cookie=user:pass",
-        "--network=regtest",
-        "--daemon-rpc-addr=bitcoin:18443",
-        "--http-addr=0.0.0.0:3002"
-      ]
-    volumes:
-      - electrs_alice:/data
-    networks:
-      regtest:
-        ipv4_address: 172.21.0.111
-
-  electrs-bob:
-    image: mempool/electrs:v3.2.0
-    platform: linux/amd64
-    container_name: electrs-bob
-    depends_on:
-      bitcoin:
-        condition: service_healthy
-    command:
-      [
-        "--jsonrpc-import",
-        "--cookie=user:pass",
-        "--network=regtest",
-        "--daemon-rpc-addr=bitcoin:18443",
-        "--http-addr=0.0.0.0:3002"
-      ]
-    volumes:
-      - electrs_bob:/data
-    networks:
-      regtest:
-        ipv4_address: 172.21.0.112
-
-  electrs-charlie:
-    image: mempool/electrs:v3.2.0
-    platform: linux/amd64
-    container_name: electrs-charlie
-    depends_on:
-      bitcoin:
-        condition: service_healthy
-    command:
-      [
-        "--jsonrpc-import",
-        "--cookie=user:pass",
-        "--network=regtest",
-        "--daemon-rpc-addr=bitcoin:18443",
-        "--http-addr=0.0.0.0:3002"
-      ]
-    volumes:
-      - electrs_charlie:/data
-    networks:
-      regtest:
-        ipv4_address: 172.21.0.113
-
-  electrs-diana:
-    image: mempool/electrs:v3.2.0
-    platform: linux/amd64
-    container_name: electrs-diana
-    depends_on:
-      bitcoin:
-        condition: service_healthy
-    command:
-      [
-        "--jsonrpc-import",
-        "--cookie=user:pass",
-        "--network=regtest",
-        "--daemon-rpc-addr=bitcoin:18443",
-        "--http-addr=0.0.0.0:3002"
-      ]
-    volumes:
-      - electrs_diana:/data
-    networks:
-      regtest:
-        ipv4_address: 172.21.0.114
-
   # Bitcoin Prometheus exporter
   bitcoin-exporter:
     image: jvstein/bitcoin-prometheus-exporter:v0.9.0
@@ -288,298 +200,6 @@ services:
       - LOG_LEVEL=INFO
     networks:
       - regtest
-
-  # deposits-node Node 1 - Alice (Operator)
-  alice:
-    build:
-      context: ..
-      dockerfile: deposits-tools/Dockerfile
-    image: deposits-node:latest
-    container_name: alice
-    cap_add:
-      - SYS_PTRACE
-    security_opt:
-      - seccomp:unconfined
-    command:
-      - "run"
-      - "--seed"
-      - "416c696365000000000000000000000000000000000000000000000000000001"
-      - "--network"
-      - "regtest"
-      - "--electrum"
-      - "http://electrs-alice:3002"
-      - "--relay"
-      - "ws://relay-alice:7777"
-      - "--relay"
-      - "ws://relay-bob:7777"
-      - "--relay"
-      - "ws://relay-charlie:7777"
-      - "--relay"
-      - "ws://relay-diana:7777"
-      - "--slow-relay"
-      - "ws://relay-ledgers:7777"
-      - "--data-dir"
-      - "/data"
-      - "--metrics-port"
-      - "9100"
-      - "--fast-poll"
-      - "--skip-nostr-verify"
-    environment:
-      # Logs: info level, debug for deposits-node
-      - RUST_LOG=info,deposits_node=debug
-      - DEPOSITS_ENABLE_METRICS_EMITTER=1
-      - LDK_HOST=alice-ln
-      - LDK_PORT=3000
-      - LDK_API_KEY=test_api_key
-      - LDK_CLI=/ldk-cli/ldk-server-cli
-      - LDK_TLS_CERT=/ldk-data/tls.crt
-    volumes:
-      - alice_data:/data
-      - ./config/deposit_allowlist.txt:/data/deposit_allowlist.txt:ro
-      - ldk_cli:/ldk-cli:ro
-      - ldk_alice_data:/ldk-data:ro
-    depends_on:
-      bitcoin:
-        condition: service_healthy
-      electrs-alice:
-        condition: service_started
-      relay-alice:
-        condition: service_healthy
-      relay-bob:
-        condition: service_healthy
-      relay-charlie:
-        condition: service_healthy
-      relay-diana:
-        condition: service_healthy
-    networks:
-      regtest:
-        ipv4_address: 172.21.0.20
-
-  # deposits-node Node 2 - Bob (Operator)
-  bob:
-    image: deposits-node:latest
-    container_name: bob
-    cap_add:
-      - SYS_PTRACE
-    security_opt:
-      - seccomp:unconfined
-    command:
-      - "run"
-      - "--seed"
-      - "426f620000000000000000000000000000000000000000000000000000000002"
-      - "--network"
-      - "regtest"
-      - "--electrum"
-      - "http://electrs-bob:3002"
-      - "--relay"
-      - "ws://relay-bob:7777"
-      - "--relay"
-      - "ws://relay-alice:7777"
-      - "--relay"
-      - "ws://relay-charlie:7777"
-      - "--relay"
-      - "ws://relay-diana:7777"
-      - "--slow-relay"
-      - "ws://relay-ledgers:7777"
-      - "--data-dir"
-      - "/data"
-      - "--metrics-port"
-      - "9100"
-      - "--fast-poll"
-      - "--skip-nostr-verify"
-    environment:
-      - RUST_LOG=info,deposits_node=debug
-      - LDK_HOST=bob-ln
-      - LDK_PORT=3000
-      - LDK_API_KEY=test_api_key
-      - LDK_CLI=/ldk-cli/ldk-server-cli
-      - LDK_TLS_CERT=/ldk-data/tls.crt
-    volumes:
-      - bob_data:/data
-      - ./config/deposit_allowlist.txt:/data/deposit_allowlist.txt:ro
-      - ldk_cli:/ldk-cli:ro
-      - ldk_bob_data:/ldk-data:ro
-    depends_on:
-      bitcoin:
-        condition: service_healthy
-      electrs-bob:
-        condition: service_started
-      relay-alice:
-        condition: service_healthy
-      relay-bob:
-        condition: service_healthy
-      relay-charlie:
-        condition: service_healthy
-      relay-diana:
-        condition: service_healthy
-    networks:
-      regtest:
-        ipv4_address: 172.21.0.21
-
-  # deposits-node Node 3 - Charlie (Partner)
-  charlie:
-    image: deposits-node:latest
-    container_name: charlie
-    cap_add:
-      - SYS_PTRACE
-    security_opt:
-      - seccomp:unconfined
-    command:
-      - "run"
-      - "--seed"
-      - "436861726c696500000000000000000000000000000000000000000000000003"
-      - "--network"
-      - "regtest"
-      - "--electrum"
-      - "http://electrs-charlie:3002"
-      - "--relay"
-      - "ws://relay-charlie:7777"
-      - "--relay"
-      - "ws://relay-alice:7777"
-      - "--relay"
-      - "ws://relay-bob:7777"
-      - "--relay"
-      - "ws://relay-diana:7777"
-      - "--slow-relay"
-      - "ws://relay-ledgers:7777"
-      - "--data-dir"
-      - "/data"
-      - "--metrics-port"
-      - "9100"
-      - "--fast-poll"
-      - "--skip-nostr-verify"
-    environment:
-      - RUST_LOG=info,deposits_node=debug
-      - LDK_HOST=charlie-ln
-      - LDK_PORT=3000
-      - LDK_API_KEY=test_api_key
-      - LDK_CLI=/ldk-cli/ldk-server-cli
-      - LDK_TLS_CERT=/ldk-data/tls.crt
-    volumes:
-      - charlie_data:/data
-      - ./config/deposit_allowlist.txt:/data/deposit_allowlist.txt:ro
-      - ldk_cli:/ldk-cli:ro
-      - ldk_charlie_data:/ldk-data:ro
-    depends_on:
-      bitcoin:
-        condition: service_healthy
-      electrs-charlie:
-        condition: service_started
-      relay-alice:
-        condition: service_healthy
-      relay-bob:
-        condition: service_healthy
-      relay-charlie:
-        condition: service_healthy
-      relay-diana:
-        condition: service_healthy
-    networks:
-      regtest:
-        ipv4_address: 172.21.0.22
-
-  # deposits-node Node 4 - Diana (Operator for 4-op tests)
-  diana:
-    image: deposits-node:latest
-    container_name: diana
-    cap_add:
-      - SYS_PTRACE
-    security_opt:
-      - seccomp:unconfined
-    command:
-      - "run"
-      - "--seed"
-      - "4469616e61000000000000000000000000000000000000000000000000000004"
-      - "--network"
-      - "regtest"
-      - "--electrum"
-      - "http://electrs-diana:3002"
-      - "--relay"
-      - "ws://relay-diana:7777"
-      - "--relay"
-      - "ws://relay-alice:7777"
-      - "--relay"
-      - "ws://relay-bob:7777"
-      - "--relay"
-      - "ws://relay-charlie:7777"
-      - "--slow-relay"
-      - "ws://relay-ledgers:7777"
-      - "--data-dir"
-      - "/data"
-      - "--metrics-port"
-      - "9100"
-      - "--fast-poll"
-      - "--skip-nostr-verify"
-    environment:
-      - RUST_LOG=info,deposits_node=debug
-      - LDK_HOST=diana-ln
-      - LDK_PORT=3000
-      - LDK_API_KEY=test_api_key
-      - LDK_CLI=/ldk-cli/ldk-server-cli
-      - LDK_TLS_CERT=/ldk-data/tls.crt
-    volumes:
-      - diana_data:/data
-      - ./config/deposit_allowlist.txt:/data/deposit_allowlist.txt:ro
-      - ldk_cli:/ldk-cli:ro
-      - ldk_diana_data:/ldk-data:ro
-    depends_on:
-      bitcoin:
-        condition: service_healthy
-      electrs-diana:
-        condition: service_started
-      relay-alice:
-        condition: service_healthy
-      relay-bob:
-        condition: service_healthy
-      relay-charlie:
-        condition: service_healthy
-      relay-diana:
-        condition: service_healthy
-    networks:
-      regtest:
-        ipv4_address: 172.21.0.23
-
-  # deposits-node Node 5 - Eve (Partner) - uses shared electrs
-  eve:
-    profiles:
-      - dev
-    image: deposits-node:latest
-    container_name: eve
-    command:
-      - "run"
-      - "--seed"
-      - "4576650000000000000000000000000000000000000000000000000000000005"
-      - "--network"
-      - "regtest"
-      - "--electrum"
-      - "http://electrs:3002"
-      - "--relay"
-      - "ws://relay-alice:7777"
-      - "--relay"
-      - "ws://relay-bob:7777"
-      - "--relay"
-      - "ws://relay-charlie:7777"
-      - "--relay"
-      - "ws://relay-diana:7777"
-      - "--slow-relay"
-      - "ws://relay-ledgers:7777"
-      - "--data-dir"
-      - "/data"
-      - "--metrics-port"
-      - "9100"
-      - "--fast-poll"
-      - "--skip-nostr-verify"
-    environment:
-      - RUST_LOG=info,deposits_node=debug
-    volumes:
-      - eve_data:/data
-    depends_on:
-      bitcoin:
-        condition: service_healthy
-      electrs:
-        condition: service_started
-    networks:
-      regtest:
-        ipv4_address: 172.21.0.24
 
   # =========================================================================
   # Lightning sidecars (profile: lightning)
@@ -755,29 +375,6 @@ services:
     networks:
       - regtest
 
-  # Development container for manual testing
-  dev:
-    image: mcr.microsoft.com/devcontainers/rust:latest
-    container_name: dev
-    command: ["sleep", "infinity"]
-    profiles:
-      - dev
-    environment:
-      - RUST_LOG=info,deposits_node=debug
-      - ELECTRUM_URL=http://electrs:3002
-      - NOSTR_RELAY=ws://relay-alice:7777
-    volumes:
-      - ..:/workspace
-    depends_on:
-      bitcoin:
-        condition: service_healthy
-      electrs:
-        condition: service_started
-    networks:
-      regtest:
-        ipv4_address: 172.21.0.30
-    working_dir: /workspace
-
   # Prometheus for metrics collection
   prometheus:
     image: prom/prometheus:latest
@@ -817,22 +414,8 @@ services:
         ipv4_address: 172.21.0.41
 
 volumes:
-  relay_alice_data:
-  relay_bob_data:
-  relay_charlie_data:
-  relay_diana_data:
-  relay_ledgers_data:
   bitcoin_data:
   electrs_data:
-  electrs_alice:
-  electrs_bob:
-  electrs_charlie:
-  electrs_diana:
-  alice_data:
-  bob_data:
-  charlie_data:
-  diana_data:
-  eve_data:
   ldk_alice_data:
   ldk_bob_data:
   ldk_charlie_data:

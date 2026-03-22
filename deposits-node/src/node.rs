@@ -6280,11 +6280,11 @@ impl Node {
             Some(d) => d,
             None => return (false, None, Some("Missing destination_deposit_id".to_string())),
         };
-        let amount = match request.params.get("amount").and_then(|v| v.as_u64()) {
+        let amount_msats = match request.params.get("amount").and_then(|v| v.as_u64()) {
             Some(a) => a,
             None => return (false, None, Some("Missing amount".to_string())),
         };
-        let fee = match request.params.get("fee").and_then(|v| v.as_u64()) {
+        let fee_msats = match request.params.get("fee").and_then(|v| v.as_u64()) {
             Some(f) => f,
             None => return (false, None, Some("Missing fee".to_string())),
         };
@@ -6339,9 +6339,7 @@ impl Node {
             None => return (false, None, Some("Invalid signature".to_string())),
         };
 
-        // Convert to msats for all internal operations
-        let amount_msats = amount * 1000;
-        let fee_msats = fee * 1000;
+        // amount_msats and fee_msats already parsed from request
 
         // Get ledger and verify source deposit exists
         let ledger_id = &request.ledger_id;
@@ -6403,8 +6401,8 @@ impl Node {
             &nonce,
             &source_deposit_id,
             &destination_deposit_id,
-            amount,
-            fee,
+            amount_msats,
+            fee_msats,
             completion_script,
             timeout_height,
         );
@@ -6525,8 +6523,8 @@ impl Node {
             append_elapsed, sign_elapsed);
         (true, Some(serde_json::json!({
             "transfer_id": transfer_id_hex,
-            "amount": amount,
-            "fee": fee,
+            "amount": amount_msats,
+            "fee": fee_msats,
             "message": "Transfer locked successfully"
         }).to_string()), None)
     }
@@ -9743,18 +9741,12 @@ impl Node {
                     .map_err(|e| Error::Protocol(format!("Failed to lock collateral: {:?}", e)))?;
             }
 
-            // Calculate total locked collateral from all deposits
-            let total_locked: u64 = ledger.state.deposits.values()
-                .filter(|d| d.collateral_lock_expires > block_height)
-                .map(|d| d.collateral_lock_amount)
-                .sum();
-
-            // Find minimum lock expiry among active locks
-            let min_lock_until: u32 = ledger.state.deposits.values()
-                .filter(|d| d.collateral_lock_expires > block_height && d.collateral_lock_amount > 0)
-                .map(|d| d.collateral_lock_expires)
-                .min()
-                .unwrap_or(lock_until_block);
+            // Use the specific deposit's lock amount, not the total across all deposits.
+            // Each attestation is for one deposit's collateral contribution.
+            let deposit = ledger.state.deposits.get(&deposit_id)
+                .ok_or_else(|| Error::Protocol("Deposit disappeared after lock".to_string()))?;
+            let locked_amount = deposit.collateral_lock_amount;
+            let lock_expiry = deposit.collateral_lock_expires;
 
             // Get current ledger hash for the attestation
             let ledger_hash = ledger.hash();
@@ -9767,9 +9759,9 @@ impl Node {
             sign_content.extend_from_slice(b"COLLATERAL_ATTESTATION:");
             sign_content.extend_from_slice(&self.node_id.serialize());
             sign_content.extend_from_slice(&requesting_operator.serialize());
-            sign_content.extend_from_slice(&total_locked.to_le_bytes());
+            sign_content.extend_from_slice(&locked_amount.to_le_bytes());
             sign_content.extend_from_slice(&block_height.to_le_bytes());
-            sign_content.extend_from_slice(&min_lock_until.to_le_bytes());
+            sign_content.extend_from_slice(&lock_expiry.to_le_bytes());
             sign_content.extend_from_slice(&ledger_hash);
 
             let hash = sha256::Hash::hash(&sign_content);
@@ -9784,9 +9776,9 @@ impl Node {
                 operator: self.node_id,
                 quorum_member: requesting_operator,
                 collateral_ledger_id,
-                amount: total_locked,
+                amount: locked_amount,
                 block_height,
-                lock_until_block: min_lock_until,
+                lock_until_block: lock_expiry,
                 signature: attestation_signature,
                 ledger_hash,
             }

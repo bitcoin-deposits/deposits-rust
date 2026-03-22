@@ -1,5 +1,5 @@
 #!/bin/bash
-# Lightning channel test script for BDK + LDK integration
+# Lightning channel test script for deposits-node + LDK integration
 #
 # This script tests:
 # 1. Opening a Lightning channel between Alice and Bob
@@ -32,7 +32,7 @@ test_fail() {
     TESTS_FAILED=$((TESTS_FAILED + 1))
 }
 
-# Helper to call ldk-cli for BDK Lightning nodes
+# Helper to call ldk-cli for Deposit nodes
 ldk_cli() {
     "$SCRIPT_DIR/ldk-cli.sh" "$@"
 }
@@ -243,7 +243,7 @@ show_channel_status() {
 
 main() {
     log_info "=========================================="
-    log_info "  Lightning Channel Test (BDK + LDK)"
+    log_info "  Lightning Channel Test (deposits-node + LDK)"
     log_info "=========================================="
     echo ""
 

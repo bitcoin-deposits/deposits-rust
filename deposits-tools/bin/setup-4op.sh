@@ -109,16 +109,20 @@ OPERATORS="alice bob charlie diana"
 # ============================================================================
 
 reset_nostr_data() {
-    log_info "Resetting Nostr relay data..."
+    log_info "Resetting Nostr relay data and node data..."
+    # Stop node processes
+    stop_all_nodes
+    # Stop relay containers
     $DC stop relay-alice relay-bob relay-charlie relay-diana relay-ledgers >/dev/null 2>&1 || true
     $DC rm -f relay-alice relay-bob relay-charlie relay-diana relay-ledgers >/dev/null 2>&1 || true
-    docker volume rm bdk_relay_alice_data bdk_relay_bob_data bdk_relay_charlie_data bdk_relay_diana_data bdk_relay_ledgers_data >/dev/null 2>&1 || true
-    $DC stop alice bob charlie diana >/dev/null 2>&1 || true
-    $DC rm -f alice bob charlie diana >/dev/null 2>&1 || true
-    docker volume rm bdk_alice_data bdk_bob_data bdk_charlie_data bdk_diana_data >/dev/null 2>&1 || true
-    $DC up -d relay-alice relay-bob relay-charlie relay-diana relay-ledgers alice bob charlie diana >/dev/null 2>&1
-    sleep 5
-    log_success "Nostr relay and nodes reset"
+    # Clear all data (node + relay bind-mount dirs)
+    rm -rf "$DATA_ROOT"
+    # Recreate relay data dirs and restart relays
+    mkdir -p "$DATA_ROOT/relays/alice" "$DATA_ROOT/relays/bob" "$DATA_ROOT/relays/charlie" "$DATA_ROOT/relays/diana" "$DATA_ROOT/relays/ledgers"
+    $DC up -d relay-alice relay-bob relay-charlie relay-diana relay-ledgers 2>&1 | grep -v "^$" || true
+    # Wait for relays to be healthy
+    sleep 3
+    log_success "Nostr relays reset (nodes will start in Phase 1)"
 }
 
 # ============================================================================
@@ -133,7 +137,7 @@ setup_operators() {
         log_info "Setting up $op..."
 
         # Fund if needed
-        local info_output=$(run_bdk_cmd "$op" info 2>&1)
+        local info_output=$(run_node_cmd "$op" info 2>&1)
         local balance=$(echo "$info_output" | grep "Wallet balance:" | awk '{print $3}')
 
         local min_balance=$((RESERVES_AMOUNT * LEDGERS_PER_OP + 50000000))  # reserves + 0.5 BTC for fees
@@ -145,7 +149,7 @@ setup_operators() {
         fi
 
         # Get node info
-        info_output=$(run_bdk_cmd "$op" info 2>&1)
+        info_output=$(run_node_cmd "$op" info 2>&1)
         local node_id=$(echo "$info_output" | grep "Node ID:" | awk '{print $3}')
         store_value "node_id_$op" "$node_id"
 
@@ -183,7 +187,7 @@ create_reserves() {
                 fi
             fi
 
-            local output=$(run_bdk_cmd "$op" reserves create $RESERVES_AMOUNT 2>&1)
+            local output=$(run_node_cmd "$op" reserves create $RESERVES_AMOUNT 2>&1)
 
             if echo "$output" | grep -q "Created reserves\|Reserves created"; then
                 local reserves_id=$(echo "$output" | grep "Address:" | awk '{print $2}')
@@ -232,7 +236,7 @@ open_ledgers() {
 
             # Pass enforcement block, fee schedule, and external relay URL
             local relay_url=$(get_node_relay_url "$op")
-            local output=$(run_bdk_cmd "$op" ledger open "$enforcement_block" \
+            local output=$(run_node_cmd "$op" ledger open "$enforcement_block" \
                 --annual-fee-bps "$ANNUAL_FEE_BPS" \
                 --min-fee-sats "$MIN_FEE_SATS" \
                 --fee-period "$FEE_PERIOD" \
@@ -327,11 +331,11 @@ add_quorum_members() {
                     log_info "$op_short ledger $idx: adding $member_short as quorum member..."
 
                     # Add member to op's quorum (pass member's ledger ID for collateral binding)
-                    local add_output=$(run_bdk_cmd "$op" partner add "$op_ledger_id" "$member_node_id" "$member_ledger_id" 2>&1)
+                    local add_output=$(run_node_cmd "$op" partner add "$op_ledger_id" "$member_node_id" "$member_ledger_id" 2>&1)
 
                     if echo "$add_output" | grep -q "Quorum member added\|added"; then
                         # Record the join on member's first ledger
-                        local join_output=$(run_bdk_cmd "$member" partner join "$member_ledger_id" "$op_node_id" "$op_ledger_id" "$membership_expires" 2>&1)
+                        local join_output=$(run_node_cmd "$member" partner join "$member_ledger_id" "$op_node_id" "$op_ledger_id" "$membership_expires" 2>&1)
 
                         if echo "$join_output" | grep -q "Quorum join recorded\|recorded"; then
                             log_success "$member_short joined $op_short ledger $idx"
@@ -358,7 +362,7 @@ establish_collateral() {
     log_info "(Each operator opens and funds collateral deposits on quorum member ledgers)"
     echo ""
 
-    local collateral_amount=$((RESERVES_AMOUNT / 6))  # 1/6th of reserves per member
+    local collateral_amount=$(( (RESERVES_AMOUNT + 5) / 6 ))  # 1/6th of reserves per member (round up)
     log_info "Collateral per member: $collateral_amount sats (1/6 of $RESERVES_AMOUNT)"
     echo ""
 
@@ -377,16 +381,17 @@ establish_collateral() {
 
                 log_info "$op opening collateral deposit on $member's ledger..."
 
-                # Open collateral deposit — connect to member's relay + ledger relay for fee discovery
-                local member_relay="ws://relay-${member}:7777"
+                # Open collateral deposit — send to member's relay where their nostr watch listens
+                local member_relay=$(get_node_relay_url "$member")
                 local op_seed=$(get_node_seed "$op")
-                local open_output=$(docker exec -e RUST_LOG=error "$op" deposits-wallet open \
+                local op_data_dir=$(get_node_data_dir "$op")
+                local open_output=$(RUST_LOG=error "$DEPOSITS_WALLET" open \
                     "$member_ledger_id" "$collateral_amount" \
                     --alias "collateral-${op}-on-${member}" --collateral --skip-cosign-verify \
                     --fee-bps "$ANNUAL_FEE_BPS" --fee-fixed "$MIN_FEE_SATS" --fee-period "$FEE_PERIOD" \
                     --seed "$op_seed" --network regtest \
                     --relay "$member_relay" \
-                    --data-dir /data/wallet 2>&1 || true)
+                    --data-dir "$op_data_dir/wallet" 2>&1 || true)
 
                 if echo "$open_output" | grep -q "created\|Fund with"; then
                     # Extract funding address (may have leading whitespace)
@@ -405,14 +410,40 @@ establish_collateral() {
         done
     done
 
-    mine_blocks 1
+    mine_blocks 2
 
-    # Wait for auto_complete_deposits to pick up the funded offers
-    mine_blocks 1
-    log_info "Waiting for deposits to complete (auto-complete cycle)..."
-    sleep 15
-    mine_blocks 1
-    sleep 5
+    # Poll until all collateral deposits have non-zero balances.
+    # Ask each operator's daemon for deposit balances via `deposit ls`.
+    log_info "Waiting for collateral deposits to complete..."
+    local num_ops=$(echo $OPERATORS | wc -w | tr -d ' ')
+    local expected_deposits=$((num_ops * (num_ops - 1)))
+    local completed=0
+    for attempt in $(seq 1 30); do
+        mine_blocks 1
+        sleep 3
+
+        completed=0
+        for member in $OPERATORS; do
+            local member_suffix=""
+            [ "$LEDGERS_PER_OP" -gt 1 ] && member_suffix="_1"
+            local lid=$(get_value "ledger_id_${member}${member_suffix}")
+            if [ -n "$lid" ]; then
+                local ls_output=$(run_node_cmd "$member" deposit ls "$lid" 2>/dev/null || true)
+                local funded=$(echo "$ls_output" | grep "Balance:" | grep -cv "Balance: 0 msats" || true)
+                completed=$((completed + funded))
+            fi
+        done
+
+        if [ "$completed" -ge "$expected_deposits" ]; then
+            log_success "All $completed/$expected_deposits collateral deposits funded"
+            break
+        fi
+        log_info "  $completed/$expected_deposits deposits funded (attempt $attempt/30)..."
+    done
+
+    if [ "$completed" -lt "$expected_deposits" ]; then
+        log_warn "Only $completed/$expected_deposits deposits funded after 30 attempts"
+    fi
 
     # Lock collateral and record attestations
     log_info "Locking collateral and recording attestations..."
@@ -430,7 +461,7 @@ establish_collateral() {
 
                 # Op locks their collateral deposit on member's ledger
                 # The deposit was opened with op's seed, so op runs the lock command
-                local lock_output=$(run_bdk_cmd "$op" collateral lock \
+                local lock_output=$(run_node_cmd "$op" collateral lock \
                     "$member_ledger_id" "$collateral_msats" "$lock_blocks" "$op_node_id" 2>&1 || true)
 
                 # Extract the base64-encoded attestation from the response
@@ -448,7 +479,7 @@ establish_collateral() {
                         [ "$LEDGERS_PER_OP" -gt 1 ] && lsuffix="_$lidx"
                         local op_reserves_id=$(get_value "reserves_id_${op}${lsuffix}")
                         if [ -n "$op_reserves_id" ]; then
-                            run_bdk_cmd "$op" collateral record \
+                            run_node_cmd "$op" collateral record \
                                 "$op_reserves_id" "$attestation_json" 2>&1 >/dev/null || true
                             recorded=$((recorded + 1))
                         fi
@@ -487,7 +518,7 @@ rotate_reserves_to_quorum() {
 
             log_info "$op_short rotating reserves $idx to quorum-based Taproot..."
 
-            local rotate_output=$(run_bdk_cmd "$op" reserves rotate "$op_reserves_id" 2>&1)
+            local rotate_output=$(run_node_cmd "$op" reserves rotate "$op_reserves_id" 2>&1)
 
             if echo "$rotate_output" | grep -q "Reserves rotated\|rotated successfully"; then
                 local quorum_count=$(echo "$rotate_output" | grep "Quorum Members:" | awk '{print $3}')
@@ -536,11 +567,11 @@ print_summary() {
     echo ""
     log_info "Useful commands:"
     echo "  Mine blocks:     docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass -rpcwallet=faucet -generate 10"
-    echo "  Alice CLI:       docker exec alice deposits-node <command>"
-    echo "  View ledger:     docker exec alice deposits-node ledger show"
+    echo "  Alice CLI:       source bin/_common.sh && run_node_cmd alice <command>"
+    echo "  View ledger:     source bin/_common.sh && run_node_cmd alice ledger show"
     echo "  Nostr relay:     ws://localhost:7801"
     echo ""
-    log_info "Nostr watchers are running in background. They will stop when containers restart."
+    log_info "Nostr watchers are running in background. They will stop when node processes are killed."
     echo ""
 }
 
@@ -572,7 +603,12 @@ main() {
     create_reserves
     open_ledgers
 
-    # Start watchers EARLY - they will dynamically discover QuorumJoin operations
+    # Start daemons and watchers before quorum/collateral phases
+    # Daemons handle auto_complete_deposits, cosign requests, etc.
+    start_all_nodes
+    sleep 2
+
+    # Watchers handle deposit_open, make_offer, collateral_lock requests
     start_nostr_watchers
 
     add_quorum_members

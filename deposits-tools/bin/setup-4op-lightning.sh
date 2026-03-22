@@ -17,7 +17,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/_common.sh"
 
 # Lightning-specific docker compose
-DC="docker compose -f $BDK_DIR/docker-compose.yml --profile lightning"
+DC="docker compose -f $TOOLS_DIR/docker-compose.yml --profile lightning"
+
+# ldk-server-cli binary (host-side, talks to LDK sidecar containers)
+LDK_SERVER_CLI="${LDK_SERVER_CLI:-$HOME/workspace/ldk-server/target/release/ldk-server-cli}"
+if [ ! -x "$LDK_SERVER_CLI" ]; then
+    log_warn "ldk-server-cli not found at $LDK_SERVER_CLI — building..."
+    (cd "$HOME/workspace/ldk-server" && cargo build --release --bin ldk-server-cli) || {
+        log_warn "Failed to build ldk-server-cli; lightning invoices will not work"
+        LDK_SERVER_CLI="ldk-server-cli"  # fall back to PATH
+    }
+fi
 
 # Configuration
 CHANNEL_AMOUNT=5000000  # 5M sats per channel
@@ -114,11 +124,11 @@ sleep 10
 
 # Copy TLS certs
 log_info "Copying TLS certificates..."
-rm -rf "$BDK_DIR/certs"
-mkdir -p "$BDK_DIR/certs"
+rm -rf "$TOOLS_DIR/certs"
+mkdir -p "$TOOLS_DIR/certs"
 for node in $OPERATORS; do
     for attempt in 1 2 3 4 5; do
-        if docker cp "${node}-ln:/ldk/tls.crt" "$BDK_DIR/certs/${node}.crt" 2>/dev/null; then
+        if docker cp "${node}-ln:/ldk/tls.crt" "$TOOLS_DIR/certs/${node}.crt" 2>/dev/null; then
             log_success "  $node TLS cert ready"
             break
         fi
@@ -126,9 +136,51 @@ for node in $OPERATORS; do
     done
 done
 
-# Restart BDK nodes with LDK environment (compose overlay adds LDK_HOST etc.)
+# Restart deposit nodes with LDK environment variables
 log_info "Restarting operator nodes with Lightning sidecar config..."
-$DC up -d alice bob charlie diana
+for node in $OPERATORS; do
+    stop_node "$node"
+done
+sleep 2
+for node in $OPERATORS; do
+    data_dir=$(get_node_data_dir "$node")
+    seed=$(get_node_seed "$node")
+    metrics_port=$(get_node_metrics_port "$node")
+    # LDK API ports exposed to host: alice=3111, bob=3112, charlie=3113, diana=3114
+    node_idx=$(echo "$OPERATORS" | tr ' ' '\n' | grep -n "^${node}$" | cut -d: -f1)
+    ldk_api_port=$((3110 + node_idx))
+
+    mkdir -p "$data_dir"
+
+    # Own relay first (primary for publishing), then the rest for reads
+    own_relay=$(get_node_relay_url "$node")
+    relay_args="--relay $own_relay"
+    for r in $RELAY_ALICE $RELAY_BOB $RELAY_CHARLIE $RELAY_DIANA; do
+        [ "$r" != "$own_relay" ] && relay_args="$relay_args --relay $r"
+    done
+
+    LDK_CLI="$LDK_SERVER_CLI" \
+    LDK_HOST="localhost" \
+    LDK_PORT="$ldk_api_port" \
+    LDK_TLS_CERT="$TOOLS_DIR/certs/${node}.crt" \
+    RUST_LOG=info,deposits_node=debug \
+    DEPOSITS_ENABLE_METRICS_EMITTER=1 \
+    "$DEPOSITS_NODE" run \
+        --seed "$seed" \
+        --network regtest \
+        --electrum "$ELECTRS_URL" \
+        $relay_args \
+        --slow-relay "$RELAY_LEDGERS" \
+        --data-dir "$data_dir" \
+        --metrics-port "$metrics_port" \
+        --fast-poll \
+        --skip-nostr-verify \
+        > "$data_dir/node.log" 2>&1 &
+
+    pid=$!
+    echo "$pid" > "$data_dir/node.pid"
+    log_success "Restarted $node with LDK sidecar (pid $pid)"
+done
 sleep 5
 
 # ============================================================================

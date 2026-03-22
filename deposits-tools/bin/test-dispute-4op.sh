@@ -78,7 +78,7 @@ setup_operators() {
         log_info "Setting up $op..."
 
         # Fund if needed
-        local info_output=$(run_bdk_cmd "$op" info 2>&1)
+        local info_output=$(run_node_cmd "$op" info 2>&1)
         local balance=$(echo "$info_output" | grep "Wallet balance:" | awk '{print $3}')
 
         if [ -z "$balance" ] || [ "$balance" -lt 200000000 ]; then
@@ -89,7 +89,7 @@ setup_operators() {
         fi
 
         # Get node info
-        info_output=$(run_bdk_cmd "$op" info 2>&1)
+        info_output=$(run_node_cmd "$op" info 2>&1)
         local node_id=$(echo "$info_output" | grep "Node ID:" | awk '{print $3}')
         store_value "node_id_$op" "$node_id"
 
@@ -114,7 +114,7 @@ create_reserves() {
     for op in $OPERATORS; do
         log_info "Creating reserves for $op..."
 
-        local reserves_output=$(run_bdk_cmd "$op" reserves "$RESERVES_AMOUNT" 2>&1)
+        local reserves_output=$(run_node_cmd "$op" reserves "$RESERVES_AMOUNT" 2>&1)
 
         if echo "$reserves_output" | grep -q "Reserves created"; then
             test_pass "$op created reserves"
@@ -148,7 +148,7 @@ open_ledgers() {
     for op in $OPERATORS; do
         log_info "Opening ledger for $op..."
 
-        local ledger_output=$(run_bdk_cmd "$op" ledger open "$enforcement_block" 2>&1)
+        local ledger_output=$(run_node_cmd "$op" ledger open "$enforcement_block" 2>&1)
 
         if echo "$ledger_output" | grep -q "Ledger opened\|Opening ledger"; then
             test_pass "$op opened ledger"
@@ -172,14 +172,14 @@ open_ledgers() {
             store_value "reserves_id_$op" "$reserves_id"
         else
             # Fallback: get reserves_id from info command
-            local info_output=$(run_bdk_cmd "$op" info 2>&1)
+            local info_output=$(run_node_cmd "$op" info 2>&1)
             reserves_id=$(echo "$info_output" | grep "Reserves address:" | awk '{print $3}')
             store_value "reserves_id_$op" "$reserves_id"
         fi
 
         # If we didn't get ledger_id, try from ledger list
         if [ -z "$ledger_id" ]; then
-            local list_output=$(run_bdk_cmd "$op" ledger list 2>&1)
+            local list_output=$(run_node_cmd "$op" ledger list 2>&1)
             ledger_id=$(echo "$list_output" | grep "Ledger ID:" | head -1 | awk '{print $3}')
             if [ -n "$ledger_id" ]; then
                 store_value "ledger_id_$op" "$ledger_id"
@@ -273,11 +273,11 @@ add_quorum_members() {
                 log_info "$op_short adding $member_short as quorum member..."
 
                 # Add member to op's quorum (pass member's ledger ID for collateral binding)
-                local add_output=$(run_bdk_cmd "$op" partner add "$op_ledger_id" "$member_node_id" "$member_ledger_id" 2>&1)
+                local add_output=$(run_node_cmd "$op" partner add "$op_ledger_id" "$member_node_id" "$member_ledger_id" 2>&1)
 
                 if echo "$add_output" | grep -q "Quorum member added\|added"; then
                     # Record the join on member's ledger (use ledger_id for both our ledger and target)
-                    local join_output=$(run_bdk_cmd "$member" partner join "$member_ledger_id" "$op_node_id" "$op_ledger_id" "$membership_expires" 2>&1)
+                    local join_output=$(run_node_cmd "$member" partner join "$member_ledger_id" "$op_node_id" "$op_ledger_id" "$membership_expires" 2>&1)
 
                     if echo "$join_output" | grep -q "Quorum join recorded\|recorded"; then
                         test_pass "$member_short joined $op_short's quorum (both sides recorded)"
@@ -308,7 +308,7 @@ rotate_reserves_to_quorum() {
 
         log_info "$op_short rotating reserves to quorum-based Taproot..."
 
-        local rotate_output=$(run_bdk_cmd "$op" reserves rotate "$op_reserves_id" 2>&1)
+        local rotate_output=$(run_node_cmd "$op" reserves rotate "$op_reserves_id" 2>&1)
 
         if echo "$rotate_output" | grep -q "Reserves rotated\|rotated successfully"; then
             local new_address=$(echo "$rotate_output" | grep "New Address:" | awk '{print $3}')
@@ -487,7 +487,7 @@ lock_collateral() {
 
                     if [ -n "$attestation_b64" ]; then
                         local attestation_json=$(echo "$attestation_b64" | base64 -d 2>/dev/null)
-                        local record_output=$(run_bdk_cmd "$depositor" collateral record "$depositor_reserves_id" "$attestation_json" 2>&1)
+                        local record_output=$(run_node_cmd "$depositor" collateral record "$depositor_reserves_id" "$attestation_json" 2>&1)
 
                         if echo "$record_output" | grep -q "recorded\|Collateral attestation"; then
                             test_pass "$dep_short: locked on $op_short, attestation recorded"
@@ -538,11 +538,11 @@ alice_goes_rogue() {
 
     # Export valid ledger first
     log_info "Alice exporting valid ledger to Nostr..."
-    run_bdk_cmd "alice" nostr export "$alice_ledger_id" >/dev/null 2>&1
+    run_node_cmd "alice" nostr export "$alice_ledger_id" >/dev/null 2>&1
 
     # Publish invalid update (use ledger_id since reserves may have been rotated)
     log_info "Alice publishing invalid update (hash chain broken)..."
-    local danger_output=$(run_bdk_cmd "alice" danger publish-invalid \
+    local danger_output=$(run_node_cmd "alice" danger publish-invalid \
         "$alice_ledger_id" invalid-hash 2>&1)
 
     if echo "$danger_output" | grep -q "Published invalid update"; then
@@ -573,7 +573,7 @@ start_disputes() {
 
         log_info "$op_short publishing DisputeEnter on Alice's ledger..."
 
-        local dispute_output=$(run_bdk_cmd "$op" recovery dispute "$alice_ledger_id" 2>&1)
+        local dispute_output=$(run_node_cmd "$op" recovery dispute "$alice_ledger_id" 2>&1)
 
         if echo "$dispute_output" | grep -q "DisputeEnter published"; then
             test_pass "$op_short published DisputeEnter"
@@ -621,7 +621,7 @@ rebuild_quorum() {
                 log_info "  $op_short adding $member_short to quorum..."
 
                 # Add member to quorum using recovery rebuild quorum-add
-                local add_output=$(run_bdk_cmd "$op" recovery rebuild "$alice_ledger_id" quorum-add "$member_node_id" "$member_ledger_id" 2>&1)
+                local add_output=$(run_node_cmd "$op" recovery rebuild "$alice_ledger_id" quorum-add "$member_node_id" "$member_ledger_id" 2>&1)
 
                 if echo "$add_output" | grep -q "published\|QuorumAddMember"; then
                     test_pass "$op_short added $member_short to dispute quorum"
@@ -689,7 +689,7 @@ post_attestations() {
                         log_info "  $op_short recording attestation from $attester_short..."
 
                         # Record attestation on dispute branch
-                        local record_output=$(run_bdk_cmd "$op" recovery rebuild "$alice_ledger_id" attestation "$attestation_json" 2>&1)
+                        local record_output=$(run_node_cmd "$op" recovery rebuild "$alice_ledger_id" attestation "$attestation_json" 2>&1)
 
                         if echo "$record_output" | grep -q "published\|CollateralAttestation"; then
                             test_pass "$op_short got attestation from $attester_short"
@@ -731,7 +731,7 @@ arm_for_entropy() {
 
         log_info "$op_short publishing DisputeArmed..."
 
-        local arm_output=$(run_bdk_cmd "$op" recovery arm "$alice_ledger_id" 2>&1)
+        local arm_output=$(run_node_cmd "$op" recovery arm "$alice_ledger_id" 2>&1)
 
         if echo "$arm_output" | grep -q "DisputeArmed published"; then
             local armed_block=$(echo "$arm_output" | grep "Armed block:" | awk '{print $3}')
@@ -775,7 +775,7 @@ confiscate_to_lottery() {
     local op_short="$confiscator"
     log_info "$op_short initiating confiscation to lottery output..."
 
-    local confiscate_output=$(run_bdk_cmd "$confiscator" recovery confiscate "$alice_ledger_id" 2>&1)
+    local confiscate_output=$(run_node_cmd "$confiscator" recovery confiscate "$alice_ledger_id" 2>&1)
 
     # Debug: show full confiscate output
     echo "=== Confiscate debug output ==="
@@ -820,7 +820,7 @@ reveal_preimages() {
         local op_short="$op"
         log_info "$op_short revealing preimage..."
 
-        local reveal_output=$(run_bdk_cmd "$op" recovery reveal "$alice_ledger_id" 2>&1)
+        local reveal_output=$(run_node_cmd "$op" recovery reveal "$alice_ledger_id" 2>&1)
 
         if echo "$reveal_output" | grep -qi "preimage revealed"; then
             test_pass "$op_short revealed preimage"
@@ -855,7 +855,7 @@ claim_custody() {
 
         log_info "$op_short checking lottery result..."
 
-        local claim_output=$(run_bdk_cmd "$op" recovery lottery-claim "$alice_ledger_id" 2>&1)
+        local claim_output=$(run_node_cmd "$op" recovery lottery-claim "$alice_ledger_id" 2>&1)
 
         if echo "$claim_output" | grep -q "DisputeAcquire published successfully"; then
             test_pass "$op_short WON (published DisputeAcquire)"
@@ -908,7 +908,7 @@ claim_custody() {
         local op_short="$op"
         log_info "$op_short publishing DisputeYield..."
 
-        local release_output=$(run_bdk_cmd "$op" recovery release "$alice_ledger_id" 2>&1)
+        local release_output=$(run_node_cmd "$op" recovery release "$alice_ledger_id" 2>&1)
 
         if echo "$release_output" | grep -q "DisputeYield published"; then
             test_pass "$op_short yielded"
@@ -939,7 +939,7 @@ winner_rotates_to_quorum() {
 
     log_info "Winner ($winner_short) rotating reserves to quorum-controlled Taproot..."
 
-    local rotate_output=$(run_bdk_cmd "$winner" recovery rotate-to-quorum "$alice_ledger_id" 2>&1)
+    local rotate_output=$(run_node_cmd "$winner" recovery rotate-to-quorum "$alice_ledger_id" 2>&1)
 
     if echo "$rotate_output" | grep -q "Reserves rotated to quorum-controlled Taproot"; then
         local new_addr=$(echo "$rotate_output" | grep "New address:" | awk '{print $3}')
@@ -981,7 +981,7 @@ winner_continues_ledger() {
     log_info "Winner ($winner_short) continuing ledger with new operations..."
 
     # Winner adds 3 more operations to make their chain longer
-    local continue_output=$(run_bdk_cmd "$winner" recovery continue "$alice_ledger_id" --count 3 2>&1)
+    local continue_output=$(run_node_cmd "$winner" recovery continue "$alice_ledger_id" --count 3 2>&1)
 
     if echo "$continue_output" | grep -q "continued successfully\|New latest"; then
         test_pass "$winner_short continued ledger (chain now longer)"
@@ -1011,7 +1011,7 @@ show_final_state() {
 
     # Show tree view of Alice's ledger
     log_info "Ledger tree view:"
-    run_bdk_cmd "bob" nostr import "$alice_ledger_id" --dry-run 2>&1
+    run_node_cmd "bob" nostr import "$alice_ledger_id" --dry-run 2>&1
 }
 
 # ============================================================================
@@ -1030,10 +1030,10 @@ reset_nostr_data() {
     log_info "Resetting Nostr relay data..."
     $DC stop relay-alice relay-bob relay-charlie relay-diana relay-ledgers >/dev/null 2>&1 || true
     $DC rm -f relay-alice relay-bob relay-charlie relay-diana relay-ledgers >/dev/null 2>&1 || true
-    docker volume rm bdk_relay_alice_data bdk_relay_bob_data bdk_relay_charlie_data bdk_relay_diana_data bdk_relay_ledgers_data >/dev/null 2>&1 || true
+    docker volume rm deposits-tools_relay_alice_data deposits-tools_relay_bob_data deposits-tools_relay_charlie_data deposits-tools_relay_diana_data deposits-tools_relay_ledgers_data >/dev/null 2>&1 || true
     $DC stop alice bob charlie diana >/dev/null 2>&1 || true
     $DC rm -f alice bob charlie diana >/dev/null 2>&1 || true
-    docker volume rm bdk_alice_data bdk_bob_data bdk_charlie_data bdk_diana_data >/dev/null 2>&1 || true
+    docker volume rm deposits-tools_alice_data deposits-tools_bob_data deposits-tools_charlie_data deposits-tools_diana_data >/dev/null 2>&1 || true
     $DC up -d relay-alice relay-bob relay-charlie relay-diana relay-ledgers alice bob charlie diana >/dev/null 2>&1
     sleep 5
     log_success "Nostr relay and nodes reset"

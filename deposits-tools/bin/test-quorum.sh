@@ -80,7 +80,7 @@ setup_operators() {
     local pids=()
     for op in $OPERATORS; do
         (
-            run_bdk_cmd "$op" info 2>&1 > "$tmpdir/info_$op" || true
+            run_node_cmd "$op" info 2>&1 > "$tmpdir/info_$op" || true
             get_node_address "$op" > "$tmpdir/addr_$op" 2>/dev/null || true
         ) &
         pids+=($!)
@@ -138,7 +138,7 @@ create_reserves() {
         log_info "Reserves batch $batch/$LEDGERS_PER_OP..."
         local pids=()
         for op in $OPERATORS; do
-            (run_bdk_cmd "$op" reserves "$RESERVES_AMOUNT" 2>&1 > "$tmpdir/${op}_${batch}" || true) &
+            (run_node_cmd "$op" reserves "$RESERVES_AMOUNT" 2>&1 > "$tmpdir/${op}_${batch}" || true) &
             pids+=($!)
         done
         for pid in "${pids[@]}"; do wait "$pid" || true; done
@@ -191,11 +191,11 @@ open_ledgers() {
     for op in $OPERATORS; do
         (
             for n in $(seq 1 $LEDGERS_PER_OP); do
-                run_bdk_cmd "$op" ledger open "$enforcement_block" \
+                run_node_cmd "$op" ledger open "$enforcement_block" \
                     2>&1 > "$tmpdir/open_${op}_${n}" || true
             done
             # Capture the authoritative ledger list after all opens
-            run_bdk_cmd "$op" ledger list 2>&1 > "$tmpdir/list_${op}" || true
+            run_node_cmd "$op" ledger list 2>&1 > "$tmpdir/list_${op}" || true
         ) &
         pids+=($!)
     done
@@ -310,11 +310,11 @@ add_quorum_members() {
                         local result_file="$STATE_DIR/quorum_${op}_${n}_${member}.result"
 
                         # Add member to op's quorum (sequential per operator)
-                        local add_output=$(run_bdk_cmd "$op" partner add "$op_reserves_id" "$member_node_id" "$member_ledger_id" 2>&1)
+                        local add_output=$(run_node_cmd "$op" partner add "$op_reserves_id" "$member_node_id" "$member_ledger_id" 2>&1)
 
                         if echo "$add_output" | grep -q "Quorum member added\|added"; then
                             # Record the join on member's FIRST ledger
-                            local join_output=$(run_bdk_cmd "$member" partner join "$member_reserves_id" "$op_node_id" "$op_ledger_id" "$membership_expires" 2>&1)
+                            local join_output=$(run_node_cmd "$member" partner join "$member_reserves_id" "$op_node_id" "$op_ledger_id" "$membership_expires" 2>&1)
 
                             if echo "$join_output" | grep -q "Quorum join recorded\|recorded"; then
                                 echo "PASS:joined" > "$result_file"
@@ -388,7 +388,7 @@ rotate_reserves_to_quorum() {
                 local op_ledger_id=$(get_value "ledger_id_${op}_${n}")
                 local ok=false
                 for attempt in 1 2 3; do
-                    local rotate_output=$(run_bdk_cmd "$op" reserves rotate "$op_ledger_id" 2>&1)
+                    local rotate_output=$(run_node_cmd "$op" reserves rotate "$op_ledger_id" 2>&1)
                     if echo "$rotate_output" | grep -q "Reserves rotated\|rotated successfully\|No existing reserves to rotate"; then
                         echo "$rotate_output" > "$tmpdir/rotate_${op}_${n}"
                         ok=true
@@ -445,7 +445,7 @@ generate_deposit_keys() {
     for op in $OPERATORS; do
         for n in $(seq 1 $LEDGERS_PER_OP); do
             local depositor=$(get_other_n "$op" $((n - 1)))
-            (run_bdk_cmd "$depositor" keygen 2>&1 > "$tmpdir/key_${depositor}_${op}_${n}") &
+            (run_node_cmd "$depositor" keygen 2>&1 > "$tmpdir/key_${depositor}_${op}_${n}") &
             pids+=($!)
         done
     done
@@ -638,7 +638,7 @@ fund_deposits() {
         local funding_detected=false
         local check_output=""
         for retry in 1 2 3 4 5; do
-            check_output=$(run_bdk_cmd "$operator" deposit check "$offer_id" 2>&1) || true
+            check_output=$(run_node_cmd "$operator" deposit check "$offer_id" 2>&1) || true
             if echo "$check_output" | grep -q "Funding detected"; then
                 funding_detected=true
                 break
@@ -653,7 +653,7 @@ fund_deposits() {
             if echo "$check_output" | grep -q "already completed"; then
                 test_pass "$dep_short's deposit on $op_short L$n funded ($detected_amount sats, auto-completed)"
             else
-                local complete_output=$(run_bdk_cmd "$operator" deposit complete "$offer_id" "$txid" "$detected_amount" 2>&1)
+                local complete_output=$(run_node_cmd "$operator" deposit complete "$offer_id" "$txid" "$detected_amount" 2>&1)
 
                 if echo "$complete_output" | grep -q "completed\|credited"; then
                     test_pass "$dep_short's deposit on $op_short L$n funded ($detected_amount sats)"
@@ -715,7 +715,7 @@ lock_collateral() {
                                     local attestation_json=$(echo "$attestation_b64" | base64 -d 2>/dev/null)
 
                                     log_info "  $dep_short recording attestation from $op_short L$n..."
-                                    local record_output=$(run_bdk_cmd "$depositor" collateral record "$depositor_ledger_id" "$attestation_json" 2>&1)
+                                    local record_output=$(run_node_cmd "$depositor" collateral record "$depositor_ledger_id" "$attestation_json" 2>&1)
 
                                     if echo "$record_output" | grep -q "recorded\|Collateral attestation"; then
                                         echo "PASS:locked and recorded" > "$result_file"
@@ -798,7 +798,7 @@ validate_ledgers() {
     for op in $OPERATORS; do
         for n in $(seq 1 $LEDGERS_PER_OP); do
             local ledger_id=$(get_value "ledger_id_${op}_${n}")
-            (run_bdk_cmd "$op" ledger history "$ledger_id" 2>&1 > "$tmpdir/${op}_${n}") &
+            (run_node_cmd "$op" ledger history "$ledger_id" 2>&1 > "$tmpdir/${op}_${n}") &
             pids+=($!)
         done
     done
@@ -843,7 +843,7 @@ full_validate_ledgers() {
     for op in $OPERATORS; do
         for n in $(seq 1 $LEDGERS_PER_OP); do
             local ledger_id=$(get_value "ledger_id_${op}_${n}")
-            (run_bdk_cmd "$op" ledger validate "$ledger_id" 2>&1 > "$tmpdir/${op}_${n}") &
+            (run_node_cmd "$op" ledger validate "$ledger_id" 2>&1 > "$tmpdir/${op}_${n}") &
             pids+=($!)
         done
     done
@@ -892,9 +892,9 @@ create_recovery_test_deposits() {
     # Generate keypairs in parallel
     log_info "Generating keypairs for deposit_r and deposit_s..."
     local tmpdir=$(mktemp -d)
-    (run_bdk_cmd "bob" keygen 2>&1 > "$tmpdir/key_r") &
+    (run_node_cmd "bob" keygen 2>&1 > "$tmpdir/key_r") &
     local pid_r=$!
-    (run_bdk_cmd "bob" keygen 2>&1 > "$tmpdir/key_s") &
+    (run_node_cmd "bob" keygen 2>&1 > "$tmpdir/key_s") &
     local pid_s=$!
     wait "$pid_r"; wait "$pid_s"
 
@@ -968,7 +968,7 @@ create_recovery_test_deposits() {
                 local funding_detected=false
                 local check_output=""
                 for retry in 1 2 3 4 5; do
-                    check_output=$(run_bdk_cmd "alice" deposit check "$offer_id" 2>&1) || true
+                    check_output=$(run_node_cmd "alice" deposit check "$offer_id" 2>&1) || true
                     if echo "$check_output" | grep -q "Funding detected"; then
                         funding_detected=true
                         break
@@ -984,7 +984,7 @@ create_recovery_test_deposits() {
                         test_pass "deposit_r funded with $detected_amount sats (auto-completed)"
                         store_value "deposit_r_balance" "$detected_amount"
                     else
-                        local complete_output=$(run_bdk_cmd "alice" deposit complete "$offer_id" "$txid" "$detected_amount" 2>&1)
+                        local complete_output=$(run_node_cmd "alice" deposit complete "$offer_id" "$txid" "$detected_amount" 2>&1)
 
                         if echo "$complete_output" | grep -q "completed\|credited"; then
                             test_pass "deposit_r funded with $detected_amount sats"
@@ -1033,7 +1033,7 @@ test_automated_dispute() {
 
     # Alice exports her valid ledger to Nostr (so daemons can auto-import it)
     log_info "Alice exporting valid L1 ledger to Nostr..."
-    run_bdk_cmd "alice" nostr export "$alice_ledger_id" >/dev/null 2>&1
+    run_node_cmd "alice" nostr export "$alice_ledger_id" >/dev/null 2>&1
     test_pass "alice exported L1 ledger to Nostr"
 
     # Wait for daemons to auto-import
@@ -1042,7 +1042,7 @@ test_automated_dispute() {
 
     # Alice publishes an invalid update
     log_info "Alice publishing invalid update (invalid-hash violation)..."
-    local danger_output=$(run_bdk_cmd "alice" danger publish-invalid \
+    local danger_output=$(run_node_cmd "alice" danger publish-invalid \
         "$alice_ledger_id" invalid-hash 2>&1)
 
     if echo "$danger_output" | grep -q "Published invalid update"; then
@@ -1159,7 +1159,8 @@ test_automated_dispute() {
     local selected_candidate=""
 
     for candidate in bob charlie diana; do
-        local rotated_content=$(docker exec "$candidate" sh -c "cat /data/lottery_rotated_${alice_prefix}*.marker 2>/dev/null" 2>/dev/null)
+        local candidate_data_dir=$(get_node_data_dir "$candidate")
+        local rotated_content=$(cat "$candidate_data_dir/lottery_rotated_${alice_prefix}"*.marker 2>/dev/null)
         if [ "$rotated_content" = "rotated" ]; then
             selected_candidate="$candidate"
             break
@@ -1171,7 +1172,7 @@ test_automated_dispute() {
     else
         # Fallback: check ledger history for DisputeAcquire
         for candidate in bob charlie diana; do
-            local history=$(run_bdk_cmd "$candidate" ledger history "$alice_ledger_id" 2>&1)
+            local history=$(run_node_cmd "$candidate" ledger history "$alice_ledger_id" 2>&1)
             if echo "$history" | grep -q "DisputeAcquire"; then
                 selected_candidate="$candidate"
                 break
@@ -1236,7 +1237,7 @@ test_post_recovery_payment() {
     local tmpdir=$(mktemp -d)
     local pids=()
     for member in bob charlie diana; do
-        (run_bdk_cmd "$member" nostr import "$alice_ledger_id" 2>&1 > "$tmpdir/import_${member}") &
+        (run_node_cmd "$member" nostr import "$alice_ledger_id" 2>&1 > "$tmpdir/import_${member}") &
         pids+=($!)
     done
     for pid in "${pids[@]}"; do wait "$pid" || true; done
@@ -1257,7 +1258,7 @@ test_post_recovery_payment() {
     # Verify imported ledger state
     log_info ""
     log_info "Verifying imported ledger state..."
-    local ledger_info=$(run_bdk_cmd "$new_custodian" ledger info 2>&1 | head -20)
+    local ledger_info=$(run_node_cmd "$new_custodian" ledger info 2>&1 | head -20)
     log_info "  Ledger info on $new_custodian:"
     echo "$ledger_info" | grep -E "(Ledger|Operator|operator_key|DisputeAcquire)" | head -5
 
@@ -1272,7 +1273,7 @@ test_post_recovery_payment() {
     # Check dispute status
     log_info ""
     log_info "deposit_s checking dispute status before depositing..."
-    local dispute_output=$(run_bdk_cmd "$new_custodian" nostr dispute status "$alice_ledger_id" 2>&1)
+    local dispute_output=$(run_node_cmd "$new_custodian" nostr dispute status "$alice_ledger_id" 2>&1)
     local dispute_status=$(echo "$dispute_output" | grep "DISPUTE_STATUS:" | awk '{print $2}')
 
     log_info "  Dispute status: $dispute_status"
@@ -1280,9 +1281,9 @@ test_post_recovery_payment() {
     if [ "$dispute_status" = "DISPUTED" ]; then
         log_info "  Ledger has unresolved custody dispute - waiting for DisputeAcquire..."
         sleep 2
-        run_bdk_cmd "$new_custodian" nostr import "$alice_ledger_id" >/dev/null 2>&1
+        run_node_cmd "$new_custodian" nostr import "$alice_ledger_id" >/dev/null 2>&1
         sleep 1
-        dispute_output=$(run_bdk_cmd "$new_custodian" nostr dispute status "$alice_ledger_id" 2>&1)
+        dispute_output=$(run_node_cmd "$new_custodian" nostr dispute status "$alice_ledger_id" 2>&1)
         dispute_status=$(echo "$dispute_output" | grep "DISPUTE_STATUS:" | awk '{print $2}')
         log_info "  After re-import: $dispute_status"
     fi
@@ -1355,7 +1356,7 @@ test_post_recovery_payment() {
     local deposit_completed=false
     local history_output=""
     for retry in 1 2 3 4 5; do
-        history_output=$(run_bdk_cmd "$new_custodian" ledger history "$alice_ledger_id" 2>&1)
+        history_output=$(run_node_cmd "$new_custodian" ledger history "$alice_ledger_id" 2>&1)
         if echo "$history_output" | grep -q "OnchainCredit.*${fund_amount}000 msat"; then
             deposit_completed=true
             break
@@ -1379,7 +1380,7 @@ test_post_recovery_payment() {
     # Verify operations in ledger history
     log_info ""
     log_info "Verifying operations in ledger history..."
-    history_output=$(run_bdk_cmd "$new_custodian" ledger history "$alice_reserves_id" 2>&1)
+    history_output=$(run_node_cmd "$new_custodian" ledger history "$alice_reserves_id" 2>&1)
 
     if echo "$history_output" | grep -q "DepositOpen"; then
         test_pass "DepositOpen recorded in ledger"
@@ -1417,7 +1418,7 @@ show_final_state() {
     for op in $OPERATORS; do
         for n in $(seq 1 $LEDGERS_PER_OP); do
             local ledger_id=$(get_value "ledger_id_${op}_${n}")
-            (run_bdk_cmd "$op" ledger history "$ledger_id" 2>&1 > "$tmpdir/${op}_${n}") &
+            (run_node_cmd "$op" ledger history "$ledger_id" 2>&1 > "$tmpdir/${op}_${n}") &
             pids+=($!)
         done
     done
@@ -1450,8 +1451,9 @@ cleanup_nostr_watchers() {
 # Clear deposits-wallet alias data from previous test runs.
 reset_wallet_aliases() {
     log_info "Clearing deposits-wallet aliases..."
-    for container in alice bob charlie diana; do
-        docker exec "$container" sh -c 'rm -f /data/wallet/deposits.json /data/wallet/deposit_key_index.txt ~/.deposits-wallet/deposits.json ~/.deposits-wallet/deposit_key_index.txt' 2>/dev/null || true
+    for node in alice bob charlie diana; do
+        local node_data_dir=$(get_node_data_dir "$node")
+        rm -f "$node_data_dir/wallet/deposits.json" "$node_data_dir/wallet/deposit_key_index.txt" 2>/dev/null || true
     done
     log_success "Wallet aliases cleared"
 }

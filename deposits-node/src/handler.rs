@@ -551,7 +551,7 @@ impl DepositsHandler {
         }
 
         if replayed > 0 {
-            tracing::info!(
+            tracing::debug!(
                 "Loaded ledger {} with {} updates ({} state changes replayed)",
                 ledger_id, ledger.history.len(), replayed
             );
@@ -681,7 +681,7 @@ impl DepositsHandler {
             if let Some(&mem_tip) = known.get(ledger_id) {
                 // Existing ledger — update if disk has higher tip sequence
                 if disk_tip > mem_tip {
-                    tracing::info!(
+                    tracing::debug!(
                         "Reloaded ledger {}... from disk (seq {} -> {}, {} entries)",
                         &ledger_id[..16.min(ledger_id.len())],
                         mem_tip,
@@ -700,7 +700,7 @@ impl DepositsHandler {
                 }
             } else {
                 // New ledger — all updates are new
-                tracing::info!(
+                tracing::debug!(
                     "Discovered new ledger {}... ({} entries)",
                     &ledger_id[..16.min(ledger_id.len())],
                     disk_len
@@ -746,7 +746,7 @@ impl DepositsHandler {
 
         let elapsed = t0.elapsed();
         if changes > 0 {
-            tracing::info!("[PROFILE] discover_new_ledgers: {} changes in {:?} ({} files re-read)", changes, elapsed, changed_files.len());
+            tracing::debug!("[PROFILE] discover_new_ledgers: {} changes in {:?} ({} files re-read)", changes, elapsed, changed_files.len());
         } else if elapsed.as_millis() > 10 {
             tracing::debug!("[PROFILE] discover_new_ledgers: no changes from {} files in {:?}", changed_files.len(), elapsed);
         }

@@ -21,43 +21,22 @@ scrape_configs:
         labels:
           cluster: 'regtest'
 
-  # Main operator nodes (always running)
+  # Main operator nodes (bare processes on host, unique metrics ports)
   - job_name: 'deposits-node'
     static_configs:
       - targets:
-          - 'alice:9100'
-          - 'bob:9100'
-          - 'charlie:9100'
-          - 'diana:9100'
+          - 'host.docker.internal:9101'
+          - 'host.docker.internal:9102'
+          - 'host.docker.internal:9103'
+          - 'host.docker.internal:9104'
         labels:
           cluster: 'regtest'
 
   # Dynamic eve nodes (scaled with payment-simulator)
-  # These are discovered via file_sd_configs or can be added manually
   - job_name: 'deposits-node-eve'
     static_configs:
       - targets:
-          - 'eve:9100'
-          - 'eve01:9100'
-          - 'eve02:9100'
-          - 'eve03:9100'
-          - 'eve04:9100'
-          - 'eve05:9100'
-          - 'eve06:9100'
-          - 'eve07:9100'
-          - 'eve08:9100'
-          - 'eve09:9100'
-          - 'eve10:9100'
-          - 'eve11:9100'
-          - 'eve12:9100'
-          - 'eve13:9100'
-          - 'eve14:9100'
-          - 'eve15:9100'
-          - 'eve16:9100'
-          - 'eve17:9100'
-          - 'eve18:9100'
-          - 'eve19:9100'
-          - 'eve20:9100'
+          - 'host.docker.internal:9105'
         labels:
           cluster: 'regtest'
           node_type: 'eve'

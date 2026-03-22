@@ -1008,13 +1008,17 @@ async fn execute_transfer(
 
     let completion_script = format!("sha256({})", hex::encode(work.hash));
 
-    // Compute signing message and transfer_id
+    // Convert to msats for signing and request
+    let amount_msats = work.amount_sats * 1000;
+    let fee_msats = work.fee_sats * 1000;
+
+    // Compute signing message and transfer_id (all in msats)
     let msg_hash = deposits_core::signature_utils::transfer_lock_signing_message(
         &nonce,
         &sender.deposit_id,
         &receiver.deposit_id,
-        work.amount_sats,
-        work.fee_sats,
+        amount_msats,
+        fee_msats,
         &completion_script,
         timeout_height,
     );
@@ -1028,8 +1032,8 @@ async fn execute_transfer(
         "nonce": hex::encode(nonce),
         "source_deposit_id": hex::encode(sender.deposit_id),
         "destination_deposit_id": hex::encode(receiver.deposit_id),
-        "amount": work.amount_sats,
-        "fee": work.fee_sats,
+        "amount": amount_msats,
+        "fee": fee_msats,
         "completion_script": completion_script,
         "timeout_height": timeout_height,
         "transfer_id": hex::encode(transfer_id),

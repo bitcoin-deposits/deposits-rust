@@ -191,8 +191,8 @@ body.hide-amounts .amt { visibility: hidden; }
             —
           </div>
           <div id="wallet-locked" style="color:var(--yellow); font-size:12px; display:none;"></div>
-          <div id="wallet-concentration" style="color:var(--yellow); font-size:11px; display:none; margin-top:4px;"></div>
         </div>
+        <div id="wallet-concentration" style="color:var(--yellow); font-size:11px; display:none; text-align:center; margin-bottom:8px;"></div>
 
         <!-- Action buttons -->
         <div style="display:flex; gap:10px; justify-content:center; margin-bottom:20px;">
@@ -293,12 +293,19 @@ body.hide-amounts .amt { visibility: hidden; }
     <div id="tab-deposits" class="panel">
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
         <span style="color:var(--muted)">Your deposits</span>
+        <div style="display:flex; gap:6px;">
+          <button style="font-size:11px; padding:4px 10px;" onclick="doAutoSpread()">Spread</button>
+          <button style="font-size:11px; padding:4px 10px;" onclick="doRebalance()">Rebalance</button>
+        </div>
       </div>
       <div id="deposits-list" style="display:flex; flex-wrap:wrap; gap:8px;"></div>
       <div id="new-deposit-pane" style="display:none; margin-top:12px;">
         <div class="card">
           <h3>Open New Deposit</h3>
           <div id="new-deposit-list" style="color:var(--muted);">Loading...</div>
+          <div style="margin-top:8px; padding-top:8px; border-top:1px solid var(--border);">
+            <button onclick="doAutoSpread()" style="font-size:11px;">Auto-spread across 4 operators</button>
+          </div>
         </div>
       </div>
 
@@ -609,6 +616,7 @@ import { schnorr } from './vendor/noble-curves-secp256k1.js';
 import qrcode from './vendor/qrcode-generator.js';
 import jsQR from './vendor/jsqr.js';
 import { WORDLIST } from './vendor/bip39-english.js';
+import { OP_NAMES, FIELD_NAMES } from './tlv-catalog.js';
 
 // ============================================================
 // QR code rendering
@@ -1090,10 +1098,47 @@ function updateConnStatus() {
   }
 }
 
+let updateSubIds = []; // track update subscriptions for resubscribe
+
 function subscribeOnSocket(sock) {
   const subId = 'wr-' + Date.now().toString(36);
-  const filter = { kinds: [20102], since: Math.floor(Date.now() / 1000) - 5 };
-  sock.send(JSON.stringify(['REQ', subId, filter]));
+  const since = Math.floor(Date.now() / 1000) - 5;
+  // Subscribe to ledger responses (kind 20102)
+  const responseFilter = { kinds: [20102], since };
+  sock.send(JSON.stringify(['REQ', subId, responseFilter]));
+
+  // Subscribe to ledger updates (kind 9100) tagged with our deposit IDs
+  subscribeUpdatesOnSocket(sock, since);
+}
+
+function subscribeUpdatesOnSocket(sock, since) {
+  const depositIds = getOurDepositIds();
+  if (depositIds.length === 0) return;
+  const updateSubId = 'wu-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+  const updateFilter = { kinds: [9100], '#i': depositIds, since };
+  sock.send(JSON.stringify(['REQ', updateSubId, updateFilter]));
+  // Track for cleanup on resubscribe
+  if (!sock._updateSubIds) sock._updateSubIds = [];
+  sock._updateSubIds.push(updateSubId);
+}
+
+function resubscribeUpdates() {
+  const since = Math.floor(Date.now() / 1000) - 5;
+  for (const s of sockets) {
+    if (!s.ws || s.ws.readyState !== WebSocket.OPEN) continue;
+    // Close old update subscriptions
+    for (const id of (s.ws._updateSubIds || [])) {
+      try { s.ws.send(JSON.stringify(['CLOSE', id])); } catch {}
+    }
+    s.ws._updateSubIds = [];
+    subscribeUpdatesOnSocket(s.ws, since);
+  }
+}
+
+function getOurDepositIds() {
+  return state.deposits
+    .filter(d => d.deposit_pubkey)
+    .map(d => bytesToHex(computeDepositId(hexToBytes(d.deposit_pubkey))));
 }
 
 function wsSend(msg) {
@@ -1143,6 +1188,11 @@ function handleRelayMessage(data, sock) {
 }
 
 function handleEvent(event) {
+  if (event.kind === 9100) {
+    // Ledger update — check for credits to our deposits
+    handleLedgerUpdate(event);
+    return;
+  }
   if (event.kind === 20102) {
     // Ledger response — match to pending request via #e tag
     const eTag = (event.tags || []).find(t => t[0] === 'e');
@@ -1160,6 +1210,45 @@ function handleEvent(event) {
       }
     }
   }
+}
+
+const seenUpdateIds = new Set();
+
+function handleLedgerUpdate(event) {
+  if (seenUpdateIds.has(event.id)) return;
+  seenUpdateIds.add(event.id);
+
+  try {
+    const u = decodeUpdate(event.content);
+    // Only care about credit operations
+    if (u.opName !== 'InvoiceCredit' && u.opName !== 'OnchainCredit' && u.opName !== 'DepositCredit') return;
+
+    // Check if any tagged deposit ID is ours
+    const iTags = (event.tags || []).filter(t => t[0] === 'i').map(t => t[1]);
+    const ourIds = getOurDepositIds();
+    const matched = iTags.find(id => ourIds.includes(id));
+    if (!matched) return;
+
+    // Find the deposit
+    const deposit = state.deposits.find(d => {
+      if (!d.deposit_pubkey) return false;
+      return bytesToHex(computeDepositId(hexToBytes(d.deposit_pubkey))) === matched;
+    });
+
+    const amtField = u.opFields.find(f => f.type === 2);
+    const amtMsats = (amtField && amtField.u64) || 0;
+    const amtSats = Math.round(amtMsats / 1000);
+    const alias = deposit ? deposit.alias : matched.slice(0, 8) + '...';
+
+    log(`Received ₿${amtSats.toLocaleString()} on ${alias} (${u.opName})`, 'success');
+
+    // Update local balance and sync
+    syncAll().then(() => renderDeposits());
+
+    // Close receive pane
+    document.getElementById('wallet-receive').style.display = 'none';
+    document.getElementById('wallet-recv-result').style.display = 'none';
+  } catch {}
 }
 
 async function sendRequest(ledgerId, action, params, timeoutMs = 30000) {
@@ -1265,7 +1354,7 @@ async function discoverLedgers() {
       });
     }
     const node = nodeMap.get(pk);
-    node.reserves += ad.reserves_amount_sats || 0;
+    node.reserves += ad.reserves_amount_msats || 0;
     // collateralAtRisk is computed solely from CollateralAttestation events (deduplicated)
     node.ledgerCount++;
     node.ads.push(ad);
@@ -1282,12 +1371,12 @@ async function discoverLedgers() {
   }
 
   // Fetch QuorumAddMember (43), QuorumBegin (12), and CollateralAttestation (42)
-  let updateEvents = await fetchEvents({ kinds: [9100], '#t': ['43', '12', '42'], limit: 500 }, 10000);
+  let updateEvents = await fetchEvents({ kinds: [9100], '#t': ['43', '12'], limit: 2000 }, 15000);
   if (updateEvents.length === 0) {
-    updateEvents = await fetchEvents({ kinds: [9100], limit: 500 }, 10000);
+    updateEvents = await fetchEvents({ kinds: [9100], limit: 2000 }, 15000);
   }
 
-  const attestationDedup = new Map(); // dedupKey → {opNode, memberPk, amount}
+  window._ledgerCollateral = {};  // ledger_id → total_collateral msats (from QuorumBegin)
   for (const ev of updateEvents) {
     try {
       const u = decodeUpdate(ev.content);
@@ -1309,10 +1398,27 @@ async function discoverLedgers() {
             if (!edgeSet.has(key)) { edgeSet.add(key); graphEdges.push({ from: opNode.id, to: memberNode.id }); }
           }
         }
-      } else if (u.opDisc === 12) { // QuorumBegin — field 6 is concatenated member pubkeys (33 bytes each)
+      } else if (u.opDisc === 12) { // QuorumBegin — field 6=member pubkeys, field 88=total_collateral
+        // Extract total_collateral (field 88) — authoritative sum from rotation time
+        const totalCollatField = u.opFields.find(f => f.type === 88);
+        if (totalCollatField && (totalCollatField.u64 || 0) > 0) {
+          const collateral = totalCollatField.u64;
+          // Use the most recent QuorumBegin per ledger (highest sequence wins)
+          const prevCollat = window._ledgerCollateral[ledgerId] || 0;
+          const prevSeq = window._ledgerCollateralSeq?.[ledgerId] || 0;
+          const thisSeq = u.seq || 0;
+          if (thisSeq >= prevSeq) {
+            window._ledgerCollateral[ledgerId] = collateral;
+            if (!window._ledgerCollateralSeq) window._ledgerCollateralSeq = {};
+            window._ledgerCollateralSeq[ledgerId] = thisSeq;
+            // Update operator node's total (remove old value, add new)
+            opNode.collateralAtRisk = opNode.collateralAtRisk - prevCollat + collateral;
+          }
+        }
+
+        // Extract quorum member pubkeys (field 6)
         const membersField = u.opFields.find(f => f.type === 6);
         if (membersField && membersField.len >= 33) {
-          // Parse concatenated 33-byte pubkeys from raw hex
           const fullHex = membersField.hex.replace('...', '');
           for (let off = 0; off + 66 <= fullHex.length; off += 66) {
             const pkHex = fullHex.slice(off, off + 66);
@@ -1323,53 +1429,11 @@ async function discoverLedgers() {
             }
           }
         }
-      } else if (u.opDisc === 42) { // CollateralAttestation — field 38=collateral_operator, field 44=quorum_member, field 2=amount, field 115=collateral_ledger_id
-        const collatOpField = u.opFields.find(f => f.type === 38);
-        const memberField = u.opFields.find(f => f.type === 44);
-        const amtField = u.opFields.find(f => f.type === 2);
-        const ledgerField = u.opFields.find(f => f.type === 115);
-        if (collatOpField && memberField && amtField) {
-          const collatOpPk = collatOpField.hex.replace('...', '');
-          const memberPk = memberField.hex.replace('...', '');
-          const amount = amtField.u64 || 0;
-          const collatLedger = ledgerField ? ledgerField.hex.replace('...', '') : '';
-          // Dedup per-ledger: (d_tag_ledger, member, collateral_ledger)
-          // Each ledger accumulates its own attestations independently
-          const dedupKey = ledgerId + ':' + memberPk + ':' + collatLedger;
-          const backedNode = graphNodes.find(n =>
-            n.pubkey === collatOpPk || n.pubkey.startsWith(collatOpPk) || collatOpPk.startsWith(n.pubkey)
-          );
-          if (backedNode) {
-            if (!attestationDedup.has(dedupKey)) {
-              attestationDedup.set(dedupKey, { opNode: backedNode, memberPk, amount, ledgerId, collatLedger });
-            } else {
-              attestationDedup.get(dedupKey).amount = amount;
-            }
-          }
-        }
       }
     } catch {}
   }
 
-  // Apply deduplicated collateral attestations — per-ledger totals
-  window._ledgerCollateral = {};       // ledger_id → total collateral sats
-  window._ledgerCollateralMembers = {}; // ledger_id → Set of collateral_ledger IDs (for overlap detection)
-  for (const [, { opNode, memberPk, amount, ledgerId, collatLedger }] of attestationDedup) {
-    const amtSats = Math.floor(amount / 1000);
-    opNode.collateralAtRisk += amtSats;
-    if (ledgerId) {
-      window._ledgerCollateral[ledgerId] = (window._ledgerCollateral[ledgerId] || 0) + amtSats;
-      if (!window._ledgerCollateralMembers[ledgerId]) window._ledgerCollateralMembers[ledgerId] = new Set();
-      if (collatLedger) window._ledgerCollateralMembers[ledgerId].add(collatLedger);
-    }
-    const memberNode = graphNodes.find(n =>
-      n.pubkey === memberPk || n.pubkey.startsWith(memberPk) || memberPk.startsWith(n.pubkey)
-    );
-    if (memberNode && memberNode !== opNode) {
-      const key = [opNode.id, memberNode.id].sort().join(':');
-      if (!edgeSet.has(key)) { edgeSet.add(key); graphEdges.push({ from: opNode.id, to: memberNode.id }); }
-    }
-  }
+  // _ledgerCollateral populated above from QuorumBegin total_collateral (msats)
 
   // Initial positions — circle layout
   const cx = 200, cy = 175, r = 120;
@@ -1492,7 +1556,8 @@ function renderGraph() {
     if (n.collateralAtRisk > 0) {
       ctx.fillStyle = '#fff';
       ctx.font = '9px -apple-system, sans-serif';
-      ctx.fillText('₿' + (n.collateralAtRisk / 1e6).toFixed(1) + 'M', n.x, n.y + 3);
+      const sats = Math.floor(n.collateralAtRisk / 1000);
+      ctx.fillText('₿' + (sats >= 1e6 ? (sats / 1e6).toFixed(1) + 'M' : (sats / 1e3).toFixed(0) + 'k'), n.x, n.y + 3);
     }
   }
 }
@@ -1562,16 +1627,25 @@ function showNodeInfo(node) {
   const lcm = window._ledgerCollateralMembers || {};
   for (const ad of node.ads) {
     const lid = ad.ledger_id || '';
-    const reserves = ad.reserves_amount_sats || 0;
-    const obligations = ad.total_obligations_sats || 0;
-    const ledgerCollateral = (window._ledgerCollateral && window._ledgerCollateral[lid]) || 0;
-    const ratio = reserves > 0 ? Math.round(ledgerCollateral / reserves * 100) : 0;
+    const reserves_msats = ad.reserves_amount_msats || 0;
+    const obligations_msats = ad.total_obligations_msats || 0;
+    const attested_collateral = ad.attested_collateral_msats || (window._ledgerCollateral && window._ledgerCollateral[lid]) || 0;
+    const held_collateral = ad.held_collateral_msats || 0;
+    const effective_reserves = Math.max(0, reserves_msats - held_collateral);
+    const ratio = effective_reserves > 0 ? Math.round(attested_collateral / effective_reserves * 100) : 0;
     const ratioColor = ratio >= 100 ? 'var(--balance)' : ratio >= 50 ? 'var(--yellow)' : 'var(--red)';
+    const fmtSats = v => Math.floor(v / 1000).toLocaleString();
     details += `<div style="margin-top:4px; padding:4px 0; border-top:1px solid var(--border);">`;
     details += `<div style="font-size:10px; color:var(--muted); cursor:pointer;" onclick="selectLedger('${lid}')">${lid.slice(0, 16)}...</div>`;
-    details += `<div class="kv"><span class="k">Collateral</span><span class="v amt">₿${ledgerCollateral.toLocaleString()} <span style="color:${ratioColor}">(${ratio}%)</span></span></div>`;
-    details += `<div class="kv"><span class="k">Reserves</span><span class="v amt">₿${reserves.toLocaleString()}</span></div>`;
-    if (obligations > 0) details += `<div class="kv"><span class="k">Obligations</span><span class="v amt">₿${obligations.toLocaleString()}</span></div>`;
+    details += `<div class="kv"><span class="k">Attested collateral</span><span class="v">₿${fmtSats(attested_collateral)} <span style="color:${ratioColor}">(${ratio}%)</span></span></div>`;
+    details += `<div class="kv"><span class="k">Reserves</span><span class="v">₿${fmtSats(reserves_msats)}${held_collateral > 0 ? ` (${fmtSats(held_collateral)} held)` : ''}</span></div>`;
+    const coverageStr = obligations_msats === 0
+      ? (attested_collateral > 0 ? '∞' : '–')
+      : Math.round(attested_collateral / obligations_msats * 100) + '%';
+    const coverageColor = obligations_msats === 0 ? 'var(--balance)'
+      : attested_collateral >= obligations_msats ? 'var(--balance)'
+      : attested_collateral >= obligations_msats / 2 ? 'var(--yellow)' : 'var(--red)';
+    details += `<div class="kv"><span class="k">Obligations</span><span class="v">₿${fmtSats(obligations_msats)} <span style="color:${coverageColor}">(${coverageStr} covered)</span></span></div>`;
 
     // Peer reuse: check if this ledger's collateral sources are shared with other ledgers
     const myMembers = lcm[lid];
@@ -1614,15 +1688,24 @@ window.selectLedger = function(ledgerId) {
     details += `<div class="kv"><span class="k">Ledger ID</span><span class="v">${ledgerId}</span></div>`;
     details += `<div class="kv"><span class="k">Operator</span><span class="v">${esc(ad.operator_pubkey || '')}</span></div>`;
     // Collateral first, then reserves
-    const collateral = (window._ledgerCollateral && window._ledgerCollateral[ledgerId]) || 0;
-    const reserves = ad.reserves_amount_sats || 0;
-    const obligations = ad.total_obligations_sats || 0;
-    const ratio = reserves > 0 ? Math.round(collateral / reserves * 100) : 0;
+    const att_coll_m = ad.attested_collateral_msats || (window._ledgerCollateral && window._ledgerCollateral[ledgerId]) || 0;
+    const held_coll_m = ad.held_collateral_msats || 0;
+    const reserves_m = ad.reserves_amount_msats || 0;
+    const effective_m = Math.max(0, reserves_m - held_coll_m);
+    const obligations_m = ad.total_obligations_msats || 0;
+    const ratio = effective_m > 0 ? Math.round(att_coll_m / effective_m * 100) : 0;
     const ratioColor = ratio >= 100 ? 'var(--balance)' : ratio >= 50 ? 'var(--yellow)' : 'var(--red)';
-    details += `<div class="kv"><span class="k">Collateral</span><span class="v">₿${collateral.toLocaleString()} <span style="color:${ratioColor}">(${ratio}%)</span></span></div>`;
-    details += `<div class="kv"><span class="k">Reserves</span><span class="v">₿${reserves.toLocaleString()}</span></div>`;
-    details += `<div class="kv"><span class="k">Obligations</span><span class="v">₿${obligations.toLocaleString()}</span></div>`;
-    details += `<div class="kv"><span class="k">Available</span><span class="v">₿${(ad.available_headroom_sats || 0).toLocaleString()}</span></div>`;
+    const fs = v => Math.floor(v / 1000).toLocaleString();
+    details += `<div class="kv"><span class="k">Attested collateral</span><span class="v">₿${fs(att_coll_m)} <span style="color:${ratioColor}">(${ratio}%)</span></span></div>`;
+    details += `<div class="kv"><span class="k">Reserves</span><span class="v">₿${fs(reserves_m)}${held_coll_m > 0 ? ` (${fs(held_coll_m)} held)` : ''}</span></div>`;
+    const covStr = obligations_m === 0
+      ? (att_coll_m > 0 ? '∞' : '–')
+      : Math.round(att_coll_m / obligations_m * 100) + '%';
+    const covColor = obligations_m === 0 ? 'var(--balance)'
+      : att_coll_m >= obligations_m ? 'var(--balance)'
+      : att_coll_m >= obligations_m / 2 ? 'var(--yellow)' : 'var(--red)';
+    details += `<div class="kv"><span class="k">Obligations</span><span class="v">₿${fs(obligations_m)} <span style="color:${covColor}">(${covStr} covered)</span></span></div>`;
+    details += `<div class="kv"><span class="k">Available</span><span class="v">₿${fs(ad.available_headroom_msats || 0)}</span></div>`;
 
     // Quorum size from graph data
     const opNode = graphNodes.find(n => n.pubkey === (ad.operator_pubkey || ''));
@@ -1664,8 +1747,8 @@ window.selectLedger = function(ledgerId) {
     const adAnnualFixed = Math.floor((ad.min_fee_sats || 0) * 52560 / adFeePeriod);
     details += `<div class="kv"><span class="k">Custody fee</span><span class="v">${(ad.annual_fee_bps || 0) / 100}%/yr + ₿${adAnnualFixed.toLocaleString()}/yr</span></div>`;
     details += `<div class="kv"><span class="k">Transfer fee</span><span class="v">₿${ad.transfer_fee_fixed_msats || 0} + ${(ad.transfer_fee_rate_bps || 0) / 100}%</span></div>`;
-    if (ad.min_deposit_sats > 0) details += `<div class="kv"><span class="k">Min deposit</span><span class="v">₿${ad.min_deposit_sats}</span></div>`;
-    if (ad.max_deposit_sats < 1e18) details += `<div class="kv"><span class="k">Max deposit</span><span class="v">₿${ad.max_deposit_sats.toLocaleString()}</span></div>`;
+    if (ad.min_deposit_msats > 0) details += `<div class="kv"><span class="k">Min deposit</span><span class="v">₿${ad.min_deposit_msats}</span></div>`;
+    if (ad.max_deposit_msats < 1e18) details += `<div class="kv"><span class="k">Max deposit</span><span class="v">₿${ad.max_deposit_msats.toLocaleString()}</span></div>`;
     if (ad.relay_url) details += `<div class="kv"><span class="k">Relay</span><span class="v">${esc(ad.relay_url)}</span></div>`;
     if (ad.description) details += `<div style="margin-top:4px; color:var(--muted);">${esc(ad.description)}</div>`;
     document.getElementById('ledger-info-details').innerHTML = details;
@@ -1740,6 +1823,7 @@ window.doOpenDeposit = async function() {
     state.keyIndex = keyIndex + 1;
     saveState();
     renderDeposits();
+    resubscribeUpdates();
 
     log(`Deposit '${alias}' created. Use "Add funds" to get a funding address.`, 'success');
 
@@ -1901,10 +1985,10 @@ function renderWalletTab() {
       const [topOp, topAmt] = entries[0];
       const pct = Math.round(topAmt / totalSats * 100);
       if (entries.length === 1) {
-        concEl.textContent = 'All funds with one operator — consider spreading';
+        concEl.innerHTML = 'All funds with one operator — <a href="#" style="color:var(--accent);" onclick="event.preventDefault(); doAutoSpread()">auto-spread</a>';
         concEl.style.display = 'block';
       } else if (pct > 75) {
-        concEl.textContent = `${pct}% with ${topOp} — consider spreading`;
+        concEl.innerHTML = `${pct}% with ${topOp} — <a href="#" style="color:var(--accent);" onclick="event.preventDefault(); doRebalance()">rebalance</a>`;
         concEl.style.display = 'block';
       } else {
         concEl.style.display = 'none';
@@ -1972,10 +2056,10 @@ window.showWalletOpen = async function() {
     const feePeriod = s.fee_period_blocks || 2016;
     const tfFixed = s.transfer_fee_fixed_msats || 0;
     const tfRate = s.transfer_fee_rate_bps || 0;
-    const totalHeadroom = groupAds.reduce((sum, a) => sum + (a.available_headroom_sats || 0), 0);
+    const totalHeadroom = groupAds.reduce((sum, a) => sum + (a.available_headroom_msats || 0), 0);
 
     // Pick the ledger with most headroom
-    const sorted = groupAds.sort((a, b) => (b.available_headroom_sats || 0) - (a.available_headroom_sats || 0));
+    const sorted = groupAds.sort((a, b) => (b.available_headroom_msats || 0) - (a.available_headroom_msats || 0));
     const best = sorted[0];
     const lid = best.ledger_id;
     const relay = best.relay_url || '';
@@ -1998,7 +2082,7 @@ window.showWalletOpen = async function() {
         const name = ad.operator_name || 'Anon';
         const adLid = ad.ledger_id || '';
         const adRelay = ad.relay_url || '';
-        const headroom = (ad.available_headroom_sats || 0).toLocaleString();
+        const headroom = Math.floor((ad.available_headroom_msats || 0) / 1000).toLocaleString();
         const quorum = ad.quorum_size || 0;
         html += `<button style="font-size:10px; padding:2px 6px;" onclick="event.stopPropagation(); doWalletQuickOpen('${adLid}','${esc(adRelay)}')" title="${adLid}">${esc(name)} (${adLid.slice(0,8)}...) ${headroom}s q=${quorum}</button>`;
       }
@@ -2053,10 +2137,229 @@ window.doWalletQuickOpen = async function(ledgerId, relayUrl) {
     state.keyIndex = keyIndex + 1;
     saveState();
     renderDeposits();
+    resubscribeUpdates();
     log(`Deposit '${alias}' created.`, 'success');
   } catch (e) {
     log(`Open failed: ${e.message}`, 'error');
   }
+};
+
+window.doAutoSpread = async function() {
+  const TARGET_SHARDS = 4;
+
+  // Sync balances first
+  await syncAll();
+  if (cachedBlockHeight === 0) { log('Block height unknown — sync failed', 'error'); return; }
+
+  // Find funded deposits
+  const funded = state.deposits.filter(d => (d.amount_sats || 0) > 0);
+  const totalBalance = funded.reduce((s, d) => s + (d.amount_sats || 0), 0);
+  if (totalBalance === 0) { log('No funded deposits to spread', 'error'); return; }
+
+  // Discover available ledgers
+  const events = await fetchEvents({ kinds: [39100] }, 10000);
+  const adMap = {};
+  for (const ev of events) {
+    try { const ad = JSON.parse(ev.content); if (!ad.network || ad.network === state.network) adMap[ad.ledger_id] = ad; } catch {}
+  }
+
+  // Count how many more shards we need (don't count funded deposits on same operator twice)
+  const fundedOperators = new Set(funded.map(d => {
+    const ad = adMap[d.ledger_id]; return ad ? ad.operator_pubkey : d.ledger_id;
+  }));
+  const existingLedgers = new Set(state.deposits.map(d => d.ledger_id));
+  const needed = Math.max(0, TARGET_SHARDS - fundedOperators.size);
+
+  if (needed === 0) {
+    log(`Already spread across ${fundedOperators.size} operators`, 'success');
+    return;
+  }
+
+  // Pick ledgers from distinct NEW operators
+  const candidates = Object.values(adMap)
+    .filter(a => !existingLedgers.has(a.ledger_id) && (a.available_headroom_msats || 0) > 0)
+    .sort((a, b) => (b.available_headroom_msats || 0) - (a.available_headroom_msats || 0));
+
+  const selected = [];
+  const usedOperators = new Set([...fundedOperators]);
+  for (const ad of candidates) {
+    const op = ad.operator_pubkey || '';
+    if (usedOperators.has(op)) continue;
+    usedOperators.add(op);
+    selected.push(ad);
+    if (selected.length >= needed) break;
+  }
+  if (selected.length < needed) {
+    for (const ad of candidates) {
+      if (selected.some(s => s.ledger_id === ad.ledger_id)) continue;
+      selected.push(ad);
+      if (selected.length >= needed) break;
+    }
+  }
+
+  if (selected.length === 0) { log('No available ledgers to spread to', 'error'); return; }
+
+  // Open new deposits
+  log(`Opening ${selected.length} new deposits...`);
+  const newDeposits = [];
+  for (const ad of selected) {
+    try {
+      await doWalletQuickOpen(ad.ledger_id, ad.relay_url || '');
+      const newest = state.deposits[state.deposits.length - 1];
+      newDeposits.push(newest);
+    } catch (e) {
+      log(`Failed on ${ad.operator_name || ad.ledger_id.slice(0,12)}: ${e.message}`, 'error');
+    }
+  }
+
+  if (newDeposits.length === 0) { log('No deposits opened', 'error'); return; }
+
+  // Pay via Lightning: divide total evenly across all shards (funded + new)
+  const totalShards = funded.length + newDeposits.length;
+  const perShard = Math.floor(totalBalance / totalShards);
+
+  log(`Spreading ₿${totalBalance.toLocaleString()} across ${totalShards} deposits (₿${perShard.toLocaleString()} each)...`);
+
+  let transferred = 0;
+  for (const dest of newDeposits) {
+    const source = funded.sort((a, b) => (b.amount_sats || 0) - (a.amount_sats || 0))[0];
+    if (!source || (source.amount_sats || 0) <= perShard) continue;
+
+    const amount = perShard;
+
+    try {
+      // 1. Create invoice on destination
+      log(`Creating invoice for ₿${amount.toLocaleString()} on ${dest.alias}...`);
+      const invResp = await sendRequest(dest.ledger_id, 'make_invoice', {
+        deposit_pubkey: dest.deposit_pubkey,
+        amount_sats: amount,
+        description: `Spread to ${dest.alias}`,
+      }, 60000);
+
+      if (!invResp.success || !(invResp.result || invResp).invoice) {
+        log(`Invoice failed on ${dest.alias}: ${invResp.error || 'no invoice'}`, 'error');
+        continue;
+      }
+      const bolt11 = (invResp.result || invResp).invoice;
+
+      // 2. Pay from source
+      const { paymentHash, amountMsat } = decodeBolt11(bolt11);
+      const keyIndex = source.key_index || 0;
+      const secretKey = deriveSecretKey(state.seed, keyIndex);
+      const pubkey = getCompressedPubkey(secretKey);
+      const depositId = computeDepositId(pubkey);
+      const msgHash = invoiceLockSigningMessage(depositId, paymentHash, amountMsat);
+      const sig = schnorr.sign(msgHash, secretKey);
+
+      log(`Paying ₿${amount.toLocaleString()} from ${source.alias}...`);
+      const payResp = await sendRequest(source.ledger_id, 'pay_invoice', {
+        deposit_pubkey: source.deposit_pubkey,
+        invoice: bolt11,
+        payment_hash: bytesToHex(paymentHash),
+        amount_msats: amountMsat,
+        signature: bytesToHex(sig),
+      }, 60000);
+
+      if (payResp.success) {
+        source.amount_sats = (source.amount_sats || 0) - amount;
+        transferred++;
+        log(`₿${amount.toLocaleString()} → ${dest.alias}`, 'success');
+      } else {
+        log(`Payment failed: ${payResp.error}`, 'error');
+      }
+    } catch (e) {
+      log(`Transfer error: ${e.message}`, 'error');
+    }
+  }
+
+  await syncAll();
+  renderDeposits();
+  log(`Auto-spread complete: ${transferred}/${newDeposits.length} payments`, 'success');
+};
+
+window.doRebalance = async function() {
+  await syncAll();
+  if (cachedBlockHeight === 0) { log('Block height unknown — sync failed', 'error'); return; }
+
+  const deposits = state.deposits.filter(d => d.amount_sats !== undefined);
+  if (deposits.length < 2) { log('Need at least 2 deposits to rebalance', 'error'); return; }
+
+  const totalBalance = deposits.reduce((s, d) => s + (d.amount_sats || 0), 0);
+  if (totalBalance === 0) { log('No balance to rebalance', 'error'); return; }
+
+  const target = Math.floor(totalBalance / deposits.length);
+  if (target === 0) { log('Balance too small to spread', 'error'); return; }
+
+  // Build over/under lists
+  const over = deposits.filter(d => (d.amount_sats || 0) > target).sort((a, b) => (b.amount_sats || 0) - (a.amount_sats || 0));
+  const under = deposits.filter(d => (d.amount_sats || 0) < target).sort((a, b) => (a.amount_sats || 0) - (b.amount_sats || 0));
+
+  if (over.length === 0 || under.length === 0) { log('Deposits already balanced', 'success'); return; }
+
+  log(`Rebalancing ₿${totalBalance.toLocaleString()} across ${deposits.length} deposits (target ₿${target.toLocaleString()} each)...`);
+
+  let transferred = 0;
+  for (const dest of under) {
+    const need = target - (dest.amount_sats || 0);
+    if (need <= 0) continue;
+
+    // Find best source (most over target)
+    const source = over.sort((a, b) => (b.amount_sats || 0) - (a.amount_sats || 0))[0];
+    if (!source) break;
+    const available = (source.amount_sats || 0) - target;
+    if (available <= 0) continue;
+
+    const amount = Math.min(need, available);
+    if (amount <= 0) continue;
+
+    try {
+      // 1. Create invoice on destination
+      log(`₿${amount.toLocaleString()}: ${source.alias} → ${dest.alias}...`);
+      const invResp = await sendRequest(dest.ledger_id, 'make_invoice', {
+        deposit_pubkey: dest.deposit_pubkey,
+        amount_sats: amount,
+        description: `Rebalance to ${dest.alias}`,
+      }, 60000);
+
+      if (!invResp.success || !(invResp.result || invResp).invoice) {
+        log(`Invoice failed on ${dest.alias}: ${invResp.error || 'no invoice'}`, 'error');
+        continue;
+      }
+      const bolt11 = (invResp.result || invResp).invoice;
+
+      // 2. Pay from source
+      const { paymentHash, amountMsat } = decodeBolt11(bolt11);
+      const keyIndex = source.key_index || 0;
+      const secretKey = deriveSecretKey(state.seed, keyIndex);
+      const pubkey = getCompressedPubkey(secretKey);
+      const depositId = computeDepositId(pubkey);
+      const msgHash = invoiceLockSigningMessage(depositId, paymentHash, amountMsat);
+      const sig = schnorr.sign(msgHash, secretKey);
+
+      const payResp = await sendRequest(source.ledger_id, 'pay_invoice', {
+        deposit_pubkey: source.deposit_pubkey,
+        invoice: bolt11,
+        payment_hash: bytesToHex(paymentHash),
+        amount_msats: amountMsat,
+        signature: bytesToHex(sig),
+      }, 60000);
+
+      if (payResp.success) {
+        source.amount_sats = (source.amount_sats || 0) - amount;
+        dest.amount_sats = (dest.amount_sats || 0) + amount;
+        transferred++;
+        log(`₿${amount.toLocaleString()}: ${source.alias} → ${dest.alias}`, 'success');
+      } else {
+        log(`Payment failed: ${payResp.error}`, 'error');
+      }
+    } catch (e) {
+      log(`Transfer error: ${e.message}`, 'error');
+    }
+  }
+
+  await syncAll();
+  renderDeposits();
+  log(`Rebalance complete: ${transferred} payments`, 'success');
 };
 
 let historyEvents = [];
@@ -2169,7 +2472,8 @@ function renderHistory() {
     html += `<div style="margin-bottom:12px;">
       <div style="font-weight:600; font-size:12px; margin-bottom:4px; color:var(--text);">${esc(alias)}</div>`;
     for (const e of entries) {
-      const amtStr = e.amount > 0 ? `${e.sign}₿${e.amount.toLocaleString()}` : '';
+      const amtSats = Math.round(e.amount / 1000);
+      const amtStr = amtSats > 0 ? `${e.sign}₿${amtSats.toLocaleString()}` : '';
       html += `<div style="display:flex; align-items:baseline; gap:8px; padding:3px 0 3px 8px; border-bottom:1px solid var(--border); font-size:11px; cursor:pointer;" onclick="openLedgerEntry('${e.ledgerId}', ${e.seq})">
         <span style="color:${e.color}; font-weight:600; min-width:100px;">${e.opName}</span>
         <span class="amt" style="flex:1; color:${e.color};">${amtStr}</span>
@@ -2326,7 +2630,8 @@ window.doWalletTransfer = async function() {
   const destId = computeDepositId(destPubkey);
   const destHex = bytesToHex(destId);
 
-  // Get fee from advertisement
+  // Get fee from advertisement (all in msats)
+  const amountMsats = amount * 1000;
   let fee = 2;
   try {
     const adFilter = { kinds: [39100], '#d': [deposit.ledger_id] };
@@ -2335,7 +2640,7 @@ window.doWalletTransfer = async function() {
       const ad = JSON.parse(adEvents[0].content);
       const fixed = ad.transfer_fee_fixed_msats || 0;
       const bps = ad.transfer_fee_rate_bps || 0;
-      fee = fixed + Math.floor(amount * bps / 10000);
+      fee = fixed + Math.floor(amountMsats * bps / 10000);
     }
   } catch {}
 
@@ -2358,7 +2663,7 @@ window.doWalletTransfer = async function() {
   const nonce = new Uint8Array(32);
   crypto.getRandomValues(nonce);
 
-  const msgHash = transferLockSigningMessage(nonce, sourceId, destId, amount, fee, completionScript, timeout);
+  const msgHash = transferLockSigningMessage(nonce, sourceId, destId, amountMsats, fee, completionScript, timeout);
   const transferId = computeTransferId(msgHash);
   const sig = schnorr.sign(msgHash, secretKey);
 
@@ -2368,7 +2673,7 @@ window.doWalletTransfer = async function() {
       nonce: bytesToHex(nonce),
       source_deposit_id: bytesToHex(sourceId),
       destination_deposit_id: destHex,
-      amount, fee,
+      amount: amountMsats, fee,
       completion_script: completionScript,
       timeout_height: timeout,
       transfer_id: bytesToHex(transferId),
@@ -2643,8 +2948,8 @@ window.toggleNewDeposit = async function() {
     const s = groupAds[0];
     const annualBps = s.annual_fee_bps||0, minFee = s.min_fee_sats||0, feePeriod = s.fee_period_blocks||2016;
     const tfFixed = s.transfer_fee_fixed_msats||0, tfRate = s.transfer_fee_rate_bps||0;
-    const totalHeadroom = groupAds.reduce((sum, a) => sum + (a.available_headroom_sats||0), 0);
-    const sorted = groupAds.sort((a, b) => (b.available_headroom_sats||0) - (a.available_headroom_sats||0));
+    const totalHeadroom = groupAds.reduce((sum, a) => sum + (a.available_headroom_msats||0), 0);
+    const sorted = groupAds.sort((a, b) => (b.available_headroom_msats||0) - (a.available_headroom_msats||0));
     const best = sorted[0];
     const gid = 'newdep-group-' + gIdx;
 
@@ -2663,7 +2968,7 @@ window.toggleNewDeposit = async function() {
       for (const ad of sorted) {
         const name = ad.operator_name || 'Anon';
         const lid = ad.ledger_id || '';
-        const headroom = (ad.available_headroom_sats||0).toLocaleString();
+        const headroom = Math.floor((ad.available_headroom_msats||0) / 1000).toLocaleString();
         html += `<button style="font-size:10px; padding:2px 6px;" onclick="event.stopPropagation(); doWalletQuickOpen('${lid}','${esc(ad.relay_url||'')}')" title="${lid}">${esc(name)} · ₿${headroom}</button>`;
       }
       html += `</div></div>`;
@@ -3001,14 +3306,14 @@ async function checkForFraud() {
       const pubkey = getCompressedPubkey(secretKey);
       const depositId = computeDepositId(pubkey);
 
-      // Small self-transfer: 1 sat + fee, with proof hash as nonce
-      const amount = 1;
-      const fee = deposit.transfer_fee_fixed || 2;
+      // Small self-transfer: 1000 msats (1 sat) + fee, with proof hash as nonce
+      const amountMsats = 1000;
+      const feeMsats = deposit.transfer_fee_fixed || 2;
       const timeout = cachedBlockHeight + 144;
       const transferId = sha256(proofHashBytes); // deterministic
 
       const msgHash = transferLockSigningMessage(
-        proofHashBytes, depositId, depositId, amount, fee,
+        proofHashBytes, depositId, depositId, amountMsats, feeMsats,
         'sha256(' + ev.fraud_proof_hash.slice(0,16) + ')', timeout
       );
       const sig = schnorr.sign(msgHash, secretKey);
@@ -3018,8 +3323,8 @@ async function checkForFraud() {
         nonce: ev.fraud_proof_hash,
         source_deposit_id: bytesToHex(depositId),
         destination_deposit_id: bytesToHex(depositId),
-        amount,
-        fee,
+        amount: amountMsats,
+        fee: feeMsats,
         completion_script: 'sha256(' + ev.fraud_proof_hash.slice(0,16) + ')',
         timeout_height: timeout,
         transfer_id: bytesToHex(transferId),
@@ -3392,17 +3697,19 @@ window.doTransferLock = async function() {
   const deposit = state.deposits.find(d => d.alias === alias);
   if (!deposit) { log('Select a deposit', 'error'); return; }
 
-  const amount = parseInt(document.getElementById('transfer-amount').value);
-  const fee = parseInt(document.getElementById('transfer-fee').value) || 2;
+  const amountSats = parseInt(document.getElementById('transfer-amount').value);
+  const feeMsats = parseInt(document.getElementById('transfer-fee').value) || 2;
   const destHex = resolveDestDepositId();
   let hashHex = document.getElementById('transfer-hash').value;
   const timeoutBlocks = parseInt(document.getElementById('transfer-timeout').value);
 
-  if (!amount || !destHex || !timeoutBlocks) { log('Missing required fields', 'error'); return; }
+  if (!amountSats || !destHex || !timeoutBlocks) { log('Missing required fields', 'error'); return; }
   await syncAll();
   if (cachedBlockHeight === 0) { log('Block height unknown — sync failed', 'error'); return; }
   const timeout = cachedBlockHeight + timeoutBlocks;
   if (destHex.length !== 32) { log('Destination deposit ID must be 32 hex chars', 'error'); return; }
+
+  const amountMsats = amountSats * 1000;
 
   try {
     // Generate preimage if no hash provided
@@ -3426,18 +3733,18 @@ window.doTransferLock = async function() {
     const nonce = new Uint8Array(32);
     crypto.getRandomValues(nonce);
 
-    const msgHash = transferLockSigningMessage(nonce, sourceId, destBytes, amount, fee, completionScript, timeout);
+    const msgHash = transferLockSigningMessage(nonce, sourceId, destBytes, amountMsats, feeMsats, completionScript, timeout);
     const transferId = computeTransferId(msgHash);
     const sig = schnorr.sign(msgHash, secretKey);
 
-    log(`Transfer lock: ₿${amount}, ID: ${bytesToHex(transferId).slice(0, 16)}...`);
+    log(`Transfer lock: ₿${amountSats}, ID: ${bytesToHex(transferId).slice(0, 16)}...`);
 
     const response = await sendRequest(deposit.ledger_id, 'transfer_lock', {
       nonce: bytesToHex(nonce),
       source_deposit_id: bytesToHex(sourceId),
       destination_deposit_id: destHex,
-      amount: amount,
-      fee: fee,
+      amount: amountMsats,
+      fee: feeMsats,
       completion_script: completionScript,
       timeout_height: timeout,
       transfer_id: bytesToHex(transferId),
@@ -3597,36 +3904,7 @@ document.addEventListener('keydown', (e) => {
 // TLV decoder & Ledger Explorer
 // ============================================================
 
-const OP_NAMES = {
-  1:'LedgerOpen', 12:'QuorumBegin',
-  20:'DepositOpen', 21:'DepositClose', 22:'DepositUpdate', 23:'DepositKeyRotate',
-  30:'InvoiceCredit', 31:'InvoiceLock', 32:'InvoiceFail', 33:'InvoiceFulfill',
-  35:'OnchainCredit', 36:'OnchainLock', 37:'OnchainFail', 38:'OnchainFulfill',
-  42:'CollateralAttestation',
-  43:'QuorumAddMember', 44:'QuorumRemoveMember', 45:'CollateralLock', 46:'QuorumJoin',
-  50:'FeeCollect', 54:'DisputeEnter', 55:'DisputeAcquire', 56:'DisputeYield',
-  57:'DisputeArmed', 60:'LedgerClose',
-  70:'TransferLock', 71:'TransferComplete', 72:'TransferFail',
-};
-
-// Field names from .ksy catalog
-const FIELD_NAMES = {
-  0:'disc', 2:'amount', 8:'new_amount', 10:'pubkey', 12:'fees', 14:'payment_hash',
-  16:'invoice', 18:'cosigner_sig', 20:'new_fees', 26:'invoice_id', 28:'seq_num',
-  30:'payment_id', 34:'preimage', 36:'block_height', 38:'collateral_op', 40:'signature',
-  42:'ledger_hash', 44:'quorum_member', 46:'member_sig', 48:'operator_sig',
-  50:'channel_id', 52:'close_reason', 54:'timestamp', 56:'operator_id', 58:'reserves_id',
-  60:'ledger_addr', 64:'enforcement', 66:'txid', 68:'vout', 70:'dest_addr',
-  72:'withdrawal_id', 74:'funding_addr', 76:'lock_until', 80:'our_sig', 82:'membership_exp',
-  90:'spend_txid', 91:'new_txid', 92:'new_vout', 93:'quorum_thresh', 94:'quorum_size',
-  95:'first_expiry', 96:'genesis_block', 100:'reason', 102:'last_valid_seq',
-  105:'entropy_height', 106:'entropy_hash', 108:'new_custodian', 109:'armed_block',
-  110:'spend_txid', 111:'new_reserves_addr', 112:'commitment_hash', 113:'target_reserves',
-  114:'member_ledger_id', 115:'collateral_ledger_id',
-  200:'deposit_id', 202:'descriptor', 204:'witness', 208:'new_descriptor',
-  210:'nonce', 212:'source_deposit', 214:'dest_deposit', 216:'completion_script',
-  218:'timeout_height', 220:'transfer_id', 222:'block_hash', 224:'script_witness', 226:'transfer_fees',
-};
+// OP_NAMES and FIELD_NAMES imported from ./tlv-catalog.js (generated by bin/gen-tlv-catalog.sh)
 
 // Decode BigEndian varint from Uint8Array at offset, returns [value, newOffset]
 function readVarint(buf, off) {
@@ -3769,7 +4047,7 @@ async function populateLedgerQuickLinks() {
       html += '<span style="display:inline-flex; flex-wrap:wrap; gap:3px;">';
       for (const ad of opAds) {
         const lid = ad.ledger_id || '';
-        const headroom = (ad.available_headroom_sats || 0).toLocaleString();
+        const headroom = Math.floor((ad.available_headroom_msats || 0) / 1000).toLocaleString();
         const isMine = myIds.includes(lid);
         const border = isMine ? 'border-color:var(--balance);' : '';
         html += `<button style="font-size:10px; padding:2px 6px; ${border}" onclick="openLedgerTab('${lid}')" title="${lid}">₿${headroom}</button>`;
