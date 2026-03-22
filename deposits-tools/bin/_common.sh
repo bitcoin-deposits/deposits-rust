@@ -209,18 +209,21 @@ wait_for_electrs() {
 
 # Wait for nostr relay to be ready
 wait_for_nostr() {
-    log_info "Waiting for Nostr relay to be ready..."
+    log_info "Waiting for Nostr relays to be ready..."
     local max_attempts=30
-    local attempt=0
-    while ! curl -s "http://localhost:7801" >/dev/null 2>&1; do
-        attempt=$((attempt + 1))
-        if [ $attempt -ge $max_attempts ]; then
-            log_error "Nostr relay not ready after $max_attempts attempts"
-            return 1
-        fi
-        sleep 1
+    local ports=(7801 7802 7803 7804)
+    for port in "${ports[@]}"; do
+        local attempt=0
+        while ! curl -s "http://localhost:$port" >/dev/null 2>&1; do
+            attempt=$((attempt + 1))
+            if [ $attempt -ge $max_attempts ]; then
+                log_error "Nostr relay on port $port not ready after $max_attempts attempts"
+                return 1
+            fi
+            sleep 1
+        done
     done
-    log_success "Nostr relay is ready"
+    log_success "All Nostr relays are ready"
 }
 
 # Create faucet wallet and mine initial blocks

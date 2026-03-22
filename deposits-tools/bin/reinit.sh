@@ -101,6 +101,9 @@ log_info "Starting infrastructure services..."
 $DC up -d bitcoin
 wait_for_bitcoin
 
+# Ensure relay data dirs exist (wiped by rm -rf above)
+mkdir -p "$DATA_ROOT/relays/alice" "$DATA_ROOT/relays/bob" "$DATA_ROOT/relays/charlie" "$DATA_ROOT/relays/diana" "$DATA_ROOT/relays/ledgers"
+
 $DC up -d relay-alice relay-bob relay-charlie relay-diana
 $DC up -d relay-ledgers
 wait_for_nostr
