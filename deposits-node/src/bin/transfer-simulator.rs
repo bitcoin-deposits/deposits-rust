@@ -26,6 +26,7 @@ use tokio::sync::oneshot;
 // Nostr event kinds (must match deposits-node/src/nostr.rs)
 const KIND_LEDGER_REQUEST: u16 = 20101;
 const KIND_LEDGER_RESPONSE: u16 = 20102;
+const KIND_LEDGER_ADVERTISE: u16 = 39100;
 
 // ─── Data Types ─────────────────────────────────────────────────────────────
 
@@ -311,7 +312,7 @@ struct WalletRunner {
 }
 
 impl WalletRunner {
-    fn new(config: &Config, node: &NodeConfig) -> Result<Self, Box<dyn std::error::Error>> {
+    fn new(config: &Config, node: &NodeConfig, extra_relays: &HashMap<String, String>) -> Result<Self, Box<dyn std::error::Error>> {
         let exe = std::env::current_exe()?;
         let bin_dir = exe.parent().ok_or("Cannot determine binary directory")?;
         let wallet_bin = bin_dir.join("deposits-wallet");
@@ -328,10 +329,8 @@ impl WalletRunner {
             bitcoin::Network::Signet => "signet",
             _ => "regtest",
         };
-        // Collect all known relay URLs so wallet can reach any operator's primary relay
         let mut relays = vec![config.relay.clone()];
-        let (_, relay_map) = scan_for_ledgers();
-        for url in relay_map.values() {
+        for url in extra_relays.values() {
             if !relays.contains(url) {
                 relays.push(url.clone());
             }
@@ -361,60 +360,6 @@ impl WalletRunner {
     }
 
     /// Discover available ledgers, returns (ledger IDs, ledger→relay_url map).
-    /// First tries `deposits-wallet discover` (advertisement-based).
-    /// Falls back to scanning relay for recent request/response events with #l tags.
-    async fn discover_ledgers(&self, relay_url: &str) -> Result<(Vec<String>, HashMap<String, String>), Box<dyn std::error::Error>> {
-        // Try advertisement-based discovery first
-        let mut args = vec!["discover".to_string()];
-        args.extend(self.base_args());
-        eprintln!("  Running: deposits-wallet discover ...");
-        let output = std::process::Command::new(&self.wallet_bin)
-            .args(&args)
-            .output()?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-
-        let mut ledger_ids = Vec::new();
-        for line in stdout.lines() {
-            if let Some(rest) = line.trim().strip_prefix("Ledger:") {
-                let id = rest.trim();
-                if id.len() == 64 && id.chars().all(|c| c.is_ascii_hexdigit()) {
-                    ledger_ids.push(id.to_string());
-                }
-            }
-        }
-
-        if !ledger_ids.is_empty() {
-            eprintln!("  Found {} ledger(s) via advertisements", ledger_ids.len());
-        }
-
-        // Also scan relay for recent request/response events with #l tags
-        eprintln!("  Scanning relay for active ledgers...");
-        let relay_ids = scan_relay_for_ledgers(relay_url).await?;
-        if !relay_ids.is_empty() {
-            eprintln!("  Found {} active ledger(s) from relay scan", relay_ids.len());
-        }
-        for id in relay_ids {
-            if !ledger_ids.contains(&id) {
-                ledger_ids.push(id);
-            }
-        }
-
-        // Also scan operator data directories (or Docker containers) for ledger JSONL files
-        let (host_ids, ledger_relay_map) = scan_for_ledgers();
-        if !host_ids.is_empty() {
-            eprintln!("  Found {} ledger(s) from operator scan", host_ids.len());
-        }
-        for id in host_ids {
-            if !ledger_ids.contains(&id) {
-                ledger_ids.push(id);
-            }
-        }
-
-        ledger_ids.sort();
-        eprintln!("  Total: {} unique ledger(s)", ledger_ids.len());
-        Ok((ledger_ids, ledger_relay_map))
-    }
-
     /// Sync deposits and return balances: alias -> sats.
     fn sync_and_get_balances(&self) -> Result<HashMap<String, u64>, Box<dyn std::error::Error>> {
         // Run sync
@@ -532,7 +477,10 @@ impl Faucet {
 // ─── Relay Scan ─────────────────────────────────────────────────────────────
 // Fallback ledger discovery: connect to relay and fetch recent events with #l tags.
 
-async fn scan_relay_for_ledgers(relay_url: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+/// Fetch ledger advertisements from a relay. Returns (ledger_ids, ledger→relay_url mapping).
+/// Advertisements (Kind 39100) are NIP-33 replaceable events published by operators,
+/// containing ledger_id and the operator's primary relay_url.
+async fn fetch_advertisements(relay_url: &str) -> Result<(Vec<String>, HashMap<String, String>), Box<dyn std::error::Error>> {
     let keys = Keys::generate();
     let opts = Options::default()
         .connection_timeout(Some(Duration::from_secs(10)));
@@ -545,21 +493,8 @@ async fn scan_relay_for_ledgers(relay_url: &str) -> Result<Vec<String>, Box<dyn 
         .map_err(|e| format!("Failed to add relay: {}", e))?;
     client.connect_with_timeout(Duration::from_secs(10)).await;
 
-    // Fetch recent request and response events (last 5 minutes)
-    let since = Timestamp::from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() - 300,
-    );
-
     let filter = Filter::new()
-        .kinds(vec![
-            Kind::Custom(KIND_LEDGER_REQUEST),
-            Kind::Custom(KIND_LEDGER_RESPONSE),
-        ])
-        .since(since)
-        .limit(500);
+        .kind(Kind::Custom(KIND_LEDGER_ADVERTISE));
 
     let events = client
         .fetch_events(vec![filter], Some(Duration::from_secs(10)))
@@ -567,138 +502,45 @@ async fn scan_relay_for_ledgers(relay_url: &str) -> Result<Vec<String>, Box<dyn 
         .map_err(|e| format!("Relay fetch failed: {}", e))?;
 
     let mut ledger_ids = std::collections::HashSet::new();
+    let mut ledger_relay_map: HashMap<String, String> = HashMap::new();
+
     for event in events.iter() {
-        for tag in event.tags.iter() {
-            if tag.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)) {
-                if let Some(id) = tag.content() {
-                    if id.len() == 64 && id.chars().all(|c| c.is_ascii_hexdigit()) {
-                        ledger_ids.insert(id.to_string());
-                    }
+        // Parse advertisement JSON content
+        let ad: serde_json::Value = match serde_json::from_str(&event.content) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        // Extract ledger_id from #d tag (NIP-33 identifier) or JSON content
+        let ledger_id = event.tags.iter()
+            .find_map(|tag| {
+                if tag.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::D)) {
+                    tag.content().map(|s| s.to_string())
+                } else {
+                    None
                 }
+            })
+            .or_else(|| ad.get("ledger_id").and_then(|v| v.as_str()).map(|s| s.to_string()));
+
+        let ledger_id = match ledger_id {
+            Some(id) if id.len() == 64 && id.chars().all(|c| c.is_ascii_hexdigit()) => id,
+            _ => continue,
+        };
+
+        // Extract relay_url from advertisement
+        if let Some(url) = ad.get("relay_url").and_then(|v| v.as_str()) {
+            if !url.is_empty() {
+                ledger_relay_map.insert(ledger_id.clone(), url.to_string());
             }
         }
+
+        ledger_ids.insert(ledger_id);
     }
 
     let _ = client.disconnect().await;
     let mut result: Vec<String> = ledger_ids.into_iter().collect();
     result.sort();
-    Ok(result)
-}
-
-/// Scan Docker containers for ledger JSONL files.
-/// Returns deduplicated list of 64-hex ledger IDs.
-/// Map operator container name to its relay URL.
-/// Convention: alice → ws://localhost:7801, bob → 7802, etc.
-fn operator_relay_url(container: &str) -> Option<String> {
-    match container {
-        "alice"   => Some("ws://localhost:7801".to_string()),
-        "bob"     => Some("ws://localhost:7802".to_string()),
-        "charlie" => Some("ws://localhost:7803".to_string()),
-        "diana"   => Some("ws://localhost:7804".to_string()),
-        _ => None,
-    }
-}
-
-/// Scan Docker containers for ledgers. Returns (ledger_ids, ledger→relay_url mapping).
-/// Only maps ledgers that are OWNED by a container (Role=Operator), not joined ones.
-fn scan_for_ledgers() -> (Vec<String>, HashMap<String, String>) {
-    let mut ledger_ids = std::collections::HashSet::new();
-    let mut ledger_relay_map: HashMap<String, String> = HashMap::new();
-
-    // Scan host data directories for bare-process operators.
-    // Look in ./data/{operator}/wallet/ledgers/*.jsonl relative to the binary's
-    // grandparent (repo_root/deposits-tools/data/) or relative to cwd.
-    let candidates = [
-        std::path::PathBuf::from("data"),
-        std::path::PathBuf::from("deposits-tools/data"),
-        // Also try the env var DATA_ROOT if set
-    ];
-    let data_root_env = std::env::var("DATA_ROOT").ok().map(std::path::PathBuf::from);
-    let operators = ["alice", "bob", "charlie", "diana"];
-
-    for base in candidates.iter().chain(data_root_env.iter()) {
-        for op in &operators {
-            let ledgers_dir = base.join(op).join("wallet").join("ledgers");
-            let entries = match std::fs::read_dir(&ledgers_dir) {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            let relay_url = operator_relay_url(op);
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                    continue;
-                }
-                let lid = match path.file_stem().and_then(|s| s.to_str()) {
-                    Some(s) if s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()) => s.to_string(),
-                    _ => continue,
-                };
-                // Check first line for Role=Operator
-                if let Ok(file) = std::fs::File::open(&path) {
-                    use std::io::BufRead;
-                    if let Some(Ok(first_line)) = std::io::BufReader::new(file).lines().next() {
-                        if !first_line.contains("Operator") {
-                            continue;
-                        }
-                    }
-                }
-                ledger_ids.insert(lid.clone());
-                if let Some(ref url) = relay_url {
-                    ledger_relay_map.insert(lid, url.clone());
-                }
-            }
-        }
-        // If we found anything, stop (don't double-count)
-        if !ledger_ids.is_empty() {
-            break;
-        }
-    }
-
-    // Fallback: scan Docker containers (legacy mode)
-    if ledger_ids.is_empty() {
-        let output = match std::process::Command::new("docker")
-            .args(["ps", "--format", "{{.Names}}"])
-            .output()
-        {
-            Ok(o) => o,
-            Err(_) => return (Vec::new(), HashMap::new()),
-        };
-        let container_names: Vec<String> = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter(|name| {
-                !name.contains("bitcoind") && !name.contains("electrs")
-                    && !name.contains("relay") && !name.contains("grafana")
-                    && !name.contains("prometheus") && !name.contains("miner")
-                    && !name.contains("wallet")
-            })
-            .map(|s| s.to_string())
-            .collect();
-
-        for container in &container_names {
-            let relay_url = operator_relay_url(container);
-            let output = match std::process::Command::new("docker")
-                .args(["exec", container, "sh", "-c",
-                       "for f in /data/wallet/ledgers/*.jsonl; do role=$(head -1 \"$f\"); lid=$(basename \"$f\" .jsonl); if echo \"$role\" | grep -q Operator; then echo \"$lid\"; fi; done"])
-                .output()
-            {
-                Ok(o) if o.status.success() => o,
-                _ => continue,
-            };
-            for line in String::from_utf8_lossy(&output.stdout).lines() {
-                let id = line.trim();
-                if id.len() == 64 && id.chars().all(|c| c.is_ascii_hexdigit()) {
-                    ledger_ids.insert(id.to_string());
-                    if let Some(ref url) = relay_url {
-                        ledger_relay_map.insert(id.to_string(), url.clone());
-                    }
-                }
-            }
-        }
-    }
-
-    let mut result: Vec<String> = ledger_ids.into_iter().collect();
-    result.sort();
-    (result, ledger_relay_map)
+    Ok((result, ledger_relay_map))
 }
 
 // ─── Bootstrap ──────────────────────────────────────────────────────────────
@@ -873,23 +715,24 @@ async fn run_bootstrap(config: &Config) -> Result<(), Box<dyn std::error::Error>
         return Err("No nodes specified for bootstrap".into());
     }
     let node = &config.nodes[0];
-    let wallet = WalletRunner::new(config, node)?;
     let faucet = Faucet::new(&config.bitcoin_cli, &node.data_dir);
 
     eprintln!("\n=== Bootstrap ===");
 
     // 1. Discover ledgers (explicit --ledger flags take priority)
-    let (ledger_ids, _relay_map) = if !config.ledger_ids.is_empty() {
+    let (ledger_ids, relay_map) = if !config.ledger_ids.is_empty() {
         eprintln!("Using {} explicit ledger ID(s)", config.ledger_ids.len());
         (config.ledger_ids.clone(), HashMap::new())
     } else {
         eprintln!("Discovering ledgers...");
-        let (ids, relay_map) = wallet.discover_ledgers(&config.relay).await?;
+        let (ids, relay_map) = fetch_advertisements(&config.ledgers_relay).await?;
+        eprintln!("  Found {} ledger(s) with {} relay mappings", ids.len(), relay_map.len());
         if ids.is_empty() {
             return Err("No ledgers found. Start operator nodes first, or use --ledger <id>.".into());
         }
         (ids, relay_map)
     };
+    let wallet = WalletRunner::new(config, node, &relay_map)?;
     for id in &ledger_ids {
         eprintln!("  Ledger: {}...{}", &id[..8], &id[56..]);
     }
@@ -925,7 +768,7 @@ async fn run_bootstrap(config: &Config) -> Result<(), Box<dyn std::error::Error>
         eprintln!("Creating {} deposits (have {}, target {})...", to_create, existing_count, target_count);
         // Collect all unique relay URLs for bootstrap (need to hear responses from all operators)
         let mut all_relay_urls: Vec<String> = vec![config.relay.clone()];
-        for url in _relay_map.values() {
+        for url in relay_map.values() {
             if !all_relay_urls.contains(url) {
                 all_relay_urls.push(url.clone());
             }
@@ -1241,6 +1084,7 @@ fn expand_tilde(path: &str) -> PathBuf {
 
 struct Config {
     relay: String,
+    ledgers_relay: String,
     network: bitcoin::Network,
     target_tps: u64,
     max_workers: usize,
@@ -1290,6 +1134,7 @@ fn parse_args() -> Result<Config, Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let mut config = Config {
         relay: "ws://localhost:7801".to_string(),
+        ledgers_relay: "ws://localhost:7779".to_string(),
         network: bitcoin::Network::Regtest,
         target_tps: 500,
         max_workers: 50,
@@ -1314,6 +1159,7 @@ fn parse_args() -> Result<Config, Box<dyn std::error::Error>> {
     while i < args.len() {
         match args[i].as_str() {
             "--relay" => { i += 1; config.relay = args[i].clone(); }
+            "--ledgers-relay" | "--slow-relay" => { i += 1; config.ledgers_relay = args[i].clone(); }
             "--network" => {
                 i += 1;
                 config.network = match args[i].as_str() {
@@ -1508,8 +1354,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("{} eligible deposits (on ledgers with >=2 deposits)", eligible_deposit_indices.len());
 
-    // Discover ledger→relay mapping (which operator owns which ledger)
-    let (_, ledger_relay_map) = scan_for_ledgers();
+    // Discover ledger→relay mapping from advertisements
+    eprintln!("Fetching relay routing from advertisements...");
+    let (_, ledger_relay_map) = fetch_advertisements(&config.ledgers_relay).await?;
     if !ledger_relay_map.is_empty() {
         eprintln!("Relay routing: {} ledgers mapped to per-operator relays", ledger_relay_map.len());
         let mut relay_counts: HashMap<&str, usize> = HashMap::new();
@@ -1741,7 +1588,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let topoff_threshold_sats = config.funding_sats / 5; // 20%
     let topoff_running = Arc::new(AtomicBool::new(false));
     let topoff_wallet = if config.auto_topoff {
-        Some(Arc::new(WalletRunner::new(&config, &config.nodes[0])?))
+        Some(Arc::new(WalletRunner::new(&config, &config.nodes[0], &ledger_relay_map)?))
     } else {
         None
     };
