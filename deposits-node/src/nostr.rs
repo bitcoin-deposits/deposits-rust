@@ -1175,6 +1175,14 @@ impl NostrTransport {
         Ok(event_id)
     }
 
+    /// Add a relay and connect to it
+    pub async fn add_relay(&self, url: &str) -> Result<(), Error> {
+        self.client.add_relay(url).await
+            .map_err(|e| Error::Nostr(format!("Failed to add relay {}: {}", url, e)))?;
+        self.client.connect_with_timeout(std::time::Duration::from_secs(5)).await;
+        Ok(())
+    }
+
     /// Send a request addressed to a courier (Kind 20101 with #p tag)
     pub async fn send_agent_request(
         &self,

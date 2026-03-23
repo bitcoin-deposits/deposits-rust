@@ -2103,6 +2103,16 @@ async fn route_transfer(args: &[String]) -> Result<(), Box<dyn std::error::Error
         _ => "unknown",
     };
 
+    // Also connect to operator relays from advertisements so requests reach operators
+    let op_ads = transport.fetch_ledger_advertisements(network_str).await?;
+    for ad in &op_ads {
+        if let Some(ref relay_url) = ad.relay_url {
+            if !config.relays.contains(relay_url) {
+                let _ = transport.add_relay(relay_url).await;
+            }
+        }
+    }
+
     // Step 1: Find a courier that bridges both ledgers
     println!("Finding courier...");
     let agent_ads = transport.fetch_agent_advertisements(network_str).await?;
@@ -2388,7 +2398,7 @@ async fn spread_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Erro
 
         println!("  {} ({}...): opening {} sats as '{}'...", name, &ledger_id[..8], deposit_amount, alias);
 
-        // Build open command args
+        // Build open command args — use operator's advertised relay
         let mut open_args = vec![
             ledger_id.clone(),
             deposit_amount.to_string(),
@@ -2396,9 +2406,17 @@ async fn spread_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Erro
             alias,
             "--skip-cosign-verify".to_string(),
         ];
-        for r in &config.relays {
+        // Operator's relay first (where they listen for requests)
+        if let Some(ref relay_url) = ad.relay_url {
             open_args.push("--relay".to_string());
-            open_args.push(r.clone());
+            open_args.push(relay_url.clone());
+        }
+        // Then user's relays as fallback
+        for r in &config.relays {
+            if ad.relay_url.as_deref() != Some(r.as_str()) {
+                open_args.push("--relay".to_string());
+                open_args.push(r.clone());
+            }
         }
         open_args.push("--seed".to_string());
         open_args.push(hex::encode(config.seed));
