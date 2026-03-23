@@ -397,7 +397,7 @@ establish_collateral() {
                     # Extract funding address (may have leading whitespace)
                     local fund_addr=$(echo "$open_output" | grep -oE 'bcrt1[a-z0-9]+' | head -1)
                     if [ -n "$fund_addr" ]; then
-                        local btc_amount=$(printf "%.8f" "$(echo "scale=8; $collateral_amount / 100000000" | bc)")
+                        local btc_amount=$(python3 -c "print(f'{$collateral_amount / 100_000_000:.8f}')")
                         bitcoin_cli -rpcwallet=faucet sendtoaddress "$fund_addr" "$btc_amount" >/dev/null 2>&1 || true
                         log_success "$op collateral on $member: $collateral_amount sats"
                     else
