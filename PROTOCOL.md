@@ -160,6 +160,371 @@ Every state change is a signed `LedgerUpdate` appended to the hash chain. Operat
 
 Full wire format: DEP-02. On-chain transactions: DEP-03.
 
+## Validation Rules
+
+Every operation must pass validation before being applied. Invalid operations are rejected. Validation occurs at two levels: global constraints that apply to all operations, and per-operation checks specific to each type.
+
+### Global Constraints
+
+**Dispute State Gate:**
+Every operation is checked against the current dispute state before any other validation. Operations not permitted in the current state are rejected immediately.
+
+| State | Allowed Operations |
+|-------|-------------------|
+| `Normal` | All except `DisputeArmed` (57), `DisputeAcquire` (55), `DisputeYield` (56) |
+| `Disputed` | Only `QuorumAddMember` (43), `CollateralAttestation` (42), `DisputeArmed` (57) |
+| `Armed` | Only `DisputeAcquire` (55), `DisputeYield` (56) |
+| `Tombstoned` | None |
+
+**Closed Ledger Gate:**
+No operations can be appended to a closed ledger.
+
+**Hash Chain Integrity:**
+- `previous_hash` must equal the `chain_hash` of the prior update
+- `chain_hash = SHA256(current_hash || operator_signature)`
+- Genesis operation (sequence 0) uses `previous_hash = [0; 32]`
+
+**Signature Authorization:**
+- Normal operations: signed by `operator_key`
+- `DisputeEnter`: may be signed by any `quorum_at_fork` member
+
+**Reserves Backing:**
+- `sum(deposits.balance) + max_outstanding_invoice <= reserves_amount`
+- Enforced on: `InvoiceCredit`, `OnchainCredit`, cosign invoice
+
+**Collateral Backing:**
+- When `quorum_members` is non-empty: `sum(deposits.balance) + amount <= received_collateral_amount`
+- Enforced on: `InvoiceCredit`, cosign invoice
+
+### Lifecycle Operations
+
+#### LedgerOpen (disc 1)
+
+| Check | Rule |
+|-------|------|
+| First | Must be first operation (sequence 0) |
+
+**State changes:** Sets `operator_key`, `reserves_key`, `genesis_block`, computes `ledger_id`, sets initial `reserves.amount`.
+
+#### LedgerClose (disc 60)
+
+| Check | Rule |
+|-------|------|
+| Zero balances | `sum(deposits.balance) == 0` |
+| No locks | `sum(deposits.locked_balance) == 0` |
+
+**State changes:** Clears `collateral_attestations`.
+
+### Quorum Operations
+
+#### QuorumBegin (disc 12)
+
+| Check | Rule |
+|-------|------|
+| Members | Quorum members exist with proper attestations |
+
+**State changes:** Updates `reserves_key`, `reserves.amount`, `total_collateral`, `quorum_expiry`.
+
+#### QuorumAddMember (disc 43)
+
+| Check | Rule |
+|-------|------|
+| Idempotent | Member not already in quorum (by pubkey) |
+| State | Ledger not in `Tombstoned` state |
+
+**State changes:** Adds `QuorumMember` to `quorum_members` with all member terms (`min_fee_bps`, `min_fee_fixed`, `max_fee_period`, `collateral_lock_amount`, `collateral_lock_until`, `dispute_response_blocks`, `dispute_arm_blocks`, `service_response_blocks`, `max_transfer_timeout_blocks`, `max_descriptor_bytes`).
+
+#### QuorumRemoveMember (disc 44)
+
+| Check | Rule |
+|-------|------|
+| Exists | Member must be in quorum |
+
+**State changes:** Removes from `quorum_members`, removes from `collateral_attestations`.
+
+#### QuorumJoin (disc 46)
+
+| Check | Rule |
+|-------|------|
+| Authority | Must be on operator's own ledger |
+| Ratchet | If renewing: `new_membership_expires >= existing_membership_expires` |
+
+**State changes:** Adds or updates entry in `joined_quorums`.
+
+### Deposit Operations
+
+#### DepositOpen (disc 20)
+
+| Check | Rule |
+|-------|------|
+| Uniqueness | Deposit with this `deposit_id` must not exist |
+| Valid fees | If provided: `frequency_blocks > 0` and `annualized_bps <= 10000` |
+
+**State changes:** Creates deposit with descriptor, fee schedule, transfer fees, `is_collateral`, `receive_requires_sig`, fee change parameters. Balance starts at zero.
+
+#### DepositClose (disc 21)
+
+| Check | Rule |
+|-------|------|
+| Exists | Deposit must exist |
+| Zero balance | `deposit.balance == 0` |
+| No locks | `deposit.locked_balance == 0` |
+
+**State changes:** Removes deposit from state.
+
+#### DepositKeyRotate (disc 23)
+
+| Check | Rule |
+|-------|------|
+| Exists | Deposit must exist |
+| Authorization | Witness satisfies current descriptor (message = `SHA256(new_descriptor)`) |
+| Valid descriptor | `new_descriptor` is non-empty |
+
+**State changes:** `deposit.descriptor = new_descriptor`.
+
+### Fee Operations
+
+#### FeeChange (disc 22)
+
+| Check | Rule |
+|-------|------|
+| Exists | Deposit must exist |
+| Valid fees | `frequency_blocks > 0` and `annualized_bps <= 10000` |
+| Timing | If `fee_change_after_blocks` set: `current_block >= opened_at_block + fee_change_after_blocks` |
+| Notice | If `fee_change_notice_blocks` set: `effective_block >= current_block + fee_change_notice_blocks` |
+| Rate limit | If `fee_change_limit_bps` set: BPS change `<= (old_bps * limit_bps) / 10000` |
+| Fixed limit | If `fee_change_limit_bps` set: fixed fee change `<= (old_fixed * limit_bps) / 10000` |
+
+**State changes:** Stores as `pending_fee_change` with `effective_block`. Applied when `FeeCollect` runs at or after `effective_block`.
+
+#### FeeCollect (disc 50)
+
+| Check | Rule |
+|-------|------|
+| Exists | Deposit must exist |
+| Available | `deposit.balance - deposit.locked_balance >= amount` |
+| Schedule | `block_height >= last_fee_assessment + frequency_blocks` |
+
+**State changes:** `deposit.balance -= amount`, `deposit.last_fee_assessment = block_height`. If pending fee change has reached its effective block, applies the new fee schedule.
+
+#### Fee Minimum Validation (on DepositOpen)
+
+| Check | Rule |
+|-------|------|
+| Annual rate | `proposed.annualized_bps >= operator_min_annual_bps` |
+| Fixed fee | `annualized_msats / periods_per_year >= operator_min_fixed_per_period` |
+
+### Lightning Payment Operations
+
+#### InvoiceCredit (disc 30)
+
+| Check | Rule |
+|-------|------|
+| Exists | Deposit must exist |
+| Positive | `amount > 0` |
+| Reasonable | `amount <= 100,000,000 sats` (1 BTC) |
+| Valid hash | Payment hash not all same byte (fake detection) |
+| Reserves | `sum(deposits.balance) + amount <= reserves_amount` |
+| Collateral | If quorum exists: `sum(deposits.balance) + amount <= received_collateral_amount` |
+
+**State changes:** `deposit.balance += amount`.
+
+#### InvoiceLock (disc 31)
+
+| Check | Rule |
+|-------|------|
+| Exists | Deposit must exist |
+| Positive | `amount > 0` |
+| Available | `deposit.balance - deposit.locked_balance >= amount` |
+| Authorization | Witness satisfies deposit descriptor |
+
+**State changes:** `deposit.locked_balance += amount`.
+
+#### InvoiceFulfill (disc 33)
+
+| Check | Rule |
+|-------|------|
+| Positive | `amount > 0` |
+| Preimage | `SHA256(preimage) == payment_hash` |
+
+**State changes:** `deposit.locked_balance -= amount`, `deposit.balance -= amount`.
+
+#### InvoiceFail (disc 32)
+
+| Check | Rule |
+|-------|------|
+| Positive | `amount > 0` |
+
+**State changes:** `deposit.locked_balance -= amount`.
+
+### On-chain Payment Operations
+
+#### OnchainCredit (disc 35)
+
+| Check | Rule |
+|-------|------|
+| Exists | Deposit must exist |
+| Positive | `amount > 0` |
+
+**State changes:** `deposit.balance += amount`.
+
+#### OnchainLock (disc 36)
+
+| Check | Rule |
+|-------|------|
+| Exists | Deposit must exist |
+| Positive | `amount > 0` |
+| Available | `deposit.balance - deposit.locked_balance >= amount + fee` |
+| Address | `destination_address` is non-empty |
+| Authorization | Witness satisfies deposit descriptor (message = `withdrawal_signing_message(withdrawal_id, deposit_id, address, amount, fee)`) |
+
+**State changes:** `deposit.locked_balance += amount`.
+
+#### OnchainFulfill (disc 38)
+
+| Check | Rule |
+|-------|------|
+| Locked | Funds were previously locked |
+
+**State changes:** `deposit.locked_balance -= amount`, `deposit.balance -= amount`.
+
+#### OnchainFail (disc 37)
+
+| Check | Rule |
+|-------|------|
+| Locked | Funds were previously locked |
+
+**State changes:** `deposit.locked_balance -= amount`.
+
+### Transfer Operations
+
+#### TransferLock (disc 70)
+
+| Check | Rule |
+|-------|------|
+| Source exists | Source deposit must exist |
+| Positive | `amount > 0` |
+| Available | `source.balance - source.locked_balance >= amount + fee` |
+| Transfer ID | `transfer_id == SHA256(transfer_lock_signing_message(nonce, src, dst, amount, fee, script, timeout))` |
+| Authorization | Witness satisfies source deposit descriptor |
+
+**State changes:** `source.balance -= (amount + fee)`, `source.locked_balance += (amount + fee)`. Creates `PendingTransfer` record.
+
+#### TransferComplete (disc 71)
+
+| Check | Rule |
+|-------|------|
+| Pending | Transfer with this `transfer_id` must be pending |
+| Script | `script_witness` satisfies the `completion_script` from the lock |
+
+**State changes:** Removes pending transfer. `source.locked_balance -= (amount + fee)`. `destination.balance += amount`. Fee is collected by operator.
+
+#### TransferFail (disc 72)
+
+| Check | Rule |
+|-------|------|
+| Pending | Transfer with this `transfer_id` must be pending |
+| Timeout | `current_block_height >= timeout_height` |
+
+**State changes:** Removes pending transfer. `source.locked_balance -= (amount + fee)`, `source.balance += (amount + fee)`.
+
+### Collateral Operations
+
+#### CollateralLock (disc 45)
+
+| Check | Rule |
+|-------|------|
+| Exists | Deposit must exist |
+| Collateral | Deposit must have `is_collateral = true` |
+| Limit | `amount <= deposit.balance` |
+| Ratchet (amount) | If existing lock: `new_amount >= existing_amount` |
+| Ratchet (time) | If existing lock: `new_lock_until_block >= existing_lock_expires` |
+| Operator | `operator_id == ledger.operator_key` |
+| Authorization | Witness satisfies deposit descriptor |
+
+**State changes:** `deposit.collateral_lock_amount = amount`, `deposit.collateral_lock_expires = lock_until_block`.
+
+#### CollateralAttestation (disc 42)
+
+| Check | Rule |
+|-------|------|
+| Quorum | `collateral_operator` must be a current quorum member |
+
+**State changes:** Updates `collateral_attestations[collateral_operator]`. Recalculates `received_collateral_amount` as sum of all attestations.
+
+### Dispute Operations
+
+#### DisputeEnter (disc 54)
+
+| Check | Rule |
+|-------|------|
+| State | Ledger must be in `Normal` state |
+| Authority | Signer must be in current quorum |
+
+**State changes:** `quorum_at_fork = quorum_members` (snapshot), `dispute_fork_sequence = last_valid_sequence`, `collateral_attestations.clear()`, `dispute_state = Disputed`.
+
+#### DisputeArmed (disc 57)
+
+| Check | Rule |
+|-------|------|
+| State | Ledger must be in `Disputed` state |
+| Quorum | At least one quorum member exists |
+| Collateral | At least one collateral attestation exists |
+
+**State changes:** `dispute_state = Armed`.
+
+#### DisputeAcquire (disc 55)
+
+| Check | Rule |
+|-------|------|
+| State | Ledger must be in `Armed` state |
+| Entropy | `entropy_block_height > 0` or `entropy_block_hash != [0; 32]` |
+| Winner | `new_custodian` is entropy-selected winner (see Dispute Resolution) |
+
+**State changes:** `operator_key = new_custodian`, `dispute_state = Normal`, clears `quorum_at_fork` and `dispute_fork_sequence`.
+
+#### DisputeYield (disc 56)
+
+| Check | Rule |
+|-------|------|
+| State | Ledger must be in `Armed` state |
+| Loser | Signer is NOT the entropy-selected winner |
+
+**State changes:** `dispute_state = Tombstoned`.
+
+### Delivery Operations
+
+#### DeliveryEmbed (disc 80)
+
+No validation beyond dispute state gate. This operation is recorded on a quorum member's ledger for certified delivery.
+
+**State changes:** None (effect is causal ordering via co-signature protocol).
+
+### Cosign Invoice Validation
+
+Before co-signing a lightning invoice, the quorum member validates:
+
+| Check | Rule |
+|-------|------|
+| Exists | Assigned deposit must exist |
+| Positive | `amount > 0` |
+| Reasonable | `amount <= 100,000,000,000 msat` (1 BTC) |
+| Invoice ID | Not empty |
+| Valid hash | Payment hash not all same byte |
+| Reserves | `sum(deposits.balance) + amount <= reserves_amount` |
+| Collateral | If quorum exists: `sum(deposits.balance) + amount <= received_collateral_amount` |
+
+### Reserves Validation
+
+Reserves must always cover total obligations:
+
+```
+required_reserves = sum(deposits.balance) + max_outstanding_invoice
+reserves_amount >= required_reserves
+```
+
+The `max_outstanding_invoice` is the largest amount among all pending invoices, ensuring that even if the largest outstanding invoice is paid, reserves remain sufficient.
+
 ## Wire Protocol
 
 ### Signed Ledger Update
@@ -489,8 +854,8 @@ When a quorum member detects fraud, they initiate a dispute to transfer custody.
 ### Lottery
 
 1. **Commitment**: Each participating member appends `DisputeArmed` with `commitment_hash` (HASH160 of a secret preimage) and `target_reserves` address. Members must arm within `dispute_arm_blocks`.
-2. **Entropy**: An entropy block is selected -- the first block mined after all participants have armed.
-3. **Reveal**: Each participant reveals their preimage. Winner: `score = SHA256(preimage || entropy_block_hash)`, lowest score wins.
+2. **Entropy**: An entropy block is selected -- the first block mined after all participants have armed (or after the arm window closes).
+3. **Selection**: Winner determined by: `score(candidate) = SHA256(entropy_block_hash || candidate_pubkey)`, lowest score wins. This is deterministic and verifiable by anyone with the candidate list and block hash.
 4. **Settlement**: Winner spends reserves to their `target_reserves`, appends `DisputeAcquire`, establishes new quorum. Losers append `DisputeYield`.
 
 ### Respectful vs Punitive
@@ -546,8 +911,16 @@ All times are measured in block height against the base layer. (DEP-11)
 | Constant | Value | Purpose |
 |----------|-------|---------|
 | `BLOCKS_PER_YEAR` | 52560 | Fee calculation |
-| `MIN_RESERVES_SATS` | 660 | Economic spendability |
-| `MAX_RESERVES_SATS` | 10 BTC | Sanity limit |
+| `MIN_RESERVES_OUTPUT_SATS` | 660 | Minimum economically spendable reserves |
+| `MAX_RESERVES_OUTPUT_SATS` | 1,000,000,000 (10 BTC) | Reserves sanity limit |
+| `MAX_FEE_RATE_BPS` | 10000 (100%) | Maximum annual fee rate |
+| `MAX_CREDIT_SATS` | 100,000,000 (1 BTC) | Maximum per-credit amount |
+| `MAX_INVOICE_MSAT` | 100,000,000,000 (1 BTC) | Maximum invoice amount |
+| `COLLATERAL_REPORTING_PERIOD` | 144 blocks (~1 day) | Attestation refresh frequency |
+| `DEFAULT_EMERGENCY_TIMEOUT` | 144 blocks (~1 day) | Default operator solo spend delay |
+| `MIN_EMERGENCY_TIMEOUT` | 144 blocks (~1 day) | Minimum operator solo spend delay |
+| `MAX_EMERGENCY_TIMEOUT` | 4320 blocks (~30 days) | Maximum operator solo spend delay |
+| `PROTOCOL_VERSION` | 1 | Current wire protocol version |
 
 ### Per-Quorum Parameters
 
