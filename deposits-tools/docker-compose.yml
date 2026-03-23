@@ -202,14 +202,15 @@ services:
       - regtest
 
   # =========================================================================
-  # Lightning sidecars (profile: lightning)
+  # Lightning node (profile: lightning)
+  # Single shared LDK node — all operators use via self-pay wrapper.
   # Start with: docker compose --profile lightning up -d
   # Build with: docker build -f deposits-tools/Dockerfile.ldk-node -t ldk-node:latest ~/workspace/
   # =========================================================================
 
-  alice-ln:
+  lightning:
     image: ldk-node:latest
-    container_name: alice-ln
+    container_name: lightning
     profiles: [lightning]
     restart: unless-stopped
     environment:
@@ -221,110 +222,14 @@ services:
       RUST_LOG: info
       LDK_ONCHAIN_WALLET_SYNC_INTERVAL_SECS: "10"
       LDK_LIGHTNING_WALLET_SYNC_INTERVAL_SECS: "10"
-      NODE_NAME: alice
-      TLS_HOSTNAME: alice-ln
+      NODE_NAME: lightning
+      TLS_HOSTNAME: lightning
       LISTEN_PORT: "9735"
     ports:
       - "9835:9735"
       - "3111:3000"
     volumes:
-      - ldk_alice_data:/ldk
-      - ldk_cli:/ldk-cli
-      - ./ldk-server-entrypoint.sh:/entrypoint.sh:ro
-    depends_on:
-      bitcoin:
-        condition: service_healthy
-      electrs:
-        condition: service_started
-    networks:
-      - regtest
-
-  bob-ln:
-    image: ldk-node:latest
-    container_name: bob-ln
-    profiles: [lightning]
-    restart: unless-stopped
-    environment:
-      LDK_DATA_DIR: /ldk
-      ELECTRUM_HOST: electrs
-      ELECTRUM_PORT: "3002"
-      NETWORK: regtest
-      LDK_API_KEY: test_api_key
-      RUST_LOG: info
-      LDK_ONCHAIN_WALLET_SYNC_INTERVAL_SECS: "10"
-      LDK_LIGHTNING_WALLET_SYNC_INTERVAL_SECS: "10"
-      NODE_NAME: bob
-      TLS_HOSTNAME: bob-ln
-      LISTEN_PORT: "9736"
-    ports:
-      - "9836:9736"
-      - "3112:3000"
-    volumes:
-      - ldk_bob_data:/ldk
-      - ldk_cli:/ldk-cli
-      - ./ldk-server-entrypoint.sh:/entrypoint.sh:ro
-    depends_on:
-      bitcoin:
-        condition: service_healthy
-      electrs:
-        condition: service_started
-    networks:
-      - regtest
-
-  charlie-ln:
-    image: ldk-node:latest
-    container_name: charlie-ln
-    profiles: [lightning]
-    restart: unless-stopped
-    environment:
-      LDK_DATA_DIR: /ldk
-      ELECTRUM_HOST: electrs
-      ELECTRUM_PORT: "3002"
-      NETWORK: regtest
-      LDK_API_KEY: test_api_key
-      RUST_LOG: info
-      LDK_ONCHAIN_WALLET_SYNC_INTERVAL_SECS: "10"
-      LDK_LIGHTNING_WALLET_SYNC_INTERVAL_SECS: "10"
-      NODE_NAME: charlie
-      TLS_HOSTNAME: charlie-ln
-      LISTEN_PORT: "9737"
-    ports:
-      - "9837:9737"
-      - "3113:3000"
-    volumes:
-      - ldk_charlie_data:/ldk
-      - ldk_cli:/ldk-cli
-      - ./ldk-server-entrypoint.sh:/entrypoint.sh:ro
-    depends_on:
-      bitcoin:
-        condition: service_healthy
-      electrs:
-        condition: service_started
-    networks:
-      - regtest
-
-  diana-ln:
-    image: ldk-node:latest
-    container_name: diana-ln
-    profiles: [lightning]
-    restart: unless-stopped
-    environment:
-      LDK_DATA_DIR: /ldk
-      ELECTRUM_HOST: electrs
-      ELECTRUM_PORT: "3002"
-      NETWORK: regtest
-      LDK_API_KEY: test_api_key
-      RUST_LOG: info
-      LDK_ONCHAIN_WALLET_SYNC_INTERVAL_SECS: "10"
-      LDK_LIGHTNING_WALLET_SYNC_INTERVAL_SECS: "10"
-      NODE_NAME: diana
-      TLS_HOSTNAME: diana-ln
-      LISTEN_PORT: "9738"
-    ports:
-      - "9838:9738"
-      - "3114:3000"
-    volumes:
-      - ldk_diana_data:/ldk
+      - ldk_data:/ldk
       - ldk_cli:/ldk-cli
       - ./ldk-server-entrypoint.sh:/entrypoint.sh:ro
     depends_on:
@@ -420,10 +325,7 @@ services:
 volumes:
   bitcoin_data:
   electrs_data:
-  ldk_alice_data:
-  ldk_bob_data:
-  ldk_charlie_data:
-  ldk_diana_data:
+  ldk_data:
   ldk_cli:
   prometheus_data:
   grafana_data:

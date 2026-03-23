@@ -116,18 +116,12 @@ The following services run in Docker containers:
 Relay data uses host bind-mounts under `data/relays/{name}/` so data survives
 container recreation.
 
-## LDK Lightning Sidecars (optional)
+## Lightning Node (optional)
 
-When running with `setup-4op-lightning.sh`, each operator gets an LDK node in a
-Docker container:
-
-- alice-ln: API port 3111
-- bob-ln: API port 3112
-- charlie-ln: API port 3113
-- diana-ln: API port 3114
-
-The deposit node connects to its LDK sidecar via `LDK_HOST=localhost` and
-`LDK_PORT=311x` environment variables.
+When running with `setup-4op-lightning.sh`, all operators share a single LDK
+Lightning node (`lightning` container, API port 3111). Cross-operator payments
+on the same node settle internally via `ldk-cli-wrapper.sh` (self-pay /
+subwallet approach).
 
 ## Setup Flow
 

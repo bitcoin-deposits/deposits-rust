@@ -38,14 +38,14 @@ fi
 
 # Set up wrapper env
 LDK_REAL_CLI="${LDK_SERVER_CLI:-$HOME/ldk-server/target/release/ldk-server-cli}"
-NETWORK=$(docker exec alice-ln printenv NETWORK 2>/dev/null || echo "regtest")
-API_KEY=$(docker exec alice-ln sh -c "cat /ldk/${NETWORK}/api_key | od -A n -t x1 | tr -d ' \n'" 2>/dev/null)
+NETWORK=$(docker exec lightning printenv NETWORK 2>/dev/null || echo "regtest")
+API_KEY=$(docker exec lightning sh -c "cat /ldk/${NETWORK}/api_key | od -A n -t x1 | tr -d ' \n'" 2>/dev/null)
 
 export LDK_REAL_CLI
 export LDK_HOST="localhost"
 export LDK_PORT="3111"
 export LDK_API_KEY="$API_KEY"
-export LDK_TLS_CERT="$TOOLS_DIR/certs/alice.crt"
+export LDK_TLS_CERT="$TOOLS_DIR/certs/lightning.crt"
 export LDK_SELF_PAY_DIR="${DATA_ROOT}/self-pay"
 
 echo "Paying invoice..."

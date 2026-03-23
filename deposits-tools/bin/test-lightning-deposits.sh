@@ -58,40 +58,22 @@ ldk_cli() {
 # Phase 1: Verify Lightning channel exists
 # ============================================================================
 
-verify_lightning_channel() {
-    log_info "=== Phase 1: Verify Lightning Channel ==="
+verify_lightning_node() {
+    log_info "=== Phase 1: Verify Lightning Node ==="
     echo ""
 
-    # Get node info
-    local alice_ln_info=$(ldk_cli alice get-node-info 2>&1)
-    local bob_ln_info=$(ldk_cli bob get-node-info 2>&1)
+    # All operators share a single lightning node
+    local ln_info=$(ldk_cli get-node-info 2>&1)
+    local ln_id=$(echo "$ln_info" | jq -r '.node_id // empty' 2>/dev/null)
 
-    local alice_ln_id=$(echo "$alice_ln_info" | jq -r '.node_id // empty' 2>/dev/null)
-    local bob_ln_id=$(echo "$bob_ln_info" | jq -r '.node_id // empty' 2>/dev/null)
-
-    if [ -z "$alice_ln_id" ] || [ -z "$bob_ln_id" ]; then
-        test_fail "LDK nodes not ready - run reinit-lightning.sh first"
+    if [ -z "$ln_id" ]; then
+        test_fail "Lightning node not ready - run reinit-lightning.sh first"
         return 1
     fi
 
-    log_info "Alice LN: ${alice_ln_id:0:20}..."
-    log_info "Bob LN:   ${bob_ln_id:0:20}..."
-
-    store_value "alice_ln_id" "$alice_ln_id"
-    store_value "bob_ln_id" "$bob_ln_id"
-
-    # Check for channel between them
-    local channels=$(ldk_cli alice list-channels 2>&1)
-    local channel_count=$(echo "$channels" | jq -r '.channels | length' 2>/dev/null || echo "0")
-
-    if [ "$channel_count" -gt 0 ]; then
-        local outbound=$(echo "$channels" | jq -r '.channels[0].outbound_capacity_msat')
-        local inbound=$(echo "$channels" | jq -r '.channels[0].inbound_capacity_msat')
-        test_pass "Lightning channel exists (outbound: $outbound msat, inbound: $inbound msat)"
-    else
-        test_fail "No Lightning channel - run test-lightning.sh first"
-        return 1
-    fi
+    log_info "Lightning node: ${ln_id:0:20}..."
+    store_value "ln_id" "$ln_id"
+    test_pass "Lightning node ready (shared by all operators)"
 }
 
 # ============================================================================
@@ -592,18 +574,11 @@ show_final_state() {
     log_info "=== Final State ==="
     echo ""
 
-    # Show Lightning channel balances
-    log_info "Lightning Channel Balances:"
-    local alice_channels=$(ldk_cli alice list-channels 2>&1)
-    local bob_channels=$(ldk_cli bob list-channels 2>&1)
-
-    local alice_out=$(echo "$alice_channels" | jq -r '.channels[0].outbound_capacity_msat // 0')
-    local alice_in=$(echo "$alice_channels" | jq -r '.channels[0].inbound_capacity_msat // 0')
-    local bob_out=$(echo "$bob_channels" | jq -r '.channels[0].outbound_capacity_msat // 0')
-    local bob_in=$(echo "$bob_channels" | jq -r '.channels[0].inbound_capacity_msat // 0')
-
-    log_info "  Alice: outbound=$alice_out msat, inbound=$alice_in msat"
-    log_info "  Bob:   outbound=$bob_out msat, inbound=$bob_in msat"
+    # Show Lightning balance
+    log_info "Lightning Node Balance:"
+    local balances=$(ldk_cli get-balances 2>&1)
+    local onchain=$(echo "$balances" | jq -r '.spendable_onchain_balance_sats // 0' 2>/dev/null)
+    log_info "  On-chain: $onchain sats"
 
     # Show deposit balances
     log_info ""
@@ -742,7 +717,7 @@ main() {
         exit 1
     fi
 
-    verify_lightning_channel
+    verify_lightning_node
     setup_operators
     create_ledgers
     add_quorum_members

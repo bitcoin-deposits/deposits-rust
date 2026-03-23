@@ -1,23 +1,18 @@
 #!/bin/bash
-# Lightning channel test script for deposits-node + LDK integration
+# Lightning test script for shared LDK node + self-pay wrapper
 #
-# This script tests:
-# 1. Opening a Lightning channel between Alice and Bob
-# 2. Creating and paying invoices
-# 3. Integration with deposits-node for invoice credits
+# Tests:
+# 1. Lightning node is reachable
+# 2. Invoice creation and self-pay settlement
+# 3. list-payments returns correct format
 #
 # Usage:
-#   ./bin/test-lightning.sh              # Run full test
-#   ./bin/test-lightning.sh open-channel # Just open channel
-#   ./bin/test-lightning.sh pay-invoice  # Just test invoice payment
+#   ./bin/test-lightning.sh
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/_common.sh"
-
-# Channel settings
-CHANNEL_AMOUNT=5000000  # 5M sats
 
 TESTS_PASSED=0
 TESTS_FAILED=0
@@ -32,263 +27,135 @@ test_fail() {
     TESTS_FAILED=$((TESTS_FAILED + 1))
 }
 
-# Helper to call ldk-cli for Deposit nodes
+# Helper: call ldk-server-cli in the lightning container
 ldk_cli() {
     "$SCRIPT_DIR/ldk-cli.sh" "$@"
 }
 
 # ============================================================================
-# Test: Wait for LDK nodes to be ready
+# Test: Lightning node is reachable
 # ============================================================================
 
-wait_for_ldk_nodes() {
-    log_info "=== Waiting for LDK nodes ==="
-    echo ""
+test_node_ready() {
+    log_info "=== Test: Lightning node reachable ==="
 
-    for node in alice bob; do
-        log_info "Waiting for $node-ln..."
-        local max_attempts=30
-        local attempt=0
-        while true; do
-            local info=$(ldk_cli "$node" get-node-info 2>/dev/null || echo "")
-            local pubkey=$(echo "$info" | jq -r '.node_id // empty' 2>/dev/null || echo "")
-            if [ -n "$pubkey" ]; then
-                log_success "$node-ln ready: ${pubkey:0:16}..."
-                break
-            fi
-            attempt=$((attempt + 1))
-            if [ $attempt -ge $max_attempts ]; then
-                log_error "$node-ln not ready after $max_attempts attempts"
-                return 1
-            fi
-            sleep 2
-        done
-    done
-}
+    local info=$(ldk_cli get-node-info 2>/dev/null || echo "")
+    local pubkey=$(echo "$info" | python3 -c "import json,sys; print(json.load(sys.stdin).get('node_id',''))" 2>/dev/null || echo "")
 
-# ============================================================================
-# Test: Open channel between Alice and Bob
-# ============================================================================
-
-open_channel() {
-    log_info ""
-    log_info "=== Opening Lightning Channel (Alice -> Bob) ==="
-    echo ""
-
-    # Get pubkeys
-    local alice_info=$(ldk_cli alice get-node-info)
-    local bob_info=$(ldk_cli bob get-node-info)
-
-    local alice_pubkey=$(echo "$alice_info" | jq -r '.node_id')
-    local bob_pubkey=$(echo "$bob_info" | jq -r '.node_id')
-
-    if [ -z "$alice_pubkey" ] || [ -z "$bob_pubkey" ]; then
-        test_fail "Could not get node pubkeys"
-        return 1
-    fi
-
-    log_info "Alice: ${alice_pubkey:0:16}..."
-    log_info "Bob:   ${bob_pubkey:0:16}..."
-
-    # Check if channel already exists
-    local existing=$(ldk_cli alice list-channels | jq -r ".channels[] | select(.counterparty_node_id == \"$bob_pubkey\") | .channel_id" 2>/dev/null || echo "")
-
-    if [ -n "$existing" ]; then
-        log_info "Channel already exists: ${existing:0:16}..."
-        test_pass "Channel exists"
-        return 0
-    fi
-
-    # Check Alice's balance
-    local alice_balances=$(ldk_cli alice get-balances)
-    local alice_balance=$(echo "$alice_balances" | jq -r '.total_onchain_balance_sats // 0')
-    log_info "Alice on-chain balance: $alice_balance sats"
-
-    if [ "$alice_balance" -lt "$CHANNEL_AMOUNT" ]; then
-        log_error "Alice needs at least $CHANNEL_AMOUNT sats, has $alice_balance"
-        test_fail "Insufficient balance"
-        return 1
-    fi
-
-    # Open channel with 50/50 balance
-    local push_msat=$((CHANNEL_AMOUNT * 500))  # 50% in millisats
-    log_info "Opening channel: $CHANNEL_AMOUNT sats, pushing $push_msat msat to Bob..."
-
-    # Bob's address inside the docker network
-    local result=$(ldk_cli alice open-channel \
-        --node-pubkey "$bob_pubkey" \
-        --address "bob-ln:9736" \
-        --channel-amount-sats "$CHANNEL_AMOUNT" \
-        --push-to-counterparty-msat "$push_msat" \
-        --announce-channel 2>&1) || true
-
-    local user_channel_id=$(echo "$result" | jq -r '.user_channel_id // empty' 2>/dev/null || echo "")
-    if [ -n "$user_channel_id" ]; then
-        log_info "Channel opening: ${user_channel_id:0:16}..."
+    if [ -n "$pubkey" ]; then
+        test_pass "Lightning node ready: ${pubkey:0:20}..."
     else
-        # Check for error message
-        local error=$(echo "$result" | grep -i "error" || echo "$result")
-        log_warn "Open channel response: $error"
+        test_fail "Lightning node not reachable"
+        return 1
     fi
-
-    # Mine blocks to confirm
-    log_info "Mining blocks to confirm channel..."
-    mine_blocks 6
-
-    # Wait for channel to be ready
-    log_info "Waiting for channel to be ready..."
-    local max_wait=60
-    local waited=0
-    while [ $waited -lt $max_wait ]; do
-        local ready=$(ldk_cli alice list-channels | jq -r ".channels[] | select(.counterparty_node_id == \"$bob_pubkey\") | .is_channel_ready" 2>/dev/null || echo "false")
-        if [ "$ready" = "true" ]; then
-            test_pass "Channel opened and ready"
-            return 0
-        fi
-        sleep 2
-        waited=$((waited + 2))
-    done
-
-    test_fail "Channel not ready after ${max_wait}s"
-    return 1
 }
 
 # ============================================================================
-# Test: Pay invoice from Alice to Bob
+# Test: Self-pay invoice round-trip
 # ============================================================================
 
-test_invoice_payment() {
+test_self_pay() {
     log_info ""
-    log_info "=== Testing Invoice Payment (Alice -> Bob) ==="
-    echo ""
+    log_info "=== Test: Self-pay invoice (create + pay + list) ==="
 
-    # Create invoice on Bob
-    local amount_msat=100000  # 100 sats
-    log_info "Bob creating invoice for $amount_msat msat..."
+    # Set up wrapper env
+    local LDK_REAL_CLI="${LDK_SERVER_CLI:-$HOME/ldk-server/target/release/ldk-server-cli}"
+    local NETWORK=$(docker exec lightning printenv NETWORK 2>/dev/null || echo "regtest")
+    local API_KEY=$(docker exec lightning sh -c "cat /ldk/${NETWORK}/api_key | od -A n -t x1 | tr -d ' \n'" 2>/dev/null)
 
-    local invoice_result=$(ldk_cli bob bolt11-receive --amount-msat "$amount_msat" --description "Test payment")
-    local invoice=$(echo "$invoice_result" | jq -r '.invoice // empty')
+    export LDK_REAL_CLI
+    export LDK_HOST="localhost"
+    export LDK_PORT="3111"
+    export LDK_API_KEY="$API_KEY"
+    export LDK_TLS_CERT="$TOOLS_DIR/certs/lightning.crt"
+    export LDK_SELF_PAY_DIR="${DATA_ROOT}/self-pay"
+
+    WRAPPER="$SCRIPT_DIR/ldk-cli-wrapper.sh"
+
+    # Create invoice
+    local amount_msat=100000
+    log_info "  Creating invoice for $amount_msat msat..."
+    local recv_output=$($WRAPPER bolt11-receive --amount-msat "$amount_msat" --description "test" 2>&1)
+    local invoice=$(echo "$recv_output" | python3 -c "import json,sys; print(json.load(sys.stdin).get('invoice',''))" 2>/dev/null || echo "")
+    local payment_hash=$(echo "$recv_output" | python3 -c "import json,sys; print(json.load(sys.stdin).get('payment_hash',''))" 2>/dev/null || echo "")
 
     if [ -z "$invoice" ]; then
-        local error=$(echo "$invoice_result" | jq -r '.error // .message // empty')
-        test_fail "Create invoice failed: $invoice_result"
+        test_fail "Create invoice failed: $recv_output"
         return 1
     fi
+    test_pass "Invoice created: ${invoice:0:40}..."
 
-    log_info "Invoice: ${invoice:0:40}..."
-
-    # Pay invoice from Alice
-    log_info "Alice paying invoice..."
-    local pay_result=$(ldk_cli alice bolt11-send --invoice "$invoice" 2>&1) || true
-    local payment_id=$(echo "$pay_result" | jq -r '.payment_id // .payment_hash // empty' 2>/dev/null || echo "")
+    # Pay invoice (self-pay via wrapper)
+    log_info "  Paying invoice (self-pay)..."
+    local pay_output=$($WRAPPER bolt11-send --invoice "$invoice" 2>&1)
+    local payment_id=$(echo "$pay_output" | python3 -c "import json,sys; print(json.load(sys.stdin).get('payment_id',''))" 2>/dev/null || echo "")
 
     if [ -n "$payment_id" ]; then
-        log_info "Payment initiated: ${payment_id:0:16}..."
-        # Wait briefly for payment to complete
-        sleep 2
-        # Check payment status
-        local payment_status=$(ldk_cli alice list-payments 2>/dev/null | jq -r ".payments[] | select(.id == \"$payment_id\") | .status" 2>/dev/null || echo "")
-        if [ "$payment_status" = "1" ]; then
-            test_pass "Payment succeeded"
-        else
-            test_pass "Payment sent (status: $payment_status)"
-        fi
+        test_pass "Self-pay succeeded: ${payment_id:0:20}..."
     else
-        test_fail "Payment failed: $pay_result"
+        test_fail "Self-pay failed: $pay_output"
         return 1
     fi
 
-    # Wait a moment for payment to settle
-    sleep 2
+    # Verify list-payments includes the self-pay record
+    log_info "  Checking list-payments..."
+    local list_output=$($WRAPPER list-payments 2>&1)
+    local found=$(echo "$list_output" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+for p in d.get('payments', []):
+    if p.get('id') == '$payment_hash' and p.get('status') == 1:
+        print('found')
+        break
+" 2>/dev/null || echo "")
 
-    # Check balances
-    local alice_channels=$(ldk_cli alice list-channels)
-    local bob_channels=$(ldk_cli bob list-channels)
-
-    local alice_balance=$(echo "$alice_channels" | jq -r '.channels[0].outbound_capacity_msat // 0')
-    local bob_balance=$(echo "$bob_channels" | jq -r '.channels[0].outbound_capacity_msat // 0')
-
-    log_info "After payment:"
-    log_info "  Alice outbound capacity: $alice_balance msat"
-    log_info "  Bob outbound capacity: $bob_balance msat"
-
-    test_pass "Invoice payment complete"
+    if [ "$found" = "found" ]; then
+        test_pass "Self-pay record in list-payments (status=1)"
+    else
+        test_fail "Self-pay record not found in list-payments"
+    fi
 }
 
 # ============================================================================
-# Test: Show channel status
+# Test: Lightning node balance
 # ============================================================================
 
-show_channel_status() {
+test_balance() {
     log_info ""
-    log_info "=== Channel Status ==="
-    echo ""
+    log_info "=== Test: Lightning balance ==="
 
-    for node in alice bob; do
-        log_info "$node-ln channels:"
-        local channels=$(ldk_cli "$node" list-channels 2>/dev/null || echo '{"channels":[]}')
-        local count=$(echo "$channels" | jq -r '.channels | length')
+    local balances=$(ldk_cli get-balances 2>/dev/null || echo "{}")
+    local onchain=$(echo "$balances" | python3 -c "import json,sys; print(json.load(sys.stdin).get('spendable_onchain_balance_sats',0))" 2>/dev/null || echo "0")
 
-        if [ "$count" = "0" ]; then
-            log_info "  No channels"
-        else
-            echo "$channels" | jq -r '.channels[] | "  - \(.counterparty_node_id[0:16])... ready=\(.is_channel_ready) outbound=\(.outbound_capacity_msat) inbound=\(.inbound_capacity_msat)"'
-        fi
-    done
+    log_info "  On-chain balance: $onchain sats"
+    if [ "$onchain" -gt 0 ] 2>/dev/null; then
+        test_pass "Lightning node has funds"
+    else
+        test_fail "Lightning node has no funds"
+    fi
 }
 
 # ============================================================================
 # Main
 # ============================================================================
 
-main() {
-    log_info "=========================================="
-    log_info "  Lightning Channel Test (deposits-node + LDK)"
-    log_info "=========================================="
-    echo ""
+log_info "=========================================="
+log_info "  Lightning Test (shared node + self-pay)"
+log_info "=========================================="
+echo ""
 
-    # Check that ldk-cli works
-    if ! command -v jq &> /dev/null; then
-        log_error "jq is required but not installed"
-        exit 1
-    fi
+test_node_ready
+test_balance
+test_self_pay
 
-    # Parse command
-    local cmd=${1:-full}
+echo ""
+log_info "=== Test Summary ==="
+log_info "  Passed: $TESTS_PASSED"
+log_info "  Failed: $TESTS_FAILED"
 
-    case "$cmd" in
-        open-channel)
-            wait_for_ldk_nodes
-            open_channel
-            show_channel_status
-            ;;
-        pay-invoice)
-            wait_for_ldk_nodes
-            test_invoice_payment
-            ;;
-        status)
-            wait_for_ldk_nodes
-            show_channel_status
-            ;;
-        full|*)
-            wait_for_ldk_nodes
-            open_channel
-            test_invoice_payment
-            show_channel_status
-
-            log_info ""
-            log_info "=== Test Summary ==="
-            log_info "  Passed: $TESTS_PASSED"
-            log_info "  Failed: $TESTS_FAILED"
-
-            if [ $TESTS_FAILED -gt 0 ]; then
-                log_error "Some tests failed"
-                exit 1
-            else
-                log_success "All tests passed!"
-            fi
-            ;;
-    esac
-}
-
-main "$@"
+if [ $TESTS_FAILED -gt 0 ]; then
+    log_error "Some tests failed"
+    exit 1
+else
+    log_success "All tests passed!"
+fi

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Reinitialize the full test network with Lightning sidecars
+# Reinitialize the full test network with Lightning node
 #
 # Tears down everything, optionally rebuilds binaries, then runs setup-4op-lightning.sh.
 #
@@ -50,15 +50,13 @@ pkill -f "deposits-node run.*eve" 2>/dev/null || true
 # Stop HTLC agent
 pkill -f "htlc-agent" 2>/dev/null || true
 
-# Stop and remove all containers (including lightning sidecars)
+# Stop and remove all containers (including lightning node)
 log_info "Stopping all containers..."
 $DC_LIGHTNING down -v --remove-orphans 2>/dev/null || true
 
-# Clean up LDK containers/volumes not managed by compose
-for node in alice bob charlie diana; do
-    docker stop "${node}-ln" 2>/dev/null || true
-    docker rm "${node}-ln" 2>/dev/null || true
-done
+# Clean up lightning container/volumes not managed by compose
+docker stop lightning 2>/dev/null || true
+docker rm lightning 2>/dev/null || true
 for v in $(docker volume ls -q --filter 'name=ldk_'); do
     docker volume rm "$v" 2>/dev/null || true
 done
@@ -87,7 +85,7 @@ fi
 # Create relay bind-mount directories
 mkdir -p "$DATA_ROOT/relays/alice" "$DATA_ROOT/relays/bob" "$DATA_ROOT/relays/charlie" "$DATA_ROOT/relays/diana" "$DATA_ROOT/relays/ledgers"
 
-# Start infrastructure (including lightning sidecars)
+# Start infrastructure (including lightning node)
 log_info "Starting infrastructure..."
 $DC_LIGHTNING up -d bitcoin electrs relay-alice relay-bob relay-charlie relay-diana relay-ledgers wallet
 
