@@ -445,6 +445,46 @@ body.hide-amounts .amt { visibility: hidden; }
       </div>
 
       <div class="card" style="margin-top: 12px;">
+        <h3>Routed Transfer</h3>
+        <p style="color:var(--muted); font-size:12px; margin-top:0;">Transfer across ledgers via a routing agent. Fees are calculated automatically.</p>
+        <div class="row">
+          <div class="form-group">
+            <label>From (your deposit)</label>
+            <select id="routed-from" onchange="onRoutedFromChange()"></select>
+          </div>
+          <div class="form-group">
+            <label>To (your deposit)</label>
+            <select id="routed-to" onchange="onRoutedToChange()"></select>
+          </div>
+        </div>
+        <div class="row">
+          <div class="form-group">
+            <label>Amount (sats)</label>
+            <input id="routed-amount" type="number" value="100000" oninput="updateRoutedQuote()">
+          </div>
+          <div class="form-group">
+            <label>Agent</label>
+            <select id="routed-agent" onchange="updateRoutedQuote()"></select>
+          </div>
+        </div>
+        <div id="routed-quote" style="font-size:12px; color:var(--muted); margin:8px 0; display:none;">
+          <span id="routed-quote-text"></span>
+        </div>
+        <div id="routed-progress" style="font-size:12px; margin:8px 0; display:none;">
+          <div id="routed-progress-text"></div>
+        </div>
+        <button id="routed-send-btn" class="primary" onclick="doRoutedTransfer()" disabled>Send via Agent</button>
+      </div>
+
+      <div class="card" style="margin-top: 12px;">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <h3>Routing Agents</h3>
+          <button onclick="refreshAgentAds()" style="font-size:11px;">Refresh</button>
+        </div>
+        <div id="agent-ads-list" style="color:var(--muted); font-size:12px;">Loading...</div>
+      </div>
+
+      <div class="card" style="margin-top: 12px;">
         <h3>Complete Transfer (Reveal Preimage)</h3>
         <div class="form-group">
           <label>Ledger ID</label>
@@ -1269,6 +1309,28 @@ async function sendRequest(ledgerId, action, params, timeoutMs = 30000) {
     pendingRequests.set(event.id, { resolve, reject, timeout });
     wsSend(['EVENT', event]);
     log(`Sent ${action} request (${event.id.slice(0, 12)}...)`);
+  });
+}
+
+/// Send a request to an agent (Kind 20101 with #p tag instead of #l)
+async function sendAgentRequest(agentPubkey, action, params, timeoutMs = 30000) {
+  const nostrKey = deriveSecretKey(state.seed, 0);
+  const content = JSON.stringify(params);
+  const tags = [
+    ['p', agentPubkey],
+    ['action', action],
+  ];
+  const event = await createEvent(nostrKey, 20101, content, tags);
+
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      pendingRequests.delete(event.id);
+      reject(new Error(`Timeout waiting for agent ${action} response`));
+    }, timeoutMs);
+
+    pendingRequests.set(event.id, { resolve, reject, timeout });
+    wsSend(['EVENT', event]);
+    log(`Sent ${action} to agent (${event.id.slice(0, 12)}...)`);
   });
 }
 
@@ -3802,6 +3864,407 @@ window.resetCompleteBtn = function() {
   btn.style.opacity = '';
 };
 
+// ─── Routed transfer (cross-ledger via agent) ───────────────────────────────
+
+// Cache of agent ads for the routed transfer UI
+let cachedAgents = [];
+window.onRoutedFromChange = function() {
+  populateRoutedTo();
+  updateRoutedQuote();
+};
+
+window.onRoutedToChange = function() {
+  updateRoutedQuote();
+};
+
+function populateRoutedTo() {
+  const fromAlias = document.getElementById('routed-from').value;
+  const fromDep = state.deposits.find(d => d.alias === fromAlias);
+  const toSel = document.getElementById('routed-to');
+  if (!toSel || !fromDep) return;
+
+  // Show deposits on OTHER ledgers
+  const prev = toSel.value;
+  const opts = state.deposits
+    .filter(d => d.ledger_id !== fromDep.ledger_id)
+    .map(d => `<option value="${esc(d.alias)}">${esc(d.alias)} (${(d.ledger_id || '').slice(0, 8)}...)</option>`)
+    .join('');
+  toSel.innerHTML = opts || '<option value="">No deposits on other ledgers</option>';
+  if ([...toSel.options].some(o => o.value === prev)) toSel.value = prev;
+}
+
+function populateRoutedDropdowns() {
+  const fromSel = document.getElementById('routed-from');
+  const agentSel = document.getElementById('routed-agent');
+  if (!fromSel) return;
+
+  const prevFrom = fromSel.value;
+  fromSel.innerHTML = state.deposits
+    .map(d => `<option value="${esc(d.alias)}">${esc(d.alias)} (${(d.ledger_id || '').slice(0, 8)}...)</option>`)
+    .join('');
+  if ([...fromSel.options].some(o => o.value === prevFrom)) fromSel.value = prevFrom;
+
+  // Populate agents dropdown
+  agentSel.innerHTML = cachedAgents
+    .map((a, i) => `<option value="${i}">Agent ${(a.agent_pubkey || '').slice(0, 12)}...</option>`)
+    .join('') || '<option value="">No agents</option>';
+
+  populateRoutedTo();
+}
+
+window.updateRoutedQuote = function() {
+  const fromAlias = document.getElementById('routed-from').value;
+  const toAlias = document.getElementById('routed-to').value;
+  const amount = parseInt(document.getElementById('routed-amount').value) || 0;
+  const agentIdx = parseInt(document.getElementById('routed-agent').value);
+  const quoteEl = document.getElementById('routed-quote');
+  const quoteText = document.getElementById('routed-quote-text');
+  const btn = document.getElementById('routed-send-btn');
+
+  const fromDep = state.deposits.find(d => d.alias === fromAlias);
+  const toDep = state.deposits.find(d => d.alias === toAlias);
+  const agent = cachedAgents[agentIdx];
+
+  if (!fromDep || !toDep || !agent || amount <= 0) {
+    quoteEl.style.display = 'none';
+    btn.disabled = true;
+    return;
+  }
+
+  // Find the agent's ledger entries for source and dest
+  const srcEntry = agent.ledgers.find(l => l.ledger_id === fromDep.ledger_id);
+  const dstEntry = agent.ledgers.find(l => l.ledger_id === toDep.ledger_id);
+
+  if (!srcEntry || !dstEntry) {
+    quoteText.textContent = 'Agent does not bridge these two ledgers.';
+    quoteEl.style.display = 'block';
+    btn.disabled = true;
+    return;
+  }
+
+  const amountMsats = amount * 1000;
+  const feeIn = (srcEntry.fee_in_fixed_msats || 0) + Math.floor(amountMsats * (srcEntry.fee_in_rate_bps || 0) / 10000);
+  const feeOut = (dstEntry.fee_out_fixed_msats || 0) + Math.floor(amountMsats * (dstEntry.fee_out_rate_bps || 0) / 10000);
+  const totalFee = feeIn + feeOut;
+  const forward = amountMsats - totalFee;
+
+  if (forward <= 0) {
+    quoteText.textContent = 'Amount too small to cover fees.';
+    quoteEl.style.display = 'block';
+    btn.disabled = true;
+    return;
+  }
+
+  quoteText.innerHTML =
+    `Fee: ${totalFee} msats (in: ${feeIn}, out: ${feeOut})<br>` +
+    `Arrives: ${forward} msats (${Math.floor(forward / 1000)} sats)<br>` +
+    `Agent deposit on source: ${srcEntry.deposit_id.slice(0, 16)}...<br>` +
+    `Agent liquidity on dest: ${Math.floor((dstEntry.balance_msats || 0) / 1000)} sats`;
+  quoteEl.style.display = 'block';
+  btn.disabled = false;
+};
+
+window.doRoutedTransfer = async function() {
+  const btn = document.getElementById('routed-send-btn');
+  const progress = document.getElementById('routed-progress');
+  const progressText = document.getElementById('routed-progress-text');
+  btn.disabled = true;
+  btn.textContent = 'Sending...';
+  progress.style.display = 'block';
+
+  function setProgress(msg, color) {
+    progressText.innerHTML = `<span style="color:${color || 'var(--fg)'}">${msg}</span>`;
+  }
+
+  try {
+    const fromAlias = document.getElementById('routed-from').value;
+    const toAlias = document.getElementById('routed-to').value;
+    const amountSats = parseInt(document.getElementById('routed-amount').value);
+    const agentIdx = parseInt(document.getElementById('routed-agent').value);
+
+    const fromDep = state.deposits.find(d => d.alias === fromAlias);
+    const toDep = state.deposits.find(d => d.alias === toAlias);
+    const agent = cachedAgents[agentIdx];
+    if (!fromDep || !toDep || !agent) throw new Error('Missing selection');
+
+    const amountMsats = amountSats * 1000;
+
+    // Derive dest deposit_id
+    const toKeyIndex = toDep.key_index || 0;
+    const toSecretKey = deriveSecretKey(state.seed, toKeyIndex);
+    const toPubkey = getCompressedPubkey(toSecretKey);
+    const toDepositId = computeDepositId(toPubkey);
+    const toDepositIdHex = bytesToHex(toDepositId);
+
+    // Step 1: Generate preimage and hash
+    setProgress('1/5 Generating preimage...');
+    const preimage = new Uint8Array(32);
+    crypto.getRandomValues(preimage);
+    const hash = sha256(preimage);
+    const hashHex = bytesToHex(hash);
+    log(`Routed transfer: preimage=${bytesToHex(preimage).slice(0, 16)}... hash=${hashHex.slice(0, 16)}...`);
+
+    // Step 2: Request route from agent via Nostr
+    setProgress('2/5 Requesting route from agent...');
+    const routeResp = await sendAgentRequest(agent.agent_pubkey, 'request_route', {
+      source_ledger: fromDep.ledger_id,
+      dest_ledger: toDep.ledger_id,
+      dest_deposit_id: toDepositIdHex,
+      amount_msats: amountMsats,
+      hash: hashHex,
+    }, 15000);
+
+    if (!routeResp.success) throw new Error(routeResp.error || 'Route request failed');
+    const routeData = routeResp.result;
+
+    const agentDepositIdHex = routeData.agent_deposit_id;
+    log(`Agent deposit: ${agentDepositIdHex}, fee: ${routeData.fee_msats} msats, forward: ${routeData.forward_amount_msats} msats`);
+
+    // Step 3: Lock transfer to agent's deposit
+    setProgress('3/5 Locking transfer to agent...');
+    await syncAll();
+    if (cachedBlockHeight === 0) throw new Error('Block height unknown');
+    const timeout = cachedBlockHeight + 288; // ~2 days
+
+    const fromKeyIndex = fromDep.key_index || 0;
+    const fromSecretKey = deriveSecretKey(state.seed, fromKeyIndex);
+    const fromPubkey = getCompressedPubkey(fromSecretKey);
+    const fromDepositId = computeDepositId(fromPubkey);
+
+    const completionScript = `sha256(${hashHex})`;
+    const nonce = new Uint8Array(32);
+    crypto.getRandomValues(nonce);
+
+    // Fee for the inbound transfer_lock (operator fee on source ledger)
+    const srcAd = window._discoveredAds?.[fromDep.ledger_id];
+    const operatorFee = srcAd
+      ? (srcAd.transfer_fee_fixed_msats || 0) + Math.floor(amountMsats * (srcAd.transfer_fee_rate_bps || 0) / 10000)
+      : 2000; // fallback: 2 sats
+
+    const msgHash = transferLockSigningMessage(
+      nonce, fromDepositId, hexToBytes(agentDepositIdHex),
+      amountMsats, operatorFee, completionScript, timeout
+    );
+    const transferId = computeTransferId(msgHash);
+    const sig = schnorr.sign(msgHash, fromSecretKey);
+
+    const lockResp = await sendRequest(fromDep.ledger_id, 'transfer_lock', {
+      nonce: bytesToHex(nonce),
+      source_deposit_id: bytesToHex(fromDepositId),
+      destination_deposit_id: agentDepositIdHex,
+      amount: amountMsats,
+      fee: operatorFee,
+      completion_script: completionScript,
+      timeout_height: timeout,
+      transfer_id: bytesToHex(transferId),
+      signature: bytesToHex(sig),
+    }, 30000);
+
+    if (!lockResp.success) throw new Error(`Lock failed: ${lockResp.error}`);
+    log(`Inbound locked! Transfer ID: ${bytesToHex(transferId).slice(0, 16)}...`, 'success');
+
+    // Step 4: Watch for outbound lock arrival on dest ledger (agent forwards)
+    setProgress('4/5 Waiting for agent to forward...');
+    const outboundArrived = await waitForTransferLock(toDep.ledger_id, toDepositIdHex, hashHex, 60000);
+    if (!outboundArrived) throw new Error('Agent did not forward within timeout');
+
+    log(`Outbound lock detected! Transfer ID: ${outboundArrived.transfer_id.slice(0, 16)}...`, 'success');
+
+    // Step 5: Complete the outbound transfer by revealing preimage
+    setProgress('5/5 Revealing preimage...');
+    const completeResp = await sendRequest(toDep.ledger_id, 'transfer_complete', {
+      transfer_id: outboundArrived.transfer_id,
+      preimage: bytesToHex(preimage),
+    }, 15000);
+
+    if (!completeResp.success) throw new Error(`Complete failed: ${completeResp.error}`);
+
+    setProgress('Transfer complete!', 'var(--success, #4caf50)');
+    log(`Routed transfer complete! ${amountSats} sats sent via agent.`, 'success');
+    btn.textContent = 'Done!';
+    syncAll();
+
+  } catch (e) {
+    setProgress(`Error: ${e.message}`, 'var(--error, #f44336)');
+    log(`Routed transfer failed: ${e.message}`, 'error');
+    btn.textContent = 'Send via Agent';
+    btn.disabled = false;
+  }
+};
+
+/// Watch for a TransferLock arriving on a ledger targeting a specific deposit with a specific hash.
+/// Returns {transfer_id} or null on timeout.
+async function waitForTransferLock(ledgerId, destDepositIdHex, hashHex, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  const targetHash = hashHex.toLowerCase();
+  const targetDest = destDepositIdHex.toLowerCase();
+
+  while (Date.now() < deadline) {
+    // Poll for recent ledger updates (Kind 9100) on this ledger
+    try {
+      const events = await fetchEvents({
+        kinds: [9100],
+        '#d': [ledgerId],
+        '#t': ['70'], // TransferLock op type
+        limit: 20,
+      }, 5000);
+
+      for (const ev of events) {
+        // Decode the update to check if it targets our deposit with our hash
+        try {
+          const u = decodeUpdate(ev.content);
+          if (u.opDisc !== 70) continue; // not TransferLock
+
+          // Field 214: destination_deposit_id (16 bytes = 32 hex, not truncated)
+          // Field 216: completion_script (string, available as .text)
+          // Field 220: transfer_id (32 bytes = 64 hex, truncated to 32+...)
+          const destField = u.opFields.find(f => f.type === 214);
+          const scriptField = u.opFields.find(f => f.type === 216);
+          const tidField = u.opFields.find(f => f.type === 220);
+          if (!destField || !scriptField || !tidField) continue;
+
+          const dest = (destField.hex || '').toLowerCase().replace('...', '');
+          const script = (scriptField.text || scriptField.hex || '').toLowerCase();
+
+          // Check if this targets our deposit and uses our hash
+          if (dest === targetDest && script.includes(targetHash)) {
+            // transfer_id hex is truncated — get full value from the raw TLV
+            // Re-decode to get full transfer_id
+            const raw = Uint8Array.from(atob(ev.content), c => c.charCodeAt(0));
+            const outer = parseTlv(raw);
+            const msgBytes = outer.find(r => r.type === 0)?.value;
+            if (msgBytes) {
+              const inner = parseTlv(msgBytes);
+              const tidRaw = inner.find(r => r.type === 220)?.value;
+              if (tidRaw && tidRaw.length === 32) {
+                return { transfer_id: bytesToHex(tidRaw) };
+              }
+            }
+          }
+        } catch {}
+      }
+    } catch {}
+
+    // Wait before polling again
+    await new Promise(r => setTimeout(r, 2000));
+  }
+  return null;
+}
+
+// ─── Agent advertisements ───────────────────────────────────────────────────
+
+window.refreshAgentAds = async function() {
+  const el = document.getElementById('agent-ads-list');
+  el.textContent = 'Fetching...';
+
+  try {
+    // Fetch agent ads (Kind 39102) and operator ads (Kind 39100) for name lookup
+    const [agentEvents, opEvents] = await Promise.all([
+      fetchEvents({ kinds: [39102] }, 8000),
+      fetchEvents({ kinds: [39100] }, 8000),
+    ]);
+
+    // Build ledger_id → operator name map and populate _discoveredAds
+    const ledgerName = {};
+    if (!window._discoveredAds) window._discoveredAds = {};
+    for (const ev of opEvents) {
+      try {
+        const ad = JSON.parse(ev.content);
+        if (ad.network && ad.network !== state.network) continue;
+        if (ad.ledger_id) window._discoveredAds[ad.ledger_id] = ad;
+        if (ad.ledger_id && ad.operator_name) ledgerName[ad.ledger_id] = ad.operator_name;
+      } catch {}
+    }
+
+    // Parse agent ads, filter by network
+    const agents = [];
+    for (const ev of agentEvents) {
+      try {
+        const ad = JSON.parse(ev.content);
+        if (ad.network && ad.network !== state.network) continue;
+        if (ad.service && ad.ledgers) agents.push(ad);
+      } catch {}
+    }
+
+    // Update cached agents for routed transfer UI
+    cachedAgents = agents;
+    populateRoutedDropdowns();
+
+    if (agents.length === 0) {
+      el.textContent = 'No routing agents found.';
+      return;
+    }
+
+    // Build per-ledger labels: "Operator/abcd..." to disambiguate multiple ledgers per operator
+    function ledgerLabel(lid) {
+      const op = ledgerName[lid];
+      const prefix = lid.slice(0, 4);
+      if (!op) return prefix + '...';
+      return `${op}/${prefix}`;
+    }
+
+    let html = '';
+    for (const agent of agents) {
+      const pk = (agent.agent_pubkey || '').slice(0, 16) + '...';
+      html += `<div style="margin-bottom:10px;">`;
+      html += `<div style="font-weight:600; color:var(--fg); margin-bottom:4px;">Agent ${pk}</div>`;
+      html += `<table style="width:100%; font-size:11px; border-collapse:collapse;">`;
+      html += `<tr style="color:var(--muted);"><th style="text-align:left; padding:2px 6px;">Ledger</th>` +
+              `<th style="text-align:right; padding:2px 6px;">Balance</th>` +
+              `<th style="text-align:right; padding:2px 6px;">Fee In</th>` +
+              `<th style="text-align:right; padding:2px 6px;">Fee Out</th></tr>`;
+
+      for (const l of agent.ledgers) {
+        const name = ledgerLabel(l.ledger_id);
+        const bal = (l.balance_msats / 1000).toLocaleString();
+        const feeIn = `${l.fee_in_fixed_msats}+${l.fee_in_rate_bps}bp`;
+        const feeOut = `${l.fee_out_fixed_msats}+${l.fee_out_rate_bps}bp`;
+        html += `<tr><td style="padding:2px 6px;">${esc(name)}</td>` +
+                `<td style="text-align:right; padding:2px 6px;">${bal} sat</td>` +
+                `<td style="text-align:right; padding:2px 6px;">${feeIn}</td>` +
+                `<td style="text-align:right; padding:2px 6px;">${feeOut}</td></tr>`;
+      }
+      html += `</table>`;
+
+      // Show route cost estimates — only between different operators (skip same-operator pairs)
+      if (agent.ledgers.length >= 2) {
+        const pairs = [];
+        for (let i = 0; i < agent.ledgers.length; i++) {
+          for (let j = 0; j < agent.ledgers.length; j++) {
+            if (i === j) continue;
+            const src = agent.ledgers[i];
+            const dst = agent.ledgers[j];
+            // Skip same-operator routes (same operator name means same custodian)
+            const srcOp = ledgerName[src.ledger_id] || src.ledger_id;
+            const dstOp = ledgerName[dst.ledger_id] || dst.ledger_id;
+            if (srcOp === dstOp) continue;
+            const fixed = src.fee_out_fixed_msats + dst.fee_in_fixed_msats;
+            const bps = src.fee_out_rate_bps + dst.fee_in_rate_bps;
+            const key = `${srcOp}\u2192${dstOp}`;
+            // Deduplicate: show one route per operator pair (fees are same across their ledgers)
+            if (!pairs.some(p => p.key === key)) {
+              pairs.push({ key, fixed, bps });
+            }
+          }
+        }
+        if (pairs.length > 0) {
+          html += `<div style="margin-top:4px; font-size:11px; color:var(--muted);">Routes:</div>`;
+          html += `<div style="font-size:11px; display:flex; flex-wrap:wrap; gap:4px 12px;">`;
+          for (const p of pairs) {
+            html += `<span>${esc(p.key)}: ${p.fixed}+${p.bps}bp</span>`;
+          }
+          html += `</div>`;
+        }
+      }
+      html += `</div>`;
+    }
+
+    el.innerHTML = html;
+  } catch (e) {
+    el.textContent = 'Error fetching agents: ' + e.message;
+  }
+};
+
 window.doMakeInvoice = async function() {
   const alias = document.getElementById('ln-deposit').value;
   const deposit = state.deposits.find(d => d.alias === alias);
@@ -4274,7 +4737,7 @@ function switchToTab(tab) {
   const panel = document.getElementById('tab-' + tab);
   if (panel) panel.classList.add('active');
   if (tab === 'discover') discoverLedgers();
-  if (tab === 'transfer') onTransferFromChange();
+  if (tab === 'transfer') { onTransferFromChange(); refreshAgentAds(); }
   if (tab === 'ledgers') populateLedgerQuickLinks();
 }
 

@@ -46,6 +46,9 @@ stop_all_nodes
 # Stop any eve scale node processes
 pkill -f "deposits-node run.*eve" 2>/dev/null || true
 
+# Stop HTLC agent
+pkill -f "htlc-agent" 2>/dev/null || true
+
 # Stop and remove all containers (including lightning sidecars)
 log_info "Stopping all containers..."
 $DC_LIGHTNING down -v --remove-orphans 2>/dev/null || true
@@ -73,8 +76,8 @@ fi
 docker image prune -f 2>/dev/null || true
 
 if ! $QUICK; then
-    log_info "Building deposits-node and deposits-wallet binaries..."
-    cargo build --release --manifest-path "$REPO_ROOT/Cargo.toml" -p deposits-node --bin deposits-node --bin deposits-wallet 2>&1 | tail -3
+    log_info "Building deposits-node, deposits-wallet, and htlc-agent binaries..."
+    cargo build --release --manifest-path "$REPO_ROOT/Cargo.toml" -p deposits-node --bin deposits-node --bin deposits-wallet --bin htlc-agent 2>&1 | tail -3
 
     log_info "Building ldk-node image..."
     docker build -f "$TOOLS_DIR/Dockerfile.ldk-node" -t ldk-node:latest "$HOME/workspace/"

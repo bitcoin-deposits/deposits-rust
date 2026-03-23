@@ -3195,7 +3195,7 @@ async fn deposit_credit(args: &[String]) -> Result<(), Box<dyn std::error::Error
         eprintln!("Usage: deposits-node deposit credit <reserves_id> <deposit_pubkey> <amount_msats> <invoice_id> [options]");
         eprintln!("\nExample:");
         eprintln!("  deposits-node deposit credit 02abc...partner 02def...deposit 1000000 inv123");
-        eprintln!("\nThis credits the deposit with the specified amount.");
+        eprintln!("\nThis credits the deposit with the specified amount via the running daemon.");
         return Ok(());
     }
 
@@ -3208,42 +3208,41 @@ async fn deposit_credit(args: &[String]) -> Result<(), Box<dyn std::error::Error
         .map_err(|_| format!("Invalid amount_msats: {}", positional[2]))?;
     let invoice_id = positional[3].clone();
 
-    // Generate a payment hash
-    use bitcoin::hashes::{sha256, Hash};
-    let payment_hash = sha256::Hash::hash(invoice_id.as_bytes()).to_byte_array();
-
     // Compute deposit_id from pubkey
     let descriptor = format!("pk({})", deposit_pubkey_hex);
     let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
 
     let config = parse_config(&config_args)?;
-    let mut node = Node::new(config).await?;
 
     // Resolve reserves_id to ledger_id
     let ledger_id = if reserves_id_arg.len() == 64 && reserves_id_arg.chars().all(|c| c.is_ascii_hexdigit()) {
         reserves_id_arg.clone()
     } else {
+        let node = Node::new(config.clone()).await?;
         node.get_ledger_with_id(reserves_id_arg)
             .map(|(lid, _)| lid)
             .ok_or_else(|| format!("Ledger not found for reserves: {}", reserves_id_arg))?
     };
 
-    println!("Crediting deposit...");
+    println!("Crediting deposit via daemon...");
     println!("  Ledger ID: {}", ledger_id);
     println!("  Deposit ID: {}", hex::encode(deposit_id));
     println!("  Amount: {} msats ({} sats)", amount_msats, amount_msats / 1000);
     println!("  Invoice ID: {}", invoice_id);
 
-    let new_balance = node.credit_deposit(
-        &ledger_id,
-        deposit_id,
-        amount_msats,
-        payment_hash,
-        invoice_id,
-    ).await?;
+    let params = serde_json::json!({
+        "deposit_pubkey": deposit_pubkey_hex,
+        "amount_msats": amount_msats,
+        "invoice_id": invoice_id,
+    });
+
+    let result = send_daemon_request(&config, &ledger_id, "deposit_credit", params).await?;
+
+    let new_balance_msats = result.get("new_balance_msats").and_then(|v| v.as_u64()).unwrap_or(0);
+    let new_balance_sats = result.get("new_balance_sats").and_then(|v| v.as_u64()).unwrap_or(0);
 
     println!("\nDeposit credited!");
-    println!("  New balance: {} msats ({} sats)", new_balance, new_balance / 1000);
+    println!("  New balance: {} msats ({} sats)", new_balance_msats, new_balance_sats);
 
     Ok(())
 }

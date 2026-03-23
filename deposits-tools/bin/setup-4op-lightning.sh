@@ -312,6 +312,14 @@ for attempt in $(seq 1 12); do
 done
 
 # ============================================================================
+# Phase 5: HTLC Agent — cross-ledger and Lightning routing
+# ============================================================================
+
+"$SCRIPT_DIR/setup-htlc-agent.sh"
+
+AGENT_DATA_DIR="$DATA_ROOT/htlc-agent"
+
+# ============================================================================
 # Summary
 # ============================================================================
 
@@ -338,9 +346,19 @@ echo ""
 echo "Channel topology: Alice <-> Bob <-> Charlie <-> Diana <-> Alice (ring)"
 echo "Channel size: $CHANNEL_AMOUNT sats each (50/50 balance)"
 echo ""
+
+# HTLC agent status
+if [ -f "$AGENT_DATA_DIR/agent.pid" ] && kill -0 "$(cat "$AGENT_DATA_DIR/agent.pid")" 2>/dev/null; then
+    log_info "HTLC Agent:"
+    echo "  PID:  $(cat "$AGENT_DATA_DIR/agent.pid")"
+    echo "  Log:  $AGENT_DATA_DIR/agent.log"
+    echo "  Deposits: ${#LEDGER_IDS[@]} across ${#LEDGER_IDS[@]} ledgers ($AGENT_DEPOSIT_SATS sats each)"
+    echo ""
+fi
+
 log_info "Next steps:"
 echo "  Test lightning:   ./bin/test-lightning.sh"
-echo "  Payment sim:      ./bin/payment-simulator.py --lightning"
+echo "  Agent logs:       tail -f $DATA_ROOT/htlc-agent/agent.log"
 echo ""
 
-log_success "Done! 4 operators with Lightning sidecars ready."
+log_success "Done! 4 operators with Lightning sidecars + HTLC agent ready."

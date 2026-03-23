@@ -64,6 +64,7 @@ log_info "=== Reinitializing Test Network ==="
 # Stop node processes
 log_info "Stopping node processes..."
 stop_all_nodes
+pkill -f "htlc-agent" 2>/dev/null || true
 
 # Stop infrastructure
 log_info "Stopping infrastructure containers..."

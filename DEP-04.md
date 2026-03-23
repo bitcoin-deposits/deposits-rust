@@ -26,6 +26,7 @@ Wallets connect to both: operator relays for requests, ledger relays for reading
 | 20102 | Response | Ephemeral | Operator-to-wallet response (JSON) |
 | 39100 | Advertisement | Replaceable | Operator terms (JSON, NIP-33) |
 | 39101 | Price Oracle | Replaceable | BTC/USD price (JSON, NIP-33) |
+| 39102 | Courier Advertisement | Replaceable | Courier capacity and fees (JSON, NIP-33, see DEP-13) |
 
 ## Event Tags
 
@@ -39,6 +40,10 @@ Wallets connect to both: operator relays for requests, ledger relays for reading
 | `i` | Kind 9100 | Affected deposit IDs (for per-deposit filtering) |
 | `l` | Kind 20101, 20102 | Ledger ID (for relay-side request routing) |
 | `action` | Kind 20101 | Request action name |
+| `d` | Kind 39102 | Courier pubkey (hex). Enables NIP-33 replacement per courier. |
+| `service` | Kind 39102 | Service type (e.g., `htlc_routing`) |
+| `n` | Kind 39102 | Network name |
+| `p` | Kind 20101 | Courier pubkey (for courier-addressed requests, see DEP-13) |
 | `p` | Kind 9101 | Accused operator pubkey |
 | `d` | Kind 9105 | Deposit ID (hex) |
 | `l` | Kind 9105 | Ledger ID (hex) |
@@ -68,6 +73,7 @@ Wallets send ephemeral Kind 20101 events to operator relays. The content is JSON
 | partner_join | Record quorum join | DEP-05 |
 | collateral_lock | Lock collateral | DEP-05 |
 | collateral_record | Record collateral attestation | DEP-05 |
+| request_route | Request cross-ledger route from courier | DEP-13 |
 
 ### Response Format
 

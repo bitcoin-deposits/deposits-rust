@@ -92,3 +92,7 @@ path = "src/bin/nostr-bench.rs"
 [[bin]]
 name = "transfer-simulator"
 path = "src/bin/transfer-simulator.rs"
+
+[[bin]]
+name = "htlc-agent"
+path = "src/bin/htlc-agent.rs"

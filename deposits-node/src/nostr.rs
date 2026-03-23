@@ -103,6 +103,12 @@ pub const KIND_RECOVERY_AGREE: u16 = 9104;
 /// Content: JSON with fees, limits, and metadata.
 pub const KIND_LEDGER_ADVERTISE: u16 = 39100;
 
+/// Custom Kind for agent service advertisement (HTLC routing, etc.)
+/// Uses NIP-33 parameterized replaceable events (30000-39999).
+/// Tag `d` = agent_pubkey ensures only latest ad per agent is kept.
+/// Content: JSON with per-ledger directional fees and balances.
+pub const KIND_AGENT_ADVERTISE: u16 = 39102;
+
 /// Custom Kind for fraud proof broadcasts (wallet evidence of operator dishonesty)
 /// Uses range 1000-9999 (regular custom events) for relay storage.
 /// Published by wallets with evidence embedded in the causal chain.
@@ -505,6 +511,48 @@ pub struct LedgerAdvertisement {
 }
 
 fn default_version() -> u8 { 1 }
+
+/// Agent service advertisement (Kind 39102)
+/// Published by HTLC routing agents with per-ledger directional fees.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AgentAdvertisement {
+    /// Agent's Nostr pubkey (hex)
+    pub agent_pubkey: String,
+
+    /// Service type (e.g. "htlc_routing")
+    pub service: String,
+
+    /// Network (bitcoin, testnet, signet, regtest)
+    pub network: String,
+
+    /// Per-ledger deposit info with directional fees
+    pub ledgers: Vec<AgentLedgerEntry>,
+
+    /// Nostr event ID
+    #[serde(skip)]
+    pub event_id: String,
+
+    /// Timestamp when published
+    #[serde(skip)]
+    pub timestamp: u64,
+}
+
+/// Per-ledger entry in an agent advertisement
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AgentLedgerEntry {
+    pub ledger_id: String,
+    pub deposit_id: String,
+    #[serde(default)]
+    pub balance_msats: u64,
+    #[serde(default)]
+    pub fee_in_fixed_msats: u64,
+    #[serde(default)]
+    pub fee_in_rate_bps: u64,
+    #[serde(default)]
+    pub fee_out_fixed_msats: u64,
+    #[serde(default)]
+    pub fee_out_rate_bps: u64,
+}
 
 impl LedgerAdvertisement {
     /// Create a new advertisement with required fields
@@ -1706,6 +1754,36 @@ impl NostrTransport {
         // Sort by timestamp descending (newest first)
         ads.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
+        Ok(ads)
+    }
+
+    /// Fetch agent service advertisements (Kind 39102)
+    pub async fn fetch_agent_advertisements(
+        &self,
+        network: &str,
+    ) -> Result<Vec<AgentAdvertisement>, Error> {
+        let filter = Filter::new()
+            .kind(Kind::Custom(KIND_AGENT_ADVERTISE));
+
+        let events = self.client
+            .fetch_events(vec![filter], Some(std::time::Duration::from_secs(10)))
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to fetch agent advertisements: {}", e)))?;
+
+        let mut ads = Vec::new();
+        for event in events.iter() {
+            if let Ok(mut ad) = serde_json::from_str::<AgentAdvertisement>(&event.content) {
+                // Filter by network client-side
+                if ad.network != network {
+                    continue;
+                }
+                ad.event_id = event.id.to_hex();
+                ad.timestamp = event.created_at.as_u64();
+                ads.push(ad);
+            }
+        }
+
+        ads.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         Ok(ads)
     }
 

@@ -2100,7 +2100,7 @@ impl Node {
 
         // Silently drop operator-only actions if we're not the operator
         // (these are broadcast but only the operator should respond)
-        let operator_only_actions = ["deposit_open", "make_offer", "withdraw", "collateral_lock", "offer_status", "balance_query", "make_invoice", "pay_invoice", "transfer_lock", "transfer_complete", "bump", "complete_offer", "partner_add", "partner_join", "collateral_record", "reserves_rotate", "resync"];
+        let operator_only_actions = ["deposit_open", "make_offer", "withdraw", "collateral_lock", "offer_status", "balance_query", "make_invoice", "pay_invoice", "transfer_lock", "transfer_complete", "bump", "complete_offer", "deposit_credit", "partner_add", "partner_join", "collateral_record", "reserves_rotate", "resync"];
         if operator_only_actions.contains(&request.action.as_str()) && !self.is_operator_of_ledger(&request.ledger_id) {
             return; // Silent drop - the actual operator will respond
         }
@@ -2262,6 +2262,7 @@ impl Node {
                 }
             }
             "complete_offer" => self.process_complete_offer_request(&request).await,
+            "deposit_credit" => self.process_deposit_credit_request(&request).await,
             "partner_add" => self.process_partner_add_request(&request).await,
             "partner_join" => self.process_partner_join_request(&request).await,
             "collateral_record" => self.process_collateral_record_request(&request).await,
@@ -7713,6 +7714,53 @@ impl Node {
             }
             Err(e) => {
                 tracing::error!("complete_offer failed: {}", e);
+                (false, None, Some(e.to_string()))
+            }
+        }
+    }
+
+    async fn process_deposit_credit_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+        tracing::info!("Processing deposit_credit request for ledger {}...",
+            &request.ledger_id[..16.min(request.ledger_id.len())]);
+
+        let deposit_pubkey_hex = match request.params.get("deposit_pubkey").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => return (false, None, Some("Missing deposit_pubkey parameter".to_string())),
+        };
+        let amount_msats = match request.params.get("amount_msats").and_then(|v| v.as_u64()) {
+            Some(v) => v,
+            None => return (false, None, Some("Missing amount_msats parameter".to_string())),
+        };
+        let invoice_id = match request.params.get("invoice_id").and_then(|v| v.as_str()) {
+            Some(s) => s.to_string(),
+            None => return (false, None, Some("Missing invoice_id parameter".to_string())),
+        };
+
+        // Compute deposit_id from pubkey
+        let descriptor = format!("pk({})", deposit_pubkey_hex);
+        let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
+
+        // Generate payment hash from invoice_id
+        use bitcoin::hashes::{sha256, Hash};
+        let payment_hash = sha256::Hash::hash(invoice_id.as_bytes()).to_byte_array();
+
+        match self.credit_deposit(
+            &request.ledger_id,
+            deposit_id,
+            amount_msats,
+            payment_hash,
+            invoice_id,
+        ).await {
+            Ok(new_balance) => {
+                let result = serde_json::json!({
+                    "status": "SUCCESS",
+                    "new_balance_msats": new_balance,
+                    "new_balance_sats": new_balance / 1000,
+                });
+                (true, Some(result.to_string()), None)
+            }
+            Err(e) => {
+                tracing::error!("deposit_credit failed: {}", e);
                 (false, None, Some(e.to_string()))
             }
         }

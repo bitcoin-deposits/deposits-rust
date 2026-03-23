@@ -93,3 +93,4 @@ The following timing parameters are recorded in `QuorumAddMember` so that all pa
 - [DEP-09](DEP-09.md): Transfers (timeout mechanics)
 - [DEP-10](DEP-10.md): Payment channels (offer deadlines, invoice credit)
 - [DEP-12](DEP-12.md): Certified delivery (escalation protocol, DeliveryEmbed, censorship proof construction)
+- [DEP-13](DEP-13.md): Couriers (timeout margin safety for cross-ledger HTLC routing)

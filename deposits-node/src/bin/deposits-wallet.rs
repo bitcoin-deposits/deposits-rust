@@ -350,6 +350,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn discover(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let config = parse_config(args)?;
 
+    // Check for --json flag
+    let json_output = args.iter().any(|a| a == "--json");
+
     if config.relays.is_empty() {
         return Err("No relay specified. Use --relay <url>".into());
     }
@@ -362,8 +365,10 @@ async fn discover(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         _ => "unknown",
     };
 
-    println!("Discovering ledgers on {} network...", network_str);
-    println!();
+    if !json_output {
+        println!("Discovering ledgers on {} network...", network_str);
+        println!();
+    }
 
     let secret_key = derive_secret_key(&config.seed, config.network)?;
     let mut transport = NostrTransportBuilder::new(secret_key)
@@ -372,6 +377,33 @@ async fn discover(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     let ads = transport.fetch_ledger_advertisements(network_str).await?;
+
+    if json_output {
+        // Machine-readable: one JSON object per line
+        for ad in &ads {
+            println!("{}", serde_json::json!({
+                "type": "ledger",
+                "ledger_id": ad.ledger_id,
+                "operator_pubkey": ad.operator_pubkey,
+                "operator_name": ad.operator_name,
+                "relay_url": ad.relay_url,
+                "reserves_msats": ad.reserves_amount_msats,
+                "obligations_msats": ad.total_obligations_msats,
+                "headroom_msats": ad.available_headroom_msats,
+            }));
+        }
+        // Also include agent advertisements
+        let agent_ads = transport.fetch_agent_advertisements(network_str).await.unwrap_or_default();
+        for ad in &agent_ads {
+            println!("{}", serde_json::json!({
+                "type": "agent",
+                "agent_pubkey": ad.agent_pubkey,
+                "service": ad.service,
+                "ledgers": ad.ledgers,
+            }));
+        }
+        return Ok(());
+    }
 
     if ads.is_empty() {
         println!("No ledgers found.");
@@ -441,6 +473,63 @@ async fn discover(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     println!("To open a deposit, use:");
     println!("  deposits-wallet open <ledger_id> <amount_sats> --alias <name>");
+
+    // ── Agent advertisements (Kind 39101) ──
+    let agent_ads = transport.fetch_agent_advertisements(network_str).await.unwrap_or_default();
+    if !agent_ads.is_empty() {
+        // Build ledger_id -> operator name map for display
+        let ledger_to_operator: std::collections::HashMap<&str, &str> = ads.iter()
+            .filter_map(|a| a.operator_name.as_deref().map(|name| (a.ledger_id.as_str(), name)))
+            .collect();
+
+        println!();
+        println!("─── Routing Agents ───");
+        println!();
+
+        // Helper: "Operator/abcd" label to disambiguate multiple ledgers per operator
+        let ledger_label = |lid: &str| -> String {
+            let op = ledger_to_operator.get(lid).copied().unwrap_or("?");
+            let prefix = &lid[..4.min(lid.len())];
+            format!("{}/{}", op, prefix)
+        };
+
+        for ad in &agent_ads {
+            println!("Agent: {}...", &ad.agent_pubkey[..16.min(ad.agent_pubkey.len())]);
+            println!("  Service: {}", ad.service);
+            println!("  Ledgers:");
+            for entry in &ad.ledgers {
+                let label = ledger_label(&entry.ledger_id);
+                let balance_sats = entry.balance_msats / 1000;
+                println!("    {}: {} sats",
+                    label, balance_sats);
+                println!("      in:  {} msats + {} bps", entry.fee_in_fixed_msats, entry.fee_in_rate_bps);
+                println!("      out: {} msats + {} bps", entry.fee_out_fixed_msats, entry.fee_out_rate_bps);
+            }
+
+            // Show example route cost (first cross-operator pair)
+            if ad.ledgers.len() >= 2 {
+                for i in 0..ad.ledgers.len() {
+                    let mut shown = false;
+                    for j in 0..ad.ledgers.len() {
+                        if i == j { continue; }
+                        let a = &ad.ledgers[i];
+                        let b = &ad.ledgers[j];
+                        let op_a = ledger_to_operator.get(a.ledger_id.as_str()).copied().unwrap_or("");
+                        let op_b = ledger_to_operator.get(b.ledger_id.as_str()).copied().unwrap_or("");
+                        if op_a == op_b { continue; } // skip same-operator
+                        println!("  Route {} → {}: {} + {} bps",
+                            ledger_label(&a.ledger_id), ledger_label(&b.ledger_id),
+                            a.fee_out_fixed_msats + b.fee_in_fixed_msats,
+                            a.fee_out_rate_bps + b.fee_in_rate_bps);
+                        shown = true;
+                        break; // one example is enough
+                    }
+                    if shown { break; }
+                }
+            }
+            println!();
+        }
+    }
 
     Ok(())
 }
@@ -1342,6 +1431,7 @@ async fn sync_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Error>
                                             println!("  {} balance: {} sats", alias, available_sats);
                                         }
                                         deposit["amount_sats"] = serde_json::json!(available_sats);
+                                        deposit["balance_msats"] = serde_json::json!(balance_msats as i64);
                                         deposit["locked_sats"] = serde_json::json!(locked_sats);
                                         updated = true;
                                     }

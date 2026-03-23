@@ -90,3 +90,4 @@ The `timeout_height` must not be more than `max_transfer_timeout_blocks` beyond 
 - [DEP-02](DEP-02.md): Wire format (TransferLock, TransferComplete, TransferFail fields)
 - [DEP-07](DEP-07.md): Fee schedules (TransferFeeSchedule)
 - [DEP-08](DEP-08.md): Deposits (descriptor witnesses, receive_requires_sig)
+- [DEP-13](DEP-13.md): Couriers (cross-ledger transfers via HTLC intermediaries)
