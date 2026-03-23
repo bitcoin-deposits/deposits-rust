@@ -87,7 +87,7 @@ if [ -f "$AGENT_DATA_DIR/agent.pid" ]; then
         log_info "Stopped old agent (pid $old_pid)"
     fi
 fi
-pkill -f "htlc-agent" 2>/dev/null || true
+pkill -f "htlc-agent --" 2>/dev/null || true
 
 # ── If --keep-data and deposits exist, skip straight to starting the agent ──
 
@@ -195,6 +195,7 @@ print(sum(1 for d in data if d.get('ledger_id','').startswith(lid[:16])))
         open_output=$(RUST_LOG=error "$DEPOSITS_WALLET" open \
             "$lid" "$AGENT_DEPOSIT_SATS" \
             --alias "agent-${lid:0:8}" --skip-cosign-verify \
+            --fee-bps 50 --fee-fixed 100 \
             --seed "$AGENT_SEED" --network regtest \
             --relay "$relay" \
             --data-dir "$AGENT_DATA_DIR" 2>&1 || true)
@@ -319,8 +320,22 @@ fi
 # ── Start the agent ──────────────────────────────────────────────────────────
 
 log_info "Starting HTLC agent..."
+
+# Build relay args from all discovered operator relays (deduped)
+AGENT_RELAY_ARGS=""
+seen_agent_relays=""
+for i in "${!LEDGER_RELAYS[@]}"; do
+    relay="${LEDGER_RELAYS[$i]}"
+    if ! echo "$seen_agent_relays" | grep -q "$relay"; then
+        AGENT_RELAY_ARGS="$AGENT_RELAY_ARGS --relay $relay"
+        seen_agent_relays="$seen_agent_relays $relay"
+    fi
+done
+# Fallback to RELAY_ALICE if no relays discovered (e.g. --keep-data path)
+[ -z "$AGENT_RELAY_ARGS" ] && AGENT_RELAY_ARGS="--relay $RELAY_ALICE --relay $RELAY_BOB --relay $RELAY_CHARLIE --relay $RELAY_DIANA"
+
 RUST_LOG=info "$HTLC_AGENT" \
-    --relay "$RELAY_ALICE" \
+    $AGENT_RELAY_ARGS \
     --ledgers-relay "$RELAY_LEDGERS" \
     --network regtest \
     --node "agent:$AGENT_DATA_DIR" \

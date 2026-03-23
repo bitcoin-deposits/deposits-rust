@@ -11,6 +11,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/_common.sh"
+WORKSPACE_DIR="$(cd "$REPO_ROOT/.." && pwd)"
 
 DC_LIGHTNING="docker compose -f $TOOLS_DIR/docker-compose.yml --profile lightning"
 
@@ -80,7 +81,7 @@ if ! $QUICK; then
     cargo build --release --manifest-path "$REPO_ROOT/Cargo.toml" -p deposits-node --bin deposits-node --bin deposits-wallet --bin htlc-agent 2>&1 | tail -3
 
     log_info "Building ldk-node image..."
-    docker build -f "$TOOLS_DIR/Dockerfile.ldk-node" -t ldk-node:latest "$HOME/workspace/"
+    docker build -f "$TOOLS_DIR/Dockerfile.ldk-node" -t ldk-node:latest "$WORKSPACE_DIR"
 fi
 
 # Create relay bind-mount directories

@@ -74,11 +74,13 @@ ldk_listen_port() {
     esac
 }
 
-# ldk-cli helper (runs inside container)
+# ldk-cli helper (runs inside container, reads auto-generated API key)
 ldk_cli() {
     local node=$1
     shift
-    docker exec "${node}-ln" ldk-server-cli -b "localhost:3000" -a test_api_key -t /ldk/tls.crt "$@" 2>/dev/null
+    local network=$(docker exec "${node}-ln" printenv NETWORK 2>/dev/null || echo "regtest")
+    local api_key=$(docker exec "${node}-ln" sh -c "cat /ldk/${network}/api_key | od -A n -t x1 | tr -d ' \n'" 2>/dev/null)
+    docker exec "${node}-ln" ldk-server-cli -b "localhost:3000" -a "$api_key" -t /ldk/tls.crt "$@" 2>/dev/null
 }
 
 # ============================================================================
@@ -194,7 +196,7 @@ for node in $OPERATORS; do
     local_address=""
     for i in 1 2 3 4 5; do
         result=$(ldk_cli "$node" onchain-receive 2>/dev/null || echo "")
-        local_address=$(echo "$result" | jq -r '.address // empty' 2>/dev/null || echo "")
+        local_address=$(echo "$result" | python3 -c "import json,sys; print(json.load(sys.stdin).get('address',''))" 2>/dev/null || echo "")
         if [ -n "$local_address" ]; then
             break
         fi
@@ -216,7 +218,7 @@ mine_blocks 6
 log_info "Waiting for Lightning wallet sync..."
 for node in $OPERATORS; do
     for i in $(seq 1 15); do
-        balance=$(ldk_cli "$node" get-balances 2>/dev/null | jq -r '.spendable_onchain_balance_sats // 0' 2>/dev/null || echo "0")
+        balance=$(ldk_cli "$node" get-balances 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('spendable_onchain_balance_sats',0))" 2>/dev/null || echo "0")
         balance=${balance:-0}
         if [ "$balance" -ge 100000000 ] 2>/dev/null; then
             log_success "  ${node}-ln balance: $balance sats"
@@ -240,31 +242,36 @@ open_channel() {
     local from=$1
     local to=$2
 
-    local to_pubkey=$(ldk_cli "$to" get-node-info 2>/dev/null | jq -r '.node_id // empty' || echo "")
+    local to_pubkey=$(ldk_cli "$to" get-node-info 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['node_id'])" 2>/dev/null || echo "")
     if [ -z "$to_pubkey" ]; then
         log_warn "Could not get $to's pubkey, skipping channel"
         return 1
     fi
 
     # Check if channel already exists
-    local existing=$(ldk_cli "$from" list-channels 2>/dev/null | jq -r ".channels[] | select(.counterparty_node_id == \"$to_pubkey\") | .channel_id" 2>/dev/null || echo "")
+    local existing=$(ldk_cli "$from" list-channels 2>/dev/null | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+for c in d.get('channels',[]):
+    if c.get('counterparty_node_id') == '$to_pubkey':
+        print(c.get('channel_id','found'))
+        break
+" 2>/dev/null || echo "")
     if [ -n "$existing" ]; then
         log_info "  Channel $from -> $to already exists"
         return 0
     fi
 
     local to_port=$(ldk_listen_port "$to")
-    local push_msat=$((CHANNEL_AMOUNT * 500))
+    local push_sat=$((CHANNEL_AMOUNT / 2))
 
     log_info "  Opening channel: $from -> $to..."
     local result=$(ldk_cli "$from" open-channel \
-        --node-pubkey "$to_pubkey" \
-        --address "${to}-ln:${to_port}" \
-        --channel-amount-sats "$CHANNEL_AMOUNT" \
-        --push-to-counterparty-msat "$push_msat" \
+        "$to_pubkey" "${to}-ln:${to_port}" "${CHANNEL_AMOUNT}sat" \
+        --push-to-counterparty "${push_sat}sat" \
         --announce-channel 2>&1) || true
 
-    local user_channel_id=$(echo "$result" | jq -r '.user_channel_id // empty' 2>/dev/null || echo "")
+    local user_channel_id=$(echo "$result" | python3 -c "import json,sys; print(json.load(sys.stdin).get('user_channel_id',''))" 2>/dev/null || echo "")
     if [ -n "$user_channel_id" ]; then
         log_success "  Channel $from -> $to pending: ${user_channel_id:0:16}..."
         return 0
@@ -283,15 +290,16 @@ open_channel "diana" "alice"
 # Also open reverse channels to force peer reconnection (acceptors need this)
 log_info ""
 log_info "Opening reverse channels (ensures peer connectivity)..."
-ALICE_KEY=$(ldk_cli alice get-node-info | jq -r .node_id)
-BOB_KEY=$(ldk_cli bob get-node-info | jq -r .node_id)
-CHARLIE_KEY=$(ldk_cli charlie get-node-info | jq -r .node_id)
-DIANA_KEY=$(ldk_cli diana get-node-info | jq -r .node_id)
+get_node_pubkey() { ldk_cli "$1" get-node-info 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['node_id'])" 2>/dev/null; }
+ALICE_KEY=$(get_node_pubkey alice)
+BOB_KEY=$(get_node_pubkey bob)
+CHARLIE_KEY=$(get_node_pubkey charlie)
+DIANA_KEY=$(get_node_pubkey diana)
 
-ldk_cli bob open-channel --node-pubkey "$ALICE_KEY" --address alice-ln:9735 --channel-amount-sats 100000 --announce-channel >/dev/null 2>&1 || true
-ldk_cli charlie open-channel --node-pubkey "$BOB_KEY" --address bob-ln:9736 --channel-amount-sats 100000 --announce-channel >/dev/null 2>&1 || true
-ldk_cli diana open-channel --node-pubkey "$CHARLIE_KEY" --address charlie-ln:9737 --channel-amount-sats 100000 --announce-channel >/dev/null 2>&1 || true
-ldk_cli alice open-channel --node-pubkey "$DIANA_KEY" --address diana-ln:9738 --channel-amount-sats 100000 --announce-channel >/dev/null 2>&1 || true
+ldk_cli bob open-channel "$ALICE_KEY" alice-ln:9735 100000sat --announce-channel >/dev/null 2>&1 || true
+ldk_cli charlie open-channel "$BOB_KEY" bob-ln:9736 100000sat --announce-channel >/dev/null 2>&1 || true
+ldk_cli diana open-channel "$CHARLIE_KEY" charlie-ln:9737 100000sat --announce-channel >/dev/null 2>&1 || true
+ldk_cli alice open-channel "$DIANA_KEY" diana-ln:9738 100000sat --announce-channel >/dev/null 2>&1 || true
 
 # Confirm all channels
 mine_blocks 6
@@ -301,7 +309,7 @@ log_info "Waiting for channels to confirm..."
 for attempt in $(seq 1 12); do
     all_ready=true
     for node in $OPERATORS; do
-        usable=$(ldk_cli "$node" list-channels 2>/dev/null | jq '[.channels[] | select(.is_usable==true)] | length' 2>/dev/null || echo "0")
+        usable=$(ldk_cli "$node" list-channels 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(sum(1 for c in d.get('channels',[]) if c.get('is_usable')))" 2>/dev/null || echo "0")
         usable=${usable:-0}
         if [ "$usable" -lt 2 ] 2>/dev/null; then
             all_ready=false
@@ -331,8 +339,8 @@ echo ""
 
 # Show channel status
 for node in $OPERATORS; do
-    channels=$(ldk_cli "$node" list-channels 2>/dev/null | jq -r '.channels | length' 2>/dev/null || echo "0")
-    ready=$(ldk_cli "$node" list-channels 2>/dev/null | jq -r '[.channels[] | select(.is_channel_ready == true)] | length' 2>/dev/null || echo "0")
+    channels=$(ldk_cli "$node" list-channels 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d.get('channels',[])))" 2>/dev/null || echo "0")
+    ready=$(ldk_cli "$node" list-channels 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(sum(1 for c in d.get('channels',[]) if c.get('is_channel_ready')))" 2>/dev/null || echo "0")
     echo "  ${node}-ln: $ready/$channels channels ready"
 done
 

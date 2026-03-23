@@ -11,8 +11,6 @@ FROM rust:1.85-slim AS builder
 RUN apt-get update && apt-get install -y pkg-config libssl-dev protobuf-compiler && rm -rf /var/lib/apt/lists/*
 
 COPY ldk-server /build/ldk-server
-COPY rust-lightning /build/rust-lightning
-COPY ldk-node /build/ldk-node
 
 WORKDIR /build/ldk-server
 RUN cargo build --release --bin ldk-server --bin ldk-server-cli && \

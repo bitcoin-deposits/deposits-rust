@@ -5,7 +5,7 @@
 set -e
 
 DATA_DIR="${LDK_DATA_DIR:-/ldk}"
-LISTEN_ADDR="${TLS_HOSTNAME:-0.0.0.0}:${LISTEN_PORT:-9735}"
+LISTEN_ADDR="0.0.0.0:${LISTEN_PORT:-9735}"
 REST_ADDR="0.0.0.0:${API_PORT:-3000}"
 NETWORK="${NETWORK:-regtest}"
 API_KEY="${LDK_API_KEY:-test_api_key}"
@@ -22,10 +22,10 @@ fi
 cat > "$DATA_DIR/config.toml" <<EOF
 [node]
 network = "${NETWORK}"
-listening_address = "${LISTEN_ADDR}"
+listening_addresses = ["${LISTEN_ADDR}"]
+announcement_addresses = ["${LISTEN_ADDR}"]
 rest_service_address = "${REST_ADDR}"
 alias = "${ALIAS}"
-api_key = "${API_KEY}"
 
 [storage.disk]
 dir_path = "${DATA_DIR}"
