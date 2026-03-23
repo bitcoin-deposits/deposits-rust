@@ -1077,21 +1077,17 @@ impl FeeScheduleArgs {
 
 /// Helper to auto-advertise a ledger for wallet discovery
 /// Accepts either reserves_key (bcrt1q...) or ledger_id (64-char hex)
+/// Uses the node's existing transport to avoid ephemeral connection race conditions.
 async fn auto_advertise_ledger(
     node: &Node,
     identifier: &str,
-    seed: &[u8; 32],
+    _seed: &[u8; 32],
     network: bitcoin::Network,
-    relays: &[String],
+    _relays: &[String],
     operator_name: Option<&str>,
     fee_schedule: &FeeScheduleArgs,
 ) {
-    use deposits_node::nostr::{NostrTransportBuilder, LedgerAdvertisement};
-
-    let relay_url = match relays.first() {
-        Some(r) => r,
-        None => return,
-    };
+    use deposits_node::nostr::LedgerAdvertisement;
 
     // Resolve identifier to ledger (supports both ledger_id and reserves_key)
     let ledger = match node.get_ledger_with_id(identifier) {
@@ -1145,21 +1141,9 @@ async fn auto_advertise_ledger(
     ad.total_obligations_msats = total_obligations_msats;
     ad.available_headroom_msats = ad.reserves_amount_msats.saturating_sub(total_obligations_msats);
 
-    let secret_key = match derive_operator_secret(seed, network) {
-        Ok(sk) => sk,
-        Err(_) => return,
-    };
-
-    let transport = match NostrTransportBuilder::new(secret_key)
-        .relay(relay_url)
-        .build()
-        .await
-    {
-        Ok(t) => t,
-        Err(_) => return,
-    };
-
-    match transport.publish_ledger_advertisement(&ad).await {
+    // Use the node's existing transport — avoids ephemeral connection race where
+    // a new transport disconnects before the relay processes the write.
+    match node.nostr.publish_ledger_advertisement(&ad).await {
         Ok(_) => println!("  Advertised ledger for wallet discovery"),
         Err(e) => eprintln!("  Warning: Failed to advertise ledger: {}", e),
     }
@@ -1937,7 +1921,7 @@ async fn ledger_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>
 
 /// Publish a ledger advertisement to Nostr
 async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    use deposits_node::nostr::{NostrTransportBuilder, LedgerAdvertisement};
+    use deposits_node::nostr::LedgerAdvertisement;
 
     // Parse arguments: <reserves_id> [options]
     let mut reserves_id: Option<String> = None;
@@ -2004,9 +1988,6 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
     )?;
 
     let config = parse_config(&config_args)?;
-    let relay_url = config.relays.first()
-        .ok_or("No relay configured. Use --relay <url>")?
-        .clone();
 
     // Load node to get ledger info
     let node = Node::new(config.clone()).await?;
@@ -2078,13 +2059,9 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
         fee_str, ad.fee_period_blocks, ad.deposit_fee_bps, ad.withdrawal_fee_bps);
     println!();
 
-    let secret_key = derive_operator_secret(&config.seed, config.network)?;
-    let transport = NostrTransportBuilder::new(secret_key)
-        .relay(&relay_url)
-        .build()
-        .await?;
-
-    let event_id = transport.publish_ledger_advertisement(&ad).await?;
+    // Use the node's existing transport to avoid ephemeral connection race
+    // where a new transport disconnects before the relay processes the write.
+    let event_id = node.nostr.publish_ledger_advertisement(&ad).await?;
     println!("Advertisement published!");
     println!("  Event ID: {}", event_id);
 

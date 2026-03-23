@@ -1687,9 +1687,13 @@ impl NostrTransport {
 
         let event_id = event.id.to_hex();
 
-        self.send_event_with_timeout(event.clone())
-            .await
+        // Send the event and give the relay time to process it before the
+        // connection drops.  nostr-sdk's send_event is fire-and-forget at the
+        // WebSocket level, so a short-lived CLI process may disconnect before
+        // strfry flushes the write.  The brief sleep is a pragmatic workaround.
+        self.send_event_with_timeout(event.clone()).await
             .map_err(|e| Error::Nostr(format!("Failed to send advertisement: {}", e)))?;
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
 
         // Enqueue mirror to durable relay (advertisements are NIP-33 replaceable, belong there)
         if let Some(ref tx) = self.mirror_tx {

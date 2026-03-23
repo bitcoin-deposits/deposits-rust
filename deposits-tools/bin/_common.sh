@@ -449,6 +449,7 @@ run_node_cmd() {
         --relay "$RELAY_BOB" \
         --relay "$RELAY_CHARLIE" \
         --relay "$RELAY_DIANA" \
+        --slow-relay "$RELAY_LEDGERS" \
         --data-dir "$data_dir" 2>&1
 }
 
