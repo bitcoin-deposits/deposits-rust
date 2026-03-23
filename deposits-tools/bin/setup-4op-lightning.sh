@@ -138,8 +138,18 @@ for node in $OPERATORS; do
     done
 done
 
-# Restart deposit nodes with LDK environment variables
-log_info "Restarting operator nodes with Lightning sidecar config..."
+# Restart deposit nodes with shared LDK node (alice-ln) via self-pay wrapper
+log_info "Restarting operator nodes with shared Lightning node (alice-ln)..."
+
+# Get alice-ln API key for the wrapper
+ALICE_NETWORK=$(docker exec alice-ln printenv NETWORK 2>/dev/null || echo "regtest")
+ALICE_API_KEY=$(docker exec alice-ln sh -c "cat /ldk/${ALICE_NETWORK}/api_key | od -A n -t x1 | tr -d ' \n'" 2>/dev/null)
+
+# Self-pay wrapper: all operators share alice-ln, wrapper handles internal payments
+LDK_WRAPPER="$TOOLS_DIR/bin/ldk-cli-wrapper.sh"
+SELF_PAY_DIR="$DATA_ROOT/self-pay"
+mkdir -p "$SELF_PAY_DIR"
+
 for node in $OPERATORS; do
     stop_node "$node"
 done
@@ -148,9 +158,6 @@ for node in $OPERATORS; do
     data_dir=$(get_node_data_dir "$node")
     seed=$(get_node_seed "$node")
     metrics_port=$(get_node_metrics_port "$node")
-    # LDK API ports exposed to host: alice=3111, bob=3112, charlie=3113, diana=3114
-    node_idx=$(echo "$OPERATORS" | tr ' ' '\n' | grep -n "^${node}$" | cut -d: -f1)
-    ldk_api_port=$((3110 + node_idx))
 
     mkdir -p "$data_dir"
 
@@ -161,10 +168,14 @@ for node in $OPERATORS; do
         [ "$r" != "$own_relay" ] && relay_args="$relay_args --relay $r"
     done
 
-    LDK_CLI="$LDK_SERVER_CLI" \
+    # All operators share alice-ln via the self-pay wrapper
+    LDK_CLI="$LDK_WRAPPER" \
+    LDK_REAL_CLI="$LDK_SERVER_CLI" \
     LDK_HOST="localhost" \
-    LDK_PORT="$ldk_api_port" \
-    LDK_TLS_CERT="$TOOLS_DIR/certs/${node}.crt" \
+    LDK_PORT="3111" \
+    LDK_API_KEY="$ALICE_API_KEY" \
+    LDK_TLS_CERT="$TOOLS_DIR/certs/alice.crt" \
+    LDK_SELF_PAY_DIR="$SELF_PAY_DIR" \
     RUST_LOG=info,deposits_node=debug \
     DEPOSITS_ENABLE_METRICS_EMITTER=1 \
     "$DEPOSITS_NODE" run \
@@ -181,7 +192,7 @@ for node in $OPERATORS; do
 
     pid=$!
     echo "$pid" > "$data_dir/node.pid"
-    log_success "Restarted $node with LDK sidecar (pid $pid)"
+    log_success "Restarted $node with shared LDK (pid $pid)"
 done
 sleep 5
 
@@ -345,11 +356,14 @@ for node in $OPERATORS; do
 done
 
 echo ""
-log_info "LDK Lightning nodes:"
-echo "  alice-ln:   API at https://localhost:3111"
-echo "  bob-ln:     API at https://localhost:3112"
-echo "  charlie-ln: API at https://localhost:3113"
-echo "  diana-ln:   API at https://localhost:3114"
+log_info "LDK Lightning node (shared):"
+echo "  alice-ln:   API at https://localhost:3111 (all operators share this node)"
+echo "  bob-ln:     API at https://localhost:3112 (channels only)"
+echo "  charlie-ln: API at https://localhost:3113 (channels only)"
+echo "  diana-ln:   API at https://localhost:3114 (channels only)"
+echo ""
+echo "Self-pay wrapper: $TOOLS_DIR/bin/ldk-cli-wrapper.sh"
+echo "Self-pay state:   $DATA_ROOT/self-pay/"
 echo ""
 echo "Channel topology: Alice <-> Bob <-> Charlie <-> Diana <-> Alice (ring)"
 echo "Channel size: $CHANNEL_AMOUNT sats each (50/50 balance)"

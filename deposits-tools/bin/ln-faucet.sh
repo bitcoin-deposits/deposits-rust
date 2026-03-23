@@ -1,23 +1,28 @@
 #!/bin/bash
-# Lightning faucet — pays a BOLT11 invoice using an LDK node with capacity
+# Lightning faucet — pays a BOLT11 invoice via the shared LDK node
 #
-# Automatically picks a node that isn't the invoice recipient and has
-# outbound capacity. Falls back to trying each node in order.
+# Uses the self-pay wrapper, so invoices created on the same node settle
+# internally without needing to route through Lightning.
 #
 # Usage:
 #   ./bin/ln-faucet.sh <bolt11_invoice>
-#   ./bin/ln-faucet.sh --from bob <bolt11_invoice>
+
+set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/_common.sh"
 
-NODE=""
 INVOICE=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --from)
-            NODE="$2"
-            shift 2
+            shift 2  # ignored — all operators share one node now
+            ;;
+        --help|-h)
+            echo "Usage: $0 <bolt11_invoice>"
+            echo "  Pays the invoice via the shared LDK node + self-pay wrapper."
+            exit 0
             ;;
         *)
             INVOICE="$1"
@@ -27,40 +32,29 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [ -z "$INVOICE" ]; then
-    echo "Usage: $0 [--from <node>] <bolt11_invoice>"
-    echo "  Pays the invoice from an LDK sidecar with outbound capacity."
-    echo "  Auto-selects the sender unless --from is specified."
+    echo "Usage: $0 <bolt11_invoice>"
     exit 1
 fi
 
-ldk_cli() {
-    docker exec "${1}-ln" ldk-server-cli -b localhost:3000 -a test_api_key -t /ldk/tls.crt "${@:2}" 2>/dev/null
-}
+# Set up wrapper env
+LDK_REAL_CLI="${LDK_SERVER_CLI:-$HOME/ldk-server/target/release/ldk-server-cli}"
+NETWORK=$(docker exec alice-ln printenv NETWORK 2>/dev/null || echo "regtest")
+API_KEY=$(docker exec alice-ln sh -c "cat /ldk/${NETWORK}/api_key | od -A n -t x1 | tr -d ' \n'" 2>/dev/null)
 
-if [ -n "$NODE" ]; then
-    # Explicit sender
-    echo "Paying invoice from ${NODE}-ln..."
-    result=$(ldk_cli "$NODE" bolt11-send --invoice "$INVOICE" 2>&1)
-    echo "$result"
+export LDK_REAL_CLI
+export LDK_HOST="localhost"
+export LDK_PORT="3111"
+export LDK_API_KEY="$API_KEY"
+export LDK_TLS_CERT="$TOOLS_DIR/certs/alice.crt"
+export LDK_SELF_PAY_DIR="${DATA_ROOT}/self-pay"
+
+echo "Paying invoice..."
+result=$("$SCRIPT_DIR/ldk-cli-wrapper.sh" bolt11-send --invoice "$INVOICE" 2>&1)
+
+payment_id=$(echo "$result" | python3 -c "import json,sys; print(json.load(sys.stdin).get('payment_id',''))" 2>/dev/null || echo "")
+if [ -n "$payment_id" ]; then
+    echo "Paid! ID: ${payment_id:0:32}..."
 else
-    # Try each node until one succeeds
-    for try_node in alice bob charlie diana; do
-        # Check if this node has outbound capacity
-        out=$(ldk_cli "$try_node" list-channels | jq '[.channels[] | select(.is_usable==true) | .outbound_capacity_msat] | add // 0' 2>/dev/null)
-        if [ "$out" -le 0 ] 2>/dev/null; then
-            continue
-        fi
-
-        echo "Trying ${try_node}-ln (${out}msat outbound)..."
-        result=$(ldk_cli "$try_node" bolt11-send --invoice "$INVOICE" 2>&1)
-
-        payment_id=$(echo "$result" | jq -r '.payment_id // empty' 2>/dev/null)
-        if [ -n "$payment_id" ]; then
-            echo "Payment sent from ${try_node}-ln! ID: ${payment_id:0:32}..."
-            exit 0
-        fi
-        echo "  ${try_node}-ln failed: $(echo "$result" | head -1)"
-    done
-    echo "All nodes failed to pay. Channels may not have enough capacity or routing."
+    echo "$result"
     exit 1
 fi

@@ -572,24 +572,25 @@ start_node() {
     done
 
     # LDK Lightning sidecar: if certs exist, wire up the sidecar connection
-    local ldk_api_port
-    case "$node" in
-        "alice")   ldk_api_port=3111 ;;
-        "bob")     ldk_api_port=3112 ;;
-        "charlie") ldk_api_port=3113 ;;
-        "diana")   ldk_api_port=3114 ;;
-        *)         ldk_api_port=3110 ;;
-    esac
-    if [ -f "$TOOLS_DIR/certs/${node}.crt" ]; then
-        local ldk_cli="${LDK_SERVER_CLI:-$HOME/workspace/ldk-server/target/release/ldk-server-cli}"
-        if [ ! -x "$ldk_cli" ]; then
-            log_warn "ldk-server-cli not found at $ldk_cli — building..."
-            (cd "$HOME/workspace/ldk-server" && cargo build --release --bin ldk-server-cli 2>&1 | tail -3) || true
+    # All operators share alice-ln via self-pay wrapper (subwallet approach)
+    if [ -f "$TOOLS_DIR/certs/alice.crt" ]; then
+        local ldk_real_cli="${LDK_SERVER_CLI:-$HOME/ldk-server/target/release/ldk-server-cli}"
+        if [ ! -x "$ldk_real_cli" ]; then
+            log_warn "ldk-server-cli not found at $ldk_real_cli"
         fi
-        export LDK_CLI="$ldk_cli"
+
+        # Get alice-ln API key
+        local alice_api_key
+        alice_api_key=$(docker exec alice-ln sh -c "cat /ldk/\$(printenv NETWORK)/api_key | od -A n -t x1 | tr -d ' \n'" 2>/dev/null || echo "")
+
+        export LDK_CLI="$TOOLS_DIR/bin/ldk-cli-wrapper.sh"
+        export LDK_REAL_CLI="$ldk_real_cli"
         export LDK_HOST="localhost"
-        export LDK_PORT="$ldk_api_port"
-        export LDK_TLS_CERT="$TOOLS_DIR/certs/${node}.crt"
+        export LDK_PORT="3111"
+        [ -n "$alice_api_key" ] && export LDK_API_KEY="$alice_api_key"
+        export LDK_TLS_CERT="$TOOLS_DIR/certs/alice.crt"
+        export LDK_SELF_PAY_DIR="$DATA_ROOT/self-pay"
+        mkdir -p "$DATA_ROOT/self-pay"
     fi
 
     RUST_LOG=info,deposits_node=debug \
