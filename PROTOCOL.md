@@ -1,26 +1,34 @@
 # Bitcoin Deposits Protocol
 
-A two-layer protocol for custodial Bitcoin deposits with cryptographic accountability and multi-party dispute resolution.
+A collateral-secured network of verifiable ledgers providing fast, scalable, key-controlled Bitcoin funds off-chain.
 
 ## Overview
 
 The protocol combines:
-- **Ledger layer**: Off-chain state machine tracking deposits, payments, and fees
-- **Collateral layer**: Multi-party custody with on-chain reserves backing
+- **Ledger layer**: Append-only hash chains of signed updates tracking deposits, transfers, and fees
+- **Collateral layer**: Operator capital locked on quorum member ledgers, confiscable upon misbehavior
+- **Reserves layer**: On-chain UTXO backing all obligations, spendable by quorum majority
 
-Each operator maintains a ledger backed by Bitcoin reserves. Deposits are credited/debited via signed operations forming a hash chain. Quorum members provide collateral backing and can dispute invalid operations.
+Each operator maintains a ledger backed by Bitcoin reserves. Deposits are credited and debited via co-signed operations forming a hash chain. Quorum members provide collateral backing and can dispute invalid operations. Wallets verify the chain, retain evidence, and escalate through the quorum if the operator misbehaves.
+
+Explicit tradeoffs:
+- No unilateral exit: when operators fail, funds stay in the network under a new custodian
+- No privacy: verification requires transparency
+- Intermittent availability: a deposit is only as available as its operator
+
+See [WHITEPAPER.md](WHITEPAPER.md) for design rationale.
 
 ## Core Concepts
 
 ### Ledger
 
-A ledger tracks:
-- **Deposits**: User balances keyed by public key
-- **Reserves**: Bitcoin UTXO backing all deposits
-- **Quorum**: Partner operators providing collateral
-- **State**: Sequence number and hash chain
+A ledger is an immutable chain of updates, each containing the hash of the previous update and signed by the operator. After quorum establishment, updates are also co-signed by a quorum member. Different update types have different rules governing when and how they can be used. Ledgers are self-descriptive: their updates are publicly available and non-repudiable, allowing anyone to evaluate conformance.
 
-Every state change is a signed `LedgerOperation` appended to the ledger history.
+A ledger tracks:
+- **Deposits**: Account balances keyed by deposit ID
+- **Reserves**: On-chain UTXO backing all obligations
+- **Quorum**: Partner operators providing collateral and co-signatures
+- **State**: Sequence number, hash chain, and causal ordering
 
 ### Ledger ID
 
@@ -29,437 +37,473 @@ Stable identifier computed as:
 ledger_id = SHA256(operator_pubkey || reserves_address || genesis_block)
 ```
 
-This survives custody transfers - the ledger ID stays constant even if the operator changes.
+This survives custody transfers -- the ledger ID stays constant even if the operator changes.
 
 ### Deposits
 
+A deposit is a balance controlled by a miniscript descriptor. The deposit ID is derived from the descriptor:
+
+```
+deposit_id = SHA256(descriptor)[0..16]
+```
+
+The descriptor is a miniscript policy string. The common case is `pk(<compressed_pubkey_hex>)` for single-key deposits, but any valid miniscript is supported: `multi()`, `and()`, `or()`, time locks, hash locks, etc. Operations are authorized by providing a witness satisfying the descriptor. (DEP-08)
+
 Each deposit has:
-- `pubkey`: Unique identifier (depositor's key)
+- `deposit_id`: 16-byte identifier derived from descriptor
+- `descriptor`: Miniscript spending policy
 - `balance`: Available funds (millisatoshis)
-- `locked_balance`: Funds locked for pending payments
-- `fees`: Maintenance fee structure
-- `last_fee_assessment`: Block height of last fee deduction
+- `locked_balance`: Funds locked for pending transfers/payments
+- `fees`: Periodic custody fee schedule
+- `transfer_fees`: Per-transfer fee schedule
+- `is_collateral`: Whether this deposit holds operator capital for collateral
+- `receive_requires_sig`: Whether incoming funds require a descriptor witness
 
 ### Reserves
 
-On-chain Bitcoin backing all deposits:
-- Must cover 100% of deposit balances
-- Stored in operator-controlled UTXO
-- Spendable via Taproot with tiered timeouts
+On-chain Bitcoin backing all obligations. After quorum establishment, reserves are held in a Taproot UTXO with tiered spending paths (DEP-03):
+
+1. **Full quorum** (k-of-n): No timelock. Normal operating path.
+2. **Degraded quorum** (k-1 of n): Available before `quorum_expiry`. Allows rotation if one member disappears.
+3. **Operator solo**: Available well after `quorum_expiry`. Last resort when the entire quorum is unresponsive.
 
 ### Quorum
 
 Partner operators who:
-- Monitor ledger for invalid operations
-- Provide collateral attestations
-- Can initiate disputes if operator misbehaves
+- Co-sign ledger updates (providing causal ordering across ledgers)
+- Monitor ledger for non-conforming operations
+- Hold operator collateral on their own ledgers
+- Can initiate disputes and confiscate collateral if the operator misbehaves
 
 ## Operations
 
-### Ledger Lifecycle
+Every state change is a signed `LedgerUpdate` appended to the hash chain. Operations are grouped by category.
+
+### Lifecycle
+
+| Disc | Operation | Purpose |
+|------|-----------|---------|
+| 1 | `LedgerOpen` | Initialize ledger with operator and reserves |
+| 60 | `LedgerClose` | Terminate ledger operations |
 
-| Operation | Purpose |
-|-----------|---------|
-| `LedgerOpen` | Initialize ledger with operator and reserves |
-| `LedgerClose` | Terminate ledger operations |
+### Quorum
+
+| Disc | Operation | Purpose |
+|------|-----------|---------|
+| 12 | `QuorumBegin` | Establish/refresh quorum multisig and rotate reserves |
+| 43 | `QuorumAddMember` | Add partner to quorum with terms |
+| 44 | `QuorumRemoveMember` | Remove partner from quorum |
+| 46 | `QuorumJoin` | Record membership on partner's own ledger |
+
+### Deposits
+
+| Disc | Operation | Purpose |
+|------|-----------|---------|
+| 20 | `DepositOpen` | Create deposit with descriptor and fee schedule |
+| 21 | `DepositClose` | Close deposit (must have zero balance) |
+| 23 | `DepositKeyRotate` | Change deposit descriptor (authorized by current descriptor) |
 
-### Reserves Management
+### Fees
 
-| Operation | Purpose |
-|-----------|---------|
-| `ReservesIncrease` | Add funds to reserves |
-| `ReservesDecrease` | Remove funds (must maintain coverage) |
-| `ReservesRotate` | Migrate to new UTXO (e.g., P2WSH → P2TR) |
+| Disc | Operation | Purpose |
+|------|-----------|---------|
+| 22 | `FeeChange` | Modify fee schedule (with notice period) |
+| 50 | `FeeCollect` | Deduct periodic fees from deposit |
 
-### Deposit Operations
+### Lightning Payments
 
-| Operation | Purpose |
-|-----------|---------|
-| `DepositOpen` | Create new deposit with fee structure |
-| `DepositClose` | Close deposit (must have zero balance) |
-| `FeeChange` | Modify fee structure |
+| Disc | Operation | Purpose |
+|------|-----------|---------|
+| 30 | `InvoiceCredit` | Credit deposit from received lightning payment |
+| 31 | `InvoiceLock` | Lock funds for outgoing lightning payment |
+| 32 | `InvoiceFail` | Cancel pending lightning payment |
+| 33 | `InvoiceFulfill` | Complete lightning payment (with preimage) |
 
-### Payment Operations
+### On-chain Payments
 
-**Lightning payments:**
-| Operation | Purpose |
-|-----------|---------|
-| `InvoiceCredit` | Credit deposit from received payment |
-| `InvoiceLock` | Lock funds for outgoing payment |
-| `InvoiceFulfill` | Complete payment (with preimage) |
-| `InvoiceFail` | Cancel pending payment |
+| Disc | Operation | Purpose |
+|------|-----------|---------|
+| 35 | `OnchainCredit` | Credit deposit from confirmed transaction |
+| 36 | `OnchainLock` | Lock funds for on-chain withdrawal |
+| 37 | `OnchainFail` | Cancel pending withdrawal |
+| 38 | `OnchainFulfill` | Complete withdrawal (with txid) |
 
-**On-chain payments:**
-| Operation | Purpose |
-|-----------|---------|
-| `OnchainCredit` | Credit deposit from Bitcoin transaction |
-| `OnchainLock` | Lock funds for withdrawal |
-| `OnchainFulfill` | Complete withdrawal (with txid) |
-| `OnchainFail` | Cancel pending withdrawal |
+### Transfers
 
-### Fee Operations
+| Disc | Operation | Purpose |
+|------|-----------|---------|
+| 70 | `TransferLock` | Lock funds with miniscript spending condition |
+| 71 | `TransferComplete` | Complete transfer (witness satisfies condition) |
+| 72 | `TransferFail` | Cancel transfer after timeout |
+
+### Collateral
 
-| Operation | Purpose |
-|-----------|---------|
-| `FeeCollect` | Deduct maintenance fees from deposit |
+| Disc | Operation | Purpose |
+|------|-----------|---------|
+| 42 | `CollateralAttestation` | Partner proves collateral lock on their ledger |
+| 45 | `CollateralLock` | Lock deposit funds as collateral backing |
+
+### Dispute
+
+| Disc | Operation | Purpose |
+|------|-----------|---------|
+| 54 | `DisputeEnter` | Quorum member declares non-conforming ledger |
+| 55 | `DisputeAcquire` | Lottery winner claims custody |
+| 56 | `DisputeYield` | Lottery loser yields |
+| 57 | `DisputeArmed` | Candidate commits to custody lottery |
+
+### Delivery
+
+| Disc | Operation | Purpose |
+|------|-----------|---------|
+| 80 | `DeliveryEmbed` | Quorum member anchors unprocessed request hash |
+
+Full wire format: DEP-02. On-chain transactions: DEP-03.
+
+## Wire Protocol
+
+### Signed Ledger Update
+
+Every operation is wrapped in a TLV-encoded signed update (DEP-02):
+
+| Type | Name | Description |
+|------|------|-------------|
+| 0 | message | Inner operation (TLV-encoded) |
+| 2 | message_type | Operation discriminant |
+| 4 | operator_id | Operator's compressed secp256k1 pubkey |
+| 6 | ledger_id | Ledger identifier hash |
+| 8 | sequence_number | Monotonically increasing counter (u64 LE) |
+| 10 | previous_hash | Chain hash of the previous update |
+| 16 | cosign_signature | Schnorr co-signature from quorum member |
+| 18 | operator_signature | Schnorr signature from operator |
+| 20 | block_height | Block height at creation |
+| 22 | block_hash | Block hash at creation |
+| 24 | cosigner_pubkey | Co-signing quorum member's pubkey |
+| 26 | member_ledger_hash | Co-signer's ledger tip hash (causal ordering) |
+
+### Hash Chain
+
+```
+current_hash = SHA256(
+    sequence_number (8 LE)
+    || previous_hash (32)
+    || message (variable)
+    [|| member_ledger_hash (32)]
+    [|| cosign_signature (64)]
+)
 
-### Collateral Operations
+chain_hash = SHA256(current_hash (32) || operator_signature (64))
+```
 
-| Operation | Purpose |
-|-----------|---------|
-| `QuorumAddMember` | Add partner to quorum |
-| `QuorumRemoveMember` | Remove partner from quorum |
-| `QuorumJoin` | Record membership in partner's ledger |
-| `CollateralAttestation` | Partner proves collateral backing |
-| `CollateralLock` | Deposit locks collateral for partner |
+The operator signs `current_hash`. Their signature is folded into `chain_hash`, which becomes the next update's `previous_hash`. Both signatures are committed without circularity. After `QuorumBegin`, `member_ledger_hash` and `cosign_signature` are mandatory.
 
-### Dispute Operations
+### Causal Ordering
 
-| Operation | Purpose |
-|-----------|---------|
-| `DisputeEnter` | Quorum member declares invalid ledger |
-| `DisputeArmed` | Candidate commits to custody race |
-| `DisputeAcquire` | Winner claims reserves |
-| `DisputeYield` | Loser acknowledges loss |
+Co-signatures include the co-signer's own ledger tip hash (`member_ledger_hash`). This hash is incorporated into `current_hash`, creating a web of causality across ledgers. When operator A's chain includes a co-signature referencing member B's chain at sequence N, it proves A's update happened after B's update N. This enables fraud proofs without relying on wall-clock time.
 
-## Validation Rules
+### Signing
 
-Every operation must pass validation before being applied. Invalid operations are rejected.
+All signatures use BIP-340 Schnorr.
 
-### Global Constraints
+**Co-signer**: signs a tagged hash over the update content and their ledger tip:
+```
+tag = SHA256("deposits/cosign")
+digest = SHA256(tag || tag || message || message_type (2 LE)
+    || sequence_number (8 LE) || previous_hash || member_ledger_hash)
+```
 
-These constraints apply to all operations:
+**Operator**: signs after `current_hash` is finalized:
+```
+sig_input = SHA256(sequence_number (8 LE) || previous_hash
+    || current_hash || message)
+```
 
-**Hash Chain Integrity:**
-- `sequence_number` must be exactly `previous_sequence + 1`
-- `previous_hash` must match the hash of the prior update
-- `current_hash` must match `SHA256(previous_hash || sequence_number || operation_bytes)`
+## Nostr Transport
 
-**Signature Authorization:**
-- Normal operations: Must be signed by `operator_key`
-- `DisputeEnter`: May be signed by any `quorum_at_fork` member
+All communication uses Nostr relays: operator relays for ephemeral request/response traffic, and ledger relays for durable event storage. (DEP-04)
 
-**Reserves Backing (100% Model):**
-- `sum(deposits.balance) <= reserves_amount` (always enforced)
-- Checked on: `InvoiceCredit`, `OnchainCredit`
+### Event Kinds
 
-**Collateral Backing (Quorum Model):**
-- If `quorum_members.len() > 0`: `sum(deposits.balance) <= received_collateral_amount`
-- Checked on: `InvoiceCredit`
+| Kind | Name | Persistence | Description |
+|------|------|-------------|-------------|
+| 9100 | Ledger Update | Durable | Signed ledger update (base64 TLV) |
+| 9101 | Fraud Proof | Durable | Fraud proof broadcast |
+| 9103 | Dispute | Durable | Custody dispute notification |
+| 9104 | Recovery Agreement | Durable | Quorum member recovery agreement |
+| 9105 | Delivery Escalation | Durable | Wallet escalation of unprocessed request |
+| 20101 | Request | Ephemeral | Wallet-to-operator request |
+| 20102 | Response | Ephemeral | Operator-to-wallet response |
+| 39100 | Advertisement | Replaceable | Operator terms (NIP-33) |
+| 39101 | Price Oracle | Replaceable | BTC/USD price (NIP-33) |
+| 39102 | Courier Advertisement | Replaceable | Courier capacity and fees (NIP-33) |
 
-### Reserves Operations
+### Request Actions
 
-#### ReservesIncrease
+| Action | Description | See |
+|--------|-------------|-----|
+| deposit_open | Open a new deposit | DEP-08 |
+| make_offer | Create on-chain funding offer | DEP-10 |
+| make_invoice | Create lightning invoice | DEP-10 |
+| pay_invoice | Pay lightning invoice from deposit | DEP-10 |
+| withdraw | On-chain withdrawal | DEP-10 |
+| transfer_lock | Lock funds for transfer | DEP-09 |
+| transfer_complete | Complete a transfer | DEP-09 |
+| balance_query | Query deposit balance | DEP-08 |
+| cosign_update | Request co-signature on update | DEP-02 |
+| cosign_offer | Request co-signature on offer | DEP-10 |
+| cosign_invoice | Request co-signature on invoice | DEP-10 |
+| partner_add | Add quorum member | DEP-05 |
+| partner_join | Record quorum join | DEP-05 |
+| collateral_lock | Lock collateral | DEP-05 |
+| collateral_record | Record collateral attestation | DEP-05 |
+| request_route | Request cross-ledger route from courier | DEP-13 |
 
-| Check | Rule |
-|-------|------|
-| Direction | `new_amount > current_reserves` (or `current == 0` for initial) |
-| Limit | If channel balance known: `new_amount <= channel_balance` |
+### Advertisements (Kind 39100)
 
-**State changes:**
-- `reserves.amount = new_amount`
+Operators publish NIP-33 replaceable events advertising their terms. Content includes: operator name and pubkey, reserves and obligations, fee schedules (periodic and transfer), deposit limits, relay URL, and collateral enforcement block.
 
-#### ReservesDecrease
+### Offline Operation
 
-| Check | Rule |
-|-------|------|
-| Direction | `new_amount < current_reserves` |
-| Coverage | `new_amount >= sum(deposits.balance) + max_pending_invoice` |
+Wallets need no persistent connections. They can go offline indefinitely and catch up by replaying Kind 9100 events from any relay. The hash chain provides integrity verification regardless of when events are fetched.
 
-**State changes:**
-- `reserves.amount = new_amount`
+## Transfers
 
-### Deposit Operations
+The basic form of transfer is a two-phase operation between deposits on the same ledger. (DEP-09)
 
-#### DepositOpen
+### Lock Phase
 
-| Check | Rule |
-|-------|------|
-| Uniqueness | Deposit with this pubkey must not exist |
-| Valid pubkey | Pubkey must not be all zeros |
-| Fee structure | If provided: `frequency_blocks > 0` and `annualized_bps <= 10000` |
+A deposit issues a `TransferLock` request specifying:
+- Source and destination deposit IDs
+- Amount and transfer fee
+- A miniscript `completion_script` (spending condition)
+- A `timeout_height` (block height deadline)
+- A `nonce` (32 random bytes, also used for fraud proof embedding)
+- A witness satisfying the sender's descriptor
 
-**State changes:**
-- Creates `Deposit { pubkey, balance: 0, locked_balance: 0, fees, last_fee_assessment: 0 }`
+If authorized, funds move from the sender's available balance to `locked_balance`.
 
-#### DepositClose
+### Completion
 
-| Check | Rule |
-|-------|------|
-| Exists | Deposit must exist |
-| Zero balance | `deposit.balance == 0` |
-| No locks | `deposit.locked_balance == 0` |
+If the spending condition is satisfied before the timeout (via `TransferComplete` with a satisfying `script_witness`), funds move to the recipient minus the operator's transfer fee. If the timeout is reached (`TransferFail`), funds return to the sender minus a smaller timeout fee.
 
-**State changes:**
-- Removes deposit from state
+### Completion Scripts
 
-#### FeeChange
+Common patterns:
+- **HTLC**: `sha256(H)` -- recipient provides preimage. Basis for cross-ledger and lightning-compatible transfers.
+- **Signature**: `pk(key)` -- recipient signs the transfer_id
+- **Timelock**: `and(pk(key), after(N))` -- key plus minimum block height
+- **Multi-party**: `multi(2, key1, key2)` -- multiple signers
 
-| Check | Rule |
-|-------|------|
-| Exists | Deposit must exist |
-| Valid fees | `frequency_blocks > 0` and `annualized_bps <= 10000` |
+Any valid miniscript is supported.
 
-**State changes:**
-- `deposit.fees = new_fees`
+### Timeout Limits
 
-### Payment Operations
+The `timeout_height` must not exceed `block_height + max_transfer_timeout_blocks` (per-quorum parameter, default 1008 blocks / ~1 week).
 
-#### InvoiceCredit
+## Fee Structure
 
-| Check | Rule |
-|-------|------|
-| Exists | Deposit must exist |
-| Positive | `amount > 0` |
-| Reasonable | `amount <= 100,000,000 sats` (1 BTC) |
-| Valid hash | Payment hash not all same byte (fake detection) |
-| Reserves | `sum(deposits.balance) + amount <= reserves_amount` |
-| Collateral | If quorum exists: `sum(deposits.balance) + amount <= received_collateral` |
+### Periodic Custody Fees
 
-**State changes:**
-- `deposit.balance += amount`
+Deposits incur maintenance fees (DEP-07):
 
-#### InvoiceLock
+```
+FeeStructure {
+    annualized_msats: u64,    // Fixed annual fee (millisatoshis)
+    annualized_bps: u16,      // Proportional fee (basis points/year)
+    frequency_blocks: u32,    // Collection period (blocks)
+}
+```
 
-| Check | Rule |
-|-------|------|
-| Exists | Deposit must exist |
-| Positive | `amount > 0` |
-| Available | `deposit.balance - deposit.locked_balance >= amount` |
-| Signature | `scriptpubkey_signature` valid |
+Calculation per collection period:
+```
+fixed_portion = annualized_msats * blocks_elapsed / 52560
+proportional_portion = balance * annualized_bps * blocks_elapsed / (52560 * 10000)
+total_fee = fixed_portion + proportional_portion
+```
 
-**State changes:**
-- `deposit.locked_balance += amount`
+### Per-Transfer Fees
 
-#### InvoiceFulfill
+Each transfer out of a deposit incurs:
 
-| Check | Rule |
-|-------|------|
-| Positive | `amount > 0` |
-| Signature | `scriptpubkey_signature` valid |
-| Preimage | `SHA256(preimage) == payment_id` |
+```
+TransferFeeSchedule {
+    fixed_msats: u64,    // Fixed fee per transfer
+    rate_bps: u16,       // Proportional fee (basis points)
+}
+```
 
-**State changes:**
-- `deposit.locked_balance -= amount`
-- `deposit.balance -= amount`
+### Fee Changes
 
-#### InvoiceFail
+Fee schedules are negotiated at deposit opening. Changes are governed by:
+- `fee_change_after_blocks`: Minimum blocks after opening before any change
+- `fee_change_notice_blocks`: Blocks of notice before a change takes effect
+- `fee_change_limit_bps`: Maximum change per adjustment (basis points of current fee)
 
-| Check | Rule |
-|-------|------|
-| Positive | `amount > 0` |
+### Fee Minimums
 
-**State changes:**
-- `deposit.locked_balance -= amount`
+Quorum members set fee minimums at join time. The operator cannot open deposits with fees below the strictest member's minimums, protecting members from inheriting unprofitable obligations after custody transfer.
 
-#### OnchainCredit
+## Payment Channels
 
-| Check | Rule |
-|-------|------|
-| Exists | Deposit must exist |
-| Positive | `amount > 0` |
+Deposits receive and send funds through on-chain transactions and lightning payments. After quorum establishment, offers and invoices are co-signed by a quorum member and retained by the wallet as evidence. (DEP-10)
 
-**State changes:**
-- `deposit.balance += amount`
+### On-chain Funding
 
-#### OnchainLock
+1. Operator creates a co-signed funding offer with a bitcoin address and deadline
+2. User sends Bitcoin to the funding address
+3. Operator detects confirmed transaction, appends `OnchainCredit`
 
-| Check | Rule |
-|-------|------|
-| Exists | Deposit must exist |
-| Available | `deposit.balance - deposit.locked_balance >= amount` |
+### Lightning
 
-**State changes:**
-- `deposit.locked_balance += amount`
+1. Operator creates a co-signed BOLT11 invoice on behalf of a deposit
+2. When payment arrives (preimage obtained), operator appends `InvoiceCredit`
+3. For outgoing payments: `InvoiceLock` -> route payment -> `InvoiceFulfill`/`InvoiceFail`
 
-#### OnchainFulfill
+### Self-Pay
 
-| Check | Rule |
-|-------|------|
-| Locked | Funds were previously locked |
+When the payer and payee are deposits on the same operator, the operator may settle internally without routing through lightning, avoiding routing fees and failure modes.
 
-**State changes:**
-- `deposit.locked_balance -= amount`
-- `deposit.balance -= amount`
+### Evidence Retention
 
-#### OnchainFail
+Wallets retain co-signed offers and invoices as evidence. Without retention, the wallet cannot prove fraud. On-chain fraud proofs are constructed autonomously; lightning fraud proofs require the payer to provide the preimage.
 
-| Check | Rule |
-|-------|------|
-| Locked | Funds were previously locked |
+## Collateral Model
 
-**State changes:**
-- `deposit.locked_balance -= amount`
+Collateral is the operator's own capital, deposited and locked on quorum member ledgers. If the operator misbehaves, members confiscate the collateral. (DEP-05)
 
-### Fee Operations
+### Flow
 
-#### FeeCollect
+1. Operator opens a collateral deposit (`is_collateral: true`) on each member's ledger
+2. Operator funds and locks the deposit via `CollateralLock`
+3. Member returns a signed attestation confirming the lock
+4. Operator publishes `CollateralAttestation` on their own ledger
 
-| Check | Rule |
-|-------|------|
-| Exists | Deposit must exist |
-| Available | `deposit.balance - deposit.locked_balance >= amount` |
-| Schedule | `block_height >= last_fee_assessment + frequency_blocks` |
+### Obligation Limits
 
-**State changes:**
-- `deposit.balance -= amount`
-- `deposit.last_fee_assessment = block_height`
+A ledger's total obligations must not exceed the least of:
 
-#### Fee Minimum Validation (on DepositOpen/DepositOffer)
+1. The reserves amount (from `QuorumBegin`)
+2. The sum of all attested collateral (`total_collateral` from `QuorumBegin`)
+3. Twice the smallest `collateral_lock_amount` across all quorum members
 
-| Check | Rule |
-|-------|------|
-| Annual rate | `proposed.annualized_bps >= operator_min_annual_bps` |
-| Fixed fee | `proposed.annualized_msats / periods_per_year >= operator_min_fixed_per_period` |
+Enforced when creating new funding offers or invoices. The `total_collateral` field on `QuorumBegin` gives wallets a single co-signed value to check against.
 
-### Collateral Operations
+### Security Arithmetic
 
-#### CollateralIncrease
+With a 3-member quorum where each member holds collateral C:
+- Total collateral at risk: 3C
+- Maximum obligations: 2C (from limit #3)
+- A theft yields at most 2C but costs 3C -- the attack costs 1.5x what it gains
 
-| Check | Rule |
-|-------|------|
-| Direction | `new_amount >= current_collateral` (idempotent OK) |
-| Limit | `new_amount <= reserves_amount` |
+### QuorumBegin
 
-**State changes:**
-- `collateral_amount = new_amount`
-- `last_collateral_increase_block = block_height`
+Once members are added, the operator rotates reserves into a new Taproot multisig UTXO. `QuorumBegin` (disc 12) records the new reserves address, quorum members, `quorum_expiry` (shortest collateral lock), and `total_collateral`. After `QuorumBegin`, co-signatures become mandatory. A new `QuorumBegin` must be appended before `quorum_expiry`. (DEP-03, DEP-05)
 
-#### CollateralDecrease
+The reserves rotation transaction includes an `OP_RETURN` output with the `chain_hash` at the `QuorumBegin` sequence, giving wallets an on-chain anchor to verify ledger state.
 
-| Check | Rule |
-|-------|------|
-| Direction | `new_amount < current_collateral` |
-| Cooldown | `block_height >= last_collateral_increase_block + 144` |
+### Member Terms
 
-**State changes:**
-- `collateral_amount = new_amount`
+Each member specifies at join time (via `QuorumAddMember`):
+- Fee minimums: `min_fee_bps`, `min_fee_fixed`, `max_fee_period`
+- Collateral requirements: `collateral_lock_amount`, `collateral_lock_until`
+- Timing obligations: `dispute_response_blocks`, `dispute_arm_blocks`, `service_response_blocks`, `max_transfer_timeout_blocks`
+- Descriptor limit: `max_descriptor_bytes`
 
-#### CollateralLock
+The strictest values across all members apply to the quorum.
 
-| Check | Rule |
-|-------|------|
-| Exists | Deposit must exist |
-| Signature | `deposit_holder_signature` valid over `(amount, lock_until_block, operator_id)` |
-| Limit | `amount <= deposit.balance` |
-| Ratchet (amount) | If existing lock: `new_amount >= existing_amount` |
-| Ratchet (time) | If existing lock: `new_lock_until_block > existing_lock_until_block` |
-| Operator | `operator_id == ledger.operator_key` |
+## Fraud Proofs
 
-**State changes:**
-- `deposit.collateral_lock_amount = amount`
-- `deposit.collateral_lock_expires = lock_until_block`
+Fraud proofs are constructed by embedding a proof hash into a ledger chain, then broadcasting the evidence with a causal chain linking the hash to the accused operator. (DEP-06)
 
-#### QuorumAddMember
+### Types
 
-| Check | Rule |
-|-------|------|
-| State | Ledger not in `Tombstoned` state |
+1. **Uncredited on-chain payment**: Operator saw sufficient confirmations but did not credit the deposit. Wallet constructs this autonomously.
+2. **Uncredited lightning payment**: Operator created a cosigned invoice, received payment (proved by preimage), but did not credit the deposit. Requires payer cooperation.
+3. **Stale co-signature**: A co-signer's `member_ledger_hash` precedes their own later hash -- proving they backdated their attestation.
+4. **Inactive quorum member**: A member was active but did not initiate a dispute within the required block window after embedded fraud evidence.
+5. **Non-conforming update**: Operator signed an update that violates protocol rules.
 
-**State changes:**
-- Adds pubkey to `quorum_members` (if not present)
+### Construction
 
-#### QuorumRemoveMember
+```
+tag = SHA256("deposits/fraud_proof")
+proof_hash = SHA256(tag || tag || proof_type || accused_pubkey
+    || ledger_id || evidence_bytes)
+```
 
-| Check | Rule |
-|-------|------|
-| Exists | Member must be in quorum |
+The `proof_hash` is embedded as the `nonce` field in a self-transfer. Once the operator signs an update containing this hash, the evidence is causally ordered.
 
-**State changes:**
-- Removes from `quorum_members`
-- Removes from `collateral_attestations`
+### Broadcast
 
-#### QuorumJoin
+A fraud broadcast (Kind 9101) contains the hashable evidence, the embedding location, and a causal chain of co-signed updates linking the embedding to the accused ledger.
 
-| Check | Rule |
-|-------|------|
-| Authority | Must be on operator's own ledger |
-| Ratchet | If renewing: `new_expires >= existing_expires` |
+## Delivery Escalation
 
-**State changes:**
-- Adds/updates entry in `joined_quorums`
+When an operator ignores a wallet's request, the wallet can escalate through quorum members. (DEP-12)
 
-#### CollateralAttestation
+1. **Direct request**: Wallet publishes Kind 20101 to operator's relay (normal flow)
+2. **Durable publication**: Wallet re-publishes as Kind 9105 (durable record)
+3. **Quorum member delivery**: Wallet pays a member to append `DeliveryEmbed` (disc 80) on their ledger, anchoring the request hash
+4. **Clock starts**: `service_response_blocks` begins at the embed's `block_height`. If the operator's ledger advances past the deadline without processing the request, the censorship proof is complete.
 
-| Check | Rule |
-|-------|------|
-| Quorum | Attester must be valid quorum member |
-| Signature | Attestation signature valid |
+The member's embedding fee is the small guaranteed payoff. The large contingent payoff is collateral confiscation if the delivery reveals genuine censorship.
 
-**State changes:**
-- Updates `collateral_attestations[quorum_member]`
-- Recalculates `received_collateral_amount`
+## Couriers
 
-### Dispute Operations
+Transfers move funds between deposits on the same ledger. To move funds across ledgers, wallets use couriers -- services that hold deposits on multiple ledgers and carry transfers between them via HTLCs. (DEP-13)
 
-#### DisputeEnter
+### Flow
 
-| Check | Rule |
-|-------|------|
-| State | Ledger must be in `Normal` state |
-| Authority | Signer must be in current quorum |
+1. Wallet locks funds to the courier's deposit on ledger A (hash lock)
+2. Courier locks funds from its deposit on ledger B to the wallet's deposit on B (same hash lock)
+3. Wallet reveals preimage on B, claiming funds
+4. Courier observes preimage, completes transfer on A
 
-**State changes:**
-- `quorum_at_fork = quorum_members` (snapshot)
-- `dispute_fork_sequence = last_valid_sequence`
-- `quorum_members.clear()`
-- `collateral_attestations.clear()`
-- `dispute_state = Disputed`
+The courier's outbound timeout is strictly earlier than the inbound timeout, ensuring that if the wallet never reveals, both locks expire and neither party loses funds.
 
-#### DisputeArmed
+### Fees
 
-| Check | Rule |
-|-------|------|
-| State | Ledger must be in `Disputed` state |
-| Quorum | At least one quorum member exists |
-| Collateral | At least one collateral attestation exists |
+Couriers set per-ledger directional fees:
+- **fee_out**: operator transfer fee + courier margin (sending from a ledger)
+- **fee_in**: courier margin (receiving on a ledger)
 
-**State changes:**
-- `dispute_state = Armed`
+Route cost: `fee_out(source) + fee_in(destination)`.
 
-#### DisputeAcquire
+### Discovery
 
-| Check | Rule |
-|-------|------|
-| State | Ledger must be in `Armed` state |
-| Entropy | `entropy_block_height > 0` or `entropy_block_hash != [0; 32]` |
-| Winner | `new_custodian` is entropy-selected winner |
+Couriers advertise via Kind 39102 (NIP-33 replaceable) on the ledger relay: which ledgers they bridge, available balance per ledger, and directional fees. Wallets compare and select based on fee, liquidity, or coverage.
 
-**State changes:**
-- `operator_key = new_custodian`
-- `dispute_state = Normal`
-- `quorum_at_fork.clear()`
+## Dispute Resolution
 
-#### DisputeYield
+When a quorum member detects fraud, they initiate a dispute to transfer custody. (DEP-06)
 
-| Check | Rule |
-|-------|------|
-| State | Ledger must be in `Armed` state |
-| Loser | Signer is NOT the entropy-selected winner |
+### States
 
-**State changes:**
-- `dispute_state = Tombstoned`
+| State | Description |
+|-------|-------------|
+| `Normal` | Regular operation, all operations allowed |
+| `Disputed` | Quorum disbanded, limited operations |
+| `Armed` | Candidates committed to lottery |
+| `Tombstoned` | Branch terminated |
 
-### Lifecycle Operations
+### Lottery
 
-#### LedgerOpen
+1. **Commitment**: Each participating member appends `DisputeArmed` with `commitment_hash` (HASH160 of a secret preimage) and `target_reserves` address. Members must arm within `dispute_arm_blocks`.
+2. **Entropy**: An entropy block is selected -- the first block mined after all participants have armed.
+3. **Reveal**: Each participant reveals their preimage. Winner: `score = SHA256(preimage || entropy_block_hash)`, lowest score wins.
+4. **Settlement**: Winner spends reserves to their `target_reserves`, appends `DisputeAcquire`, establishes new quorum. Losers append `DisputeYield`.
 
-| Check | Rule |
-|-------|------|
-| First | Must be first operation (sequence 0) |
+### Respectful vs Punitive
 
-**State changes:**
-- Initializes all ledger state fields
+**Respectful** (unavailability without proven fraud):
+- Only the amount covering obligations goes to the winner
+- Change returned to the original operator's pubkey
+- Collateral unaffected
 
-#### LedgerClose
-
-| Check | Rule |
-|-------|------|
-| Empty | `sum(deposits.balance) == 0` |
-| No locks | `sum(deposits.locked_balance) == 0` |
-
-**State changes:**
-- `collateral_attestations.clear()`
+**Punitive** (proven non-conformance):
+- Full reserves go to the winner
+- Excess above obligations split among quorum members
+- Collateral on other ledgers may be confiscated
 
 ### Dispute State Machine
 
@@ -473,267 +517,78 @@ These constraints apply to all operations:
 | `Armed` | `DisputeYield` | `Tombstoned` |
 | `Tombstoned` | None | `Tombstoned` |
 
-## Wire Protocol
+## Time Obligations
 
-### Signed Updates
+All times are measured in block height against the base layer. (DEP-11)
 
-Every operation is wrapped in a `SignedLedgerUpdate`:
+### Provable Obligations
 
-```
-SignedLedgerUpdate {
-    message: Vec<u8>,           // Serialized operation
-    message_type: u16,          // Operation discriminant
-    operator_id: PublicKey,     // Signer
-    ledger_id: [u8; 32],        // Target ledger
-    sequence_number: u64,       // Sequential counter
-    previous_hash: [u8; 32],    // Hash chain link
-    current_hash: [u8; 32],     // State hash after operation
-    operator_signature: [u8; 64], // Schnorr signature
-}
-```
+| Event | Deadline | Evidence |
+|-------|----------|----------|
+| On-chain credit | Operator signs past `deadline_block` without credit | Cosigned offer + signed update |
+| Lightning credit | Preimage exists, no credit | Cosigned invoice + preimage |
+| Transfer timeout | Operator signs past `timeout_height` with funds locked | TransferLock + signed update |
+| Request processing | Operator signs past embed + `service_response_blocks` | DeliveryEmbed + signed update |
+| Quorum rotation | Operator signs past `quorum_expiry` without new quorum | Signed update |
+| Dispute response | Member active after evidence + `dispute_response_blocks` | Fraud proof + member updates |
+| Collateral lock | Reduced before `lock_until_block` | CollateralLock + withdrawal |
 
-### Hash Chain
+### Advisory Obligations
 
-Each operation extends the hash chain:
-```
-current_hash = SHA256(previous_hash || sequence_number || operation_bytes)
-```
-
-Genesis operation uses `previous_hash = [0; 32]`.
-
-### Message Types
-
-| Type | Kind | Purpose |
-|------|------|---------|
-| `LEDGER_UPDATE` | 0x8001 | Propose state change |
-| `LEDGER_UPDATE_RESPONSE` | 0x8003 | Accept/reject change |
-| `HANDSHAKE` | 0x8005 | Establish connection |
-| `SYNC` | 0x8009 | Request missing updates |
-| `RECOVERY` | 0x800D | Recovery voting/claims |
-| `COORDINATION` | 0x8011 | Invoice cosigning, quorum requests |
-
-## Nostr Transport
-
-For public broadcasting and discovery:
-
-| Kind | Purpose |
-|------|---------|
-| 9100 | Ledger updates (signed operations) |
-| 9101 | Ledger requests (deposit_open, etc.) |
-| 9102 | Ledger responses |
-| 9103 | Disputes (quorum member only) |
-| 9104 | Recovery agreement |
-| 39100 | Ledger advertisement (replaceable) |
-
-### Ledger Advertisement
-
-Operators publish terms for wallet discovery:
-
-```json
-{
-  "ledger_id": "abc123...",
-  "operator_name": "Alice's Node",
-  "annual_fee_bps": 100,
-  "min_fee_sats": 1000,
-  "fee_period_blocks": 2016,
-  "max_deposit_sats": 10000000,
-  "quorum_size": 3
-}
-```
-
-### Request/Response Flow
-
-1. Wallet publishes `KIND_LEDGER_REQUEST` with action and params
-2. Operator watches for requests on their ledger
-3. Operator processes request and applies operation
-4. Operator publishes `KIND_LEDGER_RESPONSE` with result
-
-## Fee Structure
-
-Deposits incur maintenance fees:
-
-```rust
-FeeStructure {
-    annualized_msats: u64,    // Fixed annual fee (satoshis)
-    annualized_bps: u16,      // Percentage (basis points)
-    frequency_blocks: u32,    // Collection frequency
-}
-```
-
-### Calculation
-
-```
-elapsed_blocks = current_block - last_fee_assessment
-fixed_portion = (annualized_msats * elapsed_blocks) / BLOCKS_PER_YEAR
-percentage_portion = (balance * annualized_bps * elapsed_blocks) / (BLOCKS_PER_YEAR * 10000)
-total_fee = fixed_portion + percentage_portion
-```
-
-Where `BLOCKS_PER_YEAR = 52560`.
-
-### Validation
-
-Proposed fees must meet operator minimums:
-- `annualized_bps >= min_annual_bps`
-- `fixed_per_period >= min_fixed_per_period`
-
-Deposits with insufficient fees are rejected.
-
-## Deposit Funding
-
-### On-Chain Flow
-
-1. Operator creates `DepositOffer` with funding address
-2. User sends Bitcoin to funding address
-3. Operator detects confirmed transaction
-4. Operator broadcasts `OnchainCredit` operation
-5. Deposit balance increases
-
-### Deposit Offer
-
-```rust
-DepositOffer {
-    operator_id: PublicKey,
-    ledger_id: String,
-    deposit_pubkey: PublicKey,
-    funding_address: String,
-    max_amount_sats: u64,
-    min_amount_sats: u64,
-    deadline_block: u32,
-    fees: Option<FeeStructure>,
-    operator_signature: [u8; 64],
-}
-```
-
-The operator commits to crediting the deposit if funds arrive before the deadline.
-
-## Collateral Model
-
-### 100% + 100% Backing
-
-- **Reserves**: 100% of deposits backed by operator's on-chain UTXO
-- **Collateral**: 100% additional backing from quorum members
-
-### Attestation Flow
-
-1. Partner commits collateral on their own ledger
-2. Partner signs `CollateralAttestation` proving the commitment
-3. Operator records attestation in their ledger
-4. Attestations refresh periodically (every 144 blocks)
-
-### Collateral Lock
-
-Depositors can lock collateral backing:
-```rust
-CollateralLock {
-    deposit_pubkey: PublicKey,
-    amount: u64,
-    lock_until_block: u32,
-    operator_id: PublicKey,  // Operator being backed
-    deposit_holder_signature: [u8; 64],
-}
-```
-
-Ratchet semantics: can only increase amount and duration.
-
-## Dispute Resolution
-
-### States
-
-| State | Description |
+| Event | Consequence |
 |-------|-------------|
-| `Normal` | Regular operation |
-| `Disputed` | Quorum disbanded, limited operations |
-| `Armed` | Candidates locked for lottery |
-| `Tombstoned` | Branch terminated |
-
-### Flow
-
-1. **Detection**: Quorum member detects invalid operation
-2. **Dispute**: Publishes `DisputeEnter` → state becomes `Disputed`
-3. **Arming**: Candidates publish `DisputeArmed` with commitment hash
-4. **Selection**: After 6 blocks, entropy block determines winner
-5. **Claim**: Winner proves on-chain spend with `DisputeAcquire`
-6. **Yield**: Losers publish `DisputeYield` → branch `Tombstoned`
-
-### Entropy Selection
-
-Winner selected by:
-```
-candidates = sorted(armed_candidates)
-entropy = SHA256(entropy_block_hash || candidates)
-winner_index = entropy % len(candidates)
-```
-
-The entropy block must be at least 6 blocks after the latest `DisputeArmed`.
+| Fee collection | Operator loses revenue; members may decline to co-sign |
+| Co-sign timeliness | Unresponsive members excluded from next quorum |
+| Evidence retention | Wallet cannot prove fraud without evidence |
 
 ## Constants
 
 | Constant | Value | Purpose |
 |----------|-------|---------|
+| `BLOCKS_PER_YEAR` | 52560 | Fee calculation |
 | `MIN_RESERVES_SATS` | 660 | Economic spendability |
 | `MAX_RESERVES_SATS` | 10 BTC | Sanity limit |
-| `BLOCKS_PER_YEAR` | 52560 | Fee calculation |
-| `COLLATERAL_PERIOD` | 144 blocks | Attestation frequency |
-| `EMERGENCY_TIMEOUT` | 144 blocks | Unilateral spend delay |
+
+### Per-Quorum Parameters
+
+| Parameter | Suggested Default | Purpose |
+|-----------|-------------------|---------|
+| `dispute_response_blocks` | 144 (~1 day) | Member must respond to fraud evidence |
+| `dispute_arm_blocks` | 144 (~1 day) | Window to arm for lottery after dispute |
+| `service_response_blocks` | 72 (~12 hours) | Unprocessed request becomes provable censorship |
+| `max_transfer_timeout_blocks` | 1008 (~1 week) | Maximum transfer lock duration |
 
 ## Security Model
 
-### Cryptographic Guarantees
+### Economic Deterrence
 
-- **Hash chain**: Tamper-evident operation history
-- **Signatures**: Every operation signed by operator
-- **Taproot**: Multi-sig reserves with tiered timeouts
+Quorum members are incentivized predators. They earn basis points on co-signing fees during normal operation, but stand to confiscate the operator's entire collateral deposit on their ledger if the operator misbehaves. This asymmetry -- steady small income versus a one-time windfall worth orders of magnitude more -- ensures active monitoring without protocol-level enforcement.
 
 ### Trust Assumptions
 
 - Operator controls reserves honestly (or quorum disputes)
-- Quorum members monitor and attest honestly
-- Bitcoin blockchain provides finality
+- Quorum members monitor and attest honestly (or face collateral confiscation on their own ledgers)
+- Bitcoin blockchain provides finality and entropy
+- The only failure mode is unanimous quorum collusion, which the collateral web makes more expensive than the value at risk
 
-### Dispute Protection
+### Lightning Trust Boundary
 
-If operator misbehaves:
-1. Any quorum member can initiate dispute
-2. Entropy-based lottery selects new custodian
-3. New custodian must prove on-chain control
-4. Depositors' funds protected by collateral backing
+Lightning invoice fraud is not autonomously provable -- the operator's lightning node is a trust boundary the protocol cannot fully bridge. However, any payer might provide the preimage to the wallet, and one confirmed theft triggers dispute, reserves seizure, and collateral confiscation. The upside of stealing a single payment is bounded; the downside is existential.
 
-## Example Flows
+## DEP Index
 
-### Open Deposit and Fund
-
-```
-1. Wallet → Operator: deposit_open request
-2. Operator: Creates DepositOpen operation, signs, broadcasts
-3. Operator → Wallet: Response with deposit_pubkey
-4. Operator: Creates DepositOffer with funding_address
-5. Wallet: Sends BTC to funding_address
-6. Operator: Detects confirmed TX
-7. Operator: Creates OnchainCredit operation
-8. Result: Deposit has balance, fees structure set
-```
-
-### Collect Fees
-
-```
-1. Node: Checks current_block vs last_fee_assessment
-2. Node: Calculates fee due based on FeeStructure
-3. Node: Creates FeeCollect operation if fee > 0
-4. Node: Signs and broadcasts operation
-5. Result: Deposit balance reduced, last_fee_assessment updated
-```
-
-### Initiate Dispute
-
-```
-1. Quorum member: Detects invalid operation
-2. Quorum member: Publishes DisputeEnter on Nostr
-3. Ledger: Transitions to DISPUTED state
-4. Candidates: Publish DisputeArmed with commitments
-5. Ledger: Transitions to ARMED state
-6. Wait: 6+ blocks for entropy
-7. Winner: Spends reserves, publishes DisputeAcquire
-8. Losers: Publish DisputeYield
-9. Result: New custodian controls ledger
-```
+| DEP | Title |
+|-----|-------|
+| [DEP-01](DEP-01.md) | DEP Purpose and Guidelines |
+| [DEP-02](DEP-02.md) | Ledger State Model |
+| [DEP-03](DEP-03.md) | On-Chain Transactions |
+| [DEP-04](DEP-04.md) | Peer Messaging |
+| [DEP-05](DEP-05.md) | Quorum and Collateral |
+| [DEP-06](DEP-06.md) | Fraud Proofs and Recovery |
+| [DEP-07](DEP-07.md) | Fee Schedules |
+| [DEP-08](DEP-08.md) | Deposits |
+| [DEP-09](DEP-09.md) | Transfers |
+| [DEP-10](DEP-10.md) | Payment Channels |
+| [DEP-11](DEP-11.md) | Time Obligations |
+| [DEP-12](DEP-12.md) | Delivery Escalation |
+| [DEP-13](DEP-13.md) | Couriers |
