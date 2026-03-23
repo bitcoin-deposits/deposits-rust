@@ -1175,6 +1175,37 @@ impl NostrTransport {
         Ok(event_id)
     }
 
+    /// Send a request addressed to a courier (Kind 20101 with #p tag)
+    pub async fn send_agent_request(
+        &self,
+        agent_pubkey: &str,
+        action: &str,
+        params: serde_json::Value,
+    ) -> Result<String, Error> {
+        let content = serde_json::to_string(&params)
+            .map_err(|e| Error::Serialization(format!("Failed to serialize params: {}", e)))?;
+
+        let event = EventBuilder::new(Kind::Custom(KIND_LEDGER_REQUEST), &content)
+            .tag(Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::P)),
+                [agent_pubkey],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("action"),
+                [action],
+            ))
+            .sign_with_keys(&self.keys)
+            .map_err(|e| Error::Nostr(format!("Failed to sign event: {}", e)))?;
+
+        let event_id = event.id.to_hex();
+
+        self.send_event_with_timeout(event)
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to send request: {}", e)))?;
+
+        Ok(event_id)
+    }
+
     /// Send a ledger response (reply to a request)
     pub async fn send_ledger_response(
         &self,

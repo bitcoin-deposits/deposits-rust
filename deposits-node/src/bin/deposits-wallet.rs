@@ -158,6 +158,8 @@ fn print_usage(program: &str) {
     eprintln!("  withdraw <alias> <amt>      Withdraw from a deposit (on-chain)");
     eprintln!("  transfer <alias> <amt>      Lock funds for conditional transfer (HTLC)");
     eprintln!("  transfer_complete <id>      Complete a transfer with preimage");
+    eprintln!("  route <from> <to> <amt>     Send across ledgers via a courier");
+    eprintln!("  spread <amt> [--count N]    Open deposits across N operators");
     eprintln!("  make_invoice <alias> <amt>  Create Lightning invoice for deposit");
     eprintln!("  pay_invoice <alias> <bolt11> Pay Lightning invoice from deposit");
     eprintln!("  history <alias>             Show transaction history");
@@ -328,6 +330,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "withdraw" => withdraw(&args[2..]).await,
         "transfer" => transfer_lock(&args[2..]).await,
         "transfer_complete" => transfer_complete(&args[2..]).await,
+        "route" => route_transfer(&args[2..]).await,
+        "spread" => spread_deposits(&args[2..]).await,
         "batch" => batch_mode(&args[2..]).await,
         "make_invoice" => make_invoice(&args[2..]).await,
         "pay_invoice" => pay_invoice(&args[2..]).await,
@@ -1999,6 +2003,428 @@ async fn transfer_complete(args: &[String]) -> Result<(), Box<dyn std::error::Er
         }
         Err(e) => Err(format!("Timeout waiting for operator response: {}", e).into())
     }
+}
+
+/// Route a transfer across ledgers via a courier (DEP-13)
+///
+/// Usage: deposits-wallet route <from-alias> <to-alias> <amount_sats> --relay <url> [--relay <url>...]
+async fn route_transfer(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use bitcoin::secp256k1::rand::rngs::OsRng;
+    use bitcoin::secp256k1::rand::RngCore;
+    use deposits_core::types::compute_deposit_id;
+    use deposits_core::signature_utils::{transfer_lock_signing_message, compute_transfer_id};
+
+    let mut from_alias: Option<String> = None;
+    let mut to_alias: Option<String> = None;
+    let mut amount_sats: Option<u64> = None;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            s if s.starts_with("--") => {
+                config_args.push(args[i].clone());
+                if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                    config_args.push(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            _ => {
+                if from_alias.is_none() { from_alias = Some(args[i].clone()); }
+                else if to_alias.is_none() { to_alias = Some(args[i].clone()); }
+                else if amount_sats.is_none() { amount_sats = Some(args[i].parse()?); }
+            }
+        }
+        i += 1;
+    }
+
+    let from_alias = from_alias.ok_or("Usage: deposits-wallet route <from> <to> <amount_sats> --relay <url>")?;
+    let to_alias = to_alias.ok_or("Missing destination alias")?;
+    let amount_sats = amount_sats.ok_or("Missing amount")?;
+    let config = parse_config(&config_args)?;
+
+    if config.relays.is_empty() {
+        return Err("No relay specified. Use --relay <url>".into());
+    }
+
+    // Load deposits
+    let deposits_file = config.data_dir.join("deposits.json");
+    if !deposits_file.exists() {
+        return Err("No deposits found. Use 'open' to create deposits first.".into());
+    }
+    let data = std::fs::read_to_string(&deposits_file)?;
+    let deposits: Vec<serde_json::Value> = serde_json::from_str(&data)?;
+
+    let from_dep = deposits.iter()
+        .find(|d| d.get("alias").and_then(|v| v.as_str()) == Some(&from_alias))
+        .ok_or_else(|| format!("No deposit '{}'. Use 'list' to see deposits.", from_alias))?;
+    let to_dep = deposits.iter()
+        .find(|d| d.get("alias").and_then(|v| v.as_str()) == Some(&to_alias))
+        .ok_or_else(|| format!("No deposit '{}'. Use 'list' to see deposits.", to_alias))?;
+
+    let from_ledger = from_dep["ledger_id"].as_str().ok_or("Missing ledger_id on source")?;
+    let to_ledger = to_dep["ledger_id"].as_str().ok_or("Missing ledger_id on dest")?;
+
+    if from_ledger == to_ledger {
+        return Err("Source and destination are on the same ledger. Use 'transfer' for same-ledger transfers.".into());
+    }
+
+    let from_key_index = from_dep.get("key_index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let to_key_index = to_dep.get("key_index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+
+    let secp = bitcoin::secp256k1::Secp256k1::new();
+    let from_secret = derive_secret_key_at_index(&config.seed, config.network, from_key_index)?;
+    let from_keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &from_secret);
+    let from_pubkey = from_keypair.public_key();
+    let from_descriptor = format!("pk({})", hex::encode(from_pubkey.serialize()));
+    let from_deposit_id = compute_deposit_id(&from_descriptor);
+
+    let to_secret = derive_secret_key_at_index(&config.seed, config.network, to_key_index)?;
+    let to_pubkey = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &to_secret).public_key();
+    let to_descriptor = format!("pk({})", hex::encode(to_pubkey.serialize()));
+    let to_deposit_id = compute_deposit_id(&to_descriptor);
+    let to_deposit_id_hex = hex::encode(to_deposit_id);
+
+    let amount_msats = amount_sats * 1000;
+
+    // Connect to relays
+    let nostr_key = derive_secret_key(&config.seed, config.network)?;
+    let mut transport = NostrTransportBuilder::new(nostr_key);
+    for r in &config.relays {
+        transport = transport.relay(r);
+    }
+    let transport = transport.build().await?;
+
+    let network_str = match config.network {
+        bitcoin::Network::Bitcoin => "bitcoin",
+        bitcoin::Network::Testnet => "testnet",
+        bitcoin::Network::Signet => "signet",
+        bitcoin::Network::Regtest => "regtest",
+        _ => "unknown",
+    };
+
+    // Step 1: Find a courier that bridges both ledgers
+    println!("Finding courier...");
+    let agent_ads = transport.fetch_agent_advertisements(network_str).await?;
+    let courier = agent_ads.iter().find(|ad| {
+        ad.ledgers.iter().any(|l| l.ledger_id == from_ledger) &&
+        ad.ledgers.iter().any(|l| l.ledger_id == to_ledger)
+    }).ok_or_else(|| format!(
+        "No courier bridges {} and {}. Run 'discover' to check available couriers.",
+        &from_ledger[..8], &to_ledger[..8]
+    ))?;
+
+    let src_entry = courier.ledgers.iter().find(|l| l.ledger_id == from_ledger).unwrap();
+    let dst_entry = courier.ledgers.iter().find(|l| l.ledger_id == to_ledger).unwrap();
+    let fee_in = src_entry.fee_in_fixed_msats + amount_msats * src_entry.fee_in_rate_bps / 10000;
+    let fee_out = dst_entry.fee_out_fixed_msats + amount_msats * dst_entry.fee_out_rate_bps / 10000;
+    let route_fee = fee_in + fee_out;
+    let forward = amount_msats.saturating_sub(route_fee);
+
+    println!("  Courier: {}...", &courier.agent_pubkey[..16]);
+    println!("  Route fee: {} msats (in={}, out={})", route_fee, fee_in, fee_out);
+    println!("  Forward:  {} msats ({} sats)", forward, forward / 1000);
+    println!();
+
+    // Step 2: Generate preimage and request route
+    println!("Requesting route...");
+    let mut rng = OsRng;
+    let mut preimage = [0u8; 32];
+    rng.fill_bytes(&mut preimage);
+    let hash: [u8; 32] = {
+        use bitcoin::hashes::{sha256, Hash, HashEngine};
+        let mut engine = sha256::Hash::engine();
+        engine.input(&preimage);
+        sha256::Hash::from_engine(engine).to_byte_array()
+    };
+    let hash_hex = hex::encode(hash);
+
+    let route_req = serde_json::json!({
+        "source_ledger": from_ledger,
+        "dest_ledger": to_ledger,
+        "dest_deposit_id": to_deposit_id_hex,
+        "amount_msats": amount_msats,
+        "hash": hash_hex,
+    });
+
+    let req_id = transport.send_agent_request(&courier.agent_pubkey, "request_route", route_req).await?;
+    let route_resp = transport.wait_for_response(&req_id, 15000).await?;
+    if !route_resp.success {
+        return Err(format!("Courier rejected route: {}", route_resp.error.unwrap_or_default()).into());
+    }
+
+    let result = route_resp.result.ok_or("Missing result in route response")?;
+    let courier_deposit_id_hex = result["courier_deposit_id"].as_str()
+        .ok_or("Missing courier_deposit_id in response")?;
+    let courier_deposit_id = hex::decode(courier_deposit_id_hex)?;
+    if courier_deposit_id.len() != 16 {
+        return Err("Invalid courier_deposit_id length".into());
+    }
+    let mut dest_id = [0u8; 16];
+    dest_id.copy_from_slice(&courier_deposit_id);
+
+    println!("  Courier deposit: {}", courier_deposit_id_hex);
+    println!();
+
+    // Step 3: Lock transfer to courier
+    println!("Locking transfer to courier...");
+
+    // Get block height from a balance query
+    transport.set_response_ledger_filter(vec![from_ledger.to_string(), to_ledger.to_string()]);
+    let balance_req = serde_json::json!({
+        "deposit_pubkey": from_dep["deposit_pubkey"].as_str().unwrap_or(""),
+    });
+    let bal_req_id = transport.send_ledger_request(from_ledger, "balance_query", balance_req).await?;
+    let bal_resp = transport.wait_for_response(&bal_req_id, 10000).await?;
+    let block_height = bal_resp.result.as_ref()
+        .and_then(|r| r["block_height"].as_u64())
+        .unwrap_or(0) as u32;
+    if block_height == 0 {
+        return Err("Could not determine block height".into());
+    }
+    let timeout = block_height + 288;
+
+    // Get operator fee from advertisement
+    let op_ads = transport.fetch_ledger_advertisements(network_str).await?;
+    let op_ad = op_ads.iter().find(|a| a.ledger_id == from_ledger);
+    let operator_fee = op_ad.map(|a| {
+        a.transfer_fee_fixed_msats + amount_msats * a.transfer_fee_rate_bps as u64 / 10000
+    }).unwrap_or(2000);
+
+    let completion_script = format!("sha256({})", hash_hex);
+    let mut nonce = [0u8; 32];
+    rng.fill_bytes(&mut nonce);
+
+    let msg_hash = transfer_lock_signing_message(
+        &nonce, &from_deposit_id, &dest_id,
+        amount_msats, operator_fee, &completion_script, timeout,
+    );
+    let transfer_id = compute_transfer_id(&msg_hash);
+    let msg = bitcoin::secp256k1::Message::from_digest(msg_hash);
+    let signature = secp.sign_schnorr(&msg, &from_keypair);
+
+    let lock_params = serde_json::json!({
+        "nonce": hex::encode(nonce),
+        "source_deposit_id": hex::encode(from_deposit_id),
+        "destination_deposit_id": courier_deposit_id_hex,
+        "amount": amount_msats,
+        "fee": operator_fee,
+        "completion_script": completion_script,
+        "timeout_height": timeout,
+        "transfer_id": hex::encode(transfer_id),
+        "signature": hex::encode(signature.serialize()),
+    });
+
+    let lock_req_id = transport.send_ledger_request(from_ledger, "transfer_lock", lock_params).await?;
+    let lock_resp = transport.wait_for_response(&lock_req_id, 30000).await?;
+    if !lock_resp.success {
+        return Err(format!("Lock failed: {}", lock_resp.error.unwrap_or_default()).into());
+    }
+    println!("  Locked! Transfer ID: {}...", hex::encode(&transfer_id[..8]));
+    println!();
+
+    // Step 4: Wait for courier to forward on destination ledger
+    println!("Waiting for courier to forward...");
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(90);
+    let mut outbound_transfer_id = None;
+
+    while tokio::time::Instant::now() < deadline {
+        // Fetch recent TransferLock updates on the destination ledger
+        let updates = transport.fetch_ledger_updates(to_ledger).await?;
+        for update in &updates {
+            use deposits_core::{LedgerOperation, TlvDecode};
+            if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+                if let LedgerOperation::TransferLock {
+                    destination_deposit_id,
+                    completion_script: ref script,
+                    transfer_id: ref tid,
+                    ..
+                } = op {
+                    if destination_deposit_id == to_deposit_id
+                        && script.contains(&hash_hex)
+                    {
+                        outbound_transfer_id = Some(*tid);
+                        break;
+                    }
+                }
+            }
+        }
+        if outbound_transfer_id.is_some() { break; }
+        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+        eprint!(".");
+    }
+    eprintln!();
+
+    let outbound_tid = outbound_transfer_id
+        .ok_or("Courier did not forward within 90 seconds")?;
+    println!("  Courier forwarded! Outbound ID: {}...", hex::encode(&outbound_tid[..8]));
+    println!();
+
+    // Step 5: Complete by revealing preimage
+    println!("Revealing preimage...");
+    let complete_params = serde_json::json!({
+        "transfer_id": hex::encode(outbound_tid),
+        "preimage": hex::encode(preimage),
+    });
+    let complete_req_id = transport.send_ledger_request(to_ledger, "transfer_complete", complete_params).await?;
+    let complete_resp = transport.wait_for_response(&complete_req_id, 15000).await?;
+    if !complete_resp.success {
+        return Err(format!("Complete failed: {}", complete_resp.error.unwrap_or_default()).into());
+    }
+
+    println!();
+    println!("Routed transfer complete!");
+    println!("  {} sats sent from {} to {} via courier", amount_sats, from_alias, to_alias);
+    println!("  Fee: {} msats ({} sats)", route_fee, route_fee / 1000);
+    Ok(())
+}
+
+/// Spread funds across multiple operators by opening deposits
+///
+/// Usage: deposits-wallet spread <amount_sats> [--count N] --relay <url> [--relay <url>...]
+async fn spread_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut amount_sats: Option<u64> = None;
+    let mut count: usize = 0; // 0 = all discovered operators
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--count" if i + 1 < args.len() => {
+                count = args[i + 1].parse()?;
+                i += 1;
+            }
+            s if s.starts_with("--") => {
+                config_args.push(args[i].clone());
+                if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                    config_args.push(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            _ => {
+                if amount_sats.is_none() { amount_sats = Some(args[i].parse()?); }
+            }
+        }
+        i += 1;
+    }
+
+    let total_sats = amount_sats.ok_or("Usage: deposits-wallet spread <amount_sats> [--count N] --relay <url>")?;
+    let config = parse_config(&config_args)?;
+
+    if config.relays.is_empty() {
+        return Err("No relay specified. Use --relay <url>".into());
+    }
+
+    let network_str = match config.network {
+        bitcoin::Network::Bitcoin => "bitcoin",
+        bitcoin::Network::Testnet => "testnet",
+        bitcoin::Network::Signet => "signet",
+        bitcoin::Network::Regtest => "regtest",
+        _ => "unknown",
+    };
+
+    // Discover operators
+    println!("Discovering operators...");
+    let nostr_key = derive_secret_key(&config.seed, config.network)?;
+    let mut transport = NostrTransportBuilder::new(nostr_key);
+    for r in &config.relays {
+        transport = transport.relay(r);
+    }
+    let transport = transport.build().await?;
+
+    let ads = transport.fetch_ledger_advertisements(network_str).await?;
+    if ads.is_empty() {
+        return Err("No operators found. Check relay connectivity.".into());
+    }
+
+    // Deduplicate by operator pubkey — one ledger per operator
+    let mut seen_operators = std::collections::HashSet::new();
+    let mut targets = Vec::new();
+    for ad in &ads {
+        if seen_operators.insert(ad.operator_pubkey.clone()) {
+            targets.push(ad);
+        }
+    }
+
+    if count > 0 && count < targets.len() {
+        targets.truncate(count);
+    }
+
+    let n = targets.len();
+    let per_deposit = total_sats / n as u64;
+    let remainder = total_sats % n as u64;
+
+    println!("  Found {} operators", n);
+    println!("  Spreading {} sats across {} deposits ({} sats each)", total_sats, n, per_deposit);
+    println!();
+
+    // Load existing deposits to avoid duplicates and generate aliases
+    let deposits_file = config.data_dir.join("deposits.json");
+    let existing: Vec<serde_json::Value> = if deposits_file.exists() {
+        serde_json::from_str(&std::fs::read_to_string(&deposits_file)?)?
+    } else {
+        Vec::new()
+    };
+
+    let existing_ledgers: std::collections::HashSet<String> = existing.iter()
+        .filter_map(|d| d.get("ledger_id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .collect();
+
+    let mut opened = 0;
+    let mut skipped = 0;
+
+    for (idx, ad) in targets.iter().enumerate() {
+        let name = ad.operator_name.as_deref().unwrap_or("unknown");
+        let ledger_id = &ad.ledger_id;
+
+        if existing_ledgers.contains(ledger_id) {
+            println!("  {} ({}...): already have deposit, skipping", name, &ledger_id[..8]);
+            skipped += 1;
+            continue;
+        }
+
+        let deposit_amount = if idx == 0 { per_deposit + remainder } else { per_deposit };
+        let alias = format!("{}-{}", name.to_lowercase(), &ledger_id[..4]);
+
+        println!("  {} ({}...): opening {} sats as '{}'...", name, &ledger_id[..8], deposit_amount, alias);
+
+        // Build open command args
+        let mut open_args = vec![
+            ledger_id.clone(),
+            deposit_amount.to_string(),
+            "--alias".to_string(),
+            alias,
+            "--skip-cosign-verify".to_string(),
+        ];
+        for r in &config.relays {
+            open_args.push("--relay".to_string());
+            open_args.push(r.clone());
+        }
+        open_args.push("--seed".to_string());
+        open_args.push(hex::encode(config.seed));
+        open_args.push("--network".to_string());
+        open_args.push(network_str.to_string());
+        open_args.push("--data-dir".to_string());
+        open_args.push(config.data_dir.to_string_lossy().to_string());
+
+        match open_new_deposit(&open_args).await {
+            Ok(()) => {
+                opened += 1;
+            }
+            Err(e) => {
+                eprintln!("    Failed: {}", e);
+            }
+        }
+    }
+
+    println!();
+    println!("Spread complete: {} opened, {} skipped (existing)", opened, skipped);
+    if opened > 0 {
+        println!();
+        println!("Fund the deposits with on-chain transactions or 'offer' commands.");
+        println!("Use 'list' to see deposit addresses and 'sync' to update balances.");
+    }
+    Ok(())
 }
 
 /// Create a Lightning invoice for a deposit
