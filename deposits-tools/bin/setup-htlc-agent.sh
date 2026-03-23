@@ -19,6 +19,7 @@ AGENT_DATA_DIR="$DATA_ROOT/htlc-agent"
 AGENT_SEED="48544c43416765006e740000000000000000000000000000000000000000000a"
 AGENT_DEPOSIT_SATS=500000  # 0.005 BTC per deposit
 KEEP_DATA=false
+FUNDING_MODE=""  # auto-detect: "credit" (via operator daemon) or "onchain" (faucet)
 OPERATORS="${OPERATORS:-alice bob charlie diana}"
 
 while [[ $# -gt 0 ]]; do
@@ -35,6 +36,10 @@ while [[ $# -gt 0 ]]; do
             AGENT_SEED="$2"
             shift 2
             ;;
+        --funding)
+            FUNDING_MODE="$2"
+            shift 2
+            ;;
         --help|-h)
             echo "Usage: $0 [OPTIONS]"
             echo ""
@@ -42,6 +47,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --keep-data, -k          Reuse existing agent data, just restart"
             echo "  --deposit-sats <sats>    Deposit size per ledger (default: 500000)"
             echo "  --seed <hex>             Agent seed (default: built-in)"
+            echo "  --funding <mode>         Funding mode: credit (daemon) or onchain (faucet). Default: auto-detect"
             echo "  --help, -h               Show this help message"
             exit 0
             ;;
@@ -52,8 +58,22 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Auto-detect funding mode if not specified
+if [ -z "$FUNDING_MODE" ]; then
+    # Try to reach an operator daemon via run_node_cmd; if that works, use credit mode
+    if run_node_cmd "alice" ledger list >/dev/null 2>&1; then
+        FUNDING_MODE="credit"
+    elif bitcoin_cli getblockchaininfo >/dev/null 2>&1; then
+        FUNDING_MODE="onchain"
+    else
+        log_error "Cannot auto-detect funding mode: neither operator daemons nor bitcoind reachable"
+        log_error "Use --funding credit or --funding onchain"
+        exit 1
+    fi
+fi
+
 log_info "=========================================="
-log_info "  HTLC Agent Setup"
+log_info "  HTLC Agent Setup (funding: $FUNDING_MODE)"
 log_info "=========================================="
 echo ""
 
@@ -187,18 +207,20 @@ print(sum(1 for d in data if d.get('ledger_id','').startswith(lid[:16])))
         fi
     done
 
-    # ── Credit deposits via operators ──────────────────────────────────────
+    # ── Fund deposits ───────────────────────────────────────────────────────
 
     log_info ""
-    log_info "=== Crediting agent deposits ($AGENT_DEPOSIT_SATS sats each) ==="
+    log_info "=== Funding agent deposits ($AGENT_DEPOSIT_SATS sats each, mode=$FUNDING_MODE) ==="
 
-    credits_ok=0
-    for i in "${!LEDGER_IDS[@]}"; do
-        lid="${LEDGER_IDS[$i]}"
-        operator="${LEDGER_OPERATORS[$i]}"
+    funds_ok=0
 
-        # Get deposit_pubkey for this ledger from agent's deposits.json
-        deposit_pubkey=$(python3 -c "
+    if [ "$FUNDING_MODE" = "credit" ]; then
+        # Credit via operator daemon (deposit credit command)
+        for i in "${!LEDGER_IDS[@]}"; do
+            lid="${LEDGER_IDS[$i]}"
+            operator="${LEDGER_OPERATORS[$i]}"
+
+            deposit_pubkey=$(python3 -c "
 import json, sys
 data = json.load(open('$AGENT_DATA_DIR/deposits.json'))
 lid = sys.argv[1]
@@ -208,36 +230,89 @@ for d in data:
         break
 " "$lid" 2>/dev/null || echo "")
 
-        if [ -z "$deposit_pubkey" ]; then
-            log_warn "  No deposit_pubkey found for ${lid:0:16}..., skipping credit"
-            continue
+            if [ -z "$deposit_pubkey" ]; then
+                log_warn "  No deposit_pubkey found for ${lid:0:16}..., skipping"
+                continue
+            fi
+
+            log_info "  Crediting $AGENT_DEPOSIT_MSATS msats on $operator..."
+            credit_output=$(run_node_cmd "$operator" deposit credit \
+                "$lid" "$deposit_pubkey" "$AGENT_DEPOSIT_MSATS" "agent-setup-$(date +%s)" 2>&1 || true)
+
+            if echo "$credit_output" | grep -q "credited\|New balance"; then
+                new_bal=$(echo "$credit_output" | grep -oE '[0-9]+ msats' | tail -1)
+                log_success "  $operator: credited ($new_bal)"
+                funds_ok=$((funds_ok + 1))
+            else
+                log_warn "  $operator: credit may have failed"
+                echo "    $credit_output" | head -3
+            fi
+        done
+
+    elif [ "$FUNDING_MODE" = "onchain" ]; then
+        # Fund via on-chain faucet (send BTC to deposit funding address, mine, wait for auto-complete)
+        AGENT_DEPOSIT_BTC=$(python3 -c "print($AGENT_DEPOSIT_SATS / 100_000_000)")
+
+        for i in "${!LEDGER_IDS[@]}"; do
+            lid="${LEDGER_IDS[$i]}"
+            operator="${LEDGER_OPERATORS[$i]}"
+
+            funding_address=$(python3 -c "
+import json, sys
+data = json.load(open('$AGENT_DATA_DIR/deposits.json'))
+lid = sys.argv[1]
+for d in data:
+    if d.get('ledger_id','').startswith(lid[:16]):
+        print(d.get('funding_address',''))
+        break
+" "$lid" 2>/dev/null || echo "")
+
+            if [ -z "$funding_address" ]; then
+                log_warn "  No funding_address for ${lid:0:16}..., skipping"
+                continue
+            fi
+
+            log_info "  Sending $AGENT_DEPOSIT_BTC BTC to $operator ($funding_address)..."
+            txid=$(bitcoin_cli -rpcwallet=faucet sendtoaddress "$funding_address" "$AGENT_DEPOSIT_BTC" 2>/dev/null || echo "")
+            if [ -n "$txid" ]; then
+                log_success "  $operator: funded (txid ${txid:0:16}...)"
+                funds_ok=$((funds_ok + 1))
+            else
+                log_warn "  $operator: sendtoaddress failed"
+            fi
+        done
+
+        # Mine a block so operators see the confirmations
+        if [ "$funds_ok" -gt 0 ]; then
+            log_info "Mining block to confirm funding transactions..."
+            bitcoin_cli -rpcwallet=faucet -generate 1 >/dev/null 2>&1 || true
+            # Wait for operators to auto-complete the deposits
+            log_info "Waiting for operators to process deposits (15s)..."
+            sleep 15
         fi
+    fi
 
-        log_info "  Crediting $AGENT_DEPOSIT_MSATS msats on $operator..."
-        credit_output=$(run_node_cmd "$operator" deposit credit \
-            "$lid" "$deposit_pubkey" "$AGENT_DEPOSIT_MSATS" "agent-setup-$(date +%s)" 2>&1 || true)
+    if [ "$funds_ok" -ge "${#LEDGER_IDS[@]}" ]; then
+        log_success "All $funds_ok deposits funded"
+    else
+        log_warn "Only $funds_ok/${#LEDGER_IDS[@]} deposits funded"
+    fi
 
-        if echo "$credit_output" | grep -q "credited\|New balance"; then
-            new_bal=$(echo "$credit_output" | grep -oE '[0-9]+ msats' | tail -1)
-            log_success "  $operator: credited ($new_bal)"
-            credits_ok=$((credits_ok + 1))
-        else
-            log_warn "  $operator: credit may have failed"
-            echo "    $credit_output" | head -3
+    # Sync agent wallet balances from operators
+    log_info "Syncing agent wallet balances..."
+
+    # Build relay list from discovered operator relays
+    SYNC_RELAYS=""
+    for i in "${!LEDGER_RELAYS[@]}"; do
+        relay="${LEDGER_RELAYS[$i]}"
+        if ! echo "$SYNC_RELAYS" | grep -q "$relay"; then
+            SYNC_RELAYS="$SYNC_RELAYS --relay $relay"
         fi
     done
 
-    if [ "$credits_ok" -ge "${#LEDGER_IDS[@]}" ]; then
-        log_success "All $credits_ok deposits credited"
-    else
-        log_warn "Only $credits_ok/${#LEDGER_IDS[@]} deposits credited"
-    fi
-
-    # Update agent wallet balances
-    log_info "Syncing agent wallet balances..."
     RUST_LOG=error "$DEPOSITS_WALLET" sync \
         --seed "$AGENT_SEED" --network regtest \
-        --relay "$RELAY_ALICE" --relay "$RELAY_BOB" --relay "$RELAY_CHARLIE" --relay "$RELAY_DIANA" \
+        $SYNC_RELAYS \
         --data-dir "$AGENT_DATA_DIR" 2>&1 || true
 fi
 
