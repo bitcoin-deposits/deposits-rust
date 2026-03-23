@@ -13,115 +13,12 @@
 #   curl http://localhost:3102/tx/<txid>
 #
 # Monitoring:
-#   Prometheus: http://localhost:9090
-#   Grafana:    http://localhost:3010 (admin/admin)
+#   Prometheus: http://localhost:9190
+#   Grafana:    http://localhost:3110
 
 services:
-  # Per-operator relays — each handles only that operator's inter-operator traffic
-  # (cosign requests/responses). This distributes the ~1400 events/sec across N relays.
-  relay-alice:
-    image: strfry-performance:latest
-    container_name: relay-alice
-    command: ["relay", "--config", "/app/strfry.conf"]
-    ports:
-      - "7801:7777"
-    volumes:
-      - ./data/relays/alice:/app/strfry-db
-      - ../strfry-performance/strfry.conf:/app/strfry.conf:ro
-      - ./permissive-write-policy.py:/app/write-policy.py:ro
-    networks:
-      - regtest
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:7777"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-
-  relay-bob:
-    image: strfry-performance:latest
-    container_name: relay-bob
-    command: ["relay", "--config", "/app/strfry.conf"]
-    ports:
-      - "7802:7777"
-    volumes:
-      - ./data/relays/bob:/app/strfry-db
-      - ../strfry-performance/strfry.conf:/app/strfry.conf:ro
-      - ./permissive-write-policy.py:/app/write-policy.py:ro
-    networks:
-      - regtest
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:7777"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-
-  relay-charlie:
-    image: strfry-performance:latest
-    container_name: relay-charlie
-    command: ["relay", "--config", "/app/strfry.conf"]
-    ports:
-      - "7803:7777"
-    volumes:
-      - ./data/relays/charlie:/app/strfry-db
-      - ../strfry-performance/strfry.conf:/app/strfry.conf:ro
-      - ./permissive-write-policy.py:/app/write-policy.py:ro
-    networks:
-      - regtest
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:7777"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-
-  relay-diana:
-    image: strfry-performance:latest
-    container_name: relay-diana
-    command: ["relay", "--config", "/app/strfry.conf"]
-    ports:
-      - "7804:7777"
-    volumes:
-      - ./data/relays/diana:/app/strfry-db
-      - ../strfry-performance/strfry.conf:/app/strfry.conf:ro
-      - ./permissive-write-policy.py:/app/write-policy.py:ro
-    networks:
-      - regtest
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:7777"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-
-  # Ledger relay — durable, persists non-ephemeral events (KIND 9100 updates, 9103 disputes).
-  # Drops ephemeral kinds 20000-29999. Streams from per-operator relays for backup.
-  relay-ledgers:
-    image: strfry-performance:latest
-    container_name: relay-ledgers
-    entrypoint: ["/bin/sh", "/app/slow-relay-entrypoint.sh"]
-    ports:
-      - "7779:7777"
-    volumes:
-      - ./data/relays/ledgers:/app/strfry-db
-      - ../strfry-performance/strfry-slow.conf:/app/strfry-slow.conf:ro
-      - ./drop-ephemeral-policy.sh:/app/drop-ephemeral-policy.sh:ro
-      - ./bin/slow-relay-entrypoint.sh:/app/slow-relay-entrypoint.sh:ro
-    environment:
-      - OPERATOR_RELAY_URLS=ws://relay-alice:7777 ws://relay-bob:7777 ws://relay-charlie:7777 ws://relay-diana:7777
-    depends_on:
-      relay-alice:
-        condition: service_healthy
-      relay-bob:
-        condition: service_healthy
-      relay-charlie:
-        condition: service_healthy
-      relay-diana:
-        condition: service_healthy
-    networks:
-      - regtest
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:7777"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
+  # Nostr relays run natively (not in Docker) — see _common.sh start_all_relays.
+  # Ports: alice=7801, bob=7802, charlie=7803, diana=7804, ledgers=7779.
 
   # Bitcoin Core regtest node
   bitcoin:
@@ -287,9 +184,9 @@ services:
   # Prometheus for metrics collection
   prometheus:
     image: prom/prometheus:latest
-    container_name: prometheus
+    container_name: deposits-prometheus
     ports:
-      - "9090:9090"
+      - "9190:9090"
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
@@ -304,9 +201,9 @@ services:
   # Grafana for metrics visualization
   grafana:
     image: grafana/grafana:latest
-    container_name: grafana
+    container_name: deposits-grafana
     ports:
-      - "3010:3000"
+      - "3110:3000"
     environment:
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin

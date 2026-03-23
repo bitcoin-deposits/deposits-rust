@@ -37,13 +37,151 @@ ELECTRS_HOST="localhost"
 ELECTRS_PORT="3102"
 ELECTRS_URL="http://$ELECTRS_HOST:$ELECTRS_PORT"
 
-# Relay URLs (host-mapped ports from docker-compose)
+# Relay URLs
 RELAY_ALICE="ws://localhost:7801"
 RELAY_BOB="ws://localhost:7802"
 RELAY_CHARLIE="ws://localhost:7803"
 RELAY_DIANA="ws://localhost:7804"
 RELAY_LEDGERS="ws://localhost:7779"
 ALL_RELAYS=("$RELAY_ALICE" "$RELAY_BOB" "$RELAY_CHARLIE" "$RELAY_DIANA")
+
+# Native strfry relay binary
+STRFRY_BIN="${STRFRY_BIN:-$SCRIPT_DIR/strfry}"
+
+# Get the port for a relay by name
+get_relay_port() {
+    local name=$1
+    case "$name" in
+        alice)   echo 7801 ;;
+        bob)     echo 7802 ;;
+        charlie) echo 7803 ;;
+        diana)   echo 7804 ;;
+        ledgers) echo 7779 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Generate a strfry config for a relay and write it to the relay data dir.
+# Usage: generate_relay_config <name>
+generate_relay_config() {
+    local name=$1
+    local port=$(get_relay_port "$name")
+    local db_dir="$DATA_ROOT/relays/$name"
+    local conf="$db_dir/strfry.conf"
+
+    mkdir -p "$db_dir"
+
+    # Base config from the fast relay template
+    local src_conf="$REPO_ROOT/strfry-performance/strfry.conf"
+    if [ "$name" = "ledgers" ]; then
+        src_conf="$REPO_ROOT/strfry-performance/strfry-slow.conf"
+    fi
+
+    # Copy and patch: db path, port, and write policy path
+    sed \
+        -e "s|^db = .*|db = \"$db_dir/\"|" \
+        -e "s|port = 7777|port = $port|" \
+        -e "s|plugin = \"/app/drop-ephemeral-policy.sh\"|plugin = \"$TOOLS_DIR/drop-ephemeral-policy.sh\"|" \
+        "$src_conf" > "$conf"
+}
+
+# Start a native strfry relay process.
+# Usage: start_relay <name>
+start_relay() {
+    local name=$1
+    local port=$(get_relay_port "$name")
+    local db_dir="$DATA_ROOT/relays/$name"
+    local conf="$db_dir/strfry.conf"
+    local pidfile="$db_dir/relay.pid"
+    local logfile="$db_dir/relay.log"
+
+    # Don't start if already running
+    if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+        log_info "Relay $name already running (pid $(cat "$pidfile"))"
+        return 0
+    fi
+
+    generate_relay_config "$name"
+
+    "$STRFRY_BIN" --config "$conf" relay >> "$logfile" 2>&1 &
+    local pid=$!
+    echo "$pid" > "$pidfile"
+    log_success "Started relay $name (pid $pid, port $port)"
+
+    # For the ledgers relay, also start stream processes from each fast relay
+    if [ "$name" = "ledgers" ]; then
+        # Wait for relay to be listening
+        local attempts=0
+        while ! curl -s "http://localhost:$port" >/dev/null 2>&1; do
+            sleep 1
+            attempts=$((attempts + 1))
+            if [ $attempts -ge 15 ]; then
+                log_error "Ledgers relay not ready after 15s"
+                return 1
+            fi
+        done
+        # Stream from each fast relay
+        for op in alice bob charlie diana; do
+            local op_port=$(get_relay_port "$op")
+            "$STRFRY_BIN" --config "$conf" stream "ws://localhost:$op_port" --dir=down >> "$logfile" 2>&1 &
+            echo "$!" >> "$db_dir/stream.pids"
+        done
+        log_success "Started ledgers relay streams from all fast relays"
+    fi
+}
+
+# Stop a native strfry relay process.
+# Usage: stop_relay <name>
+stop_relay() {
+    local name=$1
+    local db_dir="$DATA_ROOT/relays/$name"
+    local pidfile="$db_dir/relay.pid"
+
+    # Kill stream processes first (ledgers relay)
+    if [ -f "$db_dir/stream.pids" ]; then
+        while read -r pid; do
+            kill "$pid" 2>/dev/null || true
+        done < "$db_dir/stream.pids"
+        rm -f "$db_dir/stream.pids"
+    fi
+
+    if [ -f "$pidfile" ]; then
+        local pid=$(cat "$pidfile")
+        if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+            local attempts=0
+            while kill -0 "$pid" 2>/dev/null && [ $attempts -lt 10 ]; do
+                sleep 0.5
+                attempts=$((attempts + 1))
+            done
+            if kill -0 "$pid" 2>/dev/null; then
+                kill -9 "$pid" 2>/dev/null || true
+            fi
+            log_info "Stopped relay $name (pid $pid)"
+        fi
+        rm -f "$pidfile"
+    fi
+
+    # Belt and suspenders
+    pkill -f "strfry.*--config.*relays/$name" 2>/dev/null || true
+}
+
+# Start all relays (fast + ledgers)
+start_all_relays() {
+    for name in alice bob charlie diana; do
+        start_relay "$name"
+    done
+    # Start ledgers after fast relays are up
+    start_relay ledgers
+}
+
+# Stop all relays
+stop_all_relays() {
+    stop_relay ledgers
+    for name in alice bob charlie diana; do
+        stop_relay "$name"
+    done
+}
 
 # Metrics ports (unique per node since all on localhost)
 get_node_metrics_port() {
@@ -211,7 +349,7 @@ wait_for_electrs() {
 wait_for_nostr() {
     log_info "Waiting for Nostr relays to be ready..."
     local max_attempts=30
-    local ports=(7801 7802 7803 7804)
+    local ports=(7801 7802 7803 7804 7779)
     for port in "${ports[@]}"; do
         local attempt=0
         while ! curl -s "http://localhost:$port" >/dev/null 2>&1; do
@@ -435,6 +573,17 @@ get_block_height() {
 show_status() {
     log_info "Infrastructure services:"
     $DC ps
+    echo ""
+    log_info "Relay processes:"
+    for name in alice bob charlie diana ledgers; do
+        local pidfile="$DATA_ROOT/relays/$name/relay.pid"
+        local port=$(get_relay_port "$name")
+        if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+            log_success "relay-$name running (pid $(cat "$pidfile"), port $port)"
+        else
+            log_warn "relay-$name not running"
+        fi
+    done
     echo ""
     log_info "Node processes:"
     for node in "${NODES[@]}"; do

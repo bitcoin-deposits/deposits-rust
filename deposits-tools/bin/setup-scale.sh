@@ -154,17 +154,18 @@ setup_infrastructure() {
     # Stop core node processes
     stop_all_nodes
 
-    # Reset relay containers
-    $DC stop relay-alice relay-bob relay-charlie relay-diana relay-ledgers >/dev/null 2>&1 || true
-    $DC rm -f relay-alice relay-bob relay-charlie relay-diana relay-ledgers >/dev/null 2>&1 || true
-    docker volume rm deposits-tools_relay_alice_data deposits-tools_relay_bob_data deposits-tools_relay_charlie_data deposits-tools_relay_diana_data deposits-tools_relay_ledgers_data >/dev/null 2>&1 || true
+    # Stop native relays
+    stop_all_relays
 
     # Clear core node data
     rm -rf "$DATA_ROOT"
 
     # Start core services
     log_info "Starting core services..."
-    $DC up -d bitcoin electrs relay-alice relay-bob relay-charlie relay-diana relay-ledgers
+    $DC up -d bitcoin electrs
+
+    # Start native relays
+    start_all_relays
 
     # Wait for services
     log_info "Waiting for services to be ready..."

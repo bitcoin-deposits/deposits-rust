@@ -102,19 +102,29 @@ responses) that don't need to be persisted.
 The wallet discovers which relay to use for each operator from the `relay_url`
 field in the operator's advertisement (Kind 39100).
 
-## Infrastructure (Docker)
+## Infrastructure
 
-The following services run in Docker containers:
+### Native Processes (strfry relays)
+
+Nostr relays run as native strfry processes (not Docker containers) on x86_64.
+The strfry binary is at `bin/strfry`, built from source in `strfry-performance/`.
+
+- **relay-alice** (port 7801): Fast relay for alice
+- **relay-bob** (port 7802): Fast relay for bob
+- **relay-charlie** (port 7803): Fast relay for charlie
+- **relay-diana** (port 7804): Fast relay for diana
+- **relay-ledgers** (port 7779): Durable relay + streams from all fast relays
+
+Each relay's config and LMDB data live under `data/relays/{name}/`.
+Managed by `start_all_relays` / `stop_all_relays` in `_common.sh`.
+
+### Docker Containers
 
 - **bitcoind**: Regtest Bitcoin Core node (ports 18543/18544)
 - **electrs**: Electrum REST API for chain queries (port 3102)
-- **relay-{alice,bob,charlie,diana}**: Per-operator strfry relays
-- **relay-ledgers**: Shared durable relay
-- **prometheus/grafana**: Metrics (ports 9090/3010)
+- **deposits-prometheus**: Metrics collection (port 9190)
+- **deposits-grafana**: Metrics visualization (port 3110)
 - **wallet**: Static file server for the web wallet
-
-Relay data uses host bind-mounts under `data/relays/{name}/` so data survives
-container recreation.
 
 ## Lightning Node (optional)
 
@@ -151,7 +161,7 @@ bin/discover.sh                          # Network topology from local data
 tail -f data/alice/node.log              # Follow alice's daemon log
 
 # Relay inspection
-docker exec relay-ledgers /app/strfry scan '{"kinds":[9100],"limit":5}'
+bin/strfry --config data/relays/ledgers/strfry.conf scan '{"kinds":[9100],"limit":5}'
 
 # Node management
 source bin/_common.sh

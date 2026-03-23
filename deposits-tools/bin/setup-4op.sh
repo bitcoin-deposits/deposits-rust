@@ -112,14 +112,12 @@ reset_nostr_data() {
     log_info "Resetting Nostr relay data and node data..."
     # Stop node processes
     stop_all_nodes
-    # Stop relay containers
-    $DC stop relay-alice relay-bob relay-charlie relay-diana relay-ledgers >/dev/null 2>&1 || true
-    $DC rm -f relay-alice relay-bob relay-charlie relay-diana relay-ledgers >/dev/null 2>&1 || true
-    # Clear all data (node + relay bind-mount dirs)
+    # Stop native relays
+    stop_all_relays
+    # Clear all data (node + relay)
     rm -rf "$DATA_ROOT"
-    # Recreate relay data dirs and restart relays
-    mkdir -p "$DATA_ROOT/relays/alice" "$DATA_ROOT/relays/bob" "$DATA_ROOT/relays/charlie" "$DATA_ROOT/relays/diana" "$DATA_ROOT/relays/ledgers"
-    $DC up -d relay-alice relay-bob relay-charlie relay-diana relay-ledgers 2>&1 | grep -v "^$" || true
+    # Restart native relays
+    start_all_relays
     # Wait for relays to be healthy
     sleep 3
     log_success "Nostr relays reset (nodes will start in Phase 1)"

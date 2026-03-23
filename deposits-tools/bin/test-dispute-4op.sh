@@ -1028,13 +1028,12 @@ cleanup_nostr_watchers() {
 
 reset_nostr_data() {
     log_info "Resetting Nostr relay data..."
-    $DC stop relay-alice relay-bob relay-charlie relay-diana relay-ledgers >/dev/null 2>&1 || true
-    $DC rm -f relay-alice relay-bob relay-charlie relay-diana relay-ledgers >/dev/null 2>&1 || true
-    docker volume rm deposits-tools_relay_alice_data deposits-tools_relay_bob_data deposits-tools_relay_charlie_data deposits-tools_relay_diana_data deposits-tools_relay_ledgers_data >/dev/null 2>&1 || true
+    stop_all_relays
     $DC stop alice bob charlie diana >/dev/null 2>&1 || true
     $DC rm -f alice bob charlie diana >/dev/null 2>&1 || true
     docker volume rm deposits-tools_alice_data deposits-tools_bob_data deposits-tools_charlie_data deposits-tools_diana_data >/dev/null 2>&1 || true
-    $DC up -d relay-alice relay-bob relay-charlie relay-diana relay-ledgers alice bob charlie diana >/dev/null 2>&1
+    start_all_relays
+    $DC up -d alice bob charlie diana >/dev/null 2>&1 || true
     sleep 5
     log_success "Nostr relay and nodes reset"
 }

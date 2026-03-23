@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """strfry Prometheus exporter.
 
-Periodically runs `docker exec <container> strfry scan --count` to collect
-event counts by kind and exposes them as Prometheus metrics on an HTTP port.
+Periodically runs `strfry scan --count` against native relay processes to
+collect event counts by kind and exposes them as Prometheus metrics on HTTP.
 
-Supports multiple relay containers (fast + slow) with a relay label.
+Supports multiple relays (fast + slow) with a relay label.
 
 Usage:
     python3 strfry-exporter.py [--port 9201] [--interval 10]
@@ -16,6 +16,7 @@ import subprocess
 import threading
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from pathlib import Path
 
 # ── Metrics state ──────────────────────────────────────────────────────────
 _lock = threading.Lock()
@@ -30,22 +31,29 @@ KINDS = {
     39100: "advertisement",
 }
 
-# Relay containers to scrape: (container_name, label, strfry_config_flag)
+# Resolve paths relative to this script
+SCRIPT_DIR = Path(__file__).resolve().parent
+TOOLS_DIR = SCRIPT_DIR.parent
+DATA_ROOT = Path(os.environ.get("DATA_ROOT", TOOLS_DIR / "data"))
+STRFRY_BIN = os.environ.get("STRFRY_BIN", str(SCRIPT_DIR / "strfry"))
+
+# Relays to scrape: (name, label)
 RELAYS = [
-    ("relay-alice", "fast", ""),
-    ("relay-ledgers", "slow", "--config /app/strfry-slow.conf"),
+    ("alice", "fast"),
+    ("ledgers", "slow"),
 ]
 
 
-def _run_scan(container: str, config_flag: str, kind_filter: str) -> int | None:
-    """Run strfry scan --count inside a relay container."""
+def _relay_config(name: str) -> str:
+    """Return the config file path for a relay."""
+    return str(DATA_ROOT / "relays" / name / "strfry.conf")
+
+
+def _run_scan(name: str, kind_filter: str) -> int | None:
+    """Run strfry scan --count against a native relay."""
     try:
-        cmd = ["docker", "exec", container]
-        if config_flag:
-            parts = config_flag.split()
-            cmd.extend(["/app/strfry"] + parts + ["scan", "--count", kind_filter])
-        else:
-            cmd.extend(["/app/strfry", "scan", "--count", kind_filter])
+        conf = _relay_config(name)
+        cmd = [STRFRY_BIN, "--config", conf, "scan", "--count", kind_filter]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
         for line in result.stdout.strip().splitlines():
             line = line.strip()
@@ -56,33 +64,33 @@ def _run_scan(container: str, config_flag: str, kind_filter: str) -> int | None:
     return None
 
 
-def _db_size_bytes(container: str) -> int | None:
+def _db_size_bytes(name: str) -> int | None:
     """Get LMDB data file size."""
     try:
-        result = subprocess.run(
-            ["docker", "exec", container, "stat", "-c", "%s", "/app/strfry-db/data.mdb"],
-            capture_output=True, text=True, timeout=5,
-        )
-        val = result.stdout.strip()
-        if val.isdigit():
-            return int(val)
+        db_file = DATA_ROOT / "relays" / name / "data.mdb"
+        if db_file.exists():
+            return db_file.stat().st_size
     except Exception:
         pass
     return None
 
 
-def _active_connections(container: str) -> int | None:
-    """Estimate active WebSocket connections from open TCP sockets on port 7777."""
+def _active_connections(name: str) -> int | None:
+    """Estimate active WebSocket connections from /proc/net/tcp."""
+    port_hex = {
+        "alice": "1E79",    # 7801
+        "bob": "1E7A",      # 7802
+        "charlie": "1E7B",  # 7803
+        "diana": "1E7C",    # 7804
+        "ledgers": "1E63",  # 7779
+    }
+    hexport = port_hex.get(name)
+    if not hexport:
+        return None
     try:
-        result = subprocess.run(
-            ["docker", "exec", container, "sh", "-c",
-             "cat /proc/net/tcp 2>/dev/null | grep -c ':1E61' || echo 0"],
-            capture_output=True, text=True, timeout=5,
-        )
-        val = result.stdout.strip()
-        if val.isdigit():
-            # Subtract 1 for the LISTEN socket itself
-            return max(0, int(val) - 1)
+        with open("/proc/net/tcp") as f:
+            count = sum(1 for line in f if f":{hexport}" in line.split()[1])
+        return max(0, count - 1)  # Subtract LISTEN socket
     except Exception:
         pass
     return None
@@ -92,27 +100,27 @@ def collect():
     """Collect all metrics (called periodically by background thread)."""
     new_metrics: dict[str, float] = {}
 
-    for container, relay_label, config_flag in RELAYS:
+    for name, relay_label in RELAYS:
         pfx = f'relay="{relay_label}"'
 
         # Total event count
-        total = _run_scan(container, config_flag, "{}")
+        total = _run_scan(name, "{}")
         if total is not None:
             new_metrics[f"strfry_events_total{{{pfx}}}"] = total
 
         # Events by kind
         for kind, label in KINDS.items():
-            count = _run_scan(container, config_flag, f'{{"kinds":[{kind}]}}')
+            count = _run_scan(name, f'{{"kinds":[{kind}]}}')
             if count is not None:
                 new_metrics[f'strfry_events_by_kind{{{pfx},kind="{kind}",name="{label}"}}'] = count
 
         # DB size
-        db_size = _db_size_bytes(container)
+        db_size = _db_size_bytes(name)
         if db_size is not None:
             new_metrics[f"strfry_db_size_bytes{{{pfx}}}"] = db_size
 
         # Active connections
-        conns = _active_connections(container)
+        conns = _active_connections(name)
         if conns is not None:
             new_metrics[f"strfry_connections_active{{{pfx}}}"] = conns
 

@@ -155,11 +155,11 @@ setup_infrastructure() {
         docker volume rm "ldk_${name}_data" 2>/dev/null || true
     done
 
-    # Reset nostr relay and core containers
-    log_info "Resetting Nostr relay and core containers..."
-    $DC stop relay-alice relay-bob relay-charlie relay-diana relay-ledgers alice bob charlie diana >/dev/null 2>&1 || true
-    $DC rm -f relay-alice relay-bob relay-charlie relay-diana relay-ledgers alice bob charlie diana >/dev/null 2>&1 || true
-    docker volume rm deposits-tools_relay_alice_data deposits-tools_relay_bob_data deposits-tools_relay_charlie_data deposits-tools_relay_diana_data deposits-tools_relay_ledgers_data 2>/dev/null || true
+    # Stop native relays and core containers
+    log_info "Resetting native relays and core containers..."
+    stop_all_relays
+    $DC stop alice bob charlie diana >/dev/null 2>&1 || true
+    $DC rm -f alice bob charlie diana >/dev/null 2>&1 || true
     docker volume rm deposits-tools_alice_data deposits-tools_bob_data deposits-tools_charlie_data deposits-tools_diana_data 2>/dev/null || true
 
     # Stop LDK sidecars for core nodes
@@ -171,7 +171,8 @@ setup_infrastructure() {
 
     # Start core services
     log_info "Starting core services..."
-    $DC up -d bitcoin electrs relay-alice relay-bob relay-charlie relay-diana relay-ledgers
+    $DC up -d bitcoin electrs
+    start_all_relays
 
     log_info "Waiting for services to be ready..."
     sleep 10
@@ -229,7 +230,7 @@ start_deposit_node() {
         --seed "$seed" \
         --network regtest \
         --electrum http://electrs:3002 \
-        --relay ws://relay-alice:7777 \
+        --relay ws://172.21.0.1:7801 \
         --data-dir /data \
         --metrics-port 9100 \
         >/dev/null 2>&1

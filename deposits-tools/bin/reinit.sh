@@ -66,6 +66,10 @@ log_info "Stopping node processes..."
 stop_all_nodes
 pkill -f "htlc-agent" 2>/dev/null || true
 
+# Stop native relays
+log_info "Stopping native relays..."
+stop_all_relays
+
 # Stop infrastructure
 log_info "Stopping infrastructure containers..."
 $DC down -v --remove-orphans 2>/dev/null || true
@@ -102,11 +106,9 @@ log_info "Starting infrastructure services..."
 $DC up -d bitcoin
 wait_for_bitcoin
 
-# Ensure relay data dirs exist (wiped by rm -rf above)
-mkdir -p "$DATA_ROOT/relays/alice" "$DATA_ROOT/relays/bob" "$DATA_ROOT/relays/charlie" "$DATA_ROOT/relays/diana" "$DATA_ROOT/relays/ledgers"
-
-$DC up -d relay-alice relay-bob relay-charlie relay-diana
-$DC up -d relay-ledgers
+# Start native strfry relays
+log_info "Starting native strfry relays..."
+start_all_relays
 wait_for_nostr
 
 $DC up -d electrs
@@ -149,6 +151,6 @@ echo "  All logs:       tail -f $DATA_ROOT/*/node.log"
 echo "  Mine blocks:    docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass -rpcwallet=faucet -generate 1"
 echo "  Nostr relay:    ws://localhost:7801"
 echo "  Electrs:        http://localhost:3102"
-echo "  Prometheus:     http://localhost:9090"
-echo "  Grafana:        http://localhost:3010 (admin/admin)"
+echo "  Prometheus:     http://localhost:9190"
+echo "  Grafana:        http://localhost:3110"
 echo "  Stop nodes:     source bin/_common.sh && stop_all_nodes"

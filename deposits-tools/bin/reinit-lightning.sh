@@ -50,6 +50,10 @@ pkill -f "deposits-node run.*eve" 2>/dev/null || true
 # Stop HTLC agent
 pkill -f "htlc-agent" 2>/dev/null || true
 
+# Stop native relays
+log_info "Stopping native relays..."
+stop_all_relays
+
 # Stop and remove all containers (including lightning node)
 log_info "Stopping all containers..."
 $DC_LIGHTNING down -v --remove-orphans 2>/dev/null || true
@@ -82,15 +86,16 @@ if ! $QUICK; then
     docker build -f "$TOOLS_DIR/Dockerfile.ldk-node" -t ldk-node:latest "$WORKSPACE_DIR"
 fi
 
-# Create relay bind-mount directories
-mkdir -p "$DATA_ROOT/relays/alice" "$DATA_ROOT/relays/bob" "$DATA_ROOT/relays/charlie" "$DATA_ROOT/relays/diana" "$DATA_ROOT/relays/ledgers"
-
-# Start infrastructure (including lightning node)
+# Start infrastructure (including lightning node, but NOT relay containers)
 log_info "Starting infrastructure..."
-$DC_LIGHTNING up -d bitcoin electrs relay-alice relay-bob relay-charlie relay-diana relay-ledgers wallet
+$DC_LIGHTNING up -d bitcoin electrs wallet
 
 wait_for_bitcoin
 wait_for_electrs
+
+# Start native strfry relays
+log_info "Starting native strfry relays..."
+start_all_relays
 wait_for_nostr
 
 # Setup faucet
