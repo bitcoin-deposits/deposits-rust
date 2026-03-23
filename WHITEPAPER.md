@@ -40,6 +40,14 @@ operators may run a lightning sidecar alongside their deposits node, allowing de
 
 when the payer and payee are deposits on the same operator, the operator may settle internally without routing through lightning, crediting and debiting the respective deposits directly. this avoids routing fees and failure modes while maintaining the same accounting guarantees
 
+## couriers
+
+transfers move funds between deposits on the same ledger. to move funds across ledgers, wallets use couriers — services that hold deposits on multiple ledgers and carry transfers between them. a courier advertises its capacity and per-ledger directional fees on the relay. when a wallet wants to send from ledger A to ledger B, it requests a route from a courier bridging both, then locks funds to the courier's deposit on A with a hash lock. the courier locks funds from its deposit on B to the wallet's deposit on B with the same hash. the wallet reveals the preimage on B, claiming the funds; the courier observes the preimage and completes on A
+
+this is a standard hash time-locked contract pattern. the courier's outbound timeout is strictly earlier than the inbound, ensuring that if the wallet never reveals, both locks expire and neither party loses funds. no trust is required beyond the timeout guarantees already enforced by operators
+
+couriers set per-ledger fees: fee_in (margin for receiving) and fee_out (operator transfer fee plus margin for sending). a wallet estimates route cost as fee_out on the source plus fee_in on the destination. couriers may vary fees by ledger based on available liquidity, naturally rebalancing their positions. wallets discover couriers through their advertisements on the relay and select based on fee, capacity, or coverage
+
 ## communication
 
 all communication between wallets and operators, and between operators, uses nostr relays. ledger updates are published as durable events that relays retain, creating a permanent auditable record. requests and responses between wallets and operators are ephemeral events with a short relay TTL. operators advertise their terms as replaceable events, allowing wallets to discover and compare operators without a centralized directory
