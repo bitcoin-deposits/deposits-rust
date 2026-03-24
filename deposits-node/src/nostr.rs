@@ -1261,7 +1261,7 @@ impl NostrTransport {
             .await
             .map_err(|e| Error::Nostr(format!("Failed to send response: {}", e)))?;
 
-        tracing::info!(
+        tracing::debug!(
             "Sent ledger response: request={}, action={}, status={}, event={}",
             &request_id[..16],
             action,
@@ -1828,6 +1828,50 @@ impl NostrTransport {
 
         ads.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         Ok(ads)
+    }
+
+    /// Re-mirror our own advertisements to the durable (slow) relay.
+    ///
+    /// Fetches Kind 39100 events authored by this node from the fast relay
+    /// and sends them to the slow relay. This covers the case where the slow
+    /// relay was restarted (losing its DB) after ads were originally published.
+    pub async fn remirror_advertisements(&self) -> usize {
+        let slow = match self.slow_client {
+            Some(ref sc) => sc,
+            None => return 0,
+        };
+
+        let filter = Filter::new()
+            .kind(Kind::Custom(KIND_LEDGER_ADVERTISE))
+            .author(self.keys.public_key());
+
+        let events = match self.client
+            .fetch_events(vec![filter], Some(std::time::Duration::from_secs(5)))
+            .await
+        {
+            Ok(evts) => evts,
+            Err(e) => {
+                tracing::debug!("remirror_advertisements: fetch failed: {}", e);
+                return 0;
+            }
+        };
+
+        let mut mirrored = 0usize;
+        for event in events.into_iter() {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                slow.send_event(event),
+            ).await {
+                Ok(Ok(_)) => mirrored += 1,
+                Ok(Err(e)) => tracing::debug!("remirror ad failed: {}", e),
+                Err(_) => tracing::debug!("remirror ad timed out"),
+            }
+        }
+
+        if mirrored > 0 {
+            tracing::info!("Re-mirrored {} advertisement(s) to durable relay", mirrored);
+        }
+        mirrored
     }
 
     /// Fetch a specific ledger's advertisement
@@ -2654,7 +2698,7 @@ impl NostrTransport {
         let update = SignedLedgerUpdate::tlv_decode(&tlv_bytes)
             .map_err(|e| Error::Serialization(format!("Failed to decode ledger update: {:?}", e)))?;
 
-        tracing::debug!(
+        tracing::trace!(
             "Received ledger update: ledger={}, seq={}, hash={}",
             ledger_id,
             update.sequence_number,
@@ -2701,7 +2745,7 @@ impl NostrTransport {
         let params: serde_json::Value = serde_json::from_str(&event.content)
             .unwrap_or(serde_json::Value::Null);
 
-        tracing::debug!(
+        tracing::trace!(
             "Received ledger request: ledger={}, action={}, event={}",
             ledger_id,
             action,
@@ -2776,7 +2820,7 @@ impl NostrTransport {
         response.event_id = event.id.to_hex();
         response.timestamp = event.created_at.as_u64();
 
-        tracing::debug!(
+        tracing::trace!(
             "Received ledger response: request={}, status={}, event={}",
             &request_id[..16.min(request_id.len())],
             status,

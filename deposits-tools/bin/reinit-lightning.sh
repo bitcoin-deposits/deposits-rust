@@ -16,6 +16,7 @@ WORKSPACE_DIR="$(cd "$REPO_ROOT/.." && pwd)"
 DC_LIGHTNING="docker compose -f $TOOLS_DIR/docker-compose.yml --profile lightning"
 
 QUICK=false
+REBUILD_LDK=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -23,12 +24,17 @@ while [[ $# -gt 0 ]]; do
             QUICK=true
             shift
             ;;
+        --rebuild-ldk)
+            REBUILD_LDK=true
+            shift
+            ;;
         --help|-h)
             echo "Usage: $0 [OPTIONS]"
             echo ""
             echo "Options:"
-            echo "  --quick, -q   Skip rebuild, just teardown + setup"
-            echo "  --help, -h    Show this help message"
+            echo "  --quick, -q      Skip rebuild, just teardown + setup"
+            echo "  --rebuild-ldk    Force rebuild of ldk-node Docker image"
+            echo "  --help, -h       Show this help message"
             exit 0
             ;;
         *)
@@ -82,8 +88,15 @@ if ! $QUICK; then
     log_info "Building deposits-node, deposits-wallet, and htlc-agent binaries..."
     cargo build --release --manifest-path "$REPO_ROOT/Cargo.toml" -p deposits-node --bin deposits-node --bin deposits-wallet --bin htlc-agent 2>&1 | tail -3
 
-    log_info "Building ldk-node image..."
-    docker build -f "$TOOLS_DIR/Dockerfile.ldk-node" -t ldk-node:latest "$WORKSPACE_DIR"
+    if $REBUILD_LDK; then
+        docker rmi ldk-node:latest 2>/dev/null || true
+    fi
+    if docker image inspect ldk-node:latest >/dev/null 2>&1; then
+        log_info "ldk-node image already exists, skipping build (use --rebuild-ldk to force)"
+    else
+        log_info "Building ldk-node image..."
+        docker build -f "$TOOLS_DIR/Dockerfile.ldk-node" -t ldk-node:latest "$WORKSPACE_DIR"
+    fi
 fi
 
 # Start infrastructure (including lightning node, but NOT relay containers)

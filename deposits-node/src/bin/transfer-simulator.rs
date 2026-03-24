@@ -477,10 +477,19 @@ impl Faucet {
 // ─── Relay Scan ─────────────────────────────────────────────────────────────
 // Fallback ledger discovery: connect to relay and fetch recent events with #l tags.
 
-/// Fetch ledger advertisements from a relay. Returns (ledger_ids, ledger→relay_url mapping).
+/// Fee minimums extracted from an operator advertisement.
+#[derive(Debug, Clone)]
+struct LedgerFees {
+    annual_fee_bps: u64,
+    /// Annualized fixed fee (min_fee_sats_per_period * periods_per_year)
+    annualized_fixed: u64,
+    fee_period_blocks: u64,
+}
+
+/// Fetch ledger advertisements from a relay. Returns (ledger_ids, ledger→relay_url mapping, ledger→fees mapping).
 /// Advertisements (Kind 39100) are NIP-33 replaceable events published by operators,
 /// containing ledger_id and the operator's primary relay_url.
-async fn fetch_advertisements(relay_url: &str) -> Result<(Vec<String>, HashMap<String, String>), Box<dyn std::error::Error>> {
+async fn fetch_advertisements(relay_url: &str) -> Result<(Vec<String>, HashMap<String, String>, HashMap<String, LedgerFees>), Box<dyn std::error::Error>> {
     let keys = Keys::generate();
     let opts = Options::default()
         .connection_timeout(Some(Duration::from_secs(10)));
@@ -503,6 +512,7 @@ async fn fetch_advertisements(relay_url: &str) -> Result<(Vec<String>, HashMap<S
 
     let mut ledger_ids = std::collections::HashSet::new();
     let mut ledger_relay_map: HashMap<String, String> = HashMap::new();
+    let mut ledger_fees_map: HashMap<String, LedgerFees> = HashMap::new();
 
     for event in events.iter() {
         // Parse advertisement JSON content
@@ -534,13 +544,26 @@ async fn fetch_advertisements(relay_url: &str) -> Result<(Vec<String>, HashMap<S
             }
         }
 
+        // Extract fee minimums from advertisement
+        // fee_fixed in the request is annualized_msats, so we must convert:
+        //   annualized = min_fee_sats_per_period * (52560 / fee_period_blocks)
+        let annual_fee_bps = ad.get("annual_fee_bps").and_then(|v| v.as_u64()).unwrap_or(0);
+        let min_fee_sats = ad.get("min_fee_sats").and_then(|v| v.as_u64()).unwrap_or(0);
+        let fee_period_blocks = ad.get("fee_period_blocks").and_then(|v| v.as_u64()).unwrap_or(2016);
+        let periods_per_year = if fee_period_blocks > 0 { 52560 / fee_period_blocks } else { 26 };
+        ledger_fees_map.insert(ledger_id.clone(), LedgerFees {
+            annual_fee_bps,
+            annualized_fixed: min_fee_sats.saturating_mul(periods_per_year),
+            fee_period_blocks,
+        });
+
         ledger_ids.insert(ledger_id);
     }
 
     let _ = client.disconnect().await;
     let mut result: Vec<String> = ledger_ids.into_iter().collect();
     result.sort();
-    Ok((result, ledger_relay_map))
+    Ok((result, ledger_relay_map, ledger_fees_map))
 }
 
 // ─── Bootstrap ──────────────────────────────────────────────────────────────
@@ -571,6 +594,7 @@ async fn batch_open_deposits(
     ledger_ids: &[String],
     aliases: &[String],
     amount_sats: u64,
+    ledger_fees: &HashMap<String, LedgerFees>,
 ) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
     let secp = Secp256k1::new();
     let nostr_key = derive_secret_key(seed, network)?;
@@ -609,11 +633,12 @@ async fn batch_open_deposits(
     for batch in dep_infos.chunks(BATCH_SIZE) {
         let mut futures = Vec::new();
         for (batch_idx, info) in batch.iter().enumerate() {
+            let fees = ledger_fees.get(&info.ledger_id);
             let open_params = serde_json::json!({
                 "deposit_pubkey": info.pubkey_hex,
-                "fee_fixed": 0_u64,
-                "fee_bps": 0_u64,
-                "fee_frequency": 2016_u64,
+                "fee_fixed": fees.map_or(0, |f| f.annualized_fixed),
+                "fee_bps": fees.map_or(0, |f| f.annual_fee_bps),
+                "fee_frequency": fees.map_or(2016, |f| f.fee_period_blocks),
             });
             let rx_result = transport.send_request(&info.ledger_id, "deposit_open", open_params).await;
             match rx_result {
@@ -648,14 +673,15 @@ async fn batch_open_deposits(
 
         let mut futures = Vec::new();
         for info in &batch_infos {
+            let fees = ledger_fees.get(&info.ledger_id);
             let offer_params = serde_json::json!({
                 "deposit_pubkey": info.pubkey_hex,
                 "max_sats": amount_sats,
                 "min_sats": std::cmp::min(1000_u64, amount_sats.saturating_sub(1).max(1)),
                 "blocks_valid": 10000_u64,
-                "fee_fixed": 0_u64,
-                "fee_bps": 0_u64,
-                "fee_frequency": 2016_u64,
+                "fee_fixed": fees.map_or(0, |f| f.annualized_fixed),
+                "fee_bps": fees.map_or(0, |f| f.annual_fee_bps),
+                "fee_frequency": fees.map_or(2016, |f| f.fee_period_blocks),
             });
             let rx_result = transport.send_request(&info.ledger_id, "make_offer", offer_params).await;
             match rx_result {
@@ -720,17 +746,17 @@ async fn run_bootstrap(config: &Config) -> Result<(), Box<dyn std::error::Error>
     eprintln!("\n=== Bootstrap ===");
 
     // 1. Discover ledgers (explicit --ledger flags take priority)
-    let (ledger_ids, relay_map) = if !config.ledger_ids.is_empty() {
+    let (ledger_ids, relay_map, fees_map) = if !config.ledger_ids.is_empty() {
         eprintln!("Using {} explicit ledger ID(s)", config.ledger_ids.len());
-        (config.ledger_ids.clone(), HashMap::new())
+        (config.ledger_ids.clone(), HashMap::new(), HashMap::new())
     } else {
         eprintln!("Discovering ledgers...");
-        let (ids, relay_map) = fetch_advertisements(&config.ledgers_relay).await?;
+        let (ids, relay_map, fees_map) = fetch_advertisements(&config.ledgers_relay).await?;
         eprintln!("  Found {} ledger(s) with {} relay mappings", ids.len(), relay_map.len());
         if ids.is_empty() {
             return Err("No ledgers found. Start operator nodes first, or use --ledger <id>.".into());
         }
-        (ids, relay_map)
+        (ids, relay_map, fees_map)
     };
     let wallet = WalletRunner::new(config, node, &relay_map)?;
     for id in &ledger_ids {
@@ -775,7 +801,7 @@ async fn run_bootstrap(config: &Config) -> Result<(), Box<dyn std::error::Error>
         }
         let new_deposits = batch_open_deposits(
             &all_relay_urls, &node.seed, config.network, &node.data_dir,
-            &ledger_ids, &aliases, config.funding_sats,
+            &ledger_ids, &aliases, config.funding_sats, &fees_map,
         ).await?;
 
         // Merge with existing and save
@@ -1356,7 +1382,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Discover ledger→relay mapping from advertisements
     eprintln!("Fetching relay routing from advertisements...");
-    let (_, ledger_relay_map) = fetch_advertisements(&config.ledgers_relay).await?;
+    let (_, ledger_relay_map, _) = fetch_advertisements(&config.ledgers_relay).await?;
     if !ledger_relay_map.is_empty() {
         eprintln!("Relay routing: {} ledgers mapped to per-operator relays", ledger_relay_map.len());
         let mut relay_counts: HashMap<&str, usize> = HashMap::new();

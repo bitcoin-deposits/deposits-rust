@@ -1489,6 +1489,9 @@ impl Node {
 
                         // Publish price oracle (~every periodic cycle)
                         node.publish_price_oracle().await;
+
+                        // Re-mirror advertisements to durable relay (handles relay restarts)
+                        node.nostr.remirror_advertisements().await;
                     });
                 }
 
@@ -1897,7 +1900,7 @@ impl Node {
                     }
 
                     self.processed_requests.lock().unwrap().insert(request.event_id.clone());
-                    tracing::debug!("Request via subscription: action={}, event={}...",
+                    tracing::trace!("Request via subscription: action={}, event={}...",
                         request.action, &request.event_id[..16.min(request.event_id.len())]);
 
                     // Cosign requests: dispatch to per-ledger cosign worker (non-blocking)
@@ -1967,7 +1970,7 @@ impl Node {
                 }
 
                 if cosign_count > 0 {
-                    tracing::debug!("Processed {} cosign requests (serial)", cosign_count);
+                    tracing::trace!("Processed {} cosign requests (serial)", cosign_count);
                 }
                 if total_drained > 0 {
                     metrics::record_request_drain_batch_size(total_drained);
@@ -2189,7 +2192,7 @@ impl Node {
             metrics::record_pre_cosign_drain(drained, true);
         }
 
-        tracing::info!(
+        tracing::debug!(
             "Ledger request: action={}, ledger={}..., event={}..., age={:.1}ms",
             request.action,
             &request.ledger_id[..16.min(request.ledger_id.len())],
@@ -2296,7 +2299,7 @@ impl Node {
         ).await {
             tracing::error!("Failed to send response: {}", e);
         } else if success {
-            tracing::info!("Request {} processed successfully", &request.event_id[..16]);
+            tracing::debug!("Request {} processed successfully", &request.event_id[..16]);
         } else {
             tracing::warn!("Request {} failed: {}", &request.event_id[..16], error.unwrap_or_default());
         }
@@ -2326,7 +2329,7 @@ impl Node {
             };
             metrics::record_event_store_insert(validity_str);
             metrics::record_ledger_update_received(validity_str);
-            tracing::debug!(
+            tracing::trace!(
                 "Event store: indexed seq {} on ledger {}... ({})",
                 inbound.update.sequence_number,
                 &inbound.ledger_id[..16.min(inbound.ledger_id.len())],
@@ -6782,7 +6785,7 @@ impl Node {
         use bitcoin::secp256k1::{Message, Secp256k1};
         use std::str::FromStr;
 
-        tracing::info!("Processing cosign_update request for ledger {}...",
+        tracing::debug!("Processing cosign_update request for ledger {}...",
             &request.ledger_id[..16.min(request.ledger_id.len())]);
 
         // Extract sequence_number early — we need it for the freshness check.
@@ -6990,7 +6993,7 @@ impl Node {
 
             if let Some(last_update) = ledger.history.last() {
                 let prev_hash = last_update.current_hash;
-                tracing::debug!("Validating co-sign for seq {} (prev_hash: {}...)",
+                tracing::trace!("Validating co-sign for seq {} (prev_hash: {}...)",
                     sequence_number, &hex::encode(&prev_hash[..4]));
             }
         }
@@ -7071,7 +7074,7 @@ impl Node {
                     let hash = ledger.history.last()
                         .map(|u| u.current_hash)
                         .unwrap_or([0u8; 32]);
-                    tracing::debug!("Member ledger {} hash {}...",
+                    tracing::trace!("Member ledger {} hash {}...",
                         &member_key[..16.min(member_key.len())],
                         &hex::encode(&hash[..4]));
                     hash
@@ -7108,7 +7111,7 @@ impl Node {
         let sig = secp.sign_schnorr(&msg, &keypair);
         let sig_bytes = sig.serialize();
 
-        tracing::info!("Co-signed update seq={} for ledger {}... (member_ledger_hash: {}...)",
+        tracing::debug!("Co-signed update seq={} for ledger {}... (member_ledger_hash: {}...)",
             sequence_number, &request.ledger_id[..16], &hex::encode(&member_ledger_hash[..4]));
 
         // Return the signature, our pubkey, and our ledger hash
