@@ -742,10 +742,7 @@ impl InnerRelay {
     }
 
     async fn receiver_message_handler(&self, mut ws_rx: Stream) {
-        let mut last_recv = std::time::Instant::now();
         while let Some(msg) = ws_rx.next().await {
-            let recv_time = last_recv.elapsed();
-            let proc_start = std::time::Instant::now();
             if let Ok(msg) = msg {
                 match msg {
                     #[cfg(not(target_arch = "wasm32"))]
@@ -786,27 +783,11 @@ impl InnerRelay {
                     }
                     WsMessage::Text(bytes) => {
                         let data: Vec<u8> = bytes.into();
-                        // Log message type for debugging
-                        let msg_type = if data.starts_with(b"[\"EVENT") { "EVENT" }
-                            else if data.starts_with(b"[\"OK") { "OK" }
-                            else if data.starts_with(b"[\"EOSE") { "EOSE" }
-                            else if data.starts_with(b"[\"NOTICE") { "NOTICE" }
-                            else { "OTHER" };
                         self.handle_relay_message_infallible(&data).await;
                     }
                     WsMessage::Binary(bytes) => {
                         let data: Vec<u8> = bytes.into();
-                        let msg_type = if data.starts_with(b"[\"EVENT") { "EVENT" }
-                            else if data.starts_with(b"[\"OK") { "OK" }
-                            else if data.starts_with(b"[\"EOSE") { "EOSE" }
-                            else if data.starts_with(b"[\"NOTICE") { "NOTICE" }
-                            else { "OTHER" };
                         self.handle_relay_message_infallible(&data).await;
-                        let proc_time = proc_start.elapsed();
-                        // Only log EVENT and OK messages to reduce noise
-                        if msg_type == "EVENT" || msg_type == "OK" {
-                            eprintln!("[nostr-sdk-performance] ws_recv: {} wait={:?} proc={:?}", msg_type, recv_time, proc_time);
-                        }
                     }
                     WsMessage::Ping(_) => {
                         // Ping messages are automatically handled by tungstenite
@@ -822,7 +803,6 @@ impl InnerRelay {
                     }
                 }
             }
-            last_recv = std::time::Instant::now();
         }
     }
 
@@ -1105,8 +1085,6 @@ impl InnerRelay {
 
     #[tracing::instrument(skip_all, level = "trace")]
     pub async fn batch_event(&self, events: Vec<Event>) -> Result<(), Error> {
-        let start = std::time::Instant::now();
-
         // Health, write permission and number of messages checks are executed in `batch_msg` method.
 
         let events_len: usize = events.len();
@@ -1122,18 +1100,12 @@ impl InnerRelay {
             }
         }
 
-        let prep_time = start.elapsed();
-
         // Batch send messages
         self.batch_msg(msgs)?;
-
-        let send_time = start.elapsed();
-        tracing::info!("batch_event: prep={:?} send={:?}", prep_time, send_time);
 
         // PERFORMANCE: Return immediately after sending (fire-and-forget)
         // This eliminates the ~150ms round-trip wait for relay OK acknowledgment.
         // The relay will still broadcast the event, we just don't wait for confirmation.
-        eprintln!("[nostr-sdk-performance] batch_event: fire-and-forget return");
         return Ok(());
 
         // Original code that waits for OK acknowledgment (disabled for performance)
