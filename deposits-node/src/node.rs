@@ -2986,18 +2986,23 @@ impl Node {
             let mut attestations_to_copy: Vec<LedgerOperation> = Vec::new();
             let mut quorum_members_to_add: Vec<(bitcoin::secp256k1::PublicKey, String)> = Vec::new();
 
+            // Use derived collateral_attestations state instead of scanning history
             for ledger_arc in &our_ledger_arcs {
                 let ledger = ledger_arc.read().unwrap();
-                for update in ledger.history.iter() {
-                    if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                        if let LedgerOperation::CollateralAttestation { collateral_operator, quorum_member, collateral_ledger_id, .. } = &op {
-                            // We want attestations where WE are the quorum_member
-                            if quorum_member == &our_pubkey {
-                                attestations_to_copy.push(op.clone());
-                                if !quorum_members_to_add.iter().any(|(pk, _)| pk == collateral_operator) {
-                                    quorum_members_to_add.push((*collateral_operator, collateral_ledger_id.clone()));
-                                }
-                            }
+                for (collateral_op, att) in ledger.state.collateral_attestations.iter() {
+                    if att.quorum_member == our_pubkey {
+                        attestations_to_copy.push(LedgerOperation::CollateralAttestation {
+                            collateral_operator: *collateral_op,
+                            quorum_member: att.quorum_member,
+                            collateral_ledger_id: att.collateral_ledger_id.clone(),
+                            amount: att.amount,
+                            block_height: att.block_height,
+                            lock_until_block: att.lock_until_block,
+                            signature: att.signature,
+                            ledger_hash: att.ledger_hash,
+                        });
+                        if !quorum_members_to_add.iter().any(|(pk, _)| pk == collateral_op) {
+                            quorum_members_to_add.push((*collateral_op, att.collateral_ledger_id.clone()));
                         }
                     }
                 }
@@ -7037,22 +7042,16 @@ impl Node {
                     }
 
                     let history_len = ledger.history.len();
-                    let has_join = ledger.history.iter().any(|update| {
-                        if update.message_type != deposits_core::messages::consts::QUORUM_JOIN {
-                            return false;
+                    // Use derived joined_quorums state instead of scanning history
+                    let has_join = ledger.state.joined_quorums.iter().any(|jq| {
+                        if jq.ledger_id == request.ledger_id {
+                            return true;
                         }
-                        if let Ok(LedgerOperation::QuorumJoin { operator_id, ledger_id, .. }) =
-                            LedgerOperation::tlv_decode(&update.message)
-                        {
-                            if ledger_id == request.ledger_id {
+                        if let Some(target_op) = &target_operator_id {
+                            let jq_x = &jq.operator_id.serialize()[1..];
+                            let target_x = &target_op.serialize()[1..];
+                            if jq_x == target_x {
                                 return true;
-                            }
-                            if let Some(target_op) = &target_operator_id {
-                                let jq_x = &operator_id.serialize()[1..];
-                                let target_x = &target_op.serialize()[1..];
-                                if jq_x == target_x {
-                                    return true;
-                                }
                             }
                         }
                         false
@@ -7245,25 +7244,16 @@ impl Node {
                     continue;
                 }
 
-                // Check if this ledger has a QuorumJoin pointing to the target ledger
-                let has_join = ledger.history.iter().any(|update| {
-                    if update.message_type != deposits_core::messages::consts::QUORUM_JOIN {
-                        return false;
+                // Use derived joined_quorums state instead of scanning history
+                let has_join = ledger.state.joined_quorums.iter().any(|jq| {
+                    if jq.ledger_id == request.ledger_id {
+                        return true;
                     }
-                    if let Ok(LedgerOperation::QuorumJoin { operator_id: join_op, ledger_id: join_ledger, .. }) =
-                        LedgerOperation::tlv_decode(&update.message)
-                    {
-                        // Primary match: ledger_id (stable across custody transfers)
-                        if join_ledger == request.ledger_id {
+                    if let Some(target_op) = &target_operator_id {
+                        let jq_x = &jq.operator_id.serialize()[1..];
+                        let target_x = &target_op.serialize()[1..];
+                        if jq_x == target_x {
                             return true;
-                        }
-                        // Fallback: operator x-coord match
-                        if let Some(target_op) = &target_operator_id {
-                            let jq_x = &join_op.serialize()[1..];
-                            let target_x = &target_op.serialize()[1..];
-                            if jq_x == target_x {
-                                return true;
-                            }
                         }
                     }
                     false
@@ -7369,12 +7359,8 @@ impl Node {
                 for (ledger_key, arc) in ledgers.iter() {
                     let ledger = arc.read().unwrap();
                     if ledger.operator_key() != self.node_id { continue; }
-                    let has_join = ledger.history.iter().any(|update| {
-                        if update.message_type != deposits_core::messages::consts::QUORUM_JOIN { return false; }
-                        if let Ok(LedgerOperation::QuorumJoin { ledger_id: join_ledger, .. }) =
-                            LedgerOperation::tlv_decode(&update.message)
-                        { join_ledger == request.ledger_id } else { false }
-                    });
+                    let has_join = ledger.state.joined_quorums.iter()
+                        .any(|jq| jq.ledger_id == request.ledger_id);
                     if has_join { found_key = Some(ledger_key.clone()); break; }
                 }
                 drop(ledgers);
@@ -9623,19 +9609,10 @@ impl Node {
 
             let block_height = self.wallet.get_block_height().unwrap_or(0);
 
-            // Count active (non-expired) QuorumJoin operations
-            let active_quorums = ledger.history.iter().filter(|u| {
-                if u.message_type != deposits_core::messages::consts::QUORUM_JOIN {
-                    return false;
-                }
-                if let Ok(LedgerOperation::QuorumJoin { membership_expires, .. }) =
-                    LedgerOperation::tlv_decode(&u.message)
-                {
-                    membership_expires > block_height
-                } else {
-                    false
-                }
-            }).count();
+            // Count active (non-expired) quorum memberships from derived state
+            let active_quorums = ledger.state.joined_quorums.iter()
+                .filter(|jq| jq.membership_expires > block_height)
+                .count();
 
             if active_quorums >= MAX_QUORUMS_JOINED {
                 return Err(Error::Protocol(format!(

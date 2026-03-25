@@ -1639,9 +1639,8 @@ async fn ledger_health(args: &[String]) -> Result<(), Box<dyn std::error::Error>
             println!("  Operator:      {}", op_hex);
         }
 
-        // Reserves status - scan history for rotation (inline to avoid deadlock)
-        let has_rotation = ledger.history.iter()
-            .any(|u| u.message_type == consts::QUORUM_BEGIN);
+        // Reserves status - use derived quorum_state instead of scanning history
+        let has_rotation = ledger.state.quorum_state == deposits_core::QuorumState::Active;
         let reserves_sats = ledger.reserves_amount() / 1000;
         println!("  Reserves:      {} sats (rotated: {})",
             reserves_sats, if has_rotation { "yes" } else { "no" });

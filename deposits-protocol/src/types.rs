@@ -1279,6 +1279,267 @@ impl LedgerState {
         hex::encode(self.ledger_id)
     }
 
+    // ========================================================================
+    // Immutable State Transition
+    // ========================================================================
+
+    /// Apply a ledger operation, returning a new state.
+    ///
+    /// This is a pure function: same state + same operation = same result.
+    /// The original state is never mutated — callers replace it atomically:
+    ///
+    /// ```ignore
+    /// self.state = self.state.apply(&operation)?;
+    /// ```
+    pub fn apply(&self, operation: &crate::messages::LedgerOperation) -> crate::DepositsResult<Self> {
+        use crate::messages::LedgerOperation;
+
+        let mut next = self.clone();
+        match operation {
+            LedgerOperation::LedgerOpen {
+                operator_id,
+                reserves_id,
+                genesis_block,
+                reserves_amount,
+            } => {
+                next.operator_key = *operator_id;
+                next.reserves_key = reserves_id.clone();
+                next.genesis_block = *genesis_block;
+                next.ledger_id = Self::compute_ledger_id(operator_id, reserves_id, *genesis_block);
+                next.reserves.amount = *reserves_amount;
+            }
+            LedgerOperation::QuorumBegin { reserves_id, amount, total_collateral, quorum_expiry, .. } => {
+                next.reserves_key = reserves_id.clone();
+                next.reserves.amount = *amount;
+                next.total_collateral = *total_collateral;
+                next.quorum_expiry = Some(*quorum_expiry);
+                // Promote pending quorum members to active
+                next.quorum_members = std::mem::take(&mut next.pending_quorum_members);
+                next.quorum_state = QuorumState::Active;
+            }
+            LedgerOperation::DepositOpen { deposit_id, descriptor, fees, transfer_fees, is_collateral, receive_requires_sig, fee_change_after_blocks, fee_change_notice_blocks, fee_change_limit_bps, .. } => {
+                let mut deposit = Deposit::new(descriptor.clone(), fees.clone());
+                if let Some(tf) = transfer_fees {
+                    deposit.transfer_fees = tf.clone();
+                }
+                deposit.is_collateral = *is_collateral;
+                deposit.receive_requires_sig = *receive_requires_sig;
+                deposit.fee_change_after_blocks = *fee_change_after_blocks;
+                deposit.fee_change_notice_blocks = *fee_change_notice_blocks;
+                deposit.fee_change_limit_bps = *fee_change_limit_bps;
+                next.deposits.insert(*deposit_id, deposit);
+            }
+            LedgerOperation::DepositClose { deposit_id } => {
+                next.deposits.remove(deposit_id);
+            }
+            LedgerOperation::FeeChange { deposit_id, new_fees, effective_block } => {
+                if let Some(deposit) = next.deposits.get_mut(deposit_id) {
+                    deposit.pending_fee_change = Some((new_fees.clone(), *effective_block));
+                }
+            }
+            LedgerOperation::DepositKeyRotate { deposit_id, new_descriptor, .. } => {
+                if let Some(deposit) = next.deposits.get_mut(deposit_id) {
+                    deposit.descriptor = new_descriptor.clone();
+                }
+            }
+            LedgerOperation::InvoiceCredit { deposit_id, amount, .. } => {
+                if let Some(deposit) = next.deposits.get_mut(deposit_id) {
+                    deposit.credit(*amount);
+                }
+            }
+            LedgerOperation::InvoiceLock { deposit_id, amount, .. } => {
+                if let Some(deposit) = next.deposits.get_mut(deposit_id) {
+                    deposit.lock(*amount)?;
+                }
+            }
+            LedgerOperation::InvoiceFail { deposit_id, amount, .. } => {
+                if let Some(deposit) = next.deposits.get_mut(deposit_id) {
+                    deposit.unlock(*amount);
+                }
+            }
+            LedgerOperation::InvoiceFulfill { deposit_id, amount, .. } => {
+                if let Some(deposit) = next.deposits.get_mut(deposit_id) {
+                    deposit.fulfill(*amount);
+                }
+            }
+            LedgerOperation::OnchainCredit { deposit_id, amount, .. } => {
+                if let Some(deposit) = next.deposits.get_mut(deposit_id) {
+                    deposit.credit(*amount);
+                }
+            }
+            LedgerOperation::OnchainLock { deposit_id, amount, .. } => {
+                if let Some(deposit) = next.deposits.get_mut(deposit_id) {
+                    deposit.lock(*amount)?;
+                }
+            }
+            LedgerOperation::OnchainFail { deposit_id, .. } => {
+                if let Some(_deposit) = next.deposits.get_mut(deposit_id) {
+                    // TODO: Need to look up the withdrawal amount from withdrawal_id
+                }
+            }
+            LedgerOperation::OnchainFulfill { deposit_id, amount, .. } => {
+                if let Some(deposit) = next.deposits.get_mut(deposit_id) {
+                    deposit.fulfill(*amount);
+                }
+            }
+            LedgerOperation::FeeCollect { deposit_id, amount, block_height } => {
+                if let Some(deposit) = next.deposits.get_mut(deposit_id) {
+                    if let Some((new_fees, effective)) = deposit.pending_fee_change.take() {
+                        if *block_height >= effective {
+                            deposit.fees = new_fees;
+                        } else {
+                            deposit.pending_fee_change = Some((new_fees, effective));
+                        }
+                    }
+                    deposit.balance = deposit.balance.saturating_sub(*amount);
+                    deposit.last_fee_assessment = *block_height;
+                }
+            }
+            LedgerOperation::QuorumAddMember {
+                quorum_member, member_ledger_id, min_fee_bps, min_fee_fixed, max_fee_period,
+                collateral_lock_amount, collateral_lock_until,
+                dispute_response_blocks, dispute_arm_blocks, service_response_blocks,
+                max_transfer_timeout_blocks, max_descriptor_bytes, ..
+            } => {
+                let already_active = next.quorum_members.iter().any(|m| m.pubkey == *quorum_member);
+                let already_pending = next.pending_quorum_members.iter().any(|m| m.pubkey == *quorum_member);
+                if !already_active && !already_pending {
+                    next.pending_quorum_members.push(QuorumMember {
+                        pubkey: *quorum_member,
+                        ledger_id: member_ledger_id.clone(),
+                        min_fee_bps: *min_fee_bps,
+                        min_fee_fixed: *min_fee_fixed,
+                        max_fee_period: *max_fee_period,
+                        collateral_lock_amount: *collateral_lock_amount,
+                        collateral_lock_until: *collateral_lock_until,
+                        dispute_response_blocks: *dispute_response_blocks,
+                        dispute_arm_blocks: *dispute_arm_blocks,
+                        service_response_blocks: *service_response_blocks,
+                        max_transfer_timeout_blocks: *max_transfer_timeout_blocks,
+                        max_descriptor_bytes: *max_descriptor_bytes,
+                    });
+                }
+            }
+            LedgerOperation::QuorumRemoveMember { quorum_member, .. } => {
+                next.quorum_members.retain(|m| m.pubkey != *quorum_member);
+                next.pending_quorum_members.retain(|m| m.pubkey != *quorum_member);
+                next.collateral_attestations.remove(quorum_member);
+            }
+            LedgerOperation::CollateralLock { deposit_id, amount, lock_until_block, .. } => {
+                if let Some(deposit) = next.deposits.get_mut(deposit_id) {
+                    if !deposit.is_collateral {
+                        return Err(crate::DepositsError::InvalidState(
+                            "CollateralLock can only be applied to collateral deposits".to_string()
+                        ));
+                    }
+                    deposit.collateral_lock_amount = *amount;
+                    deposit.collateral_lock_expires = *lock_until_block;
+                }
+            }
+            LedgerOperation::LedgerClose => {
+                next.collateral_attestations.clear();
+            }
+            LedgerOperation::CollateralAttestation {
+                collateral_operator, quorum_member, collateral_ledger_id,
+                amount, block_height, lock_until_block, signature, ledger_hash,
+            } => {
+                let attestation = CollateralAttestation::new(
+                    *collateral_operator,
+                    *quorum_member,
+                    collateral_ledger_id.clone(),
+                    *amount,
+                    *block_height,
+                    *lock_until_block,
+                    *signature,
+                    *ledger_hash,
+                );
+                next.collateral_attestations.insert(*collateral_operator, attestation);
+                next.received_collateral_amount = next.collateral_attestations.values()
+                    .map(|a| a.available_collateral())
+                    .sum();
+            }
+            LedgerOperation::QuorumJoin { operator_id, ledger_id, membership_expires, our_signature } => {
+                if let Some(existing) = next.joined_quorums.iter_mut().find(|m|
+                    m.operator_id == *operator_id && m.ledger_id == *ledger_id
+                ) {
+                    existing.membership_expires = *membership_expires;
+                    existing.our_signature = *our_signature;
+                } else {
+                    next.joined_quorums.push(QuorumMembership {
+                        operator_id: *operator_id,
+                        ledger_id: ledger_id.clone(),
+                        membership_expires: *membership_expires,
+                        our_signature: *our_signature,
+                        joined_at_sequence: next.sequence + 1,
+                    });
+                }
+            }
+            LedgerOperation::DisputeEnter { last_valid_sequence, .. } => {
+                next.quorum_at_fork = next.quorum_members.clone();
+                next.dispute_fork_sequence = *last_valid_sequence;
+                next.collateral_attestations.clear();
+                next.dispute_state = DisputeState::Disputed;
+            }
+            LedgerOperation::DisputeArmed { .. } => {
+                next.dispute_state = DisputeState::Armed;
+            }
+            LedgerOperation::DisputeAcquire { new_custodian, .. } => {
+                next.operator_key = *new_custodian;
+                next.parent_pubkey = *new_custodian;
+                next.dispute_state = DisputeState::Normal;
+                next.quorum_at_fork.clear();
+                next.dispute_fork_sequence = 0;
+            }
+            LedgerOperation::DisputeYield => {
+                next.dispute_state = DisputeState::Tombstoned;
+            }
+            LedgerOperation::TransferLock {
+                nonce, source_deposit_id, destination_deposit_id, amount, fee,
+                completion_script, timeout_height, transfer_id, ..
+            } => {
+                if let Some(deposit) = next.deposits.get_mut(source_deposit_id) {
+                    let total = amount + fee;
+                    deposit.balance = deposit.balance.saturating_sub(total);
+                    deposit.locked_balance = deposit.locked_balance.saturating_add(total);
+                }
+                next.pending_transfers.insert(*transfer_id, PendingTransfer {
+                    transfer_id: *transfer_id,
+                    nonce: *nonce,
+                    source_deposit_id: *source_deposit_id,
+                    destination_deposit_id: *destination_deposit_id,
+                    amount: *amount,
+                    fee: *fee,
+                    completion_script: completion_script.clone(),
+                    timeout_height: *timeout_height,
+                });
+            }
+            LedgerOperation::TransferComplete { transfer_id, .. } => {
+                if let Some(pending) = next.pending_transfers.remove(transfer_id) {
+                    let total = pending.total_locked();
+                    if let Some(source) = next.deposits.get_mut(&pending.source_deposit_id) {
+                        source.locked_balance = source.locked_balance.saturating_sub(total);
+                    }
+                    if let Some(dest) = next.deposits.get_mut(&pending.destination_deposit_id) {
+                        dest.balance = dest.balance.saturating_add(pending.amount);
+                    }
+                }
+            }
+            LedgerOperation::TransferFail { transfer_id, .. } => {
+                if let Some(pending) = next.pending_transfers.remove(transfer_id) {
+                    let total = pending.total_locked();
+                    if let Some(source) = next.deposits.get_mut(&pending.source_deposit_id) {
+                        source.locked_balance = source.locked_balance.saturating_sub(total);
+                        source.balance = source.balance.saturating_add(total);
+                    }
+                }
+            }
+            LedgerOperation::DeliveryEmbed { .. } => {
+                // No state changes — causal ordering only.
+            }
+        }
+        Ok(next)
+    }
+
     /// Get total balance across all deposits (millisatoshis).
     pub fn total_deposit_balance(&self) -> u64 {
         self.deposits.values().map(|d| d.balance).sum()
