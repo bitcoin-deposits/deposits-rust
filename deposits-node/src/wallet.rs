@@ -567,27 +567,39 @@ impl Wallet {
         Ok(addr.address)
     }
 
-    /// Sync wallet with esplora server
-    pub fn sync(&self) -> Result<(), Error> {
+    /// Lightweight sync: just update block height and hash (2 HTTP requests).
+    /// Call this frequently (e.g. every 5s) to keep block info fresh.
+    pub fn sync_block_height(&self) -> Result<(), Error> {
         let client = EsploraBuilder::new(&self.electrum_url)
             .build_blocking();
 
-        // Get block height
         let height = client
             .get_height()
             .map_err(|e| Error::Wallet(format!("Failed to get block height: {}", e)))?;
 
         *self.block_height.lock().unwrap() = height;
 
-        // Get block hash at current height
         if let Ok(hash) = client.get_block_hash(height) {
             *self.block_hash.lock().unwrap() = *hash.as_ref();
         }
 
-        // Sync the wallet
+        tracing::debug!("Block height synced: {}", height);
+        Ok(())
+    }
+
+    /// Full wallet sync: update block height, hash, and all script pubkeys.
+    /// Expensive (~40 HTTP requests). Call infrequently (e.g. every 30–60s).
+    pub fn sync(&self) -> Result<(), Error> {
+        // First update block info
+        self.sync_block_height()?;
+
+        let client = EsploraBuilder::new(&self.electrum_url)
+            .build_blocking();
+        let height = *self.block_height.lock().unwrap();
+
+        // Sync all wallet script pubkeys
         let mut wallet = self.inner.lock().unwrap();
 
-        // Get all script pubkeys to sync
         let spks: Vec<ScriptBuf> = wallet
             .all_unbounded_spk_iters()
             .into_iter()
