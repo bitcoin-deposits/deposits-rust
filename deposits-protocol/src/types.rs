@@ -967,6 +967,36 @@ impl CollateralAttestation {
 ///   │
 ///   └─── DisputeYield ───► TOMBSTONED (branch terminated)
 /// ```
+/// Quorum lifecycle state machine.
+///
+/// ```text
+/// PreQuorum
+///   │  - Only is_collateral deposits allowed
+///   │  - Operator-only signatures (no co-signing)
+///   │  - QuorumAddMember populates pending member list
+///   │
+///   │ QuorumBegin (reserves rotation to Taproot)
+///   ▼
+/// Active
+///   │  - Co-signatures required for all updates
+///   │  - Full deposit operations allowed
+///   │  - Must re-rotate before quorum_expiry
+///   │
+///   ├─── QuorumBegin ──► Active (re-rotation, expiry extended)
+///   │
+///   └─── expiry passes ──► Expired (non-conforming, ledger reassigned)
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum QuorumState {
+    /// No quorum yet. Only collateral deposits allowed, operator-only signatures.
+    #[default]
+    PreQuorum,
+    /// Quorum is active. Co-signatures required, full operations allowed.
+    Active,
+    /// Quorum expired without re-rotation. Chain is non-conforming.
+    Expired,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum DisputeState {
     /// Normal operation - no active dispute
@@ -1096,10 +1126,18 @@ pub struct LedgerState {
     pub reserves: ReservesOutput,
     /// Pending invoice awaiting payment.
     pub pending_invoice: Option<PendingInvoice>,
-    /// Quorum members who provide additional backing.
-    /// Each member includes their pubkey and the ledger ID where they lock collateral.
+    /// Quorum lifecycle state (PreQuorum → Active → Expired).
+    /// Determines co-signature requirements and allowed operation types.
+    #[serde(default)]
+    pub quorum_state: QuorumState,
+    /// Active quorum members (confirmed by QuorumBegin).
+    /// These are the members whose co-signatures are required for operations.
     #[serde(default)]
     pub quorum_members: Vec<QuorumMember>,
+    /// Pending quorum members (added by QuorumAddMember, awaiting QuorumBegin).
+    /// Promoted to quorum_members when the next QuorumBegin is applied.
+    #[serde(default)]
+    pub pending_quorum_members: Vec<QuorumMember>,
     /// Committed collateral amount (our collateral pledged to others).
     pub collateral_amount: u64,
     /// Block height of last collateral increase.
@@ -1211,7 +1249,9 @@ impl LedgerState {
             deposits: HashMap::new(),
             reserves: ReservesOutput::default(),
             pending_invoice: None,
+            quorum_state: QuorumState::PreQuorum,
             quorum_members: Vec::new(),
+            pending_quorum_members: Vec::new(),
             collateral_amount: 0,
             last_collateral_increase_block: None,
             received_collateral_amount: 0,

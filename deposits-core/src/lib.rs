@@ -120,8 +120,8 @@ pub use types::{
     LedgerState, LedgerUpdate, SignedLedgerUpdate, SignedLedgerUpdateLog,
     // Deposit identifier types
     DepositId, DescriptorWitness, compute_deposit_id,
-    // Dispute protocol types
-    DisputeState, entropy_selection_score, select_entropy_winner, is_entropy_winner,
+    // Quorum and dispute protocol types
+    QuorumState, DisputeState, entropy_selection_score, select_entropy_winner, is_entropy_winner,
     DepositInfo, InvoiceInfo, ReservesStatus, CollateralAttestation,
     AuditResult, Violation, CrossLedgerViolation, LedgerStateUpdate,
     QuorumJoinRequestMsg, QuorumJoinResponseMsg, QuorumVoteMsg,

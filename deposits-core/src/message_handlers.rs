@@ -373,10 +373,13 @@ pub fn handle_ledger_update<C: HandlerContext>(
         // Check for idempotent operations first - these still need ACKs but don't modify state
         let is_idempotent = match &operation {
             LedgerOperation::QuorumAddMember { quorum_member, .. } => {
+                // Check both active and pending for idempotency
                 ledger.state.quorum_members.iter().any(|m| m.pubkey == *quorum_member)
+                    || ledger.state.pending_quorum_members.iter().any(|m| m.pubkey == *quorum_member)
             }
             LedgerOperation::QuorumRemoveMember { quorum_member, .. } => {
                 !ledger.state.quorum_members.iter().any(|m| m.pubkey == *quorum_member)
+                    && !ledger.state.pending_quorum_members.iter().any(|m| m.pubkey == *quorum_member)
             }
             LedgerOperation::DepositOpen { deposit_id, .. } => {
                 ledger.state.deposits.contains_key(deposit_id)
@@ -999,8 +1002,9 @@ pub fn handle_collateral_add_partner<C: HandlerContext>(
             HandlerError::Internal("Failed to acquire ledger write lock".to_string())
         )?;
 
-        // Idempotency check
-        if ledger.state.quorum_members.iter().any(|m| m.pubkey == msg.quorum_member) {
+        // Idempotency check: member already active or pending
+        if ledger.state.quorum_members.iter().any(|m| m.pubkey == msg.quorum_member)
+            || ledger.state.pending_quorum_members.iter().any(|m| m.pubkey == msg.quorum_member) {
             let seq = ledger.sequence();
             let hash = ledger.hash();
             (hash, hash, seq, Vec::new(), true)
@@ -1080,8 +1084,9 @@ pub fn handle_collateral_remove_partner<C: HandlerContext>(
             HandlerError::Internal("Failed to acquire ledger write lock".to_string())
         )?;
 
-        // Idempotency check - if already removed, return success
-        if !ledger.state.quorum_members.iter().any(|m| m.pubkey == msg.quorum_member) {
+        // Idempotency check - if already removed from both lists, return success
+        if !ledger.state.quorum_members.iter().any(|m| m.pubkey == msg.quorum_member)
+            && !ledger.state.pending_quorum_members.iter().any(|m| m.pubkey == msg.quorum_member) {
             let seq = ledger.sequence();
             let hash = ledger.hash();
             (hash, hash, seq, Vec::new(), true)
@@ -2420,7 +2425,8 @@ pub fn handle_ledger_export_request<C: HandlerContext>(
     // Validate: sender should be a partner or quorum member
     let is_partner = ledger_guard.reserves_key() == sender.to_string()
         || sender.to_string() == msg.reserves_id;
-    let is_quorum_member = ledger_guard.state.quorum_members.iter().any(|m| m.pubkey == sender);
+    let is_quorum_member = ledger_guard.state.quorum_members.iter().any(|m| m.pubkey == sender)
+        || ledger_guard.state.pending_quorum_members.iter().any(|m| m.pubkey == sender);
 
     if !is_partner && !is_quorum_member {
         return Ok(HandlerResult::Response(ResponseData::LedgerExportResponse {

@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{DepositsError, DepositsResult};
 use crate::messages::LedgerOperation;
-use crate::types::{Deposit, DisputeState, LedgerState, ReservesOutput, SignedLedgerUpdate};
+use crate::types::{Deposit, DisputeState, QuorumState, LedgerState, ReservesOutput, SignedLedgerUpdate};
 
 /// Role of a node in a ledger relationship.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -381,13 +381,8 @@ impl Ledger {
         }
 
         // 5. After QuorumBegin, all updates must have valid co-signatures
-        // Check if we've already seen a QuorumBegin in history
-        let has_quorum_begin = self.history.iter().any(|u| {
-            u.message_type == crate::messages::consts::QUORUM_BEGIN
-        });
-
-        if has_quorum_begin {
-            // After quorum begin, co-signature is required
+        // Use quorum_state (derived from apply_state_changes) instead of scanning history
+        if self.state.quorum_state == QuorumState::Active {
             // Exception: DisputeEnter can be signed by any quorum member
             if !matches!(operation, LedgerOperation::DisputeEnter { .. }) {
                 if !update.has_cosign_signature() {
@@ -576,27 +571,29 @@ impl Ledger {
     }
 
     /// Get all quorum participants for this ledger.
-    /// Returns: operator + quorum members. For LDK, also includes reserves partner.
+    /// Returns: operator + active members + pending members. For LDK, also includes reserves partner.
     pub fn quorum_participants(&self) -> Vec<PublicKey> {
-        let mut participants = Vec::with_capacity(2 + self.state.quorum_members.len());
+        let mut participants = Vec::with_capacity(2 + self.state.quorum_members.len() + self.state.pending_quorum_members.len());
         participants.push(self.state.operator_key);
         // Include reserves partner if it's a valid pubkey (LDK)
         if let Some(reserves_pubkey) = self.reserves_key_as_pubkey() {
             participants.push(reserves_pubkey);
         }
         participants.extend(self.state.quorum_members.iter().map(|m| m.pubkey));
+        participants.extend(self.state.pending_quorum_members.iter().map(|m| m.pubkey));
         participants
     }
 
-    /// Get all partners (channel partner + quorum members).
+    /// Get all partners (channel partner + active + pending quorum members).
     /// This is the set of nodes the operator broadcasts updates to.
     pub fn all_partners(&self) -> Vec<PublicKey> {
-        let mut partners = Vec::with_capacity(1 + self.state.quorum_members.len());
+        let mut partners = Vec::with_capacity(1 + self.state.quorum_members.len() + self.state.pending_quorum_members.len());
         // Include reserves partner if it's a valid pubkey (LDK)
         if let Some(reserves_pubkey) = self.reserves_key_as_pubkey() {
             partners.push(reserves_pubkey);
         }
         partners.extend(self.state.quorum_members.iter().map(|m| m.pubkey));
+        partners.extend(self.state.pending_quorum_members.iter().map(|m| m.pubkey));
         partners
     }
 
@@ -613,12 +610,14 @@ impl Ledger {
                 "Channel partner is already part of the quorum".to_string()
             ));
         }
-        if self.state.quorum_members.iter().any(|m| m.pubkey == partner) {
+        if self.state.quorum_members.iter().any(|m| m.pubkey == partner)
+            || self.state.pending_quorum_members.iter().any(|m| m.pubkey == partner)
+        {
             return Err(DepositsError::InvalidState(
                 format!("Quorum member {} already exists", partner)
             ));
         }
-        self.state.quorum_members.push(crate::types::QuorumMember {
+        self.state.pending_quorum_members.push(crate::types::QuorumMember {
             pubkey: partner,
             ledger_id: member_ledger_id,
             min_fee_bps: None,
@@ -754,7 +753,7 @@ impl Ledger {
                 }
             }
             self.state.sequence = update.sequence_number;
-            self.state.hash = update.current_hash;
+            self.state.hash = update.chain_hash();
         }
         Ok(())
     }
@@ -803,8 +802,8 @@ impl Ledger {
             });
         }
 
-        // Requirement 2: attestations >= deposit_liability (if we have quorum members)
-        if !self.state.quorum_members.is_empty() {
+        // Requirement 2: attestations >= deposit_liability (if quorum is active)
+        if self.state.quorum_state == QuorumState::Active {
             let total_collateral = self.total_available_collateral(current_block, max_attestation_age_blocks);
             if total_collateral < deposit_liability {
                 return Err(DepositsError::InsufficientCollateral {
@@ -1129,8 +1128,8 @@ impl Ledger {
                 }
             }
             LedgerOperation::DisputeArmed { .. } => {
-                // Must have at least one quorum member to arm
-                if self.state.quorum_members.is_empty() {
+                // Must be in active quorum to arm
+                if self.state.quorum_state != QuorumState::Active {
                     return Err(DepositsError::ProtocolViolation {
                         violation_type: "custody_armed_no_quorum".to_string(),
                         details: "Cannot arm without any quorum members".to_string(),
@@ -1156,11 +1155,11 @@ impl Ledger {
                 // which requires knowing all candidates (from Nostr observation)
             }
             LedgerOperation::CollateralAttestation { collateral_operator, .. } => {
-                // Verify the collateral_operator is a quorum member.
-                // Collateral ties two operators across any number of ledgers,
-                // so we only check membership — not which specific ledger the
-                // collateral was locked on.
-                if !self.state.quorum_members.iter().any(|m| m.pubkey == *collateral_operator) {
+                // Verify the collateral_operator is a quorum member (active or pending).
+                // Attestations can arrive before QuorumBegin (during setup) or after.
+                let is_member = self.state.quorum_members.iter().any(|m| m.pubkey == *collateral_operator)
+                    || self.state.pending_quorum_members.iter().any(|m| m.pubkey == *collateral_operator);
+                if !is_member {
                     return Err(DepositsError::ProtocolViolation {
                         violation_type: "collateral_attestation_from_non_member".to_string(),
                         details: format!(
@@ -1201,6 +1200,10 @@ impl Ledger {
                 // Store total attested collateral for obligation limit checks
                 self.state.total_collateral = *total_collateral;
                 self.state.quorum_expiry = Some(*quorum_expiry);
+                // Promote pending quorum members to active
+                self.state.quorum_members = std::mem::take(&mut self.state.pending_quorum_members);
+                // Transition quorum state to Active — co-signatures now required
+                self.state.quorum_state = QuorumState::Active;
             }
             LedgerOperation::DepositOpen { deposit_id, descriptor, fees, transfer_fees, is_collateral, receive_requires_sig, fee_change_after_blocks, fee_change_notice_blocks, fee_change_limit_bps, .. } => {
                 let mut deposit = Deposit::new(descriptor.clone(), fees.clone());
@@ -1307,8 +1310,11 @@ impl Ledger {
                 max_transfer_timeout_blocks, max_descriptor_bytes, ..
             } => {
                 use crate::types::QuorumMember;
-                // Check if this member already exists (by pubkey)
-                if !self.state.quorum_members.iter().any(|m| m.pubkey == *quorum_member) {
+                // Add to pending (staging area) — promoted to active by QuorumBegin.
+                // Check both active and pending for duplicates.
+                let already_active = self.state.quorum_members.iter().any(|m| m.pubkey == *quorum_member);
+                let already_pending = self.state.pending_quorum_members.iter().any(|m| m.pubkey == *quorum_member);
+                if !already_active && !already_pending {
                     let member = QuorumMember {
                         pubkey: *quorum_member,
                         ledger_id: member_ledger_id.clone(),
@@ -1323,13 +1329,14 @@ impl Ledger {
                         max_transfer_timeout_blocks: *max_transfer_timeout_blocks,
                         max_descriptor_bytes: *max_descriptor_bytes,
                     };
-                    self.state.quorum_members.push(member);
+                    self.state.pending_quorum_members.push(member);
                 }
             }
             LedgerOperation::QuorumRemoveMember {
                 quorum_member, ..
             } => {
                 self.state.quorum_members.retain(|m| m.pubkey != *quorum_member);
+                self.state.pending_quorum_members.retain(|m| m.pubkey != *quorum_member);
                 // Also remove any attestations from this partner
                 self.state.collateral_attestations.remove(quorum_member);
             }
@@ -1771,8 +1778,8 @@ impl LedgerValidator {
             });
         }
 
-        // Requirement 2: attestations >= deposit_liability (if we have quorum members)
-        if !ledger.state.quorum_members.is_empty() {
+        // Requirement 2: attestations >= deposit_liability (if quorum is active)
+        if ledger.state.quorum_state == QuorumState::Active {
             let total_collateral =
                 Self::total_available_collateral(ledger, current_block, max_attestation_age_blocks);
             if total_collateral < deposit_liability {

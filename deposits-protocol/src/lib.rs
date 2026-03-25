@@ -32,7 +32,7 @@ pub use types::{
     Deposit, FeeStructure, TransferFeeSchedule, PendingInvoice, ReservesOutput, Invoice,
     LedgerState, LedgerUpdate, SignedLedgerUpdate, SignedLedgerUpdateLog,
     DepositId, DescriptorWitness, compute_deposit_id,
-    DisputeState, entropy_selection_score, select_entropy_winner, is_entropy_winner,
+    QuorumState, DisputeState, entropy_selection_score, select_entropy_winner, is_entropy_winner,
     DepositInfo, InvoiceInfo, ReservesStatus, CollateralAttestation,
     AuditResult, Violation, CrossLedgerViolation, LedgerStateUpdate,
     QuorumJoinRequestMsg, QuorumJoinResponseMsg, QuorumVoteMsg,

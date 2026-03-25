@@ -144,8 +144,8 @@ fn quorum_add_member_stores_fee_limits() {
     let mut ledger = make_ledger();
     add_member(&mut ledger, test_pubkey_2(), Some(50), Some(10_000), Some(2016));
 
-    assert_eq!(ledger.state.quorum_members.len(), 1);
-    let member = &ledger.state.quorum_members[0];
+    assert_eq!(ledger.state.pending_quorum_members.len(), 1);
+    let member = &ledger.state.pending_quorum_members[0];
     assert_eq!(member.min_fee_bps, Some(50));
     assert_eq!(member.min_fee_fixed, Some(10_000));
     assert_eq!(member.max_fee_period, Some(2016));
@@ -156,7 +156,7 @@ fn quorum_add_member_without_limits() {
     let mut ledger = make_ledger();
     add_member(&mut ledger, test_pubkey_2(), None, None, None);
 
-    let member = &ledger.state.quorum_members[0];
+    let member = &ledger.state.pending_quorum_members[0];
     assert_eq!(member.min_fee_bps, None);
     assert_eq!(member.min_fee_fixed, None);
     assert_eq!(member.max_fee_period, None);
@@ -168,7 +168,7 @@ fn quorum_add_member_partial_limits() {
     // Only constrain bps, leave others open
     add_member(&mut ledger, test_pubkey_2(), Some(100), None, None);
 
-    let member = &ledger.state.quorum_members[0];
+    let member = &ledger.state.pending_quorum_members[0];
     assert_eq!(member.min_fee_bps, Some(100));
     assert_eq!(member.min_fee_fixed, None);
     assert_eq!(member.max_fee_period, None);
@@ -585,10 +585,10 @@ fn deposit_open_on_ledger_with_quorum_fee_limits() {
     add_member(&mut ledger, test_pubkey_2(), Some(50), Some(1000), Some(4032));
     add_member(&mut ledger, test_pubkey_3(), Some(100), None, Some(2016));
 
-    assert_eq!(ledger.state.quorum_members.len(), 2);
+    assert_eq!(ledger.state.pending_quorum_members.len(), 2);
 
     // Verify the strictest limits
-    let (bps, fixed, period) = strictest_quorum_limits(&ledger.state.quorum_members);
+    let (bps, fixed, period) = strictest_quorum_limits(&ledger.state.pending_quorum_members);
     assert_eq!(bps, Some(100));  // strictest: 100 > 50
     assert_eq!(fixed, Some(1000)); // only member 1 has a fixed limit
     assert_eq!(period, Some(2016)); // strictest: 2016 < 4032
@@ -599,7 +599,7 @@ fn deposit_open_on_ledger_with_quorum_fee_limits() {
         annualized_msats: 5000,
         frequency_blocks: 2016,
     };
-    assert!(fees_meet_quorum_limits(&good_fees, &ledger.state.quorum_members).is_ok());
+    assert!(fees_meet_quorum_limits(&good_fees, &ledger.state.pending_quorum_members).is_ok());
 
     let did = compute_deposit_id("pk(good_deposit)");
     ledger
@@ -627,7 +627,7 @@ fn deposit_open_on_ledger_with_quorum_fee_limits() {
         annualized_msats: 500, // below 1000 minimum
         frequency_blocks: 8064, // above 2016 maximum
     };
-    let err = fees_meet_quorum_limits(&bad_fees, &ledger.state.quorum_members).unwrap_err();
+    let err = fees_meet_quorum_limits(&bad_fees, &ledger.state.pending_quorum_members).unwrap_err();
     assert!(err.contains("bps"), "first failure should be bps: {}", err);
 }
 

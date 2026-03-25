@@ -113,10 +113,8 @@ pub fn validate_credit_payment(
         ));
     }
 
-    // Check that credit doesn't exceed declared collateral
-    // Skip this check if there are no quorum members - collateral only applies when
-    // there are external parties providing attestations
-    if !ledger.state.quorum_members.is_empty() && new_total_deposits > ledger.state.received_collateral_amount {
+    // Check that credit doesn't exceed declared collateral (only when quorum is active)
+    if ledger.state.quorum_state == crate::types::QuorumState::Active && new_total_deposits > ledger.state.received_collateral_amount {
         return Err(format!(
             "Credit would exceed declared collateral: new deposits {} sats > received collateral {} sats",
             new_total_deposits, ledger.state.received_collateral_amount
@@ -470,10 +468,8 @@ pub fn validate_cosign_invoice(
         ));
     }
 
-    // CRITICAL: Check that cosigning wouldn't exceed declared collateral
-    // Skip this check if there are no quorum members - collateral only applies when
-    // there are external parties providing attestations
-    if !ledger.state.quorum_members.is_empty() && new_total_deposits > ledger.state.received_collateral_amount {
+    // CRITICAL: Check that cosigning wouldn't exceed declared collateral (only when quorum is active)
+    if ledger.state.quorum_state == crate::types::QuorumState::Active && new_total_deposits > ledger.state.received_collateral_amount {
         return Err(format!(
             "Cosigning would exceed collateral: potential deposits {} msat > collateral {} msat",
             new_total_deposits, ledger.state.received_collateral_amount
@@ -919,8 +915,8 @@ pub fn validate_credit_payment_by_id(
         return Err("Invalid payment hash: appears to be fake".to_string());
     }
 
-    // Check that credit doesn't exceed declared collateral (if quorum present)
-    if !ledger.state.quorum_members.is_empty() && new_total_deposits > ledger.state.received_collateral_amount {
+    // Check that credit doesn't exceed declared collateral (only when quorum is active)
+    if ledger.state.quorum_state == crate::types::QuorumState::Active && new_total_deposits > ledger.state.received_collateral_amount {
         return Err(format!(
             "Credit would exceed declared collateral: new deposits {} sats > received collateral {} sats",
             new_total_deposits, ledger.state.received_collateral_amount

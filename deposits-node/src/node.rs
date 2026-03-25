@@ -299,11 +299,6 @@ pub struct Node {
     /// Flushed at the end of each request drain batch to reduce write syscalls.
     dirty_ledgers: Mutex<std::collections::HashSet<String>>,
 
-    /// Cache for has_quorum_reserves: ledger_id → (result, history_len_when_scanned).
-    /// Once a QuorumBegin is found, the result is permanently true (never reverts).
-    /// For false results, the history_len is stored so we only rescan when history grows.
-    quorum_reserves_cache: Mutex<HashMap<String, (bool, usize)>>,
-
     /// Cache for is_operator_of_ledger: ledger_id → (result, history_len_when_scanned).
     /// Once true (operator found), the result is permanent.
     /// For false results, we rescan when history grows.
@@ -421,14 +416,18 @@ impl Node {
             last_relay_fetch_times: Mutex::new(HashMap::new()),
             cosign_member_cache: Mutex::new(HashMap::new()),
             dirty_ledgers: Mutex::new(std::collections::HashSet::new()),
-            quorum_reserves_cache: Mutex::new(HashMap::new()),
             operator_of_cache: Mutex::new(HashMap::new()),
         })
     }
 
-    /// Sync the wallet with the blockchain
+    /// Sync the wallet with the blockchain (full — expensive)
     pub fn sync_wallet(&self) -> Result<(), Error> {
         self.wallet.sync()
+    }
+
+    /// Lightweight sync: just block height + hash (cheap)
+    pub fn sync_block_height(&self) -> Result<(), Error> {
+        self.wallet.sync_block_height()
     }
 
     /// Sign the last update in a ledger with our operator key
@@ -581,7 +580,7 @@ impl Node {
 
         // Broadcast to Nostr
         let event_id = self.nostr.broadcast_ledger_update(&update).await?;
-        tracing::info!("Broadcast update seq={} to Nostr: {}", seq, &event_id[..16]);
+        tracing::debug!("Broadcast update seq={} to Nostr: {}", seq, &event_id[..16]);
 
         Ok(event_id)
     }
@@ -603,7 +602,7 @@ impl Node {
         for update in &ledger.history {
             match self.nostr.broadcast_ledger_update(update).await {
                 Ok(event_id) => {
-                    tracing::info!("Broadcast update seq={} to Nostr: {}", update.sequence_number, &event_id[..16]);
+                    tracing::debug!("Broadcast update seq={} to Nostr: {}", update.sequence_number, &event_id[..16]);
                     count += 1;
                 }
                 Err(e) => {
@@ -1315,7 +1314,7 @@ impl Node {
         if appended > 0 {
             // Update state sequence/hash from last appended
             let last_seq = ledger.history.last().map(|u| u.sequence_number);
-            let last_hash = ledger.history.last().map(|u| u.current_hash);
+            let last_hash = ledger.history.last().map(|u| u.chain_hash());
             if let (Some(seq), Some(hash)) = (last_seq, last_hash) {
                 ledger.state.sequence = seq;
                 ledger.state.hash = hash;
@@ -1418,8 +1417,17 @@ impl Node {
             tokio::time::Duration::from_secs(60)
         };
 
+        // Full wallet sync is expensive (~40 HTTP requests to Electrs).
+        // Run it much less frequently than the periodic tasks.
+        let mut last_wallet_sync = tokio::time::Instant::now();
+        let wallet_sync_interval = if self.fast_poll {
+            tokio::time::Duration::from_secs(30)
+        } else {
+            tokio::time::Duration::from_secs(60)
+        };
+
         if self.fast_poll {
-            tracing::info!("Fast poll mode enabled: periodic=5s, poll=5s, reload=2s");
+            tracing::info!("Fast poll mode enabled: periodic=5s, wallet_sync=30s, poll=30s, reload=2s");
         }
 
         // Adaptive timeout: short when busy (more requests likely coming),
@@ -1436,16 +1444,24 @@ impl Node {
                 tracing::debug!("run loop iteration {}", loop_iteration);
             }
 
-            // Periodic tasks (every 60 seconds) - moved outside select! to avoid reset on each iteration
+            // Full wallet sync (every 30s fast / 60s normal) — expensive, ~40 HTTP requests
+            if last_wallet_sync.elapsed() >= wallet_sync_interval {
+                if let Err(e) = self.sync_wallet() {
+                    tracing::warn!("Full wallet sync failed: {}", e);
+                }
+                last_wallet_sync = tokio::time::Instant::now();
+            }
+
+            // Periodic tasks (every 5s fast / 60s normal)
             if last_periodic.elapsed() >= periodic_interval {
                 let periodic_start = std::time::Instant::now();
                 tracing::info!("[CANARY] entering periodic section (v2-timeout-all)");
-                // Sync wallet periodically
-                if let Err(e) = self.sync_wallet() {
-                    tracing::warn!("Wallet sync failed: {}", e);
+                // Lightweight block height sync (2 HTTP requests)
+                if let Err(e) = self.sync_block_height() {
+                    tracing::warn!("Block height sync failed: {}", e);
                 }
 
-                // Emit reserves balance after sync
+                // Emit reserves balance
                 if let Ok(reserves) = self.reserves_balance() {
                     metrics::set_reserves_balance_sats(reserves);
                 }
@@ -2279,7 +2295,7 @@ impl Node {
 
         // Record request processing time
         let processing_time = start_time.elapsed();
-        if is_transfer || processing_time.as_millis() > 1 {
+        if !success || processing_time.as_millis() > 10 {
             tracing::info!("[PROFILE] handle_ledger_request action={} took {:.1}ms, age={:.1}ms (success={})",
                 request.action, processing_time.as_secs_f64() * 1000.0, request_age_secs * 1000.0, success);
         }
@@ -2853,7 +2869,7 @@ impl Node {
         // Update sequence/hash from last valid update
         if let Some(last) = truncated_history.last() {
             fork.state.sequence = last.sequence_number as u64;
-            fork.state.hash = last.current_hash;
+            fork.state.hash = last.chain_hash();
         }
 
         // Store under compound key
@@ -5297,7 +5313,7 @@ impl Node {
         match self.create_deposit_offer(&resolved_ledger_id, deposit_pubkey, max_sats, min_sats, blocks_valid, Some(fees)) {
             Ok(offer) => {
                 // Check if we need a co-signature (post-rotation)
-                let requires_cosign = self.has_quorum_reserves(&resolved_ledger_id);
+                let requires_cosign = self.is_quorum_active(&resolved_ledger_id);
 
                 if requires_cosign {
                     // Request co-signature from quorum members (retry up to 3 times)
@@ -5647,7 +5663,7 @@ impl Node {
                     hex::encode(&payment_hash[..8]));
 
                 // Request co-signature from quorum member (if post-rotation)
-                let requires_cosign = self.has_quorum_reserves(&request.ledger_id);
+                let requires_cosign = self.is_quorum_active(&request.ledger_id);
                 if requires_cosign {
                     let params = serde_json::json!({
                         "payment_hash": hex::encode(payment_hash),
@@ -6268,7 +6284,7 @@ impl Node {
         use deposits_core::types::{compute_deposit_id, DescriptorWitness};
         use deposits_core::messages::LedgerOperation;
 
-        tracing::info!("Processing transfer_lock request for ledger {}...",
+        tracing::debug!("Processing transfer_lock request for ledger {}...",
             &request.ledger_id[..16.min(request.ledger_id.len())]);
 
         // Extract parameters
@@ -6506,7 +6522,7 @@ impl Node {
                 ledger.state.pending_transfers.remove(&transfer_id);
                 // Restore sequence and hash from the last remaining entry
                 let (seq, hash) = ledger.history.last()
-                    .map(|l| (l.sequence_number, l.current_hash))
+                    .map(|l| (l.sequence_number, l.chain_hash()))
                     .unwrap_or((0, [0u8; 32]));
                 ledger.state.sequence = seq;
                 ledger.state.hash = hash;
@@ -6522,8 +6538,8 @@ impl Node {
             tracing::warn!("Failed to persist after transfer_lock: {}", e);
         }
 
-        tracing::info!("Transfer locked: {}", hex::encode(&transfer_id[..8]));
-        tracing::info!("[PROFILE] transfer_lock breakdown: append={:?}, sign_broadcast={:?}",
+        tracing::debug!("Transfer locked: {}", hex::encode(&transfer_id[..8]));
+        tracing::debug!("[PROFILE] transfer_lock breakdown: append={:?}, sign_broadcast={:?}",
             append_elapsed, sign_elapsed);
         (true, Some(serde_json::json!({
             "transfer_id": transfer_id_hex,
@@ -6538,7 +6554,7 @@ impl Node {
         use deposits_core::types::DescriptorWitness;
         use deposits_core::messages::LedgerOperation;
 
-        tracing::info!("Processing transfer_complete request for ledger {}...",
+        tracing::debug!("Processing transfer_complete request for ledger {}...",
             &request.ledger_id[..16.min(request.ledger_id.len())]);
 
         // Extract parameters
@@ -6652,7 +6668,7 @@ impl Node {
                 ledger.state.pending_transfers.insert(transfer_id, pending);
                 // Restore sequence and hash
                 let (seq, hash) = ledger.history.last()
-                    .map(|l| (l.sequence_number, l.current_hash))
+                    .map(|l| (l.sequence_number, l.chain_hash()))
                     .unwrap_or((0, [0u8; 32]));
                 ledger.state.sequence = seq;
                 ledger.state.hash = hash;
@@ -6667,7 +6683,7 @@ impl Node {
         }
 
         crate::metrics::record_transfer_completed(&request.ledger_id);
-        tracing::info!("Transfer completed: {}", hex::encode(&transfer_id[..8]));
+        tracing::debug!("Transfer completed: {}", hex::encode(&transfer_id[..8]));
         let (completed_amount, completed_fee) = pending_transfer_backup
             .as_ref()
             .map(|p| (p.amount, p.fee))
@@ -8955,7 +8971,7 @@ impl Node {
         }
 
         let cosign_send_time = std::time::Instant::now();
-        tracing::info!(
+        tracing::debug!(
             "Sent multicast co_sign request {} for seq={} (waiting for first responder)",
             &request_id[..16.min(request_id.len())],
             update.sequence_number,
@@ -8975,7 +8991,7 @@ impl Node {
                 let cosign_rtt = cosign_send_time.elapsed();
                 match result {
                     Ok(cosign_result) => {
-                        tracing::info!("[PROFILE] cosign_rtt={:.1}ms for seq={} member_hash={}...",
+                        tracing::debug!("[PROFILE] cosign_rtt={:.1}ms for seq={} member_hash={}...",
                             cosign_rtt.as_secs_f64() * 1000.0,
                             update.sequence_number,
                             &hex::encode(&cosign_result.member_ledger_hash[..4]));
@@ -9190,51 +9206,18 @@ impl Node {
         self.sent_events.lock().unwrap().insert(event_id.to_string());
     }
 
-    /// Check if this ledger has had a reserves rotation to quorum-based Taproot.
+    /// Check if this ledger has an active quorum (set by QuorumBegin).
     ///
-    /// After the first QuorumBegin operation, co-signatures are required for all updates.
-    /// This persists through disputes and custody transfers — the quorum co-signing
-    /// requirement is permanent once rotation occurs.
-    fn has_quorum_reserves(&self, ledger_id: &str) -> bool {
-        use deposits_core::messages::consts;
-
-        // Fast path: check cache
-        let current_len = {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(ledger_id) {
-                ledger_arc.read().unwrap().history.len()
-            } else {
-                return false;
-            }
-        };
-        {
-            let cache = self.quorum_reserves_cache.lock().unwrap();
-            if let Some(&(cached_result, cached_len)) = cache.get(ledger_id) {
-                // True is permanent (QuorumBegin never reverts)
-                if cached_result {
-                    return true;
-                }
-                // False is valid until history grows (or is truncated)
-                if cached_len == current_len || cached_len > current_len {
-                    return false;
-                }
-            }
+    /// After QuorumBegin, co-signatures are required for all updates.
+    /// This is derived state — set deterministically by apply_state_changes
+    /// and persisted in LedgerState, so it survives history truncation.
+    fn is_quorum_active(&self, ledger_id: &str) -> bool {
+        let ledgers = self.handler.ledgers.lock().unwrap();
+        if let Some(ledger_arc) = ledgers.get(ledger_id) {
+            ledger_arc.read().unwrap().state.quorum_state == deposits_core::QuorumState::Active
+        } else {
+            false
         }
-
-        // Cache miss or stale false: scan history
-        let result = {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(ledger_id) {
-                let ledger = ledger_arc.read().unwrap();
-                ledger.history.iter().any(|u| u.message_type == consts::QUORUM_BEGIN)
-            } else {
-                false
-            }
-        };
-
-        self.quorum_reserves_cache.lock().unwrap()
-            .insert(ledger_id.to_string(), (result, current_len));
-        result
     }
 
     /// Check if adding `additional_msats` to a ledger's obligations would exceed
@@ -9375,7 +9358,7 @@ impl Node {
         let sab_start = std::time::Instant::now();
 
         // Check if reserves have been rotated to quorum (co-signatures become required)
-        let quorum_reserves = self.has_quorum_reserves(ledger_id);
+        let quorum_active = self.is_quorum_active(ledger_id);
 
         // Get the ledger info we need
         let (has_quorum_members, update_clone) = {
@@ -9397,7 +9380,7 @@ impl Node {
 
         // If no quorum members and no rotation yet, fall back to operator-only signature
         if !has_quorum_members {
-            if quorum_reserves {
+            if quorum_active {
                 metrics::record_sign_and_broadcast("error_no_quorum", sab_start.elapsed());
                 return Err(Error::Protocol(
                     "Reserves have been rotated but no quorum members available - cannot sign".to_string()
@@ -9412,7 +9395,7 @@ impl Node {
         // Before reserves rotation, co-signatures are optional — skip the cosign
         // round-trip entirely to avoid blocking the event loop (each attempt holds
         // the run loop for 500ms, causing cascading timeouts under load).
-        if !quorum_reserves {
+        if !quorum_active {
             tracing::debug!("Pre-rotation: skipping optional co-sign, using operator-only signature");
             let result = self.operator_sign_persist_broadcast(ledger_id).await;
             metrics::record_sign_and_broadcast("success_skip_cosign", sab_start.elapsed());
@@ -9446,7 +9429,7 @@ impl Node {
                         result.cosign_signature,
                     );
 
-                    tracing::info!("Applied co-sign from {}... (member_hash: {}..., new chain_hash: {}...)",
+                    tracing::debug!("Applied co-sign from {}... (member_hash: {}..., new chain_hash: {}...)",
                         &pubkey_hex(&result.cosigner_pubkey)[..8],
                         &hex::encode(&result.member_ledger_hash[..4]),
                         &hex::encode(&ledger.state.hash[..4]));
@@ -9472,7 +9455,7 @@ impl Node {
         metrics::record_cosign_duration(cosign_start.elapsed());
 
         if let Some(e) = last_error {
-            if quorum_reserves {
+            if quorum_active {
                 // After rotation, co-signatures are required - fail instead of falling back
                 metrics::record_sign_and_broadcast("timeout", sab_start.elapsed());
                 return Err(Error::Protocol(format!(
@@ -9506,7 +9489,7 @@ impl Node {
         let result = self.broadcast_last_update(ledger_id).await;
         let broadcast_elapsed = t_broadcast.elapsed();
 
-        tracing::info!("[PROFILE] sign_and_broadcast inner: cosign_wait=included_above, sign_op={:?}, validate={:?}, persist={:?}, broadcast={:?}",
+        tracing::debug!("[PROFILE] sign_and_broadcast inner: cosign_wait=included_above, sign_op={:?}, validate={:?}, persist={:?}, broadcast={:?}",
             sign_op_elapsed, validate_elapsed, persist2_elapsed, broadcast_elapsed);
 
         metrics::record_sign_and_broadcast("success", sab_start.elapsed());
@@ -9598,7 +9581,7 @@ impl Node {
         // operator-only anyway) and attempting cosign blocks the run loop for up
         // to 36 seconds per attempt — which cascades when multiple operators are
         // adding members simultaneously.  Skip cosign entirely pre-rotation.
-        if has_quorum && self.has_quorum_reserves(ledger_id) {
+        if has_quorum && self.is_quorum_active(ledger_id) {
             self.sign_and_broadcast(ledger_id).await
         } else {
             if has_quorum {
@@ -9685,7 +9668,7 @@ impl Node {
 
         // Sign and broadcast — skip cosign pre-rotation (same reasoning as
         // add_quorum_member: avoids 36s blocking when all daemons are busy)
-        if has_quorum && self.has_quorum_reserves(our_ledger_id) {
+        if has_quorum && self.is_quorum_active(our_ledger_id) {
             self.sign_and_broadcast(our_ledger_id).await
         } else {
             if has_quorum {
@@ -10007,7 +9990,7 @@ impl Node {
                 ledger.state.deposits.remove(&deposit_id);
                 // Restore sequence and hash from the last remaining entry
                 let (seq, hash) = ledger.history.last()
-                    .map(|l| (l.sequence_number, l.current_hash))
+                    .map(|l| (l.sequence_number, l.chain_hash()))
                     .unwrap_or((0, [0u8; 32]));
                 ledger.state.sequence = seq;
                 ledger.state.hash = hash;
@@ -10105,7 +10088,7 @@ impl Node {
                 }
                 // Restore sequence and hash from the last remaining entry
                 let (seq, hash) = ledger.history.last()
-                    .map(|l| (l.sequence_number, l.current_hash))
+                    .map(|l| (l.sequence_number, l.chain_hash()))
                     .unwrap_or((0, [0u8; 32]));
                 ledger.state.sequence = seq;
                 ledger.state.hash = hash;
