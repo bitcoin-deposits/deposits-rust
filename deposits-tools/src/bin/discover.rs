@@ -125,10 +125,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             updates.sort_by_key(|u| u.sequence_number);
             if let Some(last) = updates.last() {
                 state.sequence = last.sequence_number;
-                state.hash = last.chain_hash();
+                state.chain_tip_hash = last.chain_hash();
             }
             let mut ledger = deposits_core::Ledger {
                 state,
+                protocol: Default::default(),
                 role: deposits_core::ledger::LedgerRole::Operator,
                 history: updates,
             };
@@ -175,7 +176,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             op.ledgers.push(LedgerSummary {
                 ledger_id,
                 role,
-                reserves_msats: state.reserves.amount,
+                reserves_msats: state.reserves_amount,
                 obligations_msats: obligations,
                 collateral_msats: collateral,
                 sequence: state.sequence,

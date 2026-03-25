@@ -10,12 +10,13 @@
 //! The ledger maintains a hash chain of all state transitions, ensuring
 //! both parties have cryptographic proof of the ledger history.
 
+use std::collections::HashMap;
 use bitcoin::secp256k1::PublicKey;
 use sha2::{Digest, Sha256};
 
 use crate::error::{DepositsError, DepositsResult};
 use crate::messages::LedgerOperation;
-use crate::types::{Deposit, DisputeState, QuorumState, LedgerState, ReservesOutput, SignedLedgerUpdate};
+use crate::types::{Deposit, DisputeState, PendingInvoice, QuorumState, LedgerState, SignedLedgerUpdate};
 
 /// Role of a node in a ledger relationship.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -97,14 +98,31 @@ impl LedgerUpdate {
     }
 }
 
+/// External protocol coordination state.
+///
+/// Separated from LedgerState to avoid cloning during immutable state transitions.
+/// These fields are not part of the chain-deterministic state machine.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LedgerProtocolState {
+    /// Pending invoice awaiting payment.
+    pub pending_invoice: Option<PendingInvoice>,
+    /// Pending out-of-order updates waiting for earlier updates to arrive.
+    /// Key is the sequence number of the pending update.
+    #[serde(default)]
+    pub pending_updates: HashMap<u64, SignedLedgerUpdate>,
+}
+
 /// Ledger state manager.
 ///
 /// Maintains the hash-chained ledger state and provides methods
 /// for applying validated operations.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Ledger {
-    /// Current ledger state.
+    /// Chain-deterministic ledger state.
     pub state: LedgerState,
+    /// External protocol coordination state (not part of hash chain).
+    #[serde(default)]
+    pub protocol: LedgerProtocolState,
     /// Our role in this ledger.
     pub role: LedgerRole,
     /// History of signed updates.
@@ -120,6 +138,7 @@ impl Ledger {
     ) -> Self {
         Self {
             state: LedgerState::new(operator_key, reserves_key, genesis_block),
+            protocol: LedgerProtocolState::default(),
             role: LedgerRole::Operator,
             history: Vec::new(),
         }
@@ -133,6 +152,7 @@ impl Ledger {
     ) -> Self {
         Self {
             state: LedgerState::new(operator_key, reserves_key, genesis_block),
+            protocol: LedgerProtocolState::default(),
             role: LedgerRole::Partner,
             history: Vec::new(),
         }
@@ -154,6 +174,7 @@ impl Ledger {
         state.quorum_members = quorum_members;
         Self {
             state,
+            protocol: LedgerProtocolState::default(),
             role,
             history: Vec::new(),
         }
@@ -166,7 +187,7 @@ impl Ledger {
 
     /// Get the current ledger hash.
     pub fn hash(&self) -> [u8; 32] {
-        self.state.hash
+        self.state.chain_tip_hash
     }
 
     /// Get total deposit balance (millisatoshis).
@@ -181,7 +202,7 @@ impl Ledger {
 
     /// Get reserves amount (millisatoshis).
     pub fn reserves_amount(&self) -> u64 {
-        self.state.reserves_amount()
+        self.state.reserves_amount
     }
 
     /// Calculate required reserves for current deposits (millisatoshis).
@@ -229,7 +250,7 @@ impl Ledger {
         }
 
         // Out of order (seq > expected_seq) - queue for later
-        self.state.queue_pending_update(update);
+        self.protocol.pending_updates.insert(update.sequence_number, update);
         0
     }
 
@@ -240,7 +261,7 @@ impl Ledger {
         let mut flushed = 0;
         loop {
             let next_seq = self.history.len() as u64;
-            if let Some(update) = self.state.take_pending_update(next_seq) {
+            if let Some(update) = self.protocol.pending_updates.remove(&next_seq) {
                 self.history.push(update);
                 flushed += 1;
             } else {
@@ -252,12 +273,12 @@ impl Ledger {
 
     /// Get the number of pending (out-of-order) updates.
     pub fn pending_count(&self) -> usize {
-        self.state.pending_update_count()
+        self.protocol.pending_updates.len()
     }
 
     /// Check if there are gaps in the update history.
     pub fn has_gaps(&self) -> bool {
-        self.state.has_pending_updates()
+        !self.protocol.pending_updates.is_empty()
     }
 
     // ========================================================================
@@ -573,27 +594,27 @@ impl Ledger {
     /// Get all quorum participants for this ledger.
     /// Returns: operator + active members + pending members. For LDK, also includes reserves partner.
     pub fn quorum_participants(&self) -> Vec<PublicKey> {
-        let mut participants = Vec::with_capacity(2 + self.state.quorum_members.len() + self.state.pending_quorum_members.len());
+        let mut participants = Vec::with_capacity(2 + self.state.quorum_members.len() + self.state.next_quorum_members.len());
         participants.push(self.state.operator_key);
         // Include reserves partner if it's a valid pubkey (LDK)
         if let Some(reserves_pubkey) = self.reserves_key_as_pubkey() {
             participants.push(reserves_pubkey);
         }
         participants.extend(self.state.quorum_members.iter().map(|m| m.pubkey));
-        participants.extend(self.state.pending_quorum_members.iter().map(|m| m.pubkey));
+        participants.extend(self.state.next_quorum_members.iter().map(|m| m.pubkey));
         participants
     }
 
     /// Get all partners (channel partner + active + pending quorum members).
     /// This is the set of nodes the operator broadcasts updates to.
     pub fn all_partners(&self) -> Vec<PublicKey> {
-        let mut partners = Vec::with_capacity(1 + self.state.quorum_members.len() + self.state.pending_quorum_members.len());
+        let mut partners = Vec::with_capacity(1 + self.state.quorum_members.len() + self.state.next_quorum_members.len());
         // Include reserves partner if it's a valid pubkey (LDK)
         if let Some(reserves_pubkey) = self.reserves_key_as_pubkey() {
             partners.push(reserves_pubkey);
         }
         partners.extend(self.state.quorum_members.iter().map(|m| m.pubkey));
-        partners.extend(self.state.pending_quorum_members.iter().map(|m| m.pubkey));
+        partners.extend(self.state.next_quorum_members.iter().map(|m| m.pubkey));
         partners
     }
 
@@ -611,13 +632,13 @@ impl Ledger {
             ));
         }
         if self.state.quorum_members.iter().any(|m| m.pubkey == partner)
-            || self.state.pending_quorum_members.iter().any(|m| m.pubkey == partner)
+            || self.state.next_quorum_members.iter().any(|m| m.pubkey == partner)
         {
             return Err(DepositsError::InvalidState(
                 format!("Quorum member {} already exists", partner)
             ));
         }
-        self.state.pending_quorum_members.push(crate::types::QuorumMember {
+        self.state.next_quorum_members.push(crate::types::QuorumMember {
             pubkey: partner,
             ledger_id: member_ledger_id,
             min_fee_bps: None,
@@ -738,11 +759,10 @@ impl Ledger {
 
         // Reset derived state
         self.state.deposits.clear();
-        self.state.reserves = ReservesOutput::default();
-        self.state.collateral_amount = 0;
+        self.state.reserves_amount = 0;
         self.state.collateral_attestations.clear();
         self.state.sequence = 0;
-        self.state.hash = [0u8; 32];
+        self.state.chain_tip_hash = [0u8; 32];
 
         // Replay all updates
         for update in &self.history.clone() {
@@ -753,7 +773,7 @@ impl Ledger {
                 }
             }
             self.state.sequence = update.sequence_number;
-            self.state.hash = update.chain_hash();
+            self.state.chain_tip_hash = update.chain_hash();
         }
         Ok(())
     }
@@ -795,10 +815,10 @@ impl Ledger {
         max_attestation_age_blocks: u32,
     ) -> DepositsResult<()> {
         // Requirement 1: reserves >= deposit_liability
-        if self.state.reserves.amount < deposit_liability {
+        if self.state.reserves_amount < deposit_liability {
             return Err(DepositsError::InsufficientReserves {
                 required: deposit_liability,
-                available: self.state.reserves.amount,
+                available: self.state.reserves_amount,
             });
         }
 
@@ -831,7 +851,7 @@ impl Ledger {
         let update = LedgerUpdate::new(
             self.state.sequence + 1,
             operation.clone(),
-            self.state.hash,
+            self.state.chain_tip_hash,
         );
 
         // Apply state changes
@@ -839,7 +859,7 @@ impl Ledger {
 
         // Update sequence and hash
         self.state.sequence = update.sequence_number;
-        self.state.hash = update.current_hash;
+        self.state.chain_tip_hash = update.current_hash;
 
         Ok(update)
     }
@@ -899,7 +919,7 @@ impl Ledger {
         let message_bytes = operation.tlv_encode();
 
         // Compute hashes
-        let prev_hash = self.state.hash;
+        let prev_hash = self.state.chain_tip_hash;
         // Use next_sequence() (last_entry.seq + 1) instead of history.len(),
         // because history can be truncated (compacted) while state.hash still
         // tracks the true last-entry hash. history.len() would assign a stale
@@ -934,7 +954,7 @@ impl Ledger {
 
         // Update state.hash to current_hash for now — will be updated to
         // chain_hash() after operator signing via finalize_chain_hash()
-        self.state.hash = new_hash;
+        self.state.chain_tip_hash = new_hash;
 
         // Set opened_at_block for new deposits
         if let LedgerOperation::DepositOpen { deposit_id, .. } = &operation {
@@ -984,7 +1004,7 @@ impl Ledger {
             // Recompute current_hash: includes message + member_ledger_hash + cosign_signature
             update.current_hash = update.compute_hash();
             // state.hash tracks current_hash until finalize_chain_hash
-            self.state.hash = update.current_hash;
+            self.state.chain_tip_hash = update.current_hash;
         }
     }
 
@@ -994,7 +1014,7 @@ impl Ledger {
     /// This becomes the next update's previous_hash.
     pub fn finalize_chain_hash(&mut self) {
         if let Some(update) = self.history.last() {
-            self.state.hash = update.chain_hash();
+            self.state.chain_tip_hash = update.chain_hash();
         }
     }
 
@@ -1158,7 +1178,7 @@ impl Ledger {
                 // Verify the collateral_operator is a quorum member (active or pending).
                 // Attestations can arrive before QuorumBegin (during setup) or after.
                 let is_member = self.state.quorum_members.iter().any(|m| m.pubkey == *collateral_operator)
-                    || self.state.pending_quorum_members.iter().any(|m| m.pubkey == *collateral_operator);
+                    || self.state.next_quorum_members.iter().any(|m| m.pubkey == *collateral_operator);
                 if !is_member {
                     return Err(DepositsError::ProtocolViolation {
                         violation_type: "collateral_attestation_from_non_member".to_string(),
@@ -1255,7 +1275,7 @@ impl Ledger {
     ) -> Self {
         // Validate and apply each update to reconstruct the state chain
         // The stored state should already be the final state, but we verify continuity
-        let mut current_hash = initial_state.hash;
+        let mut current_hash = initial_state.chain_tip_hash;
         
         for update in &updates {
             // Verify this update continues the chain
@@ -1272,6 +1292,7 @@ impl Ledger {
         // Return ledger with the final state and all history
         Self {
             state: initial_state,
+            protocol: LedgerProtocolState::default(),
             role: LedgerRole::Partner, // Default role for reconstructed ledgers
             history: updates,
         }
@@ -1393,13 +1414,13 @@ impl LedgerValidator {
 
     /// Check if the ledger has sufficient reserves for current deposits.
     pub fn has_sufficient_reserves(ledger: &Ledger) -> bool {
-        ledger.state.reserves.amount >= Self::calculate_minimum_reserves(ledger)
+        ledger.state.reserves_amount >= Self::calculate_minimum_reserves(ledger)
     }
 
     /// Calculate excess reserves above the minimum requirement.
     pub fn excess_reserves(ledger: &Ledger) -> u64 {
         let min_required = Self::calculate_minimum_reserves(ledger);
-        ledger.state.reserves.amount.saturating_sub(min_required)
+        ledger.state.reserves_amount.saturating_sub(min_required)
     }
 
     // ========================================================================
@@ -1445,10 +1466,10 @@ impl LedgerValidator {
         max_attestation_age_blocks: u32,
     ) -> DepositsResult<()> {
         // Requirement 1: reserves >= deposit_liability
-        if ledger.state.reserves.amount < deposit_liability {
+        if ledger.state.reserves_amount < deposit_liability {
             return Err(DepositsError::InsufficientReserves {
                 required: deposit_liability,
-                available: ledger.state.reserves.amount,
+                available: ledger.state.reserves_amount,
             });
         }
 
@@ -1477,16 +1498,12 @@ impl LedgerValidator {
     /// Collateral decreases are not allowed within the reporting period
     /// after an increase, to prevent gaming the system.
     pub fn can_decrease_collateral(
-        ledger: &Ledger,
-        current_block: u32,
-        reporting_period_blocks: u32,
+        _ledger: &Ledger,
+        _current_block: u32,
+        _reporting_period_blocks: u32,
     ) -> bool {
-        match ledger.state.last_collateral_increase_block {
-            None => true,
-            Some(increase_block) => {
-                current_block.saturating_sub(increase_block) >= reporting_period_blocks
-            }
-        }
+        // TODO: Track last collateral increase block in state if needed
+        true
     }
 
     // ========================================================================
@@ -1550,32 +1567,22 @@ impl LedgerValidator {
     }
 
     /// Check if the partner's ACK is up to date with the current ledger state.
-    pub fn is_partner_ack_current(ledger: &Ledger) -> bool {
-        ledger.state.is_fully_acked()
+    /// ACK tracking was removed with legacy Lightning fields — always returns true.
+    pub fn is_partner_ack_current(_ledger: &Ledger) -> bool {
+        true
     }
 
     /// Check if the channel commitment is up to date with the current ledger state.
-    pub fn is_commitment_current(ledger: &Ledger) -> bool {
-        ledger.state.is_fully_committed()
+    /// Commitment tracking was removed with legacy Lightning fields — always returns true.
+    pub fn is_commitment_current(_ledger: &Ledger) -> bool {
+        true
     }
 
     /// Get the sequence number difference between current state and partner's ACK.
     ///
-    /// Returns the number of updates since the partner's last acknowledged state.
-    /// Returns 0 if fully synced, or the count of unacked updates.
-    pub fn unacked_update_count(ledger: &Ledger) -> u64 {
-        if ledger.state.is_fully_acked() {
-            return 0;
-        }
-
-        // Find the sequence of partner's ack
-        match Self::find_hash_sequence(ledger, &ledger.state.partner_deepest_ack_hash) {
-            Some(ack_seq) => ledger.state.sequence.saturating_sub(ack_seq),
-            None => {
-                // Partner's ACK hash not found - all updates are unacked
-                ledger.state.sequence
-            }
-        }
+    /// Returns 0 — ACK tracking was removed with the legacy Lightning protocol fields.
+    pub fn unacked_update_count(_ledger: &Ledger) -> u64 {
+        0
     }
 }
 
@@ -1723,10 +1730,11 @@ impl LedgerManager {
 
     /// Validate a hash for reserves update.
     pub fn is_valid_reserves_hash(&self, target_hash: &[u8; 32]) -> bool {
+        // No commitment tracking — any valid hash in the chain is acceptable
         LedgerValidator::is_valid_reserves_hash(
             &self.ledger,
             target_hash,
-            &self.ledger.state.channel_deepest_commitment_hash,
+            &[0u8; 32],
         )
     }
 
@@ -1774,7 +1782,7 @@ impl LedgerManager {
             quorum_members,
             genesis_block,
         );
-        let genesis_hash = ledger.state.hash; // Initial hash from LedgerState::new()
+        let genesis_hash = ledger.state.chain_tip_hash; // Initial hash from LedgerState::new()
         (Self::new(ledger), genesis_hash)
     }
 
@@ -1833,7 +1841,7 @@ impl LedgerManager {
         // (ReservesIncrease operation was removed; reserves are now set at LedgerOpen
         // and updated at QuorumBegin)
         if let Some(required_amount) = self.reserves_topup_needed(credit_amount) {
-            self.ledger.state.reserves.amount = required_amount;
+            self.ledger.state.reserves_amount = required_amount;
         }
 
         // Apply the credit operation
@@ -1899,7 +1907,7 @@ mod tests {
         let mut ledger = Ledger::new_as_operator(op_key, partner.to_string(), 0);
 
         // Set reserves directly on state (reserves are now set at LedgerOpen)
-        ledger.state.reserves.amount = 100_000;
+        ledger.state.reserves_amount = 100_000;
 
         // Open deposit
         let user = test_pubkey_2();

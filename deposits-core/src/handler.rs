@@ -979,14 +979,14 @@ where
         let local_hash = ledgers.get(&(self.node_id, partner_node_id.to_string()))
             .map(|arc| {
                 let ledger = arc.read().unwrap();
-                ledger.state.channel_deepest_commitment_hash
+                ledger.state.chain_tip_hash
             });
 
         // Remote hash (where they are operator)
         let remote_hash = ledgers.get(&(partner_node_id, self.node_id.to_string()))
             .map(|arc| {
                 let ledger = arc.read().unwrap();
-                ledger.state.channel_deepest_commitment_hash
+                ledger.state.chain_tip_hash
             });
 
         (local_hash, remote_hash)

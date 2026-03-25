@@ -146,8 +146,7 @@ pub use validation::{
     LedgerStateSnapshot, ChainStatus, SignatureReport, RuleCheck,
 };
 pub use ledger::{
-    Ledger, LedgerRole, LedgerValidator, LedgerManager,
-    // Note: LedgerUpdate is exported from types module
+    Ledger, LedgerRole, LedgerProtocolState, LedgerValidator, LedgerManager,
 };
 pub use handler::{Handler, PendingAck};
 pub use message_processor::{

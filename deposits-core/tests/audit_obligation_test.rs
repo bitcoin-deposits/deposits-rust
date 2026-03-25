@@ -29,55 +29,29 @@ fn make_ledger() -> Ledger {
     let state = LedgerState::new(test_pubkey(), "bcrt1qtest".to_string(), 0);
     Ledger {
         state,
+        protocol: Default::default(),
         role: LedgerRole::Operator,
         history: Vec::new(),
     }
 }
 
 // =========================================================================
-// QuorumBegin stores total_collateral on state
+// total_collateral() computed from attestations
 // =========================================================================
 
 #[test]
-fn quorum_begin_stores_total_collateral() {
+fn total_collateral_computed_from_attestations() {
     let mut ledger = make_ledger();
 
-    ledger
-        .apply_state_changes(&LedgerOperation::QuorumBegin {
-            reserves_id: "tb1qtest_taproot".to_string(),
-            spending_txid: [0u8; 32],
-            new_outpoint_txid: [0u8; 32],
-            new_outpoint_vout: 0,
-            amount: 1_000_000,
-            quorum_expiry: 100_000,
-            ledger_hash: [0u8; 32],
-            quorum_members: vec![],
-            total_collateral: 500_000,
-        })
-        .unwrap();
+    // No attestations → zero collateral
+    assert_eq!(ledger.state.total_collateral(), 0);
 
-    assert_eq!(ledger.state.total_collateral, 500_000);
-}
-
-#[test]
-fn quorum_begin_zero_total_collateral() {
-    let mut ledger = make_ledger();
-
-    ledger
-        .apply_state_changes(&LedgerOperation::QuorumBegin {
-            reserves_id: "tb1qtest_taproot".to_string(),
-            spending_txid: [0u8; 32],
-            new_outpoint_txid: [0u8; 32],
-            new_outpoint_vout: 0,
-            amount: 1_000_000,
-            quorum_expiry: 50_000,
-            ledger_hash: [0u8; 32],
-            quorum_members: vec![],
-            total_collateral: 0,
-        })
-        .unwrap();
-
-    assert_eq!(ledger.state.total_collateral, 0);
+    // Add an attestation
+    use deposits_core::types::CollateralAttestation;
+    ledger.state.collateral_attestations.insert(test_pubkey_2(), CollateralAttestation::new(
+        test_pubkey(), test_pubkey_2(), String::new(), 500_000, 0, 0, [0u8; 64], [0u8; 32],
+    ));
+    assert_eq!(ledger.state.total_collateral(), 500_000);
 }
 
 // =========================================================================
@@ -124,7 +98,7 @@ fn quorum_begin_updates_reserves_key_and_amount() {
         .unwrap();
 
     assert_eq!(ledger.state.reserves_key, "tb1p_new_taproot_addr");
-    assert_eq!(ledger.state.reserves.amount, 2_000_000);
+    assert_eq!(ledger.state.reserves_amount, 2_000_000);
 }
 
 #[test]
@@ -146,7 +120,6 @@ fn quorum_begin_overwrites_previous_values() {
         })
         .unwrap();
 
-    assert_eq!(ledger.state.total_collateral, 500_000);
     assert_eq!(ledger.state.quorum_expiry, Some(100_000));
 
     // Second QuorumBegin overwrites
@@ -164,10 +137,9 @@ fn quorum_begin_overwrites_previous_values() {
         })
         .unwrap();
 
-    assert_eq!(ledger.state.total_collateral, 750_000);
     assert_eq!(ledger.state.quorum_expiry, Some(200_000));
     assert_eq!(ledger.state.reserves_key, "tb1p_second");
-    assert_eq!(ledger.state.reserves.amount, 3_000_000);
+    assert_eq!(ledger.state.reserves_amount, 3_000_000);
 }
 
 // =========================================================================
@@ -198,8 +170,8 @@ fn delivery_embed_no_state_changes() {
         .unwrap();
 
     let deposit_count = ledger.state.deposits.len();
-    let reserves_amount = ledger.state.reserves.amount;
-    let total_collateral = ledger.state.total_collateral;
+    let reserves_amount = ledger.state.reserves_amount;
+    let total_collateral = ledger.state.total_collateral();
     let quorum_expiry = ledger.state.quorum_expiry;
     let reserves_key = ledger.state.reserves_key.clone();
 
@@ -214,8 +186,8 @@ fn delivery_embed_no_state_changes() {
 
     // Verify nothing changed
     assert_eq!(ledger.state.deposits.len(), deposit_count);
-    assert_eq!(ledger.state.reserves.amount, reserves_amount);
-    assert_eq!(ledger.state.total_collateral, total_collateral);
+    assert_eq!(ledger.state.reserves_amount, reserves_amount);
+    assert_eq!(ledger.state.total_collateral(), total_collateral);
     assert_eq!(ledger.state.quorum_expiry, quorum_expiry);
     assert_eq!(ledger.state.reserves_key, reserves_key);
 }

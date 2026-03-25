@@ -1317,7 +1317,7 @@ impl Node {
             let last_hash = ledger.history.last().map(|u| u.chain_hash());
             if let (Some(seq), Some(hash)) = (last_seq, last_hash) {
                 ledger.state.sequence = seq;
-                ledger.state.hash = hash;
+                ledger.state.chain_tip_hash = hash;
             }
 
             // Truncate joined ledger history to prevent unbounded memory growth.
@@ -2843,13 +2843,14 @@ impl Node {
         fork_state.quorum_at_fork.clear();
         fork_state.dispute_fork_sequence = 0;
         fork_state.dispute_state = deposits_core::types::DisputeState::Normal;
-        fork_state.reserves.amount = 0;
+        fork_state.reserves_amount = 0;
         fork_state.sequence = 0;
-        fork_state.hash = [0u8; 32];
+        fork_state.chain_tip_hash = [0u8; 32];
 
         // Create a temporary ledger for replay
         let mut fork = Ledger {
             state: fork_state,
+            protocol: Default::default(),
             role: deposits_core::ledger::LedgerRole::Operator, // We operate the fork
             history: truncated_history.clone(),
         };
@@ -2869,7 +2870,7 @@ impl Node {
         // Update sequence/hash from last valid update
         if let Some(last) = truncated_history.last() {
             fork.state.sequence = last.sequence_number as u64;
-            fork.state.hash = last.chain_hash();
+            fork.state.chain_tip_hash = last.chain_hash();
         }
 
         // Store under compound key
@@ -4045,7 +4046,7 @@ impl Node {
                     let ledgers = self.handler.ledgers.lock().unwrap();
                     if let Some(fork_arc) = ledgers.get(&ledger_key) {
                         let fork = fork_arc.read().unwrap();
-                        fork.state.hash
+                        fork.state.chain_tip_hash
                     } else {
                         tracing::debug!("Could not find ledger hash for {}", ledger_prefix);
                         continue;
@@ -4788,7 +4789,7 @@ impl Node {
         let total_collateral = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             ledgers.get(ledger_id)
-                .map(|arc| arc.read().unwrap().state.received_collateral_amount)
+                .map(|arc| arc.read().unwrap().state.total_collateral())
                 .unwrap_or(0)
         };
 
@@ -6530,7 +6531,7 @@ impl Node {
                     .map(|l| (l.sequence_number, l.chain_hash()))
                     .unwrap_or((0, [0u8; 32]));
                 ledger.state.sequence = seq;
-                ledger.state.hash = hash;
+                ledger.state.chain_tip_hash = hash;
             }
             return (false, None, Some(format!("Failed to sign/broadcast: {:?}", e)));
         }
@@ -6676,7 +6677,7 @@ impl Node {
                     .map(|l| (l.sequence_number, l.chain_hash()))
                     .unwrap_or((0, [0u8; 32]));
                 ledger.state.sequence = seq;
-                ledger.state.hash = hash;
+                ledger.state.chain_tip_hash = hash;
             }
             return (false, None, Some(format!("Failed to sign/broadcast: {:?}", e)));
         }
@@ -9225,12 +9226,12 @@ impl Node {
         let new_total_all = all_deposits.saturating_add(additional_msats);
 
         // Check reserves limit: reserves cover everything (including collateral deposits)
-        let reserves_limit_msats = ledger.state.reserves.amount;
+        let reserves_limit_msats = ledger.state.reserves_amount;
         if reserves_limit_msats > 0 && new_total_all > reserves_limit_msats {
             return Some(format!(
                 "Would exceed reserves: {} + {} = {} msats > {} msats (reserves {} msats)",
                 all_deposits, additional_msats, new_total_all,
-                reserves_limit_msats, ledger.state.reserves.amount
+                reserves_limit_msats, ledger.state.reserves_amount
             ));
         }
 
@@ -9243,10 +9244,10 @@ impl Node {
         let new_customer_total = customer_obligations.saturating_add(additional_msats);
 
         // Check total_collateral limit: customer obligations <= sum of attested collateral
-        if ledger.state.total_collateral > 0 && new_customer_total > ledger.state.total_collateral {
+        if ledger.state.total_collateral() > 0 && new_customer_total > ledger.state.total_collateral() {
             return Some(format!(
                 "Would exceed total collateral: {} + {} = {} msats > {} msats (total attested collateral)",
-                customer_obligations, additional_msats, new_customer_total, ledger.state.total_collateral
+                customer_obligations, additional_msats, new_customer_total, ledger.state.total_collateral()
             ));
         }
 
@@ -9418,7 +9419,7 @@ impl Node {
                     tracing::debug!("Applied co-sign from {}... (member_hash: {}..., new chain_hash: {}...)",
                         &pubkey_hex(&result.cosigner_pubkey)[..8],
                         &hex::encode(&result.member_ledger_hash[..4]),
-                        &hex::encode(&ledger.state.hash[..4]));
+                        &hex::encode(&ledger.state.chain_tip_hash[..4]));
                     last_error = None;
                     break;
                 }
@@ -9970,7 +9971,7 @@ impl Node {
                     .map(|l| (l.sequence_number, l.chain_hash()))
                     .unwrap_or((0, [0u8; 32]));
                 ledger.state.sequence = seq;
-                ledger.state.hash = hash;
+                ledger.state.chain_tip_hash = hash;
             }
             return Err(e);
         }
@@ -10068,7 +10069,7 @@ impl Node {
                     .map(|l| (l.sequence_number, l.chain_hash()))
                     .unwrap_or((0, [0u8; 32]));
                 ledger.state.sequence = seq;
-                ledger.state.hash = hash;
+                ledger.state.chain_tip_hash = hash;
             }
             return Err(e);
         }
@@ -10757,7 +10758,7 @@ impl Node {
         // Update state, get ledger_id
         let ledger_id = {
             let mut ledger_guard = ledger_arc.write().unwrap();
-            ledger_guard.state.reserves.spend_to = self.node_id;
+            // spend_to removed with legacy ReservesOutput struct
             ledger_guard.ledger_id_hex()
         };
 
@@ -10909,7 +10910,7 @@ impl Node {
             let expiries: Vec<u32> = members.iter().map(|_| default_expiry).collect();
 
             let hash = ledger.hash();
-            let reserves = ledger.state.reserves.amount;
+            let reserves = ledger.state.reserves_amount;
 
             (members, expiries, hash, reserves)
         };
@@ -10951,7 +10952,7 @@ impl Node {
             };
 
             // Calculate quorum parameters
-            let total_collateral = ledger_arc.read().unwrap().state.received_collateral_amount;
+            let total_collateral = ledger_arc.read().unwrap().state.total_collateral();
             let operation = LedgerOperation::QuorumBegin {
                 reserves_id: result.address.to_string(),
                 spending_txid: txid_bytes,

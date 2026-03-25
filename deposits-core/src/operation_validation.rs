@@ -114,10 +114,10 @@ pub fn validate_credit_payment(
     }
 
     // Check that credit doesn't exceed declared collateral (only when quorum is active)
-    if ledger.state.quorum_state == crate::types::QuorumState::Active && new_total_deposits > ledger.state.received_collateral_amount {
+    if ledger.state.quorum_state == crate::types::QuorumState::Active && new_total_deposits > ledger.state.total_collateral() {
         return Err(format!(
             "Credit would exceed declared collateral: new deposits {} sats > received collateral {} sats",
-            new_total_deposits, ledger.state.received_collateral_amount
+            new_total_deposits, ledger.state.total_collateral()
         ));
     }
 
@@ -469,10 +469,10 @@ pub fn validate_cosign_invoice(
     }
 
     // CRITICAL: Check that cosigning wouldn't exceed declared collateral (only when quorum is active)
-    if ledger.state.quorum_state == crate::types::QuorumState::Active && new_total_deposits > ledger.state.received_collateral_amount {
+    if ledger.state.quorum_state == crate::types::QuorumState::Active && new_total_deposits > ledger.state.total_collateral() {
         return Err(format!(
             "Cosigning would exceed collateral: potential deposits {} msat > collateral {} msat",
-            new_total_deposits, ledger.state.received_collateral_amount
+            new_total_deposits, ledger.state.total_collateral()
         ));
     }
 
@@ -916,10 +916,10 @@ pub fn validate_credit_payment_by_id(
     }
 
     // Check that credit doesn't exceed declared collateral (only when quorum is active)
-    if ledger.state.quorum_state == crate::types::QuorumState::Active && new_total_deposits > ledger.state.received_collateral_amount {
+    if ledger.state.quorum_state == crate::types::QuorumState::Active && new_total_deposits > ledger.state.total_collateral() {
         return Err(format!(
             "Credit would exceed declared collateral: new deposits {} sats > received collateral {} sats",
-            new_total_deposits, ledger.state.received_collateral_amount
+            new_total_deposits, ledger.state.total_collateral()
         ));
     }
 

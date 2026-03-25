@@ -32,12 +32,20 @@ impl ValidationRules {
     /// - Reserves in this channel must be >= 100% of deposits + max outstanding invoice
     /// - Collateral in other channels provides additional 100% security
     pub fn validate_reserves_requirement(state: &LedgerState) -> DepositsResult<()> {
+        Self::validate_reserves_requirement_with_invoice(state, None)
+    }
+
+    /// Validate reserves requirement, accounting for a pending invoice if present.
+    pub fn validate_reserves_requirement_with_invoice(
+        state: &LedgerState,
+        pending_invoice: Option<&PendingInvoice>,
+    ) -> DepositsResult<()> {
         let total_deposit_balances = state.total_deposit_balance();
 
         let max_outstanding_invoice = Self::get_max_outstanding_invoice_amount(state, 0);
 
         // Add pending invoice if it exists
-        let max_invoice_amount = if let Some(ref pending) = state.pending_invoice {
+        let max_invoice_amount = if let Some(pending) = pending_invoice {
             std::cmp::max(max_outstanding_invoice, pending.amount)
         } else {
             max_outstanding_invoice
@@ -46,10 +54,10 @@ impl ValidationRules {
         let required_reserves =
             Self::calculate_required_reserves(total_deposit_balances, max_invoice_amount);
 
-        if state.reserves_amount() < required_reserves {
+        if state.reserves_amount < required_reserves {
             return Err(DepositsError::InsufficientReserves {
                 required: required_reserves,
-                available: state.reserves_amount(),
+                available: state.reserves_amount,
             });
         }
 
@@ -78,10 +86,10 @@ impl ValidationRules {
         let required_reserves =
             Self::calculate_required_reserves(total_deposit_balances, max_with_pending);
 
-        if state.reserves_amount() < required_reserves {
+        if state.reserves_amount < required_reserves {
             return Err(DepositsError::InsufficientReserves {
                 required: required_reserves,
-                available: state.reserves_amount(),
+                available: state.reserves_amount,
             });
         }
 
@@ -193,7 +201,7 @@ impl ValidationRules {
         let required_reserves =
             Self::calculate_required_reserves(total_deposit_balances, max_outstanding_invoice);
 
-        state.reserves_amount().saturating_sub(required_reserves)
+        state.reserves_amount.saturating_sub(required_reserves)
     }
 
     /// Validate fee assessment for deposit
@@ -315,11 +323,11 @@ impl OperationValidator {
     /// Validate reserves removal operation
     pub fn validate_remove_reserves(state: &LedgerState, amount: u64) -> DepositsResult<()> {
         // Calculate what reserves would be after removal
-        let remaining_reserves = state.reserves_amount().saturating_sub(amount);
+        let remaining_reserves = state.reserves_amount.saturating_sub(amount);
 
         // Create temporary state to validate
         let mut temp_state = state.clone();
-        temp_state.reserves.amount = remaining_reserves;
+        temp_state.reserves_amount = remaining_reserves;
 
         // Ensure reserves requirement still met
         ValidationRules::validate_reserves_requirement(&temp_state)?;
@@ -330,6 +338,7 @@ impl OperationValidator {
     /// Validate credit payment operation
     pub fn validate_credit_payment(
         state: &LedgerState,
+        pending_invoice: Option<&PendingInvoice>,
         deposit_id: &crate::types::DepositId,
         payment_hash: &[u8; 32],
         amount: u64,
@@ -339,7 +348,7 @@ impl OperationValidator {
         ValidationRules::validate_deposit_exists(state, deposit_id)?;
 
         // Verify there's a pending invoice matching this payment
-        if let Some(ref pending) = state.pending_invoice {
+        if let Some(pending) = pending_invoice {
             if pending.payment_hash == *payment_hash
                 && pending.assigned_deposit == *deposit_id
                 && pending.amount == amount
@@ -485,8 +494,8 @@ impl LedgerConformanceValidator {
         ConformanceResult {
             is_conforming: violations.is_empty(),
             final_sequence: state.sequence,
-            final_state_hash: state.hash,
-            computed_reserves: state.reserves_amount(),
+            final_state_hash: state.chain_tip_hash,
+            computed_reserves: state.reserves_amount,
             total_deposits,
             violations,
         }
@@ -887,7 +896,7 @@ impl LedgerConformanceValidator {
             // Update sequence/hash to match the update (use chain_hash for signed entries
             // so state.hash reflects the full hash chain including operator signature)
             ledger.state.sequence = update.sequence_number;
-            ledger.state.hash = update.chain_hash();
+            ledger.state.chain_tip_hash = update.chain_hash();
 
             // Add to history
             ledger.history.push(update.clone());
@@ -949,14 +958,14 @@ impl LedgerConformanceValidator {
 
         // Rule 4: hash matches computed hash (final state)
         let final_hash_valid = if let Some(last_update) = ledger.history.last() {
-            last_update.current_hash == ledger.state.hash
+            last_update.current_hash == ledger.state.chain_tip_hash
         } else {
-            ledger.state.hash == [0u8; 32]
+            ledger.state.chain_tip_hash == [0u8; 32]
         };
         checks.push(RuleCheck {
             rule: "final_hash_consistency".to_string(),
             passed: final_hash_valid,
-            details: Some(format!("final hash: {}", hex::encode(ledger.state.hash))),
+            details: Some(format!("final hash: {}", hex::encode(ledger.state.chain_tip_hash))),
         });
 
         checks
@@ -982,7 +991,7 @@ impl LedgerConformanceValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{FeeStructure, ReservesOutput};
+    use crate::types::FeeStructure;
 
     fn test_pubkey() -> PublicKey {
         let secp = bitcoin::secp256k1::Secp256k1::new();
@@ -1009,7 +1018,7 @@ mod tests {
         let deposit_id = deposit.deposit_id;
         state.deposits.insert(deposit_id, deposit);
 
-        state.reserves = ReservesOutput::new([0u8; 32], reserves, test_pubkey());
+        state.reserves_amount = reserves;
 
         state
     }

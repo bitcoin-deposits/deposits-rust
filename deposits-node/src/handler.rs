@@ -242,7 +242,7 @@ impl DepositsHandler {
             let ledger = ledger_arc.read().unwrap();
 
             // Get reserves amount from the ledger state (in millisatoshis)
-            let reserves_msats = ledger.state.reserves.amount;
+            let reserves_msats = ledger.state.reserves_amount;
             // Convert to satoshis for display (divide by 1000)
             let reserves_sats = reserves_msats / 1000;
             reserves_total += reserves_sats; // reserves_total is in sats for display
@@ -511,11 +511,12 @@ impl DepositsHandler {
             ledger_state.sequence = last_update.sequence_number as u64;
             // Use chain_hash (SHA256(current_hash || operator_signature)) so the next
             // append_operation sets prev_hash = chain_hash, matching the protocol spec.
-            ledger_state.hash = last_update.chain_hash();
+            ledger_state.chain_tip_hash = last_update.chain_hash();
         }
 
         let mut ledger = Ledger {
             state: ledger_state,
+            protocol: Default::default(),
             role: ledger_role,
             history: updates,
         };

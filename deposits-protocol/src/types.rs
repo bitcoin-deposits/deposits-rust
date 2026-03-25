@@ -1122,10 +1122,10 @@ pub struct LedgerState {
     /// All deposits in this ledger, keyed by deposit_id.
     #[serde(with = "serde_deposit_id_map")]
     pub deposits: HashMap<DepositId, Deposit>,
-    /// Current reserves output.
-    pub reserves: ReservesOutput,
-    /// Pending invoice awaiting payment.
-    pub pending_invoice: Option<PendingInvoice>,
+    /// Reserves amount backing this ledger (millisatoshis).
+    /// Set at LedgerOpen, updated at QuorumBegin during reserves rotation.
+    #[serde(default)]
+    pub reserves_amount: u64,
     /// Quorum lifecycle state (PreQuorum → Active → Expired).
     /// Determines co-signature requirements and allowed operation types.
     #[serde(default)]
@@ -1134,30 +1134,10 @@ pub struct LedgerState {
     /// These are the members whose co-signatures are required for operations.
     #[serde(default)]
     pub quorum_members: Vec<QuorumMember>,
-    /// Pending quorum members (added by QuorumAddMember, awaiting QuorumBegin).
-    /// Promoted to quorum_members when the next QuorumBegin is applied.
+    /// Next quorum members (added by QuorumAddMember, awaiting QuorumBegin).
+    /// Promoted to quorum_members when QuorumBegin is applied.
     #[serde(default)]
-    pub pending_quorum_members: Vec<QuorumMember>,
-    /// Committed collateral amount (our collateral pledged to others).
-    pub collateral_amount: u64,
-    /// Block height of last collateral increase.
-    /// Used to enforce the constraint that decreases can't happen within
-    /// COLLATERAL_REPORTING_PERIOD_BLOCKS of an increase.
-    #[serde(default)]
-    pub last_collateral_increase_block: Option<u32>,
-    /// Block height at which collateral size requirements are enforced.
-    ///
-    /// Before this block:
-    /// - Ledger conformance is always enforced (valid signatures, state roots)
-    /// - Partner validation is always required
-    /// Collateral received from other operators that backs this ledger's deposits.
-    /// In the 100%+100% model, deposits need 100% reserves + 100% received collateral.
-    #[serde(default)]
-    pub received_collateral_amount: u64,
-    /// Total attested collateral from QuorumBegin (msats).
-    /// Used for obligation limit: obligations <= min(reserves, total_collateral, 2*min_member_collateral).
-    #[serde(default)]
-    pub total_collateral: u64,
+    pub next_quorum_members: Vec<QuorumMember>,
     /// Block height when the current quorum expires (from QuorumBegin).
     #[serde(default)]
     pub quorum_expiry: Option<u32>,
@@ -1166,36 +1146,15 @@ pub struct LedgerState {
     /// Attestations are updated periodically and validated before use.
     #[serde(with = "serde_pubkey_map", default)]
     pub collateral_attestations: HashMap<PublicKey, CollateralAttestation>,
-    /// Partner's deepest acknowledged hash.
-    /// This is the most recent ledger hash that our channel partner has sent an ACK for.
-    /// When partner ACKs a message, we update this to the new_hash from that message.
-    /// Starts at [0; 32] for new ledgers, updated as partner ACKs our messages.
-    #[serde(with = "serde_32", default)]
-    pub partner_deepest_ack_hash: [u8; 32],
-    /// Channel's deepest embedded commitment hash.
-    /// This is the most recent ledger hash that has been embedded in a Lightning
-    /// commitment transaction's reserves output.
-    /// Updated when we successfully update the channel commitment with new reserves.
-    /// Starts at [0; 32] for new ledgers, updated when commitments include new state.
-    #[serde(with = "serde_32", default)]
-    pub channel_deepest_commitment_hash: [u8; 32],
-    /// Last update timestamp (Unix timestamp).
-    #[serde(default)]
-    pub last_updated: u64,
-    /// Pending out-of-order updates waiting for earlier updates to arrive.
-    /// Key is the sequence number of the pending update.
-    /// When an update arrives that fills a gap, we flush all consecutive pending updates.
-    #[serde(default)]
-    pub pending_updates: HashMap<u64, SignedLedgerUpdate>,
     /// Pending conditional transfers between deposits.
     /// Key is the transfer_id (hash of the signing message).
     #[serde(with = "serde_transfer_id_map", default)]
     pub pending_transfers: HashMap<[u8; 32], PendingTransfer>,
     /// Current sequence number.
     pub sequence: u64,
-    /// Current ledger hash.
-    #[serde(with = "serde_32")]
-    pub hash: [u8; 32],
+    /// Hash chain tip — SHA256(prev_hash || update_message) for the latest update.
+    #[serde(with = "serde_32", alias = "hash")]
+    pub chain_tip_hash: [u8; 32],
     /// Quorums we have joined as a monitoring member.
     /// Records our commitment to monitor other operators' ledgers.
     #[serde(default)]
@@ -1247,28 +1206,18 @@ impl LedgerState {
             reserves_key,
             reserves_outpoint: None,
             deposits: HashMap::new(),
-            reserves: ReservesOutput::default(),
-            pending_invoice: None,
+            reserves_amount: 0,
             quorum_state: QuorumState::PreQuorum,
             quorum_members: Vec::new(),
-            pending_quorum_members: Vec::new(),
-            collateral_amount: 0,
-            last_collateral_increase_block: None,
-            received_collateral_amount: 0,
-            total_collateral: 0,
+            next_quorum_members: Vec::new(),
             quorum_expiry: None,
             collateral_attestations: HashMap::new(),
-            partner_deepest_ack_hash: [0u8; 32],
-            channel_deepest_commitment_hash: [0u8; 32],
-            last_updated: 0,
-            pending_updates: HashMap::new(),
             pending_transfers: HashMap::new(),
             sequence: 0,
-            hash: [0u8; 32],
+            chain_tip_hash: [0u8; 32],
             joined_quorums: Vec::new(),
-            // Dispute state - start in Normal
             dispute_state: DisputeState::Normal,
-            parent_pubkey: operator_key, // Initially operator signs everything
+            parent_pubkey: operator_key,
             quorum_at_fork: Vec::new(),
             dispute_fork_sequence: 0,
         }
@@ -1306,15 +1255,14 @@ impl LedgerState {
                 next.reserves_key = reserves_id.clone();
                 next.genesis_block = *genesis_block;
                 next.ledger_id = Self::compute_ledger_id(operator_id, reserves_id, *genesis_block);
-                next.reserves.amount = *reserves_amount;
+                next.reserves_amount = *reserves_amount;
             }
             LedgerOperation::QuorumBegin { reserves_id, amount, total_collateral, quorum_expiry, .. } => {
                 next.reserves_key = reserves_id.clone();
-                next.reserves.amount = *amount;
-                next.total_collateral = *total_collateral;
+                next.reserves_amount = *amount;
                 next.quorum_expiry = Some(*quorum_expiry);
                 // Promote pending quorum members to active
-                next.quorum_members = std::mem::take(&mut next.pending_quorum_members);
+                next.quorum_members = std::mem::take(&mut next.next_quorum_members);
                 next.quorum_state = QuorumState::Active;
             }
             LedgerOperation::DepositOpen { deposit_id, descriptor, fees, transfer_fees, is_collateral, receive_requires_sig, fee_change_after_blocks, fee_change_notice_blocks, fee_change_limit_bps, .. } => {
@@ -1402,9 +1350,9 @@ impl LedgerState {
                 max_transfer_timeout_blocks, max_descriptor_bytes, ..
             } => {
                 let already_active = next.quorum_members.iter().any(|m| m.pubkey == *quorum_member);
-                let already_pending = next.pending_quorum_members.iter().any(|m| m.pubkey == *quorum_member);
+                let already_pending = next.next_quorum_members.iter().any(|m| m.pubkey == *quorum_member);
                 if !already_active && !already_pending {
-                    next.pending_quorum_members.push(QuorumMember {
+                    next.next_quorum_members.push(QuorumMember {
                         pubkey: *quorum_member,
                         ledger_id: member_ledger_id.clone(),
                         min_fee_bps: *min_fee_bps,
@@ -1422,7 +1370,7 @@ impl LedgerState {
             }
             LedgerOperation::QuorumRemoveMember { quorum_member, .. } => {
                 next.quorum_members.retain(|m| m.pubkey != *quorum_member);
-                next.pending_quorum_members.retain(|m| m.pubkey != *quorum_member);
+                next.next_quorum_members.retain(|m| m.pubkey != *quorum_member);
                 next.collateral_attestations.remove(quorum_member);
             }
             LedgerOperation::CollateralLock { deposit_id, amount, lock_until_block, .. } => {
@@ -1454,9 +1402,6 @@ impl LedgerState {
                     *ledger_hash,
                 );
                 next.collateral_attestations.insert(*collateral_operator, attestation);
-                next.received_collateral_amount = next.collateral_attestations.values()
-                    .map(|a| a.available_collateral())
-                    .sum();
             }
             LedgerOperation::QuorumJoin { operator_id, ledger_id, membership_expires, our_signature } => {
                 if let Some(existing) = next.joined_quorums.iter_mut().find(|m|
@@ -1555,15 +1500,17 @@ impl LedgerState {
         self.deposits.values().map(|d| d.locked_balance).sum()
     }
 
-    /// Get reserves amount (millisatoshis).
-    pub fn reserves_amount(&self) -> u64 {
-        self.reserves.amount
-    }
-
     /// Check if reserves are sufficient.
     pub fn has_sufficient_reserves(&self) -> bool {
-        // Both reserves and deposits are in millisatoshis
-        self.reserves_amount() >= self.total_deposit_balance()
+        self.reserves_amount >= self.total_deposit_balance()
+    }
+
+    /// Total attested collateral from all quorum members (millisatoshis).
+    /// Computed from the collateral_attestations HashMap.
+    pub fn total_collateral(&self) -> u64 {
+        self.collateral_attestations.values()
+            .map(|a| a.available_collateral())
+            .sum()
     }
 
     // ========================================================================
@@ -1625,112 +1572,6 @@ impl LedgerState {
     /// Clear all collateral attestations.
     pub fn clear_collateral_attestations(&mut self) {
         self.collateral_attestations.clear();
-    }
-
-    // ========================================================================
-    // ACK/Commitment Hash Tracking Methods
-    // ========================================================================
-
-    /// Update the partner's deepest acknowledged hash.
-    ///
-    /// Called when partner sends an ACK for one of our messages.
-    /// The new_hash should be the current_hash from the ACKed message.
-    pub fn update_partner_ack_hash(&mut self, new_hash: [u8; 32]) {
-        self.partner_deepest_ack_hash = new_hash;
-    }
-
-    /// Update the channel's deepest commitment hash.
-    ///
-    /// Called when the Lightning channel commitment transaction is updated
-    /// to include a new reserves output with this ledger state.
-    pub fn update_commitment_hash(&mut self, new_hash: [u8; 32]) {
-        self.channel_deepest_commitment_hash = new_hash;
-    }
-
-    /// Update the last_updated timestamp.
-    pub fn touch(&mut self, timestamp: u64) {
-        self.last_updated = timestamp;
-    }
-
-    /// Check if partner has acknowledged the current ledger state.
-    ///
-    /// Returns true if partner_deepest_ack_hash matches the current hash.
-    pub fn is_fully_acked(&self) -> bool {
-        self.partner_deepest_ack_hash == self.hash
-    }
-
-    /// Check if the commitment includes the current ledger state.
-    ///
-    /// Returns true if channel_deepest_commitment_hash matches the current hash.
-    pub fn is_fully_committed(&self) -> bool {
-        self.channel_deepest_commitment_hash == self.hash
-    }
-
-    /// Get the number of updates since partner's last ACK.
-    ///
-    /// Returns None if we can't determine this (e.g., hashes don't match known states).
-    /// This requires knowing the sequence numbers, which we have in the hash field
-    /// but would need the full history to map hash->sequence.
-    /// For now, we just check if they match.
-    pub fn updates_since_ack(&self) -> u64 {
-        if self.is_fully_acked() {
-            0
-        } else {
-            // We don't have sequence tracking for partner_deepest_ack_hash
-            // This would need to be enhanced if we want precise counts
-            1 // Return 1 to indicate "at least one" unacked update
-        }
-    }
-
-    // ========================================================================
-    // Pending Updates Queue Methods
-    // ========================================================================
-
-    /// Queue an out-of-order update for later processing.
-    ///
-    /// Called when an update arrives with a sequence number higher than expected.
-    /// The update is stored until the gap is filled.
-    pub fn queue_pending_update(&mut self, update: SignedLedgerUpdate) {
-        self.pending_updates.insert(update.sequence_number, update);
-    }
-
-    /// Get the number of pending (out-of-order) updates.
-    pub fn pending_update_count(&self) -> usize {
-        self.pending_updates.len()
-    }
-
-    /// Check if there are any pending updates.
-    pub fn has_pending_updates(&self) -> bool {
-        !self.pending_updates.is_empty()
-    }
-
-    /// Get a pending update by sequence number.
-    pub fn get_pending_update(&self, sequence: u64) -> Option<&SignedLedgerUpdate> {
-        self.pending_updates.get(&sequence)
-    }
-
-    /// Remove and return a pending update by sequence number.
-    pub fn take_pending_update(&mut self, sequence: u64) -> Option<SignedLedgerUpdate> {
-        self.pending_updates.remove(&sequence)
-    }
-
-    /// Get all pending update sequence numbers, sorted.
-    pub fn pending_sequences(&self) -> Vec<u64> {
-        let mut seqs: Vec<u64> = self.pending_updates.keys().copied().collect();
-        seqs.sort();
-        seqs
-    }
-
-    /// Clear all pending updates.
-    pub fn clear_pending_updates(&mut self) {
-        self.pending_updates.clear();
-    }
-
-    /// Check if the next expected sequence has a pending update.
-    ///
-    /// The next expected sequence is current sequence + 1.
-    pub fn has_next_pending(&self) -> bool {
-        self.pending_updates.contains_key(&(self.sequence + 1))
     }
 
     /// Get active quorum memberships (not expired).
@@ -3160,12 +3001,12 @@ mod tests {
         let mut state = LedgerState::new(op, partner.to_string(), 0);
 
         assert_eq!(state.total_deposit_balance(), 0);
-        assert_eq!(state.reserves_amount(), 0);
+        assert_eq!(state.reserves_amount, 0);
         assert!(state.has_sufficient_reserves()); // No deposits means 0 reserves is sufficient
 
         // Add reserves
-        state.reserves = ReservesOutput::new([0u8; 32], 100_000, op);
-        assert_eq!(state.reserves_amount(), 100_000);
+        state.reserves_amount = 100_000;
+        assert_eq!(state.reserves_amount, 100_000);
     }
 
     #[test]

@@ -375,11 +375,11 @@ pub fn handle_ledger_update<C: HandlerContext>(
             LedgerOperation::QuorumAddMember { quorum_member, .. } => {
                 // Check both active and pending for idempotency
                 ledger.state.quorum_members.iter().any(|m| m.pubkey == *quorum_member)
-                    || ledger.state.pending_quorum_members.iter().any(|m| m.pubkey == *quorum_member)
+                    || ledger.state.next_quorum_members.iter().any(|m| m.pubkey == *quorum_member)
             }
             LedgerOperation::QuorumRemoveMember { quorum_member, .. } => {
                 !ledger.state.quorum_members.iter().any(|m| m.pubkey == *quorum_member)
-                    && !ledger.state.pending_quorum_members.iter().any(|m| m.pubkey == *quorum_member)
+                    && !ledger.state.next_quorum_members.iter().any(|m| m.pubkey == *quorum_member)
             }
             LedgerOperation::DepositOpen { deposit_id, .. } => {
                 ledger.state.deposits.contains_key(deposit_id)
@@ -1004,7 +1004,7 @@ pub fn handle_collateral_add_partner<C: HandlerContext>(
 
         // Idempotency check: member already active or pending
         if ledger.state.quorum_members.iter().any(|m| m.pubkey == msg.quorum_member)
-            || ledger.state.pending_quorum_members.iter().any(|m| m.pubkey == msg.quorum_member) {
+            || ledger.state.next_quorum_members.iter().any(|m| m.pubkey == msg.quorum_member) {
             let seq = ledger.sequence();
             let hash = ledger.hash();
             (hash, hash, seq, Vec::new(), true)
@@ -1086,7 +1086,7 @@ pub fn handle_collateral_remove_partner<C: HandlerContext>(
 
         // Idempotency check - if already removed from both lists, return success
         if !ledger.state.quorum_members.iter().any(|m| m.pubkey == msg.quorum_member)
-            && !ledger.state.pending_quorum_members.iter().any(|m| m.pubkey == msg.quorum_member) {
+            && !ledger.state.next_quorum_members.iter().any(|m| m.pubkey == msg.quorum_member) {
             let seq = ledger.sequence();
             let hash = ledger.hash();
             (hash, hash, seq, Vec::new(), true)
@@ -1875,7 +1875,7 @@ pub fn handle_reserves_add_output<C: HandlerContext>(
         )?;
 
         // Check for idempotency - if reserves output already exists with same amount
-        if ledger.state.reserves.amount > 0 {
+        if ledger.state.reserves_amount > 0 {
             return Ok(HandlerResult::Response(ResponseData::ReservesAddOutputValidated {
                 operator: sender,
                 reserves_id: msg.reserves_id.clone(),
@@ -1953,7 +1953,7 @@ pub fn handle_reserves_remove_output<C: HandlerContext>(
         )?;
 
         // Check for idempotency - if reserves output already removed
-        if ledger.state.reserves.amount == 0 {
+        if ledger.state.reserves_amount == 0 {
             return Ok(HandlerResult::Response(ResponseData::ReservesRemoveOutputValidated {
                 operator: sender,
                 reserves_id: msg.reserves_id.clone(),
@@ -2426,7 +2426,7 @@ pub fn handle_ledger_export_request<C: HandlerContext>(
     let is_partner = ledger_guard.reserves_key() == sender.to_string()
         || sender.to_string() == msg.reserves_id;
     let is_quorum_member = ledger_guard.state.quorum_members.iter().any(|m| m.pubkey == sender)
-        || ledger_guard.state.pending_quorum_members.iter().any(|m| m.pubkey == sender);
+        || ledger_guard.state.next_quorum_members.iter().any(|m| m.pubkey == sender);
 
     if !is_partner && !is_quorum_member {
         return Ok(HandlerResult::Response(ResponseData::LedgerExportResponse {
@@ -2653,6 +2653,15 @@ mod tests {
         fn recovery_manager(&self) -> Option<Arc<Mutex<RecoveryManager>>> {
             self.recovery_manager.clone()
         }
+    }
+
+    /// Insert a dummy collateral attestation so total_collateral() returns the given amount.
+    fn set_test_collateral(ledger: &mut Ledger, amount: u64) {
+        use crate::types::CollateralAttestation;
+        let dummy_key = create_test_pubkey(99);
+        ledger.state.collateral_attestations.insert(dummy_key, CollateralAttestation::new(
+            dummy_key, dummy_key, String::new(), amount, 0, 0, [0u8; 64], [0u8; 32],
+        ));
     }
 
     fn create_test_pubkey(seed: u8) -> PublicKey {
@@ -3171,8 +3180,8 @@ mod tests {
 
         // Create a ledger without the deposit
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
-        ledger.state.reserves.amount = 100_000;
-        ledger.state.received_collateral_amount = 100_000;
+        ledger.state.reserves_amount = 100_000;
+        set_test_collateral(&mut ledger, 100_000);
         ctx.add_ledger(operator, our_node_id, ledger);
 
         // Create payment hash that's not all the same byte
@@ -3205,8 +3214,8 @@ mod tests {
 
         // Create a ledger with the deposit
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
-        ledger.state.reserves.amount = 100_000;
-        ledger.state.received_collateral_amount = 100_000;
+        ledger.state.reserves_amount = 100_000;
+        set_test_collateral(&mut ledger, 100_000);
         let deposit = Deposit::from_pubkey(&deposit_pubkey, None);
         ledger.state.deposits.insert(deposit.deposit_id, deposit);
         ctx.add_ledger(operator, our_node_id, ledger);
@@ -4188,8 +4197,7 @@ mod tests {
 
         // Create a ledger that already has reserves
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
-        ledger.state.reserves.amount = 100_000;
-        ledger.state.reserves.spend_to = spend_to;
+        ledger.state.reserves_amount = 100_000;
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = ReservesAddOutputMsg {
@@ -4256,8 +4264,7 @@ mod tests {
 
         // Create a ledger with reserves but no deposits
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
-        ledger.state.reserves.amount = 100_000;
-        ledger.state.reserves.spend_to = spend_to;
+        ledger.state.reserves_amount = 100_000;
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = ReservesRemoveOutputMsg {
@@ -4286,8 +4293,7 @@ mod tests {
 
         // Create a ledger with reserves and active deposits
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
-        ledger.state.reserves.amount = 100_000;
-        ledger.state.reserves.spend_to = spend_to;
+        ledger.state.reserves_amount = 100_000;
         let mut deposit = Deposit::from_pubkey(&deposit_pubkey, None);
         deposit.balance = 50_000;
         ledger.state.deposits.insert(deposit.deposit_id, deposit);
@@ -4675,8 +4681,7 @@ mod tests {
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         let deposit = Deposit::from_pubkey(&deposit_pubkey, None);
         ledger.state.deposits.insert(deposit.deposit_id, deposit);
-        ledger.state.reserves.amount = 200_000;
-        ledger.state.reserves.spend_to = spend_to;
+        ledger.state.reserves_amount = 200_000;
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = ReceivingCosignInvoiceMsg {
@@ -4708,9 +4713,8 @@ mod tests {
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         let deposit = Deposit::from_pubkey(&deposit_pubkey, None);
         ledger.state.deposits.insert(deposit.deposit_id, deposit);
-        ledger.state.reserves.amount = 200_000;
-        ledger.state.reserves.spend_to = spend_to;
-        ledger.state.received_collateral_amount = 200_000; // Set collateral to allow invoice
+        ledger.state.reserves_amount = 200_000;
+        set_test_collateral(&mut ledger, 200_000); // Set collateral to allow invoice
         ctx.add_ledger(operator, our_node_id, ledger);
 
         // Use a varied payment hash (not all same bytes to pass validation)
@@ -4765,8 +4769,7 @@ mod tests {
         let mut ledger = Ledger::new(operator, our_node_id.to_string(), LedgerRole::Partner, vec![], 0);
         let deposit = Deposit::from_pubkey(&deposit_pubkey, None);
         ledger.state.deposits.insert(deposit.deposit_id, deposit);
-        ledger.state.reserves.amount = 50_000; // Only 50k reserves
-        ledger.state.reserves.spend_to = spend_to;
+        ledger.state.reserves_amount = 50_000; // Only 50k reserves
         ctx.add_ledger(operator, our_node_id, ledger);
 
         let msg = ReceivingCosignInvoiceMsg {

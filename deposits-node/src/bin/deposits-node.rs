@@ -1115,8 +1115,8 @@ async fn auto_advertise_ledger(
     ad.operator_name = operator_name.map(|s| s.to_string());
     ad.relay_url = fee_schedule.advertise_relay.clone();
     ad.reserves_amount_msats = ledger.reserves_amount();
-    ad.received_collateral_msats = ledger.state.received_collateral_amount;
-    ad.attested_collateral_msats = ledger.state.total_collateral;
+    ad.received_collateral_msats = ledger.state.total_collateral();
+    ad.attested_collateral_msats = ledger.state.total_collateral();
     ad.held_collateral_msats = ledger.total_held_collateral();
 
     // Apply fee schedule from CLI flags
@@ -1247,7 +1247,7 @@ async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     println!("  Operator: {}", ledger.state.operator_key);
     println!("  Reserves: {}", ledger.state.reserves_key);
     println!("  Sequence: {}", ledger.state.sequence);
-    println!("  Hash: {:02x?}", &ledger.state.hash[0..8]);
+    println!("  Hash: {:02x?}", &ledger.state.chain_tip_hash[0..8]);
     // Get ledger identifiers
     let ledger_id = ledger.ledger_id_hex();
     let reserves_key = ledger.state.reserves_key.clone();
@@ -1735,7 +1735,7 @@ async fn ledger_health(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         }
 
         // Sequence/hash
-        let hash_hex = hex::encode(&ledger.state.hash[..8]);
+        let hash_hex = hex::encode(&ledger.state.chain_tip_hash[..8]);
         println!("  Sequence:      {} (hash: {}...)", ledger.state.sequence, hash_hex);
         println!();
     }
@@ -2034,8 +2034,8 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
     ad.available_headroom_msats = ad.reserves_amount_msats.saturating_sub(total_obligations_msats);
 
     // Collateral
-    ad.received_collateral_msats = ledger.state.received_collateral_amount;
-    ad.attested_collateral_msats = ledger.state.total_collateral;
+    ad.received_collateral_msats = ledger.state.total_collateral();
+    ad.attested_collateral_msats = ledger.state.total_collateral();
     ad.held_collateral_msats = ledger.total_held_collateral();
 
     println!("Publishing ledger advertisement...");
