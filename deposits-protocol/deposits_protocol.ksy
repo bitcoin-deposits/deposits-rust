@@ -66,6 +66,33 @@ types:
       Co-signing: SHA256(tag || tag || cosign_data || member_ledger_hash)
       where tag = SHA256("deposits/cosign") and cosign_data =
       message || message_type || sequence || previous_hash.
+
+      message_type constants (u16, SLU field type 2):
+        0x8001 = LEDGER_UPDATE
+        0x8005 = HANDSHAKE
+        0x80B5 = QUORUM_BEGIN
+        0x80D1 = DEPOSIT_OPEN
+        0x80D3 = DEPOSIT_CLOSE
+        0x80D5 = FEE_CHANGE
+        0x80D7 = DEPOSIT_KEY_ROTATE
+        0x80E1 = ONCHAIN_CREDIT
+        0x80E3 = ONCHAIN_LOCK
+        0x80E5 = ONCHAIN_FAIL
+        0x80E7 = ONCHAIN_FULFILL
+        0x80F1 = TRANSFER_LOCK
+        0x80F3 = TRANSFER_COMPLETE
+        0x80F5 = TRANSFER_FAIL
+        0x808D = COLLATERAL_ATTESTATION
+        0x8097 = QUORUM_ADD_MEMBER
+        0x8099 = QUORUM_REMOVE_MEMBER
+        0x809F = COLLATERAL_LOCK
+        0x80AB = QUORUM_JOIN
+        0x8021 = FEE_COLLECT
+        0x801D = LEDGER_CLOSE
+        0x8033 = INVOICE_CREDIT
+        0x8041 = INVOICE_LOCK
+        0x8043 = INVOICE_FAIL
+        0x8045 = INVOICE_FULFILL
     seq:
       - id: records
         type: tlv_record
