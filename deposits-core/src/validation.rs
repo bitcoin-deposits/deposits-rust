@@ -884,9 +884,10 @@ impl LedgerConformanceValidator {
                     reason: format!("{}", e),
                 })?;
 
-            // Update sequence/hash to match the update
+            // Update sequence/hash to match the update (use chain_hash for signed entries
+            // so state.hash reflects the full hash chain including operator signature)
             ledger.state.sequence = update.sequence_number;
-            ledger.state.hash = update.current_hash;
+            ledger.state.hash = update.chain_hash();
 
             // Add to history
             ledger.history.push(update.clone());
