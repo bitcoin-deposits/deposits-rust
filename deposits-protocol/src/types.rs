@@ -1691,17 +1691,17 @@ impl SignedLedgerUpdate {
 
     /// Compute the data that the co-signer signs (update content only, no operator signature).
     ///
-    /// Co-signer signs: message || message_type || sequence || prev_hash
+    /// Co-signer signs: sequence || prev_hash || message
+    /// Matches TLV field order: identity → chain → payload.
     /// Does NOT include current_hash — the hash is finalized after co-signing
     /// (it incorporates member_ledger_hash for causal ordering).
     /// Co-signer signs ONLY the content, NOT any operator signature.
     /// This prevents operator from tricking co-signer into endorsing invalid state.
     pub fn cosign_data(&self) -> Vec<u8> {
         let mut data = Vec::new();
-        data.extend_from_slice(&self.message);
-        data.extend_from_slice(&self.message_type.to_le_bytes());
         data.extend_from_slice(&self.sequence_number.to_le_bytes());
         data.extend_from_slice(&self.previous_hash);
+        data.extend_from_slice(&self.message);
         data
     }
 
@@ -2450,41 +2450,58 @@ impl TlvDecode for ReservesOutput {
 }
 
 // Field type constants for SignedLedgerUpdate
+//
+// Layout: identity → chain → payload → context → cosign → signatures
+//   tag=0  operator_id        (33B)
+//   tag=2  ledger_id          (32B)
+//   tag=4  sequence_number    (varint)
+//   tag=6  previous_hash      (32B)
+//   tag=8  message            (variable)       ← signed by both parties
+//   tag=10 block_height       (4B, optional)
+//   tag=12 block_hash         (32B, optional)
+//   tag=14 cosigner_pubkey    (33B, optional)
+//   tag=16 member_ledger_hash (32B, optional)
+//   tag=18 cosign_signature   (64B)
+//   tag=20 operator_signature (64B)
 mod signed_update_fields {
-    pub const MESSAGE: u64 = 0;
-    pub const MESSAGE_TYPE: u64 = 2;
-    pub const OPERATOR_ID: u64 = 4;
-    pub const LEDGER_ID: u64 = 6;
-    pub const SEQUENCE_NUMBER: u64 = 8;
-    pub const PREVIOUS_HASH: u64 = 10;
-    // 12 was CURRENT_HASH — removed from wire, now derived from content
-    pub const COSIGN_SIGNATURE: u64 = 16;
-    pub const OPERATOR_SIGNATURE: u64 = 18;
-    pub const BLOCK_HEIGHT: u64 = 20;
-    pub const BLOCK_HASH: u64 = 22;
-    pub const COSIGNER_PUBKEY: u64 = 24;
-    pub const MEMBER_LEDGER_HASH: u64 = 26;
+    pub const OPERATOR_ID: u64 = 0;
+    pub const LEDGER_ID: u64 = 2;
+    pub const SEQUENCE_NUMBER: u64 = 4;
+    pub const PREVIOUS_HASH: u64 = 6;
+    pub const MESSAGE: u64 = 8;
+    pub const BLOCK_HEIGHT: u64 = 10;
+    pub const BLOCK_HASH: u64 = 12;
+    pub const COSIGNER_PUBKEY: u64 = 14;
+    pub const MEMBER_LEDGER_HASH: u64 = 16;
+    pub const COSIGN_SIGNATURE: u64 = 18;
+    pub const OPERATOR_SIGNATURE: u64 = 20;
 }
 
 impl TlvEncode for SignedLedgerUpdate {
     fn tlv_encode(&self) -> Vec<u8> {
         let mut builder = TlvBuilder::new()
-            .bytes_field(signed_update_fields::MESSAGE, &self.message)
-            .u16_field(signed_update_fields::MESSAGE_TYPE, self.message_type)
             .pubkey_field(signed_update_fields::OPERATOR_ID, &self.operator_id)
             .bytes_field(signed_update_fields::LEDGER_ID, &self.ledger_id)
             .u64_field(signed_update_fields::SEQUENCE_NUMBER, self.sequence_number)
             .bytes_field(signed_update_fields::PREVIOUS_HASH, &self.previous_hash)
-            .u32_field(signed_update_fields::BLOCK_HEIGHT, self.block_height)
-            .bytes_field(signed_update_fields::BLOCK_HASH, &self.block_hash)
-            .bytes_field(signed_update_fields::COSIGN_SIGNATURE, &self.cosign_signature)
-            .bytes_field(signed_update_fields::OPERATOR_SIGNATURE, &self.operator_signature);
+            .bytes_field(signed_update_fields::MESSAGE, &self.message);
+        if self.block_height != 0 {
+            builder = builder.u32_field(signed_update_fields::BLOCK_HEIGHT, self.block_height);
+        }
+        if self.block_hash != [0u8; 32] {
+            builder = builder.bytes_field(signed_update_fields::BLOCK_HASH, &self.block_hash);
+        }
         if let Some(ref pk) = self.cosigner_pubkey {
             builder = builder.pubkey_field(signed_update_fields::COSIGNER_PUBKEY, pk);
         }
         if let Some(ref hash) = self.member_ledger_hash {
             builder = builder.bytes_field(signed_update_fields::MEMBER_LEDGER_HASH, hash);
         }
+        if self.cosign_signature != [0u8; 64] {
+            builder = builder.bytes_field(signed_update_fields::COSIGN_SIGNATURE, &self.cosign_signature);
+        }
+        builder = builder
+            .bytes_field(signed_update_fields::OPERATOR_SIGNATURE, &self.operator_signature);
         builder.build()
     }
 }
@@ -2492,9 +2509,12 @@ impl TlvEncode for SignedLedgerUpdate {
 impl TlvDecode for SignedLedgerUpdate {
     fn tlv_decode(data: &[u8]) -> TlvResult<Self> {
         let reader = TlvReader::new(data)?;
+        let message = reader.read_raw(signed_update_fields::MESSAGE)?.to_vec();
+        // Derive message_type from the operation discriminant in message bytes
+        let message_type = crate::messages::LedgerOperation::message_type_from_bytes(&message);
         let mut update = Self {
-            message: reader.read_raw(signed_update_fields::MESSAGE)?.to_vec(),
-            message_type: reader.read_u16(signed_update_fields::MESSAGE_TYPE)?,
+            message,
+            message_type,
             operator_id: reader.read_pubkey(signed_update_fields::OPERATOR_ID)?,
             ledger_id: reader.read_bytes(signed_update_fields::LEDGER_ID)?,
             sequence_number: reader.read_u64(signed_update_fields::SEQUENCE_NUMBER)?,
@@ -2502,7 +2522,7 @@ impl TlvDecode for SignedLedgerUpdate {
             current_hash: [0u8; 32],
             block_height: reader.read_u32_opt(signed_update_fields::BLOCK_HEIGHT)?.unwrap_or(0),
             block_hash: reader.read_bytes_opt(signed_update_fields::BLOCK_HASH)?.unwrap_or([0u8; 32]),
-            cosign_signature: reader.read_bytes(signed_update_fields::COSIGN_SIGNATURE)?,
+            cosign_signature: reader.read_bytes_opt(signed_update_fields::COSIGN_SIGNATURE)?.unwrap_or([0u8; 64]),
             operator_signature: reader.read_bytes(signed_update_fields::OPERATOR_SIGNATURE)?,
             cosigner_pubkey: reader.read_pubkey_opt(signed_update_fields::COSIGNER_PUBKEY)?,
             member_ledger_hash: reader.read_bytes_opt(signed_update_fields::MEMBER_LEDGER_HASH)?,

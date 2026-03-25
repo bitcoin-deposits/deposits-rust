@@ -863,7 +863,6 @@ impl DepositsHandler {
                 };
                 if let Err(e) = ledger_guard.append_operation(
                     operation,
-                    deposits_core::messages::consts::LEDGER_OPEN_REQUEST,
                 ) {
                     tracing::error!("Failed to append LedgerOpen: {:?}", e);
                 } else {

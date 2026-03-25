@@ -39,19 +39,6 @@ fn format_hash(hash: &[u8; 32]) -> String {
     format!("{:02x}{:02x}{:02x}{:02x}...", hash[0], hash[1], hash[2], hash[3])
 }
 
-fn format_timestamp(ts: u64) -> String {
-    if ts == 0 {
-        return "0".to_string();
-    }
-
-    use std::time::{UNIX_EPOCH, Duration};
-    let d = UNIX_EPOCH + Duration::from_secs(ts);
-
-    // Format as ISO-8601 datetime
-    let datetime: chrono::DateTime<chrono::Utc> = d.into();
-    datetime.format("%Y-%m-%d %H:%M:%S UTC").to_string()
-}
-
 /// Decode message bytes using DepositsMessage::read (same as SignedLedgerUpdate::get_message)
 /// Returns formatted string describing the message content
 fn decode_message_content(_message_type: u16, message_bytes: &[u8]) -> String {
@@ -74,7 +61,9 @@ fn print_update(idx: usize, update: &SignedLedgerUpdate) {
     println!("      ledger_id: {}", hex::encode(update.ledger_id));
     println!("      prev_hash: {}", format_hash(&update.previous_hash));
     println!("      curr_hash: {}", format_hash(&update.current_hash));
-    println!("      timestamp: {} ({})", update.timestamp, format_timestamp(update.timestamp));
+    if update.block_height != 0 {
+        println!("      block: {} ({})", update.block_height, format_hash(&update.block_hash));
+    }
     println!("      signature: {:02x}{:02x}{:02x}{:02x}...",
         update.operator_signature[0],
         update.operator_signature[1],

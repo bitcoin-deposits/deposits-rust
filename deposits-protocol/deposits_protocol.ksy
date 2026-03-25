@@ -61,79 +61,62 @@ types:
       next update's previous_hash = chain_hash
 
       current_hash is NOT on the wire -- it is derived by the receiver.
-      Type 12 is reserved.
+      message_type is NOT on the wire -- it is derived from the operation discriminant.
+
+      Layout: identity -> chain -> payload -> context -> cosign -> signatures
+        type 0  = operator_id        (33-byte pubkey)
+        type 2  = ledger_id          (32-byte hash)
+        type 4  = sequence_number    (u64)
+        type 6  = previous_hash      (32-byte hash)
+        type 8  = message            (variable, inner LedgerOperation TLV)
+        type 10 = block_height       (u32, optional)
+        type 12 = block_hash         (32-byte hash, optional)
+        type 14 = cosigner_pubkey    (33-byte pubkey, optional)
+        type 16 = member_ledger_hash (32-byte hash, optional)
+        type 18 = cosign_signature   (64-byte sig, optional when zero)
+        type 20 = operator_signature (64-byte sig)
 
       Co-signing: SHA256(tag || tag || cosign_data || member_ledger_hash)
       where tag = SHA256("deposits/cosign") and cosign_data =
-      message || message_type || sequence || previous_hash.
-
-      message_type constants (u16, SLU field type 2):
-        0x8001 = LEDGER_UPDATE
-        0x8005 = HANDSHAKE
-        0x80B5 = QUORUM_BEGIN
-        0x80D1 = DEPOSIT_OPEN
-        0x80D3 = DEPOSIT_CLOSE
-        0x80D5 = FEE_CHANGE
-        0x80D7 = DEPOSIT_KEY_ROTATE
-        0x80E1 = ONCHAIN_CREDIT
-        0x80E3 = ONCHAIN_LOCK
-        0x80E5 = ONCHAIN_FAIL
-        0x80E7 = ONCHAIN_FULFILL
-        0x80F1 = TRANSFER_LOCK
-        0x80F3 = TRANSFER_COMPLETE
-        0x80F5 = TRANSFER_FAIL
-        0x808D = COLLATERAL_ATTESTATION
-        0x8097 = QUORUM_ADD_MEMBER
-        0x8099 = QUORUM_REMOVE_MEMBER
-        0x809F = COLLATERAL_LOCK
-        0x80AB = QUORUM_JOIN
-        0x8021 = FEE_COLLECT
-        0x801D = LEDGER_CLOSE
-        0x8033 = INVOICE_CREDIT
-        0x8041 = INVOICE_LOCK
-        0x8043 = INVOICE_FAIL
-        0x8045 = INVOICE_FULFILL
+      sequence || previous_hash || message.
     seq:
       - id: records
         type: tlv_record
         repeat: eos
     instances:
-      message:
-        doc: "Inner LedgerOperation TLV bytes (type 0)"
-        value: "records[0].value"
-      message_type:
-        doc: "Operation type constant for fast filtering (type 2, u16)"
-        value: "records[1].value"
       operator_id:
-        doc: "Operator's 33-byte compressed secp256k1 pubkey (type 4)"
-        value: "records[2].value"
+        doc: "Operator's 33-byte compressed secp256k1 pubkey (type 0)"
+        value: "records[0].value"
       ledger_id:
-        doc: "32-byte ledger identifier hash (type 6)"
-        value: "records[3].value"
+        doc: "32-byte ledger identifier hash (type 2)"
+        value: "records[1].value"
       sequence_number:
-        doc: "Monotonically increasing sequence number (type 8, u64)"
-        value: "records[4].value"
+        doc: "Monotonically increasing sequence number (type 4, u64)"
+        value: "records[2].value"
       previous_hash:
-        doc: "32-byte chain hash of the previous update (type 10)"
-        value: "records[5].value"
-      cosign_signature:
-        doc: "64-byte Schnorr co-signature from quorum member (type 16)"
-        value: "records[6].value"
-      operator_signature:
-        doc: "64-byte Schnorr signature from operator (type 18)"
-        value: "records[7].value"
+        doc: "32-byte chain hash of the previous update (type 6)"
+        value: "records[3].value"
+      message:
+        doc: "Inner LedgerOperation TLV bytes (type 8)"
+        value: "records[4].value"
       block_height:
-        doc: "Block height when update was created (type 20, u32)"
-        value: "records[8].value"
+        doc: "Block height when update was created (type 10, u32, optional)"
+        value: "records[5].value"
       block_hash:
-        doc: "32-byte block hash at time of creation (type 22)"
-        value: "records[9].value"
+        doc: "32-byte block hash at time of creation (type 12, optional)"
+        value: "records[6].value"
       cosigner_pubkey:
-        doc: "33-byte compressed pubkey of the co-signing quorum member (type 24)"
-        value: "records[10].value"
+        doc: "33-byte compressed pubkey of the co-signing quorum member (type 14, optional)"
+        value: "records[7].value"
       member_ledger_hash:
-        doc: "32-byte tip hash of the co-signer's own ledger (type 26). Included in derived current_hash for causal ordering."
-        value: "records[11].value"
+        doc: "32-byte tip hash of the co-signer's own ledger (type 16, optional). Included in derived current_hash for causal ordering."
+        value: "records[8].value"
+      cosign_signature:
+        doc: "64-byte Schnorr co-signature from quorum member (type 18, optional when zero)"
+        value: "records[9].value"
+      operator_signature:
+        doc: "64-byte Schnorr signature from operator (type 20)"
+        value: "records[10].value"
 
   ledger_operation:
     doc: |

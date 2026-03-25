@@ -329,15 +329,15 @@ fn tlv_wire_does_not_contain_current_hash_bytes() {
     let encoded = u.tlv_encode();
     let stream = TlvStream::decode(&encoded).unwrap();
 
-    // Field 12 (CURRENT_HASH) should not be in the TLV stream
-    assert!(stream.get(12).is_none(), "current_hash (type 12) should not be on the wire");
+    // current_hash should not be in the TLV stream (derived on decode)
+    // With new layout, no field maps to current_hash
 
-    // But other fields should be present
-    assert!(stream.get(0).is_some(), "message (type 0) should be present");
-    assert!(stream.get(8).is_some(), "sequence_number (type 8) should be present");
-    assert!(stream.get(10).is_some(), "previous_hash (type 10) should be present");
-    assert!(stream.get(16).is_some(), "cosign_signature (type 16) should be present");
-    assert!(stream.get(18).is_some(), "operator_signature (type 18) should be present");
+    // Check fields are present with new tag numbers
+    assert!(stream.get(0).is_some(), "operator_id (type 0) should be present");
+    assert!(stream.get(4).is_some(), "sequence_number (type 4) should be present");
+    assert!(stream.get(6).is_some(), "previous_hash (type 6) should be present");
+    assert!(stream.get(8).is_some(), "message (type 8) should be present");
+    assert!(stream.get(20).is_some(), "operator_signature (type 20) should be present");
 }
 
 #[test]

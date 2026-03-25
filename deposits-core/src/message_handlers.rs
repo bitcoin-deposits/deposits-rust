@@ -499,7 +499,7 @@ pub fn handle_ledger_update<C: HandlerContext>(
             }
 
             // Append operation to ledger
-            let (prev, new, seq) = ledger.append_operation(operation.clone(), LEDGER_UPDATE)
+            let (prev, new, seq) = ledger.append_operation(operation.clone())
                 .map_err(|e| HandlerError::ValidationFailed(e.to_string()))?;
 
             // Get message bytes for signing
@@ -1010,7 +1010,7 @@ pub fn handle_collateral_add_partner<C: HandlerContext>(
             (hash, hash, seq, Vec::new(), true)
         } else {
             // Append operation
-            let (prev, new, seq) = ledger.append_operation(operation.clone(), LEDGER_UPDATE)
+            let (prev, new, seq) = ledger.append_operation(operation.clone())
                 .map_err(|e| HandlerError::ValidationFailed(e.to_string()))?;
 
             // Get message bytes for signing
@@ -1092,7 +1092,7 @@ pub fn handle_collateral_remove_partner<C: HandlerContext>(
             (hash, hash, seq, Vec::new(), true)
         } else {
             // Append operation
-            let (prev, new, seq) = ledger.append_operation(operation.clone(), LEDGER_UPDATE)
+            let (prev, new, seq) = ledger.append_operation(operation.clone())
                 .map_err(|e| HandlerError::ValidationFailed(e.to_string()))?;
 
             // Get message bytes for signing
@@ -1596,7 +1596,7 @@ pub fn handle_deposit_open<C: HandlerContext>(
             ).map_err(|e| HandlerError::ValidationFailed(e))?;
 
             // Append operation
-            let (prev, new, seq) = ledger.append_operation(operation.clone(), LEDGER_UPDATE)
+            let (prev, new, seq) = ledger.append_operation(operation.clone())
                 .map_err(|e| HandlerError::ValidationFailed(e.to_string()))?;
 
             // Get message bytes for signing
@@ -1698,7 +1698,7 @@ pub fn handle_deposit_close<C: HandlerContext>(
             ).map_err(|e| HandlerError::ValidationFailed(e))?;
 
             // Append operation
-            let (prev, new, seq) = ledger.append_operation(operation.clone(), LEDGER_UPDATE)
+            let (prev, new, seq) = ledger.append_operation(operation.clone())
                 .map_err(|e| HandlerError::ValidationFailed(e.to_string()))?;
 
             // Get message bytes for signing
@@ -1795,7 +1795,7 @@ pub fn handle_fee_change<C: HandlerContext>(
         ).map_err(|e| HandlerError::ValidationFailed(e))?;
 
         // Append operation
-        let (prev, new, seq) = ledger.append_operation(operation.clone(), LEDGER_UPDATE)
+        let (prev, new, seq) = ledger.append_operation(operation.clone())
             .map_err(|e| HandlerError::ValidationFailed(e.to_string()))?;
 
         // Get message bytes for signing

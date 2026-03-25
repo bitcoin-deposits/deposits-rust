@@ -2946,7 +2946,6 @@ impl Node {
 
                 fork_ledger.append_operation_with_block(
                     dispute_op,
-                    deposits_core::messages::consts::LEDGER_UPDATE,
                     current_block,
                     block_hash,
                 ).map_err(|e| Error::Protocol(format!("Failed to append DisputeEnter to fork: {:?}", e)))?;
@@ -3036,7 +3035,6 @@ impl Node {
 
                     if let Err(e) = fork_ledger.append_operation_with_block(
                         add_op,
-                        deposits_core::messages::consts::QUORUM_ADD_MEMBER,
                         current_block,
                         block_hash,
                     ) {
@@ -3056,7 +3054,6 @@ impl Node {
 
                     if let Err(e) = fork_ledger.append_operation_with_block(
                         attestation,
-                        deposits_core::messages::consts::COLLATERAL_ATTESTATION,
                         current_block,
                         block_hash,
                     ) {
@@ -3121,7 +3118,6 @@ impl Node {
 
                 fork_ledger.append_operation_with_block(
                     armed_op,
-                    deposits_core::messages::consts::LEDGER_UPDATE,
                     current_block,
                     block_hash,
                 ).map_err(|e| Error::Protocol(format!("Failed to append DisputeArmed to fork: {:?}", e)))?;
@@ -5894,7 +5890,6 @@ impl Node {
 
             if let Err(e) = ledger.append_operation_with_block(
                 lock_operation,
-                deposits_core::messages::consts::SENDING_LOCK_PAYMENT,
                 block_height,
                 block_hash,
             ) {
@@ -5945,7 +5940,6 @@ impl Node {
 
                     if let Err(e) = ledger.append_operation_with_block(
                         fulfill_operation,
-                        deposits_core::messages::consts::SENDING_FULFILL_PAYMENT,
                         block_height,
                         block_hash,
                     ) {
@@ -5974,7 +5968,6 @@ impl Node {
 
                     if let Err(e) = ledger.append_operation_with_block(
                         credit_operation,
-                        deposits_core::messages::consts::RECEIVING_CREDIT_PAYMENT,
                         block_height,
                         block_hash,
                     ) {
@@ -6074,7 +6067,6 @@ impl Node {
 
                 if let Err(e) = ledger.append_operation_with_block(
                     fulfill_operation,
-                    deposits_core::messages::consts::SENDING_FULFILL_PAYMENT,
                     block_height,
                     block_hash,
                 ) {
@@ -6114,7 +6106,6 @@ impl Node {
 
                 if let Err(e) = ledger.append_operation_with_block(
                     fail_operation,
-                    deposits_core::messages::consts::SENDING_FAIL_PAYMENT,
                     block_height,
                     block_hash,
                 ) {
@@ -6497,7 +6488,6 @@ impl Node {
             let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
             if let Err(e) = ledger.append_operation_with_block(
                 operation,
-                deposits_core::messages::consts::TRANSFER_LOCK,
                 block_height,
                 block_hash,
             ) {
@@ -6644,7 +6634,6 @@ impl Node {
             let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
             if let Err(e) = ledger.append_operation_with_block(
                 operation,
-                deposits_core::messages::consts::TRANSFER_COMPLETE,
                 block_height,
                 block_hash,
             ) {
@@ -8299,7 +8288,6 @@ impl Node {
                     let mut ledger = ledger_arc.write().unwrap();
                     if let Err(e) = ledger.append_operation_with_block(
                         operation,
-                        deposits_core::messages::consts::MAINTENANCE_FEE_COLLECT,
                         current_block,
                         block_hash,
                     ) {
@@ -8418,7 +8406,6 @@ impl Node {
                     let mut ledger = ledger_arc.write().unwrap();
                     if let Err(e) = ledger.append_operation_with_block(
                         operation,
-                        deposits_core::messages::consts::TRANSFER_FAIL,
                         current_block,
                         block_hash,
                     ) {
@@ -9557,7 +9544,6 @@ impl Node {
 
             ledger.append_operation_with_block(
                 operation,
-                deposits_core::messages::consts::QUORUM_ADD_MEMBER,
                 block_height,
                 block_hash,
             ).map_err(|e| Error::Protocol(format!("Failed to add quorum member: {:?}", e)))?;
@@ -9632,7 +9618,6 @@ impl Node {
 
             ledger.append_operation_with_block(
                 operation,
-                deposits_core::messages::consts::QUORUM_JOIN,
                 block_height,
                 block_hash,
             ).map_err(|e| Error::Protocol(format!("Failed to record quorum join: {:?}", e)))?;
@@ -9749,7 +9734,7 @@ impl Node {
                     witness,
                 };
 
-                ledger.append_operation_with_block(operation, deposits_core::messages::consts::COLLATERAL_LOCK, block_height, block_hash)
+                ledger.append_operation_with_block(operation, block_height, block_hash)
                     .map_err(|e| Error::Protocol(format!("Failed to lock collateral: {:?}", e)))?;
             }
 
@@ -9863,7 +9848,6 @@ impl Node {
             let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
             ledger.append_operation_with_block(
                 operation,
-                deposits_core::messages::consts::COLLATERAL_ATTESTATION,
                 block_height,
                 block_hash,
             ).map_err(|e| Error::Protocol(format!("Failed to record attestation: {:?}", e)))?;
@@ -9938,7 +9922,6 @@ impl Node {
             let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
             ledger.append_operation_with_block(
                 operation,
-                deposits_core::messages::consts::DEPOSIT_OPEN,
                 block_height,
                 block_hash,
             ).map_err(|e| Error::Protocol(format!("Failed to open deposit: {:?}", e)))?;
@@ -10031,7 +10014,6 @@ impl Node {
             let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
             ledger.append_operation_with_block(
                 operation,
-                deposits_core::messages::consts::ONCHAIN_CREDIT,
                 block_height,
                 block_hash,
             ).map_err(|e| Error::Protocol(format!("Failed to credit deposit: {:?}", e)))?;
@@ -10131,7 +10113,6 @@ impl Node {
             let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
             ledger.append_operation_with_block(
                 operation,
-                deposits_core::messages::consts::RECEIVING_CREDIT_PAYMENT,
                 block_height,
                 block_hash,
             ).map_err(|e| Error::Protocol(format!("Failed to credit deposit: {:?}", e)))?;
@@ -10211,7 +10192,6 @@ impl Node {
             let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
             ledger.append_operation_with_block(
                 operation,
-                deposits_core::messages::consts::SENDING_LOCK_PAYMENT,
                 block_height,
                 block_hash,
             ).map_err(|e| Error::Protocol(format!("Failed to lock payment: {:?}", e)))?;
@@ -10289,7 +10269,6 @@ impl Node {
             let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
             ledger.append_operation_with_block(
                 operation,
-                deposits_core::messages::consts::SENDING_FAIL_PAYMENT,
                 block_height,
                 block_hash,
             ).map_err(|e| Error::Protocol(format!("Failed to fail payment: {:?}", e)))?;
@@ -10371,7 +10350,6 @@ impl Node {
             let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
             ledger.append_operation_with_block(
                 operation,
-                deposits_core::messages::consts::SENDING_FULFILL_PAYMENT,
                 block_height,
                 block_hash,
             ).map_err(|e| Error::Protocol(format!("Failed to fulfill payment: {:?}", e)))?;
@@ -10489,7 +10467,6 @@ impl Node {
             let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
             ledger.append_operation_with_block(
                 operation,
-                deposits_core::messages::consts::ONCHAIN_LOCK,
                 block_height,
                 block_hash,
             ).map_err(|e| Error::Protocol(format!("Failed to lock withdrawal: {:?}", e)))?;
@@ -10609,7 +10586,6 @@ impl Node {
             let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
             ledger.append_operation_with_block(
                 operation,
-                deposits_core::messages::consts::ONCHAIN_FULFILL,
                 block_height,
                 block_hash,
             ).map_err(|e| Error::Protocol(format!("Failed to fulfill withdrawal: {:?}", e)))?;
@@ -10968,7 +10944,6 @@ impl Node {
             let mut ledger = ledger_arc.write().unwrap();
             ledger.append_operation_with_block(
                 operation,
-                deposits_core::messages::consts::QUORUM_BEGIN,
                 block_height,
                 block_hash,
             ).map_err(|e| Error::Protocol(format!("Failed to record reserves rotation: {:?}", e)))?;

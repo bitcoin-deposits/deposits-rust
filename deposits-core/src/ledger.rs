@@ -733,18 +733,14 @@ impl Ledger {
     /// Check if a credit has been issued for a given payment hash.
     /// This scans the history and deserializes InvoiceCredit messages to check.
     pub fn has_credit_for_payment(&self, payment_hash: &[u8; 32]) -> bool {
-        use crate::messages::DepositsMessage;
+        use crate::tlv::TlvDecode;
 
         for update in &self.history {
-            // Quick filter: only check InvoiceCredit message types
-            // InvoiceCredit is part of LedgerUpdate (0x8001) or standalone type (0x8005)
-            if update.message_type == 0x8001 || update.message_type == 0x8005 {
-                if let Ok(msg) = DepositsMessage::decode(&update.message) {
-                    if let DepositsMessage::LedgerUpdate(lu) = msg {
-                        if let LedgerOperation::InvoiceCredit { payment_hash: hash, .. } = lu.operation {
-                            if &hash == payment_hash {
-                                return true;
-                            }
+            if update.message_type == crate::messages::consts::RECEIVING_CREDIT_PAYMENT {
+                if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+                    if let LedgerOperation::InvoiceCredit { payment_hash: hash, .. } = op {
+                        if &hash == payment_hash {
+                            return true;
                         }
                     }
                 }
@@ -877,9 +873,8 @@ impl Ledger {
     pub fn append_operation(
         &mut self,
         operation: LedgerOperation,
-        message_type: u16,
     ) -> DepositsResult<([u8; 32], [u8; 32], u64)> {
-        self.append_operation_with_block(operation, message_type, 0, [0u8; 32])
+        self.append_operation_with_block(operation, 0, [0u8; 32])
     }
 
     /// Append an operation with block info.
@@ -888,7 +883,6 @@ impl Ledger {
     pub fn append_operation_with_block(
         &mut self,
         operation: LedgerOperation,
-        message_type: u16,
         block_height: u32,
         block_hash: [u8; 32],
     ) -> DepositsResult<([u8; 32], [u8; 32], u64)> {
@@ -934,8 +928,8 @@ impl Ledger {
 
         // Create SignedLedgerUpdate (unsigned - caller should populate signatures)
         let signed_update = SignedLedgerUpdate {
+            message_type: operation.message_type(),
             message: message_bytes,
-            message_type,
             operator_signature: [0u8; 64],
             cosigner_pubkey: None,
             member_ledger_hash: None,

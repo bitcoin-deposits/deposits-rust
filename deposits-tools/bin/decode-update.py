@@ -229,12 +229,12 @@ else:
     print("warning: deposits_protocol.ksy not found, using minimal builtins",
           file=sys.stderr)
     SLU_TAGS = {
-        0: ("message", "bytes"), 2: ("message_type", "u16"),
-        4: ("operator_id", "pubkey"), 6: ("ledger_id", "hash"),
-        8: ("sequence_number", "u64"), 10: ("previous_hash", "hash"),
-        16: ("cosign_signature", "sig"), 18: ("operator_signature", "sig"),
-        20: ("block_height", "u32"), 22: ("block_hash", "hash"),
-        24: ("cosigner_pubkey", "pubkey"), 26: ("member_ledger_hash", "hash"),
+        0: ("operator_id", "pubkey"), 2: ("ledger_id", "hash"),
+        4: ("sequence_number", "u64"), 6: ("previous_hash", "hash"),
+        8: ("message", "bytes"),
+        10: ("block_height", "u32"), 12: ("block_hash", "hash"),
+        14: ("cosigner_pubkey", "pubkey"), 16: ("member_ledger_hash", "hash"),
+        18: ("cosign_signature", "sig"), 20: ("operator_signature", "sig"),
     }
     MSG_TYPES = {}
     OP_DISCRIMINANTS = {}
@@ -527,10 +527,15 @@ def main():
     print(f"  chain_hash:    {chain_hash.hex()[:16]}...")
 
     seq = struct.unpack(">Q", fields.get("sequence_number", b"\x00"*8))[0]
-    mt = struct.unpack(">H", fields.get("message_type", b"\x00\x00"))[0]
-    mt_name = MSG_TYPES.get(mt, f"0x{mt:04x}")
+    # Derive message type from inner operation discriminant
+    message = fields.get("message", b"")
+    if len(message) >= 3 and message[0] == 0 and message[1] == 1:
+        disc = message[2]
+        disc_name = OP_DISCRIMINANTS.get(disc, f"disc={disc}")
+    else:
+        disc_name = "unknown"
     lid = fields.get("ledger_id", b"").hex()
-    print(f"  seq={seq}  type={mt_name}  ledger={lid[:16]}...")
+    print(f"  seq={seq}  type={disc_name}  ledger={lid[:16]}...")
     print()
 
 

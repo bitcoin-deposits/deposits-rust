@@ -904,6 +904,87 @@ impl LedgerOperation {
         }
     }
 
+    /// Get the wire message type constant for this operation.
+    /// Derived from the discriminant — this is the canonical mapping.
+    pub fn message_type(&self) -> u16 {
+        match self {
+            Self::LedgerOpen { .. } => consts::LEDGER_OPEN_REQUEST,
+            Self::QuorumBegin { .. } => consts::QUORUM_BEGIN,
+            Self::DepositOpen { .. } => consts::DEPOSIT_OPEN,
+            Self::DepositClose { .. } => consts::DEPOSIT_CLOSE,
+            Self::FeeChange { .. } => consts::FEE_CHANGE,
+            Self::DepositKeyRotate { .. } => consts::DEPOSIT_KEY_ROTATE,
+            Self::InvoiceCredit { .. } => consts::RECEIVING_CREDIT_PAYMENT,
+            Self::InvoiceLock { .. } => consts::SENDING_LOCK_PAYMENT,
+            Self::InvoiceFail { .. } => consts::SENDING_FAIL_PAYMENT,
+            Self::InvoiceFulfill { .. } => consts::SENDING_FULFILL_PAYMENT,
+            Self::OnchainCredit { .. } => consts::ONCHAIN_CREDIT,
+            Self::OnchainLock { .. } => consts::ONCHAIN_LOCK,
+            Self::OnchainFail { .. } => consts::ONCHAIN_FAIL,
+            Self::OnchainFulfill { .. } => consts::ONCHAIN_FULFILL,
+            Self::TransferLock { .. } => consts::TRANSFER_LOCK,
+            Self::TransferComplete { .. } => consts::TRANSFER_COMPLETE,
+            Self::TransferFail { .. } => consts::TRANSFER_FAIL,
+            Self::CollateralAttestation { .. } => consts::COLLATERAL_ATTESTATION,
+            Self::QuorumAddMember { .. } => consts::QUORUM_ADD_MEMBER,
+            Self::QuorumRemoveMember { .. } => consts::QUORUM_REMOVE_MEMBER,
+            Self::CollateralLock { .. } => consts::COLLATERAL_LOCK,
+            Self::QuorumJoin { .. } => consts::QUORUM_JOIN,
+            Self::FeeCollect { .. } => consts::MAINTENANCE_FEE_COLLECT,
+            Self::DisputeEnter { .. } => consts::LEDGER_UPDATE,
+            Self::DisputeAcquire { .. } => consts::LEDGER_UPDATE,
+            Self::DisputeYield => consts::LEDGER_UPDATE,
+            Self::DisputeArmed { .. } => consts::LEDGER_UPDATE,
+            Self::DeliveryEmbed { .. } => consts::LEDGER_UPDATE,
+            Self::LedgerClose => consts::LEDGER_CLOSE,
+        }
+    }
+
+    /// Derive the message_type u16 from TLV-encoded message bytes
+    /// by reading the discriminant from the first TLV field.
+    pub fn message_type_from_bytes(message: &[u8]) -> u16 {
+        // The discriminant is the first TLV field (tag=0).
+        // TLV format: varint(tag) varint(len) bytes...
+        // For tag=0: 0x00, then varint(1), then the u8 discriminant
+        if message.len() >= 3 && message[0] == 0 && message[1] == 1 {
+            Self::message_type_from_discriminant(message[2])
+        } else {
+            0
+        }
+    }
+
+    /// Map a discriminant byte to the wire message type constant.
+    pub fn message_type_from_discriminant(disc: u8) -> u16 {
+        match disc {
+            1 => consts::LEDGER_OPEN_REQUEST,
+            12 => consts::QUORUM_BEGIN,
+            20 => consts::DEPOSIT_OPEN,
+            21 => consts::DEPOSIT_CLOSE,
+            22 => consts::FEE_CHANGE,
+            23 => consts::DEPOSIT_KEY_ROTATE,
+            30 => consts::RECEIVING_CREDIT_PAYMENT,
+            31 => consts::SENDING_LOCK_PAYMENT,
+            32 => consts::SENDING_FAIL_PAYMENT,
+            33 => consts::SENDING_FULFILL_PAYMENT,
+            35 => consts::ONCHAIN_CREDIT,
+            36 => consts::ONCHAIN_LOCK,
+            37 => consts::ONCHAIN_FAIL,
+            38 => consts::ONCHAIN_FULFILL,
+            42 => consts::COLLATERAL_ATTESTATION,
+            43 => consts::QUORUM_ADD_MEMBER,
+            44 => consts::QUORUM_REMOVE_MEMBER,
+            45 => consts::COLLATERAL_LOCK,
+            46 => consts::QUORUM_JOIN,
+            50 => consts::MAINTENANCE_FEE_COLLECT,
+            54 | 55 | 56 | 57 | 80 => consts::LEDGER_UPDATE,
+            60 => consts::LEDGER_CLOSE,
+            70 => consts::TRANSFER_LOCK,
+            71 => consts::TRANSFER_COMPLETE,
+            72 => consts::TRANSFER_FAIL,
+            _ => 0,
+        }
+    }
+
     /// Return deposit IDs affected by this operation (for Nostr event tagging).
     pub fn affected_deposit_ids(&self) -> Vec<&crate::types::DepositId> {
         match self {
@@ -4628,8 +4709,9 @@ mod tests {
         use crate::tlv::{TlvEncode, TlvDecode};
 
         let mut update = SignedLedgerUpdate {
-            message: vec![0x80, 0x01, 0xAA, 0xBB], // Sample message bytes
-            message_type: 0x8001,
+            // Valid TLV: tag=0 (discriminant), len=1, value=60 (LedgerClose)
+            message: vec![0x00, 0x01, 60],
+            message_type: LEDGER_CLOSE,
             operator_id: test_pubkey(),
             ledger_id: [0x12; 32],
             sequence_number: 1,

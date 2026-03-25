@@ -53,7 +53,6 @@ fn open_deposit_with_change_params(
                 fee_change_notice_blocks: notice_blocks,
                 fee_change_limit_bps: limit_bps,
             },
-            deposits_core::messages::consts::DEPOSIT_OPEN,
             block_height,
             [0u8; 32],
         )
@@ -382,7 +381,6 @@ fn append_fee_change_too_early_rejected() {
             new_fees: FeeStructure::new(1100, 110, 2016),
             effective_block: 600,
         },
-        deposits_core::messages::consts::FEE_CHANGE,
         500,
         [0u8; 32],
     );
@@ -410,7 +408,6 @@ fn append_fee_change_exceeding_limit_rejected() {
             new_fees: FeeStructure::new(15000, 1500, 2016),
             effective_block: 300,
         },
-        deposits_core::messages::consts::FEE_CHANGE,
         200,
         [0u8; 32],
     );
