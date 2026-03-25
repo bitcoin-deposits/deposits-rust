@@ -1,17 +1,17 @@
 #!/bin/bash
-# Four-operator setup script
+# Multi-operator setup script
 #
-# Sets up a persistent environment with 4 operators cross-linked:
+# Sets up a persistent environment with N operators (default 4) cross-linked:
 # 1. Each creates reserves UTXOs (1 BTC each)
 # 2. Each opens ledgers with configurable enforcement delay
-# 3. Each operator adds others as quorum members
+# 3. Quorum members assigned per ledger (3-5 members, organic topology)
 # 4. Rotates reserves to quorum-based Taproot
 #
 # After this script completes, you have a fully cross-linked network
 # ready for manual testing, deposits, or dispute scenarios.
 #
 # Usage:
-#   ./bin/setup-4op.sh [--skip-reset] [--enforcement-delay BLOCKS]
+#   ./bin/setup-4op.sh [--nodes N] [--skip-reset] [--enforcement-delay BLOCKS]
 #
 # The --skip-reset flag preserves existing state (useful for resuming).
 # Default enforcement delay is 200 blocks.
@@ -73,11 +73,19 @@ while [[ $# -gt 0 ]]; do
             TRANSFER_FEE_RATE_BPS="$2"
             shift 2
             ;;
+        --nodes|-n)
+            NODE_COUNT="$2"
+            shift 2
+            ;;
+        --show-topology)
+            SHOW_TOPOLOGY=true
+            shift
+            ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 [--skip-reset] [--enforcement-delay BLOCKS] [--reserves SATS] [--ledgers-per-op N]"
-            echo "       [--annual-fee-bps N] [--min-fee-sats N] [--fee-period N]"
-            echo "       [--transfer-fee-fixed N] [--transfer-fee-rate-bps N]"
+            echo "Usage: $0 [--nodes N] [--skip-reset] [--enforcement-delay BLOCKS] [--reserves SATS]"
+            echo "       [--ledgers-per-op N] [--annual-fee-bps N] [--min-fee-sats N] [--fee-period N]"
+            echo "       [--transfer-fee-fixed N] [--transfer-fee-rate-bps N] [--show-topology]"
             exit 1
             ;;
     esac
@@ -101,8 +109,21 @@ get_value() {
     fi
 }
 
-# Operators - 4 total
-OPERATORS="alice bob charlie diana"
+# Re-initialize topology with final config (NODE_COUNT / LEDGERS_PER_OP may have changed)
+init_topology
+
+# Generate topology JSON for quorum lookups during setup
+python3 "$SCRIPT_DIR/generate-topology.py" --nodes "$NODE_COUNT" --ledgers-per-op "$LEDGERS_PER_OP" > "$STATE_DIR/topology.json"
+# Persist topology so redeploy can auto-detect node count
+cp "$STATE_DIR/topology.json" "$DATA_ROOT/topology.json"
+
+if [ "${SHOW_TOPOLOGY:-false}" = true ]; then
+    python3 "$SCRIPT_DIR/generate-topology.py" --nodes "$NODE_COUNT" --ledgers-per-op "$LEDGERS_PER_OP" --show-graph >/dev/null
+    exit 0
+fi
+
+# Operators (dynamic from topology)
+OPERATORS="${NODES[*]}"
 
 # ============================================================================
 # Reset function - clears Nostr relay and node data
@@ -302,10 +323,11 @@ cleanup_nostr_watchers() {
 add_quorum_members() {
     log_info ""
     log_info "=== Phase 3b: Add Quorum Members ==="
-    log_info "(Each operator adds the other operators as quorum members for all ledgers)"
+    log_info "(Topology-driven quorum assignment per ledger)"
     echo ""
 
     local membership_expires=1000000  # Far future block
+    local topo_file="$STATE_DIR/topology.json"
 
     for op in $OPERATORS; do
         local op_node_id=$(get_value "node_id_$op")
@@ -316,34 +338,37 @@ add_quorum_members() {
 
             local op_ledger_id=$(get_value "ledger_id_${op}${suffix}")
 
-            for member in $OPERATORS; do
-                if [ "$op" != "$member" ]; then
-                    local member_node_id=$(get_value "node_id_$member")
-                    # Use member's first ledger for collateral binding
-                    local member_suffix=""
-                    [ "$LEDGERS_PER_OP" -gt 1 ] && member_suffix="_1"
-                    local member_ledger_id=$(get_value "ledger_id_${member}${member_suffix}")
-                    local op_short="$op"
-                    local member_short="$member"
+            # Get quorum members for this specific ledger from topology
+            local members=$(python3 -c "
+import json
+t = json.load(open('$topo_file'))
+print(' '.join(t['quorum'].get('${op}_${idx}', [])))
+")
 
-                    log_info "$op_short ledger $idx: adding $member_short as quorum member..."
+            for member in $members; do
+                local member_node_id=$(get_value "node_id_$member")
+                # Use member's first ledger for collateral binding
+                local member_suffix=""
+                [ "$LEDGERS_PER_OP" -gt 1 ] && member_suffix="_1"
+                local member_ledger_id=$(get_value "ledger_id_${member}${member_suffix}")
 
-                    # Add member to op's quorum (pass member's ledger ID for collateral binding)
-                    local add_output=$(run_node_cmd "$op" partner add "$op_ledger_id" "$member_node_id" "$member_ledger_id" 2>&1)
+                log_info "$op ledger $idx: adding $member as quorum member..."
 
-                    if echo "$add_output" | grep -q "Quorum member added\|added"; then
-                        # Record the join on member's first ledger
-                        local join_output=$(run_node_cmd "$member" partner join "$member_ledger_id" "$op_node_id" "$op_ledger_id" "$membership_expires" 2>&1)
+                # Add member to op's quorum (pass member's ledger ID for collateral binding)
+                local add_output=$(run_node_cmd "$op" partner add "$op_ledger_id" "$member_node_id" "$member_ledger_id" 2>&1)
 
-                        if echo "$join_output" | grep -q "Quorum join recorded\|recorded"; then
-                            log_success "$member_short joined $op_short ledger $idx"
-                        else
-                            log_warn "$op_short added $member_short to ledger $idx (join record issue)"
-                        fi
+                if echo "$add_output" | grep -q "Quorum member added\|added"; then
+                    # Record the join on member's first ledger
+                    local join_output=$(run_node_cmd "$member" partner join "$member_ledger_id" "$op_node_id" "$op_ledger_id" "$membership_expires" 2>&1)
+
+                    if echo "$join_output" | grep -q "Quorum join recorded\|recorded"; then
+                        log_success "$member joined $op ledger $idx"
                     else
-                        log_error "$op_short failed to add $member_short to ledger $idx"
-                        echo "    Output: $add_output"
+                        log_warn "$op added $member to ledger $idx (join record issue)"
                     fi
+                else
+                    log_error "$op failed to add $member to ledger $idx"
+                    echo "    Output: $add_output"
                 fi
             done
         done
@@ -357,64 +382,80 @@ add_quorum_members() {
 establish_collateral() {
     log_info ""
     log_info "=== Phase 3c: Establish Collateral Deposits ==="
-    log_info "(Each operator opens and funds collateral deposits on quorum member ledgers)"
+    log_info "(Each quorum member opens collateral on ledgers they serve)"
     echo ""
 
-    local collateral_amount=$(( (RESERVES_AMOUNT + 5) / 6 ))  # 1/6th of reserves per member (round up)
-    log_info "Collateral per member: $collateral_amount sats (1/6 of $RESERVES_AMOUNT)"
+    local topo_file="$STATE_DIR/topology.json"
+
+    # Extract unique (depositor, ledger_owner) pairs and compute collateral amount.
+    # Collateral per deposit = (reserves / 2) / num_quorum_members on that ledger.
+    # We use the max member count across all owners so a single amount works everywhere.
+    local pairs_and_amount=$(python3 -c "
+import json
+from collections import Counter
+t = json.load(open('$topo_file'))
+pairs = set()
+for key, members in t['quorum'].items():
+    op = key.rsplit('_', 1)[0]
+    for m in members:
+        pairs.add((m, op))
+# Count how many deposits each owner's first ledger will receive
+owner_counts = Counter(owner for _, owner in pairs)
+max_deposits = max(owner_counts.values())
+# Half of reserves divided by the number of quorum members
+collateral = int($RESERVES_AMOUNT // 2 // max_deposits)
+print(collateral)
+for depositor, owner in sorted(pairs):
+    print(f'{depositor} {owner}')
+")
+    local collateral_amount=$(echo "$pairs_and_amount" | head -1)
+    local pairs=$(echo "$pairs_and_amount" | tail -n +2)
+    local num_pairs=$(echo "$pairs" | wc -l | tr -d ' ')
+    log_info "Collateral per deposit: $collateral_amount sats ($num_pairs unique pairs)"
     echo ""
 
-    for op in $OPERATORS; do
-        for member in $OPERATORS; do
-            if [ "$op" != "$member" ]; then
-                # Operator opens a collateral deposit on member's first ledger
-                local member_suffix=""
-                [ "$LEDGERS_PER_OP" -gt 1 ] && member_suffix="_1"
-                local member_ledger_id=$(get_value "ledger_id_${member}${member_suffix}")
+    while IFS=' ' read -r depositor owner; do
+        # Depositor opens a collateral deposit on owner's first ledger
+        local owner_suffix=""
+        [ "$LEDGERS_PER_OP" -gt 1 ] && owner_suffix="_1"
+        local owner_ledger_id=$(get_value "ledger_id_${owner}${owner_suffix}")
 
-                if [ -z "$member_ledger_id" ]; then
-                    log_warn "No ledger for $member, skipping collateral"
-                    continue
-                fi
+        if [ -z "$owner_ledger_id" ]; then
+            log_warn "No ledger for $owner, skipping collateral"
+            continue
+        fi
 
-                log_info "$op opening collateral deposit on $member's ledger..."
+        log_info "$depositor opening collateral deposit on $owner's ledger..."
 
-                # Open collateral deposit — send to member's relay where their nostr watch listens
-                local member_relay=$(get_node_relay_url "$member")
-                local op_seed=$(get_node_seed "$op")
-                local op_data_dir=$(get_node_data_dir "$op")
-                local open_output=$(RUST_LOG=error "$DEPOSITS_WALLET" open \
-                    "$member_ledger_id" "$collateral_amount" \
-                    --alias "collateral-${op}-on-${member}" --collateral --skip-cosign-verify \
-                    --fee-bps "$ANNUAL_FEE_BPS" --fee-fixed "$MIN_FEE_SATS" --fee-period "$FEE_PERIOD" \
-                    --seed "$op_seed" --network regtest \
-                    --relay "$member_relay" \
-                    --data-dir "$op_data_dir/wallet" 2>&1 || true)
+        # Open collateral deposit — send to owner's relay where their nostr watch listens.
+        # Retry on timeout (operator watch may be busy with other requests).
+        local owner_relay=$(get_node_relay_url "$owner")
+        local dep_seed=$(get_node_seed "$depositor")
+        local dep_data_dir=$(get_node_data_dir "$depositor")
+        local open_output=$(RUST_LOG=error "$DEPOSITS_WALLET" open \
+            "$owner_ledger_id" "$collateral_amount" \
+            --alias "collateral-${depositor}-on-${owner}" --collateral --skip-cosign-verify \
+            --fee-bps "$ANNUAL_FEE_BPS" --fee-fixed "$MIN_FEE_SATS" --fee-period "$FEE_PERIOD" \
+            --seed "$dep_seed" --network regtest \
+            --relay "$owner_relay" \
+            --data-dir "$dep_data_dir/wallet" 2>&1 || true)
 
-                if echo "$open_output" | grep -q "created\|Fund with"; then
-                    # Extract funding address (may have leading whitespace)
-                    local fund_addr=$(echo "$open_output" | grep -oE 'bcrt1[a-z0-9]+' | head -1)
-                    if [ -n "$fund_addr" ]; then
-                        local btc_amount=$(python3 -c "print(f'{$collateral_amount / 100_000_000:.8f}')")
-                        bitcoin_cli -rpcwallet=faucet sendtoaddress "$fund_addr" "$btc_amount" >/dev/null 2>&1 || true
-                        log_success "$op collateral on $member: $collateral_amount sats"
-                    else
-                        log_warn "$op collateral on $member: created but no funding address"
-                    fi
-                else
-                    log_warn "$op collateral on $member failed: $(echo "$open_output" | head -1)"
-                fi
-            fi
-        done
-    done
+        local fund_addr=$(echo "$open_output" | grep -oE 'bcrt1[a-z0-9]+' | head -1)
+        if [ -n "$fund_addr" ]; then
+            local btc_amount=$(python3 -c "print(f'{$collateral_amount / 100_000_000:.8f}')")
+            bitcoin_cli -rpcwallet=faucet sendtoaddress "$fund_addr" "$btc_amount" >/dev/null 2>&1 || true
+            log_success "$depositor collateral on $owner: $collateral_amount sats"
+        else
+            log_warn "$depositor collateral on $owner failed:"
+            echo "$open_output" | tail -5
+        fi
+    done <<< "$pairs"
 
     mine_blocks 2
 
-    # Poll until all collateral deposits have non-zero balances.
-    # Ask each operator's daemon for deposit balances via `deposit ls`.
+    # Poll until all collateral deposits have non-zero balances
     log_info "Waiting for collateral deposits to complete..."
-    local num_ops=$(echo $OPERATORS | wc -w | tr -d ' ')
-    local expected_deposits=$((num_ops * (num_ops - 1)))
+    local expected_deposits="$num_pairs"
     local completed=0
     for attempt in $(seq 1 30); do
         mine_blocks 1
@@ -448,51 +489,44 @@ establish_collateral() {
     local collateral_msats=$((collateral_amount * 1000))
     local lock_blocks=10000  # ~70 days
 
-    for op in $OPERATORS; do
-        local op_node_id=$(get_value "node_id_$op")
+    while IFS=' ' read -r depositor owner; do
+        local dep_node_id=$(get_value "node_id_$depositor")
+        local owner_suffix=""
+        [ "$LEDGERS_PER_OP" -gt 1 ] && owner_suffix="_1"
+        local owner_ledger_id=$(get_value "ledger_id_${owner}${owner_suffix}")
 
-        for member in $OPERATORS; do
-            if [ "$op" != "$member" ]; then
-                local member_suffix=""
-                [ "$LEDGERS_PER_OP" -gt 1 ] && member_suffix="_1"
-                local member_ledger_id=$(get_value "ledger_id_${member}${member_suffix}")
+        # Depositor locks their collateral deposit on owner's ledger
+        local lock_output=$(run_node_cmd "$depositor" collateral lock \
+            "$owner_ledger_id" "$collateral_msats" "$lock_blocks" "$dep_node_id" 2>&1 || true)
 
-                # Op locks their collateral deposit on member's ledger
-                # The deposit was opened with op's seed, so op runs the lock command
-                local lock_output=$(run_node_cmd "$op" collateral lock \
-                    "$member_ledger_id" "$collateral_msats" "$lock_blocks" "$op_node_id" 2>&1 || true)
+        local attestation_b64=$(echo "$lock_output" | grep "attestation_b64" | sed 's/.*"attestation_b64":"\([^"]*\)".*/\1/')
+        local attestation_json=""
+        if [ -n "$attestation_b64" ]; then
+            attestation_json=$(echo "$attestation_b64" | base64 -d 2>/dev/null || echo "")
+        fi
 
-                # Extract the base64-encoded attestation from the response
-                local attestation_b64=$(echo "$lock_output" | grep "attestation_b64" | sed 's/.*"attestation_b64":"\([^"]*\)".*/\1/')
-                local attestation_json=""
-                if [ -n "$attestation_b64" ]; then
-                    attestation_json=$(echo "$attestation_b64" | base64 -d 2>/dev/null || echo "")
+        if [ -n "$attestation_json" ]; then
+            # Record attestation on ALL of depositor's ledgers
+            local recorded=0
+            for lidx in $(seq 1 $LEDGERS_PER_OP); do
+                local lsuffix=""
+                [ "$LEDGERS_PER_OP" -gt 1 ] && lsuffix="_$lidx"
+                local dep_reserves_id=$(get_value "reserves_id_${depositor}${lsuffix}")
+                if [ -n "$dep_reserves_id" ]; then
+                    run_node_cmd "$depositor" collateral record \
+                        "$dep_reserves_id" "$attestation_json" 2>&1 >/dev/null || true
+                    recorded=$((recorded + 1))
                 fi
-
-                if [ -n "$attestation_json" ]; then
-                    # Record attestation on ALL of op's ledgers
-                    local recorded=0
-                    for lidx in $(seq 1 $LEDGERS_PER_OP); do
-                        local lsuffix=""
-                        [ "$LEDGERS_PER_OP" -gt 1 ] && lsuffix="_$lidx"
-                        local op_reserves_id=$(get_value "reserves_id_${op}${lsuffix}")
-                        if [ -n "$op_reserves_id" ]; then
-                            run_node_cmd "$op" collateral record \
-                                "$op_reserves_id" "$attestation_json" 2>&1 >/dev/null || true
-                            recorded=$((recorded + 1))
-                        fi
-                    done
-                    if [ $recorded -gt 0 ]; then
-                        log_success "$op locked collateral on $member, attestation on $recorded ledger(s)"
-                    else
-                        log_warn "$op attestation record issue"
-                    fi
-                else
-                    log_warn "$op collateral lock on $member failed: $(echo "$lock_output" | tail -1)"
-                fi
+            done
+            if [ $recorded -gt 0 ]; then
+                log_success "$depositor locked collateral on $owner, attestation on $recorded ledger(s)"
+            else
+                log_warn "$depositor attestation record issue"
             fi
-        done
-    done
+        else
+            log_warn "$depositor collateral lock on $owner failed: $(echo "$lock_output" | tail -1)"
+        fi
+    done <<< "$pairs"
     mine_blocks 1
 }
 
@@ -578,8 +612,9 @@ print_summary() {
 # ============================================================================
 
 main() {
+    local num_ops=$(echo $OPERATORS | wc -w | tr -d ' ')
     log_info "=========================================="
-    log_info "  Four-Operator Setup"
+    log_info "  ${num_ops}-Operator Setup"
     log_info "=========================================="
     log_info "Operators: $OPERATORS"
     log_info "Ledgers per operator: $LEDGERS_PER_OP"

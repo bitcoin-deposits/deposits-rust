@@ -40,6 +40,11 @@ while [[ $# -gt 0 ]]; do
             SKIP_BASE_SETUP=true
             shift
             ;;
+        --nodes|-n)
+            NODE_COUNT="$2"
+            SETUP_ARGS+=(--nodes "$2")
+            shift 2
+            ;;
         *)
             # Pass through to setup-4op.sh
             SETUP_ARGS+=("$1")
@@ -48,7 +53,10 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-OPERATORS="alice bob charlie diana"
+# Re-initialize topology (NODE_COUNT may have changed from --nodes)
+init_topology
+
+OPERATORS="${NODES[*]}"
 
 # ldk-cli helper (runs inside the shared lightning container)
 ldk_cli() {
@@ -131,7 +139,7 @@ for node in $OPERATORS; do
     # Own relay first (primary for publishing), then the rest for reads
     own_relay=$(get_node_relay_url "$node")
     relay_args="--relay $own_relay"
-    for r in $RELAY_ALICE $RELAY_BOB $RELAY_CHARLIE $RELAY_DIANA; do
+    for r in "${ALL_RELAYS[@]}"; do
         [ "$r" != "$own_relay" ] && relay_args="$relay_args --relay $r"
     done
 
@@ -142,12 +150,12 @@ for node in $OPERATORS; do
     LDK_API_KEY="$LN_API_KEY" \
     LDK_TLS_CERT="$TOOLS_DIR/certs/lightning.crt" \
     LDK_SELF_PAY_DIR="$SELF_PAY_DIR" \
-    RUST_LOG=info,deposits_node=debug \
+    RUST_LOG=info,nostr_relay_pool=warn,nostr_sdk=warn \
     DEPOSITS_ENABLE_METRICS_EMITTER=1 \
     "$DEPOSITS_NODE" run \
         --seed "$seed" \
         --network regtest \
-        --electrum "$ELECTRS_URL" \
+        --electrum "$(get_node_electrs_url "$node")" \
         $relay_args \
         --slow-relay "$RELAY_LEDGERS" \
         --data-dir "$data_dir" \
@@ -238,4 +246,5 @@ echo "  Test lightning:   ./bin/test-lightning.sh"
 echo "  Agent logs:       tail -f $DATA_ROOT/htlc-agent/agent.log"
 echo ""
 
-log_success "Done! 4 operators with shared Lightning node + HTLC agent ready."
+num_ops=$(echo $OPERATORS | wc -w | tr -d ' ')
+log_success "Done! $num_ops operators with shared Lightning node + HTLC agent ready."

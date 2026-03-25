@@ -20,7 +20,8 @@ AGENT_SEED="48544c43416765006e740000000000000000000000000000000000000000000a"
 AGENT_DEPOSIT_SATS=500000  # 0.005 BTC per deposit
 KEEP_DATA=false
 FUNDING_MODE=""  # auto-detect: "credit" (via operator daemon) or "onchain" (faucet)
-OPERATORS="${OPERATORS:-alice bob charlie diana}"
+# Use topology-driven operator list (NODE_COUNT set by caller or env)
+OPERATORS="${NODES[*]}"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -331,8 +332,12 @@ for i in "${!LEDGER_RELAYS[@]}"; do
         seen_agent_relays="$seen_agent_relays $relay"
     fi
 done
-# Fallback to RELAY_ALICE if no relays discovered (e.g. --keep-data path)
-[ -z "$AGENT_RELAY_ARGS" ] && AGENT_RELAY_ARGS="--relay $RELAY_ALICE --relay $RELAY_BOB --relay $RELAY_CHARLIE --relay $RELAY_DIANA"
+# Fallback to all node relays if none discovered (e.g. --keep-data path)
+if [ -z "$AGENT_RELAY_ARGS" ]; then
+    for r in "${ALL_RELAYS[@]}"; do
+        AGENT_RELAY_ARGS="$AGENT_RELAY_ARGS --relay $r"
+    done
+fi
 
 RUST_LOG=info "$HTLC_AGENT" \
     $AGENT_RELAY_ARGS \

@@ -32,13 +32,18 @@ while [[ $# -gt 0 ]]; do
             FUND_ONLY=true
             shift
             ;;
+        --nodes|-n)
+            NODE_COUNT="$2"
+            shift 2
+            ;;
         --help|-h)
             echo "Usage: $0 [OPTIONS]"
             echo ""
             echo "Options:"
-            echo "  --quick, -q   Skip rebuild, just restart"
-            echo "  --fund, -f    Just fund the nodes (assumes services are running)"
-            echo "  --help, -h    Show this help message"
+            echo "  --quick, -q      Skip rebuild, just restart"
+            echo "  --fund, -f       Just fund the nodes (assumes services are running)"
+            echo "  --nodes, -n N    Number of operator nodes (default: 4)"
+            echo "  --help, -h       Show this help message"
             exit 0
             ;;
         *)
@@ -47,6 +52,9 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Re-initialize topology (NODE_COUNT may have changed from --nodes)
+init_topology
 
 if $FUND_ONLY; then
     log_info "Funding nodes only..."
@@ -69,6 +77,10 @@ pkill -f "htlc-agent" 2>/dev/null || true
 # Stop native relays
 log_info "Stopping native relays..."
 stop_all_relays
+
+# Stop per-node Electrs containers
+log_info "Stopping per-node Electrs..."
+stop_all_electrs
 
 # Stop infrastructure
 log_info "Stopping infrastructure containers..."
@@ -111,8 +123,10 @@ log_info "Starting native strfry relays..."
 start_all_relays
 wait_for_nostr
 
-$DC up -d electrs
-wait_for_electrs
+# Start per-node Electrs instances (1 per 2 nodes)
+log_info "Starting per-node Electrs instances..."
+start_all_electrs
+wait_for_all_electrs
 
 # Setup faucet
 setup_faucet

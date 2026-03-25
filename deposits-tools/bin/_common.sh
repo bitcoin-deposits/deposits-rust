@@ -33,17 +33,23 @@ BITCOIN_RPC_USER="user"
 BITCOIN_RPC_PASS="pass"
 
 # Electrs settings
+# Per-node Electrs: each pair of nodes shares an Electrs instance.
+# Group G = ceil(index/2), host port = 3200 + G.
+# The legacy shared Electrs (port 3102) is kept for ad-hoc use.
 ELECTRS_HOST="localhost"
 ELECTRS_PORT="3102"
 ELECTRS_URL="http://$ELECTRS_HOST:$ELECTRS_PORT"
+ELECTRS_IMAGE="mempool/electrs:v3.2.0"
+ELECTRS_DOCKER_NETWORK="deposits-tools_regtest"
 
-# Relay URLs
-RELAY_ALICE="ws://localhost:7801"
-RELAY_BOB="ws://localhost:7802"
-RELAY_CHARLIE="ws://localhost:7803"
-RELAY_DIANA="ws://localhost:7804"
+# Relay URLs (dynamic — rebuilt by init_topology)
 RELAY_LEDGERS="ws://localhost:7779"
-ALL_RELAYS=("$RELAY_ALICE" "$RELAY_BOB" "$RELAY_CHARLIE" "$RELAY_DIANA")
+ALL_RELAYS=()
+# Legacy aliases (set by init_topology for backward compat when NODE_COUNT=4)
+RELAY_ALICE=""
+RELAY_BOB=""
+RELAY_CHARLIE=""
+RELAY_DIANA=""
 
 # Native strfry relay binary
 STRFRY_BIN="${STRFRY_BIN:-$SCRIPT_DIR/strfry}"
@@ -51,14 +57,16 @@ STRFRY_BIN="${STRFRY_BIN:-$SCRIPT_DIR/strfry}"
 # Get the port for a relay by name
 get_relay_port() {
     local name=$1
-    case "$name" in
-        alice)   echo 7801 ;;
-        bob)     echo 7802 ;;
-        charlie) echo 7803 ;;
-        diana)   echo 7804 ;;
-        ledgers) echo 7779 ;;
-        *) return 1 ;;
-    esac
+    if [ "$name" = "ledgers" ]; then
+        echo 7779
+        return
+    fi
+    local idx=$(get_node_index "$name")
+    if [ -n "$idx" ]; then
+        echo $((7800 + idx))
+    else
+        return 1
+    fi
 }
 
 # Generate a strfry config for a relay and write it to the relay data dir.
@@ -83,6 +91,16 @@ generate_relay_config() {
         -e "s|port = 7777|port = $port|" \
         -e "s|plugin = \"/app/drop-ephemeral-policy.sh\"|plugin = \"$TOOLS_DIR/drop-ephemeral-policy.sh\"|" \
         "$src_conf" > "$conf"
+
+    # Node relays are real-time message buses — keep events only 30 seconds
+    # (the template defaults to 300s which accumulates too much LMDB data).
+    # Also cap mapsize to 256MB so a burst can't eat all disk.
+    if [ "$name" != "ledgers" ]; then
+        sed -i \
+            -e "s|ephemeralEventsLifetimeSeconds = 300|ephemeralEventsLifetimeSeconds = 30|" \
+            -e "s|mapsize = 10995116277760|mapsize = 268435456|" \
+            "$conf"
+    fi
 }
 
 # Start a native strfry relay process.
@@ -121,7 +139,7 @@ start_relay() {
             fi
         done
         # Stream from each fast relay
-        for op in alice bob charlie diana; do
+        for op in "${NODES[@]}"; do
             local op_port=$(get_relay_port "$op")
             "$STRFRY_BIN" --config "$conf" stream "ws://localhost:$op_port" --dir=down >> "$logfile" 2>&1 &
             echo "$!" >> "$db_dir/stream.pids"
@@ -168,7 +186,7 @@ stop_relay() {
 
 # Start all relays (fast + ledgers)
 start_all_relays() {
-    for name in alice bob charlie diana; do
+    for name in "${NODES[@]}"; do
         start_relay "$name"
     done
     # Start ledgers after fast relays are up
@@ -178,26 +196,67 @@ start_all_relays() {
 # Stop all relays
 stop_all_relays() {
     stop_relay ledgers
-    for name in alice bob charlie diana; do
+    for name in "${NODES[@]}"; do
         stop_relay "$name"
     done
 }
 
-# Metrics ports (unique per node since all on localhost)
-get_node_metrics_port() {
-    local node=$1
-    case "$node" in
-        "alice")     echo "9101" ;;
-        "bob")       echo "9102" ;;
-        "charlie")   echo "9103" ;;
-        "diana")     echo "9104" ;;
-        "eve")       echo "9105" ;;
-        *) echo "9100" ;;
-    esac
+# ─── Topology-driven node infrastructure ─────────────────────────────────────
+# NODE_COUNT can be set before sourcing _common.sh (default: 4).
+# TOPOLOGY_FILE can point to a pre-generated topology JSON.
+# If neither is set, init_topology generates a default 4-node topology.
+
+export NODE_COUNT="${NODE_COUNT:-4}"
+TOPOLOGY_FILE="${TOPOLOGY_FILE:-}"
+
+# Internal arrays populated by init_topology()
+NODES=()
+declare -A _NODE_SEEDS 2>/dev/null || true
+declare -A _NODE_INDICES 2>/dev/null || true
+
+# Initialize topology: populate NODES, ALL_RELAYS, and lookup tables.
+# Call this after setting NODE_COUNT or TOPOLOGY_FILE.
+init_topology() {
+    local topo_json
+    if [ -n "$TOPOLOGY_FILE" ] && [ -f "$TOPOLOGY_FILE" ]; then
+        topo_json=$(cat "$TOPOLOGY_FILE")
+    else
+        topo_json=$(python3 "$SCRIPT_DIR/generate-topology.py" --nodes "$NODE_COUNT" --ledgers-per-op "${LEDGERS_PER_OP:-3}")
+    fi
+
+    # Parse into bash arrays using python (robust, no jq dependency)
+    eval "$(echo "$topo_json" | python3 -c "
+import json, sys
+t = json.load(sys.stdin)
+names = []
+for n in t['nodes']:
+    names.append(n['name'])
+    print(f'_NODE_SEEDS[{n[\"name\"]}]=\"{n[\"seed\"]}\"')
+    print(f'_NODE_INDICES[{n[\"name\"]}]={n[\"index\"]}')
+print('NODES=(' + ' '.join(names) + ')')
+print('ALL_RELAYS=(' + ' '.join(f'\"ws://localhost:{n[\"relay_port\"]}\"' for n in t['nodes']) + ')')
+")"
+
+    # Legacy aliases for scripts that reference RELAY_ALICE etc.
+    for node in "${NODES[@]}"; do
+        local upper=$(echo "$node" | tr '[:lower:]' '[:upper:]')
+        local port=$((7800 + ${_NODE_INDICES[$node]}))
+        eval "RELAY_${upper}=\"ws://localhost:${port}\""
+    done
 }
 
-# Node names
-NODES=("alice" "bob" "charlie" "diana")
+# Get 1-based index for a node name
+get_node_index() {
+    local node=$1
+    echo "${_NODE_INDICES[$node]:-}"
+}
+
+# Metrics port for a node
+get_node_metrics_port() {
+    local node=$1
+    local idx=$(get_node_index "$node")
+    echo $((9100 + ${idx:-0}))
+}
 
 # Get data directory for a node
 get_node_data_dir() {
@@ -205,43 +264,127 @@ get_node_data_dir() {
     echo "$DATA_ROOT/$node"
 }
 
-# Get seed for a node (compatible with bash 3.x)
+# Get seed for a node
 get_node_seed() {
     local node=$1
-    case "$node" in
-        "alice")     echo "416c696365000000000000000000000000000000000000000000000000000001" ;;
-        "bob")       echo "426f620000000000000000000000000000000000000000000000000000000002" ;;
-        "charlie")   echo "436861726c696500000000000000000000000000000000000000000000000003" ;;
-        "diana")     echo "4469616e61000000000000000000000000000000000000000000000000000004" ;;
-        "eve")       echo "4576650000000000000000000000000000000000000000000000000000000005" ;;
-        *) echo "" ;;
-    esac
+    echo "${_NODE_SEEDS[$node]:-}"
 }
 
-# Get operator name for a node
+# Get display name for a node (capitalized)
 get_node_name() {
     local node=$1
-    case "$node" in
-        "alice")     echo "Alice" ;;
-        "bob")       echo "Bob" ;;
-        "charlie")   echo "Charlie" ;;
-        "diana")     echo "Diana" ;;
-        "eve")       echo "Eve" ;;
-        *) echo "" ;;
-    esac
+    echo "$node" | python3 -c "print(input().title())"
 }
 
 # Get external relay URL for a node (host-accessible port)
 get_node_relay_url() {
     local node=$1
-    case "$node" in
-        "alice")     echo "$RELAY_ALICE" ;;
-        "bob")       echo "$RELAY_BOB" ;;
-        "charlie")   echo "$RELAY_CHARLIE" ;;
-        "diana")     echo "$RELAY_DIANA" ;;
-        *) echo "" ;;
-    esac
+    local idx=$(get_node_index "$node")
+    if [ -n "$idx" ]; then
+        echo "ws://localhost:$((7800 + idx))"
+    fi
 }
+
+# Electrs group for a node (1 instance per 2 nodes)
+get_node_electrs_group() {
+    local node=$1
+    local idx=$(get_node_index "$node")
+    echo $(( (idx + 1) / 2 ))
+}
+
+# Electrs host port for a node
+get_node_electrs_port() {
+    local node=$1
+    echo $((3200 + $(get_node_electrs_group "$node")))
+}
+
+# Electrs URL for a node
+get_node_electrs_url() {
+    local node=$1
+    echo "http://localhost:$(get_node_electrs_port "$node")"
+}
+
+# Start per-node Electrs container (shared per pair)
+# Usage: start_node_electrs <node>
+start_node_electrs() {
+    local node=$1
+    local group=$(get_node_electrs_group "$node")
+    local host_port=$(get_node_electrs_port "$node")
+    local container="electrs-g${group}"
+
+    # Skip if already running
+    if docker ps -q --filter "name=^${container}$" 2>/dev/null | grep -q .; then
+        return 0
+    fi
+    # Remove stopped container with same name
+    docker rm "$container" 2>/dev/null || true
+
+    docker run -d \
+        --name "$container" \
+        --network "$ELECTRS_DOCKER_NETWORK" \
+        --platform linux/amd64 \
+        -p "${host_port}:3002" \
+        "$ELECTRS_IMAGE" \
+        -vvvv --timestamp --jsonrpc-import --cookie=user:pass \
+        --network=regtest --daemon-rpc-addr=bitcoin:18443 \
+        --http-addr=0.0.0.0:3002 >/dev/null
+
+    log_success "Started $container (port $host_port)"
+}
+
+# Start Electrs instances for all nodes
+start_all_electrs() {
+    local started=()
+    for node in "${NODES[@]}"; do
+        local group=$(get_node_electrs_group "$node")
+        # Only start once per group
+        local already=false
+        for g in "${started[@]:-}"; do
+            [ "$g" = "$group" ] && already=true
+        done
+        if ! $already; then
+            start_node_electrs "$node"
+            started+=("$group")
+        fi
+    done
+}
+
+# Stop all per-node Electrs containers
+stop_all_electrs() {
+    for container in $(docker ps -a --filter "name=electrs-g" --format '{{.Names}}' 2>/dev/null); do
+        docker stop "$container" 2>/dev/null || true
+        docker rm "$container" 2>/dev/null || true
+    done
+}
+
+# Wait for all per-node Electrs instances to be ready
+wait_for_all_electrs() {
+    log_info "Waiting for per-node Electrs instances..."
+    local ports_checked=()
+    for node in "${NODES[@]}"; do
+        local port=$(get_node_electrs_port "$node")
+        local already=false
+        for p in "${ports_checked[@]:-}"; do
+            [ "$p" = "$port" ] && already=true
+        done
+        if $already; then continue; fi
+        ports_checked+=("$port")
+
+        local attempt=0
+        while ! curl -s "http://localhost:$port" >/dev/null 2>&1; do
+            attempt=$((attempt + 1))
+            if [ $attempt -ge 60 ]; then
+                log_error "Electrs on port $port not ready after 60s"
+                return 1
+            fi
+            sleep 2
+        done
+    done
+    log_success "All Electrs instances ready"
+}
+
+# Initialize with defaults (callers can re-init after setting NODE_COUNT)
+init_topology
 
 # Get the wallet-derived deposit secret for a node's deposit on a target ledger
 # Usage: get_deposit_secret <depositor_node> [<target_ledger_id>]
@@ -349,7 +492,11 @@ wait_for_electrs() {
 wait_for_nostr() {
     log_info "Waiting for Nostr relays to be ready..."
     local max_attempts=30
-    local ports=(7801 7802 7803 7804 7779)
+    local ports=()
+    for node in "${NODES[@]}"; do
+        ports+=("$(get_relay_port "$node")")
+    done
+    ports+=(7779)  # ledgers relay
     for port in "${ports[@]}"; do
         local attempt=0
         while ! curl -s "http://localhost:$port" >/dev/null 2>&1; do
@@ -436,19 +583,23 @@ run_node_cmd() {
     local name=$(get_node_name "$node")
     local data_dir=$(get_node_data_dir "$node")
 
+    # Build relay args dynamically
+    local relay_args=()
+    for r in "${ALL_RELAYS[@]}"; do
+        relay_args+=(--relay "$r")
+    done
+
     # Run command with positional args first, then config args at the end
     # Use RUST_LOG=error to suppress INFO logs from CLI output
     # Connect to all operator relays so CLI can reach any daemon's primary relay
+    local esplora_url=$(get_node_electrs_url "$node")
     RUST_LOG=error "$DEPOSITS_NODE" "$cmd" \
         "$@" \
         --seed "$seed" \
         --name "$name" \
         --network regtest \
-        --esplora "$ELECTRS_URL" \
-        --relay "$RELAY_ALICE" \
-        --relay "$RELAY_BOB" \
-        --relay "$RELAY_CHARLIE" \
-        --relay "$RELAY_DIANA" \
+        --esplora "$esplora_url" \
+        "${relay_args[@]}" \
         --slow-relay "$RELAY_LEDGERS" \
         --data-dir "$data_dir" 2>&1
 }
@@ -465,11 +616,13 @@ get_node_address() {
     local data_dir=$(get_node_data_dir "$node")
 
     # Run address command and extract just the address
+    local esplora_url=$(get_node_electrs_url "$node")
+    local own_relay=$(get_node_relay_url "$node")
     RUST_LOG=error "$DEPOSITS_NODE" address \
         --seed "$seed" \
         --network regtest \
-        --esplora "$ELECTRS_URL" \
-        --relay "$RELAY_ALICE" \
+        --esplora "$esplora_url" \
+        --relay "$own_relay" \
         --data-dir "$data_dir" 2>&1 | grep -E '^bcrt1' | head -1
 }
 
@@ -576,7 +729,7 @@ show_status() {
     $DC ps
     echo ""
     log_info "Relay processes:"
-    for name in alice bob charlie diana ledgers; do
+    for name in "${NODES[@]}" ledgers; do
         local pidfile="$DATA_ROOT/relays/$name/relay.pid"
         local port=$(get_relay_port "$name")
         if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
@@ -654,12 +807,14 @@ run_nostr_request() {
     local data_dir=$(get_node_data_dir "$node")
 
     # Run nostr request command
+    local esplora_url=$(get_node_electrs_url "$node")
+    local own_relay=$(get_node_relay_url "$node")
     RUST_LOG=error "$DEPOSITS_NODE" nostr request \
         "$ledger_id" "$action" "$@" \
         --seed "$seed" \
         --network regtest \
-        --esplora "$ELECTRS_URL" \
-        --relay "$RELAY_ALICE" \
+        --esplora "$esplora_url" \
+        --relay "$own_relay" \
         --data-dir "$data_dir" 2>&1
 }
 
@@ -678,15 +833,18 @@ run_wallet_cmd() {
 
     local data_dir=$(get_node_data_dir "$node")
 
+    # Build relay args dynamically
+    local relay_args=()
+    for r in "${ALL_RELAYS[@]}"; do
+        relay_args+=(--relay "$r")
+    done
+
     # Run deposits-wallet with the node's seed
     # Connect to all operator relays so wallet can reach any operator's daemon
     RUST_LOG=error "$DEPOSITS_WALLET" "$@" \
         --seed "$seed" \
         --network regtest \
-        --relay "$RELAY_ALICE" \
-        --relay "$RELAY_BOB" \
-        --relay "$RELAY_CHARLIE" \
-        --relay "$RELAY_DIANA" \
+        "${relay_args[@]}" \
         --data-dir "$data_dir/wallet" 2>&1
 }
 
@@ -717,7 +875,7 @@ start_node() {
     # Other relays are for subscriptions/reads only.
     local own_relay=$(get_node_relay_url "$node")
     local relay_args="--relay $own_relay"
-    for r in $RELAY_ALICE $RELAY_BOB $RELAY_CHARLIE $RELAY_DIANA; do
+    for r in "${ALL_RELAYS[@]}"; do
         [ "$r" != "$own_relay" ] && relay_args="$relay_args --relay $r"
     done
 
@@ -741,12 +899,13 @@ start_node() {
         mkdir -p "$DATA_ROOT/self-pay"
     fi
 
-    RUST_LOG=info,deposits_node=debug \
+    local esplora_url=$(get_node_electrs_url "$node")
+    RUST_LOG=info,nostr_relay_pool=warn,nostr_sdk=warn \
     DEPOSITS_ENABLE_METRICS_EMITTER=1 \
     "$DEPOSITS_NODE" run \
         --seed "$seed" \
         --network regtest \
-        --electrum "$ELECTRS_URL" \
+        --electrum "$esplora_url" \
         $relay_args \
         --slow-relay "$RELAY_LEDGERS" \
         --data-dir "$data_dir" \
@@ -822,11 +981,12 @@ start_nostr_watch() {
 
     # Start watch in background — use node's own relay as primary
     local own_relay=$(get_node_relay_url "$node")
+    local esplora_url=$(get_node_electrs_url "$node")
     RUST_LOG=error "$DEPOSITS_NODE" nostr watch \
         "$ledger_id" \
         --seed "$seed" \
         --network regtest \
-        --esplora "$ELECTRS_URL" \
+        --esplora "$esplora_url" \
         --relay "$own_relay" \
         --data-dir "$data_dir" &
 
@@ -854,12 +1014,22 @@ check_health() {
         log_success "Bitcoin Core healthy"
     fi
 
-    # Check electrs
-    if ! curl -s "http://$ELECTRS_HOST:$ELECTRS_PORT" >/dev/null 2>&1; then
-        log_error "Electrs unhealthy"
-        unhealthy=1
+    # Check per-node electrs
+    local electrs_ok=0
+    local electrs_total=0
+    for node in "${NODES[@]}"; do
+        local port=$(get_node_electrs_port "$node")
+        # Deduplicate (pairs share a port)
+        if curl -s "http://localhost:$port" >/dev/null 2>&1; then
+            electrs_ok=$((electrs_ok + 1))
+        fi
+        electrs_total=$((electrs_total + 1))
+    done
+    if [ "$electrs_ok" -ge "$electrs_total" ]; then
+        log_success "Electrs healthy ($electrs_ok instances reachable)"
     else
-        log_success "Electrs healthy"
+        log_error "Electrs: only $electrs_ok/$electrs_total nodes can reach their Electrs"
+        unhealthy=1
     fi
 
     # Check nostr relay

@@ -17,6 +17,7 @@ DC_LIGHTNING="docker compose -f $TOOLS_DIR/docker-compose.yml --profile lightnin
 
 QUICK=false
 REBUILD_LDK=false
+PASSTHROUGH_ARGS=()
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -28,21 +29,30 @@ while [[ $# -gt 0 ]]; do
             REBUILD_LDK=true
             shift
             ;;
+        --nodes|-n)
+            NODE_COUNT="$2"
+            PASSTHROUGH_ARGS+=(--nodes "$2")
+            shift 2
+            ;;
         --help|-h)
             echo "Usage: $0 [OPTIONS]"
             echo ""
             echo "Options:"
             echo "  --quick, -q      Skip rebuild, just teardown + setup"
             echo "  --rebuild-ldk    Force rebuild of ldk-node Docker image"
+            echo "  --nodes, -n N    Number of operator nodes (default: 4)"
             echo "  --help, -h       Show this help message"
             exit 0
             ;;
         *)
-            log_error "Unknown option: $1"
-            exit 1
+            PASSTHROUGH_ARGS+=("$1")
+            shift
             ;;
     esac
 done
+
+# Re-initialize topology (NODE_COUNT may have changed from --nodes)
+init_topology
 
 log_info "=== Reinitializing + Lightning Test Network ==="
 
@@ -59,6 +69,10 @@ pkill -f "htlc-agent" 2>/dev/null || true
 # Stop native relays
 log_info "Stopping native relays..."
 stop_all_relays
+
+# Stop per-node Electrs containers
+log_info "Stopping per-node Electrs..."
+stop_all_electrs
 
 # Stop and remove all containers (including lightning node)
 log_info "Stopping all containers..."
@@ -101,10 +115,14 @@ fi
 
 # Start infrastructure (including lightning node, but NOT relay containers)
 log_info "Starting infrastructure..."
-$DC_LIGHTNING up -d bitcoin electrs wallet
+$DC_LIGHTNING up -d bitcoin wallet
 
 wait_for_bitcoin
-wait_for_electrs
+
+# Start per-node Electrs instances (1 per 2 nodes)
+log_info "Starting per-node Electrs instances..."
+start_all_electrs
+wait_for_all_electrs
 
 # Start native strfry relays
 log_info "Starting native strfry relays..."
@@ -115,4 +133,4 @@ wait_for_nostr
 setup_faucet
 
 # Run the full 4-operator + lightning setup
-exec "$SCRIPT_DIR/setup-4op-lightning.sh" "$@"
+exec "$SCRIPT_DIR/setup-4op-lightning.sh" "${PASSTHROUGH_ARGS[@]}"
