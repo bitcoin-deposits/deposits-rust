@@ -816,7 +816,7 @@ impl Node {
             // Fetch ledger updates from Nostr
             let filter = Filter::new()
                 .kind(Kind::Custom(crate::nostr::KIND_LEDGER_UPDATE))
-                .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()]);
+                .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id.as_str())]);
 
             let events = match self.nostr.fetch_client().fetch_events(vec![filter], None).await {
                 Ok(events) => events,
@@ -1012,7 +1012,7 @@ impl Node {
         loop {
             let mut filter = Filter::new()
                 .kind(Kind::Custom(crate::nostr::KIND_LEDGER_UPDATE))
-                .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id])
+                .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id)])
                 .limit(Self::RELAY_FETCH_PAGE_LIMIT);
 
             if cursor_ts > 0 {
@@ -3343,7 +3343,7 @@ impl Node {
         // Fetch ledger updates
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-            .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id])
+            .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id)])
             .limit(500);
 
         let update_events = client
@@ -3354,7 +3354,7 @@ impl Node {
         // Fetch lottery reveals
         let reveal_filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_REQUEST))
-            .custom_tag(SingleLetterTag::lowercase(Alphabet::L), [ledger_id])
+            .custom_tag(crate::nostr::TAG_LEDGER_REQ, [ledger_id])
             .limit(100);
 
         let reveal_events = client
@@ -3780,7 +3780,7 @@ impl Node {
                 for event in response_events.iter() {
                     let mut is_our_request = false;
                     for tag in event.tags.iter() {
-                        if tag.kind() == nostr_sdk::TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::E)) {
+                        if tag.kind() == nostr_sdk::TagKind::SingleLetter(crate::nostr::TAG_EVENT_REF) {
                             if let Some(val) = tag.content() {
                                 if val == request_id {
                                     is_our_request = true;
@@ -3958,7 +3958,7 @@ impl Node {
 
             let filter = Filter::new()
                 .kind(Kind::Custom(crate::nostr::KIND_LEDGER_UPDATE))
-                .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()])
+                .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id.as_str())])
                 .limit(500);
 
             let events = match client.fetch_events(vec![filter], Some(std::time::Duration::from_secs(10))).await {
@@ -4394,7 +4394,7 @@ impl Node {
 
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-            .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id])
+            .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id)])
             .limit(500);
 
         let events = client
@@ -4597,7 +4597,7 @@ impl Node {
 
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-            .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id])
+            .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id)])
             .limit(500);
 
         let events = client
@@ -4644,7 +4644,7 @@ impl Node {
 
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-            .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id])
+            .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id)])
             .limit(500);
 
         let events = client
@@ -4875,7 +4875,7 @@ impl Node {
 
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-            .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id])
+            .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id)])
             .limit(500);
 
         let events = client
@@ -7486,7 +7486,7 @@ impl Node {
 
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-            .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()])
+            .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id.as_str())])
             .limit(500);
 
         let events = match client.fetch_events(vec![filter], None).await {

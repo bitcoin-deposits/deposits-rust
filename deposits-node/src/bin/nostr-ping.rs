@@ -12,6 +12,7 @@
 //!
 //! The responder echoes back "ping" requests as responses, measuring full protocol overhead.
 
+use deposits_node::nostr::{TAG_LEDGER_REQ, TAG_PUBKEY};
 use nostr_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -280,7 +281,7 @@ async fn run_requester(
     // Subscribe to responses tagged to us
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_RESPONSE))
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::P), vec![keys.public_key().to_hex()]);
+        .custom_tag(TAG_PUBKEY, vec![keys.public_key().to_hex()]);
     client.subscribe(vec![filter], None).await?;
 
     // Also subscribe to all responses (in case tag filtering doesn't work)
@@ -372,7 +373,7 @@ async fn run_requester(
             &request_json,
         )
         .tag(Tag::custom(
-            TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)),
+            TagKind::SingleLetter(TAG_LEDGER_REQ),
             vec![ledger_id.to_string()],
         ));
 

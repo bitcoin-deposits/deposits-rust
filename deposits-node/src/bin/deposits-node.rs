@@ -3378,6 +3378,7 @@ async fn deposit_complete(args: &[String]) -> Result<(), Box<dyn std::error::Err
 /// Use this before funding a deposit offer to ensure you're sending to the legitimate custodian.
 async fn deposit_verify_custodian(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     use nostr_sdk::prelude::*;
+    use deposits_node::nostr::{TAG_EVENT_REF, TAG_LEDGER_REQ};
     use std::collections::HashMap;
 
     let mut ledger_id: Option<String> = None;
@@ -3430,7 +3431,7 @@ async fn deposit_verify_custodian(args: &[String]) -> Result<(), Box<dyn std::er
         Kind::Custom(deposits_node::nostr::KIND_LEDGER_REQUEST),
         request_content.to_string(),
     )
-    .tag(Tag::custom(TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)), [ledger_id.as_str()]))
+    .tag(Tag::custom(TagKind::SingleLetter(TAG_LEDGER_REQ), [ledger_id.as_str()]))
     .tag(Tag::custom(TagKind::custom("action"), ["custodian_query"]))
     .sign_with_keys(&keys)?;
 
@@ -3445,7 +3446,7 @@ async fn deposit_verify_custodian(args: &[String]) -> Result<(), Box<dyn std::er
     // Fetch responses
     let response_filter = Filter::new()
         .kind(Kind::Custom(deposits_node::nostr::KIND_LEDGER_RESPONSE))
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::E), [request_event_id.as_str()])
+        .custom_tag(TAG_EVENT_REF, [request_event_id.as_str()])
         .limit(20);
 
     let events = client.fetch_events(vec![response_filter], Some(std::time::Duration::from_secs(5))).await?;

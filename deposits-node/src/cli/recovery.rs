@@ -173,7 +173,7 @@ pub async fn recovery_start(args: &[String]) -> Result<(), Box<dyn std::error::E
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()])
+        .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id.as_str())])
         .limit(500);
 
     let events = client
@@ -363,7 +363,7 @@ pub async fn recovery_agree(args: &[String]) -> Result<(), Box<dyn std::error::E
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()])
+        .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id.as_str())])
         .limit(500);
 
     let events = client
@@ -587,7 +587,7 @@ pub async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error:
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()])
+        .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id.as_str())])
         .limit(500);
 
     let events = client
@@ -638,7 +638,7 @@ pub async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error:
     if violation_details.is_empty() {
         let dispute_filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_DISPUTE))
-            .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()])
+            .custom_tag(crate::nostr::TAG_LEDGER_ID, [ledger_id.as_str()])
             .limit(10);
 
         let disputes = client
@@ -808,7 +808,7 @@ pub async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error:
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()])
+        .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id.as_str())])
         .limit(500);
 
     let events = client
@@ -968,7 +968,7 @@ pub async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error:
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()])
+        .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id.as_str())])
         .limit(500);
 
     let events = client
@@ -1235,7 +1235,7 @@ pub async fn recovery_rebuild_quorum_add(ledger_id: &str, args: &[String]) -> Re
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id])
+        .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id)])
         .limit(500);
 
     let events = client
@@ -1338,7 +1338,7 @@ pub async fn recovery_rebuild_quorum_add(ledger_id: &str, args: &[String]) -> Re
     let content = BASE64.encode(&update_bytes);
 
     let event = EventBuilder::new(Kind::Custom(KIND_LEDGER_UPDATE), content)
-        .tags(vec![Tag::custom(TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::D)), [ledger_id])])
+        .tags(vec![Tag::custom(TagKind::SingleLetter(crate::nostr::TAG_LEDGER_ID), [ledger_id])])
         .sign_with_keys(&publishing_keys)
         .map_err(|e| format!("Failed to sign event: {}", e))?;
 
@@ -1396,7 +1396,7 @@ pub async fn recovery_rebuild_attestation(ledger_id: &str, args: &[String]) -> R
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id])
+        .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id)])
         .limit(500);
 
     let events = client
@@ -1494,7 +1494,7 @@ pub async fn recovery_rebuild_attestation(ledger_id: &str, args: &[String]) -> R
     let content = BASE64.encode(&update_bytes);
 
     let event = EventBuilder::new(Kind::Custom(KIND_LEDGER_UPDATE), content)
-        .tags(vec![Tag::custom(TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::D)), [ledger_id])])
+        .tags(vec![Tag::custom(TagKind::SingleLetter(crate::nostr::TAG_LEDGER_ID), [ledger_id])])
         .sign_with_keys(&publishing_keys)
         .map_err(|e| format!("Failed to sign event: {}", e))?;
 
@@ -1532,7 +1532,7 @@ pub async fn recovery_rebuild_status(ledger_id: &str, args: &[String]) -> Result
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id])
+        .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id)])
         .limit(500);
 
     let events = client
@@ -1661,7 +1661,7 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()])
+        .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id.as_str())])
         .limit(500);
 
     let events = client
@@ -1841,7 +1841,7 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()])
+        .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id.as_str())])
         .limit(500);
 
     let events = client
@@ -2120,7 +2120,7 @@ pub async fn recovery_continue(args: &[String]) -> Result<(), Box<dyn std::error
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()])
+        .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id.as_str())])
         .limit(500);
 
     let events = client
@@ -2318,7 +2318,7 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()])
+        .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id.as_str())])
         .limit(500);
 
     let events = client
@@ -2578,7 +2578,7 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
             for event in response_events.iter() {
                 let mut is_our_request = false;
                 for tag in event.tags.iter() {
-                    if tag.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::E)) {
+                    if tag.kind() == TagKind::SingleLetter(crate::nostr::TAG_EVENT_REF) {
                         if let Some(val) = tag.content() {
                             if val == request_id {
                                 is_our_request = true;
@@ -2805,7 +2805,7 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
     // Fetch ledger updates
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()])
+        .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id.as_str())])
         .limit(500);
 
     let update_events = client
@@ -2816,7 +2816,7 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
     // Fetch lottery reveals (tagged with "l" for ledger_id)
     let reveal_filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_REQUEST))
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::L), [ledger_id.as_str()])
+        .custom_tag(crate::nostr::TAG_LEDGER_REQ, [ledger_id.as_str()])
         .limit(100);
 
     let reveal_events = client
@@ -3286,7 +3286,7 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
 
     let filter = Filter::new()
         .kind(Kind::Custom(crate::nostr::KIND_LEDGER_UPDATE))
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()])
+        .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id.as_str())])
         .limit(500);
 
     let events = client

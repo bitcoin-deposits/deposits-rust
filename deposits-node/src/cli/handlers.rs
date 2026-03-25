@@ -486,7 +486,7 @@ pub async fn process_custody_transfer_sign_request(
     use deposits_core::{TlvDecode, SignedLedgerUpdate};
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
     use nostr_sdk::prelude::*;
-    use crate::nostr::KIND_LEDGER_UPDATE;
+    use crate::nostr::{KIND_LEDGER_UPDATE, ledger_tag};
 
     // Unused: node (we don't need the node for this handler, we fetch ledger from Nostr directly)
     let _ = node;
@@ -562,7 +562,7 @@ pub async fn process_custody_transfer_sign_request(
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()])
+        .custom_tag(crate::nostr::TAG_LEDGER_ID, [ledger_tag(ledger_id.as_str())])
         .limit(500);
 
     let events = match client.fetch_events(vec![filter], None).await {
@@ -706,7 +706,7 @@ pub async fn process_confiscation_sign_request(
     use deposits_core::{TlvDecode, SignedLedgerUpdate};
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
     use nostr_sdk::prelude::*;
-    use crate::nostr::KIND_LEDGER_UPDATE;
+    use crate::nostr::{KIND_LEDGER_UPDATE, ledger_tag};
 
     // Unused: node (we don't need the node for this handler, we fetch ledger from Nostr directly)
     let _ = node;
@@ -767,7 +767,7 @@ pub async fn process_confiscation_sign_request(
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()])
+        .custom_tag(crate::nostr::TAG_LEDGER_ID, [ledger_tag(ledger_id.as_str())])
         .limit(500);
 
     let events = match client.fetch_events(vec![filter], None).await {

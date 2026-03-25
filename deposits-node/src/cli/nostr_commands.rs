@@ -17,7 +17,7 @@ use deposits_core::SignedLedgerUpdate;
 
 use crate::nostr::{
     NostrTransportBuilder, KIND_LEDGER_DISPUTE, KIND_LEDGER_REQUEST, KIND_LEDGER_RESPONSE,
-    KIND_LEDGER_UPDATE, KIND_RECOVERY_AGREE,
+    KIND_LEDGER_UPDATE, KIND_RECOVERY_AGREE, ledger_tag,
 };
 use crate::Node;
 
@@ -169,19 +169,19 @@ pub async fn nostr_list(args: &[String]) -> Result<(), Box<dyn std::error::Error
     for event in events {
         // Extract ledger_id from d tag
         let ledger_id = event.tags.iter().find_map(|tag| {
-            if tag.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::D)) {
+            if tag.kind() == TagKind::SingleLetter(crate::nostr::TAG_LEDGER_ID) {
                 tag.content().map(|s| s.to_string())
             } else {
                 None
             }
         });
 
-        // Extract sequence from seq tag
+        // Extract sequence from n tag
         let sequence = event
             .tags
             .iter()
             .find_map(|tag| {
-                if tag.kind() == TagKind::custom("seq") {
+                if tag.kind() == TagKind::SingleLetter(crate::nostr::TAG_SEQUENCE) {
                     tag.content().and_then(|s| s.parse::<u64>().ok())
                 } else {
                     None
@@ -347,7 +347,7 @@ pub async fn nostr_events(args: &[String]) -> Result<(), Box<dyn std::error::Err
             .tags
             .iter()
             .find_map(|tag| {
-                if tag.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::D)) {
+                if tag.kind() == TagKind::SingleLetter(crate::nostr::TAG_LEDGER_ID) {
                     tag.content().map(|s| s.to_string())
                 } else {
                     None
@@ -355,9 +355,9 @@ pub async fn nostr_events(args: &[String]) -> Result<(), Box<dyn std::error::Err
             })
             .unwrap_or_else(|| "-".to_string());
 
-        // Extract seq tag for updates
+        // Extract n tag (sequence) for updates
         let seq = event.tags.iter().find_map(|tag| {
-            if tag.kind() == TagKind::custom("seq") {
+            if tag.kind() == TagKind::SingleLetter(crate::nostr::TAG_SEQUENCE) {
                 tag.content().and_then(|s| s.parse::<u64>().ok())
             } else {
                 None
@@ -428,7 +428,7 @@ pub async fn nostr_events(args: &[String]) -> Result<(), Box<dyn std::error::Err
                     .iter()
                     .find_map(|tag| {
                         if tag.kind()
-                            == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::E))
+                            == TagKind::SingleLetter(crate::nostr::TAG_EVENT_REF)
                         {
                             tag.content().map(|s| s.to_string())
                         } else {
@@ -578,7 +578,7 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
         .kind(Kind::Custom(KIND_LEDGER_UPDATE));
 
     if let Some(ref lid) = ledger_id {
-        filter = filter.custom_tag(SingleLetterTag::lowercase(Alphabet::D), [lid.as_str()]);
+        filter = filter.custom_tag(crate::nostr::TAG_LEDGER_ID, [ledger_tag(lid.as_str())]);
     }
 
     // Fetch all events using pagination to work around relay limits
@@ -602,7 +602,7 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
             .tags
             .iter()
             .find_map(|tag| {
-                if tag.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::D)) {
+                if tag.kind() == TagKind::SingleLetter(crate::nostr::TAG_LEDGER_ID) {
                     tag.content().map(|s| s.to_string())
                 } else {
                     None
@@ -1262,8 +1262,8 @@ pub async fn nostr_updates(args: &[String]) -> Result<(), Box<dyn std::error::Er
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
         .custom_tag(
-            SingleLetterTag::lowercase(Alphabet::D),
-            [ledger_id.as_str()],
+            crate::nostr::TAG_LEDGER_ID,
+            [ledger_tag(ledger_id.as_str())],
         )
         .limit(limit);
 
@@ -1389,8 +1389,8 @@ pub async fn nostr_validate(args: &[String]) -> Result<(), Box<dyn std::error::E
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
         .custom_tag(
-            SingleLetterTag::lowercase(Alphabet::D),
-            [ledger_id.as_str()],
+            crate::nostr::TAG_LEDGER_ID,
+            [ledger_tag(ledger_id.as_str())],
         )
         .limit(limit);
 
@@ -1551,7 +1551,7 @@ pub async fn nostr_dispute_status(args: &[String]) -> Result<(), Box<dyn std::er
     // DisputeEnter is a LedgerOperation, so look in KIND_LEDGER_UPDATE events
     let update_filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::L), [ledger_id.as_str()]);
+        .custom_tag(crate::nostr::TAG_LEDGER_REQ, [ledger_id.as_str()]);
 
     let update_events = client
         .fetch_events(vec![update_filter], Some(std::time::Duration::from_secs(5)))
@@ -1799,7 +1799,7 @@ pub async fn nostr_dispute(args: &[String]) -> Result<(), Box<dyn std::error::Er
             // Build filter
             let mut filter = Filter::new().kind(Kind::Custom(KIND_LEDGER_DISPUTE));
             if let Some(ref lid) = ledger_id {
-                filter = filter.custom_tag(SingleLetterTag::lowercase(Alphabet::L), [lid.as_str()]);
+                filter = filter.custom_tag(crate::nostr::TAG_LEDGER_REQ, [lid.as_str()]);
             }
 
             // Subscribe
@@ -1823,7 +1823,7 @@ pub async fn nostr_dispute(args: &[String]) -> Result<(), Box<dyn std::error::Er
                             // Extract tags
                             for tag in event.tags.iter() {
                                 if tag.kind()
-                                    == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L))
+                                    == TagKind::SingleLetter(crate::nostr::TAG_LEDGER_REQ)
                                 {
                                     if let Some(v) = tag.content() {
                                         println!("  Ledger: {}", v);

@@ -24,6 +24,7 @@ use bitcoin::secp256k1::{self, Keypair, Message, Secp256k1, SecretKey};
 use bitcoin::secp256k1::rand::rngs::OsRng;
 use bitcoin::secp256k1::rand::RngCore;
 use deposits_core::{LedgerOperation, TlvDecode, compute_deposit_id};
+use deposits_node::nostr::{ledger_tag, TAG_LEDGER_ID, TAG_EVENT_REF, TAG_DEPOSIT_ID, TAG_LEDGER_REQ, TAG_SEQUENCE, TAG_PUBKEY, TAG_OP_TYPE};
 use nostr_sdk::prelude::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -271,7 +272,7 @@ impl AgentTransport {
             let update_filter = Filter::new()
                 .kind(Kind::Custom(KIND_LEDGER_UPDATE))
                 .custom_tag(
-                    SingleLetterTag::lowercase(Alphabet::I),
+                    TAG_DEPOSIT_ID,
                     deposit_id_hexes.iter().map(|s| s.as_str()),
                 );
             filters.push(update_filter);
@@ -283,11 +284,11 @@ impl AgentTransport {
             let complete_filter = Filter::new()
                 .kind(Kind::Custom(KIND_LEDGER_UPDATE))
                 .custom_tag(
-                    SingleLetterTag::lowercase(Alphabet::D),
-                    ledger_ids.iter().map(|s| s.as_str()),
+                    TAG_LEDGER_ID,
+                    ledger_ids.iter().map(|s| ledger_tag(s.as_str())),
                 )
                 .custom_tag(
-                    SingleLetterTag::lowercase(Alphabet::T),
+                    TAG_OP_TYPE,
                     ["71"],
                 );
             filters.push(complete_filter);
@@ -298,7 +299,7 @@ impl AgentTransport {
             let response_filter = Filter::new()
                 .kind(Kind::Custom(KIND_LEDGER_RESPONSE))
                 .custom_tag(
-                    SingleLetterTag::lowercase(Alphabet::L),
+                    TAG_LEDGER_REQ,
                     ledger_ids.iter().map(|s| s.as_str()),
                 );
             filters.push(response_filter);
@@ -309,7 +310,7 @@ impl AgentTransport {
         let request_filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_REQUEST))
             .custom_tag(
-                SingleLetterTag::lowercase(Alphabet::P),
+                TAG_PUBKEY,
                 [agent_pubkey_hex.as_str()],
             );
         filters.push(request_filter);
@@ -337,7 +338,7 @@ impl AgentTransport {
                         if kind == KIND_LEDGER_RESPONSE {
                             // Route response to waiting request
                             let request_id = event.tags.iter().find_map(|tag| {
-                                if tag.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::E)) {
+                                if tag.kind() == TagKind::SingleLetter(TAG_EVENT_REF) {
                                     tag.content().map(|s| s.to_string())
                                 } else {
                                     None
@@ -400,7 +401,7 @@ impl AgentTransport {
 
         let event = EventBuilder::new(Kind::Custom(KIND_LEDGER_REQUEST), &content)
             .tag(Tag::custom(
-                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)),
+                TagKind::SingleLetter(TAG_LEDGER_REQ),
                 [ledger_id],
             ))
             .tag(Tag::custom(
@@ -432,7 +433,7 @@ impl AgentTransport {
         let content = serde_json::to_string(&response)?;
         let event = EventBuilder::new(Kind::Custom(KIND_LEDGER_RESPONSE), &content)
             .tag(Tag::custom(
-                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::E)),
+                TagKind::SingleLetter(TAG_EVENT_REF),
                 [request_event_id],
             ))
             .sign_with_keys(&self.keys)
@@ -470,7 +471,7 @@ enum UpdateEvent {
 fn decode_update_event(event: &Event, our_deposit_ids: &[String]) -> Option<UpdateEvent> {
     // Get ledger_id from #d tag
     let ledger_id = event.tags.iter().find_map(|tag| {
-        if tag.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::D)) {
+        if tag.kind() == TagKind::SingleLetter(TAG_LEDGER_ID) {
             tag.content().map(|s| s.to_string())
         } else {
             None
@@ -479,7 +480,7 @@ fn decode_update_event(event: &Event, our_deposit_ids: &[String]) -> Option<Upda
 
     // Get operation discriminant from #t tag
     let op_type: u16 = event.tags.iter().find_map(|tag| {
-        if tag.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::T)) {
+        if tag.kind() == TagKind::SingleLetter(TAG_OP_TYPE) {
             tag.content().and_then(|s| s.parse().ok())
         } else {
             None
@@ -672,7 +673,7 @@ async fn fetch_advertisements(relay_url: &str) -> Result<HashMap<String, Operato
 
         let ledger_id = event.tags.iter()
             .find_map(|tag| {
-                if tag.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::D)) {
+                if tag.kind() == TagKind::SingleLetter(TAG_LEDGER_ID) {
                     tag.content().map(|s| s.to_string())
                 } else {
                     None
@@ -746,7 +747,7 @@ async fn publish_agent_advertisement(
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_AGENT_ADVERTISE))
             .custom_tag(
-                SingleLetterTag::lowercase(Alphabet::D),
+                TAG_LEDGER_ID,
                 [&agent_pubkey],
             )
             .limit(1);
@@ -765,7 +766,7 @@ async fn publish_agent_advertisement(
     let event = EventBuilder::new(Kind::Custom(KIND_AGENT_ADVERTISE), content.to_string())
         .custom_created_at(Timestamp::from(ts))
         .tag(Tag::custom(
-            TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::D)),
+            TagKind::SingleLetter(TAG_LEDGER_ID),
             [&agent_pubkey],
         ))
         .tag(Tag::custom(
@@ -773,7 +774,7 @@ async fn publish_agent_advertisement(
             ["htlc_routing"],
         ))
         .tag(Tag::custom(
-            TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::N)),
+            TagKind::SingleLetter(TAG_SEQUENCE),
             [network],
         ));
 

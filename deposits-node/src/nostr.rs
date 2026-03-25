@@ -120,6 +120,32 @@ pub const KIND_FRAUD_PROOF: u16 = 9101;
 /// Content: JSON with price, currency, and timestamp.
 pub const KIND_PRICE_ORACLE: u16 = 39101;
 
+/// Semantic Nostr tag constants (single-letter, relay-filterable per NIP-01).
+/// `d` — NIP-01 identifier tag. Used as ledger ID on durable events.
+pub const TAG_LEDGER_ID: SingleLetterTag = SingleLetterTag::lowercase(Alphabet::D);
+/// `l` — ledger ID on ephemeral request/response events.
+pub const TAG_LEDGER_REQ: SingleLetterTag = SingleLetterTag::lowercase(Alphabet::L);
+/// `n` — sequence number within a ledger's hash chain.
+pub const TAG_SEQUENCE: SingleLetterTag = SingleLetterTag::lowercase(Alphabet::N);
+/// `t` — operation type discriminant (numeric).
+pub const TAG_OP_TYPE: SingleLetterTag = SingleLetterTag::lowercase(Alphabet::T);
+/// `i` — affected deposit ID(s).
+pub const TAG_DEPOSIT_ID: SingleLetterTag = SingleLetterTag::lowercase(Alphabet::I);
+/// `e` — NIP-01 event reference (e.g. dispute event being agreed to).
+pub const TAG_EVENT_REF: SingleLetterTag = SingleLetterTag::lowercase(Alphabet::E);
+/// `p` — NIP-01 pubkey reference (e.g. target of a DM or ping).
+pub const TAG_PUBKEY: SingleLetterTag = SingleLetterTag::lowercase(Alphabet::P);
+
+/// Truncated ledger ID prefix length for Nostr tags (16 hex chars = 8 bytes).
+/// Full ledger IDs are 64 hex chars; we truncate for compact tags while
+/// maintaining collision resistance (2^64 possible values).
+const LEDGER_TAG_LEN: usize = 16;
+
+/// Truncate a ledger_id hex string to the prefix length used in Nostr tags.
+pub fn ledger_tag(ledger_id: &str) -> &str {
+    &ledger_id[..LEDGER_TAG_LEN.min(ledger_id.len())]
+}
+
 /// Default relay URLs for the network
 /// Empty by default - relays should be explicitly configured
 pub const DEFAULT_RELAYS: &[&str] = &[];
@@ -745,7 +771,7 @@ impl NostrTransport {
             tokio::spawn(async move {
                 while let Some(event) = rx.recv().await {
                     let seq_tag = event.tags.iter()
-                        .find(|t| t.as_slice().first().map(|s| s.as_str()) == Some("seq"))
+                        .find(|t| t.as_slice().first().map(|s| s.as_str()) == Some("n"))
                         .and_then(|t| t.as_slice().get(1))
                         .map(|s| s.to_string())
                         .unwrap_or_default();
@@ -836,15 +862,19 @@ impl NostrTransport {
     }
 
     /// Add a single ledger ID to the interested set.
+    /// Stores the truncated prefix to match against tag values.
     pub fn add_interested_ledger(&self, ledger_id: String) {
-        self.interested_ledgers.write().unwrap().insert(ledger_id);
+        self.interested_ledgers.write().unwrap().insert(ledger_tag(&ledger_id).to_string());
     }
 
     /// Set the ledger IDs we're interested in receiving events for.
     /// Events for other ledgers are dropped in handle_notification().
     /// Empty set = accept all (the default).
+    /// Stores truncated prefixes to match against tag values.
     pub fn set_interested_ledgers(&self, ledger_ids: impl IntoIterator<Item = String>) {
-        let new_set: std::collections::HashSet<String> = ledger_ids.into_iter().collect();
+        let new_set: std::collections::HashSet<String> = ledger_ids.into_iter()
+            .map(|id| ledger_tag(&id).to_string())
+            .collect();
         let count = new_set.len();
         *self.interested_ledgers.write().unwrap() = new_set;
         tracing::info!("Interested ledgers set: {} ledgers", count);
@@ -1016,35 +1046,32 @@ impl NostrTransport {
         let content = BASE64.encode(&tlv_bytes);
 
         // Build the event with appropriate tags
+        // - `d`: ledger ID prefix (16 hex chars, relay-filterable)
+        // - `n`: sequence number (single-letter, relay-filterable)
+        // - `t`: operation type discriminant (single-letter, relay-filterable)
+        // - `i`: affected deposit IDs (single-letter, relay-filterable)
+        // Hash chain data (prev_hash, current_hash) is in the TLV content.
         let mut builder = EventBuilder::new(Kind::Custom(KIND_LEDGER_UPDATE), &content)
             .tag(Tag::custom(
-                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::D)),
-                [&ledger_id],
+                TagKind::SingleLetter(TAG_LEDGER_ID),
+                [ledger_tag(&ledger_id)],
             ))
             .tag(Tag::custom(
-                TagKind::custom("seq"),
+                TagKind::SingleLetter(TAG_SEQUENCE),
                 [update.sequence_number.to_string()],
-            ))
-            .tag(Tag::custom(
-                TagKind::custom("prev"),
-                [hex::encode(update.previous_hash)],
-            ))
-            .tag(Tag::custom(
-                TagKind::custom("hash"),
-                [hex::encode(update.current_hash)],
             ));
 
         // Tag operation type and affected deposit IDs for relay-side filtering
         if let Ok(op) = deposits_core::messages::LedgerOperation::tlv_decode(&update.message) {
             // Operation type tag (e.g. "QuorumAddMember", "TransferLock")
             builder = builder.tag(Tag::custom(
-                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::T)),
+                TagKind::SingleLetter(TAG_OP_TYPE),
                 [op.discriminant().to_string()],
             ));
 
             for dep_id in op.affected_deposit_ids() {
                 builder = builder.tag(Tag::custom(
-                    TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::I)),
+                    TagKind::SingleLetter(TAG_DEPOSIT_ID),
                     [hex::encode(dep_id)],
                 ));
             }
@@ -1093,8 +1120,8 @@ impl NostrTransport {
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_UPDATE))
             .custom_tag(
-                SingleLetterTag::lowercase(Alphabet::D),
-                [ledger_id],
+                TAG_LEDGER_ID,
+                [ledger_tag(ledger_id)],
             );
 
         self.client
@@ -1154,7 +1181,7 @@ impl NostrTransport {
 
         let event = EventBuilder::new(Kind::Custom(KIND_LEDGER_REQUEST), &content)
             .tag(Tag::custom(
-                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)),
+                TagKind::SingleLetter(TAG_LEDGER_REQ),
                 [ledger_id],
             ))
             .tag(Tag::custom(
@@ -1247,11 +1274,11 @@ impl NostrTransport {
 
         let event = EventBuilder::new(Kind::Custom(KIND_LEDGER_RESPONSE), &content)
             .tag(Tag::custom(
-                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::E)),
+                TagKind::SingleLetter(TAG_EVENT_REF),
                 [request_id],
             ))
             .tag(Tag::custom(
-                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)),
+                TagKind::SingleLetter(TAG_LEDGER_REQ),
                 [ledger_id],
             ))
             .tag(Tag::custom(
@@ -1331,11 +1358,11 @@ impl NostrTransport {
 
         let event = EventBuilder::new(Kind::Custom(KIND_LEDGER_DISPUTE), &content)
             .tag(Tag::custom(
-                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::D)),
+                TagKind::SingleLetter(TAG_LEDGER_ID),
                 [ledger_id],
             ))
             .tag(Tag::custom(
-                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)),
+                TagKind::SingleLetter(TAG_LEDGER_REQ),
                 [ledger_id],
             ))
             .tag(Tag::custom(
@@ -1382,7 +1409,7 @@ impl NostrTransport {
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_DISPUTE))
             .custom_tag(
-                SingleLetterTag::lowercase(Alphabet::L),
+                TAG_LEDGER_REQ,
                 [ledger_id],
             )
             .since(since);
@@ -1477,7 +1504,7 @@ impl NostrTransport {
                 Filter::new()
                     .kind(Kind::Custom(KIND_LEDGER_REQUEST))
                     .custom_tag(
-                        SingleLetterTag::lowercase(Alphabet::L),
+                        TAG_LEDGER_REQ,
                         [lid.as_str()],
                     )
                     .since(since)
@@ -1490,7 +1517,7 @@ impl NostrTransport {
                 Filter::new()
                     .kind(Kind::Custom(KIND_LEDGER_DISPUTE))
                     .custom_tag(
-                        SingleLetterTag::lowercase(Alphabet::L),
+                        TAG_LEDGER_REQ,
                         [lid.as_str()],
                     )
                     .since(since)
@@ -1503,8 +1530,8 @@ impl NostrTransport {
                 Filter::new()
                     .kind(Kind::Custom(KIND_LEDGER_UPDATE))
                     .custom_tag(
-                        SingleLetterTag::lowercase(Alphabet::D),
-                        [lid.as_str()],
+                        TAG_LEDGER_ID,
+                        [ledger_tag(lid)],
                     )
                     .since(since)
             );
@@ -1584,15 +1611,15 @@ impl NostrTransport {
 
         let event = EventBuilder::new(Kind::Custom(KIND_RECOVERY_AGREE), &content)
             .tag(Tag::custom(
-                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::D)),
+                TagKind::SingleLetter(TAG_LEDGER_ID),
                 [ledger_id],
             ))
             .tag(Tag::custom(
-                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)),
+                TagKind::SingleLetter(TAG_LEDGER_REQ),
                 [ledger_id],
             ))
             .tag(Tag::custom(
-                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::E)),
+                TagKind::SingleLetter(TAG_EVENT_REF),
                 [dispute_event_id],
             ))
             .tag(Tag::custom(
@@ -1626,7 +1653,7 @@ impl NostrTransport {
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_RECOVERY_AGREE))
             .custom_tag(
-                SingleLetterTag::lowercase(Alphabet::E),
+                TAG_EVENT_REF,
                 [dispute_event_id],
             );
 
@@ -1680,11 +1707,11 @@ impl NostrTransport {
         let event = EventBuilder::new(Kind::Custom(KIND_LEDGER_ADVERTISE), &content)
             .custom_created_at(Timestamp::from(timestamp))
             .tag(Tag::custom(
-                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::D)),
+                TagKind::SingleLetter(TAG_LEDGER_ID),
                 [ad.ledger_id.as_str()],
             ))
             .tag(Tag::custom(
-                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::N)),
+                TagKind::SingleLetter(TAG_SEQUENCE),
                 [ad.network.as_str()],
             ))
             .tag(Tag::custom(
@@ -1733,7 +1760,7 @@ impl NostrTransport {
 
         let event = EventBuilder::new(Kind::Custom(KIND_PRICE_ORACLE), &content)
             .tag(Tag::custom(
-                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::D)),
+                TagKind::SingleLetter(TAG_LEDGER_ID),
                 ["btcusd"],
             ))
             .sign_with_keys(&self.keys)
@@ -1758,7 +1785,7 @@ impl NostrTransport {
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_ADVERTISE))
             .custom_tag(
-                SingleLetterTag::lowercase(Alphabet::D),
+                TAG_LEDGER_ID,
                 [ledger_id],
             )
             .limit(1);
@@ -1785,7 +1812,7 @@ impl NostrTransport {
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_ADVERTISE))
             .custom_tag(
-                SingleLetterTag::lowercase(Alphabet::N),
+                TAG_SEQUENCE,
                 [network],
             );
 
@@ -1897,7 +1924,7 @@ impl NostrTransport {
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_ADVERTISE))
             .custom_tag(
-                SingleLetterTag::lowercase(Alphabet::D),
+                TAG_LEDGER_ID,
                 [ledger_id],
             )
             .limit(1);
@@ -1926,7 +1953,7 @@ impl NostrTransport {
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_DISPUTE))
             .custom_tag(
-                SingleLetterTag::lowercase(Alphabet::L),
+                TAG_LEDGER_REQ,
                 [ledger_id],
             );
 
@@ -1959,12 +1986,11 @@ impl NostrTransport {
     ) -> Result<Vec<deposits_core::SignedLedgerUpdate>, Error> {
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
-        // Use tag `d` to match broadcast_ledger_update which publishes with tag `d`
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_UPDATE))
             .custom_tag(
-                SingleLetterTag::lowercase(Alphabet::D),
-                [ledger_id],
+                TAG_LEDGER_REQ,
+                [ledger_tag(ledger_id)],
             );
 
         let events = self.client
@@ -1989,8 +2015,7 @@ impl NostrTransport {
     }
 
     /// Fetch a single ledger update by sequence number from the relay.
-    /// Filters by `#d` (ledger_id) relay-side, then by seq client-side
-    /// (multi-char tags like "seq" aren't filterable in standard NIP-01).
+    /// Filters by `#d` (ledger prefix) relay-side, then by seq client-side.
     pub async fn fetch_ledger_update_by_seq(
         &self,
         ledger_id: &str,
@@ -2001,8 +2026,8 @@ impl NostrTransport {
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_UPDATE))
             .custom_tag(
-                SingleLetterTag::lowercase(Alphabet::D),
-                [ledger_id],
+                TAG_LEDGER_ID,
+                [ledger_tag(ledger_id)],
             );
 
         let events = self.client
@@ -2036,8 +2061,8 @@ impl NostrTransport {
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_UPDATE))
             .custom_tag(
-                SingleLetterTag::lowercase(Alphabet::D),
-                [ledger_id],
+                TAG_LEDGER_ID,
+                [ledger_tag(ledger_id)],
             );
 
         let events = self.client
@@ -2078,7 +2103,7 @@ impl NostrTransport {
         let since = nostr_sdk::Timestamp::now() - 5;
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_REQUEST))
-            .custom_tag(SingleLetterTag::lowercase(Alphabet::L), [ledger_id])
+            .custom_tag(TAG_LEDGER_REQ, [ledger_id])
             .since(since);
 
         self.client
@@ -2104,7 +2129,7 @@ impl NostrTransport {
             ledger_ids.iter().map(|lid| {
                 Filter::new()
                     .kind(Kind::Custom(KIND_LEDGER_REQUEST))
-                    .custom_tag(SingleLetterTag::lowercase(Alphabet::L), [lid.as_str()])
+                    .custom_tag(TAG_LEDGER_REQ, [lid.as_str()])
                     .since(since)
             }).collect::<Vec<_>>()
         } else {
@@ -2155,7 +2180,7 @@ impl NostrTransport {
             ledger_ids.iter().map(|lid| {
                 Filter::new()
                     .kind(Kind::Custom(KIND_LEDGER_RESPONSE))
-                    .custom_tag(SingleLetterTag::lowercase(Alphabet::L), [lid.as_str()])
+                    .custom_tag(TAG_LEDGER_REQ, [lid.as_str()])
                     .since(since)
             }).collect::<Vec<_>>()
         } else {
@@ -2631,18 +2656,18 @@ impl NostrTransport {
         false
     }
 
-    /// Extract ledger ID from an event's tags without full parsing.
+    /// Extract ledger ID prefix from an event's tags without full parsing.
     /// Updates use `#d` tag, requests/responses/disputes use `#l` tag.
+    /// Returns a truncated prefix (for interest filtering, not routing).
     fn extract_ledger_id_from_event(event: &Event, kind_num: u16) -> Option<String> {
-        // Updates use #d tag, everything else uses #l tag
         let tag_letter = if kind_num == KIND_LEDGER_UPDATE {
-            SingleLetterTag::lowercase(Alphabet::D)
+            TAG_LEDGER_ID
         } else {
-            SingleLetterTag::lowercase(Alphabet::L)
+            TAG_LEDGER_REQ
         };
         event.tags.iter().find_map(|tag| {
             if tag.kind() == TagKind::SingleLetter(tag_letter) {
-                tag.content().map(|s| s.to_string())
+                tag.content().map(|s| ledger_tag(s).to_string())
             } else {
                 None
             }
@@ -2691,31 +2716,20 @@ impl NostrTransport {
 
     /// Process a ledger update event
     fn process_ledger_update(&self, event: &Event) -> Result<InboundLedgerUpdate, Error> {
-        // Extract ledger_id from the d tag
-        let ledger_id = event
-            .tags
-            .iter()
-            .find_map(|tag| {
-                if tag.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::D)) {
-                    tag.content().map(|s| s.to_string())
-                } else {
-                    None
-                }
-            })
-            .ok_or_else(|| Error::Nostr("Missing d tag in ledger update".to_string()))?;
-
         // Decode content from base64
         let tlv_bytes = BASE64
             .decode(&event.content)
             .map_err(|e| Error::Serialization(format!("Invalid base64 in ledger update: {}", e)))?;
 
-        // Decode TLV to SignedLedgerUpdate
+        // Decode TLV to SignedLedgerUpdate — full ledger_id is in the TLV content
         let update = SignedLedgerUpdate::tlv_decode(&tlv_bytes)
             .map_err(|e| Error::Serialization(format!("Failed to decode ledger update: {:?}", e)))?;
 
+        let ledger_id = update.ledger_id_hex();
+
         tracing::trace!(
             "Received ledger update: ledger={}, seq={}, hash={}",
-            ledger_id,
+            &ledger_id[..16],
             update.sequence_number,
             &hex::encode(update.current_hash)[..16]
         );
@@ -2735,7 +2749,7 @@ impl NostrTransport {
             .tags
             .iter()
             .find_map(|tag| {
-                if tag.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)) {
+                if tag.kind() == TagKind::SingleLetter(TAG_LEDGER_REQ) {
                     tag.content().map(|s| s.to_string())
                 } else {
                     None
@@ -2784,7 +2798,7 @@ impl NostrTransport {
             .tags
             .iter()
             .find_map(|tag| {
-                if tag.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::E)) {
+                if tag.kind() == TagKind::SingleLetter(TAG_EVENT_REF) {
                     tag.content().map(|s| s.to_string())
                 } else {
                     None
@@ -2797,7 +2811,7 @@ impl NostrTransport {
             .tags
             .iter()
             .find_map(|tag| {
-                if tag.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)) {
+                if tag.kind() == TagKind::SingleLetter(TAG_LEDGER_REQ) {
                     tag.content().map(|s| s.to_string())
                 } else {
                     None

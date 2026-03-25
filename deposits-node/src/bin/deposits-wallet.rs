@@ -22,7 +22,7 @@ static GLOBAL: Jemalloc = Jemalloc;
 use bitcoin::secp256k1::{schnorr, Message, PublicKey, Secp256k1, SecretKey};
 use bitcoin::hashes::{sha256, Hash};
 use chrono::Utc;
-use deposits_node::nostr::{NostrTransportBuilder, KIND_LEDGER_UPDATE};
+use deposits_node::nostr::{NostrTransportBuilder, KIND_LEDGER_UPDATE, TAG_LEDGER_ID, TAG_SEQUENCE, ledger_tag};
 use std::collections::{BTreeMap, HashSet};
 use std::io::Write;
 use std::path::PathBuf;
@@ -2867,7 +2867,7 @@ async fn ledger_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
 
     for event in &events {
         let ledger_id = event.tags.iter().find_map(|tag| {
-            if tag.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::D)) {
+            if tag.kind() == TagKind::SingleLetter(TAG_LEDGER_ID) {
                 tag.content().map(|s| s.to_string())
             } else {
                 None
@@ -2875,9 +2875,9 @@ async fn ledger_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         });
 
         if let Some(lid) = ledger_id {
-            // Get sequence from tag
+            // Get sequence from n tag
             let seq = event.tags.iter().find_map(|tag| {
-                if tag.kind() == TagKind::Custom(std::borrow::Cow::Borrowed("seq")) {
+                if tag.kind() == TagKind::SingleLetter(TAG_SEQUENCE) {
                     tag.content().and_then(|s| s.parse::<u64>().ok())
                 } else {
                     None
@@ -2913,7 +2913,7 @@ async fn find_ledger_id(client: &Client, prefix: &str) -> Result<Option<String>,
 
     for event in events {
         if let Some(lid) = event.tags.iter().find_map(|tag| {
-            if tag.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::D)) {
+            if tag.kind() == TagKind::SingleLetter(TAG_LEDGER_ID) {
                 tag.content().map(|s| s.to_string())
             } else {
                 None
@@ -2966,7 +2966,7 @@ async fn ledger_show(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     println!();
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()]);
+        .custom_tag(TAG_LEDGER_ID, [ledger_tag(ledger_id.as_str())]);
 
     let events = fetch_all_events_paginated(&client, filter).await?;
     client.disconnect().await.ok();
@@ -3096,7 +3096,7 @@ async fn ledger_validate(args: &[String]) -> Result<(), Box<dyn std::error::Erro
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()]);
+        .custom_tag(TAG_LEDGER_ID, [ledger_tag(ledger_id.as_str())]);
 
     let events = fetch_all_events_paginated(&client, filter).await?;
     client.disconnect().await.ok();
@@ -3228,7 +3228,7 @@ async fn ledger_custody(args: &[String]) -> Result<(), Box<dyn std::error::Error
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_id.as_str()]);
+        .custom_tag(TAG_LEDGER_ID, [ledger_tag(ledger_id.as_str())]);
 
     let events = fetch_all_events_paginated(&client, filter).await?;
     client.disconnect().await.ok();

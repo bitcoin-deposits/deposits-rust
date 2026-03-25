@@ -265,14 +265,15 @@ class Decoder:
     def format_value(self, val_bytes, encoding):
         """Format a value for display."""
         if encoding == "u8":
-            return str(val_bytes[0])
+            return str(val_bytes[0]) if val_bytes else "0"
         elif encoding == "u16":
-            return str(struct.unpack(">H", val_bytes)[0])
+            v = int.from_bytes(val_bytes, "big") if val_bytes else 0
+            return str(v)
         elif encoding == "u32":
-            v = struct.unpack(">I", val_bytes)[0]
+            v = int.from_bytes(val_bytes, "big") if val_bytes else 0
             return f"{v} (0x{v:x})"
         elif encoding == "u64":
-            v = struct.unpack(">Q", val_bytes)[0]
+            v = int.from_bytes(val_bytes, "big") if val_bytes else 0
             if v < 100_000:
                 return str(v)
             elif v < 100_000_000_000:  # < 1000 BTC in msats
@@ -327,7 +328,7 @@ class Decoder:
 
             # Special: message_type lookup
             if name == "message_type" and encoding == "u16":
-                mt = struct.unpack(">H", val_bytes)[0]
+                mt = int.from_bytes(val_bytes, "big") if val_bytes else 0
                 mt_name = MSG_TYPES.get(mt, f"0x{mt:04x}")
                 display = f"0x{mt:04x} = {mt_name}"
 

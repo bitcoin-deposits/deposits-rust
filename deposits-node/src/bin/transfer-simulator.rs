@@ -14,6 +14,7 @@ use bitcoin::hashes::Hash as _;
 use bitcoin::secp256k1::{self, Keypair, Message, Secp256k1, SecretKey};
 use bitcoin::secp256k1::rand::rngs::OsRng;
 use bitcoin::secp256k1::rand::RngCore;
+use deposits_node::nostr::{TAG_LEDGER_ID, TAG_EVENT_REF, TAG_LEDGER_REQ};
 use nostr_sdk::prelude::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -164,7 +165,7 @@ impl SimTransport {
         let mut filter = Filter::new().kind(Kind::Custom(KIND_LEDGER_RESPONSE));
         if !ledger_ids.is_empty() {
             filter = filter.custom_tag(
-                SingleLetterTag::lowercase(Alphabet::L),
+                TAG_LEDGER_REQ,
                 ledger_ids.iter().map(|s| s.as_str()),
             );
         }
@@ -187,7 +188,7 @@ impl SimTransport {
                         }
                         // Extract request_id from #e tag
                         let request_id = event.tags.iter().find_map(|tag| {
-                            if tag.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::E)) {
+                            if tag.kind() == TagKind::SingleLetter(TAG_EVENT_REF) {
                                 tag.content().map(|s| s.to_string())
                             } else {
                                 None
@@ -251,7 +252,7 @@ impl SimTransport {
 
         let event = EventBuilder::new(Kind::Custom(KIND_LEDGER_REQUEST), &content)
             .tag(Tag::custom(
-                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)),
+                TagKind::SingleLetter(TAG_LEDGER_REQ),
                 [ledger_id],
             ))
             .tag(Tag::custom(
@@ -524,7 +525,7 @@ async fn fetch_advertisements(relay_url: &str) -> Result<(Vec<String>, HashMap<S
         // Extract ledger_id from #d tag (NIP-33 identifier) or JSON content
         let ledger_id = event.tags.iter()
             .find_map(|tag| {
-                if tag.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::D)) {
+                if tag.kind() == TagKind::SingleLetter(TAG_LEDGER_ID) {
                     tag.content().map(|s| s.to_string())
                 } else {
                     None
