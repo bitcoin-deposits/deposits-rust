@@ -225,6 +225,11 @@ pub struct NostrTransport {
     /// are dropped in handle_notification() before channel insertion.
     /// Empty = accept all (backwards-compatible default for CLI callers).
     interested_ledgers: RwLock<std::collections::HashSet<String>>,
+
+    /// Local cache of our own ledger advertisements.
+    /// Populated by publish_ledger_advertisement(), read by fetch_ledger_advertisement()
+    /// to avoid unnecessary relay round-trips when processing deposit requests.
+    ad_cache: RwLock<HashMap<String, LedgerAdvertisement>>,
 }
 
 /// An inbound message from a peer
@@ -786,6 +791,7 @@ impl NostrTransport {
             seen_events: std::sync::Mutex::new(std::collections::HashSet::new()),
             seen_events_prev: std::sync::Mutex::new(std::collections::HashSet::new()),
             interested_ledgers: RwLock::new(std::collections::HashSet::new()),
+            ad_cache: RwLock::new(HashMap::new()),
         })
     }
 
@@ -1060,7 +1066,7 @@ impl NostrTransport {
             let _ = tx.send(event);
         }
 
-        tracing::info!(
+        tracing::debug!(
             "Broadcast ledger update: ledger={}, seq={}, hash={}",
             ledger_id,
             update.sequence_number,
@@ -1164,7 +1170,7 @@ impl NostrTransport {
             .await
             .map_err(|e| Error::Nostr(format!("Failed to send request: {}", e)))?;
 
-        tracing::info!(
+        tracing::debug!(
             "Sent ledger request: ledger={}, action={}, event={}",
             ledger_id,
             action,
@@ -1651,6 +1657,9 @@ impl NostrTransport {
         &self,
         ad: &LedgerAdvertisement,
     ) -> Result<String, Error> {
+        // Cache locally so we don't need relay round-trips to read our own ads
+        self.ad_cache.write().unwrap().insert(ad.ledger_id.clone(), ad.clone());
+
         let content = serde_json::to_string(ad)
             .map_err(|e| Error::Serialization(format!("Failed to serialize advertisement: {}", e)))?;
 
@@ -1874,11 +1883,17 @@ impl NostrTransport {
         mirrored
     }
 
-    /// Fetch a specific ledger's advertisement
+    /// Fetch a specific ledger's advertisement.
+    /// Returns from local cache if available (our own ads), otherwise queries relay.
     pub async fn fetch_ledger_advertisement(
         &self,
         ledger_id: &str,
     ) -> Result<Option<LedgerAdvertisement>, Error> {
+        // Check local cache first (populated by publish_ledger_advertisement)
+        if let Some(ad) = self.ad_cache.read().unwrap().get(ledger_id) {
+            return Ok(Some(ad.clone()));
+        }
+
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_ADVERTISE))
             .custom_tag(
