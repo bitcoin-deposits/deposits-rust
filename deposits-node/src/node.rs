@@ -114,6 +114,15 @@ pub struct CoSignResult {
     pub member_ledger_hash: [u8; 32],
 }
 
+/// Result of a consent request from a quorum member
+#[derive(Debug, Clone)]
+pub struct ConsentResult {
+    /// The member's Schnorr signature over the consent content
+    pub consent_signature: [u8; 64],
+    /// Block height when the member's commitment expires
+    pub membership_expires: u32,
+}
+
 /// Result of a deposit offer co-sign request from a quorum member
 #[derive(Debug, Clone)]
 pub struct OfferCoSignResult {
@@ -213,6 +222,10 @@ pub struct Node {
     /// The result includes the co-signer's signature and the member's ledger hash
     pending_cosign_requests: Arc<Mutex<HashMap<String, (String, tokio::sync::oneshot::Sender<CoSignResult>)>>>,
 
+    /// Pending consent requests: request_id -> oneshot sender for consent result
+    /// Used by partner_add to await the member's consent signature
+    pending_consent_requests: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<ConsentResult>>>>,
+
     /// Semaphore to limit concurrent request_cosign calls.
     /// Multiple concurrent mini loops compete for shared channels (response_rx,
     /// ledger_rx) and can deadlock when all operators are in batch-await simultaneously.
@@ -255,8 +268,23 @@ pub struct Node {
     cosign_workers: Mutex<HashMap<String, tokio::sync::mpsc::UnboundedSender<crate::nostr::LedgerRequest>>>,
 
     /// Optional allowlist of npubs (hex) that can open deposits.
-    /// If empty, anyone can open deposits. Loaded from {data_dir}/deposit_allowlist.txt.
+    /// If empty (and domain_allowlist is also empty), anyone can open deposits.
+    /// Loaded from {data_dir}/deposit_allowlist.txt.
     deposit_allowlist: RwLock<std::collections::HashSet<String>>,
+
+    /// Optional denylist of npubs (hex). Checked first — always rejected.
+    /// Loaded from {data_dir}/deposit_denylist.txt.
+    deposit_denylist: RwLock<std::collections::HashSet<String>>,
+
+    /// Optional allowlist of lightning address domains. If an npub isn't in the
+    /// explicit allowlist, we check for a lightning-verify attestation (kind 55502)
+    /// and allow if the attested domain is in this list.
+    /// Loaded from {data_dir}/deposit_domain_allowlist.txt.
+    deposit_domain_allowlist: RwLock<std::collections::HashSet<String>>,
+
+    /// Pubkey (hex) of the lightning-verify service whose attestations we trust.
+    /// Loaded from ATTESTATION_VERIFIER_PUBKEY env var. Empty = attestation check disabled.
+    attestation_verifier_pubkey: Option<String>,
 
     /// Data directory for persistence
     data_dir: PathBuf,
@@ -395,6 +423,7 @@ impl Node {
             withdrawals: Mutex::new(withdrawals),
             pending_collateral_requests: Mutex::new(HashMap::new()),
             pending_cosign_requests: Arc::new(Mutex::new(HashMap::new())),
+            pending_consent_requests: Arc::new(Mutex::new(HashMap::new())),
             cosign_semaphore: Arc::new(tokio::sync::Semaphore::new(8)),
             pending_invoices: Arc::new(Mutex::new(HashMap::new())),
             processed_requests: Mutex::new(std::collections::HashSet::new()),
@@ -404,7 +433,10 @@ impl Node {
             active_ledger_tasks: Mutex::new(HashMap::new()),
             ledger_workers: Mutex::new(HashMap::new()),
             cosign_workers: Mutex::new(HashMap::new()),
-            deposit_allowlist: RwLock::new(Self::load_allowlist(&config.data_dir)),
+            deposit_allowlist: RwLock::new(Self::load_list(&config.data_dir, "deposit_allowlist.txt")),
+            deposit_denylist: RwLock::new(Self::load_list(&config.data_dir, "deposit_denylist.txt")),
+            deposit_domain_allowlist: RwLock::new(Self::load_list(&config.data_dir, "deposit_domain_allowlist.txt")),
+            attestation_verifier_pubkey: std::env::var("ATTESTATION_VERIFIER_PUBKEY").ok().filter(|s| !s.is_empty()),
             data_dir: config.data_dir,
             relay_url,
             fast_poll: config.fast_poll,
@@ -2119,7 +2151,7 @@ impl Node {
 
         // Silently drop operator-only actions if we're not the operator
         // (these are broadcast but only the operator should respond)
-        let operator_only_actions = ["deposit_open", "make_offer", "withdraw", "collateral_lock", "offer_status", "balance_query", "make_invoice", "pay_invoice", "transfer_lock", "transfer_complete", "bump", "complete_offer", "deposit_credit", "partner_add", "partner_join", "collateral_record", "reserves_rotate", "resync"];
+        let operator_only_actions = ["deposit_open", "make_offer", "withdraw", "collateral_lock", "offer_status", "balance_query", "make_invoice", "pay_invoice", "transfer_lock", "transfer_complete", "bump", "complete_offer", "deposit_credit", "partner_add", "partner_join", "collateral_record", "quorum_begin", "resync"];
         if operator_only_actions.contains(&request.action.as_str()) && !self.is_operator_of_ledger(&request.ledger_id) {
             return; // Silent drop - the actual operator will respond
         }
@@ -2284,8 +2316,9 @@ impl Node {
             "deposit_credit" => self.process_deposit_credit_request(&request).await,
             "partner_add" => self.process_partner_add_request(&request).await,
             "partner_join" => self.process_partner_join_request(&request).await,
+            "consent_request" => self.process_consent_request(&request).await,
             "collateral_record" => self.process_collateral_record_request(&request).await,
-            "reserves_rotate" => self.process_reserves_rotate_request(&request).await,
+            "quorum_begin" => self.process_quorum_begin_request(&request).await,
             "resync" => self.process_resync_request(&request).await,
             _ => {
                 tracing::warn!("Unknown request action: {}", request.action);
@@ -4999,10 +5032,39 @@ impl Node {
         tracing::info!("Processing deposit_open request for ledger {}...",
             &request.ledger_id[..16.min(request.ledger_id.len())]);
 
-        // Check deposit allowlist (if configured)
+        // Check deposit access control: denylist → npub allowlist → attestation + domain allowlist
+        //
+        // All RwLock guards are dropped before any .await to keep the future Send.
         {
-            let allowlist = self.deposit_allowlist.read().unwrap();
-            if !allowlist.is_empty() && !allowlist.contains(&request.sender) {
+            // 1. Denylist always wins
+            if self.deposit_denylist.read().unwrap().contains(&request.sender) {
+                tracing::warn!("Deposit open rejected: sender {} is on denylist", &request.sender[..16.min(request.sender.len())]);
+                return (false, None, Some("Not authorized to open deposits on this ledger".to_string()));
+            }
+
+            // 2. Snapshot lists for the remaining checks
+            let on_allowlist = self.deposit_allowlist.read().unwrap().contains(&request.sender);
+            let lists_configured = !self.deposit_allowlist.read().unwrap().is_empty()
+                || !self.deposit_domain_allowlist.read().unwrap().is_empty();
+            let domains: std::collections::HashSet<String> =
+                self.deposit_domain_allowlist.read().unwrap().clone();
+
+            if !lists_configured {
+                // No lists configured — open access
+            } else if on_allowlist {
+                // Explicitly allowed
+            } else if !domains.is_empty() {
+                // 3. Check for a lightning-verify attestation with an allowed domain
+                match self.check_attestation_domain(&request.sender, &domains).await {
+                    Some(domain) => {
+                        tracing::info!("Deposit open authorized via attestation: sender {} domain {}", &request.sender[..16.min(request.sender.len())], domain);
+                    }
+                    None => {
+                        tracing::warn!("Deposit open rejected: sender {} not on allowlist and no valid attestation", &request.sender[..16.min(request.sender.len())]);
+                        return (false, None, Some("Not authorized to open deposits on this ledger".to_string()));
+                    }
+                }
+            } else {
                 tracing::warn!("Deposit open rejected: sender {} not on allowlist", &request.sender[..16.min(request.sender.len())]);
                 return (false, None, Some("Not authorized to open deposits on this ledger".to_string()));
             }
@@ -7795,7 +7857,14 @@ impl Node {
             }
         };
 
-        let placeholder_sig = [0u8; 64];
+        // Request consent from the member — they sign and record QuorumJoin
+        let consent_signature = match self.request_consent(&member_ledger_id, &ledger_id).await {
+            Ok(result) => result.consent_signature,
+            Err(e) => {
+                tracing::error!("Consent request failed: {}", e);
+                return (false, None, Some(format!("Member consent failed: {}", e)));
+            }
+        };
 
         // Extract fee limits the member is imposing (from their advertisement)
         let min_fee_bps = request.params.get("min_fee_bps").and_then(|v| v.as_u64()).map(|v| v as u16);
@@ -7806,7 +7875,7 @@ impl Node {
         let collateral_lock_amount = request.params.get("collateral_lock_amount").and_then(|v| v.as_u64());
         let collateral_lock_until = request.params.get("collateral_lock_until").and_then(|v| v.as_u64()).map(|v| v as u32);
 
-        match self.add_quorum_member(&ledger_id, quorum_member, &member_ledger_id, placeholder_sig, min_fee_bps, min_fee_fixed, max_fee_period, collateral_lock_amount, collateral_lock_until).await {
+        match self.add_quorum_member(&ledger_id, quorum_member, &member_ledger_id, consent_signature, min_fee_bps, min_fee_fixed, max_fee_period, collateral_lock_amount, collateral_lock_until).await {
             Ok(event_id) => {
                 let result = serde_json::json!({
                     "status": "SUCCESS",
@@ -7861,9 +7930,25 @@ impl Node {
             }
         };
 
-        let placeholder_sig = [0u8; 64];
+        // Sign consent: COLLATERAL_CONSENT || operator_pubkey(33 bytes) || ledger_id(string bytes)
+        let signature = {
+            use bitcoin::hashes::{Hash, sha256};
+            use bitcoin::secp256k1::{Secp256k1, Message, Keypair};
 
-        match self.record_quorum_join(&our_ledger_id, target_operator, &target_ledger_id, membership_expires, placeholder_sig).await {
+            let mut sign_content = Vec::new();
+            sign_content.extend_from_slice(b"COLLATERAL_CONSENT");
+            sign_content.extend_from_slice(&target_operator.serialize());
+            sign_content.extend_from_slice(target_ledger_id.as_bytes());
+
+            let hash = sha256::Hash::hash(&sign_content);
+            let secp_msg = Message::from_digest(hash.to_byte_array());
+            let secp = Secp256k1::new();
+            let keypair = Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
+            let sig = secp.sign_schnorr_no_aux_rand(&secp_msg, &keypair);
+            sig.serialize()
+        };
+
+        match self.record_quorum_join(&our_ledger_id, target_operator, &target_ledger_id, membership_expires).await {
             Ok(event_id) => {
                 let result = serde_json::json!({
                     "status": "SUCCESS",
@@ -7877,6 +7962,76 @@ impl Node {
             Err(e) => {
                 tracing::error!("partner_join failed: {}", e);
                 (false, None, Some(e.to_string()))
+            }
+        }
+    }
+
+    /// Handle a consent_request from an operator wanting us to join their quorum.
+    ///
+    /// Auto-consents: signs the consent content, records QuorumJoin on our ledger,
+    /// and returns the signature so the operator can record QuorumAddMember.
+    async fn process_consent_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+        use std::str::FromStr;
+
+        tracing::info!("Processing consent_request for ledger {}...",
+            &request.ledger_id[..16.min(request.ledger_id.len())]);
+
+        let operator_pubkey_hex = match request.params.get("operator_pubkey").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => return (false, None, Some("Missing operator_pubkey parameter".to_string())),
+        };
+        let operator_ledger_id = match request.params.get("operator_ledger_id").and_then(|v| v.as_str()) {
+            Some(s) => s.to_string(),
+            None => return (false, None, Some("Missing operator_ledger_id parameter".to_string())),
+        };
+
+        let operator_pubkey = match PublicKey::from_str(operator_pubkey_hex) {
+            Ok(pk) => pk,
+            Err(e) => return (false, None, Some(format!("Invalid operator_pubkey: {}", e))),
+        };
+
+        if operator_ledger_id.len() != 64 || !operator_ledger_id.chars().all(|c| c.is_ascii_hexdigit()) {
+            return (false, None, Some("operator_ledger_id must be 64 hex chars".to_string()));
+        }
+
+        // Sign consent: COLLATERAL_CONSENT || operator_pubkey(33 bytes) || ledger_id(string bytes)
+        let mut sign_content = Vec::new();
+        sign_content.extend_from_slice(b"COLLATERAL_CONSENT");
+        sign_content.extend_from_slice(&operator_pubkey.serialize());
+        sign_content.extend_from_slice(operator_ledger_id.as_bytes());
+
+        let signature = {
+            use bitcoin::hashes::{Hash, sha256};
+            use bitcoin::secp256k1::{Secp256k1, Message, Keypair};
+
+            let hash = sha256::Hash::hash(&sign_content);
+            let secp_msg = Message::from_digest(hash.to_byte_array());
+            let secp = Secp256k1::new();
+            let keypair = Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
+            let sig = secp.sign_schnorr_no_aux_rand(&secp_msg, &keypair);
+            sig.serialize()
+        };
+
+        // Record QuorumJoin on our own ledger
+        let our_ledger_id = request.ledger_id.clone();
+        let current_block = self.wallet.get_block_height().unwrap_or(0);
+        let membership_expires = current_block + 1000; // ~1 week at 10 min/block
+
+        match self.record_quorum_join(&our_ledger_id, operator_pubkey, &operator_ledger_id, membership_expires).await {
+            Ok(_event_id) => {
+                tracing::info!("Consent granted: recorded QuorumJoin for operator {}... on our ledger {}...",
+                    &operator_pubkey_hex[..16.min(operator_pubkey_hex.len())],
+                    &our_ledger_id[..16]);
+                let result = serde_json::json!({
+                    "status": "CONSENT_GRANTED",
+                    "consent_signature": hex::encode(signature),
+                    "membership_expires": membership_expires,
+                });
+                (true, Some(result.to_string()), None)
+            }
+            Err(e) => {
+                tracing::error!("Failed to record QuorumJoin: {}", e);
+                (false, None, Some(format!("Failed to record QuorumJoin: {}", e)))
             }
         }
     }
@@ -7926,8 +8081,8 @@ impl Node {
         }
     }
 
-    async fn process_reserves_rotate_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
-        tracing::info!("Processing reserves_rotate request for ledger {}...",
+    async fn process_quorum_begin_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+        tracing::info!("Processing quorum_begin request for ledger {}...",
             &request.ledger_id[..16.min(request.ledger_id.len())]);
 
         // Resolve ledger_id
@@ -7947,7 +8102,7 @@ impl Node {
 
         // Sync wallet to see current UTXOs
         if let Err(e) = self.wallet.sync() {
-            tracing::warn!("Wallet sync failed before reserves_rotate: {}", e);
+            tracing::warn!("Wallet sync failed before quorum_begin: {}", e);
         }
 
         match self.rotate_reserves_to_quorum(&ledger_id) {
@@ -7969,7 +8124,7 @@ impl Node {
                 (true, Some(response.to_string()), None)
             }
             Err(e) => {
-                tracing::error!("reserves_rotate failed: {}", e);
+                tracing::error!("quorum_begin failed: {}", e);
                 (false, None, Some(e.to_string()))
             }
         }
@@ -8737,6 +8892,62 @@ impl Node {
             return;
         }
 
+        // Check if this is a response to a pending consent request
+        let is_consent_request = {
+            let pending = self.pending_consent_requests.lock().unwrap();
+            pending.contains_key(&response.request_id)
+        };
+
+        if is_consent_request {
+            if !response.success {
+                tracing::debug!(
+                    "Ignoring error consent response for {}: {}",
+                    &response.request_id[..16.min(response.request_id.len())],
+                    response.error.clone().unwrap_or_default()
+                );
+                return;
+            }
+
+            let consent_sender = {
+                let mut pending = self.pending_consent_requests.lock().unwrap();
+                pending.remove(&response.request_id)
+            };
+
+            if let Some(tx) = consent_sender {
+                if let Some(result) = &response.result {
+                    let result_obj = if result.is_object() {
+                        result.clone()
+                    } else if let Some(s) = result.as_str() {
+                        serde_json::from_str(s).unwrap_or_default()
+                    } else {
+                        serde_json::Value::Null
+                    };
+
+                    let sig_hex = result_obj.get("consent_signature").and_then(|v| v.as_str());
+                    let expires = result_obj.get("membership_expires").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+
+                    if let Some(sig_hex) = sig_hex {
+                        if let Ok(sig_vec) = hex::decode(sig_hex) {
+                            if sig_vec.len() == 64 {
+                                let mut sig = [0u8; 64];
+                                sig.copy_from_slice(&sig_vec);
+                                let consent_result = ConsentResult {
+                                    consent_signature: sig,
+                                    membership_expires: expires,
+                                };
+                                let _ = tx.send(consent_result);
+                                tracing::info!("Consent response received: signature ok, expires block {}",
+                                    expires);
+                                return;
+                            }
+                        }
+                    }
+                    tracing::warn!("Consent response missing valid consent_signature");
+                }
+            }
+            return;
+        }
+
         // Check if this is a response to one of our pending collateral_lock requests
         let our_reserves_id = {
             let pending = self.pending_collateral_requests.lock().unwrap();
@@ -8985,6 +9196,70 @@ impl Node {
                 return Err(Error::Protocol("Co-sign request timed out after 500ms".to_string()));
             }
         }
+    }
+
+    /// Request consent from a quorum member to join our quorum.
+    ///
+    /// Sends a `consent_request` to the member's ledger, waits for them to sign
+    /// and respond with their consent signature. The member also records a
+    /// QuorumJoin on their own ledger as part of handling the request.
+    async fn request_consent(
+        &self,
+        member_ledger_id: &str,
+        our_ledger_id: &str,
+    ) -> Result<ConsentResult, Error> {
+        let params = serde_json::json!({
+            "operator_pubkey": self.node_id_hex,
+            "operator_ledger_id": our_ledger_id,
+        });
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        // Temporarily add member's ledger to our interest set so we receive
+        // the response (which is tagged with member_ledger_id).
+        self.nostr.add_interested_ledger(member_ledger_id.to_string());
+
+        let request_id = self.nostr.send_ledger_request(member_ledger_id, "consent_request", params)
+            .await
+            .map_err(|e| Error::Protocol(format!("Failed to send consent request: {:?}", e)))?;
+        self.track_sent_event(&request_id);
+
+        {
+            let mut pending = self.pending_consent_requests.lock().unwrap();
+            pending.insert(request_id.clone(), tx);
+        }
+
+        tracing::info!(
+            "Sent consent request {} to member ledger {}... (waiting for signature)",
+            &request_id[..16.min(request_id.len())],
+            &member_ledger_id[..16],
+        );
+
+        let deadline = std::time::Duration::from_secs(5);
+
+        let result = tokio::select! {
+            result = rx => {
+                match result {
+                    Ok(consent_result) => {
+                        tracing::info!("Received consent signature from member");
+                        Ok(consent_result)
+                    }
+                    Err(_) => {
+                        Err(Error::Protocol("Consent response channel dropped".to_string()))
+                    }
+                }
+            }
+            _ = tokio::time::sleep(deadline) => {
+                let mut pending = self.pending_consent_requests.lock().unwrap();
+                pending.remove(&request_id);
+                Err(Error::Protocol("Consent request timed out after 5s".to_string()))
+            }
+        };
+
+        // Remove member ledger from interest set (we only needed it for the response)
+        self.nostr.remove_interested_ledger(member_ledger_id);
+
+        result
     }
 
     /// Request a co-signature on a deposit offer from quorum members.
@@ -9573,7 +9848,6 @@ impl Node {
         target_operator: PublicKey,
         target_ledger_id: &str,
         membership_expires: u32,
-        signature: [u8; 64],
     ) -> Result<String, Error> {
         // Check if there are existing quorum members
         let has_quorum = {
@@ -9613,7 +9887,6 @@ impl Node {
                 operator_id: target_operator,
                 ledger_id: target_ledger_id.to_string(),
                 membership_expires,
-                our_signature: signature,
             };
 
             ledger.append_operation_with_block(
@@ -11301,10 +11574,10 @@ impl Node {
         }
     }
 
-    /// Load deposit allowlist from {data_dir}/deposit_allowlist.txt.
-    /// Returns empty set if file doesn't exist (all deposits allowed).
-    fn load_allowlist(data_dir: &std::path::Path) -> std::collections::HashSet<String> {
-        let path = data_dir.join("deposit_allowlist.txt");
+    /// Load a line-based list from {data_dir}/{filename}.
+    /// Returns empty set if file doesn't exist.
+    fn load_list(data_dir: &std::path::Path, filename: &str) -> std::collections::HashSet<String> {
+        let path = data_dir.join(filename);
         match std::fs::read_to_string(&path) {
             Ok(content) => {
                 let list: std::collections::HashSet<String> = content
@@ -11313,7 +11586,7 @@ impl Node {
                     .filter(|l| !l.is_empty() && !l.starts_with('#'))
                     .collect();
                 if !list.is_empty() {
-                    tracing::info!("Deposit allowlist loaded: {} entries from {}", list.len(), path.display());
+                    tracing::info!("{} loaded: {} entries", filename, list.len());
                 }
                 list
             }
@@ -11321,16 +11594,86 @@ impl Node {
         }
     }
 
-    /// Reload the deposit allowlist from disk (only updates if changed).
-    pub fn reload_allowlist(&self) {
-        let new_list = Self::load_allowlist(&self.data_dir);
-        let current = self.deposit_allowlist.read().unwrap();
-        if *current != new_list {
+    /// Reload a single list file if changed.
+    fn reload_list(data_dir: &std::path::Path, filename: &str, current: &RwLock<std::collections::HashSet<String>>) {
+        let new_list = Self::load_list(data_dir, filename);
+        let guard = current.read().unwrap();
+        if *guard != new_list {
             let count = new_list.len();
-            drop(current);
-            *self.deposit_allowlist.write().unwrap() = new_list;
-            tracing::info!("Deposit allowlist updated: {} entries", count);
+            drop(guard);
+            *current.write().unwrap() = new_list;
+            tracing::info!("{} updated: {} entries", filename, count);
         }
+    }
+
+    /// Query relays for a lightning-verify attestation (kind 55502) for the given
+    /// sender pubkey. If found, extract the lightning address domain and check it
+    /// against the domain allowlist. Returns the matched domain on success.
+    async fn check_attestation_domain(
+        &self,
+        sender_hex: &str,
+        allowed_domains: &std::collections::HashSet<String>,
+    ) -> Option<String> {
+        let verifier_hex = self.attestation_verifier_pubkey.as_ref()?;
+
+        let verifier_pubkey = match nostr_sdk::PublicKey::from_hex(verifier_hex) {
+            Ok(pk) => pk,
+            Err(e) => {
+                tracing::error!("Invalid ATTESTATION_VERIFIER_PUBKEY: {}", e);
+                return None;
+            }
+        };
+
+        let sender_pubkey = match nostr_sdk::PublicKey::from_hex(sender_hex) {
+            Ok(pk) => pk,
+            Err(e) => {
+                tracing::warn!("Invalid sender pubkey for attestation lookup: {}", e);
+                return None;
+            }
+        };
+
+        // Query for kind 55502 from the verifier, tagged with the sender
+        let filter = nostr_sdk::Filter::new()
+            .kind(nostr_sdk::Kind::Custom(55502))
+            .author(verifier_pubkey)
+            .custom_tag(
+                nostr_sdk::SingleLetterTag::lowercase(nostr_sdk::Alphabet::P),
+                [sender_pubkey.to_hex()],
+            );
+
+        let events = match self.nostr.client().fetch_events(
+            vec![filter],
+            Some(std::time::Duration::from_secs(5)),
+        ).await {
+            Ok(events) => events,
+            Err(e) => {
+                tracing::warn!("Attestation query failed: {}", e);
+                return None;
+            }
+        };
+
+        // Check if any attestation has a lightning address on an allowed domain
+        for event in events.iter() {
+            if let Ok(content) = serde_json::from_str::<serde_json::Value>(&event.content) {
+                if let Some(address) = content.get("lightning_address").and_then(|v| v.as_str()) {
+                    if let Some(domain) = address.split('@').nth(1) {
+                        let domain_lower = domain.to_lowercase();
+                        if allowed_domains.contains(&domain_lower) {
+                            return Some(domain_lower);
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Reload all deposit access lists from disk.
+    pub fn reload_allowlist(&self) {
+        Self::reload_list(&self.data_dir, "deposit_allowlist.txt", &self.deposit_allowlist);
+        Self::reload_list(&self.data_dir, "deposit_denylist.txt", &self.deposit_denylist);
+        Self::reload_list(&self.data_dir, "deposit_domain_allowlist.txt", &self.deposit_domain_allowlist);
     }
 
     /// Generate a random nonce for withdrawal uniqueness
