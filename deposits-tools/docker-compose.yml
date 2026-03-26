@@ -5,7 +5,7 @@
 #
 # Usage:
 #   cd deposits-tools
-#   docker compose up -d              # Start infrastructure
+#   docker-compose up -d              # Start infrastructure
 #   source bin/_common.sh && start_all_nodes  # Start operator nodes
 #
 # Block explorer (electrs REST API):
@@ -101,7 +101,7 @@ services:
   # =========================================================================
   # Lightning node (profile: lightning)
   # Single shared LDK node — all operators use via self-pay wrapper.
-  # Start with: docker compose --profile lightning up -d
+  # Start with: docker-compose --profile lightning up -d
   # Build with: docker build -f deposits-tools/Dockerfile.ldk-node -t ldk-node:latest ~/workspace/
   # =========================================================================
 
@@ -153,7 +153,7 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        export LDK_API_KEY=$$(cat /ldk-data/regtest/api_key | od -A n -t x1 | tr -d ' \n')
+        export LDK_API_KEY=$(cat /ldk-data/regtest/api_key | od -A n -t x1 | tr -d ' \n')
         export LDK_REAL_CLI=/ldk-cli/ldk-server-cli
         mkdir -p /self-pay
         exec lightning-verify
@@ -198,7 +198,7 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        export LDK_API_KEY=$$(cat /ldk-data/regtest/api_key | od -A n -t x1 | tr -d ' \n')
+        export LDK_API_KEY=$(cat /ldk-data/regtest/api_key | od -A n -t x1 | tr -d ' \n')
         export LDK_REAL_CLI=/ldk-cli/ldk-server-cli
         mkdir -p /self-pay
         exec python3 -u /app/lnurl-server.py
@@ -256,16 +256,16 @@ services:
 
         # Wait for faucet wallet (created by reinit.sh)
         echo "Waiting for faucet wallet..."
-        until curl -sf -d '{"method":"getbalance"}' $$RPC >/dev/null 2>&1; do
+        until curl -sf -d '{"method":"getbalance"}' $RPC >/dev/null 2>&1; do
           sleep 2
         done
 
         # Get a mining address (reused for all blocks)
-        ADDR=$(curl -sf -d '{"method":"getnewaddress"}' $$RPC | sed 's/.*"result":"\([^"]*\)".*/\1/')
-        echo "Mining to $$ADDR (1 block/sec)"
+        ADDR=$(curl -sf -d '{"method":"getnewaddress"}' $RPC | sed 's/.*"result":"\([^"]*\)".*/\1/')
+        echo "Mining to $ADDR (1 block/sec)"
 
         while true; do
-          curl -sf -d "{\"method\":\"generatetoaddress\",\"params\":[1,\"$$ADDR\"]}" $$RPC >/dev/null
+          curl -sf -d "{\"method\":\"generatetoaddress\",\"params\":[1,\"$ADDR\"]}" $RPC >/dev/null
           sleep 1
         done
     networks:
