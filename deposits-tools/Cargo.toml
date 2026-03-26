@@ -40,6 +40,10 @@ path = "src/bin/discover.rs"
 name = "replay-ledger"
 path = "src/bin/replay-ledger.rs"
 
+[[bin]]
+name = "lightning-verify"
+path = "src/bin/lightning-verify.rs"
+
 [dependencies]
 # Bitcoin
 bitcoin = { version = "0.32", features = ["serde", "rand-std"] }
@@ -97,6 +101,9 @@ env_logger = "0.10"
 
 # Base64
 base64 = "0.21"
+
+# Nostr
+nostr-sdk = { version = "0.37", features = ["nip04"] }
 
 # TUI
 ratatui = "0.29"
