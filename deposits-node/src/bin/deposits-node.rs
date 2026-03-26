@@ -79,6 +79,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         "info" => show_info(&args[2..]).await?,
         "address" => show_address(&args[2..]).await?,
         "reserves" => reserves_command(&args[2..]).await?,
+        "quorum" => quorum_command(&args[2..]).await?,
         "ledger" => ledger_command(&args[2..]).await?,
         "partner" => partner_command(&args[2..]).await?,
         "collateral" => collateral_command(&args[2..]).await?,
@@ -128,9 +129,11 @@ COMMANDS:
 RESERVES SUBCOMMANDS:
     reserves create [amount_sats]
                     Create a new reserves UTXO (default: 100M sats / 1 BTC)
-    reserves rotate <reserves_id>
-                    Rotate reserves to quorum-based Taproot spending
     reserves list   List all reserves outputs
+
+QUORUM SUBCOMMANDS:
+    quorum begin [reserves_id]
+                    Activate quorum-based Taproot spending (rotates reserves into multisig)
 
 LEDGER SUBCOMMANDS:
     ledger open [fee options]
@@ -801,7 +804,7 @@ async fn reserves_command(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     match args[0].as_str() {
         "create" => reserves_create(&args[1..]).await,
-        "rotate" => reserves_rotate(&args[1..]).await,
+        "rotate" | "begin" => quorum_begin(&args[1..]).await,
         "list" => reserves_list(&args[1..]).await,
         arg if !arg.starts_with("--") && arg.parse::<u64>().is_ok() => {
             // Legacy: direct amount argument (backwards compatible)
@@ -810,6 +813,21 @@ async fn reserves_command(args: &[String]) -> Result<(), Box<dyn std::error::Err
         _ => {
             // Could be config args for create (backwards compatible)
             reserves_create(args).await
+        }
+    }
+}
+
+async fn quorum_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    if args.is_empty() {
+        eprintln!("Usage: deposits-node quorum <begin>");
+        eprintln!("  begin   Activate quorum-based Taproot spending");
+        return Ok(());
+    }
+    match args[0].as_str() {
+        "begin" => quorum_begin(&args[1..]).await,
+        _ => {
+            eprintln!("Unknown quorum subcommand: {}", args[0]);
+            Ok(())
         }
     }
 }
@@ -872,8 +890,8 @@ async fn reserves_create(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
-/// Rotate reserves to quorum-based Taproot spending
-async fn reserves_rotate(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+/// Activate quorum-based Taproot spending (rotates reserves into quorum multisig)
+async fn quorum_begin(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut reserves_id: Option<String> = None;
     let mut config_args = Vec::new();
 
@@ -915,13 +933,13 @@ async fn reserves_rotate(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     };
     drop(node);
 
-    println!("Rotating reserves via daemon...");
+    println!("Activating quorum via daemon...");
     println!("  Ledger: {}...", &ledger_id[..16]);
 
     let params = serde_json::json!({});
-    let result = send_daemon_request(&config, &ledger_id, "reserves_rotate", params).await?;
+    let result = send_daemon_request(&config, &ledger_id, "quorum_begin", params).await?;
 
-    println!("\nReserves rotated successfully!");
+    println!("\nQuorum activated!");
     if let Some(txid) = result.get("txid").and_then(|v| v.as_str()) {
         println!("  TXID: {}", txid);
     }
@@ -2431,7 +2449,7 @@ async fn partner_add(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     };
     drop(node);
 
-    println!("Adding quorum member via daemon...");
+    println!("Adding quorum member (requesting consent from member)...");
     println!("  Ledger:   {}...", &ledger_id[..16]);
     println!("  Member:   {}", quorum_member);
     println!("  Member's collateral ledger: {}...", &member_ledger_id[..16]);
@@ -2726,19 +2744,26 @@ async fn collateral_lock(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     println!("  Request ID: {}...", &request_id[..16]);
 
     // Wait for response
-    match node.nostr.wait_for_response(&request_id, 30000).await {
+    let attestation_json = match node.nostr.wait_for_response(&request_id, 30000).await {
         Ok(response) => {
             if response.success {
                 if let Some(result) = &response.result {
                     println!("\nCollateral locked!");
-                    // Extract attestation from response
-                    if let Some(att_str) = result.as_str().or_else(|| result.get("attestation").and_then(|v| v.as_str())) {
-                        println!("ATTESTATION_JSON:{}", att_str);
+                    // Extract attestation JSON for auto-recording
+                    let att_json = if let Some(att_b64) = result.get("attestation_b64").and_then(|v| v.as_str()) {
+                        use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+                        String::from_utf8(BASE64.decode(att_b64).unwrap_or_default()).ok()
                     } else {
-                        println!("ATTESTATION_JSON:{}", result);
+                        // Try raw JSON
+                        Some(result.to_string())
+                    };
+                    if let Some(ref json) = att_json {
+                        println!("  attestation_b64: {}", result.get("attestation_b64").and_then(|v| v.as_str()).unwrap_or(""));
                     }
+                    att_json
                 } else {
                     println!("\nCollateral locked! (no attestation in response)");
+                    None
                 }
             } else {
                 let error = response.error.as_deref().unwrap_or("Unknown error");
@@ -2746,6 +2771,27 @@ async fn collateral_lock(args: &[String]) -> Result<(), Box<dyn std::error::Erro
             }
         }
         Err(e) => return Err(format!("Timeout waiting for collateral_lock response: {}", e).into()),
+    };
+
+    // Auto-record attestation on all our own ledgers
+    if let Some(att_json) = attestation_json {
+        let our_ledger_ids: Vec<String> = {
+            let ledgers = node.handler.ledgers.lock().unwrap();
+            ledgers.keys().cloned().collect()
+        };
+
+        if our_ledger_ids.is_empty() {
+            println!("\n(No own ledgers to record attestation on)");
+        } else {
+            println!("\nRecording attestation on {} own ledger(s)...", our_ledger_ids.len());
+            for lid in &our_ledger_ids {
+                let params = serde_json::json!({ "attestation": att_json });
+                match send_daemon_request(&config, lid, "collateral_record", params).await {
+                    Ok(_) => println!("  Recorded on {}...", &lid[..16.min(lid.len())]),
+                    Err(e) => eprintln!("  Failed on {}...: {}", &lid[..16.min(lid.len())], e),
+                }
+            }
+        }
     }
 
     Ok(())

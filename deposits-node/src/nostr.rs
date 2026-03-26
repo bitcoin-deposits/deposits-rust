@@ -867,6 +867,11 @@ impl NostrTransport {
         self.interested_ledgers.write().unwrap().insert(ledger_tag(&ledger_id).to_string());
     }
 
+    /// Remove a ledger ID from the interested set.
+    pub fn remove_interested_ledger(&self, ledger_id: &str) {
+        self.interested_ledgers.write().unwrap().remove(ledger_tag(ledger_id));
+    }
+
     /// Set the ledger IDs we're interested in receiving events for.
     /// Events for other ledgers are dropped in handle_notification().
     /// Empty set = accept all (the default).
