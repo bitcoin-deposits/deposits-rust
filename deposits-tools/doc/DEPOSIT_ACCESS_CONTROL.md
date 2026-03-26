@@ -1,8 +1,13 @@
 # Deposit Access Control
 
-Deposit open requests are gated by a three-tier access control system.
-All list files live in the node's data directory and are hot-reloaded
-on each periodic cycle (no restart required).
+Deposit open requests are gated by an access control system that must
+be explicitly enabled. All list files live in the node's data directory
+and are hot-reloaded on each periodic cycle (no restart required).
+
+## Enabling
+
+Set `DEPOSIT_ACCESS_CONTROL=true` to enable. When disabled (the
+default), all deposit opens are allowed — only the denylist is checked.
 
 ## Evaluation order
 
@@ -11,13 +16,14 @@ deposit_open request
         |
         v
   +-----------+     yes
-  | Denylist? |----------> REJECT
+  | Denylist? |----------> REJECT  (always checked)
   +-----------+
         | no
         v
-  +-------------------+     yes
-  | Any lists exist?  |--no--> ALLOW (open access)
-  +-------------------+
+  +---------------------+
+  | DEPOSIT_ACCESS_      |--no--> ALLOW (open access)
+  | CONTROL enabled?     |
+  +---------------------+
         | yes
         v
   +------------------+     yes
@@ -25,9 +31,9 @@ deposit_open request
   +------------------+
         | no
         v
-  +--------------------+     yes
+  +--------------------+
   | Domain allowlist   |--no--> REJECT
-  | configured?        |
+  | has entries?       |
   +--------------------+
         | yes
         v
@@ -42,31 +48,38 @@ deposit_open request
       REJECT
 ```
 
+## Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `DEPOSIT_ACCESS_CONTROL` | `false` | Set to `true` to enable allowlist/domain checks. Denylist is always active regardless. |
+| `ATTESTATION_VERIFIER_PUBKEY` | unset | Hex pubkey of the lightning-verify service whose kind 55502 attestations are trusted. Required for domain-based access control. |
+
 ## List files
 
 All files use the same format: one entry per line, blank lines and
 lines starting with `#` are ignored, entries are lowercased.
 
+### deposit_denylist.txt
+
+Hex npubs that are always rejected. Checked regardless of whether
+access control is enabled — this is the kill switch.
+
+```
+# Known bad actor
+deadbeefcafe...
+```
+
 ### deposit_allowlist.txt
 
-Hex npubs that are always allowed to open deposits, regardless of
-attestation status.
+Hex npubs that are always allowed to open deposits when access control
+is enabled.
 
 ```
 # Alice (operator)
 a1b2c3d4e5f6...
 # Bob (known user)
 f6e5d4c3b2a1...
-```
-
-### deposit_denylist.txt
-
-Hex npubs that are always rejected. Checked first — overrides the
-allowlist and attestation checks.
-
-```
-# Known bad actor
-deadbeefcafe...
 ```
 
 ### deposit_domain_allowlist.txt
@@ -85,15 +98,6 @@ strike.me
 # Our own domain
 example.com
 ```
-
-## Environment variable
-
-| Variable | Description |
-|---|---|
-| `ATTESTATION_VERIFIER_PUBKEY` | Hex pubkey of the lightning-verify service whose kind 55502 attestations are trusted. Required for domain-based access control to function. |
-
-If unset or empty, the attestation/domain path is skipped entirely —
-only the npub allowlist and denylist are active.
 
 ## Lightning-verify attestation
 
@@ -133,25 +137,40 @@ the link between npub and lightning address:
 Both methods produce the same kind 55502 attestation and are treated
 identically by the deposit access control system.
 
-## Backwards compatibility
-
-If no list files exist and `ATTESTATION_VERIFIER_PUBKEY` is unset,
-the system behaves exactly as before: open access, anyone can open
-deposits. Adding only `deposit_allowlist.txt` (the original behavior)
-continues to work unchanged.
-
 ## Examples
 
-### Allowlist-only (original behavior)
+### Denylist only (default)
+
+```bash
+# No DEPOSIT_ACCESS_CONTROL set — open access with a kill switch
+```
+
+```
+data_dir/
+  deposit_denylist.txt    # blocked npubs
+```
+
+Anyone can open deposits except denied npubs.
+
+### Npub allowlist
+
+```bash
+DEPOSIT_ACCESS_CONTROL=true
+```
 
 ```
 data_dir/
   deposit_allowlist.txt    # hex npubs, one per line
 ```
 
-Only listed npubs can open deposits. No attestation checks.
+Only listed npubs can open deposits.
 
 ### Domain-based with denylist
+
+```bash
+DEPOSIT_ACCESS_CONTROL=true
+ATTESTATION_VERIFIER_PUBKEY=<your-lightning-verify-pubkey>
+```
 
 ```
 data_dir/
@@ -159,15 +178,15 @@ data_dir/
   deposit_domain_allowlist.txt   # allowed domains
 ```
 
-```bash
-ATTESTATION_VERIFIER_PUBKEY=<your-lightning-verify-pubkey>
-```
-
 Anyone with a verified lightning address on an allowed domain can open
-deposits, unless they're on the denylist. No explicit npub allowlist
-needed.
+deposits, unless they're on the denylist.
 
 ### Combined
+
+```bash
+DEPOSIT_ACCESS_CONTROL=true
+ATTESTATION_VERIFIER_PUBKEY=<your-lightning-verify-pubkey>
+```
 
 ```
 data_dir/

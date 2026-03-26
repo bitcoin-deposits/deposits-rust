@@ -267,16 +267,19 @@ pub struct Node {
     /// our OWN cosign responses get routed to oneshot channels.
     cosign_workers: Mutex<HashMap<String, tokio::sync::mpsc::UnboundedSender<crate::nostr::LedgerRequest>>>,
 
-    /// Optional allowlist of npubs (hex) that can open deposits.
-    /// If empty (and domain_allowlist is also empty), anyone can open deposits.
+    /// Whether deposit access control is enabled (DEPOSIT_ACCESS_CONTROL=true).
+    /// When false, all deposit opens are allowed (denylist still checked).
+    deposit_access_control: bool,
+
+    /// Allowlist of npubs (hex) that can open deposits.
     /// Loaded from {data_dir}/deposit_allowlist.txt.
     deposit_allowlist: RwLock<std::collections::HashSet<String>>,
 
-    /// Optional denylist of npubs (hex). Checked first — always rejected.
+    /// Denylist of npubs (hex). Checked even when access control is off.
     /// Loaded from {data_dir}/deposit_denylist.txt.
     deposit_denylist: RwLock<std::collections::HashSet<String>>,
 
-    /// Optional allowlist of lightning address domains. If an npub isn't in the
+    /// Allowlist of lightning address domains. If an npub isn't in the
     /// explicit allowlist, we check for a lightning-verify attestation (kind 55502)
     /// and allow if the attested domain is in this list.
     /// Loaded from {data_dir}/deposit_domain_allowlist.txt.
@@ -433,6 +436,9 @@ impl Node {
             active_ledger_tasks: Mutex::new(HashMap::new()),
             ledger_workers: Mutex::new(HashMap::new()),
             cosign_workers: Mutex::new(HashMap::new()),
+            deposit_access_control: std::env::var("DEPOSIT_ACCESS_CONTROL")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false),
             deposit_allowlist: RwLock::new(Self::load_list(&config.data_dir, "deposit_allowlist.txt")),
             deposit_denylist: RwLock::new(Self::load_list(&config.data_dir, "deposit_denylist.txt")),
             deposit_domain_allowlist: RwLock::new(Self::load_list(&config.data_dir, "deposit_domain_allowlist.txt")),
@@ -5032,41 +5038,41 @@ impl Node {
         tracing::info!("Processing deposit_open request for ledger {}...",
             &request.ledger_id[..16.min(request.ledger_id.len())]);
 
-        // Check deposit access control: denylist → npub allowlist → attestation + domain allowlist
+        // Deposit access control: denylist → (if enabled) npub allowlist → attestation + domain
         //
         // All RwLock guards are dropped before any .await to keep the future Send.
         {
-            // 1. Denylist always wins
+            // Denylist is always checked, even when access control is off
             if self.deposit_denylist.read().unwrap().contains(&request.sender) {
                 tracing::warn!("Deposit open rejected: sender {} is on denylist", &request.sender[..16.min(request.sender.len())]);
                 return (false, None, Some("Not authorized to open deposits on this ledger".to_string()));
             }
 
-            // 2. Snapshot lists for the remaining checks
-            let on_allowlist = self.deposit_allowlist.read().unwrap().contains(&request.sender);
-            let lists_configured = !self.deposit_allowlist.read().unwrap().is_empty()
-                || !self.deposit_domain_allowlist.read().unwrap().is_empty();
-            let domains: std::collections::HashSet<String> =
-                self.deposit_domain_allowlist.read().unwrap().clone();
+            if self.deposit_access_control {
+                let on_allowlist = self.deposit_allowlist.read().unwrap().contains(&request.sender);
 
-            if !lists_configured {
-                // No lists configured — open access
-            } else if on_allowlist {
-                // Explicitly allowed
-            } else if !domains.is_empty() {
-                // 3. Check for a lightning-verify attestation with an allowed domain
-                match self.check_attestation_domain(&request.sender, &domains).await {
-                    Some(domain) => {
-                        tracing::info!("Deposit open authorized via attestation: sender {} domain {}", &request.sender[..16.min(request.sender.len())], domain);
-                    }
-                    None => {
-                        tracing::warn!("Deposit open rejected: sender {} not on allowlist and no valid attestation", &request.sender[..16.min(request.sender.len())]);
+                if on_allowlist {
+                    // Explicitly allowed
+                } else {
+                    // Check for a lightning-verify attestation with an allowed domain
+                    let domains: std::collections::HashSet<String> =
+                        self.deposit_domain_allowlist.read().unwrap().clone();
+
+                    if !domains.is_empty() {
+                        match self.check_attestation_domain(&request.sender, &domains).await {
+                            Some(domain) => {
+                                tracing::info!("Deposit open authorized via attestation: sender {} domain {}", &request.sender[..16.min(request.sender.len())], domain);
+                            }
+                            None => {
+                                tracing::warn!("Deposit open rejected: sender {} not on allowlist and no valid attestation", &request.sender[..16.min(request.sender.len())]);
+                                return (false, None, Some("Not authorized to open deposits on this ledger".to_string()));
+                            }
+                        }
+                    } else {
+                        tracing::warn!("Deposit open rejected: sender {} not on allowlist", &request.sender[..16.min(request.sender.len())]);
                         return (false, None, Some("Not authorized to open deposits on this ledger".to_string()));
                     }
                 }
-            } else {
-                tracing::warn!("Deposit open rejected: sender {} not on allowlist", &request.sender[..16.min(request.sender.len())]);
-                return (false, None, Some("Not authorized to open deposits on this ledger".to_string()));
             }
         }
 
