@@ -523,6 +523,15 @@ pub struct LedgerAdvertisement {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_url: Option<String>,
 
+    /// Whether deposit access control is enabled (deposits may require attestation).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub access_control: bool,
+
+    /// Lightning address domains accepted for attestation-based deposit access.
+    /// Empty = domain check not used (npub allowlist only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_domains: Vec<String>,
+
     // === Metadata ===
 
     /// Network (bitcoin, testnet, signet, regtest)
@@ -617,6 +626,8 @@ impl LedgerAdvertisement {
             attested_collateral_msats: 0,
             held_collateral_msats: 0,
             relay_url: None,
+            access_control: false,
+            allowed_domains: Vec::new(),
             network,
             version: 1,
             event_id: String::new(),

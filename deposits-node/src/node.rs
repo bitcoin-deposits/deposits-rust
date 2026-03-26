@@ -5074,8 +5074,16 @@ impl Node {
                         None => {
                             tracing::warn!("Deposit open rejected: sender {} not on allowlist and no valid attestation", &request.sender[..16.min(request.sender.len())]);
                             let code = if has_domains { "attestation_required" } else { "not_authorized" };
+                            let mut err_data = serde_json::json!({"code": code});
+                            if has_domains {
+                                if let Some(ref vk) = self.attestation_verifier_pubkey {
+                                    err_data["verifier_pubkey"] = serde_json::json!(vk);
+                                }
+                                let domain_list: Vec<String> = domains.iter().cloned().collect();
+                                err_data["allowed_domains"] = serde_json::json!(domain_list);
+                            }
                             return (false,
-                                Some(serde_json::json!({"code": code}).to_string()),
+                                Some(err_data.to_string()),
                                 Some("Not authorized to open deposits on this ledger".to_string()));
                         }
                     }

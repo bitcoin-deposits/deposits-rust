@@ -81,7 +81,6 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         "reserves" => reserves_command(&args[2..]).await?,
         "quorum" => quorum_command(&args[2..]).await?,
         "ledger" => ledger_command(&args[2..]).await?,
-        "partner" => partner_command(&args[2..]).await?,
         "collateral" => collateral_command(&args[2..]).await?,
         "deposit" => deposit_command(&args[2..]).await?,
         "withdraw" => withdraw_command(&args[2..]).await?,
@@ -116,9 +115,9 @@ COMMANDS:
     keygen          Generate a new secp256k1 keypair for deposits
     derive-deposit-key
                     Derive wallet deposit secret key from seed (for collateral lock)
-    reserves        Manage reserves UTXOs (create, rotate, list)
+    reserves        Manage reserves UTXOs (create, list)
+    quorum          Manage quorum (add, join, begin, request, list)
     ledger          Manage ledgers (open, list)
-    partner         Manage quorum members (request, add, join, list)
     collateral      Manage collateral pledges
     deposit         Manage deposit offers for on-chain funding
     withdraw        Manage on-chain withdrawals
@@ -132,8 +131,15 @@ RESERVES SUBCOMMANDS:
     reserves list   List all reserves outputs
 
 QUORUM SUBCOMMANDS:
+    quorum add <ledger_id> <member_pubkey> <member_ledger_id>
+                    Add a quorum member to your ledger (requests consent, records QuorumAddMember)
+    quorum join <our_ledger_id> <target_operator> <target_ledger_id> <expires_block>
+                    Record that you joined another operator's quorum (records QuorumJoin)
     quorum begin [reserves_id]
                     Activate quorum-based Taproot spending (rotates reserves into multisig)
+    quorum request <pubkey>
+                    Send quorum membership request
+    quorum list     List all quorum relationships
 
 LEDGER SUBCOMMANDS:
     ledger open [fee options]
@@ -152,16 +158,6 @@ LEDGER SUBCOMMANDS:
                     Checks hash chain integrity, sequence continuity, and business rules.
     ledger export [reserves_id] [--json|--binary]
                     Export a ledger for external validation or backup
-
-PARTNER SUBCOMMANDS:
-    partner request <pubkey>   Send quorum membership request
-    partner add <reserves_id> <quorum_member_pubkey> <member_ledger_id>
-                    Add a quorum member to your ledger (records QuorumAddMember)
-                    member_ledger_id: 64-char hex hash identifying member's collateral ledger
-    partner join <our_ledger_id> <target_operator> <target_ledger_id> <expires_block>
-                    Record that you joined another operator's quorum (records QuorumJoin)
-                    target_ledger_id: 64-char hex hash identifying target operator's ledger
-    partner list               List all quorum members
 
 COLLATERAL SUBCOMMANDS:
     collateral lock <ledger_id> <amount_msats> <lock_blocks>
@@ -804,7 +800,6 @@ async fn reserves_command(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     match args[0].as_str() {
         "create" => reserves_create(&args[1..]).await,
-        "rotate" | "begin" => quorum_begin(&args[1..]).await,
         "list" => reserves_list(&args[1..]).await,
         arg if !arg.starts_with("--") && arg.parse::<u64>().is_ok() => {
             // Legacy: direct amount argument (backwards compatible)
@@ -819,14 +814,23 @@ async fn reserves_command(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
 async fn quorum_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {
-        eprintln!("Usage: deposits-node quorum <begin>");
-        eprintln!("  begin   Activate quorum-based Taproot spending");
+        eprintln!("Usage: deposits-node quorum <add|join|begin|request|list> [args...]");
+        eprintln!("  add      Add a quorum member to our ledger");
+        eprintln!("  join     Record that we joined another operator's quorum");
+        eprintln!("  begin    Activate quorum-based Taproot spending");
+        eprintln!("  request  Request a peer to join our quorum");
+        eprintln!("  list     List quorum relationships");
         return Ok(());
     }
     match args[0].as_str() {
+        "add" => quorum_add(&args[1..]).await,
+        "join" => quorum_join_cmd(&args[1..]).await,
         "begin" => quorum_begin(&args[1..]).await,
-        _ => {
-            eprintln!("Unknown quorum subcommand: {}", args[0]);
+        "request" => quorum_request(&args[1..]).await,
+        "list" => quorum_list(&args[1..]).await,
+        cmd => {
+            eprintln!("Unknown quorum subcommand: {}", cmd);
+            eprintln!("Usage: deposits-node quorum <add|join|begin|request|list> [args...]");
             Ok(())
         }
     }
@@ -1152,6 +1156,20 @@ async fn auto_advertise_ledger(
     }
     if let Some(bps) = fee_schedule.transfer_fee_rate_bps {
         ad.transfer_fee_rate_bps = bps;
+    }
+
+    // Access control policy
+    ad.access_control = std::env::var("DEPOSIT_ACCESS_CONTROL")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    if ad.access_control {
+        if let Ok(domains) = std::fs::read_to_string(node.data_dir().join("deposit_domain_allowlist.txt")) {
+            ad.allowed_domains = domains
+                .lines()
+                .map(|l| l.trim().to_lowercase())
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .collect();
+        }
     }
 
     // Calculate headroom
@@ -2342,27 +2360,8 @@ fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
 }
 
 /// Handle partner subcommands
-async fn partner_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    if args.is_empty() {
-        eprintln!("Usage: deposits-node partner <request|add|join|list> [args...]");
-        return Ok(());
-    }
-
-    match args[0].as_str() {
-        "request" => partner_request(&args[1..]).await,
-        "add" => partner_add(&args[1..]).await,
-        "join" => partner_join(&args[1..]).await,
-        "list" => partner_list(&args[1..]).await,
-        cmd => {
-            eprintln!("Unknown partner subcommand: {}", cmd);
-            eprintln!("Usage: deposits-node partner <request|add|join|list> [args...]");
-            Ok(())
-        }
-    }
-}
-
 /// Request a peer to be a quorum member
-async fn partner_request(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+async fn quorum_request(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // Parse positional argument: <peer_pubkey>
     let mut peer_pubkey_str: Option<String> = None;
     let mut config_args = Vec::new();
@@ -2391,7 +2390,7 @@ async fn partner_request(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     println!("Requesting quorum membership with: {}", peer_pubkey);
 
     // Send membership request via Nostr
-    node.request_partner(peer_pubkey).await?;
+    node.request_quorum_member(peer_pubkey).await?;
 
     println!("Membership request sent!");
     println!("  The peer will need to accept the request to establish the membership.");
@@ -2400,8 +2399,8 @@ async fn partner_request(args: &[String]) -> Result<(), Box<dyn std::error::Erro
 }
 
 /// Add a quorum member to our ledger
-/// Usage: partner add <reserves_id> <quorum_member_pubkey> <member_ledger_id>
-async fn partner_add(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+/// Usage: quorum add <reserves_id> <quorum_member_pubkey> <member_ledger_id>
+async fn quorum_add(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut reserves_id: Option<String> = None;
     let mut quorum_member_str: Option<String> = None;
     let mut member_ledger_id: Option<String> = None;
@@ -2481,7 +2480,7 @@ async fn partner_add(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     if let Some(v) = collateral_lock_amount { params["collateral_lock_amount"] = v.into(); }
     if let Some(v) = collateral_lock_until { params["collateral_lock_until"] = v.into(); }
 
-    let result = send_daemon_request(&config, &ledger_id, "partner_add", params).await?;
+    let result = send_daemon_request(&config, &ledger_id, "quorum_add", params).await?;
 
     println!("Quorum member added!");
     if let Some(event_id) = result.get("event_id").and_then(|v| v.as_str()) {
@@ -2495,8 +2494,8 @@ async fn partner_add(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
 }
 
 /// Record that we have joined another operator's quorum
-/// Usage: partner join <our_ledger_id> <target_operator> <target_ledger_id> <expires_block>
-async fn partner_join(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+/// Usage: quorum join <our_ledger_id> <target_operator> <target_ledger_id> <expires_block>
+async fn quorum_join_cmd(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut our_id: Option<String> = None;
     let mut target_operator_str: Option<String> = None;
     let mut target_id: Option<String> = None;
@@ -2564,7 +2563,7 @@ async fn partner_join(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         "membership_expires": expires_block,
     });
 
-    let result = send_daemon_request(&config, &our_ledger_id, "partner_join", params).await?;
+    let result = send_daemon_request(&config, &our_ledger_id, "quorum_join", params).await?;
 
     println!("Quorum join recorded!");
     if let Some(event_id) = result.get("event_id").and_then(|v| v.as_str()) {
@@ -2578,20 +2577,44 @@ async fn partner_join(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 }
 
 /// List quorum members
-async fn partner_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+async fn quorum_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let config = parse_config(args)?;
     let node = Node::new(config).await?;
 
-    let partners = node.list_partners();
+    let (our_ledgers, joined) = node.list_quorum_info();
 
-    if partners.is_empty() {
-        println!("No quorum members found.");
+    if our_ledgers.is_empty() && joined.is_empty() {
+        println!("No quorum relationships.");
         return Ok(());
     }
 
-    println!("Quorum Members ({} total):", partners.len());
-    for (pubkey, role) in partners {
-        println!("  {} - {}", pubkey, role);
+    // Our ledgers and their quorum members
+    if !our_ledgers.is_empty() {
+        println!("Our ledgers:");
+        for (ledger_id, active, pending) in &our_ledgers {
+            println!("  {}...", &ledger_id[..16.min(ledger_id.len())]);
+            if active.is_empty() && pending.is_empty() {
+                println!("    (no quorum members)");
+            }
+            for pk in active {
+                println!("    {} (active)", pk);
+            }
+            for pk in pending {
+                println!("    {} (pending)", pk);
+            }
+        }
+    }
+
+    // Quorums we've joined, grouped by our ledger
+    if !joined.is_empty() {
+        println!("\nServing on quorums:");
+        for (our_ledger_id, memberships) in &joined {
+            println!("  via {}...:", &our_ledger_id[..16.min(our_ledger_id.len())]);
+            for (operator, their_ledger, expires) in memberships {
+                println!("    operator {} ledger {}... (expires block {})",
+                    operator, &their_ledger[..16.min(their_ledger.len())], expires);
+            }
+        }
     }
 
     Ok(())

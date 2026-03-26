@@ -1143,8 +1143,8 @@ let updateSubIds = []; // track update subscriptions for resubscribe
 function subscribeOnSocket(sock) {
   const subId = 'wr-' + Date.now().toString(36);
   const since = Math.floor(Date.now() / 1000) - 5;
-  // Subscribe to ledger responses (kind 20102)
-  const responseFilter = { kinds: [20102], since };
+  // Subscribe to ledger responses (kind 20102) and verify responses (kind 25501)
+  const responseFilter = { kinds: [20102, 25501], since };
   sock.send(JSON.stringify(['REQ', subId, responseFilter]));
 
   // Subscribe to ledger updates (kind 9100) tagged with our deposit IDs
@@ -1233,7 +1233,7 @@ function handleEvent(event) {
     handleLedgerUpdate(event);
     return;
   }
-  if (event.kind === 20102) {
+  if (event.kind === 20102 || event.kind === 25501) {
     // Ledger response — match to pending request via #e tag
     const eTag = (event.tags || []).find(t => t[0] === 'e');
     if (!eTag) return;
@@ -1871,7 +1871,13 @@ window.doOpenDeposit = async function() {
 
     if (!openResponse.success && !(openResponse.error || '').includes('already')) {
       const code = openResponse.result?.code;
-      if (code === 'attestation_required' || code === 'not_authorized' || code === 'denied') {
+      if (code === 'attestation_required') {
+        const verifierPubkey = openResponse.result?.verifier_pubkey;
+        const allowedDomains = openResponse.result?.allowed_domains || [];
+        await showVerificationFlow(ledgerId, operatorName, alias, pubkeyHex, keyIndex, verifierPubkey, allowedDomains);
+        return;
+      }
+      if (code === 'not_authorized' || code === 'denied') {
         showAuthorizationRequired(ledgerId, operatorName, code);
         return;
       }
@@ -1904,6 +1910,183 @@ window.doOpenDeposit = async function() {
     log(`Open deposit failed: ${e.message}`, 'error');
   }
 };
+
+// Send a kind 25500 event to the lightning-verify service and wait for kind 25501 response
+async function sendVerifyRequest(verifierPubkey, params, timeoutMs = 30000) {
+  const nostrKey = deriveSecretKey(state.seed, 0);
+  const content = JSON.stringify(params);
+  const tags = [['p', verifierPubkey]];
+  const event = await createEvent(nostrKey, 25500, content, tags);
+
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      pendingRequests.delete(event.id);
+      reject(new Error('Timeout waiting for verification response'));
+    }, timeoutMs);
+
+    pendingRequests.set(event.id, { resolve, reject, timeout });
+    wsSend(['EVENT', event]);
+    log(`Sent verify request (${event.id.slice(0, 12)}...)`);
+  });
+}
+
+// Full verification flow: prompt for lightning address, drive the challenge-response,
+// then retry deposit open on success
+async function showVerificationFlow(ledgerId, operatorName, alias, pubkeyHex, keyIndex, verifierPubkey, allowedDomains) {
+  const name = operatorName || ledgerId.slice(0, 12) + '...';
+
+  if (!verifierPubkey) {
+    log(`${name} requires a verified lightning address but did not provide a verifier. Contact the operator.`, 'error');
+    return;
+  }
+
+  const domainHint = allowedDomains.length > 0
+    ? ` (accepted domains: ${allowedDomains.join(', ')})`
+    : '';
+
+  const address = prompt(
+    `${name} requires a verified lightning address to open a deposit.\n\n`
+    + `Enter your lightning address${domainHint}:`
+  );
+  if (!address || !address.includes('@')) {
+    log('Verification cancelled.', 'error');
+    return;
+  }
+
+  try {
+    // Step 1: Request verification (may return immediately if NIP-05 or already attested)
+    log(`Requesting verification for ${address}...`);
+    const linkResp = await sendVerifyRequest(verifierPubkey, { lightning_address: address });
+
+    if (linkResp.status === 'already_verified') {
+      log('Already verified! Retrying deposit...', 'success');
+      return retryDepositOpen(ledgerId, alias, pubkeyHex, keyIndex, operatorName);
+    }
+
+    if (linkResp.status === 'verified') {
+      log(`Verified via NIP-05! Attestation: ${linkResp.attestation_event_id?.slice(0, 16)}...`, 'success');
+      return retryDepositOpen(ledgerId, alias, pubkeyHex, keyIndex, operatorName);
+    }
+
+    if (!linkResp.invoice) {
+      throw new Error(linkResp.message || linkResp.error || 'Unexpected response from verifier');
+    }
+
+    // Step 2: Show invoice for payment
+    const sessionId = linkResp.session_id;
+    log(`Pay ${linkResp.amount_sats} sats to verify. Invoice: ${linkResp.invoice.slice(0, 40)}...`);
+
+    // Copy invoice to clipboard if available
+    if (navigator.clipboard) {
+      await navigator.clipboard.writeText(linkResp.invoice);
+      log('Invoice copied to clipboard. Pay it, then click OK.', 'success');
+    }
+
+    const paid = confirm(
+      `Pay this invoice to verify your lightning address:\n\n`
+      + `${linkResp.invoice.slice(0, 60)}...\n\n`
+      + `Amount: ${linkResp.amount_sats} sats\n\n`
+      + `Click OK after paying.`
+    );
+    if (!paid) { log('Verification cancelled.', 'error'); return; }
+
+    // Step 3: Request challenge
+    log('Checking payment and sending challenge...');
+    let challengeResp;
+    for (let i = 0; i < 10; i++) {
+      challengeResp = await sendVerifyRequest(verifierPubkey, { action: 'challenge', session_id: sessionId });
+      if (challengeResp.status === 'challenge_sent') break;
+      if (challengeResp.status === 'payment_pending') {
+        log('Payment not confirmed yet, retrying in 3s...');
+        await new Promise(r => setTimeout(r, 3000));
+      } else {
+        throw new Error(challengeResp.message || 'Challenge failed');
+      }
+    }
+    if (challengeResp.status !== 'challenge_sent') {
+      throw new Error('Payment was not confirmed in time');
+    }
+
+    log(challengeResp.message || 'Challenge payments sent! Check your wallet.');
+
+    // Step 4: Prompt for amounts
+    const amountsStr = prompt(
+      `Check your lightning wallet for incoming payments.\n\n`
+      + `Enter the amounts you received (comma-separated, in sats):`
+    );
+    if (!amountsStr) { log('Verification cancelled.', 'error'); return; }
+
+    const amounts = amountsStr.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n));
+
+    // Step 5: Submit verification
+    log('Verifying amounts...');
+    const verifyResp = await sendVerifyRequest(verifierPubkey, {
+      action: 'verify',
+      session_id: sessionId,
+      amounts,
+    });
+
+    if (verifyResp.status !== 'verified') {
+      throw new Error(verifyResp.message || verifyResp.error || 'Verification failed');
+    }
+
+    log(`Verified! Attestation: ${verifyResp.attestation_event_id?.slice(0, 16)}...`, 'success');
+
+    // Step 6: Retry deposit open
+    return retryDepositOpen(ledgerId, alias, pubkeyHex, keyIndex, operatorName);
+
+  } catch (e) {
+    log(`Verification failed: ${e.message}`, 'error');
+  }
+}
+
+async function retryDepositOpen(ledgerId, alias, pubkeyHex, keyIndex, operatorName) {
+  log('Retrying deposit open...');
+  const adFilter = { kinds: [39100], '#d': [ledgerId] };
+  const adEvents = await fetchEvents(adFilter, 5000);
+  let feeFixed = 0, feeBps = 0, feeFreq = 2016;
+  if (adEvents.length > 0) {
+    try {
+      const ad = JSON.parse(adEvents[0].content);
+      const period = ad.fee_period_blocks > 0 ? ad.fee_period_blocks : 2016;
+      const periodsPerYear = Math.floor(52560 / period);
+      feeFixed = (ad.min_fee_sats || 0) * periodsPerYear;
+      feeBps = ad.annual_fee_bps || 0;
+      feeFreq = period;
+    } catch {}
+  }
+
+  const openResponse = await sendRequest(ledgerId, 'deposit_open', {
+    deposit_pubkey: pubkeyHex,
+    fee_fixed: feeFixed,
+    fee_bps: feeBps,
+    fee_frequency: feeFreq,
+  });
+
+  if (!openResponse.success && !(openResponse.error || '').includes('already')) {
+    throw new Error(openResponse.error || 'deposit_open failed after verification');
+  }
+
+  state.deposits.push({
+    alias,
+    ledger_id: ledgerId,
+    deposit_pubkey: pubkeyHex,
+    key_index: keyIndex,
+    status: 'pending',
+    operator_name: operatorName,
+  });
+  state.keyIndex = keyIndex + 1;
+  saveState();
+  renderDeposits();
+  resubscribeUpdates();
+
+  log(`Deposit '${alias}' created. Use "Add funds" to get a funding address.`, 'success');
+
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelector('nav button[data-tab="deposits"]').classList.add('active');
+  document.getElementById('tab-deposits').classList.add('active');
+}
 
 function showAuthorizationRequired(ledgerId, operatorName, code) {
   const name = operatorName || ledgerId.slice(0, 12) + '...';
