@@ -153,8 +153,9 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        # Read binary API key from LDK data dir and export as hex
         export LDK_API_KEY=$$(cat /ldk-data/regtest/api_key | od -A n -t x1 | tr -d ' \n')
+        export LDK_REAL_CLI=/ldk-cli/ldk-server-cli
+        mkdir -p /self-pay
         exec lightning-verify
     environment:
       VERIFY_NSEC_FILE: /run/secrets/verify_nsec
@@ -164,16 +165,19 @@ services:
       VERIFY_TIMEOUT_SECS: "120"
       VERIFY_FEE_FALLBACK_SATS: "1"
       VERIFY_CA_CERT: /certs/ca.crt
-      LDK_CLI: /ldk-cli/ldk-server-cli
+      LDK_CLI: /app/ldk-cli-wrapper.sh
       LDK_HOST: lightning
       LDK_PORT: "3000"
       LDK_TLS_CERT: /ldk-data/tls.crt
+      LDK_SELF_PAY_DIR: /self-pay
       RUST_LOG: info
     volumes:
       - ldk_cli:/ldk-cli:ro
       - ldk_data:/ldk-data:ro
       - ./certs:/certs:ro
       - ./secrets:/run/secrets:ro
+      - ./bin/ldk-cli-wrapper.sh:/app/ldk-cli-wrapper.sh:ro
+      - self_pay_data:/self-pay
     depends_on:
       lightning:
         condition: service_started
@@ -195,21 +199,27 @@ services:
     command:
       - |
         export LDK_API_KEY=$$(cat /ldk-data/regtest/api_key | od -A n -t x1 | tr -d ' \n')
+        export LDK_REAL_CLI=/ldk-cli/ldk-server-cli
+        mkdir -p /self-pay
         exec python3 -u /app/lnurl-server.py
     ports:
       - "8805:443"
     environment:
-      LDK_CLI: /ldk-cli/ldk-server-cli
-      LDK_HOST: lightning:3000
+      LDK_CLI: /app/ldk-cli-wrapper.sh
+      LDK_HOST: lightning
+      LDK_PORT: "3000"
       LDK_TLS_CERT: /ldk-data/tls.crt
+      LDK_SELF_PAY_DIR: /self-pay
       LNURL_HOST: "172.21.0.50"
       NIP05_FILE: /data/nostr.json
     volumes:
       - ./lnurl-server.py:/app/lnurl-server.py:ro
+      - ./bin/ldk-cli-wrapper.sh:/app/ldk-cli-wrapper.sh:ro
       - ./certs:/certs:ro
       - nip05_data:/data
       - ldk_cli:/ldk-cli:ro
       - ldk_data:/ldk-data:ro
+      - self_pay_data:/self-pay
     depends_on:
       lightning:
         condition: service_started
@@ -305,6 +315,7 @@ volumes:
   ldk_data:
   ldk_cli:
   nip05_data:
+  self_pay_data:
   prometheus_data:
   grafana_data:
 
