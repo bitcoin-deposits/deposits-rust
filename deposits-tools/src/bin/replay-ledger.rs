@@ -772,7 +772,7 @@ fn lookup_op_field(tag: u64) -> (&'static str, Enc) {
         72  => ("withdrawal_id", Enc::Hash),
         74  => ("funding_address", Enc::Str),
         76  => ("lock_until_block", Enc::U32),
-        80  => ("our_signature", Enc::Sig),
+        // tag 80 (our_signature) removed from QuorumJoin
         82  => ("membership_expires", Enc::U32),
         84  => ("new_outpoint_txid", Enc::Hash),
         86  => ("quorum_expiry", Enc::U32),
@@ -1051,7 +1051,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, List, ListItem, ListState, Paragraph},
 };
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, MouseEventKind};
 
 /// Short label for the left panel list.
 fn update_label(update: &SignedLedgerUpdate) -> String {
@@ -1274,6 +1274,10 @@ struct BrowseState {
 
 fn refresh_right(state: &mut BrowseState, updates: &[SignedLedgerUpdate]) {
     if let Some(idx) = state.list_state.selected() {
+        if idx >= updates.len() {
+            state.list_state.select(Some(updates.len().saturating_sub(1)));
+            return refresh_right(state, updates);
+        }
         if state.cached_idx != Some(idx) {
             state.right_lines = decode_lines(&updates[idx]);
             state.cached_idx = Some(idx);
@@ -1315,34 +1319,71 @@ fn browse_loop(
         })?;
 
         if event::poll(std::time::Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press { continue; }
-                match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => break,
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        state.list_state.select_next();
-                        refresh_right(state, updates);
+            match event::read()? {
+                Event::Key(key) => {
+                    if key.kind != KeyEventKind::Press { continue; }
+                    match key.code {
+                        KeyCode::Char('q') | KeyCode::Esc => break,
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            state.list_state.select_next();
+                            refresh_right(state, updates);
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            state.list_state.select_previous();
+                            refresh_right(state, updates);
+                        }
+                        KeyCode::Home | KeyCode::Char('g') => {
+                            state.list_state.select_first();
+                            refresh_right(state, updates);
+                        }
+                        KeyCode::End | KeyCode::Char('G') => {
+                            state.list_state.select_last();
+                            refresh_right(state, updates);
+                        }
+                        KeyCode::PageDown | KeyCode::Char(' ') => {
+                            state.right_scroll = state.right_scroll.saturating_add(20);
+                        }
+                        KeyCode::PageUp => {
+                            state.right_scroll = state.right_scroll.saturating_sub(20);
+                        }
+                        _ => {}
                     }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        state.list_state.select_previous();
-                        refresh_right(state, updates);
-                    }
-                    KeyCode::Home | KeyCode::Char('g') => {
-                        state.list_state.select_first();
-                        refresh_right(state, updates);
-                    }
-                    KeyCode::End | KeyCode::Char('G') => {
-                        state.list_state.select_last();
-                        refresh_right(state, updates);
-                    }
-                    KeyCode::PageDown | KeyCode::Char(' ') => {
-                        state.right_scroll = state.right_scroll.saturating_add(20);
-                    }
-                    KeyCode::PageUp => {
-                        state.right_scroll = state.right_scroll.saturating_sub(20);
-                    }
-                    _ => {}
                 }
+                Event::Mouse(mouse) => {
+                    let in_left = mouse.column < 32;
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => {
+                            if in_left {
+                                state.list_state.select_previous();
+                                refresh_right(state, updates);
+                            } else {
+                                state.right_scroll = state.right_scroll.saturating_sub(3);
+                            }
+                        }
+                        MouseEventKind::ScrollDown => {
+                            if in_left {
+                                state.list_state.select_next();
+                                refresh_right(state, updates);
+                            } else {
+                                state.right_scroll = state.right_scroll.saturating_add(3);
+                            }
+                        }
+                        MouseEventKind::Down(_) if in_left => {
+                            // Click in left panel: row 0 is border, rows 1..N are items
+                            let row = mouse.row as usize;
+                            if row >= 1 {
+                                let offset = state.list_state.offset();
+                                let idx = offset + row - 1;
+                                if idx < updates.len() {
+                                    state.list_state.select(Some(idx));
+                                    refresh_right(state, updates);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -1372,7 +1413,9 @@ fn browse_updates(updates: &[SignedLedgerUpdate], start_seq: Option<u64>) -> Res
     let mut terminal = ratatui::try_init().map_err(|e| {
         format!("--browse requires a terminal: {}", e)
     })?;
+    crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
     let result = browse_loop(&mut terminal, &mut state, updates);
+    crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture)?;
     ratatui::restore();
     result
 }
