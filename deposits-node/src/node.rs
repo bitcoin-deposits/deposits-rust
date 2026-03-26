@@ -10874,11 +10874,15 @@ impl Node {
         let (quorum_members, quorum_expiries, ledger_hash, _current_reserves) = {
             let ledger = ledger_arc.read().unwrap();
 
-            // Get quorum members' pubkeys
-            let members: Vec<PublicKey> = ledger.state.quorum_members.iter().map(|m| m.pubkey).collect();
+            // QuorumBegin promotes next_quorum_members -> quorum_members, so at rotation
+            // time the members are still in next_quorum_members (pending).
+            // Fall back to active quorum_members for re-rotation after an existing QuorumBegin.
+            let members: Vec<PublicKey> = if !ledger.state.next_quorum_members.is_empty() {
+                ledger.state.next_quorum_members.iter().map(|m| m.pubkey).collect()
+            } else {
+                ledger.state.quorum_members.iter().map(|m| m.pubkey).collect()
+            };
 
-            // For now, use a fixed expiration window per member
-            // In a real implementation, these would come from QuorumAddMember operations
             let current_block = self.wallet.get_block_height().unwrap_or(0);
             let default_expiry = current_block + 1000; // ~1 week
 
