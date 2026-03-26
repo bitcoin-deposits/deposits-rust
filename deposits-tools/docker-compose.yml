@@ -144,13 +144,15 @@ services:
 
   lightning-verify:
     build:
-      context: ../lightning-verifier
+      context: ../../lightning-verifier
     container_name: lightning-verify
     profiles: [lightning]
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       VERIFY_NSEC_FILE: /run/secrets/verify_nsec
-      VERIFY_RELAYS: ws://host.gateway.docker.internal:7779
+      VERIFY_RELAYS: ws://host.docker.internal:7779
       VERIFY_CHALLENGE_SATS: "1000"
       VERIFY_NUM_PAYMENTS: "3"
       VERIFY_TIMEOUT_SECS: "120"
