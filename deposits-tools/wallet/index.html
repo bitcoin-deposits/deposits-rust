@@ -2090,17 +2090,23 @@ async function retryDepositOpen(ledgerId, alias, pubkeyHex, keyIndex, operatorNa
 
 function showAuthorizationRequired(ledgerId, operatorName, code) {
   const name = operatorName || ledgerId.slice(0, 12) + '...';
+  const nostrKey = deriveSecretKey(state.seed, 0);
+  const pubkey = getPublicKeyHex(nostrKey);
+
   if (code === 'denied') {
     log(`Deposit rejected by ${name}. Your account has been denied.`, 'error');
     return;
   }
-  const msg = code === 'attestation_required'
-    ? `${name} requires a verified lightning address to open deposits. `
-      + `Link your lightning address to your npub using a lightning verification service, `
-      + `then try again.`
-    : `${name} requires authorization to open deposits. `
-      + `Contact the operator or verify your identity to get access.`;
+  const msg = code === 'not_authorized'
+    ? `${name} requires authorization to open deposits. `
+      + `Contact the operator and share your pubkey to request access.`
+    : `${name} requires authorization to open deposits.`;
   log(msg, 'error');
+  log(`Your pubkey: ${pubkey}`);
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(pubkey);
+    log('(copied to clipboard)');
+  }
 }
 
 function renderDeposits() {
