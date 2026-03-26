@@ -289,6 +289,10 @@ pub struct Node {
     /// Loaded from ATTESTATION_VERIFIER_PUBKEY env var. Empty = attestation check disabled.
     attestation_verifier_pubkey: Option<String>,
 
+    /// Maximum balance any single deposit can hold (msats). 0 = unlimited.
+    /// Loaded from MAX_DEPOSIT_BALANCE_MSATS env var.
+    max_deposit_balance_msats: u64,
+
     /// Data directory for persistence
     data_dir: PathBuf,
 
@@ -443,6 +447,10 @@ impl Node {
             deposit_denylist: RwLock::new(Self::load_list(&config.data_dir, "deposit_denylist.txt")),
             deposit_domain_allowlist: RwLock::new(Self::load_list(&config.data_dir, "deposit_domain_allowlist.txt")),
             attestation_verifier_pubkey: std::env::var("ATTESTATION_VERIFIER_PUBKEY").ok().filter(|s| !s.is_empty()),
+            max_deposit_balance_msats: std::env::var("MAX_DEPOSIT_BALANCE_MSATS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0),
             data_dir: config.data_dir,
             relay_url,
             fast_poll: config.fast_poll,
@@ -5394,6 +5402,13 @@ impl Node {
             return (false, None, Some(err));
         }
 
+        // Check per-deposit balance limit
+        let descriptor = format!("pk({})", deposit_pubkey_str);
+        let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
+        if let Some(err) = self.check_deposit_balance_limit(&resolved_ledger_id, &deposit_id, max_sats * 1000) {
+            return (false, None, Some(err));
+        }
+
         // Create the offer using ledger_id (stable across custody transfers)
         match self.create_deposit_offer(&resolved_ledger_id, deposit_pubkey, max_sats, min_sats, blocks_valid, Some(fees)) {
             Ok(offer) => {
@@ -5701,6 +5716,11 @@ impl Node {
 
         // Check collateral obligation limits before creating the invoice
         if let Some(err) = self.check_collateral_obligation_limit(&request.ledger_id, amount_msat) {
+            return (false, None, Some(err));
+        }
+
+        // Check per-deposit balance limit
+        if let Some(err) = self.check_deposit_balance_limit(&request.ledger_id, &deposit_id, amount_msat) {
             return (false, None, Some(err));
         }
 
@@ -6494,6 +6514,15 @@ impl Node {
 
             deposit.descriptor.clone()
         };
+
+        // Check destination deposit balance limit
+        if let Some(err) = self.check_deposit_balance_limit(
+            &request.ledger_id,
+            &destination_deposit_id,
+            amount_msats,
+        ) {
+            return (false, None, Some(err));
+        }
 
         // Verify signature
         let secp = &self.secp;
@@ -9547,6 +9576,42 @@ impl Node {
                     customer_obligations, additional_msats, new_customer_total, collateral_limit, min_c
                 ));
             }
+        }
+
+        None
+    }
+
+    /// Check if crediting `additional_msats` to `deposit_id` on `ledger_id` would
+    /// exceed the per-deposit balance limit (MAX_DEPOSIT_BALANCE_MSATS).
+    /// Returns an error string if the limit would be exceeded, None if ok.
+    fn check_deposit_balance_limit(
+        &self,
+        ledger_id: &str,
+        deposit_id: &[u8; 16],
+        additional_msats: u64,
+    ) -> Option<String> {
+        let limit = self.max_deposit_balance_msats;
+        if limit == 0 {
+            return None; // Unlimited
+        }
+
+        let ledgers = self.handler.ledgers.lock().unwrap();
+        let ledger_arc = match ledgers.get(ledger_id) {
+            Some(l) => l.clone(),
+            None => return None,
+        };
+        let ledger = ledger_arc.read().unwrap();
+
+        let current_balance = ledger.state.deposits.get(deposit_id)
+            .map(|d| d.balance + d.locked_balance)
+            .unwrap_or(0);
+        let new_balance = current_balance.saturating_add(additional_msats);
+
+        if new_balance > limit {
+            return Some(format!(
+                "Would exceed deposit balance limit: {} + {} = {} msats > {} msats",
+                current_balance, additional_msats, new_balance, limit
+            ));
         }
 
         None

@@ -1172,6 +1172,15 @@ async fn auto_advertise_ledger(
         }
     }
 
+    // Per-deposit balance limit
+    if let Ok(limit) = std::env::var("MAX_DEPOSIT_BALANCE_MSATS") {
+        if let Ok(v) = limit.parse::<u64>() {
+            if v > 0 {
+                ad.max_deposit_msats = v;
+            }
+        }
+    }
+
     // Calculate headroom
     let total_obligations_msats = ledger.total_deposit_balance();
     ad.total_obligations_msats = total_obligations_msats;
@@ -2588,19 +2597,25 @@ async fn quorum_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         return Ok(());
     }
 
+    let pk_short = |pk: &PublicKey| {
+        let s = pk.to_string();
+        format!("{}...", &s[..16.min(s.len())])
+    };
+    let lid_short = |id: &str| format!("{}...", &id[..16.min(id.len())]);
+
     // Our ledgers and their quorum members
     if !our_ledgers.is_empty() {
         println!("Our ledgers:");
         for (ledger_id, active, pending) in &our_ledgers {
-            println!("  {}...", &ledger_id[..16.min(ledger_id.len())]);
+            println!("  {}", lid_short(ledger_id));
             if active.is_empty() && pending.is_empty() {
                 println!("    (no quorum members)");
             }
             for pk in active {
-                println!("    {} (active)", pk);
+                println!("    {} (active)", pk_short(pk));
             }
             for pk in pending {
-                println!("    {} (pending)", pk);
+                println!("    {} (pending)", pk_short(pk));
             }
         }
     }
@@ -2609,10 +2624,10 @@ async fn quorum_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     if !joined.is_empty() {
         println!("\nServing on quorums:");
         for (our_ledger_id, memberships) in &joined {
-            println!("  via {}...:", &our_ledger_id[..16.min(our_ledger_id.len())]);
+            println!("  via {}:", lid_short(our_ledger_id));
             for (operator, their_ledger, expires) in memberships {
-                println!("    operator {} ledger {}... (expires block {})",
-                    operator, &their_ledger[..16.min(their_ledger.len())], expires);
+                println!("    operator {} ledger {} (expires block {})",
+                    pk_short(operator), lid_short(their_ledger), expires);
             }
         }
     }

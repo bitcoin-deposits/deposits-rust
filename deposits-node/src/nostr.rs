@@ -476,15 +476,11 @@ pub struct LedgerAdvertisement {
 
     // === Deposit Limits ===
 
-    /// Maximum single deposit size in sats
+    /// Maximum single deposit size in msats
     pub max_deposit_msats: u64,
 
-    /// Minimum deposit size in sats
+    /// Minimum deposit size in msats
     pub min_deposit_msats: u64,
-
-    /// Maximum total balance per depositor in sats (0 = unlimited)
-    #[serde(default)]
-    pub max_balance_msats: u64,
 
     // === Trust Info ===
 
@@ -618,7 +614,6 @@ impl LedgerAdvertisement {
             transfer_fee_rate_bps: 0,
             max_deposit_msats: u64::MAX,
             min_deposit_msats: 0,
-            max_balance_msats: 0,
             total_obligations_msats: 0,
             available_headroom_msats: 0,
             reserves_amount_msats: 0,
