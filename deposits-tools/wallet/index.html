@@ -1911,12 +1911,26 @@ window.doOpenDeposit = async function() {
   }
 };
 
-// Send a kind 25500 event to the lightning-verify service and wait for kind 25501 response
+// Create and sign a nostr event via NIP-07 browser extension (window.nostr)
+async function createEventNip07(kind, content, tags) {
+  if (!window.nostr) throw new Error('No NIP-07 extension found (install nos2x, Alby, etc.)');
+  const event = { kind, content, tags, created_at: Math.floor(Date.now() / 1000) };
+  return await window.nostr.signEvent(event);
+}
+
+// Send a kind 25500 event to the lightning-verify service and wait for kind 25501 response.
+// Uses NIP-07 (browser extension) if available, otherwise falls back to the wallet's derived key.
 async function sendVerifyRequest(verifierPubkey, params, timeoutMs = 30000) {
-  const nostrKey = deriveSecretKey(state.seed, 0);
   const content = JSON.stringify(params);
   const tags = [['p', verifierPubkey]];
-  const event = await createEvent(nostrKey, 25500, content, tags);
+
+  let event;
+  if (window.nostr) {
+    event = await createEventNip07(25500, content, tags);
+  } else {
+    const nostrKey = deriveSecretKey(state.seed, 0);
+    event = await createEvent(nostrKey, 25500, content, tags);
+  }
 
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
@@ -1938,6 +1952,13 @@ async function showVerificationFlow(ledgerId, operatorName, alias, pubkeyHex, ke
   if (!verifierPubkey) {
     log(`${name} requires a verified lightning address but did not provide a verifier. Contact the operator.`, 'error');
     return;
+  }
+
+  if (window.nostr) {
+    const nip07pubkey = await window.nostr.getPublicKey();
+    log(`Signing with NIP-07 extension (${nip07pubkey.slice(0, 16)}...)`);
+  } else {
+    log('No NIP-07 extension — using wallet key. Install nos2x or Alby to verify with your nostr identity.');
   }
 
   const domainHint = allowedDomains.length > 0
@@ -2088,15 +2109,24 @@ async function retryDepositOpen(ledgerId, alias, pubkeyHex, keyIndex, operatorNa
   document.getElementById('tab-deposits').classList.add('active');
 }
 
-function showAuthorizationRequired(ledgerId, operatorName, code) {
+async function showAuthorizationRequired(ledgerId, operatorName, code) {
   const name = operatorName || ledgerId.slice(0, 12) + '...';
-  const nostrKey = deriveSecretKey(state.seed, 0);
-  const pubkey = getPublicKeyHex(nostrKey);
 
   if (code === 'denied') {
     log(`Deposit rejected by ${name}. Your account has been denied.`, 'error');
     return;
   }
+
+  // Show the pubkey that would be used for verification
+  let pubkey;
+  if (window.nostr) {
+    try { pubkey = await window.nostr.getPublicKey(); } catch {}
+  }
+  if (!pubkey) {
+    const nostrKey = deriveSecretKey(state.seed, 0);
+    pubkey = getPublicKeyHex(nostrKey);
+  }
+
   const msg = code === 'not_authorized'
     ? `${name} requires authorization to open deposits. `
       + `Contact the operator and share your pubkey to request access.`
