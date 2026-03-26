@@ -11127,14 +11127,14 @@ impl Node {
                     .map(|m| m.pubkey)
                     .collect();
                 our_ledgers.push((ledger_id.clone(), active, pending));
-            }
 
-            // Collect joined quorums from this ledger's state
-            for jq in &ledger.state.joined_quorums {
-                joined_by_ledger
-                    .entry(ledger_id.clone())
-                    .or_default()
-                    .push((jq.operator_id, jq.ledger_id.clone(), jq.membership_expires));
+                // Collect joined quorums only from our own ledgers
+                for jq in &ledger.state.joined_quorums {
+                    joined_by_ledger
+                        .entry(ledger_id.clone())
+                        .or_default()
+                        .push((jq.operator_id, jq.ledger_id.clone(), jq.membership_expires));
+                }
             }
         }
 
