@@ -223,14 +223,14 @@ pub struct Node {
     pending_cosign_requests: Arc<Mutex<HashMap<String, (String, tokio::sync::oneshot::Sender<CoSignResult>)>>>,
 
     /// Pending consent requests: request_id -> oneshot sender for consent result
-    /// Used by partner_add to await the member's consent signature
+    /// Used by quorum_add to await the member's consent signature
     pending_consent_requests: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<ConsentResult>>>>,
 
     /// Semaphore to limit concurrent request_cosign calls.
     /// Multiple concurrent mini loops compete for shared channels (response_rx,
     /// ledger_rx) and can deadlock when all operators are in batch-await simultaneously.
     /// Serializing cosign requests prevents this while still allowing concurrent
-    /// processing of non-cosign requests (cosign_update, partner_join, etc.).
+    /// processing of non-cosign requests (cosign_update, quorum_join, etc.).
     cosign_semaphore: Arc<tokio::sync::Semaphore>,
 
     /// Pending Lightning invoices: payment_hash -> (ledger_id, deposit_pubkey, amount_msat)
@@ -2157,7 +2157,7 @@ impl Node {
 
         // Silently drop operator-only actions if we're not the operator
         // (these are broadcast but only the operator should respond)
-        let operator_only_actions = ["deposit_open", "make_offer", "withdraw", "collateral_lock", "offer_status", "balance_query", "make_invoice", "pay_invoice", "transfer_lock", "transfer_complete", "bump", "complete_offer", "deposit_credit", "partner_add", "partner_join", "collateral_record", "quorum_begin", "resync"];
+        let operator_only_actions = ["deposit_open", "make_offer", "withdraw", "collateral_lock", "offer_status", "balance_query", "make_invoice", "pay_invoice", "transfer_lock", "transfer_complete", "bump", "complete_offer", "deposit_credit", "quorum_add", "quorum_join", "collateral_record", "quorum_begin", "resync"];
         if operator_only_actions.contains(&request.action.as_str()) && !self.is_operator_of_ledger(&request.ledger_id) {
             return; // Silent drop - the actual operator will respond
         }
@@ -2320,8 +2320,8 @@ impl Node {
             }
             "complete_offer" => self.process_complete_offer_request(&request).await,
             "deposit_credit" => self.process_deposit_credit_request(&request).await,
-            "partner_add" => self.process_partner_add_request(&request).await,
-            "partner_join" => self.process_partner_join_request(&request).await,
+            "quorum_add" => self.process_quorum_add_request(&request).await,
+            "quorum_join" => self.process_quorum_join_request(&request).await,
             "consent_request" => self.process_consent_request(&request).await,
             "collateral_record" => self.process_collateral_record_request(&request).await,
             "quorum_begin" => self.process_quorum_begin_request(&request).await,
@@ -5045,7 +5045,9 @@ impl Node {
             // Denylist is always checked, even when access control is off
             if self.deposit_denylist.read().unwrap().contains(&request.sender) {
                 tracing::warn!("Deposit open rejected: sender {} is on denylist", &request.sender[..16.min(request.sender.len())]);
-                return (false, None, Some("Not authorized to open deposits on this ledger".to_string()));
+                return (false,
+                    Some(serde_json::json!({"code": "denied"}).to_string()),
+                    Some("Not authorized to open deposits on this ledger".to_string()));
             }
 
             if self.deposit_access_control {
@@ -5058,19 +5060,24 @@ impl Node {
                     let domains: std::collections::HashSet<String> =
                         self.deposit_domain_allowlist.read().unwrap().clone();
 
-                    if !domains.is_empty() {
-                        match self.check_attestation_domain(&request.sender, &domains).await {
-                            Some(domain) => {
-                                tracing::info!("Deposit open authorized via attestation: sender {} domain {}", &request.sender[..16.min(request.sender.len())], domain);
-                            }
-                            None => {
-                                tracing::warn!("Deposit open rejected: sender {} not on allowlist and no valid attestation", &request.sender[..16.min(request.sender.len())]);
-                                return (false, None, Some("Not authorized to open deposits on this ledger".to_string()));
-                            }
-                        }
+                    let has_domains = !domains.is_empty();
+                    let authorized = if has_domains {
+                        self.check_attestation_domain(&request.sender, &domains).await
                     } else {
-                        tracing::warn!("Deposit open rejected: sender {} not on allowlist", &request.sender[..16.min(request.sender.len())]);
-                        return (false, None, Some("Not authorized to open deposits on this ledger".to_string()));
+                        None
+                    };
+
+                    match authorized {
+                        Some(domain) => {
+                            tracing::info!("Deposit open authorized via attestation: sender {} domain {}", &request.sender[..16.min(request.sender.len())], domain);
+                        }
+                        None => {
+                            tracing::warn!("Deposit open rejected: sender {} not on allowlist and no valid attestation", &request.sender[..16.min(request.sender.len())]);
+                            let code = if has_domains { "attestation_required" } else { "not_authorized" };
+                            return (false,
+                                Some(serde_json::json!({"code": code}).to_string()),
+                                Some("Not authorized to open deposits on this ledger".to_string()));
+                        }
                     }
                 }
             }
@@ -7829,10 +7836,10 @@ impl Node {
         }
     }
 
-    async fn process_partner_add_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_quorum_add_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
         use std::str::FromStr;
 
-        tracing::info!("Processing partner_add request for ledger {}...",
+        tracing::info!("Processing quorum_add request for ledger {}...",
             &request.ledger_id[..16.min(request.ledger_id.len())]);
 
         let member_pubkey_hex = match request.params.get("member_pubkey").and_then(|v| v.as_str()) {
@@ -7892,16 +7899,16 @@ impl Node {
                 (true, Some(result.to_string()), None)
             }
             Err(e) => {
-                tracing::error!("partner_add failed: {}", e);
+                tracing::error!("quorum_add failed: {}", e);
                 (false, None, Some(e.to_string()))
             }
         }
     }
 
-    async fn process_partner_join_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_quorum_join_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
         use std::str::FromStr;
 
-        tracing::info!("Processing partner_join request for ledger {}...",
+        tracing::info!("Processing quorum_join request for ledger {}...",
             &request.ledger_id[..16.min(request.ledger_id.len())]);
 
         let target_operator_hex = match request.params.get("target_operator").and_then(|v| v.as_str()) {
@@ -7966,7 +7973,7 @@ impl Node {
                 (true, Some(result.to_string()), None)
             }
             Err(e) => {
-                tracing::error!("partner_join failed: {}", e);
+                tracing::error!("quorum_join failed: {}", e);
                 (false, None, Some(e.to_string()))
             }
         }
@@ -11066,8 +11073,8 @@ impl Node {
     // ========================================================================
 
     /// Request a peer to be a quorum member
-    pub async fn request_partner(&self, peer: PublicKey) -> Result<(), Error> {
-        // Create a coordination message for partnership request
+    pub async fn request_quorum_member(&self, peer: PublicKey) -> Result<(), Error> {
+        // Create a coordination message for quorum membership request
         // For now, this is a simple handshake-like message
         let request_msg = deposits_core::messages::DepositsMessage::Handshake(
             deposits_core::messages::HandshakeMsg {
@@ -11089,38 +11096,44 @@ impl Node {
 
     /// List all quorum members across all ledgers
     /// Returns (identifier, role) tuples where identifier is pubkey or ledger_id string
-    pub fn list_partners(&self) -> Vec<(String, String)> {
-        let mut partners = Vec::new();
+    /// Returns (our_ledgers, joined_quorums) for display.
+    /// our_ledgers: Vec<(ledger_id, active_members, pending_members)>
+    /// joined_quorums: grouped by our_ledger_id -> Vec<(operator_id, their_ledger_id, expires)>
+    pub fn list_quorum_info(&self) -> (
+        Vec<(String, Vec<PublicKey>, Vec<PublicKey>)>,
+        Vec<(String, Vec<(PublicKey, String, u32)>)>,
+    ) {
         let ledgers = self.handler.ledgers.lock().unwrap();
+
+        let mut our_ledgers = Vec::new();
+        // Map from our_ledger_id -> Vec<(operator, their_ledger, expires)>
+        let mut joined_by_ledger: std::collections::BTreeMap<String, Vec<(PublicKey, String, u32)>> = std::collections::BTreeMap::new();
 
         for (ledger_id, ledger_arc) in ledgers.iter() {
             let ledger = ledger_arc.read().unwrap();
-            let operator = ledger.operator_key();
-            let role = if operator == self.node_id {
-                "Partner on our ledger"
-            } else {
-                "We are partner on their ledger"
-            };
 
-            // Add the partner/operator
-            if operator == self.node_id {
-                // Use ledger_id as the identifier for our own ledgers
-                partners.push((ledger_id.clone(), role.to_string()));
-            } else {
-                partners.push((operator.to_string(), role.to_string()));
+            if ledger.operator_key() == self.node_id {
+                let active: Vec<PublicKey> = ledger.state.quorum_members.iter().map(|m| m.pubkey).collect();
+                let pending: Vec<PublicKey> = ledger.state.next_quorum_members.iter()
+                    .filter(|m| !active.contains(&m.pubkey))
+                    .map(|m| m.pubkey)
+                    .collect();
+                our_ledgers.push((ledger_id.clone(), active, pending));
             }
 
-            // Add quorum members
-            for member in &ledger.state.quorum_members {
-                partners.push((member.pubkey.to_string(), "Quorum member".to_string()));
+            // Collect joined quorums from this ledger's state
+            for jq in &ledger.state.joined_quorums {
+                joined_by_ledger
+                    .entry(ledger_id.clone())
+                    .or_default()
+                    .push((jq.operator_id, jq.ledger_id.clone(), jq.membership_expires));
             }
         }
 
-        // Deduplicate
-        partners.sort_by(|a, b| a.0.cmp(&b.0));
-        partners.dedup_by(|a, b| a.0 == b.0);
+        our_ledgers.sort_by(|a, b| a.0.cmp(&b.0));
+        let joined: Vec<_> = joined_by_ledger.into_iter().collect();
 
-        partners
+        (our_ledgers, joined)
     }
 
     /// Rotate reserves to use quorum-based Taproot spending

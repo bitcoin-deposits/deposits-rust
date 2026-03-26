@@ -1870,6 +1870,11 @@ window.doOpenDeposit = async function() {
     });
 
     if (!openResponse.success && !(openResponse.error || '').includes('already')) {
+      const code = openResponse.result?.code;
+      if (code === 'attestation_required' || code === 'not_authorized' || code === 'denied') {
+        showAuthorizationRequired(ledgerId, operatorName, code);
+        return;
+      }
       throw new Error(openResponse.error || 'deposit_open failed');
     }
 
@@ -1899,6 +1904,21 @@ window.doOpenDeposit = async function() {
     log(`Open deposit failed: ${e.message}`, 'error');
   }
 };
+
+function showAuthorizationRequired(ledgerId, operatorName, code) {
+  const name = operatorName || ledgerId.slice(0, 12) + '...';
+  if (code === 'denied') {
+    log(`Deposit rejected by ${name}. Your account has been denied.`, 'error');
+    return;
+  }
+  const msg = code === 'attestation_required'
+    ? `${name} requires a verified lightning address to open deposits. `
+      + `Link your lightning address to your npub using a lightning verification service, `
+      + `then try again.`
+    : `${name} requires authorization to open deposits. `
+      + `Contact the operator or verify your identity to get access.`;
+  log(msg, 'error');
+}
 
 function renderDeposits() {
   const container = document.getElementById('deposits-list');
