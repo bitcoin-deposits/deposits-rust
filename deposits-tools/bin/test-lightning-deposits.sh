@@ -189,7 +189,7 @@ add_quorum_members() {
             local member_short="$member"
 
             # Owner adds member — member auto-consents and records QuorumJoin
-            local add_output=$(run_node_cmd "$owner" partner add "$owner_reserves" "$member_node_id" "$member_ledger_id" 2>&1)
+            local add_output=$(run_node_cmd "$owner" quorum add "$owner_reserves" "$member_node_id" "$member_ledger_id" 2>&1)
             if echo "$add_output" | grep -q "Quorum member added\|added"; then
                 log_info "  $member_short joined $owner_short's quorum"
             else

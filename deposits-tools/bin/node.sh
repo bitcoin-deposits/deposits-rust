@@ -13,7 +13,7 @@
 #   ./bin/node.sh alice reserves 100000000
 #   ./bin/node.sh alice reserves list
 #   ./bin/node.sh bob ledger history <ledger_id>
-#   ./bin/node.sh charlie partner add <reserves_id> <member_id> <member_ledger>
+#   ./bin/node.sh charlie quorum add <ledger_id> <member_id> <member_ledger>
 #
 # Environment:
 #   RUST_LOG  - Log level override (default: error)

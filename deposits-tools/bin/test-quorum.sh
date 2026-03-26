@@ -310,7 +310,7 @@ add_quorum_members() {
                         local result_file="$STATE_DIR/quorum_${op}_${n}_${member}.result"
 
                         # Add member — member auto-consents and records QuorumJoin
-                        local add_output=$(run_node_cmd "$op" partner add "$op_reserves_id" "$member_node_id" "$member_ledger_id" 2>&1)
+                        local add_output=$(run_node_cmd "$op" quorum add "$op_reserves_id" "$member_node_id" "$member_ledger_id" 2>&1)
 
                         if echo "$add_output" | grep -q "Quorum member added\|added"; then
                             echo "PASS:joined" > "$result_file"

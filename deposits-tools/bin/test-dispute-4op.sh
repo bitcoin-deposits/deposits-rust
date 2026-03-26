@@ -273,7 +273,7 @@ add_quorum_members() {
                 log_info "$op_short adding $member_short as quorum member..."
 
                 # Add member — member auto-consents and records QuorumJoin
-                local add_output=$(run_node_cmd "$op" partner add "$op_ledger_id" "$member_node_id" "$member_ledger_id" 2>&1)
+                local add_output=$(run_node_cmd "$op" quorum add "$op_ledger_id" "$member_node_id" "$member_ledger_id" 2>&1)
 
                 if echo "$add_output" | grep -q "Quorum member added\|added"; then
                     test_pass "$member_short joined $op_short's quorum (both sides recorded)"

@@ -369,7 +369,7 @@ add_quorum_members() {
         local member_ledger_id=$(get_value "ledger_id_$member_n")
 
         # Add member to our quorum — member auto-consents and records QuorumJoin
-        run_node_cmd $n partner add "$reserves_id" "$member_node_id" "$member_ledger_id" >/dev/null 2>&1 || true
+        run_node_cmd $n quorum add "$reserves_id" "$member_node_id" "$member_ledger_id" >/dev/null 2>&1 || true
 
         log_info "    + ${member_name}"
     done

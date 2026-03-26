@@ -321,7 +321,7 @@ print(' '.join(t['quorum'].get('${op}_${idx}', [])))
 
                 # Add member to op's quorum — the member's node auto-consents,
                 # signs, and records QuorumJoin on their own ledger.
-                local add_output=$(run_node_cmd "$op" partner add "$op_ledger_id" "$member_node_id" "$member_ledger_id" 2>&1)
+                local add_output=$(run_node_cmd "$op" quorum add "$op_ledger_id" "$member_node_id" "$member_ledger_id" 2>&1)
 
                 if echo "$add_output" | grep -q "Quorum member added\|added"; then
                     log_success "$member joined $op ledger $idx"
