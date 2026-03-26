@@ -272,18 +272,11 @@ add_quorum_members() {
 
                 log_info "$op_short adding $member_short as quorum member..."
 
-                # Add member to op's quorum (pass member's ledger ID for collateral binding)
+                # Add member — member auto-consents and records QuorumJoin
                 local add_output=$(run_node_cmd "$op" partner add "$op_ledger_id" "$member_node_id" "$member_ledger_id" 2>&1)
 
                 if echo "$add_output" | grep -q "Quorum member added\|added"; then
-                    # Record the join on member's ledger (use ledger_id for both our ledger and target)
-                    local join_output=$(run_node_cmd "$member" partner join "$member_ledger_id" "$op_node_id" "$op_ledger_id" "$membership_expires" 2>&1)
-
-                    if echo "$join_output" | grep -q "Quorum join recorded\|recorded"; then
-                        test_pass "$member_short joined $op_short's quorum (both sides recorded)"
-                    else
-                        test_pass "$op_short added $member_short (join record failed: $join_output)"
-                    fi
+                    test_pass "$member_short joined $op_short's quorum (both sides recorded)"
                 else
                     test_fail "$op_short failed to add $member_short as quorum member"
                     echo "    Output: $add_output"
@@ -297,18 +290,18 @@ add_quorum_members() {
 # Phase 3c: Rotate reserves to quorum-based Taproot
 # ============================================================================
 
-rotate_reserves_to_quorum() {
+activate_quorum() {
     log_info ""
-    log_info "=== Phase 3c: Rotate Reserves to Quorum-Based Taproot ==="
+    log_info "=== Phase 3c: Activate Quorum (quorum begin) ==="
     echo ""
 
     for op in $OPERATORS; do
         local op_reserves_id=$(get_value "reserves_id_$op")
         local op_short="$op"
 
-        log_info "$op_short rotating reserves to quorum-based Taproot..."
+        log_info "$op_short activating quorum..."
 
-        local rotate_output=$(run_node_cmd "$op" reserves rotate "$op_reserves_id" 2>&1)
+        local rotate_output=$(run_node_cmd "$op" quorum begin "$op_reserves_id" 2>&1)
 
         if echo "$rotate_output" | grep -q "Reserves rotated\|rotated successfully"; then
             local new_address=$(echo "$rotate_output" | grep "New Address:" | awk '{print $3}')
@@ -1068,7 +1061,7 @@ main() {
     start_nostr_watchers
 
     add_quorum_members
-    rotate_reserves_to_quorum
+    activate_quorum
 
     # Give watchers a moment to discover the new QuorumJoin operations
     sleep 2

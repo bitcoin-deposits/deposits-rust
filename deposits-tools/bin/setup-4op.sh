@@ -281,41 +281,6 @@ open_ledgers() {
 # Phase 3a: Start Nostr watchers (background)
 # ============================================================================
 
-start_nostr_watchers() {
-    log_info ""
-    log_info "=== Phase 3a: Start Nostr Watchers ==="
-    log_info "(Each operator listens for incoming requests)"
-    echo ""
-
-    for op in $OPERATORS; do
-        for idx in $(seq 1 $LEDGERS_PER_OP); do
-            local suffix=""
-            [ "$LEDGERS_PER_OP" -gt 1 ] && suffix="_$idx"
-
-            local ledger_id=$(get_value "ledger_id_${op}${suffix}")
-            if [ -n "$ledger_id" ]; then
-                start_nostr_watch "$op" "$ledger_id"
-                log_info "Started nostr watch on $op for ledger $idx"
-            else
-                log_warn "$op has no ledger_id for ledger $idx"
-            fi
-        done
-        log_success "$op nostr watcher(s) started"
-    done
-
-    # Give watchers time to connect
-    sleep 2
-}
-
-cleanup_nostr_watchers() {
-    log_info ""
-    log_info "=== Cleanup: Stopping Nostr Watchers ==="
-
-    for op in $OPERATORS; do
-        stop_nostr_watch "$op"
-    done
-}
-
 # ============================================================================
 # Phase 3b: Add quorum members
 # ============================================================================
@@ -354,18 +319,12 @@ print(' '.join(t['quorum'].get('${op}_${idx}', [])))
 
                 log_info "$op ledger $idx: adding $member as quorum member..."
 
-                # Add member to op's quorum (pass member's ledger ID for collateral binding)
+                # Add member to op's quorum — the member's node auto-consents,
+                # signs, and records QuorumJoin on their own ledger.
                 local add_output=$(run_node_cmd "$op" partner add "$op_ledger_id" "$member_node_id" "$member_ledger_id" 2>&1)
 
                 if echo "$add_output" | grep -q "Quorum member added\|added"; then
-                    # Record the join on member's first ledger
-                    local join_output=$(run_node_cmd "$member" partner join "$member_ledger_id" "$op_node_id" "$op_ledger_id" "$membership_expires" 2>&1)
-
-                    if echo "$join_output" | grep -q "Quorum join recorded\|recorded"; then
-                        log_success "$member joined $op ledger $idx"
-                    else
-                        log_warn "$op added $member to ledger $idx (join record issue)"
-                    fi
+                    log_success "$member joined $op ledger $idx"
                 else
                     log_error "$op failed to add $member to ledger $idx"
                     echo "    Output: $add_output"
@@ -484,8 +443,8 @@ for depositor, owner in sorted(pairs):
         log_warn "Only $completed/$expected_deposits deposits funded after 30 attempts"
     fi
 
-    # Lock collateral and record attestations
-    log_info "Locking collateral and recording attestations..."
+    # Lock collateral (auto-records attestation on depositor's own ledgers)
+    log_info "Locking collateral..."
     local collateral_msats=$((collateral_amount * 1000))
     local lock_blocks=10000  # ~70 days
 
@@ -495,34 +454,12 @@ for depositor, owner in sorted(pairs):
         [ "$LEDGERS_PER_OP" -gt 1 ] && owner_suffix="_1"
         local owner_ledger_id=$(get_value "ledger_id_${owner}${owner_suffix}")
 
-        # Depositor locks their collateral deposit on owner's ledger
+        # Depositor locks collateral on owner's ledger — attestation auto-recorded on all own ledgers
         local lock_output=$(run_node_cmd "$depositor" collateral lock \
             "$owner_ledger_id" "$collateral_msats" "$lock_blocks" "$dep_node_id" 2>&1 || true)
 
-        local attestation_b64=$(echo "$lock_output" | grep "attestation_b64" | sed 's/.*"attestation_b64":"\([^"]*\)".*/\1/')
-        local attestation_json=""
-        if [ -n "$attestation_b64" ]; then
-            attestation_json=$(echo "$attestation_b64" | base64 -d 2>/dev/null || echo "")
-        fi
-
-        if [ -n "$attestation_json" ]; then
-            # Record attestation on ALL of depositor's ledgers
-            local recorded=0
-            for lidx in $(seq 1 $LEDGERS_PER_OP); do
-                local lsuffix=""
-                [ "$LEDGERS_PER_OP" -gt 1 ] && lsuffix="_$lidx"
-                local dep_reserves_id=$(get_value "reserves_id_${depositor}${lsuffix}")
-                if [ -n "$dep_reserves_id" ]; then
-                    run_node_cmd "$depositor" collateral record \
-                        "$dep_reserves_id" "$attestation_json" 2>&1 >/dev/null || true
-                    recorded=$((recorded + 1))
-                fi
-            done
-            if [ $recorded -gt 0 ]; then
-                log_success "$depositor locked collateral on $owner, attestation on $recorded ledger(s)"
-            else
-                log_warn "$depositor attestation record issue"
-            fi
+        if echo "$lock_output" | grep -q "Collateral locked"; then
+            log_success "$depositor locked collateral on $owner (auto-recorded)"
         else
             log_warn "$depositor collateral lock on $owner failed: $(echo "$lock_output" | tail -1)"
         fi
@@ -531,12 +468,12 @@ for depositor, owner in sorted(pairs):
 }
 
 # ============================================================================
-# Phase 3d: Rotate reserves to quorum-based Taproot
+# Phase 3d: Activate quorum-based Taproot spending
 # ============================================================================
 
-rotate_reserves_to_quorum() {
+activate_quorum() {
     log_info ""
-    log_info "=== Phase 3d: Rotate Reserves to Quorum-Based Taproot ==="
+    log_info "=== Phase 3d: Activate Quorum (quorum begin) ==="
     echo ""
 
     for op in $OPERATORS; do
@@ -548,15 +485,15 @@ rotate_reserves_to_quorum() {
 
             local op_reserves_id=$(get_value "reserves_id_${op}${suffix}")
 
-            log_info "$op_short rotating reserves $idx to quorum-based Taproot..."
+            log_info "$op_short activating quorum on ledger $idx..."
 
-            local rotate_output=$(run_node_cmd "$op" reserves rotate "$op_reserves_id" 2>&1)
+            local begin_output=$(run_node_cmd "$op" quorum begin "$op_reserves_id" 2>&1)
 
-            if echo "$rotate_output" | grep -q "Reserves rotated\|rotated successfully"; then
-                local quorum_count=$(echo "$rotate_output" | grep "Quorum Members:" | awk '{print $3}')
-                log_success "$op_short ledger $idx rotated with $quorum_count members"
+            if echo "$begin_output" | grep -q "Quorum activated\|rotated successfully"; then
+                local quorum_count=$(echo "$begin_output" | grep "Quorum Members:" | awk '{print $3}')
+                log_success "$op_short ledger $idx: quorum active with $quorum_count members"
             else
-                log_warn "$op_short ledger $idx: $(echo "$rotate_output" | head -1)"
+                log_warn "$op_short ledger $idx: $(echo "$begin_output" | head -1)"
             fi
         done
     done
@@ -636,20 +573,14 @@ main() {
     create_reserves
     open_ledgers
 
-    # Start daemons and watchers before quorum/collateral phases
-    # Daemons handle auto_complete_deposits, cosign requests, etc.
+    # Start daemons before quorum/collateral phases
+    # Daemons handle all Nostr request processing (deposit_open, cosign, collateral_lock, etc.)
     start_all_nodes
     sleep 2
 
-    # Watchers handle deposit_open, make_offer, collateral_lock requests
-    start_nostr_watchers
-
     add_quorum_members
     establish_collateral
-    rotate_reserves_to_quorum
-
-    # Give watchers a moment to settle
-    sleep 2
+    activate_quorum
 
     # Print summary
     print_summary

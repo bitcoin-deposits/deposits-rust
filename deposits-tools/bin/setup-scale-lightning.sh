@@ -398,15 +398,15 @@ add_ring_quorum() {
         local member_node_id=$(get_value "node_id_$member_n")
         local member_ledger_id=$(get_value "ledger_id_$member_n")
 
+        # Add member to our quorum — member auto-consents and records QuorumJoin
         run_node_cmd $n partner add "$reserves_id" "$member_node_id" "$member_ledger_id" >/dev/null 2>&1 || true
-        run_node_cmd $member_n partner join "$member_ledger_id" "$node_id" "$ledger_id" "$membership_expires" >/dev/null 2>&1 || true
     done
 }
 
-rotate_to_quorum() {
+activate_quorum() {
     local n=$1
     local reserves_id=$(get_value "reserves_id_$n")
-    run_node_cmd $n reserves rotate "$reserves_id" >/dev/null 2>&1 || true
+    run_node_cmd $n quorum begin "$reserves_id" >/dev/null 2>&1 || true
 }
 
 # ============================================================================
@@ -513,7 +513,7 @@ main() {
     log_info ""
     log_info "=== Rotating reserves to quorum ==="
     for n in $(seq 1 $TOTAL_NODES); do
-        rotate_to_quorum $n
+        activate_quorum $n
     done
     mine_blocks 1
 

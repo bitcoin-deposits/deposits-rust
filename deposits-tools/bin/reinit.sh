@@ -1,17 +1,13 @@
 #!/bin/bash
 # Reinitialize the test network
 #
-# This script:
-# 1. Stops node processes and infrastructure containers
-# 2. Rebuilds the deposits-node binaries
-# 3. Starts infrastructure services (bitcoin, electrs, relays)
-# 4. Starts operator nodes as bare processes
-# 5. Sets up the faucet wallet and funds the nodes
+# Tears down everything, optionally rebuilds binaries, starts infrastructure,
+# then runs setup-4op.sh for the full setup (reserves, ledgers, quorum, collateral).
 #
 # Usage:
-#   ./bin/reinit.sh           # Full reinit
-#   ./bin/reinit.sh --quick   # Skip rebuild, just restart
-#   ./bin/reinit.sh --fund    # Just fund the nodes (assumes running)
+#   ./bin/reinit.sh              # Full teardown + rebuild + setup
+#   ./bin/reinit.sh --quick      # Skip rebuild, just teardown + setup
+#   ./bin/reinit.sh --nodes 6    # 6-operator network
 
 set -e
 
@@ -20,7 +16,7 @@ source "$SCRIPT_DIR/_common.sh"
 
 # Parse arguments
 QUICK=false
-FUND_ONLY=false
+PASSTHROUGH_ARGS=()
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -28,44 +24,35 @@ while [[ $# -gt 0 ]]; do
             QUICK=true
             shift
             ;;
-        --fund|-f)
-            FUND_ONLY=true
-            shift
-            ;;
         --nodes|-n)
             NODE_COUNT="$2"
+            PASSTHROUGH_ARGS+=(--nodes "$2")
             shift 2
             ;;
         --help|-h)
             echo "Usage: $0 [OPTIONS]"
             echo ""
             echo "Options:"
-            echo "  --quick, -q      Skip rebuild, just restart"
-            echo "  --fund, -f       Just fund the nodes (assumes services are running)"
+            echo "  --quick, -q      Skip rebuild, just teardown + setup"
             echo "  --nodes, -n N    Number of operator nodes (default: 4)"
             echo "  --help, -h       Show this help message"
+            echo ""
+            echo "Additional options are passed through to setup-4op.sh:"
+            echo "  --enforcement-delay BLOCKS   (default: 200)"
+            echo "  --reserves SATS              (default: 100000000)"
+            echo "  --ledgers-per-op N           (default: 3)"
+            echo "  --show-topology              Print topology and exit"
             exit 0
             ;;
         *)
-            log_error "Unknown option: $1"
-            exit 1
+            PASSTHROUGH_ARGS+=("$1")
+            shift
             ;;
     esac
 done
 
 # Re-initialize topology (NODE_COUNT may have changed from --nodes)
 init_topology
-
-if $FUND_ONLY; then
-    log_info "Funding nodes only..."
-    wait_for_bitcoin
-    wait_for_electrs
-
-    fund_nodes_batch 10
-    mine_blocks 6
-    log_success "All nodes funded"
-    exit 0
-fi
 
 log_info "=== Reinitializing Test Network ==="
 
@@ -113,20 +100,20 @@ if [ ! -f "$DEPOSITS_NODE" ]; then
     exit 1
 fi
 
-# Start infrastructure services first
+# Start infrastructure services
 log_info "Starting infrastructure services..."
 $DC up -d bitcoin
 wait_for_bitcoin
-
-# Start native strfry relays
-log_info "Starting native strfry relays..."
-start_all_relays
-wait_for_nostr
 
 # Start per-node Electrs instances (1 per 2 nodes)
 log_info "Starting per-node Electrs instances..."
 start_all_electrs
 wait_for_all_electrs
+
+# Start native strfry relays
+log_info "Starting native strfry relays..."
+start_all_relays
+wait_for_nostr
 
 # Setup faucet
 setup_faucet
@@ -134,37 +121,9 @@ setup_faucet
 # Start block miner (1 block/sec for regtest)
 $DC up -d miner
 
-# Start nodes as bare processes
-log_info "Starting node processes..."
-start_all_nodes
-
 # Start monitoring stack
 log_info "Starting monitoring (Prometheus + Grafana)..."
 $DC up -d prometheus grafana
 
-# Give nodes time to start
-log_info "Waiting for nodes to initialize..."
-sleep 10
-
-# Fund all nodes in parallel, then mine to confirm
-log_info "Funding nodes..."
-fund_nodes_batch 10
-mine_blocks 6
-
-# Show status
-echo ""
-log_success "=== Test Network Ready ==="
-echo ""
-show_status
-echo ""
-log_info "Block height: $(get_block_height)"
-echo ""
-log_info "Useful commands:"
-echo "  Follow logs:    tail -f $DATA_ROOT/alice/node.log"
-echo "  All logs:       tail -f $DATA_ROOT/*/node.log"
-echo "  Mine blocks:    docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass -rpcwallet=faucet -generate 1"
-echo "  Nostr relay:    ws://localhost:7801"
-echo "  Electrs:        http://localhost:3102"
-echo "  Prometheus:     http://localhost:9190"
-echo "  Grafana:        http://localhost:3110"
-echo "  Stop nodes:     source bin/_common.sh && stop_all_nodes"
+# Run the full operator setup (reserves, ledgers, quorum, collateral, rotation)
+exec "$SCRIPT_DIR/setup-4op.sh" "${PASSTHROUGH_ARGS[@]}"

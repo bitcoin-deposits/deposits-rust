@@ -188,16 +188,10 @@ add_quorum_members() {
             local member_node_id=$(get_value "node_id_$member")
             local member_short="$member"
 
-            # Owner adds member to their quorum (pass member's ledger ID for collateral binding)
+            # Owner adds member — member auto-consents and records QuorumJoin
             local add_output=$(run_node_cmd "$owner" partner add "$owner_reserves" "$member_node_id" "$member_ledger_id" 2>&1)
             if echo "$add_output" | grep -q "Quorum member added\|added"; then
-                # Member records the join on their side
-                local join_output=$(run_node_cmd "$member" partner join "$member_reserves" "$owner_node_id" "$owner_reserves" "$membership_expires" 2>&1)
-                if echo "$join_output" | grep -q "Quorum join recorded\|recorded"; then
-                    log_info "  $member_short joined $owner_short's quorum"
-                else
-                    log_warn "  $member_short join record issue: $join_output"
-                fi
+                log_info "  $member_short joined $owner_short's quorum"
             else
                 log_warn "  $owner_short failed to add $member_short: $add_output"
             fi

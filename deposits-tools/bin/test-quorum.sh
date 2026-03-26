@@ -309,19 +309,11 @@ add_quorum_members() {
                         local member_reserves_id=$(get_value "reserves_id_${member}_1")
                         local result_file="$STATE_DIR/quorum_${op}_${n}_${member}.result"
 
-                        # Add member to op's quorum (sequential per operator)
+                        # Add member — member auto-consents and records QuorumJoin
                         local add_output=$(run_node_cmd "$op" partner add "$op_reserves_id" "$member_node_id" "$member_ledger_id" 2>&1)
 
                         if echo "$add_output" | grep -q "Quorum member added\|added"; then
-                            # Record the join on member's FIRST ledger
-                            local join_output=$(run_node_cmd "$member" partner join "$member_reserves_id" "$op_node_id" "$op_ledger_id" "$membership_expires" 2>&1)
-
-                            if echo "$join_output" | grep -q "Quorum join recorded\|recorded"; then
-                                echo "PASS:joined" > "$result_file"
-                            else
-                                echo "PASS:add_ok_join_fail" > "$result_file"
-                                echo "$join_output" > "${result_file}.output"
-                            fi
+                            echo "PASS:joined" > "$result_file"
                         else
                             echo "FAIL:add_failed" > "$result_file"
                             echo "$add_output" > "${result_file}.output"
@@ -367,10 +359,10 @@ add_quorum_members() {
 # Phase 3c: Rotate reserves to quorum-based Taproot
 # ============================================================================
 
-rotate_reserves_to_quorum() {
+activate_quorum() {
     log_info ""
-    log_info "=== Phase 3c: Rotate Reserves to Quorum-Based Taproot ==="
-    log_info "(Each operator rotates all $LEDGERS_PER_OP ledgers)"
+    log_info "=== Phase 3c: Activate Quorum (quorum begin) ==="
+    log_info "(Each operator activates quorum on all $LEDGERS_PER_OP ledgers)"
     echo ""
 
     # Wait for daemons to reload ledgers with quorum members
@@ -388,7 +380,7 @@ rotate_reserves_to_quorum() {
                 local op_ledger_id=$(get_value "ledger_id_${op}_${n}")
                 local ok=false
                 for attempt in 1 2 3; do
-                    local rotate_output=$(run_node_cmd "$op" reserves rotate "$op_ledger_id" 2>&1)
+                    local rotate_output=$(run_node_cmd "$op" quorum begin "$op_ledger_id" 2>&1)
                     if echo "$rotate_output" | grep -q "Reserves rotated\|rotated successfully\|No existing reserves to rotate"; then
                         echo "$rotate_output" > "$tmpdir/rotate_${op}_${n}"
                         ok=true
@@ -1492,7 +1484,7 @@ main() {
     create_recovery_test_deposits
     # Rotate AFTER all deposits/collateral are set up (rotation enables co-signing
     # which would block deposit/lock operations with co-sign timeouts)
-    rotate_reserves_to_quorum
+    activate_quorum
     test_automated_dispute
     test_post_recovery_payment
     show_final_state

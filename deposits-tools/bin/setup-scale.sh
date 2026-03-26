@@ -368,21 +368,18 @@ add_quorum_members() {
         local member_node_id=$(get_value "node_id_$member_n")
         local member_ledger_id=$(get_value "ledger_id_$member_n")
 
-        # Add member to our quorum (our_reserves_id, member_node_id, member_ledger_id)
+        # Add member to our quorum — member auto-consents and records QuorumJoin
         run_node_cmd $n partner add "$reserves_id" "$member_node_id" "$member_ledger_id" >/dev/null 2>&1 || true
-
-        # Record join on member's side (member_ledger_id, our_node_id, our_ledger_id, membership_expires)
-        run_node_cmd $member_n partner join "$member_ledger_id" "$node_id" "$ledger_id" "$membership_expires" >/dev/null 2>&1 || true
 
         log_info "    + ${member_name}"
     done
 }
 
-rotate_to_quorum() {
+activate_quorum() {
     local n=$1
     local reserves_id=$(get_value "reserves_id_$n")
 
-    run_node_cmd $n reserves rotate "$reserves_id" >/dev/null 2>&1 || true
+    run_node_cmd $n quorum begin "$reserves_id" >/dev/null 2>&1 || true
 }
 
 # Generate random fee values for a node
@@ -516,7 +513,7 @@ main() {
         log_info ""
         log_info "Rotating reserves to quorum..."
         for n in $(seq 1 $wave_end); do
-            rotate_to_quorum $n
+            activate_quorum $n
         done
 
         mine_blocks 1
