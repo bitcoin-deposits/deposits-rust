@@ -875,7 +875,6 @@ pub fn handle_collateral_consent_request<C: HandlerContext>(
             msg.operator_id,
             &msg.reserves_id,
             membership_expires,
-            signature,
         )?;
     }
 

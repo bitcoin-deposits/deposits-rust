@@ -1116,7 +1116,7 @@ impl Ledger {
                     });
                 }
             }
-            LedgerOperation::QuorumJoin { operator_id, ledger_id, membership_expires, our_signature: _ } => {
+            LedgerOperation::QuorumJoin { operator_id, ledger_id, membership_expires } => {
                 // 1. Must be on operator's own ledger (we are the operator)
                 if !self.is_operator() {
                     return Err(DepositsError::ProtocolViolation {

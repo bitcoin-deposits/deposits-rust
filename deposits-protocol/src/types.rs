@@ -817,9 +817,6 @@ pub struct QuorumMembership {
     /// Block height when our membership commitment expires.
     /// After this block, we are no longer obligated to monitor this ledger.
     pub membership_expires: u32,
-    /// Our consent signature (matches quorum_member_signature in QuorumAddMember).
-    #[serde(with = "serde_64")]
-    pub our_signature: [u8; 64],
     /// Sequence number when we joined (for audit trail).
     pub joined_at_sequence: u64,
 }
@@ -1403,18 +1400,16 @@ impl LedgerState {
                 );
                 next.collateral_attestations.insert(*collateral_operator, attestation);
             }
-            LedgerOperation::QuorumJoin { operator_id, ledger_id, membership_expires, our_signature } => {
+            LedgerOperation::QuorumJoin { operator_id, ledger_id, membership_expires } => {
                 if let Some(existing) = next.joined_quorums.iter_mut().find(|m|
                     m.operator_id == *operator_id && m.ledger_id == *ledger_id
                 ) {
                     existing.membership_expires = *membership_expires;
-                    existing.our_signature = *our_signature;
                 } else {
                     next.joined_quorums.push(QuorumMembership {
                         operator_id: *operator_id,
                         ledger_id: ledger_id.clone(),
                         membership_expires: *membership_expires,
-                        our_signature: *our_signature,
                         joined_at_sequence: next.sequence + 1,
                     });
                 }

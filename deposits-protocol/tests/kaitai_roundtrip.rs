@@ -179,7 +179,7 @@ fn wit() -> DescriptorWitness { DescriptorWitness { stack: vec![vec![0x30; 64]] 
 
 #[test] fn quorum_join() { test_roundtrip(&LedgerOperation::QuorumJoin {
     operator_id: pk(), ledger_id: "abc123def456".into(),
-    membership_expires: 100_000, our_signature: sig(),
+    membership_expires: 100_000,
 }); }
 
 #[test] fn fee_collect() { test_roundtrip(&LedgerOperation::FeeCollect {

@@ -149,7 +149,6 @@ const DESTINATION_ADDRESS: u64 = 70;
 const WITHDRAWAL_ID: u64 = 72;
 const FUNDING_ADDRESS: u64 = 74;
 const LOCK_UNTIL_BLOCK: u64 = 76;
-const OUR_SIGNATURE: u64 = 80;
 const MEMBERSHIP_EXPIRES: u64 = 82;
 const SPENDING_TXID: u64 = 90;
 const NEW_OUTPOINT_TXID: u64 = 84;
@@ -395,7 +394,6 @@ fn schema_quorum_join() {
         (OPERATOR_ID, pubkey_bytes()),
         (RESERVES_ID, str_bytes("abc123def456")),
         (MEMBERSHIP_EXPIRES, u32_bytes(100_000)),
-        (OUR_SIGNATURE, sig64()),
     ]);
 }
 

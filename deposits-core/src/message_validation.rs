@@ -423,9 +423,8 @@ pub trait HandlerContext: ValidationContext {
         target_operator: PublicKey,
         target_reserves_id: &str,
         membership_expires: u32,
-        our_signature: [u8; 64],
     ) -> Result<(), HandlerError> {
-        let _ = (target_operator, target_reserves_id, membership_expires, our_signature);
+        let _ = (target_operator, target_reserves_id, membership_expires);
         Ok(()) // Default: no-op
     }
 

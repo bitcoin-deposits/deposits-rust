@@ -403,7 +403,7 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
         }),
         ("QuorumJoin", LedgerOperation::QuorumJoin {
             operator_id: pk(), ledger_id: "abc123def456".into(),
-            membership_expires: 100_000, our_signature: sig(),
+            membership_expires: 100_000,
         }),
         ("FeeCollect", LedgerOperation::FeeCollect {
             deposit_id: did(), amount: 1000, block_height: 500,

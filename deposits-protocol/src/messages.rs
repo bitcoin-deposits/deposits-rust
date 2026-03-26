@@ -759,8 +759,6 @@ pub enum LedgerOperation {
         ledger_id: String,
         /// Block height when our membership commitment expires
         membership_expires: u32,
-        /// Our consent signature (matches quorum_member_signature in QuorumAddMember)
-        our_signature: [u8; 64],
     },
 
     // ========== Maintenance (1) ==========
@@ -1765,11 +1763,10 @@ impl BinaryCodec for LedgerOperation {
                     .unwrap_or([0u8; 64]);
                 w.write_all(&sig_bytes)?;
             }
-            Self::QuorumJoin { operator_id, ledger_id, membership_expires, our_signature } => {
+            Self::QuorumJoin { operator_id, ledger_id, membership_expires } => {
                 write_pubkey(w, operator_id)?;
                 write_string(w, ledger_id)?;
                 write_u32(w, *membership_expires)?;
-                write_64(w, our_signature)?;
             }
             Self::FeeCollect { deposit_id, amount, block_height } => {
                 let mut legacy_bytes = [0u8; 33];
@@ -2101,7 +2098,6 @@ impl BinaryCodec for LedgerOperation {
                 operator_id: read_pubkey(r)?,
                 ledger_id: read_string(r)?,
                 membership_expires: read_u32(r)?,
-                our_signature: read_64(r)?,
             }),
             // Fee operations (50)
             50 => {
@@ -2811,7 +2807,6 @@ mod ledger_op_tlv {
     // CollateralLock fields
     pub const LOCK_UNTIL_BLOCK: u64 = 76;
     // QuorumJoin fields
-    pub const OUR_SIGNATURE: u64 = 80;
     pub const MEMBERSHIP_EXPIRES: u64 = 82;
     // QuorumBegin fields
     pub const SPENDING_TXID: u64 = 90;
@@ -3103,14 +3098,13 @@ impl TlvEncode for LedgerOperation {
                     .pubkey_field(OPERATOR_ID, operator_id)
                     .witness_field(WITNESS, witness);
             }
-            Self::QuorumJoin { operator_id, ledger_id, membership_expires, our_signature } => {
+            Self::QuorumJoin { operator_id, ledger_id, membership_expires } => {
                 // Note: TLV field ID is RESERVES_ID (58) for wire compatibility,
                 // even though the Rust field is now named ledger_id
                 builder = builder
                     .pubkey_field(OPERATOR_ID, operator_id)
                     .string_field(RESERVES_ID, ledger_id)
-                    .u32_field(MEMBERSHIP_EXPIRES, *membership_expires)
-                    .bytes_field(OUR_SIGNATURE, our_signature);
+                    .u32_field(MEMBERSHIP_EXPIRES, *membership_expires);
             }
             Self::FeeCollect { deposit_id, amount, block_height } => {
                 builder = builder
@@ -3327,7 +3321,6 @@ impl TlvDecode for LedgerOperation {
                 // Note: TLV field ID is RESERVES_ID (58) for wire compatibility
                 ledger_id: reader.read_string(RESERVES_ID)?,
                 membership_expires: reader.read_u32(MEMBERSHIP_EXPIRES)?,
-                our_signature: reader.read_bytes(OUR_SIGNATURE)?,
             }),
             50 => Ok(Self::FeeCollect {
                 deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
