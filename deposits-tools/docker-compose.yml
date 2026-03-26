@@ -150,6 +150,12 @@ services:
     restart: unless-stopped
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        # Read binary API key from LDK data dir and export as hex
+        export LDK_API_KEY=$$(cat /ldk-data/regtest/api_key | od -A n -t x1 | tr -d ' \n')
+        exec lightning-verify
     environment:
       VERIFY_NSEC_FILE: /run/secrets/verify_nsec
       VERIFY_RELAYS: ws://host.docker.internal:7779
@@ -161,11 +167,11 @@ services:
       LDK_CLI: /ldk-cli/ldk-server-cli
       LDK_HOST: lightning
       LDK_PORT: "3000"
-      LDK_API_KEY_FILE: /run/secrets/ldk_api_key
-      LDK_TLS_CERT: /certs/lightning.crt
+      LDK_TLS_CERT: /ldk-data/tls.crt
       RUST_LOG: info
     volumes:
       - ldk_cli:/ldk-cli:ro
+      - ldk_data:/ldk-data:ro
       - ./certs:/certs:ro
       - ./secrets:/run/secrets:ro
     depends_on:
@@ -182,15 +188,31 @@ services:
   # =========================================================================
 
   nip05:
-    image: nginx:alpine
+    image: python:3.12-slim
     container_name: nip05
     profiles: [lightning]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        export LDK_API_KEY=$$(cat /ldk-data/regtest/api_key | od -A n -t x1 | tr -d ' \n')
+        exec python3 -u /app/lnurl-server.py
     ports:
       - "8805:443"
+    environment:
+      LDK_CLI: /ldk-cli/ldk-server-cli
+      LDK_HOST: lightning:3000
+      LDK_TLS_CERT: /ldk-data/tls.crt
+      LNURL_HOST: "172.21.0.50"
+      NIP05_FILE: /data/nostr.json
     volumes:
-      - nip05_data:/usr/share/nginx/html/.well-known:ro
-      - ./nip05-nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./lnurl-server.py:/app/lnurl-server.py:ro
       - ./certs:/certs:ro
+      - nip05_data:/data
+      - ldk_cli:/ldk-cli:ro
+      - ldk_data:/ldk-data:ro
+    depends_on:
+      lightning:
+        condition: service_started
     networks:
       regtest:
         ipv4_address: 172.21.0.50
