@@ -36,6 +36,10 @@ path = "src/bin/standalone_reserves_demo.rs"
 name = "discover"
 path = "src/bin/discover.rs"
 
+[[bin]]
+name = "replay-ledger"
+path = "src/bin/replay-ledger.rs"
+
 [dependencies]
 # Bitcoin
 bitcoin = { version = "0.32", features = ["serde", "rand-std"] }
@@ -93,3 +97,7 @@ env_logger = "0.10"
 
 # Base64
 base64 = "0.21"
+
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
