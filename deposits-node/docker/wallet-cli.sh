@@ -104,7 +104,7 @@ for idx in [84 + 0x80000000, 0x80000000, 0x80000000, 0, $index]:
 
 pub = compress(scalar_mult(int.from_bytes(key, 'big'), (Gx, Gy)))
 print(pub.hex())
-" 2>/dev/null
+"
 }
 
 WALLET_DIR=""
