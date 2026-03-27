@@ -32,12 +32,21 @@ fi
 # deposits-node expects: <command> [subcommand] [--flag value ...] [--seed ...]
 # We pass everything through and let deposits-node parse it.
 LEDGER_RELAY="${DEPOSITS_LEDGER_RELAY:-wss://relay.ynniv.com}"
+ALL_NODES="${DEPOSITS_NODES:-alice bob charlie diana}"
+
+# Build relay list: local relay + all other nodes' relays (for cross-node requests)
+RELAY_ARGS="--relay ws://127.0.0.1:7777"
+for peer in $ALL_NODES; do
+    if [ "$peer" != "$NODE_NAME" ]; then
+        RELAY_ARGS="$RELAY_ARGS --relay ws://${peer}:7777"
+    fi
+done
 
 docker exec "$NODE_NAME" deposits-node \
     "$@" \
     --seed "$SEED" \
     --network "$NETWORK" \
     --electrum http://electrs:3000 \
-    --relay ws://127.0.0.1:7777 \
+    $RELAY_ARGS \
     --slow-relay "$LEDGER_RELAY" \
     --data-dir /data/node
