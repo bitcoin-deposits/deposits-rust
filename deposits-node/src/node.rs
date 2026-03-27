@@ -9239,7 +9239,11 @@ impl Node {
         // Since request_cosign always runs in a spawned task (per-ledger worker or
         // spawned periodic task), the main loop is free to pump events concurrently.
         // No polling or response draining needed here — just await the oneshot.
-        let deadline = Duration::from_millis(500);
+        let deadline_ms = std::env::var("COSIGN_TIMEOUT_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5000u64);
+        let deadline = Duration::from_millis(deadline_ms);
 
         tokio::select! {
             result = rx => {
