@@ -3179,59 +3179,36 @@ async fn deposit_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         return Ok(());
     }
 
-    let reserves_id_arg = &positional[0];
-    // Validate pubkey hex (used for descriptor creation below)
-    let _deposit_pubkey = PublicKey::from_str(&positional[1])
+    let ledger_id = &positional[0];
+    let deposit_pubkey = &positional[1];
+
+    // Validate pubkey
+    let _ = PublicKey::from_str(deposit_pubkey)
         .map_err(|e| format!("Invalid deposit pubkey: {}", e))?;
 
     let config = parse_config(&config_args)?;
-    let mut node = Node::new(config.clone()).await?;
-
-    // Resolve reserves_id to ledger_id
-    let ledger_id = if reserves_id_arg.len() == 64 && reserves_id_arg.chars().all(|c| c.is_ascii_hexdigit()) {
-        reserves_id_arg.clone()
-    } else {
-        node.get_ledger_with_id(reserves_id_arg)
-            .map(|(lid, _)| lid)
-            .ok_or_else(|| format!("Ledger not found for reserves: {}", reserves_id_arg))?
-    };
-
-    let relay_url = config.relays.first()
-        .ok_or("No relay configured. Use --relay <url>")?
-        .clone();
-    let secret_key = derive_operator_secret(&config.seed, config.network)?;
-    let transport = NostrTransportBuilder::new(secret_key)
-        .relay(&relay_url)
-        .build()
-        .await?;
-
-    let fees = match transport.fetch_ledger_advertisement(&ledger_id).await? {
-        Some(ad) => {
-            let fee_struct = ad.to_fee_structure();
-            Some(fee_struct)
-        }
-        None => None,
-    };
-
-    // Create descriptor from pubkey
-    let descriptor = format!("pk({})", positional[1]);
 
     println!("Opening deposit...");
     println!("  Ledger ID: {}", ledger_id);
-    println!("  Descriptor: {}", descriptor);
+    println!("  Deposit pubkey: {}", deposit_pubkey);
     if is_collateral {
         println!("  Type: COLLATERAL");
     }
-    if let Some(ref f) = fees {
-        println!("  Fees: {} bps/year + {} sats/year (period: {} blocks)",
-            f.annualized_bps, f.annualized_msats, f.frequency_blocks);
+
+    let mut params = serde_json::json!({
+        "deposit_pubkey": deposit_pubkey,
+    });
+    if is_collateral {
+        params["is_collateral"] = serde_json::json!(true);
     }
 
-    let deposit = node.open_deposit(&ledger_id, &descriptor, fees, None, is_collateral, false).await?;
+    let result = send_daemon_request(&config, ledger_id, "deposit_open", params).await?;
 
     println!("\nDeposit opened!");
-    println!("  Deposit ID: {}", hex::encode(deposit.deposit_id));
-    println!("  Balance: {} msats", deposit.balance);
+    if let Some(deposit_id) = result.get("deposit_id").and_then(|v| v.as_str()) {
+        println!("  Deposit ID: {}", deposit_id);
+    }
+    println!("  {}", serde_json::to_string_pretty(&result)?);
 
     Ok(())
 }
