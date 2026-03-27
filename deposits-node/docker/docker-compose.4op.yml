@@ -29,7 +29,7 @@ services:
       NODE_NAME: alice
       RELAY_PORT: "7777"
       METRICS_PORT: "9100"
-      LDK_CLI: /ldk-cli/ldk-server-cli
+      LDK_CLI: /ldk-data/ldk-server-cli
       LDK_HOST: lightning
       LDK_PORT: "3000"
       DEPOSIT_ACCESS_CONTROL: "${DEPOSIT_ACCESS_CONTROL:-false}"
@@ -45,7 +45,6 @@ services:
       - /mnt/bitcoind/deposits/deposit_denylist.txt:/config/deposit_denylist.txt:ro
       - /mnt/bitcoind/deposits/deposit_domain_allowlist.txt:/config/deposit_domain_allowlist.txt:ro
       - /mnt/bitcoind/ldk:/ldk-data:ro
-      - ldk_cli:/ldk-cli:ro
     depends_on:
       - electrs
       - lightning
@@ -65,7 +64,7 @@ services:
       NODE_NAME: bob
       RELAY_PORT: "7777"
       METRICS_PORT: "9100"
-      LDK_CLI: /ldk-cli/ldk-server-cli
+      LDK_CLI: /ldk-data/ldk-server-cli
       LDK_HOST: lightning
       LDK_PORT: "3000"
       DEPOSIT_ACCESS_CONTROL: "${DEPOSIT_ACCESS_CONTROL:-false}"
@@ -81,7 +80,6 @@ services:
       - /mnt/bitcoind/deposits/deposit_denylist.txt:/config/deposit_denylist.txt:ro
       - /mnt/bitcoind/deposits/deposit_domain_allowlist.txt:/config/deposit_domain_allowlist.txt:ro
       - /mnt/bitcoind/ldk:/ldk-data:ro
-      - ldk_cli:/ldk-cli:ro
     depends_on:
       - electrs
       - lightning
@@ -101,7 +99,7 @@ services:
       NODE_NAME: charlie
       RELAY_PORT: "7777"
       METRICS_PORT: "9100"
-      LDK_CLI: /ldk-cli/ldk-server-cli
+      LDK_CLI: /ldk-data/ldk-server-cli
       LDK_HOST: lightning
       LDK_PORT: "3000"
       DEPOSIT_ACCESS_CONTROL: "${DEPOSIT_ACCESS_CONTROL:-false}"
@@ -117,7 +115,6 @@ services:
       - /mnt/bitcoind/deposits/deposit_denylist.txt:/config/deposit_denylist.txt:ro
       - /mnt/bitcoind/deposits/deposit_domain_allowlist.txt:/config/deposit_domain_allowlist.txt:ro
       - /mnt/bitcoind/ldk:/ldk-data:ro
-      - ldk_cli:/ldk-cli:ro
     depends_on:
       - electrs
       - lightning
@@ -137,7 +134,7 @@ services:
       NODE_NAME: diana
       RELAY_PORT: "7777"
       METRICS_PORT: "9100"
-      LDK_CLI: /ldk-cli/ldk-server-cli
+      LDK_CLI: /ldk-data/ldk-server-cli
       LDK_HOST: lightning
       LDK_PORT: "3000"
       DEPOSIT_ACCESS_CONTROL: "${DEPOSIT_ACCESS_CONTROL:-false}"
@@ -153,15 +150,11 @@ services:
       - /mnt/bitcoind/deposits/deposit_denylist.txt:/config/deposit_denylist.txt:ro
       - /mnt/bitcoind/deposits/deposit_domain_allowlist.txt:/config/deposit_domain_allowlist.txt:ro
       - /mnt/bitcoind/ldk:/ldk-data:ro
-      - ldk_cli:/ldk-cli:ro
     depends_on:
       - electrs
       - lightning
     networks:
       - bitcoin-network
-
-volumes:
-  ldk_cli:
 
 networks:
   bitcoin-network:
