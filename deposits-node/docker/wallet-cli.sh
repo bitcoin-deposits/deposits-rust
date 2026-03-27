@@ -38,32 +38,21 @@ derive_pubkey() {
         return
     fi
 
-    # Fallback: python with secp256k1 + hmac for BIP-32
-    python3 -c "
-import hmac, hashlib, struct
-
-seed_bytes = bytes.fromhex('$seed')
-# BIP-32 master key from seed
+    # Fallback: pure Python BIP-32 derivation (no Docker needed)
+    python3 - "$seed" "$index" << 'PYEOF'
+import hmac, hashlib, struct, sys
+seed_hex, key_index = sys.argv[1], int(sys.argv[2])
+seed_bytes = bytes.fromhex(seed_hex)
 I = hmac.new(b'Bitcoin seed', seed_bytes, hashlib.sha512).digest()
-master_key = I[:32]
-master_chain = I[32:]
-
-# secp256k1 params
+key, chain = I[:32], I[32:]
 P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
-N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 Gx = 0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798
 Gy = 0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8
-
 def modinv(a, m):
-    if a < 0: a = a % m
-    g, x, _ = egcd(a, m)
+    g, x = m, 0; g1, x1 = a % m, 1
+    while g1: g, g1, x, x1 = g1, g % g1, x1, x - (g // g1) * x1
     return x % m
-
-def egcd(a, b):
-    if a == 0: return b, 0, 1
-    g, x, y = egcd(b % a, a)
-    return g, y - (b // a) * x, x
-
 def point_add(p1, p2):
     if p1 is None: return p2
     if p2 is None: return p1
@@ -71,40 +60,27 @@ def point_add(p1, p2):
     if x1 == x2 and y1 != y2: return None
     if x1 == x2: m = (3*x1*x1) * modinv(2*y1, P) % P
     else: m = (y2 - y1) * modinv(x2 - x1, P) % P
-    x3 = (m*m - x1 - x2) % P
-    y3 = (m*(x1 - x3) - y1) % P
+    x3 = (m*m - x1 - x2) % P; y3 = (m*(x1 - x3) - y1) % P
     return (x3, y3)
-
-def scalar_mult(k, point):
-    result = None; addend = point
+def scalar_mult(k, pt):
+    r = None; a = pt
     while k:
-        if k & 1: result = point_add(result, addend)
-        addend = point_add(addend, addend)
-        k >>= 1
-    return result
-
-def compress(point):
-    prefix = b'\x02' if point[1] % 2 == 0 else b'\x03'
-    return prefix + point[0].to_bytes(32, 'big')
-
-def ckd_priv(key, chain, index):
-    if index >= 0x80000000:  # hardened
-        data = b'\x00' + key + struct.pack('>I', index)
+        if k & 1: r = point_add(r, a)
+        a = point_add(a, a); k >>= 1
+    return r
+def compress(pt):
+    return (b'\x02' if pt[1] % 2 == 0 else b'\x03') + pt[0].to_bytes(32, 'big')
+def ckd(k, c, idx):
+    if idx >= 0x80000000:
+        data = b'\x00' + k + struct.pack('>I', idx)
     else:
-        pub = compress(scalar_mult(int.from_bytes(key, 'big'), (Gx, Gy)))
-        data = pub + struct.pack('>I', index)
-    I = hmac.new(chain, data, hashlib.sha512).digest()
-    child_key = ((int.from_bytes(I[:32], 'big') + int.from_bytes(key, 'big')) % N).to_bytes(32, 'big')
-    return child_key, I[32:]
-
-# Derive m/84'/0'/0'/0/$index
-key, chain = master_key, master_chain
-for idx in [84 + 0x80000000, 0x80000000, 0x80000000, 0, $index]:
-    key, chain = ckd_priv(key, chain, idx)
-
-pub = compress(scalar_mult(int.from_bytes(key, 'big'), (Gx, Gy)))
-print(pub.hex())
-"
+        data = compress(scalar_mult(int.from_bytes(k, 'big'), (Gx, Gy))) + struct.pack('>I', idx)
+    h = hmac.new(c, data, hashlib.sha512).digest()
+    return ((int.from_bytes(h[:32], 'big') + int.from_bytes(k, 'big')) % N).to_bytes(32, 'big'), h[32:]
+for idx in [84 + 0x80000000, 0x80000000, 0x80000000, 0, key_index]:
+    key, chain = ckd(key, chain, idx)
+print(compress(scalar_mult(int.from_bytes(key, 'big'), (Gx, Gy))).hex())
+PYEOF
 }
 
 WALLET_DIR=""
