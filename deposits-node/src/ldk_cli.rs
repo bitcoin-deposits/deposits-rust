@@ -188,6 +188,35 @@ impl LdkCli {
     }
 }
 
+// -- Status deserializer (handles both u8 and string formats) --
+
+fn deserialize_status<'de, D>(deserializer: D) -> Result<u8, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    struct StatusVisitor;
+    impl<'de> de::Visitor<'de> for StatusVisitor {
+        type Value = u8;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a status number or string")
+        }
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<u8, E> {
+            Ok(v as u8)
+        }
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<u8, E> {
+            match v.to_lowercase().as_str() {
+                "pending" => Ok(0),
+                "succeeded" | "complete" | "completed" => Ok(1),
+                "failed" | "expired" => Ok(2),
+                _ => Ok(0),
+            }
+        }
+    }
+    deserializer.deserialize_any(StatusVisitor)
+}
+
 // Response types for parsing CLI JSON output
 
 #[derive(Debug, Deserialize)]
@@ -240,12 +269,16 @@ pub struct ChannelInfo {
 
 #[derive(Debug, Deserialize)]
 pub struct ListPaymentsResponse {
+    /// Newer ldk-server-cli uses "list", older uses "payments"
+    #[serde(alias = "list")]
     pub payments: Vec<PaymentInfo>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct PaymentInfo {
+    #[serde(alias = "payment_id")]
     pub id: String,
+    #[serde(deserialize_with = "deserialize_status")]
     pub status: u8,  // 0 = pending, 1 = succeeded, 2 = failed
     pub amount_msat: Option<u64>,
     pub preimage: Option<String>,
