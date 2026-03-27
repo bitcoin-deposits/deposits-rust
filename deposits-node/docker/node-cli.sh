@@ -31,10 +31,13 @@ fi
 # Collect the user's command + subcommands + args, then append config flags.
 # deposits-node expects: <command> [subcommand] [--flag value ...] [--seed ...]
 # We pass everything through and let deposits-node parse it.
+LEDGER_RELAY="${DEPOSITS_LEDGER_RELAY:-wss://relay.ynniv.com}"
+
 docker exec "$NODE_NAME" deposits-node \
     "$@" \
     --seed "$SEED" \
     --network "$NETWORK" \
     --electrum http://electrs:3000 \
     --relay ws://127.0.0.1:7777 \
+    --slow-relay "$LEDGER_RELAY" \
     --data-dir /data/node
