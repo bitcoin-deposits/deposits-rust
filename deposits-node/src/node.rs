@@ -9239,10 +9239,10 @@ impl Node {
         // Since request_cosign always runs in a spawned task (per-ledger worker or
         // spawned periodic task), the main loop is free to pump events concurrently.
         // No polling or response draining needed here — just await the oneshot.
-        let deadline_ms = std::env::var("COSIGN_TIMEOUT_MS")
+        let deadline_ms: u64 = std::env::var("COSIGN_TIMEOUT_MS")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(5000u64);
+            .unwrap_or(3000);
         let deadline = Duration::from_millis(deadline_ms);
 
         tokio::select! {
@@ -9762,8 +9762,8 @@ impl Node {
         }
 
         // Send multicast co-sign request - first responder wins
-        // Retry up to 3 times since responses can be missed during polling gaps
-        let max_attempts = 3;
+        // Retry up to 5 times since responses can be missed during polling gaps
+        let max_attempts = 5;
         let mut last_error = None;
         let cosign_start = std::time::Instant::now();
 
