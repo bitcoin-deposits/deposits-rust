@@ -1,0 +1,11 @@
+target/
+.git/
+deposits-tools/data/
+deposits-tools/log/
+deposits-tools/certs/
+deposits-tools/secrets/
+deposits-tools/wallet-localhost/
+nostr-sdk-performance/
+strfry-performance/
+__pycache__/
+*.log
