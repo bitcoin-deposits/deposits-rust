@@ -46,6 +46,10 @@ fn derive_operator_secret(seed: &[u8; 32], network: Network) -> Result<SecretKey
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Install ring as the default rustls crypto provider.
+    // Required when building against stock nostr-sdk (without our patched nostr-relay-pool).
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_name_fn(|| {
