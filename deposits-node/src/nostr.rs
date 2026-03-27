@@ -715,6 +715,18 @@ impl NostrTransport {
                 .map_err(|e| Error::Nostr(format!("Failed to add relay {}: {}", relay, e)))?;
         }
 
+        // Also add slow relays to the main client pool so we receive
+        // ephemeral requests from clients who connect to the public relay.
+        for relay in &slow_relays {
+            if !relay_list.contains(relay) {
+                if let Err(e) = client.pool().add_relay(relay, relay_opts.clone()).await {
+                    tracing::warn!("Failed to add slow relay {} to main client: {}", relay, e);
+                } else {
+                    tracing::info!("Added slow relay {} to main subscription pool", relay);
+                }
+            }
+        }
+
         // Connect main client to relays with explicit timeout
         client.connect_with_timeout(std::time::Duration::from_secs(30)).await;
 
