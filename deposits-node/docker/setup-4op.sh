@@ -40,19 +40,24 @@ echo "  Reserves: $RESERVES_SATS sats each"
 echo ""
 
 # Step 1: Show funding addresses
-echo "=== Step 1: Fund node wallets ==="
-for name in "${NODES[@]}"; do
-    echo ""
-    echo "--- $name ---"
-    $CLI "$name" address || true
-done
+echo "=== Step 1: Funding addresses ==="
 echo ""
-echo "Send at least $RESERVES_SATS sats to each address above."
-echo "Press Enter when funded (or Ctrl+C to abort)..."
-read -r
+echo "Each node needs at least $RESERVES_SATS sats for reserves + fees."
+echo ""
+for name in "${NODES[@]}"; do
+    echo "--- $name ---"
+    $CLI "$name" address 2>/dev/null || echo "  (node not running?)"
+    echo ""
+done
+echo "Fund these addresses, then re-run with --skip-fund to continue."
+echo "To check balances: ./node-cli.sh <name> info"
+
+# Only show addresses unless told to continue
+if [ "$1" != "--skip-fund" ] && ! $SKIP_RESERVES; then
+    exit 0
+fi
 
 if ! $SKIP_RESERVES; then
-    # Step 2: Create reserves
     echo ""
     echo "=== Step 2: Create reserves ==="
     for name in "${NODES[@]}"; do
@@ -64,7 +69,6 @@ fi
 
 $RESERVES_ONLY && { echo "Done (reserves only)."; exit 0; }
 
-# Step 3: Open ledgers
 echo ""
 echo "=== Step 3: Open ledgers ==="
 for name in "${NODES[@]}"; do
@@ -77,22 +81,19 @@ for name in "${NODES[@]}"; do
         || echo "  (may already exist)"
 done
 
-# Step 4: Show info for quorum setup
 echo ""
 echo "=== Step 4: Node info ==="
 for name in "${NODES[@]}"; do
     echo ""
     echo "--- $name ---"
-    $CLI "$name" info || true
+    $CLI "$name" info 2>/dev/null || true
 done
 
 echo ""
-echo "=== Setup complete ==="
+echo "=== Next steps ==="
 echo ""
-echo "Next steps:"
-echo "  1. Note each node's reserves_id and operator pubkey from the info above"
-echo "  2. Set up quorum: ./node-cli.sh alice quorum begin"
-echo "  3. Add members:   ./node-cli.sh alice partner add <reserves_id> <member_pubkey> <member_ledger>"
-echo "  4. Lock collateral between operators"
+echo "  ./node-cli.sh alice quorum begin"
+echo "  ./node-cli.sh alice partner add <reserves_id> <member_pubkey> <member_ledger>"
+echo "  (repeat for each pair)"
 echo ""
-echo "See deposits-tools/doc/DEPOSIT_ACCESS_CONTROL.md for access control setup."
+echo "See deposits-tools/doc/DEPOSIT_ACCESS_CONTROL.md for access control."
