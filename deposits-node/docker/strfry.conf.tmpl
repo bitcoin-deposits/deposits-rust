@@ -1,0 +1,19 @@
+db = "__RELAY_DIR__/"
+
+relay {
+    bind = "0.0.0.0"
+    port = __RELAY_PORT__
+
+    info {
+        name = "deposits-node relay"
+        description = "Ephemeral relay for deposits protocol messages"
+    }
+
+    maxWebsocketPayloadSize = 131072
+
+    events {
+        maxEventSize = 65536
+        rejectEventsNewerThanSeconds = 900
+        ephemeralEventsLifetimeSeconds = 60
+    }
+}
