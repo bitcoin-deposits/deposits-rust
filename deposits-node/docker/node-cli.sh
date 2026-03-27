@@ -11,11 +11,10 @@
 set -e
 
 NODE_NAME="$1"
-COMMAND="$2"
-shift 2 || true
+shift || true
 
-if [ -z "$NODE_NAME" ] || [ -z "$COMMAND" ]; then
-    echo "Usage: $0 <node-name> <command> [args...]"
+if [ -z "$NODE_NAME" ] || [ $# -eq 0 ]; then
+    echo "Usage: $0 <node-name> <command> [subcommand] [args...]"
     echo "  Nodes: alice, bob, charlie, diana"
     exit 1
 fi
@@ -29,11 +28,13 @@ if [ -z "$SEED" ]; then
     exit 1
 fi
 
+# Collect the user's command + subcommands + args, then append config flags.
+# deposits-node expects: <command> [subcommand] [--flag value ...] [--seed ...]
+# We pass everything through and let deposits-node parse it.
 docker exec "$NODE_NAME" deposits-node \
-    "$COMMAND" \
+    "$@" \
     --seed "$SEED" \
     --network "$NETWORK" \
     --electrum http://electrs:3000 \
     --relay ws://127.0.0.1:7777 \
-    --data-dir /data/node \
-    "$@"
+    --data-dir /data/node
