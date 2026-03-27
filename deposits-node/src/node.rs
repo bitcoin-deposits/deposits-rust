@@ -8678,12 +8678,17 @@ impl Node {
             return;
         }
 
+        tracing::info!("auto_credit: checking {} pending invoice(s)", pending.len());
+
         // Query LDK for payment status
         let cli = LdkCli::from_env();
         let payments = match cli.list_payments() {
-            Ok(resp) => resp.payments,
+            Ok(resp) => {
+                tracing::info!("auto_credit: LDK returned {} payments", resp.payments.len());
+                resp.payments
+            }
             Err(e) => {
-                tracing::debug!("Failed to list payments for invoice check: {}", e);
+                tracing::warn!("auto_credit: Failed to list payments: {}", e);
                 return;
             }
         };
