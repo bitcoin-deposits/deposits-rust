@@ -2920,6 +2920,7 @@ async fn deposit_command(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         "open" => deposit_open(&args[1..]).await,
         "ls" => deposit_ls(&args[1..]).await,
         "invoice" => deposit_invoice(&args[1..]).await,
+        "pending" => deposit_pending(&args[1..]).await,
         "credit" => deposit_credit(&args[1..]).await,
         "check" => deposit_check(&args[1..]).await,
         "complete" => deposit_complete(&args[1..]).await,
@@ -3146,6 +3147,69 @@ async fn deposit_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Erro
 }
 
 /// Open a new deposit in a ledger
+/// Show pending invoices and deposit offers
+async fn deposit_pending(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let config = parse_config(args)?;
+    let wallet_dir = config.data_dir.join("wallet");
+
+    // Pending invoices
+    let invoices_file = wallet_dir.join("pending_invoices.json");
+    if invoices_file.exists() {
+        let contents = std::fs::read_to_string(&invoices_file)?;
+        let invoices: Vec<serde_json::Value> = serde_json::from_str(&contents).unwrap_or_default();
+        if invoices.is_empty() {
+            println!("No pending invoices.");
+        } else {
+            println!("Pending invoices ({}):", invoices.len());
+            for inv in &invoices {
+                let hash = inv.get("payment_hash_hex").and_then(|v| v.as_str()).unwrap_or("?");
+                let ledger = inv.get("ledger_id").and_then(|v| v.as_str()).unwrap_or("?");
+                let amount = inv.get("amount_msat").and_then(|v| v.as_u64()).unwrap_or(0);
+                let created = inv.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
+                let age_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs().saturating_sub(created))
+                    .unwrap_or(0);
+                let age_min = age_secs / 60;
+                println!("  hash:{:.16}  ledger:{:.16}  {} sats  {}m ago",
+                    hash, ledger, amount / 1000, age_min);
+            }
+        }
+    } else {
+        println!("No pending invoices.");
+    }
+
+    // Pending deposit offers
+    let offers_file = wallet_dir.join("deposit_offers.json");
+    if offers_file.exists() {
+        let contents = std::fs::read_to_string(&offers_file)?;
+        let offers: Vec<serde_json::Value> = serde_json::from_str(&contents).unwrap_or_default();
+        let pending: Vec<&serde_json::Value> = offers.iter()
+            .filter(|o| {
+                o.get(1).and_then(|s| s.as_str()) == Some("Pending")
+                    || o.get(1).and_then(|v| v.get("FundingReceived")).is_some()
+            })
+            .collect();
+        if pending.is_empty() {
+            println!("No pending deposit offers.");
+        } else {
+            println!("\nPending deposit offers ({}):", pending.len());
+            for offer in &pending {
+                if let Some(o) = offer.get(0) {
+                    let id = o.get("offer_id").and_then(|v| v.as_str()).unwrap_or("?");
+                    let ledger = o.get("ledger_id").and_then(|v| v.as_str()).unwrap_or("?");
+                    let status = offer.get(1).map(|v| v.to_string()).unwrap_or_default();
+                    println!("  offer:{:.16}  ledger:{:.16}  {}", id, ledger, status);
+                }
+            }
+        }
+    } else {
+        println!("No pending deposit offers.");
+    }
+
+    Ok(())
+}
+
 async fn deposit_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     use deposits_node::nostr::NostrTransportBuilder;
 
