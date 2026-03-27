@@ -293,17 +293,38 @@ print('Deposit tracked in $WALLET_DIR/deposits.json')
     ;;
 
 invoice)
-    LEDGER_ID="$1"
+    DEPOSIT_INDEX="${1:-0}"
     AMOUNT_SATS="$2"
-    INDEX="${3:-0}"
 
-    if [ -z "$LEDGER_ID" ] || [ -z "$AMOUNT_SATS" ]; then
-        echo "Usage: $0 --wallet <dir> invoice <ledger_id> <amount_sats> [key_index]"
+    if [ -z "$AMOUNT_SATS" ]; then
+        echo "Usage: $0 --wallet <dir> invoice <deposit_index> <amount_sats>"
+        echo ""
+        echo "Use 'balance' to see deposit indices."
         exit 1
     fi
 
+    # Look up deposit from wallet json
+    DEPOSIT_INFO=$(python3 -c "
+import json, sys
+deps = json.load(open('$WALLET_DIR/deposits.json'))
+idx = $DEPOSIT_INDEX
+if idx >= len(deps):
+    print(f'ERROR: deposit index {idx} out of range (have {len(deps)})', file=sys.stderr)
+    sys.exit(1)
+d = deps[idx]
+print(f\"{d['ledger_id']} {d['pubkey']} {d.get('key_index', 0)}\")
+" 2>&1)
+
+    if echo "$DEPOSIT_INFO" | grep -q "^ERROR"; then
+        echo "$DEPOSIT_INFO"
+        exit 1
+    fi
+
+    LEDGER_ID=$(echo "$DEPOSIT_INFO" | awk '{print $1}')
+    PUBKEY=$(echo "$DEPOSIT_INFO" | awk '{print $2}')
+    INDEX=$(echo "$DEPOSIT_INFO" | awk '{print $3}')
+
     SEED=$(cat "$SEED_FILE")
-    PUBKEY=$(derive_pubkey "$SEED" "$INDEX")
 
     echo "Creating invoice..."
     echo "  Ledger: ${LEDGER_ID:0:16}..."
@@ -391,22 +412,21 @@ PYEOF
     ;;
 
 fund)
-    LEDGER_ID="$1"
+    DEPOSIT_INDEX="${1:-0}"
     AMOUNT_SATS="$2"
-    INDEX="${3:-0}"
 
-    if [ -z "$LEDGER_ID" ] || [ -z "$AMOUNT_SATS" ]; then
-        echo "Usage: $0 --wallet <dir> fund <ledger_id> <amount_sats> [key_index]"
+    if [ -z "$AMOUNT_SATS" ]; then
+        echo "Usage: $0 --wallet <dir> fund <deposit_index> <amount_sats>"
         echo ""
         echo "Creates an invoice and prints it for payment."
-        echo "After paying, the deposit is automatically credited."
+        echo "Use 'balance' to see deposit indices."
         exit 1
     fi
 
     echo "=== Fund deposit ==="
 
     # Get the invoice
-    INVOICE=$("$0" --wallet "$WALLET_DIR" --relay "$LEDGER_RELAY" --network "$NETWORK" invoice "$LEDGER_ID" "$AMOUNT_SATS" "$INDEX" 2>&1)
+    INVOICE=$("$0" --wallet "$WALLET_DIR" --relay "$LEDGER_RELAY" --network "$NETWORK" invoice "$DEPOSIT_INDEX" "$AMOUNT_SATS" 2>&1)
 
     if echo "$INVOICE" | grep -q "^lnbc"; then
         echo ""
@@ -425,14 +445,14 @@ fund)
 balance)
     echo "Tracked deposits:"
     if [ -f "$WALLET_DIR/deposits.json" ]; then
-        python3 -c "
-import json
-deps = json.load(open('$WALLET_DIR/deposits.json'))
-for d in deps:
-    print(f\"  {d.get('ledger_id','?')[:16]}... pubkey:{d.get('pubkey','?')[:16]}... idx:{d.get('key_index',0)} status:{d.get('status','?')}\")
+        python3 - "$WALLET_DIR" << 'PYEOF'
+import json, sys
+deps = json.load(open(sys.argv[1] + '/deposits.json'))
+for i, d in enumerate(deps):
+    print(f"  [{i}] ledger:{d.get('ledger_id','?')[:16]}... pubkey:{d.get('pubkey','?')[:16]}... status:{d.get('status','?')}")
 if not deps:
     print('  (none)')
-" 2>/dev/null || echo "  (error reading deposits.json)"
+PYEOF
     else
         echo "  (none)"
     fi
