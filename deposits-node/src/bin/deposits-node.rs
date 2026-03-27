@@ -3112,11 +3112,15 @@ async fn deposit_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         i += 1;
     }
 
+    // Check for --collateral flag
+    let is_collateral = config_args.iter().any(|a| a == "--collateral");
+    let config_args: Vec<String> = config_args.into_iter().filter(|a| a != "--collateral").collect();
+
     if positional.len() < 2 {
-        eprintln!("Usage: deposits-node deposit open <reserves_id> <deposit_pubkey> [options]");
+        eprintln!("Usage: deposits-node deposit open <reserves_id> <deposit_pubkey> [--collateral] [options]");
         eprintln!("\nExample:");
         eprintln!("  deposits-node deposit open 02abc...partner 02def...deposit");
-        eprintln!("\nThis opens a new deposit in the ledger with the given partner.");
+        eprintln!("  deposits-node deposit open <ledger_id> <pubkey> --collateral");
         return Ok(());
     }
 
@@ -3160,12 +3164,15 @@ async fn deposit_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     println!("Opening deposit...");
     println!("  Ledger ID: {}", ledger_id);
     println!("  Descriptor: {}", descriptor);
+    if is_collateral {
+        println!("  Type: COLLATERAL");
+    }
     if let Some(ref f) = fees {
         println!("  Fees: {} bps/year + {} sats/year (period: {} blocks)",
             f.annualized_bps, f.annualized_msats, f.frequency_blocks);
     }
 
-    let deposit = node.open_deposit(&ledger_id, &descriptor, fees, None, false, false).await?;
+    let deposit = node.open_deposit(&ledger_id, &descriptor, fees, None, is_collateral, false).await?;
 
     println!("\nDeposit opened!");
     println!("  Deposit ID: {}", hex::encode(deposit.deposit_id));
