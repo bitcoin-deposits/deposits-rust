@@ -1839,6 +1839,12 @@ impl Node {
                 metrics::emit_process_metrics();
                 metrics::emit_thread_cpu_metrics();
 
+                // Check for paid Lightning invoices on every reload cycle (~5s).
+                // Lightweight no-op when no invoices are pending.
+                if !self.pending_invoices.lock().unwrap().is_empty() {
+                    self.auto_credit_received_payments().await;
+                }
+
                 metrics::record_run_loop_phase("reload", reload_start.elapsed());
                 last_reload = tokio::time::Instant::now();
             } // else (reload body)
