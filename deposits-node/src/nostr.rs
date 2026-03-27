@@ -1317,9 +1317,18 @@ impl NostrTransport {
 
         let event_id = event.id.to_hex();
 
-        self.send_event_with_timeout(event)
-            .await
-            .map_err(|e| Error::Nostr(format!("Failed to send response: {}", e)))?;
+        // Send response to ALL relays (not just primary) so the requesting
+        // client receives it regardless of which relay they're connected to.
+        {
+            let relays = self.client.relays().await;
+            let urls: Vec<RelayUrl> = relays.keys().cloned().collect();
+            tokio::time::timeout(Self::SEND_TIMEOUT,
+                self.client.send_msg_to(urls, ClientMessage::event(event))
+            )
+                .await
+                .map_err(|_| Error::Nostr("send response timed out".to_string()))?
+                .map_err(|e| Error::Nostr(format!("Failed to send response: {}", e)))?;
+        }
 
         tracing::debug!(
             "Sent ledger response: request={}, action={}, status={}, event={}",
