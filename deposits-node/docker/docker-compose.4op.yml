@@ -6,16 +6,14 @@
 # Setup:
 #   1. Generate seeds:
 #      for name in alice bob charlie diana; do
+#        mkdir -p /mnt/bitcoind/deposits/$name
 #        openssl rand -hex 32 > /mnt/bitcoind/deposits/$name/seed
 #      done
 #
 #   2. Create access control files (optional):
-#      echo "true" > /mnt/bitcoind/deposits/access_control
 #      touch /mnt/bitcoind/deposits/deposit_allowlist.txt
 #      touch /mnt/bitcoind/deposits/deposit_denylist.txt
-#      echo "getalby.com" > /mnt/bitcoind/deposits/deposit_domain_allowlist.txt
-#
-#   3. Start: docker-compose -f docker-compose.yml -f docker-compose.4op.yml up -d
+#      touch /mnt/bitcoind/deposits/deposit_domain_allowlist.txt
 
 services:
   alice:
@@ -31,6 +29,9 @@ services:
       NODE_NAME: alice
       RELAY_PORT: "7777"
       METRICS_PORT: "9100"
+      LDK_CLI: /ldk-cli/ldk-server-cli
+      LDK_HOST: lightning
+      LDK_PORT: "3000"
       DEPOSIT_ACCESS_CONTROL: "${DEPOSIT_ACCESS_CONTROL:-false}"
       ATTESTATION_VERIFIER_PUBKEY: "${ATTESTATION_VERIFIER_PUBKEY:-}"
       MAX_DEPOSIT_BALANCE_MSATS: "${MAX_DEPOSIT_BALANCE_MSATS:-0}"
@@ -43,8 +44,11 @@ services:
       - /mnt/bitcoind/deposits/deposit_allowlist.txt:/config/deposit_allowlist.txt:ro
       - /mnt/bitcoind/deposits/deposit_denylist.txt:/config/deposit_denylist.txt:ro
       - /mnt/bitcoind/deposits/deposit_domain_allowlist.txt:/config/deposit_domain_allowlist.txt:ro
+      - /mnt/bitcoind/ldk:/ldk-data:ro
+      - ldk_cli:/ldk-cli:ro
     depends_on:
       - electrs
+      - lightning
     networks:
       - bitcoin-network
 
@@ -61,6 +65,9 @@ services:
       NODE_NAME: bob
       RELAY_PORT: "7777"
       METRICS_PORT: "9100"
+      LDK_CLI: /ldk-cli/ldk-server-cli
+      LDK_HOST: lightning
+      LDK_PORT: "3000"
       DEPOSIT_ACCESS_CONTROL: "${DEPOSIT_ACCESS_CONTROL:-false}"
       ATTESTATION_VERIFIER_PUBKEY: "${ATTESTATION_VERIFIER_PUBKEY:-}"
       MAX_DEPOSIT_BALANCE_MSATS: "${MAX_DEPOSIT_BALANCE_MSATS:-0}"
@@ -73,8 +80,11 @@ services:
       - /mnt/bitcoind/deposits/deposit_allowlist.txt:/config/deposit_allowlist.txt:ro
       - /mnt/bitcoind/deposits/deposit_denylist.txt:/config/deposit_denylist.txt:ro
       - /mnt/bitcoind/deposits/deposit_domain_allowlist.txt:/config/deposit_domain_allowlist.txt:ro
+      - /mnt/bitcoind/ldk:/ldk-data:ro
+      - ldk_cli:/ldk-cli:ro
     depends_on:
       - electrs
+      - lightning
     networks:
       - bitcoin-network
 
@@ -91,6 +101,9 @@ services:
       NODE_NAME: charlie
       RELAY_PORT: "7777"
       METRICS_PORT: "9100"
+      LDK_CLI: /ldk-cli/ldk-server-cli
+      LDK_HOST: lightning
+      LDK_PORT: "3000"
       DEPOSIT_ACCESS_CONTROL: "${DEPOSIT_ACCESS_CONTROL:-false}"
       ATTESTATION_VERIFIER_PUBKEY: "${ATTESTATION_VERIFIER_PUBKEY:-}"
       MAX_DEPOSIT_BALANCE_MSATS: "${MAX_DEPOSIT_BALANCE_MSATS:-0}"
@@ -103,8 +116,11 @@ services:
       - /mnt/bitcoind/deposits/deposit_allowlist.txt:/config/deposit_allowlist.txt:ro
       - /mnt/bitcoind/deposits/deposit_denylist.txt:/config/deposit_denylist.txt:ro
       - /mnt/bitcoind/deposits/deposit_domain_allowlist.txt:/config/deposit_domain_allowlist.txt:ro
+      - /mnt/bitcoind/ldk:/ldk-data:ro
+      - ldk_cli:/ldk-cli:ro
     depends_on:
       - electrs
+      - lightning
     networks:
       - bitcoin-network
 
@@ -121,6 +137,9 @@ services:
       NODE_NAME: diana
       RELAY_PORT: "7777"
       METRICS_PORT: "9100"
+      LDK_CLI: /ldk-cli/ldk-server-cli
+      LDK_HOST: lightning
+      LDK_PORT: "3000"
       DEPOSIT_ACCESS_CONTROL: "${DEPOSIT_ACCESS_CONTROL:-false}"
       ATTESTATION_VERIFIER_PUBKEY: "${ATTESTATION_VERIFIER_PUBKEY:-}"
       MAX_DEPOSIT_BALANCE_MSATS: "${MAX_DEPOSIT_BALANCE_MSATS:-0}"
@@ -133,7 +152,18 @@ services:
       - /mnt/bitcoind/deposits/deposit_allowlist.txt:/config/deposit_allowlist.txt:ro
       - /mnt/bitcoind/deposits/deposit_denylist.txt:/config/deposit_denylist.txt:ro
       - /mnt/bitcoind/deposits/deposit_domain_allowlist.txt:/config/deposit_domain_allowlist.txt:ro
+      - /mnt/bitcoind/ldk:/ldk-data:ro
+      - ldk_cli:/ldk-cli:ro
     depends_on:
       - electrs
+      - lightning
     networks:
       - bitcoin-network
+
+volumes:
+  ldk_cli:
+    external: true
+
+networks:
+  bitcoin-network:
+    external: true

@@ -99,6 +99,19 @@ echo "  Ledger relay: $LEDGER_RELAY"
 [ -n "$ATTESTATION_VERIFIER_PUBKEY" ] && echo "  Verifier:     ${ATTESTATION_VERIFIER_PUBKEY}"
 [ -n "$NODE_NAME" ] && echo "  Name:         $NODE_NAME"
 
+# --- LDK Lightning setup (optional) ---
+# If LDK data is mounted, auto-configure the API key
+if [ -d "/ldk-data" ] && [ -z "$LDK_API_KEY" ]; then
+    API_KEY_FILE="/ldk-data/${NETWORK}/api_key"
+    if [ -f "$API_KEY_FILE" ]; then
+        export LDK_API_KEY=$(cat "$API_KEY_FILE" | od -A n -t x1 | tr -d ' \n')
+        echo "  LDK API key: loaded from $API_KEY_FILE"
+    fi
+fi
+if [ -f "/ldk-data/tls.crt" ] && [ -z "$LDK_TLS_CERT" ]; then
+    export LDK_TLS_CERT="/ldk-data/tls.crt"
+fi
+
 exec deposits-node run \
     --seed "$NODE_SEED" \
     --network "$NETWORK" \
