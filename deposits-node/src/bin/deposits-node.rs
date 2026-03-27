@@ -785,7 +785,8 @@ fn derive_deposit_key(args: &[String]) -> Result<(), String> {
         .derive_priv(&secp, &deposit_path)
         .map_err(|e| format!("Failed to derive deposit key: {}", e))?;
 
-    // Output just the secret key hex (for piping)
+    let pubkey = PublicKey::from_secret_key(&secp, &deposit_xpriv.private_key);
+    eprintln!("pubkey: {}", pubkey);
     println!("{}", hex::encode(deposit_xpriv.private_key.secret_bytes()));
 
     Ok(())
