@@ -138,7 +138,7 @@ pub struct OfferCoSignResult {
 }
 
 /// A pending Lightning invoice waiting for payment
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PendingInvoice {
     /// The ledger this invoice belongs to
     pub ledger_id: String,
@@ -152,6 +152,9 @@ pub struct PendingInvoice {
     pub invoice: String,
     /// When the invoice was created
     pub created_at: u64,
+    /// Payment hash (hex) — for persistence/lookup
+    #[serde(default)]
+    pub payment_hash_hex: String,
 }
 
 /// State for a non-blocking confiscation request awaiting co-signatures.
@@ -432,7 +435,7 @@ impl Node {
             pending_cosign_requests: Arc::new(Mutex::new(HashMap::new())),
             pending_consent_requests: Arc::new(Mutex::new(HashMap::new())),
             cosign_semaphore: Arc::new(tokio::sync::Semaphore::new(8)),
-            pending_invoices: Arc::new(Mutex::new(HashMap::new())),
+            pending_invoices: Arc::new(Mutex::new(Self::load_pending_invoices(&config.data_dir))),
             processed_requests: Mutex::new(std::collections::HashSet::new()),
             processed_requests_prev: Mutex::new(std::collections::HashSet::new()),
             sent_events: Mutex::new(std::collections::HashSet::new()),
@@ -5758,9 +5761,11 @@ impl Node {
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_secs())
                         .unwrap_or(0),
+                    payment_hash_hex: hex::encode(payment_hash),
                 };
 
                 self.pending_invoices.lock().unwrap().insert(payment_hash, pending);
+                self.save_pending_invoices();
 
                 tracing::info!("Created invoice for {}... amount={} sats, hash={}",
                     &deposit_pubkey_hex[..16.min(deposit_pubkey_hex.len())],
@@ -6020,6 +6025,7 @@ impl Node {
 
             // Look up the pending invoice to find the destination deposit
             let pending = self.pending_invoices.lock().unwrap().remove(&payment_id);
+            self.save_pending_invoices();
             if let Some(pending) = pending {
                 // Fulfill the lock (debit sender)
                 let fulfill_sequence = {
@@ -8756,6 +8762,9 @@ impl Node {
                 self.pending_invoices.lock().unwrap().remove(&payment_hash);
             }
         }
+
+        // Persist after any changes
+        self.save_pending_invoices();
     }
 
     /// Find the ledger_id for a specific deposit offer
@@ -11492,6 +11501,49 @@ impl Node {
     }
 
     /// Load deposit offers from disk
+    /// Load pending invoices from disk
+    fn load_pending_invoices(data_dir: &PathBuf) -> HashMap<[u8; 32], PendingInvoice> {
+        let path = data_dir.join("wallet").join("pending_invoices.json");
+        if !path.exists() {
+            return HashMap::new();
+        }
+        match std::fs::read_to_string(&path) {
+            Ok(contents) => {
+                let invoices: Vec<PendingInvoice> = serde_json::from_str(&contents).unwrap_or_default();
+                let mut map = HashMap::new();
+                for inv in invoices {
+                    if let Ok(hash_bytes) = hex::decode(&inv.payment_hash_hex) {
+                        if hash_bytes.len() == 32 {
+                            let mut key = [0u8; 32];
+                            key.copy_from_slice(&hash_bytes);
+                            map.insert(key, inv);
+                        }
+                    }
+                }
+                if !map.is_empty() {
+                    tracing::info!("Loaded {} pending invoices from disk", map.len());
+                }
+                map
+            }
+            Err(e) => {
+                tracing::warn!("Failed to read pending invoices: {}", e);
+                HashMap::new()
+            }
+        }
+    }
+
+    /// Save pending invoices to disk
+    fn save_pending_invoices(&self) {
+        let path = self.data_dir.join("wallet").join("pending_invoices.json");
+        let invoices: Vec<PendingInvoice> = self.pending_invoices.lock().unwrap()
+            .values().cloned().collect();
+        if let Ok(json) = serde_json::to_string_pretty(&invoices) {
+            if let Err(e) = std::fs::write(&path, json) {
+                tracing::warn!("Failed to save pending invoices: {}", e);
+            }
+        }
+    }
+
     fn load_deposit_offers(
         data_dir: &PathBuf,
     ) -> Result<HashMap<[u8; 32], (DepositOffer, DepositOfferStatus)>, Error> {
