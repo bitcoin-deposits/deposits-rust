@@ -120,10 +120,10 @@ impl LdkCli {
     /// Create a BOLT11 invoice
     pub fn create_invoice(&self, amount_msat: u64, description: &str) -> Result<String, Error> {
         tracing::info!("Creating invoice via ldk-server-cli: {} msat", amount_msat);
-        let amount_str = amount_msat.to_string();
+        let amount_str = format!("{}msat", amount_msat);
         let output = self.run_command(&[
             "bolt11-receive",
-            "--amount-msat", &amount_str,
+            &amount_str,
             "--description", description,
         ])?;
 
@@ -150,7 +150,7 @@ impl LdkCli {
         tracing::info!("Paying invoice via ldk-server-cli");
         let output = self.run_command(&[
             "bolt11-send",
-            "--invoice", invoice,
+            invoice,
         ])?;
 
         let response: Bolt11SendResponse = serde_json::from_str(&output)
@@ -161,11 +161,11 @@ impl LdkCli {
     /// Pay a BOLT11 invoice with a specific amount (for amountless invoices)
     pub fn pay_invoice_with_amount(&self, invoice: &str, amount_msat: u64) -> Result<String, Error> {
         tracing::info!("Paying invoice via ldk-server-cli with amount: {} msat", amount_msat);
-        let amount_str = amount_msat.to_string();
+        let amount_str = format!("{}msat", amount_msat);
         let output = self.run_command(&[
             "bolt11-send",
-            "--invoice", invoice,
-            "--amount-msat", &amount_str,
+            invoice,
+            &amount_str,
         ])?;
 
         let response: Bolt11SendResponse = serde_json::from_str(&output)
