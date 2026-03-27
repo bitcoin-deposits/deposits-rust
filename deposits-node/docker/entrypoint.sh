@@ -70,7 +70,7 @@ sed "s|__RELAY_DIR__|${RELAY_DIR}|g; s|__RELAY_PORT__|${RELAY_PORT}|g" \
     /etc/strfry.conf.tmpl > /tmp/strfry.conf
 
 echo "Starting relay on port $RELAY_PORT..."
-strfry relay /tmp/strfry.conf &
+strfry --config=/tmp/strfry.conf relay &
 sleep 1
 
 LOCAL_RELAY="ws://127.0.0.1:${RELAY_PORT}"

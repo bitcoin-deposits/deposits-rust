@@ -1,7 +1,7 @@
 FROM rust:slim-bookworm AS node-builder
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends pkg-config libssl-dev && \
+    apt-get install -y --no-install-recommends pkg-config libssl-dev gcc libc6-dev make && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -31,7 +31,7 @@ RUN cargo build --release --bin deposits-node
 FROM debian:bookworm AS relay-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git g++ make pkg-config libtool autoconf \
+    git ca-certificates g++ make pkg-config libtool autoconf \
     libssl-dev zlib1g-dev liblmdb-dev libflatbuffers-dev \
     libsecp256k1-dev libzstd-dev && \
     rm -rf /var/lib/apt/lists/*

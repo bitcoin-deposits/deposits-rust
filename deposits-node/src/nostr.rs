@@ -701,8 +701,12 @@ impl NostrTransport {
             None // single relay: publish to all (same thing)
         };
 
-        let relay_opts = RelayOptions::default()
-            .skip_event_verification(skip_nostr_verify);
+        let relay_opts = RelayOptions::default();
+        // skip_event_verification is only available in our patched nostr-relay-pool fork.
+        // When building against stock crates.io, verification is always enabled.
+        #[cfg(feature = "skip-verify")]
+        let relay_opts = relay_opts.skip_event_verification(skip_nostr_verify);
+        let _ = skip_nostr_verify; // suppress unused warning when feature is off
         for relay in &relay_list {
             client
                 .pool()
