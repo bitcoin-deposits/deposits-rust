@@ -6,11 +6,16 @@ RUN apt-get update && \
 
 WORKDIR /build
 
-# Copy workspace structure
+# Copy workspace Cargo.toml and strip the [patch] section (references a local
+# path that doesn't exist in the Docker build context)
 COPY Cargo.toml ./
+RUN sed -i '/\[patch.crates-io\]/,$ d' Cargo.toml
+
+# Copy crates
 COPY deposits-protocol/ deposits-protocol/
 COPY deposits-core/ deposits-core/
 COPY deposits-node/ deposits-node/
+
 # Stub out deposits-tools so workspace resolves (not built)
 COPY deposits-tools/Cargo.toml deposits-tools/Cargo.toml
 RUN mkdir -p deposits-tools/src && echo "" > deposits-tools/src/lib.rs && \
@@ -19,9 +24,6 @@ RUN mkdir -p deposits-tools/src && echo "" > deposits-tools/src/lib.rs && \
                treasury-send standalone_reserves_demo discover replay-ledger; do \
         echo "fn main() {}" > deposits-tools/src/bin/$bin.rs; \
     done
-
-# Patch out the nostr-relay-pool override (not available in this context)
-RUN sed -i '/\[patch.crates-io\]/,$ d' Cargo.toml
 
 RUN cargo build --release --bin deposits-node
 
