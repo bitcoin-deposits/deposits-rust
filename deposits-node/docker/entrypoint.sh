@@ -100,11 +100,13 @@ echo "  Ledger relay: $LEDGER_RELAY"
 [ -n "$NODE_NAME" ] && echo "  Name:         $NODE_NAME"
 
 # --- LDK Lightning setup (optional) ---
-# If LDK data is mounted, auto-configure the API key
+# If LDK data is mounted, auto-configure the API key.
+# Write the hex key to a well-known file so docker exec commands can find it too.
 if [ -d "/ldk-data" ] && [ -z "$LDK_API_KEY" ]; then
     API_KEY_FILE="/ldk-data/${NETWORK}/api_key"
     if [ -f "$API_KEY_FILE" ]; then
         export LDK_API_KEY=$(cat "$API_KEY_FILE" | od -A n -t x1 | tr -d ' \n')
+        echo "$LDK_API_KEY" > /data/ldk_api_key_hex
         echo "  LDK API key: loaded from $API_KEY_FILE"
     fi
 fi

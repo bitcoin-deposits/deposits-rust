@@ -39,7 +39,9 @@ impl Default for LdkCliConfig {
                 .ok()
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(3000),
-            api_key: std::env::var("LDK_API_KEY").unwrap_or_else(|_| "test_api_key".to_string()),
+            api_key: std::env::var("LDK_API_KEY")
+                .or_else(|_| std::fs::read_to_string("/data/ldk_api_key_hex").map(|s| s.trim().to_string()))
+                .unwrap_or_else(|_| "test_api_key".to_string()),
             tls_cert: std::env::var("LDK_TLS_CERT").ok(),
         }
     }
