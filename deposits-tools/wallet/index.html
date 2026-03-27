@@ -124,11 +124,11 @@ body.hide-amounts .amt { visibility: hidden; }
       <h3>Get Started</h3>
       <div class="form-group">
         <label>Ledger relay</label>
-        <input id="setup-ledger-relay" type="text" placeholder="ws://localhost:7779" value="ws://localhost:7779">
+        <input id="setup-ledger-relay" type="text" placeholder="wss://relay.example.com" value="">
       </div>
       <div class="form-group">
         <label>Operator relays (optional)</label>
-        <input id="setup-relay" type="text" placeholder="ws://localhost:7801,..." value="">
+        <input id="setup-relay" type="text" placeholder="ws://host:7801,ws://host:7802,..." value="">
       </div>
       <div class="form-group">
         <label>Network</label>
@@ -934,8 +934,8 @@ let state = {
   mnemonic: null,    // BIP-39 recovery phrase (if generated)
   backupVerified: false,
   network: 'regtest',
-  relays: ['ws://localhost:7801', 'ws://localhost:7802', 'ws://localhost:7803', 'ws://localhost:7804'],
-  ledgerRelay: 'ws://localhost:7779',  // durable relay for advertisements (read-only)
+  relays: [],  // populated from setup page or advertisement relay_url
+  ledgerRelay: '',  // durable relay — set on setup page (e.g. wss://relay.ynniv.com)
   deposits: [],
   keyIndex: 0,
 };
@@ -966,9 +966,9 @@ function loadState() {
     const s = JSON.parse(raw);
     state.seed = hexToBytes(s.seed);
     state.network = s.network || 'regtest';
-    state.relays = (s.relays || (s.relay ? [s.relay] : ['ws://localhost:7801']))
-      .filter(r => r !== (s.ledgerRelay || 'ws://localhost:7779')); // strip ledger relay from operator list
-    state.ledgerRelay = s.ledgerRelay || 'ws://localhost:7779';
+    state.relays = (s.relays || (s.relay ? [s.relay] : []))
+      .filter(r => r && r !== s.ledgerRelay); // strip ledger relay from operator list
+    state.ledgerRelay = s.ledgerRelay || '';
     state.mnemonic = s.mnemonic || null;
     state.backupVerified = s.backupVerified || false;
     state.deposits = s.deposits || [];
