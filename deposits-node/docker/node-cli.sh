@@ -4,15 +4,17 @@
 # Usage:
 #   ./node-cli.sh alice reserves create 1000000
 #   ./node-cli.sh bob ledger open --annual-fee-bps 50
-#   ./node-cli.sh charlie partner add <reserves_id> <member_pubkey> <member_ledger>
+#   ./node-cli.sh charlie quorum begin
 #   ./node-cli.sh diana info
+#   ./node-cli.sh alice address
 
 set -e
 
 NODE_NAME="$1"
-shift
+COMMAND="$2"
+shift 2 || true
 
-if [ -z "$NODE_NAME" ]; then
+if [ -z "$NODE_NAME" ] || [ -z "$COMMAND" ]; then
     echo "Usage: $0 <node-name> <command> [args...]"
     echo "  Nodes: alice, bob, charlie, diana"
     exit 1
@@ -28,6 +30,7 @@ if [ -z "$SEED" ]; then
 fi
 
 docker exec "$NODE_NAME" deposits-node \
+    "$COMMAND" \
     --seed "$SEED" \
     --network "$NETWORK" \
     --electrum http://electrs:3000 \
