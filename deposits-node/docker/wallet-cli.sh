@@ -292,9 +292,155 @@ print('Deposit tracked in $WALLET_DIR/deposits.json')
     fi
     ;;
 
+invoice)
+    LEDGER_ID="$1"
+    AMOUNT_SATS="$2"
+    INDEX="${3:-0}"
+
+    if [ -z "$LEDGER_ID" ] || [ -z "$AMOUNT_SATS" ]; then
+        echo "Usage: $0 --wallet <dir> invoice <ledger_id> <amount_sats> [key_index]"
+        exit 1
+    fi
+
+    SEED=$(cat "$SEED_FILE")
+    PUBKEY=$(derive_pubkey "$SEED" "$INDEX")
+
+    echo "Creating invoice..."
+    echo "  Ledger: ${LEDGER_ID:0:16}..."
+    echo "  Pubkey: $PUBKEY"
+    echo "  Amount: $AMOUNT_SATS sats"
+    echo ""
+
+    ALL_RELAYS="$LEDGER_RELAY"
+    [ -n "$EXTRA_RELAYS" ] && ALL_RELAYS="$ALL_RELAYS,$EXTRA_RELAYS"
+
+    python3 - "$SEED" "$PUBKEY" "$LEDGER_ID" "$AMOUNT_SATS" "$ALL_RELAYS" << 'PYEOF'
+import json, hashlib, time, sys
+try:
+    from secp256k1 import PrivateKey
+    import websocket
+except ImportError:
+    print("pip install secp256k1 websocket-client"); sys.exit(1)
+import hmac, struct
+
+seed, pubkey, ledger_id, amount_sats, relays_str = sys.argv[1:6]
+
+# Derive signing key (same BIP-32 path as pubkey derivation)
+seed_bytes = bytes.fromhex(seed)
+I = hmac.new(b'Bitcoin seed', seed_bytes, hashlib.sha512).digest()
+key, chain = I[:32], I[32:]
+N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+def ckd(k, c, idx):
+    if idx >= 0x80000000:
+        data = b'\x00' + k + struct.pack('>I', idx)
+    else:
+        pk = PrivateKey(k).pubkey.serialize()
+        data = pk + struct.pack('>I', idx)
+    h = hmac.new(c, data, hashlib.sha512).digest()
+    return ((int.from_bytes(h[:32],'big') + int.from_bytes(k,'big')) % N).to_bytes(32,'big'), h[32:]
+for idx in [84+0x80000000, 0x80000000, 0x80000000, 0, 0]:
+    key, chain = ckd(key, chain, idx)
+
+pk = PrivateKey(key)
+pubkey_hex = pk.pubkey.serialize()[1:].hex()  # x-only
+
+content = json.dumps({'deposit_pubkey': pubkey, 'amount_sats': int(amount_sats), 'description': 'Deposit funding'})
+created_at = int(time.time())
+tags = [['l', ledger_id], ['action', 'make_invoice']]
+serialized = json.dumps([0, pubkey_hex, created_at, 20101, tags, content], separators=(',',':'))
+event_hash = hashlib.sha256(serialized.encode()).digest()
+sig = pk.schnorr_sign(event_hash, bip340tag=None, raw=True)
+event = {'id': event_hash.hex(), 'pubkey': pubkey_hex, 'created_at': created_at,
+         'kind': 20101, 'tags': tags, 'content': content, 'sig': sig.hex()}
+
+relays = [r.strip() for r in relays_str.split(',') if r.strip()]
+for relay_url in relays:
+    try:
+        ws = websocket.create_connection(relay_url, timeout=5)
+        ws.send(json.dumps(['REQ', 'sub1', {'kinds': [20102], '#e': [event['id']], 'since': created_at - 5}]))
+        ws.send(json.dumps(['EVENT', event]))
+        ws.settimeout(30)
+        while True:
+            msg = json.loads(ws.recv())
+            if msg[0] == 'EVENT' and msg[2].get('kind') == 20102:
+                resp = json.loads(msg[2]['content'])
+                if resp.get('success') and resp.get('result'):
+                    result = resp['result']
+                    invoice = result.get('invoice', '')
+                    if invoice:
+                        print(invoice)
+                    else:
+                        print(json.dumps(result, indent=2))
+                else:
+                    print(f"Error: {resp.get('error', 'Unknown')}", file=sys.stderr)
+                    sys.exit(1)
+                ws.close()
+                sys.exit(0)
+            elif msg[0] == 'EOSE':
+                continue
+        ws.close()
+    except websocket.WebSocketTimeoutException:
+        print(f'  Timeout on {relay_url}', file=sys.stderr)
+        try: ws.close()
+        except: pass
+    except Exception as e:
+        print(f'  Failed on {relay_url}: {e}', file=sys.stderr)
+print('No response from any relay', file=sys.stderr)
+sys.exit(1)
+PYEOF
+    ;;
+
+fund)
+    LEDGER_ID="$1"
+    AMOUNT_SATS="$2"
+    INDEX="${3:-0}"
+
+    if [ -z "$LEDGER_ID" ] || [ -z "$AMOUNT_SATS" ]; then
+        echo "Usage: $0 --wallet <dir> fund <ledger_id> <amount_sats> [key_index]"
+        echo ""
+        echo "Creates an invoice and prints it for payment."
+        echo "After paying, the deposit is automatically credited."
+        exit 1
+    fi
+
+    echo "=== Fund deposit ==="
+
+    # Get the invoice
+    INVOICE=$("$0" --wallet "$WALLET_DIR" --relay "$LEDGER_RELAY" --network "$NETWORK" invoice "$LEDGER_ID" "$AMOUNT_SATS" "$INDEX" 2>&1)
+
+    if echo "$INVOICE" | grep -q "^lnbc"; then
+        echo ""
+        echo "Pay this invoice to fund your deposit with $AMOUNT_SATS sats:"
+        echo ""
+        echo "$INVOICE"
+        echo ""
+        echo "After payment, the operator will auto-credit your deposit."
+    else
+        echo "Failed to create invoice:"
+        echo "$INVOICE"
+        exit 1
+    fi
+    ;;
+
+balance)
+    echo "Tracked deposits:"
+    if [ -f "$WALLET_DIR/deposits.json" ]; then
+        python3 -c "
+import json
+deps = json.load(open('$WALLET_DIR/deposits.json'))
+for d in deps:
+    print(f\"  {d.get('ledger_id','?')[:16]}... pubkey:{d.get('pubkey','?')[:16]}... idx:{d.get('key_index',0)} status:{d.get('status','?')}\")
+if not deps:
+    print('  (none)')
+" 2>/dev/null || echo "  (error reading deposits.json)"
+    else
+        echo "  (none)"
+    fi
+    ;;
+
 *)
     echo "Unknown command: $COMMAND"
-    echo "Commands: init, pubkey, open"
+    echo "Commands: init, pubkey, open, invoice, fund, balance"
     exit 1
     ;;
 
