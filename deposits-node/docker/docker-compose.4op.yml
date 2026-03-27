@@ -162,8 +162,6 @@ services:
 
 volumes:
   ldk_cli:
-    external: true
 
 networks:
   bitcoin-network:
-    external: true
