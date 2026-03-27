@@ -2914,6 +2914,7 @@ async fn deposit_command(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         "list" => deposit_list(&args[1..]).await,
         "open" => deposit_open(&args[1..]).await,
         "ls" => deposit_ls(&args[1..]).await,
+        "invoice" => deposit_invoice(&args[1..]).await,
         "credit" => deposit_credit(&args[1..]).await,
         "check" => deposit_check(&args[1..]).await,
         "complete" => deposit_complete(&args[1..]).await,
@@ -3085,6 +3086,55 @@ async fn deposit_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         println!("    Ledger: {}...", &offer.ledger_id[..16.min(offer.ledger_id.len())]);
         println!("    Deposit ID: {}", hex::encode(offer.deposit_id));
         println!();
+    }
+
+    Ok(())
+}
+
+/// Create a lightning invoice to fund a deposit
+async fn deposit_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut positional: Vec<String> = Vec::new();
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else {
+            positional.push(args[i].clone());
+        }
+        i += 1;
+    }
+
+    if positional.len() < 3 {
+        eprintln!("Usage: deposits-node deposit invoice <ledger_id> <deposit_pubkey> <amount_sats> [description]");
+        eprintln!("\nCreates a BOLT11 invoice that credits the deposit when paid.");
+        return Ok(());
+    }
+
+    let ledger_id = &positional[0];
+    let deposit_pubkey = &positional[1];
+    let amount_sats: u64 = positional[2].parse().map_err(|_| "Invalid amount_sats")?;
+    let description = positional.get(3).map(|s| s.as_str()).unwrap_or("Deposit credit");
+
+    let config = parse_config(&config_args)?;
+
+    let params = serde_json::json!({
+        "deposit_pubkey": deposit_pubkey,
+        "amount_sats": amount_sats,
+        "description": description,
+    });
+
+    let result = send_daemon_request(&config, ledger_id, "make_invoice", params).await?;
+
+    if let Some(invoice) = result.get("invoice").and_then(|v| v.as_str()) {
+        println!("{}", invoice);
+    } else {
+        println!("{}", serde_json::to_string_pretty(&result)?);
     }
 
     Ok(())
