@@ -8,7 +8,6 @@ WORKDIR /build
 
 # Copy workspace structure
 COPY Cargo.toml ./
-COPY Cargo.lock* ./
 COPY deposits-protocol/ deposits-protocol/
 COPY deposits-core/ deposits-core/
 COPY deposits-node/ deposits-node/
