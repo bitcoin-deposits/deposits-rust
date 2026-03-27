@@ -293,11 +293,17 @@ print('Deposit tracked in $WALLET_DIR/deposits.json')
     ;;
 
 invoice)
-    DEPOSIT_INDEX="${1:-0}"
-    AMOUNT_SATS="$2"
+    DEPOSIT_INDEX="0"
+    AMOUNT_SATS=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --index|-i) DEPOSIT_INDEX="$2"; shift 2 ;;
+            *) [ -z "$AMOUNT_SATS" ] && AMOUNT_SATS="$1"; shift ;;
+        esac
+    done
 
     if [ -z "$AMOUNT_SATS" ]; then
-        echo "Usage: $0 --wallet <dir> invoice <deposit_index> <amount_sats>"
+        echo "Usage: $0 --wallet <dir> invoice <amount_sats> [--index N]"
         echo ""
         echo "Use 'balance' to see deposit indices."
         exit 1
@@ -412,21 +418,27 @@ PYEOF
     ;;
 
 fund)
-    DEPOSIT_INDEX="${1:-0}"
-    AMOUNT_SATS="$2"
+    DEPOSIT_INDEX="0"
+    AMOUNT_SATS=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --index|-i) DEPOSIT_INDEX="$2"; shift 2 ;;
+            *) [ -z "$AMOUNT_SATS" ] && AMOUNT_SATS="$1"; shift ;;
+        esac
+    done
 
     if [ -z "$AMOUNT_SATS" ]; then
-        echo "Usage: $0 --wallet <dir> fund <deposit_index> <amount_sats>"
+        echo "Usage: $0 --wallet <dir> fund <amount_sats> [--index N]"
         echo ""
-        echo "Creates an invoice and prints it for payment."
+        echo "Creates a lightning invoice and prints it for payment."
         echo "Use 'balance' to see deposit indices."
         exit 1
     fi
 
-    echo "=== Fund deposit ==="
+    echo "=== Fund deposit [$DEPOSIT_INDEX] ==="
 
     # Get the invoice
-    INVOICE=$("$0" --wallet "$WALLET_DIR" --relay "$LEDGER_RELAY" --network "$NETWORK" invoice "$DEPOSIT_INDEX" "$AMOUNT_SATS" 2>&1)
+    INVOICE=$("$0" --wallet "$WALLET_DIR" --relay "$LEDGER_RELAY" --network "$NETWORK" invoice "$AMOUNT_SATS" --index "$DEPOSIT_INDEX" 2>&1)
 
     if echo "$INVOICE" | grep -q "^lnbc"; then
         echo ""
