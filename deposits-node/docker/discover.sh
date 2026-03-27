@@ -81,7 +81,8 @@ for lid, ad in sorted(by_ledger.items()):
     if max_dep > 0 and max_dep < 2**63:
         print(f'  Max deposit: {max_dep // 1000:,} sats')
     if access:
-        print(f'  Access:     restricted (domains: {', '.join(domains) if domains else 'allowlist only'})')
+        domain_str = ', '.join(domains) if domains else 'allowlist only'
+        print(f'  Access:     restricted (domains: {domain_str})')
     if ad.get('relay_url'):
         print(f'  Relay:      {ad[\"relay_url\"]}')
     print()
