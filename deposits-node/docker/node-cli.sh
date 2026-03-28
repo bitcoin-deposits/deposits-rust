@@ -42,7 +42,7 @@ for peer in $ALL_NODES; do
     fi
 done
 
-docker exec "$NODE_NAME" deposits-node \
+docker exec -e RUST_LOG=error "$NODE_NAME" deposits-node \
     "$@" \
     --seed "$SEED" \
     --network "$NETWORK" \
