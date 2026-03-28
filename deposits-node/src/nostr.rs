@@ -1110,12 +1110,19 @@ impl NostrTransport {
 
         let event_id = event.id.to_hex();
 
-        // Broadcast to primary (fast) relay
-        self.send_event_with_timeout(event.clone())
-            .await
-            .map_err(|e| Error::Nostr(format!("Failed to broadcast ledger update: {}", e)))?;
+        // Broadcast to ALL relays (fast + slow) so quorum members on any relay see it
+        {
+            let relays = self.client.relays().await;
+            let urls: Vec<RelayUrl> = relays.keys().cloned().collect();
+            tokio::time::timeout(Self::SEND_TIMEOUT,
+                self.client.send_msg_to(urls, ClientMessage::event(event.clone()))
+            )
+                .await
+                .map_err(|_| Error::Nostr("broadcast ledger update timed out".to_string()))?
+                .map_err(|e| Error::Nostr(format!("Failed to broadcast ledger update: {}", e)))?;
+        }
 
-        // Enqueue mirror to durable relay (processed by background task)
+        // Also enqueue mirror to durable relay (for relay-specific mirroring)
         if let Some(ref tx) = self.mirror_tx {
             let _ = tx.send(event);
         }
