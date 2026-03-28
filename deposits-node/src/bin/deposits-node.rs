@@ -812,6 +812,24 @@ async fn health_ping(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         (lid.clone(), n_members, update)
     };
 
+    // Show connected relays
+    let relays = node.nostr.client().relays().await;
+    println!("Connected relays:");
+    for (url, relay) in &relays {
+        let status = relay.status();
+        println!("  {} ({:?})", url, status);
+    }
+    // fetch_client returns the slow client if available
+    let fetch = node.nostr.fetch_client();
+    if !std::ptr::eq(fetch, node.nostr.client()) {
+        let slow_relays = fetch.relays().await;
+        for (url, relay) in &slow_relays {
+            let status = relay.status();
+            println!("  {} ({:?}) [slow]", url, status);
+        }
+    }
+    println!();
+
     println!("Pinging {} quorum member(s) on ledger {}...\n",
         member_count, &ledger_id[..16]);
 
