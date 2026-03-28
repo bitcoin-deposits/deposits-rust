@@ -91,6 +91,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         "lightning" | "ln" => lightning_command(&args[2..]).await?,
         "nostr" => nostr_commands::nostr_command(&args[2..]).await?,
         "recovery" => recovery::recovery_command(&args[2..]).await?,
+        "health" => health_command(&args[2..]).await?,
         "keygen" => keygen(),
         "derive-deposit-key" => derive_deposit_key(&args[2..])?,
         #[cfg(feature = "dangerous-testing")]
@@ -715,6 +716,130 @@ async fn show_address(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 }
 
 /// Generate a new secp256k1 keypair for deposits
+// ============================================================================
+// Health Commands
+// ============================================================================
+
+async fn health_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    if args.is_empty() {
+        eprintln!("Usage: deposits-node health <ping>");
+        eprintln!("  ping    Measure co-sign latency to each quorum member");
+        return Ok(());
+    }
+    match args[0].as_str() {
+        "ping" => health_ping(&args[1..]).await,
+        _ => {
+            eprintln!("Unknown health subcommand: {}", args[0]);
+            Ok(())
+        }
+    }
+}
+
+/// Probe quorum member co-sign latency by requesting cosignature on a
+/// temporary FeeCollect(0) update. The update is never finalized/broadcast.
+async fn health_ping(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::types::SignedLedgerUpdate;
+    use deposits_core::TlvEncode;
+
+    let config = parse_config(args)?;
+    let node = std::sync::Arc::new(Node::new(config.clone()).await?);
+
+    // Find our ledger and build a dummy update
+    let (ledger_id, member_count, update) = {
+        let ledgers = node.handler.ledgers.lock().unwrap();
+        let (lid, ledger_arc) = ledgers.iter().next()
+            .ok_or("No ledgers found")?;
+        let ledger = ledger_arc.read().unwrap();
+        let n_members = ledger.state.quorum_members.len();
+
+        if n_members == 0 {
+            println!("No quorum members on ledger {}...", &lid[..16]);
+            return Ok(());
+        }
+
+        // Find any deposit for the dummy fee collect
+        let deposit_id = match ledger.state.deposits.keys().next() {
+            Some(id) => *id,
+            None => {
+                println!("No deposits on ledger — cannot create test update");
+                return Ok(());
+            }
+        };
+
+        let op = LedgerOperation::FeeCollect {
+            deposit_id,
+            amount: 0,
+            block_height: 0,
+        };
+
+        let message = op.tlv_encode();
+        let msg_type = op.message_type();
+        let sequence = ledger.state.sequence + 1;
+        let prev_hash = ledger.state.chain_tip_hash;
+
+        // Build unsigned update
+        let mut update = SignedLedgerUpdate {
+            message,
+            message_type: msg_type,
+            operator_id: node.node_id,
+            ledger_id: {
+                let lid_bytes = hex::decode(lid).unwrap_or_default();
+                let mut arr = [0u8; 32];
+                if lid_bytes.len() >= 32 { arr.copy_from_slice(&lid_bytes[..32]); }
+                arr
+            },
+            sequence_number: sequence,
+            previous_hash: prev_hash,
+            current_hash: [0u8; 32],
+            block_height: 0,
+            block_hash: [0u8; 32],
+            cosign_signature: [0u8; 64],
+            operator_signature: [0u8; 64],
+            cosigner_pubkey: None,
+            member_ledger_hash: None,
+        };
+
+        // Compute hash and sign
+        update.current_hash = update.compute_hash();
+        let secret_key = derive_operator_secret(&config.seed, config.network)?;
+        let secp = Secp256k1::signing_only();
+        let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &secret_key);
+        let msg = bitcoin::secp256k1::Message::from_digest(update.current_hash);
+        let sig = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
+        update.operator_signature = sig.serialize();
+
+        (lid.clone(), n_members, update)
+    };
+
+    println!("Pinging {} quorum member(s) on ledger {}...\n",
+        member_count, &ledger_id[..16]);
+
+    // Ping — request_cosign is multicast, first responder wins
+    let rounds = 3;
+    for round in 1..=rounds {
+        print!("  Round {}/{}: ", round, rounds);
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+
+        let start = std::time::Instant::now();
+        match node.request_cosign(&ledger_id, &update).await {
+            Ok(result) => {
+                let rtt = start.elapsed();
+                let pk = hex::encode(result.cosigner_pubkey.serialize());
+                println!("{}... {:.0}ms", &pk[..12], rtt.as_secs_f64() * 1000.0);
+            }
+            Err(e) => {
+                let rtt = start.elapsed();
+                println!("FAIL ({:.0}ms) {}", rtt.as_secs_f64() * 1000.0, e);
+            }
+        }
+    }
+
+    println!("\n(test only — update discarded)");
+    Ok(())
+}
+
 fn keygen() {
     use bitcoin::secp256k1::rand::rngs::OsRng;
 

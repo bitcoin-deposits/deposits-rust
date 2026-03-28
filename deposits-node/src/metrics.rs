@@ -640,6 +640,12 @@ pub fn record_cosign_attempt(outcome: &str, duration: Duration) {
         .record(duration.as_secs_f64());
 }
 
+/// Record per-member co-sign round-trip time.
+pub fn record_cosign_rtt(member: &str, duration: Duration) {
+    histogram!("cosign_rtt_seconds", "member" => member.to_string())
+        .record(duration.as_secs_f64());
+}
+
 /// Record events processed inside the cosign mini loop per attempt.
 pub fn record_mini_loop_activity(updates_drained: usize, cosign_requests_handled: usize, deferred_requests: usize) {
     counter!("mini_loop_updates_drained_total").increment(updates_drained as u64);

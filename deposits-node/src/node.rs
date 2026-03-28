@@ -9250,10 +9250,13 @@ impl Node {
                 let cosign_rtt = cosign_send_time.elapsed();
                 match result {
                     Ok(cosign_result) => {
-                        tracing::debug!("[PROFILE] cosign_rtt={:.1}ms for seq={} member_hash={}...",
+                        let member_hex = hex::encode(cosign_result.cosigner_pubkey.serialize());
+                        let member_short = &member_hex[..12.min(member_hex.len())];
+                        tracing::info!("[COSIGN] rtt={:.0}ms member={} seq={}",
                             cosign_rtt.as_secs_f64() * 1000.0,
-                            update.sequence_number,
-                            &hex::encode(&cosign_result.member_ledger_hash[..4]));
+                            member_short,
+                            update.sequence_number);
+                        metrics::record_cosign_rtt(member_short, cosign_rtt);
                         return Ok(cosign_result);
                     }
                     Err(_) => {
