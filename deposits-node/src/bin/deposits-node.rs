@@ -1311,6 +1311,7 @@ async fn ledger_command(args: &[String]) -> Result<(), Box<dyn std::error::Error
         "export" => ledger_export(&args[1..]).await,
         "import" => ledger_import(&args[1..]).await,
         "advertise" => ledger_advertise(&args[1..]).await,
+        "republish" => ledger_republish(&args[1..]).await,
         "discover" => ledger_discover(&args[1..]).await,
         cmd => {
             eprintln!("Unknown ledger subcommand: {}", cmd);
@@ -2357,6 +2358,51 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
 }
 
 /// Discover ledgers advertising on Nostr
+/// Re-broadcast all ledger updates to relays (triggers resync from seq 0).
+async fn ledger_republish(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut ledger_id_arg: Option<String> = None;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else if ledger_id_arg.is_none() {
+            ledger_id_arg = Some(args[i].clone());
+        }
+        i += 1;
+    }
+
+    let config = parse_config(&config_args)?;
+
+    // If no ledger specified, find ours
+    let node = Node::new(config.clone()).await?;
+    let ledger_id = match ledger_id_arg {
+        Some(lid) => lid,
+        None => {
+            let ledgers = node.handler.ledgers.lock().unwrap();
+            ledgers.keys().next()
+                .ok_or("No ledgers found")?
+                .clone()
+        }
+    };
+
+    println!("Re-publishing ledger {}... to relays", &ledger_id[..16.min(ledger_id.len())]);
+
+    let params = serde_json::json!({ "from_seq": 0 });
+    let result = send_daemon_request(&config, &ledger_id, "resync", params).await?;
+
+    let count = result.get("rebroadcast_count").and_then(|v| v.as_u64()).unwrap_or(0);
+    let through = result.get("through_seq").and_then(|v| v.as_u64()).unwrap_or(0);
+    println!("Re-published {} updates (through seq {})", count, through);
+
+    Ok(())
+}
+
 async fn ledger_discover(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     use deposits_node::nostr::NostrTransportBuilder;
 
