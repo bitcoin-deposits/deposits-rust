@@ -728,8 +728,10 @@ async fn health_command(args: &[String]) -> Result<(), Box<dyn std::error::Error
     }
     match args[0].as_str() {
         "ping" => health_ping(&args[1..]).await,
+        "chains" => health_chains(&args[1..]).await,
         _ => {
             eprintln!("Unknown health subcommand: {}", args[0]);
+            eprintln!("Usage: deposits-node health <ping|chains>");
             Ok(())
         }
     }
@@ -855,6 +857,100 @@ async fn health_ping(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     }
 
     println!("\n(test only — update discarded)");
+    Ok(())
+}
+
+/// Report chain validity for all own ledgers and joined quorum ledgers.
+async fn health_chains(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let config = parse_config(args)?;
+    let node = Node::new(config.clone()).await?;
+
+    let ledgers = node.handler.ledgers.lock().unwrap();
+
+    if ledgers.is_empty() {
+        println!("No ledgers.");
+        return Ok(());
+    }
+
+    for (lid, ledger_arc) in ledgers.iter() {
+        let ledger = ledger_arc.read().unwrap();
+        let role = match ledger.role {
+            deposits_core::ledger::LedgerRole::Operator => "operator",
+            deposits_core::ledger::LedgerRole::Partner => "quorum",
+            deposits_core::ledger::LedgerRole::Auditor => "auditor",
+        };
+        let short_lid = &lid[..16.min(lid.len())];
+
+        println!("=== {} [{}] ===", short_lid, role);
+        println!("  Sequence:   {}", ledger.state.sequence);
+        println!("  Hash:       {}", hex::encode(&ledger.state.chain_tip_hash[..8]));
+        println!("  Deposits:   {}", ledger.state.deposits.len());
+        println!("  Quorum:     {} members", ledger.state.quorum_members.len());
+
+        // Validate hash chain
+        let history_len = ledger.history.len();
+        println!("  History:    {} updates", history_len);
+
+        if history_len == 0 {
+            println!("  Chain:      EMPTY (no updates on relay?)");
+            println!();
+            continue;
+        }
+
+        let mut chain_ok = true;
+        let mut prev_hash = [0u8; 32];
+
+        for (i, update) in ledger.history.iter().enumerate() {
+            // Check sequence
+            if update.sequence_number != i as u64 {
+                println!("  Chain:      BREAK at seq {} (expected {})", update.sequence_number, i);
+                chain_ok = false;
+                break;
+            }
+
+            // Check previous hash linkage
+            if update.previous_hash != prev_hash {
+                println!("  Chain:      BREAK at seq {} (prev_hash mismatch: expected {}... got {}...)",
+                    i, hex::encode(&prev_hash[..4]), hex::encode(&update.previous_hash[..4]));
+                chain_ok = false;
+                break;
+            }
+
+            // Verify the update's own hash
+            let computed = update.compute_hash();
+            if computed != update.current_hash {
+                println!("  Chain:      BREAK at seq {} (hash mismatch: computed {}... stored {}...)",
+                    i, hex::encode(&computed[..4]), hex::encode(&update.current_hash[..4]));
+                chain_ok = false;
+                break;
+            }
+
+            prev_hash = update.current_hash;
+        }
+
+        if chain_ok {
+            // Check tip matches state
+            if prev_hash == ledger.state.chain_tip_hash {
+                println!("  Chain:      OK ({} updates verified)", history_len);
+            } else {
+                println!("  Chain:      DIVERGED (history tip {}... != state {}...)",
+                    hex::encode(&prev_hash[..4]), hex::encode(&ledger.state.chain_tip_hash[..4]));
+            }
+        }
+
+        // Show quorum join status for joined ledgers
+        if !ledger.state.joined_quorums.is_empty() {
+            println!("  Joined quorums:");
+            for jq in &ledger.state.joined_quorums {
+                let op_short = hex::encode(jq.operator_id.serialize());
+                println!("    {}... ledger:{}... expires:{}",
+                    &op_short[..12], &jq.ledger_id[..16.min(jq.ledger_id.len())], jq.membership_expires);
+            }
+        }
+
+        println!();
+    }
+
     Ok(())
 }
 
