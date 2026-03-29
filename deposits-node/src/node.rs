@@ -2369,6 +2369,7 @@ impl Node {
             "collateral_record" => self.process_collateral_record_request(&request).await,
             "quorum_begin" => self.process_quorum_begin_request(&request).await,
             "resync" => self.process_resync_request(&request).await,
+            "health_status" => self.process_health_status_request().await,
             _ => {
                 tracing::warn!("Unknown request action: {}", request.action);
                 (false, None, Some(format!("Unknown action: {}", request.action)))
@@ -8302,6 +8303,77 @@ impl Node {
             "has_more": has_more,
         });
         (true, Some(response.to_string()), None)
+    }
+
+    /// Return health status of the running daemon: relay connections, subscriptions, ledgers.
+    async fn process_health_status_request(&self) -> (bool, Option<String>, Option<String>) {
+        let mut relays = Vec::new();
+
+        // Main client relays
+        for (url, relay) in self.nostr.client().relays().await {
+            let stats = relay.stats();
+            relays.push(serde_json::json!({
+                "url": url.to_string(),
+                "status": format!("{:?}", relay.status()),
+                "latency_ms": stats.latency().map(|d| d.as_millis() as u64),
+                "attempts": stats.attempts(),
+                "success": stats.success(),
+                "success_rate": format!("{:.1}%", stats.success_rate() * 100.0),
+                "bytes_sent": stats.bytes_sent(),
+                "bytes_received": stats.bytes_received(),
+                "connected_at": stats.connected_at().as_u64(),
+            }));
+        }
+
+        // Slow client relays
+        let mut slow_relays = Vec::new();
+        let fetch = self.nostr.fetch_client();
+        if !std::ptr::eq(fetch, self.nostr.client()) {
+            for (url, relay) in fetch.relays().await {
+                let stats = relay.stats();
+                slow_relays.push(serde_json::json!({
+                    "url": url.to_string(),
+                    "status": format!("{:?}", relay.status()),
+                    "bytes_sent": stats.bytes_sent(),
+                    "bytes_received": stats.bytes_received(),
+                }));
+            }
+        }
+
+        // Subscriptions
+        let subs = self.nostr.client().subscriptions().await;
+
+        // Pending invoices
+        let pending_invoices = self.pending_invoices.lock().unwrap().len();
+
+        // Ledgers
+        let ledger_info: Vec<serde_json::Value> = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers.iter().map(|(lid, arc)| {
+                let l = arc.read().unwrap();
+                serde_json::json!({
+                    "id": &lid[..16.min(lid.len())],
+                    "role": format!("{:?}", l.role),
+                    "sequence": l.state.sequence,
+                    "deposits": l.state.deposits.len(),
+                    "quorum_members": l.state.quorum_members.len(),
+                })
+            }).collect()
+        };
+
+        let result = serde_json::json!({
+            "relays": relays,
+            "slow_relays": slow_relays,
+            "subscriptions": subs.len(),
+            "pending_invoices": pending_invoices,
+            "ledgers": ledger_info,
+            "uptime_secs": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        });
+
+        (true, Some(result.to_string()), None)
     }
 
     // ========================================================================

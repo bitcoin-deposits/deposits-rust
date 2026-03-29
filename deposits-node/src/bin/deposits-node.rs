@@ -729,9 +729,10 @@ async fn health_command(args: &[String]) -> Result<(), Box<dyn std::error::Error
     match args[0].as_str() {
         "ping" => health_ping(&args[1..]).await,
         "chains" => health_chains(&args[1..]).await,
+        "relays" => health_relays(&args[1..]).await,
         _ => {
             eprintln!("Unknown health subcommand: {}", args[0]);
-            eprintln!("Usage: deposits-node health <ping|chains>");
+            eprintln!("Usage: deposits-node health <ping|chains|relays>");
             Ok(())
         }
     }
@@ -861,6 +862,27 @@ async fn health_ping(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
 }
 
 /// Report chain validity for all own ledgers and joined quorum ledgers.
+/// Query the running daemon's relay health via Nostr.
+async fn health_relays(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let config = parse_config(args)?;
+
+    // Find our ledger to address the request
+    let node = Node::new(config.clone()).await?;
+    let ledger_id = {
+        let ledgers = node.handler.ledgers.lock().unwrap();
+        ledgers.keys().next().cloned().unwrap_or_default()
+    };
+
+    if ledger_id.is_empty() {
+        eprintln!("No ledgers found");
+        return Ok(());
+    }
+
+    let result = send_daemon_request(&config, &ledger_id, "health_status", serde_json::json!({})).await?;
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(())
+}
+
 async fn health_chains(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let config = parse_config(args)?;
     let node = Node::new(config.clone()).await?;
