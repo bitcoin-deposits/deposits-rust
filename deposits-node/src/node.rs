@@ -1786,13 +1786,29 @@ impl Node {
                                             self.dirty_ledgers.lock().unwrap().insert(stale_id.clone());
                                             continue; // Resolved — don't re-queue
                                         }
-                                        // Relay had no new events — ask operator to re-broadcast
-                                        tracing::warn!(
-                                            "Background gap-fill: relay had no new events for {}..., requesting resync",
-                                            &stale_id[..16.min(stale_id.len())],
-                                        );
-                                        metrics::record_gap_fill("relay_empty");
-                                        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), self.send_resync_request_if_needed(stale_id)).await;
+                                        // Relay had no new events — ask operator to re-broadcast.
+                                        // Only resync every 5 minutes to avoid spamming.
+                                        let should_resync = {
+                                            let cooldown = std::time::Duration::from_secs(300);
+                                            let times = self.last_relay_fetch_times.lock().unwrap();
+                                            let last = times.get(stale_id)
+                                                .copied()
+                                                .unwrap_or(std::time::Instant::now() - cooldown);
+                                            last.elapsed() >= cooldown
+                                        };
+                                        if should_resync {
+                                            tracing::info!(
+                                                "Background gap-fill: relay had no new events for {}..., requesting resync",
+                                                &stale_id[..16.min(stale_id.len())],
+                                            );
+                                            metrics::record_gap_fill("relay_empty");
+                                            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), self.send_resync_request_if_needed(stale_id)).await;
+                                        } else {
+                                            tracing::debug!(
+                                                "Background gap-fill: relay empty for {}..., resync on cooldown",
+                                                &stale_id[..16.min(stale_id.len())],
+                                            );
+                                        }
                                     }
                                     Ok(Err(e)) => {
                                         let err_str = format!("{}", e);
@@ -1811,8 +1827,18 @@ impl Node {
                                             &stale_id[..16.min(stale_id.len())], e,
                                         );
                                         metrics::record_gap_fill("relay_failed");
-                                        // Relay doesn't have the events — ask operator to re-broadcast
-                                        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), self.send_resync_request_if_needed(stale_id)).await;
+                                        // Only resync every 5 minutes
+                                        let should_resync = {
+                                            let cooldown = std::time::Duration::from_secs(300);
+                                            let times = self.last_relay_fetch_times.lock().unwrap();
+                                            let last = times.get(stale_id)
+                                                .copied()
+                                                .unwrap_or(std::time::Instant::now() - cooldown);
+                                            last.elapsed() >= cooldown
+                                        };
+                                        if should_resync {
+                                            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), self.send_resync_request_if_needed(stale_id)).await;
+                                        }
                                     }
                                 }
                             }
