@@ -2654,6 +2654,10 @@ impl NostrTransport {
                 let ledger_id = Self::extract_ledger_id_from_event(&event, kind_num);
                 if let Some(lid) = &ledger_id {
                     if !interested.contains(lid) {
+                        if kind_num == KIND_LEDGER_REQUEST {
+                            tracing::warn!("Dropping kind {} request for ledger {} (not in interested set: {:?})",
+                                kind_num, lid, interested.iter().collect::<Vec<_>>());
+                        }
                         return false; // Not our ledger — drop
                     }
                 }
