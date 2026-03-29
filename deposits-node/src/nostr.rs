@@ -987,11 +987,7 @@ impl NostrTransport {
     const SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
     async fn send_event_nowait(&self, event: Event) -> Result<(), Error> {
-        let urls: Vec<RelayUrl> = if let Some(ref primary) = self.primary_relay_url {
-            // Multi-relay mode: publish only to primary relay
-            vec![primary.clone()]
-        } else {
-            // Single-relay mode: publish to all
+        let urls: Vec<RelayUrl> = {
             let relays = self.client.relays().await;
             if relays.is_empty() {
                 return Err(Error::Nostr("No relays connected".to_string()));
@@ -1014,12 +1010,8 @@ impl NostrTransport {
 
     /// Send an event with a timeout to prevent relay hangs from freezing the node.
     async fn send_event_with_timeout(&self, event: Event) -> Result<(), Error> {
-        let urls: Vec<RelayUrl> = if let Some(ref primary) = self.primary_relay_url {
-            vec![primary.clone()]
-        } else {
-            let relays = self.client.relays().await;
-            relays.keys().cloned().collect()
-        };
+        let relays = self.client.relays().await;
+        let urls: Vec<RelayUrl> = relays.keys().cloned().collect();
         tokio::time::timeout(Self::SEND_TIMEOUT,
             self.client.send_msg_to(urls, ClientMessage::event(event))
         )
