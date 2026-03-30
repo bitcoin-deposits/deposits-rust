@@ -38,9 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 
 COPY strfry-performance/ /strfry/
-RUN cd /strfry && \
-    make setup-golpe && \
-    make -j$(nproc)
+RUN cd /strfry && make -j$(nproc)
 
 # Runtime
 FROM debian:bookworm-slim
