@@ -92,6 +92,11 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         "nostr" => nostr_commands::nostr_command(&args[2..]).await?,
         "recovery" => recovery::recovery_command(&args[2..]).await?,
         "health" => health_command(&args[2..]).await?,
+        "version" | "--version" | "-V" => {
+            println!("deposits-node {} (built {})",
+                env!("CARGO_PKG_VERSION"),
+                env!("BUILD_TIMESTAMP"));
+        }
         "keygen" => keygen(),
         "derive-deposit-key" => derive_deposit_key(&args[2..])?,
         #[cfg(feature = "dangerous-testing")]
