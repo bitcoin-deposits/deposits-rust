@@ -2223,22 +2223,39 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
         i += 1;
     }
 
-    let reserves_id = reserves_id.ok_or(
-        "Usage: deposits-node ledger advertise <reserves_id> [--name <name>] [--annual-fee <bps>] ..."
-    )?;
-
     let config = parse_config(&config_args)?;
-
-    // Load node to get ledger info
     let node = Node::new(config.clone()).await?;
 
-    // Find the ledger
-    let (_, ledger) = node.get_ledger_with_id(&reserves_id)
-        .ok_or_else(|| format!("Ledger not found for reserves: {}", reserves_id))?;
+    // If no reserves_id given, advertise all operator ledgers
+    let ledger_ids: Vec<(String, String)> = if let Some(rid) = reserves_id {
+        let (_, ledger) = node.get_ledger_with_id(&rid)
+            .ok_or_else(|| format!("Ledger not found: {}", rid))?;
+        vec![(ledger.ledger_id_hex(), rid)]
+    } else {
+        let ledgers = node.handler.ledgers.lock().unwrap();
+        ledgers.iter()
+            .filter(|(_, arc)| {
+                let l = arc.read().unwrap();
+                matches!(l.role, deposits_core::ledger::LedgerRole::Operator)
+            })
+            .map(|(lid, arc)| {
+                let l = arc.read().unwrap();
+                (lid.clone(), l.state.reserves_key.clone())
+            })
+            .collect()
+    };
+
+    if ledger_ids.is_empty() {
+        println!("No operator ledgers to advertise.");
+        return Ok(());
+    }
+
+    for (ledger_id_hex, rid) in &ledger_ids {
+    let (_, ledger) = node.get_ledger_with_id(ledger_id_hex)
+        .ok_or_else(|| format!("Ledger not found: {}", ledger_id_hex))?;
 
     let ledger_id = ledger.ledger_id_hex();
     let operator_pubkey = hex::encode(ledger.operator_key().serialize());
-    let quorum_members: Vec<_> = ledger.state.quorum_members.iter().collect();
 
     let network = match config.network {
         bitcoin::Network::Bitcoin => "bitcoin",
@@ -2251,13 +2268,13 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
     let mut ad = LedgerAdvertisement::new(
         ledger_id.clone(),
         operator_pubkey,
-        reserves_id.clone(),
+        rid.clone(),
         network.to_string(),
     );
 
-    ad.operator_name = operator_name;
-    ad.description = description;
-    ad.relay_url = advertise_relay_url;
+    ad.operator_name = operator_name.clone();
+    ad.description = description.clone();
+    ad.relay_url = advertise_relay_url.clone();
     ad.annual_fee_bps = annual_fee_bps;
     ad.deposit_fee_bps = deposit_fee_bps;
     ad.withdrawal_fee_bps = withdrawal_fee_bps;
@@ -2304,6 +2321,8 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
     let event_id = node.nostr.publish_ledger_advertisement(&ad).await?;
     println!("Advertisement published!");
     println!("  Event ID: {}", event_id);
+    println!();
+    } // end for each ledger
 
     Ok(())
 }
