@@ -69,14 +69,19 @@ for lid, ad in sorted(by_ledger.items()):
     access = ad.get('access_control', False)
     domains = ad.get('allowed_domains', [])
 
-    print(f'{name} ({network})')
+    quorum = 'yes' if collateral > 0 else 'no'
+    status = '' if collateral > 0 else ' [no quorum]'
+
+    print(f'{name} ({network}){status}')
     print(f'  Ledger:     {lid[:16]}...')
-    print(f'  Operator:   {ad.get(\"operator_pubkey\", \"?\")[:16]}...')
+    print(f'  Operator:   {ad.get("operator_pubkey", "?")[:16]}...')
     print(f'  Reserves:   {reserves // 1000:,} sats')
-    print(f'  Obligations: {obligations // 1000:,} sats')
+    if obligations > 0:
+        print(f'  Obligations: {obligations // 1000:,} sats')
     print(f'  Available:  {headroom // 1000:,} sats')
     if collateral > 0:
         print(f'  Collateral: {collateral // 1000:,} sats')
+    print(f'  Quorum:     {quorum}')
     print(f'  Fees:       {annual_bps}bps/year, min {min_fee} sats')
     if max_dep > 0 and max_dep < 2**63:
         print(f'  Max deposit: {max_dep // 1000:,} sats')
