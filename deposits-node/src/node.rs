@@ -112,6 +112,10 @@ pub struct CoSignResult {
     /// The current hash of the quorum member's own ledger at time of signing
     /// This binds the co-signature to the member's ledger state
     pub member_ledger_hash: [u8; 32],
+
+    /// Distributed tracing timestamps (microseconds since epoch)
+    pub t1_recv_us: Option<u64>,
+    pub t2_send_us: Option<u64>,
 }
 
 /// Result of a consent request from a quorum member
@@ -6982,6 +6986,12 @@ impl Node {
         use bitcoin::secp256k1::{Message, Secp256k1};
         use std::str::FromStr;
 
+        let t1_us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_micros() as u64)
+            .unwrap_or(0);
+        let t0_us = request.params.get("t0_us").and_then(|v| v.as_u64()).unwrap_or(0);
+
         tracing::debug!("Processing cosign_update request for ledger {}...",
             &request.ledger_id[..16.min(request.ledger_id.len())]);
 
@@ -7306,12 +7316,26 @@ impl Node {
             sequence_number, &request.ledger_id[..16], &hex::encode(&member_ledger_hash[..4]));
 
         // Return the signature, our pubkey, and our ledger hash
+        let t2_us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_micros() as u64)
+            .unwrap_or(0);
         let result = serde_json::json!({
             "cosign_signature_hex": hex::encode(sig_bytes),
             "cosigner_pubkey": self.node_id_hex.clone(),
             "sequence_number": sequence_number,
             "member_ledger_hash_hex": hex::encode(member_ledger_hash),
+            "t0_us": t0_us,
+            "t1_recv_us": t1_us,
+            "t2_send_us": t2_us,
         });
+
+        if t0_us > 0 {
+            tracing::info!("[COSIGN-TRACE] seq={} relay_in={}us process={}us",
+                sequence_number,
+                t1_us.saturating_sub(t0_us),
+                t2_us.saturating_sub(t1_us));
+        }
 
         (true, Some(result.to_string()), None)
     }
@@ -9073,6 +9097,8 @@ impl Node {
                                 cosign_signature: sig,
                                 cosigner_pubkey,
                                 member_ledger_hash: hash,
+                                t1_recv_us: result_obj.get("t1_recv_us").and_then(|v| v.as_u64()),
+                                t2_send_us: result_obj.get("t2_send_us").and_then(|v| v.as_u64()),
                             };
                             let _ = tx.send(cosign_result);
                             return;
@@ -9163,6 +9189,8 @@ impl Node {
                                     cosign_signature: sig,
                                     cosigner_pubkey,
                                     member_ledger_hash: hash,
+                                    t1_recv_us: None,
+                                    t2_send_us: None,
                                 };
                                 let _ = tx.send(cosign_result);
                                 tracing::debug!("Co-sign response received: sig + member_hash {}...",
@@ -9390,11 +9418,16 @@ impl Node {
         let cosign_data = update.cosign_data();
 
         // Create request parameters - responders auto-detect their bound ledger
+        let t0_us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_micros() as u64)
+            .unwrap_or(0);
         let mut params = serde_json::json!({
             "sequence_number": update.sequence_number,
             "cosign_data_hex": hex::encode(&cosign_data),
             "current_hash_hex": hex::encode(update.current_hash),
             "message_type": update.message_type,
+            "t0_us": t0_us,
         });
 
         // Piggyback previous updates so quorum members can apply them inline
@@ -9466,12 +9499,32 @@ impl Node {
                 let cosign_rtt = cosign_send_time.elapsed();
                 match result {
                     Ok(cosign_result) => {
+                        let t3_us = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_micros() as u64)
+                            .unwrap_or(0);
                         let member_hex = hex::encode(cosign_result.cosigner_pubkey.serialize());
                         let member_short = &member_hex[..12.min(member_hex.len())];
-                        tracing::info!("[COSIGN] rtt={:.0}ms member={} seq={}",
-                            cosign_rtt.as_secs_f64() * 1000.0,
-                            member_short,
-                            update.sequence_number);
+
+                        // Log distributed trace if timestamps available
+                        let t1 = cosign_result.t1_recv_us.unwrap_or(0);
+                        let t2 = cosign_result.t2_send_us.unwrap_or(0);
+                        if t0_us > 0 && t1 > 0 && t2 > 0 {
+                            let relay_out = t1.saturating_sub(t0_us);
+                            let process = t2.saturating_sub(t1);
+                            let relay_back = t3_us.saturating_sub(t2);
+                            tracing::info!(
+                                "[COSIGN-TRACE] seq={} member={} relay_out={}us process={}us relay_back={}us total={}us",
+                                update.sequence_number, member_short,
+                                relay_out, process, relay_back,
+                                t3_us.saturating_sub(t0_us)
+                            );
+                        } else {
+                            tracing::info!("[COSIGN] rtt={:.0}ms member={} seq={}",
+                                cosign_rtt.as_secs_f64() * 1000.0,
+                                member_short,
+                                update.sequence_number);
+                        }
                         metrics::record_cosign_rtt(member_short, cosign_rtt);
                         return Ok(cosign_result);
                     }
