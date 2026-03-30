@@ -11,6 +11,8 @@
 //   replay-ledger <ledger_id_prefix> --until <hash_prefix>    # Stop at a specific chain_hash
 //
 //   # Nostr mode
+//   replay-ledger --relay ws://localhost:7779                 # List ledgers on relay
+//   replay-ledger 183c --relay ws://localhost:7779            # Prefix match on relay
 //   replay-ledger <ledger_id> --relay ws://localhost:7779     # Fetch from relay
 //
 //   # Common options
@@ -553,6 +555,118 @@ fn run_jsonl(data_root: &PathBuf, prefix: &str, node_filter: Option<&str>, verbo
 // =========================================================================
 // Nostr mode — raw websocket REQ/EVENT/EOSE
 // =========================================================================
+
+/// List all ledgers available on a relay, optionally filtered by prefix.
+/// Returns the full ledger_id of a single match (for auto-selection), or None.
+async fn list_relay_ledgers(relay_url: &str, prefix: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    use tokio_tungstenite::tungstenite::Message;
+    use futures_util::{SinkExt, StreamExt};
+
+    eprintln!("Connecting to {}...", relay_url);
+    let (mut ws, _) = tokio_tungstenite::connect_async(relay_url).await
+        .map_err(|e| format!("Failed to connect to {}: {}", relay_url, e))?;
+
+    let sub_id = "list";
+    let filter = serde_json::json!({ "kinds": [9100], "limit": 50000 });
+    let req = serde_json::json!(["REQ", sub_id, filter]);
+    ws.send(Message::Text(req.to_string())).await?;
+
+    // ledger_id -> (max_seq, update_count, operator_npub)
+    let mut ledgers: HashMap<String, (u64, usize, Option<String>)> = HashMap::new();
+
+    loop {
+        let msg = match tokio::time::timeout(std::time::Duration::from_secs(30), ws.next()).await {
+            Ok(Some(Ok(Message::Text(text)))) => text,
+            Ok(Some(Ok(Message::Close(_)))) | Ok(None) => break,
+            Ok(Some(Ok(_))) => continue,
+            Ok(Some(Err(e))) => { eprintln!("WebSocket error: {}", e); break; }
+            Err(_) => { eprintln!("Timeout waiting for relay response"); break; }
+        };
+
+        let arr: serde_json::Value = match serde_json::from_str(&msg) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let arr = match arr.as_array() {
+            Some(a) => a,
+            None => continue,
+        };
+
+        match arr.first().and_then(|v| v.as_str()) {
+            Some("EVENT") => {
+                if let Some(event) = arr.get(2) {
+                    let pubkey = event.get("pubkey").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    if let Some(tags) = event.get("tags").and_then(|v| v.as_array()) {
+                        let mut lid = None;
+                        let mut seq = 0u64;
+                        for tag in tags {
+                            if let Some(tag_arr) = tag.as_array() {
+                                match tag_arr.first().and_then(|v| v.as_str()) {
+                                    Some("d") => lid = tag_arr.get(1).and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                    Some("n") => seq = tag_arr.get(1).and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0),
+                                    _ => {}
+                                }
+                            }
+                        }
+                        if let Some(id) = lid {
+                            if prefix.is_empty() || id.starts_with(prefix) {
+                                let entry = ledgers.entry(id).or_insert((0, 0, None));
+                                if seq > entry.0 { entry.0 = seq; }
+                                entry.1 += 1;
+                                if entry.2.is_none() { entry.2 = pubkey; }
+                            }
+                        }
+                    }
+                }
+            }
+            Some("EOSE") => break,
+            Some("NOTICE") => {
+                if let Some(msg) = arr.get(1).and_then(|v| v.as_str()) {
+                    eprintln!("Relay notice: {}", msg);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let close = serde_json::json!(["CLOSE", sub_id]);
+    ws.send(Message::Text(close.to_string())).await.ok();
+    ws.close(None).await.ok();
+
+    if ledgers.is_empty() {
+        if prefix.is_empty() {
+            println!("No ledgers found on {}", relay_url);
+        } else {
+            println!("No ledgers matching '{}' on {}", prefix, relay_url);
+        }
+        return Ok(None);
+    }
+
+    // Single match with a prefix → auto-select
+    if ledgers.len() == 1 && !prefix.is_empty() {
+        let (lid, _) = ledgers.into_iter().next().unwrap();
+        return Ok(Some(lid));
+    }
+
+    let mut sorted: Vec<_> = ledgers.into_iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+
+    println!("Ledgers on {}:", relay_url);
+    for (lid, (max_seq, count, pubkey)) in &sorted {
+        let short_id = if lid.len() > 16 { &lid[..16] } else { lid.as_str() };
+        let pk_str = match pubkey {
+            Some(pk) if pk.len() >= 12 => format!("  pk={}...", &pk[..12]),
+            _ => String::new(),
+        };
+        println!("  {}  seq={:<4}  updates={}{}", short_id, max_seq, count, pk_str);
+    }
+
+    if !prefix.is_empty() {
+        eprintln!("\nMultiple matches for '{}'. Provide a longer prefix.", prefix);
+    }
+
+    Ok(None)
+}
 
 async fn fetch_updates_from_relay(relay_url: &str, ledger_id: &str) -> Result<Vec<SignedLedgerUpdate>, Box<dyn std::error::Error>> {
     use tokio_tungstenite::tungstenite::Message;
@@ -1425,10 +1539,13 @@ fn browse_updates(updates: &[SignedLedgerUpdate], start_seq: Option<u64>) -> Res
 // =========================================================================
 
 fn print_help() {
-    eprintln!("Usage: replay-ledger <ledger_id_prefix> [options]");
+    eprintln!("Usage: replay-ledger [ledger_id_prefix] [options]");
     eprintln!();
     eprintln!("Replays a ledger chain: walks backward from tip, plays forward through");
     eprintln!("LedgerState, and pretty-prints the result.");
+    eprintln!();
+    eprintln!("With no prefix (or a prefix matching multiple ledgers), lists available");
+    eprintln!("ledgers. Works in both JSONL and relay modes.");
     eprintln!();
     eprintln!("Modes:");
     eprintln!("  JSONL (default):  Reads from data/<node>/wallet/ledgers/<id>.jsonl");
@@ -1445,12 +1562,15 @@ fn print_help() {
     eprintln!("  --help, -h              Show this help");
     eprintln!();
     eprintln!("Examples:");
+    eprintln!("  replay-ledger                               # List all local ledgers");
     eprintln!("  replay-ledger 183c -n alice -v              # JSONL, verbose");
     eprintln!("  replay-ledger 183c --until a536             # JSONL, stop at hash");
     eprintln!("  replay-ledger 183c --decode 5               # Decode seq 5");
     eprintln!("  replay-ledger 183c --browse                 # TUI browser");
     eprintln!("  replay-ledger 183c --browse --decode 5      # Browse starting at seq 5");
-    eprintln!("  replay-ledger 183c96af... --relay ws://localhost:7779 -v  # Nostr");
+    eprintln!("  replay-ledger --relay ws://localhost:7779    # List ledgers on relay");
+    eprintln!("  replay-ledger 183c --relay ws://localhost:7779        # Prefix match");
+    eprintln!("  replay-ledger 183c96af... --relay ws://localhost:7779 # Full replay");
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -1501,12 +1621,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(url) = relay_url {
         // Nostr mode
-        if prefix.is_empty() {
-            eprintln!("Ledger ID required for relay mode");
-            std::process::exit(1);
-        }
         let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(run_nostr(&url, &prefix, verbose, until_hash.as_deref(), decode_seq, browse))
+        // Short or empty prefix: list ledgers, auto-select single match
+        if prefix.is_empty() || prefix.len() < 16 {
+            let selected = rt.block_on(list_relay_ledgers(&url, &prefix))?;
+            match selected {
+                Some(lid) => rt.block_on(run_nostr(&url, &lid, verbose, until_hash.as_deref(), decode_seq, browse)),
+                None => Ok(()),
+            }
+        } else {
+            rt.block_on(run_nostr(&url, &prefix, verbose, until_hash.as_deref(), decode_seq, browse))
+        }
     } else {
         // JSONL mode
         if !data_root.exists() {

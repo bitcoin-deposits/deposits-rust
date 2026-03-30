@@ -1997,8 +1997,18 @@ impl Node {
                     }
 
                     self.processed_requests.lock().unwrap().insert(request.event_id.clone());
-                    tracing::trace!("Request via subscription: action={}, event={}...",
-                        request.action, &request.event_id[..16.min(request.event_id.len())]);
+                    tracing::info!("RECV request: action={}, ledger={}..., sender={}..., age={:.0}ms",
+                        request.action,
+                        &request.ledger_id[..16.min(request.ledger_id.len())],
+                        &request.sender[..12.min(request.sender.len())],
+                        {
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+                            (now.saturating_sub(request.timestamp) as f64) * 1000.0
+                        },
+                    );
 
                     // Cosign requests: dispatch to per-ledger cosign worker (non-blocking)
                     // These are requests from PARTNERS asking US to co-sign their updates.
@@ -2102,6 +2112,10 @@ impl Node {
             {
                 let phase_start = std::time::Instant::now();
                 while let Some(dispute) = self.nostr.try_recv_dispute() {
+                    tracing::info!("RECV dispute: ledger={}..., reason={}, from={}...",
+                        &dispute.ledger_id[..16.min(dispute.ledger_id.len())],
+                        dispute.reason,
+                        &dispute.disputer_pubkey[..12.min(dispute.disputer_pubkey.len())]);
                     match tokio::time::timeout(std::time::Duration::from_secs(5), self.handle_dispute(dispute)).await {
                         Ok(()) => {},
                         Err(_) => { tracing::error!("handle_dispute timed out after 5s"); break; }
@@ -2114,6 +2128,9 @@ impl Node {
             {
                 let phase_start = std::time::Instant::now();
                 while let Some(fp) = self.nostr.try_recv_fraud_proof() {
+                    tracing::info!("RECV fraud_proof: from={}..., event={}...",
+                        &fp.sender[..12.min(fp.sender.len())],
+                        &fp.event_id[..16.min(fp.event_id.len())]);
                     match tokio::time::timeout(std::time::Duration::from_secs(5), self.handle_fraud_proof(fp)).await {
                         Ok(()) => {},
                         Err(_) => { tracing::error!("handle_fraud_proof timed out after 5s"); break; }
@@ -2126,6 +2143,10 @@ impl Node {
             {
                 let phase_start = std::time::Instant::now();
                 while let Some(response) = self.nostr.try_recv_response() {
+                    tracing::info!("RECV response: request={}..., success={}, error={:?}",
+                        &response.request_id[..16.min(response.request_id.len())],
+                        response.success,
+                        response.error.as_deref().unwrap_or(""));
                     match tokio::time::timeout(std::time::Duration::from_secs(5), self.handle_ledger_response(response)).await {
                         Ok(()) => {},
                         Err(_) => { tracing::error!("handle_ledger_response timed out after 5s"); break; }
@@ -2138,6 +2159,9 @@ impl Node {
             {
                 let phase_start = std::time::Instant::now();
                 while let Some(update) = self.nostr.try_recv_ledger_update() {
+                    tracing::info!("RECV update: ledger={}..., seq={}",
+                        &update.ledger_id[..16.min(update.ledger_id.len())],
+                        update.update.sequence_number);
                     self.handle_ledger_update(update).await;
                 }
                 metrics::record_run_loop_phase("drain_updates", phase_start.elapsed());
@@ -2183,7 +2207,8 @@ impl Node {
             else { self.sent_events_prev.lock().unwrap().contains(&request.event_id) }
         };
         if is_own_event {
-            tracing::debug!("Skipping our own request: {}", &request.event_id[..16.min(request.event_id.len())]);
+            tracing::info!("DROP own_event: action={}, ledger={}...",
+                request.action, &request.ledger_id[..16.min(request.ledger_id.len())]);
             return;
         }
 
@@ -2202,11 +2227,15 @@ impl Node {
         // (these are broadcast but only the operator should respond)
         let operator_only_actions = ["deposit_open", "make_offer", "withdraw", "collateral_lock", "offer_status", "balance_query", "make_invoice", "pay_invoice", "transfer_lock", "transfer_complete", "bump", "complete_offer", "deposit_credit", "quorum_add", "quorum_join", "collateral_record", "quorum_begin", "resync"];
         if operator_only_actions.contains(&request.action.as_str()) && !self.is_operator_of_ledger(&request.ledger_id) {
-            return; // Silent drop - the actual operator will respond
+            tracing::info!("DROP not_operator: action={}, ledger={}...",
+                request.action, &request.ledger_id[..16.min(request.ledger_id.len())]);
+            return;
         }
 
         if !is_our_ledger && !is_cross_ledger_sign && !is_cosign_request {
-            return; // Silent drop - not our concern
+            tracing::info!("DROP not_ours: action={}, ledger={}...",
+                request.action, &request.ledger_id[..16.min(request.ledger_id.len())]);
+            return;
         }
 
         // Record request age (now - created_at) for all incoming requests.
@@ -2225,10 +2254,11 @@ impl Node {
 
         if is_cosign_request && request_age_secs >= 2.0 {
             metrics::record_cosign_stale_discarded();
-            tracing::debug!(
-                "Discarding stale cosign request: age={:.0}s, event={}...",
+            tracing::info!(
+                "DROP stale_cosign: action={}, ledger={}..., age={:.0}s",
+                request.action,
+                &request.ledger_id[..16.min(request.ledger_id.len())],
                 request_age_secs,
-                &request.event_id[..16.min(request.event_id.len())]
             );
             return;
         }
@@ -2323,7 +2353,7 @@ impl Node {
                 // Silently ignore if we're not a quorum member for this ledger
                 // (co-sign requests are broadcast, only quorum members should respond)
                 if !self.is_quorum_member_of_ledger(&request.ledger_id) {
-                    tracing::debug!("Ignoring cosign_update for {} - not a quorum member",
+                    tracing::info!("DROP not_quorum_member: action=cosign_update, ledger={}...",
                         &request.ledger_id[..16.min(request.ledger_id.len())]);
                     return;
                 }
@@ -2335,7 +2365,7 @@ impl Node {
             "cosign_offer" | "cosign_invoice" => {
                 // Silently ignore if we're not a quorum member for this ledger
                 if !self.is_quorum_member_of_ledger(&request.ledger_id) {
-                    tracing::debug!("Ignoring {} for {} - not a quorum member",
+                    tracing::info!("DROP not_quorum_member: action={}, ledger={}...",
                         request.action, &request.ledger_id[..16.min(request.ledger_id.len())]);
                     return;
                 }
@@ -2398,9 +2428,13 @@ impl Node {
         ).await {
             tracing::error!("Failed to send response: {}", e);
         } else if success {
-            tracing::debug!("Request {} processed successfully", &request.event_id[..16]);
+            tracing::info!("SEND response: action={}, ledger={}..., success=true, {:.0}ms",
+                request.action, &request.ledger_id[..16.min(request.ledger_id.len())],
+                processing_time.as_secs_f64() * 1000.0);
         } else {
-            tracing::warn!("Request {} failed: {}", &request.event_id[..16], error.unwrap_or_default());
+            tracing::info!("SEND response: action={}, ledger={}..., success=false, error={}",
+                request.action, &request.ledger_id[..16.min(request.ledger_id.len())],
+                error.unwrap_or_default());
         }
     }
 
