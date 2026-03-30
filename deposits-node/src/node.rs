@@ -1963,8 +1963,8 @@ impl Node {
 
             // Process subscription notifications — adaptive timeout:
             // 1ms when busy (previous iteration processed requests, more likely coming)
-            // 100ms when idle (save CPU, still responsive to new events)
-            let events_timeout_ms: u64 = if had_requests_last_iteration { 1 } else { 100 };
+            // 10ms when idle (responsive to cosign requests), 1ms when active
+            let events_timeout_ms: u64 = if had_requests_last_iteration { 1 } else { 10 };
             metrics::record_events_timeout_ms(events_timeout_ms);
             let process_events_start = std::time::Instant::now();
             let _ = self.nostr.process_events_with_timeout(events_timeout_ms).await;
