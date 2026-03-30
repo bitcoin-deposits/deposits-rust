@@ -310,19 +310,25 @@ invoice)
     fi
 
     # Look up deposit from wallet json
-    DEPOSIT_INFO=$(python3 -c "
+    DEPOSIT_INFO=$(python3 - "$WALLET_DIR" "$DEPOSIT_INDEX" << 'PYEOF'
 import json, sys
-deps = json.load(open('$WALLET_DIR/deposits.json'))
-idx = $DEPOSIT_INDEX
+wallet_dir, idx_str = sys.argv[1], sys.argv[2]
+idx = int(idx_str)
+try:
+    deps = json.load(open(wallet_dir + '/deposits.json'))
+except FileNotFoundError:
+    print("ERROR: No deposits.json — open a deposit first", file=sys.stderr)
+    sys.exit(1)
 if idx >= len(deps):
-    print(f'ERROR: deposit index {idx} out of range (have {len(deps)})', file=sys.stderr)
+    print(f"ERROR: deposit index {idx} out of range (have {len(deps)})", file=sys.stderr)
     sys.exit(1)
 d = deps[idx]
-print(f\"{d['ledger_id']} {d['pubkey']} {d.get('key_index', 0)}\")
-" 2>&1)
+print(f"{d['ledger_id']} {d['pubkey']} {d.get('key_index', 0)}")
+PYEOF
+    )
 
-    if echo "$DEPOSIT_INFO" | grep -q "^ERROR"; then
-        echo "$DEPOSIT_INFO"
+    if [ $? -ne 0 ] || echo "$DEPOSIT_INFO" | grep -q "^ERROR"; then
+        echo "$DEPOSIT_INFO" >&2
         exit 1
     fi
 
