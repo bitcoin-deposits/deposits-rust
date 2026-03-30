@@ -2400,6 +2400,7 @@ impl Node {
             "quorum_begin" => self.process_quorum_begin_request(&request).await,
             "resync" => self.process_resync_request(&request).await,
             "health_status" => self.process_health_status_request().await,
+            "health_ping" => self.process_health_ping_request(&request).await,
             _ => {
                 tracing::warn!("Unknown request action: {}", request.action);
                 (false, None, Some(format!("Unknown action: {}", request.action)))
@@ -8411,6 +8412,89 @@ impl Node {
     }
 
     // ========================================================================
+    /// Health ping: create a dummy FeeCollect(0) update, cosign it via the daemon's
+    /// live connections, measure RTT, then discard the update.
+    async fn process_health_ping_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+        use deposits_core::messages::LedgerOperation;
+
+        let ledger_id = &request.ledger_id;
+
+        // Check if quorum is active
+        if !self.is_quorum_active(ledger_id) {
+            return (false, None, Some("No active quorum".to_string()));
+        }
+
+        // Find a deposit for the dummy fee collect
+        let deposit_id = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            match ledgers.get(ledger_id) {
+                Some(arc) => {
+                    let l = arc.read().unwrap();
+                    match l.state.deposits.keys().next() {
+                        Some(id) => *id,
+                        None => return (false, None, Some("No deposits on ledger".to_string())),
+                    }
+                }
+                None => return (false, None, Some("Ledger not found".to_string())),
+            }
+        };
+
+        // Apply a FeeCollect(0) to the ledger to create a real pending update
+        let block_height = self.wallet.get_block_height().unwrap_or(0);
+        let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
+        let op = LedgerOperation::FeeCollect {
+            deposit_id,
+            amount: 0,
+            block_height,
+        };
+
+        {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let arc = ledgers.get(ledger_id).unwrap().clone();
+            let mut ledger = arc.write().unwrap();
+            if let Err(e) = ledger.append_operation_with_block(op, block_height, block_hash) {
+                return (false, None, Some(format!("Failed to stage test update: {}", e)));
+            }
+        }
+
+        if let Err(e) = self.sign_last_update(ledger_id) {
+            return (false, None, Some(format!("Failed to sign test update: {}", e)));
+        }
+
+        let start = std::time::Instant::now();
+        match self.sign_and_broadcast(ledger_id).await {
+            Ok(_) => {
+                let total_ms = start.elapsed().as_secs_f64() * 1000.0;
+                // The cosign succeeded — read the cosigner info from the latest update
+                let (cosigner, cosign_ms) = {
+                    let ledgers = self.handler.ledgers.lock().unwrap();
+                    if let Some(arc) = ledgers.get(ledger_id) {
+                        let l = arc.read().unwrap();
+                        if let Some(last) = l.history.last() {
+                            let pk = last.cosigner_pubkey.map(|pk| hex::encode(pk.serialize()))
+                                .unwrap_or_default();
+                            (pk, total_ms)
+                        } else {
+                            (String::new(), total_ms)
+                        }
+                    } else {
+                        (String::new(), total_ms)
+                    }
+                };
+
+                let result = serde_json::json!({
+                    "cosigner": cosigner,
+                    "cosign_ms": cosign_ms,
+                });
+                (true, Some(result.to_string()), None)
+            }
+            Err(e) => {
+                let ms = start.elapsed().as_secs_f64() * 1000.0;
+                (false, None, Some(format!("Cosign failed ({:.0}ms): {}", ms, e)))
+            }
+        }
+    }
+
     // Auto-Response Tasks
     // ========================================================================
 

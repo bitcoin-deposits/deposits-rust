@@ -740,103 +740,26 @@ async fn health_command(args: &[String]) -> Result<(), Box<dyn std::error::Error
 
 /// Probe quorum member co-sign latency by requesting cosignature on a
 /// temporary FeeCollect(0) update. The update is never finalized/broadcast.
+/// Ping quorum members via the running daemon.
+/// Sends a health_ping request that the daemon processes using its live connections.
 async fn health_ping(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    use deposits_core::messages::LedgerOperation;
-    use deposits_core::types::SignedLedgerUpdate;
-    use deposits_core::TlvEncode;
-
     let config = parse_config(args)?;
-    let node = std::sync::Arc::new(Node::new(config.clone()).await?);
 
-    // Find our ledger and build a dummy update
-    let (ledger_id, member_count, update) = {
+    // Find our ledger
+    let node = Node::new(config.clone()).await?;
+    let ledger_id = {
         let ledgers = node.handler.ledgers.lock().unwrap();
-        let (lid, ledger_arc) = ledgers.iter().next()
-            .ok_or("No ledgers found")?;
-        let ledger = ledger_arc.read().unwrap();
-        let n_members = ledger.state.quorum_members.len();
-
-        if n_members == 0 {
-            println!("No quorum members on ledger {}...", &lid[..16]);
-            return Ok(());
-        }
-
-        // Find any deposit for the dummy fee collect
-        let deposit_id = match ledger.state.deposits.keys().next() {
-            Some(id) => *id,
-            None => {
-                println!("No deposits on ledger — cannot create test update");
-                return Ok(());
-            }
-        };
-
-        let op = LedgerOperation::FeeCollect {
-            deposit_id,
-            amount: 0,
-            block_height: 0,
-        };
-
-        let message = op.tlv_encode();
-        let msg_type = op.message_type();
-        let sequence = ledger.state.sequence + 1;
-        let prev_hash = ledger.state.chain_tip_hash;
-
-        // Build unsigned update
-        let mut update = SignedLedgerUpdate {
-            message,
-            message_type: msg_type,
-            operator_id: node.node_id,
-            ledger_id: {
-                let lid_bytes = hex::decode(lid).unwrap_or_default();
-                let mut arr = [0u8; 32];
-                if lid_bytes.len() >= 32 { arr.copy_from_slice(&lid_bytes[..32]); }
-                arr
-            },
-            sequence_number: sequence,
-            previous_hash: prev_hash,
-            current_hash: [0u8; 32],
-            block_height: 0,
-            block_hash: [0u8; 32],
-            cosign_signature: [0u8; 64],
-            operator_signature: [0u8; 64],
-            cosigner_pubkey: None,
-            member_ledger_hash: None,
-        };
-
-        // Compute hash and sign
-        update.current_hash = update.compute_hash();
-        let secret_key = derive_operator_secret(&config.seed, config.network)?;
-        let secp = Secp256k1::signing_only();
-        let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &secret_key);
-        let msg = bitcoin::secp256k1::Message::from_digest(update.current_hash);
-        let sig = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
-        update.operator_signature = sig.serialize();
-
-        (lid.clone(), n_members, update)
+        ledgers.keys().next().cloned().unwrap_or_default()
     };
+    drop(node);
 
-    // Show connected relays
-    let relays = node.nostr.client().relays().await;
-    println!("Connected relays:");
-    for (url, relay) in &relays {
-        let status = relay.status();
-        println!("  {} ({:?})", url, status);
+    if ledger_id.is_empty() {
+        eprintln!("No ledgers found");
+        return Ok(());
     }
-    // fetch_client returns the slow client if available
-    let fetch = node.nostr.fetch_client();
-    if !std::ptr::eq(fetch, node.nostr.client()) {
-        let slow_relays = fetch.relays().await;
-        for (url, relay) in &slow_relays {
-            let status = relay.status();
-            println!("  {} ({:?}) [slow]", url, status);
-        }
-    }
-    println!();
 
-    println!("Pinging {} quorum member(s) on ledger {}...\n",
-        member_count, &ledger_id[..16]);
+    println!("Pinging quorum via daemon on ledger {}...\n", &ledger_id[..16]);
 
-    // Ping — request_cosign is multicast, first responder wins
     let rounds = 3;
     for round in 1..=rounds {
         print!("  Round {}/{}: ", round, rounds);
@@ -844,11 +767,13 @@ async fn health_ping(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         std::io::stdout().flush().ok();
 
         let start = std::time::Instant::now();
-        match node.request_cosign(&ledger_id, &update).await {
+        match send_daemon_request(&config, &ledger_id, "health_ping", serde_json::json!({})).await {
             Ok(result) => {
                 let rtt = start.elapsed();
-                let pk = hex::encode(result.cosigner_pubkey.serialize());
-                println!("{}... {:.0}ms", &pk[..12], rtt.as_secs_f64() * 1000.0);
+                let member = result.get("cosigner").and_then(|v| v.as_str()).unwrap_or("?");
+                let cosign_ms = result.get("cosign_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                println!("{}... {:.0}ms (cosign: {:.0}ms)",
+                    &member[..12.min(member.len())], rtt.as_secs_f64() * 1000.0, cosign_ms);
             }
             Err(e) => {
                 let rtt = start.elapsed();
@@ -857,7 +782,6 @@ async fn health_ping(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         }
     }
 
-    println!("\n(test only — update discarded)");
     Ok(())
 }
 
