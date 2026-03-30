@@ -72,9 +72,10 @@ for lid, ad in sorted(by_ledger.items()):
     quorum = 'yes' if collateral > 0 else 'no'
     status = '' if collateral > 0 else ' [no quorum]'
 
+    op_pk = ad.get('operator_pubkey', '?')[:16]
     print(f'{name} ({network}){status}')
     print(f'  Ledger:     {lid[:16]}...')
-    print(f'  Operator:   {ad.get("operator_pubkey", "?")[:16]}...')
+    print(f'  Operator:   {op_pk}...')
     print(f'  Reserves:   {reserves // 1000:,} sats')
     if obligations > 0:
         print(f'  Obligations: {obligations // 1000:,} sats')
