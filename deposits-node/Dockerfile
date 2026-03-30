@@ -6,10 +6,11 @@ RUN apt-get update && \
 
 WORKDIR /build
 
-# Copy workspace Cargo.toml and strip the [patch] section (references a local
-# path that doesn't exist in the Docker build context)
+# Copy workspace Cargo.toml (keep the [patch] section — we include the fork)
 COPY Cargo.toml ./
-RUN sed -i '/\[patch.crates-io\]/,$ d' Cargo.toml
+
+# Copy the nostr-sdk performance fork (referenced by [patch.crates-io])
+COPY nostr-sdk-performance/ nostr-sdk-performance/
 
 # Copy crates
 COPY deposits-protocol/ deposits-protocol/
@@ -27,18 +28,17 @@ RUN mkdir -p deposits-tools/src && echo "" > deposits-tools/src/lib.rs && \
 
 RUN cargo build --release --bin deposits-node
 
-# Build strfry
+# Build strfry from performance fork
 FROM debian:bookworm AS relay-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git ca-certificates g++ make pkg-config libtool autoconf \
+    g++ make pkg-config libtool autoconf \
     libssl-dev zlib1g-dev liblmdb-dev libflatbuffers-dev \
     libsecp256k1-dev libzstd-dev && \
     rm -rf /var/lib/apt/lists/*
 
-RUN git clone --depth 1 https://github.com/hoytech/strfry.git /strfry && \
-    cd /strfry && \
-    git submodule update --init && \
+COPY strfry-performance/ /strfry/
+RUN cd /strfry && \
     make setup-golpe && \
     make -j$(nproc)
 
