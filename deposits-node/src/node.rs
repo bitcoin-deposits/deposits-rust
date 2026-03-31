@@ -1148,6 +1148,8 @@ impl Node {
             ledgers.get(ledger_id).cloned()
         };
 
+        let mut need_full_reimport = existing.is_none();
+
         if let Some(ledger_arc) = existing {
             // --- Fast path: existing ledger, incremental update ---
             let (local_tip_hash, local_next_seq) = {
@@ -1156,8 +1158,9 @@ impl Node {
             };
 
             // Filter, sort, dedup relay events to those beyond our tip
-            let mut new_updates: Vec<_> = all_fetched.into_iter()
+            let mut new_updates: Vec<_> = all_fetched.iter()
                 .filter(|u| u.sequence_number >= local_next_seq)
+                .cloned()
                 .collect();
             new_updates.sort_by_key(|u| u.sequence_number);
             new_updates.dedup_by_key(|u| u.sequence_number);
@@ -1174,27 +1177,34 @@ impl Node {
             if new_updates[0].sequence_number == local_next_seq
                 && new_updates[0].previous_hash != local_tip_hash
             {
-                return Err(Error::Protocol(format!(
-                    "Chain break: update {} previous_hash doesn't match local tip",
-                    local_next_seq,
-                )));
+                tracing::warn!(
+                    "Chain break on ledger {}... at seq {} — purging and re-importing from genesis",
+                    &ledger_id[..16.min(ledger_id.len())], local_next_seq,
+                );
+                // Remove the corrupted ledger so the slow path can rebuild
+                self.handler.ledgers.lock().unwrap().remove(ledger_id);
+                self.cosign_member_cache.lock().unwrap().remove(ledger_id);
+                self.invalidate_joined_ledger_cache();
+                need_full_reimport = true;
+            } else {
+                match self.handler.apply_updates_to_ledger(ledger_id, new_updates.clone()) {
+                    Ok(applied) => {
+                        tracing::info!(
+                            "Re-imported joined ledger {} (+{} updates from relay, tip_seq {})",
+                            &ledger_id[..16], applied,
+                            new_updates.last().map(|u| u.sequence_number).unwrap_or(0),
+                        );
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to apply relay updates to ledger {}: {}", &ledger_id[..16], e);
+                        return Err(Error::Protocol(format!("Apply updates failed: {}", e)));
+                    }
+                }
             }
+        }
 
-            match self.handler.apply_updates_to_ledger(ledger_id, new_updates.clone()) {
-                Ok(applied) => {
-                    tracing::info!(
-                        "Re-imported joined ledger {} (+{} updates from relay, tip_seq {})",
-                        &ledger_id[..16], applied,
-                        new_updates.last().map(|u| u.sequence_number).unwrap_or(0),
-                    );
-                    Ok(())
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to apply relay updates to ledger {}: {}", &ledger_id[..16], e);
-                    Err(Error::Protocol(format!("Apply updates failed: {}", e)))
-                }
-            }
-        } else {
+        if need_full_reimport {
             // --- Slow path: new ledger, full import from genesis ---
             let mut updates: Vec<deposits_core::SignedLedgerUpdate> = all_fetched;
             updates.sort_by_key(|u| (u.sequence_number, u.operator_id.serialize(), u.current_hash));
@@ -1302,6 +1312,8 @@ impl Node {
                     Err(Error::Protocol(format!("Import failed: {}", e)))
                 }
             }
+        } else {
+            Ok(())
         }
     }
 
@@ -1359,9 +1371,13 @@ impl Node {
 
         // Re-check after acquiring write lock (another thread may have caught up)
         let next_seq = ledger.next_sequence();
+        let mut tip_hash = ledger.tail_hash();
         let mut appended = 0u64;
         for update in to_append {
-            if update.sequence_number == next_seq + appended {
+            if update.sequence_number == next_seq + appended
+                && update.previous_hash == tip_hash
+            {
+                tip_hash = update.current_hash;
                 ledger.history.push(update);
                 appended += 1;
             } else {
@@ -2318,12 +2334,15 @@ impl Node {
                     None => break,
                 };
                 self.handler.insert_event(&update.update);
-                // Also append to ledger history if consecutive
+                // Also append to ledger history if consecutive AND chains correctly
                 let ledgers = self.handler.ledgers.lock().unwrap();
                 if let Some(ledger_arc) = ledgers.get(&update.ledger_id) {
                     let mut ledger = ledger_arc.write().unwrap();
                     let expected = ledger.next_sequence();
-                    if update.update.sequence_number == expected {
+                    let tip_hash = ledger.tail_hash();
+                    if update.update.sequence_number == expected
+                        && update.update.previous_hash == tip_hash
+                    {
                         ledger.history.push(update.update);
                     }
                 }
@@ -2380,7 +2399,12 @@ impl Node {
                 }
 
                 let result = self.process_cosign_request(&request).await;
-                if !result.0 { return; }  // Silent — don't send error response
+                if !result.0 {
+                    tracing::info!("DROP cosign_failed: action=cosign_update, ledger={}..., error={}",
+                        &request.ledger_id[..16.min(request.ledger_id.len())],
+                        result.2.as_deref().unwrap_or("(silent)"));
+                    return;
+                }
                 result
             }
             "cosign_offer" | "cosign_invoice" => {
@@ -2396,7 +2420,13 @@ impl Node {
                 } else {
                     self.process_cosign_invoice_request(&request).await
                 };
-                if !result.0 { return; }  // Silent — don't send error response
+                if !result.0 {
+                    tracing::info!("DROP cosign_failed: action={}, ledger={}..., error={}",
+                        request.action,
+                        &request.ledger_id[..16.min(request.ledger_id.len())],
+                        result.2.as_deref().unwrap_or("(silent)"));
+                    return;
+                }
                 result
             }
             "offer_status" => self.process_offer_status_request(&request).await,
@@ -2676,12 +2706,15 @@ impl Node {
         } else {
             // Validation passed — append the update to our local copy so it stays
             // in sync for cosign sequence validation.  Only append if this is the
-            // exact next entry (no gaps).
+            // exact next entry (no gaps) AND chains from our tip hash.
             let ledgers = self.handler.ledgers.lock().unwrap();
             if let Some(ledger_arc) = ledgers.get(&inbound.ledger_id) {
                 let mut ledger = ledger_arc.write().unwrap();
                 let expected_seq = ledger.next_sequence();
-                if inbound.update.sequence_number == expected_seq {
+                let tip_hash = ledger.tail_hash();
+                if inbound.update.sequence_number == expected_seq
+                    && inbound.update.previous_hash == tip_hash
+                {
                     ledger.history.push(inbound.update.clone());
                 }
             }
@@ -6851,7 +6884,7 @@ impl Node {
             .unwrap_or(0);
         let t0_us = request.params.get("t0_us").and_then(|v| v.as_u64()).unwrap_or(0);
 
-        tracing::debug!("Processing cosign_update request for ledger {}...",
+        tracing::info!("PROC cosign_update: ledger={}...",
             &request.ledger_id[..16.min(request.ledger_id.len())]);
 
         // Extract sequence_number early — we need it for the freshness check.
@@ -6874,7 +6907,9 @@ impl Node {
                             let ledgers = self.handler.ledgers.lock().unwrap();
                             if let Some(arc) = ledgers.get(&request.ledger_id) {
                                 let mut ledger = arc.write().unwrap();
-                                if update.sequence_number == ledger.next_sequence() {
+                                if update.sequence_number == ledger.next_sequence()
+                                    && update.previous_hash == ledger.tail_hash()
+                                {
                                     ledger.history.push(update);
                                     applied += 1;
                                 }
@@ -6951,12 +6986,14 @@ impl Node {
                                 .map(|arc| arc.read().unwrap().next_sequence())
                                 .unwrap_or(0)
                         };
-                        tracing::debug!(
+                        tracing::info!(
                             "Cosign stale: have {}, need {} for {}...",
                             current_len, sequence_number,
                             &request.ledger_id[..16.min(request.ledger_id.len())]
                         );
-                        return (false, None, None);
+                        return (false, None, Some(format!(
+                            "Stale: have seq {}, need {}", current_len, sequence_number
+                        )));
                     }
                 }
             }
@@ -7049,12 +7086,14 @@ impl Node {
             let ledger = arc.read().unwrap();
             let expected_seq = ledger.next_sequence();
             if sequence_number > expected_seq {
-                tracing::debug!(
+                tracing::info!(
                     "Cosign seq mismatch: expected {}, got {} for {}...",
                     expected_seq, sequence_number,
                     &request.ledger_id[..16.min(request.ledger_id.len())]
                 );
-                return (false, None, None);
+                return (false, None, Some(format!(
+                    "Seq mismatch: expected {}, got {}", expected_seq, sequence_number
+                )));
             }
 
             if let Some(last_update) = ledger.history.last() {
@@ -7087,6 +7126,7 @@ impl Node {
                     }
 
                     let history_len = ledger.history.len();
+                    let jq_count = ledger.state.joined_quorums.len();
                     // Use derived joined_quorums state instead of scanning history
                     let has_join = ledger.state.joined_quorums.iter().any(|jq| {
                         if jq.ledger_id == request.ledger_id {
@@ -7101,6 +7141,8 @@ impl Node {
                         }
                         false
                     });
+                    tracing::info!("cosign scan: ledger={}..., history={}, joined_quorums={}, match={}",
+                        &ledger_key[..16.min(ledger_key.len())], history_len, jq_count, has_join);
 
                     let scan_elapsed = t_scan.elapsed();
                     if scan_elapsed.as_millis() > 0 {
