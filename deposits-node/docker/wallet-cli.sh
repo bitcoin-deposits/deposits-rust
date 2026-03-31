@@ -553,9 +553,9 @@ for i, d in enumerate(deps):
                         bal_sats = bal_msats / 1000
                         locked_sats = locked_msats / 1000
                         if locked_msats > 0:
-                            balance_str = f'₿ {bal_sats:,.0f} ({locked_sats:,.0f} locked)'
+                            balance_str = f'₿ {bal_sats:,.3f} ({locked_sats:,.3f} locked)'
                         else:
-                            balance_str = f'₿ {bal_sats:,.0f}'
+                            balance_str = f'₿ {bal_sats:,.3f}'
                     else:
                         balance_str = resp.get('error', 'error')
                     ws.close()
@@ -573,7 +573,7 @@ for i, d in enumerate(deps):
 
 print()
 total_sats = total_msats / 1000
-print(f"  Total: ₿ {total_sats:,.0f}")
+print(f"  Total: ₿ {total_sats:,.3f}")
 PYEOF
     ;;
 
