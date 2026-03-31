@@ -461,19 +461,104 @@ fund)
     ;;
 
 balance)
-    echo "Tracked deposits:"
-    if [ -f "$WALLET_DIR/deposits.json" ]; then
-        python3 - "$WALLET_DIR" << 'PYEOF'
-import json, sys
-deps = json.load(open(sys.argv[1] + '/deposits.json'))
-for i, d in enumerate(deps):
-    print(f"  [{i}] ledger:{d.get('ledger_id','?')[:16]}... pubkey:{d.get('pubkey','?')[:16]}... status:{d.get('status','?')}")
-if not deps:
-    print('  (none)')
-PYEOF
-    else
-        echo "  (none)"
+    if [ ! -f "$WALLET_DIR/deposits.json" ]; then
+        echo "No deposits. Use 'open' first."
+        exit 0
     fi
+
+    SEED=$(cat "$SEED_FILE")
+    ALL_RELAYS="$LEDGER_RELAY"
+    [ -n "$EXTRA_RELAYS" ] && ALL_RELAYS="$ALL_RELAYS,$EXTRA_RELAYS"
+
+    python3 - "$WALLET_DIR" "$SEED" "$ALL_RELAYS" << 'PYEOF'
+import json, hashlib, time, sys
+
+wallet_dir, seed_hex, relays_str = sys.argv[1], sys.argv[2], sys.argv[3]
+deps = json.load(open(wallet_dir + '/deposits.json'))
+if not deps:
+    print("No deposits.")
+    sys.exit(0)
+
+try:
+    from secp256k1 import PrivateKey
+    import websocket
+except ImportError:
+    # Fallback: just show local data
+    for i, d in enumerate(deps):
+        print(f"  [{i}] ledger:{d.get('ledger_id','?')[:16]}... pubkey:{d.get('pubkey','?')[:16]}... status:{d.get('status','?')}")
+    sys.exit(0)
+
+import hmac, struct
+# Derive signing key from seed (BIP-32, index 0)
+seed_bytes = bytes.fromhex(seed_hex)
+I = hmac.new(b'Bitcoin seed', seed_bytes, hashlib.sha512).digest()
+key, chain = I[:32], I[32:]
+N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+def ckd(k, c, idx):
+    if idx >= 0x80000000:
+        data = b'\x00' + k + struct.pack('>I', idx)
+    else:
+        pk = PrivateKey(k).pubkey.serialize()
+        data = pk + struct.pack('>I', idx)
+    h = hmac.new(c, data, hashlib.sha512).digest()
+    return ((int.from_bytes(h[:32],'big') + int.from_bytes(k,'big')) % N).to_bytes(32,'big'), h[32:]
+for idx in [84+0x80000000, 0x80000000, 0x80000000, 0, 0]:
+    key, chain = ckd(key, chain, idx)
+
+pk = PrivateKey(key)
+pubkey_hex = pk.pubkey.serialize()[1:].hex()
+
+relays = [r.strip() for r in relays_str.split(',') if r.strip()]
+
+for i, d in enumerate(deps):
+    ledger_id = d.get('ledger_id', '?')
+    deposit_pubkey = d.get('pubkey', '?')
+
+    # Send balance_query via Nostr
+    content = json.dumps({'deposit_pubkey': deposit_pubkey})
+    created_at = int(time.time())
+    tags = [['l', ledger_id], ['action', 'balance_query']]
+    serialized = json.dumps([0, pubkey_hex, created_at, 20101, tags, content], separators=(',',':'))
+    event_hash = hashlib.sha256(serialized.encode()).digest()
+    sig = pk.schnorr_sign(event_hash, bip340tag=None, raw=True)
+    event = {'id': event_hash.hex(), 'pubkey': pubkey_hex, 'created_at': created_at,
+             'kind': 20101, 'tags': tags, 'content': content, 'sig': sig.hex()}
+
+    balance_str = '?'
+    for relay_url in relays:
+        try:
+            ws = websocket.create_connection(relay_url, timeout=5)
+            ws.send(json.dumps(['REQ', 'sub1', {'kinds': [20102], '#e': [event['id']], 'since': created_at - 5}]))
+            ws.send(json.dumps(['EVENT', event]))
+            ws.settimeout(10)
+            while True:
+                msg = json.loads(ws.recv())
+                if msg[0] == 'EVENT' and msg[2].get('kind') == 20102:
+                    resp = json.loads(msg[2]['content'])
+                    if resp.get('success') and resp.get('result'):
+                        result = resp['result']
+                        bal_msats = result.get('balance_msats', result.get('balance', 0))
+                        locked_msats = result.get('locked_msats', result.get('locked', 0))
+                        bal_sats = bal_msats / 1000
+                        locked_sats = locked_msats / 1000
+                        if locked_msats > 0:
+                            balance_str = f'{bal_sats:.3f} sats ({locked_sats:.3f} locked)'
+                        else:
+                            balance_str = f'{bal_sats:.3f} sats'
+                    else:
+                        balance_str = resp.get('error', 'error')
+                    ws.close()
+                    break
+                elif msg[0] == 'EOSE':
+                    continue
+            break
+        except Exception as e:
+            balance_str = f'(unreachable: {e})'
+            try: ws.close()
+            except: pass
+
+    print(f"  [{i}] {balance_str}  ledger:{ledger_id[:16]}...")
+PYEOF
     ;;
 
 *)
