@@ -514,6 +514,7 @@ for idx in [84+0x80000000, 0x80000000, 0x80000000, 0, 0]:
 pk = PrivateKey(key)
 pubkey_hex = pk.pubkey.serialize()[1:].hex()
 
+total_msats = 0
 for i, d in enumerate(deps):
     ledger_id = d.get('ledger_id', '?')
     deposit_pubkey = d.get('pubkey', '?')
@@ -534,6 +535,7 @@ for i, d in enumerate(deps):
              'kind': 20101, 'tags': tags, 'content': content, 'sig': sig.hex()}
 
     balance_str = '?'
+    bal_msats = 0
     for relay_url in relays:
         try:
             ws = websocket.create_connection(relay_url, timeout=5)
@@ -546,14 +548,16 @@ for i, d in enumerate(deps):
                     resp = json.loads(msg[2]['content'])
                     if resp.get('success') and resp.get('result'):
                         result = resp['result']
-                        bal_msats = result.get('balance_msats', result.get('balance', 0))
-                        locked_msats = result.get('locked_msats', result.get('locked', 0))
+                        bal_msats = int(result.get('balance_msats', result.get('balance', 0)))
+                        locked_msats = int(result.get('locked_msats', result.get('locked', 0)))
                         bal_sats = bal_msats / 1000
                         locked_sats = locked_msats / 1000
+                        bal_btc = bal_sats / 100_000_000
                         if locked_msats > 0:
-                            balance_str = f'{bal_sats:.3f} sats ({locked_sats:.3f} locked)'
+                            locked_btc = locked_sats / 100_000_000
+                            balance_str = f'₿ {bal_btc:.8f} ({locked_btc:.8f} locked)'
                         else:
-                            balance_str = f'{bal_sats:.3f} sats'
+                            balance_str = f'₿ {bal_btc:.8f}'
                     else:
                         balance_str = resp.get('error', 'error')
                     ws.close()
@@ -566,7 +570,12 @@ for i, d in enumerate(deps):
             try: ws.close()
             except: pass
 
+    total_msats += bal_msats
     print(f"  [{i}] {balance_str}  ledger:{ledger_id[:16]}...")
+
+print()
+total_btc = total_msats / 1000 / 100_000_000
+print(f"  Total: ₿ {total_btc:.8f}")
 PYEOF
     ;;
 
