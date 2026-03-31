@@ -9539,7 +9539,7 @@ impl Node {
                 let mut pending = self.pending_cosign_requests.lock().unwrap();
                 pending.remove(&request_id);
                 metrics::set_pending_cosign_requests(pending.len());
-                return Err(Error::Protocol("Co-sign request timed out after 500ms".to_string()));
+                return Err(Error::Protocol(format!("Co-sign request timed out after {}ms", deadline_ms)));
             }
         }
     }
