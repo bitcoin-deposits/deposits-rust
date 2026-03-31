@@ -942,6 +942,9 @@ let state = {
 
 let sockets = [];    // [{ws, url, connected, readOnly}]
 let pendingRequests = new Map(); // eventId -> {resolve, reject, timeout}
+// ledger_id → Set of relay URLs where the operator can be reached
+// Populated from advertisement relay_url and the relay where the ad was seen
+window._ledgerRelays = {};
 let cachedBlockHeight = 0; // updated during sync
 
 function saveState() {
@@ -1210,10 +1213,11 @@ function handleRelayMessage(data, sock) {
 
   if (type === 'EVENT' && data.length >= 3) {
     const event = data[2];
+    const relayUrl = sockets.find(s => s.ws === sock)?.url || '';
     handleEvent(event);
     // Also dispatch to fetchEvents listeners
     for (const [subId, listener] of fetchListeners) {
-      if (data[1] === subId) listener.onEvent(event);
+      if (data[1] === subId) listener.onEvent(event, relayUrl);
     }
   } else if (type === 'OK' && data.length >= 3) {
     const accepted = data[2];
@@ -1311,9 +1315,62 @@ async function sendRequest(ledgerId, action, params, timeoutMs = 30000) {
     }, timeoutMs);
 
     pendingRequests.set(event.id, { resolve, reject, timeout });
-    wsSend(['EVENT', event]);
+    wsSendForLedger(['EVENT', event], ledgerId);
     log(`Sent ${action} request (${event.id.slice(0, 12)}...)`);
   });
+}
+
+// Send an event to relay(s) associated with a ledger.
+// Uses the relay from the operator's advertisement, or the relay where the ad
+// was seen, falling back to all non-readOnly relays then all relays.
+function wsSendForLedger(msg, ledgerId) {
+  const payload = JSON.stringify(msg);
+  const targetRelays = window._ledgerRelays[ledgerId];
+  let sent = 0;
+
+  if (targetRelays && targetRelays.size > 0) {
+    // Send to known relay(s) for this ledger (ignoring readOnly flag)
+    for (const s of sockets) {
+      if (s.ws && s.ws.readyState === WebSocket.OPEN && targetRelays.has(s.url)) {
+        s.ws.send(payload);
+        sent++;
+      }
+    }
+    // If target relay(s) are known but not connected, try connecting
+    if (sent === 0) {
+      for (const url of targetRelays) {
+        const existing = sockets.find(s => s.url === url);
+        if (!existing) {
+          log(`Connecting to operator relay ${url}...`);
+          connectOne(url, false);
+        }
+      }
+    }
+  }
+
+  // Fallback: also send on non-readOnly relays (operator relays from prior connections)
+  if (sent === 0) {
+    for (const s of sockets) {
+      if (s.ws && s.ws.readyState === WebSocket.OPEN && !s.readOnly) {
+        s.ws.send(payload);
+        sent++;
+      }
+    }
+  }
+
+  // Last resort: send on any connected relay
+  if (sent === 0) {
+    for (const s of sockets) {
+      if (s.ws && s.ws.readyState === WebSocket.OPEN) {
+        s.ws.send(payload);
+        sent++;
+      }
+    }
+  }
+
+  if (sent === 0) {
+    log(`WARNING: event not sent — no connected relays for ledger ${ledgerId.slice(0,12)}...`, 'error');
+  }
 }
 
 /// Send a request to an agent (Kind 20101 with #p tag instead of #l)
@@ -1362,9 +1419,10 @@ async function fetchEvents(filter, timeoutMs = 10000) {
     const timer = setTimeout(cleanup, timeoutMs);
 
     fetchListeners.set(subId, {
-      onEvent(event) {
+      onEvent(event, relayUrl) {
         if (!seen.has(event.id)) {
           seen.add(event.id);
+          event._seenOnRelay = relayUrl || '';
           events.push(event);
         }
       },
@@ -1403,7 +1461,14 @@ async function discoverLedgers() {
       const ad = JSON.parse(ev.content);
       if (ad.network && ad.network !== state.network) continue;
       ads.push(ad);
-      if (ad.ledger_id) window._discoveredAds[ad.ledger_id] = ad;
+      if (ad.ledger_id) {
+        window._discoveredAds[ad.ledger_id] = ad;
+        // Track relay(s) for this ledger: ad's relay_url + relay where we saw it
+        const relays = window._ledgerRelays[ad.ledger_id] || new Set();
+        if (ad.relay_url) relays.add(ad.relay_url);
+        if (ev._seenOnRelay) relays.add(ev._seenOnRelay);
+        window._ledgerRelays[ad.ledger_id] = relays;
+      }
     } catch {}
   }
 
@@ -1825,6 +1890,18 @@ window.selectLedger = function(ledgerId) {
   document.getElementById('open-ledger-id').value = ledgerId;
   document.getElementById('open-ledger-name').textContent = name;
 
+  // Record relay for this ledger
+  if (relayUrl) {
+    const relays = window._ledgerRelays[ledgerId] || new Set();
+    relays.add(relayUrl);
+    window._ledgerRelays[ledgerId] = relays;
+  }
+  // Also record the ledger relay itself — operator may be listening there
+  if (state.ledgerRelay) {
+    const relays = window._ledgerRelays[ledgerId] || new Set();
+    relays.add(state.ledgerRelay);
+    window._ledgerRelays[ledgerId] = relays;
+  }
   // Connect to operator's relay if needed
   if (relayUrl && relayUrl.startsWith('ws')) {
     const already = sockets.find(s => s.url === relayUrl);
@@ -1849,20 +1926,19 @@ window.doOpenDeposit = async function() {
     const pubkey = getCompressedPubkey(depositKey);
     const pubkeyHex = bytesToHex(pubkey);
 
-    // Fetch advertisement for fee info
-    const adFilter = { kinds: [39100], '#d': [ledgerTag(ledgerId)] };
-    const adEvents = await fetchEvents(adFilter, 5000);
+    // Get fee info from cached ad or fetch
+    let ad = window._discoveredAds?.[ledgerId];
+    if (!ad) {
+      const adEvents = await fetchEvents({ kinds: [39100], '#d': [ledgerTag(ledgerId)] }, 5000);
+      if (adEvents.length > 0) try { ad = JSON.parse(adEvents[0].content); } catch {}
+    }
     let feeFixed = 0, feeBps = 0, feeFreq = 2016, operatorName = '';
-    if (adEvents.length > 0) {
-      try {
-        const ad = JSON.parse(adEvents[0].content);
-        const period = ad.fee_period_blocks > 0 ? ad.fee_period_blocks : 2016;
-        const periodsPerYear = Math.floor(52560 / period);
-        feeFixed = (ad.min_fee_sats || 0) * periodsPerYear;
-        feeBps = ad.annual_fee_bps || 0;
-        feeFreq = period;
-        operatorName = ad.operator_name || '';
-      } catch {}
+    if (ad) {
+      const period = ad.fee_period_blocks > 0 ? ad.fee_period_blocks : 2016;
+      feeFixed = (ad.min_fee_sats || 0) * Math.floor(52560 / period);
+      feeBps = ad.annual_fee_bps || 0;
+      feeFreq = period;
+      operatorName = ad.operator_name || '';
     }
 
     log(`Opening deposit on ${operatorName || ledgerId.slice(0, 12)}...`);
@@ -2401,6 +2477,12 @@ window.showWalletOpen = async function() {
 };
 
 window.doWalletQuickOpen = async function(ledgerId, relayUrl) {
+  // Record relay for this ledger
+  if (relayUrl) {
+    const relays = window._ledgerRelays[ledgerId] || new Set();
+    relays.add(relayUrl);
+    window._ledgerRelays[ledgerId] = relays;
+  }
   // Connect to operator relay if needed
   if (relayUrl && relayUrl.startsWith('ws')) {
     const already = sockets.find(s => s.url === relayUrl);
@@ -2417,19 +2499,22 @@ window.doWalletQuickOpen = async function(ledgerId, relayUrl) {
   const pubkey = getCompressedPubkey(depositKey);
   const pubkeyHex = bytesToHex(pubkey);
 
-  // Fetch fee info
+  // Get fee info from cached ad or fetch
+  let ad = window._discoveredAds?.[ledgerId];
+  if (!ad) {
+    try {
+      const adEvents = await fetchEvents({ kinds: [39100], '#d': [ledgerTag(ledgerId)] }, 5000);
+      if (adEvents.length > 0) ad = JSON.parse(adEvents[0].content);
+    } catch {}
+  }
   let feeFixed = 0, feeBps = 0, feeFreq = 2016, operatorName = '';
-  try {
-    const adEvents = await fetchEvents({ kinds: [39100], '#d': [ledgerTag(ledgerId)] }, 5000);
-    if (adEvents.length > 0) {
-      const ad = JSON.parse(adEvents[0].content);
-      const period = ad.fee_period_blocks > 0 ? ad.fee_period_blocks : 2016;
-      feeFixed = (ad.min_fee_sats || 0) * Math.floor(52560 / period);
-      feeBps = ad.annual_fee_bps || 0;
-      feeFreq = period;
-      operatorName = ad.operator_name || '';
-    }
-  } catch {}
+  if (ad) {
+    const period = ad.fee_period_blocks > 0 ? ad.fee_period_blocks : 2016;
+    feeFixed = (ad.min_fee_sats || 0) * Math.floor(52560 / period);
+    feeBps = ad.annual_fee_bps || 0;
+    feeFreq = period;
+    operatorName = ad.operator_name || '';
+  }
 
   try {
     log(`Opening deposit on ${operatorName || ledgerId.slice(0,12)}...`);
@@ -3554,9 +3639,9 @@ async function checkForFraud() {
         for (const tEv of targetEvents) {
           try {
             const tu = decodeUpdate(tEv.content);
-            // Field 26 = member_ledger_hash on the outer update
+            // MEMBER_LEDGER_HASH (tag 16) on the outer update
             const outerTlv = parseTlv(Uint8Array.from(atob(tEv.content), c => c.charCodeAt(0)));
-            const mlhField = outerTlv.find(r => r.type === 26);
+            const mlhField = outerTlv.find(r => r.type === 16);
             if (mlhField && tu.seq > embeddingUpdate.seq) {
               broadcast.causal_chain.push({
                 ledger_id: ev.ledger_id,
@@ -4375,7 +4460,7 @@ async function waitForTransferLock(ledgerId, destDepositIdHex, hashHex, timeoutM
             // Re-decode to get full transfer_id
             const raw = Uint8Array.from(atob(ev.content), c => c.charCodeAt(0));
             const outer = parseTlv(raw);
-            const msgBytes = outer.find(r => r.type === 0)?.value;
+            const msgBytes = outer.find(r => r.type === 8)?.value; // MESSAGE (tag 8)
             if (msgBytes) {
               const inner = parseTlv(msgBytes);
               const tidRaw = inner.find(r => r.type === 220)?.value;
@@ -4414,7 +4499,13 @@ window.refreshAgentAds = async function() {
       try {
         const ad = JSON.parse(ev.content);
         if (ad.network && ad.network !== state.network) continue;
-        if (ad.ledger_id) window._discoveredAds[ad.ledger_id] = ad;
+        if (ad.ledger_id) {
+          window._discoveredAds[ad.ledger_id] = ad;
+          const relays = window._ledgerRelays[ad.ledger_id] || new Set();
+          if (ad.relay_url) relays.add(ad.relay_url);
+          if (ev._seenOnRelay) relays.add(ev._seenOnRelay);
+          window._ledgerRelays[ad.ledger_id] = relays;
+        }
         if (ad.ledger_id && ad.operator_name) ledgerName[ad.ledger_id] = ad.operator_name;
       } catch {}
     }
@@ -4649,14 +4740,13 @@ function decodeUpdate(base64Content) {
   const getU32 = (t) => { const v = get(t); if (!v || v.length < 4) return 0; return (v[0]<<24)|(v[1]<<16)|(v[2]<<8)|v[3]; };
   const getU16 = (t) => { const v = get(t); if (!v || v.length < 2) return 0; return (v[0]<<8)|v[1]; };
 
-  const seq = getU64(8);       // SEQUENCE_NUMBER
-  const prevHash = getHex(10); // PREVIOUS_HASH
-  const blockHeight = getU32(20); // BLOCK_HEIGHT
-  const msgType = getU16(2);   // MESSAGE_TYPE
-  const operatorHex = getHex(4); // OPERATOR_ID
+  const seq = getU64(4);       // SEQUENCE_NUMBER (tag 4)
+  const prevHash = getHex(6);  // PREVIOUS_HASH (tag 6)
+  const blockHeight = getU32(10); // BLOCK_HEIGHT (tag 10)
+  const operatorHex = getHex(0);  // OPERATOR_ID (tag 0)
 
   // Decode inner operation
-  const msgBytes = get(0); // MESSAGE
+  const msgBytes = get(8); // MESSAGE (tag 8)
   let opName = '?';
   let opDisc = 0;
   let opFields = [];
@@ -4684,9 +4774,9 @@ function decodeUpdate(base64Content) {
   const seqBytes = new Uint8Array(8);
   new DataView(seqBytes.buffer).setUint32(0, seq & 0xFFFFFFFF, true);
   new DataView(seqBytes.buffer).setUint32(4, Math.floor(seq / 0x100000000), true);
-  const prevHashBytes = get(10) || new Uint8Array(32);
-  const cosignSig = get(16) || new Uint8Array(64);
-  const memberHash = get(26); // optional
+  const prevHashBytes = get(6) || new Uint8Array(32);   // PREVIOUS_HASH (tag 6)
+  const cosignSig = get(18) || new Uint8Array(64);      // COSIGN_SIGNATURE (tag 18)
+  const memberHash = get(16);                            // MEMBER_LEDGER_HASH (tag 16)
   const hashParts = [seqBytes, prevHashBytes];
   if (msgBytes) hashParts.push(msgBytes);
   if (memberHash) hashParts.push(memberHash);
@@ -4698,7 +4788,7 @@ function decodeUpdate(base64Content) {
   for (const p of hashParts) { hashInput.set(p, hOff); hOff += p.length; }
   const curHash = bytesToHex(sha256(hashInput));
 
-  return { seq, prevHash, curHash, blockHeight, msgType, operatorHex, opName, opDisc, opFields };
+  return { seq, prevHash, curHash, blockHeight, operatorHex, opName, opDisc, opFields };
 }
 
 async function populateLedgerQuickLinks() {
@@ -5279,6 +5369,16 @@ if ('serviceWorker' in navigator) {
 
 // Boot
 if (loadState()) {
+  // Seed _ledgerRelays for existing deposits — ledger relay is always a candidate
+  if (state.ledgerRelay) {
+    for (const d of state.deposits) {
+      if (d.ledger_id) {
+        const relays = window._ledgerRelays[d.ledger_id] || new Set();
+        relays.add(state.ledgerRelay);
+        window._ledgerRelays[d.ledger_id] = relays;
+      }
+    }
+  }
   startMainUI();
   // Restore UI state from URL hash after a brief delay (wait for relays)
   setTimeout(restoreFromHash, 500);
