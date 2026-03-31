@@ -6079,25 +6079,9 @@ impl Node {
             witness: witness.clone(),
         };
 
-        // Append the lock operation
-        {
-            let mut ledger = ledger_arc.write().unwrap();
-            let block_height = self.wallet.get_block_height().unwrap_or(0);
-            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
-
-            if let Err(e) = ledger.append_operation_with_block(
-                lock_operation,
-                block_height,
-                block_hash,
-            ) {
-                return (false, None, Some(format!("Failed to lock funds: {:?}", e)));
-            }
-        }
-
-        // Sign and broadcast the lock
-        if let Err(e) = self.sign_and_broadcast(ledger_id).await {
-            tracing::error!("Failed to broadcast lock: {}", e);
-            // Note: funds are locked locally, but broadcast failed
+        // Commit the lock operation via staged flow
+        if let Err(e) = self.commit_operation(ledger_id, lock_operation).await {
+            return (false, None, Some(format!("Failed to lock funds: {}", e)));
         }
 
         tracing::info!("Locked {} msat for payment {}",
@@ -6128,21 +6112,11 @@ impl Node {
                     payment_id,
                     sequence_number: fulfill_sequence,
                     witness: witness.clone(),
-                    preimage: [0u8; 32], // No real preimage needed for internal settlement
+                    preimage: [0u8; 32],
                 };
 
-                {
-                    let mut ledger = ledger_arc.write().unwrap();
-                    let block_height = self.wallet.get_block_height().unwrap_or(0);
-                    let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
-
-                    if let Err(e) = ledger.append_operation_with_block(
-                        fulfill_operation,
-                        block_height,
-                        block_hash,
-                    ) {
-                        return (false, None, Some(format!("Failed to fulfill self-pay: {:?}", e)));
-                    }
+                if let Err(e) = self.commit_operation(ledger_id, fulfill_operation).await {
+                    return (false, None, Some(format!("Failed to fulfill self-pay: {}", e)));
                 }
 
                 // Credit the destination deposit
@@ -6159,22 +6133,8 @@ impl Node {
                     sequence_number: credit_sequence,
                 };
 
-                {
-                    let mut ledger = ledger_arc.write().unwrap();
-                    let block_height = self.wallet.get_block_height().unwrap_or(0);
-                    let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
-
-                    if let Err(e) = ledger.append_operation_with_block(
-                        credit_operation,
-                        block_height,
-                        block_hash,
-                    ) {
-                        tracing::error!("Failed to credit destination deposit: {:?}", e);
-                    }
-                }
-
-                if let Err(e) = self.sign_and_broadcast(ledger_id).await {
-                    tracing::error!("Failed to broadcast self-pay: {}", e);
+                if let Err(e) = self.commit_operation(ledger_id, credit_operation).await {
+                    tracing::error!("Failed to credit destination deposit: {}", e);
                 }
 
                 tracing::info!("Self-pay settled: {} msat from {} to {}",
@@ -6258,22 +6218,8 @@ impl Node {
                 preimage: pre,
             };
 
-            {
-                let mut ledger = ledger_arc.write().unwrap();
-                let block_height = self.wallet.get_block_height().unwrap_or(0);
-                let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
-
-                if let Err(e) = ledger.append_operation_with_block(
-                    fulfill_operation,
-                    block_height,
-                    block_hash,
-                ) {
-                    tracing::error!("Failed to record fulfill: {:?}", e);
-                }
-            }
-
-            if let Err(e) = self.sign_and_broadcast(ledger_id).await {
-                tracing::error!("Failed to broadcast fulfill: {}", e);
+            if let Err(e) = self.commit_operation(ledger_id, fulfill_operation).await {
+                tracing::error!("Failed to commit fulfill: {}", e);
             }
 
             tracing::info!("Payment {} fulfilled, {} msat debited from {}",
@@ -6297,22 +6243,8 @@ impl Node {
                 sequence_number: final_sequence,
             };
 
-            {
-                let mut ledger = ledger_arc.write().unwrap();
-                let block_height = self.wallet.get_block_height().unwrap_or(0);
-                let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
-
-                if let Err(e) = ledger.append_operation_with_block(
-                    fail_operation,
-                    block_height,
-                    block_hash,
-                ) {
-                    tracing::error!("Failed to record fail: {:?}", e);
-                }
-            }
-
-            if let Err(e) = self.sign_and_broadcast(ledger_id).await {
-                tracing::error!("Failed to broadcast fail: {}", e);
+            if let Err(e) = self.commit_operation(ledger_id, fail_operation).await {
+                tracing::error!("Failed to commit fail: {}", e);
             }
 
             tracing::warn!("Payment {} failed, {} msat unlocked for {}",
@@ -6792,61 +6724,6 @@ impl Node {
             Err(e) => {
                 return (false, None, Some(format!("Failed to commit transfer_complete: {}", e)));
             }
-        }
-
-        // Dead code marker — the old rollback block below will be removed
-        if false {
-            let block_height = 0u32;
-            let block_hash = [0u8; 32];
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            let ledger_arc = ledgers.get(ledger_id).unwrap().clone();
-            let mut ledger = ledger_arc.write().unwrap();
-            let operation = LedgerOperation::TransferComplete {
-                transfer_id, script_witness: DescriptorWitness { stack: vec![] },
-            };
-            if let Err(e) = ledger.append_operation_with_block(
-                operation,
-                block_height,
-                block_hash,
-            ) {
-                return (false, None, Some(format!("Failed to append operation: {:?}", e)));
-            }
-        }
-
-        // Sign (with co-signature if quorum active) and broadcast
-        if let Err(e) = self.sign_and_broadcast(ledger_id).await {
-            // Rollback: undo TransferComplete state changes
-            tracing::warn!("sign_and_broadcast failed for transfer_complete, rolling back state: {}", e);
-            if let Some(pending) = pending_transfer_backup {
-                let ledgers = self.handler.ledgers.lock().unwrap();
-                let ledger_arc = ledgers.get(ledger_id).unwrap().clone();
-                let mut ledger = ledger_arc.write().unwrap();
-                // Pop the unsigned operation from history
-                ledger.history.pop();
-                // Undo TransferComplete state changes: re-lock source, debit destination
-                let total = pending.total_locked();
-                if let Some(source) = ledger.state.deposits.get_mut(&pending.source_deposit_id) {
-                    source.locked_balance = source.locked_balance.saturating_add(total);
-                }
-                if let Some(dest) = ledger.state.deposits.get_mut(&pending.destination_deposit_id) {
-                    dest.balance = dest.balance.saturating_sub(pending.amount);
-                }
-                // Re-insert the pending transfer
-                ledger.state.pending_transfers.insert(transfer_id, pending);
-                // Restore sequence and hash
-                let (seq, hash) = ledger.history.last()
-                    .map(|l| (l.sequence_number, l.chain_hash()))
-                    .unwrap_or((0, [0u8; 32]));
-                ledger.state.sequence = seq;
-                ledger.state.chain_tip_hash = hash;
-            }
-            return (false, None, Some(format!("Failed to sign/broadcast: {:?}", e)));
-        }
-
-        // Persist immediately — transfer_complete consumes pending_transfer
-        // and credits the destination; must survive bounces.
-        if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
-            tracing::warn!("Failed to persist after transfer_complete: {}", e);
         }
 
         crate::metrics::record_transfer_completed(&request.ledger_id);
