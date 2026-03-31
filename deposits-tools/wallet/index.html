@@ -2521,7 +2521,19 @@ window.doWalletQuickOpen = async function(ledgerId, relayUrl) {
     const resp = await sendRequest(ledgerId, 'deposit_open', {
       deposit_pubkey: pubkeyHex, fee_fixed: feeFixed, fee_bps: feeBps, fee_frequency: feeFreq,
     });
-    if (!resp.success && !(resp.error || '').includes('already')) throw new Error(resp.error || 'Failed');
+    if (!resp.success && !(resp.error || '').includes('already')) {
+      const code = resp.result?.code;
+      if (code === 'attestation_required') {
+        await showVerificationFlow(ledgerId, operatorName, alias, pubkeyHex, keyIndex,
+          resp.result?.verifier_pubkey, resp.result?.allowed_domains || []);
+        return;
+      }
+      if (code === 'not_authorized' || code === 'denied') {
+        showAuthorizationRequired(ledgerId, operatorName, code);
+        return;
+      }
+      throw new Error(resp.error || 'Failed');
+    }
 
     state.deposits.push({ alias, ledger_id: ledgerId, deposit_pubkey: pubkeyHex, key_index: keyIndex, status: 'pending', operator_name: operatorName });
     state.keyIndex = keyIndex + 1;
