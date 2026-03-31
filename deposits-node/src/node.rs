@@ -10667,89 +10667,46 @@ impl Node {
     ) -> Result<Deposit, Error> {
         let deposit_id = compute_deposit_id(descriptor);
 
-        // Check if there are existing quorum members
-        let has_quorum = {
+        // Pre-validate: check deposit doesn't already exist
+        {
             let ledgers = self.handler.ledgers.lock().unwrap();
-            let ledger_arc = ledgers
-                .get(ledger_id)
+            let arc = ledgers.get(ledger_id)
                 .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?;
-            let ledger = ledger_arc.read().unwrap();
-            !ledger.state.quorum_members.is_empty()
-        };
-
-        // Append the operation
-        let deposit = {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            let ledger_arc = ledgers
-                .get(ledger_id)
-                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?
-                .clone();
-
-            let mut ledger = ledger_arc.write().unwrap();
-
-            // Check if deposit already exists
+            let ledger = arc.read().unwrap();
             if ledger.state.deposits.contains_key(&deposit_id) {
                 return Err(Error::Protocol(format!(
                     "Deposit already exists for descriptor {}",
                     descriptor
                 )));
             }
+        }
 
-            let operation = LedgerOperation::DepositOpen {
-                deposit_id,
-                descriptor: descriptor.to_string(),
-                fees: fees.clone(),
-                transfer_fees: transfer_fees.clone(),
-                payment_hash: None,
-                invoice: None,
-                cosigner_guarantee_signature: None,
-                is_collateral,
-                receive_requires_sig,
-                fee_change_after_blocks: None,
-                fee_change_notice_blocks: None,
-                fee_change_limit_bps: None,
-            };
+        let operation = LedgerOperation::DepositOpen {
+            deposit_id,
+            descriptor: descriptor.to_string(),
+            fees: fees.clone(),
+            transfer_fees: transfer_fees.clone(),
+            payment_hash: None,
+            invoice: None,
+            cosigner_guarantee_signature: None,
+            is_collateral,
+            receive_requires_sig,
+            fee_change_after_blocks: None,
+            fee_change_notice_blocks: None,
+            fee_change_limit_bps: None,
+        };
 
-            let block_height = self.wallet.get_block_height().unwrap_or(0);
-            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
-            ledger.append_operation_with_block(
-                operation,
-                block_height,
-                block_hash,
-            ).map_err(|e| Error::Protocol(format!("Failed to open deposit: {:?}", e)))?;
+        self.commit_operation(ledger_id, operation).await?;
 
+        // Read the deposit from the now-committed state
+        let deposit = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let arc = ledgers.get(ledger_id).unwrap();
+            let ledger = arc.read().unwrap();
             ledger.state.deposits.get(&deposit_id)
                 .cloned()
-                .ok_or_else(|| Error::Protocol("Deposit not found after creation".to_string()))?
+                .ok_or_else(|| Error::Protocol("Deposit not found after commit".to_string()))?
         };
-
-        // Sign and broadcast
-        let sign_result = if has_quorum {
-            self.sign_and_broadcast(ledger_id).await
-        } else {
-            self.operator_sign_persist_broadcast(ledger_id).await
-        };
-
-        if let Err(e) = sign_result {
-            // Rollback: undo the DepositOpen state changes.
-            tracing::warn!("sign_and_broadcast failed for open_deposit, rolling back state: {}", e);
-            {
-                let ledgers = self.handler.ledgers.lock().unwrap();
-                let ledger_arc = ledgers.get(ledger_id).unwrap().clone();
-                let mut ledger = ledger_arc.write().unwrap();
-                // Pop the unsigned operation from history
-                ledger.history.pop();
-                // Undo DepositOpen state change: remove the deposit
-                ledger.state.deposits.remove(&deposit_id);
-                // Restore sequence and hash from the last remaining entry
-                let (seq, hash) = ledger.history.last()
-                    .map(|l| (l.sequence_number, l.chain_hash()))
-                    .unwrap_or((0, [0u8; 32]));
-                ledger.state.sequence = seq;
-                ledger.state.chain_tip_hash = hash;
-            }
-            return Err(e);
-        }
 
         tracing::info!("Opened deposit {} in ledger {}", hex::encode(deposit_id), ledger_id);
         Ok(deposit)
