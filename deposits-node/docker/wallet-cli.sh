@@ -552,12 +552,10 @@ for i, d in enumerate(deps):
                         locked_msats = int(result.get('locked_msats', result.get('locked', 0)))
                         bal_sats = bal_msats / 1000
                         locked_sats = locked_msats / 1000
-                        bal_btc = bal_sats / 100_000_000
                         if locked_msats > 0:
-                            locked_btc = locked_sats / 100_000_000
-                            balance_str = f'₿ {bal_btc:.8f} ({locked_btc:.8f} locked)'
+                            balance_str = f'B {bal_sats:,.0f} ({locked_sats:,.0f} locked)'
                         else:
-                            balance_str = f'₿ {bal_btc:.8f}'
+                            balance_str = f'B {bal_sats:,.0f}'
                     else:
                         balance_str = resp.get('error', 'error')
                     ws.close()
@@ -574,8 +572,8 @@ for i, d in enumerate(deps):
     print(f"  [{i}] {balance_str}  ledger:{ledger_id[:16]}...")
 
 print()
-total_btc = total_msats / 1000 / 100_000_000
-print(f"  Total: ₿ {total_btc:.8f}")
+total_sats = total_msats / 1000
+print(f"  Total: B {total_sats:,.0f}")
 PYEOF
     ;;
 
