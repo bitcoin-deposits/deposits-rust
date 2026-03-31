@@ -8824,42 +8824,13 @@ impl Node {
                     reason: 1,
                 };
 
-                {
-                    let mut ledger = ledger_arc.write().unwrap();
-                    if let Err(e) = ledger.append_operation_with_block(
-                        operation,
-                        current_block,
-                        block_hash,
-                    ) {
-                        tracing::warn!(
-                            "Failed to timeout transfer {}...: {:?}",
-                            hex::encode(&transfer_id[..8]),
-                            e
-                        );
-                        continue;
-                    }
-                }
-
-                // Sign the update
-                if let Err(e) = self.sign_last_update(&ledger_id) {
-                    tracing::warn!("Failed to sign transfer timeout update: {}", e);
+                if let Err(e) = self.commit_operation(&ledger_id, operation).await {
+                    tracing::warn!(
+                        "Failed to timeout transfer {}...: {}",
+                        hex::encode(&transfer_id[..8]),
+                        e
+                    );
                     continue;
-                }
-
-                // Validate chain before persisting
-                if let Err(e) = self.validate_chain_before_persist(&ledger_id) {
-                    tracing::warn!("Chain validation failed for transfer timeout: {}", e);
-                    continue;
-                }
-
-                // Save ledger to disk
-                if let Err(e) = self.handler.persist_ledger_to_disk(&ledger_id) {
-                    tracing::warn!("Failed to save ledger after transfer timeout: {}", e);
-                }
-
-                // Broadcast to Nostr
-                if let Err(e) = self.broadcast_last_update(&ledger_id).await {
-                    tracing::warn!("Failed to broadcast transfer timeout: {}", e);
                 }
 
                 tracing::info!(
@@ -10233,24 +10204,13 @@ impl Node {
         collateral_lock_amount: Option<u64>,
         collateral_lock_until: Option<u32>,
     ) -> Result<String, Error> {
-        // Check if there are existing quorum members BEFORE adding the new one
-        let has_quorum = {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            let ledger_arc = ledgers
-                .get(ledger_id)
-                .ok_or_else(|| Error::Protocol("Ledger not found".to_string()))?;
-            let ledger = ledger_arc.read().unwrap();
-            !ledger.state.quorum_members.is_empty()
-        };
-
-        // Append the operation (but don't sign yet)
+        // Pre-validate
         {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let ledger_arc = ledgers
                 .get(ledger_id)
                 .ok_or_else(|| Error::Protocol("Ledger not found".to_string()))?;
-
-            let mut ledger = ledger_arc.write().unwrap();
+            let ledger = ledger_arc.read().unwrap();
 
             // Check if already a member
             if ledger.state.quorum_members.iter().any(|m| m.pubkey == quorum_member) {
@@ -10264,46 +10224,25 @@ impl Node {
                     MAX_QUORUM_MEMBERS
                 )));
             }
-
-            let block_height = self.wallet.get_block_height().unwrap_or(0);
-            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
-
-            let operation = deposits_core::messages::LedgerOperation::QuorumAddMember {
-                quorum_member,
-                quorum_member_signature: signature,
-                member_ledger_id: member_ledger_id.to_string(),
-                min_fee_bps,
-                min_fee_fixed,
-                max_fee_period,
-                collateral_lock_amount,
-                collateral_lock_until,
-                dispute_response_blocks: None,
-                dispute_arm_blocks: None,
-                service_response_blocks: None,
-                max_transfer_timeout_blocks: None,
-                max_descriptor_bytes: None,
-            };
-
-            ledger.append_operation_with_block(
-                operation,
-                block_height,
-                block_hash,
-            ).map_err(|e| Error::Protocol(format!("Failed to add quorum member: {:?}", e)))?;
         }
 
-        // Now sign and broadcast.
-        // Before reserves rotation, co-signatures are optional (the fallback is
-        // operator-only anyway) and attempting cosign blocks the run loop for up
-        // to 36 seconds per attempt — which cascades when multiple operators are
-        // adding members simultaneously.  Skip cosign entirely pre-rotation.
-        if has_quorum && self.is_quorum_active(ledger_id) {
-            self.sign_and_broadcast(ledger_id).await
-        } else {
-            if has_quorum {
-                tracing::debug!("Pre-rotation: skipping cosign for QuorumAddMember");
-            }
-            self.operator_sign_persist_broadcast(ledger_id).await
-        }
+        let operation = deposits_core::messages::LedgerOperation::QuorumAddMember {
+            quorum_member,
+            quorum_member_signature: signature,
+            member_ledger_id: member_ledger_id.to_string(),
+            min_fee_bps,
+            min_fee_fixed,
+            max_fee_period,
+            collateral_lock_amount,
+            collateral_lock_until,
+            dispute_response_blocks: None,
+            dispute_arm_blocks: None,
+            service_response_blocks: None,
+            max_transfer_timeout_blocks: None,
+            max_descriptor_bytes: None,
+        };
+
+        self.commit_operation(ledger_id, operation).await
     }
 
     /// Record a quorum join with co-signing and broadcast.
@@ -10316,24 +10255,13 @@ impl Node {
         target_ledger_id: &str,
         membership_expires: u32,
     ) -> Result<String, Error> {
-        // Check if there are existing quorum members
-        let has_quorum = {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            let ledger_arc = ledgers
-                .get(our_ledger_id)
-                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", our_ledger_id)))?;
-            let ledger = ledger_arc.read().unwrap();
-            !ledger.state.quorum_members.is_empty()
-        };
-
-        // Append the operation
+        // Pre-validate
         {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let ledger_arc = ledgers
                 .get(our_ledger_id)
                 .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", our_ledger_id)))?;
-
-            let mut ledger = ledger_arc.write().unwrap();
+            let ledger = ledger_arc.read().unwrap();
 
             let block_height = self.wallet.get_block_height().unwrap_or(0);
 
@@ -10348,20 +10276,15 @@ impl Node {
                     MAX_QUORUMS_JOINED
                 )));
             }
-            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
-
-            let operation = deposits_core::messages::LedgerOperation::QuorumJoin {
-                operator_id: target_operator,
-                ledger_id: target_ledger_id.to_string(),
-                membership_expires,
-            };
-
-            ledger.append_operation_with_block(
-                operation,
-                block_height,
-                block_hash,
-            ).map_err(|e| Error::Protocol(format!("Failed to record quorum join: {:?}", e)))?;
         }
+
+        let operation = deposits_core::messages::LedgerOperation::QuorumJoin {
+            operator_id: target_operator,
+            ledger_id: target_ledger_id.to_string(),
+            membership_expires,
+        };
+
+        let result = self.commit_operation(our_ledger_id, operation).await;
 
         // Subscribe to the target ledger's requests so we can receive co-sign requests
         // This is important for quorum members to respond to update co-signing
@@ -10369,16 +10292,7 @@ impl Node {
             tracing::warn!("Failed to subscribe to target ledger {}: {}", &target_ledger_id[..16.min(target_ledger_id.len())], e);
         }
 
-        // Sign and broadcast — skip cosign pre-rotation (same reasoning as
-        // add_quorum_member: avoids 36s blocking when all daemons are busy)
-        if has_quorum && self.is_quorum_active(our_ledger_id) {
-            self.sign_and_broadcast(our_ledger_id).await
-        } else {
-            if has_quorum {
-                tracing::debug!("Pre-rotation: skipping cosign for QuorumJoin");
-            }
-            self.operator_sign_persist_broadcast(our_ledger_id).await
-        }
+        result
     }
 
     /// Lock collateral with co-signing and broadcast.
@@ -10400,26 +10314,13 @@ impl Node {
 
         let deposit_id = compute_deposit_id(descriptor);
 
-        // Check if there are existing quorum members
-        let has_quorum = {
+        // Pre-validate and check idempotency
+        let already_locked = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let ledger_arc = ledgers
                 .get(ledger_id)
                 .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?;
             let ledger = ledger_arc.read().unwrap();
-            !ledger.state.quorum_members.is_empty()
-        };
-
-        // Create the operation and attestation
-        let attestation = {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            let ledger_arc = ledgers
-                .get(ledger_id)
-                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?
-                .clone();
-            drop(ledgers);
-
-            let mut ledger = ledger_arc.write().unwrap();
 
             // Check if deposit exists
             let deposit = ledger.state.deposits.get(&deposit_id)
@@ -10429,54 +10330,58 @@ impl Node {
                 )))?;
 
             let block_height = self.wallet.get_block_height().unwrap_or(0);
-            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
 
             // Check if collateral is already locked with sufficient amount and duration
             // This makes the operation idempotent - safe to retry without error
-            let already_locked = deposit.collateral_lock_amount >= amount_msats
+            deposit.collateral_lock_amount >= amount_msats
                 && deposit.collateral_lock_expires >= lock_until_block
-                && deposit.collateral_lock_expires > block_height;
+                && deposit.collateral_lock_expires > block_height
+        };
 
-            if already_locked {
-                tracing::info!(
-                    "Collateral already locked for deposit {}: {} msats until block {} (requested {} until {})",
-                    hex::encode(deposit_id),
-                    deposit.collateral_lock_amount,
-                    deposit.collateral_lock_expires,
-                    amount_msats,
-                    lock_until_block
-                );
-            } else {
-                // Create the deposit holder's signature for the lock
-                let secp = Secp256k1::signing_only();
-                let deposit_pubkey = PublicKey::from_secret_key(&secp, deposit_secret);
-                let msg_str = format!("COLLATERAL_LOCK:{}:{}:{}:{}",
-                    hex::encode(deposit_id),
-                    amount_msats,
-                    lock_until_block,
-                    hex::encode(self.node_id.serialize())
-                );
-                let msg_hash = sha256::Hash::hash(msg_str.as_bytes());
-                let msg = Message::from_digest(*msg_hash.as_byte_array());
-                let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, deposit_secret);
-                let signature = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
-                let lock_signature: [u8; 64] = signature.serialize();
+        if already_locked {
+            tracing::info!(
+                "Collateral already locked for deposit {}: skipping lock operation (idempotent)",
+                hex::encode(deposit_id),
+            );
+        } else {
+            // Create the deposit holder's signature for the lock
+            let secp = Secp256k1::signing_only();
+            let _deposit_pubkey = PublicKey::from_secret_key(&secp, deposit_secret);
+            let msg_str = format!("COLLATERAL_LOCK:{}:{}:{}:{}",
+                hex::encode(deposit_id),
+                amount_msats,
+                lock_until_block,
+                hex::encode(self.node_id.serialize())
+            );
+            let msg_hash = sha256::Hash::hash(msg_str.as_bytes());
+            let msg = Message::from_digest(*msg_hash.as_byte_array());
+            let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, deposit_secret);
+            let signature = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
+            let lock_signature: [u8; 64] = signature.serialize();
 
-                // Create witness from signature
-                let witness = DescriptorWitness { stack: vec![lock_signature.to_vec()] };
+            // Create witness from signature
+            let witness = DescriptorWitness { stack: vec![lock_signature.to_vec()] };
 
-                // Apply the CollateralLock operation
-                let operation = LedgerOperation::CollateralLock {
-                    deposit_id,
-                    amount: amount_msats,
-                    lock_until_block,
-                    operator_id: self.node_id,
-                    witness,
-                };
+            // Apply the CollateralLock operation
+            let operation = LedgerOperation::CollateralLock {
+                deposit_id,
+                amount: amount_msats,
+                lock_until_block,
+                operator_id: self.node_id,
+                witness,
+            };
 
-                ledger.append_operation_with_block(operation, block_height, block_hash)
-                    .map_err(|e| Error::Protocol(format!("Failed to lock collateral: {:?}", e)))?;
-            }
+            self.commit_operation(ledger_id, operation).await?;
+        }
+
+        // Build attestation from post-commit state
+        let block_height = self.wallet.get_block_height().unwrap_or(0);
+        let attestation = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let ledger_arc = ledgers
+                .get(ledger_id)
+                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?;
+            let ledger = ledger_arc.read().unwrap();
 
             // Use the specific deposit's lock amount, not the total across all deposits.
             // Each attestation is for one deposit's collateral contribution.
@@ -10521,13 +10426,6 @@ impl Node {
             }
         };
 
-        // Sign and broadcast
-        if has_quorum {
-            self.sign_and_broadcast(ledger_id).await?;
-        } else {
-            self.operator_sign_persist_broadcast(ledger_id).await?;
-        }
-
         tracing::info!(
             "Created collateral lock for deposit {}: {} msats until block {}, attestation for {}",
             hex::encode(deposit_id),
@@ -10547,16 +10445,6 @@ impl Node {
         ledger_id: &str,
         attestation: deposits_core::CollateralAttestationMsg,
     ) -> Result<String, Error> {
-        // Check if there are existing quorum members
-        let has_quorum = {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            let ledger_arc = ledgers
-                .get(ledger_id)
-                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?;
-            let ledger = ledger_arc.read().unwrap();
-            !ledger.state.quorum_members.is_empty()
-        };
-
         // Verify we are the quorum_member in the attestation
         if attestation.quorum_member != self.node_id {
             return Err(Error::Protocol(format!(
@@ -10565,40 +10453,18 @@ impl Node {
             )));
         }
 
-        // Append the operation
-        {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            let ledger_arc = ledgers
-                .get(ledger_id)
-                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?;
-            let mut ledger = ledger_arc.write().unwrap();
+        let operation = deposits_core::messages::LedgerOperation::CollateralAttestation {
+            collateral_operator: attestation.operator,
+            quorum_member: attestation.quorum_member,
+            collateral_ledger_id: attestation.collateral_ledger_id.clone(),
+            amount: attestation.amount,
+            block_height: attestation.block_height,
+            lock_until_block: attestation.lock_until_block,
+            signature: attestation.signature,
+            ledger_hash: attestation.ledger_hash,
+        };
 
-            let operation = deposits_core::messages::LedgerOperation::CollateralAttestation {
-                collateral_operator: attestation.operator,
-                quorum_member: attestation.quorum_member,
-                collateral_ledger_id: attestation.collateral_ledger_id.clone(),
-                amount: attestation.amount,
-                block_height: attestation.block_height,
-                lock_until_block: attestation.lock_until_block,
-                signature: attestation.signature,
-                ledger_hash: attestation.ledger_hash,
-            };
-
-            let block_height = self.wallet.get_block_height().unwrap_or(0);
-            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
-            ledger.append_operation_with_block(
-                operation,
-                block_height,
-                block_hash,
-            ).map_err(|e| Error::Protocol(format!("Failed to record attestation: {:?}", e)))?;
-        }
-
-        // Sign and broadcast
-        if has_quorum {
-            self.sign_and_broadcast(ledger_id).await
-        } else {
-            self.operator_sign_persist_broadcast(ledger_id).await
-        }
+        self.commit_operation(ledger_id, operation).await
     }
 
     /// Open a deposit with co-signing and broadcast.
@@ -10672,25 +10538,13 @@ impl Node {
     ) -> Result<u64, Error> {
         let deposit_id = compute_deposit_id(descriptor);
 
-        // Check if there are existing quorum members
-        let has_quorum = {
+        // Pre-validate
+        {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let ledger_arc = ledgers
                 .get(ledger_id)
                 .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?;
             let ledger = ledger_arc.read().unwrap();
-            !ledger.state.quorum_members.is_empty()
-        };
-
-        // Append the operation
-        let new_balance = {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            let ledger_arc = ledgers
-                .get(ledger_id)
-                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?
-                .clone();
-
-            let mut ledger = ledger_arc.write().unwrap();
 
             if !ledger.state.deposits.contains_key(&deposit_id) {
                 return Err(Error::Protocol(format!(
@@ -10698,60 +10552,26 @@ impl Node {
                     descriptor
                 )));
             }
+        }
 
-            let operation = LedgerOperation::OnchainCredit {
-                txid,
-                vout,
-                deposit_id,
-                amount: amount_msats,
-                funding_address,
-            };
+        let operation = LedgerOperation::OnchainCredit {
+            txid,
+            vout,
+            deposit_id,
+            amount: amount_msats,
+            funding_address,
+        };
 
-            let block_height = self.wallet.get_block_height().unwrap_or(0);
-            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
-            ledger.append_operation_with_block(
-                operation,
-                block_height,
-                block_hash,
-            ).map_err(|e| Error::Protocol(format!("Failed to credit deposit: {:?}", e)))?;
+        self.commit_operation(ledger_id, operation).await?;
 
+        let new_balance = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let arc = ledgers.get(ledger_id).unwrap();
+            let ledger = arc.read().unwrap();
             ledger.state.deposits.get(&deposit_id)
                 .map(|d| d.balance)
                 .unwrap_or(0)
         };
-
-        // Sign and broadcast
-        let sign_result = if has_quorum {
-            self.sign_and_broadcast(ledger_id).await
-        } else {
-            self.operator_sign_persist_broadcast(ledger_id).await
-        };
-
-        if let Err(e) = sign_result {
-            // Rollback: undo the OnchainCredit state changes.
-            // The operation was appended and balance credited but signing failed,
-            // so we must restore the previous state to prevent duplicate credits
-            // on the next auto_complete_deposits cycle.
-            tracing::warn!("sign_and_broadcast failed for credit_deposit_onchain, rolling back state: {}", e);
-            {
-                let ledgers = self.handler.ledgers.lock().unwrap();
-                let ledger_arc = ledgers.get(ledger_id).unwrap().clone();
-                let mut ledger = ledger_arc.write().unwrap();
-                // Pop the unsigned operation from history
-                ledger.history.pop();
-                // Undo OnchainCredit state change: subtract the credited amount
-                if let Some(deposit) = ledger.state.deposits.get_mut(&deposit_id) {
-                    deposit.balance = deposit.balance.saturating_sub(amount_msats);
-                }
-                // Restore sequence and hash from the last remaining entry
-                let (seq, hash) = ledger.history.last()
-                    .map(|l| (l.sequence_number, l.chain_hash()))
-                    .unwrap_or((0, [0u8; 32]));
-                ledger.state.sequence = seq;
-                ledger.state.chain_tip_hash = hash;
-            }
-            return Err(e);
-        }
 
         tracing::info!(
             "Credited deposit {} with {} msats (on-chain), new balance: {} msats",
@@ -10815,25 +10635,13 @@ impl Node {
         payment_id: [u8; 32],
         witness: DescriptorWitness,
     ) -> Result<u64, Error> {
-        // Check if there are existing quorum members
-        let has_quorum = {
+        // Pre-validate and read sequence number
+        let sequence_number = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let ledger_arc = ledgers
                 .get(ledger_id)
                 .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?;
             let ledger = ledger_arc.read().unwrap();
-            !ledger.state.quorum_members.is_empty()
-        };
-
-        // Append the operation
-        let new_locked = {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            let ledger_arc = ledgers
-                .get(ledger_id)
-                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?
-                .clone();
-
-            let mut ledger = ledger_arc.write().unwrap();
 
             let deposit = ledger.state.deposits.get(&deposit_id)
                 .ok_or_else(|| Error::Protocol(format!(
@@ -10848,35 +10656,27 @@ impl Node {
                 )));
             }
 
-            let sequence_number = ledger.sequence() + 1;
+            ledger.sequence() + 1
+        };
 
-            let operation = LedgerOperation::InvoiceLock {
-                deposit_id,
-                amount: amount_msats,
-                payment_id,
-                sequence_number,
-                witness,
-            };
+        let operation = LedgerOperation::InvoiceLock {
+            deposit_id,
+            amount: amount_msats,
+            payment_id,
+            sequence_number,
+            witness,
+        };
 
-            let block_height = self.wallet.get_block_height().unwrap_or(0);
-            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
-            ledger.append_operation_with_block(
-                operation,
-                block_height,
-                block_hash,
-            ).map_err(|e| Error::Protocol(format!("Failed to lock payment: {:?}", e)))?;
+        self.commit_operation(ledger_id, operation).await?;
 
+        let new_locked = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let arc = ledgers.get(ledger_id).unwrap();
+            let ledger = arc.read().unwrap();
             ledger.state.deposits.get(&deposit_id)
                 .map(|d| d.locked_balance)
                 .unwrap_or(0)
         };
-
-        // Sign and broadcast
-        if has_quorum {
-            self.sign_and_broadcast(ledger_id).await?;
-        } else {
-            self.operator_sign_persist_broadcast(ledger_id).await?;
-        }
 
         tracing::info!(
             "Locked {} msats for invoice payment {} on deposit {}",
@@ -10893,25 +10693,13 @@ impl Node {
         amount_msats: u64,
         payment_id: [u8; 32],
     ) -> Result<u64, Error> {
-        // Check if there are existing quorum members
-        let has_quorum = {
+        // Pre-validate and read sequence number
+        let sequence_number = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let ledger_arc = ledgers
                 .get(ledger_id)
                 .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?;
             let ledger = ledger_arc.read().unwrap();
-            !ledger.state.quorum_members.is_empty()
-        };
-
-        // Append the operation
-        let new_balance = {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            let ledger_arc = ledgers
-                .get(ledger_id)
-                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?
-                .clone();
-
-            let mut ledger = ledger_arc.write().unwrap();
 
             let deposit = ledger.state.deposits.get(&deposit_id)
                 .ok_or_else(|| Error::Protocol(format!(
@@ -10926,34 +10714,26 @@ impl Node {
                 )));
             }
 
-            let sequence_number = ledger.sequence() + 1;
+            ledger.sequence() + 1
+        };
 
-            let operation = LedgerOperation::InvoiceFail {
-                deposit_id,
-                amount: amount_msats,
-                payment_id,
-                sequence_number,
-            };
+        let operation = LedgerOperation::InvoiceFail {
+            deposit_id,
+            amount: amount_msats,
+            payment_id,
+            sequence_number,
+        };
 
-            let block_height = self.wallet.get_block_height().unwrap_or(0);
-            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
-            ledger.append_operation_with_block(
-                operation,
-                block_height,
-                block_hash,
-            ).map_err(|e| Error::Protocol(format!("Failed to fail payment: {:?}", e)))?;
+        self.commit_operation(ledger_id, operation).await?;
 
+        let new_balance = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let arc = ledgers.get(ledger_id).unwrap();
+            let ledger = arc.read().unwrap();
             ledger.state.deposits.get(&deposit_id)
                 .map(|d| d.balance)
                 .unwrap_or(0)
         };
-
-        // Sign and broadcast
-        if has_quorum {
-            self.sign_and_broadcast(ledger_id).await?;
-        } else {
-            self.operator_sign_persist_broadcast(ledger_id).await?;
-        }
 
         tracing::info!(
             "Failed invoice payment {} for {} msats on deposit {}, new balance: {} msats",
@@ -10972,25 +10752,13 @@ impl Node {
         preimage: [u8; 32],
         witness: DescriptorWitness,
     ) -> Result<u64, Error> {
-        // Check if there are existing quorum members
-        let has_quorum = {
+        // Pre-validate and read sequence number
+        let sequence_number = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let ledger_arc = ledgers
                 .get(ledger_id)
                 .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?;
             let ledger = ledger_arc.read().unwrap();
-            !ledger.state.quorum_members.is_empty()
-        };
-
-        // Append the operation
-        let new_balance = {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            let ledger_arc = ledgers
-                .get(ledger_id)
-                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?
-                .clone();
-
-            let mut ledger = ledger_arc.write().unwrap();
 
             let deposit = ledger.state.deposits.get(&deposit_id)
                 .ok_or_else(|| Error::Protocol(format!(
@@ -11005,36 +10773,28 @@ impl Node {
                 )));
             }
 
-            let sequence_number = ledger.sequence() + 1;
+            ledger.sequence() + 1
+        };
 
-            let operation = LedgerOperation::InvoiceFulfill {
-                deposit_id,
-                amount: amount_msats,
-                payment_id,
-                preimage,
-                sequence_number,
-                witness,
-            };
+        let operation = LedgerOperation::InvoiceFulfill {
+            deposit_id,
+            amount: amount_msats,
+            payment_id,
+            preimage,
+            sequence_number,
+            witness,
+        };
 
-            let block_height = self.wallet.get_block_height().unwrap_or(0);
-            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
-            ledger.append_operation_with_block(
-                operation,
-                block_height,
-                block_hash,
-            ).map_err(|e| Error::Protocol(format!("Failed to fulfill payment: {:?}", e)))?;
+        self.commit_operation(ledger_id, operation).await?;
 
+        let new_balance = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let arc = ledgers.get(ledger_id).unwrap();
+            let ledger = arc.read().unwrap();
             ledger.state.deposits.get(&deposit_id)
                 .map(|d| d.balance)
                 .unwrap_or(0)
         };
-
-        // Sign and broadcast
-        if has_quorum {
-            self.sign_and_broadcast(ledger_id).await?;
-        } else {
-            self.operator_sign_persist_broadcast(ledger_id).await?;
-        }
 
         tracing::info!(
             "Fulfilled invoice payment {} for {} msats on deposit {}, new balance: {} msats",
@@ -11055,16 +10815,6 @@ impl Node {
         depositor_witness: DescriptorWitness,
         memo: Option<String>,
     ) -> Result<WithdrawalLockResult, Error> {
-        // Check if there are existing quorum members
-        let has_quorum = {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            let ledger_arc = ledgers
-                .get(ledger_id)
-                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?;
-            let ledger = ledger_arc.read().unwrap();
-            !ledger.state.quorum_members.is_empty()
-        };
-
         let current_block = self.wallet.get_block_height()?;
 
         // Compute withdrawal ID
@@ -11098,15 +10848,13 @@ impl Node {
         // ECDSA with a different message format, which doesn't match the Nostr request flow.
         // TODO: Unify signature formats between Nostr requests and lock_withdrawal
 
-        // Append the operation
-        let (previous_balance, new_balance) = {
+        // Pre-validate
+        let previous_balance = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let ledger_arc = ledgers
                 .get(ledger_id)
-                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?
-                .clone();
-
-            let mut ledger = ledger_arc.write().unwrap();
+                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?;
+            let ledger = ledger_arc.read().unwrap();
 
             let deposit = ledger.state.deposits.get(&deposit_id)
                 .ok_or_else(|| Error::Protocol(format!(
@@ -11122,38 +10870,28 @@ impl Node {
                 )));
             }
 
-            let prev_balance = deposit.balance;
-
-            let operation = LedgerOperation::OnchainLock {
-                deposit_id,
-                amount: amount_sats * 1000, // Convert to msats
-                fee_sats,
-                destination_address: destination_address.clone(),
-                withdrawal_id,
-                witness: witness_for_lock,
-            };
-
-            let block_height = self.wallet.get_block_height().unwrap_or(0);
-            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
-            ledger.append_operation_with_block(
-                operation,
-                block_height,
-                block_hash,
-            ).map_err(|e| Error::Protocol(format!("Failed to lock withdrawal: {:?}", e)))?;
-
-            let new_bal = ledger.state.deposits.get(&deposit_id)
-                .map(|d| d.balance)
-                .unwrap_or(0);
-
-            (prev_balance, new_bal)
+            deposit.balance
         };
 
-        // Sign and broadcast
-        if has_quorum {
-            self.sign_and_broadcast(ledger_id).await?;
-        } else {
-            self.operator_sign_persist_broadcast(ledger_id).await?;
-        }
+        let operation = LedgerOperation::OnchainLock {
+            deposit_id,
+            amount: amount_sats * 1000, // Convert to msats
+            fee_sats,
+            destination_address: destination_address.clone(),
+            withdrawal_id,
+            witness: witness_for_lock,
+        };
+
+        self.commit_operation(ledger_id, operation).await?;
+
+        let new_balance = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let arc = ledgers.get(ledger_id).unwrap();
+            let ledger = arc.read().unwrap();
+            ledger.state.deposits.get(&deposit_id)
+                .map(|d| d.balance)
+                .unwrap_or(0)
+        };
 
         // Store the withdrawal as locked
         let status = OnChainWithdrawalStatus::Locked {
@@ -11190,16 +10928,6 @@ impl Node {
         ledger_id: &str,
         withdrawal_id: &[u8; 32],
     ) -> Result<WithdrawalCompleteResult, Error> {
-        // Check if there are existing quorum members
-        let has_quorum = {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            let ledger_arc = ledgers
-                .get(ledger_id)
-                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?;
-            let ledger = ledger_arc.read().unwrap();
-            !ledger.state.quorum_members.is_empty()
-        };
-
         let current_block = self.wallet.get_block_height()?;
 
         // Get the withdrawal
@@ -11234,43 +10962,24 @@ impl Node {
             })
             .unwrap_or([0u8; 32]);
 
-        // Append the OnchainFulfill operation
+        let operation = LedgerOperation::OnchainFulfill {
+            deposit_id: withdrawal.deposit_id,
+            withdrawal_id: *withdrawal_id,
+            amount: withdrawal.amount_sats * 1000,
+            txid: txid_bytes,
+            destination_address: withdrawal.destination_address.clone(),
+        };
+
+        self.commit_operation(ledger_id, operation).await?;
+
         let final_balance = {
             let ledgers = self.handler.ledgers.lock().unwrap();
-            let ledger_arc = ledgers
-                .get(ledger_id)
-                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?
-                .clone();
-
-            let mut ledger = ledger_arc.write().unwrap();
-
-            let operation = LedgerOperation::OnchainFulfill {
-                deposit_id: withdrawal.deposit_id,
-                withdrawal_id: *withdrawal_id,
-                amount: withdrawal.amount_sats * 1000,
-                txid: txid_bytes,
-                destination_address: withdrawal.destination_address.clone(),
-            };
-
-            let block_height = self.wallet.get_block_height().unwrap_or(0);
-            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
-            ledger.append_operation_with_block(
-                operation,
-                block_height,
-                block_hash,
-            ).map_err(|e| Error::Protocol(format!("Failed to fulfill withdrawal: {:?}", e)))?;
-
+            let arc = ledgers.get(ledger_id).unwrap();
+            let ledger = arc.read().unwrap();
             ledger.state.deposits.get(&withdrawal.deposit_id)
                 .map(|d| d.balance)
                 .unwrap_or(0)
         };
-
-        // Sign and broadcast
-        if has_quorum {
-            self.sign_and_broadcast(ledger_id).await?;
-        } else {
-            self.operator_sign_persist_broadcast(ledger_id).await?;
-        }
 
         // Update status
         let new_status = OnChainWithdrawalStatus::Broadcast {
