@@ -9834,23 +9834,7 @@ impl Node {
             staged.update.operator_signature = sig.serialize();
         }
 
-        // 4. Persist to disk FIRST (crash safety — we know what's been committed)
-        {
-            let wallet_dir = self.data_dir.join("wallet");
-            let ledgers_dir = wallet_dir.join("ledgers");
-            let path = ledgers_dir.join(format!("{}.jsonl", ledger_id));
-            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-                use std::io::Write;
-                // Serialize as the JSONL Update format
-                let mut update_value = serde_json::to_value(&staged.update).unwrap_or_default();
-                if let Some(obj) = update_value.as_object_mut() {
-                    obj.insert("type".to_string(), serde_json::json!("Update"));
-                }
-                let _ = writeln!(file, "{}", serde_json::to_string(&update_value).unwrap_or_default());
-            }
-        }
-
-        // 5. Apply state changes
+        // 4. Apply state changes (persist happens via dirty_ledgers after commit)
         let update_clone = staged.update.clone();
         {
             let ledgers = self.handler.ledgers.lock().unwrap();
@@ -9862,8 +9846,10 @@ impl Node {
                 .map_err(|e| Error::Protocol(format!("Commit failed: {}", e)))?;
         }
 
-        // Mark ledger dirty for state persistence
-        self.dirty_ledgers.lock().unwrap().insert(ledger_id.to_string());
+        // 5. Persist to disk immediately (crash safety — before broadcast)
+        if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
+            tracing::warn!("Failed to persist ledger after commit: {}", e);
+        }
 
         // 6. Broadcast
         let event_id = self.nostr.broadcast_ledger_update(&update_clone).await
