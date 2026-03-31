@@ -1877,10 +1877,14 @@ impl Node {
                 metrics::emit_process_metrics();
                 metrics::emit_thread_cpu_metrics();
 
-                // Check for paid Lightning invoices on every reload cycle (~5s).
-                // Lightweight no-op when no invoices are pending.
+                // Check for paid Lightning invoices — spawn as a task so it doesn't
+                // block the main loop (credit_deposit → sign_and_broadcast → request_cosign
+                // needs the main loop to pump events for response delivery).
                 if !self.pending_invoices.lock().unwrap().is_empty() {
-                    self.auto_credit_received_payments().await;
+                    let node = Arc::clone(self);
+                    tokio::spawn(async move {
+                        node.auto_credit_received_payments().await;
+                    });
                 }
 
                 metrics::record_run_loop_phase("reload", reload_start.elapsed());
