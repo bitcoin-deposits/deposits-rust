@@ -1175,6 +1175,10 @@ function resubscribeUpdates() {
   }
 }
 
+// Nostr events use truncated ledger IDs (16 hex chars) in tags.
+// Use this when building relay filters to match the tag format.
+function ledgerTag(ledgerId) { return ledgerId.slice(0, 16); }
+
 function getOurDepositIds() {
   return state.deposits
     .filter(d => d.deposit_pubkey)
@@ -1846,7 +1850,7 @@ window.doOpenDeposit = async function() {
     const pubkeyHex = bytesToHex(pubkey);
 
     // Fetch advertisement for fee info
-    const adFilter = { kinds: [39100], '#d': [ledgerId] };
+    const adFilter = { kinds: [39100], '#d': [ledgerTag(ledgerId)] };
     const adEvents = await fetchEvents(adFilter, 5000);
     let feeFixed = 0, feeBps = 0, feeFreq = 2016, operatorName = '';
     if (adEvents.length > 0) {
@@ -2063,7 +2067,7 @@ async function showVerificationFlow(ledgerId, operatorName, alias, pubkeyHex, ke
 
 async function retryDepositOpen(ledgerId, alias, pubkeyHex, keyIndex, operatorName) {
   log('Retrying deposit open...');
-  const adFilter = { kinds: [39100], '#d': [ledgerId] };
+  const adFilter = { kinds: [39100], '#d': [ledgerTag(ledgerId)] };
   const adEvents = await fetchEvents(adFilter, 5000);
   let feeFixed = 0, feeBps = 0, feeFreq = 2016;
   if (adEvents.length > 0) {
@@ -2416,7 +2420,7 @@ window.doWalletQuickOpen = async function(ledgerId, relayUrl) {
   // Fetch fee info
   let feeFixed = 0, feeBps = 0, feeFreq = 2016, operatorName = '';
   try {
-    const adEvents = await fetchEvents({ kinds: [39100], '#d': [ledgerId] }, 5000);
+    const adEvents = await fetchEvents({ kinds: [39100], '#d': [ledgerTag(ledgerId)] }, 5000);
     if (adEvents.length > 0) {
       const ad = JSON.parse(adEvents[0].content);
       const period = ad.fee_period_blocks > 0 ? ad.fee_period_blocks : 2016;
@@ -2935,7 +2939,7 @@ window.doWalletTransfer = async function() {
   const amountMsats = amount * 1000;
   let fee = 2;
   try {
-    const adFilter = { kinds: [39100], '#d': [deposit.ledger_id] };
+    const adFilter = { kinds: [39100], '#d': [ledgerTag(deposit.ledger_id)] };
     const adEvents = await fetchEvents(adFilter, 5000);
     if (adEvents.length > 0) {
       const ad = JSON.parse(adEvents[0].content);
@@ -3056,7 +3060,7 @@ window.doWalletRecvOnchain = async function() {
   if (!amount) { log('Missing amount', 'error'); return; }
 
   try {
-    const adFilter = { kinds: [39100], '#d': [deposit.ledger_id] };
+    const adFilter = { kinds: [39100], '#d': [ledgerTag(deposit.ledger_id)] };
     const adEvents = await fetchEvents(adFilter, 5000);
     let feeFixed = 0, feeBps = 0, feeFreq = 2016;
     if (adEvents.length > 0) {
@@ -3506,7 +3510,7 @@ async function checkForFraud() {
     // Fetch the update containing our embedded hash to get its sequence and hash
     try {
       const ledgerId = ev.embedding_ledger_id || ev.ledger_id;
-      const filter = { kinds: [9100], '#d': [ledgerId], limit: 50 };
+      const filter = { kinds: [9100], '#d': [ledgerTag(ledgerId)], limit: 50 };
       const events = await fetchEvents(filter, 10000);
 
       let embeddingUpdate = null;
@@ -3545,7 +3549,7 @@ async function checkForFraud() {
       if (embeddingUpdate.ledgerId !== ev.ledger_id) {
         // Look for a co-signed update on the accused ledger that includes
         // a member_ledger_hash from the embedding ledger
-        const targetFilter = { kinds: [9100], '#d': [ev.ledger_id], limit: 100 };
+        const targetFilter = { kinds: [9100], '#d': [ledgerTag(ev.ledger_id)], limit: 100 };
         const targetEvents = await fetchEvents(targetFilter, 10000);
         for (const tEv of targetEvents) {
           try {
@@ -3694,7 +3698,7 @@ window.doAddOffer = async function() {
 
   try {
     // Fetch advertisement for fee info
-    const adFilter = { kinds: [39100], '#d': [selectedDeposit.ledger_id] };
+    const adFilter = { kinds: [39100], '#d': [ledgerTag(selectedDeposit.ledger_id)] };
     const adEvents = await fetchEvents(adFilter, 5000);
     let feeFixed = 0, feeBps = 0, feeFreq = 2016;
     if (adEvents.length > 0) {
@@ -3960,7 +3964,7 @@ window.onTransferFromChange = async function() {
 
   // Fetch the ledger advertisement to get the fee schedule
   try {
-    const adFilter = { kinds: [39100], '#d': [deposit.ledger_id] };
+    const adFilter = { kinds: [39100], '#d': [ledgerTag(deposit.ledger_id)] };
     const adEvents = await fetchEvents(adFilter, 5000);
     if (adEvents.length > 0) {
       const ad = JSON.parse(adEvents[0].content);
@@ -4343,7 +4347,7 @@ async function waitForTransferLock(ledgerId, destDepositIdHex, hashHex, timeoutM
     try {
       const events = await fetchEvents({
         kinds: [9100],
-        '#d': [ledgerId],
+        '#d': [ledgerTag(ledgerId)],
         '#t': ['70'], // TransferLock op type
         limit: 20,
       }, 5000);
@@ -4804,7 +4808,7 @@ window.exploreLedger = async function() {
   let pages = 0;
 
   while (true) {
-    const filter = { kinds: [9100], '#d': [input], limit: PAGE_SIZE };
+    const filter = { kinds: [9100], '#d': [ledgerTag(input)], limit: PAGE_SIZE };
     if (until) filter.until = until;
 
     const events = await fetchEvents(filter, 15000);
