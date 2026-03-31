@@ -274,21 +274,23 @@ sys.exit(1)
 " 2>&1
 
     if [ $? -eq 0 ]; then
-        # Track the deposit locally
-        python3 -c "
-import json, os
-path = '$WALLET_DIR/deposits.json'
+        # Track the deposit locally (include relay so balance/invoice can find the operator)
+        python3 - "$WALLET_DIR" "$LEDGER_ID" "$PUBKEY" "$INDEX" "$ALL_RELAYS" << 'PYEOF'
+import json, os, sys
+wallet_dir, ledger_id, pubkey, index, relays = sys.argv[1:6]
+path = wallet_dir + '/deposits.json'
 deps = json.load(open(path)) if os.path.exists(path) else []
 deps.append({
-    'ledger_id': '$LEDGER_ID',
-    'pubkey': '$PUBKEY',
-    'key_index': $INDEX,
+    'ledger_id': ledger_id,
+    'pubkey': pubkey,
+    'key_index': int(index),
+    'relay': relays.split(',')[0],
     'status': 'open'
 })
 with open(path, 'w') as f:
     json.dump(deps, f, indent=2)
-print('Deposit tracked in $WALLET_DIR/deposits.json')
-" 2>/dev/null || true
+print(f'Deposit tracked in {path}')
+PYEOF
     fi
     ;;
 
@@ -323,7 +325,8 @@ if idx >= len(deps):
     print(f"ERROR: deposit index {idx} out of range (have {len(deps)})", file=sys.stderr)
     sys.exit(1)
 d = deps[idx]
-print(f"{d['ledger_id']} {d['pubkey']} {d.get('key_index', 0)}")
+relay = d.get('relay', '')
+print(f"{d['ledger_id']} {d['pubkey']} {d.get('key_index', 0)} {relay}")
 PYEOF
     )
 
@@ -335,6 +338,11 @@ PYEOF
     LEDGER_ID=$(echo "$DEPOSIT_INFO" | awk '{print $1}')
     PUBKEY=$(echo "$DEPOSIT_INFO" | awk '{print $2}')
     INDEX=$(echo "$DEPOSIT_INFO" | awk '{print $3}')
+    STORED_RELAY=$(echo "$DEPOSIT_INFO" | awk '{print $4}')
+    # Use stored relay if available
+    if [ -n "$STORED_RELAY" ]; then
+        LEDGER_RELAY="$STORED_RELAY"
+    fi
 
     SEED=$(cat "$SEED_FILE")
 
@@ -467,13 +475,11 @@ balance)
     fi
 
     SEED=$(cat "$SEED_FILE")
-    ALL_RELAYS="$LEDGER_RELAY"
-    [ -n "$EXTRA_RELAYS" ] && ALL_RELAYS="$ALL_RELAYS,$EXTRA_RELAYS"
 
-    python3 - "$WALLET_DIR" "$SEED" "$ALL_RELAYS" << 'PYEOF'
+    python3 - "$WALLET_DIR" "$SEED" "$LEDGER_RELAY" << 'PYEOF'
 import json, hashlib, time, sys
 
-wallet_dir, seed_hex, relays_str = sys.argv[1], sys.argv[2], sys.argv[3]
+wallet_dir, seed_hex, fallback_relay = sys.argv[1], sys.argv[2], sys.argv[3]
 deps = json.load(open(wallet_dir + '/deposits.json'))
 if not deps:
     print("No deposits.")
@@ -508,11 +514,14 @@ for idx in [84+0x80000000, 0x80000000, 0x80000000, 0, 0]:
 pk = PrivateKey(key)
 pubkey_hex = pk.pubkey.serialize()[1:].hex()
 
-relays = [r.strip() for r in relays_str.split(',') if r.strip()]
-
 for i, d in enumerate(deps):
     ledger_id = d.get('ledger_id', '?')
     deposit_pubkey = d.get('pubkey', '?')
+    # Use stored relay, fall back to CLI relay
+    deposit_relay = d.get('relay', fallback_relay)
+    relays = [r.strip() for r in deposit_relay.split(',') if r.strip()]
+    if fallback_relay and fallback_relay not in relays:
+        relays.append(fallback_relay)
 
     # Send balance_query via Nostr
     content = json.dumps({'deposit_pubkey': deposit_pubkey})
