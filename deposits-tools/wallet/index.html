@@ -2113,19 +2113,11 @@ async function showVerificationFlow(ledgerId, operatorName, alias, pubkeyHex, ke
 
     // Step 2: Show invoice for payment
     const sessionId = linkResp.session_id;
-    log(`Pay ${linkResp.amount_sats} sats to verify. Invoice: ${linkResp.invoice.slice(0, 40)}...`);
-
-    // Copy invoice to clipboard if available
-    try {
-      if (navigator.clipboard) {
-        await navigator.clipboard.writeText(linkResp.invoice);
-        log('Invoice copied to clipboard. Pay it, then click OK.', 'success');
-      }
-    } catch {}
+    logWithCopy(`Pay ${linkResp.amount_sats} sats to verify:`, linkResp.invoice);
 
     const paid = confirm(
       `Pay this invoice to verify your lightning address:\n\n`
-      + `${linkResp.invoice.slice(0, 60)}...\n\n`
+      + `${linkResp.invoice}\n\n`
       + `Amount: ${linkResp.amount_sats} sats\n\n`
       + `Click OK after paying.`
     );
@@ -2252,11 +2244,7 @@ async function showAuthorizationRequired(ledgerId, operatorName, code) {
       + `Contact the operator and share your pubkey to request access.`
     : `${name} requires authorization to open deposits.`;
   log(msg, 'error');
-  log(`Your pubkey: ${pubkey}`);
-  if (navigator.clipboard) {
-    navigator.clipboard.writeText(pubkey);
-    log('(copied to clipboard)');
-  }
+  logWithCopy('Your pubkey:', pubkey);
 }
 
 function renderDeposits() {
@@ -4729,6 +4717,31 @@ function log(msg, cls = '') {
     document.getElementById('error-modal-msg').textContent = msg;
     document.getElementById('error-modal').classList.add('visible');
   }
+}
+
+// Log a message with a copiable value and a copy link
+function logWithCopy(msg, value) {
+  const el = document.getElementById('activity-log');
+  if (!el) return;
+  const entry = document.createElement('div');
+  entry.className = 'entry';
+  const time = new Date().toLocaleTimeString();
+  entry.appendChild(document.createTextNode(`[${time}] ${msg} `));
+  const code = document.createElement('code');
+  code.textContent = value.length > 48 ? value.slice(0, 48) + '...' : value;
+  code.style.wordBreak = 'break-all';
+  entry.appendChild(code);
+  const copyLink = document.createElement('a');
+  copyLink.textContent = ' [copy]';
+  copyLink.href = '#';
+  copyLink.style.cursor = 'pointer';
+  copyLink.onclick = async (e) => {
+    e.preventDefault();
+    try { await navigator.clipboard.writeText(value); copyLink.textContent = ' [copied]'; } catch {}
+  };
+  entry.appendChild(copyLink);
+  el.appendChild(entry);
+  el.scrollTop = el.scrollHeight;
 }
 
 window.toggleActivityLog = function() {
