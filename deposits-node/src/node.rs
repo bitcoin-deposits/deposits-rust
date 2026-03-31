@@ -1762,6 +1762,14 @@ impl Node {
                                         .unwrap_or(0)
                                 };
 
+                                // Skip gap-fill if cosign requests are pending — the relay fetch
+                                // blocks the run loop and prevents cosign responses from being processed.
+                                if !self.pending_cosign_requests.lock().unwrap().is_empty() {
+                                    tracing::debug!("Skipping gap-fill for {}... (cosign pending)", &stale_id[..16.min(stale_id.len())]);
+                                    self.stale_joined_ledgers.lock().unwrap().insert(stale_id.clone());
+                                    continue;
+                                }
+
                                 tracing::info!(
                                     "Background gap-fill: fetching ledger {}... from relay (local_seq={})",
                                     &stale_id[..16.min(stale_id.len())], local_seq,
