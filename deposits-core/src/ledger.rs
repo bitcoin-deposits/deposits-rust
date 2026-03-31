@@ -961,10 +961,13 @@ impl Ledger {
         // chain_hash() after operator signing via finalize_chain_hash()
         self.state.chain_tip_hash = new_hash;
 
-        // Set opened_at_block for new deposits
+        // Set opened_at_block and initial last_fee_assessment for new deposits
         if let LedgerOperation::DepositOpen { deposit_id, .. } = &operation {
             if let Some(deposit) = self.state.deposits.get_mut(deposit_id) {
                 deposit.opened_at_block = block_height;
+                if deposit.last_fee_assessment == 0 {
+                    deposit.last_fee_assessment = block_height;
+                }
             }
         }
 
@@ -1067,10 +1070,13 @@ impl Ledger {
         self.state.chain_tip_hash = staged.update.chain_hash();
         self.state.sequence = staged.update.sequence_number;
 
-        // Set opened_at_block for new deposits
+        // Set opened_at_block and initial last_fee_assessment for new deposits
         if let LedgerOperation::DepositOpen { deposit_id, .. } = &staged.operation {
             if let Some(deposit) = self.state.deposits.get_mut(deposit_id) {
                 deposit.opened_at_block = staged.update.block_height;
+                if deposit.last_fee_assessment == 0 {
+                    deposit.last_fee_assessment = staged.update.block_height;
+                }
             }
         }
 
