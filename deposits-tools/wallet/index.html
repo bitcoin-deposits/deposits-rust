@@ -1991,6 +1991,32 @@ window.doOpenDeposit = async function() {
   }
 };
 
+// Decode bech32 npub/nsec/note to hex. Returns input unchanged if not bech32.
+function decodeBech32ToHex(str) {
+  if (!str || typeof str !== 'string') return str;
+  const lower = str.toLowerCase();
+  if (!lower.startsWith('npub1') && !lower.startsWith('nsec1') && !lower.startsWith('note1')) return str;
+  const CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+  const sep = lower.lastIndexOf('1');
+  const dataStr = lower.slice(sep + 1);
+  // Decode 5-bit groups (strip 6-char checksum)
+  const data5 = [];
+  for (let i = 0; i < dataStr.length - 6; i++) {
+    const idx = CHARSET.indexOf(dataStr[i]);
+    if (idx < 0) return str; // not valid bech32
+    data5.push(idx);
+  }
+  // Convert 5-bit to 8-bit
+  let acc = 0, bits = 0;
+  const bytes = [];
+  for (const v of data5) {
+    acc = (acc << 5) | v;
+    bits += 5;
+    if (bits >= 8) { bits -= 8; bytes.push((acc >> bits) & 0xff); }
+  }
+  return bytes.map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 // Create and sign a nostr event via NIP-07 browser extension (window.nostr).
 // Returns null if the extension is unavailable or the user denies signing.
 async function createEventNip07(kind, content, tags) {
@@ -2004,7 +2030,8 @@ async function createEventNip07(kind, content, tags) {
 // Uses NIP-07 (browser extension) if available, otherwise falls back to the wallet's derived key.
 async function sendVerifyRequest(verifierPubkey, params, timeoutMs = 30000) {
   const content = JSON.stringify(params);
-  const tags = [['p', verifierPubkey]];
+  const pubkeyHex = decodeBech32ToHex(verifierPubkey);
+  const tags = [['p', pubkeyHex]];
 
   let event;
   if (window.nostr) {
